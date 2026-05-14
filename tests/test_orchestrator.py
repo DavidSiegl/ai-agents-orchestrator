@@ -11,6 +11,11 @@ from orchestrator import (
 )
 
 
+async def _passthrough_anim(coro, label, style):
+    """Drop-in for _run_animated that skips animation and just returns the result."""
+    return await coro
+
+
 class TestContext(unittest.TestCase):
     def setUp(self):
         self.test_file = ".test_context.json"
@@ -43,12 +48,17 @@ class TestContext(unittest.TestCase):
         expected = "[agent1]\noutput1\n\n[agent2]\noutput2"
         self.assertEqual(ctx.summary(), expected)
 
+    def test_summary_empty(self):
+        ctx = Context()
+        self.assertEqual(ctx.summary(), "")
+
     def test_summary_truncation(self):
         ctx = Context()
         ctx.add("agent", "A" * 3000)
         ctx.add("agent", "B" * 2000)
         summary = ctx.summary(max_chars=1000)
         self.assertEqual(len(summary), 1000)
+        # Truncation must keep the tail (most recent content), not the head.
         self.assertTrue(summary.endswith("B" * 1000))
 
     def test_save_load(self):
@@ -103,6 +113,16 @@ class TestRunners(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Your task:\nnew task", full_prompt)
 
     @patch("orchestrator.subprocess.run")
+    async def test_run_claude_failure(self, mock_run):
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stderr = " Error from claude "
+        mock_run.return_value = mock_result
+
+        with self.assertRaisesRegex(RuntimeError, "Claude failed: Error from claude"):
+            await run_claude("test")
+
+    @patch("orchestrator.subprocess.run")
     async def test_run_gemini_failure(self, mock_run):
         mock_result = MagicMock()
         mock_result.returncode = 1
@@ -118,13 +138,39 @@ class TestRunners(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "Claude timed out after 600s"):
             await run_claude("test")
 
+    @patch("orchestrator.subprocess.run")
+    async def test_run_gemini_with_context(self, mock_run):
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "ok"
+        mock_run.return_value = mock_result
+
+        ctx = Context()
+        ctx.add("claude", "previous output")
+
+        await run_gemini("new task", ctx)
+
+        args, _ = mock_run.call_args
+        full_prompt = args[0][2]
+        self.assertIn("Previous steps:", full_prompt)
+        self.assertIn("[claude]\nprevious output", full_prompt)
+        self.assertIn("Your task:\nnew task", full_prompt)
+
+    @patch("orchestrator.subprocess.run")
+    async def test_run_gemini_timeout(self, mock_run):
+        mock_run.side_effect = subprocess.TimeoutExpired(["gemini"], 600)
+        with self.assertRaisesRegex(RuntimeError, "Gemini timed out after 600s"):
+            await run_gemini("test")
+
 
 class TestPrimitives(unittest.IsolatedAsyncioTestCase):
+    @patch("orchestrator._run_animated", new_callable=AsyncMock)
     @patch("orchestrator.run_claude", new_callable=AsyncMock)
     @patch("orchestrator.run_gemini", new_callable=AsyncMock)
-    async def test_sequential(self, mock_gemini, mock_claude):
+    async def test_sequential(self, mock_gemini, mock_claude, mock_anim):
         mock_gemini.return_value = "gemini result"
         mock_claude.return_value = "claude result"
+        mock_anim.side_effect = _passthrough_anim
 
         ctx = Context()
         steps = [
@@ -138,11 +184,13 @@ class TestPrimitives(unittest.IsolatedAsyncioTestCase):
         mock_gemini.assert_called_with("step 1", ctx)
         mock_claude.assert_called_with("step 2 with gemini result", ctx)
 
+    @patch("orchestrator._run_animated", new_callable=AsyncMock)
     @patch("orchestrator.run_claude", new_callable=AsyncMock)
     @patch("orchestrator.run_gemini", new_callable=AsyncMock)
-    async def test_parallel(self, mock_gemini, mock_claude):
+    async def test_parallel(self, mock_gemini, mock_claude, mock_anim):
         mock_gemini.return_value = "gemini par"
         mock_claude.return_value = "claude par"
+        mock_anim.side_effect = _passthrough_anim
 
         ctx = Context()
         tasks = [
@@ -155,9 +203,26 @@ class TestPrimitives(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results, ["gemini par", "claude par"])
         self.assertEqual(len(ctx.history), 2)
 
+    @patch("orchestrator._run_animated", new_callable=AsyncMock)
+    @patch("orchestrator.run_claude", new_callable=AsyncMock)
     @patch("orchestrator.run_gemini", new_callable=AsyncMock)
-    async def test_parallel_with_exception(self, mock_gemini):
+    async def test_parallel_mixed_results(self, mock_gemini, mock_claude, mock_anim):
+        mock_gemini.return_value = "gemini ok"
+        mock_claude.side_effect = Exception("Claude boom")
+        mock_anim.side_effect = _passthrough_anim
+
+        ctx = Context()
+        results = await parallel([("gemini", "task 1"), ("claude", "task 2")], ctx)
+
+        self.assertEqual(results, ["gemini ok", ""])
+        self.assertEqual(len(ctx.history), 1)
+        self.assertEqual(ctx.history[0]["agent"], "gemini")
+
+    @patch("orchestrator._run_animated", new_callable=AsyncMock)
+    @patch("orchestrator.run_gemini", new_callable=AsyncMock)
+    async def test_parallel_with_exception(self, mock_gemini, mock_anim):
         mock_gemini.side_effect = Exception("Boom")
+        mock_anim.side_effect = _passthrough_anim
 
         ctx = Context()
         tasks = [("gemini", "fail task")]
@@ -168,11 +233,13 @@ class TestPrimitives(unittest.IsolatedAsyncioTestCase):
 
 
 class TestPipelines(unittest.IsolatedAsyncioTestCase):
+    @patch("orchestrator._run_animated", new_callable=AsyncMock)
     @patch("orchestrator.run_gemini", new_callable=AsyncMock)
     @patch("orchestrator.run_claude", new_callable=AsyncMock)
-    async def test_review_and_fix(self, mock_claude, mock_gemini):
+    async def test_review_and_fix(self, mock_claude, mock_gemini, mock_anim):
         mock_gemini.return_value = "issues json"
         mock_claude.return_value = "fixed code"
+        mock_anim.side_effect = _passthrough_anim
 
         with patch("builtins.open", unittest.mock.mock_open(read_data="original code")):
             result = await review_and_fix("dummy.py", persist=False)
@@ -181,32 +248,38 @@ class TestPipelines(unittest.IsolatedAsyncioTestCase):
         mock_gemini.assert_called_once()
         mock_claude.assert_called_once()
 
+    @patch("orchestrator._run_animated", new_callable=AsyncMock)
     @patch("orchestrator.run_gemini", new_callable=AsyncMock)
     @patch("orchestrator.run_claude", new_callable=AsyncMock)
-    async def test_research(self, mock_claude, mock_gemini):
+    async def test_research(self, mock_claude, mock_gemini, mock_anim):
         mock_gemini.return_value = "res1"
         mock_claude.return_value = "res2"
+        mock_anim.side_effect = _passthrough_anim
 
         result = await research("topic", persist=False)
         self.assertIn("[gemini]\nres1", result)
         self.assertIn("[claude]\nres2", result)
 
+    @patch("orchestrator._run_animated", new_callable=AsyncMock)
     @patch("orchestrator.parallel", new_callable=AsyncMock)
     @patch("orchestrator.run_claude", new_callable=AsyncMock)
-    async def test_research_and_implement(self, mock_claude, mock_parallel):
+    async def test_research_and_implement(self, mock_claude, mock_parallel, mock_anim):
         mock_parallel.return_value = ["res1", "res2"]
         mock_claude.return_value = "impl"
+        mock_anim.side_effect = _passthrough_anim
 
         result = await research_and_implement("topic", persist=False)
         self.assertEqual(result, "impl")
         mock_parallel.assert_called_once()
         mock_claude.assert_called_once()
 
+    @patch("orchestrator._run_animated", new_callable=AsyncMock)
     @patch("orchestrator.run_gemini", new_callable=AsyncMock)
     @patch("orchestrator.run_claude", new_callable=AsyncMock)
-    async def test_crossvalidate_and_implement(self, mock_claude, mock_gemini):
+    async def test_crossvalidate_and_implement(self, mock_claude, mock_gemini, mock_anim):
         mock_gemini.return_value = "draft"
         mock_claude.side_effect = ["validated", "implementation"]
+        mock_anim.side_effect = _passthrough_anim
 
         result = await crossvalidate_and_implement("topic", persist=False)
         self.assertEqual(result, "implementation")
@@ -272,6 +345,29 @@ class TestCLI(unittest.TestCase):
         import orchestrator
         main(["--timeout=123", "info"])
         self.assertEqual(orchestrator.TIMEOUT, 123)
+
+    @patch("sys.exit")
+    @patch("builtins.print")
+    def test_main_unknown_pipeline(self, mock_print, mock_exit):
+        main(["unknown-pipeline", "arg"])
+        mock_print.assert_any_call("Unknown pipeline: unknown-pipeline")
+        mock_exit.assert_called_with(1)
+
+    @patch("sys.exit")
+    @patch("builtins.print")
+    def test_main_missing_arg(self, mock_print, mock_exit):
+        main(["research"])
+        mock_print.assert_any_call("Pipeline 'research' requires an argument.")
+        mock_exit.assert_called_with(1)
+
+    @patch("sys.exit")
+    @patch("os.path.exists")
+    @patch("builtins.print")
+    def test_main_clear_context_no_file(self, mock_print, mock_exists, mock_exit):
+        mock_exists.return_value = False
+        main(["clear-context"])
+        mock_print.assert_any_call("No context file found.")
+        mock_exit.assert_called_with(0)
 
 
 if __name__ == "__main__":
