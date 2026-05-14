@@ -1,10 +1,6 @@
 pipeline {
     agent any
 
-    tools {
-        sonarScanner 'sonarqube-scanner'
-    }
-
     environment {
         UV_NO_PROGRESS = '1'
         COVERAGE_FILE  = '.coverage'
@@ -31,11 +27,14 @@ pipeline {
         stage('SonarQube Analysis') {
             steps {
                 withSonarQubeEnv('Sonarqube') {
-                    sh '''
-                        sonar-scanner \
-                          -Dsonar.python.coverage.reportPaths=coverage.xml \
-                          -Dsonar.python.xunit.reportPath=test-results.xml
-                    '''
+                    script {
+                        def scannerHome = tool 'sonarqube-scanner'
+                        sh """
+                            ${scannerHome}/bin/sonar-scanner \
+                              -Dsonar.python.coverage.reportPaths=coverage.xml \
+                              -Dsonar.python.xunit.reportPath=test-results.xml
+                        """
+                    }
                 }
             }
         }
