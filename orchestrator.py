@@ -15,101 +15,6 @@ CONTEXT_FILE = os.path.join(os.path.dirname(
 
 
 # ---------------------------------------------------------------------------
-# ASCII animation — 2-line dancing bots
-#
-# Each frame is (body_line, legs_line), both 7 chars wide so they overwrite
-# cleanly. The animator uses ANSI cursor-up to redraw in place.
-# ---------------------------------------------------------------------------
-
-# fmt: off
-_FRAMES: dict[str, list[tuple[str, str]]] = {
-    # eyes scan left/right, hips sway  →  gemini reviewing
-    "scan": [
-        (" (>.>) ", " /|\\   "),
-        (" (-.-)~", "  |    "),
-        (" (<.<) ", " /|\\   "),
-        ("~(-.-)~", "  |    "),
-    ],
-    # full-body dance  →  claude fixing / implementing / synthesizing
-    "build": [
-        ("\\(^_^)/", "  | |  "),
-        (" (^_^) ", "  /|\\  "),
-        ("/(^_^)\\", "  | |  "),
-        (" (^_^) ", "  \\|/  "),
-    ],
-    # running bot  →  parallel research
-    "search": [
-        ("ε=(o.o)", "  >^<  "),
-        ("ε=(-.o)", "  /^\\  "),
-        ("ε=(o.-)", "  >^<  "),
-        ("ε=(^.^)", "  /^\\  "),
-    ],
-    # head tilts, thought dots appear  →  claude thinking
-    "think": [
-        (" (-..) ", "  |    "),
-        (" (..-) ", "  |    "),
-        (" (o.o) ", "  |  . "),
-        (" (O.O) ", "  | .. "),
-    ],
-    # arm swings writing  →  gemini drafting
-    "write": [
-        (" (^_^)_", "  |\\   "),
-        (" (^_^)/", "  /\\   "),
-        ("\\(^_^)/", "  | |  "),
-        (" (^_^)~", "  |\\   "),
-    ],
-    # confused → aha  →  claude validating
-    "check": [
-        (" (o_o)?", "  |\\   "),
-        (" (>_<)!", "  |\\   "),
-        (" (*_*) ", "  /|\\  "),
-        (" (^_^)v", "  |/   "),
-    ],
-}
-# fmt: on
-
-_AGENT_STYLE = {"claude": "think", "gemini": "scan"}
-
-
-async def _animate(label: str, style: str, interval: float = 0.15) -> None:
-    frames = _FRAMES.get(style, _FRAMES["think"])
-    pad = " " * (len(label) + 4)  # indent legs to sit under the body
-
-    # Reserve 2 lines for the animation area without disturbing prior output.
-    sys.stderr.write("\r\033[K\n\r\033[K\n")
-    sys.stderr.flush()
-
-    i = 0
-    try:
-        while True:
-            body, legs = frames[i % len(frames)]
-            sys.stderr.write("\033[2A")                          # cursor up 2
-            sys.stderr.write(f"\r  {label}  {body}\033[K\n")
-            sys.stderr.write(f"\r{pad}{legs}\033[K\n")
-            sys.stderr.flush()
-            i += 1
-            await asyncio.sleep(interval)
-    except asyncio.CancelledError:
-        sys.stderr.write("\033[2A")
-        sys.stderr.write("\r\033[K\n\r\033[K\n")
-        sys.stderr.write("\033[2A")
-        sys.stderr.flush()
-        raise
-
-
-async def _run_animated(coro, label: str, style: str) -> Any:
-    anim = asyncio.create_task(_animate(label, style))
-    try:
-        return await coro
-    finally:
-        anim.cancel()
-        try:
-            await anim
-        except asyncio.CancelledError:
-            pass
-
-
-# ---------------------------------------------------------------------------
 # Context store
 # ---------------------------------------------------------------------------
 
@@ -212,7 +117,6 @@ async def sequential(
     steps: list[tuple[str, str]],
     ctx: Context,
     labels: dict[str, str] | None = None,
-    anim_styles: dict[str, str] | None = None,
 ) -> Context:
     """
     Run steps one after another, each step seeing the previous output.
@@ -220,7 +124,6 @@ async def sequential(
     steps: list of (agent, prompt_template) where {output} in the template
            is replaced with the previous step's output.
     labels: optional display label per agent, e.g. {"gemini": "[gemini] reviewing"}
-    anim_styles: optional animation style per agent
     """
     runners = {"claude": run_claude, "gemini": run_gemini}
 
@@ -228,8 +131,7 @@ async def sequential(
         prev = ctx.last() or ""
         prompt = prompt_tpl.format(output=prev)
         label = (labels or {}).get(agent, f"[{agent}]")
-        style = (anim_styles or {}).get(agent, _AGENT_STYLE.get(agent, "think"))
-        output = await _run_animated(runners[agent](prompt, ctx), label, style)
+        output = await runners[agent](prompt, ctx)
         ctx.add(agent, output)
         print(f"  {label} done ({len(output)} chars)", file=sys.stderr)
 
@@ -240,7 +142,6 @@ async def parallel(
     tasks: list[tuple[str, str]],
     ctx: Context,
     label: str = "agents",
-    anim_style: str = "search",
 ) -> list[str]:
     """
     Run multiple agent calls at the same time, return all results.
@@ -248,11 +149,7 @@ async def parallel(
     """
     runners = {"claude": run_claude, "gemini": run_gemini}
     coros = [runners[agent](prompt, ctx) for agent, prompt in tasks]
-    results = await _run_animated(
-        asyncio.gather(*coros, return_exceptions=True),
-        label,
-        anim_style,
-    )
+    results = await asyncio.gather(*coros, return_exceptions=True)
 
     outputs = []
     for (agent, _), result in zip(tasks, results):
@@ -288,7 +185,6 @@ async def review_and_fix(file_path: str, persist: bool = True) -> str:
         ],
         ctx,
         labels={"gemini": "[gemini] reviewing", "claude": "[claude] fixing"},
-        anim_styles={"gemini": "scan", "claude": "build"},
     )
 
     if persist:
@@ -311,7 +207,6 @@ async def research(topic: str, persist: bool = True) -> str:
         ],
         ctx,
         label="[gemini + claude] researching",
-        anim_style="search",
     )
     print("  [gemini + claude] research done", file=sys.stderr)
 
@@ -332,27 +227,19 @@ async def crossvalidate_and_implement(topic: str, persist: bool = True) -> str:
 
     # Phase 1: Gemini produces the initial solution design
     # ctx not passed — prompts are self-contained, passing ctx would duplicate content via summary injection
-    draft = await _run_animated(
-        run_gemini(
-            f"Propose a detailed solution design for the following task. "
-            f"Include architecture decisions, edge cases, and potential pitfalls:\n\n{topic}",
-        ),
-        "[gemini] drafting",
-        "write",
+    draft = await run_gemini(
+        f"Propose a detailed solution design for the following task. "
+        f"Include architecture decisions, edge cases, and potential pitfalls:\n\n{topic}",
     )
     ctx.add("gemini", draft)
     print("  [gemini] draft ready", file=sys.stderr)
 
     # Phase 2: Claude validates and fixes the draft
-    validated = await _run_animated(
-        run_claude(
-            f"You are a critical reviewer. Examine the following solution design:\n\n{draft}\n\n"
-            f"1. Identify any correctness issues, missing edge cases, or design flaws.\n"
-            f"2. Produce a corrected and improved solution design, incorporating your fixes.\n"
-            f"Output only the final corrected design.",
-        ),
-        "[claude] validating",
-        "check",
+    validated = await run_claude(
+        f"You are a critical reviewer. Examine the following solution design:\n\n{draft}\n\n"
+        f"1. Identify any correctness issues, missing edge cases, or design flaws.\n"
+        f"2. Produce a corrected and improved solution design, incorporating your fixes.\n"
+        f"Output only the final corrected design.",
     )
     ctx.add("claude", validated)
     print("  [claude] validation done", file=sys.stderr)
@@ -360,14 +247,10 @@ async def crossvalidate_and_implement(topic: str, persist: bool = True) -> str:
     # Phase 3: Claude implements the validated design
     # Truncate input and constrain output scope to stay within what a single claude -p call can produce
     validated_input = validated[-MAX_PHASE_INPUT_CHARS:] if len(validated) > MAX_PHASE_INPUT_CHARS else validated
-    implementation = await _run_animated(
-        run_claude(
-            f"Implement the following validated solution design as concise, production-ready code. "
-            f"Cover the core cases only — do not generate exhaustive edge-case coverage or lengthy docstrings. "
-            f"Output only the code, no explanation:\n\n{validated_input}",
-        ),
-        "[claude] implementing",
-        "build",
+    implementation = await run_claude(
+        f"Implement the following validated solution design as concise, production-ready code. "
+        f"Cover the core cases only — do not generate exhaustive edge-case coverage or lengthy docstrings. "
+        f"Output only the code, no explanation:\n\n{validated_input}",
     )
     ctx.add("claude", implementation)
     print("  [claude] implementation done", file=sys.stderr)
@@ -392,7 +275,6 @@ async def research_and_implement(topic: str, persist: bool = True) -> str:
         ],
         ctx,
         label="[gemini + claude] researching",
-        anim_style="search",
     )
     print("  [gemini + claude] research done", file=sys.stderr)
 
@@ -401,11 +283,7 @@ async def research_and_implement(topic: str, persist: bool = True) -> str:
         f"Based on this research:\n\n{ctx.summary()}\n\n"
         f"Write a production-ready implementation for: {topic}"
     )
-    output = await _run_animated(
-        run_claude(synthesis_prompt, ctx),
-        "[claude] synthesizing",
-        "build",
-    )
+    output = await run_claude(synthesis_prompt, ctx)
     ctx.add("claude", output)
     print("  [claude] synthesis done", file=sys.stderr)
 

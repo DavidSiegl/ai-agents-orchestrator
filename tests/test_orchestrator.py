@@ -11,11 +11,6 @@ from orchestrator import (
 )
 
 
-async def _passthrough_anim(coro, label, style):
-    """Drop-in for _run_animated that skips animation and just returns the result."""
-    return await coro
-
-
 class TestContext(unittest.TestCase):
     def setUp(self):
         self.test_file = ".test_context.json"
@@ -164,13 +159,11 @@ class TestRunners(unittest.IsolatedAsyncioTestCase):
 
 
 class TestPrimitives(unittest.IsolatedAsyncioTestCase):
-    @patch("orchestrator._run_animated", new_callable=AsyncMock)
     @patch("orchestrator.run_claude", new_callable=AsyncMock)
     @patch("orchestrator.run_gemini", new_callable=AsyncMock)
-    async def test_sequential(self, mock_gemini, mock_claude, mock_anim):
+    async def test_sequential(self, mock_gemini, mock_claude):
         mock_gemini.return_value = "gemini result"
         mock_claude.return_value = "claude result"
-        mock_anim.side_effect = _passthrough_anim
 
         ctx = Context()
         steps = [
@@ -184,13 +177,11 @@ class TestPrimitives(unittest.IsolatedAsyncioTestCase):
         mock_gemini.assert_called_with("step 1", ctx)
         mock_claude.assert_called_with("step 2 with gemini result", ctx)
 
-    @patch("orchestrator._run_animated", new_callable=AsyncMock)
     @patch("orchestrator.run_claude", new_callable=AsyncMock)
     @patch("orchestrator.run_gemini", new_callable=AsyncMock)
-    async def test_parallel(self, mock_gemini, mock_claude, mock_anim):
+    async def test_parallel(self, mock_gemini, mock_claude):
         mock_gemini.return_value = "gemini par"
         mock_claude.return_value = "claude par"
-        mock_anim.side_effect = _passthrough_anim
 
         ctx = Context()
         tasks = [
@@ -203,13 +194,11 @@ class TestPrimitives(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results, ["gemini par", "claude par"])
         self.assertEqual(len(ctx.history), 2)
 
-    @patch("orchestrator._run_animated", new_callable=AsyncMock)
     @patch("orchestrator.run_claude", new_callable=AsyncMock)
     @patch("orchestrator.run_gemini", new_callable=AsyncMock)
-    async def test_parallel_mixed_results(self, mock_gemini, mock_claude, mock_anim):
+    async def test_parallel_mixed_results(self, mock_gemini, mock_claude):
         mock_gemini.return_value = "gemini ok"
         mock_claude.side_effect = Exception("Claude boom")
-        mock_anim.side_effect = _passthrough_anim
 
         ctx = Context()
         results = await parallel([("gemini", "task 1"), ("claude", "task 2")], ctx)
@@ -218,11 +207,9 @@ class TestPrimitives(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ctx.history), 1)
         self.assertEqual(ctx.history[0]["agent"], "gemini")
 
-    @patch("orchestrator._run_animated", new_callable=AsyncMock)
     @patch("orchestrator.run_gemini", new_callable=AsyncMock)
-    async def test_parallel_with_exception(self, mock_gemini, mock_anim):
+    async def test_parallel_with_exception(self, mock_gemini):
         mock_gemini.side_effect = Exception("Boom")
-        mock_anim.side_effect = _passthrough_anim
 
         ctx = Context()
         tasks = [("gemini", "fail task")]
@@ -233,13 +220,11 @@ class TestPrimitives(unittest.IsolatedAsyncioTestCase):
 
 
 class TestPipelines(unittest.IsolatedAsyncioTestCase):
-    @patch("orchestrator._run_animated", new_callable=AsyncMock)
     @patch("orchestrator.run_gemini", new_callable=AsyncMock)
     @patch("orchestrator.run_claude", new_callable=AsyncMock)
-    async def test_review_and_fix(self, mock_claude, mock_gemini, mock_anim):
+    async def test_review_and_fix(self, mock_claude, mock_gemini):
         mock_gemini.return_value = "issues json"
         mock_claude.return_value = "fixed code"
-        mock_anim.side_effect = _passthrough_anim
 
         with patch("builtins.open", unittest.mock.mock_open(read_data="original code")):
             result = await review_and_fix("dummy.py", persist=False)
@@ -248,38 +233,32 @@ class TestPipelines(unittest.IsolatedAsyncioTestCase):
         mock_gemini.assert_called_once()
         mock_claude.assert_called_once()
 
-    @patch("orchestrator._run_animated", new_callable=AsyncMock)
     @patch("orchestrator.run_gemini", new_callable=AsyncMock)
     @patch("orchestrator.run_claude", new_callable=AsyncMock)
-    async def test_research(self, mock_claude, mock_gemini, mock_anim):
+    async def test_research(self, mock_claude, mock_gemini):
         mock_gemini.return_value = "res1"
         mock_claude.return_value = "res2"
-        mock_anim.side_effect = _passthrough_anim
 
         result = await research("topic", persist=False)
         self.assertIn("[gemini]\nres1", result)
         self.assertIn("[claude]\nres2", result)
 
-    @patch("orchestrator._run_animated", new_callable=AsyncMock)
     @patch("orchestrator.parallel", new_callable=AsyncMock)
     @patch("orchestrator.run_claude", new_callable=AsyncMock)
-    async def test_research_and_implement(self, mock_claude, mock_parallel, mock_anim):
+    async def test_research_and_implement(self, mock_claude, mock_parallel):
         mock_parallel.return_value = ["res1", "res2"]
         mock_claude.return_value = "impl"
-        mock_anim.side_effect = _passthrough_anim
 
         result = await research_and_implement("topic", persist=False)
         self.assertEqual(result, "impl")
         mock_parallel.assert_called_once()
         mock_claude.assert_called_once()
 
-    @patch("orchestrator._run_animated", new_callable=AsyncMock)
     @patch("orchestrator.run_gemini", new_callable=AsyncMock)
     @patch("orchestrator.run_claude", new_callable=AsyncMock)
-    async def test_crossvalidate_and_implement(self, mock_claude, mock_gemini, mock_anim):
+    async def test_crossvalidate_and_implement(self, mock_claude, mock_gemini):
         mock_gemini.return_value = "draft"
         mock_claude.side_effect = ["validated", "implementation"]
-        mock_anim.side_effect = _passthrough_anim
 
         result = await crossvalidate_and_implement("topic", persist=False)
         self.assertEqual(result, "implementation")
