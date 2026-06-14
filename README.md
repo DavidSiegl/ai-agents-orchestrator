@@ -89,8 +89,3 @@ Both prepend a truncated context summary to the prompt when history exists.
 ```bash
 uv run pytest
 ```
-
-Motivation
-Quick Start
-Usage
-Contributing
