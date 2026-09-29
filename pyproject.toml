@@ -1,19 +1,17 @@
 [tool.pytest.ini_options]
 pythonpath = ["."]
-asyncio_mode = "auto"
 
 [project]
 name = "ai-agents-orchestrator"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "Spec Collector -> Builder -> Reviewer handoff between Claude Code sessions in herdr"
 readme = "README.md"
-requires-python = ">=3.14"
-dependencies = [
-    "pytest>=9.0.3",
-]
+# 3.13 is what slave0 ships; the orchestrator is stdlib-only so it runs there without uv.
+requires-python = ">=3.13"
+dependencies = []
 
 [dependency-groups]
 dev = [
-    "pytest-asyncio>=1.3.0",
+    "pytest>=9.0.3",
     "pytest-cov>=6.0.0",
 ]

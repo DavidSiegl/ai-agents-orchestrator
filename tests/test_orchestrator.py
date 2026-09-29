@@ -1,352 +1,485 @@
-import unittest
-import os
 import json
-import asyncio
 import subprocess
-from unittest.mock import patch, MagicMock, AsyncMock
+import unittest
+from unittest.mock import MagicMock, patch
+
+import orchestrator
 from orchestrator import (
-    Context, run_claude, run_gemini, sequential, parallel,
-    review_and_fix, research, research_and_implement, crossvalidate_and_implement,
-    main, TIMEOUT
+    APPROVE, CHANGES_REQUESTED, Herdr, HerdrError, Host, OrchestratorError,
+    RunState, Workflow, main, parse_args, parse_verdict,
 )
 
 
-class TestContext(unittest.TestCase):
-    def setUp(self):
-        self.test_file = ".test_context.json"
-        if os.path.exists(self.test_file):
-            os.remove(self.test_file)
-
-    def tearDown(self):
-        if os.path.exists(self.test_file):
-            os.remove(self.test_file)
-
-    def test_add(self):
-        ctx = Context()
-        ctx.add("agent1", "output1")
-        self.assertEqual(len(ctx.history), 1)
-        self.assertEqual(ctx.history[0], {
-                         "agent": "agent1", "output": "output1"})
-
-    def test_last(self):
-        ctx = Context()
-        self.assertIsNone(ctx.last())
-        ctx.add("agent1", "output1")
-        self.assertEqual(ctx.last(), "output1")
-        ctx.add("agent2", "output2")
-        self.assertEqual(ctx.last(), "output2")
-
-    def test_summary(self):
-        ctx = Context()
-        ctx.add("agent1", "output1")
-        ctx.add("agent2", "output2")
-        expected = "[agent1]\noutput1\n\n[agent2]\noutput2"
-        self.assertEqual(ctx.summary(), expected)
-
-    def test_summary_empty(self):
-        ctx = Context()
-        self.assertEqual(ctx.summary(), "")
-
-    def test_summary_truncation(self):
-        ctx = Context()
-        ctx.add("agent", "A" * 3000)
-        ctx.add("agent", "B" * 2000)
-        summary = ctx.summary(max_chars=1000)
-        self.assertEqual(len(summary), 1000)
-        # Truncation must keep the tail (most recent content), not the head.
-        self.assertTrue(summary.endswith("B" * 1000))
-
-    def test_save_load(self):
-        ctx = Context()
-        ctx.add("agent1", "output1")
-        ctx.artifacts["key"] = "value"
-        ctx.save(self.test_file)
-
-        self.assertTrue(os.path.exists(self.test_file))
-
-        loaded = Context.load(self.test_file)
-        self.assertEqual(loaded.history, ctx.history)
-        self.assertEqual(loaded.artifacts, ctx.artifacts)
-
-    def test_load_nonexistent(self):
-        ctx = Context.load("nonexistent.json")
-        self.assertEqual(ctx.history, [])
-        self.assertEqual(ctx.artifacts, {})
+def completed(stdout="", stderr="", returncode=0):
+    return subprocess.CompletedProcess([], returncode, stdout=stdout, stderr=stderr)
 
 
-class TestRunners(unittest.IsolatedAsyncioTestCase):
-    @patch("orchestrator.subprocess.run")
-    async def test_run_claude_success(self, mock_run):
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = " Claude Output "
-        mock_run.return_value = mock_result
-
-        output = await run_claude("test prompt")
-
-        self.assertEqual(output, "Claude Output")
-        mock_run.assert_called_once()
-        args, kwargs = mock_run.call_args
-        self.assertEqual(args[0], ["claude", "--dangerously-skip-permissions", "-p", "test prompt"])
-
-    @patch("orchestrator.subprocess.run")
-    async def test_run_claude_with_context(self, mock_run):
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "ok"
-        mock_run.return_value = mock_result
-
-        ctx = Context()
-        ctx.add("gemini", "previous output")
-
-        await run_claude("new task", ctx)
-
-        args, kwargs = mock_run.call_args
-        full_prompt = args[0][3]
-        self.assertIn("Previous steps:", full_prompt)
-        self.assertIn("[gemini]\nprevious output", full_prompt)
-        self.assertIn("Your task:\nnew task", full_prompt)
-
-    @patch("orchestrator.subprocess.run")
-    async def test_run_claude_failure(self, mock_run):
-        mock_result = MagicMock()
-        mock_result.returncode = 1
-        mock_result.stderr = " Error from claude "
-        mock_run.return_value = mock_result
-
-        with self.assertRaisesRegex(RuntimeError, "Claude failed: Error from claude"):
-            await run_claude("test")
-
-    @patch("orchestrator.subprocess.run")
-    async def test_run_gemini_failure(self, mock_run):
-        mock_result = MagicMock()
-        mock_result.returncode = 1
-        mock_result.stderr = " Error message "
-        mock_run.return_value = mock_result
-
-        with self.assertRaisesRegex(RuntimeError, "Gemini failed: Error message"):
-            await run_gemini("test")
-
-    @patch("orchestrator.subprocess.run")
-    async def test_run_claude_timeout(self, mock_run):
-        mock_run.side_effect = subprocess.TimeoutExpired(["claude"], 600)
-        with self.assertRaisesRegex(RuntimeError, "Claude timed out after 600s"):
-            await run_claude("test")
-
-    @patch("orchestrator.subprocess.run")
-    async def test_run_gemini_with_context(self, mock_run):
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "ok"
-        mock_run.return_value = mock_result
-
-        ctx = Context()
-        ctx.add("claude", "previous output")
-
-        await run_gemini("new task", ctx)
-
-        args, _ = mock_run.call_args
-        full_prompt = args[0][2]
-        self.assertIn("Previous steps:", full_prompt)
-        self.assertIn("[claude]\nprevious output", full_prompt)
-        self.assertIn("Your task:\nnew task", full_prompt)
-
-    @patch("orchestrator.subprocess.run")
-    async def test_run_gemini_timeout(self, mock_run):
-        mock_run.side_effect = subprocess.TimeoutExpired(["gemini"], 600)
-        with self.assertRaisesRegex(RuntimeError, "Gemini timed out after 600s"):
-            await run_gemini("test")
+def result(obj):
+    return completed(json.dumps({"id": "cli:x", "result": obj}))
 
 
-class TestPrimitives(unittest.IsolatedAsyncioTestCase):
-    @patch("orchestrator.run_claude", new_callable=AsyncMock)
-    @patch("orchestrator.run_gemini", new_callable=AsyncMock)
-    async def test_sequential(self, mock_gemini, mock_claude):
-        mock_gemini.return_value = "gemini result"
-        mock_claude.return_value = "claude result"
+class FakeHost:
+    """An in-memory filesystem standing in for the machine the agents run on."""
 
-        ctx = Context()
-        steps = [
-            ("gemini", "step 1"),
-            ("claude", "step 2 with {output}")
-        ]
+    def __init__(self, head="abc123"):
+        self.files = {}
+        self.head = head
 
-        await sequential(steps, ctx)
+    def read(self, path):
+        return self.files.get(path)
 
-        self.assertEqual(len(ctx.history), 2)
-        mock_gemini.assert_called_with("step 1", ctx)
-        mock_claude.assert_called_with("step 2 with gemini result", ctx)
+    def write(self, path, text):
+        self.files[path] = text
 
-    @patch("orchestrator.run_claude", new_callable=AsyncMock)
-    @patch("orchestrator.run_gemini", new_callable=AsyncMock)
-    async def test_parallel(self, mock_gemini, mock_claude):
-        mock_gemini.return_value = "gemini par"
-        mock_claude.return_value = "claude par"
-
-        ctx = Context()
-        tasks = [
-            ("gemini", "task 1"),
-            ("claude", "task 2")
-        ]
-
-        results = await parallel(tasks, ctx)
-
-        self.assertEqual(results, ["gemini par", "claude par"])
-        self.assertEqual(len(ctx.history), 2)
-
-    @patch("orchestrator.run_claude", new_callable=AsyncMock)
-    @patch("orchestrator.run_gemini", new_callable=AsyncMock)
-    async def test_parallel_mixed_results(self, mock_gemini, mock_claude):
-        mock_gemini.return_value = "gemini ok"
-        mock_claude.side_effect = Exception("Claude boom")
-
-        ctx = Context()
-        results = await parallel([("gemini", "task 1"), ("claude", "task 2")], ctx)
-
-        self.assertEqual(results, ["gemini ok", ""])
-        self.assertEqual(len(ctx.history), 1)
-        self.assertEqual(ctx.history[0]["agent"], "gemini")
-
-    @patch("orchestrator.run_gemini", new_callable=AsyncMock)
-    async def test_parallel_with_exception(self, mock_gemini):
-        mock_gemini.side_effect = Exception("Boom")
-
-        ctx = Context()
-        tasks = [("gemini", "fail task")]
-
-        results = await parallel(tasks, ctx)
-        self.assertEqual(results, [""])
-        self.assertEqual(len(ctx.history), 0)
+    def git_head(self, cwd):
+        return self.head
 
 
-class TestPipelines(unittest.IsolatedAsyncioTestCase):
-    @patch("orchestrator.run_gemini", new_callable=AsyncMock)
-    @patch("orchestrator.run_claude", new_callable=AsyncMock)
-    async def test_review_and_fix(self, mock_claude, mock_gemini):
-        mock_gemini.return_value = "issues json"
-        mock_claude.return_value = "fixed code"
+class FakeHerdr:
+    """Plays each role by writing its handoff file when prompted.
 
-        with patch("builtins.open", unittest.mock.mock_open(read_data="original code")):
-            result = await review_and_fix("dummy.py", persist=False)
+    `script[role]` is a list of callables, one per turn of that role; each
+    receives the prompt, may write files, and returns the status the agent
+    shows afterwards.
+    """
 
-        self.assertEqual(result, "fixed code")
-        mock_gemini.assert_called_once()
-        mock_claude.assert_called_once()
+    def __init__(self, host, state, script):
+        self.host = host
+        self.state = state
+        self.script = script
+        self.calls = []
+        self.panes = 0
+        self.statuses = {}
+        self.waits = []
+        self.blocked_at_start = set()
 
-    @patch("orchestrator.run_gemini", new_callable=AsyncMock)
-    @patch("orchestrator.run_claude", new_callable=AsyncMock)
-    async def test_research(self, mock_claude, mock_gemini):
-        mock_gemini.return_value = "res1"
-        mock_claude.return_value = "res2"
+    def _role(self, name):
+        return name.split("-", 1)[0]
 
-        result = await research("topic", persist=False)
-        self.assertIn("[gemini]\nres1", result)
-        self.assertIn("[claude]\nres2", result)
+    def create_workspace(self, cwd, label):
+        self.calls.append(("workspace", label))
+        return "w1", self._pane()
 
-    @patch("orchestrator.parallel", new_callable=AsyncMock)
-    @patch("orchestrator.run_claude", new_callable=AsyncMock)
-    async def test_research_and_implement(self, mock_claude, mock_parallel):
-        mock_parallel.return_value = ["res1", "res2"]
-        mock_claude.return_value = "impl"
+    def _pane(self):
+        self.panes += 1
+        return f"w1:p{self.panes}"
 
-        result = await research_and_implement("topic", persist=False)
-        self.assertEqual(result, "impl")
-        mock_parallel.assert_called_once()
-        mock_claude.assert_called_once()
+    def split(self, pane, direction, cwd):
+        self.calls.append(("split", pane, direction))
+        return self._pane()
 
-    @patch("orchestrator.run_gemini", new_callable=AsyncMock)
-    @patch("orchestrator.run_claude", new_callable=AsyncMock)
-    async def test_crossvalidate_and_implement(self, mock_claude, mock_gemini):
-        mock_gemini.return_value = "draft"
-        mock_claude.side_effect = ["validated", "implementation"]
+    def rename_pane(self, pane, label):
+        self.calls.append(("rename", pane, label))
 
-        result = await crossvalidate_and_implement("topic", persist=False)
-        self.assertEqual(result, "implementation")
-        self.assertEqual(mock_claude.call_count, 2)
+    def start_agent(self, name, pane, agent_args):
+        self.calls.append(("start", name, pane, tuple(agent_args)))
+        self.statuses[name] = "idle"
+        return self._role(name) not in self.blocked_at_start
+
+    def prompt(self, name, text):
+        self.calls.append(("prompt", name))
+        self.statuses[name] = self.script[self._role(name)].pop(0)(text, self.state, self.host)
+
+    def wait(self, name, timeout_ms, until=()):
+        self.waits.append(until)
+        return "done"
+
+    def status(self, name):
+        return self.statuses.get(name)
+
+    def focus(self, name):
+        self.calls.append(("focus", name))
+
+
+def writes(path_of, text, status="done"):
+    """A turn that writes `text` to the path the state names, then settles."""
+    def turn(prompt, state, host):
+        host.write(path_of(state), text)
+        return status
+    return turn
+
+
+def idle(prompt, state, host):
+    return "done"
+
+
+class FakeClock:
+    """Time that passes only when the workflow sleeps; hooks play the world meanwhile."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.hooks = []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+        for hook in self.hooks:
+            hook()
+
+
+def make_workflow(script, host=None, max_rounds=3, **kw):
+    host = host or FakeHost()
+    state = RunState("20260929-120000-a1b2c3", "add a rate limiter", "/proj", None)
+    herdr = FakeHerdr(host, state, script)
+    notes = []
+    clock = FakeClock()
+    wf = Workflow(herdr, host, state, notify=lambda t, b: notes.append(t),
+                  max_rounds=max_rounds, sleep=clock.sleep, clock=clock, **kw)
+    return wf, herdr, host, notes
+
+
+spec_turn = writes(lambda s: s.spec_path, "# Goal\nlimit requests")
+
+
+def build_turn(n):
+    return writes(lambda s: s.build_path(n), f"report {n}")
+
+
+def review_turn(n, verdict):
+    return writes(lambda s: s.review_path(n), f"**VERDICT: {verdict}**\n1. finding")
+
+
+class TestParseVerdict(unittest.TestCase):
+    def test_plain(self):
+        self.assertEqual(parse_verdict("VERDICT: APPROVE\n"), APPROVE)
+
+    def test_markdown_emphasis_and_leading_blank_lines(self):
+        self.assertEqual(parse_verdict("\n\n# VERDICT: CHANGES_REQUESTED\n1. x"), CHANGES_REQUESTED)
+
+    def test_verdict_not_on_first_line_is_rejected(self):
+        self.assertIsNone(parse_verdict("Looks good.\nVERDICT: APPROVE"))
+
+    def test_empty(self):
+        self.assertIsNone(parse_verdict(""))
+
+
+class TestWorkflow(unittest.TestCase):
+    def test_approved_first_round(self):
+        wf, herdr, host, notes = make_workflow({
+            "spec": [spec_turn],
+            "build": [build_turn(1)],
+            "review": [review_turn(1, APPROVE)],
+        })
+
+        self.assertEqual(wf.run(), APPROVE)
+
+        starts = [c[1] for c in herdr.calls if c[0] == "start"]
+        self.assertEqual(starts, ["spec-a1b2c3", "build-a1b2c3", "review-a1b2c3"])
+        self.assertIn(("split", "w1:p1", "right"), herdr.calls)
+        self.assertIn(("split", "w1:p2", "down"), herdr.calls)
+        self.assertIn(("focus", "spec-a1b2c3"), herdr.calls)
+        self.assertEqual(host.files["/proj/.orchestrator/.gitignore"], "*\n")
+        saved = json.loads(host.files[f"{wf.state.dir}/state.json"])
+        self.assertEqual((saved["phase"], saved["verdict"], saved["base"]), ("done", APPROVE, "abc123"))
+        self.assertEqual(notes[-1], f"Run finished: {APPROVE}")
+
+    def test_review_prompt_names_the_base_commit(self):
+        seen = []
+
+        def review(prompt, state, host):
+            seen.append(prompt)
+            return review_turn(1, APPROVE)(prompt, state, host)
+
+        wf, *_ = make_workflow({"spec": [spec_turn], "build": [build_turn(1)], "review": [review]})
+        wf.run()
+        self.assertIn("git diff abc123", seen[0])
+
+    def test_changes_requested_loop_back_to_builder(self):
+        wf, herdr, host, _ = make_workflow({
+            "spec": [spec_turn],
+            "build": [build_turn(1), build_turn(2)],
+            "review": [review_turn(1, CHANGES_REQUESTED), review_turn(2, APPROVE)],
+        })
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(wf.state.round, 2)
+        prompts = [c[1] for c in herdr.calls if c[0] == "prompt"]
+        self.assertEqual(prompts, ["spec-a1b2c3", "build-a1b2c3", "review-a1b2c3",
+                                   "build-a1b2c3", "review-a1b2c3"])
+
+    def test_stops_after_max_rounds(self):
+        wf, *_ = make_workflow({
+            "spec": [spec_turn],
+            "build": [build_turn(1), build_turn(2)],
+            "review": [review_turn(1, CHANGES_REQUESTED), review_turn(2, CHANGES_REQUESTED)],
+        }, max_rounds=2)
+
+        self.assertEqual(wf.run(), CHANGES_REQUESTED)
+        self.assertEqual(wf.state.phase, "done")
+
+    def test_blocked_turn_notifies_once_then_waits_for_the_file(self):
+        wf, herdr, host, notes = make_workflow({
+            "spec": [spec_turn], "build": [build_turn(1)], "review": [lambda p, st, h: "blocked"],
+        })
+        polls = []
+
+        def human_answers_on_third_poll():
+            polls.append(1)
+            if len(polls) == 3:
+                herdr.statuses["review-a1b2c3"] = "working"
+                host.write(wf.state.review_path(1), "VERDICT: APPROVE")
+        wf.clock.hooks.append(human_answers_on_third_poll)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(notes.count("Reviewer needs your answer"), 1)
+
+    def test_settled_status_is_not_the_end_of_a_turn(self):
+        # Claude Code reports done while a background task it started runs on.
+        wf, herdr, host, _ = make_workflow({
+            "spec": [spec_turn], "build": [lambda p, st, h: "done"], "review": [review_turn(1, APPROVE)],
+        })
+        wf.clock.hooks.append(lambda: host.write(wf.state.build_path(1), "report"))
+
+        self.assertEqual(wf.run(), APPROVE)
+
+    def test_idle_without_handoff_notifies_the_human(self):
+        wf, herdr, host, notes = make_workflow({
+            "spec": [spec_turn], "build": [idle], "review": [review_turn(1, APPROVE)],
+        })
+
+        def writes_after_stall():
+            if wf.clock.now > orchestrator.STALL_SECONDS + 10:
+                host.write(wf.state.build_path(1), "report")
+        wf.clock.hooks.append(writes_after_stall)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(notes.count("Builder is idle without writing build-1.md"), 1)
+
+    def test_idle_spec_collector_is_not_a_stall(self):
+        wf, herdr, host, notes = make_workflow({
+            "spec": [idle], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)],
+        })
+
+        def human_approves_late():
+            if wf.clock.now > 10 * orchestrator.STALL_SECONDS:
+                host.write(wf.state.spec_path, "spec")
+        wf.clock.hooks.append(human_approves_late)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertFalse([n for n in notes if "idle" in n])
+
+    def test_startup_dialog_waits_for_the_human(self):
+        wf, herdr, _, notes = make_workflow({
+            "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)],
+        })
+        herdr.blocked_at_start = {"spec"}
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(notes[0], "Spec Collector needs your answer")
+        self.assertEqual(herdr.waits, [("idle", "done")])
+
+    def test_spec_collector_exiting_aborts(self):
+        wf, herdr, host, _ = make_workflow({"spec": [idle]})
+        wf.clock.hooks.append(herdr.statuses.clear)
+
+        with self.assertRaisesRegex(OrchestratorError, "Spec Collector exited without writing"):
+            wf.run()
+        saved = json.loads(host.files[f"{wf.state.dir}/state.json"])
+        self.assertIn("exited without writing", saved["error"])
+
+    def test_builder_timeout(self):
+        wf, *_ = make_workflow({"spec": [spec_turn], "build": [idle]}, turn_timeout=60)
+
+        with self.assertRaisesRegex(OrchestratorError, "Builder did not write .*build-1.md within 60s"):
+            wf.run()
+
+    def test_empty_handoff_aborts(self):
+        wf, *_ = make_workflow({"spec": [spec_turn], "build": [writes(lambda s: s.build_path(1), "\n")]})
+
+        with self.assertRaisesRegex(OrchestratorError, "Builder wrote an empty"):
+            wf.run()
+
+    def test_review_without_verdict_aborts(self):
+        wf, *_ = make_workflow({
+            "spec": [spec_turn],
+            "build": [build_turn(1)],
+            "review": [writes(lambda s: s.review_path(1), "looks fine")],
+        })
+
+        with self.assertRaisesRegex(OrchestratorError, "does not start with a VERDICT line"):
+            wf.run()
+
+    def test_not_a_git_repo(self):
+        seen = []
+
+        def review(prompt, state, host):
+            seen.append(prompt)
+            return review_turn(1, APPROVE)(prompt, state, host)
+
+        wf, *_ = make_workflow({"spec": [spec_turn], "build": [build_turn(1)], "review": [review]},
+                               host=FakeHost(head=None))
+        wf.run()
+        self.assertIn("not a git repository", seen[0])
+
+    def test_agent_args_reach_every_role(self):
+        wf, herdr, *_ = make_workflow({
+            "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)],
+        }, agent_args=["--permission-mode", "auto"])
+        wf.run()
+        args = {c[3] for c in herdr.calls if c[0] == "start"}
+        self.assertEqual(args, {("--permission-mode", "auto")})
+
+
+class TestHerdr(unittest.TestCase):
+    def test_call_returns_result_and_forwards_machine(self):
+        run = MagicMock(return_value=result({"agent": {"agent_status": "idle"}}))
+
+        self.assertEqual(Herdr("slave0", run=run).status("build-x"), "idle")
+        self.assertEqual(run.call_args.args[0],
+                         ["herdr", "--machine", "slave0", "agent", "get", "build-x"])
+
+    def test_prompt_does_not_wait(self):
+        run = MagicMock(return_value=result({"type": "agent_prompted"}))
+        Herdr(run=run).prompt("spec-x", "hi")
+        self.assertEqual(run.call_args.args[0], ["herdr", "agent", "prompt", "spec-x", "hi"])
+
+    def test_error_json_raises_with_code(self):
+        err = json.dumps({"error": {"code": "agent_blocked", "message": "waiting"}})
+        run = MagicMock(return_value=completed(stderr=err, returncode=1))
+
+        with self.assertRaises(HerdrError) as cm:
+            Herdr(run=run).call("agent", "prompt", "x", "y")
+        self.assertEqual(cm.exception.code, "agent_blocked")
+
+    def test_plain_text_error(self):
+        run = MagicMock(return_value=completed(stderr="unknown flag", returncode=2))
+        with self.assertRaisesRegex(HerdrError, "exit_2: unknown flag"):
+            Herdr(run=run).call("agent", "bogus")
+
+    def test_status_is_none_after_exit(self):
+        err = json.dumps({"error": {"code": "agent_not_found", "message": "gone"}})
+        run = MagicMock(return_value=completed(stderr=err, returncode=1))
+        self.assertIsNone(Herdr(run=run).status("spec-x"))
+
+    def test_start_agent_passes_claude_args_after_separator(self):
+        run = MagicMock(return_value=result({}))
+        Herdr(run=run).start_agent("build-x", "w1:p2", ["--permission-mode", "auto"])
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[argv.index("--kind") + 1], "claude")
+        self.assertEqual(argv[-3:], ["--", "--permission-mode", "auto"])
+
+    def test_start_agent_blocked_at_startup(self):
+        err = json.dumps({"error": {"code": "agent_not_ready", "message": "blocked during startup"}})
+        run = MagicMock(return_value=completed(stderr=err, returncode=1))
+        self.assertFalse(Herdr(run=run).start_agent("spec-x", "w1:p1", []))
+
+    def test_wait_passes_each_until(self):
+        run = MagicMock(return_value=result({"agent": {"agent_status": "idle"}}))
+        Herdr(run=run).wait("x", 1000, until=("working", "idle"))
+        argv = run.call_args.args[0]
+        self.assertEqual(argv.count("--until"), 2)
+        self.assertEqual(run.call_args.kwargs["timeout"], 61)
+
+    def test_unbounded_wait_has_no_process_limit(self):
+        run = MagicMock(return_value=result({"agent": {"agent_status": "idle"}}))
+        Herdr(run=run).wait("x", None, until=("idle",))
+        self.assertNotIn("--timeout", run.call_args.args[0])
+        self.assertIsNone(run.call_args.kwargs["timeout"])
+
+    def test_ssh_target_by_label(self):
+        profiles = [{"id": "5d45", "label": "slave0", "target": "ai-agents", "enabled": True}]
+        run = MagicMock(return_value=completed(json.dumps(profiles)))
+
+        self.assertEqual(Herdr("slave0", run=run).ssh_target(), "ai-agents")
+        # Machine management is local; forwarding it would be rejected by herdr.
+        self.assertEqual(run.call_args.args[0], ["herdr", "machine", "list", "--json"])
+
+    def test_ssh_target_unknown_machine(self):
+        run = MagicMock(return_value=completed("[]"))
+        with self.assertRaisesRegex(OrchestratorError, "no saved herdr machine named nope"):
+            Herdr("nope", run=run).ssh_target()
+
+    def test_missing_binary(self):
+        run = MagicMock(side_effect=FileNotFoundError())
+        with self.assertRaisesRegex(OrchestratorError, "not on PATH"):
+            Herdr(run=run).call("agent", "list")
+
+
+class TestHost(unittest.TestCase):
+    def test_ssh_wraps_command(self):
+        run = MagicMock(return_value=completed("/home/agent/proj\n"))
+        cwd = Host("ai-agents", run=run).resolve_dir("~/proj")
+
+        self.assertEqual(cwd, "/home/agent/proj")
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[:4], ["ssh", "-o", "BatchMode=yes", "ai-agents"])
+        self.assertIn('"$HOME$1"', argv[4])
+        self.assertTrue(argv[4].endswith(" _ /proj"))
+
+    def test_read_missing_file(self):
+        run = MagicMock(return_value=completed(returncode=orchestrator.MISSING_FILE_STATUS))
+        self.assertIsNone(Host(run=run).read("/x/spec.md"))
+
+    def test_read_failure_raises(self):
+        run = MagicMock(return_value=completed(stderr="Permission denied", returncode=1))
+        with self.assertRaisesRegex(OrchestratorError, "Permission denied"):
+            Host(run=run).read("/x/spec.md")
+
+    def test_write_sends_text_on_stdin(self):
+        run = MagicMock(return_value=completed())
+        Host(run=run).write("/x/state.json", "{}")
+        self.assertEqual(run.call_args.kwargs["input"], "{}")
+
+    def test_git_head_outside_repo(self):
+        run = MagicMock(return_value=completed(returncode=128))
+        self.assertIsNone(Host(run=run).git_head("/x"))
+
+    def test_run_states(self):
+        out = '{"run_id": "a"}\n\n{"run_id": "b"}\n'
+        run = MagicMock(return_value=completed(out))
+        self.assertEqual([s["run_id"] for s in Host(run=run).run_states("/x")], ["a", "b"])
+
+    def test_real_filesystem_roundtrip(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            host = Host()
+            path = f"{d}/nested/file.md"
+            self.assertIsNone(host.read(path))
+            host.write(path, "hello")
+            self.assertEqual(host.read(path), "hello")
+            self.assertEqual(host.resolve_dir(d), host.check(["sh", "-c", "cd -- \"$1\" && pwd", "_", d]).strip())
 
 
 class TestCLI(unittest.TestCase):
-    def setUp(self):
-        self.orig_timeout = TIMEOUT
+    def test_machine_requires_cwd(self):
+        with self.assertRaises(SystemExit), patch("sys.stderr"):
+            parse_args(["run", "task", "--machine", "slave0"])
 
-    def tearDown(self):
-        import orchestrator
-        orchestrator.TIMEOUT = self.orig_timeout
+    def test_max_rounds_must_be_positive(self):
+        with self.assertRaises(SystemExit), patch("sys.stderr"):
+            parse_args(["run", "task", "--max-rounds", "0"])
 
-    @patch("sys.exit")
-    @patch("builtins.print")
-    def test_main_no_args(self, mock_print, mock_exit):
-        main([])
-        mock_exit.assert_called_with(1)
-        mock_print.assert_any_call(
-            "Usage: orchestrator.py <pipeline> [arg] [--no-persist] [--timeout=SECONDS]")
+    @patch.dict("os.environ", {"HERDR_ENV": ""})
+    def test_refuses_outside_herdr(self):
+        with patch("sys.stderr") as err:
+            self.assertEqual(main(["list"]), orchestrator.EXIT_ERROR)
+        self.assertIn("not inside a herdr pane", "".join(c.args[0] for c in err.write.call_args_list))
 
-    @patch("sys.exit")
-    @patch("orchestrator.Context.load")
-    @patch("builtins.print")
-    def test_main_info(self, mock_print, mock_load, mock_exit):
-        mock_load.return_value = Context()
-        main(["info"])
-        mock_exit.assert_called_with(0)
-        mock_print.assert_any_call("context entries: 0")
+    @patch.object(Workflow, "__init__", return_value=None)
+    @patch.object(Workflow, "run", return_value=APPROVE)
+    @patch.object(Host, "resolve_dir", return_value="/proj")
+    @patch.dict("os.environ", {"HERDR_ENV": "1"})
+    def test_permission_mode_reaches_claude(self, _resolve, _run, init):
+        with patch("builtins.print"):
+            self.assertEqual(main(["run", "task", "--permission-mode", "auto"]), 0)
+        self.assertEqual(init.call_args.kwargs["agent_args"], ["--permission-mode", "auto"])
 
-    @patch("sys.exit")
-    @patch("os.path.exists")
-    @patch("os.remove")
-    @patch("builtins.print")
-    def test_main_clear_context(self, mock_print, mock_remove, mock_exists, mock_exit):
-        mock_exists.return_value = True
-        main(["clear-context"])
-        mock_remove.assert_called_once()
-        mock_print.assert_any_call("Context cleared.")
-        mock_exit.assert_called_with(0)
+    @patch.object(Workflow, "run", return_value=CHANGES_REQUESTED)
+    @patch.object(Host, "resolve_dir", return_value="/proj")
+    @patch.dict("os.environ", {"HERDR_ENV": "1"})
+    def test_run_exit_code_when_changes_remain(self, _resolve, _run):
+        with patch("builtins.print"):
+            self.assertEqual(main(["run", "task"]), orchestrator.EXIT_CHANGES_REQUESTED)
 
-    @patch("orchestrator.asyncio.run")
-    @patch("orchestrator.research", new_callable=AsyncMock)
-    @patch("builtins.print")
-    def test_main_pipeline_dispatch(self, mock_print, mock_research, mock_asyncio_run):
-        mock_research.return_value = "result"
-        # Make asyncio.run return whatever the coroutine would have returned
-
-        def side_effect(coro):
-            if asyncio.iscoroutine(coro):
-                coro.close()
-            return "result"
-        mock_asyncio_run.side_effect = side_effect
-
-        main(["research", "my topic"])
-
-        mock_research.assert_called_with("my topic", persist=True)
-        mock_print.assert_any_call("result")
-
-    @patch("sys.exit")
-    def test_main_timeout_flag(self, mock_exit):
-        import orchestrator
-        main(["--timeout=123", "info"])
-        self.assertEqual(orchestrator.TIMEOUT, 123)
-
-    @patch("sys.exit")
-    @patch("builtins.print")
-    def test_main_unknown_pipeline(self, mock_print, mock_exit):
-        main(["unknown-pipeline", "arg"])
-        mock_print.assert_any_call("Unknown pipeline: unknown-pipeline")
-        mock_exit.assert_called_with(1)
-
-    @patch("sys.exit")
-    @patch("builtins.print")
-    def test_main_missing_arg(self, mock_print, mock_exit):
-        main(["research"])
-        mock_print.assert_any_call("Pipeline 'research' requires an argument.")
-        mock_exit.assert_called_with(1)
-
-    @patch("sys.exit")
-    @patch("os.path.exists")
-    @patch("builtins.print")
-    def test_main_clear_context_no_file(self, mock_print, mock_exists, mock_exit):
-        mock_exists.return_value = False
-        main(["clear-context"])
-        mock_print.assert_any_call("No context file found.")
-        mock_exit.assert_called_with(0)
+    @patch.object(Host, "run_states", return_value=[])
+    @patch.object(Host, "resolve_dir", return_value="/home/agent/proj")
+    @patch.object(Herdr, "ssh_target", return_value="ai-agents")
+    def test_list_on_machine_uses_ssh_host(self, _target, _resolve, _states):
+        with patch("builtins.print") as out:
+            self.assertEqual(main(["list", "--machine", "slave0", "--cwd", "~/proj"]), 0)
+        out.assert_called_with("No runs.")
 
 
 if __name__ == "__main__":

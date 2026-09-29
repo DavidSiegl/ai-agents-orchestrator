@@ -1,88 +1,82 @@
 # ai-agents-orchestrator
 
-A lightweight Python orchestrator that pipes tasks between **Claude Code** and **Gemini CLI**, enabling multi-agent pipelines with shared context.
+A role-based handoff workflow for **Claude Code** sessions running in [herdr](https://herdr.dev):
+
+```
+Spec Collector ──spec.md──▶ Builder ──build-N.md──▶ Reviewer ──review-N.md──▶ APPROVE
+                               ▲                                   │
+                               └──────── CHANGES_REQUESTED ────────┘
+```
+
+Each role is a separate interactive Claude Code session in its own herdr pane, so no
+role judges its own work, and you can watch or step into any of them. The agents can
+run on this machine or on a saved herdr machine such as `slave0`.
 
 ## Requirements
 
-- Python 3.14+
-- [`claude`](https://claude.ai/code) CLI available on `PATH`
-- [`gemini`](https://github.com/google-gemini/gemini-cli) CLI available on `PATH`
-- [uv](https://github.com/astral-sh/uv) (for dependency management)
-
-## Setup
-
-```bash
-uv sync
-```
+- herdr 0.9+ with the Claude integration installed where the agents run (`herdr integration install claude`)
+- `claude` on `PATH` where the agents run
+- Python 3.13+, standard library only; [uv](https://github.com/astral-sh/uv) only for the tests
+- For `--machine`: the machine saved in herdr (`herdr machine list`) and non-interactive SSH to its target
 
 ## Usage
 
 ```bash
-python orchestrator.py <pipeline> <argument> [flags]
+# From a herdr pane, on the project in the current directory
+python orchestrator.py run "add a token-bucket rate limiter to the API client"
+
+# Agents on slave0, driven from anywhere; --cwd is a path on slave0
+python orchestrator.py run "add a token-bucket rate limiter" --machine slave0 --cwd ~/GitHub/myproject
+
+# Runs recorded for a project
+python orchestrator.py list --machine slave0 --cwd ~/GitHub/myproject
 ```
-
-### Pipelines
-
-| Pipeline | Argument | Description |
-|---|---|---|
-| `review-and-fix` | `<file>` | Gemini reviews the file, Claude implements the fixes |
-| `research` | `<topic>` | Both agents research in parallel, returns combined findings |
-| `research-and-implement` | `<topic>` | Parallel research, then Claude synthesizes and implements |
-| `crossvalidate-and-implement` | `<topic>` | Gemini drafts a design, Claude validates and corrects it, Claude implements |
-
-### Utility commands
-
-| Command | Description |
-|---|---|
-| `info` | Show context file location and history entry count |
-| `clear-context` | Delete the persisted context file |
-
-### Flags
 
 | Flag | Description |
 |---|---|
-| `--no-persist` | Run without loading or saving context between runs |
-| `--timeout=SECONDS` | Per-agent timeout in seconds (default: 600) |
+| `--machine NAME` | Saved herdr machine to run the agents on. Requires `--cwd`. |
+| `--cwd PATH` | Project directory, on the machine if `--machine` is given. Default: current directory. |
+| `--max-rounds N` | Review rounds before giving up (default 3). |
+| `--timeout SECONDS` | How long one Builder or Reviewer turn may take (default 1800). The interview has no limit. |
+| `--permission-mode MODE` | Claude Code permission mode for every role, e.g. `auto` or `acceptEdits`. |
 
-### Examples
+Exit status: `0` approved, `3` changes still requested after the last round, `1` error, `130` interrupted.
 
-```bash
-# Have Gemini review a file and Claude fix the issues
-python orchestrator.py review-and-fix src/main.py
+## How a run works
 
-# Research a topic using both agents in parallel
-python orchestrator.py research "async Python patterns"
+1. **Workspace.** The run gets its own herdr workspace. Its panes are named after the roles.
+2. **Spec Collector.** The collector's pane is focused and a notification tells you it is waiting. Answer its
+   questions in that pane. Once you approve the spec, it writes `spec.md`, which hands the work on.
+3. **Builder.** It implements the spec in a pane split to the right, verifies the change, and writes
+   `build-N.md`. It does not commit.
+4. **Reviewer.** A fresh session in a pane below the Builder checks the change (`git diff` against the commit
+   the run started from, plus untracked files) against the spec, and writes `review-N.md`. The first line of
+   the review is `VERDICT: APPROVE` or `VERDICT: CHANGES_REQUESTED`. Requested changes go back to the Builder,
+   and the Reviewer checks again.
 
-# Research and produce a working implementation
-python orchestrator.py research-and-implement "rate limiter in Python"
+Everything a run writes stays in `<project>/.orchestrator/runs/<run-id>/`: the handoff files and
+`state.json`, which records the phase, round, panes, verdict and any error. `.orchestrator/` ignores itself
+through its own `.gitignore`, so it never shows up in the diff under review. The workspace is left open when
+the run ends, so you can read the sessions; close it in herdr when you are done.
 
-# Gemini proposes a design, Claude validates and implements it
-python orchestrator.py crossvalidate-and-implement "JWT authentication middleware"
+### When the orchestrator needs you
 
-# Run without persisting context
-python orchestrator.py research "Redis caching" --no-persist
+A role's turn ends when it writes its handoff file. herdr's `idle` and `done` states don't mean the turn is
+over: Claude Code ends a turn while a background task it started is still running, and resumes when that
+task finishes. So the orchestrator polls for the file. Meanwhile, it sends a herdr notification when a role:
 
-# Extend the timeout for long-running tasks
-python orchestrator.py research-and-implement "distributed tracing" --timeout=1200
-```
+- is **blocked** on a permission prompt, a question, or a startup dialog such as folder trust;
+- has sat **idle for 3 minutes** without writing its file (not for the Spec Collector, which waits on you by design).
 
-## How it works
+Notifications appear in the herdr where the orchestrator runs. Answer in the named pane, and the run
+continues.
 
-### Context
+### Running on slave0
 
-Each pipeline shares a `Context` object that accumulates agent outputs as a history. By default the context is persisted to `.orchestrator_context.json` so subsequent runs build on prior results. Use `--no-persist` to opt out, or `clear-context` to reset.
-
-### Primitives
-
-- **`sequential(steps, ctx)`** — runs steps one after another; each step receives the previous step's output via `{output}` in the prompt template.
-- **`parallel(tasks, ctx)`** — runs multiple agent calls concurrently and returns all results.
-
-### Agent runners
-
-- **`run_claude(prompt, ctx)`** — invokes `claude --dangerously-skip-permissions -p <prompt>`
-- **`run_gemini(prompt, ctx)`** — invokes `gemini -p <prompt>`
-
-Both prepend a truncated context summary to the prompt when history exists.
+With `--machine`, every herdr command is forwarded with `herdr --machine`, and file and `git` access runs
+over SSH to the target saved for that machine. The orchestrator itself can run here (inside herdr or not),
+or on slave0 directly: copy `orchestrator.py` over and run it with the system `python3` from a herdr pane
+there, without `--machine`.
 
 ## Running tests
 
