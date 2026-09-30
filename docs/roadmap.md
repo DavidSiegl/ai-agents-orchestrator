@@ -3,7 +3,8 @@
 Ideas for what comes next, in no particular order. The designs behind what has shipped are in
 [design.md](design.md).
 
-- **`close <run-id>`**: close the run's herdr workspace from its saved `workspace_id`, instead of by hand.
+- **`close <run-id>`**: close the run's herdr workspace from its saved `workspace_id`, instead of by hand. Only
+  runs that failed or used `--no-pr` need it; the others close their workspace after the pull request.
 - **`show <run-id>`**: print a run's state, its handoff file paths, the latest verdict and the open findings of
   the last review. `list` gives only one line per run.
 - **`--spec FILE`**: skip the interview when a spec already exists, by copying the file into the run as
@@ -19,3 +20,9 @@ Ideas for what comes next, in no particular order. The designs behind what has s
   run, instead of going to the Reviewer.
 - **`summary.md` and per-turn timings**: write `summary.md` at the end of a run, and record in `state.json` when
   each turn started and ended.
+
+## Known issues
+
+- **A resume can publish from the wrong branch.** The run switches to its branch only in the spec phase. If you
+  check out another branch before resuming a later phase, the commit lands there, and the push is of the run's
+  branch.
