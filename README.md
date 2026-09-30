@@ -73,6 +73,9 @@ Everything a run writes stays in `<project>/.orchestrator/runs/<run-id>/`: the h
 or in the commit. A run that fails keeps its workspace open and stays on its branch, so you can see what
 happened; close the workspace in herdr when you are done.
 
+A run cannot yet be resumed once its orchestrator process is gone; [ROADMAP.md](ROADMAP.md) has the design
+for that and what else is planned.
+
 ### When the orchestrator needs you
 
 A role's turn ends when it writes its handoff file. herdr's `idle` and `done` states don't mean the turn is
