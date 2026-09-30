@@ -8,6 +8,15 @@ them comes a backlog of smaller ideas, in no particular order, and one housekeep
 
 `file:line` references point at commit `25e756b` and will drift as the code changes.
 
+**Status:** sections 1 and 2 are implemented. They stay here as the rationale behind the code. The
+implementation differs from the design in three places:
+
+- The owner check runs before every write of `state.json`, not only before a heartbeat. A phase save made
+  after a `resume --force` would otherwise overwrite the new owner's state.
+- The run settings saved in `state.json` include the per-role models, which landed after this design.
+- A handoff file that ends the run as invalid also clears `prompted`. After the human deletes the file, the
+  resume prompts the role again instead of waiting for a file nobody is going to write.
+
 ## 1. Resume an interrupted run
 
 ### Problem

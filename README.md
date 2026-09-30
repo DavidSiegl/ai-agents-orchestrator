@@ -28,8 +28,11 @@ python orchestrator.py run "add a token-bucket rate limiter to the API client"
 # Agents on slave0, driven from anywhere; --cwd is a path on slave0
 python orchestrator.py run "add a token-bucket rate limiter" --machine slave0 --cwd ~/GitHub/myproject
 
-# Runs recorded for a project
+# Runs recorded for a project, and whether each one is still running
 python orchestrator.py list --machine slave0 --cwd ~/GitHub/myproject
+
+# Continue a run whose orchestrator has stopped, by its run id or the six-character key at its end
+python orchestrator.py resume e292fb --machine slave0 --cwd ~/GitHub/myproject
 ```
 
 | Flag | Description |
@@ -43,6 +46,10 @@ python orchestrator.py list --machine slave0 --cwd ~/GitHub/myproject
 | `--spec-model MODEL` | Claude model for the Spec Collector. Overrides `--model`. |
 | `--build-model MODEL` | Claude model for the Builder. Overrides `--model`. |
 | `--review-model MODEL` | Claude model for the Reviewer. Overrides `--model`. |
+| `--force` | `resume` only: take over a run that still looks alive. |
+
+A run saves its settings. `resume` takes the same flags as `run`, and a flag given to `resume` overrides the saved
+value; one left out keeps it.
 
 Exit status: `0` approved, `3` changes still requested after the last round, `1` error, `130` interrupted.
 
@@ -63,8 +70,33 @@ Everything a run writes stays in `<project>/.orchestrator/runs/<run-id>/`: the h
 through its own `.gitignore`, so it never shows up in the diff under review. The workspace is left open when
 the run ends, so you can read the sessions; close it in herdr when you are done.
 
-A run cannot yet be resumed once its orchestrator process is gone; [ROADMAP.md](ROADMAP.md) has the design
-for that and what else is planned.
+### Resuming a run
+
+The agents and the handoff files outlive the orchestrator: Ctrl-C, a dropped SSH session or a crash stops only
+the process that drives them. `resume` picks the run up where `state.json` says it stopped:
+
+- A handoff file written while no orchestrator was watching is taken as it is, without prompting the role again.
+- A role whose agent still runs is reused. If it was already prompted for its current file, it is only waited on.
+- An agent that exited is relaunched in its pane with `claude --resume`, keeping its conversation. When its
+  session is gone, a fresh one starts with a prompt that points it at the earlier rounds, and a Spec Collector's
+  interview starts over.
+- A closed pane is split again from a surviving one, and a closed workspace is replaced by a new one.
+- The diff under review stays against the commit the run started from, even if you commit in between.
+- An empty handoff file or a review without a verdict stops the resume with the file's name: fix it, or delete it
+  to have the role write it again.
+
+Resuming a finished run does nothing but print its verdict.
+
+### Stale runs
+
+While a run is going, its orchestrator rewrites `state.json` at least once a minute and records its host and
+pid there. `list` shows each unfinished run as `running` or `stale`. A run is stale when `state.json` is more
+than five minutes old, measured by the clock of the machine that holds it, or when its orchestrator ran on this
+host and its pid is gone. A stale run's line ends with the `resume` command for it. `resume` refuses a run
+that is still running unless you pass `--force`, and an orchestrator whose run is taken over stops at its next
+save. Ctrl-C is recorded as the error `interrupted`.
+
+[ROADMAP.md](ROADMAP.md) has the design behind both, and what else is planned.
 
 ### When the orchestrator needs you
 
