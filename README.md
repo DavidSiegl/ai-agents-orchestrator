@@ -59,6 +59,9 @@ Everything a run writes stays in `<project>/.orchestrator/runs/<run-id>/`: the h
 through its own `.gitignore`, so it never shows up in the diff under review. The workspace is left open when
 the run ends, so you can read the sessions; close it in herdr when you are done.
 
+A run cannot yet be resumed once its orchestrator process is gone; [ROADMAP.md](ROADMAP.md) has the design
+for that and what else is planned.
+
 ### When the orchestrator needs you
 
 A role's turn ends when it writes its handoff file. herdr's `idle` and `done` states don't mean the turn is
