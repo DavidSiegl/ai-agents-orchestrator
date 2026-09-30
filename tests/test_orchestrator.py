@@ -534,9 +534,9 @@ class TestHerdr(unittest.TestCase):
     def test_call_returns_result_and_forwards_machine(self):
         run = MagicMock(return_value=result({"agent": {"agent_status": "idle"}}))
 
-        self.assertEqual(Herdr("slave0", run=run).status("build-x"), "idle")
+        self.assertEqual(Herdr("remote", run=run).status("build-x"), "idle")
         self.assertEqual(run.call_args.args[0],
-                         ["herdr", "--machine", "slave0", "agent", "get", "build-x"])
+                         ["herdr", "--machine", "remote", "agent", "get", "build-x"])
 
     def test_prompt_does_not_wait(self):
         run = MagicMock(return_value=result({"type": "agent_prompted"}))
@@ -587,10 +587,10 @@ class TestHerdr(unittest.TestCase):
         self.assertIsNone(run.call_args.kwargs["timeout"])
 
     def test_ssh_target_by_label(self):
-        profiles = [{"id": "5d45", "label": "slave0", "target": "ai-agents", "enabled": True}]
+        profiles = [{"id": "5d45", "label": "remote", "target": "remote-host", "enabled": True}]
         run = MagicMock(return_value=completed(json.dumps(profiles)))
 
-        self.assertEqual(Herdr("slave0", run=run).ssh_target(), "ai-agents")
+        self.assertEqual(Herdr("remote", run=run).ssh_target(), "remote-host")
         # Machine management is local; forwarding it would be rejected by herdr.
         self.assertEqual(run.call_args.args[0], ["herdr", "machine", "list", "--json"])
 
@@ -607,12 +607,12 @@ class TestHerdr(unittest.TestCase):
 
 class TestHost(unittest.TestCase):
     def test_ssh_wraps_command(self):
-        run = MagicMock(return_value=completed("/home/agent/proj\n"))
-        cwd = Host("ai-agents", run=run).resolve_dir("~/proj")
+        run = MagicMock(return_value=completed("/home/user/proj\n"))
+        cwd = Host("remote-host", run=run).resolve_dir("~/proj")
 
-        self.assertEqual(cwd, "/home/agent/proj")
+        self.assertEqual(cwd, "/home/user/proj")
         argv = run.call_args.args[0]
-        self.assertEqual(argv[:4], ["ssh", "-o", "BatchMode=yes", "ai-agents"])
+        self.assertEqual(argv[:4], ["ssh", "-o", "BatchMode=yes", "remote-host"])
         self.assertIn('"$HOME$1"', argv[4])
         self.assertTrue(argv[4].endswith(" _ /proj"))
 
@@ -632,7 +632,7 @@ class TestHost(unittest.TestCase):
 
     def test_create_pr_runs_gh_in_the_project(self):
         run = MagicMock(return_value=completed("Creating pull request\nhttps://github.com/o/r/pull/7\n"))
-        url = Host("ai-agents", run=run).create_pr("/proj", "main", "orchestrator/x", "Title", "body", draft=True)
+        url = Host("remote-host", run=run).create_pr("/proj", "main", "orchestrator/x", "Title", "body", draft=True)
 
         self.assertEqual(url, "https://github.com/o/r/pull/7")
         remote = run.call_args.args[0][4]
@@ -669,7 +669,7 @@ class TestHost(unittest.TestCase):
 class TestCLI(unittest.TestCase):
     def test_machine_requires_cwd(self):
         with self.assertRaises(SystemExit), patch("sys.stderr"):
-            parse_args(["run", "task", "--machine", "slave0"])
+            parse_args(["run", "task", "--machine", "remote"])
 
     def test_max_rounds_must_be_positive(self):
         with self.assertRaises(SystemExit), patch("sys.stderr"):
@@ -737,11 +737,11 @@ class TestCLI(unittest.TestCase):
             self.assertEqual(main(["run", "task"]), orchestrator.EXIT_CHANGES_REQUESTED)
 
     @patch.object(Host, "run_states", return_value=[])
-    @patch.object(Host, "resolve_dir", return_value="/home/agent/proj")
-    @patch.object(Herdr, "ssh_target", return_value="ai-agents")
+    @patch.object(Host, "resolve_dir", return_value="/home/user/proj")
+    @patch.object(Herdr, "ssh_target", return_value="remote-host")
     def test_list_on_machine_uses_ssh_host(self, _target, _resolve, _states):
         with patch("builtins.print") as out:
-            self.assertEqual(main(["list", "--machine", "slave0", "--cwd", "~/proj"]), 0)
+            self.assertEqual(main(["list", "--machine", "remote", "--cwd", "~/proj"]), 0)
         out.assert_called_with("No runs.")
 
 
@@ -785,7 +785,7 @@ class TestResume(unittest.TestCase):
     def test_spec_written_while_orchestrator_was_gone(self):
         # Run e292fb: the collector wrote spec.md and exited after the orchestrator died.
         saved = {"run_id": "20260929-120000-a1b2c3", "task": "add a rate limiter", "cwd": "/proj",
-                 "machine": "slave0", "phase": "spec", "round": 0, "workspace_id": "w1", "base": None,
+                 "machine": "remote", "phase": "spec", "round": 0, "workspace_id": "w1", "base": None,
                  "verdict": None, "error": None, "agents": {"spec": {"name": "spec-a1b2c3", "pane": "w1:p1"}}}
         wf, herdr, host, _ = resume(RunState.from_dict(saved), {
             "build": [build_turn(1)], "review": [review_turn(1, APPROVE)],
@@ -1198,11 +1198,11 @@ class TestRunHealth(unittest.TestCase):
             (10**6, run_record(error="interrupted")),
         ]
         with patch("builtins.print") as out:
-            orchestrator.print_runs(runs, "here", lambda pid: True, ["--machine", "slave0", "--cwd", "~/proj"])
+            orchestrator.print_runs(runs, "here", lambda pid: True, ["--machine", "remote", "--cwd", "~/proj"])
         lines = [c.args[0] for c in out.call_args_list][::2]
         self.assertEqual(lines, [
             "20260930-070000-c0ffee  spec     round 1  stale: no heartbeat for 5m; "
-            "resume: orchestrator.py resume c0ffee --machine slave0 --cwd '~/proj'",
+            "resume: orchestrator.py resume c0ffee --machine remote --cwd '~/proj'",
             "20260930-070000-c0ffee  build    round 1  running: pid 4242 on here, beat 40s ago",
             f"20260930-070000-c0ffee  done     round 1  {APPROVE}",
             "20260930-070000-c0ffee  build    round 1  error: interrupted",
@@ -1258,8 +1258,8 @@ class TestResumableState(unittest.TestCase):
         self.assertEqual(self.resumable(["a1b2c3", "--force"], saved, age=30).run_id, saved["run_id"])
 
     def test_machine_of_the_resume_is_saved(self):
-        state = self.resumable(["a1b2c3", "--machine", "slave0", "--cwd", "~/p"], self.saved(machine=None))
-        self.assertEqual(state.machine, "slave0")
+        state = self.resumable(["a1b2c3", "--machine", "remote", "--cwd", "~/p"], self.saved(machine=None))
+        self.assertEqual(state.machine, "remote")
 
 
 class TestResumeCLI(unittest.TestCase):

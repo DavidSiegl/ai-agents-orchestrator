@@ -10,7 +10,7 @@ Spec Collector ──spec.md──▶ Builder ──build-N.md──▶ Reviewer
 
 Each role is a separate interactive Claude Code session in its own herdr pane, so no
 role judges its own work, and you can watch or step into any of them. The agents can
-run on this machine or on a saved herdr machine such as `slave0`.
+run on this machine or on another machine saved in herdr.
 
 Each feature is built on its own branch and ends as a pull request on GitHub, where you
 review it. The run's herdr panes are closed once the pull request is open.
@@ -22,7 +22,8 @@ review it. The run's herdr panes are closed once the pull request is open.
 - Where the agents run: a git checkout with a remote named `origin` it can push to, and [`gh`](https://cli.github.com)
   logged in (`gh auth status`). Not needed with `--no-pr`.
 - Python 3.13+, standard library only; [uv](https://github.com/astral-sh/uv) only for the tests
-- For `--machine`: the machine saved in herdr (`herdr machine list`) and non-interactive SSH to its target
+- For `--machine`: the machine saved in herdr and non-interactive SSH to its target; see
+  [Running the agents on another machine](#running-the-agents-on-another-machine)
 
 ## Usage
 
@@ -30,14 +31,14 @@ review it. The run's herdr panes are closed once the pull request is open.
 # From a herdr pane, on the project in the current directory
 python orchestrator.py run "add a token-bucket rate limiter to the API client"
 
-# Agents on slave0, driven from anywhere; --cwd is a path on slave0
-python orchestrator.py run "add a token-bucket rate limiter" --machine slave0 --cwd ~/GitHub/myproject
+# Agents on a machine saved in herdr, driven from anywhere; --cwd is a path on that machine
+python orchestrator.py run "add a token-bucket rate limiter" --machine <machine> --cwd ~/GitHub/myproject
 
 # Runs recorded for a project, and whether each one is still running
-python orchestrator.py list --machine slave0 --cwd ~/GitHub/myproject
+python orchestrator.py list --machine <machine> --cwd ~/GitHub/myproject
 
 # Continue a run whose orchestrator has stopped, by its run id or the six-character key at its end
-python orchestrator.py resume e292fb --machine slave0 --cwd ~/GitHub/myproject
+python orchestrator.py resume e292fb --machine <machine> --cwd ~/GitHub/myproject
 ```
 
 | Flag | Description |
@@ -126,12 +127,36 @@ task finishes. So the orchestrator polls for the file. Meanwhile, it sends a her
 Notifications appear in the herdr where the orchestrator runs. Answer in the named pane, and the run
 continues.
 
-### Running on slave0
+### Running the agents on another machine
+
+The agents can run on another machine that you reach over SSH and save in herdr. Steps 1–3 run on the
+machine you start the orchestrator from; step 4 is about the remote machine.
+
+1. **Save the machine** in herdr, under a label of your choice:
+
+   ```bash
+   herdr machine add --label <machine> <ssh-target>
+   ```
+
+2. **Check it** with `herdr machine list`. `--machine` matches the machine's label or its id, and the
+   machine must be enabled; otherwise the run stops with an error.
+3. **Check that SSH works non-interactively.** File and `git` access runs over `ssh -o BatchMode=yes`, so
+   this must succeed without prompting for a password, passphrase or host key:
+
+   ```bash
+   ssh -o BatchMode=yes <ssh-target> true
+   ```
+
+4. **Prepare the remote machine.** It needs:
+   - herdr 0.9+ with the Claude integration (`herdr integration install claude`)
+   - `claude` on `PATH`
+   - the git checkout of the project, with an `origin` it can push to
+   - `gh` logged in (`gh auth status`), unless you use `--no-pr`
 
 With `--machine`, every herdr command is forwarded with `herdr --machine`, and file and `git` access runs
-over SSH to the target saved for that machine. The orchestrator itself can run here (inside herdr or not),
-or on slave0 directly: copy `orchestrator.py` over and run it with the system `python3` from a herdr pane
-there, without `--machine`.
+over SSH to the target saved for that machine. The orchestrator itself can run on your local machine
+(inside herdr or not), or on the remote machine directly: copy `orchestrator.py` there and run it with the
+system `python3` (3.13+) from a herdr pane on the remote machine, without `--machine`.
 
 ## Running tests
 
