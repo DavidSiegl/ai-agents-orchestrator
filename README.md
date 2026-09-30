@@ -3,7 +3,7 @@
 A role-based handoff workflow for **Claude Code** sessions running in [herdr](https://herdr.dev):
 
 ```
-Spec Collector ──spec.md──▶ Builder ──build-N.md──▶ Reviewer ──review-N.md──▶ APPROVE
+Spec Collector ──spec.md──▶ Builder ──build-N.md──▶ Reviewer ──review-N.md──▶ APPROVE ──▶ pull request
                                ▲                                   │
                                └──────── CHANGES_REQUESTED ────────┘
 ```
@@ -12,10 +12,15 @@ Each role is a separate interactive Claude Code session in its own herdr pane, s
 role judges its own work, and you can watch or step into any of them. The agents can
 run on this machine or on a saved herdr machine such as `slave0`.
 
+Each feature is built on its own branch and ends as a pull request on GitHub, where you
+review it. The run's herdr panes are closed once the pull request is open.
+
 ## Requirements
 
 - herdr 0.9+ with the Claude integration installed where the agents run (`herdr integration install claude`)
 - `claude` on `PATH` where the agents run
+- Where the agents run: a git checkout with a remote named `origin` it can push to, and [`gh`](https://cli.github.com)
+  logged in (`gh auth status`). Not needed with `--no-pr`.
 - Python 3.13+, standard library only; [uv](https://github.com/astral-sh/uv) only for the tests
 - For `--machine`: the machine saved in herdr (`herdr machine list`) and non-interactive SSH to its target
 
@@ -46,29 +51,38 @@ python orchestrator.py resume e292fb --machine slave0 --cwd ~/GitHub/myproject
 | `--spec-model MODEL` | Claude model for the Spec Collector. Overrides `--model`. |
 | `--build-model MODEL` | Claude model for the Builder. Overrides `--model`. |
 | `--review-model MODEL` | Claude model for the Reviewer. Overrides `--model`. |
+| `--no-pr` | `run` only: leave the change uncommitted in the working tree and the workspace open, instead of opening a pull request. Works outside git. |
 | `--force` | `resume` only: take over a run that still looks alive. |
 
-A run saves its settings. `resume` takes the same flags as `run`, and a flag given to `resume` overrides the saved
-value; one left out keeps it.
+A run saves its settings. `resume` takes the same flags as `run` except `--no-pr`, and a flag given to `resume`
+overrides the saved value; one left out keeps it.
 
-Exit status: `0` approved, `3` changes still requested after the last round, `1` error, `130` interrupted.
+Exit status: `0` approved, `3` changes still requested after the last round (the pull request is a draft), `1` error, `130` interrupted.
 
 ## How a run works
 
-1. **Workspace.** The run gets its own herdr workspace. Its panes are named after the roles.
+1. **Workspace.** The run gets its own herdr workspace. Its panes are named after the roles. The project must
+   be on a branch (not a detached HEAD) with a clean working tree; that branch is what the pull request targets.
 2. **Spec Collector.** The collector's pane is focused and a notification tells you it is waiting. Answer its
    questions in that pane. Once you approve the spec, it writes `spec.md`, which hands the work on.
-3. **Builder.** It implements the spec in a pane split to the right, verifies the change, and writes
+3. **Builder.** The orchestrator creates the branch `orchestrator/<spec title>-<id>` from the current commit.
+   The Builder implements the spec on it in a pane split to the right, verifies the change, and writes
    `build-N.md`. It does not commit.
 4. **Reviewer.** A fresh session in a pane below the Builder checks the change (`git diff` against the commit
    the run started from, plus untracked files) against the spec, and writes `review-N.md`. The first line of
    the review is `VERDICT: APPROVE` or `VERDICT: CHANGES_REQUESTED`. Requested changes go back to the Builder,
    and the Reviewer checks again.
+5. **Pull request.** The orchestrator commits the change as one commit, titled with the spec's `#` heading,
+   pushes the branch to `origin`, and opens a pull request with `gh`. Its description holds the spec, the
+   last build report and the last review. If the Reviewer still requests changes after the last round, the
+   pull request is a draft. The project is switched back to the branch the run started on, and the run's
+   herdr workspace is closed.
 
 Everything a run writes stays in `<project>/.orchestrator/runs/<run-id>/`: the handoff files and
-`state.json`, which records the phase, round, panes, verdict and any error. `.orchestrator/` ignores itself
-through its own `.gitignore`, so it never shows up in the diff under review. The workspace is left open when
-the run ends, so you can read the sessions; close it in herdr when you are done.
+`state.json`, which records the phase, round, panes, branch, pull request, verdict and any error.
+`.orchestrator/` ignores itself through its own `.gitignore`, so it never shows up in the diff under review
+or in the commit. A run that fails keeps its workspace open and stays on its branch, so you can see what
+happened; close the workspace in herdr when you are done.
 
 ### Resuming a run
 
@@ -82,6 +96,8 @@ the process that drives them. `resume` picks the run up where `state.json` says 
   interview starts over.
 - A closed pane is split again from a surviving one, and a closed workspace is replaced by a new one.
 - The diff under review stays against the commit the run started from, even if you commit in between.
+- A run stopped while opening its pull request picks up after the last step it finished: it does not commit
+  twice or open a second pull request.
 - An empty handoff file or a review without a verdict stops the resume with the file's name: fix it, or delete it
   to have the role write it again.
 

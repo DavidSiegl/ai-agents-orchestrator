@@ -8,6 +8,10 @@ so no role judges its own work and the human can watch or step into any of
 them. Roles hand off through Markdown files in the run directory, never
 through scraped terminal output.
 
+By default the change is built on a new branch, committed, pushed and opened
+as a pull request once the review loop ends, and the run's herdr workspace is
+closed: the human reviews on GitHub, not in the panes.
+
 The agents may run on a saved herdr machine (--machine). The run directory
 then lives on that machine, so every file and git access goes through Host,
 which runs commands locally or over SSH.
@@ -38,6 +42,12 @@ HEARTBEAT_SECONDS = 60
 # A run whose state.json is older than this is stale: five missed beats, which rides out a slow SSH hop
 # or a Host.run that hits its 60 s limit.
 STALE_SECONDS = 300
+# git push and gh talk to the network; everything else Host runs is local to the machine.
+NETWORK_TIMEOUT = 300
+BRANCH_PREFIX = "orchestrator/"
+REMOTE = "origin"
+# GitHub rejects pull request bodies over 65536 characters; this leaves room for the frame.
+PR_SECTION_LIMIT = 20_000
 
 APPROVE = "APPROVE"
 CHANGES_REQUESTED = "CHANGES_REQUESTED"
@@ -76,7 +86,10 @@ testable acceptance criteria, constraints, and how the result will be verified. 
 Read the code in {cwd} first so your questions are grounded and you can cite the files the change touches. \
 Ask a few questions at a time. Do not write or change any code.
 
-When the human approves the spec, write it in a single write to {spec_path} as Markdown with these sections: \
+When the human approves the spec, write it in a single write to {spec_path} as Markdown. \
+Its first line is a `# ` heading: a short imperative title for the change, under 70 characters; \
+it becomes the commit subject and the pull request title. \
+Then these `##` sections: \
 Goal, Scope, Non-goals, Acceptance criteria (a numbered list, each one checkable), Relevant code (file:line), Verification. \
 Writing that file hands the work to the Builder, so write it only after the human approves it."""
 
@@ -86,7 +99,7 @@ The spec in {spec_path} was agreed with the human by a separate session; it is y
 
 Implement it in {cwd}, following the conventions of the surrounding code. \
 Verify the change the way the spec's Verification section says, and run the tests. \
-Do not commit or push; leave the changes in the working tree for the Reviewer. \
+Do not commit, push or switch branches; leave the changes in the working tree for the Reviewer. \
 If the spec is wrong or cannot be met, do not deviate silently: say so in your report.
 
 As your last step, write a report to {report_path} in a single write; it hands the work to the Reviewer: the files you changed and why, \
@@ -96,7 +109,7 @@ and any acceptance criterion you did not meet, with the reason."""
 FIX_PROMPT = """\
 The Reviewer requested changes; the findings are in {review_path}. \
 Fix each finding, or explain in your report why it is wrong. Re-run the verification. \
-Do not commit or push. As your last step, write a new report to {report_path} in a single write, in the same shape as before, \
+Do not commit, push or switch branches. As your last step, write a new report to {report_path} in a single write, in the same shape as before, \
 answering each finding by its number."""
 
 REVIEW_PROMPT = """\
@@ -254,6 +267,9 @@ class Herdr:
     def focus(self, name: str) -> None:
         self.call("agent", "focus", name)
 
+    def close_workspace(self, workspace: str) -> None:
+        self.call("workspace", "close", workspace)
+
     def notify(self, title: str, body: str) -> None:
         self.call("notification", "show", title, "--body", body, "--sound", "request")
 
@@ -289,17 +305,18 @@ class Host:
         self.ssh_target = ssh_target
         self._run = run
 
-    def run(self, argv: list[str], stdin: str | None = None) -> subprocess.CompletedProcess:
+    def run(self, argv: list[str], stdin: str | None = None,
+            timeout: float = 60) -> subprocess.CompletedProcess:
         if self.ssh_target:
             # BatchMode fails fast instead of hanging on a password prompt nobody can see.
             argv = ["ssh", "-o", "BatchMode=yes", self.ssh_target, shlex.join(argv)]
         try:
-            return self._run(argv, input=stdin, capture_output=True, text=True, timeout=60)
+            return self._run(argv, input=stdin, capture_output=True, text=True, timeout=timeout)
         except (OSError, subprocess.TimeoutExpired) as e:
             raise OrchestratorError(f"{shlex.join(argv)}: {e}") from e
 
-    def check(self, argv: list[str], stdin: str | None = None) -> str:
-        proc = self.run(argv, stdin)
+    def check(self, argv: list[str], stdin: str | None = None, timeout: float = 60) -> str:
+        proc = self.run(argv, stdin, timeout)
         if proc.returncode != 0:
             where = f" on {self.ssh_target}" if self.ssh_target else ""
             raise OrchestratorError(f"{shlex.join(argv)} failed{where}: {proc.stderr.strip()}")
@@ -333,6 +350,23 @@ class Host:
         """HEAD's commit, or None when cwd is not a git repository with a commit."""
         proc = self.run(["git", "-C", cwd, "rev-parse", "--verify", "HEAD"])
         return proc.stdout.strip() if proc.returncode == 0 else None
+
+    def git(self, cwd: str, *args: str, timeout: float = 60) -> str:
+        return self.check(["git", "-C", cwd, *args], timeout=timeout)
+
+    def create_pr(self, cwd: str, base: str, head: str, title: str, body: str, draft: bool) -> str:
+        """Open a pull request with gh and return its URL."""
+        argv = ["gh", "pr", "create", "--base", base, "--head", head,
+                "--title", title, "--body-file", "-"]
+        if draft:
+            argv.append("--draft")
+        # gh finds the repository from its working directory; it has no -C.
+        out = self.check(["sh", "-c", 'cd -- "$1" && shift && exec "$@"', "_", cwd, *argv],
+                         stdin=body, timeout=NETWORK_TIMEOUT)
+        lines = out.split()
+        if not lines:
+            raise OrchestratorError(f"gh pr create printed no URL for {head}")
+        return lines[-1]
 
     def run_states(self, cwd: str) -> list[tuple[int, dict]]:
         """Each run's saved state, with the seconds since its state.json was last written.
@@ -374,6 +408,9 @@ class RunState:
     # The Spec Collector's pane, which the Builder's pane is split from.
     root_pane: str = ""
     base: str | None = None
+    base_branch: str | None = None
+    branch: str | None = None
+    pr_url: str | None = None
     verdict: str | None = None
     error: str | None = None
     # Per role: the agent's name, its pane and, once herdr reports it, its Claude Code session id.
@@ -382,6 +419,8 @@ class RunState:
     turn_timeout: int = DEFAULT_TURN_TIMEOUT
     agent_args: list[str] = field(default_factory=list)
     models: dict[str, str] = field(default_factory=dict)
+    # False by default because a run saved before pull requests existed never switched to its own branch.
+    pull_request: bool = False
     # Basename of the handoff file whose prompt was delivered, so a resume does not prompt for it again.
     prompted: str | None = None
     # The orchestrator process driving the run, {"host", "pid", "started_at"}; None while none does.
@@ -433,6 +472,42 @@ def parse_verdict(review: str) -> str | None:
     return None
 
 
+def spec_title(spec: str) -> str | None:
+    """The `# ` heading on the spec's first non-blank line."""
+    for line in spec.splitlines():
+        if line.strip():
+            m = re.match(r"#\s+(\S.*)", line.strip())
+            return m.group(1).strip() if m else None
+    return None
+
+
+def branch_name(title: str, run_id: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower())[:40].strip("-")
+    key = run_id.rsplit("-", 1)[-1]
+    return f"{BRANCH_PREFIX}{slug}-{key}" if slug else f"{BRANCH_PREFIX}{key}"
+
+
+def _details(summary: str, text: str, open_: bool = False) -> str:
+    if len(text) > PR_SECTION_LIMIT:
+        text = text[:PR_SECTION_LIMIT] + "\n\n*(truncated; the full file is in the run directory)*"
+    return f"<details{' open' if open_ else ''}>\n<summary>{summary}</summary>\n\n{text.strip()}\n\n</details>"
+
+
+def pr_body(state: "RunState", spec: str, report: str, review: str) -> str:
+    approved = state.verdict == APPROVE
+    rounds = f"{state.round} round{'s' if state.round != 1 else ''}"
+    head = (f"Opened by ai-agents-orchestrator run `{state.run_id}`. "
+            f"Reviewer verdict after {rounds}: **{state.verdict}**.")
+    if not approved:
+        head += "\n\nThe Reviewer still requested changes after the last round, so this is a draft."
+    return "\n\n".join([
+        head,
+        _details("Spec", spec, open_=True),
+        _details(f"Builder report (round {state.round})", report),
+        _details(f"Review (round {state.round})", review, open_=not approved),
+    ]) + "\n"
+
+
 def log(msg: str) -> None:
     print(f"  {msg}", file=sys.stderr)
 
@@ -458,6 +533,11 @@ class Workflow:
     The same code starts a new run and resumes an interrupted one. A new run is a
     resume from phase spec with no workspace; every step first looks for what an
     earlier orchestrator, or a role working while none was watching, already did.
+
+    With pull_request, the Builder works on a new branch, and the finished change
+    is committed, pushed and opened as a pull request against the branch the run
+    started on, which is checked out again afterwards. The workspace is then
+    closed. A run that fails keeps its workspace and branch, to see what happened.
     """
 
     def __init__(self, herdr: Herdr, host: Host, state: RunState, *,
@@ -465,6 +545,7 @@ class Workflow:
                  turn_timeout: int = DEFAULT_TURN_TIMEOUT,
                  agent_args: list[str] | None = None,
                  models: dict[str, str] | None = None,
+                 pull_request: bool = True,
                  sleep=time.sleep, clock=time.monotonic, wallclock=time.time):
         self.herdr = herdr
         self.host = host
@@ -475,6 +556,7 @@ class Workflow:
         state.turn_timeout = turn_timeout
         state.agent_args = agent_args or []
         state.models = models or {}
+        state.pull_request = pull_request
         self.sleep = sleep
         self.clock = clock
         self.wallclock = wallclock
@@ -488,15 +570,24 @@ class Workflow:
             return s.verdict
         try:
             self._claim()
-            self._prepare()
+            if s.pull_request and s.phase == "spec":
+                self._check_repo()
+            # Publishing needs no agent, so a resume there opens no workspace only to close it.
+            if s.phase != "publish":
+                self._prepare()
             if s.phase == "spec":
                 self._collect_spec()
                 # Only here, before the first build: every later phase, resumed or not, diffs
                 # against this base, even if the human commits the Builder's work meanwhile.
                 s.base = self.host.git_head(s.cwd)
+                if s.pull_request:
+                    self._switch_to_branch()
                 s.phase, s.round = "build", 1
                 self._save()
-            return self._build_and_review()
+            if s.phase in ("build", "review"):
+                self._build_and_review()
+            if s.pull_request:
+                self._publish()
         except RunTakenOver:
             raise
         except OrchestratorError as e:
@@ -506,11 +597,20 @@ class Workflow:
             self._release("interrupted")
             raise
 
+        s.phase = "done"
+        s.owner = None
+        self._save()
+        self.notify(f"Run finished: {s.verdict}", s.pr_url or s.task)
+        if s.pull_request:
+            self._close_workspace()
+        return s.verdict
+
     def _claim(self) -> None:
         s = self.state
         ignore = f"{s.cwd}/.orchestrator/.gitignore"
         if self.host.read(ignore) is None:
-            # Keeps run files out of `git status`, so the Reviewer sees only the Builder's changes.
+            # Keeps run files out of `git status`, so the Reviewer sees only the Builder's changes
+            # and the commit holds nothing else.
             self.host.write(ignore, "*\n")
         s.error = None
         s.owner = self.me
@@ -525,6 +625,25 @@ class Workflow:
             self._save()
         except OrchestratorError as e:
             log(f"could not record the failure in state.json: {e}")
+
+    def _check_repo(self) -> None:
+        """Fail before the interview if the change could not become a pull request."""
+        s = self.state
+        if self.host.git_head(s.cwd) is None:
+            raise OrchestratorError(f"{s.cwd} is not a git repository with a commit; pass --no-pr")
+        branch = self.host.git(s.cwd, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        if branch == "HEAD":
+            raise OrchestratorError(f"{s.cwd} is on a detached HEAD; check out the branch the pull request targets")
+        # Kept once recorded: a run resumed after it switched to its own branch still targets the first one.
+        s.base_branch = s.base_branch or branch
+        self._require_clean()
+
+    def _require_clean(self) -> None:
+        # The commit takes every change in the working tree, so it must hold only the Builder's.
+        dirty = self.host.git(self.state.cwd, "status", "--porcelain")
+        if dirty.strip():
+            raise OrchestratorError(
+                f"{self.state.cwd} has uncommitted changes; commit or stash them first:\n{dirty.rstrip()}")
 
     def _prepare(self) -> None:
         s = self.state
@@ -557,7 +676,18 @@ class Workflow:
         self._turn("spec", SPEC_PROMPT.format(task=s.task, cwd=s.cwd, spec_path=s.spec_path),
                    s.spec_path, timeout=None, watch_stalls=False, announce=announce)
 
-    def _build_and_review(self) -> str:
+    def _switch_to_branch(self) -> None:
+        s = self.state
+        spec = self.host.read(s.spec_path) or ""
+        s.branch = branch_name(spec_title(spec) or s.task, s.run_id)
+        # Already there when an earlier orchestrator stopped between the switch and saving the build phase.
+        if self.host.git(s.cwd, "rev-parse", "--abbrev-ref", "HEAD").strip() != s.branch:
+            # Checked again: the human may have touched the tree during the interview.
+            self._require_clean()
+            self.host.git(s.cwd, "switch", "-c", s.branch)
+        log(f"building on branch {s.branch}")
+
+    def _build_and_review(self) -> None:
         s = self.state
         while True:
             n = s.round
@@ -577,12 +707,6 @@ class Workflow:
             s.phase, s.round = "build", n + 1
             self._save()
 
-        s.phase = "done"
-        s.owner = None
-        self._save()
-        self.notify(f"Run finished: {s.verdict}", s.task)
-        return s.verdict
-
     def _build_prompts(self, n: int) -> tuple[str, str | None]:
         """The Builder's prompt for round n, and the one for a fresh session that has not seen rounds before n."""
         s = self.state
@@ -592,6 +716,41 @@ class Workflow:
         fix = FIX_PROMPT.format(review_path=s.review_path(n - 1), report_path=s.build_path(n))
         note = REBUILD_NOTE.format(n=n, reports=", ".join(s.build_path(i) for i in range(1, n)))
         return fix, f"{first}\n\n{note}\n\n{fix}"
+
+    def _publish(self) -> None:
+        """Commit the change, push its branch and open a pull request for it.
+
+        Each step first checks whether an earlier orchestrator already took it, so a resume
+        in this phase finishes the job instead of committing or opening a second pull request.
+        """
+        s = self.state
+        s.phase = "publish"
+        self._save()
+        if not s.pr_url:
+            spec = self.host.read(s.spec_path) or ""
+            title = (spec_title(spec) or s.task.strip().split("\n", 1)[0] or s.run_id)[:72]
+            if self.host.git(s.cwd, "status", "--porcelain").strip():
+                self.host.git(s.cwd, "add", "--all")
+                self.host.git(s.cwd, "commit", "--quiet", "-m", title, "-m",
+                              f"Orchestrator run {s.run_id}: {s.verdict} after {s.round} review round(s).")
+            elif self.host.git_head(s.cwd) == s.base:
+                raise OrchestratorError(f"the Builder changed no files; there is nothing to commit on {s.branch}")
+            self.host.git(s.cwd, "push", "--quiet", "--set-upstream", REMOTE, s.branch, timeout=NETWORK_TIMEOUT)
+            body = pr_body(s, spec, self.host.read(s.build_path(s.round)) or "",
+                           self.host.read(s.review_path(s.round)) or "")
+            s.pr_url = self.host.create_pr(s.cwd, s.base_branch, s.branch, title, body,
+                                           draft=s.verdict != APPROVE)
+            self._save()
+            log(f"opened {s.pr_url}")
+        # Leaves the checkout where the human had it, so the next run branches from there too.
+        self.host.git(s.cwd, "switch", "--quiet", s.base_branch)
+
+    def _close_workspace(self) -> None:
+        # The pull request carries the change now; a failure here leaves only clutter behind.
+        try:
+            self.herdr.close_workspace(self.state.workspace_id)
+        except OrchestratorError as e:
+            log(f"could not close herdr workspace {self.state.workspace_id}: {e}")
 
     def _review_prompts(self, n: int) -> tuple[str, str | None]:
         """The Reviewer's prompt for round n, and the one for a fresh session that has not seen rounds before n."""
@@ -840,6 +999,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
     run = sub.add_parser("run", parents=[target, settings], help="run the handoff workflow for a task")
     run.add_argument("task", help="what to build, as you would tell the Spec Collector")
+    # Run only: a resumed run may already be on its own branch, so whether it ends in a pull request is fixed.
+    run.add_argument("--no-pr", action="store_true",
+                     help="leave the change uncommitted in the working tree and the workspace open, "
+                          "instead of opening a pull request")
 
     resume = sub.add_parser(
         "resume", parents=[target, settings], help="continue a run whose orchestrator has stopped",
@@ -942,7 +1105,9 @@ def print_runs(runs: list[tuple[int, dict]], local_host: str, pid_alive, target:
             outcome = f"{health[0]}: {health[1]}"
             if health[0] == STALE:
                 outcome += f"; resume: {resume_command(s['run_id'], target)}"
-        print(f"{s['run_id']}  {s['phase']:<6}  round {s['round']}  {outcome}")
+        if s.get("pr_url"):
+            outcome += f"  {s['pr_url']}"
+        print(f"{s['run_id']}  {s['phase']:<7}  round {s['round']}  {outcome}")
         print(f"    {s['task'][:100]}")
 
 
@@ -1008,12 +1173,13 @@ def main(argv: list[str]) -> int:
             state.turn_timeout = args.timeout or DEFAULT_TURN_TIMEOUT
             state.agent_args = ["--permission-mode", args.permission_mode] if args.permission_mode else []
             state.models = role_models(args)
+            state.pull_request = not args.no_pr
         else:
             state = resumable_state(host.run_states(cwd), args, cwd, socket.gethostname(), pid_alive)
         workflow = Workflow(
             herdr, host, state, notify=notify_locally,
             max_rounds=state.max_rounds, turn_timeout=state.turn_timeout,
-            agent_args=state.agent_args, models=state.models)
+            agent_args=state.agent_args, models=state.models, pull_request=state.pull_request)
         verdict = workflow.run()
     except OrchestratorError as e:
         print(f"error: {e}", file=sys.stderr)
@@ -1023,7 +1189,7 @@ def main(argv: list[str]) -> int:
         print(f"interrupted; the role agents keep running in herdr{hint}", file=sys.stderr)
         return EXIT_INTERRUPTED
 
-    print(f"{verdict}: {state.review_path(state.round)}")
+    print(f"{verdict}: {state.pr_url or state.review_path(state.round)}")
     return 0 if verdict == APPROVE else EXIT_CHANGES_REQUESTED
 
 

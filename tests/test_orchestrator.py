@@ -9,7 +9,8 @@ from unittest.mock import MagicMock, patch
 import orchestrator
 from orchestrator import (
     APPROVE, CHANGES_REQUESTED, HEARTBEAT_SECONDS, STALE_SECONDS, Herdr, HerdrError, Host,
-    OrchestratorError, RunState, RunTakenOver, Workflow, main, parse_args, parse_verdict,
+    OrchestratorError, RunState, RunTakenOver, Workflow, branch_name, main, parse_args, parse_verdict,
+    pr_body, spec_title,
 )
 
 
@@ -22,12 +23,19 @@ def result(obj):
 
 
 class FakeHost:
-    """An in-memory filesystem standing in for the machine the agents run on."""
+    """An in-memory filesystem and git checkout standing in for the machine the agents run on.
 
-    def __init__(self, head="abc123"):
+    Files written outside .orchestrator/ count as uncommitted changes until a commit.
+    """
+
+    def __init__(self, head="abc123", branch="main"):
         self.files = {}
         self.head = head
         self.writes = []  # every path written, in order
+        self.branch = branch
+        self.changed = set()
+        self.git_calls = []
+        self.prs = []
 
     def read(self, path):
         return self.files.get(path)
@@ -35,9 +43,28 @@ class FakeHost:
     def write(self, path, text):
         self.writes.append(path)
         self.files[path] = text
+        if not path.startswith("/proj/.orchestrator/"):
+            self.changed.add(path)
 
     def git_head(self, cwd):
         return self.head
+
+    def git(self, cwd, *args, timeout=60):
+        self.git_calls.append(args)
+        match args:
+            case ("rev-parse", "--abbrev-ref", "HEAD"):
+                return self.branch + "\n"
+            case ("status", "--porcelain"):
+                return "".join(f"?? {p}\n" for p in sorted(self.changed))
+            case ("switch", "-c", name) | ("switch", "--quiet", name):
+                self.branch = name
+            case ("commit", *_):
+                self.changed.clear()
+        return ""
+
+    def create_pr(self, cwd, base, head, title, body, draft):
+        self.prs.append({"base": base, "head": head, "title": title, "body": body, "draft": draft})
+        return "https://github.com/o/r/pull/7"
 
 
 class FakeHerdr:
@@ -121,6 +148,9 @@ class FakeHerdr:
     def focus(self, name):
         self.calls.append(("focus", name))
 
+    def close_workspace(self, workspace):
+        self.calls.append(("close", workspace))
+
 
 def writes(path_of, text, status="done"):
     """A turn that writes `text` to the path the state names, then settles."""
@@ -162,11 +192,14 @@ def make_workflow(script, host=None, max_rounds=3, state=None, **kw):
     return wf, herdr, host, notes
 
 
-spec_turn = writes(lambda s: s.spec_path, "# Goal\nlimit requests")
+spec_turn = writes(lambda s: s.spec_path, "# Add a token-bucket rate limiter\n\n## Goal\nlimit requests")
 
 
 def build_turn(n):
-    return writes(lambda s: s.build_path(n), f"report {n}")
+    def turn(prompt, state, host):
+        host.write("/proj/limiter.py", f"version {n}")
+        return writes(lambda s: s.build_path(n), f"report {n}")(prompt, state, host)
+    return turn
 
 
 def review_turn(n, verdict):
@@ -261,7 +294,7 @@ class TestWorkflow(unittest.TestCase):
         # Claude Code reports done while a background task it started runs on.
         wf, herdr, host, _ = make_workflow({
             "spec": [spec_turn], "build": [lambda p, st, h: "done"], "review": [review_turn(1, APPROVE)],
-        })
+        }, pull_request=False)
         wf.clock.hooks.append(lambda: host.write(wf.state.build_path(1), "report"))
 
         self.assertEqual(wf.run(), APPROVE)
@@ -269,7 +302,7 @@ class TestWorkflow(unittest.TestCase):
     def test_idle_without_handoff_notifies_the_human(self):
         wf, herdr, host, notes = make_workflow({
             "spec": [spec_turn], "build": [idle], "review": [review_turn(1, APPROVE)],
-        })
+        }, pull_request=False)
 
         def writes_after_stall():
             if wf.clock.now > orchestrator.STALL_SECONDS + 10:
@@ -341,7 +374,7 @@ class TestWorkflow(unittest.TestCase):
             return review_turn(1, APPROVE)(prompt, state, host)
 
         wf, *_ = make_workflow({"spec": [spec_turn], "build": [build_turn(1)], "review": [review]},
-                               host=FakeHost(head=None))
+                               host=FakeHost(head=None), pull_request=False)
         wf.run()
         self.assertIn("not a git repository", seen[0])
 
@@ -371,6 +404,130 @@ class TestWorkflow(unittest.TestCase):
             "build": ("--permission-mode", "auto"),
             "review": ("--permission-mode", "auto", "--model", "claude-opus-5-5"),
         })
+
+
+class TestPullRequest(unittest.TestCase):
+    def script(self, *verdicts):
+        n = len(verdicts)
+        return {
+            "spec": [spec_turn],
+            "build": [build_turn(i) for i in range(1, n + 1)],
+            "review": [review_turn(i, v) for i, v in enumerate(verdicts, 1)],
+        }
+
+    def test_approved_change_becomes_a_pull_request(self):
+        wf, herdr, host, notes = make_workflow(self.script(APPROVE))
+
+        self.assertEqual(wf.run(), APPROVE)
+
+        branch = "orchestrator/add-a-token-bucket-rate-limiter-a1b2c3"
+        self.assertIn(("switch", "-c", branch), host.git_calls)
+        commit = next(c for c in host.git_calls if c[0] == "commit")
+        self.assertEqual(commit[commit.index("-m") + 1], "Add a token-bucket rate limiter")
+        self.assertIn(("push", "--quiet", "--set-upstream", "origin", branch), host.git_calls)
+        pr = host.prs[0]
+        self.assertEqual((pr["base"], pr["head"], pr["draft"]), ("main", branch, False))
+        self.assertIn("## Goal", pr["body"])
+        self.assertEqual(host.branch, "main")
+        self.assertEqual(herdr.calls[-1], ("close", "w1"))
+        saved = json.loads(host.files[f"{wf.state.dir}/state.json"])
+        self.assertEqual((saved["phase"], saved["pr_url"]), ("done", "https://github.com/o/r/pull/7"))
+
+    def test_builder_works_on_the_branch(self):
+        wf, herdr, host, _ = make_workflow(self.script(APPROVE))
+        branches = []
+        build = wf.herdr.script["build"][0]
+
+        def build_on_branch(prompt, state, h):
+            branches.append(h.branch)
+            return build(prompt, state, h)
+        wf.herdr.script["build"][0] = build_on_branch
+        wf.run()
+        self.assertEqual(branches, ["orchestrator/add-a-token-bucket-rate-limiter-a1b2c3"])
+
+    def test_changes_still_requested_opens_a_draft(self):
+        wf, herdr, host, _ = make_workflow(self.script(CHANGES_REQUESTED, CHANGES_REQUESTED), max_rounds=2)
+
+        self.assertEqual(wf.run(), CHANGES_REQUESTED)
+        self.assertTrue(host.prs[0]["draft"])
+        self.assertIn("<details open>\n<summary>Review (round 2)</summary>", host.prs[0]["body"])
+        self.assertIn(("close", "w1"), herdr.calls)
+
+    def test_dirty_tree_fails_before_the_interview(self):
+        host = FakeHost()
+        host.changed.add("/proj/wip.py")
+        wf, herdr, *_ = make_workflow({"spec": []}, host=host)
+
+        with self.assertRaisesRegex(OrchestratorError, "uncommitted changes"):
+            wf.run()
+        self.assertFalse(herdr.calls)
+
+    def test_tree_touched_during_interview_fails_before_branching(self):
+        def spec_and_wip(prompt, state, host):
+            host.write("/proj/wip.py", "x")
+            return spec_turn(prompt, state, host)
+        wf, _, host, _ = make_workflow({"spec": [spec_and_wip]})
+
+        with self.assertRaisesRegex(OrchestratorError, "uncommitted changes"):
+            wf.run()
+        self.assertEqual(host.branch, "main")
+
+    def test_detached_head_is_refused(self):
+        wf, *_ = make_workflow({"spec": []}, host=FakeHost(branch="HEAD"))
+        with self.assertRaisesRegex(OrchestratorError, "detached HEAD"):
+            wf.run()
+
+    def test_not_a_git_repo_needs_no_pr(self):
+        wf, *_ = make_workflow({"spec": []}, host=FakeHost(head=None))
+        with self.assertRaisesRegex(OrchestratorError, "--no-pr"):
+            wf.run()
+
+    def test_no_changes_keeps_the_workspace_open(self):
+        wf, herdr, host, _ = make_workflow({
+            "spec": [spec_turn],
+            "build": [writes(lambda s: s.build_path(1), "nothing to do")],
+            "review": [review_turn(1, APPROVE)],
+        })
+
+        with self.assertRaisesRegex(OrchestratorError, "changed no files"):
+            wf.run()
+        self.assertFalse(host.prs)
+        self.assertNotIn(("close", "w1"), herdr.calls)
+
+    def test_close_failure_does_not_fail_the_run(self):
+        wf, herdr, *_ = make_workflow(self.script(APPROVE))
+        herdr.close_workspace = MagicMock(side_effect=HerdrError("workspace_not_found", "gone"))
+        self.assertEqual(wf.run(), APPROVE)
+
+    def test_no_pr_leaves_changes_and_workspace(self):
+        wf, herdr, host, _ = make_workflow(self.script(APPROVE), pull_request=False)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertFalse(host.git_calls)
+        self.assertFalse(host.prs)
+        self.assertNotIn(("close", "w1"), herdr.calls)
+        self.assertEqual(host.changed, {"/proj/limiter.py"})
+
+
+class TestPullRequestText(unittest.TestCase):
+    def test_spec_title(self):
+        self.assertEqual(spec_title("\n# Add a limiter \n## Goal"), "Add a limiter")
+
+    def test_spec_without_title(self):
+        self.assertIsNone(spec_title("## Goal\n# Late title"))
+
+    def test_branch_name(self):
+        self.assertEqual(branch_name("Add a Token-Bucket limiter!", "20260929-120000-a1b2c3"),
+                         "orchestrator/add-a-token-bucket-limiter-a1b2c3")
+
+    def test_branch_name_without_letters(self):
+        self.assertEqual(branch_name("???", "20260929-120000-a1b2c3"), "orchestrator/a1b2c3")
+
+    def test_long_sections_are_truncated(self):
+        state = RunState("r", "t", "/proj", verdict=APPROVE, round=1)
+        body = pr_body(state, "x" * (orchestrator.PR_SECTION_LIMIT * 2), "r", "VERDICT: APPROVE")
+        self.assertLess(len(body), 65536)
+        self.assertIn("truncated", body)
 
 
 class TestHerdr(unittest.TestCase):
@@ -473,6 +630,17 @@ class TestHost(unittest.TestCase):
         Host(run=run).write("/x/state.json", "{}")
         self.assertEqual(run.call_args.kwargs["input"], "{}")
 
+    def test_create_pr_runs_gh_in_the_project(self):
+        run = MagicMock(return_value=completed("Creating pull request\nhttps://github.com/o/r/pull/7\n"))
+        url = Host("ai-agents", run=run).create_pr("/proj", "main", "orchestrator/x", "Title", "body", draft=True)
+
+        self.assertEqual(url, "https://github.com/o/r/pull/7")
+        remote = run.call_args.args[0][4]
+        self.assertIn("_ /proj gh pr create --base main --head orchestrator/x", remote)
+        self.assertTrue(remote.endswith("--body-file - --draft"))
+        self.assertEqual(run.call_args.kwargs["input"], "body")
+        self.assertEqual(run.call_args.kwargs["timeout"], orchestrator.NETWORK_TIMEOUT)
+
     def test_git_head_outside_repo(self):
         run = MagicMock(return_value=completed(returncode=128))
         self.assertIsNone(Host(run=run).git_head("/x"))
@@ -551,6 +719,16 @@ class TestCLI(unittest.TestCase):
         with self.assertRaises(SystemExit), patch("sys.stderr"):
             parse_args(["list", "--model", "sonnet"])
 
+    @patch.object(Workflow, "__init__", return_value=None)
+    @patch.object(Workflow, "run", return_value=APPROVE)
+    @patch.object(Host, "resolve_dir", return_value="/proj")
+    @patch.dict("os.environ", {"HERDR_ENV": "1"})
+    def test_no_pr_flag(self, _resolve, _run, init):
+        with patch("builtins.print"):
+            main(["run", "task"])
+            main(["run", "task", "--no-pr"])
+        self.assertEqual([c.kwargs["pull_request"] for c in init.call_args_list], [True, False])
+
     @patch.object(Workflow, "run", return_value=CHANGES_REQUESTED)
     @patch.object(Host, "resolve_dir", return_value="/proj")
     @patch.dict("os.environ", {"HERDR_ENV": "1"})
@@ -580,6 +758,8 @@ def saved_run(phase, rnd, *, agents=("spec",), files=(), **kw):
 def resume(state, script, *, alive=(), sessions=None, files=None, host=None, **kw):
     """make_workflow on a saved run: `alive` names the roles whose agents still run."""
     host = host or FakeHost()
+    # As main does: a resumed run keeps the choice it was started with.
+    kw.setdefault("pull_request", state.pull_request)
     wf, herdr, host, notes = make_workflow(script, host=host, state=state, **kw)
     herdr.workspaces.add("w1")
     herdr.live_panes.update(a["pane"] for a in state.agents.values())
@@ -792,6 +972,74 @@ class TestResume(unittest.TestCase):
             RunState.from_dict({"run_id": "r-abc"})
 
 
+class TestResumePullRequest(unittest.TestCase):
+    BRANCH = "orchestrator/add-a-token-bucket-rate-limiter-a1b2c3"
+
+    def test_run_saved_before_pull_requests_opens_none(self):
+        saved = asdict(saved_run("review", 1, agents=("spec", "build", "review")))
+        del saved["pull_request"]
+        wf, herdr, host, _ = resume(RunState.from_dict(saved), {"review": [review_turn(1, APPROVE)]})
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(host.prs, [])
+        self.assertNotIn(("close", "w1"), herdr.calls)
+
+    def test_resumed_review_ends_in_a_pull_request(self):
+        state = saved_run("review", 1, agents=("spec", "build", "review"), pull_request=True,
+                          base_branch="main", branch=self.BRANCH)
+        host = FakeHost(branch=self.BRANCH)
+        host.changed.add("/proj/limiter.py")
+        wf, herdr, host, _ = resume(state, {"review": [review_turn(1, APPROVE)]}, host=host)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual([(p["base"], p["head"]) for p in host.prs], [("main", self.BRANCH)])
+        self.assertEqual(host.branch, "main")
+
+    def test_spec_resumed_after_switching_keeps_the_base_branch(self):
+        # The earlier orchestrator stopped between `git switch -c` and saving the build phase.
+        state = saved_run("spec", 0, pull_request=True, base_branch="main")
+        host = FakeHost(branch=self.BRANCH)
+        wf, herdr, host, _ = resume(state, {
+            "build": [build_turn(1)], "review": [review_turn(1, APPROVE)],
+        }, host=host, files={lambda s: s.spec_path: "# Add a token-bucket rate limiter\n"})
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertNotIn(("switch", "-c", self.BRANCH), host.git_calls)
+        self.assertEqual(host.prs[0]["base"], "main")
+
+    def test_publish_resumed_after_the_commit_does_not_commit_again(self):
+        state = saved_run("publish", 1, agents=("spec", "build", "review"), pull_request=True,
+                          base_branch="main", branch=self.BRANCH, verdict=APPROVE)
+        wf, herdr, host, _ = resume(state, {}, host=FakeHost(head="def456", branch=self.BRANCH))
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertFalse([c for c in host.git_calls if c[0] == "commit"])
+        self.assertIn(("push", "--quiet", "--set-upstream", "origin", self.BRANCH), host.git_calls)
+        self.assertEqual(len(host.prs), 1)
+        self.assertNotIn("workspace", [c[0] for c in herdr.calls])
+
+    def test_publish_resumed_after_the_pull_request_only_switches_back(self):
+        state = saved_run("publish", 1, agents=("spec", "build", "review"), pull_request=True,
+                          base_branch="main", branch=self.BRANCH, verdict=APPROVE,
+                          pr_url="https://github.com/o/r/pull/7")
+        wf, herdr, host, _ = resume(state, {}, host=FakeHost(branch=self.BRANCH))
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(host.prs, [])
+        self.assertEqual(host.git_calls, [("switch", "--quiet", "main")])
+        self.assertEqual(wf.state.phase, "done")
+
+    @patch.object(Workflow, "__init__", return_value=None)
+    @patch.object(Workflow, "run", return_value=APPROVE)
+    @patch.object(Host, "resolve_dir", return_value="/proj")
+    @patch.dict("os.environ", {"HERDR_ENV": "1"})
+    def test_no_pr_is_saved_with_the_run(self, _resolve, _run, init):
+        with patch("builtins.print"):
+            main(["run", "task", "--no-pr"])
+        self.assertFalse(init.call_args.args[2].pull_request)
+        with self.assertRaises(SystemExit), patch("sys.stderr"):
+            parse_args(["resume", "c0ffee", "--no-pr"])
+
 class TestHeartbeat(unittest.TestCase):
     def state_writes(self, host, state):
         return host.writes.count(f"{state.dir}/state.json")
@@ -855,9 +1103,10 @@ class TestHeartbeat(unittest.TestCase):
         self.assertGreaterEqual(len(beats), 3 + 5)  # three during the dialog, on top of the phase saves
 
     def test_failed_heartbeat_is_not_fatal(self):
+        # No pull request: the Builder here writes its report behind the flaky write and changes no files.
         wf, herdr, host, _ = make_workflow({
             "spec": [spec_turn], "build": [idle], "review": [review_turn(1, APPROVE)],
-        })
+        }, pull_request=False)
         failures = []
         orig = host.write
 
@@ -952,11 +1201,11 @@ class TestRunHealth(unittest.TestCase):
             orchestrator.print_runs(runs, "here", lambda pid: True, ["--machine", "slave0", "--cwd", "~/proj"])
         lines = [c.args[0] for c in out.call_args_list][::2]
         self.assertEqual(lines, [
-            "20260930-070000-c0ffee  spec    round 1  stale: no heartbeat for 5m; "
+            "20260930-070000-c0ffee  spec     round 1  stale: no heartbeat for 5m; "
             "resume: orchestrator.py resume c0ffee --machine slave0 --cwd '~/proj'",
-            "20260930-070000-c0ffee  build   round 1  running: pid 4242 on here, beat 40s ago",
-            f"20260930-070000-c0ffee  done    round 1  {APPROVE}",
-            "20260930-070000-c0ffee  build   round 1  error: interrupted",
+            "20260930-070000-c0ffee  build    round 1  running: pid 4242 on here, beat 40s ago",
+            f"20260930-070000-c0ffee  done     round 1  {APPROVE}",
+            "20260930-070000-c0ffee  build    round 1  error: interrupted",
         ])
 
 
