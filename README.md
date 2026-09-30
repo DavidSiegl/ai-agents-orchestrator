@@ -39,6 +39,10 @@ python orchestrator.py list --machine slave0 --cwd ~/GitHub/myproject
 | `--max-rounds N` | Review rounds before giving up (default 3). |
 | `--timeout SECONDS` | How long one Builder or Reviewer turn may take (default 1800). The interview has no limit. |
 | `--permission-mode MODE` | Claude Code permission mode for every role, e.g. `auto` or `acceptEdits`. |
+| `--model MODEL` | Claude model for every role, e.g. `sonnet` or `claude-opus-5-5`. Passed to `claude` unchecked. Default: Claude Code's own. |
+| `--spec-model MODEL` | Claude model for the Spec Collector. Overrides `--model`. |
+| `--build-model MODEL` | Claude model for the Builder. Overrides `--model`. |
+| `--review-model MODEL` | Claude model for the Reviewer. Overrides `--model`. |
 
 Exit status: `0` approved, `3` changes still requested after the last round, `1` error, `130` interrupted.
 

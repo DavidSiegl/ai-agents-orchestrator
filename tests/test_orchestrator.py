@@ -321,6 +321,25 @@ class TestWorkflow(unittest.TestCase):
         args = {c[3] for c in herdr.calls if c[0] == "start"}
         self.assertEqual(args, {("--permission-mode", "auto")})
 
+    def start_args(self, **kw):
+        wf, herdr, *_ = make_workflow({
+            "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)],
+        }, **kw)
+        wf.run()
+        return {c[1].split("-")[0]: c[3] for c in herdr.calls if c[0] == "start"}
+
+    def test_no_models_adds_no_model_arg(self):
+        self.assertEqual(self.start_args(), {"spec": (), "build": (), "review": ()})
+
+    def test_each_role_gets_its_own_model(self):
+        args = self.start_args(agent_args=["--permission-mode", "auto"],
+                               models={"spec": "sonnet", "review": "claude-opus-5-5"})
+        self.assertEqual(args, {
+            "spec": ("--permission-mode", "auto", "--model", "sonnet"),
+            "build": ("--permission-mode", "auto"),
+            "review": ("--permission-mode", "auto", "--model", "claude-opus-5-5"),
+        })
+
 
 class TestHerdr(unittest.TestCase):
     def test_call_returns_result_and_forwards_machine(self):
@@ -465,6 +484,35 @@ class TestCLI(unittest.TestCase):
         with patch("builtins.print"):
             self.assertEqual(main(["run", "task", "--permission-mode", "auto"]), 0)
         self.assertEqual(init.call_args.kwargs["agent_args"], ["--permission-mode", "auto"])
+
+    @patch.object(Workflow, "__init__", return_value=None)
+    @patch.object(Workflow, "run", return_value=APPROVE)
+    @patch.object(Host, "resolve_dir", return_value="/proj")
+    @patch.dict("os.environ", {"HERDR_ENV": "1"})
+    def test_models_reach_the_workflow(self, _resolve, _run, init):
+        with patch("builtins.print"):
+            self.assertEqual(main(["run", "task", "--permission-mode", "auto",
+                                   "--model", "sonnet", "--review-model", "opus"]), 0)
+        self.assertEqual(init.call_args.kwargs["models"],
+                         {"spec": "sonnet", "build": "sonnet", "review": "opus"})
+        self.assertEqual(init.call_args.kwargs["agent_args"], ["--permission-mode", "auto"])
+
+    def test_role_models(self):
+        cases = [
+            ([], {}),
+            (["--model", "claude-opus-5-5"],
+             {"spec": "claude-opus-5-5", "build": "claude-opus-5-5", "review": "claude-opus-5-5"}),
+            (["--model", "sonnet", "--review-model", "opus"],
+             {"spec": "sonnet", "build": "sonnet", "review": "opus"}),
+            (["--build-model", "sonnet"], {"build": "sonnet"}),
+        ]
+        for flags, models in cases:
+            with self.subTest(flags=flags):
+                self.assertEqual(orchestrator.role_models(parse_args(["run", "task", *flags])), models)
+
+    def test_model_flags_are_run_only(self):
+        with self.assertRaises(SystemExit), patch("sys.stderr"):
+            parse_args(["list", "--model", "sonnet"])
 
     @patch.object(Workflow, "run", return_value=CHANGES_REQUESTED)
     @patch.object(Host, "resolve_dir", return_value="/proj")

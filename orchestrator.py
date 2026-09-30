@@ -362,6 +362,7 @@ class Workflow:
                  notify, max_rounds: int = DEFAULT_MAX_ROUNDS,
                  turn_timeout: int = DEFAULT_TURN_TIMEOUT,
                  agent_args: list[str] | None = None,
+                 models: dict[str, str] | None = None,
                  sleep=time.sleep, clock=time.monotonic):
         self.herdr = herdr
         self.host = host
@@ -370,6 +371,7 @@ class Workflow:
         self.max_rounds = max_rounds
         self.turn_timeout = turn_timeout
         self.agent_args = agent_args or []
+        self.models = models or {}
         self.sleep = sleep
         self.clock = clock
 
@@ -448,7 +450,10 @@ class Workflow:
         key = self.state.run_id.rsplit("-", 1)[-1]
         name = f"{role}-{key}"
         self.herdr.rename_pane(pane, ROLE_LABELS[role])
-        ready = self.herdr.start_agent(name, pane, self.agent_args)
+        args = self.agent_args
+        if model := self.models.get(role):
+            args = [*args, "--model", model]
+        ready = self.herdr.start_agent(name, pane, args)
         self.state.agents[role] = {"name": name, "pane": pane}
         self._save()
         if not ready:
@@ -541,6 +546,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                      help=f"seconds a Builder or Reviewer turn may take (default {DEFAULT_TURN_TIMEOUT})")
     run.add_argument("--permission-mode",
                      help="Claude Code permission mode for every role, e.g. auto or acceptEdits")
+    run.add_argument("--model", help="Claude model for every role, e.g. sonnet or opus")
+    for role in ROLE_LABELS:
+        run.add_argument(f"--{role}-model", metavar="MODEL",
+                         help=f"Claude model for the {ROLE_LABELS[role]}; overrides --model")
 
     sub.add_parser("list", parents=[target], help="list the runs in the project directory")
 
@@ -550,6 +559,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     if args.command == "run" and args.max_rounds < 1:
         p.error("--max-rounds must be at least 1")
     return args
+
+
+def role_models(args: argparse.Namespace) -> dict[str, str]:
+    """The model each role starts with; a role without one keeps Claude Code's default."""
+    models = {role: getattr(args, f"{role}_model") or args.model for role in ROLE_LABELS}
+    return {role: m for role, m in models.items() if m}
 
 
 def notify_locally(title: str, body: str) -> None:
@@ -592,7 +607,8 @@ def main(argv: list[str]) -> int:
         workflow = Workflow(
             herdr, host, state, notify=notify_locally,
             max_rounds=args.max_rounds, turn_timeout=args.timeout,
-            agent_args=["--permission-mode", args.permission_mode] if args.permission_mode else [])
+            agent_args=["--permission-mode", args.permission_mode] if args.permission_mode else [],
+            models=role_models(args))
         verdict = workflow.run()
     except OrchestratorError as e:
         print(f"error: {e}", file=sys.stderr)

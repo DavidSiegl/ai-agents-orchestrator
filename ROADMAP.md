@@ -439,9 +439,9 @@ Tests:
   verdict and the open findings of the last review. `list` gives one line per run (`orchestrator.py:563-570`).
 - **`--spec FILE`**: skip the interview when a spec already exists. The file is copied into the run as
   `spec.md`, and `_collect_spec` (`orchestrator.py:398-407`) is skipped.
-- **Per-role agent options**: give each role its own permission mode and model. Today one
-  `--permission-mode` applies to every role (`orchestrator.py:595`), through the single `agent_args` that
-  every `start_agent` gets (`orchestrator.py:451`).
+- **Per-role agent options**: give each role its own permission mode. Today one
+  `--permission-mode` applies to every role (`orchestrator.py:610`), through the single `agent_args` that
+  every `start_agent` gets (`orchestrator.py:456`).
 - **Overridable prompts**: load the role prompts (`orchestrator.py:59-112`) from `.orchestrator/prompts/*.md`
   when those files exist, with the same placeholders.
 - **`--worktree`**: the Builder works in a git worktree or branch per run (`herdr worktree create`), for a
