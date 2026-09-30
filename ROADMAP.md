@@ -8,6 +8,19 @@ them comes a backlog of smaller ideas, in no particular order, and one housekeep
 
 `file:line` references point at commit `25e756b` and will drift as the code changes.
 
+**Status:** sections 1 and 2 are implemented. They stay here as the rationale behind the code. The
+implementation differs from the design in four places:
+
+- The owner check runs before every write of `state.json`, not only before a heartbeat. A phase save made
+  after a `resume --force` would otherwise overwrite the new owner's state.
+- The run settings saved in `state.json` include the per-role models, which landed after this design.
+- A handoff file that ends the run as invalid also clears `prompted`. After the human deletes the file, the
+  resume prompts the role again instead of waiting for a file nobody is going to write.
+- Pull requests, which also landed after this design, add a `publish` phase between the last review and
+  `done`. The saved `pull_request` setting decides whether a run has it, and a run saved before it existed
+  does not. A resume in `publish` opens no workspace, and it skips the commit and the pull request that
+  the saved state shows are already made.
+
 ## 1. Resume an interrupted run
 
 ### Problem
@@ -439,9 +452,9 @@ Tests:
   verdict and the open findings of the last review. `list` gives one line per run (`orchestrator.py:563-570`).
 - **`--spec FILE`**: skip the interview when a spec already exists. The file is copied into the run as
   `spec.md`, and `_collect_spec` (`orchestrator.py:398-407`) is skipped.
-- **Per-role agent options**: give each role its own permission mode and model. Today one
-  `--permission-mode` applies to every role (`orchestrator.py:595`), through the single `agent_args` that
-  every `start_agent` gets (`orchestrator.py:451`).
+- **Per-role agent options**: give each role its own permission mode. Today one
+  `--permission-mode` applies to every role (`orchestrator.py:610`), through the single `agent_args` that
+  every `start_agent` gets (`orchestrator.py:456`).
 - **Overridable prompts**: load the role prompts (`orchestrator.py:59-112`) from `.orchestrator/prompts/*.md`
   when those files exist, with the same placeholders.
 - **`--worktree`**: the Builder works in a git worktree or branch per run (`herdr worktree create`), for a
