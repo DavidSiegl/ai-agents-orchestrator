@@ -4,9 +4,11 @@ Where the orchestrator should go next. The first two sections are designs, with 
 choice: **resuming an interrupted run** and **detecting stale runs**. They come first because together they
 close the biggest gap today: a run lives only as long as the process that drives it. The two designs share
 the new `RunState` fields, and resume relies on stale detection to know when it may take over a run. After
-them comes a backlog of smaller ideas, in no particular order, and one housekeeping note.
+them comes a backlog of smaller ideas, in no particular order, and the known issues.
 
-`file:line` references point at commit `25e756b` and will drift as the code changes.
+`file:line` references point at the code as of the commit that brought this file up to date after pull
+requests #1 to #4, and will drift as the code changes. A reference marked "at 25e756b" points at code that no
+longer exists: the code these designs were written against, before they were implemented.
 
 **Status:** sections 1 and 2 are implemented. They stay here as the rationale behind the code. The
 implementation differs from the design in four places:
@@ -27,8 +29,8 @@ implementation differs from the design in four places:
 
 The agents and the handoff files outlive the `orchestrator.py` process, but nothing can pick them up again.
 When the process dies (Ctrl-C, a dropped SSH session, a closed laptop, a crash), `main` says "the role agents
-keep running in herdr" (`orchestrator.py:600-602`), and that is the end of the run. `run` always makes a new
-run id (`orchestrator.py:336-337`, `:591`) and a new herdr workspace (`orchestrator.py:393`), so the only way
+keep running in herdr" (`orchestrator.py:1187-1190`), and that is the end of the run. `run` always makes a new
+run id (`orchestrator.py:462-463`, `:1171`) and a new herdr workspace (`orchestrator.py:660`), so the only way
 on is to start over, interview included, or to drive the roles by hand.
 
 A real example is run `20260929-235937-e292fb`. Its Spec Collector wrote `spec.md` after the orchestrator
@@ -42,29 +44,29 @@ python orchestrator.py resume RUN [--machine NAME --cwd PATH] \
     [--max-rounds N] [--timeout SECONDS] [--permission-mode MODE] [--force]
 ```
 
-- `--machine` and `--cwd` come from the shared `target` parent parser (`orchestrator.py:532-534`), as for
-  `list` (`orchestrator.py:545`), and the "`--cwd` is required with `--machine`" check
-  (`orchestrator.py:548-549`) applies unchanged. They are needed just to find `state.json`, which lives in
-  the project directory on the agents' machine (`orchestrator.py:321-323`).
-- Exit status is the same as for `run` (`orchestrator.py:40-42`, `README.md:43`).
+- `--machine` and `--cwd` come from the shared `target` parent parser (`orchestrator.py:983-985`), as for
+  `list` (`orchestrator.py:1014`), and the "`--cwd` is required with `--machine`" check
+  (`orchestrator.py:1017-1018`) applies unchanged. They are needed just to find `state.json`, which lives in
+  the project directory on the agents' machine (`orchestrator.py:447-449`).
+- Exit status is the same as for `run` (`orchestrator.py:57-59`, `README.md:61`).
 - `--force` takes over a run that does not look stale (see section 2).
 
 **How `RUN` is named.** Either the full run id only, or also its six-hex key.
 **Recommendation:** accept the full id or the key, and fail when the key matches no run or more than one.
-The key is what the human sees in herdr, in the workspace label (`orchestrator.py:392`) and the agent names
-(`orchestrator.py:447-449`), and it is short enough to type.
+The key is what the human sees in herdr, in the workspace label (`orchestrator.py:659`) and the agent names
+(`orchestrator.py:886`), and it is short enough to type.
 
 **Run settings.** `--max-rounds`, `--timeout` and `--permission-mode` are not saved today
-(`orchestrator.py:306-319`), so a resumed run cannot know them. Either the human passes them again, or they
+(`orchestrator.py:306-319` at 25e756b), so a resumed run cannot know them. Either the human passes them again, or they
 are saved in `state.json` and the flags on `resume` override them.
 **Recommendation:** save them and let the flags override. Whoever resumes after a crash rarely remembers the
 original flags, and an override is how they grant one more review round. Refuse a `--max-rounds` below the
 saved round.
 
 **`--machine` against the saved `machine`.** `state.json` records the `--machine` the run started with
-(`orchestrator.py:591`), but the same herdr is reachable two ways: with `--machine slave0` from elsewhere, or
-without `--machine` from a pane on slave0 itself (`README.md:76-79`). Run `e292fb` records
-`"machine": "slave0"`, yet its directory and workspace sit on a host whose own herdr has no saved machines.
+(`orchestrator.py:1171`), but the same herdr is reachable two ways: with `--machine <machine>` from elsewhere,
+or without `--machine` from a pane on that machine itself (`README.md:157-160`). Run `e292fb` records
+`"machine": "<machine>"`, yet its directory and workspace sit on a host whose own herdr has no saved machines.
 From there the right resume passes no `--machine`. The options are to require the two to match, or not to
 compare them and instead check that the saved workspace exists in the herdr being addressed.
 **Recommendation:** do not compare. Check the workspace, and save the `--machine` used for the resume. A
@@ -75,14 +77,14 @@ the right herdr is being addressed.
 
 | Field | Written | Purpose |
 |---|---|---|
-| `root_pane: str` | in `_prepare`, with the workspace (`orchestrator.py:393-395`) | The Spec Collector's pane and the pane the Builder splits from. Today it is known only once `_start` saves `agents["spec"]` (`orchestrator.py:452-453`), so a crash between `:395` and `:453` loses it. |
+| `root_pane: str` | in `_prepare`, with the workspace (`orchestrator.py:660-662`) | The Spec Collector's pane and the pane the Builder splits from. Today it is known only once `_start` saves `agents["spec"]` (`orchestrator.py:452-453` at 25e756b), so a crash between `:395` and `:453`, both at 25e756b, loses it. |
 | `max_rounds`, `turn_timeout`, `agent_args` | when the run starts | The run settings above. |
-| `prompted: str \| None` | right after `herdr.prompt` returns in `_turn` (`orchestrator.py:466`) | Basename of the handoff file whose prompt was delivered, e.g. `"build-2.md"`. |
+| `prompted: str \| None` | right after `herdr.prompt` returns in `_turn` (`orchestrator.py:796-800`) | Basename of the handoff file whose prompt was delivered, e.g. `"build-2.md"`. |
 | `agents[role]["session"]` | on the first status check after `_start` | The Claude Code session id, used to relaunch an exited role with `claude --resume`. |
 | `owner`, `heartbeat_at` | see section 2 | Who drives the run and when it was last alive. |
 
 `herdr agent get` already returns the session id: its `agent` object carries `agent_session.value` next to
-`agent_status`. `Herdr.status` (`orchestrator.py:204-211`) keeps only the status, so add
+`agent_status`. `Herdr.status` (`orchestrator.py:247-250`) keeps only the status, so add
 `Herdr.agent(name) -> dict | None` with the same None-on-`agent_not_found` rule and build `status` on it.
 
 `RunState.load(host, cwd, run_id)` reads the file through `host.read`, fails with "no run RUN under
@@ -95,19 +97,19 @@ Resume could be a separate `Workflow.resume()` that repeats the phase sequence w
 could become re-entrant: it starts from `state.phase` and `state.round`, and a new run is simply a resume
 from `("spec", 0)` with no workspace.
 **Recommendation:** make `run()` re-entrant. With one path, the existing workflow tests
-(`tests/test_orchestrator.py:158-322`) keep covering every step a resume takes, and the two cannot drift
+(`tests/test_orchestrator.py:223-406`) keep covering every step a resume takes, and the two cannot drift
 apart. Concretely: `_prepare` creates a workspace only when `workspace_id` is empty or the workspace is gone;
 each phase checks its handoff file before anything else; `_start` reuses a live agent instead of starting a
 new one.
 
 ### Handoff file first, then prompt
 
-Today `_turn` prompts the role (`orchestrator.py:466`) before it looks for the handoff file
-(`orchestrator.py:471`). A file written while the orchestrator was down, like `e292fb`'s `spec.md`, would
+Today `_turn` prompts the role (`orchestrator.py:466` at 25e756b) before it looks for the handoff file
+(`orchestrator.py:471` at 25e756b). A file written while the orchestrator was down, like `e292fb`'s `spec.md`, would
 never be noticed: the role would be prompted for work it has already handed over. The new order in `_turn`:
 
 1. The file exists: return it without prompting. An empty file still fails as today
-   (`orchestrator.py:496-497`).
+   (`orchestrator.py:839-840`).
 2. `state.prompted` names this file and the agent is alive: the prompt was delivered, so only poll.
 3. Otherwise: prompt, save `prompted`, then poll.
 
@@ -123,12 +125,12 @@ two-step marker adds a state and a question to the human to close a window of mi
 
 ### Finding and checking agents
 
-The agent names are deterministic, `{role}-{key}` (`orchestrator.py:447-449`), and they are also saved in
-`state.agents`. For each role the resumed phase needs, `Herdr.status(name)` (`orchestrator.py:204-211`)
+The agent names are deterministic, `{role}-{key}` (`orchestrator.py:886`), and they are also saved in
+`state.agents`. For each role the resumed phase needs, `Herdr.status(name)` (`orchestrator.py:247-250`)
 decides:
 
 - **A status:** the agent is alive and is reused as it is. If it is `blocked`, the human is notified, as
-  `_turn` does (`orchestrator.py:486-488`).
+  `_turn` does (`orchestrator.py:822-824`).
 - **None:** the agent has exited.
 
 Panes and the workspace are checked the same way: `herdr pane get` answers `pane_not_found` and
@@ -137,11 +139,11 @@ with the None-on-not-found shape of `status`.
 
 **An exited agent, its pane still there.** Start an agent with the same name in the same pane
 (`herdr agent start` takes an existing pane). If a session id is saved, pass `--resume SESSION` after `--`,
-the path `start_agent` already uses for Claude Code arguments (`orchestrator.py:180-181`). The role then
+the path `start_agent` already uses for Claude Code arguments (`orchestrator.py:214-215`). The role then
 keeps its conversation and gets its normal prompt, or, if it was already prompted, a short "continue; your
 turn ends when you write FILE". Without a session id, or when the resumed session exits at once, start a
 fresh session with a recovery prompt. For a Builder in round n > 1 that is `BUILD_PROMPT` plus a note that
-the working tree holds its earlier rounds, plus `FIX_PROMPT` (`orchestrator.py:76-93`). For a Reviewer in
+the working tree holds its earlier rounds, plus `FIX_PROMPT` (`orchestrator.py:96-113`). For a Reviewer in
 round n > 1 it is `REVIEW_PROMPT` plus the paths of the earlier reviews to check against.
 The alternative is always to start fresh.
 **Recommendation:** resume the session and fall back to a fresh one. For the Spec Collector, the
@@ -150,11 +152,11 @@ roles, the session saves them re-reading the spec and the earlier rounds. The fa
 when there is no session to resume.
 
 **The pane gone, the workspace still there.** Split a surviving pane of the run in the direction the layout
-uses: the Builder to the right of the root pane (`orchestrator.py:415`), the Reviewer below the Builder
-(`orchestrator.py:420`). If that parent pane is gone too, split any pane of the run that survives.
+uses: the Builder to the right of the root pane (`orchestrator.py:876`), the Reviewer below the Builder
+(`orchestrator.py:874`). If that parent pane is gone too, split any pane of the run that survives.
 
 **The whole workspace gone.** The run can fail and tell the human, or it can create a new workspace
-(labelled as in `orchestrator.py:392`), save the new `workspace_id` and `root_pane`, and start the roles it
+(labelled as in `orchestrator.py:659`), save the new `workspace_id` and `root_pane`, and start the roles it
 still needs as described above.
 **Recommendation:** create a new workspace. The handoff files are the whole contract between roles, so they
 are all a new session needs. Failing would leave the human at the same dead end that resume exists to remove.
@@ -163,21 +165,21 @@ are all a new session needs. Failing would leave the human at the same dead end 
 
 | Saved state | Resume |
 |---|---|
-| `phase: "spec"` (round 0, `base` null), `spec.md` exists | The `e292fb` case. Accept the spec, leave the Spec Collector alone, and go on to the Builder. `base` is computed now, as `orchestrator.py:411` does: no build has started, so HEAD at this moment is the right base. |
-| `phase: "spec"`, no `spec.md` | Focus the Spec Collector and notify the human (`orchestrator.py:401-402`), then apply the `_turn` rules. A live, prompted collector is simply waited on. An exited one is relaunched with `--resume`. Without a session, it restarts with `SPEC_PROMPT`, and the notification says that the interview starts over. If `agents` has no `spec` entry (a crash before `orchestrator.py:453`), the collector is started in `root_pane`. |
-| `phase: "build"`, round n, `build-n.md` exists | Go on to review round n. Start the Reviewer only if `agents` has no `review` entry. For n = 1 the saved state can be `build`, round 1 with a Reviewer already recorded, because `_start("review")` saves (`orchestrator.py:453`) before the review loop does (`orchestrator.py:424`). |
-| `phase: "build"`, round n, no `build-n.md` | The `_turn` and agent rules above. Without an entry in `agents` (a crash between `orchestrator.py:413` and `:453`), the Builder is started in a split of `root_pane`. |
-| `phase: "review"`, round n, `review-n.md` exists | Parse the verdict (`orchestrator.py:430`) and branch as `orchestrator.py:434-440` does. APPROVE or the last round is done; otherwise go to build round n + 1. |
+| `phase: "spec"` (round 0, `base` null), `spec.md` exists | The `e292fb` case. Accept the spec, leave the Spec Collector alone, and go on to the Builder. `base` is computed now, as `orchestrator.py:582` does: no build has started, so HEAD at this moment is the right base. |
+| `phase: "spec"`, no `spec.md` | Focus the Spec Collector and notify the human (`orchestrator.py:669-671`), then apply the `_turn` rules. A live, prompted collector is simply waited on. An exited one is relaunched with `--resume`. Without a session, it restarts with `SPEC_PROMPT`, and the notification says that the interview starts over. If `agents` has no `spec` entry (a crash before `orchestrator.py:893`), the collector is started in `root_pane`. |
+| `phase: "build"`, round n, `build-n.md` exists | Go on to review round n. Start the Reviewer only if `agents` has no `review` entry. For n = 1 the saved state can be `build`, round 1 with a Reviewer already recorded, because `_start("review")` saves (`orchestrator.py:453` at 25e756b) before the review loop does (`orchestrator.py:424` at 25e756b). |
+| `phase: "build"`, round n, no `build-n.md` | The `_turn` and agent rules above. Without an entry in `agents` (a crash between `orchestrator.py:586` and `:893`), the Builder is started in a split of `root_pane`. |
+| `phase: "review"`, round n, `review-n.md` exists | Parse the verdict (`orchestrator.py:701`) and branch as `orchestrator.py:705-708` does. APPROVE or the last round is done; otherwise go to build round n + 1. |
 | `phase: "review"`, round n, no `review-n.md` | The `_turn` and agent rules above. |
-| `phase: "done"` | Nothing to do. Print the verdict line as `main` does (`orchestrator.py:604-605`) and exit 0 or 3. |
+| `phase: "done"` | Nothing to do. Print the verdict line as `main` does (`orchestrator.py:1192-1193`) and exit 0 or 3. |
 | `error` set, any phase | Clear `error`, then resume at the saved phase and round as above. |
 
 **`done` is a no-op** rather than an error, so that resume is idempotent and a script can call it without
 first checking the phase.
 
-**Errors.** Most recorded errors clear up by resuming: a timeout (`orchestrator.py:476-478`), an agent that
-exited (`orchestrator.py:473-474`), an SSH failure. The exception is an invalid handoff file: an empty one
-(`orchestrator.py:496-497`) or a review without a verdict (`orchestrator.py:431-432`). Step 1 of `_turn`
+**Errors.** Most recorded errors clear up by resuming: a timeout (`orchestrator.py:812-814`), an agent that
+exited (`orchestrator.py:807-808`), an SSH failure. The exception is an invalid handoff file: an empty one
+(`orchestrator.py:839-840`) or a review without a verdict (`orchestrator.py:702-703`). Step 1 of `_turn`
 reads the same file on resume and fails the same way. Resume can refuse and name the file for the human to
 fix or delete, or it can move the file aside and prompt the role again.
 **Recommendation:** refuse and name the file. Resume should not pass judgement on a role's output. Prompting
@@ -186,15 +188,16 @@ resumed runs as well.
 
 ### `base` comes from `state.json`
 
-`_build_and_review` sets `base` from HEAD (`orchestrator.py:411`). A resume that recomputed it would diff
+`_build_and_review` sets `base` from HEAD (`orchestrator.py:411` at 25e756b). A resume that recomputed it would diff
 against whatever HEAD is now. If the human committed the Builder's work in the meantime, the Reviewer would
 see an empty diff and approve nothing. So only the step from spec to build computes `base`, as today. Every
-later phase reads it from `state.json`, and a resumed run past the spec phase must never reach `:411` again.
+later phase reads it from `state.json`, and a resumed run past the spec phase must never reach
+`orchestrator.py:582` again.
 With the re-entrant `run()` that follows from the structure, and a test pins it down (test 6 below).
 
 ### Turn timeouts
 
-`_turn`'s deadline runs on the monotonic clock (`orchestrator.py:365`, `:468`), which does not survive the
+`_turn`'s deadline runs on the monotonic clock (`orchestrator.py:549`, `:802`), which does not survive the
 process. Resume could persist a wall-clock deadline, or give the resumed turn a fresh `turn_timeout`.
 **Recommendation:** start a fresh timeout. The downtime is not the role's fault, and a persisted deadline
 would often make a resumed turn time out at once.
@@ -205,27 +208,27 @@ would often make a resumed turn time out at once.
   once, would drive the same agents twice. Resume takes ownership of the run (section 2) and refuses a run
   whose owner is not stale, unless `--force` is given.
 - **A half-written handoff file.** Every prompt asks for its file "in a single write"
-  (`orchestrator.py:72`, `:85`, `:92`, `:103`, `:112`), so a file that exists is taken as complete. `_turn`
+  (`orchestrator.py:89`, `:105`, `:112`, `:123`, `:132`), so a file that exists is taken as complete. `_turn`
   makes the same assumption today.
 - **`--max-rounds` below the saved round.** Refused, as above.
 - **A `state.json` from before this change.** It has no `prompted`, `session` or settings. A live agent is
   then prompted again (one duplicate prompt, the price of an old run), an exited one starts fresh, and the
   settings come from the flags or their defaults.
-- **Not a git repository.** `base` stays None, and `_change_description` (`orchestrator.py:506-510`) works as
+- **Not a git repository.** `base` stays None, and `_change_description` (`orchestrator.py:928-932`) works as
   today.
 - **The human edited the working tree during the downtime.** This cannot be detected and is out of scope. The
   Reviewer sees those edits in the diff like any other.
 
 ### Test plan
 
-Reuse the fakes in `tests/test_orchestrator.py:21-130`:
+Reuse the fakes in `tests/test_orchestrator.py:25-192`:
 
-- `make_workflow` (`:122-130`) gets a `state=` argument, so a test can hand it a saved `RunState`.
-- `FakeHost` (`:21-35`) is pre-seeded with the run's files.
-- `FakeHerdr` (`:38-91`) has `statuses` pre-set for live agents and no entry for exited ones, so `status`
-  returns None (`:87-88`). It gets `workspaces` and `panes` sets for the new existence checks, and it records
+- `make_workflow` (`:183-192`) gets a `state=` argument, so a test can hand it a saved `RunState`.
+- `FakeHost` (`:25-67`) is pre-seeded with the run's files.
+- `FakeHerdr` (`:70-152`) has `statuses` pre-set for live agents and no entry for exited ones, so `status`
+  returns None (`:139-140`). It gets `workspaces` and `panes` sets for the new existence checks, and it records
   the session ids it hands out.
-- `FakeClock` (`:106-119`) drives polling and its hooks play the world, as today.
+- `FakeClock` (`:167-180`) drives polling and its hooks play the world, as today.
 
 Tests:
 
@@ -240,7 +243,7 @@ Tests:
 5. Phase `review`, round 1, `review-1.md` present: the Reviewer is not prompted, and the verdict is taken from
    the file.
 6. **`base`.** `FakeHost(head="moved")`, saved `base` `"abc123"`, phase `build`: the Reviewer's prompt
-   contains `git diff abc123`, as in `tests/test_orchestrator.py:178-187`.
+   contains `git diff abc123`, as in `tests/test_orchestrator.py:243-252`.
 7. Phase `done`: `run()` returns the saved verdict, and `herdr.calls` stays empty.
 8. `error` set and a `review-1.md` without a verdict: an `OrchestratorError` names the file. After the test
    deletes it from `host.files`, a second resume prompts the Reviewer.
@@ -249,8 +252,8 @@ Tests:
 10. Phase `build`, round 1 with `build-1.md` and a recorded Reviewer: the review goes ahead without a second
     `("start", "review-…")`.
 11. `RunState.load` of the `e292fb` keys (no new fields) and of a dict with an unknown key.
-12. CLI tests next to `tests/test_orchestrator.py:445-482`: `resume RUN --machine m` without `--cwd` exits;
-    `main(["resume", …])` with `Host` patched as in `:460-474`; a key that matches one run, several runs, or
+12. CLI tests next to `tests/test_orchestrator.py:669-745`: `resume RUN --machine m` without `--cwd` exits;
+    `main(["resume", …])` with `Host` patched as in `:684-737`; a key that matches one run, several runs, or
     none.
 
 ### Open questions
@@ -259,7 +262,7 @@ Tests:
   report it in `agent_session`? The design re-reads the session id after every start, so it works either way.
   This needs checking against herdr and Claude Code before building.
 - Does herdr release an agent's name as soon as it exits, so that the same name can be started again? The
-  comment at `orchestrator.py:185-186` says herdr keeps the name bound while an agent is blocked at startup.
+  comment at `orchestrator.py:219-220` says herdr keeps the name bound while an agent is blocked at startup.
   The exited case needs checking.
 
 ## 2. Stale-run detection
@@ -267,10 +270,11 @@ Tests:
 ### Problem
 
 `state.json` is written only when the phase changes (`_save`, `orchestrator.py:512-513`, called at `:395`,
-`:413`, `:424`, `:438`, `:443`, `:453`) and when a run fails (`orchestrator.py:515-519`). Ctrl-C is not
-recorded at all (`orchestrator.py:600-602`). So `list` cannot tell a dead run from a live one: `print_runs`
-(`orchestrator.py:563-570`) shows `e292fb` as `spec  round 0` with no outcome. That line could be a human in
-mid-interview, or a process that has been gone since yesterday.
+`:413`, `:424`, `:438`, `:443`, `:453`, all at 25e756b) and when a run fails
+(`orchestrator.py:515-519` at 25e756b). Ctrl-C is not recorded at all (`orchestrator.py:600-602` at 25e756b).
+So `list` cannot tell a dead run from a live one: `print_runs` (`orchestrator.py:563-570` at 25e756b) shows
+`e292fb` as `spec  round 0` with no outcome. That line could be a human in mid-interview, or a process that
+has been gone since yesterday.
 
 ### New `RunState` fields
 
@@ -283,21 +287,21 @@ A pid alone is ambiguous because, under `--machine`, the orchestrator and the ru
 machines. The host names the machine the pid belongs to.
 
 **Recording Ctrl-C.** `Workflow.run` also catches `KeyboardInterrupt`. It sets `error = "interrupted"` and
-`owner = None`, saves on a best-effort basis through `_save_after_error` (`orchestrator.py:515-519`), and
+`owner = None`, saves on a best-effort basis through `_save_after_error` (`orchestrator.py:515-519` at 25e756b), and
 re-raises, so `main` still returns 130. The alternative is a separate status field.
-**Recommendation:** use `error`. `print_runs` already shows it (`orchestrator.py:568`), and resume already
+**Recommendation:** use `error`. `print_runs` already shows it (`orchestrator.py:1100-1101`), and resume already
 treats a run with an error as resumable.
 
 ### When the fields are written
 
 **Is a heartbeat needed?** Yes. The longest gaps between phase saves are the turns themselves: up to
 `--timeout`, 1800 s, for the Builder and the Reviewer, and unbounded for the interview
-(`orchestrator.py:404-407`). Without a heartbeat, a live run in a long interview looks exactly like a dead
+(`orchestrator.py:674-677`). Without a heartbeat, a live run in a long interview looks exactly like a dead
 one.
 
-**How often?** `_turn` polls every 3 s (`orchestrator.py:31`, `:494`). Each poll already makes a `host.read`
-(`orchestrator.py:471`) and a `herdr status` call (`orchestrator.py:472`), and under `--machine` both go over
-SSH (`Host.run`, `orchestrator.py:246-253`; `herdr --machine`, `orchestrator.py:133`). There are three
+**How often?** `_turn` polls every 3 s (`orchestrator.py:37`, `:831`). Each poll already makes a `host.read`
+(`orchestrator.py:805`) and a `herdr status` call (`orchestrator.py:806`), and under `--machine` both go over
+SSH (`Host.run`, `orchestrator.py:308-316`; `herdr --machine`, `orchestrator.py:167`). There are three
 options:
 
 - (a) Write on every poll. That is one more SSH write every 3 s, 50% more round trips, and 20 rewrites of
@@ -307,28 +311,28 @@ options:
 
 **Recommendation:** (b). One write a minute is noise next to the roughly 40 SSH calls a minute that polling
 already makes. A threshold of five missed beats absorbs a slow SSH hop, or a `Host.run` that hits its 60 s
-limit (`orchestrator.py:251`), without false alarms. Five minutes to notice is fine when turns take tens of
+limit (`orchestrator.py:309`), without false alarms. Five minutes to notice is fine when turns take tens of
 minutes.
 
-**Where.** In `_turn`'s poll loop (`orchestrator.py:471-494`): `if now - last_beat >= HEARTBEAT_SECONDS`,
+**Where.** In `_turn`'s poll loop (`orchestrator.py:805-831`): `if now - last_beat >= HEARTBEAT_SECONDS`,
 save. `now` comes from the injected `clock`, so `FakeClock` drives it in tests. `heartbeat_at` comes from a
 new injected wall clock, because the monotonic clock means nothing to another process.
 
 **The startup-dialog wait.** `_start` waits without a limit while a startup dialog is open
-(`orchestrator.py:457`), and no heartbeat can run inside that call. A folder-trust question left for five
+(`orchestrator.py:457` at 25e756b), and no heartbeat can run inside that call. A folder-trust question left for five
 minutes would make a live run look stale.
 **Recommendation:** replace it with a loop of bounded waits (60 s each) and a heartbeat between them. The
-startup wait itself (`orchestrator.py:183`, at most 120 s) is below the threshold and needs no change.
+startup wait itself (`orchestrator.py:217`, at most 120 s) is below the threshold and needs no change.
 
 **A failed heartbeat.** If an SSH blip makes the heartbeat write fail, log it and carry on. A failed phase
 save still ends the run, as today. A missed beat costs nothing if the next one succeeds.
 
-**Atomic writes.** `Host.write` truncates the file and writes it in place (`orchestrator.py:273`). With a
-write every minute, a `list` that runs at the same time has a real chance of reading a half-written file,
-and `run_states` then aborts the whole listing as corrupt (`orchestrator.py:297-298`). The fix is to write
+**Atomic writes.** `Host.write` truncates the file and writes it in place (`orchestrator.py:273` at 25e756b).
+With a write every minute, a `list` that runs at the same time has a real chance of reading a half-written
+file, and `run_states` then aborts the whole listing as corrupt (`orchestrator.py:389-390`). The fix is to write
 `state.json.tmp` and `mv` it into place.
 **Recommendation:** make the write atomic. A rename within one directory is atomic, the change stays inside
-the same shell script, and the glob in `run_states` (`orchestrator.py:289`) never matches the `.tmp` file.
+the same shell script, and the glob in `run_states` (`orchestrator.py:378`) never matches the `.tmp` file.
 With a single writer, no locking is needed.
 
 **Takeover.** Before each heartbeat, the owner reads `state.json` again. If `owner` names another process,
@@ -351,7 +355,7 @@ There are two ways to measure a heartbeat's age:
 
 - (a) The listing machine's clock minus `heartbeat_at`.
 - (b) The age of `state.json`'s mtime, measured by the agents' machine: `date +%s` minus the file's mtime, in
-  the same shell call that `run_states` (`orchestrator.py:288-299`) already makes.
+  the same shell call that `run_states` (`orchestrator.py:371-391`) already makes.
 
 **Recommendation:** (b), keeping `heartbeat_at` for display and for `show`. It uses one clock, so there is no
 skew. The orchestrator is the only writer of `state.json`, so the file's mtime is its heartbeat. It also
@@ -379,10 +383,10 @@ itself when it takes over.
 ### How `list` shows a stale run
 
 `run_states` returns `(age_seconds, state)` pairs. `print_runs` keeps today's line
-(`orchestrator.py:568-569`) and fills the outcome column for an unfinished run:
+(`orchestrator.py:1100-1110`) and fills the outcome column for an unfinished run:
 
 ```
-20260929-235937-e292fb  spec    round 0  stale: no heartbeat for 7h12m; resume: orchestrator.py resume e292fb --machine slave0 --cwd ~/GitHub/ai-agents-orchestrator
+20260929-235937-e292fb  spec    round 0  stale: no heartbeat for 7h12m; resume: orchestrator.py resume e292fb --machine <machine> --cwd ~/GitHub/ai-agents-orchestrator
     assess this repo and brainstrom possible useful feature additions
 20260930-065000-c38252  build   round 1  running: pid 4242 on laptop, beat 40s ago
     implement recent changes specified in spec
@@ -406,28 +410,28 @@ For tests, `print_runs` takes the local host name and a `pid_alive` function as 
 
 ### Test plan
 
-Reuse the fakes in `tests/test_orchestrator.py:21-130`:
+Reuse the fakes in `tests/test_orchestrator.py:25-192`:
 
-- `FakeHost` (`:21-35`) records each write, so a test can count heartbeats.
-- `Workflow` takes a `wallclock`, and `FakeClock` (`:106-119`) serves as both clocks.
-- `make_workflow` (`:122-130`) passes both clocks through.
-- `FakeHerdr.wait` (`:83-85`) can return `blocked` for its first few calls.
+- `FakeHost` (`:25-67`) records each write, so a test can count heartbeats.
+- `Workflow` takes a `wallclock`, and `FakeClock` (`:167-180`) serves as both clocks.
+- `make_workflow` (`:183-192`) passes both clocks through.
+- `FakeHerdr.wait` (`:127-129`) can return `blocked` for its first few calls.
 
 Tests:
 
-1. A Spec Collector kept idle for 10 × `STALL_SECONDS`, as in `tests/test_orchestrator.py:250-261`.
+1. A Spec Collector kept idle for 10 × `STALL_SECONDS`, as in `tests/test_orchestrator.py:315-326`.
    `state.json` is written about once every `HEARTBEAT_SECONDS`, not on every poll. `heartbeat_at` advances,
    and `owner` holds the patched pid and host.
-2. The startup dialog (`tests/test_orchestrator.py:263-271`): the waits are bounded, and there are
+2. The startup dialog (`tests/test_orchestrator.py:328-336`): the waits are bounded, and there are
    heartbeats between them. The existing `herdr.waits == [("idle", "done")]` assertion changes accordingly.
 3. A `FakeHost.write` that fails once for `state.json` during a poll: the run carries on.
 4. **Takeover.** A hook rewrites `state.json` with another `owner`. The run stops with an error and does not
    overwrite the file.
 5. **Ctrl-C.** A `FakeHerdr` script turn raises `KeyboardInterrupt`. The saved state has
    `error == "interrupted"` and `owner` None, and `main` still returns 130.
-6. `owner` is None after an approved run (extend `tests/test_orchestrator.py:159-176`).
+6. `owner` is None after an approved run (extend `tests/test_orchestrator.py:224-241`).
 7. `Host.run_states` parses the age in front of each state, with a `MagicMock` run as in
-   `tests/test_orchestrator.py:429-432`.
+   `tests/test_orchestrator.py:648-651`.
 8. `print_runs` as a pure function:
    - a running run;
    - a stale run by age;
@@ -436,42 +440,51 @@ Tests:
    - `done` and error rows, which are never stale;
    - the resume hint with `--machine` and `--cwd`.
 9. The atomic write leaves no `.tmp` file behind (a real-filesystem test, like
-   `tests/test_orchestrator.py:434-442`).
+   `tests/test_orchestrator.py:658-666`).
 
 ### Open questions
 
 - Should `HEARTBEAT_SECONDS` and `STALE_SECONDS` be flags? The design starts with constants, next to
-  `POLL_SECONDS` and `STALL_SECONDS` (`orchestrator.py:31-33`). Revisit if slow links produce false stale
+  `POLL_SECONDS` and `STALL_SECONDS` (`orchestrator.py:37-39`). Revisit if slow links produce false stale
   marks.
 
 ## 3. Backlog
 
 - **`close <run-id>`**: close the run's herdr workspace with `herdr workspace close` on the saved
-  `workspace_id` (`orchestrator.py:315`). Today the README says to close it by hand (`README.md:60`).
-- **`show <run-id>`**: print the state, the handoff file paths (`orchestrator.py:321-333`), the latest
-  verdict and the open findings of the last review. `list` gives one line per run (`orchestrator.py:563-570`).
+  `workspace_id` (`orchestrator.py:407`). The workspace now closes automatically once the pull request is
+  open (`orchestrator.py:604-605`, `_close_workspace` at `:748-753`). It stays open only when the run fails
+  or was started with `--no-pr`, and then the README says to close it by hand (`README.md:55`, `:85-86`).
+  The command is needed only for those runs.
+- **`show <run-id>`**: print the state, the handoff file paths (`orchestrator.py:447-459`), the latest
+  verdict and the open findings of the last review. `list` gives one line per run (`orchestrator.py:1094-1111`).
 - **`--spec FILE`**: skip the interview when a spec already exists. The file is copied into the run as
-  `spec.md`, and `_collect_spec` (`orchestrator.py:398-407`) is skipped.
-- **Per-role agent options**: give each role its own permission mode. Today one
-  `--permission-mode` applies to every role (`orchestrator.py:610`), through the single `agent_args` that
-  every `start_agent` gets (`orchestrator.py:456`).
-- **Overridable prompts**: load the role prompts (`orchestrator.py:59-112`) from `.orchestrator/prompts/*.md`
+  `spec.md`, and `_collect_spec` (`orchestrator.py:664-677`) is skipped.
+- **Per-role agent options**: models are already per role: `--spec-model`, `--build-model` and
+  `--review-model` override `--model` (`orchestrator.py:996-998`, `role_models` at `:1024-1027`). Only the
+  permission mode is still shared: one `--permission-mode` applies to every role (`orchestrator.py:993-994`,
+  `:1174`), through the single `agent_args` that every `start_agent` gets (`orchestrator.py:887`). Give each
+  role its own permission mode as well.
+- **Overridable prompts**: load the role prompts (`orchestrator.py:76-146`) from `.orchestrator/prompts/*.md`
   when those files exist, with the same placeholders.
 - **`--worktree`**: the Builder works in a git worktree or branch per run (`herdr worktree create`), for a
-  clean base (`orchestrator.py:411`) and parallel runs. The panes and the diff follow `state.cwd`
-  (`orchestrator.py:393`, `:508`).
+  clean base (`orchestrator.py:582`) and parallel runs. The panes and the diff follow `state.cwd`
+  (`orchestrator.py:660`, `:930`).
 - **Re-prompt the Reviewer once on a malformed review** instead of aborting the run
-  (`orchestrator.py:431-432`).
+  (`orchestrator.py:702-703`).
 - **Builder `BLOCKED` escalation**: the Builder is told to report when the spec cannot be met
-  (`orchestrator.py:83`), but the report goes to the Reviewer regardless. A report that starts with
-  `BLOCKED:` should instead notify the human (`orchestrator.py:501-504`) and pause the run.
-- **`summary.md` and per-turn timings**: at the end of a run (`orchestrator.py:442-444`), write `summary.md`,
-  and record when each `_turn` (`orchestrator.py:460-499`) started and ended in `state.json`.
-- **`--commit` on APPROVE**: commit the change with a message built from the spec's Goal (a section required
-  by `orchestrator.py:72-73`) when the verdict is APPROVE (`orchestrator.py:434`).
+  (`orchestrator.py:103`), but the report goes to the Reviewer regardless. A report that starts with
+  `BLOCKED:` should instead notify the human (`orchestrator.py:923-926`) and pause the run.
+- **`summary.md` and per-turn timings**: at the end of a run (`orchestrator.py:600-606`), write `summary.md`,
+  and record when each `_turn` (`orchestrator.py:767-834`) started and ended in `state.json`.
+- **`--commit` on APPROVE**: superseded by the automatic commit and pull request. `_publish`
+  (`orchestrator.py:720-746`) commits the change with the spec's `#` title (`orchestrator.py:89-91`) at the
+  end of every run with a pull request, and opens the pull request as a draft when the verdict is not
+  APPROVE (`orchestrator.py:741-742`).
 
-## 4. Housekeeping
+## 4. Known issues
 
-`.gitignore:12` ignores `.orchestrator_context.json`. The orchestrator before the herdr rewrite persisted its
-context to that file, and 25e756b removed that code. Nothing reads or writes the file now, so the entry looks
-like a leftover. It is recorded here only, to be removed in a separate change.
+- **A resume can publish from the wrong branch.** The run switches to its own branch only in the spec phase
+  (`orchestrator.py:583-584`, `_switch_to_branch` at `:679-688`). A `resume` in `build`, `review` or
+  `publish` does not check which branch is checked out. So if the human checks out another branch before
+  resuming, `_publish` (`orchestrator.py:732-738`) commits on that branch and then pushes `state.branch`.
+  This is recorded only, not fixed.
