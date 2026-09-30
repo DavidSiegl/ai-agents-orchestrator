@@ -981,7 +981,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     sub = p.add_subparsers(dest="command", required=True)
 
     target = argparse.ArgumentParser(add_help=False)
-    target.add_argument("--machine", help="saved herdr machine to run the agents on, e.g. slave0")
+    target.add_argument("--machine", help="saved herdr machine to run the agents on")
     target.add_argument("--cwd", help="project directory (on the machine, if --machine is given)")
 
     # Unset flags are None: run fills in the defaults, resume keeps what the run was started with.
@@ -992,7 +992,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                           help=f"seconds a Builder or Reviewer turn may take (default {DEFAULT_TURN_TIMEOUT})")
     settings.add_argument("--permission-mode",
                           help="Claude Code permission mode for every role, e.g. auto or acceptEdits")
-    settings.add_argument("--model", help="Claude model for every role, e.g. sonnet or opus")
+    settings.add_argument("--model", help="Claude model for every role, e.g. sonnet or claude-opus-5-5")
     for role in ROLE_LABELS:
         settings.add_argument(f"--{role}-model", metavar="MODEL",
                               help=f"Claude model for the {ROLE_LABELS[role]}; overrides --model")

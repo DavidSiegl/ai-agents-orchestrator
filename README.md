@@ -114,6 +114,7 @@ that is still running unless you pass `--force`, and an orchestrator whose run i
 save. Ctrl-C is recorded as the error `interrupted`.
 
 [ROADMAP.md](ROADMAP.md) has the design behind both, and what else is planned.
+[ARCHITECTURE.md](ARCHITECTURE.md) gives an overview of the code.
 
 ### When the orchestrator needs you
 
