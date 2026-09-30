@@ -6,7 +6,7 @@ name = "ai-agents-orchestrator"
 version = "0.2.0"
 description = "Spec Collector -> Builder -> Reviewer handoff between Claude Code sessions in herdr"
 readme = "README.md"
-# 3.13 is what slave0 ships; the orchestrator is stdlib-only so it runs there without uv.
+# The orchestrator is stdlib-only, so it runs with a system python3 3.13+ without uv.
 requires-python = ">=3.13"
 dependencies = []
 

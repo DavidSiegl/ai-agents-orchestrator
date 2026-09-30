@@ -482,9 +482,9 @@ class TestHerdr(unittest.TestCase):
     def test_call_returns_result_and_forwards_machine(self):
         run = MagicMock(return_value=result({"agent": {"agent_status": "idle"}}))
 
-        self.assertEqual(Herdr("slave0", run=run).status("build-x"), "idle")
+        self.assertEqual(Herdr("remote", run=run).status("build-x"), "idle")
         self.assertEqual(run.call_args.args[0],
-                         ["herdr", "--machine", "slave0", "agent", "get", "build-x"])
+                         ["herdr", "--machine", "remote", "agent", "get", "build-x"])
 
     def test_prompt_does_not_wait(self):
         run = MagicMock(return_value=result({"type": "agent_prompted"}))
@@ -535,10 +535,10 @@ class TestHerdr(unittest.TestCase):
         self.assertIsNone(run.call_args.kwargs["timeout"])
 
     def test_ssh_target_by_label(self):
-        profiles = [{"id": "5d45", "label": "slave0", "target": "ai-agents", "enabled": True}]
+        profiles = [{"id": "5d45", "label": "remote", "target": "remote-host", "enabled": True}]
         run = MagicMock(return_value=completed(json.dumps(profiles)))
 
-        self.assertEqual(Herdr("slave0", run=run).ssh_target(), "ai-agents")
+        self.assertEqual(Herdr("remote", run=run).ssh_target(), "remote-host")
         # Machine management is local; forwarding it would be rejected by herdr.
         self.assertEqual(run.call_args.args[0], ["herdr", "machine", "list", "--json"])
 
@@ -555,12 +555,12 @@ class TestHerdr(unittest.TestCase):
 
 class TestHost(unittest.TestCase):
     def test_ssh_wraps_command(self):
-        run = MagicMock(return_value=completed("/home/agent/proj\n"))
-        cwd = Host("ai-agents", run=run).resolve_dir("~/proj")
+        run = MagicMock(return_value=completed("/home/user/proj\n"))
+        cwd = Host("remote-host", run=run).resolve_dir("~/proj")
 
-        self.assertEqual(cwd, "/home/agent/proj")
+        self.assertEqual(cwd, "/home/user/proj")
         argv = run.call_args.args[0]
-        self.assertEqual(argv[:4], ["ssh", "-o", "BatchMode=yes", "ai-agents"])
+        self.assertEqual(argv[:4], ["ssh", "-o", "BatchMode=yes", "remote-host"])
         self.assertIn('"$HOME$1"', argv[4])
         self.assertTrue(argv[4].endswith(" _ /proj"))
 
@@ -580,7 +580,7 @@ class TestHost(unittest.TestCase):
 
     def test_create_pr_runs_gh_in_the_project(self):
         run = MagicMock(return_value=completed("Creating pull request\nhttps://github.com/o/r/pull/7\n"))
-        url = Host("ai-agents", run=run).create_pr("/proj", "main", "orchestrator/x", "Title", "body", draft=True)
+        url = Host("remote-host", run=run).create_pr("/proj", "main", "orchestrator/x", "Title", "body", draft=True)
 
         self.assertEqual(url, "https://github.com/o/r/pull/7")
         remote = run.call_args.args[0][4]
@@ -612,7 +612,7 @@ class TestHost(unittest.TestCase):
 class TestCLI(unittest.TestCase):
     def test_machine_requires_cwd(self):
         with self.assertRaises(SystemExit), patch("sys.stderr"):
-            parse_args(["run", "task", "--machine", "slave0"])
+            parse_args(["run", "task", "--machine", "remote"])
 
     def test_max_rounds_must_be_positive(self):
         with self.assertRaises(SystemExit), patch("sys.stderr"):
@@ -651,11 +651,11 @@ class TestCLI(unittest.TestCase):
             self.assertEqual(main(["run", "task"]), orchestrator.EXIT_CHANGES_REQUESTED)
 
     @patch.object(Host, "run_states", return_value=[])
-    @patch.object(Host, "resolve_dir", return_value="/home/agent/proj")
-    @patch.object(Herdr, "ssh_target", return_value="ai-agents")
+    @patch.object(Host, "resolve_dir", return_value="/home/user/proj")
+    @patch.object(Herdr, "ssh_target", return_value="remote-host")
     def test_list_on_machine_uses_ssh_host(self, _target, _resolve, _states):
         with patch("builtins.print") as out:
-            self.assertEqual(main(["list", "--machine", "slave0", "--cwd", "~/proj"]), 0)
+            self.assertEqual(main(["list", "--machine", "remote", "--cwd", "~/proj"]), 0)
         out.assert_called_with("No runs.")
 
 
