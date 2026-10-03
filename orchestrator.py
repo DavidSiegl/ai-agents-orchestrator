@@ -42,7 +42,7 @@ HEARTBEAT_SECONDS = 60
 # A run whose state.json is older than this is stale: five missed beats, which rides out a slow SSH hop
 # or a Host.run that hits its 60 s limit.
 STALE_SECONDS = 300
-# git push and gh talk to the network; everything else Host runs is local to the machine.
+# git fetch, git push and gh talk to the network; everything else Host runs is local to the machine.
 NETWORK_TIMEOUT = 300
 BRANCH_PREFIX = "orchestrator/"
 REMOTE = "origin"
@@ -56,6 +56,8 @@ ROLE_LABELS = {"spec": "Spec Collector", "build": "Builder", "review": "Reviewer
 
 EXIT_ERROR = 1
 EXIT_CHANGES_REQUESTED = 3
+# Approved, but the pull request conflicts with its base, so it was opened as a draft.
+EXIT_CONFLICT = 4
 EXIT_INTERRUPTED = 130
 
 
@@ -316,7 +318,9 @@ class Host:
             raise OrchestratorError(f"{shlex.join(argv)}: {e}") from e
 
     def check(self, argv: list[str], stdin: str | None = None, timeout: float = 60) -> str:
-        proc = self.run(argv, stdin, timeout)
+        return self._checked(argv, self.run(argv, stdin, timeout))
+
+    def _checked(self, argv: list[str], proc: subprocess.CompletedProcess) -> str:
         if proc.returncode != 0:
             where = f" on {self.ssh_target}" if self.ssh_target else ""
             raise OrchestratorError(f"{shlex.join(argv)} failed{where}: {proc.stderr.strip()}")
@@ -352,7 +356,65 @@ class Host:
         return proc.stdout.strip() if proc.returncode == 0 else None
 
     def git(self, cwd: str, *args: str, timeout: float = 60) -> str:
-        return self.check(["git", "-C", cwd, *args], timeout=timeout)
+        return self._checked(["git", "-C", cwd, *args], self.git_run(cwd, *args, timeout=timeout))
+
+    def git_run(self, cwd: str, *args: str, timeout: float = 60) -> subprocess.CompletedProcess:
+        """A git command whose failure the caller interprets; git uses exit status 1 for answers such as "no"."""
+        return self.run(["git", "-C", cwd, *args], timeout=timeout)
+
+    def _git_test(self, cwd: str, *args: str) -> bool:
+        """Whether a yes-or-no git command answers yes: status 0 is yes, 1 is no, anything else an error."""
+        proc = self.git_run(cwd, *args)
+        if proc.returncode not in (0, 1):
+            self._checked(["git", "-C", cwd, *args], proc)
+        return proc.returncode == 0
+
+    def fetch(self, cwd: str, branch: str) -> str:
+        """Fetch the branch from origin and return its remote-tracking ref."""
+        try:
+            self.git(cwd, "fetch", "--quiet", REMOTE, branch, timeout=NETWORK_TIMEOUT)
+        except OrchestratorError as e:
+            raise OrchestratorError(f"could not fetch {branch} from {REMOTE}: {e}") from e
+        return f"{REMOTE}/{branch}"
+
+    def fast_forward(self, cwd: str, branch: str) -> None:
+        """Bring the checked-out branch up to origin's. One only ahead of origin's is left as it is."""
+        upstream = self.fetch(cwd, branch)
+        argv = ["merge", "--ff-only", "--quiet", upstream]
+        proc = self.git_run(cwd, *argv)
+        if proc.returncode != 0:
+            if self._git_test(cwd, "merge-base", "--is-ancestor", "HEAD", upstream):
+                why = f"{branch} cannot be fast-forwarded to {upstream}"
+            else:
+                why = f"{branch} has diverged from {upstream}"
+            raise OrchestratorError(f"{why}; reconcile it first. "
+                                    f"git {shlex.join(argv)} failed: {proc.stderr.strip()}")
+
+    def merge_upstream(self, cwd: str, branch: str) -> list[str]:
+        """Merge origin's latest branch into HEAD with a merge commit, and return the files that conflict.
+
+        Nothing is merged when HEAD already contains it, so a repeated call merges once. A
+        conflicting merge is aborted, leaving HEAD and the working tree as they were.
+        """
+        upstream = self.fetch(cwd, branch)
+        if self._git_test(cwd, "merge-base", "--is-ancestor", upstream, "HEAD"):
+            return []
+        merge = self.git_run(cwd, "merge", "--no-edit", "--quiet", upstream)
+        if merge.returncode == 0:
+            return []
+        # -z: paths with unusual characters come unquoted.
+        conflicts = [p for p in self.git(cwd, "diff", "--name-only", "-z", "--diff-filter=U").split("\0") if p]
+        self.abort_merge(cwd)
+        if not conflicts:
+            raise OrchestratorError(f"git merge {upstream} failed in {cwd}: {merge.stderr.strip()}")
+        return conflicts
+
+    def abort_merge(self, cwd: str) -> bool:
+        """Abort a merge in progress, if there is one; True when there was."""
+        if not self._git_test(cwd, "rev-parse", "-q", "--verify", "MERGE_HEAD"):
+            return False
+        self.git(cwd, "merge", "--abort")
+        return True
 
     def create_pr(self, cwd: str, base: str, head: str, title: str, body: str, draft: bool) -> str:
         """Open a pull request with gh and return its URL."""
@@ -412,6 +474,8 @@ class RunState:
     branch: str | None = None
     pr_url: str | None = None
     verdict: str | None = None
+    # The files that conflicted with the base branch when the pull request was opened, as a draft.
+    conflicts: list[str] = field(default_factory=list)
     error: str | None = None
     # Per role: the agent's name, its pane and, once herdr reports it, its Claude Code session id.
     agents: dict[str, dict[str, str]] = field(default_factory=dict)
@@ -500,7 +564,13 @@ def pr_body(state: "RunState", spec: str, report: str, review: str) -> str:
             f"Reviewer verdict after {rounds}: **{state.verdict}**.")
     if not approved:
         head += "\n\nThe Reviewer still requested changes after the last round, so this is a draft."
+    warning = []
+    if state.conflicts:
+        files = "\n".join(f"> - `{f}`" for f in state.conflicts)
+        warning = [f"> [!WARNING]\n> This branch conflicts with `{state.base_branch}`, so this is a draft. "
+                   f"Merge `{state.base_branch}` into it and resolve the conflicts in:\n{files}"]
     return "\n\n".join([
+        *warning,
         head,
         _details("Spec", spec, open_=True),
         _details(f"Builder report (round {state.round})", report),
@@ -577,11 +647,12 @@ class Workflow:
                 self._prepare()
             if s.phase == "spec":
                 self._collect_spec()
-                # Only here, before the first build: every later phase, resumed or not, diffs
-                # against this base, even if the human commits the Builder's work meanwhile.
-                s.base = self.host.git_head(s.cwd)
                 if s.pull_request:
                     self._switch_to_branch()
+                # Only here, before the first build and after the base branch was fast-forwarded:
+                # every later phase, resumed or not, diffs against this base, even if the human
+                # commits the Builder's work meanwhile.
+                s.base = self.host.git_head(s.cwd)
                 s.phase, s.round = "build", 1
                 self._save()
             if s.phase in ("build", "review"):
@@ -637,6 +708,10 @@ class Workflow:
         # Kept once recorded: a run resumed after it switched to its own branch still targets the first one.
         s.base_branch = s.base_branch or branch
         self._require_clean()
+        # So the Spec Collector reads current code. A resume already on the run's own branch
+        # leaves it to _switch_to_branch.
+        if branch == s.base_branch:
+            self.host.fast_forward(s.cwd, s.base_branch)
 
     def _require_clean(self) -> None:
         # The commit takes every change in the working tree, so it must hold only the Builder's.
@@ -681,9 +756,15 @@ class Workflow:
         spec = self.host.read(s.spec_path) or ""
         s.branch = branch_name(spec_title(spec) or s.task, s.run_id)
         # Already there when an earlier orchestrator stopped between the switch and saving the build phase.
-        if self.host.git(s.cwd, "rev-parse", "--abbrev-ref", "HEAD").strip() != s.branch:
+        current = self.host.git(s.cwd, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        if current != s.branch:
             # Checked again: the human may have touched the tree during the interview.
             self._require_clean()
+            if current != s.base_branch:
+                raise OrchestratorError(f"{s.cwd} is on {current}, not {s.base_branch}, which the pull request "
+                                        f"targets; check out {s.base_branch} and resume")
+            # Again, because the interview can take hours: the branch starts from origin's latest base.
+            self.host.fast_forward(s.cwd, s.base_branch)
             self.host.git(s.cwd, "switch", "-c", s.branch)
         log(f"building on branch {s.branch}")
 
@@ -718,15 +799,18 @@ class Workflow:
         return fix, f"{first}\n\n{note}\n\n{fix}"
 
     def _publish(self) -> None:
-        """Commit the change, push its branch and open a pull request for it.
+        """Commit the change, merge the latest base into it, push its branch and open a pull request for it.
 
         Each step first checks whether an earlier orchestrator already took it, so a resume
-        in this phase finishes the job instead of committing or opening a second pull request.
+        in this phase finishes the job instead of committing, merging or opening a second pull request.
         """
         s = self.state
         s.phase = "publish"
         self._save()
         if not s.pr_url:
+            # An earlier orchestrator stopped mid-merge: committing now would commit the conflict markers.
+            if self.host.abort_merge(s.cwd):
+                log(f"aborted the merge an earlier orchestrator left in {s.cwd}")
             spec = self.host.read(s.spec_path) or ""
             title = (spec_title(spec) or s.task.strip().split("\n", 1)[0] or s.run_id)[:72]
             if self.host.git(s.cwd, "status", "--porcelain").strip():
@@ -735,13 +819,22 @@ class Workflow:
                               f"Orchestrator run {s.run_id}: {s.verdict} after {s.round} review round(s).")
             elif self.host.git_head(s.cwd) == s.base:
                 raise OrchestratorError(f"the Builder changed no files; there is nothing to commit on {s.branch}")
+            # The base moved on while the run built and reviewed. A conflict is left to the human:
+            # the branch is pushed without the merge and the pull request says what conflicts.
+            s.conflicts = self.host.merge_upstream(s.cwd, s.base_branch)
+            self._save()
+            if s.conflicts:
+                log(f"{s.branch} conflicts with {REMOTE}/{s.base_branch} in {', '.join(s.conflicts)}; "
+                    f"the pull request will be a draft")
             self.host.git(s.cwd, "push", "--quiet", "--set-upstream", REMOTE, s.branch, timeout=NETWORK_TIMEOUT)
             body = pr_body(s, spec, self.host.read(s.build_path(s.round)) or "",
                            self.host.read(s.review_path(s.round)) or "")
             s.pr_url = self.host.create_pr(s.cwd, s.base_branch, s.branch, title, body,
-                                           draft=s.verdict != APPROVE)
+                                           draft=s.verdict != APPROVE or bool(s.conflicts))
             self._save()
             log(f"opened {s.pr_url}")
+            if s.conflicts:
+                self.notify(f"Pull request conflicts with {s.base_branch}", s.pr_url)
         # Leaves the checkout where the human had it, so the next run branches from there too.
         self.host.git(s.cwd, "switch", "--quiet", s.base_branch)
 
@@ -1189,8 +1282,11 @@ def main(argv: list[str]) -> int:
         print(f"interrupted; the role agents keep running in herdr{hint}", file=sys.stderr)
         return EXIT_INTERRUPTED
 
-    print(f"{verdict}: {state.pr_url or state.review_path(state.round)}")
-    return 0 if verdict == APPROVE else EXIT_CHANGES_REQUESTED
+    conflict = f" (a draft: it conflicts with {state.base_branch})" if state.conflicts else ""
+    print(f"{verdict}: {state.pr_url or state.review_path(state.round)}{conflict}")
+    if verdict != APPROVE:
+        return EXIT_CHANGES_REQUESTED
+    return EXIT_CONFLICT if state.conflicts else 0
 
 
 if __name__ == "__main__":

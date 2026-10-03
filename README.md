@@ -55,22 +55,28 @@ python orchestrator.py resume e292fb --machine <machine> --cwd ~/GitHub/myprojec
 A run saves its settings. `resume` takes the same flags as `run` except `--no-pr`, and a flag given to `resume`
 overrides the saved value; one left out keeps it.
 
-Exit status: `0` approved, `3` changes still requested after the last round (the pull request is a draft), `1`
-error, `130` interrupted.
+Exit status: `0` approved, `3` changes still requested after the last round (the pull request is a draft), `4`
+approved but the pull request conflicts with its base branch (it is a draft), `1` error, `130` interrupted.
 
 ## How a run works
 
 1. **Workspace.** The run gets its own herdr workspace, with a pane per role. The project must be on a branch
-   with a clean working tree; the pull request targets that branch.
+   with a clean working tree; the pull request targets that branch. That branch is fetched from `origin` and
+   fast-forwarded, so the Spec Collector reads current code. If that fails, for example offline or because the
+   local branch has diverged from `origin`'s, the run stops before the interview.
 2. **Spec Collector.** A notification tells you it is waiting. Answer its questions in its pane; once you
    approve the spec, it writes `spec.md`.
-3. **Builder.** The orchestrator creates the branch `orchestrator/<spec title>-<id>`. The Builder implements
-   the spec there, verifies it, and writes `build-N.md` without committing.
+3. **Builder.** The orchestrator fetches and fast-forwards the base branch again, since the interview can take
+   hours, and creates the branch `orchestrator/<spec title>-<id>` from it. The Builder implements the spec
+   there, verifies it, and writes `build-N.md` without committing.
 4. **Reviewer.** A fresh session checks the change against the spec and writes `review-N.md`, which starts with
    `VERDICT: APPROVE` or `VERDICT: CHANGES_REQUESTED`; requested changes go back to the Builder.
-5. **Pull request.** The change is committed as one commit, pushed to `origin` and opened as a pull request with
-   `gh`, a draft if changes were still requested after the last round. The project goes back to its starting
-   branch, and the workspace is closed.
+5. **Pull request.** The change is committed as one commit. If the base branch on `origin` has moved on since,
+   it is merged in with a merge commit. The branch is pushed to `origin` and opened as a pull request with `gh`,
+   a draft if changes were still requested after the last round. If the merge conflicts, it is aborted, the
+   branch is pushed without it, and the pull request is a draft whose description starts with a warning listing
+   the conflicting files; you resolve them. The project goes back to its starting branch, and the workspace is
+   closed.
 
 Everything a run writes stays in `<project>/.orchestrator/runs/<run-id>/`: the handoff files and `state.json`,
 which records the phase, round, panes, branch, pull request, verdict and any error. `.orchestrator/` ignores
