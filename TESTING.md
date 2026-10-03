@@ -519,9 +519,9 @@ class TestShellSnippets(unittest.TestCase):
 ## 6. Branch coverage with a fail-under threshold
 
 **Catches.** New code that lands with no test, and branches no test takes, such as the error path of an
-`if`. The Jenkins Test stage already measures statement coverage for SonarQube, but nothing fails a build
-locally or in the Test stage when coverage drops. Today's report, run with `--cov-branch`, shows 760
-statements with 45 missed and 224 branches with 13 partly taken: 94% together.
+`if`. The Jenkins Test stage already measures branch coverage of `orchestrator` for SonarQube, but nothing
+fails a build locally or in the Test stage when coverage drops. Today's report, run with `--cov-branch`,
+shows 760 statements with 45 missed and 224 branches with 13 partly taken: 94% together.
 
 **Targets.** The uncovered code today: the error paths of `Herdr.call`, `Herdr._exec` and
 `Herdr.ssh_target` (`orchestrator.py:160`, `orchestrator.py:174`, `orchestrator.py:185`), `Host.run`'s
@@ -541,7 +541,7 @@ show_missing = true
 ```
 
 The threshold starts two points below today's figure and is raised as entries 1–5 add tests. Measure
-`orchestrator` only: the Jenkinsfile's `--cov=.` also counts the test files, which inflates the figure.
+`orchestrator` only, as the Jenkinsfile does: counting the test files would inflate the figure.
 
 **Run.** `uv run pytest --cov=orchestrator --cov-branch --cov-report=term-missing`
 
@@ -664,8 +664,8 @@ select = ["E", "F", "W", "B", "UP"]
 
 ## CI
 
-The Jenkinsfile's Test stage runs `uv run pytest --cov=. --cov-report=xml:coverage.xml
---junitxml=test-results.xml`. Recommendations:
+The Jenkinsfile's Test stage runs `uv run pytest --cov=orchestrator --cov-branch
+--cov-report=xml:coverage.xml --junitxml=test-results.xml`. Recommendations:
 
 - **Hypothesis, the stateful tests, the real-git tests and the shell-snippet tests run in that same
   `uv run pytest` stage.** pytest discovers them under `tests/` without a change to the command. Together
@@ -687,8 +687,8 @@ The Jenkinsfile's Test stage runs `uv run pytest --cov=. --cov-report=xml:covera
   needed to replay a failure locally. On a laptop the default profile stays random, which is where new
   failures are found. `.hypothesis/` goes into `.gitignore`. CI keeps no example database, since
   `cleanWs()` wipes it.
-- **Branch coverage** joins the same command: `--cov=orchestrator --cov-branch`, with `fail_under` from
-  `pyproject.toml` failing the stage before SonarQube runs.
+- **Branch coverage** is already in that command (`--cov=orchestrator --cov-branch`). Only `fail_under`
+  from `pyproject.toml` is left to add, to fail the stage before SonarQube runs.
 - **Static analysis** can be a short `Lint` stage before Test (`uv run ruff check && uv run mypy
   orchestrator.py`) once its 6 errors are fixed.
 - **Mutation testing stays out of CI.** It is the documented manual command `uv run mutmut run` (entry 3).
