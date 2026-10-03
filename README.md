@@ -163,3 +163,5 @@ system `python3` (3.13+) from a herdr pane on the remote machine, without `--mac
 ```bash
 uv run pytest
 ```
+
+[TESTING.md](TESTING.md) plans the testing methods beyond these unit tests, and the order to adopt them in.
