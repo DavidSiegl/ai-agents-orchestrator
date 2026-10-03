@@ -661,45 +661,6 @@ line-length = 120
 select = ["E", "F", "W", "B", "UP"]
 ```
 
-## 9. End-to-end with real herdr and a stub `claude`
-
-**Catches.** Drift between the orchestrator and the herdr CLI: a renamed flag, a changed JSON shape, a new
-error code. `FakeHerdr` (`tests/test_orchestrator.py:70`) cannot see any of that. The argv tests in
-`TestHerdr` pin down what the orchestrator sends, but not that herdr still accepts it.
-
-**Targets.** `Herdr` (`orchestrator.py:153`), above all `start_agent` (`orchestrator.py:210`) and the
-statuses `_turn` (`orchestrator.py:767`) polls.
-
-**Verdict: not worth it now.** A stub `claude` would have to pass for Claude Code, and that part is not
-under this project's control:
-
-- `herdr agent start` succeeds only when "the expected agent was detected in the same terminal and is
-  ready for input" (`herdr agent start --help`, herdr 0.9.1).
-- The statuses (`idle`, `working`, `blocked`, `done`) and the session id the orchestrator relies on come
-  from herdr's Claude integration hooks. The stub would have to reproduce them, which ties the test to
-  herdr internals instead of its CLI.
-- It needs a running herdr server and a terminal on the Jenkins agent, and every step waits on real
-  polling, so it would be slow and flaky.
-
-Instead, a manual smoke run with the real `claude` before a release, on a throwaway repository, catches
-the same drift at a fraction of the cost. Revisit if herdr ships a documented test agent kind.
-
-**Tool.** None: herdr and Claude Code are installed on the machine, not Python dependencies.
-
-**Run.** The manual smoke run, from a herdr pane, sketched below.
-
-**Cost.** For the automated version: several days, and tens of seconds to minutes per run. For the manual
-smoke run: about 15 minutes per release.
-
-**Sketch** of the manual smoke run:
-
-```bash
-cd "$(mktemp -d)" && git init -q && git commit -q --allow-empty -m initial
-python ~/GitHub/ai-agents-orchestrator/orchestrator.py run "add a hello.txt saying hi" --no-pr --max-rounds 1
-# Ctrl-C while the Builder works, then:
-python ~/GitHub/ai-agents-orchestrator/orchestrator.py list
-python ~/GitHub/ai-agents-orchestrator/orchestrator.py resume <key>
-```
 
 ## CI
 
@@ -753,5 +714,3 @@ The Jenkinsfile's Test stage runs `uv run pytest --cov=. --cov-report=xml:covera
    main value is a reviewable diff when they do.
 8. **Mutation testing.** The most informative audit of the suite, but each run takes over a minute and
    grows with the suite, and the first triage takes a day or two. It pays off most once entries 1–7 exist, so it measures them too.
-9. **End-to-end with real herdr.** Several days for a slow, flaky test of an interface owned by herdr. The
-   manual smoke run per release covers the same risk.
