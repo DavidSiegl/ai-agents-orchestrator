@@ -87,7 +87,8 @@ branch; close the workspace in herdr when done.
 ([Resuming a run](docs/design.md#resuming-a-run)). `list` marks a run `stale` after five minutes without a
 heartbeat ([Stale runs](docs/design.md#stale-runs)). You get a herdr notification when a role is blocked or idle
 for 3 minutes ([When the orchestrator needs you](docs/design.md#when-the-orchestrator-needs-you)).
-See also [design decisions](docs/design.md), [architecture](docs/architecture.md) and [roadmap](docs/roadmap.md).
+See also [design decisions](docs/design.md), [architecture](docs/architecture.md), [roadmap](docs/roadmap.md)
+and [quality gate](docs/quality-gate.md).
 
 ## Running tests
 
