@@ -22,13 +22,26 @@ def result(obj):
     return completed(json.dumps({"id": "cli:x", "result": obj}))
 
 
-class FakeHost:
+def no_processes(argv, **kw):
+    raise AssertionError(f"FakeHost ran a real process: {argv}")
+
+
+class FakeHost(Host):
     """An in-memory filesystem and git checkout standing in for the machine the agents run on.
 
-    Files written outside .orchestrator/ count as uncommitted changes until a commit.
+    Files written outside .orchestrator/ count as uncommitted changes until a commit. Git is
+    played at the level of single commands, so Host's own fetch, fast-forward and merge steps
+    run on it. A test scripts origin with these attributes:
+
+    - `upstream`: the commit origin's branch is at when HEAD lacks it; None when HEAD has it all.
+    - `fetch_error`: the stderr of a failing fetch, e.g. offline or no such branch on origin.
+    - `diverged`: the local branch and origin's each have commits the other lacks.
+    - `conflicts`: the files a merge of `upstream` conflicts in.
+    - `merge_head`: a merge is in progress, as one that conflicted and was never aborted leaves it.
     """
 
     def __init__(self, head="abc123", branch="main"):
+        super().__init__(run=no_processes)
         self.files = {}
         self.head = head
         self.writes = []  # every path written, in order
@@ -36,6 +49,11 @@ class FakeHost:
         self.changed = set()
         self.git_calls = []
         self.prs = []
+        self.upstream = None
+        self.fetch_error = None
+        self.diverged = False
+        self.conflicts = []
+        self.merge_head = False
 
     def read(self, path):
         return self.files.get(path)
@@ -49,18 +67,42 @@ class FakeHost:
     def git_head(self, cwd):
         return self.head
 
-    def git(self, cwd, *args, timeout=60):
+    def git_run(self, cwd, *args, timeout=60):
         self.git_calls.append(args)
         match args:
             case ("rev-parse", "--abbrev-ref", "HEAD"):
-                return self.branch + "\n"
+                return completed(self.branch + "\n")
+            case ("rev-parse", "-q", "--verify", "MERGE_HEAD"):
+                return completed(returncode=0 if self.merge_head else 1)
             case ("status", "--porcelain"):
-                return "".join(f"?? {p}\n" for p in sorted(self.changed))
+                return completed("".join(f"?? {p}\n" for p in sorted(self.changed)))
             case ("switch", "-c", name) | ("switch", "--quiet", name):
                 self.branch = name
             case ("commit", *_):
                 self.changed.clear()
-        return ""
+                self.head += "+commit"
+            case ("fetch", "--quiet", "origin", _) if self.fetch_error:
+                return completed(stderr=self.fetch_error, returncode=128)
+            case ("merge-base", "--is-ancestor", "HEAD", _):
+                return completed(returncode=1 if self.diverged else 0)
+            case ("merge-base", "--is-ancestor", _, "HEAD"):
+                return completed(returncode=0 if self.upstream is None and not self.diverged else 1)
+            case ("merge", "--ff-only", "--quiet", _):
+                if self.diverged:
+                    return completed(stderr="fatal: Not possible to fast-forward, aborting.", returncode=128)
+                self.head, self.upstream = self.upstream or self.head, None
+            case ("merge", "--no-edit", "--quiet", _):
+                if self.conflicts:
+                    self.merge_head = True
+                    self.changed |= {f"/proj/{f}" for f in self.conflicts}
+                    return completed(f"CONFLICT (content): Merge conflict in {self.conflicts[0]}", returncode=1)
+                self.head, self.upstream = f"merge-{self.upstream}", None
+            case ("diff", "--name-only", "-z", "--diff-filter=U"):
+                return completed("".join(f"{f}\0" for f in self.conflicts) if self.merge_head else "")
+            case ("merge", "--abort"):
+                self.merge_head = False
+                self.changed -= {f"/proj/{f}" for f in self.conflicts}
+        return completed()
 
     def create_pr(self, cwd, base, head, title, body, draft):
         self.prs.append({"base": base, "head": head, "title": title, "body": body, "draft": draft})
@@ -508,6 +550,168 @@ class TestPullRequest(unittest.TestCase):
         self.assertNotIn(("close", "w1"), herdr.calls)
         self.assertEqual(host.changed, {"/proj/limiter.py"})
 
+    def test_no_pr_neither_fetches_nor_merges_even_when_origin_moved(self):
+        host = FakeHost()
+        host.upstream = "u1"
+        wf, *_ = make_workflow(self.script(APPROVE), host=host, pull_request=False)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertFalse(host.git_calls)
+        self.assertEqual(wf.state.base, "abc123")
+
+
+class TestUpToDateBase(unittest.TestCase):
+    """The base branch is brought up to origin's before the interview and the branch, and merged in before the push."""
+
+    BRANCH = "orchestrator/add-a-token-bucket-rate-limiter-a1b2c3"
+    FETCH = ("fetch", "--quiet", "origin", "main")
+    FAST_FORWARD = ("merge", "--ff-only", "--quiet", "origin/main")
+    MERGE = ("merge", "--no-edit", "--quiet", "origin/main")
+
+    def script(self, build=None, verdict=APPROVE, spec=spec_turn, review=None):
+        return {"spec": [spec], "build": [build or build_turn(1)], "review": [review or review_turn(1, verdict)]}
+
+    def test_base_is_fast_forwarded_before_the_interview(self):
+        host = FakeHost()
+        host.upstream = "u1"
+        at_interview = []
+
+        def spec(prompt, state, h):
+            at_interview.append((list(h.git_calls), h.head))
+            return spec_turn(prompt, state, h)
+        wf, *_ = make_workflow(self.script(spec=spec), host=host)
+
+        self.assertEqual(wf.run(), APPROVE)
+        calls, head = at_interview[0]
+        self.assertEqual(calls[calls.index(self.FETCH) + 1], self.FAST_FORWARD)
+        self.assertEqual(head, "u1")
+
+    def test_fetch_failure_stops_before_the_interview(self):
+        host = FakeHost()
+        host.fetch_error = "fatal: couldn't find remote ref main"
+        wf, herdr, *_ = make_workflow({"spec": []}, host=host)
+
+        with self.assertRaisesRegex(OrchestratorError, "could not fetch main from origin: "
+                                    "git -C /proj fetch --quiet origin main failed: fatal: couldn't find"):
+            wf.run()
+        self.assertFalse(herdr.calls)
+        self.assertIn("could not fetch main", json.loads(host.files[f"{wf.state.dir}/state.json"])["error"])
+
+    def test_diverged_base_stops_before_the_interview(self):
+        host = FakeHost()
+        host.diverged = True
+        wf, herdr, *_ = make_workflow({"spec": []}, host=host)
+
+        with self.assertRaisesRegex(OrchestratorError, "main has diverged from origin/main; reconcile it first. "
+                                    "git merge --ff-only --quiet origin/main failed"):
+            wf.run()
+        self.assertFalse(herdr.calls)
+
+    def test_base_is_fast_forwarded_again_before_branching(self):
+        def spec_while_origin_moves(prompt, state, h):
+            h.upstream = "u2"
+            return spec_turn(prompt, state, h)
+        seen = []
+        wf, _, host, _ = make_workflow(self.script(spec=spec_while_origin_moves,
+                                                   review=recording(review_turn(1, APPROVE), seen)))
+
+        self.assertEqual(wf.run(), APPROVE)
+        switch = host.git_calls.index(("switch", "-c", self.BRANCH))
+        self.assertEqual(host.git_calls[switch - 2:switch], [self.FETCH, self.FAST_FORWARD])
+        self.assertEqual(wf.state.base, "u2")
+        self.assertIn("git diff u2", seen[0])
+
+    def test_switching_away_from_the_base_during_the_interview_is_refused(self):
+        def spec_and_switch(prompt, state, h):
+            h.branch = "wip"
+            return spec_turn(prompt, state, h)
+        wf, _, host, _ = make_workflow(self.script(spec=spec_and_switch))
+
+        with self.assertRaisesRegex(OrchestratorError, "is on wip, not main"):
+            wf.run()
+        self.assertNotIn(("switch", "-c", self.BRANCH), host.git_calls)
+
+    def test_moved_base_is_merged_before_the_push(self):
+        def build_while_origin_moves(prompt, state, h):
+            h.upstream = "u3"
+            return build_turn(1)(prompt, state, h)
+        wf, _, host, notes = make_workflow(self.script(build=build_while_origin_moves))
+
+        self.assertEqual(wf.run(), APPROVE)
+        calls = host.git_calls
+        commit = next(i for i, c in enumerate(calls) if c[0] == "commit")
+        push = calls.index(("push", "--quiet", "--set-upstream", "origin", self.BRANCH))
+        self.assertLess(commit, calls.index(self.MERGE))
+        self.assertLess(calls.index(self.MERGE), push)
+        self.assertEqual(host.head, "merge-u3")
+        self.assertFalse(host.prs[0]["draft"])
+        self.assertFalse(host.prs[0]["body"].startswith("> [!WARNING]"))
+        self.assertEqual(json.loads(host.files[f"{wf.state.dir}/state.json"])["conflicts"], [])
+        self.assertFalse([n for n in notes if "conflicts" in n])
+
+    def test_base_already_merged_is_not_merged_again(self):
+        wf, _, host, _ = make_workflow(self.script())
+
+        self.assertEqual(wf.run(), APPROVE)
+        push = host.git_calls.index(("push", "--quiet", "--set-upstream", "origin", self.BRANCH))
+        self.assertEqual(host.git_calls[push - 2:push],
+                         [self.FETCH, ("merge-base", "--is-ancestor", "origin/main", "HEAD")])
+        self.assertNotIn(self.MERGE, host.git_calls)
+
+    def conflicting(self, verdict=APPROVE):
+        def build_while_origin_conflicts(prompt, state, h):
+            h.upstream, h.conflicts = "u3", ["limiter.py", "docs/api.md"]
+            return build_turn(1)(prompt, state, h)
+        wf, herdr, host, notes = make_workflow(self.script(build=build_while_origin_conflicts, verdict=verdict),
+                                                 max_rounds=1)
+        self.assertEqual(wf.run(), verdict)
+        return wf, host, notes
+
+    def test_conflict_is_aborted_and_opens_a_draft_that_says_so(self):
+        wf, host, notes = self.conflicting()
+
+        calls = host.git_calls
+        push = calls.index(("push", "--quiet", "--set-upstream", "origin", self.BRANCH))
+        self.assertLess(calls.index(self.MERGE), calls.index(("merge", "--abort")))
+        self.assertLess(calls.index(("merge", "--abort")), push)
+        self.assertEqual(host.head, "abc123+commit")  # pushed without the merge
+        self.assertFalse(host.merge_head)
+        pr = host.prs[0]
+        self.assertTrue(pr["draft"])
+        warning = pr["body"].split("\n\n", 1)[0]
+        self.assertTrue(warning.startswith("> [!WARNING]"))
+        for name in ("`main`", "`limiter.py`", "`docs/api.md`"):
+            self.assertIn(name, warning)
+        saved = json.loads(host.files[f"{wf.state.dir}/state.json"])
+        self.assertEqual(saved["conflicts"], ["limiter.py", "docs/api.md"])
+        self.assertIn("Pull request conflicts with main", notes)
+
+    def test_conflict_with_changes_requested_is_a_draft_too(self):
+        wf, host, _ = self.conflicting(CHANGES_REQUESTED)
+        self.assertTrue(host.prs[0]["draft"])
+        self.assertEqual(wf.state.conflicts, ["limiter.py", "docs/api.md"])
+
+    def test_fetch_failure_at_publish_stops_and_resume_retries(self):
+        def build_then_offline(prompt, state, h):
+            h.fetch_error = "fatal: unable to access 'https://github.com/o/r/': Could not resolve host"
+            return build_turn(1)(prompt, state, h)
+        wf, herdr, host, _ = make_workflow(self.script(build=build_then_offline), max_rounds=1)
+
+        with self.assertRaisesRegex(OrchestratorError, "could not fetch main from origin"):
+            wf.run()
+        self.assertFalse(host.prs)
+        self.assertFalse([c for c in host.git_calls if c[0] == "push"])
+        saved = json.loads(host.files[f"{wf.state.dir}/state.json"])
+        self.assertEqual(saved["phase"], "publish")
+
+        host.fetch_error = None
+        wf2, *_ = resume(RunState.from_dict(saved), {}, host=host)
+        self.assertEqual(wf2.run(), APPROVE)
+        self.assertEqual(len(host.prs), 1)
+        self.assertEqual(len([c for c in host.git_calls if c[0] == "commit"]), 1)
+
+
+
 
 class TestPullRequestText(unittest.TestCase):
     def test_spec_title(self):
@@ -522,6 +726,18 @@ class TestPullRequestText(unittest.TestCase):
 
     def test_branch_name_without_letters(self):
         self.assertEqual(branch_name("???", "20260929-120000-a1b2c3"), "orchestrator/a1b2c3")
+
+    def test_conflict_warning_comes_first(self):
+        state = RunState("r", "t", "/proj", verdict=APPROVE, round=1, base_branch="main",
+                         conflicts=["a.py", "docs/b.md"])
+        body = pr_body(state, "spec", "r", "VERDICT: APPROVE")
+        self.assertEqual(body.split("\n\n", 1)[0],
+                         "> [!WARNING]\n> This branch conflicts with `main`, so this is a draft. "
+                         "Merge `main` into it and resolve the conflicts in:\n> - `a.py`\n> - `docs/b.md`")
+
+    def test_no_conflicts_no_warning(self):
+        state = RunState("r", "t", "/proj", verdict=APPROVE, round=1, base_branch="main")
+        self.assertTrue(pr_body(state, "spec", "r", "VERDICT: APPROVE").startswith("Opened by"))
 
     def test_long_sections_are_truncated(self):
         state = RunState("r", "t", "/proj", verdict=APPROVE, round=1)
@@ -664,6 +880,110 @@ class TestHost(unittest.TestCase):
             host.write(path, "hello")
             self.assertEqual(host.read(path), "hello")
             self.assertEqual(host.resolve_dir(d), host.check(["sh", "-c", "cd -- \"$1\" && pwd", "_", d]).strip())
+
+
+class TestHostGit(unittest.TestCase):
+    """Host's fetch, fast-forward and merge steps on real git: a bare origin, our checkout A and someone else's B."""
+
+    def setUp(self):
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+        self.host = Host()
+        self.sh("git", "init", "--quiet", "--bare", "-b", "main", f"{self.dir}/origin.git")
+        self.a, self.b = self.clone("a"), self.clone("b")
+        self.commit(self.b, "app.py", "one\n")
+        self.sh("git", "-C", self.b, "push", "--quiet", "origin", "main")
+        self.sh("git", "-C", self.a, "pull", "--quiet", "origin", "main")
+
+    def sh(self, *argv):
+        return self.host.check(list(argv))
+
+    def clone(self, name):
+        path = f"{self.dir}/{name}"
+        self.sh("git", "clone", "--quiet", f"{self.dir}/origin.git", path)
+        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
+            self.sh("git", "-C", path, "config", key, value)
+        return path
+
+    def commit(self, repo, name, text):
+        with open(f"{repo}/{name}", "w") as f:
+            f.write(text)
+        self.sh("git", "-C", repo, "add", name)
+        self.sh("git", "-C", repo, "commit", "--quiet", "-m", f"change {name}")
+        return self.head(repo)
+
+    def head(self, repo):
+        return self.host.git_head(repo)
+
+    def push_from_b(self, name, text):
+        upstream = self.commit(self.b, name, text)
+        self.sh("git", "-C", self.b, "push", "--quiet", "origin", "main")
+        return upstream
+
+    def test_fast_forward_moves_the_base_to_origins(self):
+        upstream = self.push_from_b("lib.py", "new\n")
+        self.host.fast_forward(self.a, "main")
+        self.assertEqual(self.head(self.a), upstream)
+
+    def test_fast_forward_leaves_a_base_ahead_of_origin(self):
+        ahead = self.commit(self.a, "local.py", "mine\n")
+        self.host.fast_forward(self.a, "main")
+        self.assertEqual(self.head(self.a), ahead)
+
+    def test_fast_forward_refuses_a_diverged_base(self):
+        self.push_from_b("lib.py", "theirs\n")
+        mine = self.commit(self.a, "local.py", "mine\n")
+        with self.assertRaisesRegex(OrchestratorError, "main has diverged from origin/main; reconcile it first. "
+                                    "git merge --ff-only --quiet origin/main failed"):
+            self.host.fast_forward(self.a, "main")
+        self.assertEqual(self.head(self.a), mine)
+
+    def test_fetch_of_a_branch_origin_lacks(self):
+        with self.assertRaisesRegex(OrchestratorError, "could not fetch develop from origin: "
+                                    "git -C .* fetch --quiet origin develop failed"):
+            self.host.fast_forward(self.a, "develop")
+
+    def feature_branch(self):
+        self.sh("git", "-C", self.a, "switch", "--quiet", "-c", "feature")
+        return self.commit(self.a, "app.py", "one\nfeature\n")
+
+    def test_merge_of_a_moved_base_is_a_merge_commit(self):
+        mine = self.feature_branch()
+        upstream = self.push_from_b("lib.py", "new\n")
+
+        self.assertEqual(self.host.merge_upstream(self.a, "main"), [])
+        parents = self.sh("git", "-C", self.a, "rev-list", "--parents", "-n", "1", "HEAD").split()[1:]
+        self.assertEqual(parents, [mine, upstream])
+
+    def test_merge_is_skipped_when_the_base_is_in_head(self):
+        self.feature_branch()
+        self.push_from_b("lib.py", "new\n")
+        self.host.merge_upstream(self.a, "main")
+        merged = self.head(self.a)
+
+        self.assertEqual(self.host.merge_upstream(self.a, "main"), [])
+        self.assertEqual(self.head(self.a), merged)
+
+    def test_conflicting_merge_is_aborted_and_reported(self):
+        mine = self.feature_branch()
+        self.push_from_b("app.py", "one\ntheirs\n")
+
+        self.assertEqual(self.host.merge_upstream(self.a, "main"), ["app.py"])
+        self.assertEqual(self.head(self.a), mine)
+        self.assertEqual(self.sh("git", "-C", self.a, "status", "--porcelain"), "")
+        self.assertFalse(self.host.abort_merge(self.a))
+
+    def test_abort_merge_ends_a_half_done_merge(self):
+        mine = self.feature_branch()
+        self.push_from_b("app.py", "one\ntheirs\n")
+        self.sh("git", "-C", self.a, "fetch", "--quiet", "origin", "main")
+        self.assertEqual(self.host.git_run(self.a, "merge", "origin/main").returncode, 1)
+
+        self.assertTrue(self.host.abort_merge(self.a))
+        self.assertEqual(self.head(self.a), mine)
+        self.assertEqual(self.sh("git", "-C", self.a, "status", "--porcelain"), "")
 
 
 class TestCLI(unittest.TestCase):
@@ -1006,6 +1326,9 @@ class TestResumePullRequest(unittest.TestCase):
         self.assertEqual(wf.run(), APPROVE)
         self.assertNotIn(("switch", "-c", self.BRANCH), host.git_calls)
         self.assertEqual(host.prs[0]["base"], "main")
+        # Neither before the interview nor before branching: the only fetch is the one at publish.
+        self.assertNotIn(TestUpToDateBase.FAST_FORWARD, host.git_calls)
+        self.assertEqual(host.git_calls.count(TestUpToDateBase.FETCH), 1)
 
     def test_publish_resumed_after_the_commit_does_not_commit_again(self):
         state = saved_run("publish", 1, agents=("spec", "build", "review"), pull_request=True,
@@ -1017,6 +1340,25 @@ class TestResumePullRequest(unittest.TestCase):
         self.assertIn(("push", "--quiet", "--set-upstream", "origin", self.BRANCH), host.git_calls)
         self.assertEqual(len(host.prs), 1)
         self.assertNotIn("workspace", [c[0] for c in herdr.calls])
+        # Whether HEAD is the Builder's commit or the merge commit after it, origin's base is in it.
+        self.assertNotIn(TestUpToDateBase.MERGE, host.git_calls)
+
+    def test_publish_resumed_mid_merge_aborts_it_before_committing(self):
+        state = saved_run("publish", 1, agents=("spec", "build", "review"), pull_request=True,
+                          base_branch="main", branch=self.BRANCH, verdict=APPROVE)
+        host = FakeHost(head="def456", branch=self.BRANCH)
+        host.upstream, host.conflicts, host.merge_head = "u3", ["limiter.py"], True
+        host.changed = {"/proj/limiter.py"}  # the conflict markers
+        wf, herdr, host, _ = resume(state, {}, host=host)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(host.git_calls[:3], [("rev-parse", "-q", "--verify", "MERGE_HEAD"), ("merge", "--abort"),
+                                              ("status", "--porcelain")])
+        self.assertFalse([c for c in host.git_calls if c[0] in ("add", "commit")])
+        # The merge is tried again, conflicts again, and is aborted again.
+        self.assertEqual(host.git_calls.count(("merge", "--abort")), 2)
+        self.assertTrue(host.prs[0]["draft"])
+        self.assertEqual(wf.state.conflicts, ["limiter.py"])
 
     def test_publish_resumed_after_the_pull_request_only_switches_back(self):
         state = saved_run("publish", 1, agents=("spec", "build", "review"), pull_request=True,
@@ -1276,6 +1618,25 @@ class TestResumeCLI(unittest.TestCase):
             self.assertEqual(main(["resume", "a1b2c3"]), 0)
         run.assert_called_once()
         out.assert_called_with(f"{APPROVE}: {RunState.from_dict(saved).review_path(1)}")
+
+    @patch.object(Host, "resolve_dir", return_value="/proj")
+    @patch.dict("os.environ", {"HERDR_ENV": "1"})
+    def test_finished_run_exit_status(self, _resolve):
+        url = "https://github.com/o/r/pull/7"
+        cases = [
+            (APPROVE, [], 0, f"{APPROVE}: {url}"),
+            (APPROVE, ["a.py"], orchestrator.EXIT_CONFLICT, f"{APPROVE}: {url} (a draft: it conflicts with main)"),
+            (CHANGES_REQUESTED, ["a.py"], orchestrator.EXIT_CHANGES_REQUESTED,
+             f"{CHANGES_REQUESTED}: {url} (a draft: it conflicts with main)"),
+        ]
+        for verdict, conflicts, status, line in cases:
+            with self.subTest(verdict=verdict, conflicts=conflicts):
+                saved = asdict(saved_run("done", 1, agents=("spec", "build", "review"), pull_request=True,
+                                         base_branch="main", verdict=verdict, pr_url=url, conflicts=conflicts))
+                with patch.object(Host, "run_states", return_value=[(10**4, saved)]), \
+                        patch("builtins.print") as out:
+                    self.assertEqual(main(["resume", "a1b2c3"]), status)
+                out.assert_called_with(line)
 
     @patch.object(Workflow, "run", side_effect=KeyboardInterrupt)
     @patch.object(Host, "resolve_dir", return_value="/proj")

@@ -15,7 +15,9 @@ the process that drives them. `resume` picks the run up where `state.json` says 
   interview starts over.
 - A closed pane is split again from a surviving one, and a closed workspace is replaced by a new one.
 - The diff under review stays against the commit the run started from, even if you commit in between.
-- A run stopped while opening its pull request does not commit twice or open a second pull request.
+- A run stopped while opening its pull request does not commit twice, merge the base branch twice, or open a
+  second pull request. A merge it left half done is aborted before anything is committed, so conflict markers
+  never are.
 - An empty handoff file or a review without a verdict stops the resume with the file's name: fix it, or delete
   it to have the role write it again.
 
