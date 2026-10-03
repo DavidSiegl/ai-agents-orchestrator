@@ -88,3 +88,5 @@ See also [design decisions](docs/design.md), [architecture](docs/architecture.md
 ```bash
 uv run pytest
 ```
+
+[TESTING.md](TESTING.md) plans the testing methods beyond these unit tests, and the order to adopt them in.
