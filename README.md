@@ -52,11 +52,13 @@ python orchestrator.py resume e292fb --machine <machine> --cwd ~/GitHub/myprojec
 | `--spec-model MODEL` | Claude model for the Spec Collector. Overrides `--model`. |
 | `--build-model MODEL` | Claude model for the Builder. Overrides `--model`. |
 | `--review-model MODEL` | Claude model for the Reviewer. Overrides `--model`. |
+| `--workflow NAME` | `run` only: the workflow the run goes through (default `default`, the Spec Collector → Builder → Reviewer sequence above). `--help` lists the choices; a resumed run keeps its workflow. |
 | `--no-pr` | `run` only: leave the change uncommitted in the working tree and the workspace open, instead of opening a pull request. Works outside git. |
 | `--force` | `resume` only: take over a run that still looks alive. |
 
-A run saves its settings. `resume` takes the same flags as `run` except `--no-pr`, and a flag given to `resume`
-overrides the saved value; one left out keeps it.
+A run saves its settings. `resume` takes the same flags as `run` except `--no-pr` and `--workflow`, and a flag
+given to `resume` overrides the saved value; one left out keeps it. In a workflow with other roles, a role
+without its own `--ROLE-model` flag gets `--model`.
 
 Exit status: `0` approved, `3` changes still requested after the last round (the pull request is a draft), `1` error, `130` interrupted.
 
@@ -103,6 +105,14 @@ the process that drives them. `resume` picks the run up where `state.json` says 
   to have the role write it again.
 
 Resuming a finished run does nothing but print its verdict.
+
+### Workflows
+
+The sequence of roles is a *workflow*: a definition in `orchestrator.py` (`Pipeline` and `Step`) that lists
+each step's role, its handoff file, its prompts, whether the human paces it, whether it edits the working tree,
+and, for one step, the verdict that loops back to an earlier step. `run --workflow NAME` chooses one;
+`default` is the only one so far, and is the run described above. `list` names the workflow of a run that does
+not use the default. [ROADMAP.md](ROADMAP.md#3-workflows) lists the workflows planned next.
 
 ### Stale runs
 

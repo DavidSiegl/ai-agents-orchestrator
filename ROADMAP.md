@@ -4,7 +4,8 @@ Where the orchestrator should go next. The first two sections are designs, with 
 choice: **resuming an interrupted run** and **detecting stale runs**. They come first because together they
 close the biggest gap today: a run lives only as long as the process that drives it. The two designs share
 the new `RunState` fields, and resume relies on stale detection to know when it may take over a run. After
-them comes a backlog of smaller ideas, in no particular order, and one housekeeping note.
+them come the workflows worth adding to the default one, a backlog of smaller ideas in no particular order,
+and one housekeeping note.
 
 `file:line` references point at commit `25e756b` and will drift as the code changes.
 
@@ -444,14 +445,69 @@ Tests:
   `POLL_SECONDS` and `STALL_SECONDS` (`orchestrator.py:31-33`). Revisit if slow links produce false stale
   marks.
 
-## 3. Backlog
+## 3. Workflows
+
+A run follows a workflow: a `Pipeline` of `Step`s in `orchestrator.py`, chosen with `run --workflow` from the
+`WORKFLOWS` registry. Only `default` (Spec Collector -> Builder <-> Reviewer) ships. The engine already handles:
+
+- any number of roles, each with its own pane, label and agent; the first two side by side, the rest stacked
+  under the second;
+- fixed handoff files (`spec.md`) and per-round ones (`build-{n}.md`), with a first-round prompt, a later-round
+  prompt and a note for a fresh session in a later round;
+- human-paced steps (no timeout or stall notice), and steps that edit the working tree, before the first of
+  which the base commit and the branch are fixed;
+- one verdict step whose `CHANGES_REQUESTED` loops back to an earlier step, up to `--max-rounds`;
+- resume at the saved step and round, and the pull request (or `--no-pr`) as the ending.
+
+The tests define two more workflows that run on this engine as it is: Builder <-> Reviewer with the task as the
+contract, and Spec Collector -> Test Writer -> Builder <-> Reviewer.
+
+### Engine gaps
+
+Each candidate below names the gaps it needs closed, by letter.
+
+- **A. Run inputs.** Seed a handoff file at `run` (`--spec FILE` becomes `spec.md`), or name what to work on:
+  a base ref, a branch or a pull request.
+- **B. Human approval gate.** Stop after a step until the human approves its file in herdr, or sends it back.
+- **C. Parallel steps.** Several roles working at once, and a step that waits for all of them.
+- **D. Richer verdicts.** More than one loop; a verdict that picks which step to go back to; a verdict that ends
+  the run early (such as a bug that cannot be reproduced); verdict words other than `APPROVE` and
+  `CHANGES_REQUESTED`.
+- **E. Aggregated verdicts.** One decision from several verdict files: any `CHANGES_REQUESTED` loops back.
+- **F. Other endings.** Today a run ends in a pull request or in an uncommitted working tree. Missing: a
+  document as the result, review comments posted on an existing pull request.
+- **G. Runs without a verdict.** The exit status is `3` and the pull request a draft whenever the verdict is
+  not `APPROVE`, and the pull request body has fixed Spec / Builder report / Review sections.
+- **H. Runs without an editing step.** The base commit and the branch are fixed only before the first editing
+  step, so a workflow without one has neither; `Pipeline` also rejects per-round files in such a workflow.
+- **I. Orchestrator checks.** A step without an agent that runs a command and judges it, such as "the new
+  tests fail at the base commit and pass after the build".
+- **J. Per-role settings for other roles.** Only `spec`, `build` and `review` have `--ROLE-model` flags; every
+  other role takes `--model`. Per-role permission modes are in the backlog.
+- **K. Choosing the workflow mid-run**, by the Spec Collector or the human. Today it is fixed at `run`.
+- **L. User-defined workflows** in `.orchestrator/workflows/*`, with their own prompts.
+
+### Candidates
+
+| Workflow | Roles | Handoff files | Gaps |
+|---|---|---|---|
+| **quick**: no interview | Builder, Reviewer | `spec.md` from `--spec FILE`, or none and the task is the contract; `build-{n}.md`, `review-{n}.md` | A for `--spec FILE`; without it, none |
+| **tdd** | Spec Collector, Test Writer, Builder, Reviewer | `spec.md`, `tests.md`, `build-{n}.md`, `review-{n}.md` | none for the shape; I to prove the tests fail first; D to send a review back to the Test Writer |
+| **plan**: an approved plan first | Spec Collector, Planner, Builder, Reviewer | `spec.md`, `plan.md` (approved by the human), `build-{n}.md`, `review-{n}.md` | B; D for a plan sent back for revision (`plan-{n}.md`) |
+| **bugfix**: reproduce first | Spec Collector or none, Reproducer, Builder, Reviewer | `spec.md` or the task, `repro.md` with a failing test, `build-{n}.md`, `review-{n}.md` | D for "cannot reproduce" ending the run; I to check that the test fails before and passes after |
+| **review-only** | Reviewer (one or more) | `review.md` on a given branch or pull request | A, F, G, H; C and E for more than one reviewer |
+| **research / spike** | Spec Collector, Researcher, Critic | `question.md`, `findings-{n}.md`, `critique-{n}.md` | F (findings as the result), G and H if nothing is built; a critic's verdict is D |
+| **panel review** | Spec Collector, Builder, two or three Reviewers (e.g. correctness, security) | `spec.md`, `build-{n}.md`, `review-<lens>-{n}.md` | C, E |
+| **solo** | Builder, with or without a Spec Collector | `spec.md` (optional), `build.md` | G |
+
+## 4. Backlog
 
 - **`close <run-id>`**: close the run's herdr workspace with `herdr workspace close` on the saved
   `workspace_id` (`orchestrator.py:315`). Today the README says to close it by hand (`README.md:60`).
 - **`show <run-id>`**: print the state, the handoff file paths (`orchestrator.py:321-333`), the latest
   verdict and the open findings of the last review. `list` gives one line per run (`orchestrator.py:563-570`).
 - **`--spec FILE`**: skip the interview when a spec already exists. The file is copied into the run as
-  `spec.md`, and `_collect_spec` (`orchestrator.py:398-407`) is skipped.
+  `spec.md`, and the Spec Collector's step is skipped. See the quick workflow in section 3.
 - **Per-role agent options**: give each role its own permission mode. Today one
   `--permission-mode` applies to every role (`orchestrator.py:610`), through the single `agent_args` that
   every `start_agent` gets (`orchestrator.py:456`).
@@ -470,7 +526,7 @@ Tests:
 - **`--commit` on APPROVE**: commit the change with a message built from the spec's Goal (a section required
   by `orchestrator.py:72-73`) when the verdict is APPROVE (`orchestrator.py:434`).
 
-## 4. Housekeeping
+## 5. Housekeeping
 
 `.gitignore:12` ignores `.orchestrator_context.json`. The orchestrator before the herdr rewrite persisted its
 context to that file, and 25e756b removed that code. Nothing reads or writes the file now, so the entry looks

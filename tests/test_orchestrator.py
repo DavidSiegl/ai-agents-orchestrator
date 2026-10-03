@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import socket
 import subprocess
 import unittest
@@ -1324,6 +1325,374 @@ class TestAtomicWrite(unittest.TestCase):
             [(age, state)] = host.run_states(d)
             self.assertEqual(state["phase"], "build")
             self.assertLess(age, 5)
+
+
+
+# ---------------------------------------------------------------------------
+# Workflows
+# ---------------------------------------------------------------------------
+
+D = "/proj/.orchestrator/runs/20260929-120000-a1b2c3"
+
+# The prompts the default workflow sent at commit 3f7f439, recorded by running that commit's code.
+GOLDEN_SPEC = (
+    'You are the Spec Collector, the first of three roles (Spec Collector -> Builder -> Reviewer). Separate Claude Code sessions play the Builder and the Reviewer; they will know only what you write down. A human is at this terminal and answers you directly.\n'
+    '\n'
+    'Task from the human:\n'
+    'add a rate limiter\n'
+    '\n'
+    'Interview the human until the requirements are unambiguous: the goal, what is in and out of scope, testable acceptance criteria, constraints, and how the result will be verified. Read the code in /proj first so your questions are grounded and you can cite the files the change touches. Ask a few questions at a time. Do not write or change any code.\n'
+    '\n'
+    f'When the human approves the spec, write it in a single write to {D}/spec.md as Markdown. Its first line is a `# ` heading: a short imperative title for the change, under 70 characters; it becomes the commit subject and the pull request title. Then these `##` sections: Goal, Scope, Non-goals, Acceptance criteria (a numbered list, each one checkable), Relevant code (file:line), Verification. Writing that file hands the work to the Builder, so write it only after the human approves it.')
+GOLDEN_BUILD_1 = (
+    f'You are the Builder, the second of three roles (Spec Collector -> Builder -> Reviewer). The spec in {D}/spec.md was agreed with the human by a separate session; it is your contract.\n'
+    '\n'
+    "Implement it in /proj, following the conventions of the surrounding code. Verify the change the way the spec's Verification section says, and run the tests. Do not commit, push or switch branches; leave the changes in the working tree for the Reviewer. If the spec is wrong or cannot be met, do not deviate silently: say so in your report.\n"
+    '\n'
+    f'As your last step, write a report to {D}/build-1.md in a single write; it hands the work to the Reviewer: the files you changed and why, how you verified the change (commands and a summary of their results), and any acceptance criterion you did not meet, with the reason.')
+GOLDEN_REVIEW_1 = (
+    f'You are the Reviewer, the last of three roles (Spec Collector -> Builder -> Reviewer). You did not write this change. Judge it only against the spec in {D}/spec.md and the code itself.\n'
+    '\n'
+    'The change: `git diff abc123` in /proj, plus the untracked files `git status --porcelain` lists\n'
+    f"The Builder's report is in {D}/build-1.md. Treat its claims as unverified: check them, and run the verification yourself. Do not modify any file other than your review.\n"
+    '\n'
+    f'As your last step, write your review to {D}/review-1.md in a single write. Its first line must be exactly `VERDICT: APPROVE` or `VERDICT: CHANGES_REQUESTED`. Then list numbered findings, each with file:line, what is wrong, and which acceptance criterion it violates or what failure it causes. Request changes only for defects: an unmet acceptance criterion, a bug, a broken test. Style preferences are not defects.')
+GOLDEN_FIX_2 = (
+    f'The Reviewer requested changes; the findings are in {D}/review-1.md. Fix each finding, or explain in your report why it is wrong. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2.md in a single write, in the same shape as before, answering each finding by its number.')
+GOLDEN_RECHECK_2 = (
+    f"The Builder has answered your review; the new report is in {D}/build-2.md. Review the change again (`git diff abc123` in /proj, plus the untracked files `git status --porcelain` lists) against the spec in {D}/spec.md and your previous findings, checking the Builder's claims rather than trusting them. As your last step, write the review to {D}/review-2.md in a single write, with the same first-line verdict and numbered findings as before.")
+GOLDEN_FRESH_BUILD_2 = (
+    f'You are the Builder, the second of three roles (Spec Collector -> Builder -> Reviewer). The spec in {D}/spec.md was agreed with the human by a separate session; it is your contract.\n'
+    '\n'
+    "Implement it in /proj, following the conventions of the surrounding code. Verify the change the way the spec's Verification section says, and run the tests. Do not commit, push or switch branches; leave the changes in the working tree for the Reviewer. If the spec is wrong or cannot be met, do not deviate silently: say so in your report.\n"
+    '\n'
+    f'As your last step, write a report to {D}/build-2.md in a single write; it hands the work to the Reviewer: the files you changed and why, how you verified the change (commands and a summary of their results), and any acceptance criterion you did not meet, with the reason.\n'
+    '\n'
+    f'This is round 2, and you are a fresh session. An earlier Builder session did the previous rounds; its changes are already in the working tree, and its reports are {D}/build-1.md.\n'
+    '\n'
+    f'The Reviewer requested changes; the findings are in {D}/review-1.md. Fix each finding, or explain in your report why it is wrong. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2.md in a single write, in the same shape as before, answering each finding by its number.')
+GOLDEN_FRESH_REVIEW_2 = (
+    f'You are the Reviewer, the last of three roles (Spec Collector -> Builder -> Reviewer). You did not write this change. Judge it only against the spec in {D}/spec.md and the code itself.\n'
+    '\n'
+    'The change: `git diff abc123` in /proj, plus the untracked files `git status --porcelain` lists\n'
+    f"The Builder's report is in {D}/build-2.md. Treat its claims as unverified: check them, and run the verification yourself. Do not modify any file other than your review.\n"
+    '\n'
+    f'As your last step, write your review to {D}/review-2.md in a single write. Its first line must be exactly `VERDICT: APPROVE` or `VERDICT: CHANGES_REQUESTED`. Then list numbered findings, each with file:line, what is wrong, and which acceptance criterion it violates or what failure it causes. Request changes only for defects: an unmet acceptance criterion, a bug, a broken test. Style preferences are not defects.\n'
+    '\n'
+    f'This is round 2, and you are a fresh session. The earlier reviews of this change are {D}/review-1.md; check that the Builder has answered each of their findings.')
+GOLDEN_CONTINUE_BUILD_2 = (
+    f'Your session was restarted in the middle of this turn. Continue where you left off; the turn still ends when you write {D}/build-2.md in a single write.')
+
+
+class TestDefaultWorkflowPrompts(unittest.TestCase):
+    def test_two_round_run(self):
+        seen = []
+        wf, herdr, host, _ = make_workflow({
+            "spec": [recording(spec_turn, seen)],
+            "build": [recording(build_turn(1), seen), recording(build_turn(2), seen)],
+            "review": [recording(review_turn(1, CHANGES_REQUESTED), seen), recording(review_turn(2, APPROVE), seen)],
+        })
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(seen, [GOLDEN_SPEC, GOLDEN_BUILD_1, GOLDEN_REVIEW_1, GOLDEN_FIX_2, GOLDEN_RECHECK_2])
+        self.assertEqual([c[2] for c in herdr.calls if c[0] == "rename"], ["Spec Collector", "Builder", "Reviewer"])
+        self.assertEqual([c for c in herdr.calls if c[0] == "split"], [("split", "w1:p1", "right"), ("split", "w1:p2", "down")])
+        written = [p.rsplit("/", 1)[-1] for p in host.writes if p.startswith(D) and not p.endswith("state.json")]
+        self.assertEqual(written, ["spec.md", "build-1.md", "review-1.md", "build-2.md", "review-2.md"])
+
+    def test_phases_saved(self):
+        wf, herdr, host, _ = make_workflow({
+            "spec": [spec_turn], "build": [build_turn(1), build_turn(2)],
+            "review": [review_turn(1, CHANGES_REQUESTED), review_turn(2, APPROVE)],
+        })
+        phases = []
+        orig = host.write
+
+        def write(path, text):
+            orig(path, text)
+            if path.endswith("state.json"):
+                saved = json.loads(text)
+                phases.append((saved["phase"], saved["round"]))
+        host.write = write
+
+        wf.run()
+        self.assertEqual(list(dict.fromkeys(phases)), [
+            ("spec", 0), ("build", 1), ("review", 1), ("build", 2), ("review", 2), ("publish", 2), ("done", 2)])
+
+    def test_fresh_builder_in_round_two(self):
+        seen = []
+        wf, *_ = resume(saved_run("build", 2, agents=("spec", "build", "review"), prompted="build-2.md"), {
+            "build": [recording(build_turn(2), seen)], "review": [review_turn(2, APPROVE)],
+        }, alive=["review"])
+        wf.run()
+        self.assertEqual(seen, [GOLDEN_FRESH_BUILD_2])
+
+    def test_fresh_reviewer_in_round_two(self):
+        seen = []
+        wf, *_ = resume(saved_run("review", 2, agents=("spec", "build", "review")), {
+            "review": [recording(review_turn(2, APPROVE), seen)],
+        }, files={lambda s: s.build_path(2): "report 2"})
+        wf.run()
+        self.assertEqual(seen, [GOLDEN_FRESH_REVIEW_2])
+
+    def test_continue_after_a_resumed_session(self):
+        seen = []
+        wf, *_ = resume(saved_run("build", 2, agents=("spec", "build", "review"), prompted="build-2.md"), {
+            "build": [recording(build_turn(2), seen)], "review": [review_turn(2, APPROVE)],
+        }, alive=["review"], sessions={"build": "s-build"})
+        wf.run()
+        self.assertEqual(seen, [GOLDEN_CONTINUE_BUILD_2])
+
+
+# A workflow without a spec step: the task is the Builder's contract.
+QUICK = orchestrator.Pipeline("quick", {"build": "Builder", "review": "Reviewer"}, (
+    orchestrator.Step("build", "build", "build-{n}.md", "Build {task} in {cwd}; report to {build_path}.",
+                      again="Fix {prev_review_path}; report to {build_path}.", edits=True),
+    orchestrator.Step("review", "review", "review-{n}.md", "Review {change} against {task}; write {review_path}.",
+                      again="Recheck {build_path}; write {review_path}.", loop_to="build"),
+))
+
+# Four roles: tests are written once, and the review loop goes back to the Builder only.
+FOUR = orchestrator.Pipeline("four", {"spec": "Spec Collector", "tests": "Test Writer", "build": "Builder",
+                                      "review": "Reviewer"}, (
+    orchestrator.Step("spec", "spec", "spec.md", "Interview about {task}; write {spec_path}.", human_paced=True),
+    orchestrator.Step("tests", "tests", "tests.md", "Write tests for {spec_path}; report to {tests_path}.", edits=True),
+    orchestrator.Step("build", "build", "build-{n}.md", "Build {spec_path} against {tests_path}; report to {build_path}.",
+                      again="Fix {prev_review_path}; report to {build_path}.",
+                      fresh_note="Earlier reports: {earlier_build_paths}.", fresh_repeats_again=True, edits=True),
+    orchestrator.Step("review", "review", "review-{n}.md", "Review {change}; write {review_path}.",
+                      again="Recheck; write {review_path}.", loop_to="build"),
+))
+
+write_tests = writes(lambda s: f"{s.dir}/tests.md", "tests written")
+
+
+def new_run(pipeline):
+    """A new run's state, as main makes it for the workflow."""
+    return RunState("20260929-120000-a1b2c3", "add a rate limiter", "/proj", None,
+                    phase=pipeline.steps[0].id, workflow=pipeline.name)
+
+
+class TestWorkflowDefinitions(unittest.TestCase):
+    def test_default_is_the_only_registered_workflow(self):
+        self.assertEqual(list(orchestrator.WORKFLOWS), ["default"])
+
+    def pipeline(self, *steps, roles=None):
+        return orchestrator.Pipeline("bad", roles or {"build": "Builder", "review": "Reviewer"}, steps)
+
+    def step(self, id, file, **kw):
+        return orchestrator.Step(id, kw.pop("role", id), file, "go", **kw)
+
+    def test_invalid_definitions(self):
+        build, review = self.step("build", "a-{n}.md", edits=True), self.step("review", "b-{n}.md")
+        cases = [
+            ("duplicate step id build", [build, self.step("build", "b-{n}.md", role="review")]),
+            ("duplicate handoff file a-{n}.md", [build, self.step("review", "a-{n}.md")]),
+            ("step review loops back to nope, which is not a step",
+             [build, self.step("review", "b-{n}.md", loop_to="nope")]),
+            ("step build loops back to review, which does not come before it",
+             [self.step("build", "a-{n}.md", edits=True, loop_to="review"), review]),
+            ("steps build, review each loop back; only one verdict loop is supported",
+             [self.step("prep", "p-{n}.md", role="build", edits=True),
+              self.step("build", "a-{n}.md", loop_to="prep"), self.step("review", "b-{n}.md", loop_to="build")]),
+            ("role review has no step", [build]),
+            ("step review is in the review loop, so its handoff file needs {n}",
+             [build, self.step("review", "b.md", loop_to="build")]),
+            ("step build: a per-round handoff file needs an editing step at or before it",
+             [self.step("build", "a-{n}.md"), self.step("review", "b-{n}.md", edits=True)]),
+            ("step id done is reserved", [build, self.step("done", "b.md", role="review")]),
+            ("has no steps", []),
+            ("step build: handoff file a-{round}.md may use only {n}",
+             [self.step("build", "a-{round}.md", edits=True), review]),
+        ]
+        for problem, steps in cases:
+            with self.subTest(problem=problem):
+                with self.assertRaisesRegex(ValueError, "^workflow bad: " + re.escape(problem)):
+                    self.pipeline(*steps)
+
+    def test_role_without_label(self):
+        with self.assertRaisesRegex(ValueError, "workflow bad: step build: role build has no label"):
+            self.pipeline(self.step("build", "a.md", edits=True), self.step("review", "b.md"),
+                          roles={"review": "Reviewer"})
+        with self.assertRaisesRegex(ValueError, "workflow bad: role build has no label"):
+            self.pipeline(self.step("build", "a.md", edits=True), self.step("review", "b.md"),
+                          roles={"build": "", "review": "Reviewer"})
+
+    def test_unknown_placeholder(self):
+        step = orchestrator.Step("build", "build", "a-{n}.md", "write {spec_path}", edits=True)
+        with self.assertRaisesRegex(ValueError, "workflow bad: step build: unknown prompt placeholder spec_path"):
+            orchestrator.Pipeline("bad", {"build": "Builder"}, (step,))
+
+
+class TestOtherWorkflows(unittest.TestCase):
+    def test_workflow_without_a_spec_step(self):
+        seen, at_first_build = [], []
+
+        def build(prompt, state, host):
+            at_first_build.append((state.base, host.branch, state.round))
+            return build_turn(1)(prompt, state, host)
+        wf, herdr, host, _ = make_workflow({
+            "build": [recording(build, seen)], "review": [recording(review_turn(1, APPROVE), seen)],
+        }, state=new_run(QUICK), pipeline=QUICK)
+
+        self.assertEqual(wf.run(), APPROVE)
+        branch = "orchestrator/add-a-rate-limiter-a1b2c3"
+        self.assertEqual(at_first_build, [("abc123", branch, 1)])
+        self.assertEqual(seen, [f"Build add a rate limiter in /proj; report to {D}/build-1.md.",
+                                f"Review `git diff abc123` in /proj, plus the untracked files `git status --porcelain` "
+                                f"lists against add a rate limiter; write {D}/review-1.md."])
+        self.assertEqual([c[1] for c in herdr.calls if c[0] == "start"], ["build-a1b2c3", "review-a1b2c3"])
+        self.assertEqual([c for c in herdr.calls if c[0] == "split"], [("split", "w1:p1", "right")])
+        self.assertFalse([c for c in herdr.calls if c[0] == "focus"])
+        self.assertEqual((host.prs[0]["title"], host.prs[0]["head"]), ("add a rate limiter", branch))
+        saved = json.loads(host.files[f"{D}/state.json"])
+        self.assertEqual((saved["workflow"], saved["phase"]), ("quick", "done"))
+
+    def test_four_roles_loop_back_to_the_builder_only(self):
+        seen = []
+        wf, herdr, host, notes = make_workflow({
+            "spec": [spec_turn], "tests": [write_tests],
+            "build": [recording(build_turn(1), seen), recording(build_turn(2), seen)],
+            "review": [review_turn(1, CHANGES_REQUESTED), review_turn(2, APPROVE)],
+        }, state=new_run(FOUR), pipeline=FOUR)
+
+        self.assertEqual(wf.run(), APPROVE)
+        prompts = [c[1] for c in herdr.calls if c[0] == "prompt"]
+        self.assertEqual(prompts, ["spec-a1b2c3", "tests-a1b2c3", "build-a1b2c3", "review-a1b2c3",
+                                   "build-a1b2c3", "review-a1b2c3"])
+        self.assertEqual([c for c in herdr.calls if c[0] == "split"],
+                         [("split", "w1:p1", "right"), ("split", "w1:p2", "down"), ("split", "w1:p3", "down")])
+        self.assertEqual([c[2] for c in herdr.calls if c[0] == "rename"],
+                         ["Spec Collector", "Test Writer", "Builder", "Reviewer"])
+        self.assertEqual(seen[1], f"Fix {D}/review-1.md; report to {D}/build-2.md.")
+        self.assertEqual(notes[0], "Spec Collector is waiting for you")
+        self.assertEqual(host.prs[0]["title"], "Add a token-bucket rate limiter")
+        self.assertEqual(wf.state.round, 2)
+
+    def test_interrupted_mid_loop_resumes_at_the_right_step(self):
+        def build_then_interrupt(prompt, state, host):
+            build_turn(2)(prompt, state, host)
+            raise KeyboardInterrupt
+        wf, herdr, host, _ = make_workflow({
+            "spec": [spec_turn], "tests": [write_tests], "build": [build_turn(1), build_then_interrupt],
+            "review": [review_turn(1, CHANGES_REQUESTED)],
+        }, state=new_run(FOUR), pipeline=FOUR)
+        with self.assertRaises(KeyboardInterrupt):
+            wf.run()
+        saved = json.loads(host.files[f"{D}/state.json"])
+        self.assertEqual((saved["workflow"], saved["phase"], saved["round"], saved["error"]),
+                         ("four", "build", 2, "interrupted"))
+
+        seen = []
+        wf2, herdr2, *_ = resume(RunState.from_dict(saved), {"review": [recording(review_turn(2, APPROVE), seen)]},
+                                 host=host, pipeline=FOUR)
+        herdr2.panes = 4
+        self.assertEqual(wf2.run(), APPROVE)
+        self.assertEqual([c[1] for c in herdr2.calls if c[0] == "prompt"], ["review-a1b2c3"])
+        self.assertEqual([c[1] for c in herdr2.calls if c[0] == "start"], ["review-a1b2c3"])
+        self.assertEqual(seen, [f"Recheck; write {D}/review-2.md."])
+        self.assertEqual((wf2.state.round, wf2.state.phase, wf2.state.verdict), (2, "done", APPROVE))
+
+    def test_model_reaches_a_role_without_its_own_flag(self):
+        models = orchestrator.role_models(parse_args(["run", "task", "--model", "X", "--build-model", "Y"]),
+                                          FOUR.roles)
+        self.assertEqual(models, {"spec": "X", "tests": "X", "build": "Y", "review": "X"})
+        wf, herdr, *_ = make_workflow({
+            "spec": [spec_turn], "tests": [write_tests], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)],
+        }, state=new_run(FOUR), pipeline=FOUR, models=models)
+        wf.run()
+        self.assertIn(("start", "tests-a1b2c3", "w1:p2", ("--model", "X")), herdr.calls)
+
+    def test_phase_outside_the_workflow_is_refused(self):
+        wf, *_ = make_workflow({}, state=new_run(FOUR), pipeline=QUICK)
+        with self.assertRaisesRegex(OrchestratorError, "phase spec, which workflow quick has no step for"):
+            wf.run()
+
+
+class TestSavedBeforeWorkflows(unittest.TestCase):
+    """state.json as commit 3f7f439 wrote it, without a workflow field."""
+
+    def old(self, state):
+        saved = asdict(state)
+        del saved["workflow"]
+        return RunState.from_dict(saved)
+
+    def test_each_phase_resumes_under_the_default(self):
+        full = ("spec", "build", "review")
+        cases = {
+            "spec": (saved_run("spec", 0, pull_request=True),
+                     {"spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, None),
+            "build": (saved_run("build", 1, agents=full),
+                      {"build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, None),
+            "review": (saved_run("review", 2, agents=full),
+                       {"review": [review_turn(2, APPROVE)]}, {lambda s: s.build_path(2): "report 2"}),
+            "publish": (saved_run("publish", 1, agents=full, pull_request=True, base_branch="main",
+                                  branch="orchestrator/x-a1b2c3", verdict=APPROVE), {}, None),
+            "done": (saved_run("done", 1, agents=full, verdict=APPROVE), {}, None),
+        }
+        for phase, (state, script, files) in cases.items():
+            with self.subTest(phase=phase):
+                host = FakeHost(head="def456" if phase == "publish" else "abc123")
+                wf, *_ = resume(self.old(state), script, host=host, files=files)
+                self.assertEqual(wf.state.workflow, "default")
+                self.assertEqual(wf.run(), APPROVE)
+                self.assertEqual(wf.state.phase, "done")
+
+
+class TestWorkflowCLI(unittest.TestCase):
+    @patch.object(Workflow, "__init__", return_value=None)
+    @patch.object(Workflow, "run", return_value=APPROVE)
+    @patch.object(Host, "resolve_dir", return_value="/proj")
+    @patch.dict("os.environ", {"HERDR_ENV": "1"})
+    def test_default_workflow_is_the_default(self, _resolve, _run, init):
+        with patch("builtins.print"), patch("orchestrator.new_run_id", return_value="20260930-070000-c0ffee"):
+            main(["run", "task", "--model", "m"])
+            main(["run", "task", "--model", "m", "--workflow", "default"])
+        first, second = init.call_args_list
+        self.assertEqual(first.kwargs, second.kwargs)
+        self.assertEqual(asdict(first.args[2]), asdict(second.args[2]))
+        self.assertEqual((first.args[2].workflow, first.args[2].phase), ("default", "spec"))
+
+    def test_unknown_workflow_is_an_argparse_error(self):
+        with self.assertRaises(SystemExit), patch("sys.stderr") as err:
+            parse_args(["run", "task", "--workflow", "nope"])
+        message = "".join(c.args[0] for c in err.write.call_args_list)
+        self.assertRegex(message, r"argument --workflow: invalid choice: 'nope' \(choose from '?default'?\)")
+
+    def test_resume_has_no_workflow_flag(self):
+        with self.assertRaises(SystemExit), patch("sys.stderr"):
+            parse_args(["resume", "a1b2c3", "--workflow", "default"])
+
+    def test_resuming_an_unknown_workflow(self):
+        saved = {**asdict(saved_run("build", 1)), "workflow": "nope"}
+        args = parse_args(["resume", "a1b2c3"])
+        with self.assertRaisesRegex(OrchestratorError, "unknown workflow nope"):
+            orchestrator.resumable_state([(10**4, saved)], args, "/proj", "here", lambda pid: True)
+
+    @patch.object(Workflow, "__init__", return_value=None)
+    @patch.object(Workflow, "run", return_value=APPROVE)
+    @patch.object(Host, "resolve_dir", return_value="/proj")
+    @patch.dict("os.environ", {"HERDR_ENV": "1"})
+    def test_registered_workflow_is_offered_and_started(self, _resolve, _run, init):
+        with patch.dict(orchestrator.WORKFLOWS, {"quick": QUICK}), patch("builtins.print") as out:
+            self.assertEqual(main(["run", "task", "--workflow", "quick", "--model", "X"]), 0)
+        state = init.call_args.args[2]
+        self.assertEqual((state.workflow, state.phase), ("quick", "build"))
+        self.assertEqual(init.call_args.kwargs["models"], {"build": "X", "review": "X"})
+        out.assert_called_with(f"{APPROVE}: {state.dir}/review-0.md")
+
+    def test_list_names_a_non_default_workflow(self):
+        runs = [(10**6, run_record(phase="done", verdict=APPROVE)),
+                (10**6, {**run_record(phase="done", verdict=APPROVE), "workflow": "default"}),
+                (10**6, {**run_record(phase="done", verdict=APPROVE), "workflow": "quick"})]
+        with patch("builtins.print") as out:
+            orchestrator.print_runs(runs, "here", lambda pid: True, [])
+        lines = [c.args[0] for c in out.call_args_list][::2]
+        self.assertEqual(lines, [
+            f"20260930-070000-c0ffee  done     round 1  {APPROVE}",
+            f"20260930-070000-c0ffee  done     round 1  {APPROVE}",
+            f"20260930-070000-c0ffee  done     round 1  {APPROVE}  [quick workflow]",
+        ])
 
 
 if __name__ == "__main__":
