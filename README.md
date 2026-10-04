@@ -25,7 +25,8 @@ herdr. Each feature is built on its own branch and ends as a pull request on Git
 - For `--machine`: the machine saved in herdr and non-interactive SSH to its target; see
   [Running the agents on another machine](docs/design.md#running-the-agents-on-another-machine)
 - For `--quality-gate`: a Jenkins quality job and SonarQube set up as in [quality gate](docs/quality-gate.md),
-  their credentials in the orchestrator's environment, and a git checkout with an `origin`
+  their credentials in `~/.config/ai-agents-orchestrator/ci.env` or the environment, and a git checkout with an
+  `origin`
 
 ## Usage
 
@@ -42,8 +43,8 @@ python orchestrator.py list --machine <machine> --cwd ~/GitHub/myproject
 # Continue a stopped run, by its run id or the six-character key at its end
 python orchestrator.py resume e292fb --machine <machine> --cwd ~/GitHub/myproject
 
-# With the SonarQube quality gate after each Builder turn; the credentials are loaded for this process only
-(set -a; . ~/.config/ai-agents-orchestrator/ci.env || exit; set +a; exec python3 orchestrator.py run --quality-gate AI-Agents-Orchestrator/py-ai-agents-orchestrator-quality "add a token-bucket rate limiter")
+# With the SonarQube quality gate after each Builder turn; credentials from ~/.config/ai-agents-orchestrator/ci.env
+python orchestrator.py run --quality-gate AI-Agents-Orchestrator/py-ai-agents-orchestrator-quality "add a token-bucket rate limiter"
 ```
 
 | Flag | Description |
@@ -58,7 +59,7 @@ python orchestrator.py resume e292fb --machine <machine> --cwd ~/GitHub/myprojec
 | `--build-model MODEL` | Claude model for the Builder. Overrides `--model`. |
 | `--review-model MODEL` | Claude model for the Reviewer. Overrides `--model`. |
 | `--no-pr` | `run` only: leave the change uncommitted and the workspace open instead of opening a pull request. Works outside git. |
-| `--quality-gate JOB` | `run` only: after each Builder turn, analyse the change with this Jenkins job, by its full name with folders, and SonarQube, and send the findings back to the Builder before the Reviewer. Needs `JENKINS_URL`, `JENKINS_USER`, `JENKINS_TOKEN`, `SONAR_HOST_URL` and `SONAR_TOKEN`. |
+| `--quality-gate JOB` | `run` only: after each Builder turn, analyse the change with this Jenkins job, by its full name with folders, and SonarQube, and send the findings back to the Builder before the Reviewer. Needs `JENKINS_URL`, `JENKINS_USER`, `JENKINS_TOKEN`, `SONAR_HOST_URL` and `SONAR_TOKEN`, from the environment or `~/.config/ai-agents-orchestrator/ci.env`. |
 | `--max-quality-rounds N` | With the gate: SonarQube analyses per review round before the Reviewer gets the change anyway (default 3). |
 | `--force` | `resume` only: take over a run that still looks alive. |
 
