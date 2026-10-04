@@ -117,6 +117,53 @@ def child_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if k not in CI_ENV}
 
 
+def ci_env_path() -> str:
+    """The file the quality gate's credentials come from when the environment lacks them."""
+    config = os.environ.get("XDG_CONFIG_HOME", "")
+    if not os.path.isabs(config):
+        config = os.path.expanduser("~/.config")
+    return os.path.join(config, "ai-agents-orchestrator", "ci.env")
+
+
+def ci_credentials(environ, path: str) -> dict[str, str]:
+    """CI_ENV from environ, each one it lacks taken from the file at path.
+
+    The file's values stay in the returned dict and never enter os.environ, so child_env needs no
+    help to keep them from the agents. It is read only when something is missing, and refused when
+    others may read it: it holds two tokens.
+    """
+    found = {k: environ[k] for k in CI_ENV if environ.get(k)}
+    if len(found) == len(CI_ENV):
+        return found
+    try:
+        with open(path, encoding="utf-8") as f:
+            if os.fstat(f.fileno()).st_mode & 0o077:
+                raise OrchestratorError(f"{path} holds tokens but others may read it; run: chmod 600 {path}")
+            text = f.read()
+    except FileNotFoundError:
+        return found
+    except (OSError, UnicodeDecodeError) as e:
+        raise OrchestratorError(f"could not read {path}: {e}") from e
+    return {**parse_env_file(text, path), **found}
+
+
+def parse_env_file(text: str, path: str) -> dict[str, str]:
+    """The NAME=value lines of text, with the quotes and `export ` that a file also sourced by a shell has."""
+    values = {}
+    for i, line in enumerate(text.splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, sep, value = line.removeprefix("export ").partition("=")
+        name, value = name.strip(), value.strip()
+        if not sep or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            raise OrchestratorError(f"{path}:{i}: expected NAME=value")
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        values[name] = value
+    return values
+
+
 # ---------------------------------------------------------------------------
 # Role prompts
 # ---------------------------------------------------------------------------
@@ -570,14 +617,14 @@ class CIError(OrchestratorError):
 class CI:
     """Jenkins's quality job and SonarQube, over HTTP from the orchestrator's own machine.
 
-    The credentials come from the orchestrator's environment and travel only in the Authorization
-    header, never in a URL, so no error, log or state.json can carry them. Errors name the method,
-    the URL and the status, and text from either server goes through mask before it is shown or saved.
+    The credentials come from the orchestrator's environment or ci_env_path() and travel only in the
+    Authorization header, never in a URL, so no error, log or state.json can carry them. Errors name the
+    method, the URL and the status, and text from either server goes through mask before it is shown or saved.
     """
 
     def __init__(self, job: str, env=None, urlopen=None):
         self.job = job
-        env = os.environ if env is None else env
+        env = ci_credentials(os.environ, ci_env_path()) if env is None else env
         self._env = {k: env.get(k) or "" for k in CI_ENV}
         self._urlopen = urlopen or urllib.request.urlopen
 
@@ -599,7 +646,8 @@ class CI:
 
     def check_credentials(self) -> None:
         if missing := [k for k in CI_ENV if not self._env[k]]:
-            raise OrchestratorError(f"the quality gate needs {', '.join(missing)} in the orchestrator's environment")
+            raise OrchestratorError(f"the quality gate needs {', '.join(missing)} in the orchestrator's environment "
+                                    f"or in {ci_env_path()}")
 
     def _request(self, method: str, url: str, user: str, password: str,
                  form: dict | None = None) -> tuple[bytes, dict]:
@@ -1965,7 +2013,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     run.add_argument("--quality-gate", metavar="JOB",
                      help="after each Builder turn, analyse the change with this Jenkins job (its full name, "
                           "folders included) and SonarQube, and send the findings back to the Builder; "
-                          "needs JENKINS_URL, JENKINS_USER, JENKINS_TOKEN, SONAR_HOST_URL and SONAR_TOKEN")
+                          "needs JENKINS_URL, JENKINS_USER, JENKINS_TOKEN, SONAR_HOST_URL and SONAR_TOKEN, "
+                          "from the environment or ~/.config/ai-agents-orchestrator/ci.env")
 
     resume = sub.add_parser(
         "resume", parents=[target, settings], help="continue a run whose orchestrator has stopped",

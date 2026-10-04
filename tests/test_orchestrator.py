@@ -2677,6 +2677,79 @@ class TestQualityReport(unittest.TestCase):
         self.assertEqual(CI(JOB, env={}).mask("text"), "text")
 
 
+class TestCIEnvFile(unittest.TestCase):
+    """The credentials file the quality gate falls back on when the environment lacks a variable."""
+
+    def setUp(self):
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = f"{tmp.name}/ai-agents-orchestrator/ci.env"
+        os.makedirs(os.path.dirname(self.path))
+
+    def write(self, text, mode=0o600):
+        with open(self.path, "w") as f:
+            f.write(text)
+        os.chmod(self.path, mode)
+
+    def test_the_file_fills_what_the_environment_lacks(self):
+        self.write("".join(f"{k}=file-{k}\n" for k in orchestrator.CI_ENV))
+        env = {"JENKINS_USER": "from-env", "SONAR_TOKEN": ""}
+        self.assertEqual(orchestrator.ci_credentials(env, self.path),
+                         {**{k: f"file-{k}" for k in orchestrator.CI_ENV}, "JENKINS_USER": "from-env"})
+
+    def test_the_file_is_not_read_when_the_environment_has_everything(self):
+        self.write("garbage", mode=0o644)
+        self.assertEqual(orchestrator.ci_credentials(CREDENTIALS, self.path), CREDENTIALS)
+
+    def test_a_missing_file_leaves_the_environment(self):
+        self.assertEqual(orchestrator.ci_credentials({"JENKINS_URL": JENKINS}, self.path), {"JENKINS_URL": JENKINS})
+
+    def test_a_file_others_may_read_is_refused(self):
+        self.write(f"SONAR_TOKEN={SONAR_TOKEN}\n", mode=0o640)
+        with self.assertRaisesRegex(OrchestratorError, f"others may read it; run: chmod 600 {self.path}"):
+            orchestrator.ci_credentials({}, self.path)
+
+    def test_shell_syntax(self):
+        self.write("# Jenkins\n\nexport JENKINS_URL=https://jenkins.example/\n"
+                   f"  JENKINS_TOKEN = '{JENKINS_TOKEN}'\nSONAR_TOKEN=old\nSONAR_TOKEN=\"{SONAR_TOKEN}\"\n")
+        self.assertEqual(orchestrator.ci_credentials({}, self.path),
+                         {"JENKINS_URL": "https://jenkins.example/", "JENKINS_TOKEN": JENKINS_TOKEN,
+                          "SONAR_TOKEN": SONAR_TOKEN})
+
+    def test_a_malformed_line_is_named_without_its_content(self):
+        self.write(f"JENKINS_URL={JENKINS}\n{JENKINS_TOKEN}\n")
+        with self.assertRaises(OrchestratorError) as cm:
+            orchestrator.ci_credentials({}, self.path)
+        self.assertEqual(str(cm.exception), f"{self.path}:2: expected NAME=value")
+
+    def test_path_follows_xdg_config_home(self):
+        with patch.dict("os.environ", {"XDG_CONFIG_HOME": "/xdg", "HOME": "/home/u"}):
+            self.assertEqual(orchestrator.ci_env_path(), "/xdg/ai-agents-orchestrator/ci.env")
+        with patch.dict("os.environ", {"XDG_CONFIG_HOME": "relative", "HOME": "/home/u"}):
+            self.assertEqual(orchestrator.ci_env_path(), "/home/u/.config/ai-agents-orchestrator/ci.env")
+
+    def test_ci_reads_the_file_but_no_child_process_sees_it(self):
+        self.write("".join(f"{k}={v}\n" for k, v in CREDENTIALS.items()))
+        xdg = os.path.dirname(os.path.dirname(self.path))
+        with patch.dict("os.environ", {"XDG_CONFIG_HOME": xdg}):
+            for k in orchestrator.CI_ENV:
+                os.environ.pop(k, None)
+            ci = CI(JOB)
+            ci.check_credentials()
+            self.assertEqual(ci.job_url, f"{JENKINS}{JOB_PATH}")
+            self.assertFalse(set(orchestrator.CI_ENV) & set(os.environ))
+            self.assertFalse(leaks(Host().check(["env"])))
+
+    def test_missing_credentials_name_the_file(self):
+        xdg = os.path.dirname(os.path.dirname(self.path))
+        with patch.dict("os.environ", {"XDG_CONFIG_HOME": xdg}):
+            for k in orchestrator.CI_ENV:
+                os.environ.pop(k, None)
+            with self.assertRaisesRegex(OrchestratorError, f"environment or in {self.path}$"):
+                CI(JOB).check_credentials()
+
+
 class TestCI(unittest.TestCase):
     def ci(self, *answers, env=None):
         urlopen = MagicMock(side_effect=list(answers))
@@ -2939,7 +3012,8 @@ class TestQualityCLI(unittest.TestCase):
     @patch.object(Workflow, "__init__", return_value=None)
     @patch.object(Workflow, "run", return_value=APPROVE)
     @patch.object(Host, "resolve_dir", return_value="/proj")
-    @patch.dict("os.environ", {"HERDR_ENV": "1"})
+    # No real ci.env on this machine may decide the test.
+    @patch.dict("os.environ", {"HERDR_ENV": "1", "XDG_CONFIG_HOME": "/nonexistent"})
     def test_gate_reaches_the_workflow(self, _resolve, _run, init):
         with patch("builtins.print"):
             main(["run", "task"])

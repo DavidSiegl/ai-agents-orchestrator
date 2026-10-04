@@ -56,8 +56,8 @@ command. `GIT_REF` is interpolated only into the checkout's branch spec.
 
 ## Credentials and permissions
 
-The orchestrator talks to Jenkins and SonarQube itself, over HTTP from the machine it runs on, and reads its
-credentials only from its own environment:
+The orchestrator talks to Jenkins and SonarQube itself, over HTTP from the machine it runs on, with these
+credentials:
 
 | Variable | What it holds |
 |---|---|
@@ -66,14 +66,24 @@ credentials only from its own environment:
 | `SONAR_HOST_URL` | SonarQube's base URL |
 | `SONAR_TOKEN` | a user token of the technical user `agents` on SonarQube |
 
-They live in `~/.config/ai-agents-orchestrator/ci.env` (mode 600), as `NAME=value` lines, and are loaded only
-for the orchestrator, in a subshell:
+Put them in `~/.config/ai-agents-orchestrator/ci.env` (`$XDG_CONFIG_HOME/ai-agents-orchestrator/ci.env` if that
+is set), one `NAME=value` per line, and `chmod 600` it:
 
 ```bash
-(set -a; . ~/.config/ai-agents-orchestrator/ci.env || exit; set +a; exec python3 orchestrator.py run --quality-gate AI-Agents-Orchestrator/py-ai-agents-orchestrator-quality "…")
+JENKINS_URL=https://jenkins.example/
+JENKINS_USER=agents
+JENKINS_TOKEN=…
+SONAR_HOST_URL=https://sonar.example/
+SONAR_TOKEN=…
 ```
 
-Never put them in `~/.bashrc`: every agent's shell would have them.
+The orchestrator reads the file itself, on `run` and `resume`, so no wrapper is needed. Comments, blank lines,
+quotes and `export ` are allowed, so the same file can also be sourced by a shell. A variable set in the
+environment wins over the file, and the file is read only when one is missing. The orchestrator refuses a file
+that others may read.
+
+Never export them from `~/.bashrc` or a direnv `.envrc`: every agent's shell would have them. Values from the
+file stay inside the orchestrator process and are never put into its environment.
 
 - **Jenkins**: a user `agents` with Overall/Read, and Job/Read and Job/Build on the `AI-Agents-Orchestrator`
   folder.
