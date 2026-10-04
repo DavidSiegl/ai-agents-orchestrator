@@ -6,7 +6,9 @@ Role-based handoff orchestrator for Claude Code in herdr:
 Each role is a separate interactive Claude Code session in its own herdr pane,
 so no role judges its own work and the human can watch or step into any of
 them. Roles hand off through Markdown files in the run directory, never
-through scraped terminal output.
+through scraped terminal output. That sequence is the default workflow; a
+workflow is data (a Pipeline of Steps), and `run --workflow` picks one from
+WORKFLOWS.
 
 By default the change is built on a new branch, committed, pushed and opened
 as a pull request once the review loop ends, and the run's herdr workspace is
@@ -19,6 +21,7 @@ which runs commands locally or over SSH.
 With --quality-gate, every Builder turn is followed by a quality round: a
 snapshot of the change is analysed by a Jenkins job into SonarQube, and a gate
 that does not pass goes back to the Builder before the Reviewer sees the change.
+In another workflow, its quality-gated step takes the Builder's place.
 HTTP to Jenkins and SonarQube goes through CI, from the orchestrator's machine.
 """
 
@@ -31,6 +34,7 @@ import re
 import secrets
 import shlex
 import socket
+import string
 import subprocess
 import sys
 import time
@@ -89,6 +93,7 @@ GATE_OK = "OK"
 GATE_ERROR = "ERROR"
 GATE_BUILD_FAILED = "BUILD_FAILED"
 
+# The default workflow's roles. Each has its own --ROLE-model flag; another workflow's roles take --model.
 ROLE_LABELS = {"spec": "Spec Collector", "build": "Builder", "review": "Reviewer"}
 
 EXIT_ERROR = 1
@@ -197,14 +202,14 @@ Verify the change the way the spec's Verification section says, and run the test
 Do not commit, push or switch branches; leave the changes in the working tree for the Reviewer. \
 If the spec is wrong or cannot be met, do not deviate silently: say so in your report.
 
-As your last step, write a report to {report_path} in a single write; it hands the work to the Reviewer: the files you changed and why, \
+As your last step, write a report to {build_path} in a single write; it hands the work to the Reviewer: the files you changed and why, \
 how you verified the change (commands and a summary of their results), \
 and any acceptance criterion you did not meet, with the reason."""
 
 FIX_PROMPT = """\
-The Reviewer requested changes; the findings are in {review_path}. \
+The Reviewer requested changes; the findings are in {prev_review_path}. \
 Fix each finding, or explain in your report why it is wrong. Re-run the verification. \
-Do not commit, push or switch branches. As your last step, write a new report to {report_path} in a single write, in the same shape as before, \
+Do not commit, push or switch branches. As your last step, write a new report to {build_path} in a single write, in the same shape as before, \
 answering each finding by its number."""
 
 REVIEW_PROMPT = """\
@@ -212,7 +217,7 @@ You are the Reviewer, the last of three roles (Spec Collector -> Builder -> Revi
 You did not write this change. Judge it only against the spec in {spec_path} and the code itself.
 
 The change: {change}
-The Builder's report is in {report_path}. Treat its claims as unverified: check them, and run the verification yourself. \
+The Builder's report is in {build_path}. Treat its claims as unverified: check them, and run the verification yourself. \
 Do not modify any file other than your review.
 
 As your last step, write your review to {review_path} in a single write. Its first line must be exactly `VERDICT: {approve}` or `VERDICT: {changes}`. \
@@ -221,7 +226,7 @@ or what failure it causes. Request changes only for defects: an unmet acceptance
 Style preferences are not defects."""
 
 RECHECK_PROMPT = """\
-The Builder has answered your review; the new report is in {report_path}. \
+The Builder has answered your review; the new report is in {build_path}. \
 Review the change again ({change}) against the spec in {spec_path} and your previous findings, \
 checking the Builder's claims rather than trusting them. \
 As your last step, write the review to {review_path} in a single write, with the same first-line verdict and numbered findings as before."""
@@ -234,10 +239,10 @@ the turn still ends when you write {path} in a single write."""
 # Appended for a Builder or Reviewer that starts a fresh session in a later round: it has not seen the earlier ones.
 REBUILD_NOTE = """\
 This is round {n}, and you are a fresh session. An earlier Builder session did the earlier turns; \
-its changes are already in the working tree, and its reports are {reports}."""
+its changes are already in the working tree, and its reports are {earlier_build_paths}."""
 
 REREVIEW_NOTE = """\
-This is round {n}, and you are a fresh session. The earlier reviews of this change are {reviews}; \
+This is round {n}, and you are a fresh session. The earlier reviews of this change are {earlier_review_paths}; \
 check that the Builder has answered each of their findings."""
 
 QUALITY_FIX_PROMPT = """\
@@ -254,6 +259,233 @@ The SonarQube quality gate passed on this change; its report is in {quality_path
 QUALITY_UNRESOLVED_NOTE = """\
 The SonarQube quality gate still did not pass after the Builder's last quality round; \
 its unresolved findings are in {quality_path}. Weigh them as you would your own."""
+
+
+# ---------------------------------------------------------------------------
+# Workflow definitions
+# ---------------------------------------------------------------------------
+
+# Run phases that are no step's: the quality loop after a quality-gated step's turn, and the run's last two.
+QUALITY = "quality"
+PUBLISH = "publish"
+DONE = "done"
+
+# The placeholders a step's prompts may use besides the per-step paths (see Step).
+PROMPT_FIELDS = {"task", "cwd", "n", "change", "approve", "changes", "path"}
+# The per-step paths: (prefix, suffix) around a step's id.
+PATH_FIELDS = (("", "_path"), ("prev_", "_path"), ("earlier_", "_paths"))
+
+
+@dataclass(frozen=True)
+class Step:
+    """One role's turn in a workflow, which ends when the role writes its handoff file.
+
+    A prompt is formatted with PROMPT_FIELDS, where n is the round and path the turn's own
+    file, and with three paths for every step X of the workflow: X_path in round n,
+    prev_X_path in round n-1, and earlier_X_paths, rounds 1 to n-1 joined with commas.
+
+    A quality-gated step writes more than one file a round: the answer to quality round q
+    inserts -q<q> before the extension. So for such an X, X_path is the file its current turn
+    writes in its own prompts and its last one of round n in the others', prev_X_path is its
+    last one of round n-1, and earlier_X_paths lists every one before its current turn.
+    """
+    id: str  # also the run's phase while the step is current
+    role: str  # names the agent, and keys its pane, label and model
+    file: str  # the handoff file's name; a {n} in it makes one file per round
+    prompt: str  # round 1, or a step outside the review loop
+    # A later round, for an agent that has seen the earlier ones; None repeats prompt.
+    again: str | None = None
+    # A fresh session in a later round gets prompt, then this note on the turns it has not seen,
+    # then again when fresh_repeats_again: when again asks for work that prompt does not.
+    fresh_note: str | None = None
+    fresh_repeats_again: bool = False
+    # Paced by the human: no turn timeout, no stall notice, and the pane is focused once the agent is ready.
+    human_paced: bool = False
+    # Changes the working tree; the run's base commit and branch are fixed just before the first such step.
+    edits: bool = False
+    # Makes this the verdict step: its file starts with a VERDICT line, and CHANGES_REQUESTED goes
+    # back to the step with this id in round n+1, until max_rounds.
+    loop_to: str | None = None
+    # With --quality-gate, each turn is followed by the quality loop, which sends a gate that does
+    # not pass back to this step with QUALITY_FIX_PROMPT, and the verdict step hears how it ended.
+    quality_gated: bool = False
+
+    @property
+    def per_round(self) -> bool:
+        return "n" in _fields_of(self.file)
+
+    def path(self, run_dir: str, n: int, q: int = 0) -> str:
+        """The handoff file of round n; with q, the answer to quality round q."""
+        name = self.file.format(n=n)
+        if q:
+            stem, ext = os.path.splitext(name)
+            name = f"{stem}-q{q}{ext}"
+        return f"{run_dir}/{name}"
+
+    def last_path(self, run_dir: str, n: int, quality_round: int) -> str:
+        """The step's last file of round n, once the round's quality rounds, if any, are over."""
+        return self.path(run_dir, n, max(quality_round - 1, 0) if self.quality_gated else 0)
+
+    def templates(self) -> list[str]:
+        return [t for t in (self.prompt, self.again, self.fresh_note) if t is not None]
+
+    def placeholders(self) -> set[str]:
+        return {name for t in self.templates() for name in _fields_of(t)}
+
+
+@dataclass(frozen=True)
+class Pipeline:
+    """A named workflow: roles that hand off through files, one step after another.
+
+    A run is in round 0 until its first editing step, round 1 from there, and one round
+    more each time the verdict step loops back.
+    """
+    name: str
+    # Role key -> pane label. The order lays out the panes: the first role takes the workspace's
+    # root pane, the second a split to its right, and each further one a split below the one before.
+    roles: dict[str, str]
+    steps: tuple[Step, ...]
+
+    def __post_init__(self):
+        if problem := self._problem():
+            raise ValueError(f"workflow {self.name}: {problem}")
+
+    def _problem(self) -> str | None:
+        """What makes the definition unusable, or None; the first problem found, in the order of the checks."""
+        if not self.steps:
+            return "has no steps"
+        checks = (self._name_problem, self._role_problem, self._uniqueness_problem, self._step_problem,
+                  self._loop_problem)
+        return next((problem for check in checks if (problem := check())), None)
+
+    def _name_problem(self) -> str | None:
+        ids, files = [st.id for st in self.steps], [st.file for st in self.steps]
+        for kind, names in (("step id", ids), ("handoff file", files)):
+            if dup := next((x for x in names if names.count(x) > 1), None):
+                return f"duplicate {kind} {dup}"
+        if reserved := {QUALITY, PUBLISH, DONE} & set(ids):
+            return f"step id {min(reserved)} is reserved for a phase of the run's own"
+        return None
+
+    def _role_problem(self) -> str | None:
+        for role, label in self.roles.items():
+            if not label:
+                return f"role {role} has no label"
+            if role not in {st.role for st in self.steps}:
+                return f"role {role} has no step"
+        return None
+
+    def _uniqueness_problem(self) -> str | None:
+        """More than one verdict loop or quality-gated step, or a gated step that cannot be one."""
+        loops = [st for st in self.steps if st.loop_to is not None]
+        if len(loops) > 1:
+            return f"steps {', '.join(st.id for st in loops)} each loop back; only one verdict loop is supported"
+        gated = [st for st in self.steps if st.quality_gated]
+        if len(gated) > 1:
+            return f"steps {', '.join(st.id for st in gated)} are each quality-gated; only one may be"
+        for st in gated:
+            if not st.edits:
+                return f"step {st.id} is quality-gated, so it must edit"
+            if not st.per_round:
+                return f"step {st.id} is quality-gated, so its handoff file needs {{n}}"
+            if st.loop_to is not None:
+                return f"step {st.id} is quality-gated, so it cannot be the verdict step"
+        return None
+
+    def _step_problem(self) -> str | None:
+        names = [name for name, _, _ in self.path_placeholders()]
+        if dup := next((x for x in names if names.count(x) > 1), None):
+            return f"prompt placeholder {dup} names the files of two steps"
+        known = PROMPT_FIELDS | set(names)
+        first_edit = next((i for i, st in enumerate(self.steps) if st.edits), len(self.steps))
+        for i, st in enumerate(self.steps):
+            if st.role not in self.roles:
+                return f"step {st.id}: role {st.role} has no label"
+            if set(_fields_of(st.file)) - {"n"}:
+                return f"step {st.id}: handoff file {st.file} may use only {{n}}"
+            if st.per_round and i < first_edit:
+                # Round 0 lasts until the first editing step, so such a file would be numbered 0.
+                return f"step {st.id}: a per-round handoff file needs an editing step at or before it"
+            if unknown := st.placeholders() - known:
+                return f"step {st.id}: unknown prompt placeholder {min(unknown)}"
+        return None
+
+    def _loop_problem(self) -> str | None:
+        verdict = self.verdict_step
+        if verdict is None:
+            return None
+        ids = [st.id for st in self.steps]
+        if verdict.loop_to not in ids:
+            return f"step {verdict.id} loops back to {verdict.loop_to}, which is not a step"
+        target, end = ids.index(verdict.loop_to), ids.index(verdict.id)
+        if target >= end:
+            return f"step {verdict.id} loops back to {verdict.loop_to}, which does not come before it"
+        # A later round finds a fixed file already written and would skip the step.
+        if fixed := next((st for st in self.steps[target:end + 1] if not st.per_round), None):
+            return f"step {fixed.id} is in the review loop, so its handoff file needs {{n}}"
+        return None
+
+    def path_placeholders(self) -> list[tuple[str, str, Step]]:
+        """Each per-step path placeholder, with its prefix and the step whose file it names."""
+        return [(f"{pre}{st.id}{post}", pre, st) for st in self.steps for pre, post in PATH_FIELDS]
+
+    def step(self, step_id: str) -> Step | None:
+        return next((st for st in self.steps if st.id == step_id), None)
+
+    def after(self, step: Step) -> Step | None:
+        i = self.steps.index(step) + 1
+        return self.steps[i] if i < len(self.steps) else None
+
+    @property
+    def first_edit(self) -> Step | None:
+        return next((st for st in self.steps if st.edits), None)
+
+    @property
+    def last_edit(self) -> Step | None:
+        return next((st for st in reversed(self.steps) if st.edits), None)
+
+    @property
+    def verdict_step(self) -> Step | None:
+        return next((st for st in self.steps if st.loop_to is not None), None)
+
+    @property
+    def gated(self) -> Step | None:
+        return next((st for st in self.steps if st.quality_gated), None)
+
+    @property
+    def contract(self) -> Step | None:
+        """The step whose file is the change's spec, titling its branch and pull request; None leaves the task."""
+        first = self.steps[0]
+        return None if first.edits or first.per_round else first
+
+    @property
+    def result(self) -> Step:
+        """The step whose file the run ends on."""
+        return self.verdict_step or self.steps[-1]
+
+
+def _fields_of(template: str) -> list[str]:
+    return [name for _, name, _, _ in string.Formatter().parse(template) if name is not None]
+
+
+DEFAULT_WORKFLOW = Pipeline("default", dict(ROLE_LABELS), (
+    Step("spec", "spec", "spec.md", SPEC_PROMPT, human_paced=True),
+    Step("build", "build", "build-{n}.md", BUILD_PROMPT, again=FIX_PROMPT,
+         fresh_note=REBUILD_NOTE, fresh_repeats_again=True, edits=True, quality_gated=True),
+    Step("review", "review", "review-{n}.md", REVIEW_PROMPT, again=RECHECK_PROMPT,
+         fresh_note=REREVIEW_NOTE, loop_to="build"),
+))
+
+# The workflows `run --workflow` offers, by name.
+WORKFLOWS = {w.name: w for w in (DEFAULT_WORKFLOW,)}
+
+
+def find_workflow(name: str) -> Pipeline:
+    try:
+        return WORKFLOWS[name]
+    except KeyError:
+        raise OrchestratorError(f"unknown workflow {name}; this orchestrator has "
+                                f"{', '.join(sorted(WORKFLOWS))}") from None
 
 
 # ---------------------------------------------------------------------------
@@ -884,10 +1116,11 @@ class RunState:
     task: str
     cwd: str
     machine: str | None = None
+    # The current step's id, or quality, publish or done. main starts a run at its workflow's first step.
     phase: str = "spec"
     round: int = 0
     workspace_id: str = ""
-    # The Spec Collector's pane, which the Builder's pane is split from.
+    # The first role's pane, which the second role's pane is split from.
     root_pane: str = ""
     base: str | None = None
     base_branch: str | None = None
@@ -921,6 +1154,8 @@ class RunState:
     # The analysis in flight, {ref, sha, queue_url, build, ce_task}, each saved as soon as it is known.
     # rejected lists builds of ref that ended without a verdict, so a resume does not adopt them again.
     ci: dict = field(default_factory=dict)
+    # The name of the run's workflow in WORKFLOWS; a run saved before workflows existed ran the default.
+    workflow: str = DEFAULT_WORKFLOW.name
 
     @classmethod
     def from_dict(cls, saved: dict) -> "RunState":
@@ -930,8 +1165,10 @@ class RunState:
             state = cls(**{k: v for k, v in saved.items() if k in known})
         except TypeError as e:
             raise OrchestratorError(f"run state {saved.get('run_id', '?')} is incomplete: {e}") from e
-        if not state.root_pane and "spec" in state.agents:
-            state.root_pane = state.agents["spec"]["pane"]
+        pipeline = WORKFLOWS.get(state.workflow)
+        first = next(iter(pipeline.roles)) if pipeline else None
+        if not state.root_pane and first in state.agents:
+            state.root_pane = state.agents[first]["pane"]
         return state
 
     @property
@@ -943,6 +1180,7 @@ class RunState:
     def dir(self) -> str:
         return f"{self.cwd}/{RUNS_DIR}/{self.run_id}"
 
+    # The default workflow's handoff files; the quality files are every workflow's.
     @property
     def spec_path(self) -> str:
         return f"{self.dir}/spec.md"
@@ -1175,24 +1413,24 @@ RESTARTED = "restarted"  # had exited; relaunched in a fresh session that has lo
 
 
 class Workflow:
-    """Drives one run through Spec Collector -> Builder -> Reviewer in a herdr workspace.
+    """Drives one run through the steps of its workflow in a herdr workspace.
 
     A role's turn ends when it writes its handoff file, not when herdr reports it
     settled: Claude Code ends a turn while a background task it started is still
     running and resumes when the task completes, so idle or done can come mid-work.
 
     The same code starts a new run and resumes an interrupted one. A new run is a
-    resume from phase spec with no workspace; every step first looks for what an
+    resume from the first step with no workspace; every step first looks for what an
     earlier orchestrator, or a role working while none was watching, already did.
 
-    With pull_request, the Builder works on a new branch, and the finished change
+    With pull_request, the editing steps work on a new branch, and the finished change
     is committed, pushed and opened as a pull request against the branch the run
     started on, which is checked out again afterwards. The workspace is then
     closed. A run that fails keeps its workspace and branch, to see what happened.
 
-    With ci, each Builder turn is followed by a quality round (phase quality) that
-    analyses a snapshot of the change; a gate that does not pass goes back to the
-    Builder, up to max_quality_rounds analyses per round, before the Reviewer.
+    With ci, each turn of the quality-gated step is followed by a quality round (phase
+    quality) that analyses a snapshot of the change; a gate that does not pass goes back
+    to that step, up to max_quality_rounds analyses per round, before the next step.
     """
 
     def __init__(self, herdr: Herdr, host: Host, state: RunState, *,
@@ -1203,12 +1441,23 @@ class Workflow:
                  pull_request: bool = True,
                  ci: CI | None = None,
                  max_quality_rounds: int = DEFAULT_MAX_QUALITY_ROUNDS,
+                 pipeline: Pipeline | None = None,
                  sleep=time.sleep, clock=time.monotonic, wallclock=time.time):
+        """pipeline overrides the workflow the state names, for one that WORKFLOWS lacks."""
         self.herdr = herdr
         self.host = host
         self.state = state
         self.notify = notify
         self.ci = ci
+        self.pipeline = pipeline = pipeline or find_workflow(state.workflow)
+        if ci and pipeline.gated is None:
+            raise OrchestratorError(f"workflow {pipeline.name} has no quality-gated step, "
+                                    f"so the quality gate does not apply")
+        # Publishing commits on the run's branch, which only the first editing step creates.
+        if pull_request and pipeline.first_edit is None:
+            raise OrchestratorError(f"workflow {pipeline.name} has no editing step, "
+                                    f"so it cannot end in a pull request; pass --no-pr")
+        state.workflow = pipeline.name
         # Saved with the run, so a resume starts from them.
         state.max_rounds = max_rounds
         state.turn_timeout = turn_timeout
@@ -1226,33 +1475,16 @@ class Workflow:
     def run(self) -> str:
         """Run every phase not yet done and return the final verdict."""
         s = self.state
-        if s.phase == "done":
+        if s.phase == DONE:
             return s.verdict
+        self._check_phase()
         try:
             self._claim()
-            if s.phase == "spec":
-                if self.ci:
-                    self._check_gate()
-                if s.pull_request:
-                    self._check_repo()
-            elif self.ci and s.phase in ("build", "quality"):
-                # Before a Builder turn that may take half an hour, not after it.
-                self.ci.check_credentials()
+            self._check_start()
             # Publishing needs no agent, so a resume there opens no workspace only to close it.
-            if s.phase != "publish":
+            if s.phase != PUBLISH:
                 self._prepare()
-            if s.phase == "spec":
-                self._collect_spec()
-                if s.pull_request:
-                    self._switch_to_branch()
-                # Only here, before the first build and after the base branch was fast-forwarded:
-                # every later phase, resumed or not, diffs against this base, even if the human
-                # commits the Builder's work meanwhile.
-                s.base = self.host.git_head(s.cwd)
-                s.phase, s.round = "build", 1
-                self._save()
-            if s.phase in ("build", "quality", "review"):
-                self._build_and_review()
+            self._walk()
             if s.pull_request:
                 self._publish()
             self._clean_up_quality()
@@ -1265,13 +1497,35 @@ class Workflow:
             self._release("interrupted")
             raise
 
-        s.phase = "done"
+        s.phase = DONE
         s.owner = None
         self._save()
         self.notify(f"Run finished: {s.verdict}", s.pr_url or s.task)
         if s.pull_request:
             self._close_workspace()
         return s.verdict
+
+    def _check_phase(self) -> None:
+        s, p = self.state, self.pipeline
+        phases = {st.id for st in p.steps} | {PUBLISH}
+        if p.gated:
+            phases.add(QUALITY)
+        if s.phase not in phases:
+            raise OrchestratorError(f"run {s.run_id} is in phase {s.phase}, "
+                                    f"which workflow {p.name} has no step for")
+
+    def _check_start(self) -> None:
+        """Fail before the next turn if the run could not finish."""
+        s = self.state
+        # Round 0: the run has not reached its first editing step, so it has no base or branch yet.
+        if s.round == 0:
+            if self.ci:
+                self._check_gate()
+            if s.pull_request:
+                self._check_repo()
+        elif self.ci and s.phase in (self.pipeline.gated.id, QUALITY):
+            # Before a turn of the gated step that may take half an hour, not after it.
+            self.ci.check_credentials()
 
     def _claim(self) -> None:
         s = self.state
@@ -1346,26 +1600,151 @@ class Workflow:
         log(f"run {s.run_id} in herdr workspace {s.workspace_id}")
         self._save()
 
-    def _collect_spec(self) -> None:
+    def _walk(self) -> None:
+        """Take the turn of the current step and of each one after it, looping back as the verdict says."""
+        s, p = self.state, self.pipeline
+        if s.phase == PUBLISH:
+            return
+        if s.round == 0 and (step := p.step(s.phase)).edits:
+            self._goto(step, 0)  # a run whose first step edits
+        while True:
+            n = s.round
+            if s.phase == QUALITY:
+                step, finished = p.gated, self._judge_quality(n)
+            else:
+                step = p.step(s.phase)
+                finished = self._take_turn(step, n)
+            if not finished:
+                continue
+            if (following := p.after(step)) is None:
+                return
+            self._goto(following, n)
+
+    def _take_turn(self, step: Step, n: int) -> bool:
+        """The step's turn in round n; False when the run goes on elsewhere than the next step."""
         s = self.state
+        out = self._step_turn(step, n)
+        if step.quality_gated and self.ci:
+            s.phase, s.quality_round = QUALITY, s.quality_round + 1
+            self._save()
+            return False
+        if step.loop_to is None:
+            return True
+        s.verdict = parse_verdict(out)
+        if s.verdict is None:
+            self._reject(step.path(s.dir, n), "does not start with a VERDICT line")
+        log(f"[{step.role}] round {n}: {s.verdict}")
+        if s.verdict != APPROVE and n < s.max_rounds:
+            s.quality_round = 0
+            self._goto(self.pipeline.step(step.loop_to), n + 1)
+            return False
+        return True
+
+    def _judge_quality(self, n: int) -> bool:
+        """The current quality round of round n; False when its gate sends the change back to the gated step."""
+        s = self.state
+        gate = self._quality(n, s.quality_round)
+        # As for review rounds: a saved round beyond a lowered limit ends here too.
+        if gate != GATE_OK and s.quality_round < s.max_quality_rounds:
+            s.phase = self.pipeline.gated.id
+            self._save()
+            return False
+        return True
+
+    def _goto(self, step: Step, n: int) -> None:
+        """Make step the current one, in round n, and save that; the first editing step starts round 1."""
+        s = self.state
+        if n == 0 and step.edits:
+            if s.pull_request:
+                self._switch_to_branch()
+            # Only here, before the first editing step and after the base branch was fast-forwarded:
+            # every later step, resumed or not, diffs against this base, even if the human commits
+            # the Builder's work meanwhile.
+            s.base = self.host.git_head(s.cwd)
+            n = 1
+        s.phase, s.round = step.id, n
+        self._save()
+
+    def _step_turn(self, step: Step, n: int) -> str:
+        s = self.state
+        text, fresh = self._prompts(step, n)
+        path = self._own_path(step, n)
+        if not step.human_paced:
+            return self._turn(step.role, text, path, s.turn_timeout, fresh_text=fresh)
+        label = self.pipeline.roles[step.role]
 
         def announce(how: str) -> None:
-            name, pane = s.agents["spec"]["name"], s.agents["spec"]["pane"]
+            name, pane = s.agents[step.role]["name"], s.agents[step.role]["pane"]
             self.herdr.focus(name)
             what = "restarted; the interview starts over" if how == RESTARTED else "is waiting for you"
-            self.notify(f"Spec Collector {what}", f"pane {pane}: {s.task}")
-            log(f"[spec] answer the Spec Collector in pane {pane}")
+            self.notify(f"{label} {what}", f"pane {pane}: {s.task}")
+            log(f"[{step.role}] answer the {label} in pane {pane}")
 
-        # The interview is paced by the human, so it has no deadline, and an idle
-        # collector is normal: it is waiting for the human's reply.
-        self._turn("spec", SPEC_PROMPT.format(task=s.task, cwd=s.cwd, spec_path=s.spec_path),
-                   s.spec_path, timeout=None, watch_stalls=False, announce=announce)
+        # Paced by the human, so the turn has no deadline, and an idle agent is normal:
+        # it is waiting for the human's reply.
+        return self._turn(step.role, text, path, timeout=None, fresh_text=fresh,
+                          watch_stalls=False, announce=announce)
+
+    def _own_path(self, step: Step, n: int) -> str:
+        """The file the step's turn in round n writes: for the gated step, its answer to the quality round if any."""
+        return step.path(self.state.dir, n, self.state.quality_round if step.quality_gated else 0)
+
+    def _prompts(self, step: Step, n: int) -> tuple[str, str | None]:
+        """The step's prompt for its turn in round n, and the one for a fresh session that has not seen the turns
+        before it."""
+        s = self.state
+        q = s.quality_round if step.quality_gated else 0
+        fill = {name: self._placeholder(name, step, n) for name in step.placeholders()}
+        quality = self._quality_note(n) if step.loop_to is not None else ""
+        first = step.prompt.format(**fill) + quality
+        if q:
+            follow = QUALITY_FIX_PROMPT.format(quality_path=s.quality_path(n, q), report_path=self._own_path(step, n))
+        elif n > 1:
+            follow = (step.again or step.prompt).format(**fill) + quality
+        else:
+            return first, None
+        fresh = [first]
+        if step.fresh_note:
+            fresh.append(step.fresh_note.format(**fill))
+        # A quality fix always asks for work that the first prompt does not.
+        if q or step.fresh_repeats_again:
+            fresh.append(follow)
+        return follow, "\n\n".join(fresh)
+
+    def _placeholder(self, name: str, step: Step, n: int) -> str:
+        """The value of a prompt placeholder (see Step) in the step's turn in round n."""
+        s = self.state
+        fixed = {"task": s.task, "cwd": s.cwd, "n": str(n), "approve": APPROVE, "changes": CHANGES_REQUESTED}
+        if name in fixed:
+            return fixed[name]
+        if name == "change":
+            return self._change_description()
+        if name == "path":
+            return self._own_path(step, n)
+        prefix, other = next((pre, st) for x, pre, st in self.pipeline.path_placeholders() if x == name)
+        if prefix == "prev_":
+            return self._reports(other, n - 1)[-1]
+        if prefix == "earlier_":
+            reports = [r for i in range(1, n) for r in self._reports(other, i)]
+            if other is step and step.quality_gated:
+                reports += [step.path(s.dir, n, j) for j in range(s.quality_round)]
+            return ", ".join(reports)
+        return self._own_path(step, n) if other is step else other.last_path(s.dir, n, s.quality_round)
+
+    def _reports(self, step: Step, n: int) -> list[str]:
+        """The step's files of round n, oldest first; for the gated step, its answers to quality rounds too."""
+        s = self.state
+        reports = [step.path(s.dir, n)]
+        # How many quality rounds an earlier round took is recorded only by the files it left.
+        while self.ci and step.quality_gated and self.host.read(step.path(s.dir, n, len(reports))) is not None:
+            reports.append(step.path(s.dir, n, len(reports)))
+        return reports
 
     def _switch_to_branch(self) -> None:
         s = self.state
-        spec = self.host.read(s.spec_path) or ""
+        spec = self._last_text(self.pipeline.contract, 0)
         s.branch = branch_name(spec_title(spec) or s.task, s.run_id)
-        # Already there when an earlier orchestrator stopped between the switch and saving the build phase.
+        # Already there when an earlier orchestrator stopped between the switch and saving the next phase.
         current = self.host.git(s.cwd, "rev-parse", "--abbrev-ref", "HEAD").strip()
         if current != s.branch:
             # Checked again: the human may have touched the tree during the interview.
@@ -1378,83 +1757,20 @@ class Workflow:
             self.host.git(s.cwd, "switch", "-c", s.branch)
         log(f"building on branch {s.branch}")
 
-    def _build_and_review(self) -> None:
-        s = self.state
-        while True:
-            n = s.round
-            if s.phase == "build":
-                q = s.quality_round
-                text, fresh = self._build_prompts(n, q)
-                self._turn("build", text, s.builder_report_path(n, q), s.turn_timeout, fresh_text=fresh)
-                if self.ci:
-                    s.phase, s.quality_round = "quality", q + 1
-                else:
-                    s.phase = "review"
-                self._save()
-            if s.phase == "quality":
-                gate = self._quality(n, s.quality_round)
-                # As for review rounds: a saved round beyond a lowered limit ends here too.
-                if gate != GATE_OK and s.quality_round < s.max_quality_rounds:
-                    s.phase = "build"
-                    self._save()
-                    continue
-                s.phase = "review"
-                self._save()
-            text, fresh = self._review_prompts(n)
-            review = self._turn("review", text, s.review_path(n), s.turn_timeout, fresh_text=fresh)
-            s.verdict = parse_verdict(review)
-            if s.verdict is None:
-                self._reject(s.review_path(n), "does not start with a VERDICT line")
-            log(f"[review] round {n}: {s.verdict}")
-            if s.verdict == APPROVE or n >= s.max_rounds:
-                break
-            s.phase, s.round, s.quality_round = "build", n + 1, 0
-            self._save()
-
-    def _build_prompts(self, n: int, q: int) -> tuple[str, str | None]:
-        """The Builder's prompt for its turn in round n that answers quality round q (none when 0),
-        and the one for a fresh session that has not seen the turns before it."""
-        s = self.state
-        report = s.builder_report_path(n, q)
-        first = BUILD_PROMPT.format(spec_path=s.spec_path, cwd=s.cwd, report_path=report)
-        if q:
-            follow = QUALITY_FIX_PROMPT.format(quality_path=s.quality_path(n, q), report_path=report)
-        elif n > 1:
-            follow = FIX_PROMPT.format(review_path=s.review_path(n - 1), report_path=report)
-        else:
-            return first, None
-        note = REBUILD_NOTE.format(n=n, reports=", ".join(self._earlier_reports(n, q)))
-        return follow, f"{first}\n\n{note}\n\n{follow}"
-
-    def _earlier_reports(self, n: int, q: int) -> list[str]:
-        """The Builder's reports before its turn in round n that answers quality round q, oldest first."""
-        s = self.state
-        reports = []
-        for i in range(1, n):
-            reports.append(s.build_path(i))
-            # How many quality rounds an earlier round took is recorded only by the files it left.
-            j = 1
-            while self.ci and self.host.read(s.quality_build_path(i, j)) is not None:
-                reports.append(s.quality_build_path(i, j))
-                j += 1
-        if q:
-            reports += [s.builder_report_path(n, j) for j in range(q)]
-        return reports
-
     def _publish(self) -> None:
         """Commit the change, merge the latest base into it, push its branch and open a pull request for it.
 
         Each step first checks whether an earlier orchestrator already took it, so a resume
         in this phase finishes the job instead of committing, merging or opening a second pull request.
         """
-        s = self.state
-        s.phase = "publish"
+        s, p = self.state, self.pipeline
+        s.phase = PUBLISH
         self._save()
         if not s.pr_url:
             # An earlier orchestrator stopped mid-merge: committing now would commit the conflict markers.
             if self.host.abort_merge(s.cwd):
                 log(f"aborted the merge an earlier orchestrator left in {s.cwd}")
-            spec = self.host.read(s.spec_path) or ""
+            spec = self._last_text(p.contract, 0)
             title = (spec_title(spec) or s.task.strip().split("\n", 1)[0] or s.run_id)[:72]
             if self.host.git(s.cwd, "status", "--porcelain").strip():
                 self.host.git(s.cwd, "add", "--all")
@@ -1471,8 +1787,9 @@ class Workflow:
                     f"the pull request will be a draft")
             self.host.git(s.cwd, "push", "--quiet", "--set-upstream", REMOTE, s.branch, timeout=NETWORK_TIMEOUT)
             quality = self.host.read(s.quality_path(s.round, s.quality_round)) if s.quality_round else None
-            body = pr_body(s, spec, self.host.read(s.last_report_path(s.round)) or "",
-                           self.host.read(s.review_path(s.round)) or "", quality)
+            report = self._last_text(p.last_edit, s.round)
+            verdict = self._last_text(p.verdict_step, s.round)
+            body = pr_body(s, spec, report, verdict, quality)
             s.pr_url = self.host.create_pr(s.cwd, s.base_branch, s.branch, title, body,
                                            draft=s.verdict != APPROVE or bool(s.conflicts))
             self._save()
@@ -1482,6 +1799,12 @@ class Workflow:
         # Leaves the checkout where the human had it, so the next run branches from there too.
         self.host.git(s.cwd, "switch", "--quiet", s.base_branch)
 
+    def _last_text(self, step: Step | None, n: int) -> str:
+        """The step's last file of round n, or "" for no step or no file."""
+        if step is None:
+            return ""
+        return self.host.read(step.last_path(self.state.dir, n, self.state.quality_round)) or ""
+
     def _close_workspace(self) -> None:
         # The pull request carries the change now; a failure here leaves only clutter behind.
         try:
@@ -1489,21 +1812,8 @@ class Workflow:
         except OrchestratorError as e:
             log(f"could not close herdr workspace {self.state.workspace_id}: {e}")
 
-    def _review_prompts(self, n: int) -> tuple[str, str | None]:
-        """The Reviewer's prompt for round n, and the one for a fresh session that has not seen rounds before n."""
-        s = self.state
-        fill = dict(spec_path=s.spec_path, change=self._change_description(),
-                    report_path=s.last_report_path(n), review_path=s.review_path(n),
-                    approve=APPROVE, changes=CHANGES_REQUESTED)
-        quality = self._quality_note(n)
-        first = REVIEW_PROMPT.format(**fill) + quality
-        if n == 1:
-            return first, None
-        note = REREVIEW_NOTE.format(n=n, reviews=", ".join(s.review_path(i) for i in range(1, n)))
-        return RECHECK_PROMPT.format(**fill) + quality, f"{first}\n\n{note}"
-
     def _quality_note(self, n: int) -> str:
-        """What the Reviewer is told of round n's last quality round: passed, or the findings left; "" without one."""
+        """What the verdict step hears of round n's last quality round: passed, or the findings left; "" without one."""
         s = self.state
         if not self.ci or not s.quality_round:
             return ""
@@ -1775,7 +2085,7 @@ class Workflow:
         earlier turns. announce(how) runs once the agent is ready, before any prompt.
         """
         s = self.state
-        label = ROLE_LABELS[role]
+        label = self.pipeline.roles[role]
         file = os.path.basename(path)
         # First, because the role may have written it while no orchestrator was watching.
         if (out := self._handoff(label, path)) is not None:
@@ -1869,12 +2179,14 @@ class Workflow:
     def _pane_for(self, role: str) -> str:
         """The pane for the role's next agent: its old one if that survives, else a new split."""
         s = self.state
-        old = (s.agents.get(role) or {}).get("pane") or (s.root_pane if role == "spec" else "")
+        roles = list(self.pipeline.roles)
+        i = roles.index(role)
+        old = (s.agents.get(role) or {}).get("pane") or (s.root_pane if i == 0 else "")
         if old and self.herdr.pane_exists(old):
             return old
-        # The layout: the Builder to the right of the root pane, the Reviewer below the Builder.
-        if role == "review":
-            parent, direction = (s.agents.get("build") or {}).get("pane"), "down"
+        # The layout: the second role to the right of the root pane, each further one below the one before.
+        if i >= 2:
+            parent, direction = (s.agents.get(roles[i - 1]) or {}).get("pane"), "down"
         else:
             parent, direction = s.root_pane, "right"
         survivors = [parent, s.root_pane, *(a["pane"] for a in s.agents.values())]
@@ -1890,7 +2202,7 @@ class Workflow:
         args = [*s.agent_args, *(extra_args or [])]
         if model := s.models.get(role):
             args += ["--model", model]
-        self.herdr.rename_pane(pane, ROLE_LABELS[role])
+        self.herdr.rename_pane(pane, self.pipeline.roles[role])
         ready = self.herdr.start_agent(name, pane, args)
         s.agents[role] = {"name": name, "pane": pane}
         self._save()
@@ -1925,7 +2237,7 @@ class Workflow:
 
     def _ask_human(self, role: str, what: str) -> None:
         pane = self.state.agents[role]["pane"]
-        self.notify(f"{ROLE_LABELS[role]} {what}", f"pane {pane}")
+        self.notify(f"{self.pipeline.roles[role]} {what}", f"pane {pane}")
         log(f"[{role}] {what} (pane {pane})")
 
     def _change_description(self) -> str:
@@ -1980,7 +2292,8 @@ class Workflow:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="orchestrator.py",
-        description="Spec Collector -> Builder -> Reviewer handoff between Claude Code sessions in herdr.")
+        description="Role-based handoff between Claude Code sessions in herdr; "
+                    "by default Spec Collector -> Builder -> Reviewer.")
     sub = p.add_subparsers(dest="command", required=True)
 
     target = argparse.ArgumentParser(add_help=False)
@@ -2005,6 +2318,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
     run = sub.add_parser("run", parents=[target, settings], help="run the handoff workflow for a task")
     run.add_argument("task", help="what to build, as you would tell the Spec Collector")
+    # Run only: a resumed run keeps the workflow it was started with.
+    run.add_argument("--workflow", choices=sorted(WORKFLOWS), default=DEFAULT_WORKFLOW.name,
+                     help=f"the roles and handoffs the run goes through (default {DEFAULT_WORKFLOW.name})")
     # Run only: a resumed run may already be on its own branch, so whether it ends in a pull request is fixed.
     run.add_argument("--no-pr", action="store_true",
                      help="leave the change uncommitted in the working tree and the workspace open, "
@@ -2040,9 +2356,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
-def role_models(args: argparse.Namespace) -> dict[str, str]:
-    """The model each role starts with; a role without one keeps Claude Code's default."""
-    models = {role: getattr(args, f"{role}_model") or args.model for role in ROLE_LABELS}
+def role_models(args: argparse.Namespace, roles=ROLE_LABELS) -> dict[str, str]:
+    """The model each role starts with; a role without one keeps Claude Code's default.
+
+    Only the default workflow's roles have a --ROLE-model flag; another workflow's other roles take --model.
+    """
+    models = {role: (getattr(args, f"{role}_model") if role in ROLE_LABELS else None) or args.model
+              for role in roles}
     return {role: m for role, m in models.items() if m}
 
 
@@ -2126,11 +2446,21 @@ def print_runs(runs: list[tuple[int, dict]], local_host: str, pid_alive, target:
                 outcome += f"; resume: {resume_command(s['run_id'], target)}"
         if s.get("pr_url"):
             outcome += f"  {s['pr_url']}"
-        rnd = f"round {s['round']}"
-        if s.get("quality_round") and s["phase"] in ("build", "quality"):
-            rnd += f" q{s['quality_round']}"
-        print(f"{s['run_id']}  {s['phase']:<7}  {rnd}  {outcome}")
+        if (workflow := s.get("workflow", DEFAULT_WORKFLOW.name)) != DEFAULT_WORKFLOW.name:
+            outcome += f"  [{workflow} workflow]"
+        print(f"{s['run_id']}  {s['phase']:<7}  {run_round(s)}  {outcome}")
         print(f"    {s['task'][:100]}")
+
+
+def run_round(s: dict) -> str:
+    """The run's round, and its quality round while it is in the quality loop or the gated step."""
+    rnd = f"round {s['round']}"
+    # A workflow this orchestrator lacks has no gated step known, so only phase quality shows the quality round.
+    pipeline = WORKFLOWS.get(s.get("workflow", DEFAULT_WORKFLOW.name))
+    gated = pipeline.gated.id if pipeline and pipeline.gated else QUALITY
+    if s.get("quality_round") and s["phase"] in (QUALITY, gated):
+        rnd += f" q{s['quality_round']}"
+    return rnd
 
 
 def find_run(runs: list[tuple[int, dict]], ref: str, cwd: str) -> tuple[int, dict]:
@@ -2151,6 +2481,7 @@ def resumable_state(runs: list[tuple[int, dict]], args: argparse.Namespace, cwd:
     """The saved state of the run to resume, with the flags given to resume applied."""
     age, saved = find_run(runs, args.run_ref, cwd)
     state = RunState.from_dict(saved)
+    pipeline = find_workflow(state.workflow)
     health = run_health(saved, age, local_host, pid_alive)
     if health and health[0] == RUNNING and not args.force:
         raise OrchestratorError(
@@ -2161,8 +2492,8 @@ def resumable_state(runs: list[tuple[int, dict]], args: argparse.Namespace, cwd:
         state.turn_timeout = args.timeout
     if args.permission_mode:
         state.agent_args = ["--permission-mode", args.permission_mode]
-    state.models = {**state.models, **role_models(args)}
-    if state.phase != "done" and state.max_rounds < state.round:
+    state.models = {**state.models, **role_models(args, pipeline.roles)}
+    if state.phase != DONE and state.max_rounds < state.round:
         raise OrchestratorError(f"run {state.run_id} is already in round {state.round}; "
                                 f"--max-rounds {state.max_rounds} is too low")
     if args.max_quality_rounds is not None:
@@ -2170,10 +2501,11 @@ def resumable_state(runs: list[tuple[int, dict]], args: argparse.Namespace, cwd:
             raise OrchestratorError(f"run {state.run_id} has no quality gate, so --max-quality-rounds does not apply")
         state.max_quality_rounds = args.max_quality_rounds
     q = state.quality_round
-    # In quality, round q is analysed whatever the limit; in build with q >= 1, the Builder is
+    # In quality, round q is analysed whatever the limit; in the gated step with q >= 1, it is
     # answering quality round q, and only a round q + 1 would judge that answer.
-    if (state.phase == "quality" and state.max_quality_rounds < q) or \
-            (state.phase == "build" and q >= 1 and state.max_quality_rounds <= q):
+    gated = pipeline.gated
+    if (state.phase == QUALITY and state.max_quality_rounds < q) or \
+            (gated and state.phase == gated.id and q >= 1 and state.max_quality_rounds <= q):
         raise OrchestratorError(f"run {state.run_id} is already in quality round {q} of its {state.phase} phase; "
                                 f"--max-quality-rounds {state.max_quality_rounds} is too low")
     # The herdr this resume addresses: the saved one may name the same herdr reached another way.
@@ -2201,16 +2533,19 @@ def main(argv: list[str]) -> int:
             return 0
 
         if args.command == "run":
-            state = RunState(new_run_id(), args.task, cwd, args.machine)
+            pipeline = WORKFLOWS[args.workflow]
+            state = RunState(new_run_id(), args.task, cwd, args.machine,
+                             phase=pipeline.steps[0].id, workflow=pipeline.name)
             state.max_rounds = args.max_rounds or DEFAULT_MAX_ROUNDS
             state.turn_timeout = args.timeout or DEFAULT_TURN_TIMEOUT
             state.agent_args = ["--permission-mode", args.permission_mode] if args.permission_mode else []
-            state.models = role_models(args)
+            state.models = role_models(args, pipeline.roles)
             state.pull_request = not args.no_pr
             state.quality_job = args.quality_gate
             state.max_quality_rounds = args.max_quality_rounds or DEFAULT_MAX_QUALITY_ROUNDS
         else:
             state = resumable_state(host.run_states(cwd), args, cwd, socket.gethostname(), pid_alive)
+            pipeline = find_workflow(state.workflow)
         workflow = Workflow(
             herdr, host, state, notify=notify_locally,
             max_rounds=state.max_rounds, turn_timeout=state.turn_timeout,
@@ -2227,7 +2562,8 @@ def main(argv: list[str]) -> int:
         return EXIT_INTERRUPTED
 
     conflict = f" (a draft: it conflicts with {state.base_branch})" if state.conflicts else ""
-    print(f"{verdict}: {state.pr_url or state.review_path(state.round)}{conflict}")
+    result = pipeline.result.last_path(state.dir, state.round, state.quality_round)
+    print(f"{verdict}: {state.pr_url or result}{conflict}")
     if verdict != APPROVE:
         return EXIT_CHANGES_REQUESTED
     return EXIT_CONFLICT if state.conflicts else 0

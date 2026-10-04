@@ -58,13 +58,14 @@ python orchestrator.py run --quality-gate AI-Agents-Orchestrator/py-ai-agents-or
 | `--spec-model MODEL` | Claude model for the Spec Collector. Overrides `--model`. |
 | `--build-model MODEL` | Claude model for the Builder. Overrides `--model`. |
 | `--review-model MODEL` | Claude model for the Reviewer. Overrides `--model`. |
+| `--workflow NAME` | `run` only: the workflow the run goes through (default `default`, the run described below). `--help` lists the choices; a resumed run keeps its workflow. A role of another workflow without its own `--ROLE-model` flag gets `--model`. |
 | `--no-pr` | `run` only: leave the change uncommitted and the workspace open instead of opening a pull request. Works outside git. |
 | `--quality-gate JOB` | `run` only: after each Builder turn, analyse the change with this Jenkins job, by its full name with folders, and SonarQube, and send the findings back to the Builder before the Reviewer. Needs `JENKINS_URL`, `JENKINS_USER`, `JENKINS_TOKEN`, `SONAR_HOST_URL` and `SONAR_TOKEN`, from the environment or `~/.config/ai-agents-orchestrator/ci.env`. |
 | `--max-quality-rounds N` | With the gate: SonarQube analyses per review round before the Reviewer gets the change anyway (default 3). |
 | `--force` | `resume` only: take over a run that still looks alive. |
 
-A run saves its settings. `resume` takes the same flags as `run` except `--no-pr` and `--quality-gate`, and a
-flag given to `resume` overrides the saved value; one left out keeps it.
+A run saves its settings. `resume` takes the same flags as `run` except `--no-pr`, `--quality-gate` and
+`--workflow`, and a flag given to `resume` overrides the saved value; one left out keeps it.
 
 Exit status: `0` approved, `3` changes still requested after the last round (the pull request is a draft), `4`
 approved but the pull request conflicts with its base branch (it is a draft), `1` error, `130` interrupted.
