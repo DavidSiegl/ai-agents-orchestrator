@@ -1,16 +1,19 @@
+import io
 import json
 import os
 import socket
 import subprocess
 import unittest
+import urllib.error
+import urllib.parse
 from dataclasses import asdict
 from unittest.mock import MagicMock, patch
 
 import orchestrator
 from orchestrator import (
-    APPROVE, CHANGES_REQUESTED, HEARTBEAT_SECONDS, STALE_SECONDS, Herdr, HerdrError, Host,
-    OrchestratorError, RunState, RunTakenOver, Workflow, branch_name, main, parse_args, parse_verdict,
-    pr_body, spec_title,
+    APPROVE, CHANGES_REQUESTED, CI, HEARTBEAT_SECONDS, STALE_SECONDS, CIError, Herdr, HerdrError, Host,
+    OrchestratorError, RunState, RunTakenOver, Workflow, branch_name, changed_lines, main, parse_args,
+    parse_gate, parse_verdict, pr_body, quality_report, spec_title,
 )
 
 
@@ -38,6 +41,9 @@ class FakeHost(Host):
     - `diverged`: the local branch and origin's each have commits the other lacks.
     - `conflicts`: the files a merge of `upstream` conflicts in.
     - `merge_head`: a merge is in progress, as one that conflicted and was never aborted leaves it.
+    - `remote`: origin's branches that `push --force` created, by name; `ls-remote` lists them.
+    - `diff`: what `git diff -U0` from the base to a snapshot prints.
+    - `has_origin`: whether the checkout has an origin at all.
     """
 
     def __init__(self, head="abc123", branch="main"):
@@ -54,6 +60,14 @@ class FakeHost(Host):
         self.diverged = False
         self.conflicts = []
         self.merge_head = False
+        self.snapshots = []  # (parent, message) of each snapshot, whose commit is snap<n>
+        self.remote = {}
+        self.diff = ""
+        self.has_origin = True
+
+    def snapshot(self, cwd, parent, message):
+        self.snapshots.append((parent, message))
+        return f"snap{len(self.snapshots)}"
 
     def read(self, path):
         return self.files.get(path)
@@ -102,6 +116,21 @@ class FakeHost(Host):
             case ("merge", "--abort"):
                 self.merge_head = False
                 self.changed -= {f"/proj/{f}" for f in self.conflicts}
+            case ("push", "--quiet", "--force", "origin", refspec):
+                commit, ref = refspec.split(":")
+                self.remote[ref.removeprefix("refs/heads/")] = commit
+            case ("push", "--quiet", "origin", "--delete", ref):
+                if self.remote.pop(ref.removeprefix("refs/heads/"), None) is None:
+                    return completed(stderr=f"error: unable to delete '{ref}': remote ref does not exist",
+                                     returncode=1)
+            case ("ls-remote", "--heads", "origin"):
+                return completed("".join(f"{c}\trefs/heads/{b}\n" for b, c in self.remote.items()))
+            case ("-c", "core.quotePath=false", "diff", *_):
+                return completed(self.diff)
+            case ("remote", "get-url", "origin"):
+                if not self.has_origin:
+                    return completed(stderr="error: No such remote 'origin'", returncode=2)
+                return completed("git@github.com:o/r.git\n")
         return completed()
 
     def create_pr(self, cwd, base, head, title, body, draft):
@@ -1685,6 +1714,1246 @@ class TestAtomicWrite(unittest.TestCase):
             [(age, state)] = host.run_states(d)
             self.assertEqual(state["phase"], "build")
             self.assertLess(age, 5)
+
+
+
+# ---------------------------------------------------------------------------
+# The quality gate
+# ---------------------------------------------------------------------------
+
+JENKINS = "https://jenkins.example"
+SONAR = "https://sonar.example"
+JENKINS_TOKEN = "jenkins-secret-token"
+SONAR_TOKEN = "sonar-secret-token"
+CREDENTIALS = {"JENKINS_URL": f"{JENKINS}/", "JENKINS_USER": "agents", "JENKINS_TOKEN": JENKINS_TOKEN,
+               "SONAR_HOST_URL": SONAR, "SONAR_TOKEN": SONAR_TOKEN}
+JOB = "AI-Agents-Orchestrator/py-ai-agents-orchestrator-quality"
+JOB_PATH = "/job/AI-Agents-Orchestrator/job/py-ai-agents-orchestrator-quality/"
+PROJECT = "py-ai-agents-orchestrator-a1b2c3"
+BASE_REF = "orchestrator-ci/a1b2c3-base"
+REF_1_1 = "orchestrator-ci/a1b2c3-1-q1"
+
+
+class FakeResponse:
+    def __init__(self, body=b"", headers=None):
+        self.body = body if isinstance(body, bytes) else body.encode()
+        self.headers = headers or {}
+
+    def read(self):
+        return self.body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def outcome(gate="OK", *, report=True, result=None, task="SUCCESS", issues=(), conditions=(), tests=(),
+            test_report=True, console="", coverage=None, polls=2):
+    """What one Jenkins build does, and the SonarQube analysis it makes.
+
+    report: whether it archives report-task.txt; result defaults to what the Jenkinsfile ends with.
+    task: how its SonarQube task ends. tests: (className, name, errorDetails) of each failing test.
+    polls: how many polls still see it building.
+    """
+    if result is None:
+        result = ("SUCCESS" if gate == "OK" else "UNSTABLE") if report else "FAILURE"
+    return dict(gate=gate, report=report, result=result, task=task, issues=list(issues),
+                conditions=list(conditions), tests=list(tests), test_report=test_report, console=console,
+                polls=polls,
+                coverage=coverage or {"new_coverage": "87.5", "new_lines_to_cover": "8", "new_uncovered_lines": "1"})
+
+
+RED = dict(gate="ERROR", conditions=[{"status": "ERROR", "metricKey": "new_coverage", "comparator": "LT",
+                                      "errorThreshold": "80", "actualValue": "50.0"}])
+
+
+def issue(path, line=None, message="fix this", severity="MAJOR", rule="python:S1"):
+    out = {"component": f"{PROJECT}:{path}" if path else PROJECT, "message": message, "rule": rule,
+           "severity": severity}
+    if line is not None:
+        out["line"] = line
+    return out
+
+
+class FakeCI:
+    """Jenkins and SonarQube behind urlopen; each triggered build plays the next scripted outcome.
+
+    - `base`: the outcome of a build of the base; `outcomes`: those of the change's builds in order, OK once
+      they run out.
+    - `down`: the servers, "jenkins" or "sonar", that do not answer.
+    - `fail`: {(method, path): status} for requests answered with an HTTP error.
+    - `job_gone`: the job was deleted; `forgotten`: Jenkins forgot its queue items.
+
+    Every request is recorded as (method, url, form) in `requests`, and by a short name in `names`.
+    """
+
+    def __init__(self):
+        self.requests, self.names, self.auth = [], [], []
+        self.parameters = list(orchestrator.JOB_PARAMETERS)
+        self.base = outcome()
+        self.outcomes = []
+        self.down = set()
+        self.fail = {}
+        self.job_gone = False
+        self.forgotten = False
+        self.builds = {}
+        self.queue = {}
+        self.tasks = {}
+        self.projects = {orchestrator.SONAR_PROJECT}
+        self.current = None  # the outcome whose issues and measures the project shows
+        self.number = 40
+
+    def add_build(self, ref, version, out):
+        """A build as Jenkins has it; returns its number n, whose SonarQube task is task-<n>."""
+        self.number += 1
+        n = self.number
+        self.builds[n] = {"ref": ref, "version": version, "left": out["polls"], **out}
+        if out["report"]:
+            self.tasks[f"task-{n}"] = {"left": 1, "status": out["task"], "analysis": f"analysis-{n}", "out": out}
+        return n
+
+    def triggered(self, version):
+        return [b for b in self.builds.values() if b["version"] == version]
+
+    def jenkins_requests(self):
+        return [url for _, url, _ in self.requests if url.startswith(JENKINS)]
+
+    def __call__(self, req, timeout=None):
+        assert timeout == orchestrator.HTTP_TIMEOUT
+        method, url = req.get_method(), req.full_url
+        form = dict(urllib.parse.parse_qsl(req.data.decode())) if req.data else {}
+        self.requests.append((method, url, form))
+        self.auth.append(req.get_header("Authorization"))
+        parts = urllib.parse.urlsplit(url)
+        query = dict(urllib.parse.parse_qsl(parts.query))
+        server = "jenkins" if url.startswith(JENKINS) else "sonar"
+        if server in self.down:
+            # A reason that quotes a token, to show it never gets any further.
+            self.names.append(f"{server} down")
+            raise urllib.error.URLError(f"[Errno 111] Connection refused (token {JENKINS_TOKEN})")
+        if (method, parts.path) in self.fail:
+            self.names.append(f"{method} {parts.path} failing")
+            return self.error(url, self.fail[(method, parts.path)])
+        name, answer = (self.jenkins if server == "jenkins" else self.sonar)(method, parts.path, query, form)
+        self.names.append(name)
+        if isinstance(answer, int):
+            return self.error(url, answer)
+        if isinstance(answer, FakeResponse):
+            return answer
+        return FakeResponse(b"" if answer is None else json.dumps(answer))
+
+    def error(self, url, status):
+        body = json.dumps({"errors": [{"msg": f"refused with {status}"}]}).encode()
+        raise urllib.error.HTTPError(url, status, "Error", {}, io.BytesIO(body))
+
+    def jenkins(self, method, path, query, form):
+        if path.startswith("/queue/item/"):
+            item = int(path.split("/")[3])
+            if self.forgotten or item not in self.queue:
+                return "queue", 404
+            waiting = self.queue[item]
+            if waiting["left"]:
+                waiting["left"] -= 1
+                return "queue", {"why": "Waiting for next available executor"}
+            return "queue", {"executable": {"number": waiting["number"]}}
+        if not path.startswith(JOB_PATH) or self.job_gone:
+            return f"{method} {path}", 404
+        rest = path[len(JOB_PATH):]
+        if rest == "api/json" and "property" in query.get("tree", ""):
+            return "parameters", {"property": [{}, {"parameterDefinitions": [{"name": p} for p in self.parameters]}]}
+        if rest == "api/json":
+            builds = sorted(self.builds.items(), reverse=True)[:20]
+            return "find", {"builds": [{"number": n, "actions": [{}, {"parameters": [
+                {"name": "GIT_REF", "value": b["ref"]}]}]} for n, b in builds]}
+        if rest == "buildWithParameters" and method == "POST":
+            version = form["SONAR_PROJECT_VERSION"]
+            out = self.base if version == "base" else (self.outcomes.pop(0) if self.outcomes else outcome())
+            n = self.add_build(form["GIT_REF"], version, out)
+            self.queue[900 + n] = {"left": 1, "number": n}
+            return f"trigger {version}", FakeResponse(headers={"Location": f"{JENKINS}/queue/item/{900 + n}/"})
+        n, _, what = rest.partition("/")
+        build = self.builds.get(int(n)) if n.isdigit() else None
+        if build is None:
+            return f"{method} {path}", 404
+        if what == "api/json":
+            if build["left"]:
+                build["left"] -= 1
+                return "build", {"building": True, "result": None}
+            return "build", {"building": False, "result": build["result"]}
+        if what == "artifact/.scannerwork/report-task.txt":
+            if not build["report"]:
+                return "report", 404
+            return "report", FakeResponse(f"projectKey={PROJECT}\nceTaskId=task-{n}\n")
+        if what == "testReport/api/json":
+            if not build["test_report"]:
+                return "tests", 404
+            cases = [{"className": c, "name": t, "status": "FAILED", "errorDetails": e} for c, t, e in build["tests"]]
+            return "tests", {"suites": [{"cases": [*cases, {"className": "t", "name": "ok", "status": "PASSED"}]}]}
+        if what == "consoleText":
+            return "console", FakeResponse(build["console"])
+        return f"{method} {path}", 404
+
+    def sonar(self, method, path, query, form):
+        match path:
+            case "/api/authentication/validate":
+                return "validate", {"valid": True}
+            case "/api/qualitygates/get_by_project":
+                return "template gate", {"qualityGate": {"name": "Sonar way", "default": True}}
+            case "/api/projects/create":
+                if form["project"] in self.projects:
+                    return "create", 400
+                self.projects.add(form["project"])
+                return "create", {"project": {"key": form["project"]}}
+            case "/api/components/show":
+                return "show", {"component": {}} if query["component"] in self.projects else 404
+            case "/api/qualitygates/select":
+                return "select gate", None
+            case "/api/new_code_periods/set":
+                return f"new code {form['type']}", None
+            case "/api/ce/task":
+                task = self.tasks[query["id"]]
+                if task["left"]:
+                    task["left"] -= 1
+                    return "task", {"task": {"id": query["id"], "status": "IN_PROGRESS"}}
+                answer = {"id": query["id"], "status": task["status"]}
+                if task["status"] == "SUCCESS":
+                    answer["analysisId"] = task["analysis"]
+                else:
+                    answer["errorMessage"] = f"the report was rejected for {SONAR_TOKEN}"
+                return "task", {"task": answer}
+            case "/api/qualitygates/project_status":
+                self.current = next(t["out"] for t in self.tasks.values() if t["analysis"] == query["analysisId"])
+                return "gate", {"projectStatus": {"status": self.current["gate"],
+                                                  "conditions": self.current["conditions"]}}
+            case "/api/issues/search":
+                found = self.current["issues"]
+                size, page = int(query["ps"]), int(query["p"])
+                return "issues", {"paging": {"pageIndex": page, "pageSize": size, "total": len(found)},
+                                  "issues": found[(page - 1) * size:page * size]}
+            case "/api/measures/component":
+                measures = [{"metric": k, "period": {"index": 1, "value": v}}
+                            for k, v in self.current["coverage"].items()]
+                return "coverage", {"component": {"key": query["component"], "measures": measures}}
+            case "/api/projects/delete":
+                self.projects.discard(form["project"])
+                return "delete project", None
+        return f"{method} {path}", 404
+
+
+def ci_for(fake, env=None):
+    return CI(JOB, env=CREDENTIALS if env is None else env, urlopen=fake)
+
+
+def gated(script, *, fake=None, env=None, **kw):
+    """make_workflow with the quality gate on a FakeCI."""
+    fake = fake or FakeCI()
+    wf, herdr, host, notes = make_workflow(script, ci=ci_for(fake, env), **kw)
+    return wf, herdr, host, fake, notes
+
+
+def fix_turn(n, q):
+    """The Builder's answer to quality-<n>-<q>.md."""
+    def turn(prompt, state, host):
+        host.write("/proj/limiter.py", f"version {n}.{q}")
+        return writes(lambda s: s.quality_build_path(n, q), f"report {n} q{q}")(prompt, state, host)
+    return turn
+
+
+def collapsed(names):
+    """The names without repeats in a row, which polls make."""
+    return [n for i, n in enumerate(names) if i == 0 or n != names[i - 1]]
+
+
+def quality_state(q=1, ci=None, **kw):
+    """A run saved in quality round q of round 1, its project and baseline in place."""
+    kw.setdefault("quality_baseline", "analysis-base")
+    return saved_run("quality", 1, agents=("spec", "build"), quality_job=JOB, quality_round=q,
+                     quality_project=PROJECT, ci=ci or {}, **kw)
+
+
+def resume_gated(state, script, fake, **kw):
+    """resume with the gate on fake; the ref in flight, if any, is on origin."""
+    host = kw.pop("host", None) or FakeHost()
+    if state.ci.get("ref"):
+        host.remote.setdefault(state.ci["ref"], state.ci["sha"])
+    return resume(state, script, ci=ci_for(fake), max_quality_rounds=state.max_quality_rounds, host=host,
+                  files={lambda s: s.build_path(1): "report 1", **kw.pop("files", {})}, **kw)
+
+
+def leaks(text):
+    return [t for t in (JENKINS_TOKEN, SONAR_TOKEN) if t in text]
+
+
+class TestQualityGate(unittest.TestCase):
+    def test_without_the_gate_no_request_is_made(self):
+        fake = FakeCI()
+        with patch("urllib.request.urlopen", fake):
+            wf, herdr, host, _ = make_workflow({
+                "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]})
+            self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(fake.requests, [])
+        saved = json.loads(host.files[f"{wf.state.dir}/state.json"])
+        self.assertEqual((saved["quality_job"], saved["quality_round"], saved["ci"]), (None, 0, {}))
+        self.assertFalse(host.snapshots)
+
+    def test_gate_passes_first_time(self):
+        seen = []
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "build": [build_turn(1)], "review": [recording(review_turn(1, APPROVE), seen)]})
+
+        self.assertEqual(wf.run(), APPROVE)
+
+        self.assertEqual(collapsed(fake.names), [
+            "parameters", "validate",
+            "template gate", "create", "select gate", "new code PREVIOUS_VERSION",
+            "trigger base", "queue", "build", "report", "task",
+            "trigger change", "queue", "build", "report", "task", "gate", "issues", "coverage", "tests",
+            "delete project"])
+        triggers = [form for method, url, form in fake.requests if url.endswith("/buildWithParameters")]
+        self.assertEqual(triggers, [
+            {"GIT_REF": BASE_REF, "SONAR_PROJECT_KEY": PROJECT, "SONAR_PROJECT_VERSION": "base"},
+            {"GIT_REF": REF_1_1, "SONAR_PROJECT_KEY": PROJECT, "SONAR_PROJECT_VERSION": "change"}])
+        self.assertIn(("push", "--quiet", "--force", "origin", f"abc123:refs/heads/{BASE_REF}"), host.git_calls)
+        self.assertIn(("push", "--quiet", "--force", "origin", f"snap1:refs/heads/{REF_1_1}"), host.git_calls)
+        self.assertEqual(host.snapshots[0][0], "abc123")
+        state = wf.state
+        self.assertTrue(host.files[state.quality_path(1, 1)].startswith("GATE: OK\n"))
+        self.assertIn(orchestrator.QUALITY_PASSED_NOTE.format(quality_path=state.quality_path(1, 1)), seen[0])
+        self.assertIn(f"The Builder's report is in {state.build_path(1)}", seen[0])
+        self.assertIn("<summary>Quality gate (round 1)</summary>", host.prs[0]["body"])
+        # done: the refs and the run's project are gone.
+        self.assertEqual(host.remote, {})
+        self.assertNotIn(PROJECT, fake.projects)
+        saved = json.loads(host.files[f"{state.dir}/state.json"])
+        self.assertEqual((saved["phase"], saved["quality_project"], saved["ci"]), ("done", None, {}))
+        self.assertEqual(saved["quality_baseline"], "analysis-41")
+
+    def test_credentials_travel_only_in_the_authorization_header(self):
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]})
+        wf.run()
+
+        import base64
+        jenkins = "Basic " + base64.b64encode(f"agents:{JENKINS_TOKEN}".encode()).decode()
+        sonar = "Basic " + base64.b64encode(f"{SONAR_TOKEN}:".encode()).decode()
+        for (method, url, form), auth in zip(fake.requests, fake.auth):
+            self.assertEqual(auth, jenkins if url.startswith(JENKINS) else sonar)
+            self.assertFalse(leaks(url + json.dumps(form)))
+        for path, text in host.files.items():
+            self.assertFalse(leaks(text), path)
+
+    def test_jenkins_requests_go_under_the_jobs_folder(self):
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]})
+        wf.run()
+
+        job = f"{JENKINS}{JOB_PATH}"
+        urls = fake.jenkins_requests()
+        # The queue items Jenkins names in Location are its own, outside any job.
+        self.assertEqual([u for u in urls if not u.startswith(job)],
+                         [u for u in urls if u.startswith(f"{JENKINS}/queue/item/")])
+        self.assertTrue(any(u.startswith(job) for u in urls))
+
+    def test_gate_fails_then_passes(self):
+        host = FakeHost()
+        host.diff = ("diff --git a/limiter.py b/limiter.py\n--- a/limiter.py\n+++ b/limiter.py\n"
+                     "@@ -2 +2,2 @@\n-old\n+new\n+newer\n"
+                     "diff --git a/new_module.py b/new_module.py\nnew file mode 100644\n--- /dev/null\n"
+                     "+++ b/new_module.py\n@@ -0,0 +1 @@\n+x\n")
+        fake = FakeCI()
+        fake.outcomes = [outcome(**RED, issues=[
+            issue("limiter.py", 9, "on a line the change did not add"),
+            issue("limiter.py", 3, "on an added line"),
+            issue("new_module.py", 1, "in a file the Builder created"),
+            issue("limiter.py", None, "on a touched file"),
+            issue("other.py", None, "on an untouched file"),
+            issue(None, None, "on the project"),
+        ]), outcome()]
+        builds, reviews = [], []
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "build": [build_turn(1), recording(fix_turn(1, 1), builds)],
+            "review": [recording(review_turn(1, APPROVE), reviews)]}, fake=fake, host=host)
+
+        self.assertEqual(wf.run(), APPROVE)
+
+        state = wf.state
+        quality = host.files[state.quality_path(1, 1)]
+        self.assertTrue(quality.startswith("GATE: ERROR\n"))
+        self.assertIn("1. `limiter.py (the whole file)` MAJOR python:S1: on a touched file\n"
+                      "2. `limiter.py:3` MAJOR python:S1: on an added line\n"
+                      "3. `new_module.py:1` MAJOR python:S1: in a file the Builder created\n", quality)
+        self.assertIn("3 other open issues in the project are not on lines this change added", quality)
+        self.assertNotIn("did not add", quality)
+        self.assertIn("`new_coverage` is 50.0; the gate wants at least 80.", quality)
+        self.assertEqual(builds, [orchestrator.QUALITY_FIX_PROMPT.format(
+            quality_path=state.quality_path(1, 1), report_path=state.quality_build_path(1, 1))])
+        self.assertIn(f"The Builder's report is in {state.quality_build_path(1, 1)}", reviews[0])
+        self.assertIn(orchestrator.QUALITY_PASSED_NOTE.format(quality_path=state.quality_path(1, 2)), reviews[0])
+        self.assertTrue(host.files[state.quality_path(1, 2)].startswith("GATE: OK"))
+        self.assertEqual([b["ref"] for b in fake.triggered("change")], [REF_1_1, "orchestrator-ci/a1b2c3-1-q2"])
+        self.assertEqual(len(fake.triggered("base")), 1)
+
+    def test_rounds_run_out(self):
+        fake = FakeCI()
+        fake.outcomes = [outcome(**RED), outcome(**RED)]
+        reviews = []
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "build": [build_turn(1), fix_turn(1, 1)],
+            "review": [recording(review_turn(1, APPROVE), reviews)]}, fake=fake, max_quality_rounds=2)
+
+        self.assertEqual(wf.run(), APPROVE)
+
+        self.assertEqual(herdr.calls.count(("prompt", "build-a1b2c3")), 2)
+        state = wf.state
+        self.assertIn(orchestrator.QUALITY_UNRESOLVED_NOTE.format(quality_path=state.quality_path(1, 2)), reviews[0])
+        self.assertIn(f"The Builder's report is in {state.quality_build_path(1, 1)}", reviews[0])
+        self.assertTrue(host.prs[0]["body"].count("GATE: ERROR"), 1)
+
+    def test_a_later_round_has_its_own_quality_rounds_and_no_new_baseline(self):
+        reviews = []
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "build": [build_turn(1), build_turn(2)],
+            "review": [review_turn(1, CHANGES_REQUESTED), recording(review_turn(2, APPROVE), reviews)]})
+
+        self.assertEqual(wf.run(), APPROVE)
+
+        self.assertIn(("push", "--quiet", "--force", "origin", "snap2:refs/heads/orchestrator-ci/a1b2c3-2-q1"),
+                      host.git_calls)
+        self.assertEqual(len(fake.triggered("base")), 1)
+        self.assertIn(f"the new report is in {wf.state.build_path(2)}", reviews[0])
+        self.assertIn(orchestrator.QUALITY_PASSED_NOTE.format(quality_path=wf.state.quality_path(2, 1)), reviews[0])
+
+    def preflight_fails(self, pattern, *, fake=None, env=None, host=None, **kw):
+        wf, herdr, host, fake, _ = gated({"spec": []}, fake=fake, env=env, host=host, **kw)
+        with self.assertRaisesRegex(OrchestratorError, pattern) as cm:
+            wf.run()
+        self.assertEqual(herdr.calls, [])
+        self.assertFalse(leaks(str(cm.exception)))
+        self.assertRegex(json.loads(host.files[f"{wf.state.dir}/state.json"])["error"], pattern)
+        return fake
+
+    def test_missing_credentials_fail_before_the_interview(self):
+        env = {k: v for k, v in CREDENTIALS.items() if k not in ("JENKINS_USER", "SONAR_TOKEN")}
+        fake = self.preflight_fails("the quality gate needs JENKINS_USER, SONAR_TOKEN in", env=env)
+        self.assertEqual(fake.requests, [])
+
+    def test_unreachable_jenkins_fails_before_the_interview(self):
+        fake = FakeCI()
+        fake.down = {"jenkins"}
+        self.preflight_fails("Jenkins at JENKINS_URL failed the preflight: GET .*Connection refused", fake=fake)
+
+    def test_unreachable_sonarqube_fails_before_the_interview(self):
+        fake = FakeCI()
+        fake.down = {"sonar"}
+        self.preflight_fails("SonarQube at SONAR_HOST_URL failed the preflight", fake=fake)
+
+    def test_job_without_the_parameters_fails_before_the_interview(self):
+        fake = FakeCI()
+        fake.parameters = ["GIT_REF"]
+        self.preflight_fails("lacks the parameters SONAR_PROJECT_KEY, SONAR_PROJECT_VERSION; build it once by hand",
+                             fake=fake)
+
+    def test_missing_job_fails_before_the_interview(self):
+        fake = FakeCI()
+        fake.job_gone = True
+        self.preflight_fails(f"there is no Jenkins job {JOB} at JENKINS_URL: .* HTTP 404", fake=fake)
+
+    def test_not_a_git_repository_is_refused(self):
+        for pull_request in (True, False):
+            with self.subTest(pull_request=pull_request):
+                fake = self.preflight_fails("the quality gate needs a git repository", host=FakeHost(head=None),
+                                            pull_request=pull_request)
+                self.assertEqual(fake.requests, [])
+
+    def test_no_pr_needs_a_clean_tree_and_an_origin(self):
+        host = FakeHost()
+        host.changed.add("/proj/wip.py")
+        self.preflight_fails("uncommitted changes", host=host, pull_request=False)
+        host = FakeHost()
+        host.has_origin = False
+        self.preflight_fails("pushes snapshots to origin, and /proj has no origin", host=host, pull_request=False)
+
+    def test_no_pr_pushes_snapshots_without_a_run_branch(self):
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]},
+            pull_request=False)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertIn(("push", "--quiet", "--force", "origin", f"snap1:refs/heads/{REF_1_1}"), host.git_calls)
+        self.assertFalse([c for c in host.git_calls if c[0] in ("switch", "commit", "add")])
+        self.assertEqual(host.changed, {"/proj/limiter.py"})
+        self.assertEqual(host.remote, {})
+        self.assertNotIn(PROJECT, fake.projects)
+
+    def test_job_deleted_mid_run_fails_at_once(self):
+        fake = FakeCI()
+
+        def spec_then_job_deleted(prompt, state, host):
+            fake.job_gone = True
+            return spec_turn(prompt, state, host)
+        wf, *_ = gated({"spec": [spec_then_job_deleted], "build": [build_turn(1)]}, fake=fake)
+
+        with self.assertRaisesRegex(OrchestratorError, f"Jenkins job {JOB} is gone: POST .*HTTP 404"):
+            wf.run()
+        self.assertLess(wf.clock.now, 60)
+
+    def jenkins_down_after_the_change_is_triggered(self, fake, wf, back_after=None):
+        down_at = []
+
+        def flaky():
+            if fake.triggered("change") and not down_at:
+                fake.down.add("jenkins")
+                down_at.append(wf.clock.now)
+            elif back_after and down_at and wf.clock.now >= down_at[0] + back_after:
+                fake.down.discard("jenkins")
+        wf.clock.hooks.append(flaky)
+
+    def test_jenkins_unreachable_mid_round_then_back(self):
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]})
+        self.jenkins_down_after_the_change_is_triggered(fake, wf, back_after=300)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertIn("jenkins down", fake.names)
+        self.assertTrue(host.files[wf.state.quality_path(1, 1)].startswith("GATE: OK"))
+
+    def test_jenkins_unreachable_until_the_round_times_out(self):
+        wf, herdr, host, fake, _ = gated({"spec": [spec_turn], "build": [build_turn(1)]})
+        self.jenkins_down_after_the_change_is_triggered(fake, wf)
+
+        with self.assertRaisesRegex(OrchestratorError, "quality gate: waiting for Jenkins to start the build of "
+                                    f"{REF_1_1} did not finish within 1200s") as cm:
+            wf.run()
+        self.assertIn("Connection refused (token ****)", str(cm.exception))
+        saved_text = host.files[f"{wf.state.dir}/state.json"]
+        saved = json.loads(saved_text)
+        self.assertEqual(saved["ci"], {"ref": REF_1_1, "sha": "snap1", "queue_url": f"{JENKINS}/queue/item/942/"})
+        self.assertEqual(saved["phase"], "quality")
+        for path, text in host.files.items():
+            self.assertFalse(leaks(text), path)
+        # A failed run keeps its project and the ref in flight, for a resume.
+        self.assertIn(PROJECT, fake.projects)
+        self.assertIn(REF_1_1, host.remote)
+
+    def test_heartbeat_during_a_twenty_minute_build(self):
+        fake = FakeCI()
+        fake.outcomes = [outcome(polls=110)]
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, fake=fake)
+        beats = []
+        orig = host.write
+
+        def write(path, text):
+            if path.endswith("state.json"):
+                beats.append(wf.clock.now)
+            orig(path, text)
+        host.write = write
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertGreater(wf.clock.now, 1100)
+        gaps = [b - a for a, b in zip(beats, beats[1:])]
+        self.assertLessEqual(max(gaps), HEARTBEAT_SECONDS + orchestrator.CI_POLL_SECONDS)
+
+    def test_build_failed_before_the_analysis_goes_back_to_the_builder(self):
+        fake = FakeCI()
+        console = "\n".join(f"line {i}" for i in range(100)) + f"\nSONAR_TOKEN={SONAR_TOKEN}\nSyntaxError: bad"
+        fake.outcomes = [outcome(report=False, console=console, test_report=False), outcome()]
+        builds = []
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "build": [build_turn(1), recording(fix_turn(1, 1), builds)],
+            "review": [review_turn(1, APPROVE)]}, fake=fake)
+
+        self.assertEqual(wf.run(), APPROVE)
+        quality = host.files[wf.state.quality_path(1, 1)]
+        self.assertTrue(quality.startswith("GATE: BUILD_FAILED\n"))
+        self.assertIn("ended FAILURE before the SonarQube analysis", quality)
+        self.assertIn("SONAR_TOKEN=****\nSyntaxError: bad", quality)
+        self.assertNotIn("line 41\n", quality)
+        self.assertIn("````\nline 42\n", quality)
+        self.assertFalse(leaks(quality))
+        self.assertIn(wf.state.quality_path(1, 1), builds[0])
+        # Only the second change build was analysed.
+        self.assertEqual(fake.names.count("gate"), 1)
+
+    def test_build_failed_with_failing_tests_has_no_console(self):
+        fake = FakeCI()
+        fake.outcomes = [outcome(report=False, console="x", tests=[("tests.t", "test_a", "AssertionError: 1 != 2")])]
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "build": [build_turn(1), fix_turn(1, 1)], "review": [review_turn(1, APPROVE)]},
+            fake=fake)
+
+        wf.run()
+        quality = host.files[wf.state.quality_path(1, 1)]
+        self.assertIn("- `tests.t.test_a`: AssertionError: 1 != 2", quality)
+        self.assertNotIn("console", quality)
+        self.assertNotIn("console", fake.names)
+
+    def test_base_build_failed_fails_the_run(self):
+        fake = FakeCI()
+        fake.base = outcome(report=False)
+        wf, herdr, host, fake, _ = gated({"spec": [spec_turn], "build": [build_turn(1)]}, fake=fake)
+
+        with self.assertRaisesRegex(OrchestratorError, "build #41 of the base commit abc123 ended FAILURE"):
+            wf.run()
+        saved = json.loads(host.files[f"{wf.state.dir}/state.json"])
+        self.assertEqual(saved["ci"], {"ref": BASE_REF, "sha": "abc123", "rejected": [41]})
+        self.assertIsNone(saved["quality_baseline"])
+
+        # Once the base builds, a resume triggers a new build rather than adopting the failed one.
+        fake.base = outcome()
+        wf2, herdr2, *_ = resume_gated(RunState.from_dict(saved), {"review": [review_turn(1, APPROVE)]}, fake,
+                                       host=host)
+        self.assertEqual(wf2.run(), APPROVE)
+        self.assertEqual(len(fake.triggered("base")), 2)
+
+    def test_aborted_build_without_a_report_fails_the_run(self):
+        fake = FakeCI()
+        fake.outcomes = [outcome(report=False, result="ABORTED")]
+        wf, herdr, host, fake, _ = gated({"spec": [spec_turn], "build": [build_turn(1)]}, fake=fake)
+
+        with self.assertRaisesRegex(OrchestratorError, f"build #42 of {REF_1_1} was aborted before"):
+            wf.run()
+        saved = json.loads(host.files[f"{wf.state.dir}/state.json"])
+        self.assertEqual(saved["ci"], {"ref": REF_1_1, "sha": "snap1", "rejected": [42]})
+        self.assertNotIn(wf.state.quality_path(1, 1), host.files)
+        self.assertEqual(herdr.calls.count(("prompt", "build-a1b2c3")), 1)
+
+    def test_report_is_followed_whatever_the_result(self):
+        for result in ("FAILURE", "ABORTED"):
+            with self.subTest(result=result):
+                fake = FakeCI()
+                fake.outcomes = [outcome(result=result)]
+                wf, herdr, host, fake, _ = gated({
+                    "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, fake=fake)
+                self.assertEqual(wf.run(), APPROVE)
+                self.assertTrue(host.files[wf.state.quality_path(1, 1)].startswith("GATE: OK"))
+
+    def test_failed_sonarqube_task_fails_the_run(self):
+        fake = FakeCI()
+        fake.outcomes = [outcome(task="FAILED")]
+        wf, herdr, host, fake, _ = gated({"spec": [spec_turn], "build": [build_turn(1)]}, fake=fake)
+
+        with self.assertRaisesRegex(OrchestratorError, "SonarQube task task-42 of Jenkins build #42 ended FAILED: "
+                                    r"the report was rejected for \*\*\*\*"):
+            wf.run()
+        saved = json.loads(host.files[f"{wf.state.dir}/state.json"])
+        self.assertEqual(saved["ci"], {"ref": REF_1_1, "sha": "snap1", "rejected": [42]})
+
+    def test_queue_item_cancelled_fails_the_run(self):
+        fake = FakeCI()
+        wf, herdr, host, fake, _ = gated({"spec": [spec_turn], "build": [build_turn(1)]}, fake=fake)
+        orig = fake.jenkins
+
+        def cancelled(method, path, query, form):
+            if path.startswith("/queue/item/") and fake.triggered("change"):
+                return "queue", {"cancelled": True}
+            return orig(method, path, query, form)
+        fake.jenkins = cancelled
+
+        with self.assertRaisesRegex(OrchestratorError, "cancelled in Jenkins's queue"):
+            wf.run()
+        self.assertEqual(json.loads(host.files[f"{wf.state.dir}/state.json"])["ci"], {"ref": REF_1_1, "sha": "snap1"})
+
+    def test_failed_cleanup_is_only_logged(self):
+        fake = FakeCI()
+        fake.fail[("POST", "/api/projects/delete")] = 403
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, fake=fake)
+        host.remote["orchestrator-ci/a1b2c3-1-q7"] = "left-over"
+        host.remote["orchestrator-ci/ffffff-1-q1"] = "another-run"
+
+        with patch("sys.stderr") as err:
+            self.assertEqual(wf.run(), APPROVE)
+        self.assertIn("could not delete SonarQube project", "".join(c.args[0] for c in err.write.call_args_list))
+        self.assertEqual(wf.state.phase, "done")
+        self.assertEqual(wf.state.quality_project, PROJECT)
+        self.assertEqual(host.remote, {"orchestrator-ci/ffffff-1-q1": "another-run"})
+
+
+    def test_refused_request_mid_round_fails_at_once_naming_the_step(self):
+        fake = FakeCI()
+        fake.fail[("GET", "/api/issues/search")] = 403
+        wf, herdr, host, fake, _ = gated({"spec": [spec_turn], "build": [build_turn(1)]}, fake=fake)
+
+        with self.assertRaisesRegex(OrchestratorError, f"quality gate: reading the issues of {PROJECT}: "
+                                    r"GET .*/api/issues/search\?.*: HTTP 403 \(refused with 403\)"):
+            wf.run()
+        self.assertLess(wf.clock.now, 200)
+        self.assertEqual(json.loads(host.files[f"{wf.state.dir}/state.json"])["ci"]["ce_task"], "task-42")
+
+    def test_cleanup_without_origin_listing_is_only_logged(self):
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]})
+        host.remote_branches = MagicMock(side_effect=OrchestratorError("ssh: connection reset"))
+
+        with patch("sys.stderr") as err:
+            self.assertEqual(wf.run(), APPROVE)
+        self.assertIn("could not list the orchestrator-ci/ branches", "".join(c.args[0] for c in err.write.call_args_list))
+        self.assertNotIn(PROJECT, fake.projects)
+
+
+class TestQualityResume(unittest.TestCase):
+    def test_resume_with_a_build_only_polls_it(self):
+        fake = FakeCI()
+        n = fake.add_build(REF_1_1, "change", outcome())
+        state = quality_state(ci={"ref": REF_1_1, "sha": "snap9", "queue_url": f"{JENKINS}/queue/item/1/", "build": n})
+        wf, herdr, host, _ = resume_gated(state, {"review": [review_turn(1, APPROVE)]}, fake)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertFalse(host.snapshots)
+        self.assertFalse([c for c in host.git_calls if c[:3] == ("push", "--quiet", "--force")])
+        self.assertNotIn("trigger change", fake.names)
+        self.assertNotIn("queue", fake.names)
+        self.assertEqual(collapsed(fake.names)[:3], ["build", "report", "task"])
+        self.assertIn(f"`snap9`", host.files[state.quality_path(1, 1)])
+
+    def test_resume_with_a_task_asks_jenkins_only_for_the_test_report(self):
+        fake = FakeCI()
+        n = fake.add_build(REF_1_1, "change", outcome())
+        state = quality_state(ci={"ref": REF_1_1, "sha": "snap9", "queue_url": f"{JENKINS}/queue/item/1/",
+                                  "build": n, "ce_task": f"task-{n}"})
+        wf, herdr, host, _ = resume_gated(state, {"review": [review_turn(1, APPROVE)]}, fake)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(fake.jenkins_requests(),
+                         [f"{JENKINS}{JOB_PATH}{n}/testReport/api/json?tree="
+                          "suites%5Bcases%5BclassName%2Cname%2Cstatus%2CerrorDetails%5D%5D"])
+
+    def test_resume_with_only_the_ref_adopts_its_build(self):
+        fake = FakeCI()
+        n = fake.add_build(REF_1_1, "change", outcome())
+        fake.add_build("orchestrator-ci/a1b2c3-1-q2", "change", outcome())
+        state = quality_state(ci={"ref": REF_1_1, "sha": "snap9"})
+        wf, herdr, host, _ = resume_gated(state, {"review": [review_turn(1, APPROVE)]}, fake)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertNotIn("trigger change", fake.names)
+        self.assertFalse(host.snapshots)
+        self.assertIn(f"Jenkins build #{n}", host.files[state.quality_path(1, 1)])
+
+    def test_resume_with_only_the_ref_and_no_build_triggers_one(self):
+        fake = FakeCI()
+        state = quality_state(ci={"ref": REF_1_1, "sha": "snap9"})
+        wf, herdr, host, _ = resume_gated(state, {"review": [review_turn(1, APPROVE)]}, fake)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(collapsed(fake.names)[:2], ["find", "trigger change"])
+        self.assertFalse(host.snapshots)
+
+    def test_forgotten_queue_item_finds_its_build(self):
+        fake = FakeCI()
+        n = fake.add_build(REF_1_1, "change", outcome())
+        fake.forgotten = True
+        state = quality_state(ci={"ref": REF_1_1, "sha": "snap9", "queue_url": f"{JENKINS}/queue/item/1/"})
+        wf, herdr, host, _ = resume_gated(state, {"review": [review_turn(1, APPROVE)]}, fake)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(collapsed(fake.names)[:3], ["queue", "find", "build"])
+        self.assertIn(f"Jenkins build #{n}", host.files[state.quality_path(1, 1)])
+
+    def test_forgotten_queue_item_without_a_build_fails_the_run(self):
+        fake = FakeCI()
+        fake.forgotten = True
+        state = quality_state(ci={"ref": REF_1_1, "sha": "snap9", "queue_url": f"{JENKINS}/queue/item/1/"})
+        wf, herdr, host, _ = resume_gated(state, {}, fake)
+
+        with self.assertRaisesRegex(OrchestratorError, "Jenkins forgot queue item .*none of the job's last 20"):
+            wf.run()
+        self.assertEqual(wf.state.ci, {"ref": REF_1_1, "sha": "snap9"})
+
+    def test_a_leftover_ref_of_another_round_is_dropped(self):
+        fake = FakeCI()
+        state = quality_state(q=2, ci={"ref": REF_1_1, "sha": "snap9", "queue_url": f"{JENKINS}/queue/item/1/"})
+        wf, herdr, host, _ = resume_gated(state, {"review": [review_turn(1, APPROVE)]}, fake,
+                                          files={lambda s: s.quality_build_path(1, 1): "report 1 q1"})
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertNotIn(REF_1_1, host.remote)
+        self.assertEqual([b["ref"] for b in fake.triggered("change")], ["orchestrator-ci/a1b2c3-1-q2"])
+
+    def test_resume_with_the_quality_file_makes_no_request(self):
+        fake = FakeCI()
+        state = quality_state()
+        wf, herdr, host, _ = resume_gated(state, {"review": [review_turn(1, APPROVE)]}, fake,
+                                          files={lambda s: s.quality_path(1, 1): "GATE: OK\n"})
+        fake.fail[("POST", "/api/projects/delete")] = 500  # done's cleanup is not the round's
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(fake.names, ["POST /api/projects/delete failing"])
+
+    def test_quality_file_without_a_gate_is_refused(self):
+        fake = FakeCI()
+        state = quality_state()
+        wf, *_ = resume_gated(state, {}, fake, files={lambda s: s.quality_path(1, 1): "all good\n"})
+
+        with self.assertRaisesRegex(OrchestratorError, "quality-1-1.md does not start with a GATE line; fix it"):
+            wf.run()
+        self.assertEqual(fake.requests, [])
+
+    def test_resume_mid_baseline_continues_it(self):
+        fake = FakeCI()
+        n = fake.add_build(BASE_REF, "base", outcome())
+        state = quality_state(quality_baseline=None,
+                              ci={"ref": BASE_REF, "sha": "abc123", "queue_url": f"{JENKINS}/queue/item/1/",
+                                  "build": n})
+        wf, herdr, host, _ = resume_gated(state, {"review": [review_turn(1, APPROVE)]}, fake)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(fake.triggered("base"), [fake.builds[n]])
+        self.assertEqual(wf.state.quality_baseline, f"analysis-{n}")
+        self.assertEqual(len(fake.triggered("change")), 1)
+
+    def test_build_ends_alike_live_and_resumed(self):
+        cases = [
+            ("no report", outcome(report=False), "GATE: BUILD_FAILED"),
+            ("report after FAILURE", outcome(result="FAILURE"), "GATE: OK"),
+            ("aborted, no report", outcome(report=False, result="ABORTED"), "was aborted before"),
+        ]
+        for name, out, expected in cases:
+            with self.subTest(name):
+                fake = FakeCI()
+                n = fake.add_build(REF_1_1, "change", out)
+                state = quality_state(ci={"ref": REF_1_1, "sha": "snap9",
+                                          "queue_url": f"{JENKINS}/queue/item/1/", "build": n})
+                wf, herdr, host, _ = resume_gated(state, {"build": [fix_turn(1, 1)],
+                                                          "review": [review_turn(1, APPROVE)]}, fake)
+                if expected.startswith("GATE"):
+                    self.assertEqual(wf.run(), APPROVE)
+                    self.assertTrue(host.files[state.quality_path(1, 1)].startswith(expected))
+                else:
+                    with self.assertRaisesRegex(OrchestratorError, expected):
+                        wf.run()
+                    self.assertEqual(wf.state.ci, {"ref": REF_1_1, "sha": "snap9", "rejected": [n]})
+
+    def test_resumed_base_build_failed_fails_the_run(self):
+        fake = FakeCI()
+        n = fake.add_build(BASE_REF, "base", outcome(report=False))
+        state = quality_state(quality_baseline=None,
+                              ci={"ref": BASE_REF, "sha": "abc123", "queue_url": f"{JENKINS}/queue/item/1/",
+                                  "build": n})
+        wf, *_ = resume_gated(state, {}, fake)
+        with self.assertRaisesRegex(OrchestratorError, "of the base commit abc123 ended FAILURE"):
+            wf.run()
+
+    def test_fresh_builder_answering_a_quality_round_is_briefed(self):
+        fake = FakeCI()
+        seen = []
+        state = saved_run("build", 1, agents=("spec", "build", "review"), quality_job=JOB, quality_round=1,
+                          quality_project=PROJECT, quality_baseline="analysis-base", prompted="build-1-q1.md")
+        wf, herdr, host, _ = resume_gated(state, {"build": [recording(fix_turn(1, 1), seen)],
+                                                  "review": [review_turn(1, APPROVE)]}, fake,
+                                          alive=["review"], files={lambda s: s.quality_path(1, 1): "GATE: ERROR\n"})
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertIn("You are the Builder", seen[0])
+        self.assertIn(f"you are a fresh session. An earlier Builder session did the earlier turns; its changes are "
+                      f"already in the working tree, and its reports are {state.build_path(1)}.", seen[0])
+        self.assertTrue(seen[0].endswith(orchestrator.QUALITY_FIX_PROMPT.format(
+            quality_path=state.quality_path(1, 1), report_path=state.quality_build_path(1, 1))))
+        self.assertEqual(wf.state.quality_round, 2)
+
+    def test_fresh_builder_in_a_later_round_hears_of_every_earlier_report(self):
+        fake = FakeCI()
+        seen = []
+        state = saved_run("build", 2, agents=("spec", "build", "review"), quality_job=JOB,
+                          quality_project=PROJECT, quality_baseline="analysis-base")
+        wf, *_ = resume_gated(state, {"build": [recording(build_turn(2), seen)],
+                                      "review": [review_turn(2, APPROVE)]}, fake, alive=["review"],
+                              files={lambda s: s.quality_build_path(1, 1): "r", lambda s: s.quality_build_path(1, 2): "r"})
+
+        self.assertEqual(wf.run(), APPROVE)
+        reports = ", ".join([state.build_path(1), state.quality_build_path(1, 1), state.quality_build_path(1, 2)])
+        self.assertIn(f"its reports are {reports}.", seen[0])
+
+    def test_the_last_allowed_quality_round_goes_to_review(self):
+        fake = FakeCI()
+        fake.outcomes = [outcome(**RED)]
+        reviews = []
+        state = quality_state(q=2, max_quality_rounds=2)
+        wf, herdr, host, _ = resume_gated(state, {"review": [recording(review_turn(1, APPROVE), reviews)]}, fake,
+                                          files={lambda s: s.quality_build_path(1, 1): "report 1 q1"})
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertNotIn(("prompt", "build-a1b2c3"), herdr.calls)
+        self.assertIn(orchestrator.QUALITY_UNRESOLVED_NOTE.format(quality_path=state.quality_path(1, 2)), reviews[0])
+
+    def test_resume_checks_the_credentials_before_the_builder(self):
+        fake = FakeCI()
+        state = saved_run("build", 1, agents=("spec", "build"), quality_job=JOB)
+        env = {k: v for k, v in CREDENTIALS.items() if k != "JENKINS_TOKEN"}
+        wf, herdr, *_ = resume(state, {"build": [build_turn(1)]}, ci=ci_for(fake, env))
+
+        with self.assertRaisesRegex(OrchestratorError, "needs JENKINS_TOKEN"):
+            wf.run()
+        self.assertNotIn(("prompt", "build-a1b2c3"), herdr.calls)
+
+
+class TestChangedLines(unittest.TestCase):
+    def test_added_modified_and_deleted_files(self):
+        diff = ("diff --git a/new.py b/new.py\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n"
+                "+++ b/new.py\n@@ -0,0 +1,3 @@\n+a\n+b\n+c\n"
+                "diff --git a/mod.py b/mod.py\nindex 1..2 100644\n--- a/mod.py\n+++ b/mod.py\n"
+                "@@ -3 +3 @@ def f():\n-x\n+y\n@@ -10,2 +10,0 @@\n-p\n-q\n@@ -20,0 +18,2 @@\n+r\n+s\n"
+                "diff --git a/gone.py b/gone.py\ndeleted file mode 100644\nindex 1..0\n--- a/gone.py\n+++ /dev/null\n"
+                "@@ -1 +0,0 @@\n-z\n")
+        self.assertEqual(changed_lines(diff), {"new.py": {1, 2, 3}, "mod.py": {3, 18, 19}})
+
+    def test_renames(self):
+        diff = ("diff --git a/old name.py b/new name.py\nsimilarity index 100%\nrename from old name.py\n"
+                "rename to new name.py\n"
+                "diff --git a/a.py b/b.py\nsimilarity index 80%\nrename from a.py\nrename to b.py\n"
+                "--- a/a.py\n+++ b/b.py\n@@ -4,0 +5 @@\n+added\n")
+        self.assertEqual(changed_lines(diff), {"new name.py": set(), "b.py": {5}})
+
+    def test_a_file_that_only_loses_lines_is_touched(self):
+        diff = "diff --git a/f.py b/f.py\n--- a/f.py\n+++ b/f.py\n@@ -5,2 +4,0 @@\n-a\n-b\n"
+        self.assertEqual(changed_lines(diff), {"f.py": set()})
+
+    def test_empty_new_file_and_names_with_spaces(self):
+        diff = ("diff --git a/my file.py b/my file.py\nnew file mode 100644\nindex 0000000..e69de29\n"
+                "diff --git a/x y.py b/x y.py\n--- a/x y.py\t\n+++ b/x y.py\t\n@@ -1 +1 @@\n-a\n+b\n")
+        self.assertEqual(changed_lines(diff), {"my file.py": set(), "x y.py": {1}})
+
+    def test_quoted_names(self):
+        diff = ('diff --git "a/tab\\there.py" "b/tab\\there.py"\n--- "a/tab\\there.py"\n+++ "b/tab\\there.py"\n'
+                "@@ -0,0 +1 @@\n+x\n")
+        self.assertEqual(changed_lines(diff), {"tab\there.py": {1}})
+
+    def test_hunk_lines_that_look_like_headers(self):
+        diff = ("diff --git a/f.md b/f.md\n--- a/f.md\n+++ b/f.md\n@@ -1,0 +2,3 @@\n"
+                "+++ b/evil.md\n+--- a/x\n+rename to y\n")
+        self.assertEqual(changed_lines(diff), {"f.md": {2, 3, 4}})
+
+    def test_build_config_edits(self):
+        diff = ("diff --git a/Jenkinsfile b/Jenkinsfile\n--- a/Jenkinsfile\n+++ b/Jenkinsfile\n@@ -1 +1 @@\n-a\n+b\n"
+                "diff --git a/sonar-project.properties b/sonar-project.properties\ndeleted file mode 100644\n"
+                "--- a/sonar-project.properties\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n")
+        self.assertEqual(orchestrator.edited_config(diff, changed_lines(diff)),
+                         ["Jenkinsfile", "sonar-project.properties"])
+        self.assertEqual(orchestrator.edited_config("", {}), [])
+
+
+class TestQualityReport(unittest.TestCase):
+    def test_gate_line(self):
+        self.assertEqual(parse_gate("\n**GATE: BUILD_FAILED**\n"), "BUILD_FAILED")
+        self.assertEqual(parse_gate("GATE: OK"), "OK")
+        self.assertIsNone(parse_gate("GATE: WARN"))
+        self.assertIsNone(parse_gate("Findings\nGATE: OK"))
+        self.assertIsNone(parse_gate(""))
+
+    def issues(self, n):
+        return [{"path": "f.py", "line": i, "severity": "HIGH", "rule": "r", "message": f"m{i}"} for i in range(1, n + 1)]
+
+    def test_numbers_at_most_fifty_issues(self):
+        text = quality_report("ERROR", "intro", {"f.py": set(range(1, 61))}, issues=self.issues(70), tests=[])
+        self.assertTrue(text.startswith("GATE: ERROR\n\nintro\n"))
+        self.assertIn("50. `f.py:50` HIGH r: m50\n", text)
+        self.assertNotIn("51. ", text)
+        self.assertIn("10 more issues on changed lines are not listed", text)
+        self.assertIn("10 other open issues in the project", text)
+
+    def test_tests_coverage_and_console(self):
+        text = quality_report("BUILD_FAILED", "intro", {}, tests=None, console="last\nlines")
+        self.assertIn("Jenkins has no test report for this build.", text)
+        self.assertIn("````\nlast\nlines\n````", text)
+        self.assertNotIn("Issues on changed lines", text)
+        text = quality_report("OK", "intro", {}, tests=[("t.T.test_x", "AssertionError\ntraceback")],
+                              coverage={"new_coverage": "62.5", "new_lines_to_cover": "40", "new_uncovered_lines": "15"})
+        self.assertIn("- `t.T.test_x`: AssertionError\n", text)
+        self.assertIn("62.5% of 40 new lines to cover; 15 are not covered.", text)
+        self.assertIn("None.", text)
+        self.assertIn("No new lines to cover.", quality_report("OK", "i", {}, tests=[], coverage={}))
+
+    def test_build_config_edits_are_named(self):
+        text = quality_report("OK", "i", {}, tests=[], edited=["Jenkinsfile", "sonar-project.properties"])
+        self.assertIn("The change edits `Jenkinsfile`. The quality job reads it from `main`", text)
+        self.assertIn("The change edits `sonar-project.properties`. The scanner read the edited file", text)
+
+    def test_tokens_are_masked(self):
+        ci = CI(JOB, env=CREDENTIALS)
+        self.assertEqual(ci.mask(f"a {JENKINS_TOKEN} b {SONAR_TOKEN}"), "a **** b ****")
+        self.assertEqual(CI(JOB, env={}).mask("text"), "text")
+
+
+class TestCI(unittest.TestCase):
+    def ci(self, *answers, env=None):
+        urlopen = MagicMock(side_effect=list(answers))
+        return CI(JOB, env=CREDENTIALS if env is None else env, urlopen=urlopen), urlopen
+
+    def http_error(self, status, body=b"<html>"):
+        return urllib.error.HTTPError("u", status, "Error", {}, io.BytesIO(body))
+
+    def test_job_url_maps_folders(self):
+        self.assertEqual(CI(JOB, env=CREDENTIALS).job_url, f"{JENKINS}{JOB_PATH}")
+        self.assertEqual(CI("a b", env=CREDENTIALS).job_url, f"{JENKINS}/job/a%20b/")
+
+    def test_preflight_sends_basic_auth_in_the_header_only(self):
+        params = {"property": [{"parameterDefinitions": [{"name": p} for p in orchestrator.JOB_PARAMETERS]}]}
+        ci, urlopen = self.ci(FakeResponse(json.dumps(params)), FakeResponse('{"valid": true}'))
+        ci.preflight()
+
+        import base64
+        jenkins, sonar = [c.args[0] for c in urlopen.call_args_list]
+        self.assertEqual(jenkins.get_header("Authorization"),
+                         "Basic " + base64.b64encode(f"agents:{JENKINS_TOKEN}".encode()).decode())
+        self.assertEqual(sonar.get_header("Authorization"),
+                         "Basic " + base64.b64encode(f"{SONAR_TOKEN}:".encode()).decode())
+        # Kept from a redirect to another server.
+        self.assertNotIn("Authorization", jenkins.headers)
+        for req in (jenkins, sonar):
+            self.assertFalse(leaks(req.full_url))
+        self.assertEqual(sonar.full_url, f"{SONAR}/api/authentication/validate")
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], orchestrator.HTTP_TIMEOUT)
+
+    def test_errors_name_method_url_and_status(self):
+        ci, _ = self.ci(self.http_error(403, b'{"errors": [{"msg": "Insufficient privileges"}]}'))
+        with self.assertRaises(CIError) as cm:
+            ci.delete_project(PROJECT)
+        self.assertEqual(str(cm.exception), f"POST {SONAR}/api/projects/delete: HTTP 403 (Insufficient privileges)")
+        self.assertEqual(cm.exception.status, 403)
+        self.assertFalse(cm.exception.transient)
+
+    def test_network_errors_are_transient_and_masked(self):
+        ci, _ = self.ci(urllib.error.URLError(f"refused {SONAR_TOKEN}"), TimeoutError("timed out"),
+                        self.http_error(503))
+        for _ in range(3):
+            with self.assertRaises(CIError) as cm:
+                ci.build_result(7)
+            self.assertTrue(cm.exception.transient)
+            self.assertFalse(leaks(str(cm.exception)))
+            self.assertIn(f"GET {JENKINS}{JOB_PATH}7/api/json?tree=building%2Cresult", str(cm.exception))
+
+    def test_trigger_returns_the_queue_item(self):
+        ci, urlopen = self.ci(FakeResponse(headers={"Location": "http://internal:8080/queue/item/77/"}))
+        self.assertEqual(ci.trigger(REF_1_1, PROJECT, "change"), f"{JENKINS}/queue/item/77/")
+        req = urlopen.call_args.args[0]
+        self.assertEqual((req.get_method(), req.full_url), ("POST", f"{JENKINS}{JOB_PATH}buildWithParameters"))
+        self.assertEqual(dict(urllib.parse.parse_qsl(req.data.decode())),
+                         {"GIT_REF": REF_1_1, "SONAR_PROJECT_KEY": PROJECT, "SONAR_PROJECT_VERSION": "change"})
+
+    def test_trigger_on_a_deleted_job_is_not_retried(self):
+        ci, _ = self.ci(self.http_error(404))
+        with self.assertRaises(OrchestratorError) as cm:
+            ci.trigger(REF_1_1, PROJECT, "change")
+        self.assertNotIsInstance(cm.exception, CIError)
+        self.assertRegex(str(cm.exception), f"Jenkins job {JOB} is gone: POST .*buildWithParameters: HTTP 404")
+
+    def test_missing_credentials_are_named_before_any_request(self):
+        ci, urlopen = self.ci(env={"JENKINS_URL": JENKINS})
+        with self.assertRaisesRegex(OrchestratorError,
+                                    "needs JENKINS_USER, JENKINS_TOKEN, SONAR_HOST_URL, SONAR_TOKEN in"):
+            ci.build_result(1)
+        urlopen.assert_not_called()
+
+    def test_issues_page_by_page(self):
+        page1 = {"paging": {"total": 3}, "issues": [
+            {"component": f"{PROJECT}:a.py", "line": 3, "rule": "r1", "message": "m1", "severity": "MINOR",
+             "impacts": [{"softwareQuality": "MAINTAINABILITY", "severity": "LOW"},
+                         {"softwareQuality": "RELIABILITY", "severity": "HIGH"}]},
+            {"component": PROJECT, "rule": "r2", "message": "m2", "severity": "MAJOR"}]}
+        page2 = {"paging": {"total": 3}, "issues": [
+            {"component": f"{PROJECT}:dir/b.py", "rule": "r3", "message": "m3", "severity": "CRITICAL", "impacts": []}]}
+        ci, urlopen = self.ci(FakeResponse(json.dumps(page1)), FakeResponse(json.dumps(page2)))
+
+        self.assertEqual(ci.issues(PROJECT), [
+            {"path": "a.py", "line": 3, "severity": "HIGH", "rule": "r1", "message": "m1"},
+            {"path": None, "line": None, "severity": "MAJOR", "rule": "r2", "message": "m2"},
+            {"path": "dir/b.py", "line": None, "severity": "CRITICAL", "rule": "r3", "message": "m3"}])
+        query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(urlopen.call_args.args[0].full_url).query))
+        self.assertEqual(query, {"components": PROJECT, "resolved": "false", "ps": "500", "p": "2"})
+
+    def test_coverage_in_either_shape(self):
+        body = {"component": {"measures": [{"metric": "new_coverage", "period": {"value": "50.0"}},
+                                           {"metric": "new_lines_to_cover", "value": "4"},
+                                           {"metric": "new_uncovered_lines", "periods": [{"value": "2"}]}]}}
+        ci, _ = self.ci(FakeResponse(json.dumps(body)))
+        self.assertEqual(ci.coverage(PROJECT),
+                         {"new_coverage": "50.0", "new_lines_to_cover": "4", "new_uncovered_lines": "2"})
+
+    def test_missing_artifact_and_test_report(self):
+        ci, _ = self.ci(self.http_error(404), self.http_error(404))
+        self.assertIsNone(ci.report_task(3))
+        self.assertIsNone(ci.failed_tests(3))
+
+    def test_malformed_answers(self):
+        ci, _ = self.ci(FakeResponse("<html>proxy error</html>"), FakeResponse("[1]"), FakeResponse(),
+                        FakeResponse("projectKey=x\n"), FakeResponse('{"qualityGate": null}'))
+        for call in (lambda: ci.build_result(1), lambda: ci.build_result(1)):
+            with self.assertRaisesRegex(CIError, "the answer is not") as cm:
+                call()
+            self.assertTrue(cm.exception.transient)
+        with self.assertRaisesRegex(OrchestratorError, "named no queue item"):
+            ci.trigger(REF_1_1, PROJECT, "change")
+        self.assertIsNone(ci.report_task(1))
+        with self.assertRaisesRegex(OrchestratorError, "names no quality gate for py-ai-agents-orchestrator"):
+            ci.create_project(PROJECT, "py-ai-agents-orchestrator")
+
+    def test_create_project_refused_is_raised(self):
+        ci, _ = self.ci(FakeResponse('{"qualityGate": {"name": "Sonar way"}}'), self.http_error(400),
+                        self.http_error(404))
+        with self.assertRaisesRegex(CIError, "projects/create: HTTP 400"):
+            ci.create_project(PROJECT, "py-ai-agents-orchestrator")
+
+    def test_create_project_adopts_one_already_there(self):
+        ci, urlopen = self.ci(FakeResponse('{"qualityGate": {"name": "Sonar way"}}'), self.http_error(400),
+                              FakeResponse('{"component": {}}'), FakeResponse(), FakeResponse())
+        ci.create_project(PROJECT, "py-ai-agents-orchestrator")
+        select = urlopen.call_args_list[3].args[0]
+        self.assertEqual(dict(urllib.parse.parse_qsl(select.data.decode())),
+                         {"gateName": "Sonar way", "projectKey": PROJECT})
+
+
+class TestHostSnapshot(unittest.TestCase):
+    """Host.snapshot on real git."""
+
+    def setUp(self):
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = tmp.name
+        self.host = Host()
+        self.git("init", "--quiet", "-b", "main")
+        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
+            self.git("config", key, value)
+
+    def git(self, *args):
+        return self.host.git(self.repo, *args)
+
+    def put(self, name, text):
+        path = f"{self.repo}/{name}"
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    def test_snapshot_of_the_working_tree(self):
+        self.put("keep.py", "a\n")
+        self.put("mod.py", "1\n2\n")
+        self.put("del.py", "x\n")
+        self.put(".gitignore", "*.log\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "base")
+        base = self.host.git_head(self.repo)
+        self.put("mod.py", "1\ntwo\n3\n")
+        os.remove(f"{self.repo}/del.py")
+        self.put("untracked.py", "new\n")
+        self.put("debug.log", "ignored\n")
+        self.put(".orchestrator/.gitignore", "*\n")
+        self.put(".orchestrator/runs/r/state.json", "{}\n")
+        self.git("add", "mod.py")  # a staged change, to show the index is left as it was
+        before = [self.git("rev-parse", "HEAD"), self.git("ls-files", "--stage"), self.git("status", "--porcelain")]
+
+        sha = self.host.snapshot(self.repo, base, "snapshot")
+
+        self.assertEqual([self.git("rev-parse", "HEAD"), self.git("ls-files", "--stage"),
+                          self.git("status", "--porcelain")], before)
+        self.assertEqual(self.git("ls-tree", "-r", "--name-only", sha).split(),
+                         [".gitignore", "keep.py", "mod.py", "untracked.py"])
+        self.assertEqual(self.git("show", f"{sha}:mod.py"), "1\ntwo\n3\n")
+        self.assertEqual(self.git("rev-parse", f"{sha}^"), self.git("rev-parse", base))
+        self.assertEqual(self.git("log", "--format=%s", "-n", "1", sha).strip(), "snapshot")
+        self.assertEqual(changed_lines(self.host.change_diff(self.repo, base, sha)),
+                         {"mod.py": {2, 3}, "untracked.py": {1}})
+
+    def test_snapshot_of_a_repository_without_an_index(self):
+        self.git("commit", "--quiet", "--allow-empty", "-m", "empty")
+        base = self.host.git_head(self.repo)
+        self.put("first.py", "x\n")
+
+        sha = self.host.snapshot(self.repo, base, "snapshot")
+        self.assertEqual(self.git("ls-tree", "-r", "--name-only", sha).split(), ["first.py"])
+
+
+class TestChildEnvironment(unittest.TestCase):
+    ENV = {**CREDENTIALS, "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "KEEP_ME": "1"}
+
+    def assert_scrubbed(self, env):
+        self.assertFalse(set(orchestrator.CI_ENV) & set(env))
+        self.assertEqual(env["KEEP_ME"], "1")
+
+    @patch.dict("os.environ", ENV)
+    def test_host_commands_get_no_credentials(self):
+        run = MagicMock(return_value=completed())
+        Host("remote-host", run=run).run(["git", "status"])
+        self.assert_scrubbed(run.call_args.kwargs["env"])
+
+    @patch.dict("os.environ", ENV)
+    def test_herdr_gets_no_credentials(self):
+        run = MagicMock(return_value=result({}))
+        Herdr(run=run).call("agent", "list")
+        self.assert_scrubbed(run.call_args.kwargs["env"])
+
+    @patch.dict("os.environ", ENV)
+    def test_a_real_process_sees_none(self):
+        out = Host().check(["env"])
+        self.assertIn("KEEP_ME=1", out)
+        self.assertFalse([k for k in orchestrator.CI_ENV if f"{k}=" in out])
+        self.assertFalse(leaks(out))
+
+
+class TestQualityCLI(unittest.TestCase):
+    def refused(self, argv):
+        with self.assertRaises(SystemExit), patch("sys.stderr"):
+            parse_args(argv)
+
+    def test_flag_checks(self):
+        self.refused(["run", "t", "--quality-gate", JOB, "--max-quality-rounds", "0"])
+        self.refused(["run", "t", "--max-quality-rounds", "2"])
+        self.refused(["run", "t", "--quality-gate", "/folder/"])
+        self.refused(["resume", "a1b2c3", "--quality-gate", JOB])
+        self.refused(["resume", "a1b2c3", "--max-quality-rounds", "0"])
+        args = parse_args(["run", "t", "--quality-gate", JOB, "--max-quality-rounds", "2"])
+        self.assertEqual((args.quality_gate, args.max_quality_rounds), (JOB, 2))
+
+    def resumable(self, argv, saved):
+        args = parse_args(["resume", "a1b2c3", *argv])
+        return orchestrator.resumable_state([(10**4, saved)], args, "/proj", "here", lambda pid: False)
+
+    def test_resume_limit_against_the_saved_quality_round(self):
+        quality = asdict(quality_state(q=2))
+        with self.assertRaisesRegex(OrchestratorError, "already in quality round 2 of its quality phase; "
+                                    "--max-quality-rounds 1 is too low"):
+            self.resumable(["--max-quality-rounds", "1"], quality)
+        self.assertEqual(self.resumable(["--max-quality-rounds", "2"], quality).max_quality_rounds, 2)
+
+        build = asdict(saved_run("build", 1, quality_job=JOB, quality_round=2))
+        with self.assertRaisesRegex(OrchestratorError, "already in quality round 2 of its build phase"):
+            self.resumable(["--max-quality-rounds", "2"], build)
+        self.assertEqual(self.resumable(["--max-quality-rounds", "3"], build).max_quality_rounds, 3)
+        # Round q = 0 has had no quality round yet.
+        self.resumable(["--max-quality-rounds", "1"], asdict(saved_run("build", 2, quality_job=JOB)))
+
+    def test_resume_limit_needs_the_gate(self):
+        with self.assertRaisesRegex(OrchestratorError, "has no quality gate"):
+            self.resumable(["--max-quality-rounds", "2"], asdict(saved_run("build", 1)))
+
+    def test_state_saved_before_the_gate_has_none(self):
+        saved = asdict(saved_run("review", 1))
+        for key in ("quality_job", "max_quality_rounds", "quality_round", "quality_project", "quality_baseline", "ci"):
+            del saved[key]
+        state = RunState.from_dict(saved)
+        self.assertEqual((state.quality_job, state.quality_round, state.ci), (None, 0, {}))
+        self.assertEqual(state.last_report_path(1), state.build_path(1))
+
+    @patch.object(Workflow, "__init__", return_value=None)
+    @patch.object(Workflow, "run", return_value=APPROVE)
+    @patch.object(Host, "resolve_dir", return_value="/proj")
+    @patch.dict("os.environ", {"HERDR_ENV": "1"})
+    def test_gate_reaches_the_workflow(self, _resolve, _run, init):
+        with patch("builtins.print"):
+            main(["run", "task"])
+            main(["run", "task", "--quality-gate", JOB, "--max-quality-rounds", "2"])
+        plain, gated_ = init.call_args_list
+        self.assertIsNone(plain.kwargs["ci"])
+        self.assertEqual((gated_.kwargs["ci"].job, gated_.kwargs["max_quality_rounds"]), (JOB, 2))
+        self.assertEqual(gated_.args[2].quality_job, JOB)
+
+    def test_list_shows_the_quality_phase(self):
+        record = {**run_record("quality"), "quality_round": 2}
+        with patch("builtins.print") as out:
+            orchestrator.print_runs([(10**6, record)], "here", lambda pid: True, [])
+        self.assertTrue(out.call_args_list[0].args[0].startswith("20260930-070000-c0ffee  quality  round 1 q2  stale"))
 
 
 if __name__ == "__main__":

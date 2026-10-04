@@ -15,9 +15,16 @@ closed: the human reviews on GitHub, not in the panes.
 The agents may run on a saved herdr machine (--machine). The run directory
 then lives on that machine, so every file and git access goes through Host,
 which runs commands locally or over SSH.
+
+With --quality-gate, every Builder turn is followed by a quality round: a
+snapshot of the change is analysed by a Jenkins job into SonarQube, and a gate
+that does not pass goes back to the Builder before the Reviewer sees the change.
+HTTP to Jenkins and SonarQube goes through CI, from the orchestrator's machine.
 """
 
 import argparse
+import base64
+import http.client
 import json
 import os
 import re
@@ -27,6 +34,9 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 
@@ -52,6 +62,33 @@ PR_SECTION_LIMIT = 20_000
 APPROVE = "APPROVE"
 CHANGES_REQUESTED = "CHANGES_REQUESTED"
 
+# The quality gate. Requests time out below STALE_SECONDS, so a hung one cannot make a live run look stale.
+DEFAULT_MAX_QUALITY_ROUNDS = 3
+HTTP_TIMEOUT = 30
+CI_POLL_SECONDS = 10
+# How long one quality round may wait on Jenkins and SonarQube, failed requests retried, before the run fails.
+QUALITY_TIMEOUT = 1200
+# The orchestrator's own environment variables that hold the credentials; no process it starts inherits them.
+CI_ENV = ("JENKINS_URL", "JENKINS_USER", "JENKINS_TOKEN", "SONAR_HOST_URL", "SONAR_TOKEN")
+CI_TOKENS = ("JENKINS_TOKEN", "SONAR_TOKEN")
+JOB_PARAMETERS = ("GIT_REF", "SONAR_PROJECT_KEY", "SONAR_PROJECT_VERSION")
+# The SonarQube project whose quality gate each run's own project, SONAR_PROJECT-<key>, copies.
+SONAR_PROJECT = "py-ai-agents-orchestrator"
+# Snapshots are pushed to orchestrator-ci/<key>-<round>-q<quality round>, the base to orchestrator-ci/<key>-base.
+CI_REF_PREFIX = "orchestrator-ci/"
+# Files a change may edit that alter how Jenkins and the scanner judge it.
+BUILD_CONFIG_FILES = ("Jenkinsfile", "sonar-project.properties")
+QUALITY_ISSUE_LIMIT = 50
+CONSOLE_TAIL_LINES = 60
+ISSUE_PAGE_SIZE = 500
+# SonarQube serves at most this many issues of one search.
+ISSUE_SEARCH_LIMIT = 10_000
+COVERAGE_METRICS = ("new_coverage", "new_lines_to_cover", "new_uncovered_lines")
+
+GATE_OK = "OK"
+GATE_ERROR = "ERROR"
+GATE_BUILD_FAILED = "BUILD_FAILED"
+
 ROLE_LABELS = {"spec": "Spec Collector", "build": "Builder", "review": "Reviewer"}
 
 EXIT_ERROR = 1
@@ -69,6 +106,15 @@ class HerdrError(OrchestratorError):
     def __init__(self, code: str, message: str):
         super().__init__(f"herdr {code}: {message}")
         self.code = code
+
+
+def child_env() -> dict[str, str]:
+    """The environment for every process the orchestrator starts: its own, without the CI credentials.
+
+    So the agents, which herdr, git, ssh and gh start or reach, never inherit the tokens. They can
+    still read a file the tokens came from, as the same user.
+    """
+    return {k: v for k, v in os.environ.items() if k not in CI_ENV}
 
 
 # ---------------------------------------------------------------------------
@@ -140,12 +186,27 @@ the turn still ends when you write {path} in a single write."""
 
 # Appended for a Builder or Reviewer that starts a fresh session in a later round: it has not seen the earlier ones.
 REBUILD_NOTE = """\
-This is round {n}, and you are a fresh session. An earlier Builder session did the previous rounds; \
+This is round {n}, and you are a fresh session. An earlier Builder session did the earlier turns; \
 its changes are already in the working tree, and its reports are {reports}."""
 
 REREVIEW_NOTE = """\
 This is round {n}, and you are a fresh session. The earlier reviews of this change are {reviews}; \
 check that the Builder has answered each of their findings."""
+
+QUALITY_FIX_PROMPT = """\
+The SonarQube quality gate did not pass on your change; the findings are in {quality_path}. \
+Fix each numbered issue, the failed conditions, the failing tests and a failed build, \
+or explain in your report why one should stand. Re-run the verification. \
+Do not commit, push or switch branches. As your last step, write a new report to {report_path} in a single write, \
+in the same shape as before, answering each numbered issue by its number."""
+
+# Appended to the Reviewer's prompt in a run with the quality gate.
+QUALITY_PASSED_NOTE = """\
+The SonarQube quality gate passed on this change; its report is in {quality_path}."""
+
+QUALITY_UNRESOLVED_NOTE = """\
+The SonarQube quality gate still did not pass after the Builder's last quality round; \
+its unresolved findings are in {quality_path}. Weigh them as you would your own."""
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +236,7 @@ class Herdr:
 
     def _exec(self, args: list[str], limit: float | None = 120) -> str:
         try:
-            proc = self._run(["herdr", *args], capture_output=True, text=True, timeout=limit)
+            proc = self._run(["herdr", *args], capture_output=True, text=True, timeout=limit, env=child_env())
         except FileNotFoundError as e:
             raise OrchestratorError("herdr is not on PATH") from e
         except subprocess.TimeoutExpired as e:
@@ -313,7 +374,7 @@ class Host:
             # BatchMode fails fast instead of hanging on a password prompt nobody can see.
             argv = ["ssh", "-o", "BatchMode=yes", self.ssh_target, shlex.join(argv)]
         try:
-            return self._run(argv, input=stdin, capture_output=True, text=True, timeout=timeout)
+            return self._run(argv, input=stdin, capture_output=True, text=True, timeout=timeout, env=child_env())
         except (OSError, subprocess.TimeoutExpired) as e:
             raise OrchestratorError(f"{shlex.join(argv)}: {e}") from e
 
@@ -416,6 +477,42 @@ class Host:
         self.git(cwd, "merge", "--abort")
         return True
 
+    def snapshot(self, cwd: str, parent: str, message: str) -> str:
+        """Commit the working tree as it is, untracked files included, on top of parent; returns the commit.
+
+        It goes through a copy of the index, so no ref moves and the index stays as it was. `git add -A`
+        honours .gitignore, which keeps .orchestrator/ out, so the snapshot holds what committing the
+        change would. One sh -c script, because git -C cannot pass GIT_INDEX_FILE.
+        """
+        script = ('cd -- "$1" || exit 1; i=$(git rev-parse --git-path index) || exit 1; t=$(mktemp) || exit 1; '
+                  'trap \'rm -f -- "$t"\' EXIT; '
+                  # A repository whose index was never written: git starts the copy from nothing.
+                  'if [ -f "$i" ]; then cp -- "$i" "$t" || exit 1; else rm -f -- "$t"; fi; '
+                  'GIT_INDEX_FILE=$t git add -A && tree=$(GIT_INDEX_FILE=$t git write-tree) && '
+                  'git commit-tree "$tree" -p "$2" -m "$3"')
+        sha = self.check(["sh", "-c", script, "_", cwd, parent, message]).strip()
+        if not re.fullmatch(r"[0-9a-f]{40,64}", sha):
+            raise OrchestratorError(f"snapshot of {cwd}: git commit-tree printed {sha!r}, not a commit")
+        return sha
+
+    def change_diff(self, cwd: str, base: str, commit: str) -> str:
+        """`git diff -U0` from base to commit, in the one shape changed_lines parses, whatever the user's git config."""
+        return self.git(cwd, "-c", "core.quotePath=false", "diff", "-U0", "-M", "--no-color", "--no-ext-diff",
+                        "--src-prefix=a/", "--dst-prefix=b/", base, commit)
+
+    def push_ref(self, cwd: str, commit: str, branch: str) -> None:
+        # --force replaces what a failed attempt left under the same name.
+        self.git(cwd, "push", "--quiet", "--force", REMOTE, f"{commit}:refs/heads/{branch}", timeout=NETWORK_TIMEOUT)
+
+    def delete_remote_branch(self, cwd: str, branch: str) -> None:
+        self.git(cwd, "push", "--quiet", REMOTE, "--delete", f"refs/heads/{branch}", timeout=NETWORK_TIMEOUT)
+
+    def remote_branches(self, cwd: str, prefix: str) -> list[str]:
+        """origin's branches whose names start with prefix."""
+        out = self.git(cwd, "ls-remote", "--heads", REMOTE, timeout=NETWORK_TIMEOUT)
+        refs = [line.split("\t", 1)[1] for line in out.splitlines() if "\t" in line]
+        return [r.removeprefix("refs/heads/") for r in refs if r.startswith(f"refs/heads/{prefix}")]
+
     def create_pr(self, cwd: str, base: str, head: str, title: str, body: str, draft: bool) -> str:
         """Open a pull request with gh and return its URL."""
         argv = ["gh", "pr", "create", "--base", base, "--head", head,
@@ -451,6 +548,281 @@ class Host:
             except ValueError as e:  # JSONDecodeError is a ValueError
                 raise OrchestratorError(f"corrupt run state under {cwd}/{RUNS_DIR}: {e}") from e
         return runs
+
+
+# ---------------------------------------------------------------------------
+# CI: Jenkins and SonarQube, for the quality gate
+# ---------------------------------------------------------------------------
+
+class CIError(OrchestratorError):
+    """A request to Jenkins or SonarQube that failed; status is the HTTP status, None when no answer came."""
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
+    @property
+    def transient(self) -> bool:
+        # No answer, or the server's own trouble, may pass; a 4xx answer will not change by asking again.
+        return self.status is None or self.status >= 500
+
+
+class CI:
+    """Jenkins's quality job and SonarQube, over HTTP from the orchestrator's own machine.
+
+    The credentials come from the orchestrator's environment and travel only in the Authorization
+    header, never in a URL, so no error, log or state.json can carry them. Errors name the method,
+    the URL and the status, and text from either server goes through mask before it is shown or saved.
+    """
+
+    def __init__(self, job: str, env=None, urlopen=None):
+        self.job = job
+        env = os.environ if env is None else env
+        self._env = {k: env.get(k) or "" for k in CI_ENV}
+        self._urlopen = urlopen or urllib.request.urlopen
+
+    @property
+    def job_url(self) -> str:
+        # A job in a folder is folder/job in Jenkins's full name and /job/folder/job/job/ in its URL.
+        path = "".join(f"/job/{urllib.parse.quote(part, safe='')}" for part in self.job.split("/"))
+        return f"{self._base('JENKINS_URL')}{path}/"
+
+    def _base(self, name: str) -> str:
+        return self._env[name].rstrip("/")
+
+    def mask(self, text: str) -> str:
+        """text with each token replaced by ****."""
+        for name in CI_TOKENS:
+            if token := self._env[name]:
+                text = text.replace(token, "****")
+        return text
+
+    def check_credentials(self) -> None:
+        if missing := [k for k in CI_ENV if not self._env[k]]:
+            raise OrchestratorError(f"the quality gate needs {', '.join(missing)} in the orchestrator's environment")
+
+    def _request(self, method: str, url: str, user: str, password: str,
+                 form: dict | None = None) -> tuple[bytes, dict]:
+        """The body and headers of a 2xx answer; CIError otherwise."""
+        self.check_credentials()
+        data = None if form is None else urllib.parse.urlencode(form).encode()
+        req = urllib.request.Request(url, data=data, method=method)
+        auth = base64.b64encode(f"{user}:{password}".encode()).decode()
+        # Unredirected: a redirect to another server does not take the credentials along.
+        req.add_unredirected_header("Authorization", f"Basic {auth}")
+        try:
+            with self._urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+                return resp.read(), resp.headers
+        except urllib.error.HTTPError as e:
+            raise CIError(self.mask(f"{method} {url}: HTTP {e.code}{_server_message(e)}"), e.code) from e
+        # URLError, a timeout and a dropped connection are all OSErrors.
+        except (OSError, http.client.HTTPException) as e:
+            reason = e.reason if isinstance(e, urllib.error.URLError) else e
+            raise CIError(self.mask(f"{method} {url}: {reason}")) from e
+
+    def _json(self, method: str, url: str, body: bytes) -> dict:
+        try:
+            out = json.loads(body)
+        except ValueError as e:  # JSONDecodeError and UnicodeDecodeError
+            raise CIError(self.mask(f"{method} {url}: the answer is not JSON: {e}")) from e
+        if not isinstance(out, dict):
+            raise CIError(self.mask(f"{method} {url}: the answer is not a JSON object"))
+        return out
+
+    def _jenkins(self, method: str, url: str, form: dict | None = None) -> tuple[bytes, dict]:
+        return self._request(method, url, self._env["JENKINS_USER"], self._env["JENKINS_TOKEN"], form)
+
+    def _jenkins_json(self, url: str) -> dict:
+        body, _ = self._jenkins("GET", url)
+        return self._json("GET", url, body)
+
+    def _build_url(self, number: int, path: str, tree: str | None = None) -> str:
+        query = f"?{urllib.parse.urlencode({'tree': tree})}" if tree else ""
+        return f"{self.job_url}{number}/{path}{query}"
+
+    def _sonar(self, method: str, path: str, params: dict | None = None) -> dict:
+        """SonarQube's JSON answer, {} for an empty one. A GET sends params in the query, a POST as a form."""
+        url = f"{self._base('SONAR_HOST_URL')}{path}"
+        if method == "GET" and params:
+            url += f"?{urllib.parse.urlencode(params)}"
+        form = (params or {}) if method == "POST" else None
+        # SonarQube takes a token as the user name, with an empty password.
+        body, _ = self._request(method, url, self._env["SONAR_TOKEN"], "", form)
+        return self._json(method, url, body) if body.strip() else {}
+
+    def preflight(self) -> None:
+        """Fail before the interview if the gate could not run: the credentials, both servers and the job's parameters."""
+        self.check_credentials()
+        url = f"{self.job_url}api/json?{urllib.parse.urlencode({'tree': 'property[parameterDefinitions[name]]'})}"
+        try:
+            job = self._jenkins_json(url)
+        except CIError as e:
+            if e.status == 404:
+                raise OrchestratorError(f"there is no Jenkins job {self.job} at JENKINS_URL: {e}") from e
+            raise OrchestratorError(f"Jenkins at JENKINS_URL failed the preflight: {e}") from e
+        defined = {d.get("name") for p in job.get("property") or [] if isinstance(p, dict)
+                   for d in p.get("parameterDefinitions") or []}
+        if missing := [p for p in JOB_PARAMETERS if p not in defined]:
+            raise OrchestratorError(
+                f"Jenkins job {self.job} lacks the parameters {', '.join(missing)}; build it once by hand with "
+                "empty parameters, so Jenkins learns them from the Jenkinsfile")
+        try:
+            valid = self._sonar("GET", "/api/authentication/validate").get("valid")
+        except CIError as e:
+            raise OrchestratorError(f"SonarQube at SONAR_HOST_URL failed the preflight: {e}") from e
+        if valid is not True:
+            raise OrchestratorError("SonarQube at SONAR_HOST_URL does not accept SONAR_TOKEN")
+
+    def create_project(self, key: str, template: str) -> None:
+        """Create the run's project, with the template project's quality gate and the previous version as new code."""
+        gate = self._sonar("GET", "/api/qualitygates/get_by_project", {"project": template}).get("qualityGate")
+        if not isinstance(gate, dict) or not gate.get("name"):
+            raise OrchestratorError(f"SonarQube names no quality gate for {template}")
+        try:
+            self._sonar("POST", "/api/projects/create", {"project": key, "name": key})
+        except CIError as e:
+            # An attempt whose answer was lost, or an earlier orchestrator, already created it.
+            if e.status != 400 or not self._project_exists(key):
+                raise
+        self._sonar("POST", "/api/qualitygates/select", {"gateName": gate["name"], "projectKey": key})
+        self._sonar("POST", "/api/new_code_periods/set", {"project": key, "type": "PREVIOUS_VERSION"})
+
+    def _project_exists(self, key: str) -> bool:
+        try:
+            self._sonar("GET", "/api/components/show", {"component": key})
+        except CIError as e:
+            if e.status == 404:
+                return False
+            raise
+        return True
+
+    def delete_project(self, key: str) -> None:
+        self._sonar("POST", "/api/projects/delete", {"project": key})
+
+    def trigger(self, ref: str, project: str, version: str) -> str:
+        """Queue a build of the branch ref that analyses it into project as version; returns the queue item's URL."""
+        url = f"{self.job_url}buildWithParameters"
+        params = {"GIT_REF": ref, "SONAR_PROJECT_KEY": project, "SONAR_PROJECT_VERSION": version}
+        try:
+            _, headers = self._jenkins("POST", url, params)
+        except CIError as e:
+            if e.status == 404:
+                raise OrchestratorError(f"Jenkins job {self.job} is gone: {e}") from e
+            raise
+        m = re.search(r"/queue/item/(\d+)/?$", headers.get("Location") or "")
+        if not m:
+            raise OrchestratorError(f"POST {url} named no queue item")
+        # Rebuilt from JENKINS_URL: behind a proxy, Location may name a host only Jenkins itself can reach.
+        return f"{self._base('JENKINS_URL')}/queue/item/{m.group(1)}/"
+
+    def queue_item(self, queue_url: str) -> dict:
+        """The queue item: its build is executable.number once one started; cancelled is true if it never will."""
+        return self._jenkins_json(f"{queue_url}api/json")
+
+    def find_build(self, ref: str, skip=()) -> int | None:
+        """The newest of the job's last 20 builds whose GIT_REF is ref, leaving out the numbers in skip."""
+        tree = "builds[number,actions[parameters[name,value]]]{0,20}"
+        for build in self._jenkins_json(f"{self.job_url}api/json?{urllib.parse.urlencode({'tree': tree})}"
+                                        ).get("builds") or []:
+            params = {p.get("name"): p.get("value")
+                      for a in build.get("actions") or [] if isinstance(a, dict) for p in a.get("parameters") or []}
+            number = build.get("number")
+            if params.get("GIT_REF") == ref and isinstance(number, int) and number not in skip:
+                return number
+        return None
+
+    def build_result(self, number: int) -> str | None:
+        """The finished build's result, such as SUCCESS, UNSTABLE, FAILURE or ABORTED; None while it runs."""
+        build = self._jenkins_json(self._build_url(number, "api/json", "building,result"))
+        return None if build.get("building") else build.get("result")
+
+    def report_task(self, number: int) -> str | None:
+        """The SonarQube task id in the build's archived report-task.txt; None when the build archived none."""
+        try:
+            body, _ = self._jenkins("GET", self._build_url(number, "artifact/.scannerwork/report-task.txt"))
+        except CIError as e:
+            if e.status == 404:
+                return None
+            raise
+        m = re.search(r"^ceTaskId=(\S+)", body.decode(errors="replace"), re.M)
+        return m.group(1) if m else None
+
+    def failed_tests(self, number: int) -> list[tuple[str, str]] | None:
+        """(test, error) for each failing test of the build; None when the build has no test report."""
+        tree = "suites[cases[className,name,status,errorDetails]]"
+        try:
+            report = self._jenkins_json(self._build_url(number, "testReport/api/json", tree))
+        except CIError as e:
+            if e.status == 404:
+                return None
+            raise
+        return [(f"{c.get('className')}.{c.get('name')}", c.get("errorDetails") or "")
+                for suite in report.get("suites") or [] for c in suite.get("cases") or []
+                if c.get("status") in ("FAILED", "REGRESSION")]
+
+    def console_tail(self, number: int) -> str:
+        body, _ = self._jenkins("GET", self._build_url(number, "consoleText"))
+        return "\n".join(body.decode(errors="replace").splitlines()[-CONSOLE_TAIL_LINES:])
+
+    def ce_task(self, task: str) -> dict:
+        """The SonarQube task: its status, and its analysisId once the status is SUCCESS."""
+        return self._sonar("GET", "/api/ce/task", {"id": task}).get("task") or {}
+
+    def gate_status(self, analysis: str) -> dict:
+        """The analysis's quality gate: its status and its conditions."""
+        return self._sonar("GET", "/api/qualitygates/project_status", {"analysisId": analysis}).get("projectStatus") or {}
+
+    def issues(self, project: str) -> list[dict]:
+        """The project's open issues as {path, line, severity, rule, message}; path is None for the project's own."""
+        found, page = [], 1
+        while True:
+            out = self._sonar("GET", "/api/issues/search", {"components": project, "resolved": "false",
+                                                             "ps": ISSUE_PAGE_SIZE, "p": page})
+            batch = out.get("issues") or []
+            found += batch
+            total = (out.get("paging") or {}).get("total", out.get("total", 0))
+            if not batch or len(found) >= min(total, ISSUE_SEARCH_LIMIT):
+                break
+            page += 1
+        prefix = f"{project}:"
+        return [{"path": i["component"][len(prefix):] if str(i.get("component", "")).startswith(prefix) else None,
+                 "line": i.get("line"), "severity": issue_severity(i),
+                 "rule": i.get("rule") or "", "message": i.get("message") or ""} for i in found]
+
+    def coverage(self, project: str) -> dict[str, str]:
+        """The coverage measures of new code, by metric."""
+        out = self._sonar("GET", "/api/measures/component",
+                          {"component": project, "metricKeys": ",".join(COVERAGE_METRICS)})
+        values = {}
+        for m in (out.get("component") or {}).get("measures") or []:
+            # A new-code measure is a value, or in older versions a period's or the first of its periods.
+            periods = m.get("periods") or [{}]
+            value = m.get("value") or (m.get("period") or {}).get("value") or periods[0].get("value")
+            if value is not None:
+                values[m.get("metric")] = value
+        return values
+
+
+def _server_message(e: urllib.error.HTTPError) -> str:
+    """SonarQube's reason for refusing a request, from its {"errors": [{"msg"}]} body; "" for anything else."""
+    try:
+        errors = json.loads(e.read()).get("errors") or []
+    except (OSError, ValueError, AttributeError, http.client.HTTPException):
+        return ""
+    msgs = [x["msg"] for x in errors if isinstance(x, dict) and isinstance(x.get("msg"), str)]
+    return f" ({'; '.join(msgs)})" if msgs else ""
+
+
+IMPACT_SEVERITIES = ("INFO", "LOW", "MEDIUM", "HIGH", "BLOCKER")
+
+
+def issue_severity(issue: dict) -> str:
+    """The issue's highest impact severity, or its older single severity when it lists no impacts."""
+    impacts = [i.get("severity") for i in issue.get("impacts") or []
+               if isinstance(i, dict) and i.get("severity") in IMPACT_SEVERITIES]
+    if impacts:
+        return max(impacts, key=IMPACT_SEVERITIES.index)
+    return issue.get("severity") or "UNKNOWN"
 
 
 # ---------------------------------------------------------------------------
@@ -490,6 +862,17 @@ class RunState:
     # The orchestrator process driving the run, {"host", "pid", "started_at"}; None while none does.
     owner: dict | None = None
     heartbeat_at: str | None = None
+    # The Jenkins job that runs the quality gate; None for a run without the gate, as for one saved before it.
+    quality_job: str | None = None
+    max_quality_rounds: int = DEFAULT_MAX_QUALITY_ROUNDS
+    # The quality round the round is in: 0 until the Builder's first report, then q from quality round q on.
+    quality_round: int = 0
+    # The run's SonarQube project, once created and configured, and the analysis of the base it is judged against.
+    quality_project: str | None = None
+    quality_baseline: str | None = None
+    # The analysis in flight, {ref, sha, queue_url, build, ce_task}, each saved as soon as it is known.
+    # rejected lists builds of ref that ended without a verdict, so a resume does not adopt them again.
+    ci: dict = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, saved: dict) -> "RunState":
@@ -522,6 +905,21 @@ class RunState:
     def review_path(self, n: int) -> str:
         return f"{self.dir}/review-{n}.md"
 
+    def quality_path(self, n: int, q: int) -> str:
+        return f"{self.dir}/quality-{n}-{q}.md"
+
+    def quality_build_path(self, n: int, q: int) -> str:
+        """The Builder's answer to quality-<n>-<q>.md."""
+        return f"{self.dir}/build-{n}-q{q}.md"
+
+    def builder_report_path(self, n: int, q: int) -> str:
+        """The report of the Builder's turn in round n that answers quality round q, or none when q is 0."""
+        return self.quality_build_path(n, q) if q else self.build_path(n)
+
+    def last_report_path(self, n: int) -> str:
+        """The Builder's last report in round n, once its quality rounds are over: the one the Reviewer reads."""
+        return self.builder_report_path(n, max(self.quality_round - 1, 0))
+
 
 def new_run_id() -> str:
     return f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}"
@@ -534,6 +932,140 @@ def parse_verdict(review: str) -> str | None:
             m = re.search(rf"VERDICT:\s*({APPROVE}|{CHANGES_REQUESTED})\b", line)
             return m.group(1) if m else None
     return None
+
+
+def parse_gate(quality: str) -> str | None:
+    """The gate on the quality file's first non-blank line, tolerating Markdown emphasis around it."""
+    for line in quality.splitlines():
+        if line.strip():
+            m = re.search(rf"GATE:\s*({GATE_OK}|{GATE_ERROR}|{GATE_BUILD_FAILED})\b", line)
+            return m.group(1) if m else None
+    return None
+
+
+def changed_lines(diff: str) -> dict[str, set[int]]:
+    """The lines each file gains in a `git diff -U0`, by its path in the new tree.
+
+    A file the diff touches without adding a line, such as a pure rename, one that only loses lines
+    or an empty new file, maps to an empty set; a deleted file is left out. Only `diff --git` and
+    `@@` lines are read inside a hunk, since an added line can itself start with `+++ `.
+    """
+    out: dict[str, set[int]] = {}
+    path, in_hunk = None, False
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            path, in_hunk = _diff_git_path(line[len("diff --git "):]), False
+            if path is not None:
+                out.setdefault(path, set())
+        elif line.startswith("@@"):
+            in_hunk = True
+            m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
+            if m and path is not None:
+                start = int(m.group(1))
+                count = 1 if m.group(2) is None else int(m.group(2))
+                out[path].update(range(start, start + count))
+        elif in_hunk:
+            continue
+        elif line.startswith("deleted file mode") and path is not None:
+            out.pop(path, None)
+            path = None
+        elif line.startswith("rename to "):
+            path = _unquote(line[len("rename to "):])
+            out.setdefault(path, set())
+        elif line.startswith("+++ "):
+            # git ends the name with a tab when it holds a space.
+            name = _unquote(line[len("+++ "):].removesuffix("\t"))
+            path = None if name == "/dev/null" else name.removeprefix("b/")
+            if path is not None:
+                out.setdefault(path, set())
+    return out
+
+
+def _diff_git_path(names: str) -> str | None:
+    """The path of `a/<path> b/<path>`; None when the two differ, as for a rename, which later lines name."""
+    if m := re.fullmatch(r'("(?:[^"\\]|\\.)*") ("(?:[^"\\]|\\.)*")', names):
+        a, b = _unquote(m.group(1)), _unquote(m.group(2))
+    else:
+        half = (len(names) - 1) // 2
+        a, b = names[:half], names[half + 1:]
+    if a.startswith("a/") and b.startswith("b/") and a[2:] == b[2:]:
+        return b[2:]
+    return None
+
+
+def _unquote(name: str) -> str:
+    """A path as git quotes it when it holds a quote, a backslash or a control character."""
+    if len(name) < 2 or not (name.startswith('"') and name.endswith('"')):
+        return name
+    escapes = {"a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v", '"': '"', "\\": "\\"}
+    return re.sub(r'\\([0-7]{3}|.)',
+                  lambda m: chr(int(m.group(1), 8)) if len(m.group(1)) == 3 else escapes.get(m.group(1), m.group(1)),
+                  name[1:-1])
+
+
+def quality_report(gate: str, intro: str, changed: dict[str, set[int]], *, conditions=(), issues=(),
+                   tests: list[tuple[str, str]] | None = None, coverage: dict[str, str] | None = None,
+                   console: str = "", edited=()) -> str:
+    """The quality file: the gate on its first line, then what the Builder has to answer.
+
+    Only the issues on lines the change added, and the lineless ones on files it touched, are
+    numbered, at most QUALITY_ISSUE_LIMIT of them; the rest are counted.
+    """
+    out = [f"GATE: {gate}", "", intro]
+    if conditions:
+        out += ["", "## Failed conditions", ""]
+        for c in conditions:
+            wants = "at least" if c.get("comparator") == "LT" else "at most"
+            out.append(f"- `{c.get('metricKey')}` is {c.get('actualValue')}; the gate wants {wants} "
+                       f"{c.get('errorThreshold')}.")
+    if gate != GATE_BUILD_FAILED:
+        on_change = sorted((i for i in issues if i["path"] in changed
+                            and (i["line"] is None or i["line"] in changed[i["path"]])),
+                           key=lambda i: (i["path"], i["line"] or 0))
+        out += ["", "## Issues on changed lines", ""]
+        for k, i in enumerate(on_change[:QUALITY_ISSUE_LIMIT], 1):
+            where = f"{i['path']}:{i['line']}" if i["line"] is not None else f"{i['path']} (the whole file)"
+            out.append(f"{k}. `{where}` {i['severity']} {i['rule']}: {i['message']}")
+        if not on_change:
+            out.append("None.")
+        if (more := len(on_change) - QUALITY_ISSUE_LIMIT) > 0:
+            out += ["", f"{more} more issues on changed lines are not listed; fix the ones above first."]
+        if others := len(issues) - len(on_change):
+            out += ["", f"{others} other open issues in the project are not on lines this change added, "
+                        "so they are not listed."]
+    out += ["", "## Failing tests", ""]
+    if tests is None:
+        out.append("Jenkins has no test report for this build.")
+    else:
+        out += [f"- `{name}`: {detail.strip().splitlines()[0] if detail.strip() else 'failed'}"
+                for name, detail in tests[:QUALITY_ISSUE_LIMIT]] or ["None."]
+        if len(tests) > QUALITY_ISSUE_LIMIT:
+            out.append(f"- and {len(tests) - QUALITY_ISSUE_LIMIT} more.")
+    if coverage is not None:
+        out += ["", "## Coverage on new code", ""]
+        to_cover = coverage.get("new_lines_to_cover")
+        if to_cover in (None, "0"):
+            out.append("No new lines to cover.")
+        else:
+            out.append(f"{coverage.get('new_coverage', '?')}% of {to_cover} new lines to cover; "
+                       f"{coverage.get('new_uncovered_lines', '?')} are not covered.")
+    if console:
+        out += ["", f"## The last {CONSOLE_TAIL_LINES} lines of the build's console", "", "````", console, "````"]
+    if edited:
+        out += ["", "## Build configuration", ""]
+        if "Jenkinsfile" in edited:
+            out.append("- The change edits `Jenkinsfile`. The quality job reads it from `main`, "
+                       "so this analysis ran without the edit.")
+        if "sonar-project.properties" in edited:
+            out.append("- The change edits `sonar-project.properties`. The scanner read the edited file "
+                       "from the snapshot.")
+    return "\n".join(out) + "\n"
+
+
+def edited_config(diff: str, changed: dict[str, set[int]]) -> list[str]:
+    """The BUILD_CONFIG_FILES the diff changes, deletes or renames away."""
+    return [f for f in BUILD_CONFIG_FILES
+            if f in changed or re.search(rf"^(--- a/|rename from ){re.escape(f)}\t?$", diff, re.M)]
 
 
 def spec_title(spec: str) -> str | None:
@@ -557,7 +1089,7 @@ def _details(summary: str, text: str, open_: bool = False) -> str:
     return f"<details{' open' if open_ else ''}>\n<summary>{summary}</summary>\n\n{text.strip()}\n\n</details>"
 
 
-def pr_body(state: "RunState", spec: str, report: str, review: str) -> str:
+def pr_body(state: "RunState", spec: str, report: str, review: str, quality: str | None = None) -> str:
     approved = state.verdict == APPROVE
     rounds = f"{state.round} round{'s' if state.round != 1 else ''}"
     head = (f"Opened by ai-agents-orchestrator run `{state.run_id}`. "
@@ -574,6 +1106,7 @@ def pr_body(state: "RunState", spec: str, report: str, review: str) -> str:
         head,
         _details("Spec", spec, open_=True),
         _details(f"Builder report (round {state.round})", report),
+        *([_details(f"Quality gate (round {state.round})", quality)] if quality else []),
         _details(f"Review (round {state.round})", review, open_=not approved),
     ]) + "\n"
 
@@ -608,6 +1141,10 @@ class Workflow:
     is committed, pushed and opened as a pull request against the branch the run
     started on, which is checked out again afterwards. The workspace is then
     closed. A run that fails keeps its workspace and branch, to see what happened.
+
+    With ci, each Builder turn is followed by a quality round (phase quality) that
+    analyses a snapshot of the change; a gate that does not pass goes back to the
+    Builder, up to max_quality_rounds analyses per round, before the Reviewer.
     """
 
     def __init__(self, herdr: Herdr, host: Host, state: RunState, *,
@@ -616,17 +1153,22 @@ class Workflow:
                  agent_args: list[str] | None = None,
                  models: dict[str, str] | None = None,
                  pull_request: bool = True,
+                 ci: CI | None = None,
+                 max_quality_rounds: int = DEFAULT_MAX_QUALITY_ROUNDS,
                  sleep=time.sleep, clock=time.monotonic, wallclock=time.time):
         self.herdr = herdr
         self.host = host
         self.state = state
         self.notify = notify
+        self.ci = ci
         # Saved with the run, so a resume starts from them.
         state.max_rounds = max_rounds
         state.turn_timeout = turn_timeout
         state.agent_args = agent_args or []
         state.models = models or {}
         state.pull_request = pull_request
+        state.quality_job = ci.job if ci else None
+        state.max_quality_rounds = max_quality_rounds
         self.sleep = sleep
         self.clock = clock
         self.wallclock = wallclock
@@ -640,8 +1182,14 @@ class Workflow:
             return s.verdict
         try:
             self._claim()
-            if s.pull_request and s.phase == "spec":
-                self._check_repo()
+            if s.phase == "spec":
+                if self.ci:
+                    self._check_gate()
+                if s.pull_request:
+                    self._check_repo()
+            elif self.ci and s.phase in ("build", "quality"):
+                # Before a Builder turn that may take half an hour, not after it.
+                self.ci.check_credentials()
             # Publishing needs no agent, so a resume there opens no workspace only to close it.
             if s.phase != "publish":
                 self._prepare()
@@ -655,10 +1203,11 @@ class Workflow:
                 s.base = self.host.git_head(s.cwd)
                 s.phase, s.round = "build", 1
                 self._save()
-            if s.phase in ("build", "review"):
+            if s.phase in ("build", "quality", "review"):
                 self._build_and_review()
             if s.pull_request:
                 self._publish()
+            self._clean_up_quality()
         except RunTakenOver:
             raise
         except OrchestratorError as e:
@@ -690,7 +1239,7 @@ class Workflow:
 
     def _release(self, error: str) -> None:
         """Record why the run stopped and that no process drives it now, as far as saving still works."""
-        self.state.error = error
+        self.state.error = self.ci.mask(error) if self.ci else error
         self.state.owner = None
         try:
             self._save()
@@ -712,6 +1261,19 @@ class Workflow:
         # leaves it to _switch_to_branch.
         if branch == s.base_branch:
             self.host.fast_forward(s.cwd, s.base_branch)
+
+    def _check_gate(self) -> None:
+        """Fail before the interview if the quality gate could not run."""
+        s = self.state
+        if self.host.git_head(s.cwd) is None:
+            raise OrchestratorError(f"the quality gate needs a git repository, and {s.cwd} is not one with a commit")
+        # _check_repo checks both for a pull-request run.
+        if not s.pull_request:
+            # A snapshot takes every change in the tree, so the tree must start with none.
+            self._require_clean()
+            if self.host.git_run(s.cwd, "remote", "get-url", REMOTE).returncode != 0:
+                raise OrchestratorError(f"the quality gate pushes snapshots to {REMOTE}, and {s.cwd} has no {REMOTE}")
+        self.ci.preflight()
 
     def _require_clean(self) -> None:
         # The commit takes every change in the working tree, so it must hold only the Builder's.
@@ -773,8 +1335,21 @@ class Workflow:
         while True:
             n = s.round
             if s.phase == "build":
-                text, fresh = self._build_prompts(n)
-                self._turn("build", text, s.build_path(n), s.turn_timeout, fresh_text=fresh)
+                q = s.quality_round
+                text, fresh = self._build_prompts(n, q)
+                self._turn("build", text, s.builder_report_path(n, q), s.turn_timeout, fresh_text=fresh)
+                if self.ci:
+                    s.phase, s.quality_round = "quality", q + 1
+                else:
+                    s.phase = "review"
+                self._save()
+            if s.phase == "quality":
+                gate = self._quality(n, s.quality_round)
+                # As for review rounds: a saved round beyond a lowered limit ends here too.
+                if gate != GATE_OK and s.quality_round < s.max_quality_rounds:
+                    s.phase = "build"
+                    self._save()
+                    continue
                 s.phase = "review"
                 self._save()
             text, fresh = self._review_prompts(n)
@@ -785,18 +1360,38 @@ class Workflow:
             log(f"[review] round {n}: {s.verdict}")
             if s.verdict == APPROVE or n >= s.max_rounds:
                 break
-            s.phase, s.round = "build", n + 1
+            s.phase, s.round, s.quality_round = "build", n + 1, 0
             self._save()
 
-    def _build_prompts(self, n: int) -> tuple[str, str | None]:
-        """The Builder's prompt for round n, and the one for a fresh session that has not seen rounds before n."""
+    def _build_prompts(self, n: int, q: int) -> tuple[str, str | None]:
+        """The Builder's prompt for its turn in round n that answers quality round q (none when 0),
+        and the one for a fresh session that has not seen the turns before it."""
         s = self.state
-        first = BUILD_PROMPT.format(spec_path=s.spec_path, cwd=s.cwd, report_path=s.build_path(n))
-        if n == 1:
+        report = s.builder_report_path(n, q)
+        first = BUILD_PROMPT.format(spec_path=s.spec_path, cwd=s.cwd, report_path=report)
+        if q:
+            follow = QUALITY_FIX_PROMPT.format(quality_path=s.quality_path(n, q), report_path=report)
+        elif n > 1:
+            follow = FIX_PROMPT.format(review_path=s.review_path(n - 1), report_path=report)
+        else:
             return first, None
-        fix = FIX_PROMPT.format(review_path=s.review_path(n - 1), report_path=s.build_path(n))
-        note = REBUILD_NOTE.format(n=n, reports=", ".join(s.build_path(i) for i in range(1, n)))
-        return fix, f"{first}\n\n{note}\n\n{fix}"
+        note = REBUILD_NOTE.format(n=n, reports=", ".join(self._earlier_reports(n, q)))
+        return follow, f"{first}\n\n{note}\n\n{follow}"
+
+    def _earlier_reports(self, n: int, q: int) -> list[str]:
+        """The Builder's reports before its turn in round n that answers quality round q, oldest first."""
+        s = self.state
+        reports = []
+        for i in range(1, n):
+            reports.append(s.build_path(i))
+            # How many quality rounds an earlier round took is recorded only by the files it left.
+            j = 1
+            while self.ci and self.host.read(s.quality_build_path(i, j)) is not None:
+                reports.append(s.quality_build_path(i, j))
+                j += 1
+        if q:
+            reports += [s.builder_report_path(n, j) for j in range(q)]
+        return reports
 
     def _publish(self) -> None:
         """Commit the change, merge the latest base into it, push its branch and open a pull request for it.
@@ -827,8 +1422,9 @@ class Workflow:
                 log(f"{s.branch} conflicts with {REMOTE}/{s.base_branch} in {', '.join(s.conflicts)}; "
                     f"the pull request will be a draft")
             self.host.git(s.cwd, "push", "--quiet", "--set-upstream", REMOTE, s.branch, timeout=NETWORK_TIMEOUT)
-            body = pr_body(s, spec, self.host.read(s.build_path(s.round)) or "",
-                           self.host.read(s.review_path(s.round)) or "")
+            quality = self.host.read(s.quality_path(s.round, s.quality_round)) if s.quality_round else None
+            body = pr_body(s, spec, self.host.read(s.last_report_path(s.round)) or "",
+                           self.host.read(s.review_path(s.round)) or "", quality)
             s.pr_url = self.host.create_pr(s.cwd, s.base_branch, s.branch, title, body,
                                            draft=s.verdict != APPROVE or bool(s.conflicts))
             self._save()
@@ -849,13 +1445,279 @@ class Workflow:
         """The Reviewer's prompt for round n, and the one for a fresh session that has not seen rounds before n."""
         s = self.state
         fill = dict(spec_path=s.spec_path, change=self._change_description(),
-                    report_path=s.build_path(n), review_path=s.review_path(n),
+                    report_path=s.last_report_path(n), review_path=s.review_path(n),
                     approve=APPROVE, changes=CHANGES_REQUESTED)
-        first = REVIEW_PROMPT.format(**fill)
+        quality = self._quality_note(n)
+        first = REVIEW_PROMPT.format(**fill) + quality
         if n == 1:
             return first, None
         note = REREVIEW_NOTE.format(n=n, reviews=", ".join(s.review_path(i) for i in range(1, n)))
-        return RECHECK_PROMPT.format(**fill), f"{first}\n\n{note}"
+        return RECHECK_PROMPT.format(**fill) + quality, f"{first}\n\n{note}"
+
+    def _quality_note(self, n: int) -> str:
+        """What the Reviewer is told of round n's last quality round: passed, or the findings left; "" without one."""
+        s = self.state
+        if not self.ci or not s.quality_round:
+            return ""
+        path = s.quality_path(n, s.quality_round)
+        text = self.host.read(path)
+        note = QUALITY_PASSED_NOTE if text is not None and parse_gate(text) == GATE_OK else QUALITY_UNRESOLVED_NOTE
+        return "\n\n" + note.format(quality_path=path)
+
+    # -- The quality gate --------------------------------------------------
+
+    def _quality(self, n: int, q: int) -> str:
+        """Quality round q of round n: analyse the change, write quality-<n>-<q>.md, and return its gate.
+
+        Each step first looks for what an earlier orchestrator already did, furthest first: the
+        quality file; then the project and the base's analysis; then, in _analyse, the chain in ci.
+        """
+        s = self.state
+        path = s.quality_path(n, q)
+        ref = f"{CI_REF_PREFIX}{s.key}-{n}-q{q}"
+        if (text := self.host.read(path)) is not None:
+            log(f"[quality] {os.path.basename(path)} is already written")
+        else:
+            # Per round, and afresh on a resume.
+            deadline = self.clock() + QUALITY_TIMEOUT
+            self._quality_project(deadline)
+            self._quality_baseline(deadline)
+            message = f"Orchestrator run {s.run_id}: round {n}, quality round {q}"
+            build, result, analysis = self._analyse(
+                ref, "change", deadline, lambda: self.host.snapshot(s.cwd, s.base, message))
+            text = self.ci.mask(self._quality_report(n, q, build, result, analysis, deadline))
+            self.host.write(path, text)
+        gate = parse_gate(text)
+        if gate is None:
+            self._reject(path, "does not start with a GATE line")
+        log(f"[quality] round {n}, quality round {q}: {gate}")
+        self._finish_analysis(ref)
+        return gate
+
+    def _quality_project(self, deadline: float) -> None:
+        s = self.state
+        if s.quality_project:
+            return
+        key = f"{SONAR_PROJECT}-{s.key}"
+        self._once(f"creating SonarQube project {key}", deadline, lambda: self.ci.create_project(key, SONAR_PROJECT))
+        s.quality_project = key
+        self._save()
+
+    def _quality_baseline(self, deadline: float) -> None:
+        """Analyse the base once per run, as version base, so new code is only what the change adds."""
+        s = self.state
+        if s.quality_baseline:
+            return
+        ref = f"{CI_REF_PREFIX}{s.key}-base"
+        build, result, analysis = self._analyse(ref, "base", deadline, lambda: s.base)
+        if analysis is None:
+            self._cut_back(build)
+            raise OrchestratorError(
+                f"Jenkins build #{build} of the base commit {s.base} ended {result} before the SonarQube analysis, "
+                f"so there is no baseline to judge the change against; see the build, then resume")
+        s.quality_baseline = analysis
+        self._finish_analysis(ref)
+
+    def _analyse(self, ref: str, version: str, deadline: float, commit) -> tuple[int, str | None, str | None]:
+        """Have Jenkins analyse a commit into the run's project; returns (build, its result, analysis id).
+
+        commit() makes the commit, which is pushed to the branch ref. The analysis id is None when
+        the build ended before the analysis; the result is None when a resume found the analysis
+        already under way. Each link of the chain is saved as soon as it is known, so a resume
+        picks it up from the furthest one.
+        """
+        s = self.state
+        fresh = s.ci.get("ref") != ref
+        if fresh:
+            if s.ci.get("ref"):
+                self._delete_ci_ref(s.ci["ref"])
+            sha = commit()
+            self.host.push_ref(s.cwd, sha, ref)
+            s.ci = {"ref": ref, "sha": sha}
+            self._save()
+        result = None
+        if "ce_task" not in s.ci:
+            if "build" not in s.ci:
+                self._start_build(ref, version, deadline, adopt=not fresh)
+            number = s.ci["build"]
+            result = self._poll(f"waiting for Jenkins build #{number} of {ref}", deadline,
+                                lambda: self.ci.build_result(number))
+            task = self._once(f"reading report-task.txt of Jenkins build #{number}", deadline,
+                              lambda: self.ci.report_task(number))
+            if task is None:
+                if result == "ABORTED":
+                    self._cut_back(number)
+                    raise OrchestratorError(
+                        f"Jenkins build #{number} of {ref} was aborted before the SonarQube analysis, so nothing "
+                        f"judged the change; resume to build it again")
+                return number, result, None
+            s.ci["ce_task"] = task
+            self._save()
+        task, number = s.ci["ce_task"], s.ci["build"]
+        analysis = self._poll(f"waiting for SonarQube task {task} of Jenkins build #{number}", deadline,
+                              lambda: self._analysis_id(task))
+        return number, result, analysis
+
+    def _start_build(self, ref: str, version: str, deadline: float, adopt: bool) -> None:
+        """Record in ci the build of ref: one triggered now, or with adopt one an earlier orchestrator triggered."""
+        s = self.state
+        if "queue_url" not in s.ci:
+            # The ref names one round of one run, so a build of it is this round's, triggered by an
+            # orchestrator that stopped before it recorded the queue item.
+            found = self._once(f"looking for a Jenkins build of {ref}", deadline,
+                               lambda: self.ci.find_build(ref, s.ci.get("rejected", ()))) if adopt else None
+            if found is not None:
+                log(f"[quality] adopting Jenkins build #{found} of {ref}")
+                s.ci["build"] = found
+                self._save()
+                return
+            s.ci["queue_url"] = self._once(f"triggering Jenkins job {self.ci.job} for {ref}", deadline,
+                                           lambda: self.ci.trigger(ref, s.quality_project, version))
+            self._save()
+        s.ci["build"] = self._poll(f"waiting for Jenkins to start the build of {ref}", deadline,
+                                   lambda: self._queued_build(ref))
+        self._save()
+
+    def _queued_build(self, ref: str) -> int | None:
+        s = self.state
+        queue_url = s.ci["queue_url"]
+        try:
+            item = self.ci.queue_item(queue_url)
+        except CIError as e:
+            if e.status != 404:
+                raise
+            # Jenkins forgets a queue item some minutes after its build started.
+            found = self.ci.find_build(ref, s.ci.get("rejected", ()))
+            if found is None:
+                self._cut_back()
+                raise OrchestratorError(f"Jenkins forgot queue item {queue_url}, and none of the job's last 20 "
+                                        f"builds is of {ref}; resume to trigger a new one") from e
+            return found
+        if item.get("cancelled"):
+            self._cut_back()
+            raise OrchestratorError(f"the build of {ref} was cancelled in Jenkins's queue, so nothing judged the "
+                                    f"change; resume to trigger a new one")
+        return (item.get("executable") or {}).get("number")
+
+    def _analysis_id(self, task: str) -> str | None:
+        """The analysis the SonarQube task made, None while it runs."""
+        t = self.ci.ce_task(task)
+        status = t.get("status")
+        if status == "SUCCESS":
+            if not t.get("analysisId"):
+                raise OrchestratorError(f"SonarQube task {task} succeeded without an analysis")
+            return t["analysisId"]
+        if status in ("FAILED", "CANCELED"):
+            number = self.state.ci.get("build")
+            self._cut_back(number)
+            raise OrchestratorError(self.ci.mask(
+                f"SonarQube task {task} of Jenkins build #{number} ended {status}: {t.get('errorMessage') or ''}; "
+                f"resume to build it again"))
+        return None
+
+    def _cut_back(self, rejected: int | None = None) -> None:
+        """Keep only the pushed commit in ci, so a resume builds it anew, never adopting the rejected build."""
+        ci = self.state.ci
+        skip = [*ci.get("rejected", []), *([rejected] if rejected is not None else [])]
+        self.state.ci = {"ref": ci["ref"], "sha": ci["sha"], **({"rejected": skip} if skip else {})}
+
+    def _quality_report(self, n: int, q: int, build: int, result: str | None, analysis: str | None,
+                        deadline: float) -> str:
+        s = self.state
+        sha = s.ci["sha"]
+        diff = self.host.change_diff(s.cwd, s.base, sha)
+        changed = changed_lines(diff)
+        edited = edited_config(diff, changed)
+        where = f"round {n}, quality round {q} of {s.max_quality_rounds}"
+        tests_step = f"reading the test report of Jenkins build #{build}"
+        if analysis is None:
+            tests = self._once(tests_step, deadline, lambda: self.ci.failed_tests(build))
+            console = "" if tests else self._once(f"reading the console of Jenkins build #{build}", deadline,
+                                                  lambda: self.ci.console_tail(build))
+            intro = (f"Jenkins build #{build} of snapshot `{sha}` ({where}) ended {result} before the SonarQube "
+                     f"analysis, so nothing judged the change. Make it build first.")
+            return quality_report(GATE_BUILD_FAILED, intro, changed, tests=tests, console=console, edited=edited)
+        status = self._once(f"reading the quality gate of analysis {analysis}", deadline,
+                            lambda: self.ci.gate_status(analysis))
+        issues = self._once(f"reading the issues of {s.quality_project}", deadline,
+                            lambda: self.ci.issues(s.quality_project))
+        coverage = self._once(f"reading the coverage of {s.quality_project}", deadline,
+                              lambda: self.ci.coverage(s.quality_project))
+        tests = self._once(tests_step, deadline, lambda: self.ci.failed_tests(build))
+        sonar = status.get("status")
+        intro = (f"SonarQube analysed snapshot `{sha}` ({where}) in Jenkins build #{build}, "
+                 f"against the base `{s.base}`: quality gate {sonar}.")
+        failed = [c for c in status.get("conditions") or [] if c.get("status") == "ERROR"]
+        return quality_report(GATE_OK if sonar == "OK" else GATE_ERROR, intro, changed, conditions=failed,
+                              issues=issues, tests=tests, coverage=coverage, edited=edited)
+
+    def _poll(self, step: str, deadline: float, poll):
+        """Call poll() every CI_POLL_SECONDS until it returns something other than None, and return that.
+
+        A failure that may pass, such as Jenkins being unreachable, is retried until the round's
+        deadline; any other fails the run at once. Either way ci keeps what is known so far.
+        """
+        failing = None
+        while True:
+            try:
+                out = poll()
+            except CIError as e:
+                if not e.transient:
+                    raise OrchestratorError(f"quality gate: {step}: {e}") from e
+                if failing is None:
+                    log(f"[quality] {step}: {e}; retrying")
+                failing = e
+            else:
+                if failing is not None:
+                    log(f"[quality] {step}: answered again")
+                failing = None
+                if out is not None:
+                    return out
+            if self.clock() >= deadline:
+                why = f"; last error: {failing}" if failing else ""
+                raise OrchestratorError(f"quality gate: {step} did not finish within {QUALITY_TIMEOUT}s of the "
+                                        f"round's start{why}; resume to go on")
+            self._heartbeat()
+            self.sleep(CI_POLL_SECONDS)
+
+    def _once(self, step: str, deadline: float, call):
+        """call()'s result, retried as _poll retries; None is a result here too."""
+        return self._poll(step, deadline, lambda: (call(),))[0]
+
+    def _finish_analysis(self, ref: str) -> None:
+        s = self.state
+        if s.ci.get("ref") == ref:
+            self._delete_ci_ref(ref)
+            s.ci = {}
+        self._save()
+
+    def _delete_ci_ref(self, ref: str) -> None:
+        # Jenkins has checked the ref out by now; a leftover is only clutter, which `done` tries again.
+        try:
+            self.host.delete_remote_branch(self.state.cwd, ref)
+        except OrchestratorError as e:
+            log(f"could not delete {ref} on {REMOTE}: {e}")
+
+    def _clean_up_quality(self) -> None:
+        """At the end of a run, delete its refs on origin and its SonarQube project; a failure is only logged."""
+        s = self.state
+        if not self.ci:
+            return
+        try:
+            refs = self.host.remote_branches(s.cwd, f"{CI_REF_PREFIX}{s.key}-")
+        except OrchestratorError as e:
+            log(f"could not list the {CI_REF_PREFIX} branches on {REMOTE}: {e}")
+            refs = []
+        for ref in refs:
+            self._delete_ci_ref(ref)
+        s.ci = {}
+        if s.quality_project:
+            try:
+                self.ci.delete_project(s.quality_project)
+            except OrchestratorError as e:
+                log(f"could not delete SonarQube project {s.quality_project}: {e}")
+            else:
+                s.quality_project = None
 
     def _turn(self, role: str, text: str, path: str, timeout: int | None, *,
               fresh_text: str | None = None, watch_stalls: bool = True, announce=None) -> str:
@@ -1089,6 +1951,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     for role in ROLE_LABELS:
         settings.add_argument(f"--{role}-model", metavar="MODEL",
                               help=f"Claude model for the {ROLE_LABELS[role]}; overrides --model")
+    settings.add_argument("--max-quality-rounds", type=int, metavar="N",
+                          help=f"with --quality-gate: SonarQube analyses per review round before the Reviewer "
+                               f"gets the change anyway (default {DEFAULT_MAX_QUALITY_ROUNDS})")
 
     run = sub.add_parser("run", parents=[target, settings], help="run the handoff workflow for a task")
     run.add_argument("task", help="what to build, as you would tell the Spec Collector")
@@ -1096,6 +1961,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     run.add_argument("--no-pr", action="store_true",
                      help="leave the change uncommitted in the working tree and the workspace open, "
                           "instead of opening a pull request")
+    # Run only: turning the gate on or off in the middle of a run is not supported yet.
+    run.add_argument("--quality-gate", metavar="JOB",
+                     help="after each Builder turn, analyse the change with this Jenkins job (its full name, "
+                          "folders included) and SonarQube, and send the findings back to the Builder; "
+                          "needs JENKINS_URL, JENKINS_USER, JENKINS_TOKEN, SONAR_HOST_URL and SONAR_TOKEN")
 
     resume = sub.add_parser(
         "resume", parents=[target, settings], help="continue a run whose orchestrator has stopped",
@@ -1111,6 +1981,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         p.error("--cwd is required with --machine")
     if getattr(args, "max_rounds", None) is not None and args.max_rounds < 1:
         p.error("--max-rounds must be at least 1")
+    if getattr(args, "max_quality_rounds", None) is not None:
+        if args.max_quality_rounds < 1:
+            p.error("--max-quality-rounds must be at least 1")
+        if args.command == "run" and not args.quality_gate:
+            p.error("--max-quality-rounds needs --quality-gate")
+    if getattr(args, "quality_gate", None) is not None and not re.fullmatch(r"[^/]+(/[^/]+)*", args.quality_gate):
+        p.error("--quality-gate takes a Jenkins job's full name, such as folder/job")
     return args
 
 
@@ -1200,7 +2077,10 @@ def print_runs(runs: list[tuple[int, dict]], local_host: str, pid_alive, target:
                 outcome += f"; resume: {resume_command(s['run_id'], target)}"
         if s.get("pr_url"):
             outcome += f"  {s['pr_url']}"
-        print(f"{s['run_id']}  {s['phase']:<7}  round {s['round']}  {outcome}")
+        rnd = f"round {s['round']}"
+        if s.get("quality_round") and s["phase"] in ("build", "quality"):
+            rnd += f" q{s['quality_round']}"
+        print(f"{s['run_id']}  {s['phase']:<7}  {rnd}  {outcome}")
         print(f"    {s['task'][:100]}")
 
 
@@ -1236,6 +2116,17 @@ def resumable_state(runs: list[tuple[int, dict]], args: argparse.Namespace, cwd:
     if state.phase != "done" and state.max_rounds < state.round:
         raise OrchestratorError(f"run {state.run_id} is already in round {state.round}; "
                                 f"--max-rounds {state.max_rounds} is too low")
+    if args.max_quality_rounds is not None:
+        if not state.quality_job:
+            raise OrchestratorError(f"run {state.run_id} has no quality gate, so --max-quality-rounds does not apply")
+        state.max_quality_rounds = args.max_quality_rounds
+    q = state.quality_round
+    # In quality, round q is analysed whatever the limit; in build with q >= 1, the Builder is
+    # answering quality round q, and only a round q + 1 would judge that answer.
+    if (state.phase == "quality" and state.max_quality_rounds < q) or \
+            (state.phase == "build" and q >= 1 and state.max_quality_rounds <= q):
+        raise OrchestratorError(f"run {state.run_id} is already in quality round {q} of its {state.phase} phase; "
+                                f"--max-quality-rounds {state.max_quality_rounds} is too low")
     # The herdr this resume addresses: the saved one may name the same herdr reached another way.
     state.machine = args.machine
     return state
@@ -1267,12 +2158,16 @@ def main(argv: list[str]) -> int:
             state.agent_args = ["--permission-mode", args.permission_mode] if args.permission_mode else []
             state.models = role_models(args)
             state.pull_request = not args.no_pr
+            state.quality_job = args.quality_gate
+            state.max_quality_rounds = args.max_quality_rounds or DEFAULT_MAX_QUALITY_ROUNDS
         else:
             state = resumable_state(host.run_states(cwd), args, cwd, socket.gethostname(), pid_alive)
         workflow = Workflow(
             herdr, host, state, notify=notify_locally,
             max_rounds=state.max_rounds, turn_timeout=state.turn_timeout,
-            agent_args=state.agent_args, models=state.models, pull_request=state.pull_request)
+            agent_args=state.agent_args, models=state.models, pull_request=state.pull_request,
+            ci=CI(state.quality_job) if state.quality_job else None,
+            max_quality_rounds=state.max_quality_rounds)
         verdict = workflow.run()
     except OrchestratorError as e:
         print(f"error: {e}", file=sys.stderr)
