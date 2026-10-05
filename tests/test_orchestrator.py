@@ -4,6 +4,8 @@ import os
 import re
 import socket
 import subprocess
+import tempfile
+import tomllib
 import unittest
 import urllib.error
 import urllib.parse
@@ -260,7 +262,7 @@ def make_workflow(script, host=None, max_rounds=3, state=None, **kw):
     notes = []
     clock = FakeClock()
     wf = Workflow(herdr, host, state, notify=lambda t, b: notes.append(t),
-                  max_rounds=max_rounds, sleep=clock.sleep, clock=clock, wallclock=clock, **kw)
+                  max_rounds=max_rounds, clocks=orchestrator.Clocks(clock.sleep, clock, clock), **kw)
     return wf, herdr, host, notes
 
 
@@ -793,14 +795,16 @@ class TestHerdr(unittest.TestCase):
         err = json.dumps({"error": {"code": "agent_blocked", "message": "waiting"}})
         run = MagicMock(return_value=completed(stderr=err, returncode=1))
 
+        herdr = Herdr(run=run)
         with self.assertRaises(HerdrError) as cm:
-            Herdr(run=run).call("agent", "prompt", "x", "y")
+            herdr.call("agent", "prompt", "x", "y")
         self.assertEqual(cm.exception.code, "agent_blocked")
 
     def test_plain_text_error(self):
         run = MagicMock(return_value=completed(stderr="unknown flag", returncode=2))
+        herdr = Herdr(run=run)
         with self.assertRaisesRegex(HerdrError, "exit_2: unknown flag"):
-            Herdr(run=run).call("agent", "bogus")
+            herdr.call("agent", "bogus")
 
     def test_status_is_none_after_exit(self):
         err = json.dumps({"error": {"code": "agent_not_found", "message": "gone"}})
@@ -842,13 +846,15 @@ class TestHerdr(unittest.TestCase):
 
     def test_ssh_target_unknown_machine(self):
         run = MagicMock(return_value=completed("[]"))
+        herdr = Herdr("nope", run=run)
         with self.assertRaisesRegex(OrchestratorError, "no saved herdr machine named nope"):
-            Herdr("nope", run=run).ssh_target()
+            herdr.ssh_target()
 
     def test_missing_binary(self):
         run = MagicMock(side_effect=FileNotFoundError())
+        herdr = Herdr(run=run)
         with self.assertRaisesRegex(OrchestratorError, "not on PATH"):
-            Herdr(run=run).call("agent", "list")
+            herdr.call("agent", "list")
 
 
 class TestHost(unittest.TestCase):
@@ -868,8 +874,9 @@ class TestHost(unittest.TestCase):
 
     def test_read_failure_raises(self):
         run = MagicMock(return_value=completed(stderr="Permission denied", returncode=1))
+        host = Host(run=run)
         with self.assertRaisesRegex(OrchestratorError, "Permission denied"):
-            Host(run=run).read("/x/spec.md")
+            host.read("/x/spec.md")
 
     def test_write_sends_text_on_stdin(self):
         run = MagicMock(return_value=completed())
@@ -898,8 +905,9 @@ class TestHost(unittest.TestCase):
 
     def test_run_states_corrupt(self):
         run = MagicMock(return_value=completed('5 {"run_id": \n'))
+        host = Host(run=run)
         with self.assertRaisesRegex(OrchestratorError, "corrupt run state"):
-            Host(run=run).run_states("/x")
+            host.run_states("/x")
 
     def test_real_filesystem_roundtrip(self):
         import tempfile
@@ -1620,8 +1628,9 @@ class TestResumableState(unittest.TestCase):
                          (5, 60, ["--permission-mode", "acceptEdits"], {"build": "sonnet", "review": "opus"}))
 
     def test_max_rounds_below_the_saved_round(self):
+        saved = self.saved()
         with self.assertRaisesRegex(OrchestratorError, "already in round 2"):
-            self.resumable(["a1b2c3", "--max-rounds", "1"], self.saved())
+            self.resumable(["a1b2c3", "--max-rounds", "1"], saved)
 
     def test_live_run_needs_force(self):
         saved = self.saved(owner=ME)
@@ -1699,8 +1708,9 @@ class TestHerdrLookups(unittest.TestCase):
         self.assertFalse(Herdr(run=self.not_found("pane_not_found")).pane_exists("wA:p1"))
 
     def test_other_errors_raise(self):
+        herdr = Herdr(run=self.not_found("server_unavailable"))
         with self.assertRaises(HerdrError):
-            Herdr(run=self.not_found("server_unavailable")).pane_exists("wA:p1")
+            herdr.pane_exists("wA:p1")
 
 
 class TestAtomicWrite(unittest.TestCase):
@@ -2601,6 +2611,10 @@ class TestChangedLines(unittest.TestCase):
                 "@@ -1 +0,0 @@\n-z\n")
         self.assertEqual(changed_lines(diff), {"new.py": {1, 2, 3}, "mod.py": {3, 18, 19}})
 
+    def test_a_hunk_header_it_cannot_read_adds_no_lines(self):
+        diff = "diff --git a/m.py b/m.py\n--- a/m.py\n+++ b/m.py\n@@ garbled @@\n+x\n"
+        self.assertEqual(changed_lines(diff), {"m.py": set()})
+
     def test_renames(self):
         diff = ("diff --git a/old name.py b/new name.py\nsimilarity index 100%\nrename from old name.py\n"
                 "rename to new name.py\n"
@@ -2667,10 +2681,22 @@ class TestQualityReport(unittest.TestCase):
         self.assertIn("None.", text)
         self.assertIn("No new lines to cover.", quality_report("OK", "i", {}, tests=[], coverage={}))
 
+    def test_failing_tests_beyond_the_limit_are_counted(self):
+        tests = [(f"t.T.test_{k}", "") for k in range(orchestrator.QUALITY_ISSUE_LIMIT + 3)]
+        text = quality_report("ERROR", "intro", {}, tests=tests)
+        self.assertIn("- `t.T.test_0`: failed\n", text)
+        self.assertIn("- and 3 more.\n", text)
+        self.assertNotIn(f"test_{orchestrator.QUALITY_ISSUE_LIMIT}`", text)
+
     def test_build_config_edits_are_named(self):
         text = quality_report("OK", "i", {}, tests=[], edited=["Jenkinsfile", "sonar-project.properties"])
         self.assertIn("The change edits `Jenkinsfile`. The quality job reads it from `main`", text)
         self.assertIn("The change edits `sonar-project.properties`. The scanner read the edited file", text)
+        for only, other in (("Jenkinsfile", "sonar-project.properties"), ("sonar-project.properties", "Jenkinsfile")):
+            with self.subTest(only=only):
+                text = quality_report("OK", "i", {}, tests=[], edited=[only])
+                self.assertIn(f"The change edits `{only}`", text)
+                self.assertNotIn(f"The change edits `{other}`", text)
 
     def test_tokens_are_masked(self):
         ci = CI(JOB, env=CREDENTIALS)
@@ -2747,8 +2773,9 @@ class TestCIEnvFile(unittest.TestCase):
         with patch.dict("os.environ", {"XDG_CONFIG_HOME": xdg}):
             for k in orchestrator.CI_ENV:
                 os.environ.pop(k, None)
+            ci = CI(JOB)
             with self.assertRaisesRegex(OrchestratorError, f"environment or in {self.path}$"):
-                CI(JOB).check_credentials()
+                ci.check_credentials()
 
 
 class TestCI(unittest.TestCase):
@@ -2920,8 +2947,8 @@ class TestHostSnapshot(unittest.TestCase):
 
         sha = self.host.snapshot(self.repo, base, "snapshot")
 
-        self.assertEqual([self.git("rev-parse", "HEAD"), self.git("ls-files", "--stage"),
-                          self.git("status", "--porcelain")], before)
+        after = [self.git("rev-parse", "HEAD"), self.git("ls-files", "--stage"), self.git("status", "--porcelain")]
+        self.assertEqual(after, before)
         self.assertEqual(self.git("ls-tree", "-r", "--name-only", sha).split(),
                          [".gitignore", "keep.py", "mod.py", "untracked.py"])
         self.assertEqual(self.git("show", f"{sha}:mod.py"), "1\ntwo\n3\n")
@@ -2999,8 +3026,9 @@ class TestQualityCLI(unittest.TestCase):
         self.resumable(["--max-quality-rounds", "1"], asdict(saved_run("build", 2, quality_job=JOB)))
 
     def test_resume_limit_needs_the_gate(self):
+        saved = asdict(saved_run("build", 1))
         with self.assertRaisesRegex(OrchestratorError, "has no quality gate"):
-            self.resumable(["--max-quality-rounds", "2"], asdict(saved_run("build", 1)))
+            self.resumable(["--max-quality-rounds", "2"], saved)
 
     def test_state_saved_before_the_gate_has_none(self):
         saved = asdict(saved_run("review", 1))
@@ -3431,7 +3459,7 @@ class TestWorkflowDefinitions(unittest.TestCase):
             make_workflow({}, state=state, pipeline=talk)
         wf, *_ = make_workflow({"spec": [writes(lambda s: f"{s.dir}/spec.md", "notes")]}, state=new_run(talk),
                                pipeline=talk, pull_request=False)
-        self.assertIsNone(wf.run())
+        self.assertEqual(wf.run(), orchestrator.FINISHED)
         self.assertEqual(wf.state.phase, "done")
 
 
@@ -3625,7 +3653,20 @@ class TestSavedBeforeWorkflows(unittest.TestCase):
         self.assertEqual(RunState.from_dict(saved).root_pane, "")
 
 
+def without_workflow_files(test):
+    """Point the orchestrator's config directory at an empty one for the test; returns it."""
+    config = tempfile.TemporaryDirectory()
+    test.addCleanup(config.cleanup)
+    env = patch.dict("os.environ", {"XDG_CONFIG_HOME": config.name})
+    env.start()
+    test.addCleanup(env.stop)
+    return config.name
+
+
 class TestWorkflowCLI(unittest.TestCase):
+    def setUp(self):
+        without_workflow_files(self)
+
     @patch.object(Workflow, "__init__", return_value=None)
     @patch.object(Workflow, "run", return_value=APPROVE)
     @patch.object(Host, "resolve_dir", return_value="/proj")
@@ -3690,6 +3731,436 @@ class TestWorkflowCLI(unittest.TestCase):
         ])
         self.assertTrue(lines[3].startswith("20260930-070000-c0ffee  impl     round 1 q2  stale"))
         self.assertTrue(lines[3].endswith("  [impl workflow]"))
+
+
+EXAMPLES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples", "workflows")
+
+
+class TestWorkflowFiles(unittest.TestCase):
+    def setUp(self):
+        self.workflows = os.path.join(without_workflow_files(self), "ai-agents-orchestrator", "workflows")
+        os.makedirs(self.workflows)
+
+    def file(self, name, text):
+        path = os.path.join(self.workflows, f"{name}.toml")
+        with open(path, "w") as f:
+            f.write(text)
+        return path
+
+    def test_examples_load(self):
+        default = orchestrator.DEFAULT_WORKFLOW
+        quick = orchestrator.load_workflow_file(f"{EXAMPLES}/quick.toml")
+        self.assertEqual(orchestrator.workflow_shape(quick), "build -> review (back to build)")
+        tdd = orchestrator.load_workflow_file(f"{EXAMPLES}/tdd.toml")
+        self.assertEqual(tdd.name, "tdd")
+        self.assertEqual(tdd.roles, {"spec": "Spec Collector", "tests": "Test Writer", "build": "Builder",
+                                     "review": "Reviewer"})
+        self.assertEqual(tdd.models, {"tests": "sonnet"})
+        spec, tests, build, review = tdd.steps
+        self.assertEqual((spec, review), (default.step("spec"), default.step("review")))
+        # use keeps every field the file does not set.
+        self.assertNotEqual(build.prompt, default.step("build").prompt)
+        self.assertEqual(Step(**{**orchestrator.step_fields(build), "prompt": default.step("build").prompt}),
+                         default.step("build"))
+        self.assertEqual((tests.role, tests.file, tests.edits), ("tests", "tests.md", True))
+
+    def test_default_round_trips_through_its_file(self):
+        default = orchestrator.DEFAULT_WORKFLOW
+        text = orchestrator.workflow_toml(default)
+        self.assertEqual(orchestrator.parse_workflow("default", tomllib.loads(text)), default)
+
+    def test_any_text_round_trips(self):
+        odd = ["ends in a quote '", "has ''' inside\nand a newline", "tab\there", "del\x7f", "ünïcode 🦀\n",
+               "\nstarts with a newline", 'back\\slash "quoted"\n']
+        p = Pipeline("odd", {"b": "Bob's \"pane\""}, tuple(
+            Step(f"s{i}", "b", f"s{i}.md", text + " {path}") for i, text in enumerate(odd)),
+            models={"b": "m"}, description="with ''' and '")
+        self.assertEqual(orchestrator.parse_workflow("odd", tomllib.loads(orchestrator.workflow_toml(p))), p)
+
+    def test_roles_default_from_the_steps(self):
+        p = orchestrator.load_workflow_file(self.file("mine", """
+            [[steps]]
+            id = "test_writer"
+            file = "tests.md"
+            prompt = "Write tests for {task}; report to {path}."
+            edits = true
+
+            [[steps]]
+            use = "build"
+            prompt = "Make {test_writer_path} pass; report to {build_path}."
+            again = "Fix them; report to {build_path}."
+            fresh_note = "Earlier: {earlier_build_paths}."
+            quality_gated = false
+        """))
+        self.assertEqual(p.roles, {"test_writer": "Test Writer", "build": "Builder"})
+        self.assertEqual(p.steps[0].role, "test_writer")
+        self.assertEqual((p.steps[1].edits, p.steps[1].quality_gated, p.steps[1].fresh_repeats_again),
+                         (True, False, True))
+        self.assertEqual(p.models, {})
+
+    def test_panes_follow_the_steps_not_the_roles_table(self):
+        p = orchestrator.load_workflow_file(self.file("mine", """
+            roles.review = { model = "opus" }
+            roles.build = "Implementer"
+            [[steps]]
+            use = "spec"
+            [[steps]]
+            use = "build"
+            [[steps]]
+            use = "review"
+        """))
+        self.assertEqual(p.roles, {"spec": "Spec Collector", "build": "Implementer", "review": "Reviewer"})
+        self.assertEqual(p.models, {"review": "opus"})
+
+    def test_invalid_files_name_the_problem(self):
+        step = 'id = "build"\nfile = "b-{n}.md"\nprompt = "{path}"\nedits = true\n'
+        cases = [
+            ("step 1 (build): unknown key edit; did you mean edits?", f"[[steps]]\n{step}edit = true\n"),
+            ("the file: unknown key step; did you mean steps?", f"[[step]]\n{step}"),
+            ("it has no [[steps]]", 'description = "x"\n'),
+            ("step 1 (build): file is missing", '[[steps]]\nid = "build"\nprompt = "x"\n'),
+            ("step 1 (build): use names no step of the default workflow; it has spec, build, review",
+             f'[[steps]]\nuse = "test"\n{step}'),
+            ("step 1 (build): edits must be true or false", "[[steps]]\n" + step.replace("true", '"yes"')),
+            ("step 1 (build): prompt: Single '}' encountered in format string; write a literal brace as {{ or }}",
+             '[[steps]]\nid = "build"\nfile = "b-{n}.md"\nprompt = "a } b"\nedits = true\n'),
+            ("role build: give a label, or a table with label and model", f"roles.build = 3\n[[steps]]\n{step}"),
+            ("role build: unknown key modle; did you mean model?",
+             f'roles.build = {{ modle = "x" }}\n[[steps]]\n{step}'),
+            ("step 1 (a b): id may use only letters, digits, - and _",
+             "[[steps]]\n" + step.replace('"build"', '"a b"')),
+            ("workflow bad: duplicate step id build", f"[[steps]]\n{step}[[steps]]\n{step}"),
+            ("workflow bad: role y has no step", f'[roles]\ny = {{ model = "m" }}\n[[steps]]\n{step}'),
+            ("Expected '=' after a key", "this is not toml\n"),
+            ("roles must be a table", f"roles = 3\n[[steps]]\n{step}"),
+            ("description must be a string", f"description = 3\n[[steps]]\n{step}"),
+            ("role a b: a role key may use only letters, digits, - and _", f'roles."a b" = "x"\n[[steps]]\n{step}'),
+            ("role build: label must be a string", f"roles.build = {{ label = 3 }}\n[[steps]]\n{step}"),
+            ("step 1 must be a table", "steps = [3]\n"),
+            ("step 1 (build): prompt must be a string", "[[steps]]\n" + step.replace('"{path}"', "3")),
+            # Placeholders that are all known, but that could not be filled in when the step comes up.
+            ("step build: prompt cannot be filled in: ValueError: Unknown format code 'd'",
+             "[[steps]]\n" + step.replace('"{path}"', '"{task:d}"')),
+            ("step build: prompt cannot be filled in: ValueError: Unknown conversion specifier z",
+             "[[steps]]\n" + step.replace('"{path}"', '"{task!z}"')),
+            ("step build: again cannot be filled in: KeyError: 'nope'",
+             f'[[steps]]\n{step}again = "{{task:{{nope}}}}"\n'),
+        ]
+        for name in ("b-{n!s}.md", "b-{n:d}.md", "b-{n:{x}}.md"):
+            cases.append((f"step build: handoff file {name} may use {{n}} only as it is, with no format spec or "
+                          f"conversion", "[[steps]]\n" + step.replace("b-{n}.md", name)))
+        for name in ("state.json", "quality-{n}-1.md", "../b-{n}.md", "/tmp/b-{n}.md", ".."):
+            cases.append((f"step build: handoff file {name} must be a plain file name, and not state.json or "
+                          f"quality-*, which the run writes itself", "[[steps]]\n" + step.replace("b-{n}.md", name)))
+        for message, text in cases:
+            with self.subTest(message=message):
+                path = self.file("bad", text)
+                with self.assertRaises(OrchestratorError) as e:
+                    orchestrator.load_workflow_file(path)
+                self.assertTrue(str(e.exception).startswith(f"{path}: "), str(e.exception))
+                self.assertIn(message, str(e.exception))
+
+    def test_a_saved_definition_that_cannot_be_filled_in_stops_the_resume(self):
+        definition = orchestrator.workflow_definition(QUICK)
+        definition["steps"][0]["prompt"] = "{task:d}"
+        saved = {**asdict(saved_run("build", 1)), "workflow": "quick", "workflow_definition": definition}
+        args = parse_args(["resume", "a1b2c3"])
+        with self.assertRaisesRegex(OrchestratorError, "saved with the run is invalid: workflow quick: step build: "
+                                                       "prompt cannot be filled in"):
+            orchestrator.resumable_state([(10**4, saved)], args, "/proj", "here", lambda pid: True)
+
+    def test_steps_whose_files_can_share_a_name(self):
+        default = orchestrator.DEFAULT_WORKFLOW
+        spec, build, review = default.steps
+        b = Step("b", "b", "x{n}.md", "{path}", edits=True)
+        cases = [
+            ("steps spec and build can both write build-1.md",
+             [Step("spec", "spec", "build-1.md", "{path}"), build, review]),
+            ("steps build and review can both write build-1-q1.md",
+             [spec, build, Step("review", "review", "build-{n}-q1.md", "{path}", loop_to="build")]),
+            ("steps b and r can both write x1.md", [b, Step("r", "b", "x1.md", "{path}")]),
+            # {n} in the extension: a quality answer goes before it, as b-q3.1.
+            ("steps a and r can both write b-q3.1",
+             [Step("a", "a", "b.{n}", "{path}", edits=True, quality_gated=True),
+              Step("r", "r", "b-q3.{n}", "{path}", loop_to="a")]),
+            ("steps a and z can both write b-q3.1",
+             [Step("a", "a", "b.{n}", "{path}", edits=True, quality_gated=True), Step("z", "z", "b-q3.1", "{path}")]),
+            # Rounds that differ give one name: round 3 of a and round 5 of r.
+            ("steps a and r can both write x35.md",
+             [Step("a", "a", "x{n}5.md", "{path}", edits=True), Step("r", "r", "x3{n}.md", "{path}", loop_to="a")]),
+            ("steps a and r can both write x3-5.md",
+             [Step("a", "a", "x{n}-5.md", "{path}", edits=True), Step("r", "r", "x3-{n}.md", "{path}", loop_to="a")]),
+            ("steps a and r can both write 31.33",
+             [Step("a", "a", "{n}.33", "{path}", edits=True), Step("r", "r", "31.{n}", "{path}", loop_to="a")]),
+        ]
+        for message, steps in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                Pipeline("bad", {st.role: st.role for st in steps}, tuple(steps))
+        # The gated step's own answers, and names that only look alike, are not collisions.
+        Pipeline("ok", {"b": "B"}, (Step("b", "b", "x{n}.md", "{path}", edits=True, quality_gated=True),
+                                    Step("r", "b", "x{n}-r.md", "{path}", loop_to="b")))
+        Pipeline("ok", {"b": "B"}, (Step("s", "b", "notes", "{path}"), Step("b", "b", "notes-{n}", "{path}",
+                                                                            edits=True, quality_gated=True)))
+        # A round number is never 0 and has no leading zero, and a digit beside {n} is fine on its own.
+        Pipeline("ok", {"b": "B"}, (Step("s", "b", "x0.md", "{path}"), Step("b", "b", "x{n}.md", "{path}", edits=True),
+                                    Step("r", "b", "x0{n}.md", "{path}", loop_to="b")))
+        Pipeline("ok", {"b": "B"}, (Step("b", "b", "x-{n}.md", "{path}", edits=True),
+                                    Step("r", "b", "x3{n}.md", "{path}", loop_to="b")))
+
+    def test_a_model_for_a_role_not_in_the_workflow(self):
+        steps = (Step("build", "build", "b.md", "{path}"),)
+        with self.assertRaisesRegex(ValueError, "a model is set for role x, which is not one of the workflow's"):
+            Pipeline("bad", {"build": "Builder"}, steps, models={"x": "m"})
+
+    def test_a_file_cannot_replace_a_built_in_workflow(self):
+        path = self.file("default", '[[steps]]\nuse = "spec"\n')
+        with self.assertRaisesRegex(OrchestratorError, "workflow default is built in; give the file another name"):
+            orchestrator.load_workflow_file(path)
+
+    def test_a_name_that_cannot_be_a_workflows(self):
+        path = self.file("my flow", f"[[steps]]\nuse = \"spec\"\n")
+        with self.assertRaisesRegex(OrchestratorError, "a workflow's name, its file's, may use only letters"):
+            orchestrator.load_workflow_file(path)
+
+    def test_an_unlistable_workflows_directory(self):
+        os.rmdir(self.workflows)
+        with open(self.workflows, "w") as f:
+            f.write("a file, not a directory")
+        with patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(main(["workflows"]), orchestrator.EXIT_ERROR)
+        self.assertIn(f"error: cannot list {self.workflows}", err.getvalue())
+        self.assertEqual(parse_args(["run", "task"]).workflow, "default")
+
+    def test_a_missing_file(self):
+        with self.assertRaisesRegex(OrchestratorError, "cannot read workflow file /nope/x.toml"):
+            orchestrator.load_workflow_file("/nope/x.toml")
+
+    def test_files_are_offered_by_name(self):
+        with open(f"{EXAMPLES}/tdd.toml") as f:
+            self.file("tdd", f.read())
+        self.file("broken", "nonsense\n")
+        with open(os.path.join(self.workflows, "notes.txt"), "w") as f:
+            f.write("not a workflow")
+        self.assertEqual(orchestrator.workflow_names(), ["broken", "default", "tdd"])
+        self.assertEqual(orchestrator.named_workflow("tdd").name, "tdd")
+        with self.assertRaisesRegex(OrchestratorError, "unknown workflow nope; there are broken, default, tdd"):
+            orchestrator.named_workflow("nope")
+
+    def test_a_run_keeps_its_workflow_when_the_file_is_gone(self):
+        with open(f"{EXAMPLES}/quick.toml") as f:
+            quick = orchestrator.load_workflow_file(self.file("quick", f.read()))
+
+        def build_then_interrupt(prompt, state, host):
+            build_turn(2)(prompt, state, host)
+            raise KeyboardInterrupt
+        wf, _, host, _ = make_workflow({
+            "build": [build_turn(1), build_then_interrupt], "review": [review_turn(1, CHANGES_REQUESTED)],
+        }, state=new_run(quick), pipeline=quick)
+        with self.assertRaises(KeyboardInterrupt):
+            wf.run()
+        saved = json.loads(host.files[f"{D}/state.json"])
+        self.assertEqual(saved["workflow_definition"], orchestrator.workflow_definition(quick))
+        os.remove(os.path.join(self.workflows, "quick.toml"))
+
+        seen = []
+        state = RunState.from_dict(saved)
+        self.assertEqual(state.root_pane, saved["agents"]["build"]["pane"])
+        wf2, *_ = resume(state, {"review": [recording(review_turn(2, APPROVE), seen)]}, host=host)
+        self.assertEqual(wf2.run(), APPROVE)
+        self.assertEqual(wf2.pipeline, quick)
+        self.assertTrue(seen[0].startswith(f"The Builder has answered your review; the new report is in "
+                                           f"{D}/build-2.md."))
+
+    def test_a_built_in_workflow_is_saved_by_name_only(self):
+        wf, *_ = make_workflow({"spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]},
+                               pull_request=False)
+        wf.run()
+        self.assertEqual((wf.state.workflow, wf.state.workflow_definition), ("default", None))
+
+    def test_list_reads_the_gated_step_from_the_saved_definition(self):
+        runs = [(10**6, {**run_record(phase="impl"), "quality_round": 2, "workflow": "impl",
+                         "workflow_definition": orchestrator.workflow_definition(IMPL)})]
+        with patch("builtins.print") as out:
+            orchestrator.print_runs(runs, "here", lambda pid: True, [])
+        self.assertTrue(out.call_args_list[0].args[0].startswith("20260930-070000-c0ffee  impl     round 1 q2"))
+
+    def test_a_corrupt_saved_definition_is_an_error(self):
+        saved = {**asdict(saved_run("build", 1)), "workflow": "quick", "workflow_definition": {"steps": []}}
+        args = parse_args(["resume", "a1b2c3"])
+        with self.assertRaisesRegex(OrchestratorError, r"the definition of workflow quick saved with the run is "
+                                                       r"invalid: it has no \[\[steps\]\]"):
+            orchestrator.resumable_state([(10**4, saved)], args, "/proj", "here", lambda pid: True)
+
+
+@patch.object(Workflow, "__init__", return_value=None)
+@patch.object(Workflow, "run", return_value=APPROVE)
+@patch.object(Host, "resolve_dir", return_value="/proj")
+@patch.dict("os.environ", {"HERDR_ENV": "1"})
+class TestWorkflowFileCLI(unittest.TestCase):
+    def setUp(self):
+        workflows = os.path.join(without_workflow_files(self), "ai-agents-orchestrator", "workflows")
+        os.makedirs(workflows)
+        with open(f"{EXAMPLES}/tdd.toml") as src, open(f"{workflows}/tdd.toml", "w") as dst:
+            dst.write(src.read())
+
+    def started(self, init, *flags):
+        with patch("builtins.print"):
+            self.assertEqual(main(["run", "task", *flags]), 0)
+        return init.call_args.args[2], init.call_args.kwargs
+
+    def test_run_a_workflow_file_by_name(self, _resolve, _run, init):
+        state, kw = self.started(init, "--workflow", "tdd")
+        self.assertEqual((state.workflow, state.phase), ("tdd", "spec"))
+        self.assertEqual(kw["pipeline"], orchestrator.load_workflow_file(f"{EXAMPLES}/tdd.toml"))
+        self.assertEqual(kw["models"], {"tests": "sonnet"})
+
+    def test_run_a_workflow_file_by_path(self, _resolve, _run, init):
+        state, kw = self.started(init, "--workflow-file", f"{EXAMPLES}/quick.toml")
+        self.assertEqual((state.workflow, state.phase, kw["pipeline"].name), ("quick", "build", "quick"))
+
+    def test_model_flags_override_the_files_models(self, _resolve, _run, init):
+        _, kw = self.started(init, "--workflow", "tdd", "--model", "X")
+        self.assertEqual(kw["models"], {"spec": "X", "tests": "X", "build": "X", "review": "X"})
+        _, kw = self.started(init, "--workflow", "tdd", "--role-model", "tests=haiku", "--role-model", "spec=opus",
+                             "--build-model", "Y")
+        self.assertEqual(kw["models"], {"spec": "opus", "tests": "haiku", "build": "Y"})
+
+    def test_role_model_for_a_role_the_workflow_lacks(self, _resolve, _run, init):
+        with patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(main(["run", "task", "--role-model", "tests=haiku"]), orchestrator.EXIT_ERROR)
+        self.assertIn("--role-model names role tests, which the workflow does not have; its roles are spec, "
+                      "build, review", err.getvalue())
+        init.assert_not_called()
+
+    def test_bad_flags(self, _resolve, _run, init):
+        for argv in (["run", "task", "--role-model", "tests"],
+                     ["run", "task", "--workflow", "tdd", "--workflow-file", "x.toml"]):
+            with self.subTest(argv=argv), self.assertRaises(SystemExit), patch("sys.stderr"):
+                parse_args(argv)
+
+    def test_resume_takes_role_model(self, _resolve, _run, init):
+        tdd = orchestrator.named_workflow("tdd")
+        saved = {**asdict(saved_run("build", 1, models={"tests": "sonnet"})), "workflow": "tdd",
+                 "workflow_definition": orchestrator.workflow_definition(tdd)}
+        args = parse_args(["resume", "a1b2c3", "--role-model", "review=opus"])
+        state = orchestrator.resumable_state([(10**4, saved)], args, "/proj", "here", lambda pid: False)
+        self.assertEqual(state.models, {"tests": "sonnet", "review": "opus"})
+
+    def test_workflows_lists_them(self, _resolve, _run, init):
+        workflows = orchestrator.workflows_dir()
+        with open(f"{workflows}/broken.toml", "w") as f:
+            f.write("[[steps]]\nid = 3\n")
+        with patch.dict("os.environ", {"HERDR_ENV": ""}), patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(main(["workflows"]), 0)
+        self.assertEqual(out.getvalue().splitlines(), [
+            "default  built in",
+            "    spec -> build -> review (back to build)",
+            f"broken  {workflows}/broken.toml",
+            "    error: step 1: file is missing",
+            f"tdd  {workflows}/tdd.toml",
+            "    spec -> tests -> build -> review (back to build)",
+            "    Spec Collector -> Test Writer -> Builder <-> Reviewer: tests first, by another session",
+            "",
+            f"Add one as {workflows}/NAME.toml; `orchestrator.py workflows default` prints the default as a file "
+            f"to start from.",
+        ])
+
+    def test_workflows_prints_one_as_a_file(self, _resolve, _run, init):
+        for ref in ("tdd", f"{EXAMPLES}/tdd.toml"):
+            with self.subTest(ref=ref), patch("sys.stdout", new_callable=io.StringIO) as out:
+                self.assertEqual(main(["workflows", ref]), 0)
+                self.assertEqual(orchestrator.parse_workflow("tdd", tomllib.loads(out.getvalue())),
+                                 orchestrator.named_workflow("tdd"))
+
+
+# No verdict step: the run finishes when the Builder's one turn is done.
+SOLO = Pipeline("solo", {"build": "Builder"}, (
+    Step("build", "build", "build.md", "Build {task} in {cwd}; report to {path}.", edits=True),))
+
+
+def solo_turn(prompt, state, host):
+    host.write("/proj/limiter.py", "version 1")
+    return writes(lambda s: f"{s.dir}/build.md", "solo report")(prompt, state, host)
+
+
+class TestWorkflowWithoutAVerdict(unittest.TestCase):
+    def test_a_run_finishes_and_opens_a_ready_pull_request(self):
+        wf, herdr, host, notes = make_workflow({"build": [solo_turn]}, state=new_run(SOLO), pipeline=SOLO)
+
+        self.assertEqual(wf.run(), orchestrator.FINISHED)
+        pr = host.prs[0]
+        self.assertFalse(pr["draft"])
+        self.assertTrue(pr["body"].startswith(
+            "Opened by ai-agents-orchestrator run `20260929-120000-a1b2c3`. **FINISHED**: its workflow has no review "
+            "step, so no agent reviewed this change.\n\n<details open>\n<summary>Spec</summary>"))
+        self.assertIn("<summary>Builder report (round 1)</summary>\n\nsolo report", pr["body"])
+        self.assertNotIn("<summary>Review", pr["body"])
+        commit = next(c for c in host.git_calls if c[0] == "commit")
+        self.assertEqual(commit[-1], "Orchestrator run 20260929-120000-a1b2c3: FINISHED, unreviewed.")
+        self.assertIn("Run finished: FINISHED", notes)
+        saved = json.loads(host.files[f"{D}/state.json"])
+        self.assertEqual((saved["phase"], saved["verdict"]), ("done", "FINISHED"))
+
+    def test_a_resume_at_publish_keeps_the_outcome(self):
+        state = saved_run("publish", 1, agents=("build",), pull_request=True, base_branch="main",
+                          branch="orchestrator/x-a1b2c3", verdict=orchestrator.FINISHED, workflow="solo")
+        wf, _, host, _ = resume(state, {}, host=FakeHost(head="def456"), pipeline=SOLO)
+        self.assertEqual(wf.run(), orchestrator.FINISHED)
+        self.assertFalse(host.prs[0]["draft"])
+
+    def gated_solo(self, *outcomes):
+        """A run of a one-step gated workflow, with up to two quality rounds playing these outcomes."""
+        solo = Pipeline("gsolo", {"impl": "Implementer"}, (
+            Step("impl", "impl", "impl-{n}.md", "Implement {task}; report to {path}.", edits=True, quality_gated=True),))
+        fake = FakeCI()
+        fake.outcomes = list(outcomes)
+        wf, _, host, _, notes = gated({"impl": [impl_turn(1), impl_turn(1, 1)]}, fake=fake, state=new_run(solo),
+                                      pipeline=solo, max_quality_rounds=2)
+        return wf.run(), host, notes
+
+    def test_a_gate_that_still_fails_is_not_finished(self):
+        verdict, host, notes = self.gated_solo(outcome(**RED), outcome(**RED))
+
+        self.assertEqual(verdict, orchestrator.QUALITY_GATE_FAILED)
+        pr = host.prs[0]
+        self.assertTrue(pr["draft"])
+        self.assertTrue(pr["body"].startswith(
+            "Opened by ai-agents-orchestrator run `20260929-120000-a1b2c3`. **QUALITY_GATE_FAILED**: its workflow has "
+            "no review step, and the SonarQube quality gate still did not pass after the last quality round, so this "
+            "is a draft.\n\n<details open>"))
+        self.assertNotIn("Reviewer", pr["body"])
+        self.assertIn("<summary>Quality gate (round 1)</summary>\n\nGATE: ERROR", pr["body"])
+        commit = next(c for c in host.git_calls if c[0] == "commit")
+        self.assertEqual(commit[-1], "Orchestrator run 20260929-120000-a1b2c3: QUALITY_GATE_FAILED, unreviewed.")
+        self.assertIn("Run finished: QUALITY_GATE_FAILED", notes)
+
+    def test_a_gate_that_passes_is_finished(self):
+        verdict, host, _ = self.gated_solo(outcome(**RED), outcome())
+        self.assertEqual(verdict, orchestrator.FINISHED)
+        self.assertFalse(host.prs[0]["draft"])
+        self.assertIn("<summary>Quality gate (round 1)</summary>\n\nGATE: OK", host.prs[0]["body"])
+
+    @patch.object(Workflow, "__init__", return_value=None)
+    @patch.object(Workflow, "run", return_value=orchestrator.QUALITY_GATE_FAILED)
+    @patch.object(Host, "resolve_dir", return_value="/proj")
+    @patch.dict("os.environ", {"HERDR_ENV": "1"})
+    def test_a_failed_gate_exits_as_changes_requested(self, _resolve, _run, init):
+        with patch("builtins.print"):
+            self.assertEqual(main(["run", "task"]), orchestrator.EXIT_CHANGES_REQUESTED)
+
+    @patch.object(Workflow, "__init__", return_value=None)
+    @patch.object(Workflow, "run", return_value=orchestrator.FINISHED)
+    @patch.object(Host, "resolve_dir", return_value="/proj")
+    @patch.dict("os.environ", {"HERDR_ENV": "1"})
+    def test_finished_exits_zero(self, _resolve, _run, init):
+        config = without_workflow_files(self)
+        path = os.path.join(config, "solo.toml")
+        with open(path, "w") as f:
+            f.write(orchestrator.workflow_toml(SOLO))
+        with patch("builtins.print") as out:
+            self.assertEqual(main(["run", "task", "--workflow-file", path]), 0)
+        state = init.call_args.args[2]
+        out.assert_called_with(f"FINISHED: {state.dir}/build.md")
 
 
 if __name__ == "__main__":

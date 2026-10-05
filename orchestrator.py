@@ -27,6 +27,8 @@ HTTP to Jenkins and SonarQube goes through CI, from the orchestrator's machine.
 
 import argparse
 import base64
+import collections
+import difflib
 import http.client
 import json
 import os
@@ -38,9 +40,11 @@ import string
 import subprocess
 import sys
 import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 
@@ -65,6 +69,12 @@ PR_SECTION_LIMIT = 20_000
 
 APPROVE = "APPROVE"
 CHANGES_REQUESTED = "CHANGES_REQUESTED"
+# The outcomes of a run whose workflow has no verdict step, once its last step is done. FINISHED counts as
+# approved: the run did all it was asked to, though no agent judged the change. With the quality gate,
+# QUALITY_GATE_FAILED says it still failed after the last quality round, and no agent weighed that.
+FINISHED = "FINISHED"
+QUALITY_GATE_FAILED = "QUALITY_GATE_FAILED"
+SUCCEEDED = (APPROVE, FINISHED)
 
 # The quality gate. Requests time out below STALE_SECONDS, so a hung one cannot make a live run look stale.
 DEFAULT_MAX_QUALITY_ROUNDS = 3
@@ -122,12 +132,17 @@ def child_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if k not in CI_ENV}
 
 
-def ci_env_path() -> str:
-    """The file the quality gate's credentials come from when the environment lacks them."""
+def config_dir() -> str:
+    """The orchestrator's own configuration directory, on the machine it runs on."""
     config = os.environ.get("XDG_CONFIG_HOME", "")
     if not os.path.isabs(config):
         config = os.path.expanduser("~/.config")
-    return os.path.join(config, "ai-agents-orchestrator", "ci.env")
+    return os.path.join(config, "ai-agents-orchestrator")
+
+
+def ci_env_path() -> str:
+    """The file the quality gate's credentials come from when the environment lacks them."""
+    return os.path.join(config_dir(), "ci.env")
 
 
 def ci_credentials(environ, path: str) -> dict[str, str]:
@@ -161,7 +176,7 @@ def parse_env_file(text: str, path: str) -> dict[str, str]:
             continue
         name, sep, value = line.removeprefix("export ").partition("=")
         name, value = name.strip(), value.strip()
-        if not sep or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        if not sep or not re.fullmatch(r"[A-Za-z_]\w*", name, re.ASCII):
             raise OrchestratorError(f"{path}:{i}: expected NAME=value")
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
             value = value[1:-1]
@@ -316,11 +331,24 @@ class Step:
 
     def path(self, run_dir: str, n: int, q: int = 0) -> str:
         """The handoff file of round n; with q, the answer to quality round q."""
+        return f"{run_dir}/{self.name(n, q)}"
+
+    def name(self, n: int, q: int = 0) -> str:
         name = self.file.format(n=n)
         if q:
             stem, ext = os.path.splitext(name)
             name = f"{stem}-q{q}{ext}"
-        return f"{run_dir}/{name}"
+        return name
+
+    def name_forms(self) -> list[list[str | None]]:
+        """The step's file names as _name_tokens: its file's, and for the gated step its quality answers'."""
+        forms = [_name_tokens(self.file)]
+        if self.quality_gated:
+            # As name() does: -q<q> before the extension, where the template splits at the same dot as
+            # the filled-in name, since a round number has none.
+            stem, ext = os.path.splitext(self.file)
+            forms.append(_name_tokens(stem) + ["-", "q", None] + _name_tokens(ext))
+        return forms
 
     def last_path(self, run_dir: str, n: int, quality_round: int) -> str:
         """The step's last file of round n, once the round's quality rounds, if any, are over."""
@@ -345,6 +373,9 @@ class Pipeline:
     # root pane, the second a split to its right, and each further one a split below the one before.
     roles: dict[str, str]
     steps: tuple[Step, ...]
+    # Role key -> the model its agent starts with when no model flag names one.
+    models: dict[str, str] = field(default_factory=dict)
+    description: str = ""
 
     def __post_init__(self):
         if problem := self._problem():
@@ -355,7 +386,7 @@ class Pipeline:
         if not self.steps:
             return "has no steps"
         checks = (self._name_problem, self._role_problem, self._uniqueness_problem, self._step_problem,
-                  self._loop_problem)
+                  self._collision_problem, self._loop_problem)
         return next((problem for check in checks if (problem := check())), None)
 
     def _name_problem(self) -> str | None:
@@ -373,6 +404,8 @@ class Pipeline:
                 return f"role {role} has no label"
             if role not in {st.role for st in self.steps}:
                 return f"role {role} has no step"
+        if unknown := set(self.models) - set(self.roles):
+            return f"a model is set for role {min(unknown)}, which is not one of the workflow's roles"
         return None
 
     def _uniqueness_problem(self) -> str | None:
@@ -408,6 +441,16 @@ class Pipeline:
                 return f"step {st.id}: a per-round handoff file needs an editing step at or before it"
             if unknown := st.placeholders() - known:
                 return f"step {st.id}: unknown prompt placeholder {min(unknown)}"
+            if problem := _fill_problem(st, known):
+                return f"step {st.id}: {problem}"
+        return None
+
+    def _collision_problem(self) -> str | None:
+        """Two steps whose files can have the same name: the later turn would find its file already written."""
+        for i, st in enumerate(self.steps):
+            for other in self.steps[i + 1:]:
+                if (name := _shared_step_name(st, other)) is not None:
+                    return f"steps {st.id} and {other.id} can both write {name}"
         return None
 
     def _loop_problem(self) -> str | None:
@@ -464,6 +507,95 @@ class Pipeline:
         return self.verdict_step or self.steps[-1]
 
 
+# Files the run writes into its directory itself, beside the steps' handoff files.
+RUN_FILE = re.compile(r"state\.json|quality-.*")
+
+
+def _fill_problem(step: Step, known: set[str]) -> str | None:
+    """What stops the step's file or prompts from being filled in at run time, which a bad format spec,
+    conversion or nested field would, though its placeholders are all known."""
+    # A plain {n}, so that _name_tokens knows every name it can give.
+    if any(spec or conversion for _, field, spec, conversion in string.Formatter().parse(step.file) if field):
+        return f"handoff file {step.file} may use {{n}} only as it is, with no format spec or conversion"
+    name = step.file.format(n=1)
+    if "/" in name or name in ("", ".", "..") or RUN_FILE.fullmatch(name):
+        return f"handoff file {step.file} must be a plain file name, and not state.json or quality-*, " \
+               f"which the run writes itself"
+    # Every value a prompt is filled in with is a string.
+    values = dict.fromkeys(known, "")
+    for field_name in ("prompt", "again", "fresh_note"):
+        if (template := getattr(step, field_name)) is None:
+            continue
+        try:
+            template.format(**values)
+        except (ValueError, KeyError, IndexError, AttributeError) as e:
+            return f"{field_name} cannot be filled in: {type(e).__name__}: {e}"
+    return None
+
+
+def _name_tokens(template: str) -> list[str | None]:
+    """A file template as its characters, with None for each {n}: a round or quality round number."""
+    tokens = []
+    for literal, field, _, _ in string.Formatter().parse(template):
+        tokens += literal
+        if field is not None:
+            tokens.append(None)
+    return tokens
+
+
+def _shared_name(a: list[str | None], b: list[str | None]) -> str | None:
+    """The shortest name that both token lists give, or None when they share none.
+
+    Each list is matched by a small automaton whose states are (position, inside a number), a number
+    being [1-9][0-9]*, as rounds are. A breadth-first walk over pairs of state sets, one character at a
+    time, finds a name both accept, so the answer is exact: no sampling of rounds. The one approximation
+    is a template that repeats {n}, whose numbers are taken as independent; it can only reject more.
+    """
+    alphabet = sorted({t for t in a + b if t is not None} | set("0123456789"))
+    start = (_token_closure({(0, False)}),) * 2
+    # Each pair of state sets reached, with the name that first reached it.
+    reached = {start: ""}
+    queue = collections.deque([start])
+    while queue:
+        pair = queue.popleft()
+        if (len(a), False) in pair[0] and (len(b), False) in pair[1]:
+            return reached[pair]
+        for c in alphabet:
+            nxt = (_token_advance(pair[0], a, c), _token_advance(pair[1], b, c))
+            if nxt[0] and nxt[1] and nxt not in reached:
+                reached[nxt] = reached[pair] + c
+                queue.append(nxt)
+    return None
+
+
+def _shared_step_name(st: Step, other: Step) -> str | None:
+    """The shortest name that files of both steps can have, or None."""
+    return next((name for a in st.name_forms() for b in other.name_forms()
+                 if (name := _shared_name(a, b)) is not None), None)
+
+
+def _token_closure(states: set) -> frozenset:
+    """The automaton states of _shared_name, with each number also ended: one may end after any digit."""
+    return frozenset(states | {(i + 1, False) for i, inside in states if inside})
+
+
+def _token_advance(states: frozenset, tokens: list[str | None], c: str) -> frozenset:
+    return _token_closure({nxt for state in states if (nxt := _token_step(state, tokens, c)) is not None})
+
+
+def _token_step(state: tuple[int, bool], tokens: list[str | None], c: str) -> tuple[int, bool] | None:
+    """Where one state goes on the character c, or None when c ends it."""
+    i, inside = state
+    if inside:
+        return state if c.isdigit() else None
+    if i == len(tokens):
+        return None
+    if tokens[i] is None:
+        # A number starts with a digit other than 0.
+        return (i, True) if c in "123456789" else None
+    return (i + 1, False) if tokens[i] == c else None
+
+
 def _fields_of(template: str) -> list[str]:
     return [name for _, name, _, _ in string.Formatter().parse(template) if name is not None]
 
@@ -486,6 +618,230 @@ def find_workflow(name: str) -> Pipeline:
     except KeyError:
         raise OrchestratorError(f"unknown workflow {name}; this orchestrator has "
                                 f"{', '.join(sorted(WORKFLOWS))}") from None
+
+
+# ---------------------------------------------------------------------------
+# Workflow files
+# ---------------------------------------------------------------------------
+
+# A workflow file is TOML holding a workflow's definition, named after the file:
+#
+#   description = "..."                      # optional, shown by `workflows`
+#   [roles]                                  # optional
+#   build = "Builder"                        # a role's pane label,
+#   tests = { label = "Test Writer", model = "sonnet" }   # or its label and default model
+#   [[steps]]                                # one table per step, in order
+#   use = "build"                            # optional: start from that step of the default workflow
+#   id = "build"                             # and Step's fields; role defaults to id
+#
+# A role the [roles] table leaves out, or gives no label, is labelled after the default workflow's
+# role of that key, or else after the key itself. The panes are laid out in the order the steps
+# first use the roles. workflow_definition writes the canonical form, which
+# such a file may also be: every role with its label, and every step with its fields.
+
+WORKFLOW_KEYS = {"description", "roles", "steps"}
+ROLE_KEYS = {"label", "model"}
+STEP_KEYS = {f.name for f in fields(Step)}
+STEP_FLAGS = {f.name for f in fields(Step) if f.default is False}
+# Role keys name agents and panes, and step ids name phases and prompt placeholders.
+NAME_PATTERN = r"[A-Za-z0-9_-]+"
+
+
+def workflows_dir() -> str:
+    """Where `run --workflow NAME` finds NAME.toml, on the orchestrator's machine."""
+    return os.path.join(config_dir(), "workflows")
+
+
+def workflow_files() -> dict[str, str]:
+    """Name -> path of each workflow file in workflows_dir(), unparsed; none without the directory."""
+    try:
+        names = os.listdir(workflows_dir())
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        raise OrchestratorError(f"cannot list {workflows_dir()}: {e.strerror}") from e
+    return {stem: os.path.join(workflows_dir(), name) for name in sorted(names)
+            for stem, ext in [os.path.splitext(name)] if ext == ".toml"}
+
+
+def workflow_names() -> list[str]:
+    return sorted(set(WORKFLOWS) | set(workflow_files()))
+
+
+def named_workflow(name: str) -> Pipeline:
+    """The built-in workflow of that name, or else the one in workflows_dir()."""
+    if name in WORKFLOWS:
+        return WORKFLOWS[name]
+    if path := workflow_files().get(name):
+        return load_workflow_file(path)
+    raise OrchestratorError(f"unknown workflow {name}; there are {', '.join(workflow_names())}")
+
+
+def load_workflow_file(path: str) -> Pipeline:
+    name = os.path.splitext(os.path.basename(path))[0]
+    try:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+    except OSError as e:
+        raise OrchestratorError(f"cannot read workflow file {path}: {e.strerror}") from e
+    except tomllib.TOMLDecodeError as e:
+        raise OrchestratorError(f"{path}: {e}") from e
+    if name in WORKFLOWS:
+        raise OrchestratorError(f"{path}: workflow {name} is built in; give the file another name")
+    if not re.fullmatch(NAME_PATTERN, name):
+        raise OrchestratorError(f"{path}: a workflow's name, its file's, may use only letters, digits, - and _")
+    try:
+        return parse_workflow(name, data)
+    except ValueError as e:
+        raise OrchestratorError(f"{path}: {e}") from e
+
+
+def parse_workflow(name: str, data: dict) -> Pipeline:
+    """The workflow a definition describes; ValueError names what is wrong with it."""
+    _check_keys(data, WORKFLOW_KEYS, "the file")
+    raw_steps = data.get("steps")
+    if not isinstance(raw_steps, list) or not raw_steps:
+        raise ValueError("it has no [[steps]]")
+    steps = [_parse_step(i, raw) for i, raw in enumerate(raw_steps, 1)]
+    raw_roles = data.get("roles", {})
+    if not isinstance(raw_roles, dict):
+        raise ValueError("roles must be a table")
+    declared = {role: _parse_role(role, raw) for role, raw in raw_roles.items()}
+    # The panes follow the steps; a declared role no step uses goes last, for Pipeline to reject.
+    order = dict.fromkeys([st["role"] for st in steps] + list(declared))
+    labels = {role: declared.get(role, (None, None))[0] or _default_label(role) for role in order}
+    models = {role: model for role, (_, model) in declared.items() if model}
+    description = data.get("description", "")
+    if not isinstance(description, str):
+        raise ValueError("description must be a string")
+    return Pipeline(name, labels, tuple(Step(**st) for st in steps), models=models, description=description)
+
+
+def _parse_role(role: str, raw) -> tuple[str | None, str | None]:
+    where = f"role {role}"
+    if not re.fullmatch(NAME_PATTERN, role):
+        raise ValueError(f"{where}: a role key may use only letters, digits, - and _")
+    if isinstance(raw, str):
+        return raw, None
+    if not isinstance(raw, dict):
+        raise ValueError(f"{where}: give a label, or a table with label and model")
+    _check_keys(raw, ROLE_KEYS, where)
+    for key in ROLE_KEYS & raw.keys():
+        if not isinstance(raw[key], str):
+            raise ValueError(f"{where}: {key} must be a string")
+    return raw.get("label"), raw.get("model")
+
+
+def _parse_step(i: int, raw) -> dict:
+    """Step's arguments from step i of a definition, its use resolved."""
+    if not isinstance(raw, dict):
+        raise ValueError(f"step {i} must be a table")
+    where = f"step {i}" + (f" ({raw['id']})" if isinstance(raw.get("id"), str) else "")
+    _check_keys(raw, STEP_KEYS | {"use"}, where)
+    step = _used_step(raw, where) | {k: v for k, v in raw.items() if k != "use"}
+    step.setdefault("role", step.get("id"))
+    for key in ("id", "file", "prompt"):
+        if key not in step:
+            raise ValueError(f"{where}: {key} is missing")
+    for key, value in step.items():
+        _check_step_value(key, value, where)
+    return step
+
+
+def _used_step(raw: dict, where: str) -> dict:
+    """The fields of the default step that raw's use names; none without a use."""
+    if "use" not in raw:
+        return {}
+    used = DEFAULT_WORKFLOW.step(raw["use"]) if isinstance(raw["use"], str) else None
+    if used is None:
+        raise ValueError(f"{where}: use names no step of the default workflow; it has "
+                         f"{', '.join(st.id for st in DEFAULT_WORKFLOW.steps)}")
+    return step_fields(used)
+
+
+def _check_step_value(key: str, value, where: str) -> None:
+    if key in STEP_FLAGS:
+        if not isinstance(value, bool):
+            raise ValueError(f"{where}: {key} must be true or false")
+        return
+    if not isinstance(value, str):
+        raise ValueError(f"{where}: {key} must be a string")
+    if key in ("id", "role") and not re.fullmatch(NAME_PATTERN, value):
+        raise ValueError(f"{where}: {key} may use only letters, digits, - and _")
+    try:
+        _fields_of(value)
+    except ValueError as e:
+        raise ValueError(f"{where}: {key}: {e}; write a literal brace as {{{{ or }}}}") from None
+
+
+def _check_keys(table: dict, known: set[str], where: str) -> None:
+    for key in table:
+        if key not in known:
+            close = difflib.get_close_matches(key, known, n=1)
+            hint = f"did you mean {close[0]}?" if close else f"it takes {', '.join(sorted(known))}"
+            raise ValueError(f"{where}: unknown key {key}; {hint}")
+
+
+def _default_label(role: str) -> str:
+    return DEFAULT_WORKFLOW.roles.get(role) or re.sub(r"[-_]+", " ", role).title()
+
+
+def step_fields(step: Step) -> dict:
+    """The step's fields that differ from their defaults, in declaration order."""
+    return {f.name: getattr(step, f.name) for f in fields(Step) if getattr(step, f.name) != f.default}
+
+
+def workflow_definition(p: Pipeline) -> dict:
+    """The canonical definition of a workflow, which parse_workflow turns back into it."""
+    roles = {role: {"label": label, **({"model": p.models[role]} if role in p.models else {})}
+             for role, label in p.roles.items()}
+    return {**({"description": p.description} if p.description else {}),
+            "roles": roles, "steps": [step_fields(st) for st in p.steps]}
+
+
+def workflow_toml(p: Pipeline) -> str:
+    """The workflow as a workflow file."""
+    d = workflow_definition(p)
+    lines = [f"description = {_toml_string(d['description'])}"] if "description" in d else []
+    for role, table in d["roles"].items():
+        lines += ["", f"[roles.{role}]", *(f"{k} = {_toml_string(v)}" for k, v in table.items())]
+    for st in d["steps"]:
+        lines += ["", "[[steps]]"]
+        lines += [f"{k} = {str(v).lower() if isinstance(v, bool) else _toml_string(v)}" for k, v in st.items()]
+    return "\n".join(lines) + "\n"
+
+
+def _toml_string(s: str) -> str:
+    # A multi-line literal string keeps a prompt readable, but cannot hold ''' or end in a quote,
+    # and holds no control characters besides tab and newline.
+    if "\n" in s and "'''" not in s and not s.endswith("'") and \
+            all(c in "\t\n" or " " <= c != "\x7f" for c in s):
+        return f"'''\n{s}'''"
+    # JSON's escapes are TOML's too, except that TOML also forbids a raw DEL.
+    return json.dumps(s, ensure_ascii=False).replace("\x7f", "\\u007f")
+
+
+def workflow_shape(p: Pipeline) -> str:
+    """The workflow's steps in order, e.g. spec -> build -> review (back to build)."""
+    return " -> ".join(st.id + (f" (back to {st.loop_to})" if st.loop_to else "") for st in p.steps)
+
+
+def run_pipeline(name: str, definition: dict | None) -> Pipeline:
+    """A run's workflow: the definition saved with it, or the built-in workflow of its name."""
+    if definition is None:
+        return find_workflow(name)
+    try:
+        return parse_workflow(name, definition)
+    except ValueError as e:
+        raise OrchestratorError(f"the definition of workflow {name} saved with the run is invalid: {e}") from e
+
+
+def saved_pipeline(saved: dict) -> Pipeline | None:
+    """The workflow of a saved state, or None when this orchestrator cannot tell."""
+    try:
+        return run_pipeline(saved.get("workflow") or DEFAULT_WORKFLOW.name, saved.get("workflow_definition"))
+    except OrchestratorError:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -1154,8 +1510,10 @@ class RunState:
     # The analysis in flight, {ref, sha, queue_url, build, ce_task}, each saved as soon as it is known.
     # rejected lists builds of ref that ended without a verdict, so a resume does not adopt them again.
     ci: dict = field(default_factory=dict)
-    # The name of the run's workflow in WORKFLOWS; a run saved before workflows existed ran the default.
+    # The name of the run's workflow; a run saved before workflows existed ran the default.
     workflow: str = DEFAULT_WORKFLOW.name
+    # The workflow_definition of one that is not built in, so a resume does not depend on its file.
+    workflow_definition: dict | None = None
 
     @classmethod
     def from_dict(cls, saved: dict) -> "RunState":
@@ -1165,7 +1523,7 @@ class RunState:
             state = cls(**{k: v for k, v in saved.items() if k in known})
         except TypeError as e:
             raise OrchestratorError(f"run state {saved.get('run_id', '?')} is incomplete: {e}") from e
-        pipeline = WORKFLOWS.get(state.workflow)
+        pipeline = saved_pipeline(saved)
         first = next(iter(pipeline.roles)) if pipeline else None
         if not state.root_pane and first in state.agents:
             state.root_pane = state.agents[first]["pane"]
@@ -1240,31 +1598,44 @@ def changed_lines(diff: str) -> dict[str, set[int]]:
     path, in_hunk = None, False
     for line in diff.splitlines():
         if line.startswith("diff --git "):
-            path, in_hunk = _diff_git_path(line[len("diff --git "):]), False
-            if path is not None:
-                out.setdefault(path, set())
+            path, in_hunk = _note_path(out, _diff_git_path(line[len("diff --git "):])), False
         elif line.startswith("@@"):
             in_hunk = True
-            m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
-            if m and path is not None:
-                start = int(m.group(1))
-                count = 1 if m.group(2) is None else int(m.group(2))
-                out[path].update(range(start, start + count))
-        elif in_hunk:
-            continue
-        elif line.startswith("deleted file mode") and path is not None:
-            out.pop(path, None)
-            path = None
-        elif line.startswith("rename to "):
-            path = _unquote(line[len("rename to "):])
-            out.setdefault(path, set())
-        elif line.startswith("+++ "):
-            # git ends the name with a tab when it holds a space.
-            name = _unquote(line[len("+++ "):].removesuffix("\t"))
-            path = None if name == "/dev/null" else name.removeprefix("b/")
             if path is not None:
-                out.setdefault(path, set())
+                out[path].update(_hunk_lines(line))
+        elif not in_hunk:
+            path = _header_path(out, path, line)
     return out
+
+
+def _note_path(out: dict[str, set[int]], path: str | None) -> str | None:
+    """path, entered in out with no lines yet unless it is there or None."""
+    if path is not None:
+        out.setdefault(path, set())
+    return path
+
+
+def _hunk_lines(line: str) -> range:
+    """The new tree's lines that a `@@` line's hunk adds."""
+    m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
+    if not m:
+        return range(0)
+    start = int(m.group(1))
+    return range(start, start + (1 if m.group(2) is None else int(m.group(2))))
+
+
+def _header_path(out: dict[str, set[int]], path: str | None, line: str) -> str | None:
+    """The file the diff is about after a header line outside a hunk, kept in out as changed_lines says."""
+    if line.startswith("deleted file mode") and path is not None:
+        out.pop(path, None)
+        return None
+    if line.startswith("rename to "):
+        return _note_path(out, _unquote(line[len("rename to "):]))
+    if line.startswith("+++ "):
+        # git ends the name with a tab when it holds a space.
+        name = _unquote(line[len("+++ "):].removesuffix("\t"))
+        return _note_path(out, None if name == "/dev/null" else name.removeprefix("b/"))
+    return path
 
 
 def _diff_git_path(names: str) -> str | None:
@@ -1299,53 +1670,77 @@ def quality_report(gate: str, intro: str, changed: dict[str, set[int]], *, condi
     """
     out = [f"GATE: {gate}", "", intro]
     if conditions:
-        out += ["", "## Failed conditions", ""]
-        for c in conditions:
-            wants = "at least" if c.get("comparator") == "LT" else "at most"
-            out.append(f"- `{c.get('metricKey')}` is {c.get('actualValue')}; the gate wants {wants} "
-                       f"{c.get('errorThreshold')}.")
+        out += _conditions_section(conditions)
     if gate != GATE_BUILD_FAILED:
-        on_change = sorted((i for i in issues if i["path"] in changed
-                            and (i["line"] is None or i["line"] in changed[i["path"]])),
-                           key=lambda i: (i["path"], i["line"] or 0))
-        out += ["", "## Issues on changed lines", ""]
-        for k, i in enumerate(on_change[:QUALITY_ISSUE_LIMIT], 1):
-            where = f"{i['path']}:{i['line']}" if i["line"] is not None else f"{i['path']} (the whole file)"
-            out.append(f"{k}. `{where}` {i['severity']} {i['rule']}: {i['message']}")
-        if not on_change:
-            out.append("None.")
-        if (more := len(on_change) - QUALITY_ISSUE_LIMIT) > 0:
-            out += ["", f"{more} more issues on changed lines are not listed; fix the ones above first."]
-        if others := len(issues) - len(on_change):
-            out += ["", f"{others} other open issues in the project are not on lines this change added, "
-                        "so they are not listed."]
-    out += ["", "## Failing tests", ""]
-    if tests is None:
-        out.append("Jenkins has no test report for this build.")
-    else:
-        out += [f"- `{name}`: {detail.strip().splitlines()[0] if detail.strip() else 'failed'}"
-                for name, detail in tests[:QUALITY_ISSUE_LIMIT]] or ["None."]
-        if len(tests) > QUALITY_ISSUE_LIMIT:
-            out.append(f"- and {len(tests) - QUALITY_ISSUE_LIMIT} more.")
+        out += _issues_section(issues, changed)
+    out += _tests_section(tests)
     if coverage is not None:
-        out += ["", "## Coverage on new code", ""]
-        to_cover = coverage.get("new_lines_to_cover")
-        if to_cover in (None, "0"):
-            out.append("No new lines to cover.")
-        else:
-            out.append(f"{coverage.get('new_coverage', '?')}% of {to_cover} new lines to cover; "
-                       f"{coverage.get('new_uncovered_lines', '?')} are not covered.")
+        out += _coverage_section(coverage)
     if console:
         out += ["", f"## The last {CONSOLE_TAIL_LINES} lines of the build's console", "", "````", console, "````"]
     if edited:
-        out += ["", "## Build configuration", ""]
-        if "Jenkinsfile" in edited:
-            out.append("- The change edits `Jenkinsfile`. The quality job reads it from `main`, "
-                       "so this analysis ran without the edit.")
-        if "sonar-project.properties" in edited:
-            out.append("- The change edits `sonar-project.properties`. The scanner read the edited file "
-                       "from the snapshot.")
+        out += _config_section(edited)
     return "\n".join(out) + "\n"
+
+
+# The sections of quality_report after its first, each as lines that start with a blank one.
+
+def _conditions_section(conditions) -> list[str]:
+    out = ["", "## Failed conditions", ""]
+    for c in conditions:
+        wants = "at least" if c.get("comparator") == "LT" else "at most"
+        out.append(f"- `{c.get('metricKey')}` is {c.get('actualValue')}; the gate wants {wants} "
+                   f"{c.get('errorThreshold')}.")
+    return out
+
+
+def _issues_section(issues, changed: dict[str, set[int]]) -> list[str]:
+    on_change = sorted((i for i in issues if i["path"] in changed
+                        and (i["line"] is None or i["line"] in changed[i["path"]])),
+                       key=lambda i: (i["path"], i["line"] or 0))
+    out = ["", "## Issues on changed lines", ""]
+    for k, i in enumerate(on_change[:QUALITY_ISSUE_LIMIT], 1):
+        where = f"{i['path']}:{i['line']}" if i["line"] is not None else f"{i['path']} (the whole file)"
+        out.append(f"{k}. `{where}` {i['severity']} {i['rule']}: {i['message']}")
+    if not on_change:
+        out.append("None.")
+    if (more := len(on_change) - QUALITY_ISSUE_LIMIT) > 0:
+        out += ["", f"{more} more issues on changed lines are not listed; fix the ones above first."]
+    if others := len(issues) - len(on_change):
+        out += ["", f"{others} other open issues in the project are not on lines this change added, "
+                    "so they are not listed."]
+    return out
+
+
+def _tests_section(tests: list[tuple[str, str]] | None) -> list[str]:
+    out = ["", "## Failing tests", ""]
+    if tests is None:
+        return out + ["Jenkins has no test report for this build."]
+    out += [f"- `{name}`: {detail.strip().splitlines()[0] if detail.strip() else 'failed'}"
+            for name, detail in tests[:QUALITY_ISSUE_LIMIT]] or ["None."]
+    if len(tests) > QUALITY_ISSUE_LIMIT:
+        out.append(f"- and {len(tests) - QUALITY_ISSUE_LIMIT} more.")
+    return out
+
+
+def _coverage_section(coverage: dict[str, str]) -> list[str]:
+    to_cover = coverage.get("new_lines_to_cover")
+    if to_cover in (None, "0"):
+        return ["", "## Coverage on new code", "", "No new lines to cover."]
+    return ["", "## Coverage on new code", "",
+            f"{coverage.get('new_coverage', '?')}% of {to_cover} new lines to cover; "
+            f"{coverage.get('new_uncovered_lines', '?')} are not covered."]
+
+
+def _config_section(edited) -> list[str]:
+    out = ["", "## Build configuration", ""]
+    if "Jenkinsfile" in edited:
+        out.append("- The change edits `Jenkinsfile`. The quality job reads it from `main`, "
+                   "so this analysis ran without the edit.")
+    if "sonar-project.properties" in edited:
+        out.append("- The change edits `sonar-project.properties`. The scanner read the edited file "
+                   "from the snapshot.")
+    return out
 
 
 def edited_config(diff: str, changed: dict[str, set[int]]) -> list[str]:
@@ -1375,13 +1770,29 @@ def _details(summary: str, text: str, open_: bool = False) -> str:
     return f"<details{' open' if open_ else ''}>\n<summary>{summary}</summary>\n\n{text.strip()}\n\n</details>"
 
 
+def verdict_line(state: "RunState") -> str:
+    """How the run ended, for its pull request, and why it is a draft if it is one for that."""
+    if state.verdict == FINISHED:
+        return f"**{FINISHED}**: its workflow has no review step, so no agent reviewed this change."
+    if state.verdict == QUALITY_GATE_FAILED:
+        return (f"**{QUALITY_GATE_FAILED}**: its workflow has no review step, and the SonarQube quality gate still "
+                f"did not pass after the last quality round, so this is a draft.")
+    line = f"Reviewer verdict after {state.round} round{'s' if state.round != 1 else ''}: **{state.verdict}**."
+    if state.verdict != APPROVE:
+        line += "\n\nThe Reviewer still requested changes after the last round, so this is a draft."
+    return line
+
+
+def commit_note(state: "RunState") -> str:
+    """How the run ended, for its commit message."""
+    if state.verdict in (FINISHED, QUALITY_GATE_FAILED):
+        return f"Orchestrator run {state.run_id}: {state.verdict}, unreviewed."
+    return f"Orchestrator run {state.run_id}: {state.verdict} after {state.round} review round(s)."
+
+
 def pr_body(state: "RunState", spec: str, report: str, review: str, quality: str | None = None) -> str:
-    approved = state.verdict == APPROVE
-    rounds = f"{state.round} round{'s' if state.round != 1 else ''}"
-    head = (f"Opened by ai-agents-orchestrator run `{state.run_id}`. "
-            f"Reviewer verdict after {rounds}: **{state.verdict}**.")
-    if not approved:
-        head += "\n\nThe Reviewer still requested changes after the last round, so this is a draft."
+    approved = state.verdict in SUCCEEDED
+    head = f"Opened by ai-agents-orchestrator run `{state.run_id}`. {verdict_line(state)}"
     warning = []
     if state.conflicts:
         files = "\n".join(f"> - `{f}`" for f in state.conflicts)
@@ -1393,7 +1804,8 @@ def pr_body(state: "RunState", spec: str, report: str, review: str, quality: str
         _details("Spec", spec, open_=True),
         _details(f"Builder report (round {state.round})", report),
         *([_details(f"Quality gate (round {state.round})", quality)] if quality else []),
-        _details(f"Review (round {state.round})", review, open_=not approved),
+        *([] if state.verdict in (FINISHED, QUALITY_GATE_FAILED) else
+          [_details(f"Review (round {state.round})", review, open_=not approved)]),
     ]) + "\n"
 
 
@@ -1410,6 +1822,14 @@ NEW = "new"              # the role's first agent in this run
 ALIVE = "alive"          # still running from before
 RESUMED = "resumed"      # had exited; relaunched into its saved Claude Code session
 RESTARTED = "restarted"  # had exited; relaunched in a fresh session that has lost its earlier turns
+
+
+@dataclass(frozen=True)
+class Clocks:
+    """The time a Workflow keeps: passed in, so the tests can run one on a fake that sleeps instantly."""
+    sleep: Callable[[float], None] = time.sleep
+    monotonic: Callable[[], float] = time.monotonic  # for deadlines and stalls
+    wall: Callable[[], float] = time.time  # for timestamps in state.json
 
 
 class Workflow:
@@ -1442,14 +1862,14 @@ class Workflow:
                  ci: CI | None = None,
                  max_quality_rounds: int = DEFAULT_MAX_QUALITY_ROUNDS,
                  pipeline: Pipeline | None = None,
-                 sleep=time.sleep, clock=time.monotonic, wallclock=time.time):
-        """pipeline overrides the workflow the state names, for one that WORKFLOWS lacks."""
+                 clocks: Clocks | None = None):
+        """pipeline is the run's workflow; without it, the one the state names."""
         self.herdr = herdr
         self.host = host
         self.state = state
         self.notify = notify
         self.ci = ci
-        self.pipeline = pipeline = pipeline or find_workflow(state.workflow)
+        self.pipeline = pipeline = pipeline or run_pipeline(state.workflow, state.workflow_definition)
         if ci and pipeline.gated is None:
             raise OrchestratorError(f"workflow {pipeline.name} has no quality-gated step, "
                                     f"so the quality gate does not apply")
@@ -1458,6 +1878,7 @@ class Workflow:
             raise OrchestratorError(f"workflow {pipeline.name} has no editing step, "
                                     f"so it cannot end in a pull request; pass --no-pr")
         state.workflow = pipeline.name
+        state.workflow_definition = None if WORKFLOWS.get(pipeline.name) is pipeline else workflow_definition(pipeline)
         # Saved with the run, so a resume starts from them.
         state.max_rounds = max_rounds
         state.turn_timeout = turn_timeout
@@ -1466,14 +1887,16 @@ class Workflow:
         state.pull_request = pull_request
         state.quality_job = ci.job if ci else None
         state.max_quality_rounds = max_quality_rounds
-        self.sleep = sleep
-        self.clock = clock
-        self.wallclock = wallclock
+        clocks = clocks or Clocks()
+        self.sleep = clocks.sleep
+        self.clock = clocks.monotonic
+        self.wallclock = clocks.wall
         self.me = {"host": socket.gethostname(), "pid": os.getpid(), "started_at": self._timestamp()}
         self._last_write = 0.0
 
     def run(self) -> str:
-        """Run every phase not yet done and return the final verdict."""
+        """Run every phase not yet done and return the final verdict; for a workflow without one, FINISHED,
+        or QUALITY_GATE_FAILED when the gate still failed."""
         s = self.state
         if s.phase == DONE:
             return s.verdict
@@ -1485,6 +1908,8 @@ class Workflow:
             if s.phase != PUBLISH:
                 self._prepare()
             self._walk()
+            if self.pipeline.verdict_step is None:
+                s.verdict = FINISHED if self._gate_passed(s.round) else QUALITY_GATE_FAILED
             if s.pull_request:
                 self._publish()
             self._clean_up_quality()
@@ -1774,8 +2199,7 @@ class Workflow:
             title = (spec_title(spec) or s.task.strip().split("\n", 1)[0] or s.run_id)[:72]
             if self.host.git(s.cwd, "status", "--porcelain").strip():
                 self.host.git(s.cwd, "add", "--all")
-                self.host.git(s.cwd, "commit", "--quiet", "-m", title, "-m",
-                              f"Orchestrator run {s.run_id}: {s.verdict} after {s.round} review round(s).")
+                self.host.git(s.cwd, "commit", "--quiet", "-m", title, "-m", commit_note(s))
             elif self.host.git_head(s.cwd) == s.base:
                 raise OrchestratorError(f"the Builder changed no files; there is nothing to commit on {s.branch}")
             # The base moved on while the run built and reviewed. A conflict is left to the human:
@@ -1791,7 +2215,7 @@ class Workflow:
             verdict = self._last_text(p.verdict_step, s.round)
             body = pr_body(s, spec, report, verdict, quality)
             s.pr_url = self.host.create_pr(s.cwd, s.base_branch, s.branch, title, body,
-                                           draft=s.verdict != APPROVE or bool(s.conflicts))
+                                           draft=s.verdict not in SUCCEEDED or bool(s.conflicts))
             self._save()
             log(f"opened {s.pr_url}")
             if s.conflicts:
@@ -1817,10 +2241,16 @@ class Workflow:
         s = self.state
         if not self.ci or not s.quality_round:
             return ""
-        path = s.quality_path(n, s.quality_round)
-        text = self.host.read(path)
-        note = QUALITY_PASSED_NOTE if text is not None and parse_gate(text) == GATE_OK else QUALITY_UNRESOLVED_NOTE
-        return "\n\n" + note.format(quality_path=path)
+        note = QUALITY_PASSED_NOTE if self._gate_passed(n) else QUALITY_UNRESOLVED_NOTE
+        return "\n\n" + note.format(quality_path=s.quality_path(n, s.quality_round))
+
+    def _gate_passed(self, n: int) -> bool:
+        """Whether round n's last quality round passed the gate; True for a run without one."""
+        s = self.state
+        if not self.ci or not s.quality_round:
+            return True
+        text = self.host.read(s.quality_path(n, s.quality_round))
+        return text is not None and parse_gate(text) == GATE_OK
 
     # -- The quality gate --------------------------------------------------
 
@@ -2017,26 +2447,30 @@ class Workflow:
         """
         failing = None
         while True:
-            try:
-                out = poll()
-            except CIError as e:
-                if not e.transient:
-                    raise OrchestratorError(f"quality gate: {step}: {e}") from e
-                if failing is None:
-                    log(f"[quality] {step}: {e}; retrying")
-                failing = e
-            else:
-                if failing is not None:
-                    log(f"[quality] {step}: answered again")
-                failing = None
-                if out is not None:
-                    return out
+            out, failing = self._poll_once(step, poll, failing)
+            if out is not None:
+                return out
             if self.clock() >= deadline:
                 why = f"; last error: {failing}" if failing else ""
                 raise OrchestratorError(f"quality gate: {step} did not finish within {QUALITY_TIMEOUT}s of the "
                                         f"round's start{why}; resume to go on")
             self._heartbeat()
             self.sleep(CI_POLL_SECONDS)
+
+    @staticmethod
+    def _poll_once(step: str, poll, failing: CIError | None) -> tuple:
+        """poll()'s result, None when it failed in a way that may pass, and the failure that stands after it."""
+        try:
+            out = poll()
+        except CIError as e:
+            if not e.transient:
+                raise OrchestratorError(f"quality gate: {step}: {e}") from e
+            if failing is None:
+                log(f"[quality] {step}: {e}; retrying")
+            return None, e
+        if failing is not None:
+            log(f"[quality] {step}: answered again")
+        return out, None
 
     def _once(self, step: str, deadline: float, call):
         """call()'s result, retried as _poll retries; None is a result here too."""
@@ -2097,21 +2531,29 @@ class Workflow:
         if announce:
             announce(how)
         log(f"[{role}] working in pane {agent['pane']}")
-        if how in (NEW, RESTARTED):
-            message = fresh_text or text
-        elif s.prompted != file:
-            message = text
-        elif how == RESUMED:
-            message = CONTINUE_PROMPT.format(path=path)
-        else:
-            message = None  # alive and already prompted for this file: only wait for it
-        if message is not None:
+        if (message := self._prompt_for(how, file, text, fresh_text, path)) is not None:
             self.herdr.prompt(agent["name"], message)
             # Recorded only once the prompt is delivered. Dying in between costs one duplicate
             # prompt, which the role answers by writing the same file again.
             s.prompted = file
             self._save()
+        out = self._await_handoff(role, path, timeout, watch_stalls)
+        log(f"[{role}] wrote {file}")
+        return out
 
+    def _prompt_for(self, how: str, file: str, text: str, fresh_text: str | None, path: str) -> str | None:
+        """What to prompt an agent that is ready as how says with; None when it only has to be waited for."""
+        if how in (NEW, RESTARTED):
+            return fresh_text or text
+        if self.state.prompted != file:
+            return text
+        if how == RESUMED:
+            return CONTINUE_PROMPT.format(path=path)
+        return None  # alive and already prompted for this file
+
+    def _await_handoff(self, role: str, path: str, timeout: int | None, watch_stalls: bool) -> str:
+        """Poll until the role writes path, telling the human when it is blocked or stalled."""
+        label, agent, file = self.pipeline.roles[role], self.state.agents[role], os.path.basename(path)
         deadline = None if timeout is None else self.clock() + timeout
         quiet_since = None
         told = None  # what the human was last told about this turn
@@ -2125,26 +2567,25 @@ class Workflow:
             if deadline is not None and now > deadline:
                 raise OrchestratorError(
                     f"the {label} did not write {path} within {timeout}s; see pane {agent['pane']}")
-
-            if status in ("idle", "done"):
-                if quiet_since is None:
-                    quiet_since = now
-            else:
+            if status not in ("idle", "done"):
                 quiet_since = None
+            elif quiet_since is None:
+                quiet_since = now
             stalled = watch_stalls and quiet_since is not None and now - quiet_since >= STALL_SECONDS
-            if status == "blocked" and told != "blocked":
-                self._ask_human(role, "needs your answer")
-                told = "blocked"
-            elif stalled and told != "stalled":
-                self._ask_human(role, f"is idle without writing {file}")
-                told = "stalled"
-            elif status == "working":
-                told = None
+            told = self._tell_human(role, status, stalled, told, file)
             self._heartbeat()
             self.sleep(POLL_SECONDS)
-
-        log(f"[{role}] wrote {file}")
         return out
+
+    def _tell_human(self, role: str, status: str, stalled: bool, told: str | None, file: str) -> str | None:
+        """Notify the human of a blocked or stalled agent once; returns what they have been told now."""
+        if status == "blocked" and told != "blocked":
+            self._ask_human(role, "needs your answer")
+            return "blocked"
+        if stalled and told != "stalled":
+            self._ask_human(role, f"is idle without writing {file}")
+            return "stalled"
+        return None if status == "working" else told
 
     def _handoff(self, label: str, path: str) -> str | None:
         """The handoff file, or None while it is not written; an empty one ends the run."""
@@ -2312,6 +2753,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     for role in ROLE_LABELS:
         settings.add_argument(f"--{role}-model", metavar="MODEL",
                               help=f"Claude model for the {ROLE_LABELS[role]}; overrides --model")
+    settings.add_argument("--role-model", metavar="ROLE=MODEL", action="append", type=role_model_arg,
+                          help="Claude model for one role of the workflow, by its key; overrides --model and "
+                               "the workflow's own model for it; repeatable")
     settings.add_argument("--max-quality-rounds", type=int, metavar="N",
                           help=f"with --quality-gate: SonarQube analyses per review round before the Reviewer "
                                f"gets the change anyway (default {DEFAULT_MAX_QUALITY_ROUNDS})")
@@ -2319,8 +2763,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     run = sub.add_parser("run", parents=[target, settings], help="run the handoff workflow for a task")
     run.add_argument("task", help="what to build, as you would tell the Spec Collector")
     # Run only: a resumed run keeps the workflow it was started with.
-    run.add_argument("--workflow", choices=sorted(WORKFLOWS), default=DEFAULT_WORKFLOW.name,
-                     help=f"the roles and handoffs the run goes through (default {DEFAULT_WORKFLOW.name})")
+    which = run.add_mutually_exclusive_group()
+    try:
+        names = workflow_names()
+    except OrchestratorError:
+        names = sorted(WORKFLOWS)  # the workflows command shows why the directory cannot be listed
+    which.add_argument("--workflow", choices=names, default=DEFAULT_WORKFLOW.name,
+                       help=f"the roles and handoffs the run goes through: a built-in workflow or one in "
+                            f"{workflows_dir()} (default {DEFAULT_WORKFLOW.name}); see the workflows command")
+    which.add_argument("--workflow-file", metavar="FILE",
+                       help="like --workflow, for the workflow file at FILE, on this machine")
     # Run only: a resumed run may already be on its own branch, so whether it ends in a pull request is fixed.
     run.add_argument("--no-pr", action="store_true",
                      help="leave the change uncommitted in the working tree and the workspace open, "
@@ -2341,8 +2793,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
     sub.add_parser("list", parents=[target], help="list the runs in the project directory")
 
+    workflows = sub.add_parser(
+        "workflows", help="list the workflows, or print one as a workflow file",
+        description=f"Without WORKFLOW, list the workflows `run --workflow` offers: the built-in ones and "
+                    f"the workflow files in {workflows_dir()}. With it, print that workflow, or the file "
+                    f"at that path, as a workflow file, a starting point for your own.")
+    workflows.add_argument("workflow", nargs="?", metavar="WORKFLOW", help="a workflow's name, or a file's path")
+
     args = p.parse_args(argv)
-    if args.machine and not args.cwd:
+    if getattr(args, "machine", None) and not args.cwd:
         p.error("--cwd is required with --machine")
     if getattr(args, "max_rounds", None) is not None and args.max_rounds < 1:
         p.error("--max-rounds must be at least 1")
@@ -2356,13 +2815,24 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
-def role_models(args: argparse.Namespace, roles=ROLE_LABELS) -> dict[str, str]:
-    """The model each role starts with; a role without one keeps Claude Code's default.
+def role_model_arg(text: str) -> tuple[str, str]:
+    role, sep, model = text.partition("=")
+    if not (sep and role and model):
+        raise argparse.ArgumentTypeError(f"expected ROLE=MODEL, not {text!r}")
+    return role, model
 
-    Only the default workflow's roles have a --ROLE-model flag; another workflow's other roles take --model.
+
+def role_models(args: argparse.Namespace, roles=ROLE_LABELS) -> dict[str, str]:
+    """The model each role starts with by the flags; a role without one keeps its workflow's, or Claude Code's.
+
+    --role-model names any role; only the default workflow's roles have a --ROLE-model flag too.
     """
-    models = {role: (getattr(args, f"{role}_model") if role in ROLE_LABELS else None) or args.model
-              for role in roles}
+    named = dict(args.role_model or [])
+    if unknown := set(named) - set(roles):
+        raise OrchestratorError(f"--role-model names role {min(unknown)}, which the workflow does not have; "
+                                f"its roles are {', '.join(roles)}")
+    models = {role: named.get(role) or (getattr(args, f"{role}_model") if role in ROLE_LABELS else None)
+              or args.model for role in roles}
     return {role: m for role, m in models.items() if m}
 
 
@@ -2456,7 +2926,7 @@ def run_round(s: dict) -> str:
     """The run's round, and its quality round while it is in the quality loop or the gated step."""
     rnd = f"round {s['round']}"
     # A workflow this orchestrator lacks has no gated step known, so only phase quality shows the quality round.
-    pipeline = WORKFLOWS.get(s.get("workflow", DEFAULT_WORKFLOW.name))
+    pipeline = saved_pipeline(s)
     gated = pipeline.gated.id if pipeline and pipeline.gated else QUALITY
     if s.get("quality_round") and s["phase"] in (QUALITY, gated):
         rnd += f" q{s['quality_round']}"
@@ -2481,7 +2951,7 @@ def resumable_state(runs: list[tuple[int, dict]], args: argparse.Namespace, cwd:
     """The saved state of the run to resume, with the flags given to resume applied."""
     age, saved = find_run(runs, args.run_ref, cwd)
     state = RunState.from_dict(saved)
-    pipeline = find_workflow(state.workflow)
+    pipeline = run_pipeline(state.workflow, state.workflow_definition)
     health = run_health(saved, age, local_host, pid_alive)
     if health and health[0] == RUNNING and not args.force:
         raise OrchestratorError(
@@ -2513,45 +2983,52 @@ def resumable_state(runs: list[tuple[int, dict]], args: argparse.Namespace, cwd:
     return state
 
 
+def print_workflows() -> None:
+    for name in sorted(WORKFLOWS):
+        print_workflow(name, "built in", WORKFLOWS[name])
+    for name, path in workflow_files().items():
+        try:
+            print_workflow(name, path, load_workflow_file(path))
+        except OrchestratorError as e:
+            print(f"{name}  {path}\n    error: {str(e).removeprefix(f'{path}: ')}")
+    print(f"\nAdd one as {workflows_dir()}/NAME.toml; `orchestrator.py workflows {DEFAULT_WORKFLOW.name}` "
+          f"prints the default as a file to start from.")
+
+
+def print_workflow(name: str, source: str, p: Pipeline) -> None:
+    print(f"{name}  {source}")
+    print(f"    {workflow_shape(p)}")
+    if p.description:
+        print(f"    {p.description}")
+
+
+def workflow_arg(ref: str) -> Pipeline:
+    """The workflow a name or a path names: a path has a / or ends in .toml."""
+    if "/" in ref or ref.endswith(".toml"):
+        return load_workflow_file(ref)
+    return named_workflow(ref)
+
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     state = None
     try:
-        herdr = Herdr(args.machine)
-        if args.machine:
-            host = Host(herdr.ssh_target())
-        elif os.environ.get("HERDR_ENV") != "1":
-            # Without a machine, herdr commands target whichever session is focused;
-            # only a pane herdr manages knows it is talking to its own session.
-            raise OrchestratorError("not inside a herdr pane; run from herdr, or pass --machine")
-        else:
-            host = Host()
+        # Workflows are on this machine, so listing them needs no herdr.
+        if args.command == "workflows":
+            workflows_command(args.workflow)
+            return 0
+        herdr, host = connect(args.machine)
         cwd = host.resolve_dir(args.cwd or os.getcwd())
-
         if args.command == "list":
             print_runs(host.run_states(cwd), socket.gethostname(), pid_alive, target_args(args))
             return 0
-
-        if args.command == "run":
-            pipeline = WORKFLOWS[args.workflow]
-            state = RunState(new_run_id(), args.task, cwd, args.machine,
-                             phase=pipeline.steps[0].id, workflow=pipeline.name)
-            state.max_rounds = args.max_rounds or DEFAULT_MAX_ROUNDS
-            state.turn_timeout = args.timeout or DEFAULT_TURN_TIMEOUT
-            state.agent_args = ["--permission-mode", args.permission_mode] if args.permission_mode else []
-            state.models = role_models(args, pipeline.roles)
-            state.pull_request = not args.no_pr
-            state.quality_job = args.quality_gate
-            state.max_quality_rounds = args.max_quality_rounds or DEFAULT_MAX_QUALITY_ROUNDS
-        else:
-            state = resumable_state(host.run_states(cwd), args, cwd, socket.gethostname(), pid_alive)
-            pipeline = find_workflow(state.workflow)
+        state, pipeline = new_state(args, cwd) if args.command == "run" else resumed_state(args, host, cwd)
         workflow = Workflow(
             herdr, host, state, notify=notify_locally,
             max_rounds=state.max_rounds, turn_timeout=state.turn_timeout,
             agent_args=state.agent_args, models=state.models, pull_request=state.pull_request,
             ci=CI(state.quality_job) if state.quality_job else None,
-            max_quality_rounds=state.max_quality_rounds)
+            max_quality_rounds=state.max_quality_rounds, pipeline=pipeline)
         verdict = workflow.run()
     except OrchestratorError as e:
         print(f"error: {e}", file=sys.stderr)
@@ -2560,14 +3037,56 @@ def main(argv: list[str]) -> int:
         hint = f"; resume with: {resume_command(state.run_id, target_args(args))}" if state else ""
         print(f"interrupted; the role agents keep running in herdr{hint}", file=sys.stderr)
         return EXIT_INTERRUPTED
+    return finish(verdict, state, pipeline)
 
+
+def workflows_command(ref: str | None) -> None:
+    if ref:
+        print(workflow_toml(workflow_arg(ref)), end="")
+    else:
+        print_workflows()
+
+
+def connect(machine: str | None) -> tuple[Herdr, Host]:
+    """The herdr the agents run in, and the host the project is on."""
+    herdr = Herdr(machine)
+    if machine:
+        return herdr, Host(herdr.ssh_target())
+    if os.environ.get("HERDR_ENV") != "1":
+        # Without a machine, herdr commands target whichever session is focused;
+        # only a pane herdr manages knows it is talking to its own session.
+        raise OrchestratorError("not inside a herdr pane; run from herdr, or pass --machine")
+    return herdr, Host()
+
+
+def new_state(args: argparse.Namespace, cwd: str) -> tuple[RunState, Pipeline]:
+    """A new run's state from the run command's flags, and its workflow."""
+    pipeline = load_workflow_file(args.workflow_file) if args.workflow_file else named_workflow(args.workflow)
+    state = RunState(new_run_id(), args.task, cwd, args.machine,
+                     phase=pipeline.steps[0].id, workflow=pipeline.name)
+    state.max_rounds = args.max_rounds or DEFAULT_MAX_ROUNDS
+    state.turn_timeout = args.timeout or DEFAULT_TURN_TIMEOUT
+    state.agent_args = ["--permission-mode", args.permission_mode] if args.permission_mode else []
+    state.models = {**pipeline.models, **role_models(args, pipeline.roles)}
+    state.pull_request = not args.no_pr
+    state.quality_job = args.quality_gate
+    state.max_quality_rounds = args.max_quality_rounds or DEFAULT_MAX_QUALITY_ROUNDS
+    return state, pipeline
+
+
+def resumed_state(args: argparse.Namespace, host: Host, cwd: str) -> tuple[RunState, Pipeline]:
+    state = resumable_state(host.run_states(cwd), args, cwd, socket.gethostname(), pid_alive)
+    return state, run_pipeline(state.workflow, state.workflow_definition)
+
+
+def finish(verdict: str, state: RunState, pipeline: Pipeline) -> int:
+    """Print how the run ended and return its exit status."""
     conflict = f" (a draft: it conflicts with {state.base_branch})" if state.conflicts else ""
     result = pipeline.result.last_path(state.dir, state.round, state.quality_round)
     print(f"{verdict}: {state.pr_url or result}{conflict}")
-    if verdict != APPROVE:
+    if verdict not in SUCCEEDED:
         return EXIT_CHANGES_REQUESTED
     return EXIT_CONFLICT if state.conflicts else 0
-
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))

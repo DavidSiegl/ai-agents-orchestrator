@@ -27,8 +27,9 @@ Ideas for what comes next, in no particular order. The designs behind what has s
 
 ## Workflows
 
-Only `default` ships ([Workflows](architecture.md#workflows)). These engine gaps, by letter, stand between it
-and the candidates below:
+Only `default` ships ([Workflows](architecture.md#workflows)); others are workflow files, and
+[`examples/workflows/`](../examples/workflows) has `quick` and `tdd`. These engine gaps, by letter (G, runs without a verdict, is closed), stand
+between the engine and the candidates below:
 
 - **A. Run inputs**: seed a handoff file at `run` (`--spec FILE` as `spec.md`), or name a base ref, branch or
   pull request to work on.
@@ -39,15 +40,13 @@ and the candidates below:
 - **E. Aggregated verdicts**: one decision from several verdict files.
 - **F. Other endings** than a pull request or `--no-pr`: a document as the result, comments on an existing pull
   request.
-- **G. Runs without a verdict**: the exit status is `3` and the pull request a draft unless the verdict is
-  `APPROVE`.
 - **H. Runs without an editing step** have no base commit or branch, so they need `--no-pr`.
 - **I. Orchestrator checks**: a step without an agent that runs a command and judges it, such as "the new tests
   fail at the base".
 - **J. More than one quality-gated step.**
-- **K. Workflow choice**: mid-run, by the Spec Collector or the human, or with `resume --workflow`; user-defined
-  workflows in `.orchestrator/workflows/*` with their own prompts; `--role-model ROLE=MODEL` for roles without
-  their own flag.
+- **K. Workflow choice**: mid-run, by the Spec Collector or the human, or with `resume --workflow`; a default
+  workflow other than `default` without passing `--workflow` each time; workflow files that extend another
+  workflow file, not only the default's steps.
 
 | Workflow | Roles | Handoff files | Gaps |
 |---|---|---|---|
@@ -55,10 +54,10 @@ and the candidates below:
 | **tdd** | Spec Collector, Test Writer, Builder, Reviewer | `spec.md`, `tests.md`, `build-{n}.md`, `review-{n}.md` | none for the shape; I to prove the tests fail first; D to send a review to the Test Writer |
 | **plan** | Spec Collector, Planner, Builder, Reviewer | `spec.md`, `plan.md` (approved by the human), `build-{n}.md`, `review-{n}.md` | B; D for a plan sent back (`plan-{n}.md`) |
 | **bugfix** | Spec Collector or none, Reproducer, Builder, Reviewer | `spec.md` or the task, `repro.md` with a failing test, `build-{n}.md`, `review-{n}.md` | D for "cannot reproduce"; I for the test failing before and passing after |
-| **review-only** | one or more Reviewers | `review.md` on a given branch or pull request | A, F, G, H; C and E for several reviewers |
-| **research / spike** | Spec Collector, Researcher, Critic | `question.md`, `findings-{n}.md`, `critique-{n}.md` | F, G, H; D for the critic's verdict |
+| **review-only** | one or more Reviewers | `review.md` on a given branch or pull request | A, F, H; C and E for several reviewers |
+| **research / spike** | Spec Collector, Researcher, Critic | `question.md`, `findings-{n}.md`, `critique-{n}.md` | F, H; D for the critic's verdict |
 | **panel review** | Spec Collector, Builder, two or three Reviewers (e.g. correctness, security) | `spec.md`, `build-{n}.md`, `review-<lens>-{n}.md` | C, E |
-| **solo** | Builder, with or without a Spec Collector | `spec.md` (optional), `build.md` | G |
+| **solo** | Builder, with or without a Spec Collector | `spec.md` (optional), `build.md` | none |
 
 ## Known issues
 

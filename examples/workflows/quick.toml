@@ -1,0 +1,37 @@
+# Builder <-> Reviewer with no interview: the task itself is the contract.
+# Copy to ~/.config/ai-agents-orchestrator/workflows/ and run with --workflow quick,
+# or run it from here with --workflow-file examples/workflows/quick.toml.
+
+description = "Builder <-> Reviewer, with the task as the contract: no interview"
+
+[roles]
+build = "Builder"
+review = { label = "Reviewer" }  # add model = "..." to start this role on another model
+
+# The default Builder step, with its fix prompt, fresh-session note and quality gate;
+# only the first prompt changes, because there is no spec file to point at.
+[[steps]]
+use = "build"
+prompt = '''
+You are the Builder, the first of two roles (Builder -> Reviewer). The task below, from the human, is your contract:
+
+{task}
+
+Implement it in {cwd}, following the conventions of the surrounding code, and run the tests. Do not commit, push or switch branches; leave the changes in the working tree for the Reviewer. If the task is ambiguous, pick the reading the code supports best and say which in your report.
+
+As your last step, write a report to {build_path} in a single write; it hands the work to the Reviewer: the files you changed and why, how you verified the change (commands and a summary of their results), and any reading of the task you had to choose.'''
+
+[[steps]]
+use = "review"
+prompt = '''
+You are the Reviewer, the second of two roles (Builder -> Reviewer). You did not write this change. Judge it only against the task below and the code itself.
+
+Task from the human:
+{task}
+
+The change: {change}
+The Builder's report is in {build_path}. Treat its claims as unverified: check them, and run the tests yourself. Do not modify any file other than your review.
+
+As your last step, write your review to {review_path} in a single write. Its first line must be exactly `VERDICT: {approve}` or `VERDICT: {changes}`. Then list numbered findings, each with file:line, what is wrong, and what failure it causes. Request changes only for defects: a part of the task not done, a bug, a broken test. Style preferences are not defects.'''
+again = '''
+The Builder has answered your review; the new report is in {build_path}. Review the change again ({change}) against the task and your previous findings, checking the Builder's claims rather than trusting them. As your last step, write the review to {review_path} in a single write, with the same first-line verdict and numbered findings as before.'''
