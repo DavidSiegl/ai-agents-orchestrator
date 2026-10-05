@@ -13,8 +13,8 @@ analyses one snapshot into one run's own project.
 
 ### What Jenkins needs
 
-- **Plugins**: Pipeline, Git, SonarQube Scanner, JUnit and Workspace Cleanup, and GitHub Branch Source for the
-  multibranch job.
+- **Plugins**: Pipeline, Git, SonarQube Scanner, JUnit, Workspace Cleanup and Credentials Binding, and GitHub
+  Branch Source for the multibranch job.
 - **The SonarQube server**, under Manage Jenkins → System → SonarQube servers, named `Sonarqube`, with a token
   that may analyse into the project. `withSonarQubeEnv('Sonarqube')` finds it by that name.
 - **The scanner**, under Manage Jenkins → Tools → SonarQube Scanner installations, named `sonarqube-scanner`.
@@ -23,6 +23,9 @@ analyses one snapshot into one run's own project.
   minutes.
 - **`uv` and `git` on the agent**: the Install stage runs `uv sync --frozen`, and `uv` brings the Python of
   `.python-version`.
+- **`gh` on the agent, and a GitHub token** for the Release stage: a Secret text credential with the ID
+  `github-release-token`, holding a fine-grained token with *Contents: read and write* on this repository.
+  Only builds of `main` use it.
 
 ### The two jobs
 
@@ -61,7 +64,10 @@ command. `GIT_REF` is interpolated only into the checkout's branch spec.
 ### What each kind of build reports
 
 - **Ordinary builds** stop at a failing test. On `main` they also fail on a gate status other than `OK`; a
-  pull request or another branch is not analysed.
+  pull request or another branch is not analysed. A build of `main` that passes the gate then releases the
+  version in `pyproject.toml`: if GitHub has no release `v<version>` yet, `gh release create` makes one, with
+  the tag at the commit built and notes generated from the pull requests merged since the last release. To
+  release, raise `version` in the pull request; a merge that leaves it alone releases nothing.
 - **Quality builds** (`SONAR_PROJECT_KEY` set) run the analysis even when tests fail, end UNSTABLE when tests
   fail or the gate is not `OK`, and archive `.scannerwork/report-task.txt`, whose `ceTaskId` leads to the
   analysis. FAILURE then means the change never got as far as the gate.

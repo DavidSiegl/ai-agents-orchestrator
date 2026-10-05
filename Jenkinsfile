@@ -111,6 +111,32 @@ pipeline {
                 }
             }
         }
+
+        // A merge into main that raises the version in pyproject.toml releases it; any other merge finds that
+        // release already there. gh creates the tag v<version> on GitHub at the commit built, so Jenkins needs
+        // no git push credentials.
+        stage('Release') {
+            when { branch 'main' }
+            steps {
+                withCredentials([string(credentialsId: 'github-release-token', variable: 'GH_TOKEN')]) {
+                    sh '''
+                        version=$(uv run --frozen python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+                        tag="v$version"
+                        sha=$(git rev-parse HEAD)
+                        if gh release view "$tag" >/dev/null 2>gh-release-view.err; then
+                            echo "$tag is already released"
+                            exit 0
+                        fi
+                        # Anything but a missing release, e.g. a bad token, must fail rather than release twice.
+                        if ! grep -q 'release not found' gh-release-view.err; then
+                            cat gh-release-view.err >&2
+                            exit 1
+                        fi
+                        gh release create "$tag" --target "$sha" --title "$tag" --generate-notes
+                    '''
+                }
+            }
+        }
     }
 
     post {
