@@ -552,7 +552,7 @@ def _shared_name(a: list[str | None], b: list[str | None]) -> str | None:
     time, finds a name both accept, so the answer is exact: no sampling of rounds. The one approximation
     is a template that repeats {n}, whose numbers are taken as independent; it can only reject more.
     """
-    def closure(states: set, tokens: list) -> frozenset:
+    def closure(states: set) -> frozenset:
         # A number may end after any digit.
         return frozenset(states | {(i + 1, False) for i, inside in states if inside})
 
@@ -564,10 +564,10 @@ def _shared_name(a: list[str | None], b: list[str | None]) -> str | None:
                     out.add((i, True))
             elif i < len(tokens) and (tokens[i] == c or (tokens[i] is None and c in "123456789")):
                 out.add((i + 1, False) if tokens[i] is not None else (i, True))
-        return closure(out, tokens)
+        return closure(out)
 
     alphabet = sorted({t for t in a + b if t is not None} | set("0123456789"))
-    start = (closure({(0, False)}, a), closure({(0, False)}, b))
+    start = (closure({(0, False)}),) * 2
     # Each pair of state sets reached, with the name that first reached it.
     reached = {start: ""}
     queue = collections.deque([start])
