@@ -6,13 +6,15 @@ the orchestrator needs, and the [orchestrator loop](#orchestrator-loop) itself.
 
 ## Jenkins setup
 
-One `Jenkinsfile` serves two jobs. An ordinary build checks out the job's own branch, tests with branch coverage
-of `orchestrator`, analyses into the SonarQube project of `sonar-project.properties` and fails on a red gate. A
-quality build gets parameters from the orchestrator and analyses one snapshot into one run's own project.
+One `Jenkinsfile` serves two jobs. An ordinary build checks out its branch or pull request and tests it with
+branch coverage of `orchestrator`; on `main` it also analyses into the SonarQube project of
+`sonar-project.properties` and fails on a red gate. A quality build gets parameters from the orchestrator and
+analyses one snapshot into one run's own project.
 
 ### What Jenkins needs
 
-- **Plugins**: Pipeline, Git, SonarQube Scanner, JUnit and Workspace Cleanup.
+- **Plugins**: Pipeline, Git, SonarQube Scanner, JUnit, Workspace Cleanup and Credentials Binding, and GitHub
+  Branch Source for the multibranch job.
 - **The SonarQube server**, under Manage Jenkins → System → SonarQube servers, named `Sonarqube`, with a token
   that may analyse into the project. `withSonarQubeEnv('Sonarqube')` finds it by that name.
 - **The scanner**, under Manage Jenkins → Tools → SonarQube Scanner installations, named `sonarqube-scanner`.
@@ -21,13 +23,27 @@ quality build gets parameters from the orchestrator and analyses one snapshot in
   minutes.
 - **`uv` and `git` on the agent**: the Install stage runs `uv sync --frozen`, and `uv` brings the Python of
   `.python-version`.
+- **`gh` on the agent, and a GitHub token** for the Release stage: a Secret text credential with the ID
+  `GitHub-Agents`, holding a token with *Contents: read and write* on this repository. It is the agents' own
+  `gh` token, so when that is rotated the credential must be too, or every build of `main` fails at Release.
+  Only builds of `main` use it.
 
 ### The two jobs
 
 Both load the `Jenkinsfile` with "Pipeline script from SCM". The Checkout stage needs that: it runs
 `checkout scm`, or fetches `GIT_REF` from `scm`'s remote.
 
-- **The ordinary job** builds the repository as it does today, whatever its kind (Pipeline or multibranch).
+- **The ordinary job**, a Multibranch Pipeline, builds `main` and every pull request. Only a build of `main`,
+  that is a merge, runs the SonarQube stages: Community Edition has no branch analysis, so analysing a pull
+  request would overwrite `main`'s analysis and its new-code baseline. Its branch source needs:
+  - **Discover branches** set to *Exclude branches that are also filed as PRs*, so an `orchestrator/*` branch
+    is built once, as its pull request.
+  - **Filter by name (with wildcards)** excluding `orchestrator-ci/*`. The orchestrator pushes its snapshots
+    there for the quality job and deletes them afterwards; the multibranch job would otherwise test each one
+    as a branch of its own.
+
+  The stages run on `BRANCH_NAME`, which only a multibranch job sets, so a plain Pipeline job running
+  ordinary builds would test without analysing.
 - **The quality job**, here `AI-Agents-Orchestrator/py-ai-agents-orchestrator-quality`: a plain Pipeline job that loads the `Jenkinsfile`
   from `main`. It takes any ref as a parameter, keeps quality builds out of the ordinary job's history, and a
   change to the `Jenkinsfile` cannot alter how that same change is judged.
@@ -41,15 +57,20 @@ empty parameters, before it accepts `buildWithParameters`.
 |---|---|---|
 | `GIT_REF` | a branch on `origin`, e.g. `orchestrator-ci/cd3492-1-q2` | `checkout scm` |
 | `SONAR_PROJECT_KEY` | the run's project, `py-ai-agents-orchestrator-<key>` | the key in `sonar-project.properties`; a failing test or a red gate fails the build |
-| `SONAR_PROJECT_VERSION` | `base` or `change` | no `sonar.projectVersion` |
+| `SONAR_PROJECT_VERSION` | `base` or `change` | on `main`, the version in `pyproject.toml` |
 
 The parameters reach the scanner as shell variables, never as Groovy-built shell code, so no value can inject a
 command. `GIT_REF` is interpolated only into the checkout's branch spec.
 
 ### What each kind of build reports
 
-- **Ordinary builds** stop at a failing test, and fail on a gate status other than `OK`, as before the
-  parameters.
+- **Ordinary builds** stop at a failing test. On `main` they also fail on a gate status other than `OK`; a
+  pull request or another branch is not analysed. `main` is analysed as the version in `pyproject.toml`, and
+  the project's new code is set to "previous version", so the gate judges what changed since the version was
+  last raised. Code from before the first versioned analysis counts as existing, not new. A build of `main` that passes the gate then releases the
+  version in `pyproject.toml`: if GitHub has no release `v<version>` yet, `gh release create` makes one, with
+  the tag at the commit built and notes generated from the pull requests merged since the last release. To
+  release, raise `version` in the pull request; a merge that leaves it alone releases nothing.
 - **Quality builds** (`SONAR_PROJECT_KEY` set) run the analysis even when tests fail, end UNSTABLE when tests
   fail or the gate is not `OK`, and archive `.scannerwork/report-task.txt`, whose `ceTaskId` leads to the
   analysis. FAILURE then means the change never got as far as the gate.
@@ -251,7 +272,6 @@ not supported; see the [roadmap](roadmap.md).
 - **Blame**: new lines need history down to the base, which a shallow clone lacks; check the clone options.
 - **Permissions**: can Jenkins's scanner token analyse into the projects `agents` creates? Confirm on the first
   live run.
-- **Branch discovery**: a multibranch job or push webhook must not build `orchestrator-ci/*` branches.
 - **Reachability under `--machine`**: HTTP runs on the orchestrator's machine and git on the agents', meeting
   at `origin`. If only the agents' machine reaches Jenkins, the calls would need to go through `Host`, with
   curl taking its config on stdin.
