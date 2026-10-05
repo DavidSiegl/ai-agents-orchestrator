@@ -24,7 +24,8 @@ analyses one snapshot into one run's own project.
 - **`uv` and `git` on the agent**: the Install stage runs `uv sync --frozen`, and `uv` brings the Python of
   `.python-version`.
 - **`gh` on the agent, and a GitHub token** for the Release stage: a Secret text credential with the ID
-  `github-release-token`, holding a fine-grained token with *Contents: read and write* on this repository.
+  `GitHub-Agents`, holding a token with *Contents: read and write* on this repository. It is the agents' own
+  `gh` token, so when that is rotated the credential must be too, or every build of `main` fails at Release.
   Only builds of `main` use it.
 
 ### The two jobs

@@ -118,7 +118,7 @@ pipeline {
         stage('Release') {
             when { branch 'main' }
             steps {
-                withCredentials([string(credentialsId: 'github-release-token', variable: 'GH_TOKEN')]) {
+                withCredentials([string(credentialsId: 'GitHub-Agents', variable: 'GH_TOKEN')]) {
                     sh '''
                         version=$(uv run --frozen python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
                         tag="v$version"
