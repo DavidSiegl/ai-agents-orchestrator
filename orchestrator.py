@@ -67,6 +67,10 @@ PR_SECTION_LIMIT = 20_000
 
 APPROVE = "APPROVE"
 CHANGES_REQUESTED = "CHANGES_REQUESTED"
+# The outcome of a run whose workflow has no verdict step, once its last step is done. It counts as approved:
+# the run did all it was asked to, though no agent judged the change.
+FINISHED = "FINISHED"
+SUCCEEDED = (APPROVE, FINISHED)
 
 # The quality gate. Requests time out below STALE_SECONDS, so a hung one cannot make a live run look stale.
 DEFAULT_MAX_QUALITY_ROUNDS = 3
@@ -1664,11 +1668,23 @@ def _details(summary: str, text: str, open_: bool = False) -> str:
     return f"<details{' open' if open_ else ''}>\n<summary>{summary}</summary>\n\n{text.strip()}\n\n</details>"
 
 
+def verdict_line(state: "RunState") -> str:
+    """How the run ended, for its pull request."""
+    if state.verdict == FINISHED:
+        return f"**{FINISHED}**: its workflow has no review step, so no agent reviewed this change."
+    return f"Reviewer verdict after {state.round} round{'s' if state.round != 1 else ''}: **{state.verdict}**."
+
+
+def commit_note(state: "RunState") -> str:
+    """How the run ended, for its commit message."""
+    if state.verdict == FINISHED:
+        return f"Orchestrator run {state.run_id}: {FINISHED}, unreviewed."
+    return f"Orchestrator run {state.run_id}: {state.verdict} after {state.round} review round(s)."
+
+
 def pr_body(state: "RunState", spec: str, report: str, review: str, quality: str | None = None) -> str:
-    approved = state.verdict == APPROVE
-    rounds = f"{state.round} round{'s' if state.round != 1 else ''}"
-    head = (f"Opened by ai-agents-orchestrator run `{state.run_id}`. "
-            f"Reviewer verdict after {rounds}: **{state.verdict}**.")
+    approved = state.verdict in SUCCEEDED
+    head = f"Opened by ai-agents-orchestrator run `{state.run_id}`. {verdict_line(state)}"
     if not approved:
         head += "\n\nThe Reviewer still requested changes after the last round, so this is a draft."
     warning = []
@@ -1682,7 +1698,8 @@ def pr_body(state: "RunState", spec: str, report: str, review: str, quality: str
         _details("Spec", spec, open_=True),
         _details(f"Builder report (round {state.round})", report),
         *([_details(f"Quality gate (round {state.round})", quality)] if quality else []),
-        _details(f"Review (round {state.round})", review, open_=not approved),
+        *([] if state.verdict == FINISHED else [_details(f"Review (round {state.round})", review,
+                                                          open_=not approved)]),
     ]) + "\n"
 
 
@@ -1763,7 +1780,7 @@ class Workflow:
         self._last_write = 0.0
 
     def run(self) -> str:
-        """Run every phase not yet done and return the final verdict."""
+        """Run every phase not yet done and return the final verdict, FINISHED for a workflow without one."""
         s = self.state
         if s.phase == DONE:
             return s.verdict
@@ -1775,6 +1792,8 @@ class Workflow:
             if s.phase != PUBLISH:
                 self._prepare()
             self._walk()
+            if self.pipeline.verdict_step is None:
+                s.verdict = FINISHED
             if s.pull_request:
                 self._publish()
             self._clean_up_quality()
@@ -2064,8 +2083,7 @@ class Workflow:
             title = (spec_title(spec) or s.task.strip().split("\n", 1)[0] or s.run_id)[:72]
             if self.host.git(s.cwd, "status", "--porcelain").strip():
                 self.host.git(s.cwd, "add", "--all")
-                self.host.git(s.cwd, "commit", "--quiet", "-m", title, "-m",
-                              f"Orchestrator run {s.run_id}: {s.verdict} after {s.round} review round(s).")
+                self.host.git(s.cwd, "commit", "--quiet", "-m", title, "-m", commit_note(s))
             elif self.host.git_head(s.cwd) == s.base:
                 raise OrchestratorError(f"the Builder changed no files; there is nothing to commit on {s.branch}")
             # The base moved on while the run built and reviewed. A conflict is left to the human:
@@ -2081,7 +2099,7 @@ class Workflow:
             verdict = self._last_text(p.verdict_step, s.round)
             body = pr_body(s, spec, report, verdict, quality)
             s.pr_url = self.host.create_pr(s.cwd, s.base_branch, s.branch, title, body,
-                                           draft=s.verdict != APPROVE or bool(s.conflicts))
+                                           draft=s.verdict not in SUCCEEDED or bool(s.conflicts))
             self._save()
             log(f"opened {s.pr_url}")
             if s.conflicts:
@@ -2917,7 +2935,7 @@ def main(argv: list[str]) -> int:
     conflict = f" (a draft: it conflicts with {state.base_branch})" if state.conflicts else ""
     result = pipeline.result.last_path(state.dir, state.round, state.quality_round)
     print(f"{verdict}: {state.pr_url or result}{conflict}")
-    if verdict != APPROVE:
+    if verdict not in SUCCEEDED:
         return EXIT_CHANGES_REQUESTED
     return EXIT_CONFLICT if state.conflicts else 0
 

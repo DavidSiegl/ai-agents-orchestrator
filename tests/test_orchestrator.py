@@ -3433,7 +3433,7 @@ class TestWorkflowDefinitions(unittest.TestCase):
             make_workflow({}, state=state, pipeline=talk)
         wf, *_ = make_workflow({"spec": [writes(lambda s: f"{s.dir}/spec.md", "notes")]}, state=new_run(talk),
                                pipeline=talk, pull_request=False)
-        self.assertIsNone(wf.run())
+        self.assertEqual(wf.run(), orchestrator.FINISHED)
         self.assertEqual(wf.state.phase, "done")
 
 
@@ -4027,6 +4027,56 @@ class TestWorkflowFileCLI(unittest.TestCase):
                 self.assertEqual(main(["workflows", ref]), 0)
                 self.assertEqual(orchestrator.parse_workflow("tdd", tomllib.loads(out.getvalue())),
                                  orchestrator.named_workflow("tdd"))
+
+
+# No verdict step: the run finishes when the Builder's one turn is done.
+SOLO = Pipeline("solo", {"build": "Builder"}, (
+    Step("build", "build", "build.md", "Build {task} in {cwd}; report to {path}.", edits=True),))
+
+
+def solo_turn(prompt, state, host):
+    host.write("/proj/limiter.py", "version 1")
+    return writes(lambda s: f"{s.dir}/build.md", "solo report")(prompt, state, host)
+
+
+class TestWorkflowWithoutAVerdict(unittest.TestCase):
+    def test_a_run_finishes_and_opens_a_ready_pull_request(self):
+        wf, herdr, host, notes = make_workflow({"build": [solo_turn]}, state=new_run(SOLO), pipeline=SOLO)
+
+        self.assertEqual(wf.run(), orchestrator.FINISHED)
+        pr = host.prs[0]
+        self.assertFalse(pr["draft"])
+        self.assertTrue(pr["body"].startswith(
+            "Opened by ai-agents-orchestrator run `20260929-120000-a1b2c3`. **FINISHED**: its workflow has no review "
+            "step, so no agent reviewed this change.\n\n<details open>\n<summary>Spec</summary>"))
+        self.assertIn("<summary>Builder report (round 1)</summary>\n\nsolo report", pr["body"])
+        self.assertNotIn("<summary>Review", pr["body"])
+        commit = next(c for c in host.git_calls if c[0] == "commit")
+        self.assertEqual(commit[-1], "Orchestrator run 20260929-120000-a1b2c3: FINISHED, unreviewed.")
+        self.assertIn("Run finished: FINISHED", notes)
+        saved = json.loads(host.files[f"{D}/state.json"])
+        self.assertEqual((saved["phase"], saved["verdict"]), ("done", "FINISHED"))
+
+    def test_a_resume_at_publish_keeps_the_outcome(self):
+        state = saved_run("publish", 1, agents=("build",), pull_request=True, base_branch="main",
+                          branch="orchestrator/x-a1b2c3", verdict=orchestrator.FINISHED, workflow="solo")
+        wf, _, host, _ = resume(state, {}, host=FakeHost(head="def456"), pipeline=SOLO)
+        self.assertEqual(wf.run(), orchestrator.FINISHED)
+        self.assertFalse(host.prs[0]["draft"])
+
+    @patch.object(Workflow, "__init__", return_value=None)
+    @patch.object(Workflow, "run", return_value=orchestrator.FINISHED)
+    @patch.object(Host, "resolve_dir", return_value="/proj")
+    @patch.dict("os.environ", {"HERDR_ENV": "1"})
+    def test_finished_exits_zero(self, _resolve, _run, init):
+        config = without_workflow_files(self)
+        path = os.path.join(config, "solo.toml")
+        with open(path, "w") as f:
+            f.write(orchestrator.workflow_toml(SOLO))
+        with patch("builtins.print") as out:
+            self.assertEqual(main(["run", "task", "--workflow-file", path]), 0)
+        state = init.call_args.args[2]
+        out.assert_called_with(f"FINISHED: {state.dir}/build.md")
 
 
 if __name__ == "__main__":

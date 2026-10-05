@@ -17,7 +17,7 @@ One standard-library module, in these sections:
 | `Herdr` | A thin wrapper around the `herdr` CLI, one method per command, forwarding `--machine` when one is given. |
 | `Host` | The project's filesystem and git checkout, run locally or over `ssh -o BatchMode=yes`. `write` is atomic; `run_states` ages each `state.json` by the host's clock; `fast_forward`, `merge_upstream` and `abort_merge` keep the branch up to date with `origin`. For the quality gate, `snapshot` commits the working tree through a temporary index without moving a ref, `push_ref`, `delete_remote_branch` and `remote_branches` handle the throwaway branches, and `change_diff` is the `git diff -U0` that `changed_lines` parses. |
 | `CI` | Jenkins's quality job and SonarQube over HTTP, from the orchestrator's machine, one method per call, over an injected `urlopen`. The credentials come from the environment or `ci.env` and go only into the `Authorization` header; `mask` replaces the tokens in text from either server. `CIError` carries the HTTP status, and `transient` says whether a retry may help. |
-| `RunState` and helpers | `RunState` is `state.json`. The pure helpers are `parse_verdict`, `parse_gate`, `spec_title`, `branch_name`, `pr_body`, and for the quality file `changed_lines`, `edited_config`, `issue_severity` and `quality_report`. |
+| `RunState` and helpers | `RunState` is `state.json`. The pure helpers are `parse_verdict`, `parse_gate`, `spec_title`, `branch_name`, `pr_body` (with `verdict_line`; `commit_note` for the commit message), and for the quality file `changed_lines`, `edited_config`, `issue_severity` and `quality_report`. |
 | `Workflow` | Drives one run through its `pipeline`. Its collaborators (`herdr`, `host`, `ci`, `notify`, `sleep`, `clock`, `wallclock`) are arguments, which is what lets the tests use fakes. |
 | CLI | `parse_args`, `role_models` (with `role_model_arg`), `print_workflows`, `workflow_arg`, `run_health`, `print_runs` (with `run_round`), `find_run`, `resumable_state` and `main`. |
 
@@ -47,7 +47,9 @@ base branch; a resume that starts in the gated step or in `quality` checks the C
   from the furthest one. `_poll` retries a failed request until `QUALITY_TIMEOUT` and keeps the heartbeat going.
   A gate that does not pass goes back to the gated step, whose answer is `build-N-qQ.md` in the default.
 - The verdict step, the default's `review`, records `verdict`; `CHANGES_REQUESTED` goes back to its loop target
-  in the next round until `max_rounds`, resetting `quality_round`.
+  in the next round until `max_rounds`, resetting `quality_round`. A workflow without a verdict step records
+  `FINISHED` once its last step is done, which counts as `APPROVE` (`SUCCEEDED`) for the exit status and the
+  draft, while `verdict_line` and `commit_note` say that no agent reviewed the change.
 - `publish`, only with a pull request: `_publish` commits, merges `origin`'s base branch in (recording
   `conflicts` and aborting when it conflicts), pushes and records `pr_url`, skipping any step already done.
 - `done`: `_clean_up_quality` deletes the run's throwaway branches and SonarQube project, `owner` is cleared,
