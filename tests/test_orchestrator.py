@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 import socket
 import subprocess
 import unittest
@@ -3028,6 +3029,667 @@ class TestQualityCLI(unittest.TestCase):
         with patch("builtins.print") as out:
             orchestrator.print_runs([(10**6, record)], "here", lambda pid: True, [])
         self.assertTrue(out.call_args_list[0].args[0].startswith("20260930-070000-c0ffee  quality  round 1 q2  stale"))
+
+
+# ---------------------------------------------------------------------------
+# Workflows
+# ---------------------------------------------------------------------------
+
+D = "/proj/.orchestrator/runs/20260929-120000-a1b2c3"
+
+# The default workflow's prompts and pull request body as commit d6bb100 sent them, recorded by
+# running the scenarios of TestDefaultWorkflowPrompts on that commit's code.
+GOLDEN = {
+    'spec': (
+        'You are the Spec Collector, the first of three roles (Spec Collector -> Builder -> Reviewer). Separate Claude Code sessions play the Builder and the Reviewer; they will know only what you write down. A human is at this terminal and answers you directly.\n'
+        '\n'
+        'Task from the human:\n'
+        'add a rate limiter\n'
+        '\n'
+        'Interview the human until the requirements are unambiguous: the goal, what is in and out of scope, testable acceptance criteria, constraints, and how the result will be verified. Read the code in /proj first so your questions are grounded and you can cite the files the change touches. Ask a few questions at a time. Do not write or change any code.\n'
+        '\n'
+        f'When the human approves the spec, write it in a single write to {D}/spec.md as Markdown. Its first line is a `# ` heading: a short imperative title for the change, under 70 characters; it becomes the commit subject and the pull request title. Then these `##` sections: Goal, Scope, Non-goals, Acceptance criteria (a numbered list, each one checkable), Relevant code (file:line), Verification. Writing that file hands the work to the Builder, so write it only after the human approves it.'),
+    'build_1': (
+        f'You are the Builder, the second of three roles (Spec Collector -> Builder -> Reviewer). The spec in {D}/spec.md was agreed with the human by a separate session; it is your contract.\n'
+        '\n'
+        "Implement it in /proj, following the conventions of the surrounding code. Verify the change the way the spec's Verification section says, and run the tests. Do not commit, push or switch branches; leave the changes in the working tree for the Reviewer. If the spec is wrong or cannot be met, do not deviate silently: say so in your report.\n"
+        '\n'
+        f'As your last step, write a report to {D}/build-1.md in a single write; it hands the work to the Reviewer: the files you changed and why, how you verified the change (commands and a summary of their results), and any acceptance criterion you did not meet, with the reason.'),
+    'quality_fix_1_1': (
+        f'The SonarQube quality gate did not pass on your change; the findings are in {D}/quality-1-1.md. Fix each numbered issue, the failed conditions, the failing tests and a failed build, or explain in your report why one should stand. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-1-q1.md in a single write, in the same shape as before, answering each numbered issue by its number.'),
+    'review_1_passed': (
+        f'You are the Reviewer, the last of three roles (Spec Collector -> Builder -> Reviewer). You did not write this change. Judge it only against the spec in {D}/spec.md and the code itself.\n'
+        '\n'
+        'The change: `git diff abc123` in /proj, plus the untracked files `git status --porcelain` lists\n'
+        f"The Builder's report is in {D}/build-1-q1.md. Treat its claims as unverified: check them, and run the verification yourself. Do not modify any file other than your review.\n"
+        '\n'
+        f'As your last step, write your review to {D}/review-1.md in a single write. Its first line must be exactly `VERDICT: APPROVE` or `VERDICT: CHANGES_REQUESTED`. Then list numbered findings, each with file:line, what is wrong, and which acceptance criterion it violates or what failure it causes. Request changes only for defects: an unmet acceptance criterion, a bug, a broken test. Style preferences are not defects.\n'
+        '\n'
+        f'The SonarQube quality gate passed on this change; its report is in {D}/quality-1-2.md.'),
+    'fix_2': (
+        f'The Reviewer requested changes; the findings are in {D}/review-1.md. Fix each finding, or explain in your report why it is wrong. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2.md in a single write, in the same shape as before, answering each finding by its number.'),
+    'quality_fix_2_1': (
+        f'The SonarQube quality gate did not pass on your change; the findings are in {D}/quality-2-1.md. Fix each numbered issue, the failed conditions, the failing tests and a failed build, or explain in your report why one should stand. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2-q1.md in a single write, in the same shape as before, answering each numbered issue by its number.'),
+    'recheck_2_unresolved': (
+        f"The Builder has answered your review; the new report is in {D}/build-2-q1.md. Review the change again (`git diff abc123` in /proj, plus the untracked files `git status --porcelain` lists) against the spec in {D}/spec.md and your previous findings, checking the Builder's claims rather than trusting them. As your last step, write the review to {D}/review-2.md in a single write, with the same first-line verdict and numbered findings as before.\n"
+        '\n'
+        f"The SonarQube quality gate still did not pass after the Builder's last quality round; its unresolved findings are in {D}/quality-2-2.md. Weigh them as you would your own."),
+    'review_1_unresolved': (
+        f'You are the Reviewer, the last of three roles (Spec Collector -> Builder -> Reviewer). You did not write this change. Judge it only against the spec in {D}/spec.md and the code itself.\n'
+        '\n'
+        'The change: `git diff abc123` in /proj, plus the untracked files `git status --porcelain` lists\n'
+        f"The Builder's report is in {D}/build-1-q1.md. Treat its claims as unverified: check them, and run the verification yourself. Do not modify any file other than your review.\n"
+        '\n'
+        f'As your last step, write your review to {D}/review-1.md in a single write. Its first line must be exactly `VERDICT: APPROVE` or `VERDICT: CHANGES_REQUESTED`. Then list numbered findings, each with file:line, what is wrong, and which acceptance criterion it violates or what failure it causes. Request changes only for defects: an unmet acceptance criterion, a bug, a broken test. Style preferences are not defects.\n'
+        '\n'
+        f"The SonarQube quality gate still did not pass after the Builder's last quality round; its unresolved findings are in {D}/quality-1-2.md. Weigh them as you would your own."),
+    'recheck_2_passed': (
+        f"The Builder has answered your review; the new report is in {D}/build-2.md. Review the change again (`git diff abc123` in /proj, plus the untracked files `git status --porcelain` lists) against the spec in {D}/spec.md and your previous findings, checking the Builder's claims rather than trusting them. As your last step, write the review to {D}/review-2.md in a single write, with the same first-line verdict and numbered findings as before.\n"
+        '\n'
+        f'The SonarQube quality gate passed on this change; its report is in {D}/quality-2-1.md.'),
+    'fresh_build_2': (
+        f'You are the Builder, the second of three roles (Spec Collector -> Builder -> Reviewer). The spec in {D}/spec.md was agreed with the human by a separate session; it is your contract.\n'
+        '\n'
+        "Implement it in /proj, following the conventions of the surrounding code. Verify the change the way the spec's Verification section says, and run the tests. Do not commit, push or switch branches; leave the changes in the working tree for the Reviewer. If the spec is wrong or cannot be met, do not deviate silently: say so in your report.\n"
+        '\n'
+        f'As your last step, write a report to {D}/build-2.md in a single write; it hands the work to the Reviewer: the files you changed and why, how you verified the change (commands and a summary of their results), and any acceptance criterion you did not meet, with the reason.\n'
+        '\n'
+        f'This is round 2, and you are a fresh session. An earlier Builder session did the earlier turns; its changes are already in the working tree, and its reports are {D}/build-1.md.\n'
+        '\n'
+        f'The Reviewer requested changes; the findings are in {D}/review-1.md. Fix each finding, or explain in your report why it is wrong. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2.md in a single write, in the same shape as before, answering each finding by its number.'),
+    'fresh_build_2_after_quality_rounds': (
+        f'You are the Builder, the second of three roles (Spec Collector -> Builder -> Reviewer). The spec in {D}/spec.md was agreed with the human by a separate session; it is your contract.\n'
+        '\n'
+        "Implement it in /proj, following the conventions of the surrounding code. Verify the change the way the spec's Verification section says, and run the tests. Do not commit, push or switch branches; leave the changes in the working tree for the Reviewer. If the spec is wrong or cannot be met, do not deviate silently: say so in your report.\n"
+        '\n'
+        f'As your last step, write a report to {D}/build-2.md in a single write; it hands the work to the Reviewer: the files you changed and why, how you verified the change (commands and a summary of their results), and any acceptance criterion you did not meet, with the reason.\n'
+        '\n'
+        f'This is round 2, and you are a fresh session. An earlier Builder session did the earlier turns; its changes are already in the working tree, and its reports are {D}/build-1.md, {D}/build-1-q1.md, {D}/build-1-q2.md.\n'
+        '\n'
+        f'The Reviewer requested changes; the findings are in {D}/review-1.md. Fix each finding, or explain in your report why it is wrong. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2.md in a single write, in the same shape as before, answering each finding by its number.'),
+    'fresh_quality_fix_2_1': (
+        f'You are the Builder, the second of three roles (Spec Collector -> Builder -> Reviewer). The spec in {D}/spec.md was agreed with the human by a separate session; it is your contract.\n'
+        '\n'
+        "Implement it in /proj, following the conventions of the surrounding code. Verify the change the way the spec's Verification section says, and run the tests. Do not commit, push or switch branches; leave the changes in the working tree for the Reviewer. If the spec is wrong or cannot be met, do not deviate silently: say so in your report.\n"
+        '\n'
+        f'As your last step, write a report to {D}/build-2-q1.md in a single write; it hands the work to the Reviewer: the files you changed and why, how you verified the change (commands and a summary of their results), and any acceptance criterion you did not meet, with the reason.\n'
+        '\n'
+        f'This is round 2, and you are a fresh session. An earlier Builder session did the earlier turns; its changes are already in the working tree, and its reports are {D}/build-1.md, {D}/build-1-q1.md, {D}/build-2.md.\n'
+        '\n'
+        f'The SonarQube quality gate did not pass on your change; the findings are in {D}/quality-2-1.md. Fix each numbered issue, the failed conditions, the failing tests and a failed build, or explain in your report why one should stand. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2-q1.md in a single write, in the same shape as before, answering each numbered issue by its number.'),
+    'fresh_review_2': (
+        f'You are the Reviewer, the last of three roles (Spec Collector -> Builder -> Reviewer). You did not write this change. Judge it only against the spec in {D}/spec.md and the code itself.\n'
+        '\n'
+        'The change: `git diff abc123` in /proj, plus the untracked files `git status --porcelain` lists\n'
+        f"The Builder's report is in {D}/build-2.md. Treat its claims as unverified: check them, and run the verification yourself. Do not modify any file other than your review.\n"
+        '\n'
+        f'As your last step, write your review to {D}/review-2.md in a single write. Its first line must be exactly `VERDICT: APPROVE` or `VERDICT: CHANGES_REQUESTED`. Then list numbered findings, each with file:line, what is wrong, and which acceptance criterion it violates or what failure it causes. Request changes only for defects: an unmet acceptance criterion, a bug, a broken test. Style preferences are not defects.\n'
+        '\n'
+        f'This is round 2, and you are a fresh session. The earlier reviews of this change are {D}/review-1.md; check that the Builder has answered each of their findings.'),
+    'fresh_review_2_passed': (
+        f'You are the Reviewer, the last of three roles (Spec Collector -> Builder -> Reviewer). You did not write this change. Judge it only against the spec in {D}/spec.md and the code itself.\n'
+        '\n'
+        'The change: `git diff abc123` in /proj, plus the untracked files `git status --porcelain` lists\n'
+        f"The Builder's report is in {D}/build-2.md. Treat its claims as unverified: check them, and run the verification yourself. Do not modify any file other than your review.\n"
+        '\n'
+        f'As your last step, write your review to {D}/review-2.md in a single write. Its first line must be exactly `VERDICT: APPROVE` or `VERDICT: CHANGES_REQUESTED`. Then list numbered findings, each with file:line, what is wrong, and which acceptance criterion it violates or what failure it causes. Request changes only for defects: an unmet acceptance criterion, a bug, a broken test. Style preferences are not defects.\n'
+        '\n'
+        f'The SonarQube quality gate passed on this change; its report is in {D}/quality-2-1.md.\n'
+        '\n'
+        f'This is round 2, and you are a fresh session. The earlier reviews of this change are {D}/review-1.md; check that the Builder has answered each of their findings.'),
+    'continue_build_2': (
+        f'Your session was restarted in the middle of this turn. Continue where you left off; the turn still ends when you write {D}/build-2.md in a single write.'),
+}
+GOLDEN_PR_BODY = (
+    'Opened by ai-agents-orchestrator run `20260929-120000-a1b2c3`. Reviewer verdict after 2 rounds: **APPROVE**.\n'
+    '\n'
+    '<details open>\n'
+    '<summary>Spec</summary>\n'
+    '\n'
+    '# Add a token-bucket rate limiter\n'
+    '\n'
+    '## Goal\n'
+    'limit requests\n'
+    '\n'
+    '</details>\n'
+    '\n'
+    '<details>\n'
+    '<summary>Builder report (round 2)</summary>\n'
+    '\n'
+    'report 2 q1\n'
+    '\n'
+    '</details>\n'
+    '\n'
+    '<details>\n'
+    '<summary>Quality gate (round 2)</summary>\n'
+    '\n'
+    'GATE: ERROR\n'
+    '\n'
+    'SonarQube analysed snapshot `snap4` (round 2, quality round 2 of 2) in Jenkins build #45, against the base `abc123`: quality gate ERROR.\n'
+    '\n'
+    '## Failed conditions\n'
+    '\n'
+    '- `new_coverage` is 50.0; the gate wants at least 80.\n'
+    '\n'
+    '## Issues on changed lines\n'
+    '\n'
+    'None.\n'
+    '\n'
+    '## Failing tests\n'
+    '\n'
+    'None.\n'
+    '\n'
+    '## Coverage on new code\n'
+    '\n'
+    '87.5% of 8 new lines to cover; 1 are not covered.\n'
+    '\n'
+    '</details>\n'
+    '\n'
+    '<details>\n'
+    '<summary>Review (round 2)</summary>\n'
+    '\n'
+    '**VERDICT: APPROVE**\n'
+    '1. finding\n'
+    '\n'
+    '</details>\n')
+
+
+class TestDefaultWorkflowPrompts(unittest.TestCase):
+    def two_gated_rounds(self, outcomes, build, review):
+        """A run with the gate and two quality rounds a round; its prompts, saved phases and host, in order."""
+        seen, phases = [], []
+        fake = FakeCI()
+        fake.outcomes = outcomes
+        wf, herdr, host, fake, _ = gated({
+            "spec": [recording(spec_turn, seen)], "build": [recording(b, seen) for b in build],
+            "review": [recording(r, seen) for r in review]}, fake=fake, max_quality_rounds=2)
+        orig = host.write
+
+        def write(path, text):
+            orig(path, text)
+            if path.endswith("state.json"):
+                saved = json.loads(text)
+                phases.append((saved["phase"], saved["round"], saved["quality_round"]))
+        host.write = write
+
+        self.assertEqual(wf.run(), APPROVE)
+        return seen, list(dict.fromkeys(phases)), herdr, host
+
+    def test_gate_passes_after_a_fix_then_runs_out(self):
+        red = outcome(**RED)
+        seen, phases, herdr, host = self.two_gated_rounds(
+            [red, outcome(), red, red], [build_turn(1), fix_turn(1, 1), build_turn(2), fix_turn(2, 1)],
+            [review_turn(1, CHANGES_REQUESTED), review_turn(2, APPROVE)])
+
+        self.assertEqual(seen, [GOLDEN[k] for k in ("spec", "build_1", "quality_fix_1_1", "review_1_passed", "fix_2",
+                                                    "quality_fix_2_1", "recheck_2_unresolved")])
+        self.assertEqual(phases, [
+            ("spec", 0, 0), ("build", 1, 0), ("quality", 1, 1), ("build", 1, 1), ("quality", 1, 2), ("review", 1, 2),
+            ("build", 2, 0), ("quality", 2, 1), ("build", 2, 1), ("quality", 2, 2), ("review", 2, 2),
+            ("publish", 2, 2), ("done", 2, 2)])
+        written = [p.rsplit("/", 1)[-1] for p in host.writes if p.startswith(D) and not p.endswith("state.json")]
+        self.assertEqual(written, ["spec.md", "build-1.md", "quality-1-1.md", "build-1-q1.md", "quality-1-2.md",
+                                   "review-1.md", "build-2.md", "quality-2-1.md", "build-2-q1.md", "quality-2-2.md",
+                                   "review-2.md"])
+        self.assertEqual([c for c in herdr.calls if c[0] in ("rename", "split")], [
+            ("rename", "w1:p1", "Spec Collector"), ("split", "w1:p1", "right"), ("rename", "w1:p2", "Builder"),
+            ("split", "w1:p2", "down"), ("rename", "w1:p3", "Reviewer")])
+        self.assertEqual((host.prs[0]["title"], host.prs[0]["body"]), ("Add a token-bucket rate limiter", GOLDEN_PR_BODY))
+
+    def test_gate_runs_out_then_passes(self):
+        red = outcome(**RED)
+        seen, *_ = self.two_gated_rounds(
+            [red, red, outcome()], [build_turn(1), fix_turn(1, 1), build_turn(2)],
+            [review_turn(1, CHANGES_REQUESTED), review_turn(2, APPROVE)])
+
+        self.assertEqual(seen, [GOLDEN[k] for k in ("spec", "build_1", "quality_fix_1_1", "review_1_unresolved",
+                                                    "fix_2", "recheck_2_passed")])
+
+    def test_fresh_builder_in_round_two(self):
+        seen = []
+        wf, *_ = resume(saved_run("build", 2, agents=("spec", "build", "review"), prompted="build-2.md"), {
+            "build": [recording(build_turn(2), seen)], "review": [review_turn(2, APPROVE)],
+        }, alive=["review"])
+        wf.run()
+        self.assertEqual(seen, [GOLDEN["fresh_build_2"]])
+
+    def test_fresh_builder_in_round_two_after_quality_rounds(self):
+        seen = []
+        state = saved_run("build", 2, agents=("spec", "build", "review"), quality_job=JOB,
+                          quality_project=PROJECT, quality_baseline="analysis-base")
+        wf, *_ = resume_gated(state, {"build": [recording(build_turn(2), seen)], "review": [review_turn(2, APPROVE)]},
+                              FakeCI(), alive=["review"], files={lambda s: s.quality_build_path(1, 1): "r",
+                                                                 lambda s: s.quality_build_path(1, 2): "r"})
+        wf.run()
+        self.assertEqual(seen, [GOLDEN["fresh_build_2_after_quality_rounds"]])
+
+    def test_fresh_builder_answering_a_quality_round_in_round_two(self):
+        seen = []
+        state = saved_run("build", 2, agents=("spec", "build", "review"), quality_job=JOB, quality_round=1,
+                          quality_project=PROJECT, quality_baseline="analysis-base", prompted="build-2-q1.md")
+        wf, *_ = resume_gated(state, {"build": [recording(fix_turn(2, 1), seen)], "review": [review_turn(2, APPROVE)]},
+                              FakeCI(), alive=["review"],
+                              files={lambda s: s.quality_build_path(1, 1): "r", lambda s: s.build_path(2): "r",
+                                     lambda s: s.quality_path(2, 1): "GATE: ERROR\n"})
+        wf.run()
+        self.assertEqual(seen, [GOLDEN["fresh_quality_fix_2_1"]])
+
+    def test_fresh_reviewer_in_round_two(self):
+        seen = []
+        wf, *_ = resume(saved_run("review", 2, agents=("spec", "build", "review")), {
+            "review": [recording(review_turn(2, APPROVE), seen)],
+        }, files={lambda s: s.build_path(2): "report 2"})
+        wf.run()
+        self.assertEqual(seen, [GOLDEN["fresh_review_2"]])
+
+    def test_fresh_reviewer_in_round_two_with_the_gate(self):
+        seen = []
+        state = saved_run("review", 2, agents=("spec", "build", "review"), quality_job=JOB, quality_round=1,
+                          quality_project=PROJECT, quality_baseline="analysis-base")
+        wf, *_ = resume_gated(state, {"review": [recording(review_turn(2, APPROVE), seen)]}, FakeCI(),
+                              files={lambda s: s.build_path(2): "r", lambda s: s.quality_path(2, 1): "GATE: OK\n"})
+        wf.run()
+        self.assertEqual(seen, [GOLDEN["fresh_review_2_passed"]])
+
+    def test_continue_after_a_resumed_session(self):
+        seen = []
+        wf, *_ = resume(saved_run("build", 2, agents=("spec", "build", "review"), prompted="build-2.md"), {
+            "build": [recording(build_turn(2), seen)], "review": [review_turn(2, APPROVE)],
+        }, alive=["review"], sessions={"build": "s-build"})
+        wf.run()
+        self.assertEqual(seen, [GOLDEN["continue_build_2"]])
+
+
+Pipeline, Step = orchestrator.Pipeline, orchestrator.Step
+
+# No spec step: the task is the Builder's contract.
+QUICK = Pipeline("quick", {"build": "Builder", "review": "Reviewer"}, (
+    Step("build", "build", "build-{n}.md", "Build {task} in {cwd}; report to {build_path}.",
+         again="Fix {prev_review_path}; report to {build_path}.", edits=True),
+    Step("review", "review", "review-{n}.md", "Review {change} against {task}; write {review_path}.",
+         again="Recheck {build_path}; write {review_path}.", loop_to="build"),
+))
+
+# Four roles: the tests are written once, and the review loop goes back to the Builder only.
+FOUR = Pipeline("four", {"spec": "Spec Collector", "tests": "Test Writer", "build": "Builder",
+                         "review": "Reviewer"}, (
+    Step("spec", "spec", "spec.md", "Interview about {task}; write {spec_path}.", human_paced=True),
+    Step("tests", "tests", "tests.md", "Write tests for {spec_path}; report to {tests_path}.", edits=True),
+    Step("build", "build", "build-{n}.md", "Build {spec_path} against {tests_path}; report to {build_path}.",
+         again="Fix {prev_review_path}; report to {build_path}.",
+         fresh_note="Earlier reports: {earlier_build_paths}.", fresh_repeats_again=True, edits=True),
+    Step("review", "review", "review-{n}.md", "Review {change}; write {review_path}.",
+         again="Recheck; write {review_path}.", loop_to="build"),
+))
+
+# The quality-gated step is not called build.
+IMPL = Pipeline("impl", {"impl": "Implementer", "review": "Reviewer"}, (
+    Step("impl", "impl", "impl-{n}.md", "Implement {task}; report to {impl_path}.",
+         again="Fix {prev_review_path}; report to {impl_path}.", fresh_note="Earlier reports: {earlier_impl_paths}.",
+         edits=True, quality_gated=True),
+    Step("review", "review", "review-{n}.md", "Review {change} with {impl_path}; write {path}.",
+         again="Recheck {impl_path}; write {review_path}.", loop_to="impl"),
+))
+
+CHANGE = "`git diff abc123` in /proj, plus the untracked files `git status --porcelain` lists"
+
+write_tests = writes(lambda s: f"{s.dir}/tests.md", "tests written")
+
+
+def impl_turn(n, q=0):
+    """The Implementer's report in round n, answering quality round q when q is not 0."""
+    def turn(prompt, state, host):
+        host.write("/proj/limiter.py", f"version {n}.{q}")
+        return writes(lambda s: IMPL.steps[0].path(s.dir, n, q), f"impl {n} q{q}")(prompt, state, host)
+    return turn
+
+
+def new_run(pipeline):
+    """A new run's state, as main makes it for the workflow."""
+    return RunState("20260929-120000-a1b2c3", "add a rate limiter", "/proj", None,
+                    phase=pipeline.steps[0].id, workflow=pipeline.name)
+
+
+class TestWorkflowDefinitions(unittest.TestCase):
+    def test_default_is_the_only_registered_workflow(self):
+        self.assertEqual(list(orchestrator.WORKFLOWS), ["default"])
+
+    def pipeline(self, *steps, roles=None):
+        return Pipeline("bad", roles or {"build": "Builder", "review": "Reviewer"}, steps)
+
+    def step(self, id, file, **kw):
+        return Step(id, kw.pop("role", id), file, "go", **kw)
+
+    def test_invalid_definitions(self):
+        build, review = self.step("build", "a-{n}.md", edits=True), self.step("review", "b-{n}.md")
+        cases = [
+            ("duplicate step id build", [build, self.step("build", "b-{n}.md", role="review")]),
+            ("duplicate handoff file a-{n}.md", [build, self.step("review", "a-{n}.md")]),
+            ("step review loops back to nope, which is not a step",
+             [build, self.step("review", "b-{n}.md", loop_to="nope")]),
+            ("step build loops back to review, which does not come before it",
+             [self.step("build", "a-{n}.md", edits=True, loop_to="review"), review]),
+            ("step build loops back to build, which does not come before it",
+             [self.step("build", "a-{n}.md", edits=True, loop_to="build"), review]),
+            ("steps build, review each loop back; only one verdict loop is supported",
+             [self.step("prep", "p-{n}.md", role="build", edits=True),
+              self.step("build", "a-{n}.md", loop_to="prep"), self.step("review", "b-{n}.md", loop_to="build")]),
+            ("steps build, review are each quality-gated; only one may be",
+             [self.step("build", "a-{n}.md", edits=True, quality_gated=True),
+              self.step("review", "b-{n}.md", edits=True, quality_gated=True)]),
+            ("step build is quality-gated, so it must edit",
+             [self.step("prep", "p-{n}.md", role="review", edits=True),
+              self.step("build", "a-{n}.md", quality_gated=True)]),
+            ("step build is quality-gated, so its handoff file needs {n}",
+             [self.step("build", "a.md", edits=True, quality_gated=True), review]),
+            ("step review is quality-gated, so it cannot be the verdict step",
+             [build, self.step("review", "b-{n}.md", edits=True, quality_gated=True, loop_to="build")]),
+            ("role review has no step", [build]),
+            ("step review is in the review loop, so its handoff file needs {n}",
+             [build, self.step("review", "b.md", loop_to="build")]),
+            ("step build: a per-round handoff file needs an editing step at or before it",
+             [self.step("build", "a-{n}.md"), self.step("review", "b-{n}.md", edits=True)]),
+            ("step id done is reserved", [build, self.step("done", "b.md", role="review")]),
+            ("step id quality is reserved", [build, self.step("quality", "b.md", role="review")]),
+            ("has no steps", []),
+            ("step build: handoff file a-{round}.md may use only {n}",
+             [self.step("build", "a-{round}.md", edits=True), review]),
+            ("prompt placeholder prev_review_path names the files of two steps",
+             [build, self.step("review", "b-{n}.md"), self.step("prev_review", "c-{n}.md", role="review")]),
+        ]
+        for problem, steps in cases:
+            with self.subTest(problem=problem):
+                with self.assertRaisesRegex(ValueError, "^workflow bad: " + re.escape(problem)):
+                    self.pipeline(*steps)
+
+    def test_role_without_label(self):
+        steps = (self.step("build", "a.md", edits=True), self.step("review", "b.md"))
+        with self.assertRaisesRegex(ValueError, "workflow bad: step build: role build has no label"):
+            self.pipeline(*steps, roles={"review": "Reviewer"})
+        with self.assertRaisesRegex(ValueError, "workflow bad: role build has no label"):
+            self.pipeline(*steps, roles={"build": "", "review": "Reviewer"})
+
+    def test_unknown_placeholder(self):
+        step = Step("build", "build", "a-{n}.md", "write {spec_path}", edits=True)
+        with self.assertRaisesRegex(ValueError, "workflow bad: step build: unknown prompt placeholder spec_path"):
+            Pipeline("bad", {"build": "Builder"}, (step,))
+
+    def test_quality_fix_report_names(self):
+        self.assertEqual(Step("b", "b", "build-{n}.md", "go").path(D, 2, 3), f"{D}/build-2-q3.md")
+        self.assertEqual(Step("b", "b", "impl-{n}", "go").path(D, 1, 1), f"{D}/impl-1-q1")
+
+    def test_the_gate_needs_a_gated_step(self):
+        state = new_run(QUICK)
+        with self.assertRaisesRegex(OrchestratorError, "workflow quick has no quality-gated step"):
+            gated({}, state=state, pipeline=QUICK)
+
+    def test_a_pull_request_needs_an_editing_step(self):
+        talk = Pipeline("talk", {"spec": "Spec Collector"}, (Step("spec", "spec", "spec.md", "{task}"),))
+        state = new_run(talk)
+        with self.assertRaisesRegex(OrchestratorError, "workflow talk has no editing step, so it cannot end in a "
+                                                       "pull request; pass --no-pr"):
+            make_workflow({}, state=state, pipeline=talk)
+        wf, *_ = make_workflow({"spec": [writes(lambda s: f"{s.dir}/spec.md", "notes")]}, state=new_run(talk),
+                               pipeline=talk, pull_request=False)
+        self.assertIsNone(wf.run())
+        self.assertEqual(wf.state.phase, "done")
+
+
+class TestOtherWorkflows(unittest.TestCase):
+    def test_workflow_without_a_spec_step(self):
+        seen, at_first_build = [], []
+
+        def build(prompt, state, host):
+            at_first_build.append((state.base, host.branch, state.round))
+            return build_turn(1)(prompt, state, host)
+        wf, herdr, host, _ = make_workflow({
+            "build": [recording(build, seen)], "review": [recording(review_turn(1, APPROVE), seen)],
+        }, state=new_run(QUICK), pipeline=QUICK)
+
+        self.assertEqual(wf.run(), APPROVE)
+        branch = "orchestrator/add-a-rate-limiter-a1b2c3"
+        self.assertEqual(at_first_build, [("abc123", branch, 1)])
+        self.assertEqual(seen, [f"Build add a rate limiter in /proj; report to {D}/build-1.md.",
+                                f"Review {CHANGE} against add a rate limiter; write {D}/review-1.md."])
+        self.assertEqual([c[1] for c in herdr.calls if c[0] == "start"], ["build-a1b2c3", "review-a1b2c3"])
+        self.assertEqual([c for c in herdr.calls if c[0] == "split"], [("split", "w1:p1", "right")])
+        self.assertFalse([c for c in herdr.calls if c[0] == "focus"])
+        self.assertEqual((host.prs[0]["title"], host.prs[0]["head"]), ("add a rate limiter", branch))
+        commit = next(c for c in host.git_calls if c[0] == "commit")
+        self.assertEqual(commit[commit.index("-m") + 1], "add a rate limiter")
+        saved = json.loads(host.files[f"{D}/state.json"])
+        self.assertEqual((saved["workflow"], saved["phase"]), ("quick", "done"))
+
+    def test_four_roles_loop_back_to_the_builder_only(self):
+        seen = []
+        wf, herdr, host, notes = make_workflow({
+            "spec": [spec_turn], "tests": [write_tests],
+            "build": [recording(build_turn(1), seen), recording(build_turn(2), seen)],
+            "review": [review_turn(1, CHANGES_REQUESTED), review_turn(2, APPROVE)],
+        }, state=new_run(FOUR), pipeline=FOUR)
+
+        self.assertEqual(wf.run(), APPROVE)
+        prompts = [c[1] for c in herdr.calls if c[0] == "prompt"]
+        self.assertEqual(prompts, ["spec-a1b2c3", "tests-a1b2c3", "build-a1b2c3", "review-a1b2c3",
+                                   "build-a1b2c3", "review-a1b2c3"])
+        self.assertEqual([c for c in herdr.calls if c[0] == "split"],
+                         [("split", "w1:p1", "right"), ("split", "w1:p2", "down"), ("split", "w1:p3", "down")])
+        self.assertEqual([c[2] for c in herdr.calls if c[0] == "rename"],
+                         ["Spec Collector", "Test Writer", "Builder", "Reviewer"])
+        self.assertEqual(seen, [f"Build {D}/spec.md against {D}/tests.md; report to {D}/build-1.md.",
+                                f"Fix {D}/review-1.md; report to {D}/build-2.md."])
+        self.assertEqual(notes[0], "Spec Collector is waiting for you")
+        self.assertEqual(host.prs[0]["title"], "Add a token-bucket rate limiter")
+        self.assertIn("<summary>Builder report (round 2)</summary>\n\nreport 2", host.prs[0]["body"])
+        self.assertEqual(wf.state.round, 2)
+
+    def test_interrupted_mid_loop_resumes_at_the_right_step(self):
+        def build_then_interrupt(prompt, state, host):
+            build_turn(2)(prompt, state, host)
+            raise KeyboardInterrupt
+        wf, herdr, host, _ = make_workflow({
+            "spec": [spec_turn], "tests": [write_tests], "build": [build_turn(1), build_then_interrupt],
+            "review": [review_turn(1, CHANGES_REQUESTED)],
+        }, state=new_run(FOUR), pipeline=FOUR)
+        with self.assertRaises(KeyboardInterrupt):
+            wf.run()
+        saved = json.loads(host.files[f"{D}/state.json"])
+        self.assertEqual((saved["workflow"], saved["phase"], saved["round"], saved["error"]),
+                         ("four", "build", 2, "interrupted"))
+
+        seen = []
+        wf2, herdr2, *_ = resume(RunState.from_dict(saved), {"review": [recording(review_turn(2, APPROVE), seen)]},
+                                 host=host, pipeline=FOUR)
+        herdr2.panes = 4
+        self.assertEqual(wf2.run(), APPROVE)
+        self.assertEqual([c[1] for c in herdr2.calls if c[0] == "prompt"], ["review-a1b2c3"])
+        self.assertEqual([c[1] for c in herdr2.calls if c[0] == "start"], ["review-a1b2c3"])
+        self.assertEqual(seen, [f"Recheck; write {D}/review-2.md."])
+        self.assertEqual((wf2.state.round, wf2.state.phase, wf2.state.verdict), (2, "done", APPROVE))
+
+    def test_gated_step_with_another_name(self):
+        fake = FakeCI()
+        fake.outcomes = [outcome(**RED), outcome()]
+        impls, reviews = [], []
+        wf, herdr, host, fake, _ = gated({
+            "impl": [recording(impl_turn(1), impls), recording(impl_turn(1, 1), impls)],
+            "review": [recording(review_turn(1, APPROVE), reviews)],
+        }, fake=fake, state=new_run(IMPL), pipeline=IMPL)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(impls, [
+            f"Implement add a rate limiter; report to {D}/impl-1.md.",
+            orchestrator.QUALITY_FIX_PROMPT.format(quality_path=f"{D}/quality-1-1.md", report_path=f"{D}/impl-1-q1.md")])
+        self.assertEqual(reviews, [f"Review {CHANGE} with {D}/impl-1-q1.md; write {D}/review-1.md.\n\n" +
+                                   orchestrator.QUALITY_PASSED_NOTE.format(quality_path=f"{D}/quality-1-2.md")])
+        written = [p.rsplit("/", 1)[-1] for p in host.writes if p.startswith(D) and not p.endswith("state.json")]
+        self.assertEqual(written, ["impl-1.md", "quality-1-1.md", "impl-1-q1.md", "quality-1-2.md", "review-1.md"])
+        self.assertTrue(host.files[f"{D}/quality-1-1.md"].startswith("GATE: ERROR\n"))
+        self.assertTrue(host.files[f"{D}/quality-1-2.md"].startswith("GATE: OK\n"))
+        self.assertEqual([b["ref"] for b in fake.triggered("change")], [REF_1_1, "orchestrator-ci/a1b2c3-1-q2"])
+        body = host.prs[0]["body"]
+        self.assertIn("<summary>Builder report (round 1)</summary>\n\nimpl 1 q1", body)
+        self.assertIn("<summary>Quality gate (round 1)</summary>\n\nGATE: OK", body)
+        self.assertEqual(host.prs[0]["title"], "add a rate limiter")
+
+    def test_fresh_gated_step_answering_a_quality_round(self):
+        seen = []
+        state = saved_run("impl", 1, agents=(), quality_job=JOB, quality_round=1, quality_project=PROJECT,
+                          quality_baseline="analysis-base", prompted="impl-1-q1.md", workflow="impl")
+        state.agents = {"impl": {"name": "impl-a1b2c3", "pane": "w1:p1"}}
+        wf, herdr, host, _ = resume_gated(state, {"impl": [recording(impl_turn(1, 1), seen)],
+                                                  "review": [review_turn(1, APPROVE)]}, FakeCI(), pipeline=IMPL,
+                                          files={lambda s: f"{s.dir}/impl-1.md": "impl 1",
+                                                 lambda s: s.quality_path(1, 1): "GATE: ERROR\n"})
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(seen, [f"Implement add a rate limiter; report to {D}/impl-1-q1.md.\n\n"
+                                f"Earlier reports: {D}/impl-1.md.\n\n" +
+                                orchestrator.QUALITY_FIX_PROMPT.format(quality_path=f"{D}/quality-1-1.md",
+                                                                       report_path=f"{D}/impl-1-q1.md")])
+        # The second role goes to the right of the first.
+        self.assertEqual([c for c in herdr.calls if c[0] == "split"], [("split", "w1:p1", "right")])
+        self.assertEqual(wf.state.quality_round, 2)
+
+    def test_resumed_gated_step_checks_the_credentials_first(self):
+        state = saved_run("impl", 1, agents=(), quality_job=JOB, workflow="impl")
+        env = {k: v for k, v in CREDENTIALS.items() if k != "JENKINS_TOKEN"}
+        wf, herdr, *_ = resume(state, {"impl": [impl_turn(1)]}, ci=ci_for(FakeCI(), env), pipeline=IMPL)
+
+        with self.assertRaisesRegex(OrchestratorError, "needs JENKINS_TOKEN"):
+            wf.run()
+        self.assertFalse([c for c in herdr.calls if c[0] == "prompt"])
+
+    def test_model_reaches_a_role_without_its_own_flag(self):
+        models = orchestrator.role_models(parse_args(["run", "task", "--model", "X", "--build-model", "Y"]),
+                                          FOUR.roles)
+        self.assertEqual(models, {"spec": "X", "tests": "X", "build": "Y", "review": "X"})
+        wf, herdr, *_ = make_workflow({
+            "spec": [spec_turn], "tests": [write_tests], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)],
+        }, state=new_run(FOUR), pipeline=FOUR, models=models)
+        wf.run()
+        self.assertIn(("start", "tests-a1b2c3", "w1:p2", ("--model", "X")), herdr.calls)
+
+    def test_phase_outside_the_workflow_is_refused(self):
+        wf, *_ = make_workflow({}, state=new_run(FOUR), pipeline=QUICK)
+        with self.assertRaisesRegex(OrchestratorError, "phase spec, which workflow quick has no step for"):
+            wf.run()
+
+
+class TestSavedBeforeWorkflows(unittest.TestCase):
+    """state.json as commit d6bb100 wrote it, without a workflow field."""
+
+    def old(self, state):
+        saved = asdict(state)
+        del saved["workflow"]
+        return RunState.from_dict(saved)
+
+    def test_each_phase_resumes_under_the_default(self):
+        full = ("spec", "build", "review")
+        cases = {
+            "spec": (saved_run("spec", 0, pull_request=True),
+                     {"spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, None),
+            "build": (saved_run("build", 1, agents=full),
+                      {"build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, None),
+            "review": (saved_run("review", 2, agents=full),
+                       {"review": [review_turn(2, APPROVE)]}, {lambda s: s.build_path(2): "report 2"}),
+            "publish": (saved_run("publish", 1, agents=full, pull_request=True, base_branch="main",
+                                  branch="orchestrator/x-a1b2c3", verdict=APPROVE), {}, None),
+            "done": (saved_run("done", 1, agents=full, verdict=APPROVE), {}, None),
+        }
+        for phase, (state, script, files) in cases.items():
+            with self.subTest(phase=phase):
+                host = FakeHost(head="def456" if phase == "publish" else "abc123")
+                wf, *_ = resume(self.old(state), script, host=host, files=files)
+                self.assertEqual(wf.state.workflow, "default")
+                self.assertEqual(wf.run(), APPROVE)
+                self.assertEqual(wf.state.phase, "done")
+
+    def test_quality_resumes_under_the_default(self):
+        reviews = []
+        state = self.old(quality_state())
+        wf, herdr, host, _ = resume_gated(state, {"review": [recording(review_turn(1, APPROVE), reviews)]}, FakeCI(),
+                                          files={lambda s: s.quality_path(1, 1): "GATE: OK\n"})
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(wf.state.workflow, "default")
+        self.assertEqual(wf.state.phase, "done")
+        self.assertIn(orchestrator.QUALITY_PASSED_NOTE.format(quality_path=state.quality_path(1, 1)), reviews[0])
+
+    def test_root_pane_comes_from_the_workflows_first_role(self):
+        saved = {"run_id": "r-abc", "task": "t", "cwd": "/p", "workflow": "quick",
+                 "agents": {"review": {"name": "review-abc", "pane": "w9:p2"}, "build": {"name": "build-abc",
+                                                                                     "pane": "w9:p1"}}}
+        with patch.dict(orchestrator.WORKFLOWS, {"quick": QUICK}):
+            self.assertEqual(RunState.from_dict(saved).root_pane, "w9:p1")
+        self.assertEqual(RunState.from_dict(saved).root_pane, "")
+
+
+class TestWorkflowCLI(unittest.TestCase):
+    @patch.object(Workflow, "__init__", return_value=None)
+    @patch.object(Workflow, "run", return_value=APPROVE)
+    @patch.object(Host, "resolve_dir", return_value="/proj")
+    @patch.dict("os.environ", {"HERDR_ENV": "1"})
+    def test_default_workflow_is_the_default(self, _resolve, _run, init):
+        with patch("builtins.print") as out, patch("orchestrator.new_run_id", return_value="20260930-070000-c0ffee"):
+            self.assertEqual(main(["run", "task", "--model", "m"]), 0)
+            self.assertEqual(main(["run", "task", "--model", "m", "--workflow", "default"]), 0)
+        first, second = init.call_args_list
+        self.assertEqual(first.kwargs, second.kwargs)
+        self.assertEqual(asdict(first.args[2]), asdict(second.args[2]))
+        self.assertEqual((first.args[2].workflow, first.args[2].phase), ("default", "spec"))
+        self.assertEqual(out.call_args_list[0], out.call_args_list[1])
+
+    def test_unknown_workflow_is_an_argparse_error(self):
+        with self.assertRaises(SystemExit), patch("sys.stderr") as err:
+            parse_args(["run", "task", "--workflow", "nope"])
+        message = "".join(c.args[0] for c in err.write.call_args_list)
+        self.assertRegex(message, r"argument --workflow: invalid choice: 'nope' \(choose from '?default'?\)")
+
+    def test_resume_has_no_workflow_flag(self):
+        with self.assertRaises(SystemExit), patch("sys.stderr"):
+            parse_args(["resume", "a1b2c3", "--workflow", "default"])
+
+    def test_resuming_an_unknown_workflow(self):
+        saved = {**asdict(saved_run("build", 1)), "workflow": "nope"}
+        args = parse_args(["resume", "a1b2c3"])
+        with self.assertRaisesRegex(OrchestratorError, "unknown workflow nope; this orchestrator has default"):
+            orchestrator.resumable_state([(10**4, saved)], args, "/proj", "here", lambda pid: True)
+
+    def test_resume_limit_against_the_quality_round_of_another_gated_step(self):
+        saved = asdict(saved_run("impl", 1, agents=(), quality_job=JOB, quality_round=2, workflow="impl"))
+        args = parse_args(["resume", "a1b2c3", "--max-quality-rounds", "2"])
+        with patch.dict(orchestrator.WORKFLOWS, {"impl": IMPL}):
+            with self.assertRaisesRegex(OrchestratorError, "already in quality round 2 of its impl phase"):
+                orchestrator.resumable_state([(10**4, saved)], args, "/proj", "here", lambda pid: False)
+
+    @patch.object(Workflow, "__init__", return_value=None)
+    @patch.object(Workflow, "run", return_value=APPROVE)
+    @patch.object(Host, "resolve_dir", return_value="/proj")
+    @patch.dict("os.environ", {"HERDR_ENV": "1"})
+    def test_registered_workflow_is_offered_and_started(self, _resolve, _run, init):
+        with patch.dict(orchestrator.WORKFLOWS, {"quick": QUICK}), patch("builtins.print") as out:
+            self.assertEqual(main(["run", "task", "--workflow", "quick", "--model", "X"]), 0)
+        state = init.call_args.args[2]
+        self.assertEqual((state.workflow, state.phase), ("quick", "build"))
+        self.assertEqual(init.call_args.kwargs["models"], {"build": "X", "review": "X"})
+        out.assert_called_with(f"{APPROVE}: {state.dir}/review-0.md")
+
+    def test_list_names_a_non_default_workflow(self):
+        runs = [(10**6, run_record(phase="done", verdict=APPROVE)),
+                (10**6, {**run_record(phase="done", verdict=APPROVE), "workflow": "default"}),
+                (10**6, {**run_record(phase="done", verdict=APPROVE), "workflow": "quick"}),
+                (10**6, {**run_record(phase="impl"), "quality_round": 2, "workflow": "impl"})]
+        with patch("builtins.print") as out, patch.dict(orchestrator.WORKFLOWS, {"impl": IMPL}):
+            orchestrator.print_runs(runs, "here", lambda pid: True, [])
+        lines = [c.args[0] for c in out.call_args_list][::2]
+        self.assertEqual(lines[:3], [
+            f"20260930-070000-c0ffee  done     round 1  {APPROVE}",
+            f"20260930-070000-c0ffee  done     round 1  {APPROVE}",
+            f"20260930-070000-c0ffee  done     round 1  {APPROVE}  [quick workflow]",
+        ])
+        self.assertTrue(lines[3].startswith("20260930-070000-c0ffee  impl     round 1 q2  stale"))
+        self.assertTrue(lines[3].endswith("  [impl workflow]"))
 
 
 if __name__ == "__main__":
