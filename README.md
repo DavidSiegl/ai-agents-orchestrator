@@ -156,16 +156,18 @@ A step takes `id`, `role`, `file` (a plain file name in the run directory, which
 any round), `prompt`, and optionally `again` (its prompt in a later round), `fresh_note` (for a fresh session in a
 later round), `loop_to`, which makes it the verdict step that sends `CHANGES_REQUESTED` back to the step it names
 (a workflow without one ends `FINISHED` when its last step is done, and its pull request says no agent reviewed the
-change), and the flags `human_paced`, `edits`, `quality_gated` and `fresh_repeats_again` (a fresh session gets
-`again` too). `use = "spec"`, `"build"` or `"review"` starts from that default step and overrides only the keys you
-give. Prompts fill in `{task}`, `{cwd}`, `{n}`, `{change}`, `{path}` (the step's own file), and for every step `X`:
-`{X_path}`, `{prev_X_path}` and `{earlier_X_paths}`; write a literal brace as `{{` or `}}`. A role you do not list
-in `[roles]`, or list without a label, keeps the default workflow's label for that key (`build` is "Builder"), and
-is otherwise labelled after its key (`test_writer` is "Test Writer"). The panes follow the steps: the first role to
-take a turn gets the root pane, the next one a split to its right, and each further one a split below. A role's
-`model` is its default, and any model flag overrides it. The file is checked when it loads, and an error names the
-step and key. A run saves its workflow's definition, so editing or deleting the file does not change a run already
-started. See [Workflows](docs/architecture.md#workflows) for the rules.
+change; with `--quality-gate`, a gate that still failed after the last quality round ends it `QUALITY_GATE_FAILED`
+instead, a draft, as under Exit status above), and the flags `human_paced`, `edits`, `quality_gated` and
+`fresh_repeats_again` (a fresh session gets `again` too). `use = "spec"`, `"build"` or `"review"` starts from that
+default step and overrides only the keys you give. Prompts fill in `{task}`, `{cwd}`, `{n}`, `{change}`, `{path}`
+(the step's own file), and for every step `X`: `{X_path}`, `{prev_X_path}` and `{earlier_X_paths}`; write a literal
+brace as `{{` or `}}`. A role you do not list in `[roles]`, or list without a label, keeps the default workflow's
+label for that key (`build` is "Builder"), and is otherwise labelled after its key (`test_writer` is "Test
+Writer"). The panes follow the steps: the first role to take a turn gets the root pane, the next one a split to its
+right, and each further one a split below. A role's `model` is its default, and any model flag overrides it. The
+file is checked when it loads, and an error names the step and key. A run saves its workflow's definition, so
+editing or deleting the file does not change a run already started. See [Workflows](docs/architecture.md#workflows)
+for the rules.
 
 ## Running tests
 
