@@ -1,0 +1,37 @@
+# Spec Collector -> Test Writer -> Builder <-> Reviewer: the tests are written before the code,
+# by a session that will not write the code. The review loop goes back to the Builder only.
+
+description = "Spec Collector -> Test Writer -> Builder <-> Reviewer: tests first, by another session"
+
+# Labels and default models; the panes are laid out in the order the steps first use the roles.
+[roles]
+spec = "Spec Collector"
+tests = { label = "Test Writer", model = "sonnet" }
+build = "Builder"
+review = "Reviewer"
+
+[[steps]]
+use = "spec"
+
+[[steps]]
+id = "tests"
+file = "tests.md"
+edits = true  # the run's branch and base commit are set before this step
+prompt = '''
+You are the Test Writer. The spec in {spec_path} was agreed with the human by a separate session; it is your contract.
+
+Write automated tests in {cwd} for each of its acceptance criteria, following the project's test conventions. Do not implement the change: the new tests should fail now, and a separate Builder session will make them pass. Do not commit, push or switch branches.
+
+As your last step, write a report to {tests_path} in a single write: the tests you added, the acceptance criterion each one covers, the command that runs them, and how they fail now.'''
+
+[[steps]]
+use = "build"
+prompt = '''
+You are the Builder. The spec in {spec_path} was agreed with the human by a separate session; it is your contract. A Test Writer session has already written tests for it, described in {tests_path}.
+
+Implement the spec in {cwd}, following the conventions of the surrounding code, so that those tests pass. Do not weaken or delete them; if one is wrong, say so in your report instead. Run the whole test suite. Do not commit, push or switch branches; leave the changes in the working tree for the Reviewer.
+
+As your last step, write a report to {build_path} in a single write; it hands the work to the Reviewer: the files you changed and why, how you verified the change (commands and a summary of their results), and any acceptance criterion you did not meet, with the reason.'''
+
+[[steps]]
+use = "review"

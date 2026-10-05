@@ -43,6 +43,10 @@ python orchestrator.py list --machine <machine> --cwd ~/GitHub/myproject
 # Continue a stopped run, by its run id or the six-character key at its end
 python orchestrator.py resume e292fb --machine <machine> --cwd ~/GitHub/myproject
 
+# Another workflow: one of yours by name, or a workflow file anywhere; `workflows` lists them
+python orchestrator.py run --workflow tdd "add a token-bucket rate limiter"
+python orchestrator.py run --workflow-file examples/workflows/quick.toml "fix the off-by-one in the pager"
+
 # With the SonarQube quality gate after each Builder turn; credentials from ~/.config/ai-agents-orchestrator/ci.env
 python orchestrator.py run --quality-gate AI-Agents-Orchestrator/py-ai-agents-orchestrator-quality "add a token-bucket rate limiter"
 ```
@@ -54,18 +58,20 @@ python orchestrator.py run --quality-gate AI-Agents-Orchestrator/py-ai-agents-or
 | `--max-rounds N` | Review rounds before giving up (default 3). |
 | `--timeout SECONDS` | How long one Builder or Reviewer turn may take (default 1800). The interview has no limit. |
 | `--permission-mode MODE` | Claude Code permission mode for every role, e.g. `auto` or `acceptEdits`. |
-| `--model MODEL` | Claude model for every role, e.g. `sonnet`. Default: Claude Code's own. |
+| `--model MODEL` | Claude model for every role, e.g. `sonnet`. Default: the workflow file's model for the role, else Claude Code's own. |
 | `--spec-model MODEL` | Claude model for the Spec Collector. Overrides `--model`. |
 | `--build-model MODEL` | Claude model for the Builder. Overrides `--model`. |
 | `--review-model MODEL` | Claude model for the Reviewer. Overrides `--model`. |
-| `--workflow NAME` | `run` only: the workflow the run goes through (default `default`, the run described below). `--help` lists the choices; a resumed run keeps its workflow. A role of another workflow without its own `--ROLE-model` flag gets `--model`. |
+| `--workflow NAME` | `run` only: the workflow the run goes through: `default`, the run described below, or one of [your own](#your-own-workflows) in `~/.config/ai-agents-orchestrator/workflows/`. `--help` lists the choices; a resumed run keeps its workflow. |
+| `--workflow-file FILE` | `run` only: like `--workflow`, for the workflow file at `FILE`, such as one kept in the project. |
+| `--role-model ROLE=MODEL` | Claude model for one role of the workflow, by its key, e.g. `tests=sonnet`. Overrides `--model`; repeatable. |
 | `--no-pr` | `run` only: leave the change uncommitted and the workspace open instead of opening a pull request. Works outside git. |
 | `--quality-gate JOB` | `run` only: after each Builder turn, analyse the change with this Jenkins job, by its full name with folders, and SonarQube, and send the findings back to the Builder before the Reviewer. Needs `JENKINS_URL`, `JENKINS_USER`, `JENKINS_TOKEN`, `SONAR_HOST_URL` and `SONAR_TOKEN`, from the environment or `~/.config/ai-agents-orchestrator/ci.env`. |
 | `--max-quality-rounds N` | With the gate: SonarQube analyses per review round before the Reviewer gets the change anyway (default 3). |
 | `--force` | `resume` only: take over a run that still looks alive. |
 
-A run saves its settings. `resume` takes the same flags as `run` except `--no-pr`, `--quality-gate` and
-`--workflow`, and a flag given to `resume` overrides the saved value; one left out keeps it.
+A run saves its settings. `resume` takes the same flags as `run` except `--no-pr`, `--quality-gate`,
+`--workflow` and `--workflow-file`, and a flag given to `resume` overrides the saved value; one left out keeps it.
 
 Exit status: `0` approved, `3` changes still requested after the last round (the pull request is a draft), `4`
 approved but the pull request conflicts with its base branch (it is a draft), `1` error, `130` interrupted.
@@ -109,6 +115,51 @@ heartbeat ([Stale runs](docs/design.md#stale-runs)). You get a herdr notificatio
 for 3 minutes ([When the orchestrator needs you](docs/design.md#when-the-orchestrator-needs-you)).
 See also [design decisions](docs/design.md), [architecture](docs/architecture.md), [roadmap](docs/roadmap.md)
 and [quality gate](docs/quality-gate.md).
+
+## Your own workflows
+
+The roles, their prompts and their order are a workflow. Besides the built-in `default`, you can add your own
+without touching the code: a TOML file in `~/.config/ai-agents-orchestrator/workflows/`, named after the
+workflow, or a file anywhere passed with `--workflow-file`. `python orchestrator.py workflows` lists them and
+shows why one does not load; `python orchestrator.py workflows default > ~/.config/ai-agents-orchestrator/workflows/mine.toml`
+gives you the default's full definition to edit. [`examples/workflows/`](examples/workflows) has two more:
+`quick` (Builder ⇄ Reviewer, the task as the contract) and `tdd` (a Test Writer before the Builder).
+
+```toml
+description = "Spec Collector -> Test Writer -> Builder <-> Reviewer"
+
+[roles]                    # optional: labels and default models
+tests = { label = "Test Writer", model = "sonnet" }
+
+[[steps]]
+use = "spec"               # a step of the default workflow, as it is
+
+[[steps]]
+id = "tests"               # also the role, unless role = "..." says otherwise
+file = "tests.md"          # the handoff file that ends the turn; {n} in it makes one per round
+edits = true               # the run's branch is created before the first editing step
+prompt = """
+You are the Test Writer. Write failing tests for the spec in {spec_path} in {cwd}.
+As your last step, write a report to {tests_path} in a single write."""
+
+[[steps]]
+use = "build"              # the default Builder step, with only its first prompt replaced
+prompt = "... the tests in {tests_path} ... write a report to {build_path} in a single write."
+
+[[steps]]
+use = "review"
+```
+
+A step takes `id`, `role`, `file`, `prompt`, and optionally `again` (its prompt in a later round), `fresh_note`
+(for a fresh session in a later round), and the flags `human_paced`, `edits`, `quality_gated` and `loop_to`, which
+makes it the verdict step that sends `CHANGES_REQUESTED` back to the named step. `use = "spec"`, `"build"` or
+`"review"` starts from that default step and overrides only the keys you give. Prompts fill in `{task}`, `{cwd}`,
+`{n}`, `{change}`, `{path}` (the step's own file), and for every step `X`: `{X_path}`, `{prev_X_path}` and
+`{earlier_X_paths}`; write a literal brace as `{{` or `}}`. A role you do not list in `[roles]` is labelled after
+its key. The panes follow the steps: the first role to take a turn gets the root pane, the next one a split to
+its right, and each further one a split below. A role's `model` is its default, and any model flag overrides it. The file is checked when it loads,
+and an error names the step and key. A run saves its workflow's definition, so editing or deleting the file
+does not change a run already started. See [Workflows](docs/architecture.md#workflows) for the rules.
 
 ## Running tests
 

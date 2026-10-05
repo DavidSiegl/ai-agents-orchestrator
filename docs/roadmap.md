@@ -27,8 +27,9 @@ Ideas for what comes next, in no particular order. The designs behind what has s
 
 ## Workflows
 
-Only `default` ships ([Workflows](architecture.md#workflows)). These engine gaps, by letter, stand between it
-and the candidates below:
+Only `default` ships ([Workflows](architecture.md#workflows)); others are workflow files, and
+[`examples/workflows/`](../examples/workflows) has `quick` and `tdd`. These engine gaps, by letter, stand
+between the engine and the candidates below:
 
 - **A. Run inputs**: seed a handoff file at `run` (`--spec FILE` as `spec.md`), or name a base ref, branch or
   pull request to work on.
@@ -45,9 +46,9 @@ and the candidates below:
 - **I. Orchestrator checks**: a step without an agent that runs a command and judges it, such as "the new tests
   fail at the base".
 - **J. More than one quality-gated step.**
-- **K. Workflow choice**: mid-run, by the Spec Collector or the human, or with `resume --workflow`; user-defined
-  workflows in `.orchestrator/workflows/*` with their own prompts; `--role-model ROLE=MODEL` for roles without
-  their own flag.
+- **K. Workflow choice**: mid-run, by the Spec Collector or the human, or with `resume --workflow`; a default
+  workflow other than `default` without passing `--workflow` each time; workflow files that extend another
+  workflow file, not only the default's steps.
 
 | Workflow | Roles | Handoff files | Gaps |
 |---|---|---|---|
