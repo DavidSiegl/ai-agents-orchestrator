@@ -49,7 +49,8 @@ base branch; a resume that starts in the gated step or in `quality` checks the C
 - The verdict step, the default's `review`, records `verdict`; `CHANGES_REQUESTED` goes back to its loop target
   in the next round until `max_rounds`, resetting `quality_round`. A workflow without a verdict step records
   `FINISHED` once its last step is done, which counts as `APPROVE` (`SUCCEEDED`) for the exit status and the
-  draft, while `verdict_line` and `commit_note` say that no agent reviewed the change.
+  draft, while `verdict_line` and `commit_note` say that no agent reviewed the change. With the gate, a last
+  quality round that did not pass (`_gate_passed`) records `QUALITY_GATE_FAILED` instead, which does not count.
 - `publish`, only with a pull request: `_publish` commits, merges `origin`'s base branch in (recording
   `conflicts` and aborting when it conflicts), pushes and records `pr_url`, skipping any step already done.
 - `done`: `_clean_up_quality` deletes the run's throwaway branches and SonarQube project, `owner` is cleared,

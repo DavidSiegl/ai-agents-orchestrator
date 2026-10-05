@@ -4081,6 +4081,46 @@ class TestWorkflowWithoutAVerdict(unittest.TestCase):
         self.assertEqual(wf.run(), orchestrator.FINISHED)
         self.assertFalse(host.prs[0]["draft"])
 
+    def gated_solo(self, *outcomes):
+        """A run of a one-step gated workflow, with up to two quality rounds playing these outcomes."""
+        solo = Pipeline("gsolo", {"impl": "Implementer"}, (
+            Step("impl", "impl", "impl-{n}.md", "Implement {task}; report to {path}.", edits=True, quality_gated=True),))
+        fake = FakeCI()
+        fake.outcomes = list(outcomes)
+        wf, _, host, _, notes = gated({"impl": [impl_turn(1), impl_turn(1, 1)]}, fake=fake, state=new_run(solo),
+                                      pipeline=solo, max_quality_rounds=2)
+        return wf.run(), host, notes
+
+    def test_a_gate_that_still_fails_is_not_finished(self):
+        verdict, host, notes = self.gated_solo(outcome(**RED), outcome(**RED))
+
+        self.assertEqual(verdict, orchestrator.QUALITY_GATE_FAILED)
+        pr = host.prs[0]
+        self.assertTrue(pr["draft"])
+        self.assertTrue(pr["body"].startswith(
+            "Opened by ai-agents-orchestrator run `20260929-120000-a1b2c3`. **QUALITY_GATE_FAILED**: its workflow has "
+            "no review step, and the SonarQube quality gate still did not pass after the last quality round, so this "
+            "is a draft.\n\n<details open>"))
+        self.assertNotIn("Reviewer", pr["body"])
+        self.assertIn("<summary>Quality gate (round 1)</summary>\n\nGATE: ERROR", pr["body"])
+        commit = next(c for c in host.git_calls if c[0] == "commit")
+        self.assertEqual(commit[-1], "Orchestrator run 20260929-120000-a1b2c3: QUALITY_GATE_FAILED, unreviewed.")
+        self.assertIn("Run finished: QUALITY_GATE_FAILED", notes)
+
+    def test_a_gate_that_passes_is_finished(self):
+        verdict, host, _ = self.gated_solo(outcome(**RED), outcome())
+        self.assertEqual(verdict, orchestrator.FINISHED)
+        self.assertFalse(host.prs[0]["draft"])
+        self.assertIn("<summary>Quality gate (round 1)</summary>\n\nGATE: OK", host.prs[0]["body"])
+
+    @patch.object(Workflow, "__init__", return_value=None)
+    @patch.object(Workflow, "run", return_value=orchestrator.QUALITY_GATE_FAILED)
+    @patch.object(Host, "resolve_dir", return_value="/proj")
+    @patch.dict("os.environ", {"HERDR_ENV": "1"})
+    def test_a_failed_gate_exits_as_changes_requested(self, _resolve, _run, init):
+        with patch("builtins.print"):
+            self.assertEqual(main(["run", "task"]), orchestrator.EXIT_CHANGES_REQUESTED)
+
     @patch.object(Workflow, "__init__", return_value=None)
     @patch.object(Workflow, "run", return_value=orchestrator.FINISHED)
     @patch.object(Host, "resolve_dir", return_value="/proj")

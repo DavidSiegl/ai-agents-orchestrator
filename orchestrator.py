@@ -68,9 +68,11 @@ PR_SECTION_LIMIT = 20_000
 
 APPROVE = "APPROVE"
 CHANGES_REQUESTED = "CHANGES_REQUESTED"
-# The outcome of a run whose workflow has no verdict step, once its last step is done. It counts as approved:
-# the run did all it was asked to, though no agent judged the change.
+# The outcomes of a run whose workflow has no verdict step, once its last step is done. FINISHED counts as
+# approved: the run did all it was asked to, though no agent judged the change. With the quality gate,
+# QUALITY_GATE_FAILED says it still failed after the last quality round, and no agent weighed that.
 FINISHED = "FINISHED"
+QUALITY_GATE_FAILED = "QUALITY_GATE_FAILED"
 SUCCEEDED = (APPROVE, FINISHED)
 
 # The quality gate. Requests time out below STALE_SECONDS, so a hung one cannot make a live run look stale.
@@ -1711,24 +1713,28 @@ def _details(summary: str, text: str, open_: bool = False) -> str:
 
 
 def verdict_line(state: "RunState") -> str:
-    """How the run ended, for its pull request."""
+    """How the run ended, for its pull request, and why it is a draft if it is one for that."""
     if state.verdict == FINISHED:
         return f"**{FINISHED}**: its workflow has no review step, so no agent reviewed this change."
-    return f"Reviewer verdict after {state.round} round{'s' if state.round != 1 else ''}: **{state.verdict}**."
+    if state.verdict == QUALITY_GATE_FAILED:
+        return (f"**{QUALITY_GATE_FAILED}**: its workflow has no review step, and the SonarQube quality gate still "
+                f"did not pass after the last quality round, so this is a draft.")
+    line = f"Reviewer verdict after {state.round} round{'s' if state.round != 1 else ''}: **{state.verdict}**."
+    if state.verdict != APPROVE:
+        line += "\n\nThe Reviewer still requested changes after the last round, so this is a draft."
+    return line
 
 
 def commit_note(state: "RunState") -> str:
     """How the run ended, for its commit message."""
-    if state.verdict == FINISHED:
-        return f"Orchestrator run {state.run_id}: {FINISHED}, unreviewed."
+    if state.verdict in (FINISHED, QUALITY_GATE_FAILED):
+        return f"Orchestrator run {state.run_id}: {state.verdict}, unreviewed."
     return f"Orchestrator run {state.run_id}: {state.verdict} after {state.round} review round(s)."
 
 
 def pr_body(state: "RunState", spec: str, report: str, review: str, quality: str | None = None) -> str:
     approved = state.verdict in SUCCEEDED
     head = f"Opened by ai-agents-orchestrator run `{state.run_id}`. {verdict_line(state)}"
-    if not approved:
-        head += "\n\nThe Reviewer still requested changes after the last round, so this is a draft."
     warning = []
     if state.conflicts:
         files = "\n".join(f"> - `{f}`" for f in state.conflicts)
@@ -1740,8 +1746,8 @@ def pr_body(state: "RunState", spec: str, report: str, review: str, quality: str
         _details("Spec", spec, open_=True),
         _details(f"Builder report (round {state.round})", report),
         *([_details(f"Quality gate (round {state.round})", quality)] if quality else []),
-        *([] if state.verdict == FINISHED else [_details(f"Review (round {state.round})", review,
-                                                          open_=not approved)]),
+        *([] if state.verdict in (FINISHED, QUALITY_GATE_FAILED) else
+          [_details(f"Review (round {state.round})", review, open_=not approved)]),
     ]) + "\n"
 
 
@@ -1822,7 +1828,8 @@ class Workflow:
         self._last_write = 0.0
 
     def run(self) -> str:
-        """Run every phase not yet done and return the final verdict, FINISHED for a workflow without one."""
+        """Run every phase not yet done and return the final verdict; for a workflow without one, FINISHED,
+        or QUALITY_GATE_FAILED when the gate still failed."""
         s = self.state
         if s.phase == DONE:
             return s.verdict
@@ -1835,7 +1842,7 @@ class Workflow:
                 self._prepare()
             self._walk()
             if self.pipeline.verdict_step is None:
-                s.verdict = FINISHED
+                s.verdict = FINISHED if self._gate_passed(s.round) else QUALITY_GATE_FAILED
             if s.pull_request:
                 self._publish()
             self._clean_up_quality()
@@ -2167,10 +2174,16 @@ class Workflow:
         s = self.state
         if not self.ci or not s.quality_round:
             return ""
-        path = s.quality_path(n, s.quality_round)
-        text = self.host.read(path)
-        note = QUALITY_PASSED_NOTE if text is not None and parse_gate(text) == GATE_OK else QUALITY_UNRESOLVED_NOTE
-        return "\n\n" + note.format(quality_path=path)
+        note = QUALITY_PASSED_NOTE if self._gate_passed(n) else QUALITY_UNRESOLVED_NOTE
+        return "\n\n" + note.format(quality_path=s.quality_path(n, s.quality_round))
+
+    def _gate_passed(self, n: int) -> bool:
+        """Whether round n's last quality round passed the gate; True for a run without one."""
+        s = self.state
+        if not self.ci or not s.quality_round:
+            return True
+        text = self.host.read(s.quality_path(n, s.quality_round))
+        return text is not None and parse_gate(text) == GATE_OK
 
     # -- The quality gate --------------------------------------------------
 

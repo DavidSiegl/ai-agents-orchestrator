@@ -74,8 +74,9 @@ A run saves its settings. `resume` takes the same flags as `run` except `--no-pr
 `--workflow` and `--workflow-file`, and a flag given to `resume` overrides the saved value; one left out keeps it.
 
 Exit status: `0` approved, or `FINISHED` for a workflow without a verdict step; `3` changes still requested after
-the last round (the pull request is a draft); `4` approved or finished, but the pull request conflicts with its base
-branch (it is a draft); `1` error; `130` interrupted.
+the last round, or, for a workflow without a verdict step, `QUALITY_GATE_FAILED`: the quality gate still failed
+after the last quality round (either way the pull request is a draft); `4` approved or finished, but the pull
+request conflicts with its base branch (it is a draft); `1` error; `130` interrupted.
 
 ## How a run works
 
