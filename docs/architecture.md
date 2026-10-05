@@ -64,9 +64,10 @@ on a `FakeCI`. `TestHostGit` and `TestHostSnapshot` run on real git in a tempora
 ## Tooling
 
 - `pyproject.toml`: no runtime dependencies, Python 3.13+; pytest and pytest-cov in the `dev` group.
-- `Jenkinsfile`: `uv sync --frozen`, `uv run pytest` with branch coverage of `orchestrator`, a SonarQube
-  analysis and a quality gate. Its parameters `GIT_REF`, `SONAR_PROJECT_KEY` and `SONAR_PROJECT_VERSION` are for
-  quality builds: with `SONAR_PROJECT_KEY` set, a red gate does not abort the pipeline but marks it UNSTABLE.
+- `Jenkinsfile`: `uv sync --frozen`, `uv run pytest` with branch coverage of `orchestrator`, and on `main` or
+  in a quality build a SonarQube analysis and a quality gate. Its parameters `GIT_REF`, `SONAR_PROJECT_KEY` and
+  `SONAR_PROJECT_VERSION` are for quality builds: with `SONAR_PROJECT_KEY` set, a red gate does not abort the
+  pipeline but marks it UNSTABLE.
 - `sonar-project.properties`: the SonarQube project key, the sources (`orchestrator.py`) and the tests (`tests`).
 
 How to set Jenkins up for it is in [quality-gate.md](quality-gate.md).

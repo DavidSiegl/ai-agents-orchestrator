@@ -59,39 +59,52 @@ pipeline {
             }
         }
 
-        stage('SonarQube Analysis') {
-            steps {
-                withSonarQubeEnv('Sonarqube') {
-                    script {
-                        def scannerHome = tool 'sonarqube-scanner'
-                        // The parameters reach the shell as environment variables, never as Groovy-built shell code.
-                        // The name is set too, or the analysis would rename the per-run project after sonar-project.properties.
-                        sh """
-                            ${scannerHome}/bin/sonar-scanner \
-                              -Dsonar.python.coverage.reportPaths=coverage.xml \
-                              -Dsonar.python.xunit.reportPath=test-results.xml \
-                              \${SONAR_PROJECT_KEY:+-Dsonar.projectKey=\$SONAR_PROJECT_KEY -Dsonar.projectName=\$SONAR_PROJECT_KEY} \
-                              \${SONAR_PROJECT_VERSION:+-Dsonar.projectVersion=\$SONAR_PROJECT_VERSION}
-                        """
-                        if (params.SONAR_PROJECT_KEY) {
-                            // Holds the ceTaskId the orchestrator follows; cleanWs() would delete it.
-                            archiveArtifacts artifacts: '.scannerwork/report-task.txt'
+        // A multibranch job analyses only main: Community Edition has no branch analysis, so a branch or pull
+        // request would overwrite main's analysis and its new-code baseline. Quality builds always analyse,
+        // into their run's own project; their plain Pipeline job has no BRANCH_NAME.
+        stage('SonarQube') {
+            when {
+                anyOf {
+                    branch 'main'
+                    expression { return params.SONAR_PROJECT_KEY as boolean }
+                }
+            }
+            stages {
+                stage('SonarQube Analysis') {
+                    steps {
+                        withSonarQubeEnv('Sonarqube') {
+                            script {
+                                def scannerHome = tool 'sonarqube-scanner'
+                                // The parameters reach the shell as environment variables, never as Groovy-built shell code.
+                                // The name is set too, or the analysis would rename the per-run project after sonar-project.properties.
+                                sh """
+                                    ${scannerHome}/bin/sonar-scanner \
+                                      -Dsonar.python.coverage.reportPaths=coverage.xml \
+                                      -Dsonar.python.xunit.reportPath=test-results.xml \
+                                      \${SONAR_PROJECT_KEY:+-Dsonar.projectKey=\$SONAR_PROJECT_KEY -Dsonar.projectName=\$SONAR_PROJECT_KEY} \
+                                      \${SONAR_PROJECT_VERSION:+-Dsonar.projectVersion=\$SONAR_PROJECT_VERSION}
+                                """
+                                if (params.SONAR_PROJECT_KEY) {
+                                    // Holds the ceTaskId the orchestrator follows; cleanWs() would delete it.
+                                    archiveArtifacts artifacts: '.scannerwork/report-task.txt'
+                                }
+                            }
                         }
                     }
                 }
-            }
-        }
 
-        stage('Quality Gate') {
-            steps {
-                timeout(time: 5, unit: 'MINUTES') {
-                    script {
-                        def gate = waitForQualityGate abortPipeline: false
-                        if (gate.status != 'OK') {
-                            if (params.SONAR_PROJECT_KEY) {
-                                unstable "Quality gate ${gate.status}"
-                            } else {
-                                error "Quality gate ${gate.status}"
+                stage('Quality Gate') {
+                    steps {
+                        timeout(time: 5, unit: 'MINUTES') {
+                            script {
+                                def gate = waitForQualityGate abortPipeline: false
+                                if (gate.status != 'OK') {
+                                    if (params.SONAR_PROJECT_KEY) {
+                                        unstable "Quality gate ${gate.status}"
+                                    } else {
+                                        error "Quality gate ${gate.status}"
+                                    }
+                                }
                             }
                         }
                     }
