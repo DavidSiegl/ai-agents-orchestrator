@@ -338,19 +338,16 @@ class Step:
 
     def names(self) -> re.Pattern:
         """Every name the step's files can take, in any round and quality round."""
-        # A quality answer inserts -q<q> before the extension, here the literal one the template ends in.
-        ext = os.path.splitext(self.name(1))[1]
-        if not self.file.endswith(ext):
-            ext = ""
-        stem = self.file[:len(self.file) - len(ext)]
-        pattern = "".join(re.escape(literal) + ("[0-9]+" if field is not None else "")
-                          for literal, field, _, _ in string.Formatter().parse(stem))
-        if self.quality_gated:
-            pattern += "(?:-q[0-9]+)?"
-        return re.compile(pattern + re.escape(ext))
+        # name() inserts -q<q> before the extension of the filled-in name. A round number has no dot,
+        # so the template splits at the same dot, though its extension may hold {n}.
+        stem, ext = os.path.splitext(self.file)
+        q = "(?:-q[0-9]+)?" if self.quality_gated else ""
+        return re.compile(_name_pattern(stem) + q + _name_pattern(ext))
 
     def samples(self) -> set[str]:
-        """Names the step's files take in a few rounds, enough to meet any other step's names() they overlap."""
+        """Names the step's files take in a few rounds, enough to meet any other step's names() they overlap:
+        two templates that can give the same name, with no digit next to {n} (see _fill_problem), give
+        it in one step's round 1 or 2 against any round of the other, or else in rounds 10 or 11."""
         rounds = (1, 2, 10, 11) if self.per_round else (1,)
         quality_rounds = (0, 1, 2) if self.quality_gated else (0,)
         return {self.name(n, q) for n in rounds for q in quality_rounds}
@@ -523,6 +520,10 @@ def _fill_problem(step: Step, known: set[str]) -> str | None:
     # A plain {n}, so that names() knows every name it can give.
     if any(spec or conversion for _, field, spec, conversion in string.Formatter().parse(step.file) if field):
         return f"handoff file {step.file} may use {{n}} only as it is, with no format spec or conversion"
+    # A digit beside {n} makes rounds run into each other: x{n}5.md in round 3 and x3{n}.md in round 5
+    # are both x35.md.
+    if re.search(r"[0-9]\{n\}|\{n\}[0-9]", step.file):
+        return f"handoff file {step.file} has a digit next to {{n}}; put another character between them"
     name = step.file.format(n=1)
     if "/" in name or name in ("", ".", "..") or RUN_FILE.fullmatch(name):
         return f"handoff file {step.file} must be a plain file name, and not state.json or quality-*, " \
@@ -537,6 +538,12 @@ def _fill_problem(step: Step, known: set[str]) -> str | None:
         except (ValueError, KeyError, IndexError, AttributeError) as e:
             return f"{field_name} cannot be filled in: {type(e).__name__}: {e}"
     return None
+
+
+def _name_pattern(template: str) -> str:
+    """A regular expression for the names a file template gives, {n} being any round number."""
+    return "".join(re.escape(literal) + ("[0-9]+" if field is not None else "")
+                   for literal, field, _, _ in string.Formatter().parse(template))
 
 
 def _fields_of(template: str) -> list[str]:

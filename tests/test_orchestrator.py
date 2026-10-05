@@ -3852,8 +3852,17 @@ class TestWorkflowFiles(unittest.TestCase):
              [Step("spec", "spec", "build-1.md", "{path}"), build, review]),
             ("steps build and review can both write build-1-q1.md",
              [spec, build, Step("review", "review", "build-{n}-q1.md", "{path}", loop_to="build")]),
-            ("steps b and r can both write x10.md", [b, Step("r", "b", "x1{n}.md", "{path}", loop_to="b")]),
             ("steps b and r can both write x1.md", [b, Step("r", "b", "x1.md", "{path}")]),
+            # {n} in the extension: a quality answer goes before it, as b-q3.1.
+            ("steps r and a can both write b-q3.1",
+             [Step("a", "a", "b.{n}", "{path}", edits=True, quality_gated=True),
+              Step("r", "r", "b-q3.{n}", "{path}", loop_to="a")]),
+            ("steps z and a can both write b-q3.1",
+             [Step("a", "a", "b.{n}", "{path}", edits=True, quality_gated=True), Step("z", "z", "b-q3.1", "{path}")]),
+            ("step r: handoff file x3{n}.md has a digit next to {n}; put another character between them",
+             [Step("a", "a", "x-{n}.md", "{path}", edits=True), Step("r", "r", "x3{n}.md", "{path}", loop_to="a")]),
+            ("step a: handoff file x{n}5.md has a digit next to {n}",
+             [Step("a", "a", "x{n}5.md", "{path}", edits=True), Step("r", "r", "y-{n}.md", "{path}", loop_to="a")]),
         ]
         for message, steps in cases:
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
