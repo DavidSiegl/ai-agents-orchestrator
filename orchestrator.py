@@ -27,6 +27,7 @@ HTTP to Jenkins and SonarQube goes through CI, from the orchestrator's machine.
 
 import argparse
 import base64
+import collections
 import difflib
 import http.client
 import json
@@ -336,21 +337,15 @@ class Step:
             name = f"{stem}-q{q}{ext}"
         return name
 
-    def names(self) -> re.Pattern:
-        """Every name the step's files can take, in any round and quality round."""
-        # name() inserts -q<q> before the extension of the filled-in name. A round number has no dot,
-        # so the template splits at the same dot, though its extension may hold {n}.
-        stem, ext = os.path.splitext(self.file)
-        q = "(?:-q[0-9]+)?" if self.quality_gated else ""
-        return re.compile(_name_pattern(stem) + q + _name_pattern(ext))
-
-    def samples(self) -> set[str]:
-        """Names the step's files take in a few rounds, enough to meet any other step's names() they overlap:
-        two templates that can give the same name, with no digit next to {n} (see _fill_problem), give
-        it in one step's round 1 or 2 against any round of the other, or else in rounds 10 or 11."""
-        rounds = (1, 2, 10, 11) if self.per_round else (1,)
-        quality_rounds = (0, 1, 2) if self.quality_gated else (0,)
-        return {self.name(n, q) for n in rounds for q in quality_rounds}
+    def name_forms(self) -> list[list[str | None]]:
+        """The step's file names as _name_tokens: its file's, and for the gated step its quality answers'."""
+        forms = [_name_tokens(self.file)]
+        if self.quality_gated:
+            # As name() does: -q<q> before the extension, where the template splits at the same dot as
+            # the filled-in name, since a round number has none.
+            stem, ext = os.path.splitext(self.file)
+            forms.append(_name_tokens(stem) + ["-", "q", None] + _name_tokens(ext))
+        return forms
 
     def last_path(self, run_dir: str, n: int, quality_round: int) -> str:
         """The step's last file of round n, once the round's quality rounds, if any, are over."""
@@ -449,11 +444,12 @@ class Pipeline:
 
     def _collision_problem(self) -> str | None:
         """Two steps whose files can have the same name: the later turn would find its file already written."""
-        for st in self.steps:
-            for other in self.steps:
-                if other is not st and (name := next((x for x in sorted(st.samples())
-                                                      if other.names().fullmatch(x)), None)):
-                    return f"steps {st.id} and {other.id} can both write {name}"
+        for i, st in enumerate(self.steps):
+            for other in self.steps[i + 1:]:
+                for a in st.name_forms():
+                    for b in other.name_forms():
+                        if (name := _shared_name(a, b)) is not None:
+                            return f"steps {st.id} and {other.id} can both write {name}"
         return None
 
     def _loop_problem(self) -> str | None:
@@ -517,13 +513,9 @@ RUN_FILE = re.compile(r"state\.json|quality-.*")
 def _fill_problem(step: Step, known: set[str]) -> str | None:
     """What stops the step's file or prompts from being filled in at run time, which a bad format spec,
     conversion or nested field would, though its placeholders are all known."""
-    # A plain {n}, so that names() knows every name it can give.
+    # A plain {n}, so that _name_tokens knows every name it can give.
     if any(spec or conversion for _, field, spec, conversion in string.Formatter().parse(step.file) if field):
         return f"handoff file {step.file} may use {{n}} only as it is, with no format spec or conversion"
-    # A digit beside {n} makes rounds run into each other: x{n}5.md in round 3 and x3{n}.md in round 5
-    # are both x35.md.
-    if re.search(r"[0-9]\{n\}|\{n\}[0-9]", step.file):
-        return f"handoff file {step.file} has a digit next to {{n}}; put another character between them"
     name = step.file.format(n=1)
     if "/" in name or name in ("", ".", "..") or RUN_FILE.fullmatch(name):
         return f"handoff file {step.file} must be a plain file name, and not state.json or quality-*, " \
@@ -540,10 +532,53 @@ def _fill_problem(step: Step, known: set[str]) -> str | None:
     return None
 
 
-def _name_pattern(template: str) -> str:
-    """A regular expression for the names a file template gives, {n} being any round number."""
-    return "".join(re.escape(literal) + ("[0-9]+" if field is not None else "")
-                   for literal, field, _, _ in string.Formatter().parse(template))
+def _name_tokens(template: str) -> list[str | None]:
+    """A file template as its characters, with None for each {n}: a round or quality round number."""
+    tokens = []
+    for literal, field, _, _ in string.Formatter().parse(template):
+        tokens += literal
+        if field is not None:
+            tokens.append(None)
+    return tokens
+
+
+def _shared_name(a: list[str | None], b: list[str | None]) -> str | None:
+    """The shortest name that both token lists give, or None when they share none.
+
+    Each list is matched by a small automaton whose states are (position, inside a number), a number
+    being [1-9][0-9]*, as rounds are. A breadth-first walk over pairs of state sets, one character at a
+    time, finds a name both accept, so the answer is exact: no sampling of rounds. The one approximation
+    is a template that repeats {n}, whose numbers are taken as independent; it can only reject more.
+    """
+    def closure(states: set, tokens: list) -> frozenset:
+        # A number may end after any digit.
+        return frozenset(states | {(i + 1, False) for i, inside in states if inside})
+
+    def advance(states: frozenset, tokens: list, c: str) -> frozenset:
+        out = set()
+        for i, inside in states:
+            if inside:
+                if c.isdigit():
+                    out.add((i, True))
+            elif i < len(tokens) and (tokens[i] == c or (tokens[i] is None and c in "123456789")):
+                out.add((i + 1, False) if tokens[i] is not None else (i, True))
+        return closure(out, tokens)
+
+    alphabet = sorted({t for t in a + b if t is not None} | set("0123456789"))
+    start = (closure({(0, False)}, a), closure({(0, False)}, b))
+    # Each pair of state sets reached, with the name that first reached it.
+    reached = {start: ""}
+    queue = collections.deque([start])
+    while queue:
+        pair = queue.popleft()
+        if (len(a), False) in pair[0] and (len(b), False) in pair[1]:
+            return reached[pair]
+        for c in alphabet:
+            nxt = (advance(pair[0], a, c), advance(pair[1], b, c))
+            if nxt[0] and nxt[1] and nxt not in reached:
+                reached[nxt] = reached[pair] + c
+                queue.append(nxt)
+    return None
 
 
 def _fields_of(template: str) -> list[str]:

@@ -3854,15 +3854,18 @@ class TestWorkflowFiles(unittest.TestCase):
              [spec, build, Step("review", "review", "build-{n}-q1.md", "{path}", loop_to="build")]),
             ("steps b and r can both write x1.md", [b, Step("r", "b", "x1.md", "{path}")]),
             # {n} in the extension: a quality answer goes before it, as b-q3.1.
-            ("steps r and a can both write b-q3.1",
+            ("steps a and r can both write b-q3.1",
              [Step("a", "a", "b.{n}", "{path}", edits=True, quality_gated=True),
               Step("r", "r", "b-q3.{n}", "{path}", loop_to="a")]),
-            ("steps z and a can both write b-q3.1",
+            ("steps a and z can both write b-q3.1",
              [Step("a", "a", "b.{n}", "{path}", edits=True, quality_gated=True), Step("z", "z", "b-q3.1", "{path}")]),
-            ("step r: handoff file x3{n}.md has a digit next to {n}; put another character between them",
-             [Step("a", "a", "x-{n}.md", "{path}", edits=True), Step("r", "r", "x3{n}.md", "{path}", loop_to="a")]),
-            ("step a: handoff file x{n}5.md has a digit next to {n}",
-             [Step("a", "a", "x{n}5.md", "{path}", edits=True), Step("r", "r", "y-{n}.md", "{path}", loop_to="a")]),
+            # Rounds that differ give one name: round 3 of a and round 5 of r.
+            ("steps a and r can both write x35.md",
+             [Step("a", "a", "x{n}5.md", "{path}", edits=True), Step("r", "r", "x3{n}.md", "{path}", loop_to="a")]),
+            ("steps a and r can both write x3-5.md",
+             [Step("a", "a", "x{n}-5.md", "{path}", edits=True), Step("r", "r", "x3-{n}.md", "{path}", loop_to="a")]),
+            ("steps a and r can both write 31.33",
+             [Step("a", "a", "{n}.33", "{path}", edits=True), Step("r", "r", "31.{n}", "{path}", loop_to="a")]),
         ]
         for message, steps in cases:
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
@@ -3872,6 +3875,11 @@ class TestWorkflowFiles(unittest.TestCase):
                                     Step("r", "b", "x{n}-r.md", "{path}", loop_to="b")))
         Pipeline("ok", {"b": "B"}, (Step("s", "b", "notes", "{path}"), Step("b", "b", "notes-{n}", "{path}",
                                                                             edits=True, quality_gated=True)))
+        # A round number is never 0 and has no leading zero, and a digit beside {n} is fine on its own.
+        Pipeline("ok", {"b": "B"}, (Step("s", "b", "x0.md", "{path}"), Step("b", "b", "x{n}.md", "{path}", edits=True),
+                                    Step("r", "b", "x0{n}.md", "{path}", loop_to="b")))
+        Pipeline("ok", {"b": "B"}, (Step("b", "b", "x-{n}.md", "{path}", edits=True),
+                                    Step("r", "b", "x3{n}.md", "{path}", loop_to="b")))
 
     def test_a_model_for_a_role_not_in_the_workflow(self):
         with self.assertRaisesRegex(ValueError, "a model is set for role x, which is not one of the workflow's"):

@@ -84,8 +84,8 @@ step can `use` a default step and override some of its fields; a role without a 
 workflow's label for its key, or else is named after the key; a role's `model` sits under every model flag. A
 file cannot take a built-in workflow's name. `Pipeline` also rejects a prompt or file that could not be filled
 in at run time (`_fill_problem`), and a handoff file outside the run directory or named like the run's own
-`state.json` and `quality-*` files, and two steps whose files can share a name in some round (`Step.names`,
-`_collision_problem`). `state.json` saves
+`state.json` and `quality-*` files, and two steps whose files can share a name in some round (`Step.name_forms`,
+`_shared_name` and `_collision_problem`, an exact check). `state.json` saves
 the workflow's name and, for one that is not built in, its canonical definition (`workflow_definition`), which
 a resume rebuilds the `Pipeline` from, so editing or deleting the file does not change a started run. One saved
 before workflows existed loads as `default`. Panes: the first role takes the root pane, the second
