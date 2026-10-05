@@ -67,10 +67,14 @@ command. `GIT_REF` is interpolated only into the checkout's branch spec.
 - **Ordinary builds** stop at a failing test. On `main` they also fail on a gate status other than `OK`; a
   pull request or another branch is not analysed. `main` is analysed as the version in `pyproject.toml`, and
   the project's new code is set to "previous version", so the gate judges what changed since the version was
-  last raised. Code from before the first versioned analysis counts as existing, not new. A build of `main` that passes the gate then releases the
-  version in `pyproject.toml`: if GitHub has no release `v<version>` yet, `gh release create` makes one, with
-  the tag at the commit built and notes generated from the pull requests merged since the last release. To
-  release, raise `version` in the pull request; a merge that leaves it alone releases nothing.
+  last raised. Code from before the first versioned analysis counts as existing, not new.
+
+  A build of `main` that passes the gate then releases the version in `pyproject.toml`: if GitHub has no
+  release `v<version>` yet, `gh release create` makes one, with the tag at the commit built, notes generated
+  from the pull requests merged since the last release, and `orchestrator.pyz` with its `.sha256` attached.
+  The `.pyz` is `orchestrator.py` packed as a zipapp, built and started once with `--help` before the upload.
+  To release, raise `version` in the pull request; a merge that leaves it alone releases nothing. A release
+  that already exists is skipped whole, so its files are never replaced.
 - **Quality builds** (`SONAR_PROJECT_KEY` set) run the analysis even when tests fail, end UNSTABLE when tests
   fail or the gate is not `OK`, and archive `.scannerwork/report-task.txt`, whose `ceTaskId` leads to the
   analysis. FAILURE then means the change never got as far as the gate.

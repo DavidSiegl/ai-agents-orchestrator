@@ -147,7 +147,15 @@ pipeline {
                             cat gh-release-view.err >&2
                             exit 1
                         fi
-                        gh release create "$tag" --target "$sha" --title "$tag" --generate-notes
+                        # orchestrator.py packed as an executable zipapp, which runs on any machine with Python 3.13+.
+                        mkdir -p build/pyz dist
+                        cp orchestrator.py build/pyz/
+                        echo 'import sys, orchestrator; sys.exit(orchestrator.main(sys.argv[1:]))' > build/pyz/__main__.py
+                        uv run --frozen python -m zipapp build/pyz -p '/usr/bin/env python3' -c -o dist/orchestrator.pyz
+                        uv run --frozen python dist/orchestrator.pyz --help >/dev/null
+                        (cd dist && sha256sum orchestrator.pyz > orchestrator.pyz.sha256)
+                        gh release create "$tag" dist/orchestrator.pyz dist/orchestrator.pyz.sha256 \
+                            --target "$sha" --title "$tag" --generate-notes
                     '''
                 }
             }
