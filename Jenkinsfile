@@ -134,6 +134,8 @@ pipeline {
             steps {
                 withCredentials([string(credentialsId: 'GitHub-Agents', variable: 'GH_TOKEN')]) {
                     sh '''
+                        # Install sets it, so a restart from this stage, which skips Install, has none and must not release "v".
+                        : "${PROJECT_VERSION:?is unset; run the whole build, not a restart from the Release stage}"
                         tag="v$PROJECT_VERSION"
                         sha=$(git rev-parse HEAD)
                         if gh release view "$tag" >/dev/null 2>gh-release-view.err; then
