@@ -28,6 +28,20 @@ herdr. Each feature is built on its own branch and ends as a pull request on Git
   their credentials in `~/.config/ai-agents-orchestrator/ci.env` or the environment, and a git checkout with an
   `origin`
 
+## Install
+
+Each [release](https://github.com/DavidSiegl/ai-agents-orchestrator/releases) has `orchestrator.pyz`, an
+executable of `orchestrator.py` that needs only Python 3.13+:
+
+```bash
+curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/orchestrator.pyz
+curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/orchestrator.pyz.sha256
+sha256sum -c orchestrator.pyz.sha256 && chmod +x orchestrator.pyz
+./orchestrator.pyz run "add a token-bucket rate limiter to the API client"
+```
+
+It takes the same commands and flags as `python orchestrator.py` in a checkout, which the examples below use.
+
 ## Usage
 
 ```bash
