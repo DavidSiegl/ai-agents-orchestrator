@@ -116,7 +116,11 @@ pipeline {
         // release already there. gh creates the tag v<version> on GitHub at the commit built, so Jenkins needs
         // no git push credentials.
         stage('Release') {
-            when { branch 'main' }
+            when {
+                branch 'main'
+                // A quality build pointed at main's job by mistake checks out an agent's snapshot, never to be released.
+                expression { return !params.GIT_REF && !params.SONAR_PROJECT_KEY }
+            }
             steps {
                 withCredentials([string(credentialsId: 'GitHub-Agents', variable: 'GH_TOKEN')]) {
                     sh '''
