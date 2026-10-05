@@ -420,6 +420,8 @@ class Pipeline:
                 return f"step {st.id}: a per-round handoff file needs an editing step at or before it"
             if unknown := st.placeholders() - known:
                 return f"step {st.id}: unknown prompt placeholder {min(unknown)}"
+            if problem := _fill_problem(st, known):
+                return f"step {st.id}: {problem}"
         return None
 
     def _loop_problem(self) -> str | None:
@@ -474,6 +476,32 @@ class Pipeline:
     def result(self) -> Step:
         """The step whose file the run ends on."""
         return self.verdict_step or self.steps[-1]
+
+
+# Files the run writes into its directory itself, beside the steps' handoff files.
+RUN_FILE = re.compile(r"state\.json|quality-.*")
+
+
+def _fill_problem(step: Step, known: set[str]) -> str | None:
+    """What stops the step's file or prompts from being filled in at run time, which a bad format spec,
+    conversion or nested field would, though its placeholders are all known."""
+    try:
+        name = step.file.format(n=1)
+    except (ValueError, KeyError, IndexError, AttributeError) as e:
+        return f"handoff file {step.file} cannot be filled in: {e}"
+    if "/" in name or name in ("", ".", "..") or RUN_FILE.fullmatch(name):
+        return f"handoff file {step.file} must be a plain file name, and not state.json or quality-*, " \
+               f"which the run writes itself"
+    # Every value a prompt is filled in with is a string.
+    values = dict.fromkeys(known, "")
+    for field_name in ("prompt", "again", "fresh_note"):
+        if (template := getattr(step, field_name)) is None:
+            continue
+        try:
+            template.format(**values)
+        except (ValueError, KeyError, IndexError, AttributeError) as e:
+            return f"{field_name} cannot be filled in: {type(e).__name__}: {e}"
+    return None
 
 
 def _fields_of(template: str) -> list[str]:

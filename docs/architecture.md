@@ -78,8 +78,11 @@ holds the contract, the last editing step's last report, the last quality file a
 `WORKFLOWS` holds only `DEFAULT_WORKFLOW`. Other workflows are TOML files: `run --workflow NAME` finds
 `NAME.toml` in `workflows_dir` (`~/.config/ai-agents-orchestrator/workflows/`), and `run --workflow-file` takes
 one by path; the README's [Your own workflows](../README.md#your-own-workflows) gives the format. A file's
-step can `use` a default step and override some of its fields; a role without a label is named after its key;
-a role's `model` sits under every model flag. A file cannot take a built-in workflow's name. `state.json` saves
+step can `use` a default step and override some of its fields; a role without a label keeps the default
+workflow's label for its key, or else is named after the key; a role's `model` sits under every model flag. A
+file cannot take a built-in workflow's name. `Pipeline` also rejects a prompt or file that could not be filled
+in at run time (`_fill_problem`), and a handoff file outside the run directory or named like the run's own
+`state.json` and `quality-*` files. `state.json` saves
 the workflow's name and, for one that is not built in, its canonical definition (`workflow_definition`), which
 a resume rebuilds the `Pipeline` from, so editing or deleting the file does not change a started run. One saved
 before workflows existed loads as `default`. Panes: the first role takes the root pane, the second

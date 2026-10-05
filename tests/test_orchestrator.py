@@ -3812,7 +3812,19 @@ class TestWorkflowFiles(unittest.TestCase):
             ("role build: label must be a string", f"roles.build = {{ label = 3 }}\n[[steps]]\n{step}"),
             ("step 1 must be a table", "steps = [3]\n"),
             ("step 1 (build): prompt must be a string", "[[steps]]\n" + step.replace('"{path}"', "3")),
+            # Placeholders that are all known, but that could not be filled in when the step comes up.
+            ("step build: prompt cannot be filled in: ValueError: Unknown format code 'd'",
+             "[[steps]]\n" + step.replace('"{path}"', '"{task:d}"')),
+            ("step build: prompt cannot be filled in: ValueError: Unknown conversion specifier z",
+             "[[steps]]\n" + step.replace('"{path}"', '"{task!z}"')),
+            ("step build: again cannot be filled in: KeyError: 'nope'",
+             f'[[steps]]\n{step}again = "{{task:{{nope}}}}"\n'),
+            ("step build: handoff file b-{n!z}.md cannot be filled in: Unknown conversion specifier z",
+             "[[steps]]\n" + step.replace("b-{n}.md", "b-{n!z}.md")),
         ]
+        for name in ("state.json", "quality-{n}-1.md", "../b-{n}.md", "/tmp/b-{n}.md", ".."):
+            cases.append((f"step build: handoff file {name} must be a plain file name, and not state.json or "
+                          f"quality-*, which the run writes itself", "[[steps]]\n" + step.replace("b-{n}.md", name)))
         for message, text in cases:
             with self.subTest(message=message):
                 path = self.file("bad", text)
@@ -3820,6 +3832,15 @@ class TestWorkflowFiles(unittest.TestCase):
                     orchestrator.load_workflow_file(path)
                 self.assertTrue(str(e.exception).startswith(f"{path}: "), str(e.exception))
                 self.assertIn(message, str(e.exception))
+
+    def test_a_saved_definition_that_cannot_be_filled_in_stops_the_resume(self):
+        definition = orchestrator.workflow_definition(QUICK)
+        definition["steps"][0]["prompt"] = "{task:d}"
+        saved = {**asdict(saved_run("build", 1)), "workflow": "quick", "workflow_definition": definition}
+        with self.assertRaisesRegex(OrchestratorError, "saved with the run is invalid: workflow quick: step build: "
+                                                       "prompt cannot be filled in"):
+            orchestrator.resumable_state([(10**4, saved)], parse_args(["resume", "a1b2c3"]), "/proj", "here",
+                                         lambda pid: True)
 
     def test_a_model_for_a_role_not_in_the_workflow(self):
         with self.assertRaisesRegex(ValueError, "a model is set for role x, which is not one of the workflow's"):
