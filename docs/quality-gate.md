@@ -57,7 +57,7 @@ empty parameters, before it accepts `buildWithParameters`.
 |---|---|---|
 | `GIT_REF` | a branch on `origin`, e.g. `orchestrator-ci/cd3492-1-q2` | `checkout scm` |
 | `SONAR_PROJECT_KEY` | the run's project, `py-ai-agents-orchestrator-<key>` | the key in `sonar-project.properties`; a failing test or a red gate fails the build |
-| `SONAR_PROJECT_VERSION` | `base` or `change` | no `sonar.projectVersion` |
+| `SONAR_PROJECT_VERSION` | `base` or `change` | on `main`, the version in `pyproject.toml` |
 
 The parameters reach the scanner as shell variables, never as Groovy-built shell code, so no value can inject a
 command. `GIT_REF` is interpolated only into the checkout's branch spec.
@@ -65,7 +65,9 @@ command. `GIT_REF` is interpolated only into the checkout's branch spec.
 ### What each kind of build reports
 
 - **Ordinary builds** stop at a failing test. On `main` they also fail on a gate status other than `OK`; a
-  pull request or another branch is not analysed. A build of `main` that passes the gate then releases the
+  pull request or another branch is not analysed. `main` is analysed as the version in `pyproject.toml`, and
+  the project's new code is set to "previous version", so the gate judges what changed since the version was
+  last raised. Code from before the first versioned analysis counts as existing, not new. A build of `main` that passes the gate then releases the
   version in `pyproject.toml`: if GitHub has no release `v<version>` yet, `gh release create` makes one, with
   the tag at the commit built and notes generated from the pull requests merged since the last release. To
   release, raise `version` in the pull request; a merge that leaves it alone releases nothing.

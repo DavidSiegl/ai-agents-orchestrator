@@ -35,6 +35,12 @@ pipeline {
         stage('Install') {
             steps {
                 sh 'uv sync --frozen'
+                script {
+                    // main's SonarQube analyses and its releases carry this version.
+                    env.PROJECT_VERSION = sh(returnStdout: true, script: '''
+                        uv run --frozen python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])'
+                    ''').trim()
+                }
             }
         }
 
@@ -77,12 +83,16 @@ pipeline {
                                 def scannerHome = tool 'sonarqube-scanner'
                                 // The parameters reach the shell as environment variables, never as Groovy-built shell code.
                                 // The name is set too, or the analysis would rename the per-run project after sonar-project.properties.
+                                // A quality build analyses as the version it is given. main analyses as its release version, so
+                                // with the project's new code set to "previous version", new code is what changed since the
+                                // version was last raised.
                                 sh """
+                                    if [ -n "\$SONAR_PROJECT_KEY" ]; then version=\$SONAR_PROJECT_VERSION; else version=\$PROJECT_VERSION; fi
                                     ${scannerHome}/bin/sonar-scanner \
                                       -Dsonar.python.coverage.reportPaths=coverage.xml \
                                       -Dsonar.python.xunit.reportPath=test-results.xml \
                                       \${SONAR_PROJECT_KEY:+-Dsonar.projectKey=\$SONAR_PROJECT_KEY -Dsonar.projectName=\$SONAR_PROJECT_KEY} \
-                                      \${SONAR_PROJECT_VERSION:+-Dsonar.projectVersion=\$SONAR_PROJECT_VERSION}
+                                      \${version:+-Dsonar.projectVersion=\$version}
                                 """
                                 if (params.SONAR_PROJECT_KEY) {
                                     // Holds the ceTaskId the orchestrator follows; cleanWs() would delete it.
@@ -124,8 +134,7 @@ pipeline {
             steps {
                 withCredentials([string(credentialsId: 'GitHub-Agents', variable: 'GH_TOKEN')]) {
                     sh '''
-                        version=$(uv run --frozen python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
-                        tag="v$version"
+                        tag="v$PROJECT_VERSION"
                         sha=$(git rev-parse HEAD)
                         if gh release view "$tag" >/dev/null 2>gh-release-view.err; then
                             echo "$tag is already released"
