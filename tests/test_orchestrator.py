@@ -3819,9 +3819,10 @@ class TestWorkflowFiles(unittest.TestCase):
              "[[steps]]\n" + step.replace('"{path}"', '"{task!z}"')),
             ("step build: again cannot be filled in: KeyError: 'nope'",
              f'[[steps]]\n{step}again = "{{task:{{nope}}}}"\n'),
-            ("step build: handoff file b-{n!z}.md cannot be filled in: Unknown conversion specifier z",
-             "[[steps]]\n" + step.replace("b-{n}.md", "b-{n!z}.md")),
         ]
+        for name in ("b-{n!s}.md", "b-{n:d}.md", "b-{n:{x}}.md"):
+            cases.append((f"step build: handoff file {name} may use {{n}} only as it is, with no format spec or "
+                          f"conversion", "[[steps]]\n" + step.replace("b-{n}.md", name)))
         for name in ("state.json", "quality-{n}-1.md", "../b-{n}.md", "/tmp/b-{n}.md", ".."):
             cases.append((f"step build: handoff file {name} must be a plain file name, and not state.json or "
                           f"quality-*, which the run writes itself", "[[steps]]\n" + step.replace("b-{n}.md", name)))
@@ -3841,6 +3842,27 @@ class TestWorkflowFiles(unittest.TestCase):
                                                        "prompt cannot be filled in"):
             orchestrator.resumable_state([(10**4, saved)], parse_args(["resume", "a1b2c3"]), "/proj", "here",
                                          lambda pid: True)
+
+    def test_steps_whose_files_can_share_a_name(self):
+        default = orchestrator.DEFAULT_WORKFLOW
+        spec, build, review = default.steps
+        b = Step("b", "b", "x{n}.md", "{path}", edits=True)
+        cases = [
+            ("steps spec and build can both write build-1.md",
+             [Step("spec", "spec", "build-1.md", "{path}"), build, review]),
+            ("steps build and review can both write build-1-q1.md",
+             [spec, build, Step("review", "review", "build-{n}-q1.md", "{path}", loop_to="build")]),
+            ("steps b and r can both write x10.md", [b, Step("r", "b", "x1{n}.md", "{path}", loop_to="b")]),
+            ("steps b and r can both write x1.md", [b, Step("r", "b", "x1.md", "{path}")]),
+        ]
+        for message, steps in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                Pipeline("bad", {st.role: st.role for st in steps}, tuple(steps))
+        # The gated step's own answers, and names that only look alike, are not collisions.
+        Pipeline("ok", {"b": "B"}, (Step("b", "b", "x{n}.md", "{path}", edits=True, quality_gated=True),
+                                    Step("r", "b", "x{n}-r.md", "{path}", loop_to="b")))
+        Pipeline("ok", {"b": "B"}, (Step("s", "b", "notes", "{path}"), Step("b", "b", "notes-{n}", "{path}",
+                                                                            edits=True, quality_gated=True)))
 
     def test_a_model_for_a_role_not_in_the_workflow(self):
         with self.assertRaisesRegex(ValueError, "a model is set for role x, which is not one of the workflow's"):

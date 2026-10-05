@@ -323,11 +323,33 @@ class Step:
 
     def path(self, run_dir: str, n: int, q: int = 0) -> str:
         """The handoff file of round n; with q, the answer to quality round q."""
+        return f"{run_dir}/{self.name(n, q)}"
+
+    def name(self, n: int, q: int = 0) -> str:
         name = self.file.format(n=n)
         if q:
             stem, ext = os.path.splitext(name)
             name = f"{stem}-q{q}{ext}"
-        return f"{run_dir}/{name}"
+        return name
+
+    def names(self) -> re.Pattern:
+        """Every name the step's files can take, in any round and quality round."""
+        # A quality answer inserts -q<q> before the extension, here the literal one the template ends in.
+        ext = os.path.splitext(self.name(1))[1]
+        if not self.file.endswith(ext):
+            ext = ""
+        stem = self.file[:len(self.file) - len(ext)]
+        pattern = "".join(re.escape(literal) + ("[0-9]+" if field is not None else "")
+                          for literal, field, _, _ in string.Formatter().parse(stem))
+        if self.quality_gated:
+            pattern += "(?:-q[0-9]+)?"
+        return re.compile(pattern + re.escape(ext))
+
+    def samples(self) -> set[str]:
+        """Names the step's files take in a few rounds, enough to meet any other step's names() they overlap."""
+        rounds = (1, 2, 10, 11) if self.per_round else (1,)
+        quality_rounds = (0, 1, 2) if self.quality_gated else (0,)
+        return {self.name(n, q) for n in rounds for q in quality_rounds}
 
     def last_path(self, run_dir: str, n: int, quality_round: int) -> str:
         """The step's last file of round n, once the round's quality rounds, if any, are over."""
@@ -365,7 +387,7 @@ class Pipeline:
         if not self.steps:
             return "has no steps"
         checks = (self._name_problem, self._role_problem, self._uniqueness_problem, self._step_problem,
-                  self._loop_problem)
+                  self._collision_problem, self._loop_problem)
         return next((problem for check in checks if (problem := check())), None)
 
     def _name_problem(self) -> str | None:
@@ -422,6 +444,15 @@ class Pipeline:
                 return f"step {st.id}: unknown prompt placeholder {min(unknown)}"
             if problem := _fill_problem(st, known):
                 return f"step {st.id}: {problem}"
+        return None
+
+    def _collision_problem(self) -> str | None:
+        """Two steps whose files can have the same name: the later turn would find its file already written."""
+        for st in self.steps:
+            for other in self.steps:
+                if other is not st and (name := next((x for x in sorted(st.samples())
+                                                      if other.names().fullmatch(x)), None)):
+                    return f"steps {st.id} and {other.id} can both write {name}"
         return None
 
     def _loop_problem(self) -> str | None:
@@ -485,10 +516,10 @@ RUN_FILE = re.compile(r"state\.json|quality-.*")
 def _fill_problem(step: Step, known: set[str]) -> str | None:
     """What stops the step's file or prompts from being filled in at run time, which a bad format spec,
     conversion or nested field would, though its placeholders are all known."""
-    try:
-        name = step.file.format(n=1)
-    except (ValueError, KeyError, IndexError, AttributeError) as e:
-        return f"handoff file {step.file} cannot be filled in: {e}"
+    # A plain {n}, so that names() knows every name it can give.
+    if any(spec or conversion for _, field, spec, conversion in string.Formatter().parse(step.file) if field):
+        return f"handoff file {step.file} may use {{n}} only as it is, with no format spec or conversion"
+    name = step.file.format(n=1)
     if "/" in name or name in ("", ".", "..") or RUN_FILE.fullmatch(name):
         return f"handoff file {step.file} must be a plain file name, and not state.json or quality-*, " \
                f"which the run writes itself"
