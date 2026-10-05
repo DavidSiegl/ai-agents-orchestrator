@@ -10,9 +10,13 @@ the process that drives them. `resume` picks the run up where `state.json` says 
 
 - A handoff file written while no orchestrator was watching is taken as it is, without prompting the role again.
 - A role whose agent still runs is reused. If it was already prompted for its current file, it is only waited on.
-- An agent that exited is relaunched in its pane with `claude --resume`, keeping its conversation. When its
-  session is gone, a fresh one starts with a prompt that points it at the earlier rounds, and a Spec Collector's
-  interview starts over.
+- An agent that exited is relaunched in its pane into its saved session, keeping its conversation, with its
+  harness's own syntax: `--resume <id>` for claude and gemini, `--session <id>` for pi and opencode, and
+  `codex resume <id>`. When its session is gone, or the role runs in another harness now, a fresh one starts
+  with a prompt that points it at the earlier rounds, and a Spec Collector's interview starts over.
+- `resume --agent` and `--role-agent` change the harness of each role's next agent; a role whose agent still
+  runs keeps it until it exits. A state saved by 0.3.0 resumes with every role on claude and its saved
+  permission mode.
 - A closed pane is split again from a surviving one, and a closed workspace is replaced by a new one.
 - The diff under review stays against the commit the run started from, even if you commit in between.
 - A run stopped while opening its pull request does not commit twice, merge the base branch twice, or open a
@@ -34,8 +38,9 @@ save. Ctrl-C is recorded as the error `interrupted`.
 
 ## When the orchestrator needs you
 
-A role's turn ends when it writes its handoff file, not when herdr reports it `idle` or `done`: Claude Code
-ends a turn while a background task it started still runs, and resumes when the task finishes. So the
+A role's turn ends when it writes its handoff file, not when herdr reports it `idle` or `done`: an agent can
+end a turn while a background task it started still runs, and resume when the task finishes, as Claude Code
+does. So the
 orchestrator polls for the file, and sends a herdr notification when a role:
 
 - is **blocked** on a permission prompt, a question, or a startup dialog such as folder trust;
@@ -52,7 +57,8 @@ Steps 1–3 run on the machine you start the orchestrator from.
    enabled.
 3. **Check that SSH works non-interactively.** File and `git` access runs over `ssh -o BatchMode=yes`, so
    `ssh -o BatchMode=yes <ssh-target> true` must succeed without a password, passphrase or host-key prompt.
-4. **Prepare the remote machine** as in the README's Requirements: herdr with the Claude integration, `claude`,
+4. **Prepare the remote machine** as in the README's Requirements: herdr with the integration of each harness
+   the run uses (`herdr integration install <kind>`), that harness's CLI on `PATH` (`claude` by default),
    the project's git checkout with an `origin` it can push to, and `gh` logged in unless you use `--no-pr`.
 
 With `--machine`, every herdr command is forwarded with `herdr --machine`. The orchestrator can also run on the
@@ -70,9 +76,11 @@ pane, without `--machine`.
   check catches work handed over while no orchestrator watched. The marker keeps a live Builder in mid-turn from
   getting its prompt twice; dying between the prompt and the save costs one duplicate prompt, which the role
   answers by writing the same file again.
-- **An exited agent is relaunched with `claude --resume`, falling back to a fresh session.** For the Spec
+- **An exited agent is relaunched into its saved session, falling back to a fresh one.** For the Spec
   Collector the conversation is the interview; for the others it saves re-reading the spec and earlier rounds.
-  The fallback keeps resume working when the session is gone.
+  The fallback keeps resume working when the session is gone. Each agent's record saves its harness, and a
+  session is resumed only in the harness that made it: no harness can open another's, so a role whose harness
+  changed takes the lost-session path.
 - **A missing pane or workspace is recreated.** The handoff files are the whole contract between roles, so a
   new pane or workspace loses nothing a role needs. Failing would leave you at the dead end resume removes.
 - **`base` is read from `state.json`.** It is computed once, before the first build. Recomputing it would diff
@@ -85,11 +93,34 @@ pane, without `--machine`.
   in the `publish` phase opens no workspace and skips the commit and the pull request that `state.json` shows
   are already made.
 - **Run settings are saved and `resume` flags override them.** Whoever resumes rarely remembers the original
-  flags, and an override is how they grant one more round. The saved settings include the per-role models, and
-  a `--max-rounds` below the saved round is refused.
+  flags, and an override is how they grant one more round. The saved settings include the per-role models and
+  harnesses, and a `--max-rounds` below the saved round is refused.
 - **The saved `--machine` is not compared with the one given.** The same herdr can be reached with `--machine`
   from elsewhere or without it from a pane on that machine; finding the saved workspace is what proves the right
   herdr is addressed.
+
+### Harnesses
+
+- **A role's harness is herdr's `--kind`.** herdr already recognizes each harness's agent and its states, so
+  the orchestrator only chooses the kind and builds its arguments. The five supported are the ones whose
+  resume and approval flags are known; herdr supports more.
+- **`--permission-mode` keeps Claude Code's names and is translated per harness.** The flag existed before the
+  other harnesses, and one mode for every role keeps it simple. A mode a harness has no equivalent for is
+  dropped rather than guessed, and logged once per role, so the agent starts with its own default instead of
+  failing on an unknown flag:
+
+  | `--permission-mode` | claude | gemini | codex | pi, opencode |
+  |---|---|---|---|---|
+  | `default` | `--permission-mode default` | `--approval-mode default` | (nothing) | dropped |
+  | `acceptEdits` | `--permission-mode acceptEdits` | `--approval-mode auto_edit` | `--full-auto` | dropped |
+  | `bypassPermissions` | `--permission-mode bypassPermissions` | `--approval-mode yolo` | `--dangerously-bypass-approvals-and-sandbox` | dropped |
+  | `plan` | `--permission-mode plan` | dropped | `--sandbox read-only` | dropped |
+  | `auto`, `dontAsk`, any other | passed through | dropped | dropped | dropped |
+
+- **`state.json` saves the permission mode and the harnesses, not Claude Code's arguments.** The arguments
+  depend on the harness, which `resume` can change, so they are built at each launch.
+- **Model names are passed as they are.** Every harness takes `--model`; translating names between providers
+  would be a guess, so a role's model must be one its harness knows.
 
 ### Stale-run detection
 

@@ -157,7 +157,8 @@ class FakeHerdr:
         self.panes = 0
         self.statuses = {}  # the agents alive, by name; an exited agent has no entry
         self.sessions = {}
-        self.lost_sessions = set()  # sessions `claude --resume` cannot find, so the agent exits at once
+        self.lost_sessions = set()  # sessions a harness cannot resume, so the agent exits at once
+        self.kinds = []  # (name, kind) of each agent started, in order
         self.workspaces = set()
         self.live_panes = set()
         self.waits = []
@@ -184,10 +185,10 @@ class FakeHerdr:
     def rename_pane(self, pane, label):
         self.calls.append(("rename", pane, label))
 
-    def start_agent(self, name, pane, agent_args):
+    def start_agent(self, name, pane, kind, agent_args):
         self.calls.append(("start", name, pane, tuple(agent_args)))
-        args = list(agent_args)
-        session = args[args.index("--resume") + 1] if "--resume" in args else f"session-{len(self.calls)}"
+        self.kinds.append((name, kind))
+        session = resumed_session(kind, list(agent_args)) or f"session-{len(self.calls)}"
         if session in self.lost_sessions:
             return True
         self.statuses[name] = "idle"
@@ -226,6 +227,14 @@ class FakeHerdr:
         self.calls.append(("close", workspace))
 
 
+def resumed_session(kind, args):
+    """The session a harness's arguments resume, as each harness takes it; None for a fresh one."""
+    flag = orchestrator.RESUME_ARGS[kind]
+    if kind == "codex":
+        return args[1] if args[:1] == [flag] else None
+    return args[args.index(flag) + 1] if flag in args else None
+
+
 def writes(path_of, text, status="done"):
     """A turn that writes `text` to the path the state names, then settles."""
     def turn(prompt, state, host):
@@ -254,15 +263,20 @@ class FakeClock:
             hook()
 
 
-def make_workflow(script, host=None, max_rounds=3, state=None, **kw):
-    """A workflow on fakes; pass `state` to resume a saved run instead of starting a new one."""
+def make_workflow(script, host=None, max_rounds=3, state=None, *, permission_mode=None, models=None, agent_kinds=None,
+                  **kw):
+    """A workflow on fakes; pass `state` to resume a saved run instead of starting a new one.
+
+    permission_mode, models and agent_kinds make up the Workflow's AgentSettings.
+    """
     host = host or FakeHost()
     state = state or RunState("20260929-120000-a1b2c3", "add a rate limiter", "/proj", None)
     herdr = FakeHerdr(host, state, script)
     notes = []
     clock = FakeClock()
-    wf = Workflow(herdr, host, state, notify=lambda t, b: notes.append(t),
-                  max_rounds=max_rounds, clocks=orchestrator.Clocks(clock.sleep, clock, clock), **kw)
+    agents = orchestrator.AgentSettings(permission_mode, models or {}, agent_kinds or {})
+    wf = Workflow(herdr, host, state, notify=lambda t, b: notes.append(t), max_rounds=max_rounds, agents=agents,
+                  clocks=orchestrator.Clocks(clock.sleep, clock, clock), **kw)
     return wf, herdr, host, notes
 
 
@@ -455,10 +469,11 @@ class TestWorkflow(unittest.TestCase):
     def test_agent_args_reach_every_role(self):
         wf, herdr, *_ = make_workflow({
             "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)],
-        }, agent_args=["--permission-mode", "auto"])
+        }, permission_mode="auto")
         wf.run()
         args = {c[3] for c in herdr.calls if c[0] == "start"}
         self.assertEqual(args, {("--permission-mode", "auto")})
+        self.assertEqual({kind for _, kind in herdr.kinds}, {"claude"})
 
     def start_args(self, **kw):
         wf, herdr, *_ = make_workflow({
@@ -471,7 +486,7 @@ class TestWorkflow(unittest.TestCase):
         self.assertEqual(self.start_args(), {"spec": (), "build": (), "review": ()})
 
     def test_each_role_gets_its_own_model(self):
-        args = self.start_args(agent_args=["--permission-mode", "auto"],
+        args = self.start_args(permission_mode="auto",
                                models={"spec": "sonnet", "review": "claude-opus-5-5"})
         self.assertEqual(args, {
             "spec": ("--permission-mode", "auto", "--model", "sonnet"),
@@ -811,17 +826,20 @@ class TestHerdr(unittest.TestCase):
         run = MagicMock(return_value=completed(stderr=err, returncode=1))
         self.assertIsNone(Herdr(run=run).status("spec-x"))
 
-    def test_start_agent_passes_claude_args_after_separator(self):
+    def test_start_agent_passes_the_harness_args_after_separator(self):
         run = MagicMock(return_value=result({}))
-        Herdr(run=run).start_agent("build-x", "w1:p2", ["--permission-mode", "auto"])
+        Herdr(run=run).start_agent("build-x", "w1:p2", "claude", ["--permission-mode", "auto"])
         argv = run.call_args.args[0]
         self.assertEqual(argv[argv.index("--kind") + 1], "claude")
         self.assertEqual(argv[-3:], ["--", "--permission-mode", "auto"])
+        Herdr(run=run).start_agent("review-x", "w1:p3", "codex", [])
+        self.assertEqual(run.call_args.args[0], ["herdr", "agent", "start", "review-x", "--kind", "codex",
+                                                 "--pane", "w1:p3", "--timeout", "60000"])
 
     def test_start_agent_blocked_at_startup(self):
         err = json.dumps({"error": {"code": "agent_not_ready", "message": "blocked during startup"}})
         run = MagicMock(return_value=completed(stderr=err, returncode=1))
-        self.assertFalse(Herdr(run=run).start_agent("spec-x", "w1:p1", []))
+        self.assertFalse(Herdr(run=run).start_agent("spec-x", "w1:p1", "claude", []))
 
     def test_wait_passes_each_until(self):
         run = MagicMock(return_value=result({"agent": {"agent_status": "idle"}}))
@@ -1043,10 +1061,10 @@ class TestCLI(unittest.TestCase):
     @patch.object(Workflow, "run", return_value=APPROVE)
     @patch.object(Host, "resolve_dir", return_value="/proj")
     @patch.dict("os.environ", {"HERDR_ENV": "1"})
-    def test_permission_mode_reaches_claude(self, _resolve, _run, init):
+    def test_permission_mode_reaches_the_workflow(self, _resolve, _run, init):
         with patch("builtins.print"):
             self.assertEqual(main(["run", "task", "--permission-mode", "auto"]), 0)
-        self.assertEqual(init.call_args.kwargs["agent_args"], ["--permission-mode", "auto"])
+        self.assertEqual(init.call_args.kwargs["agents"].permission_mode, "auto")
 
     @patch.object(Workflow, "__init__", return_value=None)
     @patch.object(Workflow, "run", return_value=APPROVE)
@@ -1056,9 +1074,9 @@ class TestCLI(unittest.TestCase):
         with patch("builtins.print"):
             self.assertEqual(main(["run", "task", "--permission-mode", "auto",
                                    "--model", "sonnet", "--review-model", "opus"]), 0)
-        self.assertEqual(init.call_args.kwargs["models"],
+        self.assertEqual(init.call_args.kwargs["agents"].models,
                          {"spec": "sonnet", "build": "sonnet", "review": "opus"})
-        self.assertEqual(init.call_args.kwargs["agent_args"], ["--permission-mode", "auto"])
+        self.assertEqual(init.call_args.kwargs["agents"].permission_mode, "auto")
 
     def test_role_models(self):
         cases = [
@@ -1609,7 +1627,7 @@ class TestFindRun(unittest.TestCase):
 class TestResumableState(unittest.TestCase):
     def saved(self, **kw):
         return {**asdict(saved_run("build", 2, agents=("spec", "build"))),
-                "max_rounds": 3, "turn_timeout": 600, "agent_args": ["--permission-mode", "auto"],
+                "max_rounds": 3, "turn_timeout": 600, "permission_mode": "auto",
                 "models": {"build": "sonnet"}, **kw}
 
     def resumable(self, argv, saved, age=10**4, alive=True):
@@ -1618,14 +1636,14 @@ class TestResumableState(unittest.TestCase):
 
     def test_saved_settings_are_kept(self):
         state = self.resumable(["a1b2c3"], self.saved())
-        self.assertEqual((state.max_rounds, state.turn_timeout, state.agent_args, state.models),
-                         (3, 600, ["--permission-mode", "auto"], {"build": "sonnet"}))
+        self.assertEqual((state.max_rounds, state.turn_timeout, state.permission_mode, state.models),
+                         (3, 600, "auto", {"build": "sonnet"}))
 
     def test_flags_override_saved_settings(self):
         state = self.resumable(["a1b2c3", "--max-rounds", "5", "--timeout", "60",
                                 "--permission-mode", "acceptEdits", "--review-model", "opus"], self.saved())
-        self.assertEqual((state.max_rounds, state.turn_timeout, state.agent_args, state.models),
-                         (5, 60, ["--permission-mode", "acceptEdits"], {"build": "sonnet", "review": "opus"}))
+        self.assertEqual((state.max_rounds, state.turn_timeout, state.permission_mode, state.models),
+                         (5, 60, "acceptEdits", {"build": "sonnet", "review": "opus"}))
 
     def test_max_rounds_below_the_saved_round(self):
         saved = self.saved()
@@ -3067,9 +3085,10 @@ D = "/proj/.orchestrator/runs/20260929-120000-a1b2c3"
 
 # The default workflow's prompts and pull request body as commit d6bb100 sent them, recorded by
 # running the scenarios of TestDefaultWorkflowPrompts on that commit's code.
+# Since then, only SPEC_PROMPT's "Separate Claude Code sessions" became "Separate agent sessions".
 GOLDEN = {
     'spec': (
-        'You are the Spec Collector, the first of three roles (Spec Collector -> Builder -> Reviewer). Separate Claude Code sessions play the Builder and the Reviewer; they will know only what you write down. A human is at this terminal and answers you directly.\n'
+        'You are the Spec Collector, the first of three roles (Spec Collector -> Builder -> Reviewer). Separate agent sessions play the Builder and the Reviewer; they will know only what you write down. A human is at this terminal and answers you directly.\n'
         '\n'
         'Task from the human:\n'
         'add a rate limiter\n'
@@ -3713,7 +3732,7 @@ class TestWorkflowCLI(unittest.TestCase):
             self.assertEqual(main(["run", "task", "--workflow", "quick", "--model", "X"]), 0)
         state = init.call_args.args[2]
         self.assertEqual((state.workflow, state.phase), ("quick", "build"))
-        self.assertEqual(init.call_args.kwargs["models"], {"build": "X", "review": "X"})
+        self.assertEqual(init.call_args.kwargs["agents"].models, {"build": "X", "review": "X"})
         out.assert_called_with(f"{APPROVE}: {state.dir}/review-0.md")
 
     def test_list_names_a_non_default_workflow(self):
@@ -3824,7 +3843,8 @@ class TestWorkflowFiles(unittest.TestCase):
             ("step 1 (build): edits must be true or false", "[[steps]]\n" + step.replace("true", '"yes"')),
             ("step 1 (build): prompt: Single '}' encountered in format string; write a literal brace as {{ or }}",
              '[[steps]]\nid = "build"\nfile = "b-{n}.md"\nprompt = "a } b"\nedits = true\n'),
-            ("role build: give a label, or a table with label and model", f"roles.build = 3\n[[steps]]\n{step}"),
+            ("role build: give a label, or a table with label, model and agent",
+             f"roles.build = 3\n[[steps]]\n{step}"),
             ("role build: unknown key modle; did you mean model?",
              f'roles.build = {{ modle = "x" }}\n[[steps]]\n{step}'),
             ("step 1 (a b): id may use only letters, digits, - and _",
@@ -4012,7 +4032,7 @@ class TestWorkflowFileCLI(unittest.TestCase):
         state, kw = self.started(init, "--workflow", "tdd")
         self.assertEqual((state.workflow, state.phase), ("tdd", "spec"))
         self.assertEqual(kw["pipeline"], orchestrator.load_workflow_file(f"{EXAMPLES}/tdd.toml"))
-        self.assertEqual(kw["models"], {"tests": "sonnet"})
+        self.assertEqual(kw["agents"].models, {"tests": "sonnet"})
 
     def test_run_a_workflow_file_by_path(self, _resolve, _run, init):
         state, kw = self.started(init, "--workflow-file", f"{EXAMPLES}/quick.toml")
@@ -4020,10 +4040,10 @@ class TestWorkflowFileCLI(unittest.TestCase):
 
     def test_model_flags_override_the_files_models(self, _resolve, _run, init):
         _, kw = self.started(init, "--workflow", "tdd", "--model", "X")
-        self.assertEqual(kw["models"], {"spec": "X", "tests": "X", "build": "X", "review": "X"})
+        self.assertEqual(kw["agents"].models, {"spec": "X", "tests": "X", "build": "X", "review": "X"})
         _, kw = self.started(init, "--workflow", "tdd", "--role-model", "tests=haiku", "--role-model", "spec=opus",
                              "--build-model", "Y")
-        self.assertEqual(kw["models"], {"spec": "opus", "tests": "haiku", "build": "Y"})
+        self.assertEqual(kw["agents"].models, {"spec": "opus", "tests": "haiku", "build": "Y"})
 
     def test_role_model_for_a_role_the_workflow_lacks(self, _resolve, _run, init):
         with patch("sys.stderr", new_callable=io.StringIO) as err:
@@ -4161,6 +4181,323 @@ class TestWorkflowWithoutAVerdict(unittest.TestCase):
             self.assertEqual(main(["run", "task", "--workflow-file", path]), 0)
         state = init.call_args.args[2]
         out.assert_called_with(f"FINISHED: {state.dir}/build.md")
+
+
+
+KINDS = ("claude", "codex", "gemini", "opencode", "pi")
+MODES = ("default", "acceptEdits", "bypassPermissions", "plan", "auto", "dontAsk")
+# The spec's table of what --permission-mode becomes in each harness; None is dropped.
+PERMISSIONS = {
+    "claude": {mode: ("--permission-mode", mode) for mode in MODES},
+    "gemini": {"default": ("--approval-mode", "default"), "acceptEdits": ("--approval-mode", "auto_edit"),
+               "bypassPermissions": ("--approval-mode", "yolo"), "plan": None, "auto": None, "dontAsk": None},
+    "codex": {"default": (), "acceptEdits": ("--full-auto",),
+              "bypassPermissions": ("--dangerously-bypass-approvals-and-sandbox",),
+              "plan": ("--sandbox", "read-only"), "auto": None, "dontAsk": None},
+    "opencode": dict.fromkeys(MODES),
+    "pi": dict.fromkeys(MODES),
+}
+FULL = ("spec", "build", "review")
+
+
+def every_role(kind, roles=FULL):
+    return dict.fromkeys(roles, kind)
+
+
+class TestHarnesses(unittest.TestCase):
+    def run_default(self, **kw):
+        """A whole run of the default workflow; its starts as {role: (kind, args)} and what it logged."""
+        wf, herdr, *_ = make_workflow({
+            "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, **kw)
+        with patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(wf.run(), APPROVE)
+        args = {c[1].split("-")[0]: c[3] for c in herdr.calls if c[0] == "start"}
+        return {name.split("-")[0]: (kind, args[name.split("-")[0]]) for name, kind in herdr.kinds}, err.getvalue()
+
+    def test_a_new_agent_in_each_harness(self):
+        for kind in KINDS:
+            with self.subTest(kind=kind):
+                starts, _ = self.run_default(agent_kinds=every_role(kind), models={"build": "m"})
+                self.assertEqual(starts, {"spec": (kind, ()), "build": (kind, ("--model", "m")),
+                                          "review": (kind, ())})
+
+    def test_each_permission_mode_in_each_harness(self):
+        for kind in KINDS:
+            for mode in MODES:
+                with self.subTest(kind=kind, mode=mode):
+                    starts, logged = self.run_default(agent_kinds=every_role(kind), permission_mode=mode,
+                                                      models={"review": "m"})
+                    expected = PERMISSIONS[kind][mode] or ()
+                    self.assertEqual(starts, {"spec": (kind, expected), "build": (kind, expected),
+                                              "review": (kind, (*expected, "--model", "m"))})
+                    dropped = [line.strip() for line in logged.splitlines() if "no equivalent" in line]
+                    if PERMISSIONS[kind][mode] is None:
+                        self.assertEqual(dropped, [f"[{role}] {kind} has no equivalent of --permission-mode {mode}; "
+                                                   f"starting it without one" for role in FULL])
+                    else:
+                        self.assertEqual(dropped, [])
+
+    def test_without_a_harness_every_role_is_claude_as_before(self):
+        starts, logged = self.run_default(permission_mode="auto")
+        self.assertEqual(starts, every_role(("claude", ("--permission-mode", "auto"))))
+        self.assertNotIn("no equivalent", logged)
+
+    def test_a_dropped_mode_is_logged_once_per_role(self):
+        wf, herdr, *_ = resume(saved_run("build", 2, agents=FULL), {
+            "build": [build_turn(2)], "review": [review_turn(2, APPROVE)]},
+            alive=["review"], sessions={"build": "s-gone"}, agent_kinds=every_role("pi"), permission_mode="plan")
+        wf.state.agents["build"]["kind"] = "pi"
+        herdr.lost_sessions.add("s-gone")
+        with patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual([c[3] for c in herdr.calls if c[0] == "start"], [("--session", "s-gone"), ()])
+        self.assertEqual(err.getvalue().count("no equivalent"), 1)
+
+    def test_an_exited_agent_resumes_in_its_own_harness(self):
+        resumed = {
+            "claude": ("--permission-mode", "acceptEdits", "--resume", "s-build", "--model", "m"),
+            "gemini": ("--approval-mode", "auto_edit", "--resume", "s-build", "--model", "m"),
+            "codex": ("resume", "s-build", "--full-auto", "--model", "m"),
+            "pi": ("--session", "s-build", "--model", "m"),
+            "opencode": ("--session", "s-build", "--model", "m"),
+        }
+        for kind in KINDS:
+            with self.subTest(kind=kind):
+                seen = []
+                wf, herdr, *_ = resume(saved_run("build", 2, agents=FULL, prompted="build-2.md"), {
+                    "build": [recording(build_turn(2), seen)], "review": [review_turn(2, APPROVE)]},
+                    alive=["review"], sessions={"build": "s-build"}, agent_kinds=every_role(kind),
+                    permission_mode="acceptEdits", models={"build": "m"})
+                wf.state.agents["build"]["kind"] = kind
+                with patch("sys.stderr"):
+                    self.assertEqual(wf.run(), APPROVE)
+                self.assertEqual([c for c in herdr.calls if c[0] == "start"],
+                                 [("start", "build-a1b2c3", "w1:p2", resumed[kind])])
+                self.assertEqual(herdr.kinds, [("build-a1b2c3", kind)])
+                self.assertEqual(seen, [orchestrator.CONTINUE_PROMPT.format(path=wf.state.build_path(2))])
+                self.assertEqual(wf.state.agents["build"]["kind"], kind)
+
+    def test_a_changed_harness_starts_fresh(self):
+        # The saved record without a kind is a claude agent's, as 0.3.0 saved it.
+        for saved_kind, kind in ((None, "codex"), ("claude", "pi"), ("gemini", "claude")):
+            with self.subTest(saved=saved_kind, now=kind):
+                seen = []
+                wf, herdr, *_ = resume(saved_run("build", 2, agents=FULL, prompted="build-2.md"), {
+                    "build": [recording(build_turn(2), seen)], "review": [review_turn(2, APPROVE)]},
+                    alive=["review"], sessions={"build": "s-build"}, agent_kinds={"build": kind})
+                if saved_kind:
+                    wf.state.agents["build"]["kind"] = saved_kind
+                with patch("sys.stderr") as err:
+                    self.assertEqual(wf.run(), APPROVE)
+                self.assertEqual([c for c in herdr.calls if c[0] == "start"],
+                                 [("start", "build-a1b2c3", "w1:p2", ())])
+                self.assertEqual(herdr.kinds, [("build-a1b2c3", kind)])
+                self.assertIn("You are the Builder", seen[0])
+                self.assertIn("This is round 2, and you are a fresh session", seen[0])
+                logged = "".join(c.args[0] for c in err.write.call_args_list)
+                self.assertIn(f"[build] session s-build is {saved_kind or 'claude'}'s, and the role runs in {kind} "
+                              f"now; starting a fresh one", logged)
+
+    def test_a_live_agent_keeps_its_harness(self):
+        wf, herdr, *_ = resume(saved_run("review", 1, agents=FULL), {"review": [review_turn(1, APPROVE)]},
+                               alive=["review"], files={lambda s: s.build_path(1): "report 1"},
+                               agent_kinds=every_role("codex"))
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(herdr.kinds, [])
+        self.assertIn(("prompt", "review-a1b2c3"), herdr.calls)
+
+    def test_every_roles_harness_is_saved(self):
+        wf, *_ = make_workflow({"spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]},
+                               agent_kinds={"review": "pi"}, permission_mode="plan")
+        wf.run()
+        saved = json.loads(wf.host.files[f"{wf.state.dir}/state.json"])
+        self.assertEqual(saved["agent_kinds"], {"spec": "claude", "build": "claude", "review": "pi"})
+        self.assertEqual(saved["permission_mode"], "plan")
+        self.assertNotIn("agent_args", saved)
+        self.assertEqual({role: a["kind"] for role, a in saved["agents"].items()},
+                         {"spec": "claude", "build": "claude", "review": "pi"})
+
+
+def v030_state(**kw):
+    """state.json as 0.3.0 wrote it: Claude Code's agent_args, no harnesses, agent records without a kind."""
+    saved = asdict(saved_run("build", 2, agents=FULL, prompted="build-2.md"))
+    for key in ("permission_mode", "agent_kinds"):
+        del saved[key]
+    saved["agents"]["build"]["session"] = "s-build"
+    return {**saved, "agent_args": ["--permission-mode", "acceptEdits"], **kw}
+
+
+class TestHarnessFlags(unittest.TestCase):
+    def setUp(self):
+        workflows = os.path.join(without_workflow_files(self), "ai-agents-orchestrator", "workflows")
+        os.makedirs(workflows)
+        with open(f"{workflows}/coded.toml", "w") as f:
+            f.write('roles.review = { agent = "codex" }\n[[steps]]\nuse = "spec"\n[[steps]]\nuse = "build"\n'
+                    '[[steps]]\nuse = "review"\n')
+
+    def kinds(self, *flags):
+        """The harness of each role of a new run with these flags, once its Workflow fills in the default."""
+        state, pipeline = orchestrator.new_state(parse_args(["run", "task", *flags]), "/proj")
+        wf, *_ = make_workflow({}, state=state, pipeline=pipeline, agent_kinds=state.agent_kinds)
+        return wf.state.agent_kinds
+
+    def test_precedence(self):
+        cases = [
+            ([], every_role("claude")),
+            (["--agent", "codex"], every_role("codex")),
+            (["--agent", "gemini", "--role-agent", "review=pi"], {"spec": "gemini", "build": "gemini", "review": "pi"}),
+            (["--role-agent", "build=opencode"], {"spec": "claude", "build": "opencode", "review": "claude"}),
+            (["--workflow", "coded"], {"spec": "claude", "build": "claude", "review": "codex"}),
+            (["--workflow", "coded", "--agent", "gemini"], every_role("gemini")),
+            (["--workflow", "coded", "--role-agent", "review=pi"],
+             {"spec": "claude", "build": "claude", "review": "pi"}),
+            (["--workflow", "coded", "--agent", "pi", "--role-agent", "spec=claude"],
+             {"spec": "claude", "build": "pi", "review": "pi"}),
+        ]
+        for flags, kinds in cases:
+            with self.subTest(flags=flags):
+                self.assertEqual(self.kinds(*flags), kinds)
+
+    def test_role_agent_starts_that_role_in_its_harness(self):
+        state, pipeline = orchestrator.new_state(
+            parse_args(["run", "task", "--agent", "gemini", "--role-agent", "review=pi"]), "/proj")
+        wf, herdr, *_ = make_workflow({
+            "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)],
+        }, state=state, pipeline=pipeline, agent_kinds=state.agent_kinds)
+        wf.run()
+        self.assertEqual([(name.split("-")[0], kind) for name, kind in herdr.kinds],
+                         [("spec", "gemini"), ("build", "gemini"), ("review", "pi")])
+
+    @patch.object(Workflow, "__init__", return_value=None)
+    @patch.object(Workflow, "run", return_value=APPROVE)
+    @patch.object(Host, "resolve_dir", return_value="/proj")
+    @patch.dict("os.environ", {"HERDR_ENV": "1"})
+    def test_flags_reach_the_workflow(self, _resolve, _run, init):
+        with patch("builtins.print"):
+            self.assertEqual(main(["run", "task", "--agent", "codex", "--role-agent", "spec=claude"]), 0)
+        self.assertEqual(init.call_args.kwargs["agents"].kinds, {"spec": "claude", "build": "codex", "review": "codex"})
+
+    @patch.object(Workflow, "__init__", return_value=None)
+    @patch.object(Host, "resolve_dir", return_value="/proj")
+    @patch.dict("os.environ", {"HERDR_ENV": "1"})
+    def test_role_agent_for_a_role_the_workflow_lacks(self, _resolve, init):
+        with patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(main(["run", "task", "--role-agent", "tests=pi"]), orchestrator.EXIT_ERROR)
+        self.assertIn("--role-agent names role tests, which the workflow does not have; its roles are spec, "
+                      "build, review", err.getvalue())
+        init.assert_not_called()
+
+    def test_unknown_kinds_are_argparse_errors(self):
+        for argv in (["run", "task", "--agent", "cursor"], ["resume", "a1b2c3", "--agent", "cursor"],
+                     ["run", "task", "--role-agent", "review=cursor"], ["resume", "a1b2c3", "--role-agent", "review"],
+                     ["run", "task", "--role-agent", "=pi"]):
+            with self.subTest(argv=argv), self.assertRaises(SystemExit), \
+                    patch("sys.stderr", new_callable=io.StringIO) as err:
+                parse_args(argv)
+            self.assertRegex(err.getvalue(), r"claude'?, '?codex'?, '?gemini'?, '?opencode'?,? (and )?'?pi")
+
+    def resumable(self, argv, saved):
+        return orchestrator.resumable_state([(10**4, saved)], parse_args(["resume", "a1b2c3", *argv]), "/proj",
+                                            "here", lambda pid: False)
+
+    def test_resume_keeps_or_overrides_the_saved_harnesses(self):
+        saved = {**asdict(saved_run("build", 2, agents=FULL)),
+                 "agent_kinds": {"spec": "claude", "build": "codex", "review": "gemini"}}
+        cases = [
+            ([], {"spec": "claude", "build": "codex", "review": "gemini"}),
+            (["--agent", "pi"], every_role("pi")),
+            (["--role-agent", "review=opencode"], {"spec": "claude", "build": "codex", "review": "opencode"}),
+        ]
+        for flags, kinds in cases:
+            with self.subTest(flags=flags):
+                self.assertEqual(self.resumable(flags, saved).agent_kinds, kinds)
+
+    def test_resume_with_a_new_harness_relaunches_in_it(self):
+        state = self.resumable(["--agent", "pi"], {**v030_state(), "phase": "review"})
+        wf, herdr, *_ = resume(state, {"review": [review_turn(2, APPROVE)]},
+                               files={lambda s: s.build_path(2): "report 2"},
+                               permission_mode=state.permission_mode, agent_kinds=state.agent_kinds)
+        with patch("sys.stderr"):
+            self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(herdr.kinds, [("review-a1b2c3", "pi")])
+
+    def test_a_030_state_resumes_on_claude(self):
+        state = self.resumable([], v030_state())
+        self.assertEqual((state.permission_mode, state.agent_kinds), ("acceptEdits", {}))
+        seen = []
+        wf, herdr, host, _ = resume(state, {
+            "build": [recording(build_turn(2), seen)], "review": [review_turn(2, APPROVE)]},
+            permission_mode=state.permission_mode, agent_kinds=state.agent_kinds, models=state.models)
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual([c[3] for c in herdr.calls if c[0] == "start"], [
+            ("--permission-mode", "acceptEdits", "--resume", "s-build"), ("--permission-mode", "acceptEdits")])
+        self.assertEqual(herdr.kinds, [("build-a1b2c3", "claude"), ("review-a1b2c3", "claude")])
+        self.assertEqual(seen, [orchestrator.CONTINUE_PROMPT.format(path=wf.state.build_path(2))])
+        saved = json.loads(host.files[f"{wf.state.dir}/state.json"])
+        self.assertEqual((saved["permission_mode"], saved["agent_kinds"]), ("acceptEdits", every_role("claude")))
+
+    def test_a_030_state_without_a_permission_mode(self):
+        self.assertIsNone(RunState.from_dict(v030_state(agent_args=[])).permission_mode)
+
+    def test_unreadable_agent_args(self):
+        saved = v030_state(agent_args=["--model", "x"])
+        with self.assertRaisesRegex(OrchestratorError, r"has agent_args \['--model', 'x'\], which name no permission"):
+            RunState.from_dict(saved)
+
+
+class TestWorkflowFileAgents(unittest.TestCase):
+    def test_parsed_and_round_tripped(self):
+        p = orchestrator.parse_workflow("mine", tomllib.loads(
+            'roles.review = { agent = "codex", model = "o3" }\nroles.build = { label = "Implementer", agent = "pi" }\n'
+            '[[steps]]\nuse = "spec"\n[[steps]]\nuse = "build"\n[[steps]]\nuse = "review"\n'))
+        self.assertEqual(p.agents, {"review": "codex", "build": "pi"})
+        definition = orchestrator.workflow_definition(p)
+        self.assertEqual(definition["roles"], {"spec": {"label": "Spec Collector"},
+                                               "build": {"label": "Implementer", "agent": "pi"},
+                                               "review": {"label": "Reviewer", "model": "o3", "agent": "codex"}})
+        text = orchestrator.workflow_toml(p)
+        self.assertIn('[roles.review]\nlabel = "Reviewer"\nmodel = "o3"\nagent = "codex"\n', text)
+        self.assertEqual(orchestrator.parse_workflow("mine", tomllib.loads(text)), p)
+        self.assertEqual(orchestrator.parse_workflow("mine", definition), p)
+
+    def test_workflows_prints_it(self):
+        config = without_workflow_files(self)
+        workflows = os.path.join(config, "ai-agents-orchestrator", "workflows")
+        os.makedirs(workflows)
+        with open(f"{workflows}/coded.toml", "w") as f:
+            f.write('roles.review = { agent = "codex" }\n[[steps]]\nuse = "spec"\n[[steps]]\nuse = "build"\n'
+                    '[[steps]]\nuse = "review"\n')
+        with patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(main(["workflows", "coded"]), 0)
+        self.assertIn('[roles.review]\nlabel = "Reviewer"\nagent = "codex"\n', out.getvalue())
+
+    def test_saved_with_the_run(self):
+        p = Pipeline("coded", dict(QUICK.roles), QUICK.steps, agents={"review": "codex"})
+        wf, *_ = make_workflow({"build": [build_turn(1)], "review": [review_turn(1, APPROVE)]},
+                               state=new_run(p), pipeline=p, pull_request=False)
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(wf.state.workflow_definition["roles"]["review"], {"label": "Reviewer", "agent": "codex"})
+        self.assertEqual(orchestrator.run_pipeline("coded", wf.state.workflow_definition), p)
+
+    def test_invalid_agents_name_the_role(self):
+        steps = '[[steps]]\nuse = "spec"\n[[steps]]\nuse = "build"\n[[steps]]\nuse = "review"\n'
+        self.assertEqual(orchestrator.parse_workflow("mine", tomllib.loads(steps)).steps,
+                         orchestrator.DEFAULT_WORKFLOW.steps)
+        cases = [
+            ('roles.review = { agent = "cursor" }\n',
+             "role review: agent cursor is not a harness this orchestrator supports; "
+             "it takes claude, codex, gemini, opencode, pi"),
+            ('roles.review = { agent = 3 }\n', "role review: agent must be a string"),
+            ('roles.review = { agnet = "pi" }\n', "role review: unknown key agnet; did you mean agent?"),
+        ]
+        for text, message in cases:
+            data = tomllib.loads(text + steps)
+            with self.subTest(text=text), self.assertRaises(ValueError) as cm:
+                orchestrator.parse_workflow("mine", data)
+            self.assertIn(message, str(cm.exception))
+        roles = dict(QUICK.roles)
+        with self.assertRaisesRegex(ValueError, "an agent is set for role x, which is not one of the workflow's roles"):
+            Pipeline("bad", roles, QUICK.steps, agents={"x": "pi"})
 
 
 if __name__ == "__main__":
