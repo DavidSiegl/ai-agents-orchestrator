@@ -795,14 +795,16 @@ class TestHerdr(unittest.TestCase):
         err = json.dumps({"error": {"code": "agent_blocked", "message": "waiting"}})
         run = MagicMock(return_value=completed(stderr=err, returncode=1))
 
+        herdr = Herdr(run=run)
         with self.assertRaises(HerdrError) as cm:
-            Herdr(run=run).call("agent", "prompt", "x", "y")
+            herdr.call("agent", "prompt", "x", "y")
         self.assertEqual(cm.exception.code, "agent_blocked")
 
     def test_plain_text_error(self):
         run = MagicMock(return_value=completed(stderr="unknown flag", returncode=2))
+        herdr = Herdr(run=run)
         with self.assertRaisesRegex(HerdrError, "exit_2: unknown flag"):
-            Herdr(run=run).call("agent", "bogus")
+            herdr.call("agent", "bogus")
 
     def test_status_is_none_after_exit(self):
         err = json.dumps({"error": {"code": "agent_not_found", "message": "gone"}})
@@ -844,13 +846,15 @@ class TestHerdr(unittest.TestCase):
 
     def test_ssh_target_unknown_machine(self):
         run = MagicMock(return_value=completed("[]"))
+        herdr = Herdr("nope", run=run)
         with self.assertRaisesRegex(OrchestratorError, "no saved herdr machine named nope"):
-            Herdr("nope", run=run).ssh_target()
+            herdr.ssh_target()
 
     def test_missing_binary(self):
         run = MagicMock(side_effect=FileNotFoundError())
+        herdr = Herdr(run=run)
         with self.assertRaisesRegex(OrchestratorError, "not on PATH"):
-            Herdr(run=run).call("agent", "list")
+            herdr.call("agent", "list")
 
 
 class TestHost(unittest.TestCase):
@@ -870,8 +874,9 @@ class TestHost(unittest.TestCase):
 
     def test_read_failure_raises(self):
         run = MagicMock(return_value=completed(stderr="Permission denied", returncode=1))
+        host = Host(run=run)
         with self.assertRaisesRegex(OrchestratorError, "Permission denied"):
-            Host(run=run).read("/x/spec.md")
+            host.read("/x/spec.md")
 
     def test_write_sends_text_on_stdin(self):
         run = MagicMock(return_value=completed())
@@ -900,8 +905,9 @@ class TestHost(unittest.TestCase):
 
     def test_run_states_corrupt(self):
         run = MagicMock(return_value=completed('5 {"run_id": \n'))
+        host = Host(run=run)
         with self.assertRaisesRegex(OrchestratorError, "corrupt run state"):
-            Host(run=run).run_states("/x")
+            host.run_states("/x")
 
     def test_real_filesystem_roundtrip(self):
         import tempfile
@@ -1622,8 +1628,9 @@ class TestResumableState(unittest.TestCase):
                          (5, 60, ["--permission-mode", "acceptEdits"], {"build": "sonnet", "review": "opus"}))
 
     def test_max_rounds_below_the_saved_round(self):
+        saved = self.saved()
         with self.assertRaisesRegex(OrchestratorError, "already in round 2"):
-            self.resumable(["a1b2c3", "--max-rounds", "1"], self.saved())
+            self.resumable(["a1b2c3", "--max-rounds", "1"], saved)
 
     def test_live_run_needs_force(self):
         saved = self.saved(owner=ME)
@@ -1701,8 +1708,9 @@ class TestHerdrLookups(unittest.TestCase):
         self.assertFalse(Herdr(run=self.not_found("pane_not_found")).pane_exists("wA:p1"))
 
     def test_other_errors_raise(self):
+        herdr = Herdr(run=self.not_found("server_unavailable"))
         with self.assertRaises(HerdrError):
-            Herdr(run=self.not_found("server_unavailable")).pane_exists("wA:p1")
+            herdr.pane_exists("wA:p1")
 
 
 class TestAtomicWrite(unittest.TestCase):
@@ -2749,8 +2757,9 @@ class TestCIEnvFile(unittest.TestCase):
         with patch.dict("os.environ", {"XDG_CONFIG_HOME": xdg}):
             for k in orchestrator.CI_ENV:
                 os.environ.pop(k, None)
+            ci = CI(JOB)
             with self.assertRaisesRegex(OrchestratorError, f"environment or in {self.path}$"):
-                CI(JOB).check_credentials()
+                ci.check_credentials()
 
 
 class TestCI(unittest.TestCase):
@@ -2922,8 +2931,8 @@ class TestHostSnapshot(unittest.TestCase):
 
         sha = self.host.snapshot(self.repo, base, "snapshot")
 
-        self.assertEqual([self.git("rev-parse", "HEAD"), self.git("ls-files", "--stage"),
-                          self.git("status", "--porcelain")], before)
+        after = [self.git("rev-parse", "HEAD"), self.git("ls-files", "--stage"), self.git("status", "--porcelain")]
+        self.assertEqual(after, before)
         self.assertEqual(self.git("ls-tree", "-r", "--name-only", sha).split(),
                          [".gitignore", "keep.py", "mod.py", "untracked.py"])
         self.assertEqual(self.git("show", f"{sha}:mod.py"), "1\ntwo\n3\n")
@@ -3001,8 +3010,9 @@ class TestQualityCLI(unittest.TestCase):
         self.resumable(["--max-quality-rounds", "1"], asdict(saved_run("build", 2, quality_job=JOB)))
 
     def test_resume_limit_needs_the_gate(self):
+        saved = asdict(saved_run("build", 1))
         with self.assertRaisesRegex(OrchestratorError, "has no quality gate"):
-            self.resumable(["--max-quality-rounds", "2"], asdict(saved_run("build", 1)))
+            self.resumable(["--max-quality-rounds", "2"], saved)
 
     def test_state_saved_before_the_gate_has_none(self):
         saved = asdict(saved_run("review", 1))
@@ -3838,10 +3848,10 @@ class TestWorkflowFiles(unittest.TestCase):
         definition = orchestrator.workflow_definition(QUICK)
         definition["steps"][0]["prompt"] = "{task:d}"
         saved = {**asdict(saved_run("build", 1)), "workflow": "quick", "workflow_definition": definition}
+        args = parse_args(["resume", "a1b2c3"])
         with self.assertRaisesRegex(OrchestratorError, "saved with the run is invalid: workflow quick: step build: "
                                                        "prompt cannot be filled in"):
-            orchestrator.resumable_state([(10**4, saved)], parse_args(["resume", "a1b2c3"]), "/proj", "here",
-                                         lambda pid: True)
+            orchestrator.resumable_state([(10**4, saved)], args, "/proj", "here", lambda pid: True)
 
     def test_steps_whose_files_can_share_a_name(self):
         default = orchestrator.DEFAULT_WORKFLOW
@@ -3882,8 +3892,9 @@ class TestWorkflowFiles(unittest.TestCase):
                                     Step("r", "b", "x3{n}.md", "{path}", loop_to="b")))
 
     def test_a_model_for_a_role_not_in_the_workflow(self):
+        steps = (Step("build", "build", "b.md", "{path}"),)
         with self.assertRaisesRegex(ValueError, "a model is set for role x, which is not one of the workflow's"):
-            Pipeline("bad", {"build": "Builder"}, (Step("build", "build", "b.md", "{path}"),), models={"x": "m"})
+            Pipeline("bad", {"build": "Builder"}, steps, models={"x": "m"})
 
     def test_a_file_cannot_replace_a_built_in_workflow(self):
         path = self.file("default", '[[steps]]\nuse = "spec"\n')
