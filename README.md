@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo.svg" alt="An octopus holding a terminal, a robot and a chat bubble" width="200"></p>
+
 # ai-agents-orchestrator
 
 A role-based handoff workflow for **Claude Code** sessions running in [herdr](https://herdr.dev):
