@@ -18,8 +18,8 @@ One standard-library module, in these sections:
 | `Host` | The project's filesystem and git checkout, run locally or over `ssh -o BatchMode=yes`. `write` is atomic; `run_states` ages each `state.json` by the host's clock; `fast_forward`, `merge_upstream` and `abort_merge` keep the branch up to date with `origin`. For the quality gate, `snapshot` commits the working tree through a temporary index without moving a ref, `push_ref`, `delete_remote_branch` and `remote_branches` handle the throwaway branches, and `change_diff` is the `git diff -U0` that `changed_lines` parses. |
 | `CI` | Jenkins's quality job and SonarQube over HTTP, from the orchestrator's machine, one method per call, over an injected `urlopen`. The credentials come from the environment or `ci.env` and go only into the `Authorization` header; `mask` replaces the tokens in text from either server. `CIError` carries the HTTP status, and `transient` says whether a retry may help. |
 | `RunState` and helpers | `RunState` is `state.json`. The pure helpers are `parse_verdict`, `parse_gate`, `spec_title`, `branch_name`, `pr_body` (with `verdict_line`; `commit_note` for the commit message), and for the quality file `changed_lines`, `edited_config`, `issue_severity` and `quality_report`. |
-| `Workflow` | Drives one run through its `pipeline`. Its collaborators (`herdr`, `host`, `ci`, `notify`, `sleep`, `clock`, `wallclock`) are arguments, which is what lets the tests use fakes. |
-| CLI | `parse_args`, `role_models` (with `role_model_arg`), `print_workflows`, `workflow_arg`, `run_health`, `print_runs` (with `run_round`), `find_run`, `resumable_state` and `main`. |
+| `Workflow` | Drives one run through its `pipeline`. Its collaborators (`herdr`, `host`, `ci`, `notify`, and `clocks`, a `Clocks` of `sleep`, `monotonic` and `wall`) are arguments, which is what lets the tests use fakes. |
+| CLI | `parse_args`, `role_models` (with `role_model_arg`), `print_workflows`, `workflow_arg`, `run_health`, `print_runs` (with `run_round`), `find_run`, `resumable_state`, and `main` with `workflows_command`, `connect`, `new_state`, `resumed_state` and `finish`. |
 
 ## The phase machine
 
@@ -58,7 +58,8 @@ base branch; a resume that starts in the gated step or in `quality` checks the C
 
 A failure goes through `_release`, which records `error`. Each role's turn is `_turn`: it takes a handoff file
 that already exists, and otherwise gets the agent ready through `_agent` (`NEW`, `ALIVE`, `RESUMED` or
-`RESTARTED`), prompts it and polls for the file. `_save` checks the owner before every write and raises
+`RESTARTED`), prompts it with what `_prompt_for` picks, and polls for the file in `_await_handoff`, where
+`_tell_human` notifies the human of a blocked or stalled agent once. `_save` checks the owner before every write and raises
 `RunTakenOver` after a takeover; `_heartbeat` keeps `state.json` fresh while a turn runs.
 
 ## Workflows

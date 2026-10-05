@@ -262,7 +262,7 @@ def make_workflow(script, host=None, max_rounds=3, state=None, **kw):
     notes = []
     clock = FakeClock()
     wf = Workflow(herdr, host, state, notify=lambda t, b: notes.append(t),
-                  max_rounds=max_rounds, sleep=clock.sleep, clock=clock, wallclock=clock, **kw)
+                  max_rounds=max_rounds, clocks=orchestrator.Clocks(clock.sleep, clock, clock), **kw)
     return wf, herdr, host, notes
 
 
@@ -2611,6 +2611,10 @@ class TestChangedLines(unittest.TestCase):
                 "@@ -1 +0,0 @@\n-z\n")
         self.assertEqual(changed_lines(diff), {"new.py": {1, 2, 3}, "mod.py": {3, 18, 19}})
 
+    def test_a_hunk_header_it_cannot_read_adds_no_lines(self):
+        diff = "diff --git a/m.py b/m.py\n--- a/m.py\n+++ b/m.py\n@@ garbled @@\n+x\n"
+        self.assertEqual(changed_lines(diff), {"m.py": set()})
+
     def test_renames(self):
         diff = ("diff --git a/old name.py b/new name.py\nsimilarity index 100%\nrename from old name.py\n"
                 "rename to new name.py\n"
@@ -2677,10 +2681,22 @@ class TestQualityReport(unittest.TestCase):
         self.assertIn("None.", text)
         self.assertIn("No new lines to cover.", quality_report("OK", "i", {}, tests=[], coverage={}))
 
+    def test_failing_tests_beyond_the_limit_are_counted(self):
+        tests = [(f"t.T.test_{k}", "") for k in range(orchestrator.QUALITY_ISSUE_LIMIT + 3)]
+        text = quality_report("ERROR", "intro", {}, tests=tests)
+        self.assertIn("- `t.T.test_0`: failed\n", text)
+        self.assertIn("- and 3 more.\n", text)
+        self.assertNotIn(f"test_{orchestrator.QUALITY_ISSUE_LIMIT}`", text)
+
     def test_build_config_edits_are_named(self):
         text = quality_report("OK", "i", {}, tests=[], edited=["Jenkinsfile", "sonar-project.properties"])
         self.assertIn("The change edits `Jenkinsfile`. The quality job reads it from `main`", text)
         self.assertIn("The change edits `sonar-project.properties`. The scanner read the edited file", text)
+        for only, other in (("Jenkinsfile", "sonar-project.properties"), ("sonar-project.properties", "Jenkinsfile")):
+            with self.subTest(only=only):
+                text = quality_report("OK", "i", {}, tests=[], edited=[only])
+                self.assertIn(f"The change edits `{only}`", text)
+                self.assertNotIn(f"The change edits `{other}`", text)
 
     def test_tokens_are_masked(self):
         ci = CI(JOB, env=CREDENTIALS)
