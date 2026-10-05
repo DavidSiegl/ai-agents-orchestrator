@@ -128,5 +128,3 @@ and [quality gate](docs/quality-gate.md).
 ```bash
 uv run pytest
 ```
-
-[TESTING.md](TESTING.md) plans the testing methods beyond these unit tests, and the order to adopt them in.
