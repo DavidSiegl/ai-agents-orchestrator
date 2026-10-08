@@ -1,3 +1,4 @@
+import base64
 import io
 import json
 import os
@@ -5,6 +6,7 @@ import re
 import socket
 import subprocess
 import shlex
+import struct
 import tempfile
 import threading
 import time
@@ -4670,13 +4672,18 @@ class TestRunProcess(unittest.TestCase):
 
 class FakeVar:
     def __init__(self, master=None, value=""):
-        self.value = value
+        self.value, self.traces = value, []
 
     def get(self):
         return self.value
 
     def set(self, value):
         self.value = value
+        for fn in self.traces:
+            fn("PY_VAR0", "", "write")
+
+    def trace_add(self, mode, fn):
+        self.traces.append(fn)
 
 
 class FakeBooleanVar(FakeVar):
@@ -4685,14 +4692,24 @@ class FakeBooleanVar(FakeVar):
 
 
 class FakeWidget:
-    """A tkinter widget that records its options and bindings, and accepts any layout call."""
+    """A tkinter widget that records its options, children, tags and bindings, and accepts any layout call."""
 
     def __init__(self, master=None, **options):
         self.options = options
-        self.bindings = {}
+        self.bindings, self.children, self.tags = {}, [], {}
+        if isinstance(master, FakeWidget):
+            master.children.append(self)
 
     def configure(self, **options):
         self.options.update(options)
+
+    def tag_configure(self, tag, **options):
+        self.tags[tag] = options
+
+    def descendants(self):
+        for child in self.children:
+            yield child
+            yield from child.descendants()
 
     def bind(self, event, handler):
         self.bindings[event] = handler
@@ -4705,13 +4722,18 @@ class FakeWidget:
 
 
 class FakeText(FakeWidget):
-    """Like Tk's Text, it ignores inserts while disabled."""
+    """Like Tk's Text, it ignores inserts while disabled. tagged holds each insert's text and tags."""
 
     text = ""
 
-    def insert(self, index, text):
+    def __init__(self, master=None, **options):
+        super().__init__(master, **options)
+        self.tagged = []
+
+    def insert(self, index, text, *tags):
         if self.options.get("state") != "disabled":
             self.text += text
+            self.tagged.append((text, tags))
 
     def get(self, start, end):
         return self.text
@@ -4720,10 +4742,11 @@ class FakeText(FakeWidget):
 class FakeTreeview(FakeWidget):
     def __init__(self, master=None, **options):
         super().__init__(master, **options)
-        self.rows, self.selected = {}, ()
+        self.rows, self.row_tags, self.selected = {}, {}, ()
 
-    def insert(self, parent, index, iid, values):
+    def insert(self, parent, index, iid, values, tags=()):
         self.rows[iid] = values
+        self.row_tags[iid] = tags
 
     def delete(self, *iids):
         for iid in iids:
@@ -4740,6 +4763,7 @@ class FakeRoot(FakeWidget):
     def __init__(self):
         super().__init__()
         self.pending, self.protocols, self.destroyed = [], {}, False
+        self.icon, self.option_db = None, {}
 
     def after(self, ms, fn):
         self.pending.append(fn)
@@ -4749,6 +4773,12 @@ class FakeRoot(FakeWidget):
 
     def destroy(self):
         self.destroyed = True
+
+    def iconphoto(self, default, image):
+        self.icon = (default, image)
+
+    def option_add(self, pattern, value):
+        self.option_db[pattern] = value
 
     def tick(self):
         """Run the callbacks due so far, as one pass of Tk's event loop would."""
@@ -4761,12 +4791,64 @@ class FakeRoot(FakeWidget):
             self.tick()
 
 
+class FakeStyle:
+    """ttk.Style, recording the theme and each style's options and state maps."""
+
+    def __init__(self, master=None):
+        self.theme, self.options, self.maps = None, {}, {}
+
+    def theme_use(self, name):
+        self.theme = name
+
+    def configure(self, style, **options):
+        self.options.setdefault(style, {}).update(options)
+
+    def map(self, style, **options):
+        self.maps.setdefault(style, {}).update(options)
+
+
+class FakeFont:
+    """A Tk named font, as tkinter.font.nametofont gives it."""
+
+    def __init__(self, name, size=-12):
+        self.name, self.options = name, {"size": size, "weight": "normal"}
+
+    def copy(self):
+        return FakeFont(self.name, self.options["size"])
+
+    def configure(self, **options):
+        self.options.update(options)
+
+    def cget(self, option):
+        return self.options[option]
+
+    def metrics(self, option):
+        return 15
+
+
+class FakePhotoImage:
+    def __init__(self, master=None, **options):
+        self.options = options
+
+
+# The ttk widget classes the window may create; a class of its own each, so a test can tell them apart.
+TTK_WIDGETS = {name: type(name, (FakeWidget,), {}) for name in
+               ("Frame", "Label", "Entry", "Combobox", "Button", "Checkbutton", "Scrollbar")}
+
+
 def fake_ui():
-    ttk = SimpleNamespace(**{name: FakeWidget for name in
-                             ("LabelFrame", "Label", "Entry", "Combobox", "Button", "Checkbutton", "Scrollbar")},
-                          Treeview=FakeTreeview)
-    return SimpleNamespace(tk=SimpleNamespace(StringVar=FakeVar, BooleanVar=FakeBooleanVar, Text=FakeText),
-                           ttk=ttk, filedialog=MagicMock(), messagebox=MagicMock())
+    """The tkinter modules, faked; styles holds each ttk.Style the window creates."""
+    styles = []
+
+    def style(master=None):
+        styles.append(FakeStyle(master))
+        return styles[-1]
+
+    return SimpleNamespace(
+        tk=SimpleNamespace(StringVar=FakeVar, BooleanVar=FakeBooleanVar, Text=FakeText, PhotoImage=FakePhotoImage),
+        ttk=SimpleNamespace(**TTK_WIDGETS, Treeview=FakeTreeview, Style=style),
+        font=SimpleNamespace(nametofont=lambda name, root=None: FakeFont(name)),
+        filedialog=MagicMock(), messagebox=MagicMock(), styles=styles)
 
 
 class FakeProcess:
@@ -4941,6 +5023,216 @@ class TestRunWindow(unittest.TestCase):
         self.assertEqual(self.listed, [])
 
 
+DOCS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs")
+
+
+def contrast(a, b):
+    """WCAG's contrast ratio of two #RRGGBB colors."""
+    def luminance(color):
+        r, g, b = (int(color[i:i + 2], 16) / 255 for i in (1, 3, 5))
+        r, g, b = (c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in (r, g, b))
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    hi, lo = sorted((luminance(a), luminance(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+PALETTE = {name: getattr(orchestrator, name) for name in
+           ("NAVY", "NAVY_LIGHT", "NAVY_DARK", "NAVY_RAISED", "NAVY_HOVER", "PALE_MINT", "MUTED_MINT", "CORAL",
+            "CORAL_LIGHT", "TEAL", "MINT", "AMBER")}
+
+
+class TestGuiPalette(unittest.TestCase):
+    def test_the_logos_colors(self):
+        with open(os.path.join(DOCS, "logo.svg")) as f:
+            svg = f.read().upper()
+        for name in ("NAVY", "PALE_MINT", "CORAL", "TEAL", "MINT", "AMBER"):
+            with self.subTest(name=name):
+                self.assertIn(f'"{PALETTE[name]}"', svg)
+
+    def test_text_is_legible_on_its_backgrounds(self):
+        o = orchestrator
+        pairs = {
+            "text on the window, cards, fields and output": [(o.PALE_MINT, bg) for bg in
+                                                             (o.NAVY, o.NAVY_LIGHT, o.NAVY_DARK)],
+            "text on buttons and headings": [(o.PALE_MINT, o.NAVY_RAISED), (o.PALE_MINT, o.NAVY_HOVER)],
+            "muted and disabled text": [(o.MUTED_MINT, o.NAVY), (o.MUTED_MINT, o.NAVY_LIGHT)],
+            "Start run": [(o.NAVY, o.CORAL), (o.NAVY, o.CORAL_LIGHT)],
+            "the header's role chain": [(o.MINT, o.NAVY)],
+            "run statuses": [(color, o.NAVY) for color in (o.MINT, o.AMBER, o.CORAL)],
+            "selected text": [(o.NAVY, o.MINT), (o.NAVY, o.MUTED_MINT)],
+            "the output's command and exit lines": [(o.MINT, o.NAVY_DARK), (o.CORAL, o.NAVY_DARK)],
+        }
+        for use, colors in pairs.items():
+            for fg, bg in colors:
+                with self.subTest(use=use, fg=fg, bg=bg):
+                    self.assertGreaterEqual(contrast(fg, bg), 4.5)
+
+    def test_the_contrast_formula(self):
+        self.assertAlmostEqual(contrast("#000000", "#FFFFFF"), 21)
+        self.assertAlmostEqual(contrast("#777777", "#777777"), 1)
+
+
+class TestGuiLogo(unittest.TestCase):
+    def test_the_constant_is_the_committed_png(self):
+        with open(os.path.join(DOCS, "logo-64.png"), "rb") as f:
+            png = f.read()
+        self.assertEqual(base64.b64decode(orchestrator.LOGO_PNG, validate=True), png)
+        self.assertEqual(png[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertEqual(png[12:16], b"IHDR")
+        self.assertEqual(struct.unpack(">II", png[16:24]), (64, 64))
+
+
+class TestStatusTag(unittest.TestCase):
+    def test_each_status(self):
+        url = "  https://github.com/o/r/pull/7"
+        for status, tag in (("APPROVE", "ok"), (f"APPROVE{url}", "ok"), (f"APPROVE{url}  [quick workflow]", "ok"),
+                            ("CHANGES_REQUESTED", "warn"), (f"CHANGES_REQUESTED{url}  [tdd workflow]", "warn"),
+                            ("stale: no heartbeat for 6m; resume: orchestrator.py resume c0ffee", "warn"),
+                            ("error: herdr: no such pane", "error"), ("error: boom  [quick workflow]", "error"),
+                            ("running: pid 4242 on here", None), ("FINISHED", None), ("", None),
+                            ("[quick workflow]", None)):
+            with self.subTest(status=status):
+                self.assertEqual(orchestrator.status_tag(status), tag)
+
+
+class TestRoleChain(unittest.TestCase):
+    def test_in_the_order_the_steps_use_the_roles(self):
+        self.assertEqual(orchestrator.role_chain(orchestrator.DEFAULT_WORKFLOW),
+                         "Spec Collector → Builder → Reviewer")
+        self.assertEqual(orchestrator.role_chain(QUICK), "Builder → Reviewer")
+        roles = {"review": "Reviewer", "build": "Builder"}  # declared out of the steps' order
+        self.assertEqual(orchestrator.role_chain(Pipeline("q", roles, QUICK.steps)), "Builder → Reviewer")
+
+
+class TestRunWindowLook(unittest.TestCase):
+    def setUp(self):
+        self.workflows = os.path.join(without_workflow_files(self), "ai-agents-orchestrator", "workflows")
+        os.makedirs(self.workflows)
+        self.root, self.ui = FakeRoot(), fake_ui()
+        self.started = []
+        self.window = orchestrator.RunWindow(self.root, self.ui, start=self.start, list_runs=lambda m, c: [],
+                                             background=lambda fn: fn())
+        [self.style] = self.ui.styles
+
+    def start(self, argv):
+        self.started.append(FakeProcess(argv))
+        return self.started[-1]
+
+    def ttk_widgets(self):
+        """Each ttk widget in the window, with the style it is drawn in."""
+        classes = {cls: name for name, cls in vars(self.ui.ttk).items() if isinstance(cls, type)}
+        for w in self.root.descendants():
+            if (name := classes.get(type(w))) is not None:
+                yield w, w.options.get("style") or (name if name == "Treeview" else f"T{name}")
+
+    def test_every_widget_is_styled_on_clam(self):
+        self.assertEqual(self.style.theme, "clam")
+        styles = {style for _, style in self.ttk_widgets()}
+        self.assertLessEqual({"TFrame", "Card.TFrame", "TLabel", "Section.TLabel", "TEntry", "TCombobox", "TButton",
+                              "Accent.TButton", "TCheckbutton", "Treeview", "TScrollbar"}, styles)
+        for style in styles | {"Treeview.Heading"}:
+            with self.subTest(style=style):
+                self.assertTrue({"background", "fieldbackground"} & self.style.options[style].keys())
+        self.assertEqual(self.window.start_button.options["style"], "Accent.TButton")
+        self.assertEqual(self.style.options["Accent.TButton"]["foreground"], orchestrator.NAVY)
+        self.assertEqual(self.style.options["Accent.TButton"]["background"], orchestrator.CORAL)
+        self.assertEqual(self.root.option_db["*TCombobox*Listbox.background"], orchestrator.NAVY)
+        self.assertEqual(self.root.options["background"], orchestrator.NAVY)
+
+    def test_every_color_is_from_the_palette(self):
+        colors = set(PALETTE.values())
+        values = [v for options in self.style.options.values() for v in options.values()]
+        values += [spec[-1] for maps in self.style.maps.values() for specs in maps.values() for spec in specs]
+        values += list(self.root.option_db.values())
+        for w in (self.window.task, self.window.log, self.window.runs):
+            values += list(w.options.values()) + [v for tag in w.tags.values() for v in tag.values()]
+        hexes = [v for v in values if isinstance(v, str) and v.startswith("#")]
+        self.assertTrue(hexes)
+        self.assertEqual([v for v in hexes if v not in colors], [])
+
+    def test_disabled_and_hovered_buttons_stay_legible(self):
+        o = orchestrator
+        for style in ("TButton", "Accent.TButton"):
+            with self.subTest(style=style):
+                maps = self.style.maps[style]
+                self.assertEqual(dict(maps["background"])["disabled"], o.NAVY_LIGHT)
+                self.assertEqual(dict(maps["foreground"])["disabled"], o.MUTED_MINT)
+                self.assertEqual(maps["background"][0][0], "disabled")  # the first state that matches wins
+        self.assertEqual(dict(self.style.maps["Accent.TButton"]["background"])["active"], o.CORAL_LIGHT)
+
+    def test_the_logo_in_the_header_and_as_the_icon(self):
+        logo = self.window.logo
+        self.assertIsInstance(logo, FakePhotoImage)
+        self.assertEqual(logo.options["data"], orchestrator.LOGO_PNG)
+        self.assertEqual(self.root.icon, (True, logo))
+        self.assertIn(logo, [w.options.get("image") for w, _ in self.ttk_widgets()])
+
+    def header(self):
+        return self.window.vars["pipeline"].get(), self.window.pipeline_label.options["style"]
+
+    def test_the_header_names_the_selected_workflows_roles(self):
+        texts = [w.options.get("text") for w, _ in self.ttk_widgets()]
+        self.assertIn("ai-agents-orchestrator", texts)
+        self.assertEqual(self.header(), ("Spec Collector → Builder → Reviewer", "Pipeline.TLabel"))
+        with open(f"{EXAMPLES}/quick.toml") as src, open(f"{self.workflows}/quick.toml", "w") as dst:
+            dst.write(src.read())
+        self.window.vars["workflow"].set("quick")
+        self.assertEqual(self.header(), ("Builder → Reviewer", "Pipeline.TLabel"))
+
+    def test_an_unloadable_workflow_shows_its_error(self):
+        with open(f"{self.workflows}/broken.toml", "w") as f:
+            f.write("[[steps]]\nid = 3\n")
+        self.window.vars["workflow"].set("broken")
+        text, style = self.header()
+        self.assertTrue(text.startswith(f"error: {self.workflows}/broken.toml: "), text)
+        self.assertEqual(style, "Muted.TLabel")
+        self.window.vars["workflow"].set("default")
+        self.assertEqual(self.header(), ("Spec Collector → Builder → Reviewer", "Pipeline.TLabel"))
+
+    def test_run_statuses_are_colored(self):
+        o = orchestrator
+        runs = self.window.runs
+        self.assertEqual(runs.tags, {"ok": {"foreground": o.MINT}, "warn": {"foreground": o.AMBER},
+                                     "error": {"foreground": o.CORAL}})
+        rows = [("a", "done", "round 1", "APPROVE  https://github.com/o/r/pull/7", "t"),
+                ("b", "review", "round 2", "running: pid 1 on here", "t"),
+                ("c", "build", "round 1", "error: boom  [quick workflow]", "t")]
+        self.window._show_runs(o.RunForm(cwd="/proj"), rows)
+        self.assertEqual(list(runs.rows.values()), rows)
+        self.assertEqual(runs.row_tags, {"a": ("ok",), "b": (), "c": ("error",)})
+
+    def test_the_output_pane_is_a_terminal(self):
+        o = orchestrator
+        log = self.window.log
+        self.assertEqual((log.options["font"], log.options["background"], log.options["foreground"]),
+                         ("TkFixedFont", o.NAVY_DARK, o.PALE_MINT))
+        self.assertEqual(log.tags["command"]["foreground"], o.MINT)
+        self.assertEqual(log.tags["command"]["font"].options["weight"], "bold")
+        self.assertEqual((log.tags["success"], log.tags["failure"]), ({"foreground": o.MINT},
+                                                                      {"foreground": o.CORAL}))
+        for status, tag in ((0, "success"), (130, "failure")):
+            with self.subTest(status=status):
+                log.tagged.clear()
+                self.window.task.text, self.window.vars["cwd"].value = "fix it", "/proj"
+                self.window.start_run()
+                self.started[-1].out, self.started[-1].status = "working\n", status
+                self.root.tick()
+                self.assertEqual(log.tagged[0][1], ("command",))
+                self.assertTrue(log.tagged[0][0].startswith("$ orchestrator.py run --cwd /proj"))
+                self.assertEqual(log.tagged[1:], [("working\n", ()), (f"[exited with status {status}]\n", (tag,))])
+
+    def test_fonts_are_tks_named_fonts(self):
+        o = orchestrator
+        fonts = self.window.fonts
+        self.assertEqual({name: (f.name, f.options["weight"]) for name, f in fonts.items()},
+                         {"section": ("TkHeadingFont", "bold"), "title": ("TkHeadingFont", "bold"),
+                          "command": ("TkFixedFont", "bold")})
+        self.assertEqual(fonts["title"].options["size"], -18)  # 1.5 times the heading's 12 pixels
+        self.assertEqual(self.style.options["Section.TLabel"]["font"], fonts["section"])
+        self.assertEqual(self.window.task.options["font"], "TkDefaultFont")
+
+
 class FakeTclError(Exception):
     pass
 
@@ -4949,9 +5241,10 @@ def fake_tkinter(root):
     ui = fake_ui()
     tk = ModuleType("tkinter")
     tk.Tk, tk.TclError = root, FakeTclError
-    tk.StringVar, tk.BooleanVar, tk.Text = ui.tk.StringVar, ui.tk.BooleanVar, ui.tk.Text
-    tk.ttk, tk.filedialog, tk.messagebox = ui.ttk, ui.filedialog, ui.messagebox
-    return {"tkinter": tk, "tkinter.ttk": tk.ttk, "tkinter.filedialog": tk.filedialog,
+    tk.StringVar, tk.BooleanVar, tk.Text, tk.PhotoImage = (ui.tk.StringVar, ui.tk.BooleanVar, ui.tk.Text,
+                                                           ui.tk.PhotoImage)
+    tk.ttk, tk.font, tk.filedialog, tk.messagebox = ui.ttk, ui.font, ui.filedialog, ui.messagebox
+    return {"tkinter": tk, "tkinter.ttk": tk.ttk, "tkinter.font": tk.font, "tkinter.filedialog": tk.filedialog,
             "tkinter.messagebox": tk.messagebox}
 
 

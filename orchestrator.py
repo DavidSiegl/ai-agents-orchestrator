@@ -3266,6 +3266,81 @@ PERMISSION_MODES = ("default", "acceptEdits", "auto", "bypassPermissions", "dont
 HERDR_NOTE = ("The role agents run in herdr: open herdr in a terminal to answer the Spec Collector. "
               "Without a machine, start this window from a herdr pane, as you would the CLI.")
 
+# The window's palette: the colors of docs/logo.svg, with lighter and darker navies for depth. Every text
+# color has a contrast of at least 4.5:1 (WCAG AA) on each background it is drawn on, which the tests check.
+NAVY = "#1E2A38"         # the window and its header; entries and the run list
+NAVY_LIGHT = "#283A4E"   # the section cards, and disabled buttons
+NAVY_DARK = "#131B25"    # the output pane
+NAVY_RAISED = "#34495F"  # buttons, column headings, borders
+NAVY_HOVER = "#3D546C"   # a button under the pointer
+PALE_MINT = "#E3F1EF"    # text
+MUTED_MINT = "#A3B8BA"   # secondary and disabled text
+CORAL = "#EE7B5E"        # Start run, failed runs
+CORAL_LIGHT = "#F4987F"  # Start run under the pointer
+TEAL = "#2A9D8F"         # focus
+MINT = "#7FE0D2"         # selection, approved runs, the echoed command
+AMBER = "#F2B33D"        # runs that need a look
+# The ttk styles the window switches between or sets on a widget, besides defining them.
+ACCENT_BUTTON = "Accent.TButton"
+PIPELINE_LABEL = "Pipeline.TLabel"
+MUTED_LABEL = "Muted.TLabel"
+
+# docs/logo-64.png, docs/logo.svg rendered once for Tk 8.6, which loads no SVG. Regenerated with:
+#   uv run --no-project --with resvg-py==0.5.0 python -c "import pathlib, resvg_py; pathlib.Path('docs/logo-64.png')
+#   .write_bytes(bytes(resvg_py.svg_to_bytes(svg_path='docs/logo.svg', width=64, height=64)))"
+#   base64 -w 110 docs/logo-64.png
+LOGO_PNG = (
+    "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"
+)
+
 
 def gui_by_default(platform: str, environ) -> bool:
     """Whether no arguments open the GUI: always on macOS, elsewhere when there is a display."""
@@ -3286,6 +3361,38 @@ def self_command() -> list[str]:
     # In a zipapp, __file__ lies inside the archive, which is a file.
     archive = os.path.dirname(here)
     return [sys.executable, archive if os.path.isfile(archive) else here]
+
+
+def role_chain(pipeline: Pipeline) -> str:
+    """The workflow's roles in the order its steps first use them, as the window's header shows them."""
+    return " → ".join(pipeline.roles[role] for role in dict.fromkeys(step.role for step in pipeline.steps))
+
+
+def status_tag(status: str) -> str | None:
+    """The run list's color for a Status as run_outcome words it: ok, warn, error, or None for the text's own."""
+    if status.startswith(APPROVE):
+        return "ok"
+    if status.startswith((CHANGES_REQUESTED, STALE)):
+        return "warn"
+    if status.startswith("error"):
+        return "error"
+    return None
+
+
+def text_colors(background: str) -> dict:
+    """A tk.Text's options in the palette: it is no ttk widget, so no style reaches it."""
+    return {"background": background, "foreground": PALE_MINT, "insertbackground": MINT, "selectbackground": MINT,
+            "selectforeground": NAVY, "inactiveselectbackground": MUTED_MINT, "relief": "flat", "borderwidth": 0,
+            "highlightthickness": 1, "highlightbackground": NAVY_RAISED, "highlightcolor": TEAL, "padx": 8,
+            "pady": 6}
+
+
+def _derived_font(font, weight: str, scale: float = 1):
+    """A copy of a Tk named font; Tk deletes it once Python drops it, so keep it referenced."""
+    copy = font.copy()
+    # A negative size is in pixels, a positive one in points; scaling keeps the sign.
+    copy.configure(weight=weight, size=round(font.cget("size") * scale))
+    return copy
 
 
 @dataclass
@@ -3390,8 +3497,8 @@ class RunWindow:
     """The GUI: a form that starts a run, the project's runs with Resume, and the running command's output.
 
     Every run goes through the CLI as a child process, one at a time, so a run started here is the one
-    typed into a terminal. ui holds the tkinter modules: tk, ttk, filedialog and messagebox. Listing the
-    runs may go over SSH, so it runs in the background; Tk is touched only from its own thread, which
+    typed into a terminal. ui holds the tkinter modules: tk, ttk, font, filedialog and messagebox. Listing
+    the runs may go over SSH, so it runs in the background; Tk is touched only from its own thread, which
     takes up the results in _poll.
     """
 
@@ -3405,36 +3512,157 @@ class RunWindow:
         self._listings = queue.Queue()
         root.title("ai-agents-orchestrator")
         root.protocol("WM_DELETE_WINDOW", self.close)
+        # The header and the form keep their size; at the window's least, the run list and the output still
+        # show a few lines each.
+        root.minsize(760, 760)
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(1, weight=1)
-        root.rowconfigure(2, weight=2)
+        root.rowconfigure(2, weight=1, minsize=120)
+        root.rowconfigure(3, weight=2, minsize=140)
         tk = ui.tk
+        # Kept on the window: Tk frees an image as soon as Python drops it.
+        self.logo = tk.PhotoImage(master=root, data=LOGO_PNG)
+        root.iconphoto(True, self.logo)
+        self._theme()
         self.vars = {name: tk.StringVar(root) for name in
                      ("cwd", "machine", "workflow", "agent", "model", "permission_mode", "quality_gate",
-                      "runs_note")}
+                      "runs_note", "pipeline")}
         self.vars["workflow"].set(DEFAULT_WORKFLOW.name)
         self.vars["no_pr"] = tk.BooleanVar(root)
+        self._header()
+        self.vars["workflow"].trace_add("write", lambda *_: self._show_pipeline())
+        self._show_pipeline()
         self._form_frame()
         self._runs_frame()
         self._log_frame()
-        ui.ttk.Label(root, text=HERDR_NOTE, wraplength=760).grid(row=3, column=0, sticky="w", padx=8, pady=(0, 8))
+        ui.ttk.Label(root, text=HERDR_NOTE, wraplength=720, style=MUTED_LABEL).grid(
+            row=4, column=0, sticky="w", padx=16, pady=(0, 12))
         self._set_running(False)
         root.after(GUI_POLL_MS, self._poll)
 
+    def _theme(self) -> None:
+        """Style every widget the window uses in the palette.
+
+        On clam everywhere, since it takes the colors on every platform; macOS's aqua ignores them.
+        """
+        root, ttk, font = self.root, self.ui.ttk, self.ui.font
+        heading = font.nametofont("TkHeadingFont", root=root)
+        self.fonts = {"section": _derived_font(heading, "bold"), "title": _derived_font(heading, "bold", 1.5),
+                      "command": _derived_font(font.nametofont("TkFixedFont", root=root), "bold")}
+        linespace = font.nametofont("TkDefaultFont", root=root).metrics("linespace")
+        root.configure(background=NAVY)
+        # A combobox's drop-down list is a plain Listbox, which only the option database reaches.
+        for option, value in (("background", NAVY), ("foreground", PALE_MINT), ("selectBackground", MINT),
+                              ("selectForeground", NAVY), ("font", "TkDefaultFont")):
+            root.option_add(f"*TCombobox*Listbox.{option}", value)
+        style = ttk.Style(root)
+        style.theme_use("clam")
+
+        def flat(color: str) -> dict:
+            """clam's gradient and border colors, all one color: no bevel."""
+            return {"background": color, "bordercolor": color, "lightcolor": color, "darkcolor": color}
+
+        def states(disabled: str, active: str) -> list:
+            return [("disabled", disabled), ("pressed", active), ("active", active)]
+
+        style.configure(".", background=NAVY_LIGHT, foreground=PALE_MINT, fieldbackground=NAVY,
+                        bordercolor=NAVY_RAISED, lightcolor=NAVY_LIGHT, darkcolor=NAVY_LIGHT, troughcolor=NAVY_DARK,
+                        selectbackground=MINT, selectforeground=NAVY, insertcolor=MINT, focuscolor=TEAL,
+                        arrowcolor=PALE_MINT, font="TkDefaultFont")
+        style.map(".", foreground=[("disabled", MUTED_MINT)])
+        style.configure("TFrame", background=NAVY)
+        style.configure("Card.TFrame", background=NAVY_LIGHT)
+        style.configure("Rule.TFrame", background=TEAL)
+        style.configure("TLabel", background=NAVY_LIGHT, foreground=PALE_MINT)
+        style.configure("Header.TLabel", background=NAVY, foreground=PALE_MINT)
+        style.configure("Title.TLabel", background=NAVY, foreground=PALE_MINT, font=self.fonts["title"])
+        style.configure(PIPELINE_LABEL, background=NAVY, foreground=MINT)
+        style.configure("Section.TLabel", background=NAVY, foreground=PALE_MINT, font=self.fonts["section"])
+        style.configure(MUTED_LABEL, background=NAVY, foreground=MUTED_MINT)
+        style.configure("TButton", **flat(NAVY_RAISED), foreground=PALE_MINT, padding=(12, 4))
+        for option in ("background", "lightcolor", "darkcolor"):
+            style.map("TButton", **{option: states(NAVY_LIGHT, NAVY_HOVER)})
+        style.map("TButton", foreground=[("disabled", MUTED_MINT)],
+                  bordercolor=[("disabled", NAVY_RAISED), ("focus", TEAL), ("active", TEAL)])
+        style.configure(ACCENT_BUTTON, **flat(CORAL), foreground=NAVY, focuscolor=NAVY, padding=(16, 4))
+        for option in ("background", "lightcolor", "darkcolor"):
+            style.map(ACCENT_BUTTON, **{option: states(NAVY_LIGHT, CORAL_LIGHT)})
+        style.map(ACCENT_BUTTON, foreground=[("disabled", MUTED_MINT)],
+                  bordercolor=[("disabled", NAVY_RAISED), ("focus", PALE_MINT)])
+        for widget in ("TEntry", "TCombobox"):
+            style.configure(widget, fieldbackground=NAVY, foreground=PALE_MINT, insertcolor=MINT,
+                            bordercolor=NAVY_RAISED, lightcolor=NAVY, darkcolor=NAVY, padding=4)
+            style.map(widget, bordercolor=[("focus", TEAL), ("active", TEAL)], lightcolor=[("focus", TEAL)],
+                      fieldbackground=[("disabled", NAVY_LIGHT)])
+        # A read-only combobox selects its text while focused, and clam paints the field the selection's color.
+        style.configure("TCombobox", background=NAVY_RAISED)
+        style.map("TCombobox", background=states(NAVY_LIGHT, NAVY_HOVER), arrowcolor=[("disabled", MUTED_MINT)],
+                  fieldbackground=[("disabled", NAVY_LIGHT), ("readonly", "focus", NAVY_RAISED), ("readonly", NAVY)],
+                  foreground=[("disabled", MUTED_MINT), ("readonly", PALE_MINT)],
+                  selectbackground=[("readonly", NAVY_RAISED)], selectforeground=[("readonly", PALE_MINT)])
+        style.configure("TCheckbutton", background=NAVY_LIGHT, foreground=PALE_MINT, indicatorbackground=NAVY,
+                        indicatorforeground=MINT, upperbordercolor=NAVY_RAISED, lowerbordercolor=NAVY_RAISED)
+        style.map("TCheckbutton", background=[("active", NAVY_LIGHT)],
+                  indicatorbackground=[("disabled", NAVY_LIGHT), ("pressed", NAVY_RAISED), ("active", NAVY_HOVER)],
+                  upperbordercolor=[("focus", TEAL)], lowerbordercolor=[("focus", TEAL)])
+        style.configure("Treeview", background=NAVY, fieldbackground=NAVY, foreground=PALE_MINT,
+                        bordercolor=NAVY_RAISED, lightcolor=NAVY, darkcolor=NAVY, rowheight=linespace + 8)
+        # Only the selected state: a map entry for unselected rows would outweigh the status tags' colors.
+        style.map("Treeview", background=[("selected", MINT)], foreground=[("selected", NAVY)])
+        style.configure("Treeview.Heading", **flat(NAVY_RAISED), foreground=PALE_MINT, relief="flat",
+                        font="TkHeadingFont", padding=6)
+        style.map("Treeview.Heading", background=[("active", NAVY_HOVER)])
+        style.configure("TScrollbar", **flat(NAVY_RAISED), troughcolor=NAVY_DARK, arrowcolor=PALE_MINT,
+                        gripcount=0)
+        style.map("TScrollbar", background=[("pressed", TEAL), ("active", TEAL)])
+
+    def _header(self) -> None:
+        """The logo, the name, and the role chain of the workflow the form has selected."""
+        ttk = self.ui.ttk
+        h = ttk.Frame(self.root)
+        h.grid(row=0, column=0, sticky="ew", padx=16, pady=(12, 12))
+        h.columnconfigure(1, weight=1)
+        ttk.Label(h, image=self.logo, style="Header.TLabel").grid(row=0, column=0, rowspan=2, padx=(0, 12))
+        ttk.Label(h, text="ai-agents-orchestrator", style="Title.TLabel").grid(row=0, column=1, sticky="sw")
+        # Wrapped, so that a long error, such as a workflow file's path, does not widen the window.
+        self.pipeline_label = ttk.Label(h, textvariable=self.vars["pipeline"], style=PIPELINE_LABEL,
+                                        wraplength=640)
+        self.pipeline_label.grid(row=1, column=1, sticky="nw")
+        ttk.Frame(h, height=2, style="Rule.TFrame").grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+
+    def _show_pipeline(self) -> None:
+        # Static, from the workflow's definition: the window shows no run's live phase.
+        try:
+            line, style = role_chain(named_workflow(self.vars["workflow"].get())), PIPELINE_LABEL
+        except OrchestratorError as e:
+            line, style = f"error: {e}", MUTED_LABEL
+        self.vars["pipeline"].set(line)
+        self.pipeline_label.configure(style=style)
+
+    def _section(self, row: int, title: str):
+        """A bold heading over a card; returns the card, which holds the section's widgets."""
+        ttk = self.ui.ttk
+        s = ttk.Frame(self.root)
+        s.grid(row=row, column=0, sticky="nsew", padx=16, pady=(0, 12))
+        s.columnconfigure(0, weight=1)
+        s.rowconfigure(1, weight=1)
+        ttk.Label(s, text=title, style="Section.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        card = ttk.Frame(s, style="Card.TFrame", padding=12)
+        card.grid(row=1, column=0, sticky="nsew")
+        return card
+
     def _form_frame(self) -> None:
         ttk, v = self.ui.ttk, self.vars
-        f = ttk.LabelFrame(self.root, text="New run")
-        f.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+        f = self._section(1, "New run")
         f.columnconfigure(1, weight=1)
         f.columnconfigure(3, weight=1)
-        ttk.Label(f, text="Task").grid(row=0, column=0, sticky="nw", padx=4, pady=2)
-        self.task = self.ui.tk.Text(f, height=4, width=80, wrap="word")
-        self.task.grid(row=0, column=1, columnspan=4, sticky="nsew", padx=4, pady=2)
-        ttk.Label(f, text="Project folder").grid(row=1, column=0, sticky="w", padx=4, pady=2)
+        ttk.Label(f, text="Task").grid(row=0, column=0, sticky="nw", padx=6, pady=4)
+        self.task = self.ui.tk.Text(f, height=4, width=80, wrap="word", font="TkDefaultFont", **text_colors(NAVY))
+        self.task.grid(row=0, column=1, columnspan=4, sticky="nsew", padx=6, pady=4)
+        ttk.Label(f, text="Project folder").grid(row=1, column=0, sticky="w", padx=6, pady=4)
         cwd = ttk.Entry(f, textvariable=v["cwd"])
-        cwd.grid(row=1, column=1, columnspan=3, sticky="ew", padx=4, pady=2)
+        cwd.grid(row=1, column=1, columnspan=3, sticky="ew", padx=6, pady=4)
         cwd.bind("<Return>", lambda _: self.refresh())
-        ttk.Button(f, text="Choose…", command=self.choose_folder).grid(row=1, column=4, padx=4, pady=2)
+        ttk.Button(f, text="Choose…", command=self.choose_folder).grid(row=1, column=4, padx=6, pady=4)
         fields_ = (("Machine", ttk.Entry(f, textvariable=v["machine"])),
                    ("Workflow", ttk.Combobox(f, textvariable=v["workflow"], values=offered_workflows(),
                                              state="readonly")),
@@ -3446,18 +3674,17 @@ class RunWindow:
                    ("Quality gate job", ttk.Entry(f, textvariable=v["quality_gate"])))
         for i, (label, widget) in enumerate(fields_):
             row, col = 2 + i // 2, i % 2 * 2
-            ttk.Label(f, text=label).grid(row=row, column=col, sticky="w", padx=4, pady=2)
-            widget.grid(row=row, column=col + 1, sticky="ew", padx=4, pady=2)
+            ttk.Label(f, text=label).grid(row=row, column=col, sticky="w", padx=6, pady=4)
+            widget.grid(row=row, column=col + 1, sticky="ew", padx=6, pady=4)
         fields_[0][1].bind("<Return>", lambda _: self.refresh())
         ttk.Checkbutton(f, text="No pull request (--no-pr)", variable=v["no_pr"]).grid(
-            row=5, column=1, sticky="w", padx=4, pady=2)
-        self.start_button = ttk.Button(f, text="Start run", command=self.start_run)
-        self.start_button.grid(row=5, column=4, sticky="e", padx=4, pady=4)
+            row=5, column=1, sticky="w", padx=6, pady=4)
+        self.start_button = ttk.Button(f, text="Start run", command=self.start_run, style=ACCENT_BUTTON)
+        self.start_button.grid(row=5, column=4, sticky="e", padx=6, pady=(8, 4))
 
     def _runs_frame(self) -> None:
         ttk = self.ui.ttk
-        f = ttk.LabelFrame(self.root, text="Runs of the project")
-        f.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        f = self._section(2, "Runs of the project")
         f.columnconfigure(0, weight=1)
         f.rowconfigure(0, weight=1)
         columns = (("run", "Run", 190), ("phase", "Phase", 70), ("round", "Round", 70),
@@ -3467,25 +3694,30 @@ class RunWindow:
         for name, heading, width in columns:
             self.runs.heading(name, text=heading)
             self.runs.column(name, width=width, stretch=name in ("outcome", "task"))
-        self.runs.grid(row=0, column=0, columnspan=3, sticky="nsew", padx=4, pady=2)
-        ttk.Label(f, textvariable=self.vars["runs_note"]).grid(row=1, column=0, sticky="w", padx=4)
-        ttk.Button(f, text="Refresh", command=self.refresh).grid(row=1, column=1, padx=4, pady=4)
+        for tag, color in (("ok", MINT), ("warn", AMBER), ("error", CORAL)):
+            self.runs.tag_configure(tag, foreground=color)
+        self.runs.grid(row=0, column=0, columnspan=3, sticky="nsew", padx=6, pady=4)
+        ttk.Label(f, textvariable=self.vars["runs_note"]).grid(row=1, column=0, sticky="w", padx=6)
+        ttk.Button(f, text="Refresh", command=self.refresh).grid(row=1, column=1, padx=6, pady=(8, 0))
         self.resume_button = ttk.Button(f, text="Resume", command=self.resume_run)
-        self.resume_button.grid(row=1, column=2, padx=4, pady=4)
+        self.resume_button.grid(row=1, column=2, padx=6, pady=(8, 0))
 
     def _log_frame(self) -> None:
         ttk = self.ui.ttk
-        f = ttk.LabelFrame(self.root, text="Output")
-        f.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        f = self._section(3, "Output")
         f.columnconfigure(0, weight=1)
         f.rowconfigure(0, weight=1)
-        self.log = self.ui.tk.Text(f, height=14, wrap="char", state="disabled")
-        self.log.grid(row=0, column=0, sticky="nsew", padx=(4, 0), pady=2)
+        self.log = self.ui.tk.Text(f, height=14, wrap="char", state="disabled", font="TkFixedFont",
+                                   **text_colors(NAVY_DARK))
+        self.log.tag_configure("command", foreground=MINT, font=self.fonts["command"])
+        self.log.tag_configure("success", foreground=MINT)
+        self.log.tag_configure("failure", foreground=CORAL)
+        self.log.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=4)
         bar = ttk.Scrollbar(f, orient="vertical", command=self.log.yview)
-        bar.grid(row=0, column=1, sticky="ns", pady=2)
+        bar.grid(row=0, column=1, sticky="ns", pady=4)
         self.log.configure(yscrollcommand=bar.set)
         self.stop_button = ttk.Button(f, text="Stop", command=self.stop)
-        self.stop_button.grid(row=1, column=0, columnspan=2, sticky="e", padx=4, pady=4)
+        self.stop_button.grid(row=1, column=0, columnspan=2, sticky="e", padx=6, pady=(8, 0))
 
     def form(self) -> RunForm:
         v = self.vars
@@ -3519,7 +3751,7 @@ class RunWindow:
     def _launch(self, args: list[str]) -> None:
         if self.process:
             return
-        self._append(f"$ {shlex.join(['orchestrator.py', *args])}\n")
+        self._append(f"$ {shlex.join(['orchestrator.py', *args])}\n", "command")
         try:
             self.process = self._start([*self_command(), *args])
         except OSError as e:
@@ -3576,7 +3808,7 @@ class RunWindow:
         if status is None:
             return
         self.process = None
-        self._append(f"[exited with status {status}]\n")
+        self._append(f"[exited with status {status}]\n", "success" if status == 0 else "failure")
         self._set_running(False)
         if self._closing:
             self._destroy()
@@ -3591,12 +3823,13 @@ class RunWindow:
             return
         self._listed = form
         for row in rows:
-            self.runs.insert("", "end", iid=row[0], values=row)
+            tag = status_tag(row[3])
+            self.runs.insert("", "end", iid=row[0], values=row, tags=(tag,) if tag else ())
         self.vars["runs_note"].set("" if rows else "No runs.")
 
-    def _append(self, text: str) -> None:
+    def _append(self, text: str, *tags: str) -> None:
         self.log.configure(state="normal")
-        self.log.insert("end", text)
+        self.log.insert("end", text, *tags)
         self.log.see("end")
         self.log.configure(state="disabled")
 
@@ -3615,7 +3848,7 @@ def gui_command(smoke_test: bool) -> int:
     # Imported here, so the CLI and the tests run on a Python without tkinter, and without a display.
     try:
         import tkinter
-        from tkinter import filedialog, messagebox, ttk
+        from tkinter import filedialog, font, messagebox, ttk
     except ImportError:
         print(f"error: the GUI needs tkinter, which this Python lacks; install it, e.g. with "
               f"{tk_install_hint(sys.platform, sys.version_info)}", file=sys.stderr)
@@ -3625,7 +3858,8 @@ def gui_command(smoke_test: bool) -> int:
     except tkinter.TclError as e:
         print(f"error: cannot open the GUI: {e}", file=sys.stderr)
         return EXIT_ERROR
-    window = RunWindow(root, SimpleNamespace(tk=tkinter, ttk=ttk, filedialog=filedialog, messagebox=messagebox))
+    window = RunWindow(root, SimpleNamespace(tk=tkinter, ttk=ttk, font=font, filedialog=filedialog,
+                                             messagebox=messagebox))
     if smoke_test:
         root.after(SMOKE_TEST_MS, window.close)
     root.mainloop()
