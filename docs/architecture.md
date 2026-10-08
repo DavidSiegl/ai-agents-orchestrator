@@ -140,7 +140,9 @@ running `after` callbacks on `tick`), and `TestRunProcess` runs real child proce
   in the `build` group.
 - `packaging/build-binary.sh`: builds `dist/orchestrator-<os>-<arch>` (`linux-x86_64`, `macos-arm64`), a
   PyInstaller one-file binary with Python and tkinter inside, and its `.sha256`, then smoke-tests it: `--help`,
-  `workflows` lists `default`, and `gui --smoke-test` where there is a display.
+  `workflows` lists `default`, and `gui --smoke-test` where there is a display. On Linux it builds with the
+  system `python3` (`python3-tk` installed) in `build/binary-venv`, not uv's Python, whose Tk lacks Xft and so
+  draws every font in one fixed bitmap size; it refuses a Tk without libXft.
 - `Jenkinsfile`: `uv sync --frozen`, `uv run pytest` with branch coverage of `orchestrator`, a Package stage that
   runs `packaging/build-binary.sh` on every build but a quality build, and on `main` or in a quality build a
   SonarQube analysis and a quality gate. On `main` a Release stage publishes a new `pyproject.toml` version as a
