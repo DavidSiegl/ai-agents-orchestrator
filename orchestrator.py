@@ -3288,12 +3288,13 @@ GUI_TEXT_FONTS = ("TkDefaultFont", "TkTextFont", "TkHeadingFont", "TkMenuFont", 
                   "TkSmallCaptionFont", "TkIconFont", "TkTooltipFont")
 # The zoom levels, as factors of the fonts' sizes at start; Ctrl or Cmd with +, - and 0 steps through them.
 ZOOM_LEVELS = (0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0)
-# Ctrl and the wheel, by event, each with its step; ZOOM_WHEEL_MS is the least time between two of its steps.
+# Ctrl and the wheel, by event, each with its step; ZOOM_WHEEL_SECONDS is the least time between two of its steps.
 # The wheel is Button-4 and -5 on X11, and MouseWheel elsewhere, whose delta's sign says which way (tkinter
 # gives the others a delta of 0). Its size is no measure across platforms and Tk versions, and a trackpad
 # sends one swipe as a burst of small ones, so time, not the delta, keeps a swipe from running to either end.
+# The time is the orchestrator's own clock, not the event's, which wraps around and which no Tk promises to fill.
 ZOOM_WHEEL = {"<Control-Button-4>": 1, "<Control-Button-5>": -1, "<Control-MouseWheel>": 1}
-ZOOM_WHEEL_MS = 250
+ZOOM_WHEEL_SECONDS = 0.25
 # The ttk styles the window switches between or sets on a widget, besides defining them.
 ACCENT_BUTTON = "Accent.TButton"
 PIPELINE_LABEL = "Pipeline.TLabel"
@@ -3565,7 +3566,7 @@ class RunWindow:
         self._set_running(False)
         for event, step in zoom_keys(sys.platform).items():
             root.bind(event, lambda _, step=step: self.zoom(step))
-        self._wheel_zoomed = None  # the event time of the wheel's last zoom step
+        self._wheel_zoomed = None  # when the wheel last zoomed, by time.monotonic()
         for event, step in ZOOM_WHEEL.items():
             root.bind(event, lambda e, step=step: self._wheel_zoom(e, step if e.delta >= 0 else -step))
         root.after(GUI_POLL_MS, self._poll)
@@ -3692,10 +3693,10 @@ class RunWindow:
         self.zoom_buttons[1].configure(state="normal" if i < len(ZOOM_LEVELS) - 1 else "disabled")
 
     def _wheel_zoom(self, event, step: int) -> None:
-        # Event times are milliseconds that wrap around, so one that seems earlier is a new burst.
-        if self._wheel_zoomed is not None and 0 <= event.time - self._wheel_zoomed < ZOOM_WHEEL_MS:
+        now = time.monotonic()
+        if self._wheel_zoomed is not None and now - self._wheel_zoomed < ZOOM_WHEEL_SECONDS:
             return
-        self._wheel_zoomed = event.time
+        self._wheel_zoomed = now
         self.zoom(step)
 
     def _show_pipeline(self) -> None:
@@ -3756,15 +3757,18 @@ class RunWindow:
         f = self._section(2, "Runs of the project")
         f.columnconfigure(0, weight=1)
         f.rowconfigure(0, weight=1)
+        stretching = ("outcome", "task")
         columns = (("run", "Run", 190), ("phase", "Phase", 70), ("round", "Round", 70),
                    ("outcome", "Status", 300), ("task", "Task", 300))
         self.runs = ttk.Treeview(f, columns=[c[0] for c in columns], show="headings", height=5,
                                  selectmode="browse")
         for name, heading, width in columns:
             self.runs.heading(name, text=heading)
-            self.runs.column(name, width=width, stretch=name in ("outcome", "task"))
-        # Pixels, so zoom() scales them with the text, or a run id no longer fits its column from 150%.
-        self._column_widths = {name: width for name, _, width in columns}
+            self.runs.column(name, width=width, stretch=name in stretching)
+        # The fixed columns are pixels, so zoom() scales them with the text, or a run id no longer fits its column
+        # from 150%. Not the stretching ones: they take whatever room is left, and scaled, they would widen the
+        # window past a laptop's screen.
+        self._column_widths = {name: width for name, _, width in columns if name not in stretching}
         for tag, color in (("ok", MINT), ("warn", AMBER), ("error", CORAL)):
             self.runs.tag_configure(tag, foreground=color)
         self.runs.grid(row=0, column=0, columnspan=3, sticky="nsew", padx=6, pady=4)
