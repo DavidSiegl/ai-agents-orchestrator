@@ -19,6 +19,13 @@ esac
 name="orchestrator-$os-$arch"
 bin="dist/$name"
 
+# PyInstaller leaves tkinter out, with only a warning, when the build Python lacks it, and the GUI smoke test
+# below is skipped on a Linux without a display, so a binary without its GUI could otherwise be released.
+if ! uv run --frozen --group build python -c 'import tkinter' 2>/dev/null; then
+    echo "build-binary.sh: the build Python has no tkinter; use uv's own, e.g. UV_PYTHON_PREFERENCE=only-managed" >&2
+    exit 1
+fi
+
 # The build group holds PyInstaller; the runtime needs nothing beyond the standard library.
 uv run --frozen --group build pyinstaller --onefile --name "$name" --noconfirm --clean \
     --distpath dist --workpath build/pyinstaller --specpath build/pyinstaller orchestrator.py
