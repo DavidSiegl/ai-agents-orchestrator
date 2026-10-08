@@ -6,7 +6,7 @@ description = "Builder <-> Reviewer, with the task as the contract: no interview
 
 [roles]
 build = "Builder"
-review = { label = "Reviewer" }  # add model = "..." to start this role on another model
+review = { label = "Reviewer" }  # add model = "..." or agent = "codex" to start this role on another model or harness
 
 # The default Builder step, with its fix prompt, fresh-session note and quality gate;
 # only the first prompt changes, because there is no spec file to point at.

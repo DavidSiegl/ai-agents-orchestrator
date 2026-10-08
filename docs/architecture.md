@@ -10,16 +10,17 @@ One standard-library module, in these sections:
 
 | Section | What it holds |
 |---|---|
-| Constants | Defaults (`DEFAULT_MAX_ROUNDS`, `DEFAULT_TURN_TIMEOUT`, `DEFAULT_MAX_QUALITY_ROUNDS`), intervals (`POLL_SECONDS`, `STALL_SECONDS`, `HEARTBEAT_SECONDS`, `STALE_SECONDS`, and for the quality gate `HTTP_TIMEOUT`, `CI_POLL_SECONDS`, `QUALITY_TIMEOUT`), `BRANCH_PREFIX`, `CI_REF_PREFIX`, `CI_ENV` (the credential variables), `ROLE_LABELS` (the default workflow's roles, and so the `--<role>-model` flags) and the exit codes. `OrchestratorError` ends a run with a message; `HerdrError` carries herdr's error code. `child_env` is the environment of every process the orchestrator starts: its own without `CI_ENV`. `ci_credentials` fills what the environment lacks of `CI_ENV` from the file at `ci_env_path` in `config_dir`, parsed by `parse_env_file`, without putting it into the environment. |
+| Constants | Defaults (`DEFAULT_MAX_ROUNDS`, `DEFAULT_TURN_TIMEOUT`, `DEFAULT_MAX_QUALITY_ROUNDS`), intervals (`POLL_SECONDS`, `STALL_SECONDS`, `HEARTBEAT_SECONDS`, `STALE_SECONDS`, and for the quality gate `HTTP_TIMEOUT`, `CI_POLL_SECONDS`, `QUALITY_TIMEOUT`), `BRANCH_PREFIX`, `CI_REF_PREFIX`, `CI_ENV` (the credential variables), `ROLE_LABELS` (the default workflow's roles, and so the `--<role>-model` flags), `AGENT_KINDS` (the harnesses a role can run in, herdr's `--kind`) with `DEFAULT_AGENT` and the exit codes. `OrchestratorError` ends a run with a message; `HerdrError` carries herdr's error code. `child_env` is the environment of every process the orchestrator starts: its own without `CI_ENV`. `ci_credentials` fills what the environment lacks of `CI_ENV` from the file at `ci_env_path` in `config_dir`, parsed by `parse_env_file`, without putting it into the environment. |
 | Role prompts | `SPEC_PROMPT`, `BUILD_PROMPT` and `REVIEW_PROMPT` start each role; `FIX_PROMPT` and `RECHECK_PROMPT` follow up in later rounds; `QUALITY_FIX_PROMPT` sends a quality file to the Builder; `CONTINUE_PROMPT` goes to a relaunched session; `REBUILD_NOTE` and `REREVIEW_NOTE` brief a fresh session on earlier turns; `QUALITY_PASSED_NOTE` and `QUALITY_UNRESOLVED_NOTE` end the Reviewer's prompt in a run with the gate. |
 | Workflow definitions | `Step` and `Pipeline`, the reserved phases `QUALITY`, `PUBLISH` and `DONE`, `DEFAULT_WORKFLOW` built from the role prompts, the `WORKFLOWS` registry and `find_workflow`; see [Workflows](#workflows). |
 | Workflow files | `parse_workflow` turns a definition (TOML, or one saved in `state.json`) into a `Pipeline`, resolving `use` and filling in labels; `load_workflow_file` reads one, `workflow_files` and `named_workflow` find them in `workflows_dir`, and `workflow_definition` and `workflow_toml` write one back. `run_pipeline` is a run's workflow: its saved definition, else the built-in one of its name. |
-| `Herdr` | A thin wrapper around the `herdr` CLI, one method per command, forwarding `--machine` when one is given. |
+| Agent harnesses | `AgentSettings` is how each role's agent starts: the permission mode, and per role its model and harness; `Workflow` takes one and saves it in `state.json`. `launch_args` builds the arguments an agent starts with in its harness: `permission_args` translates `--permission-mode` through `PERMISSION_ARGS` (claude takes every mode as it is; `None` means the harness has no equivalent), `RESUME_ARGS` names each harness's way into a saved session (codex's `resume` is a subcommand, so it goes first), and the model goes last as `--model`. |
+| `Herdr` | A thin wrapper around the `herdr` CLI, one method per command, forwarding `--machine` when one is given. `start_agent` takes the harness as herdr's `--kind`. |
 | `Host` | The project's filesystem and git checkout, run locally or over `ssh -o BatchMode=yes`. `write` is atomic; `run_states` ages each `state.json` by the host's clock; `fast_forward`, `merge_upstream` and `abort_merge` keep the branch up to date with `origin`. For the quality gate, `snapshot` commits the working tree through a temporary index without moving a ref, `push_ref`, `delete_remote_branch` and `remote_branches` handle the throwaway branches, and `change_diff` is the `git diff -U0` that `changed_lines` parses. |
 | `CI` | Jenkins's quality job and SonarQube over HTTP, from the orchestrator's machine, one method per call, over an injected `urlopen`. The credentials come from the environment or `ci.env` and go only into the `Authorization` header; `mask` replaces the tokens in text from either server. `CIError` carries the HTTP status, and `transient` says whether a retry may help. |
-| `RunState` and helpers | `RunState` is `state.json`. The pure helpers are `parse_verdict`, `parse_gate`, `spec_title`, `branch_name`, `pr_body` (with `verdict_line`; `commit_note` for the commit message), and for the quality file `changed_lines`, `edited_config`, `issue_severity` and `quality_report`. |
+| `RunState` and helpers | `RunState` is `state.json`; it saves `permission_mode` as given and each role's harness in `agent_kinds`, and `from_dict` reads a 0.3.0 state's `agent_args` as its permission mode. The pure helpers are `parse_verdict`, `parse_gate`, `spec_title`, `branch_name`, `pr_body` (with `verdict_line`; `commit_note` for the commit message), and for the quality file `changed_lines`, `edited_config`, `issue_severity` and `quality_report`. |
 | `Workflow` | Drives one run through its `pipeline`. Its collaborators (`herdr`, `host`, `ci`, `notify`, and `clocks`, a `Clocks` of `sleep`, `monotonic` and `wall`) are arguments, which is what lets the tests use fakes. |
-| CLI | `parse_args`, `role_models` (with `role_model_arg`), `print_workflows`, `workflow_arg`, `run_health`, `print_runs` (with `run_round`), `find_run`, `resumable_state`, and `main` with `workflows_command`, `connect`, `new_state`, `resumed_state` and `finish`. |
+| CLI | `parse_args`, `role_models` (with `role_model_arg`), `role_agents` (with `role_agent_arg`), `print_workflows`, `workflow_arg`, `run_health`, `print_runs` (with `run_round`), `find_run`, `resumable_state`, and `main` with `workflows_command`, `connect`, `new_state`, `resumed_state` and `finish`. |
 
 ## The phase machine
 
@@ -58,7 +59,8 @@ base branch; a resume that starts in the gated step or in `quality` checks the C
 
 A failure goes through `_release`, which records `error`. Each role's turn is `_turn`: it takes a handoff file
 that already exists, and otherwise gets the agent ready through `_agent` (`NEW`, `ALIVE`, `RESUMED` or
-`RESTARTED`), prompts it with what `_prompt_for` picks, and polls for the file in `_await_handoff`, where
+`RESTARTED`; an exited agent is resumed into its saved session only if its record's `kind` is the role's
+harness now, and otherwise starts fresh), prompts it with what `_prompt_for` picks, and polls for the file in `_await_handoff`, where
 `_tell_human` notifies the human of a blocked or stalled agent once. `_save` checks the owner before every write and raises
 `RunTakenOver` after a takeover; `_heartbeat` keeps `state.json` fresh while a turn runs.
 
@@ -83,7 +85,8 @@ holds the contract, the last editing step's last report, the last quality file a
 `NAME.toml` in `workflows_dir` (`~/.config/ai-agents-orchestrator/workflows/`), and `run --workflow-file` takes
 one by path; the README's [Your own workflows](../README.md#your-own-workflows) gives the format. A file's
 step can `use` a default step and override some of its fields; a role without a label keeps the default
-workflow's label for its key, or else is named after the key; a role's `model` sits under every model flag. A
+workflow's label for its key, or else is named after the key; a role's `model` sits under every model flag,
+and its `agent` (`Pipeline.agents`, one of `AGENT_KINDS`) under `--agent` and `--role-agent`. A
 file cannot take a built-in workflow's name. `Pipeline` also rejects a prompt or file that could not be filled
 in at run time (`_fill_problem`), and a handoff file outside the run directory or named like the run's own
 `state.json` and `quality-*` files, and two steps whose files can share a name in some round (`Step.name_forms`,
@@ -105,7 +108,9 @@ playing a scripted `outcome`) and `FakeClock` (time that passes only when the wo
 `make_workflow` builds a new run on them; `saved_run` and `resume` build one from a saved state. Test classes
 are named after what they cover, e.g. `TestWorkflow`, `TestPullRequest`, `TestResume`, `TestHeartbeat`,
 `TestRunHealth`, `TestQualityGate`, `TestQualityResume` and `TestOtherWorkflows`; `TestDefaultWorkflowPrompts`
-compares the default's prompts with those recorded from commit `d6bb100`; `gated` and `resume_gated` build a run with the gate
+compares the default's prompts with those recorded from commit `d6bb100`, except for `SPEC_PROMPT`'s
+"Separate agent sessions"; `TestHarnesses`, `TestHarnessFlags` and `TestWorkflowFileAgents` cover the harnesses,
+on `FakeHerdr`, which records each agent's kind in `kinds` and finds a resumed session by its harness's syntax; `gated` and `resume_gated` build a run with the gate
 on a `FakeCI`. `TestHostGit` and `TestHostSnapshot` run on real git in a temporary directory.
 
 ## Tooling

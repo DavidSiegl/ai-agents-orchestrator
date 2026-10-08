@@ -1,14 +1,15 @@
 """
-Role-based handoff orchestrator for Claude Code in herdr:
+Role-based handoff orchestrator for coding agents in herdr:
 
     Spec Collector -> Builder -> Reviewer  (review findings loop back to the Builder)
 
-Each role is a separate interactive Claude Code session in its own herdr pane,
-so no role judges its own work and the human can watch or step into any of
-them. Roles hand off through Markdown files in the run directory, never
-through scraped terminal output. That sequence is the default workflow; a
-workflow is data (a Pipeline of Steps), and `run --workflow` picks one from
-WORKFLOWS.
+Each role is a separate interactive agent session in its own herdr pane, so no
+role judges its own work and the human can watch or step into any of them.
+Each role runs in the agent harness of its choice (AGENT_KINDS), Claude Code by
+default, so that, say, Claude Code builds and Codex reviews. Roles hand off
+through Markdown files in the run directory, never through scraped terminal
+output. That sequence is the default workflow; a workflow is data (a Pipeline
+of Steps), and `run --workflow` picks one from WORKFLOWS.
 
 By default the change is built on a new branch, committed, pushed and opened
 as a pull request once the review loop ends, and the run's herdr workspace is
@@ -106,6 +107,11 @@ GATE_BUILD_FAILED = "BUILD_FAILED"
 # The default workflow's roles. Each has its own --ROLE-model flag; another workflow's roles take --model.
 ROLE_LABELS = {"spec": "Spec Collector", "build": "Builder", "review": "Reviewer"}
 
+# The agent harnesses a role can run in, by herdr's --kind. Each needs its herdr integration and its CLI
+# where the agents run.
+AGENT_KINDS = ("claude", "codex", "gemini", "opencode", "pi")
+DEFAULT_AGENT = "claude"
+
 EXIT_ERROR = 1
 EXIT_CHANGES_REQUESTED = 3
 # Approved, but the pull request conflicts with its base, so it was opened as a draft.
@@ -190,7 +196,7 @@ def parse_env_file(text: str, path: str) -> dict[str, str]:
 
 SPEC_PROMPT = """\
 You are the Spec Collector, the first of three roles (Spec Collector -> Builder -> Reviewer). \
-Separate Claude Code sessions play the Builder and the Reviewer; they will know only what you write down. \
+Separate agent sessions play the Builder and the Reviewer; they will know only what you write down. \
 A human is at this terminal and answers you directly.
 
 Task from the human:
@@ -246,7 +252,7 @@ Review the change again ({change}) against the spec in {spec_path} and your prev
 checking the Builder's claims rather than trusting them. \
 As your last step, write the review to {review_path} in a single write, with the same first-line verdict and numbered findings as before."""
 
-# For a role relaunched into its saved Claude Code session after it had already been prompted.
+# For a role relaunched into its saved agent session after it had already been prompted.
 CONTINUE_PROMPT = """\
 Your session was restarted in the middle of this turn. Continue where you left off; \
 the turn still ends when you write {path} in a single write."""
@@ -376,6 +382,8 @@ class Pipeline:
     # Role key -> the model its agent starts with when no model flag names one.
     models: dict[str, str] = field(default_factory=dict)
     description: str = ""
+    # Role key -> the harness its agent runs in when no agent flag names one; else DEFAULT_AGENT.
+    agents: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self):
         if problem := self._problem():
@@ -404,8 +412,13 @@ class Pipeline:
                 return f"role {role} has no label"
             if role not in {st.role for st in self.steps}:
                 return f"role {role} has no step"
-        if unknown := set(self.models) - set(self.roles):
-            return f"a model is set for role {min(unknown)}, which is not one of the workflow's roles"
+        for what, table in (("a model", self.models), ("an agent", self.agents)):
+            if unknown := set(table) - set(self.roles):
+                return f"{what} is set for role {min(unknown)}, which is not one of the workflow's roles"
+        for role, kind in self.agents.items():
+            if kind not in AGENT_KINDS:
+                return f"role {role}: agent {kind} is not a harness this orchestrator supports; " \
+                       f"it takes {', '.join(AGENT_KINDS)}"
         return None
 
     def _uniqueness_problem(self) -> str | None:
@@ -629,7 +642,8 @@ def find_workflow(name: str) -> Pipeline:
 #   description = "..."                      # optional, shown by `workflows`
 #   [roles]                                  # optional
 #   build = "Builder"                        # a role's pane label,
-#   tests = { label = "Test Writer", model = "sonnet" }   # or its label and default model
+#   tests = { label = "Test Writer", model = "sonnet", agent = "codex" }   # or its label, default model
+#                                                                         # and harness (AGENT_KINDS)
 #   [[steps]]                                # one table per step, in order
 #   use = "build"                            # optional: start from that step of the default workflow
 #   id = "build"                             # and Step's fields; role defaults to id
@@ -640,7 +654,7 @@ def find_workflow(name: str) -> Pipeline:
 # such a file may also be: every role with its label, and every step with its fields.
 
 WORKFLOW_KEYS = {"description", "roles", "steps"}
-ROLE_KEYS = {"label", "model"}
+ROLE_KEYS = {"label", "model", "agent"}
 STEP_KEYS = {f.name for f in fields(Step)}
 STEP_FLAGS = {f.name for f in fields(Step) if f.default is False}
 # Role keys name agents and panes, and step ids name phases and prompt placeholders.
@@ -709,27 +723,30 @@ def parse_workflow(name: str, data: dict) -> Pipeline:
     declared = {role: _parse_role(role, raw) for role, raw in raw_roles.items()}
     # The panes follow the steps; a declared role no step uses goes last, for Pipeline to reject.
     order = dict.fromkeys([st["role"] for st in steps] + list(declared))
-    labels = {role: declared.get(role, (None, None))[0] or _default_label(role) for role in order}
-    models = {role: model for role, (_, model) in declared.items() if model}
+    labels = {role: declared.get(role, {}).get("label") or _default_label(role) for role in order}
+    models = {role: table["model"] for role, table in declared.items() if table.get("model")}
+    agents = {role: table["agent"] for role, table in declared.items() if table.get("agent")}
     description = data.get("description", "")
     if not isinstance(description, str):
         raise ValueError("description must be a string")
-    return Pipeline(name, labels, tuple(Step(**st) for st in steps), models=models, description=description)
+    return Pipeline(name, labels, tuple(Step(**st) for st in steps), models=models, description=description,
+                    agents=agents)
 
 
-def _parse_role(role: str, raw) -> tuple[str | None, str | None]:
+def _parse_role(role: str, raw) -> dict[str, str]:
+    """The ROLE_KEYS a role's entry in [roles] sets."""
     where = f"role {role}"
     if not re.fullmatch(NAME_PATTERN, role):
         raise ValueError(f"{where}: a role key may use only letters, digits, - and _")
     if isinstance(raw, str):
-        return raw, None
+        return {"label": raw}
     if not isinstance(raw, dict):
-        raise ValueError(f"{where}: give a label, or a table with label and model")
+        raise ValueError(f"{where}: give a label, or a table with label, model and agent")
     _check_keys(raw, ROLE_KEYS, where)
     for key in ROLE_KEYS & raw.keys():
         if not isinstance(raw[key], str):
             raise ValueError(f"{where}: {key} must be a string")
-    return raw.get("label"), raw.get("model")
+    return raw
 
 
 def _parse_step(i: int, raw) -> dict:
@@ -793,7 +810,8 @@ def step_fields(step: Step) -> dict:
 
 def workflow_definition(p: Pipeline) -> dict:
     """The canonical definition of a workflow, which parse_workflow turns back into it."""
-    roles = {role: {"label": label, **({"model": p.models[role]} if role in p.models else {})}
+    roles = {role: {"label": label, **{key: table[role] for key, table in (("model", p.models), ("agent", p.agents))
+                                       if role in table}}
              for role, label in p.roles.items()}
     return {**({"description": p.description} if p.description else {}),
             "roles": roles, "steps": [step_fields(st) for st in p.steps]}
@@ -842,6 +860,56 @@ def saved_pipeline(saved: dict) -> Pipeline | None:
         return run_pipeline(saved.get("workflow") or DEFAULT_WORKFLOW.name, saved.get("workflow_definition"))
     except OrchestratorError:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Agent harnesses
+# ---------------------------------------------------------------------------
+
+# --permission-mode takes Claude Code's mode names, which claude gets as they are. These are the other
+# harnesses' equivalents; a mode a harness's table lacks has none, and is not passed to it.
+PERMISSION_ARGS = {
+    "gemini": {"default": ["--approval-mode", "default"], "acceptEdits": ["--approval-mode", "auto_edit"],
+               "bypassPermissions": ["--approval-mode", "yolo"]},
+    # Codex asks before acting by default, so its default needs no flag.
+    "codex": {"default": [], "acceptEdits": ["--full-auto"],
+              "bypassPermissions": ["--dangerously-bypass-approvals-and-sandbox"], "plan": ["--sandbox", "read-only"]},
+    "opencode": {},
+    "pi": {},
+}
+
+# How each harness resumes a saved session; codex's is a subcommand, so it has to come first.
+RESUME_ARGS = {"claude": "--resume", "gemini": "--resume", "pi": "--session", "opencode": "--session",
+               "codex": "resume"}
+
+
+@dataclass(frozen=True)
+class AgentSettings:
+    """How each role's agent starts: the permission mode, and by role its model and its harness (kinds).
+
+    A role missing from models starts on its harness's default model, and one missing from kinds in DEFAULT_AGENT.
+    """
+    permission_mode: str | None = None
+    models: dict[str, str] = field(default_factory=dict)
+    kinds: dict[str, str] = field(default_factory=dict)
+
+
+def permission_args(kind: str, mode: str) -> list[str] | None:
+    """The harness's arguments for a --permission-mode, or None when it has no equivalent."""
+    if kind == "claude":
+        return ["--permission-mode", mode]
+    return PERMISSION_ARGS[kind].get(mode)
+
+
+def launch_args(kind: str, permission_mode: str | None, model: str | None, session: str | None) -> list[str]:
+    """The arguments a role's agent starts with in the harness: into its saved session, if given one."""
+    args = (permission_args(kind, permission_mode) or []) if permission_mode else []
+    if session:
+        resume = [RESUME_ARGS[kind], session]
+        args = resume + args if kind == "codex" else args + resume
+    if model:
+        args += ["--model", model]
+    return args
 
 
 # ---------------------------------------------------------------------------
@@ -905,16 +973,16 @@ class Herdr:
     def rename_pane(self, pane: str, label: str) -> None:
         self.call("pane", "rename", pane, label)
 
-    def start_agent(self, name: str, pane: str, agent_args: list[str]) -> bool:
-        """Start Claude Code in the pane. False means it is blocked on a startup dialog."""
-        args = ["agent", "start", name, "--kind", "claude", "--pane", pane,
+    def start_agent(self, name: str, pane: str, kind: str, agent_args: list[str]) -> bool:
+        """Start an agent of the harness kind in the pane. False means it is blocked on a startup dialog."""
+        args = ["agent", "start", name, "--kind", kind, "--pane", pane,
                 "--timeout", str(AGENT_START_TIMEOUT_MS)]
         if agent_args:
             args += ["--", *agent_args]
         try:
             self.call(*args, limit=AGENT_START_TIMEOUT_MS / 1000 + 60)
         except HerdrError as e:
-            # Such as the folder-trust question in a directory Claude Code has not seen.
+            # Such as Claude Code's folder-trust question in a directory it has not seen.
             # herdr keeps the name bound, so the agent can still be waited on.
             if e.code == "agent_not_ready":
                 return False
@@ -973,7 +1041,7 @@ class Herdr:
 
 
 def agent_session(agent: dict) -> str | None:
-    """The Claude Code session id herdr reports for an agent, once it knows it."""
+    """The session id herdr reports for an agent, once it knows it."""
     return (agent.get("agent_session") or {}).get("value")
 
 
@@ -1486,12 +1554,16 @@ class RunState:
     # The files that conflicted with the base branch when the pull request was opened, as a draft.
     conflicts: list[str] = field(default_factory=list)
     error: str | None = None
-    # Per role: the agent's name, its pane and, once herdr reports it, its Claude Code session id.
+    # Per role: the agent's name, its pane, the harness it runs in (kind) and, once herdr reports it,
+    # its session id. A record without a kind is a claude agent's, saved before there were others.
     agents: dict[str, dict[str, str]] = field(default_factory=dict)
     max_rounds: int = DEFAULT_MAX_ROUNDS
     turn_timeout: int = DEFAULT_TURN_TIMEOUT
-    agent_args: list[str] = field(default_factory=list)
+    # As --permission-mode names it; each harness's agent gets its own equivalent (permission_args).
+    permission_mode: str | None = None
     models: dict[str, str] = field(default_factory=dict)
+    # Per role: the harness its next agent starts in. A role missing here runs in DEFAULT_AGENT.
+    agent_kinds: dict[str, str] = field(default_factory=dict)
     # False by default because a run saved before pull requests existed never switched to its own branch.
     pull_request: bool = False
     # Basename of the handoff file whose prompt was delivered, so a resume does not prompt for it again.
@@ -1523,6 +1595,8 @@ class RunState:
             state = cls(**{k: v for k, v in saved.items() if k in known})
         except TypeError as e:
             raise OrchestratorError(f"run state {saved.get('run_id', '?')} is incomplete: {e}") from e
+        if "permission_mode" not in saved:
+            state.permission_mode = _saved_permission_mode(saved)
         pipeline = saved_pipeline(saved)
         first = next(iter(pipeline.roles)) if pipeline else None
         if not state.root_pane and first in state.agents:
@@ -1563,6 +1637,17 @@ class RunState:
     def last_report_path(self, n: int) -> str:
         """The Builder's last report in round n, once its quality rounds are over: the one the Reviewer reads."""
         return self.builder_report_path(n, max(self.quality_round - 1, 0))
+
+
+def _saved_permission_mode(saved: dict) -> str | None:
+    """The permission mode of a state saved by 0.3.0, which kept it as Claude Code's agent_args."""
+    args = saved.get("agent_args") or []
+    if not args:
+        return None
+    if len(args) != 2 or args[0] != "--permission-mode":
+        raise OrchestratorError(f"run state {saved.get('run_id', '?')} has agent_args {args}, "
+                                f"which name no permission mode")
+    return args[1]
 
 
 def new_run_id() -> str:
@@ -1820,7 +1905,7 @@ class RunTakenOver(OrchestratorError):
 # How a role's agent came to be ready for a turn, which decides what it is prompted with.
 NEW = "new"              # the role's first agent in this run
 ALIVE = "alive"          # still running from before
-RESUMED = "resumed"      # had exited; relaunched into its saved Claude Code session
+RESUMED = "resumed"      # had exited; relaunched into its saved agent session
 RESTARTED = "restarted"  # had exited; relaunched in a fresh session that has lost its earlier turns
 
 
@@ -1836,8 +1921,9 @@ class Workflow:
     """Drives one run through the steps of its workflow in a herdr workspace.
 
     A role's turn ends when it writes its handoff file, not when herdr reports it
-    settled: Claude Code ends a turn while a background task it started is still
-    running and resumes when the task completes, so idle or done can come mid-work.
+    settled: an agent can end a turn while a background task it started is still
+    running and resume when the task completes, as Claude Code does, so idle or done
+    can come mid-work.
 
     The same code starts a new run and resumes an interrupted one. A new run is a
     resume from the first step with no workspace; every step first looks for what an
@@ -1856,8 +1942,7 @@ class Workflow:
     def __init__(self, herdr: Herdr, host: Host, state: RunState, *,
                  notify, max_rounds: int = DEFAULT_MAX_ROUNDS,
                  turn_timeout: int = DEFAULT_TURN_TIMEOUT,
-                 agent_args: list[str] | None = None,
-                 models: dict[str, str] | None = None,
+                 agents: AgentSettings | None = None,
                  pull_request: bool = True,
                  ci: CI | None = None,
                  max_quality_rounds: int = DEFAULT_MAX_QUALITY_ROUNDS,
@@ -1882,8 +1967,10 @@ class Workflow:
         # Saved with the run, so a resume starts from them.
         state.max_rounds = max_rounds
         state.turn_timeout = turn_timeout
-        state.agent_args = agent_args or []
-        state.models = models or {}
+        agents = agents or AgentSettings()
+        state.permission_mode = agents.permission_mode
+        state.models = dict(agents.models)
+        state.agent_kinds = {role: agents.kinds.get(role, DEFAULT_AGENT) for role in pipeline.roles}
         state.pull_request = pull_request
         state.quality_job = ci.job if ci else None
         state.max_quality_rounds = max_quality_rounds
@@ -1893,6 +1980,8 @@ class Workflow:
         self.wallclock = clocks.wall
         self.me = {"host": socket.gethostname(), "pid": os.getpid(), "started_at": self._timestamp()}
         self._last_write = 0.0
+        # The roles whose harness has no equivalent of the permission mode and that the log has said so for.
+        self._told_dropped = set()
 
     def run(self) -> str:
         """Run every phase not yet done and return the final verdict; for a workflow without one, FINISHED,
@@ -2606,10 +2695,14 @@ class Workflow:
         if known and self.herdr.status(known["name"]) is not None:
             return ALIVE
         pane = self._pane_for(role)
-        if session := (known or {}).get("session"):
+        session, kind = (known or {}).get("session"), (known or {}).get("kind", DEFAULT_AGENT)
+        if session and kind != self.state.agent_kinds[role]:
+            log(f"[{role}] session {session} is {kind}'s, and the role runs in {self.state.agent_kinds[role]} now; "
+                f"starting a fresh one")
+        elif session:
             # Keeps the conversation: for the Spec Collector that is the interview itself.
             try:
-                if self._start(role, pane, ["--resume", session]):
+                if self._start(role, pane, session):
                     return RESUMED
             except HerdrError as e:
                 log(f"[{role}] could not resume session {session}: {e}")
@@ -2636,16 +2729,17 @@ class Workflow:
                 return self.herdr.split(pane, direction, s.cwd)
         raise OrchestratorError(f"no pane of run {s.run_id} is left in herdr workspace {s.workspace_id}")
 
-    def _start(self, role: str, pane: str, extra_args: list[str] | None = None) -> bool:
-        """Start the role's agent in the pane. False means it exited at once."""
+    def _start(self, role: str, pane: str, session: str | None = None) -> bool:
+        """Start the role's agent in the pane, in its saved session if given one. False means it exited at once."""
         s = self.state
-        name = f"{role}-{s.key}"
-        args = [*s.agent_args, *(extra_args or [])]
-        if model := s.models.get(role):
-            args += ["--model", model]
+        name, kind = f"{role}-{s.key}", s.agent_kinds[role]
+        mode = s.permission_mode
+        if mode and permission_args(kind, mode) is None and role not in self._told_dropped:
+            self._told_dropped.add(role)
+            log(f"[{role}] {kind} has no equivalent of --permission-mode {mode}; starting it without one")
         self.herdr.rename_pane(pane, self.pipeline.roles[role])
-        ready = self.herdr.start_agent(name, pane, args)
-        s.agents[role] = {"name": name, "pane": pane}
+        ready = self.herdr.start_agent(name, pane, kind, launch_args(kind, mode, s.models.get(role), session))
+        s.agents[role] = {"name": name, "pane": pane, "kind": kind}
         self._save()
         if not ready:
             self._ask_human(role, "needs your answer")
@@ -2733,8 +2827,8 @@ class Workflow:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="orchestrator.py",
-        description="Role-based handoff between Claude Code sessions in herdr; "
-                    "by default Spec Collector -> Builder -> Reviewer.")
+        description="Role-based handoff between agent sessions in herdr, each role in the harness of its "
+                    "choice; by default Spec Collector -> Builder -> Reviewer, all in Claude Code.")
     sub = p.add_subparsers(dest="command", required=True)
 
     target = argparse.ArgumentParser(add_help=False)
@@ -2748,14 +2842,28 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     settings.add_argument("--timeout", type=int,
                           help=f"seconds a Builder or Reviewer turn may take (default {DEFAULT_TURN_TIMEOUT})")
     settings.add_argument("--permission-mode",
-                          help="Claude Code permission mode for every role, e.g. auto or acceptEdits")
-    settings.add_argument("--model", help="Claude model for every role, e.g. sonnet or claude-opus-5-5")
+                          help="permission mode for every role, by Claude Code's names, e.g. auto or acceptEdits. "
+                               "claude takes any as it is. gemini gets --approval-mode default, auto_edit or yolo "
+                               "for default, acceptEdits or bypassPermissions; codex nothing for default, "
+                               "--full-auto for acceptEdits, --dangerously-bypass-approvals-and-sandbox for "
+                               "bypassPermissions and --sandbox read-only for plan. Any other mode, and every mode "
+                               "for opencode and pi, is not passed, and the log says so")
+    settings.add_argument("--model", help="model for every role, passed to its harness as --model, "
+                                          "e.g. sonnet or claude-opus-5-5")
     for role in ROLE_LABELS:
         settings.add_argument(f"--{role}-model", metavar="MODEL",
-                              help=f"Claude model for the {ROLE_LABELS[role]}; overrides --model")
+                              help=f"model for the {ROLE_LABELS[role]}; overrides --model")
     settings.add_argument("--role-model", metavar="ROLE=MODEL", action="append", type=role_model_arg,
-                          help="Claude model for one role of the workflow, by its key; overrides --model and "
+                          help="model for one role of the workflow, by its key; overrides --model and "
                                "the workflow's own model for it; repeatable")
+    settings.add_argument("--agent", metavar="KIND", choices=AGENT_KINDS,
+                          help=f"agent harness for every role, one of {', '.join(AGENT_KINDS)}; overrides the "
+                               f"agent key of a role in the workflow file (default {DEFAULT_AGENT}). Each harness a "
+                               f"run uses needs its CLI on PATH and `herdr integration install KIND` where the agents "
+                               f"run")
+    settings.add_argument("--role-agent", metavar="ROLE=KIND", action="append", type=role_agent_arg,
+                          help="agent harness for one role of the workflow, by its key; overrides --agent; "
+                               "repeatable")
     settings.add_argument("--max-quality-rounds", type=int, metavar="N",
                           help=f"with --quality-gate: SonarQube analyses per review round before the Reviewer "
                                f"gets the change anyway (default {DEFAULT_MAX_QUALITY_ROUNDS})")
@@ -2822,18 +2930,39 @@ def role_model_arg(text: str) -> tuple[str, str]:
     return role, model
 
 
+def role_agent_arg(text: str) -> tuple[str, str]:
+    role, sep, kind = text.partition("=")
+    if not (sep and role) or kind not in AGENT_KINDS:
+        raise argparse.ArgumentTypeError(f"expected ROLE=KIND, where KIND is one of {', '.join(AGENT_KINDS)}; "
+                                         f"not {text!r}")
+    return role, kind
+
+
+def _named_roles(flag: str, pairs, roles) -> dict[str, str]:
+    """The ROLE=VALUE pairs of a flag, by role, each role one of the workflow's."""
+    named = dict(pairs or [])
+    if unknown := set(named) - set(roles):
+        raise OrchestratorError(f"{flag} names role {min(unknown)}, which the workflow does not have; "
+                                f"its roles are {', '.join(roles)}")
+    return named
+
+
 def role_models(args: argparse.Namespace, roles=ROLE_LABELS) -> dict[str, str]:
-    """The model each role starts with by the flags; a role without one keeps its workflow's, or Claude Code's.
+    """The model each role starts with by the flags; a role without one keeps its workflow's, or its harness's.
 
     --role-model names any role; only the default workflow's roles have a --ROLE-model flag too.
     """
-    named = dict(args.role_model or [])
-    if unknown := set(named) - set(roles):
-        raise OrchestratorError(f"--role-model names role {min(unknown)}, which the workflow does not have; "
-                                f"its roles are {', '.join(roles)}")
+    named = _named_roles("--role-model", args.role_model, roles)
     models = {role: named.get(role) or (getattr(args, f"{role}_model") if role in ROLE_LABELS else None)
               or args.model for role in roles}
     return {role: m for role, m in models.items() if m}
+
+
+def role_agents(args: argparse.Namespace, roles) -> dict[str, str]:
+    """The harness each role runs in by the flags; a role without one keeps its workflow's, or the saved one."""
+    named = _named_roles("--role-agent", args.role_agent, roles)
+    agents = {role: named.get(role) or args.agent for role in roles}
+    return {role: kind for role, kind in agents.items() if kind}
 
 
 def target_args(args: argparse.Namespace) -> list[str]:
@@ -2961,8 +3090,10 @@ def resumable_state(runs: list[tuple[int, dict]], args: argparse.Namespace, cwd:
     if args.timeout is not None:
         state.turn_timeout = args.timeout
     if args.permission_mode:
-        state.agent_args = ["--permission-mode", args.permission_mode]
+        state.permission_mode = args.permission_mode
     state.models = {**state.models, **role_models(args, pipeline.roles)}
+    # Taken up by each role's next agent; one still running keeps its harness.
+    state.agent_kinds = {**state.agent_kinds, **role_agents(args, pipeline.roles)}
     if state.phase != DONE and state.max_rounds < state.round:
         raise OrchestratorError(f"run {state.run_id} is already in round {state.round}; "
                                 f"--max-rounds {state.max_rounds} is too low")
@@ -3026,7 +3157,8 @@ def main(argv: list[str]) -> int:
         workflow = Workflow(
             herdr, host, state, notify=notify_locally,
             max_rounds=state.max_rounds, turn_timeout=state.turn_timeout,
-            agent_args=state.agent_args, models=state.models, pull_request=state.pull_request,
+            agents=AgentSettings(state.permission_mode, state.models, state.agent_kinds),
+            pull_request=state.pull_request,
             ci=CI(state.quality_job) if state.quality_job else None,
             max_quality_rounds=state.max_quality_rounds, pipeline=pipeline)
         verdict = workflow.run()
@@ -3066,8 +3198,9 @@ def new_state(args: argparse.Namespace, cwd: str) -> tuple[RunState, Pipeline]:
                      phase=pipeline.steps[0].id, workflow=pipeline.name)
     state.max_rounds = args.max_rounds or DEFAULT_MAX_ROUNDS
     state.turn_timeout = args.timeout or DEFAULT_TURN_TIMEOUT
-    state.agent_args = ["--permission-mode", args.permission_mode] if args.permission_mode else []
+    state.permission_mode = args.permission_mode
     state.models = {**pipeline.models, **role_models(args, pipeline.roles)}
+    state.agent_kinds = {**pipeline.agents, **role_agents(args, pipeline.roles)}
     state.pull_request = not args.no_pr
     state.quality_job = args.quality_gate
     state.max_quality_rounds = args.max_quality_rounds or DEFAULT_MAX_QUALITY_ROUNDS

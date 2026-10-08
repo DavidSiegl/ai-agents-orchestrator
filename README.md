@@ -2,7 +2,8 @@
 
 # ai-agents-orchestrator
 
-A role-based handoff workflow for **Claude Code** sessions running in [herdr](https://herdr.dev):
+A role-based handoff workflow for coding agents running in [herdr](https://herdr.dev): **Claude Code** by
+default, or Codex, Gemini CLI, opencode or pi, chosen per role:
 
 ```
 Spec Collector ──spec.md──▶ Builder ──build-N.md──▶ Reviewer ──review-N.md──▶ APPROVE ──▶ pull request
@@ -13,14 +14,17 @@ Spec Collector ──spec.md──▶ Builder ──build-N.md──▶ Reviewer
 With `--quality-gate`, a SonarQube analysis through Jenkins sits between the Builder and the Reviewer, and
 sends its findings back to the Builder first.
 
-Each role is a separate interactive Claude Code session in its own herdr pane, so no role judges its own
-work, and you can watch or step into any of them. The agents run on this machine or on another one saved in
+Each role is a separate interactive agent session in its own herdr pane, so no role judges its own
+work, and you can watch or step into any of them. Each role runs in the [harness](#harnesses) of your choice, so
+that, say, Claude Code builds and Codex reviews; you answer the Spec Collector in its pane whichever it runs. The agents run on this machine or on another one saved in
 herdr. Each feature is built on its own branch and ends as a pull request on GitHub, where you review it.
 
 ## Requirements
 
-- herdr 0.9+ with the Claude integration installed where the agents run (`herdr integration install claude`)
-- `claude` on `PATH` where the agents run
+- herdr 0.9+ where the agents run, with the integration of each harness a run uses installed there
+  (`herdr integration install <kind>`, e.g. `herdr integration install claude`)
+- The CLI of each harness a run uses on `PATH` where the agents run: `claude` by default, and `codex`, `gemini`,
+  `opencode` or `pi` for a role that runs in one of those
 - Where the agents run, unless you use `--no-pr`: a git checkout with an `origin` it can push to, and
   [`gh`](https://cli.github.com) logged in (`gh auth status`)
 - Python 3.13+, standard library only; [uv](https://github.com/astral-sh/uv) only for the tests
@@ -73,14 +77,16 @@ python orchestrator.py run --quality-gate AI-Agents-Orchestrator/py-ai-agents-or
 | `--cwd PATH` | Project directory, on the machine if `--machine` is given. Default: current directory. |
 | `--max-rounds N` | Review rounds before giving up (default 3). |
 | `--timeout SECONDS` | How long one Builder or Reviewer turn may take (default 1800). The interview has no limit. |
-| `--permission-mode MODE` | Claude Code permission mode for every role, e.g. `auto` or `acceptEdits`. |
-| `--model MODEL` | Claude model for every role, e.g. `sonnet`. Default: the workflow file's model for the role, else Claude Code's own. |
-| `--spec-model MODEL` | Claude model for the Spec Collector. Overrides `--model`. |
-| `--build-model MODEL` | Claude model for the Builder. Overrides `--model`. |
-| `--review-model MODEL` | Claude model for the Reviewer. Overrides `--model`. |
+| `--agent KIND` | The [harness](#harnesses) every role runs in: `claude`, `codex`, `gemini`, `opencode` or `pi`. Overrides the `agent` of a role in the workflow file. Default: that, else `claude`. |
+| `--role-agent ROLE=KIND` | The harness of one role of the workflow, by its key, e.g. `review=codex`. Overrides `--agent`; repeatable. |
+| `--permission-mode MODE` | Permission mode for every role, by Claude Code's names, e.g. `auto` or `acceptEdits`; each other harness gets its [equivalent](#harnesses), if it has one. |
+| `--model MODEL` | Model for every role, e.g. `sonnet`, passed to its harness as `--model MODEL` unchanged. Default: the workflow file's model for the role, else the harness's own. |
+| `--spec-model MODEL` | Model for the Spec Collector. Overrides `--model`. |
+| `--build-model MODEL` | Model for the Builder. Overrides `--model`. |
+| `--review-model MODEL` | Model for the Reviewer. Overrides `--model`. |
 | `--workflow NAME` | `run` only: the workflow the run goes through: `default`, the run described below, or one of [your own](#your-own-workflows) in `~/.config/ai-agents-orchestrator/workflows/`. `--help` lists the choices; a resumed run keeps its workflow. |
 | `--workflow-file FILE` | `run` only: like `--workflow`, for the workflow file at `FILE`, such as one kept in the project. |
-| `--role-model ROLE=MODEL` | Claude model for one role of the workflow, by its key, e.g. `tests=sonnet`. Overrides `--model`; repeatable. |
+| `--role-model ROLE=MODEL` | Model for one role of the workflow, by its key, e.g. `tests=sonnet`. Overrides `--model`; repeatable. |
 | `--no-pr` | `run` only: leave the change uncommitted and the workspace open instead of opening a pull request. Works outside git. |
 | `--quality-gate JOB` | `run` only: after each Builder turn, analyse the change with this Jenkins job, by its full name with folders, and SonarQube, and send the findings back to the Builder before the Reviewer. Needs `JENKINS_URL`, `JENKINS_USER`, `JENKINS_TOKEN`, `SONAR_HOST_URL` and `SONAR_TOKEN`, from the environment or `~/.config/ai-agents-orchestrator/ci.env`. |
 | `--max-quality-rounds N` | With the gate: SonarQube analyses per review round before the Reviewer gets the change anyway (default 3). |
@@ -88,6 +94,29 @@ python orchestrator.py run --quality-gate AI-Agents-Orchestrator/py-ai-agents-or
 
 A run saves its settings. `resume` takes the same flags as `run` except `--no-pr`, `--quality-gate`,
 `--workflow` and `--workflow-file`, and a flag given to `resume` overrides the saved value; one left out keeps it.
+A harness changed by `resume` applies to each role's next agent; one still running keeps its own.
+
+### Harnesses
+
+A role's harness is herdr's `--kind` for its agent: `claude` (Claude Code, the default), `codex`, `gemini`,
+`opencode` or `pi`. The precedence is `--role-agent`, then `--agent`, then the role's `agent` in the workflow file,
+then `claude`. A model name is passed as it is, never translated between harnesses, so give each role a model its
+harness knows.
+
+`--permission-mode` takes Claude Code's mode names, and each harness gets its own equivalent:
+
+| `--permission-mode` | claude | gemini | codex | pi, opencode |
+|---|---|---|---|---|
+| `default` | `--permission-mode default` | `--approval-mode default` | (nothing) | dropped |
+| `acceptEdits` | `--permission-mode acceptEdits` | `--approval-mode auto_edit` | `--full-auto` | dropped |
+| `bypassPermissions` | `--permission-mode bypassPermissions` | `--approval-mode yolo` | `--dangerously-bypass-approvals-and-sandbox` | dropped |
+| `plan` | `--permission-mode plan` | dropped | `--sandbox read-only` | dropped |
+| `auto`, `dontAsk`, any other | passed through | dropped | dropped | dropped |
+
+A dropped mode is not passed to the agent, which then starts with its own default, and the log says so once per
+role. An agent that exited is relaunched into its saved session with its harness's own syntax: `--resume <id>` for
+claude and gemini, `--session <id>` for pi and opencode, and `codex resume <id>`. If the role's harness has changed
+since, the agent starts a fresh session instead.
 
 Exit status: `0` approved, or `FINISHED` for a workflow without a verdict step; `3` changes still requested after
 the last round, or, for a workflow without a verdict step, `QUALITY_GATE_FAILED`: the quality gate still failed
@@ -146,8 +175,9 @@ gives you the default's full definition to edit. [`examples/workflows/`](example
 ```toml
 description = "Spec Collector -> Test Writer -> Builder <-> Reviewer"
 
-[roles]                    # optional: labels and default models
+[roles]                    # optional: labels, default models and harnesses
 tests = { label = "Test Writer", model = "sonnet" }
+review = { agent = "codex" }
 
 [[steps]]
 use = "spec"               # a step of the default workflow, as it is
@@ -180,7 +210,9 @@ default step and overrides only the keys you give. Prompts fill in `{task}`, `{c
 brace as `{{` or `}}`. A role you do not list in `[roles]`, or list without a label, keeps the default workflow's
 label for that key (`build` is "Builder"), and is otherwise labelled after its key (`test_writer` is "Test
 Writer"). The panes follow the steps: the first role to take a turn gets the root pane, the next one a split to its
-right, and each further one a split below. A role's `model` is its default, and any model flag overrides it. The
+right, and each further one a split below. A role's `model` is its default, and any model flag overrides it; likewise its `agent`, the
+[harness](#harnesses) it runs in, one of `claude`, `codex`, `gemini`, `opencode` and `pi`, which `--agent` and
+`--role-agent` override. The
 file is checked when it loads, and an error names the step and key. A run saves its workflow's definition, so
 editing or deleting the file does not change a run already started. See [Workflows](docs/architecture.md#workflows)
 for the rules.
