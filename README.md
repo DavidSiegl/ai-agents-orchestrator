@@ -72,7 +72,9 @@ window you fill in a run (the task, the project folder, and optionally a machine
 every role, the model, the permission mode, `--no-pr` and a quality-gate job; per-role harnesses and models stay
 on the command line), see the project's runs as `list` shows them, resume one, and follow the output of the
 run, which Stop interrupts as Ctrl-C would. The window starts the same `run` or `resume` command you would type,
-one at a time, and shows it at the top of the output.
+one at a time, and shows it at the top of the output. It is dressed in the colors of the octopus logo
+(`docs/logo.svg`, embedded as `docs/logo-64.png`): a dark navy window whose header names the selected workflow's
+roles, with the runs' statuses in color and a terminal-style output pane.
 
 The role agents still run in herdr, so open `herdr` in a terminal to answer the Spec Collector. As on the
 command line, a run without a machine has to start from a herdr pane: start the window from one, or give a

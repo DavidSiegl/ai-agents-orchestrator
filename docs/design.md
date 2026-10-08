@@ -78,6 +78,12 @@ command line. The agents are still in herdr, where you answer the Spec Collector
 still has to start inside a herdr pane, since herdr commands from outside one would reach whichever session is
 focused; listing a local project's runs sends no herdr command, so the window lists them from anywhere.
 
+Its look comes from the octopus in `docs/logo.svg`: a dark navy theme in the logo's colors, on ttk's `clam`
+theme on every platform, since macOS's native one ignores colors. A header shows the logo and the chain of roles
+of the workflow chosen in the form, which is the workflow's definition rather than a run's progress. The run list
+colors each status, and the output pane is terminal-like. Tk 8.6 loads no SVG, so the window embeds
+`docs/logo-64.png`, the logo rendered once, which is also its window and Dock icon.
+
 tkinter is imported only when the window opens, so the CLI keeps running on a Python without it.
 
 ## Builds and releases
