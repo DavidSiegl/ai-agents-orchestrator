@@ -3280,6 +3280,12 @@ CORAL_LIGHT = "#F4987F"  # Start run under the pointer
 TEAL = "#2A9D8F"         # focus
 MINT = "#7FE0D2"         # selection, approved runs, the echoed command
 AMBER = "#F2B33D"        # runs that need a look
+# The window's typeface, given to Tk's named fonts for proportional text, which every widget but the output
+# pane draws with. Tk cannot load a font file, so where Roboto is not installed the platform's font stays. The
+# output pane keeps TkFixedFont, a monospace one, so it still reads as a terminal.
+GUI_FONT_FAMILY = "Roboto"
+GUI_TEXT_FONTS = ("TkDefaultFont", "TkTextFont", "TkHeadingFont", "TkMenuFont", "TkCaptionFont",
+                  "TkSmallCaptionFont", "TkIconFont", "TkTooltipFont")
 # The ttk styles the window switches between or sets on a widget, besides defining them.
 ACCENT_BUTTON = "Accent.TButton"
 PIPELINE_LABEL = "Pipeline.TLabel"
@@ -3545,6 +3551,10 @@ class RunWindow:
         On clam everywhere, since it takes the colors on every platform; macOS's aqua ignores them.
         """
         root, ttk, font = self.root, self.ui.ttk, self.ui.font
+        # Before the copies below, so the section and title headings get the family too.
+        if GUI_FONT_FAMILY in font.families(root):
+            for name in GUI_TEXT_FONTS:
+                font.nametofont(name, root=root).configure(family=GUI_FONT_FAMILY)
         heading = font.nametofont("TkHeadingFont", root=root)
         self.fonts = {"section": _derived_font(heading, "bold"), "title": _derived_font(heading, "bold", 1.5),
                       "command": _derived_font(font.nametofont("TkFixedFont", root=root), "bold")}

@@ -4810,11 +4810,11 @@ class FakeStyle:
 class FakeFont:
     """A Tk named font, as tkinter.font.nametofont gives it."""
 
-    def __init__(self, name, size=-12):
-        self.name, self.options = name, {"size": size, "weight": "normal"}
+    def __init__(self, name, size=-12, family="DejaVu Sans"):
+        self.name, self.options = name, {"family": family, "size": size, "weight": "normal"}
 
     def copy(self):
-        return FakeFont(self.name, self.options["size"])
+        return FakeFont(self.name, self.options["size"], self.options["family"])
 
     def configure(self, **options):
         self.options.update(options)
@@ -4836,9 +4836,10 @@ TTK_WIDGETS = {name: type(name, (FakeWidget,), {}) for name in
                ("Frame", "Label", "Entry", "Combobox", "Button", "Checkbutton", "Scrollbar")}
 
 
-def fake_ui():
-    """The tkinter modules, faked; styles holds each ttk.Style the window creates."""
-    styles = []
+def fake_ui(families=("DejaVu Sans",)):
+    """The tkinter modules, faked, with the font families installed; styles holds each ttk.Style the window
+    creates, and named_fonts Tk's named fonts, one object per name as in Tk."""
+    styles, named_fonts = [], {}
 
     def style(master=None):
         styles.append(FakeStyle(master))
@@ -4847,8 +4848,9 @@ def fake_ui():
     return SimpleNamespace(
         tk=SimpleNamespace(StringVar=FakeVar, BooleanVar=FakeBooleanVar, Text=FakeText, PhotoImage=FakePhotoImage),
         ttk=SimpleNamespace(**TTK_WIDGETS, Treeview=FakeTreeview, Style=style),
-        font=SimpleNamespace(nametofont=lambda name, root=None: FakeFont(name)),
-        filedialog=MagicMock(), messagebox=MagicMock(), styles=styles)
+        font=SimpleNamespace(nametofont=lambda name, root=None: named_fonts.setdefault(name, FakeFont(name)),
+                             families=lambda root=None, displayof=None: families),
+        filedialog=MagicMock(), messagebox=MagicMock(), styles=styles, named_fonts=named_fonts)
 
 
 class FakeProcess:
@@ -5231,6 +5233,21 @@ class TestRunWindowLook(unittest.TestCase):
         self.assertEqual(fonts["title"].options["size"], -18)  # 1.5 times the heading's 12 pixels
         self.assertEqual(self.style.options["Section.TLabel"]["font"], fonts["section"])
         self.assertEqual(self.window.task.options["font"], "TkDefaultFont")
+
+    def test_roboto_where_it_is_installed(self):
+        ui = fake_ui(families=("DejaVu Sans", "Roboto"))
+        window = orchestrator.RunWindow(FakeRoot(), ui, start=self.start, list_runs=lambda m, c: [],
+                                        background=lambda fn: fn())
+        families = {name: f.options["family"] for name, f in ui.named_fonts.items()}
+        self.assertEqual({name: families[name] for name in orchestrator.GUI_TEXT_FONTS},
+                         dict.fromkeys(orchestrator.GUI_TEXT_FONTS, "Roboto"))
+        self.assertEqual(families["TkFixedFont"], "DejaVu Sans")  # the output pane stays monospace
+        self.assertEqual({name: f.options["family"] for name, f in window.fonts.items()},
+                         {"section": "Roboto", "title": "Roboto", "command": "DejaVu Sans"})
+
+    def test_the_platforms_font_without_roboto(self):
+        self.assertEqual({f.options["family"] for f in self.ui.named_fonts.values()}, {"DejaVu Sans"})
+        self.assertEqual({f.options["family"] for f in self.window.fonts.values()}, {"DejaVu Sans"})
 
 
 class FakeTclError(Exception):
