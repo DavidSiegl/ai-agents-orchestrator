@@ -4,12 +4,16 @@ import os
 import re
 import socket
 import subprocess
+import shlex
 import tempfile
+import threading
+import time
 import tomllib
 import unittest
 import urllib.error
 import urllib.parse
 from dataclasses import asdict
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import orchestrator
@@ -4498,6 +4502,514 @@ class TestWorkflowFileAgents(unittest.TestCase):
         roles = dict(QUICK.roles)
         with self.assertRaisesRegex(ValueError, "an agent is set for role x, which is not one of the workflow's roles"):
             Pipeline("bad", roles, QUICK.steps, agents={"x": "pi"})
+
+
+
+# ---------------------------------------------------------------------------
+# GUI: on fakes of the tkinter modules, so the suite needs neither tkinter nor a display
+# ---------------------------------------------------------------------------
+
+EVERY_OPTION = orchestrator.RunForm(
+    task="add a rate limiter", cwd="~/proj", machine="remote", workflow="default", agent="codex",
+    model="gpt-5", permission_mode="acceptEdits", no_pr=True, quality_gate="folder/job")
+
+
+class TestRunArgs(unittest.TestCase):
+    def test_every_option(self):
+        self.assertEqual(orchestrator.run_args(EVERY_OPTION), [
+            "run", "--machine", "remote", "--cwd", "~/proj", "--workflow", "default", "--agent", "codex",
+            "--model", "gpt-5", "--permission-mode", "acceptEdits", "--quality-gate", "folder/job", "--no-pr",
+            "--", "add a rate limiter"])
+
+    def test_the_cli_reads_every_option_as_the_form_has_it(self):
+        args = parse_args(orchestrator.run_args(EVERY_OPTION))
+        self.assertEqual((args.command, args.task, args.machine, args.cwd, args.workflow, args.agent, args.model,
+                          args.permission_mode, args.no_pr, args.quality_gate),
+                         ("run", "add a rate limiter", "remote", "~/proj", "default", "codex", "gpt-5",
+                          "acceptEdits", True, "folder/job"))
+
+    def test_unset_options_are_left_out(self):
+        form = orchestrator.RunForm(task="  fix it\n", cwd=" /proj ", machine=" ", model="", agent="")
+        self.assertEqual(orchestrator.run_args(form), ["run", "--cwd", "/proj", "--", "fix it"])
+
+    def test_a_task_that_looks_like_a_flag_stays_the_task(self):
+        for task in ("-v is broken", "--help", "line one\nline two -- three"):
+            with self.subTest(task=task):
+                args = parse_args(orchestrator.run_args(orchestrator.RunForm(task=task, cwd="/proj")))
+                self.assertEqual((args.task, args.cwd), (task, "/proj"))
+
+    def test_task_and_folder_are_required(self):
+        no_task, no_folder = orchestrator.RunForm(task=" \n", cwd="/proj"), orchestrator.RunForm(task="fix it", cwd=" ")
+        with self.assertRaisesRegex(OrchestratorError, "the task is empty"):
+            orchestrator.run_args(no_task)
+        with self.assertRaisesRegex(OrchestratorError, "choose a project folder"):
+            orchestrator.run_args(no_folder)
+
+    def test_resume_takes_the_target_arguments(self):
+        self.assertEqual(orchestrator.resume_args("20260930-070000-c0ffee", EVERY_OPTION),
+                         ["resume", "20260930-070000-c0ffee", "--machine", "remote", "--cwd", "~/proj"])
+        self.assertEqual(orchestrator.resume_args("c0ffee", orchestrator.RunForm(cwd="/proj ")),
+                         ["resume", "c0ffee", "--cwd", "/proj"])
+
+
+class TestGuiByDefault(unittest.TestCase):
+    def test_display(self):
+        cases = [("darwin", {}, True), ("linux", {"DISPLAY": ":0"}, True), ("linux", {"WAYLAND_DISPLAY": "w"}, True),
+                 ("linux", {}, False), ("linux", {"DISPLAY": "", "WAYLAND_DISPLAY": ""}, False)]
+        for platform, environ, expected in cases:
+            with self.subTest(platform=platform, environ=environ):
+                self.assertEqual(orchestrator.gui_by_default(platform, environ), expected)
+
+    @patch.object(orchestrator.sys, "platform", "linux")
+    def test_no_arguments_open_the_gui_with_a_display(self):
+        with patch.dict("os.environ", {"DISPLAY": ":0"}):
+            self.assertEqual(parse_args([]).command, "gui")
+
+    @patch.object(orchestrator.sys, "platform", "linux")
+    @patch.dict("os.environ", {"DISPLAY": "", "WAYLAND_DISPLAY": ""})
+    def test_no_arguments_without_a_display_print_the_usage(self):
+        with patch("sys.stderr", new_callable=io.StringIO) as err, self.assertRaises(SystemExit) as cm:
+            parse_args([])
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("usage: orchestrator.py", err.getvalue())
+
+    @patch.object(orchestrator.sys, "platform", "darwin")
+    def test_arguments_never_open_the_gui(self):
+        self.assertEqual(parse_args(["workflows"]).command, "workflows")
+        with patch("sys.stdout", new_callable=io.StringIO) as out, self.assertRaises(SystemExit) as cm:
+            parse_args(["--help"])
+        self.assertEqual(cm.exception.code, 0)
+        self.assertIn("gui", out.getvalue())
+
+    @patch.object(orchestrator, "gui_command", return_value=0)
+    def test_main_opens_the_gui_without_herdr(self, gui):
+        with patch.dict("os.environ", {"HERDR_ENV": ""}):
+            self.assertEqual(main(["gui", "--smoke-test"]), 0)
+        gui.assert_called_once_with(True)
+
+
+class TestSelfCommand(unittest.TestCase):
+    def test_script(self):
+        self.assertEqual(orchestrator.self_command(),
+                         [orchestrator.sys.executable, os.path.abspath(orchestrator.__file__)])
+
+    def test_zipapp(self):
+        with tempfile.TemporaryDirectory() as d:
+            pyz = os.path.join(d, "orchestrator.pyz")
+            with open(pyz, "wb") as f:
+                f.write(b"PK")
+            with patch.object(orchestrator, "__file__", os.path.join(pyz, "orchestrator.py")):
+                self.assertEqual(orchestrator.self_command(), [orchestrator.sys.executable, pyz])
+
+    def test_pyinstaller_binary(self):
+        with patch.object(orchestrator.sys, "frozen", True, create=True), \
+                patch.object(orchestrator.sys, "executable", "/opt/orchestrator-linux-x86_64"):
+            self.assertEqual(orchestrator.self_command(), ["/opt/orchestrator-linux-x86_64"])
+
+
+class TestRunProcess(unittest.TestCase):
+    """On real child processes."""
+
+    def finish(self, process, until=None):
+        out, deadline = "", time.monotonic() + 20
+        while time.monotonic() < deadline:
+            text, status = process.read()
+            out += text
+            if status is not None or (until and until in out):
+                return out, status
+            time.sleep(0.02)
+        self.fail(f"the child did not finish; output so far: {out!r}")
+
+    def test_stdout_and_stderr_then_the_status(self):
+        p = orchestrator.RunProcess([orchestrator.sys.executable, "-c",
+                                     "import sys; print('out'); print('err', file=sys.stderr); sys.exit(3)"])
+        out, status = self.finish(p)
+        self.assertEqual((sorted(out.split()), status), (["err", "out"], 3))
+
+    def interrupted(self):
+        """The output and status of a child that waits for Ctrl-C, once interrupted."""
+        child = ("import time\ntry:\n    print('ready')\n    time.sleep(60)\n"
+                 "except KeyboardInterrupt:\n    print('interrupted')\n    raise SystemExit(130)\n")
+        p = orchestrator.RunProcess([orchestrator.sys.executable, "-c", child])
+        out, _ = self.finish(p, until="ready")
+        p.interrupt()
+        rest, status = self.finish(p)
+        return out + rest, status
+
+    def test_interrupt_is_ctrl_c(self):
+        self.assertEqual(self.interrupted(), ("ready\ninterrupted\n", 130))
+
+    def test_interrupt_where_sigint_is_ignored(self):
+        # As in a background job of a non-interactive shell, such as a Jenkins sh step.
+        before = orchestrator.signal.signal(orchestrator.signal.SIGINT, orchestrator.signal.SIG_IGN)
+        try:
+            self.assertEqual(self.interrupted(), ("ready\ninterrupted\n", 130))
+        finally:
+            orchestrator.signal.signal(orchestrator.signal.SIGINT, before)
+
+    def test_started_in_its_own_session_unbuffered(self):
+        popen = MagicMock()
+        popen.return_value.stdout = io.StringIO("a\n")
+        orchestrator.RunProcess(["orchestrator.py", "list"], popen=popen)
+        kwargs = popen.call_args.kwargs
+        self.assertTrue(kwargs["start_new_session"])
+        self.assertEqual((kwargs["stderr"], kwargs["env"]["PYTHONUNBUFFERED"]), (subprocess.STDOUT, "1"))
+
+    def test_interrupt_after_exit_does_nothing(self):
+        popen = MagicMock()
+        popen.return_value.stdout = io.StringIO("")
+        p = orchestrator.RunProcess(["x"], popen=popen)
+        killpg = MagicMock(side_effect=ProcessLookupError)
+        popen.return_value.poll.return_value = None
+        p.interrupt(killpg)  # exited between the poll and the signal
+        killpg.assert_called_once_with(popen.return_value.pid, orchestrator.signal.SIGINT)
+        popen.return_value.poll.return_value = 0
+        p.interrupt(killpg)
+        self.assertEqual(killpg.call_count, 1)
+
+
+class FakeVar:
+    def __init__(self, master=None, value=""):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, value):
+        self.value = value
+
+
+class FakeBooleanVar(FakeVar):
+    def __init__(self, master=None, value=False):
+        super().__init__(master, value)
+
+
+class FakeWidget:
+    """A tkinter widget that records its options and bindings, and accepts any layout call."""
+
+    def __init__(self, master=None, **options):
+        self.options = options
+        self.bindings = {}
+
+    def configure(self, **options):
+        self.options.update(options)
+
+    def bind(self, event, handler):
+        self.bindings[event] = handler
+
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: None
+
+    def press(self):
+        self.options["command"]()
+
+
+class FakeText(FakeWidget):
+    """Like Tk's Text, it ignores inserts while disabled."""
+
+    text = ""
+
+    def insert(self, index, text):
+        if self.options.get("state") != "disabled":
+            self.text += text
+
+    def get(self, start, end):
+        return self.text
+
+
+class FakeTreeview(FakeWidget):
+    def __init__(self, master=None, **options):
+        super().__init__(master, **options)
+        self.rows, self.selected = {}, ()
+
+    def insert(self, parent, index, iid, values):
+        self.rows[iid] = values
+
+    def delete(self, *iids):
+        for iid in iids:
+            del self.rows[iid]
+
+    def get_children(self):
+        return tuple(self.rows)
+
+    def selection(self):
+        return self.selected
+
+
+class FakeRoot(FakeWidget):
+    def __init__(self):
+        super().__init__()
+        self.pending, self.protocols, self.destroyed = [], {}, False
+
+    def after(self, ms, fn):
+        self.pending.append(fn)
+
+    def protocol(self, name, fn):
+        self.protocols[name] = fn
+
+    def destroy(self):
+        self.destroyed = True
+
+    def tick(self):
+        """Run the callbacks due so far, as one pass of Tk's event loop would."""
+        pending, self.pending = self.pending, []
+        for fn in pending:
+            fn()
+
+    def mainloop(self):
+        while self.pending and not self.destroyed:
+            self.tick()
+
+
+def fake_ui():
+    ttk = SimpleNamespace(**{name: FakeWidget for name in
+                             ("LabelFrame", "Label", "Entry", "Combobox", "Button", "Checkbutton", "Scrollbar")},
+                          Treeview=FakeTreeview)
+    return SimpleNamespace(tk=SimpleNamespace(StringVar=FakeVar, BooleanVar=FakeBooleanVar, Text=FakeText),
+                           ttk=ttk, filedialog=MagicMock(), messagebox=MagicMock())
+
+
+class FakeProcess:
+    """A started command; the test scripts its output and when it exits."""
+
+    def __init__(self, argv):
+        self.argv, self.out, self.status, self.interrupts = argv, "", None, 0
+
+    def read(self):
+        out, self.out = self.out, ""
+        return out, self.status
+
+    def interrupt(self):
+        self.interrupts += 1
+
+
+class TestRunWindow(unittest.TestCase):
+    def setUp(self):
+        self.root, self.ui, self.started, self.listed = FakeRoot(), fake_ui(), [], []
+        self.runs = [(10**6, run_record(phase="done", verdict=APPROVE))]
+        self.window = orchestrator.RunWindow(self.root, self.ui, start=self.start, list_runs=self.list_runs,
+                                             background=lambda fn: fn())
+
+    def start(self, argv):
+        self.started.append(FakeProcess(argv))
+        return self.started[-1]
+
+    def list_runs(self, machine, cwd):
+        self.listed.append((machine, cwd))
+        if isinstance(self.runs, Exception):
+            raise self.runs
+        return self.runs
+
+    def fill(self, **values):
+        self.window.task.text = values.pop("task", "add a rate limiter")
+        for name, value in values.items():
+            self.window.vars[name].set(value)
+
+    def log(self):
+        return self.window.log.text
+
+    def buttons(self):
+        w = self.window
+        return [b.options["state"] for b in (w.start_button, w.resume_button, w.stop_button)]
+
+    def test_the_form_starts_the_cli_command(self):
+        self.fill(**{k: v for k, v in asdict(EVERY_OPTION).items() if k != "task"})
+        self.window.start_button.press()
+        argv = orchestrator.run_args(EVERY_OPTION)
+        self.assertEqual(self.started[0].argv, [*orchestrator.self_command(), *argv])
+        self.assertEqual(self.log(), f"$ {shlex.join(['orchestrator.py', *argv])}\n")
+        self.assertEqual(self.buttons(), ["disabled", "disabled", "normal"])
+
+    def test_output_streams_into_the_log_until_the_command_exits(self):
+        self.fill(cwd="/proj")
+        self.window.start_run()
+        self.started[0].out = "  spec: waiting\n"
+        self.root.tick()
+        self.assertTrue(self.log().endswith("  spec: waiting\n"))
+        self.started[0].status = 0
+        self.root.tick()
+        self.assertTrue(self.log().endswith("  spec: waiting\n[exited with status 0]\n"))
+        self.assertIsNone(self.window.process)
+        self.assertEqual(self.buttons(), ["normal", "normal", "disabled"])
+        self.assertEqual(self.listed, [("", "/proj")])  # the run list catches up with the run
+        self.assertEqual(len(self.root.pending), 1)  # the poll goes on
+
+    def test_one_run_at_a_time(self):
+        self.fill(cwd="/proj")
+        self.window.start_run()
+        self.window.start_run()
+        self.assertEqual(len(self.started), 1)
+
+    def test_an_incomplete_form_starts_nothing(self):
+        self.fill(task=" ", cwd="/proj")
+        self.window.start_run()
+        self.assertEqual(self.started, [])
+        self.ui.messagebox.showerror.assert_called_once_with("Cannot start the run", "the task is empty",
+                                                             parent=self.root)
+
+    def test_a_command_that_cannot_start(self):
+        self.window.task.text, self.window.vars["cwd"].value = "fix it", "/proj"
+        self.window._start = MagicMock(side_effect=PermissionError("denied"))
+        self.window.start_run()
+        self.assertTrue(self.log().endswith("could not start it: denied\n"))
+        self.assertEqual(self.buttons(), ["normal", "normal", "disabled"])
+
+    def test_stop_interrupts(self):
+        self.window.stop()  # nothing to stop
+        self.fill(cwd="/proj")
+        self.window.start_run()
+        self.window.stop_button.press()
+        self.assertEqual(self.started[0].interrupts, 1)
+
+    def test_the_run_list_is_what_list_shows(self):
+        self.runs = [(STALE_SECONDS + 1, run_record(phase="spec")),
+                     (40, {**run_record(owner=ME), "run_id": "20260930-080000-beef00"})]
+        self.fill(cwd=" ~/proj ", machine="remote")
+        self.window.refresh()
+        self.assertEqual(self.window.vars["runs_note"].get(), "Listing the runs…")
+        self.root.tick()
+        self.assertEqual(self.listed, [("remote", "~/proj")])
+        expected = orchestrator.run_rows(self.runs, socket.gethostname(), orchestrator.pid_alive,
+                                         ["--machine", "remote", "--cwd", "~/proj"])
+        self.assertEqual(list(self.window.runs.rows.values()), expected)
+        self.assertEqual(self.window.vars["runs_note"].get(), "")
+
+    def test_no_runs_and_a_failed_listing(self):
+        self.runs = []
+        self.fill(cwd="/proj")
+        self.window.refresh()
+        self.root.tick()
+        self.assertEqual(self.window.vars["runs_note"].get(), "No runs.")
+        self.runs = OrchestratorError("cd: /proj: No such file or directory")
+        self.window.refresh()
+        self.root.tick()
+        self.assertEqual(self.window.vars["runs_note"].get(), "error: cd: /proj: No such file or directory")
+        self.window.runs.selected = ("20260930-070000-c0ffee",)
+        self.window.resume_run()
+        self.assertEqual(self.started, [])  # the list no longer stands for any project
+
+    def test_refresh_needs_a_folder(self):
+        self.window.refresh()
+        self.root.tick()
+        self.assertEqual(self.listed, [])
+
+    def test_resume_takes_the_listed_project(self):
+        self.fill(cwd="~/proj", machine="remote")
+        self.window.refresh()
+        self.root.tick()
+        self.fill(cwd="/elsewhere", machine="")
+        self.window.runs.selected = ("20260930-070000-c0ffee",)
+        self.window.resume_button.press()
+        self.assertEqual(self.started[0].argv, [*orchestrator.self_command(), "resume", "20260930-070000-c0ffee",
+                                                "--machine", "remote", "--cwd", "~/proj"])
+
+    def test_resume_needs_a_selected_run(self):
+        self.window.resume_run()
+        self.assertEqual(self.started, [])
+        self.ui.messagebox.showerror.assert_called_once()
+
+    def test_choose_folder_lists_its_runs(self):
+        self.ui.filedialog.askdirectory.return_value = ""
+        self.window.choose_folder()
+        self.assertEqual(self.window.vars["cwd"].get(), "")
+        self.ui.filedialog.askdirectory.return_value = "/home/me/proj"
+        self.window.choose_folder()
+        self.root.tick()
+        self.assertEqual(self.listed, [("", "/home/me/proj")])
+
+    def test_close_without_a_run(self):
+        self.root.protocols["WM_DELETE_WINDOW"]()
+        self.assertTrue(self.root.destroyed)
+        self.root.tick()
+        self.assertEqual(self.root.pending, [])  # no poll after the window is gone
+        self.ui.messagebox.askokcancel.assert_not_called()
+
+    def test_close_during_a_run_asks_first(self):
+        self.fill(cwd="/proj")
+        self.window.start_run()
+        self.ui.messagebox.askokcancel.return_value = False
+        self.window.close()
+        self.assertEqual((self.started[0].interrupts, self.root.destroyed), (0, False))
+        self.ui.messagebox.askokcancel.return_value = True
+        self.window.close()
+        self.window.close()  # asks once, interrupts once
+        self.assertEqual(self.ui.messagebox.askokcancel.call_count, 2)
+        self.assertEqual((self.started[0].interrupts, self.root.destroyed), (1, False))
+        self.started[0].out, self.started[0].status = "interrupted; resume with: ...\n", 130
+        self.root.tick()
+        self.assertTrue(self.root.destroyed)
+        self.assertEqual(self.listed, [])
+
+
+class FakeTclError(Exception):
+    pass
+
+
+def fake_tkinter(root):
+    ui = fake_ui()
+    tk = ModuleType("tkinter")
+    tk.Tk, tk.TclError = root, FakeTclError
+    tk.StringVar, tk.BooleanVar, tk.Text = ui.tk.StringVar, ui.tk.BooleanVar, ui.tk.Text
+    tk.ttk, tk.filedialog, tk.messagebox = ui.ttk, ui.filedialog, ui.messagebox
+    return {"tkinter": tk, "tkinter.ttk": tk.ttk, "tkinter.filedialog": tk.filedialog,
+            "tkinter.messagebox": tk.messagebox}
+
+
+class TestGuiCommand(unittest.TestCase):
+    def test_smoke_test_opens_and_closes_the_window(self):
+        root = FakeRoot()
+        with patch.dict("sys.modules", fake_tkinter(lambda: root)):
+            self.assertEqual(main(["gui", "--smoke-test"]), 0)
+        self.assertTrue(root.destroyed)
+
+    def test_the_window_stays_until_closed(self):
+        root = FakeRoot()
+        root.mainloop = MagicMock()
+        with patch.dict("sys.modules", fake_tkinter(lambda: root)):
+            self.assertEqual(main(["gui"]), 0)
+        root.mainloop.assert_called_once()
+        self.assertFalse(root.destroyed)
+
+    def test_listing_runs_in_the_background(self):
+        done = threading.Event()
+        orchestrator._in_thread(done.set)
+        self.assertTrue(done.wait(10))
+
+    def test_without_tkinter(self):
+        for platform, hint in (("linux", "apt install python3-tk"), ("darwin", "brew install python-tk@3.")):
+            with self.subTest(platform=platform), patch.dict("sys.modules", {"tkinter": None}), \
+                    patch.object(orchestrator.sys, "platform", platform), \
+                    patch("sys.stderr", new_callable=io.StringIO) as err:
+                self.assertEqual(main(["gui"]), orchestrator.EXIT_ERROR)
+            self.assertIn("the GUI needs tkinter", err.getvalue())
+            self.assertIn(hint, err.getvalue())
+
+    def test_without_a_display(self):
+        def no_display():
+            raise FakeTclError("no display name and no $DISPLAY environment variable")
+
+        with patch.dict("sys.modules", fake_tkinter(no_display)), \
+                patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(main(["gui"]), orchestrator.EXIT_ERROR)
+        self.assertEqual(err.getvalue(),
+                         "error: cannot open the GUI: no display name and no $DISPLAY environment variable\n")
+
+
+class TestProjectRuns(unittest.TestCase):
+    @patch.dict("os.environ", {"HERDR_ENV": ""})
+    @patch.object(Host, "run_states", return_value=[])
+    @patch.object(Host, "resolve_dir", return_value="/home/user/proj")
+    def test_a_local_project_needs_no_herdr_pane(self, resolve_dir, run_states):
+        self.assertEqual(orchestrator.project_runs("", "~/proj"), [])
+        resolve_dir.assert_called_once_with("~/proj")
+        run_states.assert_called_once_with("/home/user/proj")
+
+    @patch.object(Host, "run_states", autospec=True, return_value=[])
+    @patch.object(Host, "resolve_dir", return_value="/home/user/proj")
+    @patch.object(Herdr, "ssh_target", return_value="remote-host")
+    def test_a_machine_is_read_over_ssh(self, _target, _resolve, run_states):
+        orchestrator.project_runs("remote", "~/proj")
+        self.assertEqual(run_states.call_args.args[0].ssh_target, "remote-host")
 
 
 if __name__ == "__main__":
