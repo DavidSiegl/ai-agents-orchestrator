@@ -24,6 +24,9 @@ snapshot of the change is analysed by a Jenkins job into SonarQube, and a gate
 that does not pass goes back to the Builder before the Reviewer sees the change.
 In another workflow, its quality-gated step takes the Builder's place.
 HTTP to Jenkins and SonarQube goes through CI, from the orchestrator's machine.
+
+The gui command, the default with no arguments where there is a display, is a
+window over the same CLI: it starts run and resume as child processes.
 """
 
 import argparse
@@ -33,13 +36,16 @@ import difflib
 import http.client
 import json
 import os
+import queue
 import re
 import secrets
 import shlex
+import signal
 import socket
 import string
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 import urllib.error
@@ -48,6 +54,7 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 RUNS_DIR = ".orchestrator/runs"
 DEFAULT_TURN_TIMEOUT = 1800
@@ -2830,6 +2837,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         description="Role-based handoff between agent sessions in herdr, each role in the harness of its "
                     "choice; by default Spec Collector -> Builder -> Reviewer, all in Claude Code.")
     sub = p.add_subparsers(dest="command", required=True)
+    if not argv and gui_by_default(sys.platform, os.environ):
+        argv = ["gui"]
 
     target = argparse.ArgumentParser(add_help=False)
     target.add_argument("--machine", help="saved herdr machine to run the agents on")
@@ -2872,11 +2881,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     run.add_argument("task", help="what to build, as you would tell the Spec Collector")
     # Run only: a resumed run keeps the workflow it was started with.
     which = run.add_mutually_exclusive_group()
-    try:
-        names = workflow_names()
-    except OrchestratorError:
-        names = sorted(WORKFLOWS)  # the workflows command shows why the directory cannot be listed
-    which.add_argument("--workflow", choices=names, default=DEFAULT_WORKFLOW.name,
+    which.add_argument("--workflow", choices=offered_workflows(), default=DEFAULT_WORKFLOW.name,
                        help=f"the roles and handoffs the run goes through: a built-in workflow or one in "
                             f"{workflows_dir()} (default {DEFAULT_WORKFLOW.name}); see the workflows command")
     which.add_argument("--workflow-file", metavar="FILE",
@@ -2908,6 +2913,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                     f"at that path, as a workflow file, a starting point for your own.")
     workflows.add_argument("workflow", nargs="?", metavar="WORKFLOW", help="a workflow's name, or a file's path")
 
+    gui = sub.add_parser(
+        "gui", help="open a window to start, list and resume runs; the default with no arguments where there "
+                    "is a display")
+    gui.add_argument("--smoke-test", action="store_true", help="open the window and close it at once")
+
     args = p.parse_args(argv)
     if getattr(args, "machine", None) and not args.cwd:
         p.error("--cwd is required with --machine")
@@ -2921,6 +2931,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     if getattr(args, "quality_gate", None) is not None and not re.fullmatch(r"[^/]+(/[^/]+)*", args.quality_gate):
         p.error("--quality-gate takes a Jenkins job's full name, such as folder/job")
     return args
+
+
+def offered_workflows() -> list[str]:
+    """The workflows `run --workflow` takes."""
+    try:
+        return workflow_names()
+    except OrchestratorError:
+        return sorted(WORKFLOWS)  # the workflows command shows why the directory cannot be listed
 
 
 def role_model_arg(text: str) -> tuple[str, str]:
@@ -3033,22 +3051,33 @@ def print_runs(runs: list[tuple[int, dict]], local_host: str, pid_alive, target:
     if not runs:
         print("No runs.")
         return
-    for age, s in runs:
-        health = run_health(s, age, local_host, pid_alive)
-        if s.get("error"):
-            outcome = f"error: {s['error']}"
-        elif health is None:
-            outcome = s.get("verdict") or ""
-        else:
-            outcome = f"{health[0]}: {health[1]}"
-            if health[0] == STALE:
-                outcome += f"; resume: {resume_command(s['run_id'], target)}"
-        if s.get("pr_url"):
-            outcome += f"  {s['pr_url']}"
-        if (workflow := s.get("workflow", DEFAULT_WORKFLOW.name)) != DEFAULT_WORKFLOW.name:
-            outcome += f"  [{workflow} workflow]"
-        print(f"{s['run_id']}  {s['phase']:<7}  {run_round(s)}  {outcome}")
-        print(f"    {s['task'][:100]}")
+    for run_id, phase, rnd, outcome, task in run_rows(runs, local_host, pid_alive, target):
+        print(f"{run_id}  {phase:<7}  {rnd}  {outcome}")
+        print(f"    {task}")
+
+
+def run_rows(runs: list[tuple[int, dict]], local_host: str, pid_alive,
+             target: list[str]) -> list[tuple[str, str, str, str, str]]:
+    """Each run as `list` shows it, in the GUI too: its id, phase, round, outcome and task."""
+    return [(s["run_id"], s["phase"], run_round(s), run_outcome(s, age, local_host, pid_alive, target),
+             s["task"][:100]) for age, s in runs]
+
+
+def run_outcome(s: dict, age: int, local_host: str, pid_alive, target: list[str]) -> str:
+    health = run_health(s, age, local_host, pid_alive)
+    if s.get("error"):
+        outcome = f"error: {s['error']}"
+    elif health is None:
+        outcome = s.get("verdict") or ""
+    else:
+        outcome = f"{health[0]}: {health[1]}"
+        if health[0] == STALE:
+            outcome += f"; resume: {resume_command(s['run_id'], target)}"
+    if s.get("pr_url"):
+        outcome += f"  {s['pr_url']}"
+    if (workflow := s.get("workflow", DEFAULT_WORKFLOW.name)) != DEFAULT_WORKFLOW.name:
+        outcome += f"  [{workflow} workflow]"
+    return outcome
 
 
 def run_round(s: dict) -> str:
@@ -3148,6 +3177,8 @@ def main(argv: list[str]) -> int:
         if args.command == "workflows":
             workflows_command(args.workflow)
             return 0
+        if args.command == "gui":
+            return gui_command(args.smoke_test)
         herdr, host = connect(args.machine)
         cwd = host.resolve_dir(args.cwd or os.getcwd())
         if args.command == "list":
@@ -3220,6 +3251,386 @@ def finish(verdict: str, state: RunState, pipeline: Pipeline) -> int:
     if verdict not in SUCCEEDED:
         return EXIT_CHANGES_REQUESTED
     return EXIT_CONFLICT if state.conflicts else 0
+
+
+# ---------------------------------------------------------------------------
+# GUI: a window over the CLI
+# ---------------------------------------------------------------------------
+
+# How often the window takes up the running command's output and a finished listing of the runs.
+GUI_POLL_MS = 100
+# gui --smoke-test keeps the window open this long, so it is drawn before it closes.
+SMOKE_TEST_MS = 500
+# Offered in the form; it takes any other mode as typed, as --permission-mode does.
+PERMISSION_MODES = ("default", "acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan")
+HERDR_NOTE = ("The role agents run in herdr: open herdr in a terminal to answer the Spec Collector. "
+              "Without a machine, start this window from a herdr pane, as you would the CLI.")
+
+
+def gui_by_default(platform: str, environ) -> bool:
+    """Whether no arguments open the GUI: always on macOS, elsewhere when there is a display."""
+    return platform == "darwin" or bool(environ.get("DISPLAY") or environ.get("WAYLAND_DISPLAY"))
+
+
+def tk_install_hint(platform: str, version) -> str:
+    if platform == "darwin":
+        return f"brew install python-tk@{version[0]}.{version[1]}"
+    return "apt install python3-tk, or dnf install python3-tkinter"
+
+
+def self_command() -> list[str]:
+    """How to start this program again: the PyInstaller binary, the .pyz or orchestrator.py."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+    here = os.path.abspath(__file__)
+    # In a zipapp, __file__ lies inside the archive, which is a file.
+    archive = os.path.dirname(here)
+    return [sys.executable, archive if os.path.isfile(archive) else here]
+
+
+@dataclass
+class RunForm:
+    """The GUI's run form, as typed. Per-role agents and models are CLI-only."""
+    task: str = ""
+    cwd: str = ""
+    machine: str = ""
+    workflow: str = ""
+    agent: str = ""
+    model: str = ""
+    permission_mode: str = ""
+    no_pr: bool = False
+    quality_gate: str = ""
+
+    def stripped(self) -> "RunForm":
+        return RunForm(**{f.name: v.strip() if isinstance(v := getattr(self, f.name), str) else v
+                          for f in fields(self)})
+
+
+def run_args(form: RunForm) -> list[str]:
+    """The arguments of the `run` command the form stands for, as one would type them."""
+    form = form.stripped()
+    if not form.task:
+        raise OrchestratorError("the task is empty")
+    if not form.cwd:
+        raise OrchestratorError("choose a project folder")
+    args = ["run", *target_args(form)]
+    for flag, value in (("--workflow", form.workflow), ("--agent", form.agent), ("--model", form.model),
+                        ("--permission-mode", form.permission_mode), ("--quality-gate", form.quality_gate)):
+        if value:
+            args += [flag, value]
+    if form.no_pr:
+        args.append("--no-pr")
+    # The task last, after --, so one that starts with - is not taken for a flag.
+    return [*args, "--", form.task]
+
+
+def resume_args(run_id: str, form: RunForm) -> list[str]:
+    """The arguments of `resume` for a run in the list of the form's project."""
+    return ["resume", run_id, *target_args(form.stripped())]
+
+
+def project_runs(machine: str, cwd: str) -> list[tuple[int, dict]]:
+    """The runs `list` shows for the project.
+
+    Without connect's check for a herdr pane, which guards the herdr commands a run sends: listing a
+    local project sends none, so a GUI started from a file manager lists it too.
+    """
+    host = Host(Herdr(machine).ssh_target()) if machine else Host()
+    return host.run_states(host.resolve_dir(cwd))
+
+
+class RunProcess:
+    """A CLI command the GUI started, its stdout and stderr read together on a thread."""
+
+    def __init__(self, argv: list[str], popen=subprocess.Popen):
+        # An ignored SIGINT stays ignored across exec, and a Python started so never raises KeyboardInterrupt:
+        # in a GUI started that way, as a non-interactive shell starts a background job, Stop would do nothing.
+        # exec resets a handler to the default, so handling it here lets the command take Ctrl-C again.
+        if signal.getsignal(signal.SIGINT) == signal.SIG_IGN:
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+        # A session of its own, so Stop can signal its process group as Ctrl-C in a terminal does.
+        # Unbuffered, so the output arrives as it is printed rather than when the run ends.
+        self.proc = popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          text=True, errors="replace", start_new_session=True,
+                          env={**os.environ, "PYTHONUNBUFFERED": "1"})
+        self._lines = queue.Queue()
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self) -> None:
+        for line in self.proc.stdout:
+            self._lines.put(line)
+        self._lines.put(None)
+
+    def read(self) -> tuple[str, int | None]:
+        """The output since the last read, and the exit status once the output has ended."""
+        out = []
+        while True:
+            try:
+                line = self._lines.get_nowait()
+            except queue.Empty:
+                return "".join(out), None
+            if line is None:
+                return "".join(out), self.proc.wait()
+            out.append(line)
+
+    def interrupt(self, killpg=os.killpg) -> None:
+        """Ctrl-C: SIGINT to the command's process group, which ends a run with its resume hint and status 130."""
+        if self.proc.poll() is None:
+            try:
+                killpg(self.proc.pid, signal.SIGINT)
+            except ProcessLookupError:
+                pass  # it has just exited
+
+
+def _in_thread(fn: Callable[[], None]) -> None:
+    threading.Thread(target=fn, daemon=True).start()
+
+
+class RunWindow:
+    """The GUI: a form that starts a run, the project's runs with Resume, and the running command's output.
+
+    Every run goes through the CLI as a child process, one at a time, so a run started here is the one
+    typed into a terminal. ui holds the tkinter modules: tk, ttk, filedialog and messagebox. Listing the
+    runs may go over SSH, so it runs in the background; Tk is touched only from its own thread, which
+    takes up the results in _poll.
+    """
+
+    def __init__(self, root, ui, start=RunProcess, list_runs=project_runs, background=_in_thread):
+        self.root, self.ui = root, ui
+        self._start, self._list_runs, self._background = start, list_runs, background
+        self.process = None
+        self._closing = False
+        self._closed = False
+        self._listed = None  # the form whose project the run list shows
+        self._listings = queue.Queue()
+        root.title("ai-agents-orchestrator")
+        root.protocol("WM_DELETE_WINDOW", self.close)
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(1, weight=1)
+        root.rowconfigure(2, weight=2)
+        tk = ui.tk
+        self.vars = {name: tk.StringVar(root) for name in
+                     ("cwd", "machine", "workflow", "agent", "model", "permission_mode", "quality_gate",
+                      "runs_note")}
+        self.vars["workflow"].set(DEFAULT_WORKFLOW.name)
+        self.vars["no_pr"] = tk.BooleanVar(root)
+        self._form_frame()
+        self._runs_frame()
+        self._log_frame()
+        ui.ttk.Label(root, text=HERDR_NOTE, wraplength=760).grid(row=3, column=0, sticky="w", padx=8, pady=(0, 8))
+        self._set_running(False)
+        root.after(GUI_POLL_MS, self._poll)
+
+    def _form_frame(self) -> None:
+        ttk, v = self.ui.ttk, self.vars
+        f = ttk.LabelFrame(self.root, text="New run")
+        f.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+        f.columnconfigure(1, weight=1)
+        f.columnconfigure(3, weight=1)
+        ttk.Label(f, text="Task").grid(row=0, column=0, sticky="nw", padx=4, pady=2)
+        self.task = self.ui.tk.Text(f, height=4, width=80, wrap="word")
+        self.task.grid(row=0, column=1, columnspan=4, sticky="nsew", padx=4, pady=2)
+        ttk.Label(f, text="Project folder").grid(row=1, column=0, sticky="w", padx=4, pady=2)
+        cwd = ttk.Entry(f, textvariable=v["cwd"])
+        cwd.grid(row=1, column=1, columnspan=3, sticky="ew", padx=4, pady=2)
+        cwd.bind("<Return>", lambda _: self.refresh())
+        ttk.Button(f, text="Choose…", command=self.choose_folder).grid(row=1, column=4, padx=4, pady=2)
+        fields_ = (("Machine", ttk.Entry(f, textvariable=v["machine"])),
+                   ("Workflow", ttk.Combobox(f, textvariable=v["workflow"], values=offered_workflows(),
+                                             state="readonly")),
+                   ("Agent", ttk.Combobox(f, textvariable=v["agent"], values=("", *AGENT_KINDS),
+                                          state="readonly")),
+                   ("Model", ttk.Entry(f, textvariable=v["model"])),
+                   ("Permission mode", ttk.Combobox(f, textvariable=v["permission_mode"],
+                                                    values=("", *PERMISSION_MODES))),
+                   ("Quality gate job", ttk.Entry(f, textvariable=v["quality_gate"])))
+        for i, (label, widget) in enumerate(fields_):
+            row, col = 2 + i // 2, i % 2 * 2
+            ttk.Label(f, text=label).grid(row=row, column=col, sticky="w", padx=4, pady=2)
+            widget.grid(row=row, column=col + 1, sticky="ew", padx=4, pady=2)
+        fields_[0][1].bind("<Return>", lambda _: self.refresh())
+        ttk.Checkbutton(f, text="No pull request (--no-pr)", variable=v["no_pr"]).grid(
+            row=5, column=1, sticky="w", padx=4, pady=2)
+        self.start_button = ttk.Button(f, text="Start run", command=self.start_run)
+        self.start_button.grid(row=5, column=4, sticky="e", padx=4, pady=4)
+
+    def _runs_frame(self) -> None:
+        ttk = self.ui.ttk
+        f = ttk.LabelFrame(self.root, text="Runs of the project")
+        f.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        f.columnconfigure(0, weight=1)
+        f.rowconfigure(0, weight=1)
+        columns = (("run", "Run", 190), ("phase", "Phase", 70), ("round", "Round", 70),
+                   ("outcome", "Status", 300), ("task", "Task", 300))
+        self.runs = ttk.Treeview(f, columns=[c[0] for c in columns], show="headings", height=5,
+                                 selectmode="browse")
+        for name, heading, width in columns:
+            self.runs.heading(name, text=heading)
+            self.runs.column(name, width=width, stretch=name in ("outcome", "task"))
+        self.runs.grid(row=0, column=0, columnspan=3, sticky="nsew", padx=4, pady=2)
+        ttk.Label(f, textvariable=self.vars["runs_note"]).grid(row=1, column=0, sticky="w", padx=4)
+        ttk.Button(f, text="Refresh", command=self.refresh).grid(row=1, column=1, padx=4, pady=4)
+        self.resume_button = ttk.Button(f, text="Resume", command=self.resume_run)
+        self.resume_button.grid(row=1, column=2, padx=4, pady=4)
+
+    def _log_frame(self) -> None:
+        ttk = self.ui.ttk
+        f = ttk.LabelFrame(self.root, text="Output")
+        f.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        f.columnconfigure(0, weight=1)
+        f.rowconfigure(0, weight=1)
+        self.log = self.ui.tk.Text(f, height=14, wrap="char", state="disabled")
+        self.log.grid(row=0, column=0, sticky="nsew", padx=(4, 0), pady=2)
+        bar = ttk.Scrollbar(f, orient="vertical", command=self.log.yview)
+        bar.grid(row=0, column=1, sticky="ns", pady=2)
+        self.log.configure(yscrollcommand=bar.set)
+        self.stop_button = ttk.Button(f, text="Stop", command=self.stop)
+        self.stop_button.grid(row=1, column=0, columnspan=2, sticky="e", padx=4, pady=4)
+
+    def form(self) -> RunForm:
+        v = self.vars
+        return RunForm(task=self.task.get("1.0", "end-1c"), cwd=v["cwd"].get(), machine=v["machine"].get(),
+                       workflow=v["workflow"].get(), agent=v["agent"].get(), model=v["model"].get(),
+                       permission_mode=v["permission_mode"].get(), no_pr=v["no_pr"].get(),
+                       quality_gate=v["quality_gate"].get())
+
+    def choose_folder(self) -> None:
+        path = self.ui.filedialog.askdirectory(parent=self.root, mustexist=True,
+                                               initialdir=self.vars["cwd"].get() or os.path.expanduser("~"))
+        if path:
+            self.vars["cwd"].set(path)
+            self.refresh()
+
+    def start_run(self) -> None:
+        try:
+            args = run_args(self.form())
+        except OrchestratorError as e:
+            self.ui.messagebox.showerror("Cannot start the run", str(e), parent=self.root)
+            return
+        self._launch(args)
+
+    def resume_run(self) -> None:
+        selected = self.runs.selection()
+        if not selected or self._listed is None:
+            self.ui.messagebox.showerror("Cannot resume", "Select a run in the list first.", parent=self.root)
+            return
+        self._launch(resume_args(selected[0], self._listed))
+
+    def _launch(self, args: list[str]) -> None:
+        if self.process:
+            return
+        self._append(f"$ {shlex.join(['orchestrator.py', *args])}\n")
+        try:
+            self.process = self._start([*self_command(), *args])
+        except OSError as e:
+            self._append(f"could not start it: {e}\n")
+            return
+        self._set_running(True)
+
+    def stop(self) -> None:
+        if self.process:
+            self.process.interrupt()
+
+    def close(self) -> None:
+        """Close the window; during a run, once the human confirms, after interrupting it as Stop does."""
+        if self.process is None:
+            self._destroy()
+            return
+        if self._closing:
+            return
+        if self.ui.messagebox.askokcancel(
+                "Stop the run?", "A run is going. Closing the window interrupts it, as Ctrl-C would; "
+                                 "you can resume it later.", parent=self.root):
+            self._closing = True
+            self.stop()
+
+    def refresh(self) -> None:
+        """List the runs of the form's project, in the background."""
+        form = self.form().stripped()
+        if not form.cwd:
+            return
+        self.vars["runs_note"].set("Listing the runs…")
+
+        def fetch():
+            try:
+                rows = run_rows(self._list_runs(form.machine, form.cwd), socket.gethostname(), pid_alive,
+                                target_args(form))
+            except OrchestratorError as e:
+                rows = e
+            self._listings.put((form, rows))
+
+        self._background(fetch)
+
+    def _poll(self) -> None:
+        if self.process:
+            self._take_output()
+        while not self._listings.empty():
+            self._show_runs(*self._listings.get_nowait())
+        if not self._closed:
+            self.root.after(GUI_POLL_MS, self._poll)
+
+    def _take_output(self) -> None:
+        out, status = self.process.read()
+        if out:
+            self._append(out)
+        if status is None:
+            return
+        self.process = None
+        self._append(f"[exited with status {status}]\n")
+        self._set_running(False)
+        if self._closing:
+            self._destroy()
+        else:
+            self.refresh()
+
+    def _show_runs(self, form: RunForm, rows) -> None:
+        self.runs.delete(*self.runs.get_children())
+        if isinstance(rows, OrchestratorError):
+            self._listed = None
+            self.vars["runs_note"].set(f"error: {rows}")
+            return
+        self._listed = form
+        for row in rows:
+            self.runs.insert("", "end", iid=row[0], values=row)
+        self.vars["runs_note"].set("" if rows else "No runs.")
+
+    def _append(self, text: str) -> None:
+        self.log.configure(state="normal")
+        self.log.insert("end", text)
+        self.log.see("end")
+        self.log.configure(state="disabled")
+
+    def _set_running(self, running: bool) -> None:
+        idle = "disabled" if running else "normal"
+        self.start_button.configure(state=idle)
+        self.resume_button.configure(state=idle)
+        self.stop_button.configure(state="normal" if running else "disabled")
+
+    def _destroy(self) -> None:
+        self._closed = True
+        self.root.destroy()
+
+
+def gui_command(smoke_test: bool) -> int:
+    # Imported here, so the CLI and the tests run on a Python without tkinter, and without a display.
+    try:
+        import tkinter
+        from tkinter import filedialog, messagebox, ttk
+    except ImportError:
+        print(f"error: the GUI needs tkinter, which this Python lacks; install it, e.g. with "
+              f"{tk_install_hint(sys.platform, sys.version_info)}", file=sys.stderr)
+        return EXIT_ERROR
+    try:
+        root = tkinter.Tk()
+    except tkinter.TclError as e:
+        print(f"error: cannot open the GUI: {e}", file=sys.stderr)
+        return EXIT_ERROR
+    window = RunWindow(root, SimpleNamespace(tk=tkinter, ttk=ttk, filedialog=filedialog, messagebox=messagebox))
+    if smoke_test:
+        root.after(SMOKE_TEST_MS, window.close)
+    root.mainloop()
+    return 0
+
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))

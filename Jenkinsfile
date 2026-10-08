@@ -65,6 +65,18 @@ pipeline {
             }
         }
 
+        // The Linux binary, built on every build but a quality build, so a change that breaks it fails before it is
+        // merged; Release attaches it. The macOS binary comes from .github/workflows/macos-binary.yml, with the
+        // same script, since Jenkins has no macOS machine.
+        stage('Package') {
+            when {
+                expression { return !params.SONAR_PROJECT_KEY }
+            }
+            steps {
+                sh 'packaging/build-binary.sh'
+            }
+        }
+
         // A multibranch job analyses only main: Community Edition has no branch analysis, so a branch or pull
         // request would overwrite main's analysis and its new-code baseline. Quality builds always analyse,
         // into their run's own project; their plain Pipeline job has no BRANCH_NAME.
@@ -147,6 +159,8 @@ pipeline {
                             cat gh-release-view.err >&2
                             exit 1
                         fi
+                        # Package builds it on every build that reaches Release.
+                        [ -f dist/orchestrator-linux-x86_64.sha256 ] || { echo "no Linux binary; run the whole build" >&2; exit 1; }
                         # orchestrator.py packed as an executable zipapp, which runs on any machine with Python 3.13+.
                         mkdir -p build/pyz dist
                         cp orchestrator.py build/pyz/
@@ -154,7 +168,9 @@ pipeline {
                         uv run --frozen python -m zipapp build/pyz -p '/usr/bin/env python3' -c -o dist/orchestrator.pyz
                         uv run --frozen python dist/orchestrator.pyz --help >/dev/null
                         (cd dist && sha256sum orchestrator.pyz > orchestrator.pyz.sha256)
+                        # Publishing it starts .github/workflows/macos-binary.yml, which adds the macOS binary.
                         gh release create "$tag" dist/orchestrator.pyz dist/orchestrator.pyz.sha256 \
+                            dist/orchestrator-linux-x86_64 dist/orchestrator-linux-x86_64.sha256 \
                             --target "$sha" --title "$tag" --generate-notes
                     '''
                 }

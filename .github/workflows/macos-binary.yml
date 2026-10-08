@@ -1,0 +1,38 @@
+# Jenkins tests, builds and releases; it has no macOS machine, so this adds only the macOS binary to a release
+# Jenkins has published. It never creates a release or a tag: gh release upload fails if the release is missing.
+name: macOS binary
+
+on:
+  release:
+    types: [published]
+  # To build it again for an existing release, e.g. after a failed run.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag of the existing release, e.g. v0.5.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  macos-binary:
+    runs-on: macos-latest
+    env:
+      TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ env.TAG }}
+
+      - uses: astral-sh/setup-uv@v6
+
+      # The script Jenkins builds the Linux binary with; it smoke-tests --help, workflows and gui --smoke-test.
+      - run: packaging/build-binary.sh
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "$TAG" dist/orchestrator-macos-arm64 dist/orchestrator-macos-arm64.sha256 --clobber

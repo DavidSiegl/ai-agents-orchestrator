@@ -20,7 +20,8 @@ One standard-library module, in these sections:
 | `CI` | Jenkins's quality job and SonarQube over HTTP, from the orchestrator's machine, one method per call, over an injected `urlopen`. The credentials come from the environment or `ci.env` and go only into the `Authorization` header; `mask` replaces the tokens in text from either server. `CIError` carries the HTTP status, and `transient` says whether a retry may help. |
 | `RunState` and helpers | `RunState` is `state.json`; it saves `permission_mode` as given and each role's harness in `agent_kinds`, and `from_dict` reads a 0.3.0 state's `agent_args` as its permission mode. The pure helpers are `parse_verdict`, `parse_gate`, `spec_title`, `branch_name`, `pr_body` (with `verdict_line`; `commit_note` for the commit message), and for the quality file `changed_lines`, `edited_config`, `issue_severity` and `quality_report`. |
 | `Workflow` | Drives one run through its `pipeline`. Its collaborators (`herdr`, `host`, `ci`, `notify`, and `clocks`, a `Clocks` of `sleep`, `monotonic` and `wall`) are arguments, which is what lets the tests use fakes. |
-| CLI | `parse_args`, `role_models` (with `role_model_arg`), `role_agents` (with `role_agent_arg`), `print_workflows`, `workflow_arg`, `run_health`, `print_runs` (with `run_round`), `find_run`, `resumable_state`, and `main` with `workflows_command`, `connect`, `new_state`, `resumed_state` and `finish`. |
+| CLI | `parse_args` (which turns no arguments into `gui` when `gui_by_default` finds a display), `offered_workflows`, `role_models` (with `role_model_arg`), `role_agents` (with `role_agent_arg`), `print_workflows`, `workflow_arg`, `run_health`, `print_runs` (with `run_rows`, `run_outcome` and `run_round`), `find_run`, `resumable_state`, and `main` with `workflows_command`, `connect`, `new_state`, `resumed_state` and `finish`. |
+| GUI | `gui_command` and `RunWindow`, a tkinter window over the CLI; see [GUI](#gui). |
 
 ## The phase machine
 
@@ -99,6 +100,24 @@ order its steps first use them. The tests define three more workflows
 that run on this engine: Builder ⇄ Reviewer with the task as the contract, Spec Collector → Test Writer →
 Builder ⇄ Reviewer, and an Implementer ⇄ Reviewer whose gated step writes `impl-N.md`.
 
+## GUI
+
+`gui_command` imports tkinter only when it runs, so the CLI and the tests work without tkinter or a display;
+without tkinter it exits 1 with `tk_install_hint`, and without a display with Tk's error. `RunWindow` is the
+window, given the tkinter modules (`tk`, `ttk`, `filedialog`, `messagebox`) as `ui`, so the tests drive it on
+fakes:
+
+- The form is a `RunForm`; `run_args` turns it into the `run` command's arguments, the task last after `--`,
+  and `resume_args` builds `resume <run id>` with the `target_args` of the project the list shows.
+- A command runs as a `RunProcess`, a child of `self_command` (the PyInstaller binary when frozen, else the
+  Python running the `.pyz` or `orchestrator.py`) in a session of its own, its stdout and stderr read on a
+  thread. Stop and a confirmed close call `interrupt`, which sends SIGINT to its process group as Ctrl-C does,
+  so the run ends through `main`'s `KeyboardInterrupt` handler: status 130 and the resume hint. One runs at a
+  time.
+- The run list is `run_rows`, what `print_runs` prints, of `project_runs`: the runs `list` reads, without
+  `connect`'s herdr-pane check, since listing sends no herdr command. It is read on a background thread.
+- Tk is used only from its own thread: `_poll`, every `GUI_POLL_MS`, takes up the output and the listings.
+
 ## Tests
 
 `tests/test_orchestrator.py` runs `Workflow` on in-memory fakes: `FakeHost` (filesystem and git, played one git
@@ -111,16 +130,28 @@ are named after what they cover, e.g. `TestWorkflow`, `TestPullRequest`, `TestRe
 compares the default's prompts with those recorded from commit `d6bb100`, except for `SPEC_PROMPT`'s
 "Separate agent sessions"; `TestHarnesses`, `TestHarnessFlags` and `TestWorkflowFileAgents` cover the harnesses,
 on `FakeHerdr`, which records each agent's kind in `kinds` and finds a resumed session by its harness's syntax; `gated` and `resume_gated` build a run with the gate
-on a `FakeCI`. `TestHostGit` and `TestHostSnapshot` run on real git in a temporary directory.
+on a `FakeCI`. `TestHostGit` and `TestHostSnapshot` run on real git in a temporary directory. `TestRunWindow`
+and `TestGuiCommand` drive the GUI on fakes of the tkinter modules (`fake_ui`, `fake_tkinter`, with `FakeRoot`
+running `after` callbacks on `tick`), and `TestRunProcess` runs real child processes.
 
 ## Tooling
 
-- `pyproject.toml`: no runtime dependencies, Python 3.13+; pytest and pytest-cov in the `dev` group.
-- `Jenkinsfile`: `uv sync --frozen`, `uv run pytest` with branch coverage of `orchestrator`, and on `main` or
-  in a quality build a SonarQube analysis and a quality gate. On `main` a Release stage publishes a new
-  `pyproject.toml` version as a GitHub release, with `orchestrator.py` attached as the zipapp `orchestrator.pyz`.
-  Its parameters `GIT_REF`, `SONAR_PROJECT_KEY` and `SONAR_PROJECT_VERSION` are for quality builds: with
-  `SONAR_PROJECT_KEY` set, a red gate does not abort the pipeline but marks it UNSTABLE.
+- `pyproject.toml`: no runtime dependencies, Python 3.13+; pytest and pytest-cov in the `dev` group, PyInstaller
+  in the `build` group.
+- `packaging/build-binary.sh`: builds `dist/orchestrator-<os>-<arch>` (`linux-x86_64`, `macos-arm64`), a
+  PyInstaller one-file binary with Python and tkinter inside, and its `.sha256`, then smoke-tests it: `--help`,
+  `workflows` lists `default`, and `gui --smoke-test` where there is a display.
+- `Jenkinsfile`: `uv sync --frozen`, `uv run pytest` with branch coverage of `orchestrator`, a Package stage that
+  runs `packaging/build-binary.sh` on every build but a quality build, and on `main` or in a quality build a
+  SonarQube analysis and a quality gate. On `main` a Release stage publishes a new `pyproject.toml` version as a
+  GitHub release, with `orchestrator.py` attached as the zipapp `orchestrator.pyz` and the Linux binary, each
+  with its `.sha256`, in one `gh release create`. Its parameters `GIT_REF`, `SONAR_PROJECT_KEY` and
+  `SONAR_PROJECT_VERSION` are for quality builds: with `SONAR_PROJECT_KEY` set, a red gate does not abort the
+  pipeline but marks it UNSTABLE.
+- `.github/workflows/macos-binary.yml`, the only GitHub Action: Jenkins has no Mac, so when a release is
+  published, or by hand for an existing tag, it runs `packaging/build-binary.sh` on `macos-latest` and uploads
+  `orchestrator-macos-arm64` and its `.sha256` to that release with `gh release upload --clobber`. With only
+  `contents: write`, it never creates a release or a tag; everything else stays in Jenkins.
 - `sonar-project.properties`: the SonarQube project key, the sources (`orchestrator.py`) and the tests (`tests`).
 
 How to set Jenkins up for it is in [quality-gate.md](quality-gate.md).

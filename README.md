@@ -27,7 +27,8 @@ herdr. Each feature is built on its own branch and ends as a pull request on Git
   `opencode` or `pi` for a role that runs in one of those
 - Where the agents run, unless you use `--no-pr`: a git checkout with an `origin` it can push to, and
   [`gh`](https://cli.github.com) logged in (`gh auth status`)
-- Python 3.13+, standard library only; [uv](https://github.com/astral-sh/uv) only for the tests
+- Python 3.13+, standard library only, unless you use a [binary](#install), which brings its own; tkinter for the
+  [GUI](#gui); [uv](https://github.com/astral-sh/uv) only for the tests and the build
 - For `--machine`: the machine saved in herdr and non-interactive SSH to its target; see
   [Running the agents on another machine](docs/design.md#running-the-agents-on-another-machine)
 - For `--quality-gate`: a Jenkins quality job and SonarQube set up as in [quality gate](docs/quality-gate.md),
@@ -36,8 +37,23 @@ herdr. Each feature is built on its own branch and ends as a pull request on Git
 
 ## Install
 
-Each [release](https://github.com/DavidSiegl/ai-agents-orchestrator/releases) has `orchestrator.pyz`, an
-executable of `orchestrator.py` that needs only Python 3.13+:
+Each [release](https://github.com/DavidSiegl/ai-agents-orchestrator/releases) has a single-file executable for
+Linux x86_64 and for Apple Silicon macOS, which needs no Python, and each with its `.sha256`:
+
+```bash
+# Linux x86_64; on an Apple Silicon Mac, orchestrator-macos-arm64 and `shasum -a 256 -c`
+curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/orchestrator-linux-x86_64
+curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/orchestrator-linux-x86_64.sha256
+sha256sum -c orchestrator-linux-x86_64.sha256 && chmod +x orchestrator-linux-x86_64
+./orchestrator-linux-x86_64 run "add a token-bucket rate limiter to the API client"
+```
+
+The macOS binary is not signed or notarized. Downloaded with a browser, macOS refuses to open it the first time:
+right-click it and choose Open once, or run `xattr -d com.apple.quarantine orchestrator-macos-arm64`. A file
+`curl` downloads is not quarantined, so it opens straight away.
+
+Everywhere else, use `orchestrator.pyz`, an executable of `orchestrator.py` that needs Python 3.13+, and tkinter
+for the GUI:
 
 ```bash
 curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/orchestrator.pyz
@@ -46,7 +62,25 @@ sha256sum -c orchestrator.pyz.sha256 && chmod +x orchestrator.pyz
 ./orchestrator.pyz run "add a token-bucket rate limiter to the API client"
 ```
 
-It takes the same commands and flags as `python orchestrator.py` in a checkout, which the examples below use.
+Both take the same commands and flags as `python orchestrator.py` in a checkout, which the examples below use.
+
+### GUI
+
+Run without arguments, or with `gui`, the orchestrator opens a window where a display is available: always on
+macOS, and on Linux when `DISPLAY` or `WAYLAND_DISPLAY` is set; otherwise it prints its usage, as before. In the
+window you fill in a run (the task, the project folder, and optionally a machine, the workflow, the harness for
+every role, the model, the permission mode, `--no-pr` and a quality-gate job; per-role harnesses and models stay
+on the command line), see the project's runs as `list` shows them, resume one, and follow the output of the
+run, which Stop interrupts as Ctrl-C would. The window starts the same `run` or `resume` command you would type,
+one at a time, and shows it at the top of the output.
+
+The role agents still run in herdr, so open `herdr` in a terminal to answer the Spec Collector. As on the
+command line, a run without a machine has to start from a herdr pane: start the window from one, or give a
+machine. Launched from a file manager instead of a shell, the binary sees only that session's `PATH`, so
+`herdr`, `git`, `gh` and the CLI of each harness a run uses must be on it.
+
+A Python without tkinter makes `gui` exit with status 1 and the command to install it, such as
+`apt install python3-tk` or `brew install python-tk@3.13`; the binaries include it.
 
 ## Usage
 
@@ -69,6 +103,9 @@ python orchestrator.py run --workflow-file examples/workflows/quick.toml "fix th
 
 # With the SonarQube quality gate after each Builder turn; credentials from ~/.config/ai-agents-orchestrator/ci.env
 python orchestrator.py run --quality-gate AI-Agents-Orchestrator/py-ai-agents-orchestrator-quality "add a token-bucket rate limiter"
+
+# The window to start, list and resume runs in; no arguments open it too where there is a display
+python orchestrator.py gui
 ```
 
 | Flag | Description |
@@ -222,3 +259,6 @@ for the rules.
 ```bash
 uv run pytest
 ```
+
+`packaging/build-binary.sh` builds the binary for the machine it runs on into `dist/`, with PyInstaller from the
+`build` dependency group, and smoke-tests it; see [Tooling](docs/architecture.md#tooling).

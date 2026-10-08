@@ -1,7 +1,7 @@
 # Design
 
-How resuming, stale-run detection, notifications and remote machines work, and why. The
-[README](../README.md) covers installing and running the orchestrator.
+How resuming, stale-run detection, notifications, remote machines, the GUI and the release builds work, and
+why. The [README](../README.md) covers installing and running the orchestrator.
 
 ## Resuming a run
 
@@ -64,6 +64,32 @@ Steps 1–3 run on the machine you start the orchestrator from.
 With `--machine`, every herdr command is forwarded with `herdr --machine`. The orchestrator can also run on the
 remote machine itself: copy `orchestrator.py` there and run it with the system `python3` (3.13+) from a herdr
 pane, without `--machine`.
+
+## The GUI
+
+The window is a front end to the CLI, not a second way to drive a run. It starts `run` or `resume` as a child
+process of the program it was launched from, so a run started there is the command you would type, which it
+shows at the top of the output, and everything the CLI does applies unchanged: the saved state, `list`, the
+heartbeat, and Ctrl-C's handling, which Stop and a confirmed close reach by sending SIGINT to the child's
+process group. One run at a time keeps the output pane and Stop unambiguous; more runs take more windows.
+
+It shows no live view of a run's phase or handoff files, and leaves per-role harnesses and models to the
+command line. The agents are still in herdr, where you answer the Spec Collector. A run without `--machine`
+still has to start inside a herdr pane, since herdr commands from outside one would reach whichever session is
+focused; listing a local project's runs sends no herdr command, so the window lists them from anywhere.
+
+tkinter is imported only when the window opens, so the CLI keeps running on a Python without it.
+
+## Builds and releases
+
+Jenkins does the building and releasing: the tests, the SonarQube gate, the Linux binary (on every build but a
+quality build, so a change that breaks it fails before it is merged) and, on a merge into `main` that raises the
+version, the release with `orchestrator.pyz` and the Linux binary. Jenkins has no Mac, so one GitHub Action
+builds the macOS binary when that release is published and uploads it there. It can only add files to a release
+that exists. Both build with `packaging/build-binary.sh`, so the binaries cannot be built or smoke-tested
+differently. The macOS binary is built only for Apple Silicon and is unsigned, apart from PyInstaller's ad-hoc
+signature, and nobody tests it by hand: the Action's smoke tests, the window opened and closed included, are its
+check.
 
 ## Design decisions
 
