@@ -21,6 +21,10 @@ jobs:
     runs-on: macos-latest
     env:
       TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+      # uv's own Python, which bundles Tcl/Tk. uv would otherwise take the runner's Homebrew python@3.14, which has
+      # no tkinter, and PyInstaller would leave the GUI out of the binary. Set here, not in build-binary.sh, so a
+      # rebuild of a tag cut before this fix gets it too.
+      UV_PYTHON_PREFERENCE: only-managed
     steps:
       - uses: actions/checkout@v5
         with:
