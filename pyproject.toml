@@ -3,7 +3,7 @@ pythonpath = ["."]
 
 [project]
 name = "ai-agents-orchestrator"
-version = "0.6.1"
+version = "0.7.0"
 description = "Spec Collector -> Builder -> Reviewer handoff between Claude Code sessions in herdr"
 readme = "README.md"
 # The orchestrator is stdlib-only, so it runs with a system python3 3.13+ without uv.

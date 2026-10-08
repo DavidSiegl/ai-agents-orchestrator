@@ -4823,7 +4823,7 @@ class FakeFont:
         return self.options[option]
 
     def metrics(self, option):
-        return 15
+        return round(abs(self.options["size"]) * 1.25)  # the linespace: 15 at the default 12 pixels
 
 
 class FakePhotoImage:
@@ -5244,6 +5244,57 @@ class TestRunWindowLook(unittest.TestCase):
         self.assertEqual(families["TkFixedFont"], "DejaVu Sans")  # the output pane stays monospace
         self.assertEqual({name: f.options["family"] for name, f in window.fonts.items()},
                          {"section": "Roboto", "title": "Roboto", "command": "DejaVu Sans"})
+
+    def sizes(self):
+        """Each font's size: Tk's named fonts by name, the window's own by its key."""
+        return ({name: f.options["size"] for name, f in self.ui.named_fonts.items()} |
+                {key: f.options["size"] for key, f in self.window.fonts.items()})
+
+    def test_zoom_scales_every_font_and_the_run_lists_rows(self):
+        at_start = self.sizes()
+        self.assertEqual(self.style.options["Treeview"]["rowheight"], 15 + 8)
+        self.window.zoom(1)
+        self.assertEqual(self.sizes(), {name: round(size * 1.1) for name, size in at_start.items()})
+        self.assertEqual((self.sizes()["TkDefaultFont"], self.sizes()["title"]), (-13, -20))
+        self.assertEqual(self.style.options["Treeview"]["rowheight"], 16 + 8)  # 13 pixels' linespace
+        self.assertEqual(self.window.vars["zoom"].get(), "110%")
+        self.window.zoom(0)
+        self.assertEqual(self.sizes(), at_start)
+        self.assertEqual(self.window.vars["zoom"].get(), "100%")
+
+    def test_zoom_stops_at_either_end(self):
+        buttons = self.window.zoom_buttons
+        for _ in range(len(orchestrator.ZOOM_LEVELS)):
+            buttons[1].press()
+        self.assertEqual(self.window.vars["zoom"].get(), "200%")
+        self.assertEqual(self.sizes()["TkDefaultFont"], -24)
+        self.assertEqual((buttons[1].options["state"], buttons[-1].options["state"]), ("disabled", "normal"))
+        for _ in range(len(orchestrator.ZOOM_LEVELS)):
+            buttons[-1].press()
+        self.assertEqual(self.window.vars["zoom"].get(), "75%")
+        self.assertEqual((buttons[1].options["state"], buttons[-1].options["state"]), ("normal", "disabled"))
+        buttons[0].press()
+        self.assertEqual(self.window.vars["zoom"].get(), "100%")
+        self.assertEqual(self.sizes()["TkDefaultFont"], -12)
+
+    def test_zoom_by_keys_and_wheel(self):
+        bindings = self.root.bindings
+        mod = "Command" if orchestrator.sys.platform == "darwin" else "Control"
+        for event, delta, zoom in ((f"<{mod}-Key-plus>", 0, "110%"), (f"<{mod}-Key-minus>", 0, "100%"),
+                                   ("<Control-Button-4>", 0, "110%"), ("<Control-Button-5>", 0, "100%"),
+                                   ("<Control-MouseWheel>", 120, "110%"), ("<Control-MouseWheel>", -120, "100%"),
+                                   (f"<{mod}-Key-equal>", 0, "110%"), (f"<{mod}-Key-0>", 0, "100%")):
+            with self.subTest(event=event, delta=delta):
+                bindings[event](SimpleNamespace(delta=delta))
+                self.assertEqual(self.window.vars["zoom"].get(), zoom)
+
+    def test_zoom_events(self):
+        mac, linux = orchestrator.zoom_events("darwin"), orchestrator.zoom_events("linux")
+        self.assertEqual((mac["<Command-Key-plus>"], mac["<Command-Key-minus>"], mac["<Command-Key-0>"]), (1, -1, 0))
+        self.assertEqual((linux["<Control-Key-plus>"], linux["<Control-Key-minus>"], linux["<Control-Key-0>"]),
+                         (1, -1, 0))
+        self.assertFalse([e for e in mac if e.startswith("<Control-Key")])
+        self.assertNotIn("<Control-0>", linux)  # Tk would read that as mouse button 0
 
     def test_the_platforms_font_without_roboto(self):
         self.assertEqual({f.options["family"] for f in self.ui.named_fonts.values()}, {"DejaVu Sans"})

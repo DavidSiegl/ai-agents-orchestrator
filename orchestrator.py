@@ -3286,6 +3286,8 @@ AMBER = "#F2B33D"        # runs that need a look
 GUI_FONT_FAMILY = "Roboto"
 GUI_TEXT_FONTS = ("TkDefaultFont", "TkTextFont", "TkHeadingFont", "TkMenuFont", "TkCaptionFont",
                   "TkSmallCaptionFont", "TkIconFont", "TkTooltipFont")
+# The zoom levels, as factors of the fonts' sizes at start; Ctrl or Cmd with +, - and 0 steps through them.
+ZOOM_LEVELS = (0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0)
 # The ttk styles the window switches between or sets on a widget, besides defining them.
 ACCENT_BUTTON = "Accent.TButton"
 PIPELINE_LABEL = "Pipeline.TLabel"
@@ -3351,6 +3353,21 @@ LOGO_PNG = (
 def gui_by_default(platform: str, environ) -> bool:
     """Whether no arguments open the GUI: always on macOS, elsewhere when there is a display."""
     return platform == "darwin" or bool(environ.get("DISPLAY") or environ.get("WAYLAND_DISPLAY"))
+
+
+def zoom_events(platform: str) -> dict[str, int]:
+    """The events that zoom the window, each with its step: 1 larger, -1 smaller, 0 back to 100%.
+
+    Key-0, not 0: Tk reads <Control-0> as a click of mouse button 0. Ctrl-+ arrives as Shift-plus on most
+    layouts, which <Control-Key-plus> still matches; Ctrl-= is the same key without Shift. The wheel is
+    Button-4 and -5 on X11, and MouseWheel elsewhere, whose delta's sign says which way; tkinter gives every
+    other event a delta of 0.
+    """
+    mod = "Command" if platform == "darwin" else "Control"
+    keys = {"plus": 1, "equal": 1, "KP_Add": 1, "minus": -1, "KP_Subtract": -1, "0": 0}
+    events = {f"<{mod}-Key-{key}>": step for key, step in keys.items()}
+    events.update({"<Control-Button-4>": 1, "<Control-Button-5>": -1, "<Control-MouseWheel>": 1})
+    return events
 
 
 def tk_install_hint(platform: str, version) -> str:
@@ -3531,8 +3548,9 @@ class RunWindow:
         self._theme()
         self.vars = {name: tk.StringVar(root) for name in
                      ("cwd", "machine", "workflow", "agent", "model", "permission_mode", "quality_gate",
-                      "runs_note", "pipeline")}
+                      "runs_note", "pipeline", "zoom")}
         self.vars["workflow"].set(DEFAULT_WORKFLOW.name)
+        self.vars["zoom"].set("100%")
         self.vars["no_pr"] = tk.BooleanVar(root)
         self._header()
         self.vars["workflow"].trace_add("write", lambda *_: self._show_pipeline())
@@ -3543,6 +3561,8 @@ class RunWindow:
         ui.ttk.Label(root, text=HERDR_NOTE, wraplength=720, style=MUTED_LABEL).grid(
             row=4, column=0, sticky="w", padx=16, pady=(0, 12))
         self._set_running(False)
+        for event, step in zoom_events(sys.platform).items():
+            root.bind(event, lambda e, step=step: self.zoom(step if e.delta >= 0 else -step))
         root.after(GUI_POLL_MS, self._poll)
 
     def _theme(self) -> None:
@@ -3558,13 +3578,17 @@ class RunWindow:
         heading = font.nametofont("TkHeadingFont", root=root)
         self.fonts = {"section": _derived_font(heading, "bold"), "title": _derived_font(heading, "bold", 1.5),
                       "command": _derived_font(font.nametofont("TkFixedFont", root=root), "bold")}
+        # Each font the window draws with, and its size at 100%, which every zoom level scales from.
+        named = [font.nametofont(name, root=root) for name in (*GUI_TEXT_FONTS, "TkFixedFont")]
+        self._sizes = [(f, f.cget("size")) for f in (*named, *self.fonts.values())]
+        self._zoom = ZOOM_LEVELS.index(1)
         linespace = font.nametofont("TkDefaultFont", root=root).metrics("linespace")
         root.configure(background=NAVY)
         # A combobox's drop-down list is a plain Listbox, which only the option database reaches.
         for option, value in (("background", NAVY), ("foreground", PALE_MINT), ("selectBackground", MINT),
                               ("selectForeground", NAVY), ("font", "TkDefaultFont")):
             root.option_add(f"*TCombobox*Listbox.{option}", value)
-        style = ttk.Style(root)
+        self.style = style = ttk.Style(root)
         style.theme_use("clam")
 
         def flat(color: str) -> dict:
@@ -3637,7 +3661,28 @@ class RunWindow:
         self.pipeline_label = ttk.Label(h, textvariable=self.vars["pipeline"], style=PIPELINE_LABEL,
                                         wraplength=640)
         self.pipeline_label.grid(row=1, column=1, sticky="nw")
-        ttk.Frame(h, height=2, style="Rule.TFrame").grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        z = ttk.Frame(h)
+        z.grid(row=0, column=2, rowspan=2, sticky="ne")
+        self.zoom_buttons = {step: ttk.Button(z, text=text, width=width, command=lambda step=step: self.zoom(step))
+                             for step, text, width in ((-1, "−", 2), (0, None, 5), (1, "+", 2))}
+        self.zoom_buttons[0].configure(textvariable=self.vars["zoom"])
+        for column, step in enumerate((-1, 0, 1)):
+            self.zoom_buttons[step].grid(row=0, column=column, padx=(0 if column == 0 else 4, 0))
+        ttk.Frame(h, height=2, style="Rule.TFrame").grid(row=2, column=0, columnspan=3, sticky="ew", pady=(12, 0))
+
+    def zoom(self, step: int) -> None:
+        """Make every font a zoom level larger (1) or smaller (-1), or with 0 its size at start."""
+        i = ZOOM_LEVELS.index(1) if step == 0 else min(max(self._zoom + step, 0), len(ZOOM_LEVELS) - 1)
+        self._zoom, factor = i, ZOOM_LEVELS[i]
+        for f, size in self._sizes:
+            # A negative size is in pixels, a positive one in points; scaling keeps the sign.
+            f.configure(size=round(size * factor))
+        # The run list's rows are as tall as configured, not as their text, so they follow by hand.
+        linespace = self.ui.font.nametofont("TkDefaultFont", root=self.root).metrics("linespace")
+        self.style.configure("Treeview", rowheight=linespace + 8)
+        self.vars["zoom"].set(f"{round(factor * 100)}%")
+        self.zoom_buttons[-1].configure(state="normal" if i > 0 else "disabled")
+        self.zoom_buttons[1].configure(state="normal" if i < len(ZOOM_LEVELS) - 1 else "disabled")
 
     def _show_pipeline(self) -> None:
         # Static, from the workflow's definition: the window shows no run's live phase.

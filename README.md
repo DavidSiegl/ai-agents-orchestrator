@@ -81,6 +81,10 @@ command line, a run without a machine has to start from a herdr pane: start the 
 machine. Launched from a file manager instead of a shell, the binary sees only that session's `PATH`, so
 `herdr`, `git`, `gh` and the CLI of each harness a run uses must be on it.
 
+The text is set in Roboto where it is installed, and in the platform's font otherwise. Zoom it from 75% to 200%
+with the − and + buttons at the top right, with Ctrl (⌘ on macOS) and +, − or 0, or with Ctrl and the mouse
+wheel; the percentage between the buttons sets it back to 100%.
+
 A Python without tkinter makes `gui` exit with status 1 and the command to install it, such as
 `apt install python3-tk` or `brew install python-tk@3.13`; the binaries include it.
 
