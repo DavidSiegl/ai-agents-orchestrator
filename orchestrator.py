@@ -3288,6 +3288,12 @@ GUI_TEXT_FONTS = ("TkDefaultFont", "TkTextFont", "TkHeadingFont", "TkMenuFont", 
                   "TkSmallCaptionFont", "TkIconFont", "TkTooltipFont")
 # The zoom levels, as factors of the fonts' sizes at start; Ctrl or Cmd with +, - and 0 steps through them.
 ZOOM_LEVELS = (0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0)
+# Ctrl and the wheel, by event, each with its step; ZOOM_WHEEL_MS is the least time between two of its steps.
+# The wheel is Button-4 and -5 on X11, and MouseWheel elsewhere, whose delta's sign says which way (tkinter
+# gives the others a delta of 0). Its size is no measure across platforms and Tk versions, and a trackpad
+# sends one swipe as a burst of small ones, so time, not the delta, keeps a swipe from running to either end.
+ZOOM_WHEEL = {"<Control-Button-4>": 1, "<Control-Button-5>": -1, "<Control-MouseWheel>": 1}
+ZOOM_WHEEL_MS = 250
 # The ttk styles the window switches between or sets on a widget, besides defining them.
 ACCENT_BUTTON = "Accent.TButton"
 PIPELINE_LABEL = "Pipeline.TLabel"
@@ -3355,19 +3361,15 @@ def gui_by_default(platform: str, environ) -> bool:
     return platform == "darwin" or bool(environ.get("DISPLAY") or environ.get("WAYLAND_DISPLAY"))
 
 
-def zoom_events(platform: str) -> dict[str, int]:
-    """The events that zoom the window, each with its step: 1 larger, -1 smaller, 0 back to 100%.
+def zoom_keys(platform: str) -> dict[str, int]:
+    """The key events that zoom the window, each with its step: 1 larger, -1 smaller, 0 back to 100%.
 
     Key-0, not 0: Tk reads <Control-0> as a click of mouse button 0. Ctrl-+ arrives as Shift-plus on most
-    layouts, which <Control-Key-plus> still matches; Ctrl-= is the same key without Shift. The wheel is
-    Button-4 and -5 on X11, and MouseWheel elsewhere, whose delta's sign says which way; tkinter gives every
-    other event a delta of 0.
+    layouts, which <Control-Key-plus> still matches; Ctrl-= is the same key without Shift.
     """
     mod = "Command" if platform == "darwin" else "Control"
     keys = {"plus": 1, "equal": 1, "KP_Add": 1, "minus": -1, "KP_Subtract": -1, "0": 0}
-    events = {f"<{mod}-Key-{key}>": step for key, step in keys.items()}
-    events.update({"<Control-Button-4>": 1, "<Control-Button-5>": -1, "<Control-MouseWheel>": 1})
-    return events
+    return {f"<{mod}-Key-{key}>": step for key, step in keys.items()}
 
 
 def tk_install_hint(platform: str, version) -> str:
@@ -3561,8 +3563,11 @@ class RunWindow:
         ui.ttk.Label(root, text=HERDR_NOTE, wraplength=720, style=MUTED_LABEL).grid(
             row=4, column=0, sticky="w", padx=16, pady=(0, 12))
         self._set_running(False)
-        for event, step in zoom_events(sys.platform).items():
-            root.bind(event, lambda e, step=step: self.zoom(step if e.delta >= 0 else -step))
+        for event, step in zoom_keys(sys.platform).items():
+            root.bind(event, lambda _, step=step: self.zoom(step))
+        self._wheel_zoomed = None  # the event time of the wheel's last zoom step
+        for event, step in ZOOM_WHEEL.items():
+            root.bind(event, lambda e, step=step: self._wheel_zoom(e, step if e.delta >= 0 else -step))
         root.after(GUI_POLL_MS, self._poll)
 
     def _theme(self) -> None:
@@ -3680,9 +3685,18 @@ class RunWindow:
         # The run list's rows are as tall as configured, not as their text, so they follow by hand.
         linespace = self.ui.font.nametofont("TkDefaultFont", root=self.root).metrics("linespace")
         self.style.configure("Treeview", rowheight=linespace + 8)
+        for name, width in self._column_widths.items():
+            self.runs.column(name, width=round(width * factor))
         self.vars["zoom"].set(f"{round(factor * 100)}%")
         self.zoom_buttons[-1].configure(state="normal" if i > 0 else "disabled")
         self.zoom_buttons[1].configure(state="normal" if i < len(ZOOM_LEVELS) - 1 else "disabled")
+
+    def _wheel_zoom(self, event, step: int) -> None:
+        # Event times are milliseconds that wrap around, so one that seems earlier is a new burst.
+        if self._wheel_zoomed is not None and 0 <= event.time - self._wheel_zoomed < ZOOM_WHEEL_MS:
+            return
+        self._wheel_zoomed = event.time
+        self.zoom(step)
 
     def _show_pipeline(self) -> None:
         # Static, from the workflow's definition: the window shows no run's live phase.
@@ -3749,6 +3763,8 @@ class RunWindow:
         for name, heading, width in columns:
             self.runs.heading(name, text=heading)
             self.runs.column(name, width=width, stretch=name in ("outcome", "task"))
+        # Pixels, so zoom() scales them with the text, or a run id no longer fits its column from 150%.
+        self._column_widths = {name: width for name, _, width in columns}
         for tag, color in (("ok", MINT), ("warn", AMBER), ("error", CORAL)):
             self.runs.tag_configure(tag, foreground=color)
         self.runs.grid(row=0, column=0, columnspan=3, sticky="nsew", padx=6, pady=4)

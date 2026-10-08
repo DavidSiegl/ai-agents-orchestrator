@@ -4742,7 +4742,10 @@ class FakeText(FakeWidget):
 class FakeTreeview(FakeWidget):
     def __init__(self, master=None, **options):
         super().__init__(master, **options)
-        self.rows, self.row_tags, self.selected = {}, {}, ()
+        self.rows, self.row_tags, self.selected, self.widths = {}, {}, (), {}
+
+    def column(self, name, width=None, **options):
+        self.widths[name] = width
 
     def insert(self, parent, index, iid, values, tags=()):
         self.rows[iid] = values
@@ -5260,6 +5263,16 @@ class TestRunWindowLook(unittest.TestCase):
         self.assertEqual(self.window.vars["zoom"].get(), "110%")
         self.window.zoom(0)
         self.assertEqual(self.sizes(), at_start)
+
+    def test_zoom_widens_the_run_lists_columns(self):
+        at_start = dict(self.window.runs.widths)
+        self.assertEqual(at_start["run"], 190)
+        for _ in range(3):
+            self.window.zoom(1)
+        self.assertEqual(self.window.vars["zoom"].get(), "150%")
+        self.assertEqual(self.window.runs.widths, {name: round(w * 1.5) for name, w in at_start.items()})
+        self.window.zoom(0)
+        self.assertEqual(self.window.runs.widths, at_start)
         self.assertEqual(self.window.vars["zoom"].get(), "100%")
 
     def test_zoom_stops_at_either_end(self):
@@ -5280,16 +5293,29 @@ class TestRunWindowLook(unittest.TestCase):
     def test_zoom_by_keys_and_wheel(self):
         bindings = self.root.bindings
         mod = "Command" if orchestrator.sys.platform == "darwin" else "Control"
-        for event, delta, zoom in ((f"<{mod}-Key-plus>", 0, "110%"), (f"<{mod}-Key-minus>", 0, "100%"),
-                                   ("<Control-Button-4>", 0, "110%"), ("<Control-Button-5>", 0, "100%"),
-                                   ("<Control-MouseWheel>", 120, "110%"), ("<Control-MouseWheel>", -120, "100%"),
-                                   (f"<{mod}-Key-equal>", 0, "110%"), (f"<{mod}-Key-0>", 0, "100%")):
+        # The wheel's events a second apart, so that each one steps.
+        for i, (event, delta, zoom) in enumerate((
+                (f"<{mod}-Key-plus>", 0, "110%"), (f"<{mod}-Key-minus>", 0, "100%"),
+                ("<Control-Button-4>", 0, "110%"), ("<Control-Button-5>", 0, "100%"),
+                ("<Control-MouseWheel>", 120, "110%"), ("<Control-MouseWheel>", -120, "100%"),
+                (f"<{mod}-Key-equal>", 0, "110%"), (f"<{mod}-Key-0>", 0, "100%"))):
             with self.subTest(event=event, delta=delta):
-                bindings[event](SimpleNamespace(delta=delta))
+                bindings[event](SimpleNamespace(delta=delta, time=1000 * i))
                 self.assertEqual(self.window.vars["zoom"].get(), zoom)
 
-    def test_zoom_events(self):
-        mac, linux = orchestrator.zoom_events("darwin"), orchestrator.zoom_events("linux")
+    def test_a_swipe_of_the_wheel_zooms_a_step_at_a_time(self):
+        wheel = self.root.bindings["<Control-MouseWheel>"]
+        # A trackpad's swipe: small deltas, 20 ms apart.
+        for t in range(10_000, 10_200, 20):
+            wheel(SimpleNamespace(delta=3, time=t))
+        self.assertEqual(self.window.vars["zoom"].get(), "110%")
+        wheel(SimpleNamespace(delta=3, time=10_000 + orchestrator.ZOOM_WHEEL_MS))
+        self.assertEqual(self.window.vars["zoom"].get(), "125%")
+        wheel(SimpleNamespace(delta=-3, time=5))  # the clock wrapped around: a new burst
+        self.assertEqual(self.window.vars["zoom"].get(), "110%")
+
+    def test_zoom_keys(self):
+        mac, linux = orchestrator.zoom_keys("darwin"), orchestrator.zoom_keys("linux")
         self.assertEqual((mac["<Command-Key-plus>"], mac["<Command-Key-minus>"], mac["<Command-Key-0>"]), (1, -1, 0))
         self.assertEqual((linux["<Control-Key-plus>"], linux["<Control-Key-minus>"], linux["<Control-Key-0>"]),
                          (1, -1, 0))
