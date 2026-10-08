@@ -1,5 +1,6 @@
 import base64
 import io
+import itertools
 import json
 import os
 import re
@@ -4742,7 +4743,10 @@ class FakeText(FakeWidget):
 class FakeTreeview(FakeWidget):
     def __init__(self, master=None, **options):
         super().__init__(master, **options)
-        self.rows, self.row_tags, self.selected = {}, {}, ()
+        self.rows, self.row_tags, self.selected, self.widths = {}, {}, (), {}
+
+    def column(self, name, width=None, **options):
+        self.widths[name] = width
 
     def insert(self, parent, index, iid, values, tags=()):
         self.rows[iid] = values
@@ -4810,11 +4814,11 @@ class FakeStyle:
 class FakeFont:
     """A Tk named font, as tkinter.font.nametofont gives it."""
 
-    def __init__(self, name, size=-12):
-        self.name, self.options = name, {"size": size, "weight": "normal"}
+    def __init__(self, name, size=-12, family="DejaVu Sans"):
+        self.name, self.options = name, {"family": family, "size": size, "weight": "normal"}
 
     def copy(self):
-        return FakeFont(self.name, self.options["size"])
+        return FakeFont(self.name, self.options["size"], self.options["family"])
 
     def configure(self, **options):
         self.options.update(options)
@@ -4823,7 +4827,7 @@ class FakeFont:
         return self.options[option]
 
     def metrics(self, option):
-        return 15
+        return round(abs(self.options["size"]) * 1.25)  # the linespace: 15 at the default 12 pixels
 
 
 class FakePhotoImage:
@@ -4836,9 +4840,10 @@ TTK_WIDGETS = {name: type(name, (FakeWidget,), {}) for name in
                ("Frame", "Label", "Entry", "Combobox", "Button", "Checkbutton", "Scrollbar")}
 
 
-def fake_ui():
-    """The tkinter modules, faked; styles holds each ttk.Style the window creates."""
-    styles = []
+def fake_ui(families=("DejaVu Sans",)):
+    """The tkinter modules, faked, with the font families installed; styles holds each ttk.Style the window
+    creates, and named_fonts Tk's named fonts, one object per name as in Tk."""
+    styles, named_fonts = [], {}
 
     def style(master=None):
         styles.append(FakeStyle(master))
@@ -4847,8 +4852,9 @@ def fake_ui():
     return SimpleNamespace(
         tk=SimpleNamespace(StringVar=FakeVar, BooleanVar=FakeBooleanVar, Text=FakeText, PhotoImage=FakePhotoImage),
         ttk=SimpleNamespace(**TTK_WIDGETS, Treeview=FakeTreeview, Style=style),
-        font=SimpleNamespace(nametofont=lambda name, root=None: FakeFont(name)),
-        filedialog=MagicMock(), messagebox=MagicMock(), styles=styles)
+        font=SimpleNamespace(nametofont=lambda name, root=None: named_fonts.setdefault(name, FakeFont(name)),
+                             families=lambda root=None, displayof=None: families),
+        filedialog=MagicMock(), messagebox=MagicMock(), styles=styles, named_fonts=named_fonts)
 
 
 class FakeProcess:
@@ -5231,6 +5237,103 @@ class TestRunWindowLook(unittest.TestCase):
         self.assertEqual(fonts["title"].options["size"], -18)  # 1.5 times the heading's 12 pixels
         self.assertEqual(self.style.options["Section.TLabel"]["font"], fonts["section"])
         self.assertEqual(self.window.task.options["font"], "TkDefaultFont")
+
+    def test_roboto_where_it_is_installed(self):
+        ui = fake_ui(families=("DejaVu Sans", "Roboto"))
+        window = orchestrator.RunWindow(FakeRoot(), ui, start=self.start, list_runs=lambda m, c: [],
+                                        background=lambda fn: fn())
+        families = {name: f.options["family"] for name, f in ui.named_fonts.items()}
+        self.assertEqual({name: families[name] for name in orchestrator.GUI_TEXT_FONTS},
+                         dict.fromkeys(orchestrator.GUI_TEXT_FONTS, "Roboto"))
+        self.assertEqual(families["TkFixedFont"], "DejaVu Sans")  # the output pane stays monospace
+        self.assertEqual({name: f.options["family"] for name, f in window.fonts.items()},
+                         {"section": "Roboto", "title": "Roboto", "command": "DejaVu Sans"})
+
+    def sizes(self):
+        """Each font's size: Tk's named fonts by name, the window's own by its key."""
+        return ({name: f.options["size"] for name, f in self.ui.named_fonts.items()} |
+                {key: f.options["size"] for key, f in self.window.fonts.items()})
+
+    def test_zoom_scales_every_font_and_the_run_lists_rows(self):
+        at_start = self.sizes()
+        self.assertEqual(self.style.options["Treeview"]["rowheight"], 15 + 8)
+        self.window.zoom(1)
+        self.assertEqual(self.sizes(), {name: round(size * 1.1) for name, size in at_start.items()})
+        self.assertEqual((self.sizes()["TkDefaultFont"], self.sizes()["title"]), (-13, -20))
+        self.assertEqual(self.style.options["Treeview"]["rowheight"], 16 + 8)  # 13 pixels' linespace
+        self.assertEqual(self.window.vars["zoom"].get(), "110%")
+        self.window.zoom(0)
+        self.assertEqual(self.sizes(), at_start)
+        self.assertEqual(self.window.vars["zoom"].get(), "100%")
+
+    def test_zoom_widens_the_run_lists_fixed_columns_only(self):
+        at_start = dict(self.window.runs.widths)
+        self.assertEqual(at_start, {"run": 190, "phase": 70, "round": 70, "outcome": 300, "task": 300})
+        for _ in range(3):
+            self.window.zoom(1)
+        self.assertEqual(self.window.vars["zoom"].get(), "150%")
+        # Status and Task stretch into the room left, so the window asks for no more width than at 100%.
+        self.assertEqual(self.window.runs.widths, {"run": 285, "phase": 105, "round": 105, "outcome": 300,
+                                                   "task": 300})
+        self.window.zoom(0)
+        self.assertEqual(self.window.runs.widths, at_start)
+        self.assertEqual(self.window.vars["zoom"].get(), "100%")
+
+    def test_zoom_stops_at_either_end(self):
+        buttons = self.window.zoom_buttons
+        for _ in range(len(orchestrator.ZOOM_LEVELS)):
+            buttons[1].press()
+        self.assertEqual(self.window.vars["zoom"].get(), "200%")
+        self.assertEqual(self.sizes()["TkDefaultFont"], -24)
+        self.assertEqual((buttons[1].options["state"], buttons[-1].options["state"]), ("disabled", "normal"))
+        for _ in range(len(orchestrator.ZOOM_LEVELS)):
+            buttons[-1].press()
+        self.assertEqual(self.window.vars["zoom"].get(), "75%")
+        self.assertEqual((buttons[1].options["state"], buttons[-1].options["state"]), ("normal", "disabled"))
+        buttons[0].press()
+        self.assertEqual(self.window.vars["zoom"].get(), "100%")
+        self.assertEqual(self.sizes()["TkDefaultFont"], -12)
+
+    def test_zoom_by_keys_and_wheel(self):
+        bindings = self.root.bindings
+        mod = "Command" if orchestrator.sys.platform == "darwin" else "Control"
+        clock = itertools.count()  # the wheel's events a second apart, so that each one steps
+        for event, delta, zoom in (
+                (f"<{mod}-Key-plus>", 0, "110%"), (f"<{mod}-Key-minus>", 0, "100%"),
+                ("<Control-Button-4>", 0, "110%"), ("<Control-Button-5>", 0, "100%"),
+                ("<Control-MouseWheel>", 120, "110%"), ("<Control-MouseWheel>", -120, "100%"),
+                (f"<{mod}-Key-equal>", 0, "110%"), (f"<{mod}-Key-0>", 0, "100%")):
+            with self.subTest(event=event, delta=delta), \
+                    patch.object(orchestrator.time, "monotonic", return_value=next(clock)):
+                bindings[event](SimpleNamespace(delta=delta))
+                self.assertEqual(self.window.vars["zoom"].get(), zoom)
+
+    def test_a_swipe_of_the_wheel_zooms_a_step_at_a_time(self):
+        wheel = self.root.bindings["<Control-MouseWheel>"]
+
+        def at(seconds, delta):
+            with patch.object(orchestrator.time, "monotonic", return_value=seconds):
+                wheel(SimpleNamespace(delta=delta))
+
+        for i in range(10):  # a trackpad's swipe: small deltas, 20 ms apart
+            at(100 + i * 0.02, 3)
+        self.assertEqual(self.window.vars["zoom"].get(), "110%")
+        at(100 + orchestrator.ZOOM_WHEEL_SECONDS, 3)
+        self.assertEqual(self.window.vars["zoom"].get(), "125%")
+        at(101, -3)
+        self.assertEqual(self.window.vars["zoom"].get(), "110%")
+
+    def test_zoom_keys(self):
+        mac, linux = orchestrator.zoom_keys("darwin"), orchestrator.zoom_keys("linux")
+        self.assertEqual((mac["<Command-Key-plus>"], mac["<Command-Key-minus>"], mac["<Command-Key-0>"]), (1, -1, 0))
+        self.assertEqual((linux["<Control-Key-plus>"], linux["<Control-Key-minus>"], linux["<Control-Key-0>"]),
+                         (1, -1, 0))
+        self.assertFalse([e for e in mac if e.startswith("<Control-Key")])
+        self.assertNotIn("<Control-0>", linux)  # Tk would read that as mouse button 0
+
+    def test_the_platforms_font_without_roboto(self):
+        self.assertEqual({f.options["family"] for f in self.ui.named_fonts.values()}, {"DejaVu Sans"})
+        self.assertEqual({f.options["family"] for f in self.window.fonts.values()}, {"DejaVu Sans"})
 
 
 class FakeTclError(Exception):

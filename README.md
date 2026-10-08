@@ -2,8 +2,9 @@
 
 # ai-agents-orchestrator
 
-A role-based handoff workflow for coding agents running in [herdr](https://herdr.dev): **Claude Code** by
-default, or Codex, Gemini CLI, opencode or pi, chosen per role:
+A role-based handoff workflow for coding agents running in [herdr](https://herdr.dev), each role in the agent
+of your choice: [Claude Code, Codex, Gemini CLI, opencode or pi](#five-coding-agents-in-any-mix). The default
+workflow:
 
 ```
 Spec Collector ──spec.md──▶ Builder ──build-N.md──▶ Reviewer ──review-N.md──▶ APPROVE ──▶ pull request
@@ -15,9 +16,40 @@ With `--quality-gate`, a SonarQube analysis through Jenkins sits between the Bui
 sends its findings back to the Builder first.
 
 Each role is a separate interactive agent session in its own herdr pane, so no role judges its own
-work, and you can watch or step into any of them. Each role runs in the [harness](#harnesses) of your choice, so
-that, say, Claude Code builds and Codex reviews; you answer the Spec Collector in its pane whichever it runs. The agents run on this machine or on another one saved in
+work, and you can watch or step into any of them. The agents run on this machine or on another one saved in
 herdr. Each feature is built on its own branch and ends as a pull request on GitHub, where you review it.
+
+## Five coding agents, in any mix
+
+Every role runs in the agent harness you pick for it, so the agent that reviews a change need not be the one
+that wrote it:
+
+| Harness | `--agent` | Models | `--permission-mode` it understands |
+|---|---|---|---|
+| [Claude Code](https://github.com/anthropics/claude-code) | `claude`, the default | Anthropic's Claude | every mode, as it is |
+| [Codex CLI](https://github.com/openai/codex) | `codex` | OpenAI's GPT | `default`, `acceptEdits`, `bypassPermissions`, `plan` |
+| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `gemini` | Google's Gemini | `default`, `acceptEdits`, `bypassPermissions` |
+| [opencode](https://github.com/sst/opencode) | `opencode` | any provider it is set up for | none; it starts with its own default |
+| [pi](https://github.com/badlogic/pi-mono) | `pi` | any provider it is set up for | none; it starts with its own default |
+
+- **A second opinion from another model.** `--role-agent review=codex` has Claude Code write the change and
+  Codex review it, so the review does not share the builder's blind spots.
+- **One flag for every role, or one role at a time.** `--agent gemini` moves the whole run; `--role-agent
+  ROLE=KIND`, repeatable, moves one role; a [workflow file](#your-own-workflows) can pin `agent = "codex"` to a
+  role. Models work the same way, with `--model`, `--build-model` or `--role-model ROLE=MODEL`.
+- **One permission vocabulary.** `--permission-mode` takes Claude Code's mode names and gives each harness its
+  own equivalent: `acceptEdits` is `--full-auto` for Codex and `--approval-mode auto_edit` for Gemini CLI. The log
+  says when a harness has none.
+- **Sessions that survive.** An agent that exits is relaunched into its saved session, with its harness's own
+  resume syntax. Switch a role's harness on `resume`, and its next agent starts fresh in the new one.
+- **You answer the Spec Collector in its pane**, whichever harness it runs in.
+
+```bash
+python orchestrator.py run "add a token-bucket rate limiter" --role-agent review=codex --role-agent spec=gemini
+```
+
+Each harness a run uses needs its CLI and its herdr integration where the agents run; see
+[Requirements](#requirements) and, for the precedence and the exact flags, [Harnesses](#harnesses).
 
 ## Requirements
 
@@ -67,19 +99,23 @@ Both take the same commands and flags as `python orchestrator.py` in a checkout,
 ### GUI
 
 Run without arguments, or with `gui`, the orchestrator opens a window where a display is available: always on
-macOS, and on Linux when `DISPLAY` or `WAYLAND_DISPLAY` is set; otherwise it prints its usage, as before. In the
+macOS, and on Linux when `DISPLAY` or `WAYLAND_DISPLAY` is set; otherwise it prints its usage. In the
 window you fill in a run (the task, the project folder, and optionally a machine, the workflow, the harness for
 every role, the model, the permission mode, `--no-pr` and a quality-gate job; per-role harnesses and models stay
 on the command line), see the project's runs as `list` shows them, resume one, and follow the output of the
 run, which Stop interrupts as Ctrl-C would. The window starts the same `run` or `resume` command you would type,
-one at a time, and shows it at the top of the output. It is dressed in the colors of the octopus logo
-(`docs/logo.svg`, embedded as `docs/logo-64.png`): a dark navy window whose header names the selected workflow's
-roles, with the runs' statuses in color and a terminal-style output pane.
+one at a time, and shows it at the top of the output. The window wears the octopus logo's dark navy: its
+header names the selected workflow's roles, each run's status is in color, and the output is in a terminal-style
+pane.
 
 The role agents still run in herdr, so open `herdr` in a terminal to answer the Spec Collector. As on the
 command line, a run without a machine has to start from a herdr pane: start the window from one, or give a
 machine. Launched from a file manager instead of a shell, the binary sees only that session's `PATH`, so
 `herdr`, `git`, `gh` and the CLI of each harness a run uses must be on it.
+
+The text is set in Roboto where it is installed, and in the platform's font otherwise. Zoom it from 75% to 200%
+with the − and + buttons at the top right, with Ctrl (⌘ on macOS) and +, − or 0, or with Ctrl and the mouse
+wheel; the percentage between the buttons sets it back to 100%.
 
 A Python without tkinter makes `gui` exit with status 1 and the command to install it, such as
 `apt install python3-tk` or `brew install python-tk@3.13`; the binaries include it.
@@ -123,9 +159,9 @@ python orchestrator.py gui
 | `--spec-model MODEL` | Model for the Spec Collector. Overrides `--model`. |
 | `--build-model MODEL` | Model for the Builder. Overrides `--model`. |
 | `--review-model MODEL` | Model for the Reviewer. Overrides `--model`. |
+| `--role-model ROLE=MODEL` | Model for one role of the workflow, by its key, e.g. `tests=sonnet`. Overrides `--model`; repeatable. |
 | `--workflow NAME` | `run` only: the workflow the run goes through: `default`, the run described below, or one of [your own](#your-own-workflows) in `~/.config/ai-agents-orchestrator/workflows/`. `--help` lists the choices; a resumed run keeps its workflow. |
 | `--workflow-file FILE` | `run` only: like `--workflow`, for the workflow file at `FILE`, such as one kept in the project. |
-| `--role-model ROLE=MODEL` | Model for one role of the workflow, by its key, e.g. `tests=sonnet`. Overrides `--model`; repeatable. |
 | `--no-pr` | `run` only: leave the change uncommitted and the workspace open instead of opening a pull request. Works outside git. |
 | `--quality-gate JOB` | `run` only: after each Builder turn, analyse the change with this Jenkins job, by its full name with folders, and SonarQube, and send the findings back to the Builder before the Reviewer. Needs `JENKINS_URL`, `JENKINS_USER`, `JENKINS_TOKEN`, `SONAR_HOST_URL` and `SONAR_TOKEN`, from the environment or `~/.config/ai-agents-orchestrator/ci.env`. |
 | `--max-quality-rounds N` | With the gate: SonarQube analyses per review round before the Reviewer gets the change anyway (default 3). |
@@ -157,10 +193,15 @@ role. An agent that exited is relaunched into its saved session with its harness
 claude and gemini, `--session <id>` for pi and opencode, and `codex resume <id>`. If the role's harness has changed
 since, the agent starts a fresh session instead.
 
-Exit status: `0` approved, or `FINISHED` for a workflow without a verdict step; `3` changes still requested after
-the last round, or, for a workflow without a verdict step, `QUALITY_GATE_FAILED`: the quality gate still failed
-after the last quality round (either way the pull request is a draft); `4` approved or finished, but the pull
-request conflicts with its base branch (it is a draft); `1` error; `130` interrupted.
+### Exit status
+
+| Status | Meaning |
+|---|---|
+| `0` | Approved, or `FINISHED` for a workflow without a verdict step. |
+| `3` | Changes still requested after the last round, or, for a workflow without a verdict step, `QUALITY_GATE_FAILED`: the quality gate still failed after the last quality round. Either way the pull request is a draft. |
+| `4` | Approved or finished, but the pull request conflicts with its base branch, so it is a draft. |
+| `1` | Error. |
+| `130` | Interrupted. |
 
 ## How a run works
 
@@ -242,19 +283,18 @@ any round), `prompt`, and optionally `again` (its prompt in a later round), `fre
 later round), `loop_to`, which makes it the verdict step that sends `CHANGES_REQUESTED` back to the step it names
 (a workflow without one ends `FINISHED` when its last step is done, and its pull request says no agent reviewed the
 change; with `--quality-gate`, a gate that still failed after the last quality round ends it `QUALITY_GATE_FAILED`
-instead, a draft, as under Exit status above), and the flags `human_paced`, `edits`, `quality_gated` and
+instead, a draft, as under [Exit status](#exit-status)), and the flags `human_paced`, `edits`, `quality_gated` and
 `fresh_repeats_again` (a fresh session gets `again` too). `use = "spec"`, `"build"` or `"review"` starts from that
 default step and overrides only the keys you give. Prompts fill in `{task}`, `{cwd}`, `{n}`, `{change}`, `{path}`
 (the step's own file), and for every step `X`: `{X_path}`, `{prev_X_path}` and `{earlier_X_paths}`; write a literal
 brace as `{{` or `}}`. A role you do not list in `[roles]`, or list without a label, keeps the default workflow's
 label for that key (`build` is "Builder"), and is otherwise labelled after its key (`test_writer` is "Test
 Writer"). The panes follow the steps: the first role to take a turn gets the root pane, the next one a split to its
-right, and each further one a split below. A role's `model` is its default, and any model flag overrides it; likewise its `agent`, the
-[harness](#harnesses) it runs in, one of `claude`, `codex`, `gemini`, `opencode` and `pi`, which `--agent` and
-`--role-agent` override. The
-file is checked when it loads, and an error names the step and key. A run saves its workflow's definition, so
-editing or deleting the file does not change a run already started. See [Workflows](docs/architecture.md#workflows)
-for the rules.
+right, and each further one a split below. A role's `model` is its default, and any model flag overrides it;
+likewise its `agent`, the [harness](#harnesses) it runs in, one of `claude`, `codex`, `gemini`, `opencode` and
+`pi`, which `--agent` and `--role-agent` override. The file is checked when it loads, and an error names the step
+and key. A run saves its workflow's definition, so editing or deleting the file does not change a run already
+started. See [Workflows](docs/architecture.md#workflows) for the rules.
 
 ## Running tests
 
