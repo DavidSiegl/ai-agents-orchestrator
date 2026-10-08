@@ -19,9 +19,13 @@ esac
 name="orchestrator-$os-$arch"
 bin="dist/$name"
 
-# PyInstaller leaves tkinter out, with only a warning, when the build Python lacks it, and the GUI smoke test
-# below is skipped on a Linux without a display, so a binary without its GUI could otherwise be released.
-if ! uv run --frozen --group build python -c 'import tkinter' 2>/dev/null; then
+# Installs the build Python and PyInstaller first, so a failure there is reported as itself.
+uv sync --frozen --group build
+
+# PyInstaller leaves tkinter out, with only a warning, when the build Python cannot import it or start Tcl, and
+# the GUI smoke test below is skipped on a Linux without a display, so a binary without its GUI could otherwise
+# be released. Tcl(), unlike Tk(), needs no display.
+if ! uv run --frozen --group build python -c 'import tkinter; tkinter.Tcl()'; then
     echo "build-binary.sh: the build Python has no tkinter; use uv's own, e.g. UV_PYTHON_PREFERENCE=only-managed" >&2
     exit 1
 fi
