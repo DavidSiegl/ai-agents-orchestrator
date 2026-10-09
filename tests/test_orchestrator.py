@@ -39,6 +39,9 @@ def no_processes(argv, **kw):
     raise AssertionError(f"FakeHost ran a real process: {argv}")
 
 
+HOST_RUN_STATES = Host.run_states
+
+
 class FakeHost(Host):
     """An in-memory filesystem and git checkout standing in for the machine the agents run on.
 
@@ -54,6 +57,7 @@ class FakeHost(Host):
     - `remote`: origin's branches that `push --force` created, by name; `ls-remote` lists them.
     - `diff`: what `git diff -U0` from the base to a snapshot prints.
     - `has_origin`: whether the checkout has an origin at all.
+    - `ages`: the seconds since each run's state.json was written, by run id; 0 for one not listed.
     """
 
     def __init__(self, head="abc123", branch="main"):
@@ -74,6 +78,7 @@ class FakeHost(Host):
         self.remote = {}
         self.diff = ""
         self.has_origin = True
+        self.ages = {}
 
     def snapshot(self, cwd, parent, message):
         self.snapshots.append((parent, message))
@@ -93,6 +98,18 @@ class FakeHost(Host):
 
     def git_head(self, cwd):
         return self.head
+
+    def run_states(self, cwd):
+        # A test that patches Host.run_states, for main to find the run to resume, decides it here too.
+        if Host.run_states is not HOST_RUN_STATES:
+            return super().run_states(cwd)
+        runs = f"{cwd}/{orchestrator.RUNS_DIR}/"
+        states = []
+        for path, text in self.files.items():
+            run_id, _, name = path.removeprefix(runs).partition("/")
+            if path.startswith(runs) and name == "state.json":
+                states.append((self.ages.get(run_id, 0), json.loads(text)))
+        return states
 
     def git_run(self, cwd, *args, timeout=60):
         self.git_calls.append(args)
@@ -1887,6 +1904,19 @@ class TestRunHealth(unittest.TestCase):
         ])
 
 
+class TestPidAlive(unittest.TestCase):
+    def test_own_process_is_alive(self):
+        self.assertTrue(orchestrator.pid_alive(os.getpid()))
+
+    def test_exited_process_is_not(self):
+        with patch("os.kill", side_effect=ProcessLookupError):
+            self.assertFalse(orchestrator.pid_alive(3354482))
+
+    def test_another_users_process_is_alive(self):
+        with patch("os.kill", side_effect=PermissionError):
+            self.assertTrue(orchestrator.pid_alive(1))
+
+
 class TestFindRun(unittest.TestCase):
     runs = [(1, {"run_id": "20260930-070000-c0ffee"}), (2, {"run_id": "20260930-080000-beef00"}),
             (3, {"run_id": "20260929-080000-beef00"})]
@@ -1939,6 +1969,129 @@ class TestResumableState(unittest.TestCase):
     def test_machine_of_the_resume_is_saved(self):
         state = self.resumable(["a1b2c3", "--machine", "remote", "--cwd", "~/p"], self.saved(machine=None))
         self.assertEqual(state.machine, "remote")
+
+
+OTHER_ID = "20261009-220151-537935"
+OTHER_DIR = f"/proj/.orchestrator/runs/{OTHER_ID}"
+
+
+class TestOneRunPerCheckout(unittest.TestCase):
+    """A run refuses to go on while another run in its checkout is live, since both would edit one tree."""
+
+    def full_run(self):
+        """A run's script, new each time since each turn is taken off it."""
+        return {"spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}
+
+    def host_with_other_run(self, age=16, **kw):
+        """A FakeHost whose /proj holds run OTHER_ID, which this host's orchestrator pid 3354482 last saved age
+        seconds ago."""
+        host = FakeHost()
+        owner = {"host": socket.gethostname(), "pid": 3354482, "started_at": "2026-10-09T22:01:51+00:00"}
+        saved = {**asdict(RunState(OTHER_ID, "another task", "/proj", None, phase="build", round=1)),
+                 "owner": owner, **kw}
+        host.files[f"{OTHER_DIR}/state.json"] = json.dumps(saved)
+        host.ages[OTHER_ID] = age
+        return host
+
+    def assert_refused(self, wf, host, beat="16s"):
+        """The run fails naming the other run, records that in its own state.json, and starts no agent."""
+        other = host.files[f"{OTHER_DIR}/state.json"]
+        with self.assertRaises(OrchestratorError) as raised:
+            wf.run()
+        message = str(raised.exception)
+        self.assertEqual(message, f"run {OTHER_ID} is running in /proj "
+                                  f"(pid 3354482 on {socket.gethostname()}, beat {beat} ago); "
+                                  f"one run at a time per checkout: wait for it, stop it, or use another clone")
+        saved = json.loads(host.files[f"{wf.state.dir}/state.json"])
+        self.assertEqual((saved["error"], saved["owner"]), (message, None))
+        self.assertEqual(wf.herdr.calls, [])
+        self.assertEqual(host.files[f"{OTHER_DIR}/state.json"], other)
+
+    def test_new_run_is_refused_while_another_runs(self):
+        for pull_request in (True, False):
+            with self.subTest(pull_request=pull_request):
+                host = self.host_with_other_run()
+                wf, *_ = make_workflow(self.full_run(), host=host, pull_request=pull_request)
+                self.assert_refused(wf, host)
+
+    def test_resume_is_refused_while_another_runs(self):
+        for pull_request in (True, False):
+            with self.subTest(pull_request=pull_request):
+                host = self.host_with_other_run()
+                state = saved_run("review", 2, agents=("spec", "build", "review"), pull_request=pull_request,
+                                  base_branch="main", branch="orchestrator/x-a1b2c3")
+                wf, *_ = resume(state, {"review": [review_turn(2, APPROVE)]}, host=host)
+                self.assert_refused(wf, host)
+
+    def test_runs_nothing_drives_do_not_block(self):
+        alive, dead = (lambda pid: True), (lambda pid: False)
+        cases = {
+            "stale": (STALE_SECONDS + 1, {}, alive),
+            "dead pid on this host": (HEARTBEAT_SECONDS + 1, {}, dead),
+            "done": (0, {"phase": "done", "verdict": APPROVE, "owner": None}, alive),
+            "failed": (0, {"error": "interrupted", "owner": None}, alive),
+        }
+        for name, (age, saved, pid_alive) in cases.items():
+            with self.subTest(name):
+                host = self.host_with_other_run(age, **saved)
+                wf, *_ = make_workflow(self.full_run(), host=host)
+                wf.pid_alive = pid_alive
+                self.assertEqual(wf.run(), APPROVE)
+                self.assertIsNone(wf.state.error)
+
+    def test_live_pid_with_a_late_beat_blocks(self):
+        host = self.host_with_other_run(HEARTBEAT_SECONDS + 1)
+        wf, *_ = make_workflow(self.full_run(), host=host)
+        wf.pid_alive = lambda pid: True
+        self.assert_refused(wf, host, beat="1m")
+
+    def test_two_runs_that_claim_together_both_refuse(self):
+        host = FakeHost()
+        first, *_ = make_workflow(self.full_run(), host=host,
+                                  state=RunState("20261009-220151-aaaaaa", "first", "/proj", None))
+        second, *_ = make_workflow(self.full_run(), host=host,
+                                   state=RunState("20261009-220151-bbbbbb", "second", "/proj", None))
+        list_runs = host.run_states
+        reads = []
+
+        def second_claims_and_checks_as_first_reads(cwd):
+            reads.append(cwd)
+            if len(reads) > 1:
+                return list_runs(cwd)
+            second._claim()
+            runs = list_runs(cwd)
+            with self.assertRaisesRegex(OrchestratorError, "run 20261009-220151-aaaaaa is running in /proj"):
+                second.run()
+            return runs
+        host.run_states = second_claims_and_checks_as_first_reads
+
+        with self.assertRaisesRegex(OrchestratorError, "run 20261009-220151-bbbbbb is running in /proj"):
+            first.run()
+        for wf in (first, second):
+            saved = json.loads(host.files[f"{wf.state.dir}/state.json"])
+            self.assertIn("one run at a time per checkout", saved["error"])
+            self.assertIsNone(saved["owner"])
+
+    def force_resume(self, host):
+        """resume --force of run a1b2c3, which looks alive: saved 30 s ago by a live pid on this host."""
+        saved = saved_run("review", 1, agents=("spec", "build", "review"),
+                          owner={"host": socket.gethostname(), "pid": 4242, "started_at": "x"})
+        host.files[f"{saved.dir}/state.json"] = json.dumps(asdict(saved))
+        host.ages[saved.run_id] = 30
+        args = parse_args(["resume", "a1b2c3", "--force"])
+        state = orchestrator.resumable_state(host.run_states("/proj"), args, "/proj", socket.gethostname(),
+                                             lambda pid: True)
+        wf, *_ = resume(state, {"review": [review_turn(1, APPROVE)]}, host=host)
+        wf.pid_alive = lambda pid: True
+        return wf
+
+    def test_force_takes_over_the_run_itself(self):
+        wf = self.force_resume(FakeHost())
+        self.assertEqual(wf.run(), APPROVE)
+
+    def test_force_does_not_override_another_live_run(self):
+        host = self.host_with_other_run()
+        self.assert_refused(self.force_resume(host), host)
 
 
 class TestResumeCLI(unittest.TestCase):

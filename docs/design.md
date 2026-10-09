@@ -45,6 +45,11 @@ host and its pid is gone. A stale run's line ends with the `resume` command for 
 that is still running unless you pass `--force`, and an orchestrator whose run is taken over stops at its next
 save. Ctrl-C is recorded as the error `interrupted`.
 
+A running run also blocks every other run in its checkout, since they would share one working tree: right
+after claiming its own `state.json`, a run that starts or resumes stops with an error if another run there is
+`running`. A stale, finished or failed run does not block, and `--force` does not override the check, which is
+about a different run. Two runs that start together each see the other's claim and both stop.
+
 ## When the orchestrator needs you
 
 A role's turn ends when it writes its handoff file, not when herdr reports it `idle` or `done`: an agent can

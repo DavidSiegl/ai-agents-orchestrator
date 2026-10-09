@@ -1965,6 +1965,16 @@ def log(msg: str) -> None:
     print(f"  {msg}", file=sys.stderr)
 
 
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # it exists, under another user
+    return True
+
+
 class RunTakenOver(OrchestratorError):
     """Another orchestrator process owns the run now, so this one stops without saving."""
 
@@ -2005,6 +2015,10 @@ class Workflow:
     quality) that analyses a snapshot of the change; a gate that does not pass goes back
     to that step, up to max_quality_rounds analyses per round, before the next step.
     """
+
+    # Whether a process on this host exists, for judging the other runs in the checkout. A class attribute,
+    # not a parameter, which __init__ has enough of; a test sets its own on the instance.
+    pid_alive = staticmethod(pid_alive)
 
     def __init__(self, herdr: Herdr, host: Host, state: RunState, *,
                  notify, max_rounds: int = DEFAULT_MAX_ROUNDS,
@@ -2104,6 +2118,7 @@ class Workflow:
     def _check_start(self) -> None:
         """Fail before the next turn if the run could not finish."""
         s = self.state
+        self._check_alone()
         # Round 0: the run has not reached its first editing step, so it has no base or branch yet.
         if s.round == 0:
             if self.ci:
@@ -2115,6 +2130,22 @@ class Workflow:
             if self.ci and s.phase in (self.pipeline.gated.id, QUALITY):
                 # Before a turn of the gated step that may take half an hour, not after it.
                 self.ci.check_credentials()
+
+    def _check_alone(self) -> None:
+        """Fail if another run in this checkout is live: the two would share one working tree.
+
+        After _claim, so of two runs that start together each sees the other's state.json and both stop,
+        rather than both going on.
+        """
+        s = self.state
+        for age, other in self.host.run_states(s.cwd):
+            if other.get("run_id") == s.run_id:
+                continue
+            health = run_health(other, age, self.me["host"], self.pid_alive)
+            if health and health[0] == RUNNING:
+                raise OrchestratorError(f"run {other['run_id']} is running in {s.cwd} ({health[1]}); "
+                                        f"one run at a time per checkout: wait for it, stop it, "
+                                        f"or use another clone")
 
     def _claim(self) -> None:
         s = self.state
@@ -3183,16 +3214,6 @@ def notify_locally(title: str, body: str) -> None:
         Herdr().notify(title, body)
     except OrchestratorError as e:
         log(f"notification failed: {e}")
-
-
-def pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # it exists, under another user
-    return True
 
 
 def format_age(seconds: int) -> str:

@@ -239,6 +239,10 @@ since, the agent starts a fresh session instead.
    the conflicting files; you resolve them. The project goes back to its starting branch, and the workspace is
    closed.
 
+One run at a time per checkout: runs in one project directory share its working tree, so a run, `--no-pr`
+or not, refuses to start or resume while another run there is `running` (see `list`). A stale, finished or
+failed run does not count. To run in parallel, give each run its own clone.
+
 Everything a run writes stays in `<project>/.orchestrator/runs/<run-id>/`: the handoff files and `state.json`,
 which records the phase, round, panes, branch, pull request, verdict and any error. `.orchestrator/` ignores
 itself, so it never shows up in the diff or the commit. A failed run keeps its workspace open and stays on its
