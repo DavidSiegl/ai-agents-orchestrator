@@ -26,8 +26,13 @@ the process that drives them. `resume` picks the run up where `state.json` says 
   resume refuses to start, and publishing refuses to commit, while HEAD is another branch or detached; the error
   names the branch to check out, and nothing is switched or stashed for you. Once you check it out, `resume`
   goes on.
-- An empty handoff file or a review without a verdict stops the resume with the file's name: fix it, or delete
-  it to have the role write it again.
+- An empty handoff file stops the resume with the file's name: fix it, or delete it to have the role write it
+  again.
+- A verdict file, the default's `review-N.md`, that is empty or does not start with a `VERDICT` line is moved
+  aside to `review-N.rejected.md`, and the role is asked once to write it again, with the path of the rejected
+  file so it can reuse its findings. The retry uses no review round. Each verdict file gets one retry, saved in
+  `state.json`, so a resume does not grant a second. If the second file is malformed too, the run stops as for
+  an empty handoff file, keeping both files.
 
 Resuming a finished run does nothing but print its verdict.
 

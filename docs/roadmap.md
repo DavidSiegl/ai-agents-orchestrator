@@ -13,7 +13,6 @@ Ideas for what comes next, in no particular order. The designs behind what has s
   the same placeholders.
 - **`--worktree`**: the Builder works in a git worktree per run (`herdr worktree create`), for a clean base and
   parallel runs.
-- **Re-prompt the Reviewer once on a malformed review** instead of stopping the run.
 - **Builder `BLOCKED` escalation**: a build report that starts with `BLOCKED:` notifies the human and pauses the
   run, instead of going to the Reviewer.
 - **`summary.md` and per-turn timings**: write `summary.md` at the end of a run, and record in `state.json` when

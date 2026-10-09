@@ -264,6 +264,13 @@ CONTINUE_PROMPT = """\
 Your session was restarted in the middle of this turn. Continue where you left off; \
 the turn still ends when you write {path} in a single write."""
 
+# For a verdict step whose file had no VERDICT first line. Self-contained, so a fresh session can answer it too.
+RETRY_VERDICT_PROMPT = """\
+The file {path} was rejected: it was empty, or its first non-blank line was not a verdict line. \
+It has been moved to {rejected_path}; reuse its findings, if it has any. \
+Write the file again to {path} in a single write. Its first line must be exactly `VERDICT: {approve}` \
+or `VERDICT: {changes}`, followed by the numbered findings."""
+
 # Appended for a Builder or Reviewer that starts a fresh session in a later round: it has not seen the earlier ones.
 REBUILD_NOTE = """\
 This is round {n}, and you are a fresh session. An earlier Builder session did the earlier turns; \
@@ -1113,6 +1120,9 @@ class Host:
                   '|| { rm -f -- "$t"; exit 1; }')
         self.check(["sh", "-c", script, "_", path], stdin=text)
 
+    def rename(self, path: str, new_path: str) -> None:
+        self.check(["mv", "-f", "--", path, new_path])
+
     def resolve_dir(self, path: str) -> str:
         """Absolute form of a directory path, expanding a leading ~ on the host."""
         if path == "~" or path.startswith("~/"):
@@ -1594,6 +1604,10 @@ class RunState:
     pull_request: bool = False
     # Basename of the handoff file whose prompt was delivered, so a resume does not prompt for it again.
     prompted: str | None = None
+    # Basenames of the verdict files whose one retry was used, and the one whose retry turn is under way, so a
+    # resume neither grants a second retry nor sends the step's own prompt in place of the retry prompt.
+    retried: list[str] = field(default_factory=list)
+    retrying: str | None = None
     # The orchestrator process driving the run, {"host", "pid", "started_at"}; None while none does.
     owner: dict | None = None
     heartbeat_at: str | None = None
@@ -2186,9 +2200,7 @@ class Workflow:
             return False
         if step.loop_to is None:
             return True
-        s.verdict = parse_verdict(out)
-        if s.verdict is None:
-            self._reject(step.path(s.dir, n), "does not start with a VERDICT line")
+        s.verdict = parse_verdict(out)  # _turn accepts no verdict file without one
         log(f"[{step.role}] round {n}: {s.verdict}")
         if s.verdict != APPROVE and n < s.max_rounds:
             s.quality_round = 0
@@ -2225,8 +2237,9 @@ class Workflow:
         s = self.state
         text, fresh = self._prompts(step, n)
         path = self._own_path(step, n)
+        verdict = step.loop_to is not None
         if not step.human_paced:
-            return self._turn(step.role, text, path, s.turn_timeout, fresh_text=fresh)
+            return self._turn(step.role, text, path, s.turn_timeout, fresh_text=fresh, verdict=verdict)
         label = self.pipeline.roles[step.role]
 
         def announce(how: str) -> None:
@@ -2239,7 +2252,7 @@ class Workflow:
         # Paced by the human, so the turn has no deadline, and an idle agent is normal:
         # it is waiting for the human's reply.
         return self._turn(step.role, text, path, timeout=None, fresh_text=fresh,
-                          watch_stalls=False, announce=announce)
+                          watch_stalls=False, announce=announce, verdict=verdict)
 
     def _own_path(self, step: Step, n: int) -> str:
         """The file the step's turn in round n writes: for the gated step, its answer to the quality round if any."""
@@ -2645,17 +2658,37 @@ class Workflow:
                 s.quality_project = None
 
     def _turn(self, role: str, text: str, path: str, timeout: int | None, *,
-              fresh_text: str | None = None, watch_stalls: bool = True, announce=None) -> str:
+              fresh_text: str | None = None, watch_stalls: bool = True, announce=None, verdict: bool = False) -> str:
         """Return the handoff file that ends the role's turn, prompting the role only if it still owes it.
 
         fresh_text replaces text for an agent in a new session, which has not seen the role's
-        earlier turns. announce(how) runs once the agent is ready, before any prompt.
+        earlier turns. announce(how) runs once the agent is ready, before any prompt. A verdict
+        file without a VERDICT first line is asked for once more (_retry) before it ends the run.
         """
         s = self.state
-        label = self.pipeline.roles[role]
+        file = os.path.basename(path)
+        if s.retrying == file:
+            text = fresh_text = self._retry_prompt(path)
+        while True:
+            out = self._written(role, text, path, timeout, fresh_text, watch_stalls, announce)
+            if not verdict:
+                if not out.strip():
+                    self._reject(path, f"was written empty by the {self.pipeline.roles[role]}")
+                return out
+            if parse_verdict(out):
+                if s.retrying == file:
+                    s.retrying = None
+                return out
+            self._retry(role, path, out)
+            text = fresh_text = self._retry_prompt(path)
+
+    def _written(self, role: str, text: str, path: str, timeout: int | None, fresh_text: str | None,
+                 watch_stalls: bool, announce) -> str:
+        """The handoff file as the role wrote it, before _turn judges it."""
+        s = self.state
         file = os.path.basename(path)
         # First, because the role may have written it while no orchestrator was watching.
-        if (out := self._handoff(label, path)) is not None:
+        if (out := self.host.read(path)) is not None:
             log(f"[{role}] {file} is already written")
             return out
 
@@ -2674,6 +2707,34 @@ class Workflow:
         log(f"[{role}] wrote {file}")
         return out
 
+    def _retry(self, role: str, path: str, out: str) -> None:
+        """Move a malformed verdict file aside so its role writes it again; end the run if its retry is used."""
+        s = self.state
+        file = os.path.basename(path)
+        why = f"was written empty by the {self.pipeline.roles[role]}" if not out.strip() \
+            else "does not start with a VERDICT line"
+        if file in s.retried:
+            self._reject(path, f"{why}, and its one retry was already used")
+        rejected = self._rejected_path(path)
+        # Saved around the rename, so dying at any point leaves the malformed file with its retry unused, no file
+        # and no prompt counted as delivered, or the retry under way; never a used retry the role was not asked for.
+        s.prompted = None
+        self._save()
+        self.host.rename(path, rejected)
+        s.retried.append(file)
+        s.retrying = file
+        self._save()
+        log(f"[{role}] {file} {why}; moved it to {os.path.basename(rejected)}, prompting once more")
+
+    @staticmethod
+    def _rejected_path(path: str) -> str:
+        stem, ext = os.path.splitext(path)
+        return f"{stem}.rejected{ext}"
+
+    def _retry_prompt(self, path: str) -> str:
+        return RETRY_VERDICT_PROMPT.format(path=path, rejected_path=self._rejected_path(path),
+                                           approve=APPROVE, changes=CHANGES_REQUESTED)
+
     def _prompt_for(self, how: str, file: str, text: str, fresh_text: str | None, path: str) -> str | None:
         """What to prompt an agent that is ready as how says with; None when it only has to be waited for."""
         if how in (NEW, RESTARTED):
@@ -2690,7 +2751,7 @@ class Workflow:
         deadline = None if timeout is None else self.clock() + timeout
         quiet_since = None
         told = None  # what the human was last told about this turn
-        while (out := self._handoff(label, path)) is None:
+        while (out := self.host.read(path)) is None:
             record = self.herdr.agent(agent["name"])
             if record is None:
                 raise OrchestratorError(f"the {label} exited without writing {path}")
@@ -2720,17 +2781,11 @@ class Workflow:
             return "stalled"
         return None if status == "working" else told
 
-    def _handoff(self, label: str, path: str) -> str | None:
-        """The handoff file, or None while it is not written; an empty one ends the run."""
-        out = self.host.read(path)
-        if out is not None and not out.strip():
-            self._reject(path, f"was written empty by the {label}")
-        return out
-
     def _reject(self, path: str, why: str) -> None:
         # Resume does not judge a role's output; the human fixes the file or deletes it,
-        # and a deleted file is asked for again, so the prompt no longer counts as delivered.
-        self.state.prompted = None
+        # and a deleted file is asked for again, so the prompt no longer counts as delivered,
+        # and neither does a retry: the deleted file is asked for with the step's own prompt.
+        self.state.prompted = self.state.retrying = None
         raise OrchestratorError(f"{path} {why}; fix it, or delete it to have it written again, then resume")
 
     def _agent(self, role: str) -> str:
