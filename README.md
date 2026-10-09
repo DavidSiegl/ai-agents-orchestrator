@@ -132,6 +132,9 @@ python orchestrator.py run "add a token-bucket rate limiter" --machine <machine>
 # Runs recorded for a project, and whether each one is still running
 python orchestrator.py list --machine <machine> --cwd ~/GitHub/myproject
 
+# One run in full: its state, branch and pull request, agents, handoff files and last review
+python orchestrator.py show e292fb --machine <machine> --cwd ~/GitHub/myproject
+
 # Continue a stopped run, by its run id or the six-character key at its end
 python orchestrator.py resume e292fb --machine <machine> --cwd ~/GitHub/myproject
 
@@ -239,7 +242,9 @@ branch; close the workspace in herdr when done.
 `resume` continues a run whose orchestrator stopped where `state.json` says, reusing or relaunching its agents
 ([Resuming a run](docs/design.md#resuming-a-run)). It refuses while another branch than the run's is checked
 out, and names the one to check out. `list` marks a run `stale` after five minutes without a
-heartbeat ([Stale runs](docs/design.md#stale-runs)). You get a herdr notification when a role is blocked or idle
+heartbeat ([Stale runs](docs/design.md#stale-runs)). `show` prints one run in full, without opening
+`state.json`: its `list` line and whole task, its workflow, branch and pull request, each role's agent and pane,
+the paths of its handoff files, and the last review. You get a herdr notification when a role is blocked or idle
 for 3 minutes ([When the orchestrator needs you](docs/design.md#when-the-orchestrator-needs-you)).
 See also [design decisions](docs/design.md), [architecture](docs/architecture.md), [roadmap](docs/roadmap.md)
 and [quality gate](docs/quality-gate.md).
