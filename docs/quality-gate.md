@@ -246,7 +246,7 @@ goes to `build`, round n + 1, q = 0. `list` shows the phase `quality` and, in `b
 quality round.
 
 A resume in `quality` takes the furthest step the state allows: an existing quality file (one without a valid
-`GATE:` line is refused, as a review without a verdict is); the project, then the base analysis; `ci.ce_task`;
+`GATE:` line is refused, as an empty handoff file is); the project, then the base analysis; `ci.ce_task`;
 `ci.build`; `ci.queue_url` (when Jenkins has forgotten the queue item, the build with that `GIT_REF` among the
 job's last 20); `ci.ref` alone, where a build with that `GIT_REF` is adopted before a new one is triggered;
 otherwise snapshot, push and trigger.

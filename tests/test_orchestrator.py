@@ -88,6 +88,9 @@ class FakeHost(Host):
         if not path.startswith("/proj/.orchestrator/"):
             self.changed.add(path)
 
+    def rename(self, path, new_path):
+        self.files[new_path] = self.files.pop(path)
+
     def git_head(self, cwd):
         return self.head
 
@@ -301,6 +304,15 @@ def review_turn(n, verdict):
     return writes(lambda s: s.review_path(n), f"**VERDICT: {verdict}**\n1. finding")
 
 
+def malformed_review(n, text="looks fine"):
+    return writes(lambda s: s.review_path(n), text)
+
+
+def retry_prompt(path):
+    return orchestrator.RETRY_VERDICT_PROMPT.format(
+        path=path, rejected_path=path.removesuffix(".md") + ".rejected.md", approve=APPROVE, changes=CHANGES_REQUESTED)
+
+
 class TestParseVerdict(unittest.TestCase):
     def test_plain(self):
         self.assertEqual(parse_verdict("VERDICT: APPROVE\n"), APPROVE)
@@ -451,15 +463,95 @@ class TestWorkflow(unittest.TestCase):
         with self.assertRaisesRegex(OrchestratorError, "build-1.md was written empty by the Builder"):
             wf.run()
 
-    def test_review_without_verdict_aborts(self):
+    def test_review_without_verdict_is_asked_for_once_more(self):
+        seen = []
+        wf, herdr, host, _ = make_workflow({
+            "spec": [spec_turn],
+            "build": [build_turn(1)],
+            "review": [recording(malformed_review(1), seen), recording(review_turn(1, APPROVE), seen)],
+        })
+
+        with patch.object(orchestrator, "log") as log:
+            self.assertEqual(wf.run(), APPROVE)
+        path = wf.state.review_path(1)
+        rejected = f"{wf.state.dir}/review-1.rejected.md"
+        self.assertEqual(seen[1], retry_prompt(path))
+        self.assertIn(path, seen[1])
+        self.assertIn(rejected, seen[1])
+        self.assertIn(f"`VERDICT: {APPROVE}`", seen[1])
+        self.assertIn(f"`VERDICT: {CHANGES_REQUESTED}`", seen[1])
+        self.assertEqual(herdr.calls.count(("prompt", "review-a1b2c3")), 2)
+        self.assertEqual(host.files[rejected], "looks fine")
+        self.assertEqual(parse_verdict(host.files[path]), APPROVE)
+        retries = [c.args[0] for c in log.call_args_list if "prompting once more" in c.args[0]]
+        self.assertEqual(retries, ["[review] review-1.md does not start with a VERDICT line; "
+                                   "moved it to review-1.rejected.md, prompting once more"])
+        # The run goes on as if the first review had been valid: a pull request, and the retry spent.
+        self.assertEqual(len(host.prs), 1)
+        saved = json.loads(host.files[f"{wf.state.dir}/state.json"])
+        self.assertEqual((saved["phase"], saved["round"], saved["verdict"]), ("done", 1, APPROVE))
+        self.assertEqual((saved["retried"], saved["retrying"]), (["review-1.md"], None))
+
+    def test_empty_review_is_asked_for_once_more(self):
+        seen = []
+        wf, herdr, host, _ = make_workflow({
+            "spec": [spec_turn],
+            "build": [build_turn(1)],
+            "review": [malformed_review(1, " \n\n"), recording(review_turn(1, CHANGES_REQUESTED), seen)],
+        }, max_rounds=1)
+
+        self.assertEqual(wf.run(), CHANGES_REQUESTED)
+        self.assertEqual(seen, [retry_prompt(wf.state.review_path(1))])
+        self.assertEqual(host.files[f"{wf.state.dir}/review-1.rejected.md"], " \n\n")
+
+    def test_review_malformed_twice_aborts(self):
+        wf, herdr, host, _ = make_workflow({
+            "spec": [spec_turn],
+            "build": [build_turn(1)],
+            "review": [malformed_review(1), malformed_review(1, "still no verdict")],
+        })
+
+        with self.assertRaisesRegex(OrchestratorError, "review-1.md does not start with a VERDICT line, and its one "
+                                    "retry was already used; fix it, or delete it to have it written again, "
+                                    "then resume$"):
+            wf.run()
+        self.assertEqual(host.files[f"{wf.state.dir}/review-1.rejected.md"], "looks fine")
+        self.assertEqual(host.files[wf.state.review_path(1)], "still no verdict")
+        saved = json.loads(host.files[f"{wf.state.dir}/state.json"])
+        self.assertEqual((saved["retried"], saved["retrying"], saved["prompted"]), (["review-1.md"], None, None))
+
+        # A resume does not grant a second retry.
+        wf2, herdr2, *_ = resume(RunState.from_dict(saved), {"review": []}, alive=["review"], host=host)
+        with self.assertRaisesRegex(OrchestratorError, "its one retry was already used"):
+            wf2.run()
+        self.assertNotIn(("prompt", "review-a1b2c3"), herdr2.calls)
+
+    def test_empty_review_after_a_retry_aborts(self):
         wf, *_ = make_workflow({
             "spec": [spec_turn],
             "build": [build_turn(1)],
-            "review": [writes(lambda s: s.review_path(1), "looks fine")],
+            "review": [malformed_review(1), malformed_review(1, "\n")],
         })
 
-        with self.assertRaisesRegex(OrchestratorError, "does not start with a VERDICT line"):
+        with self.assertRaisesRegex(OrchestratorError, "review-1.md was written empty by the Reviewer, and its one "
+                                    "retry was already used; fix it"):
             wf.run()
+
+    def test_each_round_has_its_own_retry(self):
+        seen = []
+        wf, herdr, host, _ = make_workflow({
+            "spec": [spec_turn],
+            "build": [build_turn(1), build_turn(2)],
+            "review": [malformed_review(1), review_turn(1, CHANGES_REQUESTED),
+                       recording(malformed_review(2), seen), recording(review_turn(2, APPROVE), seen)],
+        }, max_rounds=2)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(seen[1], retry_prompt(wf.state.review_path(2)))
+        self.assertIn(f"{wf.state.dir}/review-1.rejected.md", host.files)
+        self.assertIn(f"{wf.state.dir}/review-2.rejected.md", host.files)
+        # The retries used no review round: two rounds were enough under --max-rounds 2.
+        self.assertEqual((wf.state.round, wf.state.retried), (2, ["review-1.md", "review-2.md"]))
 
     def test_not_a_git_repo(self):
         seen = []
@@ -943,6 +1035,20 @@ class TestHost(unittest.TestCase):
             host.write(path, "hello")
             self.assertEqual(host.read(path), "hello")
             self.assertEqual(host.resolve_dir(d), host.check(["sh", "-c", "cd -- \"$1\" && pwd", "_", d]).strip())
+            host.rename(path, f"{d}/nested/file.rejected.md")
+            self.assertIsNone(host.read(path))
+            self.assertEqual(host.read(f"{d}/nested/file.rejected.md"), "hello")
+
+    def test_rename_over_ssh(self):
+        run = MagicMock(return_value=completed())
+        Host("remote-host", run=run).rename("/x/review-1.md", "/x/review 1.rejected.md")
+        self.assertEqual(run.call_args.args[0],
+                         ["ssh", "-o", "BatchMode=yes", "remote-host", "mv -f -- /x/review-1.md '/x/review 1.rejected.md'"])
+
+    def test_rename_failure_raises(self):
+        run = MagicMock(return_value=completed(stderr="No such file or directory", returncode=1))
+        with self.assertRaisesRegex(OrchestratorError, "No such file or directory"):
+            Host(run=run).rename("/x/review-1.md", "/x/review-1.rejected.md")
 
 
 class TestHostGit(unittest.TestCase):
@@ -1292,23 +1398,85 @@ class TestResume(unittest.TestCase):
         self.assertEqual(host.writes, [])
 
     def test_invalid_review_is_refused_until_deleted(self):
-        state = saved_run("review", 1, agents=("spec", "build", "review"), prompted="review-1.md",
-                          error="review-1.md does not start with a VERDICT line")
+        # As a run that stopped because its retry was used left it.
+        state = saved_run("review", 1, agents=("spec", "build", "review"), retried=["review-1.md"],
+                          error="review-1.md does not start with a VERDICT line, and its one retry was already used")
         wf, herdr, host, _ = resume(state, {"review": [review_turn(1, APPROVE)]},
                                     alive=["review"], files={lambda s: s.review_path(1): "looks fine"})
 
-        with self.assertRaisesRegex(OrchestratorError, "review-1.md does not start with a VERDICT line; fix it"):
+        with self.assertRaisesRegex(OrchestratorError, "review-1.md does not start with a VERDICT line, and its one "
+                                    "retry was already used; fix it"):
             wf.run()
         saved = json.loads(host.files[f"{state.dir}/state.json"])
         self.assertIsNone(saved["prompted"])
         self.assertNotIn(("prompt", "review-a1b2c3"), herdr.calls)
 
         del host.files[state.review_path(1)]
-        wf2, herdr2, *_ = resume(RunState.from_dict(saved), {"review": [review_turn(1, APPROVE)]},
+        seen = []
+        wf2, herdr2, *_ = resume(RunState.from_dict(saved), {"review": [recording(review_turn(1, APPROVE), seen)]},
                                  alive=["review"], host=host)
         self.assertEqual(wf2.run(), APPROVE)
         self.assertEqual(herdr2.calls.count(("prompt", "review-a1b2c3")), 1)
+        self.assertTrue(seen[0].startswith("You are the Reviewer"))
         self.assertIsNone(wf2.state.error)
+
+    def test_malformed_review_found_on_resume_is_retried(self):
+        # Saved by a version without retries: state.json has neither retried nor retrying.
+        saved = asdict(saved_run("review", 1, agents=("spec", "build", "review"), prompted="review-1.md"))
+        del saved["retried"], saved["retrying"]
+        seen = []
+        wf, herdr, host, _ = resume(RunState.from_dict(saved), {"review": [recording(review_turn(1, APPROVE), seen)]},
+                                    alive=["review"], files={lambda s: s.review_path(1): "looks fine"})
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(seen, [retry_prompt(wf.state.review_path(1))])
+        self.assertEqual(host.files[f"{wf.state.dir}/review-1.rejected.md"], "looks fine")
+        self.assertEqual(wf.state.retried, ["review-1.md"])
+
+    def retrying_run(self):
+        """A run that stopped after the Reviewer was given the retry prompt, before it wrote review-1.md again."""
+        state = saved_run("review", 1, agents=("spec", "build", "review"), prompted="review-1.md",
+                          retried=["review-1.md"], retrying="review-1.md")
+        return state, {lambda s: f"{s.dir}/review-1.rejected.md": "looks fine"}
+
+    def test_live_reviewer_mid_retry_is_only_waited_for(self):
+        state, files = self.retrying_run()
+        wf, herdr, host, _ = resume(state, {"review": []}, alive=["review"], files=files)
+        wf.clock.hooks.append(lambda: host.write(state.review_path(1), f"VERDICT: {APPROVE}\n"))
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertNotIn(("prompt", "review-a1b2c3"), herdr.calls)
+        self.assertIsNone(wf.state.retrying)
+
+    def test_resumed_reviewer_mid_retry_continues_it(self):
+        state, files = self.retrying_run()
+        seen = []
+        wf, *_ = resume(state, {"review": [recording(review_turn(1, APPROVE), seen)]},
+                        sessions={"review": "s-review"}, files=files)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(seen, [orchestrator.CONTINUE_PROMPT.format(path=state.review_path(1))])
+
+    def test_fresh_reviewer_mid_retry_gets_the_retry_prompt_and_no_second_retry(self):
+        state, files = self.retrying_run()
+        seen = []
+        wf, herdr, host, _ = resume(state, {"review": [recording(malformed_review(1, "again"), seen)]}, files=files)
+
+        with self.assertRaisesRegex(OrchestratorError, "its one retry was already used"):
+            wf.run()
+        self.assertEqual(seen, [retry_prompt(state.review_path(1))])
+        self.assertEqual(host.files[f"{state.dir}/review-1.rejected.md"], "looks fine")
+        self.assertEqual(host.files[state.review_path(1)], "again")
+
+    def test_reviewer_not_yet_given_the_retry_prompt_gets_it(self):
+        # Stopped between saving the retry and delivering its prompt.
+        state, files = self.retrying_run()
+        state.prompted = None
+        seen = []
+        wf, *_ = resume(state, {"review": [recording(review_turn(1, APPROVE), seen)]}, alive=["review"], files=files)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(seen, [retry_prompt(state.review_path(1))])
 
     def test_workspace_gone_opens_a_new_one(self):
         state = saved_run("build", 1, agents=("spec", "build"))
@@ -3618,6 +3786,24 @@ class TestOtherWorkflows(unittest.TestCase):
         self.assertEqual(commit[commit.index("-m") + 1], "add a rate limiter")
         saved = json.loads(host.files[f"{D}/state.json"])
         self.assertEqual((saved["workflow"], saved["phase"]), ("quick", "done"))
+
+    def test_verdict_step_of_another_name_gets_one_retry(self):
+        checked = Pipeline("checked", {"build": "Builder", "check": "Checker"}, (
+            Step("build", "build", "build-{n}.md", "Build {task}; report to {build_path}.",
+                 again="Fix {prev_check_path}; report to {build_path}.", edits=True),
+            Step("check", "check", "check-{n}.md", "Check {change}; write {path}.", loop_to="build"),
+        ))
+        seen = []
+        wf, herdr, host, _ = make_workflow({
+            "build": [build_turn(1)],
+            "check": [writes(lambda s: f"{s.dir}/check-1.md", "fine by me"),
+                      recording(writes(lambda s: f"{s.dir}/check-1.md", f"VERDICT: {APPROVE}\n"), seen)],
+        }, state=new_run(checked), pipeline=checked)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(seen, [retry_prompt(f"{D}/check-1.md")])
+        self.assertEqual(host.files[f"{D}/check-1.rejected.md"], "fine by me")
+        self.assertEqual(wf.state.retried, ["check-1.md"])
 
     def test_four_roles_loop_back_to_the_builder_only(self):
         seen = []

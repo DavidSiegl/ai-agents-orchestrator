@@ -62,7 +62,10 @@ A failure goes through `_release`, which records `error`. Each role's turn is `_
 that already exists, and otherwise gets the agent ready through `_agent` (`NEW`, `ALIVE`, `RESUMED` or
 `RESTARTED`; an exited agent is resumed into its saved session only if its record's `kind` is the role's
 harness now, and otherwise starts fresh), prompts it with what `_prompt_for` picks, and polls for the file in `_await_handoff`, where
-`_tell_human` notifies the human of a blocked or stalled agent once. `_save` checks the owner before every write and raises
+`_tell_human` notifies the human of a blocked or stalled agent once. A verdict step's file without a `VERDICT`
+first line goes to `_retry`, which moves it aside and, once per file (`retried`), prompts the role again with
+`RETRY_VERDICT_PROMPT`; `retrying` names the file while that turn is under way, so a resume sends the retry prompt,
+not the step's own. `_save` checks the owner before every write and raises
 `RunTakenOver` after a takeover; `_heartbeat` keeps `state.json` fresh while a turn runs.
 
 ## Workflows
