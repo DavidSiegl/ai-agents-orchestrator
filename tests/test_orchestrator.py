@@ -5513,5 +5513,218 @@ class TestProjectRuns(unittest.TestCase):
         self.assertEqual(run_states.call_args.args[0].ssh_target, "remote-host")
 
 
+
+# ---------------------------------------------------------------------------
+# The show command
+# ---------------------------------------------------------------------------
+
+SHOW_ID = "20260929-120000-a1b2c3"
+SHOW_DIR = f"/proj/.orchestrator/runs/{SHOW_ID}"
+LONG_TASK = "add a token-bucket rate limiter to the API client " * 4
+
+
+class ShowHost(FakeHost):
+    """A FakeHost whose project /proj holds the saved runs in `states` and the run files in `files`."""
+
+    def __init__(self, *states):
+        super().__init__()
+        self.states = [(10**6, s) for s in states]
+
+    def resolve_dir(self, path):
+        return "/proj"
+
+    def run_states(self, cwd):
+        return self.states
+
+    def run_files(self, run_dir):
+        # Written in mtime order, so the order of insertion is the age order.
+        return [p for p in self.files if p.startswith(f"{run_dir}/")]
+
+
+def show_state(**kw):
+    saved = {"run_id": SHOW_ID, "task": LONG_TASK, "cwd": "/proj", "phase": "done", "round": 1,
+             "verdict": APPROVE, "workspace_id": "w1",
+             "agents": {"spec": {"name": "spec-a1b2c3", "pane": "w1:p1"},
+                        "build": {"name": "build-a1b2c3", "pane": "w1:p2", "kind": "codex"},
+                        "review": {"name": "review-a1b2c3", "pane": "w1:p3", "kind": "claude"}}}
+    return {**saved, **kw}
+
+
+@patch.dict("os.environ", {"HERDR_ENV": "1"})
+class TestShow(unittest.TestCase):
+    def show(self, host, ref="a1b2c3", *flags):
+        with patch.object(orchestrator, "connect", return_value=(None, host)), \
+                patch("sys.stdout", new_callable=io.StringIO) as out, \
+                patch("sys.stderr", new_callable=io.StringIO) as err:
+            code = main(["show", ref, *flags])
+        return code, out.getvalue(), err.getvalue()
+
+    def list_lines(self, host):
+        with patch.object(orchestrator, "connect", return_value=(None, host)), \
+                patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(main(["list"]), 0)
+        return out.getvalue().splitlines()
+
+    def test_key_and_full_id_print_the_same(self):
+        host = ShowHost(show_state(), show_state(run_id="20260929-130000-ffffff"))
+        host.files[f"{SHOW_DIR}/review-1.md"] = f"VERDICT: {APPROVE}\n\nfine\n"
+        by_key = self.show(host, "a1b2c3")
+        self.assertEqual(by_key, self.show(host, SHOW_ID))
+        self.assertEqual(by_key[0], 0)
+        self.assertIn(SHOW_ID, by_key[1])
+        self.assertNotIn("ffffff", by_key[1])
+
+    def test_unknown_or_ambiguous_run(self):
+        host = ShowHost(show_state(), show_state(run_id="20260930-120000-a1b2c3"))
+        cases = [("nosuch", "error: no run nosuch under /proj/.orchestrator/runs\n"),
+                 ("a1b2c3", (f"error: a1b2c3 matches several runs ({SHOW_ID}, 20260930-120000-a1b2c3); "
+                             "give the full run id\n"))]
+        for ref, message in cases:
+            with self.subTest(ref=ref):
+                self.assertEqual(self.show(host, ref), (orchestrator.EXIT_ERROR, "", message))
+
+    def test_starts_with_the_list_line_and_the_whole_task(self):
+        cases = [show_state(pr_url="https://github.com/o/r/pull/7"),
+                 show_state(phase="build", owner=ME, verdict=None, workflow="nosuch"),
+                 show_state(phase="review", verdict=None, error="interrupted")]
+        for saved in cases:
+            with self.subTest(phase=saved["phase"]):
+                host = ShowHost(saved)
+                _, out, _ = self.show(host)
+                lines = out.splitlines()
+                self.assertEqual(lines[0], self.list_lines(host)[0])
+                self.assertEqual(lines[1], f"    {LONG_TASK}")
+                self.assertGreater(len(LONG_TASK), 100)
+
+    def test_branch_pull_request_and_conflicts(self):
+        published = show_state(branch="orchestrator/x-a1b2c3", base_branch="main",
+                               pr_url="https://github.com/o/r/pull/7", conflicts=["a.py", "b c.py"])
+        _, out, _ = self.show(ShowHost(published))
+        self.assertIn("\nbranch     orchestrator/x-a1b2c3\nbase       main\n"
+                      "pr         https://github.com/o/r/pull/7\nconflicts  a.py, b c.py\nworkspace  w1\n", out)
+
+        _, out, _ = self.show(ShowHost(show_state(pull_request=False)))
+        for label in ("branch", "base", "pr", "conflicts"):
+            self.assertNotRegex(out, rf"(?m)^{label} ")
+
+    def test_every_agent_with_its_kind_and_pane(self):
+        _, out, _ = self.show(ShowHost(show_state()))
+        self.assertIn("\nagents\n"
+                      "    spec    claude    w1:p1\n"
+                      "    build   codex     w1:p2\n"
+                      "    review  claude    w1:p3\n", out)
+
+    def test_files_oldest_first(self):
+        host = ShowHost(show_state())
+        for name in ("spec.md", "build-1.md", "review-1.md"):
+            host.files[f"{SHOW_DIR}/{name}"] = "x"
+        _, out, _ = self.show(host)
+        self.assertIn(f"\nfiles\n    {SHOW_DIR}/spec.md\n    {SHOW_DIR}/build-1.md\n    {SHOW_DIR}/review-1.md\n",
+                      out)
+
+    def test_the_last_review_in_a_later_round(self):
+        host = ShowHost(show_state(phase="build", round=2, verdict=CHANGES_REQUESTED))
+        host.files[f"{SHOW_DIR}/review-1.md"] = f"\n**VERDICT: {CHANGES_REQUESTED}**\n\n## Findings\n\n1. a bug\n"
+        _, out, _ = self.show(host)
+        self.assertTrue(out.endswith(f"\nlast review: {SHOW_DIR}/review-1.md\n\n\n## Findings\n\n1. a bug\n"))
+        self.assertNotIn("VERDICT", out)
+
+    def test_a_review_without_a_verdict_line_is_shown_whole(self):
+        host = ShowHost(show_state(phase="review", round=1, verdict=None))
+        host.files[f"{SHOW_DIR}/review-1.md"] = "half a review"
+        _, out, _ = self.show(host)
+        self.assertTrue(out.endswith(f"\nlast review: {SHOW_DIR}/review-1.md\nhalf a review\n"))
+
+    def test_no_last_review(self):
+        solo = orchestrator.workflow_definition(SOLO)
+        cases = {"no verdict step": show_state(workflow="solo", workflow_definition=solo, verdict="FINISHED"),
+                 "spec phase": show_state(phase="spec", round=0, verdict=None),
+                 "unknown workflow": show_state(workflow="nosuch")}
+        for why, saved in cases.items():
+            with self.subTest(why):
+                host = ShowHost(saved)
+                for name in ("review-1.md", "build.md", "build-1.md"):
+                    host.files[f"{SHOW_DIR}/{name}"] = f"VERDICT: {APPROVE}\n"
+                code, out, _ = self.show(host)
+                self.assertEqual(code, 0)
+                self.assertNotIn("last review", out)
+        _, out, _ = self.show(ShowHost(cases["unknown workflow"]))
+        self.assertIn("\nworkflow   nosuch: this orchestrator cannot load it\n", out)
+        _, out, _ = self.show(ShowHost(cases["no verdict step"]))
+        self.assertIn("\nworkflow   solo: build\n", out)
+
+    @patch.object(Herdr, "ssh_target", return_value="remote-host")
+    def test_on_a_machine_everything_goes_over_ssh(self, _target):
+        saved = show_state(phase="build", round=2, verdict=CHANGES_REQUESTED)
+        review = f"{SHOW_DIR}/review-1.md"
+
+        def remote(argv, **kw):
+            self.assertEqual(argv[:4], ["ssh", "-o", "BatchMode=yes", "remote-host"])
+            script, *args = shlex.split(argv[4])[2:]
+            if "pwd" in script:
+                return completed("/proj\n")
+            if "state.json; do" in script:
+                return completed(f"{STALE_SECONDS + 1} {json.dumps(saved)}\n")
+            if "stat" in script:
+                self.assertEqual(args, ["_", SHOW_DIR])
+                return completed(f"7 {SHOW_DIR}/spec.md\0" f"9 {review}\0" f"8 {SHOW_DIR}/build-1.md\0")
+            if args == ["_", review]:
+                return completed(f"VERDICT: {CHANGES_REQUESTED}\nremote findings\n")
+            return completed(returncode=orchestrator.MISSING_FILE_STATUS)
+
+        # remote checks that every process the Host from connect starts is an ssh command.
+        run = MagicMock(side_effect=remote)
+        with patch.object(orchestrator, "Host", lambda target=None: Host(target, run=run)), \
+                patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(main(["show", "--machine", "M", "--cwd", "~/proj", "a1b2c3"]), 0)
+        self.assertTrue(out.getvalue().endswith(
+            f"\nfiles\n    {SHOW_DIR}/spec.md\n    {SHOW_DIR}/build-1.md\n    {review}\n"
+            f"\nlast review: {review}\nremote findings\n"))
+        self.assertIn("resume: orchestrator.py resume a1b2c3 --machine M --cwd '~/proj'", out.getvalue())
+        reads = [shlex.split(c.args[0][4])[-1] for c in run.call_args_list
+                 if f"|| exit {orchestrator.MISSING_FILE_STATUS}; cat" in c.args[0][4]]
+        self.assertEqual(reads, [f"{SHOW_DIR}/review-2.md", review])
+
+    def test_help(self):
+        for argv, text in ((["--help"], "show"), (["show", "--help"], "RUN")):
+            with self.subTest(argv=argv), self.assertRaises(SystemExit) as exit_, \
+                    patch("sys.stdout", new_callable=io.StringIO) as out:
+                parse_args(argv)
+            self.assertEqual(exit_.exception.code, 0)
+            self.assertIn(text, out.getvalue())
+        self.assertIn("the run id, or the six-character key at its end", out.getvalue())
+
+
+class TestRunFiles(unittest.TestCase):
+    def test_real_directory_oldest_first(self):
+        with tempfile.TemporaryDirectory() as d:
+            host = Host()
+            run_dir = f"{d}/{orchestrator.RUNS_DIR}/r-abc"
+            # Name order is a, b, c, d; modification order is c, a, then b and d together.
+            for name, mtime in (("b.md", 300), ("a.md", 200), ("c.md", 100), ("d.md", 300),
+                                ("state.json", 50), ("state.json.tmp.123", 60), ("spec.md.tmp.9", 70)):
+                host.write(f"{run_dir}/{name}", name)
+                os.utime(f"{run_dir}/{name}", (mtime, mtime))
+            os.mkdir(f"{run_dir}/sub")
+            self.assertEqual(host.run_files(run_dir), [f"{run_dir}/{n}" for n in ("c.md", "a.md", "b.md", "d.md")])
+
+    def test_missing_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(Host().run_files(f"{d}/nosuch"), [])
+
+    def test_one_call_over_ssh(self):
+        run = MagicMock(return_value=completed("5 /r/b.md\0" "5 /r/a b.md\0" "3 /r/c.md\0"))
+        self.assertEqual(Host("remote-host", run=run).run_files("/r"), ["/r/c.md", "/r/a b.md", "/r/b.md"])
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0][:4], ["ssh", "-o", "BatchMode=yes", "remote-host"])
+        self.assertIn("stat -c %Y", run.call_args.args[0][4])
+        self.assertIn("stat -f %m", run.call_args.args[0][4])
+
+    def test_failure_raises(self):
+        run = MagicMock(return_value=completed(stderr="Permission denied", returncode=1))
+        with self.assertRaisesRegex(OrchestratorError, "Permission denied"):
+            Host(run=run).run_files("/r")
+
+
 if __name__ == "__main__":
     unittest.main()

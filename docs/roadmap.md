@@ -5,8 +5,6 @@ Ideas for what comes next, in no particular order. The designs behind what has s
 
 - **`close <run-id>`**: close the run's herdr workspace from its saved `workspace_id`, instead of by hand. Only
   runs that failed or used `--no-pr` need it; the others close their workspace after the pull request.
-- **`show <run-id>`**: print a run's state, its handoff file paths, the latest verdict and the open findings of
-  the last review. `list` gives only one line per run.
 - **`--spec FILE`**: skip the interview when a spec already exists, by copying the file into the run as
   `spec.md`.
 - **Per-role permission mode**: give each role its own permission mode. Today one `--permission-mode` applies to

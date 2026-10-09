@@ -1259,6 +1259,25 @@ class Host:
                 raise OrchestratorError(f"corrupt run state under {cwd}/{RUNS_DIR}: {e}") from e
         return runs
 
+    def run_files(self, run_dir: str) -> list[str]:
+        """The paths of the files in a run directory, oldest first, except state.json and write's temp files."""
+        # Each entry is "<mtime> <path>" ended by a NUL, which no path holds. stat -c is GNU, stat -f is BSD.
+        script = ('for f in "$1"/*; do [ -f "$f" ] || continue; '
+                  'case "${f##*/}" in state.json|*.tmp.*) continue;; esac; '
+                  'm=$(stat -c %Y -- "$f" 2>/dev/null || stat -f %m -- "$f") || exit 1; '
+                  'printf "%s %s\\0" "$m" "$f"; done; true')
+        out = self.check(["sh", "-c", script, "_", run_dir])
+        files = []
+        for entry in out.split("\0"):
+            if not entry:
+                continue
+            mtime, _, path = entry.partition(" ")
+            try:
+                files.append((int(mtime), path))
+            except ValueError as e:
+                raise OrchestratorError(f"listing {run_dir}: stat printed {mtime!r}, not a time") from e
+        return [path for _, path in sorted(files)]
+
 
 # ---------------------------------------------------------------------------
 # CI: Jenkins and SonarQube, for the quality gate
@@ -2924,6 +2943,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
     sub.add_parser("list", parents=[target], help="list the runs in the project directory")
 
+    show = sub.add_parser(
+        "show", parents=[target], help="print one run in full: its state, files and last review",
+        description="Print one run: its line as list shows it and its whole task, its workflow, branch and "
+                    "pull request, each role's agent, the files in its run directory, and the last review.")
+    show.add_argument("run_ref", metavar="RUN", help="the run id, or the six-character key at its end")
+
     workflows = sub.add_parser(
         "workflows", help="list the workflows, or print one as a workflow file",
         description=f"Without WORKFLOW, list the workflows `run --workflow` offers: the built-in ones and "
@@ -3070,8 +3095,67 @@ def print_runs(runs: list[tuple[int, dict]], local_host: str, pid_alive, target:
         print("No runs.")
         return
     for run_id, phase, rnd, outcome, task in run_rows(runs, local_host, pid_alive, target):
-        print(f"{run_id}  {phase:<7}  {rnd}  {outcome}")
+        print(run_line(run_id, phase, rnd, outcome))
         print(f"    {task}")
+
+
+def run_line(run_id: str, phase: str, rnd: str, outcome: str) -> str:
+    return f"{run_id}  {phase:<7}  {rnd}  {outcome}"
+
+
+def show_run(host: Host, cwd: str, ref: str, local_host: str, pid_alive, target: list[str]) -> None:
+    """Print one run in full: its list line and task, workflow, branch, agents, files and last review."""
+    age, s = find_run(host.run_states(cwd), ref, cwd)
+    run_id, phase, rnd, outcome, _ = run_rows([(age, s)], local_host, pid_alive, target)[0]
+    print(run_line(run_id, phase, rnd, outcome))
+    print(f"    {s['task']}")
+    # The directory state.json was found in, which outlives a project moved since the run saved its cwd.
+    run_dir = f"{cwd}/{RUNS_DIR}/{run_id}"
+    pipeline = saved_pipeline(s)
+    workflow = s.get("workflow") or DEFAULT_WORKFLOW.name
+    print()
+    if pipeline:
+        print(f"workflow   {workflow}: {workflow_shape(pipeline)}")
+    else:
+        print(f"workflow   {workflow}: this orchestrator cannot load it")
+    for label, value in (("branch", s.get("branch")), ("base", s.get("base_branch")), ("pr", s.get("pr_url")),
+                         ("conflicts", ", ".join(s.get("conflicts") or [])), ("workspace", s.get("workspace_id"))):
+        if value:
+            print(f"{label:<9}  {value}")
+    agents = s.get("agents") or {}
+    if agents:
+        print("\nagents")
+        width = max(len(role) for role in agents)
+        for role, a in agents.items():
+            print(f"    {role:<{width}}  {a.get('kind') or DEFAULT_AGENT:<8}  {a.get('pane', '')}")
+    files = host.run_files(run_dir)
+    if files:
+        print("\nfiles")
+        for path in files:
+            print(f"    {path}")
+    review = last_review(host, run_dir, pipeline, s.get("round", 0)) if pipeline else None
+    if review:
+        path, text = review
+        print(f"\nlast review: {path}")
+        print(text, end="" if text.endswith("\n") else "\n")
+
+
+def last_review(host: Host, run_dir: str, pipeline: Pipeline, rnd: int) -> tuple[str, str] | None:
+    """The latest round's verdict file that exists, and its text without the VERDICT line; None without one."""
+    step = pipeline.verdict_step
+    if step is None:
+        return None
+    for n in range(rnd, 0, -1):
+        path = step.path(run_dir, n)
+        text = host.read(path)
+        if text is None:
+            continue
+        if parse_verdict(text):
+            lines = text.splitlines(keepends=True)
+            first = next(i for i, line in enumerate(lines) if line.strip())
+            text = "".join(lines[:first] + lines[first + 1:])
+        return path, text
+    return None
 
 
 def run_rows(runs: list[tuple[int, dict]], local_host: str, pid_alive,
@@ -3201,6 +3285,9 @@ def main(argv: list[str]) -> int:
         cwd = host.resolve_dir(args.cwd or os.getcwd())
         if args.command == "list":
             print_runs(host.run_states(cwd), socket.gethostname(), pid_alive, target_args(args))
+            return 0
+        if args.command == "show":
+            show_run(host, cwd, args.run_ref, socket.gethostname(), pid_alive, target_args(args))
             return 0
         state, pipeline = new_state(args, cwd) if args.command == "run" else resumed_state(args, host, cwd)
         workflow = Workflow(
