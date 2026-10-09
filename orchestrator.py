@@ -390,7 +390,8 @@ class Pipeline:
     """
     name: str
     # Role key -> pane label. The order lays out the panes: the first role takes the workspace's
-    # root pane, the second a split to its right, and each further one a split below the one before.
+    # root pane, the second a split to its right, and each further one a split below the one before
+    # (Workflow._pane_order, which reorders them for a run that skips its contract step).
     roles: dict[str, str]
     steps: tuple[Step, ...]
     # Role key -> the model its agent starts with when no model flag names one.
@@ -1889,6 +1890,32 @@ def branch_name(title: str, run_id: str) -> str:
     return f"{BRANCH_PREFIX}{slug}-{key}" if slug else f"{BRANCH_PREFIX}{key}"
 
 
+@dataclass(frozen=True)
+class SpecFile:
+    """A spec given with run --spec, read on the orchestrator's machine: it becomes the contract step's file."""
+    path: str  # as given, for the log
+    text: str
+
+    @property
+    def task(self) -> str:
+        """The task of a run given none: the spec's title, or else the file's name without its extension."""
+        return spec_title(self.text) or os.path.splitext(os.path.basename(self.path))[0]
+
+
+def read_spec_file(path: str) -> SpecFile:
+    try:
+        # newline="" keeps the file's line endings, so the run gets it unchanged.
+        with open(path, encoding="utf-8", newline="") as f:
+            text = f.read()
+    except OSError as e:
+        raise OrchestratorError(f"cannot read spec file {path}: {e.strerror}") from e
+    except UnicodeDecodeError as e:
+        raise OrchestratorError(f"spec file {path} is not UTF-8 text: {e}") from e
+    if not text.strip():
+        raise OrchestratorError(f"spec file {path} is empty")
+    return SpecFile(path, text)
+
+
 def _details(summary: str, text: str, open_: bool = False) -> str:
     if len(text) > PR_SECTION_LIMIT:
         text = text[:PR_SECTION_LIMIT] + "\n\n*(truncated; the full file is in the run directory)*"
@@ -1987,13 +2014,19 @@ class Workflow:
                  ci: CI | None = None,
                  max_quality_rounds: int = DEFAULT_MAX_QUALITY_ROUNDS,
                  pipeline: Pipeline | None = None,
-                 clocks: Clocks | None = None):
-        """pipeline is the run's workflow; without it, the one the state names."""
+                 clocks: Clocks | None = None,
+                 spec: SpecFile | None = None):
+        """pipeline is the run's workflow; without it, the one the state names.
+
+        spec, from run --spec, is written as the contract step's file before the run starts, for a state
+        that starts at the step after it (seeded_start).
+        """
         self.herdr = herdr
         self.host = host
         self.state = state
         self.notify = notify
         self.ci = ci
+        self.spec = spec
         self.pipeline = pipeline = pipeline or run_pipeline(state.workflow, state.workflow_definition)
         if ci and pipeline.gated is None:
             raise OrchestratorError(f"workflow {pipeline.name} has no quality-gated step, "
@@ -2090,10 +2123,25 @@ class Workflow:
             # Keeps run files out of `git status`, so the Reviewer sees only the Builder's changes
             # and the commit holds nothing else.
             self.host.write(ignore, "*\n")
+        if self.spec:
+            self._seed_spec()
         s.error = None
         s.owner = self.me
         # Not _save: the caller has already decided that any earlier owner is gone.
         self._write_state()
+
+    def _seed_spec(self) -> None:
+        """Write the spec given with run --spec as the contract step's file.
+
+        After .gitignore, which keeps it out of the clean-tree check, and before the first state.json, which
+        starts the run after the contract step: a resume of that run must find the file.
+        """
+        contract = self.pipeline.contract
+        path = contract.path(self.state.dir, 0)
+        self.host.write(path, self.spec.text)
+        skipped = "interview" if contract.human_paced else "turn"
+        log(f"[{contract.role}] {os.path.basename(path)} is a copy of {self.spec.path}; "
+            f"skipping the {self.pipeline.roles[contract.role]}'s {skipped}")
 
     def _release(self, error: str) -> None:
         """Record why the run stopped and that no process drives it now, as far as saving still works."""
@@ -2812,7 +2860,7 @@ class Workflow:
     def _pane_for(self, role: str) -> str:
         """The pane for the role's next agent: its old one if that survives, else a new split."""
         s = self.state
-        roles = list(self.pipeline.roles)
+        roles = self._pane_order(role)
         i = roles.index(role)
         old = (s.agents.get(role) or {}).get("pane") or (s.root_pane if i == 0 else "")
         if old and self.herdr.pane_exists(old):
@@ -2827,6 +2875,21 @@ class Workflow:
             if self.herdr.pane_exists(pane):
                 return self.herdr.split(pane, direction, s.cwd)
         raise OrchestratorError(f"no pane of run {s.run_id} is left in herdr workspace {s.workspace_id}")
+
+    def _pane_order(self, role: str) -> list[str]:
+        """The roles in the order their panes are laid out, the root pane going to the first.
+
+        That is the workflow's order, unless the run skipped its contract step (run --spec): then the first
+        role to take a turn leads, and the contract's role, which may still have a later step, comes last.
+        s.agents keeps the order the roles' agents first started in, and the role asking now is the first
+        when none has.
+        """
+        roles = list(self.pipeline.roles)
+        contract = self.pipeline.contract
+        first = next(iter(self.state.agents), role)
+        if contract is None or first == contract.role:
+            return roles
+        return [first, *(r for r in roles if r not in (first, contract.role)), contract.role]
 
     def _start(self, role: str, pane: str, session: str | None = None) -> bool:
         """Start the role's agent in the pane, in its saved session if given one. False means it exited at once."""
@@ -2970,7 +3033,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                                f"gets the change anyway (default {DEFAULT_MAX_QUALITY_ROUNDS})")
 
     run = sub.add_parser("run", parents=[target, settings], help="run the handoff workflow for a task")
-    run.add_argument("task", help="what to build, as you would tell the Spec Collector")
+    run.add_argument("task", nargs="?",
+                     help="what to build, as you would tell the Spec Collector; optional with --spec, "
+                          "which then takes the spec's title")
+    # Run only: a resumed run already has its spec.
+    run.add_argument("--spec", metavar="FILE",
+                     help="skip the interview: copy the spec at FILE, on this machine, into the run as the "
+                          "first step's file, and start at the step after it. Needs a workflow whose first "
+                          "step writes the spec, as default's does")
     # Run only: a resumed run keeps the workflow it was started with.
     which = run.add_mutually_exclusive_group()
     which.add_argument("--workflow", choices=offered_workflows(), default=DEFAULT_WORKFLOW.name,
@@ -2995,6 +3065,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                     "was started with; an unset one keeps it, not the default shown.")
     resume.add_argument("run_ref", metavar="RUN", help="the run id, or the six-character key at its end")
     resume.add_argument("--force", action="store_true", help="take over a run that still looks alive")
+    # Hidden and refused below: argparse would otherwise take --spec for an abbreviation of --spec-model.
+    resume.add_argument("--spec", nargs="?", const="", help=argparse.SUPPRESS)
 
     sub.add_parser("list", parents=[target], help="list the runs in the project directory")
 
@@ -3017,6 +3089,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     gui.add_argument("--smoke-test", action="store_true", help="open the window and close it at once")
 
     args = p.parse_args(argv)
+    check_spec_args(args, run, resume)
     if getattr(args, "machine", None) and not args.cwd:
         p.error("--cwd is required with --machine")
     if getattr(args, "max_rounds", None) is not None and args.max_rounds < 1:
@@ -3029,6 +3102,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     if getattr(args, "quality_gate", None) is not None and not re.fullmatch(r"[^/]+(/[^/]+)*", args.quality_gate):
         p.error("--quality-gate takes a Jenkins job's full name, such as folder/job")
     return args
+
+
+def check_spec_args(args: argparse.Namespace, run: argparse.ArgumentParser,
+                    resume: argparse.ArgumentParser) -> None:
+    """Exit with a usage error for a run with neither a task nor --spec, or a resume given --spec."""
+    if args.command == "run" and args.task is None and args.spec is None:
+        run.error("a task or --spec FILE is needed")
+    if args.command == "resume" and args.spec is not None:
+        resume.error("unrecognized arguments: --spec; a resumed run keeps the spec it has")
 
 
 def offered_workflows() -> list[str]:
@@ -3346,14 +3428,15 @@ def main(argv: list[str]) -> int:
         if args.command == "show":
             show_run(host, cwd, args.run_ref, socket.gethostname(), pid_alive, target_args(args))
             return 0
-        state, pipeline = new_state(args, cwd) if args.command == "run" else resumed_state(args, host, cwd)
+        spec = read_spec_file(args.spec) if args.command == "run" and args.spec is not None else None
+        state, pipeline = new_state(args, cwd, spec) if args.command == "run" else resumed_state(args, host, cwd)
         workflow = Workflow(
             herdr, host, state, notify=notify_locally,
             max_rounds=state.max_rounds, turn_timeout=state.turn_timeout,
             agents=AgentSettings(state.permission_mode, state.models, state.agent_kinds),
             pull_request=state.pull_request,
             ci=CI(state.quality_job) if state.quality_job else None,
-            max_quality_rounds=state.max_quality_rounds, pipeline=pipeline)
+            max_quality_rounds=state.max_quality_rounds, pipeline=pipeline, spec=spec)
         verdict = workflow.run()
     except OrchestratorError as e:
         print(f"error: {e}", file=sys.stderr)
@@ -3384,11 +3467,14 @@ def connect(machine: str | None) -> tuple[Herdr, Host]:
     return herdr, Host()
 
 
-def new_state(args: argparse.Namespace, cwd: str) -> tuple[RunState, Pipeline]:
-    """A new run's state from the run command's flags, and its workflow."""
+def new_state(args: argparse.Namespace, cwd: str, spec: SpecFile | None = None) -> tuple[RunState, Pipeline]:
+    """A new run's state from the run command's flags, and its workflow; with spec, from --spec, the run
+    starts after the contract step."""
     pipeline = load_workflow_file(args.workflow_file) if args.workflow_file else named_workflow(args.workflow)
-    state = RunState(new_run_id(), args.task, cwd, args.machine,
-                     phase=pipeline.steps[0].id, workflow=pipeline.name)
+    first = seeded_start(pipeline) if spec else pipeline.steps[0]
+    # parse_args leaves the task out only with --spec.
+    task = args.task if args.task is not None else spec.task
+    state = RunState(new_run_id(), task, cwd, args.machine, phase=first.id, workflow=pipeline.name)
     state.max_rounds = args.max_rounds or DEFAULT_MAX_ROUNDS
     state.turn_timeout = args.timeout or DEFAULT_TURN_TIMEOUT
     state.permission_mode = args.permission_mode
@@ -3398,6 +3484,17 @@ def new_state(args: argparse.Namespace, cwd: str) -> tuple[RunState, Pipeline]:
     state.quality_job = args.quality_gate
     state.max_quality_rounds = args.max_quality_rounds or DEFAULT_MAX_QUALITY_ROUNDS
     return state, pipeline
+
+
+def seeded_start(p: Pipeline) -> Step:
+    """The step a run given its spec with --spec starts at: the one after the contract step."""
+    if p.contract is None:
+        raise OrchestratorError(f"workflow {p.name} starts with step {p.steps[0].id}, which edits or writes a "
+                                f"file per round; --spec needs a first step that writes the spec")
+    if (following := p.after(p.contract)) is None:
+        raise OrchestratorError(f"workflow {p.name} has no step after {p.contract.id}, so with --spec "
+                                f"it has nothing to do")
+    return following
 
 
 def resumed_state(args: argparse.Namespace, host: Host, cwd: str) -> tuple[RunState, Pipeline]:
