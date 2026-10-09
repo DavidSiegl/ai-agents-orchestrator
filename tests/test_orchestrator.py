@@ -5912,5 +5912,245 @@ class TestRunFiles(unittest.TestCase):
             host.run_files("/r")
 
 
+# ---------------------------------------------------------------------------
+# run --spec
+# ---------------------------------------------------------------------------
+
+# CRLF and trailing blanks, which the run's copy keeps.
+GIVEN_SPEC = "# Add a token-bucket rate limiter\r\n\r\n## Goal\r\nlimit requests  \n\n"
+SPEC_SOURCE = "/home/me/spec.md"
+
+
+def seeded_run(pipeline=orchestrator.DEFAULT_WORKFLOW):
+    """A new run's state, as main makes it for the workflow with --spec."""
+    return RunState("20260929-120000-a1b2c3", "add a rate limiter", "/proj", None,
+                    phase=orchestrator.seeded_start(pipeline).id, workflow=pipeline.name)
+
+
+class TestSeededSpec(unittest.TestCase):
+    def run_seeded(self, script, text=GIVEN_SPEC, pipeline=orchestrator.DEFAULT_WORKFLOW, **kw):
+        """Run a new run given its spec; also returns the first state.json it wrote, and its log."""
+        wf, herdr, host, notes = make_workflow(script, state=seeded_run(pipeline), pipeline=pipeline,
+                                               spec=orchestrator.SpecFile(SPEC_SOURCE, text), **kw)
+        first_saved = []
+        write = host.write
+
+        def recording_write(path, text):
+            if path.endswith("/state.json") and not first_saved:
+                first_saved.append(json.loads(text))
+            write(path, text)
+        host.write = recording_write
+        with patch("sys.stderr", new_callable=io.StringIO) as err:
+            verdict = wf.run()
+        return verdict, wf, herdr, host, notes, first_saved[0], err.getvalue()
+
+    def test_the_spec_is_the_contract_and_the_interview_is_skipped(self):
+        seen = []
+        verdict, wf, herdr, host, notes, first_saved, log = self.run_seeded({
+            "build": [recording(build_turn(1), seen)], "review": [review_turn(1, APPROVE)],
+        })
+
+        self.assertEqual(verdict, APPROVE)
+        self.assertEqual(host.files[f"{D}/spec.md"], GIVEN_SPEC)
+        self.assertLess(host.writes.index(f"{D}/spec.md"), host.writes.index(f"{D}/state.json"))
+        self.assertEqual((first_saved["phase"], first_saved["round"], first_saved["agents"]), ("build", 0, {}))
+        self.assertIn(f"The spec in {D}/spec.md was agreed", seen[0])
+        # No Spec Collector: no agent, no pane, no notification.
+        self.assertEqual([c[1:3] for c in herdr.calls if c[0] == "start"],
+                         [("build-a1b2c3", "w1:p1"), ("review-a1b2c3", "w1:p2")])
+        self.assertEqual([c for c in herdr.calls if c[0] == "split"], [("split", "w1:p1", "right")])
+        self.assertEqual(herdr.panes, 2)
+        self.assertFalse([c for c in herdr.calls if c[0] == "focus"])
+        self.assertFalse([n for n in notes if "waiting" in n])
+        self.assertEqual(list(wf.state.agents), ["build", "review"])
+        self.assertIn(f"[spec] spec.md is a copy of {SPEC_SOURCE}; skipping the Spec Collector's interview", log)
+        self.assertNotIn("already written", log)
+        branch = "orchestrator/add-a-token-bucket-rate-limiter-a1b2c3"
+        self.assertEqual((host.prs[0]["title"], host.prs[0]["head"]), ("Add a token-bucket rate limiter", branch))
+
+    def test_a_spec_without_a_title_titles_by_the_task(self):
+        verdict, _, _, host, *_ = self.run_seeded(
+            {"build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, text="Limit the requests.\n")
+
+        self.assertEqual(verdict, APPROVE)
+        self.assertEqual((host.prs[0]["title"], host.prs[0]["head"]),
+                         ("add a rate limiter", "orchestrator/add-a-rate-limiter-a1b2c3"))
+
+    def test_a_seeded_run_resumes_like_any_other(self):
+        def interrupted(prompt, state, host):
+            raise KeyboardInterrupt
+        wf, herdr, host, _ = make_workflow({"build": [build_turn(1)], "review": [interrupted]},
+                                           state=seeded_run(), spec=orchestrator.SpecFile(SPEC_SOURCE, GIVEN_SPEC))
+        with patch("sys.stderr"), self.assertRaises(KeyboardInterrupt):
+            wf.run()
+        saved = RunState.from_dict(json.loads(host.files[f"{D}/state.json"]))
+        self.assertEqual((saved.phase, saved.round, saved.error), ("review", 1, "interrupted"))
+
+        # As main resumes it: no spec given, and here a new workspace, since herdr lost the old one.
+        wf, herdr, host, _ = make_workflow({"review": [review_turn(1, APPROVE)]}, host=host, state=saved,
+                                           pull_request=saved.pull_request)
+        with patch("sys.stderr"):
+            self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(host.files[f"{D}/spec.md"], GIVEN_SPEC)
+        self.assertEqual([c[1:3] for c in herdr.calls if c[0] == "start"], [("review-a1b2c3", "w1:p2")])
+        self.assertEqual([c for c in herdr.calls if c[0] == "split"], [("split", "w1:p1", "right")])
+        self.assertEqual(host.prs[0]["title"], "Add a token-bucket rate limiter")
+
+    def test_a_contract_role_with_a_later_step_lays_out_last(self):
+        planned = Pipeline("planned", {"plan": "Planner", "build": "Builder"}, (
+            Step("plan", "plan", "plan.md", "Plan {task}; write {path}."),
+            Step("build", "build", "build-{n}.md", "Build {plan_path}; report to {build_path}.",
+                 again="Fix {prev_check_path}; report to {build_path}.", edits=True),
+            Step("check", "plan", "check-{n}.md", "Check {change} against {plan_path}; write {path}.",
+                 loop_to="build"),
+        ))
+        seen = []
+        verdict, _, herdr, _, _, _, log = self.run_seeded({
+            "build": [recording(build_turn(1), seen)],
+            "plan": [writes(lambda s: f"{s.dir}/check-1.md", f"VERDICT: {APPROVE}\n")],
+        }, pipeline=planned)
+
+        self.assertEqual(verdict, APPROVE)
+        self.assertEqual(seen, [f"Build {D}/plan.md; report to {D}/build-1.md."])
+        self.assertEqual([c[1:3] for c in herdr.calls if c[0] == "start"],
+                         [("build-a1b2c3", "w1:p1"), ("plan-a1b2c3", "w1:p2")])
+        self.assertEqual([c for c in herdr.calls if c[0] == "split"], [("split", "w1:p1", "right")])
+        self.assertIn(f"[plan] plan.md is a copy of {SPEC_SOURCE}; skipping the Planner's turn", log)
+
+    def test_a_workflow_without_a_contract_step_cannot_take_a_spec(self):
+        with self.assertRaisesRegex(OrchestratorError, r"^workflow quick starts with step build, which edits or "
+                                                       r"writes a file per round; --spec needs a first step that "
+                                                       r"writes the spec$"):
+            orchestrator.seeded_start(QUICK)
+
+    def test_a_workflow_with_only_a_contract_step_cannot_take_a_spec(self):
+        solo = Pipeline("solo", {"spec": "Spec Collector"}, (Step("spec", "spec", "spec.md", "Write {path}."),))
+        with self.assertRaisesRegex(OrchestratorError, "workflow solo has no step after spec, so with --spec"):
+            orchestrator.seeded_start(solo)
+
+
+@patch.object(Workflow, "__init__", return_value=None)
+@patch.object(Workflow, "run", return_value=APPROVE)
+@patch.object(Host, "resolve_dir", return_value="/proj")
+@patch.dict("os.environ", {"HERDR_ENV": "1"})
+class TestSpecCLI(unittest.TestCase):
+    def setUp(self):
+        without_workflow_files(self)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+        self.spec = self.file("spec.md", GIVEN_SPEC)
+
+    def file(self, name, text, mode="w"):
+        path = os.path.join(self.dir, name)
+        with open(path, mode, **({"newline": ""} if "b" not in mode else {})) as f:
+            f.write(text)
+        return path
+
+    def started(self, init, *argv):
+        with patch("builtins.print"):
+            self.assertEqual(main(["run", *argv]), 0)
+        return init.call_args.args[2], init.call_args.kwargs
+
+    def refused(self, init, *argv):
+        """The error message of a run that exits 1 before its Workflow, and so its workspace, exists."""
+        with patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(main(["run", *argv]), orchestrator.EXIT_ERROR)
+        init.assert_not_called()
+        return err.getvalue()
+
+    def test_the_spec_reaches_the_workflow(self, _resolve, _run, init):
+        state, kw = self.started(init, "--spec", self.spec)
+        self.assertEqual(kw["spec"], orchestrator.SpecFile(self.spec, GIVEN_SPEC))
+        self.assertEqual((state.task, state.phase, state.round), ("Add a token-bucket rate limiter", "build", 0))
+
+    def test_a_given_task_is_used_unchanged(self, _resolve, _run, init):
+        state, _ = self.started(init, "  the task\nas typed", "--spec", self.spec)
+        self.assertEqual(state.task, "  the task\nas typed")
+
+    def test_an_untitled_spec_names_the_task_after_its_file(self, _resolve, _run, init):
+        state, _ = self.started(init, "--spec", self.file("rate-limiter.v2.md", "Limit the requests.\n"))
+        self.assertEqual(state.task, "rate-limiter.v2")
+
+    def test_a_relative_path_is_the_shells_not_cwds(self, _resolve, _run, init):
+        here = os.getcwd()
+        os.chdir(self.dir)
+        self.addCleanup(os.chdir, here)
+        _, kw = self.started(init, "--spec", "spec.md", "--cwd", "/elsewhere")
+        self.assertEqual(kw["spec"].text, GIVEN_SPEC)
+
+    def test_without_spec_the_run_starts_at_the_first_step(self, _resolve, _run, init):
+        state, kw = self.started(init, "task")
+        self.assertEqual((state.phase, kw["spec"]), ("spec", None))
+
+    @patch.object(Herdr, "ssh_target", return_value="remote-host")
+    # No real ci.env on this machine may decide the --quality-gate case.
+    @patch.dict("os.environ", {"XDG_CONFIG_HOME": "/nonexistent"})
+    def test_spec_combines_with_the_other_run_flags(self, _target, _resolve, _run, init):
+        example = f"{EXAMPLES}/spec-build-review.toml"
+        cases = [
+            (["--no-pr"], lambda st, kw: self.assertFalse(st.pull_request)),
+            (["--quality-gate", JOB], lambda st, kw: self.assertEqual((st.quality_job, kw["ci"].job), (JOB, JOB))),
+            (["--machine", "m", "--cwd", "~/p"], lambda st, kw: self.assertEqual(st.machine, "m")),
+            (["--workflow", "default"], lambda st, kw: self.assertEqual(st.workflow, "default")),
+            (["--workflow-file", example], lambda st, kw: self.assertEqual(st.workflow, "spec-build-review")),
+        ]
+        for flags, check in cases:
+            with self.subTest(flags=flags):
+                state, kw = self.started(init, "--spec", self.spec, *flags)
+                self.assertEqual((state.phase, kw["spec"].text), ("build", GIVEN_SPEC))
+                check(state, kw)
+
+    def test_an_unreadable_spec_is_an_error(self, _resolve, _run, init):
+        missing = os.path.join(self.dir, "nosuch.md")
+        self.assertEqual(self.refused(init, "--spec", missing),
+                         f"error: cannot read spec file {missing}: No such file or directory\n")
+        self.assertEqual(self.refused(init, "--spec", self.dir),
+                         f"error: cannot read spec file {self.dir}: Is a directory\n")
+        binary = self.file("spec.bin", b"\xff\xfe# spec", "wb")
+        self.assertIn(f"error: spec file {binary} is not UTF-8 text", self.refused(init, "--spec", binary))
+
+    def test_an_empty_spec_is_an_error(self, _resolve, _run, init):
+        for text in ("", " \n\t\r\n"):
+            with self.subTest(text=text):
+                path = self.file("blank.md", text)
+                self.assertEqual(self.refused(init, "--spec", path), f"error: spec file {path} is empty\n")
+
+    def test_a_workflow_without_a_contract_step_is_an_error(self, _resolve, _run, init):
+        message = self.refused(init, "--spec", self.spec, "--workflow-file", f"{EXAMPLES}/quick.toml")
+        self.assertIn("workflow quick starts with step build", message)
+        self.assertIn("--spec needs a first step that writes the spec", message)
+
+    def test_a_task_or_spec_is_needed(self, _resolve, _run, init):
+        with self.assertRaises(SystemExit) as exit_, patch("sys.stderr", new_callable=io.StringIO) as err:
+            parse_args(["run"])
+        self.assertEqual(exit_.exception.code, 2)
+        self.assertIn("orchestrator.py run: error: a task or --spec FILE is needed", err.getvalue())
+
+    def test_resume_takes_no_spec(self, _resolve, _run, init):
+        # Not even as an abbreviation of --spec-model, which argparse would otherwise make of it.
+        for flags in (["--spec", "spec.md"], ["--spec"], [f"--spec={self.spec}"]):
+            with self.subTest(flags=flags):
+                with self.assertRaises(SystemExit) as exit_, patch("sys.stderr", new_callable=io.StringIO) as err:
+                    parse_args(["resume", "a1b2c3", *flags])
+                self.assertEqual(exit_.exception.code, 2)
+                self.assertIn("unrecognized arguments: --spec", err.getvalue())
+        self.assertEqual(parse_args(["resume", "a1b2c3", "--spec-model", "opus"]).spec_model, "opus")
+
+    def test_run_help_lists_spec(self, _resolve, _run, init):
+        with self.assertRaises(SystemExit), patch("sys.stdout", new_callable=io.StringIO) as out:
+            parse_args(["run", "--help"])
+        self.assertIn("--spec FILE", out.getvalue())
+        self.assertEqual(parse_args(["run", "t", "--spec-model", "opus"]).spec_model, "opus")
+
+
+class TestSpecBuildReviewExample(unittest.TestCase):
+    def test_it_is_the_default_workflow(self):
+        # Fails when a built-in prompt or step changes; regenerate the file with `workflows default`.
+        example = orchestrator.load_workflow_file(f"{EXAMPLES}/spec-build-review.toml")
+        self.assertEqual(orchestrator.workflow_definition(example),
+                         orchestrator.workflow_definition(orchestrator.DEFAULT_WORKFLOW))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -142,6 +142,9 @@ python orchestrator.py resume e292fb --machine <machine> --cwd ~/GitHub/myprojec
 python orchestrator.py run --workflow tdd "add a token-bucket rate limiter"
 python orchestrator.py run --workflow-file examples/workflows/quick.toml "fix the off-by-one in the pager"
 
+# Skip the interview: a spec you already have is the contract, and the Builder starts on it
+python orchestrator.py run --spec docs/specs/rate-limiter.md
+
 # With the SonarQube quality gate after each Builder turn; credentials from ~/.config/ai-agents-orchestrator/ci.env
 python orchestrator.py run --quality-gate AI-Agents-Orchestrator/py-ai-agents-orchestrator-quality "add a token-bucket rate limiter"
 
@@ -165,13 +168,14 @@ python orchestrator.py gui
 | `--role-model ROLE=MODEL` | Model for one role of the workflow, by its key, e.g. `tests=sonnet`. Overrides `--model`; repeatable. |
 | `--workflow NAME` | `run` only: the workflow the run goes through: `default`, the run described below, or one of [your own](#your-own-workflows) in `~/.config/ai-agents-orchestrator/workflows/`. `--help` lists the choices; a resumed run keeps its workflow. |
 | `--workflow-file FILE` | `run` only: like `--workflow`, for the workflow file at `FILE`, such as one kept in the project. |
+| `--spec FILE` | `run` only: skip the interview. `FILE`, read on this machine (a relative path is from the current directory, not `--cwd`), is copied into the run as the handoff file of the workflow's first step, `spec.md` in `default`, and the run starts at the step after it. The task is then optional: without one it is the spec's `# ` title, or else `FILE`'s name. Needs a workflow whose first step writes the spec, such as `default` or `tdd`, not `quick`. |
 | `--no-pr` | `run` only: leave the change uncommitted and the workspace open instead of opening a pull request. Works outside git. |
 | `--quality-gate JOB` | `run` only: after each Builder turn, analyse the change with this Jenkins job, by its full name with folders, and SonarQube, and send the findings back to the Builder before the Reviewer. Needs `JENKINS_URL`, `JENKINS_USER`, `JENKINS_TOKEN`, `SONAR_HOST_URL` and `SONAR_TOKEN`, from the environment or `~/.config/ai-agents-orchestrator/ci.env`. |
 | `--max-quality-rounds N` | With the gate: SonarQube analyses per review round before the Reviewer gets the change anyway (default 3). |
 | `--force` | `resume` only: take over a run that still looks alive. |
 
 A run saves its settings. `resume` takes the same flags as `run` except `--no-pr`, `--quality-gate`,
-`--workflow` and `--workflow-file`, and a flag given to `resume` overrides the saved value; one left out keeps it.
+`--workflow`, `--workflow-file` and `--spec`, and a flag given to `resume` overrides the saved value; one left out keeps it.
 A harness changed by `resume` applies to each role's next agent; one still running keeps its own.
 
 ### Harnesses
@@ -213,7 +217,8 @@ since, the agent starts a fresh session instead.
    fast-forwarded, so the Spec Collector reads current code. If that fails, for example offline or because the
    local branch has diverged from `origin`'s, the run stops before the interview.
 2. **Spec Collector.** A notification tells you it is waiting. Answer its questions in its pane; once you
-   approve the spec, it writes `spec.md`.
+   approve the spec, it writes `spec.md`. With `--spec FILE` there is no interview: `FILE` is copied to
+   `spec.md`, no Spec Collector starts, and the Builder takes the root pane.
 3. **Builder.** The orchestrator fetches and fast-forwards the base branch again, since the interview can take
    hours, and creates the branch `orchestrator/<spec title>-<id>` from it. The Builder implements the spec
    there, verifies it, and writes `build-N.md` without committing.
@@ -255,8 +260,9 @@ The roles, their prompts and their order are a workflow. Besides the built-in `d
 without touching the code: a TOML file in `~/.config/ai-agents-orchestrator/workflows/`, named after the
 workflow, or a file anywhere passed with `--workflow-file`. `python orchestrator.py workflows` lists them and
 shows why one does not load; `python orchestrator.py workflows default > ~/.config/ai-agents-orchestrator/workflows/mine.toml`
-gives you the default's full definition to edit. [`examples/workflows/`](examples/workflows) has two more:
-`quick` (Builder ⇄ Reviewer, the task as the contract) and `tdd` (a Test Writer before the Builder).
+gives you the default's full definition to edit. [`examples/workflows/`](examples/workflows) has three more:
+`spec-build-review` (the built-in `default` as a file, to copy and edit), `quick` (Builder ⇄ Reviewer, the task
+as the contract) and `tdd` (a Test Writer before the Builder).
 
 ```toml
 description = "Spec Collector -> Test Writer -> Builder <-> Reviewer"

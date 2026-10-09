@@ -5,8 +5,6 @@ Ideas for what comes next, in no particular order. The designs behind what has s
 
 - **`close <run-id>`**: close the run's herdr workspace from its saved `workspace_id`, instead of by hand. Only
   runs that failed or used `--no-pr` need it; the others close their workspace after the pull request.
-- **`--spec FILE`**: skip the interview when a spec already exists, by copying the file into the run as
-  `spec.md`.
 - **Per-role permission mode**: give each role its own permission mode. Today one `--permission-mode` applies to
   every role.
 - **Overridable prompts**: load the role prompts from `.orchestrator/prompts/*.md` when those files exist, with
@@ -25,11 +23,12 @@ Ideas for what comes next, in no particular order. The designs behind what has s
 ## Workflows
 
 Only `default` ships ([Workflows](architecture.md#workflows)); others are workflow files, and
-[`examples/workflows/`](../examples/workflows) has `quick` and `tdd`. These engine gaps, by letter (G, runs without a verdict, is closed), stand
+[`examples/workflows/`](../examples/workflows) has `spec-build-review`, `quick` and `tdd`. These engine gaps, by letter (G, runs without a verdict, is closed), stand
 between the engine and the candidates below:
 
-- **A. Run inputs**: seed a handoff file at `run` (`--spec FILE` as `spec.md`), or name a base ref, branch or
-  pull request to work on.
+- **A. Run inputs**: `--spec FILE` seeds `spec.md` for a workflow whose first step writes the spec (a contract
+  step), but not yet for one without, such as `quick`; to come: name a base ref, branch or pull request to work
+  on.
 - **B. Human approval gates** between steps: stop until the human approves a step's file, or sends it back.
 - **C. Parallel steps**, and a step that waits for all of them.
 - **D. Richer verdicts**: more than one verdict loop, a verdict that picks the step to go back to or ends the run
@@ -47,7 +46,7 @@ between the engine and the candidates below:
 
 | Workflow | Roles | Handoff files | Gaps |
 |---|---|---|---|
-| **quick** | Builder, Reviewer | `spec.md` from `--spec FILE`, or the task as the contract; `build-{n}.md`, `review-{n}.md` | A for `--spec`; none without it |
+| **quick** | Builder, Reviewer | `spec.md` from `--spec FILE`, or the task as the contract; `build-{n}.md`, `review-{n}.md` | A for `--spec`, which works only for workflows with a contract step so far; none without it |
 | **tdd** | Spec Collector, Test Writer, Builder, Reviewer | `spec.md`, `tests.md`, `build-{n}.md`, `review-{n}.md` | none for the shape; I to prove the tests fail first; D to send a review to the Test Writer |
 | **plan** | Spec Collector, Planner, Builder, Reviewer | `spec.md`, `plan.md` (approved by the human), `build-{n}.md`, `review-{n}.md` | B; D for a plan sent back (`plan-{n}.md`) |
 | **bugfix** | Spec Collector or none, Reproducer, Builder, Reviewer | `spec.md` or the task, `repro.md` with a failing test, `build-{n}.md`, `review-{n}.md` | D for "cannot reproduce"; I for the test failing before and passing after |
