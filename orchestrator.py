@@ -72,6 +72,8 @@ STALE_SECONDS = 300
 NETWORK_TIMEOUT = 300
 BRANCH_PREFIX = "orchestrator/"
 REMOTE = "origin"
+# prune deletes a run's branch once its pull request is merged, or closed this long: time to reopen it.
+CLOSED_BRANCH_GRACE = 14 * 24 * 3600
 # GitHub rejects pull request bodies over 65536 characters; this leaves room for the frame.
 PR_SECTION_LIMIT = 20_000
 
@@ -1077,6 +1079,14 @@ def _herdr_error(proc: subprocess.CompletedProcess) -> HerdrError:
 # ---------------------------------------------------------------------------
 
 MISSING_FILE_STATUS = 3
+# gh's exit status when it is not logged in, and sh's when gh is not installed: no gh call can succeed then.
+GH_UNUSABLE_STATUS = (4, 127)
+# Runs a command in a directory, for gh, which finds the repository from its working directory and has no -C.
+IN_DIR = 'cd -- "$1" && shift && exec "$@"'
+
+
+class GhUnusable(OrchestratorError):
+    """gh is missing or logged out where the project is, so no gh call can succeed."""
 
 
 class Host:
@@ -1115,9 +1125,14 @@ class Host:
             raise OrchestratorError(f"reading {path}: {proc.stderr.strip()}")
         return proc.stdout
 
-    def write(self, path: str, text: str) -> None:
+    def write(self, path: str, text: str, keep_mtime: bool = False) -> None:
+        """Replace the file's contents; with keep_mtime, the existing file keeps its modification time.
+
+        keep_mtime is for a state.json written by someone other than its run: its age is the run's heartbeat.
+        """
         # Written aside and renamed into place, so a concurrent `list` never reads half a state.json.
-        script = ('t="$1.tmp.$$"; mkdir -p -- "$(dirname -- "$1")" && cat > "$t" && mv -f -- "$t" "$1" '
+        keep = ' && touch -r "$1" -- "$t"' if keep_mtime else ""
+        script = (f't="$1.tmp.$$"; mkdir -p -- "$(dirname -- "$1")" && cat > "$t"{keep} && mv -f -- "$t" "$1" '
                   '|| { rm -f -- "$t"; exit 1; }')
         self.check(["sh", "-c", script, "_", path], stdin=text)
 
@@ -1234,15 +1249,93 @@ class Host:
         refs = [line.split("\t", 1)[1] for line in out.splitlines() if "\t" in line]
         return [r.removeprefix("refs/heads/") for r in refs if r.startswith(f"refs/heads/{prefix}")]
 
+    def remote_branch_commit(self, cwd: str, branch: str) -> str | None:
+        """The commit origin's branch is at; None when origin has no such branch."""
+        ref = f"refs/heads/{branch}"
+        out = self.git(cwd, "ls-remote", REMOTE, ref, timeout=NETWORK_TIMEOUT)
+        # ls-remote matches its pattern against the end of each ref's name, so the exact name is picked out.
+        for line in out.splitlines():
+            commit, _, name = line.partition("\t")
+            if name == ref:
+                return commit
+        return None
+
+    def delete_remote_branch_at(self, cwd: str, branch: str, commit: str) -> None:
+        """Delete origin's branch while it is at commit; the lease fails the push if anyone pushed since."""
+        ref = f"refs/heads/{branch}"
+        self.git(cwd, "push", "--quiet", f"--force-with-lease={ref}:{commit}", REMOTE, "--delete", ref,
+                 timeout=NETWORK_TIMEOUT)
+
+    def delete_tracking_ref(self, cwd: str, branch: str) -> None:
+        """Drop origin/<branch>, which outlives the branch on origin until a fetch prunes it; none is fine."""
+        self.git(cwd, "update-ref", "-d", f"refs/remotes/{REMOTE}/{branch}")
+
+    def branch_commit(self, cwd: str, branch: str) -> str | None:
+        """The commit the local branch is at; None when there is no such branch."""
+        argv = ["rev-parse", "-q", "--verify", f"refs/heads/{branch}"]
+        proc = self.git_run(cwd, *argv)
+        if proc.returncode == 1:
+            return None
+        return self._checked(["git", "-C", cwd, *argv], proc).strip()
+
+    def has_commit(self, cwd: str, commit: str) -> bool:
+        return self._git_test(cwd, "rev-parse", "-q", "--verify", f"{commit}^{{commit}}")
+
+    def is_ancestor(self, cwd: str, commit: str, of: str) -> bool:
+        """Whether commit is of or one of its ancestors."""
+        return self._git_test(cwd, "merge-base", "--is-ancestor", commit, of)
+
+    def commits_beyond(self, cwd: str, commit: str, branch: str) -> int:
+        """How many commits the local branch has that commit lacks."""
+        out = self.git(cwd, "rev-list", "--count", f"{commit}..refs/heads/{branch}").strip()
+        if not out.isdigit():
+            raise OrchestratorError(f"git rev-list --count {commit}..refs/heads/{branch} printed {out!r}, not a count")
+        return int(out)
+
+    def delete_branch(self, cwd: str, branch: str) -> None:
+        # -D: -d checks the branch against HEAD or its upstream, not its pull request, so it refuses a squash merge.
+        self.git(cwd, "branch", "--quiet", "-D", branch)
+
+    def checked_out_branches(self, cwd: str) -> dict[str, str]:
+        """The branches checked out in the repository's worktrees, the main checkout's included, with each path."""
+        branches, path = {}, ""
+        for line in self.git(cwd, "worktree", "list", "--porcelain").splitlines():
+            key, _, value = line.partition(" ")
+            if key == "worktree":
+                path = value
+            elif key == "branch":
+                branches[value.removeprefix("refs/heads/")] = path
+        return branches
+
+    def gh_run(self, cwd: str, *args: str) -> subprocess.CompletedProcess:
+        """A gh command in cwd whose failure the caller interprets."""
+        return self.run(["sh", "-c", IN_DIR, "_", cwd, "gh", *args], timeout=NETWORK_TIMEOUT)
+
+    def pull_request(self, cwd: str, url: str) -> dict:
+        """The pull request's state (OPEN, CLOSED or MERGED), headRefOid and closedAt, as gh reports them."""
+        args = ["pr", "view", url, "--json", "state,headRefOid,closedAt"]
+        proc = self.gh_run(cwd, *args)
+        if proc.returncode in GH_UNUSABLE_STATUS:
+            raise GhUnusable(f"gh {shlex.join(args)} failed with status {proc.returncode}: "
+                             f"{(proc.stderr or proc.stdout).strip()}")
+        out = self._checked(["gh", *args], proc)
+        try:
+            pr = json.loads(out)
+            fields_ok = (isinstance(pr["state"], str) and re.fullmatch(r"[0-9a-f]{40,64}", pr["headRefOid"])
+                         and (pr["closedAt"] is None or isinstance(pr["closedAt"], str)))
+        except (ValueError, KeyError, TypeError) as e:
+            raise OrchestratorError(f"gh pr view {url} printed {out.strip()!r}: {e}") from e
+        if not fields_ok:
+            raise OrchestratorError(f"gh pr view {url} printed {out.strip()!r}, not a pull request's state")
+        return pr
+
     def create_pr(self, cwd: str, base: str, head: str, title: str, body: str, draft: bool) -> str:
         """Open a pull request with gh and return its URL."""
         argv = ["gh", "pr", "create", "--base", base, "--head", head,
                 "--title", title, "--body-file", "-"]
         if draft:
             argv.append("--draft")
-        # gh finds the repository from its working directory; it has no -C.
-        out = self.check(["sh", "-c", 'cd -- "$1" && shift && exec "$@"', "_", cwd, *argv],
-                         stdin=body, timeout=NETWORK_TIMEOUT)
+        out = self.check(["sh", "-c", IN_DIR, "_", cwd, *argv], stdin=body, timeout=NETWORK_TIMEOUT)
         lines = out.split()
         if not lines:
             raise OrchestratorError(f"gh pr create printed no URL for {head}")
@@ -1627,6 +1720,9 @@ class RunState:
     workflow: str = DEFAULT_WORKFLOW.name
     # The workflow_definition of one that is not built in, so a resume does not depend on its file.
     workflow_definition: dict | None = None
+    # What prune did with branch once the pull request was done: "deleted", or "kept: <why>". Written by
+    # prune_branches, never by the run itself.
+    branch_cleanup: str | None = None
 
     @classmethod
     def from_dict(cls, saved: dict) -> "RunState":
@@ -3107,6 +3203,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                     "pull request, each role's agent, the files in its run directory, and the last review.")
     show.add_argument("run_ref", metavar="RUN", help="the run id, or the six-character key at its end")
 
+    prune = sub.add_parser(
+        "prune", parents=[target], help="delete the branches of runs whose pull request is done",
+        description=f"Delete the branch of each run whose pull request is merged, or closed for "
+                    f"{CLOSED_BRANCH_GRACE // 86400} days, locally and on {REMOTE}, and print what became of each. "
+                    f"A branch with commits its pull request lacks, or one checked out, is kept. Every run "
+                    f"that opens a pull request does this first, except for branches kept before.")
+    prune.add_argument("--dry-run", action="store_true", help="print what would be deleted, and delete nothing")
+
     workflows = sub.add_parser(
         "workflows", help="list the workflows, or print one as a workflow file",
         description=f"Without WORKFLOW, list the workflows `run --workflow` offers: the built-in ones and "
@@ -3277,6 +3381,7 @@ def show_run(host: Host, cwd: str, ref: str, local_host: str, pid_alive, target:
     else:
         print(f"workflow   {workflow}: this orchestrator cannot load it")
     for label, value in (("branch", s.get("branch")), ("base", s.get("base_branch")), ("pr", s.get("pr_url")),
+                         ("cleanup", s.get("branch_cleanup")),
                          ("conflicts", ", ".join(s.get("conflicts") or [])), ("workspace", s.get("workspace_id"))):
         if value:
             print(f"{label:<9}  {value}")
@@ -3405,6 +3510,195 @@ def resumable_state(runs: list[tuple[int, dict]], args: argparse.Namespace, cwd:
     return state
 
 
+BRANCH_DELETED = "deleted"
+BRANCH_KEPT = "kept: "
+
+
+@dataclass
+class PrunedRun:
+    """What prune_branches did with one run's branch, locally and on origin, and what it recorded for it."""
+    run_id: str
+    branch: str
+    local: str = ""
+    remote: str = ""
+    # Why nothing was decided: the pull request is not done yet, or the run failed. Nothing is recorded then.
+    skipped: str | None = None
+    # The run's branch_cleanup: written, or what would be in a dry run.
+    cleanup: str | None = None
+
+    @property
+    def line(self) -> str:
+        """The run as prune prints it."""
+        what = f"skipped: {self.skipped}" if self.skipped else f"local {self.local}, remote {self.remote}"
+        return f"{self.run_id}  {self.branch}  {what}"
+
+
+def prune_branches(host: Host, cwd: str, wall: Callable[[], float], local_host: str, pid_alive, *,
+                   dry_run: bool = False, revisit: bool = False) -> list[PrunedRun]:
+    """Delete the branches of the runs in cwd whose pull request is merged, or closed for CLOSED_BRANCH_GRACE.
+
+    A branch is deleted only when its pull request's head commit holds all of it: a local branch at or
+    behind that commit, and origin's at it, under a lease. GitHub keeps refs/pull/<n>/head, so every deleted
+    branch can be restored from its pull request (docs/design.md). Only runs with no branch_cleanup yet
+    are candidates, and with revisit the runs whose branch was kept too. A failure on one run is logged and
+    skips that run; gh being unusable ends the sweep.
+    """
+    runs = [s for age, s in host.run_states(cwd) if is_prune_candidate(s, age, local_host, pid_alive, revisit)]
+    if not runs:
+        return []
+    checked_out = host.checked_out_branches(cwd)
+    pruned = []
+    for saved in runs:
+        run = PrunedRun(saved["run_id"], saved["branch"])
+        try:
+            prune_run(host, cwd, saved, run, wall(), checked_out, dry_run)
+        except GhUnusable as e:
+            log(f"stopped pruning run branches: {e}")
+            break
+        except OrchestratorError as e:
+            log(f"could not prune the branch of run {run.run_id}: {e}")
+            run.skipped = f"failed: {e}"
+        pruned.append(run)
+    return pruned
+
+
+def is_prune_candidate(s: dict, age: int, local_host: str, pid_alive, revisit: bool) -> bool:
+    """Whether prune may touch the run's branch: one it made and opened a pull request for, and that no
+    orchestrator drives now. A run without a pull request may hold the Builder's uncommitted work."""
+    branch, cleanup = s.get("branch"), s.get("branch_cleanup")
+    if not (isinstance(branch, str) and branch.startswith(BRANCH_PREFIX) and s.get("pr_url")):
+        return False
+    if cleanup and not (revisit and cleanup.startswith(BRANCH_KEPT)):
+        return False
+    health = run_health(s, age, local_host, pid_alive)
+    return not (health and health[0] == RUNNING)
+
+
+def prune_run(host: Host, cwd: str, saved: dict, run: PrunedRun, now: float, checked_out: dict[str, str],
+              dry_run: bool) -> None:
+    """Decide each side of one run's branch, delete what may go and record the result in its state.json."""
+    state = RunState.from_dict(saved)
+    number = state.pr_url.rstrip("/").rsplit("/", 1)[-1]
+    pr = host.pull_request(cwd, state.pr_url)
+    if why := pull_request_pending(pr, number, now):
+        run.skipped = why
+        return
+    head = pr["headRefOid"]
+    # Each side is decided on its own, so keeping one does not keep the other.
+    run.remote, remote_kept = prune_remote(host, cwd, state.branch, head, number, dry_run)
+    run.local, local_kept = prune_local(host, cwd, state.branch, head, number, checked_out, dry_run)
+    kept = [why for why in (local_kept, remote_kept) if why]
+    run.cleanup = BRANCH_KEPT + "; ".join(kept) if kept else BRANCH_DELETED
+    if not dry_run:
+        record_cleanup(host, f"{cwd}/{RUNS_DIR}/{state.run_id}/state.json", saved, run.cleanup)
+
+
+def pull_request_pending(pr: dict, number: str, now: float) -> str | None:
+    """Why the pull request's branch stays for now; None once it is merged, or closed for CLOSED_BRANCH_GRACE."""
+    if pr["state"] == "MERGED":
+        return None
+    if pr["state"] != "CLOSED":
+        return f"PR #{number} is {pr['state'].lower()}"
+    try:
+        closed = datetime.fromisoformat(pr["closedAt"]).timestamp()
+    except (TypeError, ValueError) as e:
+        raise OrchestratorError(f"PR #{number} is closed at {pr['closedAt']!r}, which is not a time") from e
+    if now - closed > CLOSED_BRANCH_GRACE:
+        return None
+    return f"PR #{number} was closed less than {CLOSED_BRANCH_GRACE // 86400} days ago"
+
+
+def prune_remote(host: Host, cwd: str, branch: str, head: str, number: str,
+                 dry_run: bool) -> tuple[str, str | None]:
+    """What became of origin's branch, and why it was kept, if it was."""
+    tip = host.remote_branch_commit(cwd, branch)
+    if tip is None:
+        if not dry_run:
+            host.delete_tracking_ref(cwd, branch)
+        return "gone", None
+    if tip != head:
+        why = f"remote has commits beyond PR #{number}"
+        return f"{BRANCH_KEPT}{why}", why
+    if not dry_run:
+        host.delete_remote_branch_at(cwd, branch, head)
+    return deletion(dry_run), None
+
+
+def prune_local(host: Host, cwd: str, branch: str, head: str, number: str, checked_out: dict[str, str],
+                dry_run: bool) -> tuple[str, str | None]:
+    """What became of the local branch, and why it was kept, if it was."""
+    if branch in checked_out:
+        why = f"checked out in {checked_out[branch]}"
+        return f"{BRANCH_KEPT}{why}", why
+    tip = host.branch_commit(cwd, branch)
+    if tip is None:
+        return "gone", None
+    if tip != head:
+        if not host.has_commit(cwd, head):
+            why = f"PR #{number}'s head {head[:12]} is not in this clone; fetch it to decide"
+            return f"{BRANCH_KEPT}{why}", why
+        if not host.is_ancestor(cwd, tip, head):
+            n = host.commits_beyond(cwd, head, branch)
+            why = f"local has {n} commit{'s' if n != 1 else ''} beyond PR #{number}"
+            return f"{BRANCH_KEPT}{why}", why
+    if not dry_run:
+        host.delete_branch(cwd, branch)
+    return deletion(dry_run), None
+
+
+def deletion(dry_run: bool) -> str:
+    return "would be deleted" if dry_run else BRANCH_DELETED
+
+
+def record_cleanup(host: Host, path: str, saved: dict, cleanup: str) -> None:
+    """Add branch_cleanup to the run's state.json, unless the run has saved since it was read.
+
+    The file keeps its modification time, which is the run's heartbeat: a stale run must not look live.
+    """
+    text = host.read(path)
+    try:
+        unchanged = text is not None and json.loads(text) == saved
+    except ValueError as e:
+        raise OrchestratorError(f"corrupt {path}: {e}") from e
+    if not unchanged:
+        raise OrchestratorError(f"{path} changed while its branch was pruned; branch_cleanup is not recorded")
+    host.write(path, json.dumps({**saved, "branch_cleanup": cleanup}) + "\n", keep_mtime=True)
+
+
+def print_pruned(pruned: list[PrunedRun]) -> None:
+    if not pruned:
+        print("No run branches to prune.")
+    for run in pruned:
+        print(run.line)
+
+
+def sweep_summary(pruned: list[PrunedRun]) -> str | None:
+    """The one line a run logs about the branches of earlier runs it pruned; None when it did nothing."""
+    deleted = sum(run.cleanup == BRANCH_DELETED and BRANCH_DELETED in (run.local, run.remote) for run in pruned)
+    kept = sum(bool(run.cleanup and run.cleanup.startswith(BRANCH_KEPT)) for run in pruned)
+    parts = []
+    if deleted:
+        parts.append(f"deleted {branches(deleted)} of earlier runs")
+    if kept:
+        parts.append(f"kept {kept}, see prune" if deleted else f"kept {branches(kept)} of earlier runs, see prune")
+    return "; ".join(parts) or None
+
+
+def branches(n: int) -> str:
+    return f"{n} branch" if n == 1 else f"{n} branches"
+
+
+def sweep_branches(host: Host, cwd: str) -> None:
+    """Prune the branches of earlier runs, as a new run starts; nothing that goes wrong stops the run."""
+    try:
+        pruned = prune_branches(host, cwd, time.time, socket.gethostname(), pid_alive)
+    except OrchestratorError as e:
+        log(f"could not prune the branches of earlier runs: {e}")
+        return
+    if line := sweep_summary(pruned):
+        log(line)
+
+
 def print_workflows() -> None:
     for name in sorted(WORKFLOWS):
         print_workflow(name, "built in", WORKFLOWS[name])
@@ -3443,13 +3737,13 @@ def main(argv: list[str]) -> int:
             return gui_command(args.smoke_test)
         herdr, host = connect(args.machine)
         cwd = host.resolve_dir(args.cwd or os.getcwd())
-        if args.command == "list":
-            print_runs(host.run_states(cwd), socket.gethostname(), pid_alive, target_args(args))
-            return 0
-        if args.command == "show":
-            show_run(host, cwd, args.run_ref, socket.gethostname(), pid_alive, target_args(args))
+        if args.command in RUNS_COMMANDS:
+            runs_command(args, host, cwd)
             return 0
         spec = read_spec_file(args.spec) if args.command == "run" and args.spec is not None else None
+        # Only a run that opens a pull request: a --no-pr run's project may have no gh.
+        if args.command == "run" and not args.no_pr:
+            sweep_branches(host, cwd)
         state, pipeline = new_state(args, cwd, spec) if args.command == "run" else resumed_state(args, host, cwd)
         workflow = Workflow(
             herdr, host, state, notify=notify_locally,
@@ -3467,6 +3761,20 @@ def main(argv: list[str]) -> int:
         print(f"interrupted; the role agents keep running in herdr{hint}", file=sys.stderr)
         return EXIT_INTERRUPTED
     return finish(verdict, state, pipeline)
+
+
+# The commands about a project's runs, which start none.
+RUNS_COMMANDS = ("list", "show", "prune")
+
+
+def runs_command(args: argparse.Namespace, host: Host, cwd: str) -> None:
+    local_host = socket.gethostname()
+    if args.command == "list":
+        print_runs(host.run_states(cwd), local_host, pid_alive, target_args(args))
+    elif args.command == "show":
+        show_run(host, cwd, args.run_ref, local_host, pid_alive, target_args(args))
+    else:
+        print_pruned(prune_branches(host, cwd, time.time, local_host, pid_alive, dry_run=args.dry_run, revisit=True))
 
 
 def workflows_command(ref: str | None) -> None:
