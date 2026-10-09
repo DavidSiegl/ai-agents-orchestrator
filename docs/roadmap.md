@@ -58,9 +58,3 @@ between the engine and the candidates below:
 | **research / spike** | Spec Collector, Researcher, Critic | `question.md`, `findings-{n}.md`, `critique-{n}.md` | F, H; D for the critic's verdict |
 | **panel review** | Spec Collector, Builder, two or three Reviewers (e.g. correctness, security) | `spec.md`, `build-{n}.md`, `review-<lens>-{n}.md` | C, E |
 | **solo** | Builder, with or without a Spec Collector | `spec.md` (optional), `build.md` | none |
-
-## Known issues
-
-- **A resume can publish from the wrong branch.** The run switches to its branch only in the spec phase. If you
-  check out another branch before resuming a later phase, the commit lands there, and the push is of the run's
-  branch.

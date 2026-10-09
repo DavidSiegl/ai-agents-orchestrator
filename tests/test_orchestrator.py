@@ -1357,6 +1357,9 @@ class TestResume(unittest.TestCase):
 
 class TestResumePullRequest(unittest.TestCase):
     BRANCH = "orchestrator/add-a-token-bucket-rate-limiter-a1b2c3"
+    ON_BRANCH = ("rev-parse", "--abbrev-ref", "HEAD")
+    # The git commands that would change the tree, the branch or origin.
+    MUTATING = ("add", "commit", "merge", "push", "switch")
 
     def test_run_saved_before_pull_requests_opens_none(self):
         saved = asdict(saved_run("review", 1, agents=("spec", "build", "review")))
@@ -1415,7 +1418,9 @@ class TestResumePullRequest(unittest.TestCase):
         wf, herdr, host, _ = resume(state, {}, host=host)
 
         self.assertEqual(wf.run(), APPROVE)
-        self.assertEqual(host.git_calls[:3], [("rev-parse", "-q", "--verify", "MERGE_HEAD"), ("merge", "--abort"),
+        # The branch is checked at the start and again in _publish, before anything touches the tree.
+        self.assertEqual(host.git_calls[:5], [self.ON_BRANCH, self.ON_BRANCH,
+                                              ("rev-parse", "-q", "--verify", "MERGE_HEAD"), ("merge", "--abort"),
                                               ("status", "--porcelain")])
         self.assertFalse([c for c in host.git_calls if c[0] in ("add", "commit")])
         # The merge is tried again, conflicts again, and is aborted again.
@@ -1433,6 +1438,106 @@ class TestResumePullRequest(unittest.TestCase):
         self.assertEqual(host.prs, [])
         self.assertEqual(host.git_calls, [("switch", "--quiet", "main")])
         self.assertEqual(wf.state.phase, "done")
+
+    def pr_run(self, phase, **kw):
+        return saved_run(phase, 1, agents=("spec", "build", "review"), pull_request=True,
+                         base_branch="main", branch=self.BRANCH, **kw)
+
+    def assert_refused(self, wf, host, current):
+        """The run fails naming both branches, state.json records it as resumable, and nothing in git_calls
+        changed the tree, the branch or origin."""
+        with self.assertRaises(OrchestratorError) as raised:
+            wf.run()
+        message = str(raised.exception)
+        self.assertEqual(message, f"/proj is on {current}, not {self.BRANCH}, which holds this run's change; "
+                                  f"check out {self.BRANCH} and resume")
+        saved = json.loads(host.files[f"{wf.state.dir}/state.json"])
+        self.assertEqual((saved["error"], saved["owner"]), (message, None))
+        self.assertFalse([c for c in host.git_calls if c[0] in self.MUTATING])
+        self.assertEqual(host.prs, [])
+        return saved
+
+    def test_resume_on_another_branch_fails_before_any_turn(self):
+        for current in ("main", "HEAD"):  # HEAD: detached
+            for phase in ("build", "review", "quality"):
+                with self.subTest(current=current, phase=phase):
+                    host = FakeHost(branch=current)
+                    host.changed.add("/proj/limiter.py")
+                    fake = FakeCI()
+                    if phase == "quality":
+                        state = quality_state(pull_request=True, base_branch="main", branch=self.BRANCH)
+                        wf, herdr, *_ = resume_gated(state, {"build": [fix_turn(1, 1)]}, fake, host=host)
+                    else:
+                        wf, herdr, *_ = resume(self.pr_run(phase), {
+                            "build": [build_turn(1)], "review": [review_turn(1, APPROVE)],
+                        }, host=host, ci=ci_for(fake))
+                    saved = self.assert_refused(wf, host, current)
+                    self.assertEqual(saved["phase"], phase)
+                    self.assertEqual(herdr.calls, [])
+                    self.assertEqual(fake.requests, [])
+                    self.assertEqual(host.git_calls, [self.ON_BRANCH])
+
+    def test_publish_resumed_on_another_branch_touches_nothing(self):
+        host = FakeHost(head="def456", branch="main")
+        host.changed, host.merge_head = {"/proj/limiter.py"}, True
+        wf, herdr, *_ = resume(self.pr_run("publish", verdict=APPROVE), {}, host=host)
+
+        self.assert_refused(wf, host, "main")
+        self.assertEqual(host.git_calls, [self.ON_BRANCH])
+        self.assertTrue(host.merge_head)
+
+    def test_branch_switched_during_a_turn_is_refused_before_the_commit(self):
+        def switching(turn):
+            def wrapped(prompt, state, host):
+                host.branch = "main"
+                # From here on, git_calls holds only what ran after the switch.
+                host.git_calls.clear()
+                return turn(prompt, state, host)
+            return wrapped
+
+        for role in ("build", "review"):
+            with self.subTest(role=role):
+                script = {"spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}
+                script[role] = [switching(script[role][0])]
+                wf, herdr, host, _ = make_workflow(script)
+
+                saved = self.assert_refused(wf, host, "main")
+                self.assertEqual(saved["phase"], "publish")
+                self.assertEqual(host.git_calls, [self.ON_BRANCH])
+
+                host.branch = self.BRANCH
+                wf2, *_ = resume(RunState.from_dict(saved), {}, host=host)
+                self.assertEqual(wf2.run(), APPROVE)
+                self.assertEqual([(p["base"], p["head"]) for p in host.prs], [("main", self.BRANCH)])
+                self.assertEqual(len([c for c in host.git_calls if c[0] == "commit"]), 1)
+                self.assertIsNone(wf2.state.error)
+
+    @patch.object(Host, "resolve_dir", return_value="/proj")
+    @patch.dict("os.environ", {"HERDR_ENV": "1"})
+    def test_cli_exits_1_on_another_branch(self, _resolve):
+        state = self.pr_run("review")
+        host = FakeHost(branch="main")
+        herdr = FakeHerdr(host, state, {})
+        with patch.object(Host, "run_states", return_value=[(10**4, asdict(state))]), \
+                patch("orchestrator.connect", return_value=(herdr, host)), patch("sys.stderr") as err:
+            self.assertEqual(main(["resume", "a1b2c3"]), orchestrator.EXIT_ERROR)
+        self.assertIn(f"check out {self.BRANCH} and resume", "".join(c.args[0] for c in err.write.call_args_list))
+        saved = json.loads(host.files[f"{state.dir}/state.json"])
+        self.assertIn("check out", saved["error"])
+        self.assertIsNone(saved["owner"])
+        self.assertEqual(herdr.calls, [])
+
+    def test_runs_without_a_branch_to_guard_are_not_checked(self):
+        cases = {
+            "no-pr": (saved_run("build", 1, agents=("spec", "build", "review")),
+                      {"build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}),
+            "pr_url set": (self.pr_run("publish", verdict=APPROVE, pr_url="https://github.com/o/r/pull/7"), {}),
+        }
+        for name, (state, script) in cases.items():
+            with self.subTest(name):
+                wf, herdr, host, _ = resume(state, script, host=FakeHost(branch="feature"))
+                self.assertEqual(wf.run(), APPROVE)
+                self.assertNotIn(self.ON_BRANCH, host.git_calls)
 
     @patch.object(Workflow, "__init__", return_value=None)
     @patch.object(Workflow, "run", return_value=APPROVE)
@@ -3653,7 +3758,7 @@ class TestSavedBeforeWorkflows(unittest.TestCase):
         }
         for phase, (state, script, files) in cases.items():
             with self.subTest(phase=phase):
-                host = FakeHost(head="def456" if phase == "publish" else "abc123")
+                host = FakeHost(head="def456" if phase == "publish" else "abc123", branch=state.branch or "main")
                 wf, *_ = resume(self.old(state), script, host=host, files=files)
                 self.assertEqual(wf.state.workflow, "default")
                 self.assertEqual(wf.run(), APPROVE)
@@ -4131,7 +4236,7 @@ class TestWorkflowWithoutAVerdict(unittest.TestCase):
     def test_a_resume_at_publish_keeps_the_outcome(self):
         state = saved_run("publish", 1, agents=("build",), pull_request=True, base_branch="main",
                           branch="orchestrator/x-a1b2c3", verdict=orchestrator.FINISHED, workflow="solo")
-        wf, _, host, _ = resume(state, {}, host=FakeHost(head="def456"), pipeline=SOLO)
+        wf, _, host, _ = resume(state, {}, host=FakeHost(head="def456", branch=state.branch), pipeline=SOLO)
         self.assertEqual(wf.run(), orchestrator.FINISHED)
         self.assertFalse(host.prs[0]["draft"])
 
