@@ -135,6 +135,9 @@ python orchestrator.py list --machine <machine> --cwd ~/GitHub/myproject
 # One run in full: its state, branch and pull request, agents, handoff files and last review
 python orchestrator.py show e292fb --machine <machine> --cwd ~/GitHub/myproject
 
+# Delete the branches of runs whose pull request is merged, or closed 14 days ago; --dry-run only prints
+python orchestrator.py prune --dry-run --machine <machine> --cwd ~/GitHub/myproject
+
 # Continue a stopped run, by its run id or the six-character key at its end
 python orchestrator.py resume e292fb --machine <machine> --cwd ~/GitHub/myproject
 
@@ -173,6 +176,7 @@ python orchestrator.py gui
 | `--quality-gate JOB` | `run` only: after each Builder turn, analyse the change with this Jenkins job, by its full name with folders, and SonarQube, and send the findings back to the Builder before the Reviewer. Needs `JENKINS_URL`, `JENKINS_USER`, `JENKINS_TOKEN`, `SONAR_HOST_URL` and `SONAR_TOKEN`, from the environment or `~/.config/ai-agents-orchestrator/ci.env`. |
 | `--max-quality-rounds N` | With the gate: SonarQube analyses per review round before the Reviewer gets the change anyway (default 3). |
 | `--force` | `resume` only: take over a run that still looks alive. |
+| `--dry-run` | `prune` only: print what would become of each branch, and delete and record nothing. |
 
 A run saves its settings. `resume` takes the same flags as `run` except `--no-pr`, `--quality-gate`,
 `--workflow`, `--workflow-file` and `--spec`, and a flag given to `resume` overrides the saved value; one left out keeps it.
@@ -215,7 +219,9 @@ since, the agent starts a fresh session instead.
 1. **Workspace.** The run gets its own herdr workspace, with a pane per role. The project must be on a branch
    with a clean working tree; the pull request targets that branch. That branch is fetched from `origin` and
    fast-forwarded, so the Spec Collector reads current code. If that fails, for example offline or because the
-   local branch has diverged from `origin`'s, the run stops before the interview.
+   local branch has diverged from `origin`'s, the run stops before the interview. Before all that, a run that
+   will open a pull request deletes the branches of earlier runs whose pull request is done, as `prune` does,
+   skipping any it kept before; a failure there is logged and the run goes on.
 2. **Spec Collector.** A notification tells you it is waiting. Answer its questions in its pane; once you
    approve the spec, it writes `spec.md`. With `--spec FILE` there is no interview: `FILE` is copied to
    `spec.md`, no Spec Collector starts, and the Builder takes the root pane.
@@ -237,7 +243,7 @@ since, the agent starts a fresh session instead.
    a draft if changes were still requested after the last round. If the merge conflicts, it is aborted, the
    branch is pushed without it, and the pull request is a draft whose description starts with a warning listing
    the conflicting files; you resolve them. The project goes back to its starting branch, and the workspace is
-   closed.
+   closed. The branch stays, locally and on `origin`, until a later run's sweep or `prune` deletes it.
 
 One run at a time per checkout: runs in one project directory share its working tree, so a run, `--no-pr`
 or not, refuses to start or resume while another run there is `running` (see `list`). A stale, finished or
@@ -253,7 +259,11 @@ branch; close the workspace in herdr when done.
 out, and names the one to check out. `list` marks a run `stale` after five minutes without a
 heartbeat ([Stale runs](docs/design.md#stale-runs)). `show` prints one run in full, without opening
 `state.json`: its `list` line and whole task, its workflow, branch and pull request, each role's agent and pane,
-the paths of its handoff files, and the last review. You get a herdr notification when a role is blocked or idle
+the paths of its handoff files, the last review, and what `prune` did with its branch. `prune` deletes the
+branch of each run whose pull request is merged, or closed for 14 days, locally and on `origin`, and prints a
+line per run. It keeps a side that has commits the pull request lacks, and a local branch checked out in any
+worktree; a later `prune` looks at kept branches again
+([Deleting run branches](docs/design.md#deleting-run-branches)). You get a herdr notification when a role is blocked or idle
 for 3 minutes ([When the orchestrator needs you](docs/design.md#when-the-orchestrator-needs-you)).
 See also [design decisions](docs/design.md), [architecture](docs/architecture.md), [roadmap](docs/roadmap.md)
 and [quality gate](docs/quality-gate.md).

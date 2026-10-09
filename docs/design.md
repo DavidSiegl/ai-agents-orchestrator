@@ -50,6 +50,27 @@ after claiming its own `state.json`, a run that starts or resumes stops with an 
 `running`. A stale, finished or failed run does not block, and `--force` does not override the check, which is
 about a different run. Two runs that start together each see the other's claim and both stop.
 
+## Deleting run branches
+
+A run that opens a pull request leaves its branch `orchestrator/<slug>-<key>` locally and on `origin`. `prune`
+deletes it once the pull request is merged, or has been closed for 14 days, and every run that will open a pull
+request does the same sweep before it starts; the sweep passes over branches it kept before, `prune` looks at
+them again. Only a run's own recorded branch is a candidate, and only when the run has a pull request and is not
+`running`. A run without one may hold the Builder's uncommitted work, so it is never touched. The pull request's
+state and head commit come from `gh pr view`, run where the project is.
+
+**Invariant:** a branch is deleted only when everything on it is reachable from its pull request's head commit.
+The local branch goes when its tip is that commit or an ancestor of it, which is why it is deleted with
+`git branch -D`: `-d` checks against HEAD or the upstream, and refuses a squash-merged branch. `origin`'s goes only
+while it is at that commit, under `--force-with-lease`, so a push that lands meanwhile fails the delete. A side
+with more commits, or a local branch checked out in any worktree, is kept, and the reason is recorded as the
+run's `branch_cleanup` (`kept: …`, or `deleted` when both sides are gone). The record is added to `state.json`
+without changing its modification time, so a stale run does not look live again.
+
+**Recovery:** GitHub keeps `refs/pull/<n>/head` after a branch is deleted, so every deleted branch can come back
+from its pull request: with the pull request's "Restore branch" button, or with
+`git fetch origin pull/<n>/head:<branch>`.
+
 ## When the orchestrator needs you
 
 A role's turn ends when it writes its handoff file, not when herdr reports it `idle` or `done`: an agent can

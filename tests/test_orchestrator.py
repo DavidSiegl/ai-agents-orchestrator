@@ -58,6 +58,16 @@ class FakeHost(Host):
     - `diff`: what `git diff -U0` from the base to a snapshot prints.
     - `has_origin`: whether the checkout has an origin at all.
     - `ages`: the seconds since each run's state.json was written, by run id; 0 for one not listed.
+
+    For prune, which also reads `remote`:
+
+    - `branches`: the local branches besides the checked-out one, by name, with their commit.
+    - `tracking`: the branches origin/<name> exists for.
+    - `worktrees`: the linked worktrees' branches, by path; /proj has `branch` checked out.
+    - `ancestors`: (commit, of) pairs where commit is an ancestor of of.
+    - `ahead`: by branch, the commits it has beyond the commit rev-list --count compares it to.
+    - `missing_commits`: commits this clone lacks.
+    - `pull_requests`: what `gh pr view` prints, by URL: a dict, or a completed process for a failure.
     """
 
     def __init__(self, head="abc123", branch="main"):
@@ -79,6 +89,15 @@ class FakeHost(Host):
         self.diff = ""
         self.has_origin = True
         self.ages = {}
+        self.branches = {}
+        self.tracking = set()
+        self.worktrees = {}
+        self.ancestors = set()
+        self.ahead = {}
+        self.missing_commits = set()
+        self.pull_requests = {}
+        self.gh_calls = []
+        self.mtime_kept = []  # every path written with keep_mtime
 
     def snapshot(self, cwd, parent, message):
         self.snapshots.append((parent, message))
@@ -87,8 +106,10 @@ class FakeHost(Host):
     def read(self, path):
         return self.files.get(path)
 
-    def write(self, path, text):
+    def write(self, path, text, keep_mtime=False):
         self.writes.append(path)
+        if keep_mtime:
+            self.mtime_kept.append(path)
         self.files[path] = text
         if not path.startswith("/proj/.orchestrator/"):
             self.changed.add(path)
@@ -161,7 +182,41 @@ class FakeHost(Host):
                 if not self.has_origin:
                     return completed(stderr="error: No such remote 'origin'", returncode=2)
                 return completed("git@github.com:o/r.git\n")
+            case ("ls-remote", "origin", ref):
+                b = ref.removeprefix("refs/heads/")
+                return completed(f"{self.remote[b]}\t{ref}\n" if b in self.remote else "")
+            case ("push", "--quiet", lease, "origin", "--delete", ref) if lease.startswith("--force-with-lease="):
+                b = ref.removeprefix("refs/heads/")
+                if lease != f"--force-with-lease={ref}:{self.remote.get(b)}":
+                    return completed(stderr=f" ! [rejected]        {b} (stale info)", returncode=1)
+                del self.remote[b]
+                self.tracking.discard(b)
+            case ("update-ref", "-d", ref):
+                self.tracking.discard(ref.removeprefix("refs/remotes/origin/"))
+            case ("rev-parse", "-q", "--verify", ref) if ref.startswith("refs/heads/"):
+                b = ref.removeprefix("refs/heads/")
+                return completed(f"{self.branches[b]}\n") if b in self.branches else completed(returncode=1)
+            case ("rev-parse", "-q", "--verify", obj) if obj.endswith("^{commit}"):
+                return completed(returncode=1 if obj.removesuffix("^{commit}") in self.missing_commits else 0)
+            case ("merge-base", "--is-ancestor", commit, of):
+                return completed(returncode=0 if commit == of or (commit, of) in self.ancestors else 1)
+            case ("rev-list", "--count", commits):
+                return completed(f"{self.ahead[commits.partition('..refs/heads/')[2]]}\n")
+            case ("branch", "--quiet", "-D", b):
+                del self.branches[b]
+            case ("worktree", "list", "--porcelain"):
+                trees = {"/proj": self.branch, **self.worktrees}
+                return completed("".join(f"worktree {path}\nHEAD {'0' * 40}\nbranch refs/heads/{b}\n\n"
+                                         for path, b in trees.items()))
         return completed()
+
+    def gh_run(self, cwd, *args):
+        self.gh_calls.append(args)
+        match args:
+            case ("pr", "view", url, "--json", "state,headRefOid,closedAt"):
+                pr = self.pull_requests[url]
+                return pr if isinstance(pr, subprocess.CompletedProcess) else completed(json.dumps(pr))
+        raise AssertionError(f"FakeHost got an unscripted gh command: {args}")
 
     def create_pr(self, cwd, base, head, title, body, draft):
         self.prs.append({"base": base, "head": head, "title": title, "body": body, "draft": draft})
@@ -1171,6 +1226,82 @@ class TestHostGit(unittest.TestCase):
         self.assertEqual(self.head(self.a), mine)
         self.assertEqual(self.sh("git", "-C", self.a, "status", "--porcelain"), "")
 
+    def pushed_run_branch(self):
+        """A run branch with one commit, pushed from A; returns its commit."""
+        self.sh("git", "-C", self.a, "switch", "--quiet", "-c", "orchestrator/x-a1b2c3")
+        head = self.commit(self.a, "x.py", "x\n")
+        self.sh("git", "-C", self.a, "push", "--quiet", "origin", "orchestrator/x-a1b2c3")
+        self.sh("git", "-C", self.a, "switch", "--quiet", "main")
+        return head
+
+    def test_lease_guarded_delete_at_the_expected_commit(self):
+        head = self.pushed_run_branch()
+        self.assertEqual(self.host.remote_branch_commit(self.a, "orchestrator/x-a1b2c3"), head)
+        self.host.delete_remote_branch_at(self.a, "orchestrator/x-a1b2c3", head)
+        self.assertIsNone(self.host.remote_branch_commit(self.a, "orchestrator/x-a1b2c3"))
+        self.assertEqual(self.sh("git", "-C", self.a, "for-each-ref", "refs/remotes/origin/orchestrator/"), "")
+
+    def test_lease_guarded_delete_refuses_a_branch_that_moved(self):
+        head = self.pushed_run_branch()
+        self.sh("git", "-C", self.b, "fetch", "--quiet", "origin", "orchestrator/x-a1b2c3:orchestrator/x-a1b2c3")
+        self.sh("git", "-C", self.b, "switch", "--quiet", "orchestrator/x-a1b2c3")
+        moved = self.commit(self.b, "x.py", "x\ntheirs\n")
+        self.sh("git", "-C", self.b, "push", "--quiet", "origin", "orchestrator/x-a1b2c3")
+
+        with self.assertRaisesRegex(OrchestratorError, "(?s)--force-with-lease=refs/heads/orchestrator/x-a1b2c3:"
+                                                       f"{head} origin --delete .* failed: .*stale info"):
+            self.host.delete_remote_branch_at(self.a, "orchestrator/x-a1b2c3", head)
+        self.assertEqual(self.host.remote_branch_commit(self.a, "orchestrator/x-a1b2c3"), moved)
+
+    def test_remote_branch_commit_is_the_exact_name(self):
+        self.pushed_run_branch()
+        self.assertIsNone(self.host.remote_branch_commit(self.a, "x-a1b2c3"))
+
+    def test_checked_out_branches_of_every_worktree(self):
+        wt = f"{self.dir}/wt"
+        self.sh("git", "-C", self.a, "worktree", "add", "--quiet", "-b", "orchestrator/y-a1b2c3", wt)
+        self.assertEqual(self.host.checked_out_branches(self.a),
+                         {"main": os.path.realpath(self.a), "orchestrator/y-a1b2c3": os.path.realpath(wt)})
+        self.assertEqual(self.host.checked_out_branches(wt), self.host.checked_out_branches(self.a))
+
+    def test_local_branch_steps(self):
+        head = self.pushed_run_branch()
+        older = self.sh("git", "-C", self.a, "rev-parse", "main").strip()
+        self.assertEqual(self.host.branch_commit(self.a, "orchestrator/x-a1b2c3"), head)
+        self.assertIsNone(self.host.branch_commit(self.a, "orchestrator/none"))
+        self.assertTrue(self.host.is_ancestor(self.a, older, head))
+        self.assertFalse(self.host.is_ancestor(self.a, head, older))
+        self.assertEqual(self.host.commits_beyond(self.a, older, "orchestrator/x-a1b2c3"), 1)
+        self.assertTrue(self.host.has_commit(self.a, head))
+        self.assertFalse(self.host.has_commit(self.a, "f" * 40))
+        self.host.delete_tracking_ref(self.a, "orchestrator/x-a1b2c3")
+        self.host.delete_tracking_ref(self.a, "orchestrator/x-a1b2c3")
+        self.assertEqual(self.sh("git", "-C", self.a, "for-each-ref", "refs/remotes/origin/orchestrator/"), "")
+        self.host.delete_branch(self.a, "orchestrator/x-a1b2c3")
+        self.assertIsNone(self.host.branch_commit(self.a, "orchestrator/x-a1b2c3"))
+
+    def test_prune_on_real_git(self):
+        """A squash-merged run branch: local behind the PR head, origin at it."""
+        self.sh("git", "-C", self.a, "switch", "--quiet", "-c", "orchestrator/x-a1b2c3")
+        behind = self.commit(self.a, "x.py", "x\n")
+        head = self.commit(self.a, "x.py", "x\ny\n")
+        self.sh("git", "-C", self.a, "push", "--quiet", "origin", "orchestrator/x-a1b2c3")
+        self.sh("git", "-C", self.a, "reset", "--quiet", "--hard", behind)
+        self.sh("git", "-C", self.a, "switch", "--quiet", "main")
+        state = RunState("20261001-120000-a1b2c3", "x", self.a, None, phase="done", verdict=APPROVE,
+                         branch="orchestrator/x-a1b2c3", pr_url="https://github.com/o/r/pull/7")
+        self.host.write(f"{state.dir}/state.json", json.dumps(asdict(state)) + "\n")
+        gh = {"state": "MERGED", "headRefOid": head, "closedAt": "2026-10-01T12:00:00Z"}
+        self.host.gh_run = lambda cwd, *args: completed(json.dumps(gh))
+
+        with patch("sys.stderr"):
+            [run] = orchestrator.prune_branches(self.host, self.a, time.time, "here", lambda pid: False)
+        self.assertEqual((run.local, run.remote, run.cleanup), ("deleted", "deleted", "deleted"))
+        self.assertEqual(self.sh("git", "-C", self.a, "for-each-ref", "refs/heads/orchestrator/",
+                                 "refs/remotes/origin/orchestrator/"), "")
+        self.assertIsNone(self.host.remote_branch_commit(self.a, "orchestrator/x-a1b2c3"))
+        self.assertEqual(json.loads(self.host.read(f"{state.dir}/state.json"))["branch_cleanup"], "deleted")
+
 
 class TestCLI(unittest.TestCase):
     def test_machine_requires_cwd(self):
@@ -2176,6 +2307,18 @@ class TestAtomicWrite(unittest.TestCase):
             [(age, state)] = host.run_states(d)
             self.assertEqual(state["phase"], "build")
             self.assertLess(age, 5)
+
+    def test_keep_mtime(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            host, path = Host(), f"{d}/state.json"
+            host.write(path, "old\n")
+            os.utime(path, (1_000_000_000, 1_000_000_000))
+            host.write(path, "new\n", keep_mtime=True)
+            self.assertEqual((host.read(path), os.stat(path).st_mtime), ("new\n", 1_000_000_000))
+            self.assertEqual(os.listdir(d), ["state.json"])
+            host.write(path, "newer\n")
+            self.assertGreater(os.stat(path).st_mtime, 1_000_000_000)
 
 
 
@@ -5946,6 +6089,15 @@ class TestShow(unittest.TestCase):
         for label in ("branch", "base", "pr", "conflicts"):
             self.assertNotRegex(out, rf"(?m)^{label} ")
 
+    def test_branch_cleanup_once_set(self):
+        published = show_state(branch="orchestrator/x-a1b2c3", pr_url="https://github.com/o/r/pull/7")
+        _, out, _ = self.show(ShowHost({**published, "branch_cleanup": "kept: checked out in /proj"}))
+        self.assertIn("pr         https://github.com/o/r/pull/7\ncleanup    kept: checked out in /proj\n", out)
+
+        for saved in (published, {**published, "branch_cleanup": None}):
+            _, out, _ = self.show(ShowHost(saved))
+            self.assertNotRegex(out, r"(?m)^cleanup ")
+
     def test_every_agent_with_its_kind_and_pane(self):
         _, out, _ = self.show(ShowHost(show_state()))
         self.assertIn("\nagents\n"
@@ -6303,6 +6455,485 @@ class TestSpecBuildReviewExample(unittest.TestCase):
         example = orchestrator.load_workflow_file(f"{EXAMPLES}/spec-build-review.toml")
         self.assertEqual(orchestrator.workflow_definition(example),
                          orchestrator.workflow_definition(orchestrator.DEFAULT_WORKFLOW))
+
+
+# ---------------------------------------------------------------------------
+# Pruning run branches
+# ---------------------------------------------------------------------------
+
+PR_HEAD = "1" * 40
+OLDER = "2" * 40
+LATER = "3" * 40
+NOW = 1_791_500_000.0  # 2026-10-09
+
+
+def iso(seconds):
+    return orchestrator.datetime.fromtimestamp(seconds, orchestrator.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def merged(head=PR_HEAD):
+    return {"state": "MERGED", "headRefOid": head, "closedAt": iso(NOW - 86400)}
+
+
+def closed(days_ago):
+    return {"state": "CLOSED", "headRefOid": PR_HEAD, "closedAt": iso(NOW - days_ago * 86400)}
+
+
+OPEN = {"state": "OPEN", "headRefOid": PR_HEAD, "closedAt": None}
+
+
+def deleting_calls(host):
+    """The git commands host ran that delete a branch or a ref."""
+    return [c for c in host.git_calls if c[:1] == ("update-ref",) or c[:2] == ("branch", "--quiet") or "--delete" in c]
+
+
+class PruneTest(unittest.TestCase):
+    """Runs in /proj on a FakeHost, each with a pull request #<n> on branch orchestrator/task-<key>."""
+
+    def setUp(self):
+        self.host = FakeHost()
+
+    def add_run(self, key, pr, *, n=7, local=PR_HEAD, remote=PR_HEAD, branch=None, **kw):
+        """A finished run with key whose PR gh reports as pr; local and remote are where its branch is, None
+        for nowhere. Returns its run id."""
+        run_id = f"20261001-120000-{key}"
+        branch = branch or f"orchestrator/task-{key}"
+        url = f"https://github.com/o/r/pull/{n}"
+        saved = {**asdict(RunState(run_id, "a task", "/proj", None, phase="done", verdict=APPROVE,
+                                   pull_request=True, base_branch="main", branch=branch, pr_url=url)), **kw}
+        self.host.files[self.state_path(run_id)] = json.dumps(saved) + "\n"
+        self.host.pull_requests[url] = pr
+        if local:
+            self.host.branches[branch] = local
+        if remote:
+            self.host.remote[branch] = remote
+        return run_id
+
+    @staticmethod
+    def state_path(run_id):
+        return f"/proj/.orchestrator/runs/{run_id}/state.json"
+
+    def saved(self, run_id):
+        return json.loads(self.host.files[self.state_path(run_id)])
+
+    def prune(self, **kw):
+        with patch("sys.stderr", new_callable=io.StringIO) as err:
+            pruned = orchestrator.prune_branches(self.host, "/proj", lambda: NOW, "here", lambda pid: False, **kw)
+        self.log = err.getvalue()
+        return {run.run_id: run for run in pruned}
+
+
+class TestPrune(PruneTest):
+    def test_merged_at_the_pull_requests_head(self):
+        run_id = self.add_run("aaaaaa", merged())
+        self.host.tracking.add("orchestrator/task-aaaaaa")
+        run = self.prune()[run_id]
+        self.assertEqual((run.local, run.remote, run.cleanup), ("deleted", "deleted", "deleted"))
+        self.assertEqual((self.host.branches, self.host.remote, self.host.tracking), ({}, {}, set()))
+        self.assertEqual(self.saved(run_id)["branch_cleanup"], "deleted")
+        self.assertEqual(self.host.mtime_kept, [self.state_path(run_id)])
+        self.assertIn(("push", "--quiet", f"--force-with-lease=refs/heads/orchestrator/task-aaaaaa:{PR_HEAD}",
+                       "origin", "--delete", "refs/heads/orchestrator/task-aaaaaa"), self.host.git_calls)
+        self.assertEqual(self.host.gh_calls,
+                         [("pr", "view", "https://github.com/o/r/pull/7", "--json", "state,headRefOid,closedAt")])
+
+    def test_local_behind_the_pull_requests_head_is_deleted(self):
+        run_id = self.add_run("aaaaaa", merged(), local=OLDER)
+        self.host.ancestors.add((OLDER, PR_HEAD))
+        run = self.prune()[run_id]
+        self.assertEqual((run.local, run.cleanup), ("deleted", "deleted"))
+        self.assertIn(("branch", "--quiet", "-D", "orchestrator/task-aaaaaa"), self.host.git_calls)
+
+    def test_local_ahead_of_the_pull_requests_head_is_kept(self):
+        run_id = self.add_run("aaaaaa", merged(), local=LATER)
+        self.host.ahead["orchestrator/task-aaaaaa"] = 3
+        run = self.prune()[run_id]
+        self.assertEqual((run.local, run.remote), ("kept: local has 3 commits beyond PR #7", "deleted"))
+        self.assertEqual(self.host.branches, {"orchestrator/task-aaaaaa": LATER})
+        self.assertEqual(self.host.remote, {})
+        self.assertEqual(self.saved(run_id)["branch_cleanup"], "kept: local has 3 commits beyond PR #7")
+        self.assertIn(("rev-list", "--count", f"{PR_HEAD}..refs/heads/orchestrator/task-aaaaaa"), self.host.git_calls)
+
+    def test_one_commit_beyond(self):
+        run_id = self.add_run("aaaaaa", merged(), local=LATER)
+        self.host.ahead["orchestrator/task-aaaaaa"] = 1
+        self.assertEqual(self.prune()[run_id].local, "kept: local has 1 commit beyond PR #7")
+
+    def test_remote_moved_past_the_pull_requests_head_is_kept(self):
+        run_id = self.add_run("aaaaaa", merged(), remote=LATER)
+        run = self.prune()[run_id]
+        self.assertEqual((run.local, run.remote), ("deleted", "kept: remote has commits beyond PR #7"))
+        self.assertEqual(self.host.remote, {"orchestrator/task-aaaaaa": LATER})
+        self.assertEqual(self.saved(run_id)["branch_cleanup"], "kept: remote has commits beyond PR #7")
+        self.assertFalse([c for c in self.host.git_calls if "--delete" in c])
+
+    def test_remote_already_gone_drops_the_stale_tracking_ref(self):
+        run_id = self.add_run("aaaaaa", merged(), remote=None)
+        self.host.tracking.add("orchestrator/task-aaaaaa")
+        run = self.prune()[run_id]
+        self.assertEqual((run.local, run.remote, run.cleanup), ("deleted", "gone", "deleted"))
+        self.assertEqual(self.host.tracking, set())
+        self.assertIn(("update-ref", "-d", "refs/remotes/origin/orchestrator/task-aaaaaa"), self.host.git_calls)
+
+    def test_checked_out_branch_is_kept(self):
+        for where in ("/proj", "/proj-wt"):
+            with self.subTest(where):
+                self.setUp()
+                run_id = self.add_run("aaaaaa", merged())
+                if where == "/proj":
+                    self.host.branch = "orchestrator/task-aaaaaa"
+                else:
+                    self.host.worktrees[where] = "orchestrator/task-aaaaaa"
+                run = self.prune()[run_id]
+                self.assertEqual((run.local, run.remote), (f"kept: checked out in {where}", "deleted"))
+                self.assertIn("orchestrator/task-aaaaaa", self.host.branches)
+                self.assertEqual(self.saved(run_id)["branch_cleanup"], f"kept: checked out in {where}")
+
+    def test_both_sides_kept_records_both_reasons(self):
+        run_id = self.add_run("aaaaaa", merged(), local=LATER, remote=LATER)
+        self.host.ahead["orchestrator/task-aaaaaa"] = 2
+        self.prune()
+        self.assertEqual(self.saved(run_id)["branch_cleanup"],
+                         "kept: local has 2 commits beyond PR #7; remote has commits beyond PR #7")
+
+    def test_pull_request_head_missing_from_the_clone_keeps_local(self):
+        run_id = self.add_run("aaaaaa", merged(), local=OLDER)
+        self.host.missing_commits.add(PR_HEAD)
+        run = self.prune()[run_id]
+        self.assertEqual(run.local, f"kept: PR #7's head {PR_HEAD[:12]} is not in this clone; fetch it to decide")
+        self.assertIn("orchestrator/task-aaaaaa", self.host.branches)
+
+    def test_pull_requests_not_done_are_skipped(self):
+        cases = {"closed 13 days ago": (closed(13), "PR #7 was closed less than 14 days ago"),
+                 "open": (OPEN, "PR #7 is open")}
+        for name, (pr, why) in cases.items():
+            with self.subTest(name):
+                self.setUp()
+                run_id = self.add_run("aaaaaa", pr)
+                before = self.host.files[self.state_path(run_id)]
+                run = self.prune()[run_id]
+                self.assertEqual(run.skipped, why)
+                self.assertIsNone(run.cleanup)
+                self.assertEqual(deleting_calls(self.host), [])
+                self.assertEqual(self.host.writes, [])
+                self.assertEqual(self.host.files[self.state_path(run_id)], before)
+                self.assertEqual(run.line, f"{run_id}  orchestrator/task-aaaaaa  skipped: {why}")
+
+    def test_closed_15_days_ago_is_deleted(self):
+        run_id = self.add_run("aaaaaa", closed(15))
+        run = self.prune()[run_id]
+        self.assertEqual((run.local, run.remote, run.cleanup), ("deleted", "deleted", "deleted"))
+        self.assertEqual((self.host.branches, self.host.remote), ({}, {}))
+
+    def test_running_run_is_skipped(self):
+        # Saved a moment ago by an orchestrator on another host: RUNNING, whatever its pid.
+        self.add_run("aaaaaa", merged(), phase="build", verdict=None,
+                     owner={"host": "elsewhere", "pid": 1, "started_at": "x"})
+        self.assertEqual(self.prune(), {})
+        self.assertEqual((self.host.gh_calls, deleting_calls(self.host)), ([], []))
+
+    def test_stale_run_is_a_candidate_and_keeps_its_age(self):
+        run_id = self.add_run("aaaaaa", merged(), phase="publish", verdict=None)
+        self.host.ages[run_id] = STALE_SECONDS + 1
+        self.assertEqual(self.prune()[run_id].cleanup, "deleted")
+        self.assertEqual(self.host.mtime_kept, [self.state_path(run_id)])
+
+    def test_branch_without_the_prefix_is_never_touched(self):
+        self.add_run("aaaaaa", merged(), branch="feature/rate-limiter")
+        self.add_run("bbbbbb", merged(), branch="main")
+        self.assertEqual(self.prune(), {})
+        self.assertEqual((self.host.gh_calls, deleting_calls(self.host)), ([], []))
+        self.assertEqual(set(self.host.branches), {"feature/rate-limiter", "main"})
+
+    def test_runs_without_a_pull_request_are_never_touched(self):
+        run_id = self.add_run("aaaaaa", merged())
+        saved = self.saved(run_id)
+        saved["pr_url"] = None
+        self.host.files[self.state_path(run_id)] = json.dumps(saved)
+        self.assertEqual(self.prune(), {})
+        self.assertEqual(self.host.gh_calls, [])
+
+    def test_recorded_runs(self):
+        done = self.add_run("aaaaaa", merged(), branch_cleanup="deleted")
+        kept = self.add_run("bbbbbb", merged(), n=8, branch_cleanup="kept: checked out in /proj")
+        self.assertEqual(self.prune(), {})
+        self.assertEqual(self.host.gh_calls, [])
+
+        pruned = self.prune(revisit=True)
+        self.assertEqual(list(pruned), [kept])
+        self.assertEqual(self.saved(kept)["branch_cleanup"], "deleted")
+        self.assertEqual(self.saved(done)["branch_cleanup"], "deleted")
+
+    def test_saved_before_prune_existed(self):
+        run_id = self.add_run("aaaaaa", merged())
+        saved = self.saved(run_id)
+        del saved["branch_cleanup"]
+        self.host.files[self.state_path(run_id)] = json.dumps(saved)
+        self.assertIsNone(RunState.from_dict(saved).branch_cleanup)
+        self.assertEqual(self.prune()[run_id].cleanup, "deleted")
+        self.assertEqual(self.saved(run_id), {**saved, "branch_cleanup": "deleted"})
+
+    def test_dry_run_deletes_and_records_nothing(self):
+        run_id = self.add_run("aaaaaa", merged(), remote=None)
+        self.host.tracking.add("orchestrator/task-aaaaaa")
+        kept = self.add_run("bbbbbb", merged(), n=8, remote=LATER)
+        pruned = self.prune(dry_run=True)
+        self.assertEqual((pruned[run_id].local, pruned[run_id].remote), ("would be deleted", "gone"))
+        self.assertEqual(pruned[kept].remote, "kept: remote has commits beyond PR #8")
+        self.assertEqual((deleting_calls(self.host), self.host.writes), ([], []))
+        self.assertEqual(len(self.host.branches), 2)
+        self.assertEqual(self.host.tracking, {"orchestrator/task-aaaaaa"})
+
+    def test_gh_failure_on_one_run_skips_only_that_run(self):
+        failing = self.add_run("aaaaaa", completed(stderr="HTTP 502: Bad Gateway", returncode=1))
+        fine = self.add_run("bbbbbb", merged(), n=8)
+        pruned = self.prune()
+        self.assertEqual(pruned[failing].skipped,
+                         "failed: gh pr view https://github.com/o/r/pull/7 --json state,headRefOid,closedAt "
+                         "failed: HTTP 502: Bad Gateway")
+        self.assertIn(f"could not prune the branch of run {failing}: gh pr view", self.log)
+        self.assertIsNone(self.saved(failing)["branch_cleanup"])
+        self.assertIn("orchestrator/task-aaaaaa", self.host.branches)
+        self.assertEqual(pruned[fine].cleanup, "deleted")
+
+    def test_rejected_lease_skips_the_run(self):
+        run_id = self.add_run("aaaaaa", merged())
+        lease = self.host.git_run
+
+        def moved_meanwhile(cwd, *args, **kw):
+            if args[:1] == ("push",):
+                self.host.remote["orchestrator/task-aaaaaa"] = LATER
+            return lease(cwd, *args, **kw)
+        self.host.git_run = moved_meanwhile
+        run = self.prune()[run_id]
+        self.assertIn("stale info", run.skipped)
+        self.assertIn(f"could not prune the branch of run {run_id}", self.log)
+        self.assertIsNone(self.saved(run_id)["branch_cleanup"])
+
+    def test_unusable_gh_stops_the_sweep_after_one_line(self):
+        for status, stderr in ((127, "sh: 1: exec: gh: not found"),
+                               (4, "To get started with GitHub CLI, please run:  gh auth login")):
+            with self.subTest(status):
+                self.setUp()
+                self.add_run("aaaaaa", completed(stderr=stderr, returncode=status))
+                self.add_run("bbbbbb", completed(stderr=stderr, returncode=status), n=8)
+                self.assertEqual(self.prune(), {})
+                self.assertEqual(len(self.host.gh_calls), 1)
+                self.assertEqual(self.log.count("\n"), 1)
+                self.assertIn(f"stopped pruning run branches: gh pr view https://github.com/o/r/pull/7 --json "
+                              f"state,headRefOid,closedAt failed with status {status}: {stderr}", self.log)
+                self.assertEqual(deleting_calls(self.host), [])
+
+    def test_unreadable_state_skips_the_run(self):
+        run_id = self.add_run("aaaaaa", merged())
+        saved = self.saved(run_id)
+        del saved["task"]
+        self.host.files[self.state_path(run_id)] = json.dumps(saved)
+        self.assertIn("is incomplete", self.prune()[run_id].skipped)
+        self.assertEqual(deleting_calls(self.host), [])
+
+    def test_state_saved_meanwhile_is_not_overwritten(self):
+        run_id = self.add_run("aaaaaa", merged())
+        view = self.host.gh_run
+
+        def resumed_meanwhile(cwd, *args):
+            self.host.files[self.state_path(run_id)] = json.dumps({**self.saved(run_id), "phase": "done", "round": 2})
+            return view(cwd, *args)
+        self.host.gh_run = resumed_meanwhile
+        self.assertIn("changed while its branch was pruned", self.prune()[run_id].skipped)
+        self.assertEqual(self.saved(run_id)["round"], 2)
+        self.assertIsNone(self.saved(run_id)["branch_cleanup"])
+
+
+class TestHostPullRequest(unittest.TestCase):
+    URL = "https://github.com/o/r/pull/7"
+
+    def view(self, proc):
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return proc
+        pr = Host(run=run).pull_request("/my proj", self.URL)
+        self.assertEqual(calls, [["sh", "-c", orchestrator.IN_DIR, "_", "/my proj",
+                                  "gh", "pr", "view", self.URL, "--json", "state,headRefOid,closedAt"]])
+        return pr
+
+    def test_state(self):
+        self.assertEqual(self.view(completed(json.dumps(merged()))), merged())
+        self.assertEqual(self.view(completed(json.dumps(OPEN))), OPEN)
+
+    def test_unexpected_output(self):
+        for out in ("not json", "[]", json.dumps({"state": "MERGED"}), json.dumps({**OPEN, "headRefOid": "main"}),
+                    json.dumps({**OPEN, "closedAt": 5})):
+            proc = completed(out)
+            with self.subTest(out), self.assertRaisesRegex(OrchestratorError, f"gh pr view {self.URL} printed"):
+                self.view(proc)
+
+    def test_unusable_gh(self):
+        logged_out = completed(stderr="gh auth login\n", returncode=4)
+        failing = completed(stderr="HTTP 502", returncode=1)
+        with self.assertRaisesRegex(orchestrator.GhUnusable, "failed with status 4: gh auth login"):
+            self.view(logged_out)
+        with self.assertRaises(OrchestratorError) as raised:
+            self.view(failing)
+        self.assertNotIsInstance(raised.exception, orchestrator.GhUnusable)
+
+    def test_closed_without_a_time(self):
+        pr = {**closed(1), "closedAt": "yesterday"}
+        with self.assertRaisesRegex(OrchestratorError, "PR #7 is closed at 'yesterday', which is not a time"):
+            orchestrator.pull_request_pending(pr, "7", NOW)
+
+
+class TestSweepSummary(PruneTest):
+    def sweep(self):
+        with patch("sys.stderr", new_callable=io.StringIO) as err:
+            orchestrator.sweep_branches(self.host, "/proj")
+        return err.getvalue()
+
+    def test_one_line_when_it_deleted_or_kept(self):
+        self.add_run("aaaaaa", merged())
+        self.add_run("bbbbbb", merged(), n=8)
+        self.add_run("cccccc", merged(), n=9, remote=LATER)
+        self.assertEqual(self.sweep(), "  deleted 2 branches of earlier runs; kept 1, see prune\n")
+
+    def test_single_branches(self):
+        self.add_run("aaaaaa", merged())
+        self.assertEqual(self.sweep(), "  deleted 1 branch of earlier runs\n")
+        self.add_run("bbbbbb", merged(), n=8, remote=LATER)
+        self.assertEqual(self.sweep(), "  kept 1 branch of earlier runs, see prune\n")
+
+    def test_nothing_when_there_was_nothing_to_do(self):
+        self.assertEqual(self.sweep(), "")
+        self.add_run("aaaaaa", OPEN)
+        self.add_run("bbbbbb", merged(), n=8, branch_cleanup="kept: checked out in /proj")
+        # Both sides already gone: recorded, but nothing deleted.
+        gone = self.add_run("cccccc", merged(), n=9, local=None, remote=None)
+        self.assertEqual(self.sweep(), "")
+        self.assertEqual(self.saved(gone)["branch_cleanup"], "deleted")
+
+    def test_a_sweep_that_fails_is_one_line(self):
+        self.add_run("aaaaaa", merged())
+        self.host.checked_out_branches = MagicMock(side_effect=OrchestratorError("git worktree list failed"))
+        self.assertEqual(self.sweep(), "  could not prune the branches of earlier runs: git worktree list failed\n")
+
+
+@patch.dict("os.environ", {"HERDR_ENV": "1"})
+class TestPruneCLI(PruneTest):
+    def main(self, *argv):
+        with patch.object(orchestrator, "connect", return_value=(None, self.host)), \
+                patch.object(Host, "resolve_dir", return_value="/proj"), \
+                patch("sys.stdout", new_callable=io.StringIO) as out, \
+                patch("sys.stderr", new_callable=io.StringIO) as err:
+            code = orchestrator.main(list(argv))
+        self.log = err.getvalue()
+        return code, out.getvalue()
+
+    def test_prints_one_line_per_candidate_run(self):
+        deleted = self.add_run("aaaaaa", merged())
+        kept = self.add_run("bbbbbb", merged(), n=8, local=LATER)
+        self.host.ahead["orchestrator/task-bbbbbb"] = 3
+        waiting = self.add_run("cccccc", OPEN, n=9)
+        code, out = self.main("prune")
+        self.assertEqual(code, 0)
+        self.assertEqual(out.splitlines(), [
+            f"{deleted}  orchestrator/task-aaaaaa  local deleted, remote deleted",
+            f"{kept}  orchestrator/task-bbbbbb  local kept: local has 3 commits beyond PR #8, remote deleted",
+            f"{waiting}  orchestrator/task-cccccc  skipped: PR #9 is open",
+        ])
+
+    def test_revisits_kept_branches(self):
+        run_id = self.add_run("aaaaaa", merged(), branch_cleanup="kept: checked out in /proj")
+        self.assertEqual(self.main("prune"),
+                         (0, f"{run_id}  orchestrator/task-aaaaaa  local deleted, remote deleted\n"))
+
+    def test_dry_run(self):
+        run_id = self.add_run("aaaaaa", merged())
+        code, out = self.main("prune", "--dry-run")
+        self.assertEqual((code, out),
+                         (0, f"{run_id}  orchestrator/task-aaaaaa  local would be deleted, remote would be deleted\n"))
+        self.assertEqual((deleting_calls(self.host), self.host.writes), ([], []))
+
+    def test_nothing_to_prune(self):
+        self.assertEqual(self.main("prune"), (0, "No run branches to prune.\n"))
+
+    def test_unusable_gh_is_not_an_error(self):
+        self.add_run("aaaaaa", completed(stderr="exec: gh: not found", returncode=127))
+        self.assertEqual(self.main("prune"), (0, "No run branches to prune.\n"))
+        self.assertEqual(self.log.count("\n"), 1)
+
+    def test_target_flags(self):
+        args = parse_args(["prune", "--dry-run", "--machine", "m", "--cwd", "~/proj"])
+        self.assertEqual((args.dry_run, args.machine, args.cwd), (True, "m", "~/proj"))
+        self.assertFalse(parse_args(["prune"]).dry_run)
+        with self.assertRaises(SystemExit), patch("sys.stderr"):
+            parse_args(["prune", "--machine", "m"])
+
+
+NEW_RUN = "20261009-120000-c0ffee"
+
+
+@patch.dict("os.environ", {"HERDR_ENV": "1"})
+class TestSweepOnRun(PruneTest):
+    """The automatic sweep: main's run, before the new run's state and its interview."""
+
+    def run_main(self, *argv, prune=None):
+        """main(argv) on the fakes, the new run taking the default workflow's turns; returns its exit status
+        and output. prune stands in for prune_branches, when given."""
+        state = RunState(NEW_RUN, "task", "/proj", None)
+        self.seen_at_interview = None
+
+        def spec(prompt, s, host):
+            self.seen_at_interview = (dict(host.branches), dict(host.remote))
+            return spec_turn(prompt, s, host)
+        herdr = FakeHerdr(self.host, state, {"spec": [spec], "build": [build_turn(1)],
+                                             "review": [review_turn(1, APPROVE)]})
+        sweep = patch.object(orchestrator, "prune_branches", prune) if prune else patch.dict({})
+        with patch.object(orchestrator, "connect", return_value=(herdr, self.host)), \
+                patch.object(Host, "resolve_dir", return_value="/proj"), \
+                patch.object(orchestrator, "new_run_id", return_value=NEW_RUN), sweep, \
+                patch("sys.stdout", new_callable=io.StringIO) as out, \
+                patch("sys.stderr", new_callable=io.StringIO) as err:
+            code = orchestrator.main(list(argv))
+        self.log = err.getvalue()
+        return code, out.getvalue()
+
+    def test_deletes_merged_branches_before_the_interview(self):
+        earlier = self.add_run("aaaaaa", merged())
+        self.assertEqual(self.run_main("run", "task")[0], 0)
+        self.assertEqual(self.seen_at_interview[0], {})
+        self.assertNotIn("orchestrator/task-aaaaaa", self.seen_at_interview[1])
+        self.assertEqual(self.saved(earlier)["branch_cleanup"], "deleted")
+        self.assertIn("  deleted 1 branch of earlier runs\n", self.log)
+
+    def test_a_failing_sweep_leaves_the_run_as_it_was(self):
+        self.add_run("aaaaaa", merged())
+        expected = self.run_main("run", "task")
+
+        self.setUp()
+        self.add_run("aaaaaa", merged())
+        failing = MagicMock(side_effect=OrchestratorError("ssh: connection reset"))
+        self.assertEqual(self.run_main("run", "task", prune=failing), expected)
+        failing.assert_called_once()
+        self.assertIsNotNone(self.seen_at_interview)
+        self.assertIn("could not prune the branches of earlier runs: ssh: connection reset", self.log)
+        self.assertIn("orchestrator/task-aaaaaa", self.host.branches)
+
+    @patch.object(Workflow, "run", return_value=APPROVE)
+    def test_no_gh_for_resume_or_no_pr(self, _run):
+        self.add_run("aaaaaa", merged())
+        resumable = saved_run("review", 1, agents=("spec", "build", "review"))
+        self.host.files[self.state_path(resumable.run_id)] = json.dumps(asdict(resumable))
+        self.host.ages[resumable.run_id] = 10**4
+        for argv in (["resume", "a1b2c3"], ["run", "task", "--no-pr"]):
+            with self.subTest(argv[0]):
+                self.host.gh_calls.clear()
+                self.assertEqual(self.run_main(*argv)[0], 0)
+                self.assertEqual(self.host.gh_calls, [])
+        self.assertIn("orchestrator/task-aaaaaa", self.host.branches)
+
+        self.run_main("run", "task")
+        self.assertEqual(len(self.host.gh_calls), 1)
 
 
 if __name__ == "__main__":
