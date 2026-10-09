@@ -1046,9 +1046,9 @@ class TestHost(unittest.TestCase):
                          ["ssh", "-o", "BatchMode=yes", "remote-host", "mv -f -- /x/review-1.md '/x/review 1.rejected.md'"])
 
     def test_rename_failure_raises(self):
-        run = MagicMock(return_value=completed(stderr="No such file or directory", returncode=1))
+        host = Host(run=MagicMock(return_value=completed(stderr="No such file or directory", returncode=1)))
         with self.assertRaisesRegex(OrchestratorError, "No such file or directory"):
-            Host(run=run).rename("/x/review-1.md", "/x/review-1.rejected.md")
+            host.rename("/x/review-1.md", "/x/review-1.rejected.md")
 
 
 class TestHostGit(unittest.TestCase):
@@ -5907,9 +5907,9 @@ class TestRunFiles(unittest.TestCase):
         self.assertIn("stat -f %m", run.call_args.args[0][4])
 
     def test_failure_raises(self):
-        run = MagicMock(return_value=completed(stderr="Permission denied", returncode=1))
+        host = Host(run=MagicMock(return_value=completed(stderr="Permission denied", returncode=1)))
         with self.assertRaisesRegex(OrchestratorError, "Permission denied"):
-            Host(run=run).run_files("/r")
+            host.run_files("/r")
 
 
 if __name__ == "__main__":

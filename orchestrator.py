@@ -3178,21 +3178,23 @@ def show_run(host: Host, cwd: str, ref: str, local_host: str, pid_alive, target:
         if value:
             print(f"{label:<9}  {value}")
     agents = s.get("agents") or {}
-    if agents:
-        print("\nagents")
-        width = max(len(role) for role in agents)
-        for role, a in agents.items():
-            print(f"    {role:<{width}}  {a.get('kind') or DEFAULT_AGENT:<8}  {a.get('pane', '')}")
-    files = host.run_files(run_dir)
-    if files:
-        print("\nfiles")
-        for path in files:
-            print(f"    {path}")
+    width = max((len(role) for role in agents), default=0)
+    print_section("agents", [f"{role:<{width}}  {a.get('kind') or DEFAULT_AGENT:<8}  {a.get('pane', '')}"
+                             for role, a in agents.items()])
+    print_section("files", host.run_files(run_dir))
     review = last_review(host, run_dir, pipeline, s.get("round", 0)) if pipeline else None
     if review:
         path, text = review
         print(f"\nlast review: {path}")
         print(text, end="" if text.endswith("\n") else "\n")
+
+
+def print_section(title: str, lines: list[str]) -> None:
+    """A heading and its lines, indented; nothing when there are no lines."""
+    if lines:
+        print(f"\n{title}")
+        for line in lines:
+            print(f"    {line}")
 
 
 def last_review(host: Host, run_dir: str, pipeline: Pipeline, rnd: int) -> tuple[str, str] | None:
