@@ -263,8 +263,9 @@ not supported; see the [roadmap](roadmap.md).
 
 - **Concurrent runs** share only executors and SonarQube's one-at-a-time queue; `QUALITY_TIMEOUT` allows for it.
 - **Two runs in one checkout**: a snapshot takes every change in the tree, so it would take the other run's
-  too. A run refuses to start or resume while another run in its checkout is live, so the two never overlap;
-  parallel runs need separate clones until `--worktree` in the roadmap.
+  too. A run refuses to start or resume while another run in its checkout is live, so the two never overlap.
+  A `run --worktree` run snapshots its own worktree, which holds only its change, so worktree runs go in
+  parallel in one checkout, beside each other and beside one run in the checkout itself.
 - **No change**: the gate passes, and `_publish` refuses the empty change.
 - **Cleanup**: a failed run keeps its project and the branch in flight; `done` deletes the run's
   `orchestrator-ci/<key>-*` branches and its project, and a failed delete is only logged.

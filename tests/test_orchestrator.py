@@ -4,6 +4,7 @@ import itertools
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import shlex
@@ -63,11 +64,13 @@ class FakeHost(Host):
 
     - `branches`: the local branches besides the checked-out one, by name, with their commit.
     - `tracking`: the branches origin/<name> exists for.
-    - `worktrees`: the linked worktrees' branches, by path; /proj has `branch` checked out.
+    - `worktrees`: the linked worktrees' branches, by path, "HEAD" for a detached one; /proj has `branch` checked
+      out. git in a worktree sees its own branch, and the changed files under its path as its own changes.
     - `ancestors`: (commit, of) pairs where commit is an ancestor of of.
     - `ahead`: by branch, the commits it has beyond the commit rev-list --count compares it to.
     - `missing_commits`: commits this clone lacks.
     - `pull_requests`: what `gh pr view` prints, by URL: a dict, or a completed process for a failure.
+    - `remove_error`: the stderr of a failing `git worktree remove`.
     """
 
     def __init__(self, head="abc123", branch="main"):
@@ -78,6 +81,7 @@ class FakeHost(Host):
         self.branch = branch
         self.changed = set()
         self.git_calls = []
+        self.git_log = []  # (cwd, args) of each git call
         self.prs = []
         self.upstream = None
         self.fetch_error = None
@@ -96,6 +100,7 @@ class FakeHost(Host):
         self.ahead = {}
         self.missing_commits = set()
         self.pull_requests = {}
+        self.remove_error = None
         self.gh_calls = []
         self.mtime_kept = []  # every path written with keep_mtime
 
@@ -111,7 +116,7 @@ class FakeHost(Host):
         if keep_mtime:
             self.mtime_kept.append(path)
         self.files[path] = text
-        if not path.startswith("/proj/.orchestrator/"):
+        if not path.startswith("/proj/.orchestrator/") or path.startswith(f"/proj/{orchestrator.WORKTREES_DIR}/"):
             self.changed.add(path)
 
     def rename(self, path, new_path):
@@ -132,20 +137,50 @@ class FakeHost(Host):
                 states.append((self.ages.get(run_id, 0), json.loads(text)))
         return states
 
+    def is_worktree(self, cwd, path):
+        return path in self.worktrees
+
+    def _changed_in(self, cwd):
+        """The changed files in the worktree at cwd, or else in the checkout: those outside every worktree."""
+        if cwd in self.worktrees:
+            return {p for p in self.changed if p.startswith(f"{cwd}/")}
+        return {p for p in self.changed if not any(p.startswith(f"{w}/") for w in self.worktrees)}
+
     def git_run(self, cwd, *args, timeout=60):
         self.git_calls.append(args)
+        self.git_log.append((cwd, args))
+        if cwd in self.worktrees:
+            match args:
+                case ("rev-parse", "--abbrev-ref", "HEAD"):
+                    return completed(self.worktrees[cwd] + "\n")
+                case ("switch", "-c", name, _):
+                    self.worktrees[cwd] = name
+                    return completed()
+                case ("status", "--porcelain") | ("commit", *_):
+                    changed = self._changed_in(cwd)
+                    if args[0] == "status":
+                        return completed("".join(f"?? {p}\n" for p in sorted(changed)))
+                    self.changed -= changed
+                    self.head += "+commit"
+                    return completed()
         match args:
             case ("rev-parse", "--abbrev-ref", "HEAD"):
                 return completed(self.branch + "\n")
             case ("rev-parse", "-q", "--verify", "MERGE_HEAD"):
                 return completed(returncode=0 if self.merge_head else 1)
             case ("status", "--porcelain"):
-                return completed("".join(f"?? {p}\n" for p in sorted(self.changed)))
+                return completed("".join(f"?? {p}\n" for p in sorted(self._changed_in(cwd))))
             case ("switch", "-c", name) | ("switch", "--quiet", name):
                 self.branch = name
             case ("commit", *_):
-                self.changed.clear()
+                self.changed -= self._changed_in(cwd)
                 self.head += "+commit"
+            case ("worktree", "add", "--detach", path, _):
+                self.worktrees[path] = "HEAD"
+            case ("worktree", "remove", path):
+                if self.remove_error:
+                    return completed(stderr=self.remove_error, returncode=128)
+                del self.worktrees[path]
             case ("fetch", "--quiet", "origin", _) if self.fetch_error:
                 return completed(stderr=self.fetch_error, returncode=128)
             case ("merge-base", "--is-ancestor", "HEAD", _):
@@ -206,7 +241,8 @@ class FakeHost(Host):
                 del self.branches[b]
             case ("worktree", "list", "--porcelain"):
                 trees = {"/proj": self.branch, **self.worktrees}
-                return completed("".join(f"worktree {path}\nHEAD {'0' * 40}\nbranch refs/heads/{b}\n\n"
+                return completed("".join(f"worktree {path}\nHEAD {'0' * 40}\n"
+                                         f"{'detached' if b == 'HEAD' else f'branch refs/heads/{b}'}\n\n"
                                          for path, b in trees.items()))
         return completed()
 
@@ -245,12 +281,14 @@ class FakeHerdr:
         self.live_panes = set()
         self.waits = []
         self.blocked_at_start = set()
+        self.cwds = []  # (what, cwd) of each workspace created and pane split
 
     def _role(self, name):
         return name.split("-", 1)[0]
 
     def create_workspace(self, cwd, label):
         self.calls.append(("workspace", label))
+        self.cwds.append(("workspace", cwd))
         self.workspaces.add("w1")
         return "w1", self._pane()
 
@@ -262,6 +300,7 @@ class FakeHerdr:
 
     def split(self, pane, direction, cwd):
         self.calls.append(("split", pane, direction))
+        self.cwds.append(("split", cwd))
         return self._pane()
 
     def rename_pane(self, pane, label):
@@ -1303,6 +1342,62 @@ class TestHostGit(unittest.TestCase):
         self.assertEqual(json.loads(self.host.read(f"{state.dir}/state.json"))["branch_cleanup"], "deleted")
 
 
+    def test_worktree_steps(self):
+        os.makedirs(f"{self.a}/.orchestrator")
+        with open(f"{self.a}/.orchestrator/.gitignore", "w") as f:
+            f.write("*\n")
+        wt = f"{self.a}/.orchestrator/worktrees/a1b2c3"
+        upstream = self.push_from_b("lib.py", "new\n")
+        self.assertFalse(self.host.is_worktree(self.a, wt))
+
+        self.host.add_worktree(self.a, wt, self.host.fetch(self.a, "main"))
+        self.assertTrue(self.host.is_worktree(self.a, wt))
+        self.assertEqual(self.head(wt), upstream)
+        self.assertEqual(self.sh("git", "-C", wt, "rev-parse", "--abbrev-ref", "HEAD"), "HEAD\n")
+        self.assertEqual(self.sh("git", "-C", self.a, "status", "--porcelain"), "")
+        self.assertFalse(self.host.is_worktree(self.a, self.b))  # another clone's checkout
+        self.assertFalse(self.host.is_worktree(self.a, f"{self.dir}/nowhere"))
+
+        with open(f"{wt}/new.py", "w") as f:
+            f.write("x\n")
+        with self.assertRaisesRegex(OrchestratorError, "worktree remove .* failed: .*untracked"):
+            self.host.remove_worktree(self.a, wt)
+        os.remove(f"{wt}/new.py")
+        self.host.remove_worktree(self.a, wt)
+        self.assertFalse(os.path.exists(wt))
+        self.assertFalse(self.host.is_worktree(self.a, wt))
+
+    def test_a_deleted_worktree_is_no_worktree(self):
+        wt = f"{self.dir}/wt"
+        self.host.add_worktree(self.a, wt, "HEAD")
+        shutil.rmtree(wt)
+        self.assertIn(f"worktree {wt}", self.sh("git", "-C", self.a, "worktree", "list", "--porcelain"))
+        self.assertFalse(self.host.is_worktree(self.a, wt))
+
+    def test_worktree_through_a_symlink(self):
+        os.symlink(self.a, f"{self.dir}/link")
+        wt = f"{self.dir}/link/wt"
+        self.host.add_worktree(f"{self.dir}/link", wt, "HEAD")
+        self.assertTrue(self.host.is_worktree(f"{self.dir}/link", wt))
+        self.assertTrue(self.host.is_worktree(self.a, f"{self.a}/wt"))
+
+    def test_snapshot_in_a_worktree_holds_only_its_change(self):
+        base = self.head(self.a)
+        wt = f"{self.dir}/wt"
+        self.host.add_worktree(self.a, wt, base)
+        with open(f"{self.a}/app.py", "w") as f:
+            f.write("one\nchecked out\n")
+        with open(f"{self.a}/mine.py", "w") as f:
+            f.write("mine\n")
+        with open(f"{wt}/feature.py", "w") as f:
+            f.write("feature\n")
+
+        sha = self.host.snapshot(wt, base, "snapshot")
+        self.assertEqual(self.sh("git", "-C", wt, "diff", "--name-only", base, sha), "feature.py\n")
+        self.assertEqual(changed_lines(self.host.change_diff(wt, base, sha)), {"feature.py": {1}})
+        self.assertEqual(self.sh("git", "-C", self.a, "status", "--porcelain"), " M app.py\n?? mine.py\n")
+
+
 class TestCLI(unittest.TestCase):
     def test_machine_requires_cwd(self):
         with self.assertRaises(SystemExit), patch("sys.stderr"):
@@ -2223,6 +2318,245 @@ class TestOneRunPerCheckout(unittest.TestCase):
     def test_force_does_not_override_another_live_run(self):
         host = self.host_with_other_run()
         self.assert_refused(self.force_resume(host), host)
+
+
+    def test_worktree_runs_do_not_refuse_each_other(self):
+        host = self.host_with_other_run(worktree=f"/proj/{orchestrator.WORKTREES_DIR}/537935")
+        wf, *_ = worktree_run(host=host)
+        wf.pid_alive = lambda pid: True
+        self.assertEqual(wf.run(), APPROVE)
+
+    def test_a_worktree_run_and_one_in_the_checkout_do_not_refuse_each_other(self):
+        cases = {"in-place run, live worktree run": (self.host_with_other_run(worktree="/elsewhere"), make_workflow),
+                 "worktree run, live in-place run": (self.host_with_other_run(), worktree_run)}
+        for name, (host, workflow) in cases.items():
+            with self.subTest(name):
+                wf, *_ = workflow(self.full_run(), host=host)
+                wf.pid_alive = lambda pid: True
+                self.assertEqual(wf.run(), APPROVE)
+
+
+WORKTREE = f"/proj/{orchestrator.WORKTREES_DIR}/a1b2c3"
+RUN_BRANCH = "orchestrator/add-a-token-bucket-rate-limiter-a1b2c3"
+
+
+def worktree_build_turn(n):
+    """build_turn, in the run's worktree."""
+    def turn(prompt, state, host):
+        host.write(f"{state.work_dir}/limiter.py", f"version {n}")
+        return writes(lambda s: s.build_path(n), f"report {n}")(prompt, state, host)
+    return turn
+
+
+def worktree_run(script=None, host=None, **kw):
+    """make_workflow for a new run --worktree run, by default one the Reviewer approves in round 1.
+
+    Its Builder writes in the worktree, whatever the script says.
+    """
+    state = RunState("20260929-120000-a1b2c3", "add a rate limiter", "/proj", None, worktree=WORKTREE)
+    script = script or {"spec": [spec_turn], "review": [review_turn(1, APPROVE)]}
+    script["build"] = [worktree_build_turn(1)]
+    return make_workflow(script, host=host, state=state, **kw)
+
+
+def saved_worktree_run(phase, rnd, **kw):
+    """A worktree run that an earlier orchestrator took to phase in round rnd, with its branch."""
+    return saved_run(phase, rnd, agents=("spec", "build", "review"), worktree=WORKTREE, pull_request=True,
+                     base_branch="main", branch=RUN_BRANCH, **kw)
+
+
+class TestWorktreeRun(unittest.TestCase):
+    """run --worktree: the run works in a git worktree of its own and leaves the project's checkout alone."""
+
+    def test_a_run_flag(self):
+        with self.assertRaises(SystemExit), patch("sys.stdout", new_callable=io.StringIO) as out:
+            parse_args(["run", "--help"])
+        self.assertIn("--worktree", out.getvalue())
+        with self.assertRaises(SystemExit), patch("sys.stderr", new_callable=io.StringIO) as err:
+            parse_args(["resume", "a1b2c3", "--worktree"])
+        self.assertIn("unrecognized arguments: --worktree", err.getvalue())
+
+        state, _ = orchestrator.new_state(parse_args(["run", "task", "--worktree"]), "/proj")
+        self.assertEqual(state.worktree, f"/proj/.orchestrator/worktrees/{state.key}")
+        self.assertIsNone(orchestrator.new_state(parse_args(["run", "task"]), "/proj")[0].worktree)
+
+    @patch.object(Workflow, "__init__", return_value=None)
+    @patch.object(Workflow, "run", return_value=APPROVE)
+    @patch.object(Host, "resolve_dir", return_value="/proj")
+    @patch.dict("os.environ", {"HERDR_ENV": "1"})
+    def test_flag_reaches_the_workflow(self, _resolve, _run, init):
+        with patch("builtins.print"), patch.object(orchestrator, "sweep_branches"):
+            self.assertEqual(main(["run", "task", "--worktree"]), 0)
+        state = init.call_args.args[2]
+        self.assertEqual(state.worktree, f"/proj/.orchestrator/worktrees/{state.key}")
+
+    def test_dirty_checkout_on_another_branch_is_left_alone(self):
+        host = FakeHost(branch="feature")
+        host.changed.add("/proj/wip.py")
+        host.upstream = "u1"  # so the base is merged into the run's branch before the push
+        wf, _, host, _ = worktree_run(host=host)
+
+        self.assertEqual(wf.run(), APPROVE)
+
+        in_checkout = [args for cwd, args in host.git_log if cwd == "/proj"]
+        self.assertFalse([a for a in in_checkout if a[0] in ("switch", "status", "add", "commit", "push")
+                          or a[:2] == ("merge", "--ff-only")], in_checkout)
+        in_worktree = [args for cwd, args in host.git_log if cwd == WORKTREE]
+        self.assertIn(("switch", "-c", RUN_BRANCH, "origin/feature"), in_worktree)
+        self.assertIn(("merge", "--no-edit", "--quiet", "origin/feature"), in_worktree)
+        self.assertIn(("push", "--quiet", "--set-upstream", "origin", RUN_BRANCH), in_worktree)
+        self.assertLessEqual({"status", "add", "commit"}, {a[0] for a in in_worktree})
+        self.assertEqual((host.branch, host.changed), ("feature", {"/proj/wip.py"}))
+        self.assertEqual((host.prs[0]["base"], host.prs[0]["head"]), ("feature", RUN_BRANCH))
+
+    def test_worktree_is_added_from_origin_before_the_workspace_opens(self):
+        wf, herdr, host, _ = worktree_run()
+        at_workspace = []
+        create = herdr.create_workspace
+
+        def create_workspace(cwd, label):
+            saved = json.loads(host.files[f"{wf.state.dir}/state.json"])
+            at_workspace.append((saved["worktree"], WORKTREE in host.worktrees))
+            return create(cwd, label)
+        herdr.create_workspace = create_workspace
+
+        self.assertEqual(wf.run(), APPROVE)
+        steps = [(cwd, args) for cwd, args in host.git_log if args[0] in ("fetch", "worktree")]
+        self.assertEqual(steps[:2], [("/proj", ("fetch", "--quiet", "origin", "main")),
+                                     ("/proj", ("worktree", "add", "--detach", WORKTREE, "origin/main"))])
+        self.assertEqual(at_workspace, [(WORKTREE, True)])
+        self.assertEqual(wf.state.base_branch, "main")
+
+    def test_agents_work_in_the_worktree(self):
+        seen = []
+        wf, herdr, _, _ = worktree_run({"spec": [recording(spec_turn, seen)],
+                                        "review": [recording(review_turn(1, APPROVE), seen)]})
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(herdr.cwds, [("workspace", WORKTREE), ("split", WORKTREE), ("split", WORKTREE)])
+        self.assertIn(f"Read the code in {WORKTREE} first", seen[0])
+        self.assertIn(f"`git diff abc123` in {WORKTREE},", seen[1])
+
+    def test_needs_a_repository_a_branch_and_an_origin(self):
+        no_origin = FakeHost()
+        no_origin.has_origin = False
+        cases = [(FakeHost(head=None), "/proj is not a git repository with a commit, which --worktree needs"),
+                 (FakeHost(branch="HEAD"), "/proj is on a detached HEAD"),
+                 (no_origin, "/proj has no origin")]
+        for host, message in cases:
+            for pull_request in (True, False):
+                with self.subTest(message, pull_request=pull_request):
+                    wf, herdr, *_ = worktree_run(host=host, pull_request=pull_request)
+                    with self.assertRaisesRegex(OrchestratorError, message):
+                        wf.run()
+                    self.assertEqual((herdr.calls, host.worktrees), ([], {}))
+
+    def test_publishing_removes_the_worktree(self):
+        wf, herdr, host, _ = worktree_run()
+        removed = []
+        remove = host.remove_worktree
+
+        def remove_worktree(cwd, path):
+            removed.append((cwd, path, json.loads(host.files[f"{wf.state.dir}/state.json"])["pr_url"]))
+            remove(cwd, path)
+        host.remove_worktree = remove_worktree
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(removed, [("/proj", WORKTREE, "https://github.com/o/r/pull/7")])
+        self.assertIn(("/proj", ("worktree", "remove", WORKTREE)), host.git_log)
+        self.assertEqual(host.worktrees, {})
+        self.assertFalse([a for a in host.git_calls if a[:2] == ("switch", "--quiet")])
+        self.assertEqual(herdr.calls[-1], ("close", "w1"))
+
+    def test_a_failed_removal_is_only_logged(self):
+        host = FakeHost()
+        host.remove_error = f"fatal: '{WORKTREE}' contains modified or untracked files, use --force to delete it"
+        wf, *_ = worktree_run(host=host)
+
+        with patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(wf.state.phase, "done")
+        self.assertIn(f"could not remove worktree {WORKTREE}: ", err.getvalue())
+        self.assertIn("use --force to delete it", err.getvalue())
+        self.assertIn(WORKTREE, host.worktrees)
+
+    def test_no_pr_keeps_the_worktree_with_the_change(self):
+        wf, herdr, host, _ = worktree_run(pull_request=False)
+
+        with patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(wf.run(), APPROVE)
+        self.assertIn(f"the change is in worktree {WORKTREE}", err.getvalue())
+        self.assertEqual(host.worktrees, {WORKTREE: "HEAD"})
+        self.assertEqual(host.changed, {f"{WORKTREE}/limiter.py"})
+        self.assertFalse([a for a in host.git_calls if a[0] in ("switch", "commit", "push")])
+        self.assertNotIn(("close", "w1"), herdr.calls)
+
+    def test_a_failed_run_keeps_the_worktree(self):
+        wf, herdr, host, _ = worktree_run()
+        herdr.script["build"] = [writes(lambda s: s.build_path(1), "nothing to do")]
+
+        with self.assertRaisesRegex(OrchestratorError, "changed no files"):
+            wf.run()
+        self.assertEqual(host.worktrees, {WORKTREE: RUN_BRANCH})
+
+    def test_resume_reuses_the_worktree(self):
+        host = FakeHost()
+        host.worktrees[WORKTREE] = RUN_BRANCH
+        host.changed.add(f"{WORKTREE}/limiter.py")
+        wf, _, host, _ = resume(saved_worktree_run("review", 1), {"review": [review_turn(1, APPROVE)]},
+                                host=host, files={lambda s: s.build_path(1): "report 1"})
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertFalse([a for a in host.git_calls if a[:2] == ("worktree", "add")])
+        self.assertIn((WORKTREE, ("commit", "--quiet", "-m", "add a rate limiter", "-m",
+                                  orchestrator.commit_note(wf.state))), host.git_log)
+
+    def test_resume_before_the_first_edit_reuses_the_worktree(self):
+        host = FakeHost()
+        host.worktrees[WORKTREE] = "HEAD"
+        state = saved_run("spec", 0, worktree=WORKTREE, pull_request=True)
+        wf, *_ = resume(state, {"spec": [spec_turn], "build": [worktree_build_turn(1)],
+                                "review": [review_turn(1, APPROVE)]}, host=host)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertFalse([a for a in host.git_calls if a[:2] == ("worktree", "add")])
+
+    def test_resume_refuses_a_worktree_that_is_gone(self):
+        for registered in ({}, {f"/proj/{orchestrator.WORKTREES_DIR}/ffffff": "HEAD"}):
+            with self.subTest(registered=registered):
+                host = FakeHost()
+                host.worktrees.update(registered)
+                wf, herdr, *_ = resume(saved_worktree_run("review", 1), {"review": []}, host=host)
+
+                with self.assertRaisesRegex(OrchestratorError, f"the worktree of run {wf.state.run_id}, "
+                                                               f"{WORKTREE}, is gone"):
+                    wf.run()
+                self.assertEqual(herdr.calls, [])
+                self.assertFalse([a for a in host.git_calls if a[:2] == ("worktree", "add")])
+
+    def test_resume_with_a_pull_request_finishes_without_the_worktree(self):
+        state = saved_worktree_run("publish", 1, verdict=APPROVE, pr_url="https://github.com/o/r/pull/7")
+        wf, herdr, host, _ = resume(state, {})
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(wf.state.phase, "done")
+        self.assertFalse([a for a in host.git_calls if a[0] in ("worktree", "switch")])
+        self.assertEqual(herdr.calls[-1], ("close", "w1"))
+
+    def test_a_state_saved_without_worktree_resumes_in_place(self):
+        saved = asdict(saved_run("review", 1, agents=("spec", "build", "review"), pull_request=True,
+                                 base_branch="main", branch=RUN_BRANCH))
+        del saved["worktree"]
+        state = RunState.from_dict(saved)
+        self.assertEqual((state.worktree, state.work_dir), (None, "/proj"))
+        host = FakeHost(branch=RUN_BRANCH)
+        host.changed.add("/proj/limiter.py")
+        wf, *_ = resume(state, {"review": [review_turn(1, APPROVE)]}, host=host,
+                        files={lambda s: s.build_path(1): "report 1"})
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual({cwd for cwd, _ in host.git_log}, {"/proj"})
+        self.assertEqual(host.git_calls[-1], ("switch", "--quiet", "main"))
 
 
 class TestResumeCLI(unittest.TestCase):
@@ -5039,6 +5373,25 @@ class TestHarnessFlags(unittest.TestCase):
             RunState.from_dict(saved)
 
 
+    def test_run_dir_granted_in_worktree_runs_only(self):
+        d = "/proj/.orchestrator/runs/r"
+        grants = {"claude": ["--add-dir", d], "codex": ["--add-dir", d], "gemini": ["--include-directories", d],
+                  "opencode": [], "pi": []}
+        for kind, grant in grants.items():
+            with self.subTest(kind=kind):
+                for args in ((kind, None, None, None), (kind, "acceptEdits", "m", "s1")):
+                    self.assertEqual(orchestrator.launch_args(*args, d), orchestrator.launch_args(*args) + grant)
+                self.assertEqual(orchestrator.launch_args(kind, None, None, None), [])
+
+        wf, herdr, *_ = worktree_run()
+        wf.run()
+        self.assertEqual([c[3] for c in herdr.calls if c[0] == "start"], [("--add-dir", wf.state.dir)] * 3)
+        wf, herdr, *_ = make_workflow({"spec": [spec_turn], "build": [build_turn(1)],
+                                       "review": [review_turn(1, APPROVE)]})
+        wf.run()
+        self.assertEqual([c[3] for c in herdr.calls if c[0] == "start"], [()] * 3)
+
+
 class TestWorkflowFileAgents(unittest.TestCase):
     def test_parsed_and_round_tripped(self):
         p = orchestrator.parse_workflow("mine", tomllib.loads(
@@ -6097,6 +6450,12 @@ class TestShow(unittest.TestCase):
         for saved in (published, {**published, "branch_cleanup": None}):
             _, out, _ = self.show(ShowHost(saved))
             self.assertNotRegex(out, r"(?m)^cleanup ")
+
+    def test_worktree_of_a_worktree_run(self):
+        _, out, _ = self.show(ShowHost(show_state(worktree=WORKTREE, branch="orchestrator/x-a1b2c3")))
+        self.assertIn(f"\nworktree   {WORKTREE}\nbranch     orchestrator/x-a1b2c3\n", out)
+        _, out, _ = self.show(ShowHost(show_state()))
+        self.assertNotRegex(out, r"(?m)^worktree ")
 
     def test_every_agent_with_its_kind_and_pane(self):
         _, out, _ = self.show(ShowHost(show_state()))

@@ -57,6 +57,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 RUNS_DIR = ".orchestrator/runs"
+# Where run --worktree puts each run's worktree, named by the run's key.
+WORKTREES_DIR = ".orchestrator/worktrees"
 DEFAULT_TURN_TIMEOUT = 1800
 DEFAULT_MAX_ROUNDS = 3
 AGENT_START_TIMEOUT_MS = 60_000
@@ -899,6 +901,10 @@ PERMISSION_ARGS = {
 RESUME_ARGS = {"claude": "--resume", "gemini": "--resume", "pi": "--session", "opencode": "--session",
                "codex": "resume"}
 
+# How each harness grants an agent a directory outside its working directory: a worktree run's handoff files
+# are in the project's run directory, not the worktree. opencode and pi have no such flag.
+ADD_DIR_ARGS = {"claude": "--add-dir", "codex": "--add-dir", "gemini": "--include-directories"}
+
 
 @dataclass(frozen=True)
 class AgentSettings:
@@ -918,14 +924,18 @@ def permission_args(kind: str, mode: str) -> list[str] | None:
     return PERMISSION_ARGS[kind].get(mode)
 
 
-def launch_args(kind: str, permission_mode: str | None, model: str | None, session: str | None) -> list[str]:
-    """The arguments a role's agent starts with in the harness: into its saved session, if given one."""
+def launch_args(kind: str, permission_mode: str | None, model: str | None, session: str | None,
+                extra_dir: str | None = None) -> list[str]:
+    """The arguments a role's agent starts with in the harness: into its saved session, if given one, and with
+    access to extra_dir where the harness can grant it."""
     args = (permission_args(kind, permission_mode) or []) if permission_mode else []
     if session:
         resume = [RESUME_ARGS[kind], session]
         args = resume + args if kind == "codex" else args + resume
     if model:
         args += ["--model", model]
+    if extra_dir and kind in ADD_DIR_ARGS:
+        args += [ADD_DIR_ARGS[kind], extra_dir]
     return args
 
 
@@ -1295,6 +1305,26 @@ class Host:
     def delete_branch(self, cwd: str, branch: str) -> None:
         # -D: -d checks the branch against HEAD or its upstream, not its pull request, so it refuses a squash merge.
         self.git(cwd, "branch", "--quiet", "-D", branch)
+
+    def add_worktree(self, cwd: str, path: str, commit: str) -> None:
+        """Check commit out, on a detached HEAD, in a new worktree of cwd's repository at path."""
+        self.git(cwd, "worktree", "add", "--detach", path, commit)
+
+    def is_worktree(self, cwd: str, path: str) -> bool:
+        """Whether path is a worktree of cwd's repository, registered and still there."""
+        # git lists a worktree by its physical path, which differs from path when path goes through a symlink.
+        proc = self.run(["sh", "-c", 'cd -P -- "$1" && pwd -P', "_", path])
+        if proc.returncode != 0:
+            return False
+        out = self.git(cwd, "worktree", "list", "--porcelain")
+        # One record per worktree, separated by a blank line; "prunable" marks one whose directory is gone.
+        records = [r.splitlines() for r in out.split("\n\n")]
+        return any(r and r[0] == f"worktree {proc.stdout.strip()}" and not any(x.startswith("prunable") for x in r)
+                   for r in records)
+
+    def remove_worktree(self, cwd: str, path: str) -> None:
+        """Remove the worktree at path; without --force, git refuses one with changes it would lose."""
+        self.git(cwd, "worktree", "remove", path)
 
     def checked_out_branches(self, cwd: str) -> dict[str, str]:
         """The branches checked out in the repository's worktrees, the main checkout's included, with each path."""
@@ -1723,6 +1753,9 @@ class RunState:
     # What prune did with branch once the pull request was done: "deleted", or "kept: <why>". Written by
     # prune_branches, never by the run itself.
     branch_cleanup: str | None = None
+    # A run --worktree run's own git worktree, by its absolute path, from the run's start on: round 0 creates it
+    # there. None for a run in the project's checkout, cwd. cwd stays the project, where the run directory is.
+    worktree: str | None = None
 
     @classmethod
     def from_dict(cls, saved: dict) -> "RunState":
@@ -1748,6 +1781,11 @@ class RunState:
     @property
     def dir(self) -> str:
         return f"{self.cwd}/{RUNS_DIR}/{self.run_id}"
+
+    @property
+    def work_dir(self) -> str:
+        """Where the agents work and the run's git steps run: its worktree, or else the project's checkout."""
+        return self.worktree or self.cwd
 
     # The default workflow's handoff files; the quality files are every workflow's.
     @property
@@ -2107,6 +2145,10 @@ class Workflow:
     started on, which is checked out again afterwards. The workspace is then
     closed. A run that fails keeps its workspace and branch, to see what happened.
 
+    With a worktree, the agents and every git step of the run work there instead
+    of in the project's checkout (work_dir), which the run then never touches; the
+    worktree is removed once the pull request is open, and kept otherwise.
+
     With ci, each turn of the quality-gated step is followed by a quality round (phase
     quality) that analyses a snapshot of the change; a gate that does not pass goes back
     to that step, up to max_quality_rounds analyses per round, before the next step.
@@ -2197,6 +2239,8 @@ class Workflow:
         s.phase = DONE
         s.owner = None
         self._save()
+        if s.worktree and not s.pull_request:
+            log(f"the change is in worktree {s.worktree}")
         self.notify(f"Run finished: {s.verdict}", s.pr_url or s.task)
         if s.pull_request:
             self._close_workspace()
@@ -2217,11 +2261,15 @@ class Workflow:
         self._check_alone()
         # Round 0: the run has not reached its first editing step, so it has no base or branch yet.
         if s.round == 0:
+            if s.worktree:
+                self._open_worktree()
             if self.ci:
                 self._check_gate()
-            if s.pull_request:
+            if s.pull_request and not s.worktree:
                 self._check_repo()
         else:
+            if s.worktree:
+                self._check_worktree()
             self._check_branch()
             if self.ci and s.phase in (self.pipeline.gated.id, QUALITY):
                 # Before a turn of the gated step that may take half an hour, not after it.
@@ -2230,12 +2278,15 @@ class Workflow:
     def _check_alone(self) -> None:
         """Fail if another run in this checkout is live: the two would share one working tree.
 
-        After _claim, so of two runs that start together each sees the other's state.json and both stop,
-        rather than both going on.
+        A worktree run shares no working tree, neither with another worktree run nor with the run in the
+        checkout. After _claim, so of two runs that start together each sees the other's state.json and both
+        stop, rather than both going on.
         """
         s = self.state
+        if s.worktree:
+            return
         for age, other in self.host.run_states(s.cwd):
-            if other.get("run_id") == s.run_id:
+            if other.get("run_id") == s.run_id or other.get("worktree"):
                 continue
             health = run_health(other, age, self.me["host"], self.pid_alive)
             if health and health[0] == RUNNING:
@@ -2295,6 +2346,39 @@ class Workflow:
         if branch == s.base_branch:
             self.host.fast_forward(s.cwd, s.base_branch)
 
+    def _open_worktree(self) -> None:
+        """Before the interview, check out origin's base branch, detached, in the run's worktree.
+
+        The base branch is the one checked out in the project. The checkout itself is left as it is, so it
+        need not be clean or up to date, and the human can go on working in it.
+        """
+        s = self.state
+        if self.host.git_head(s.cwd) is None:
+            raise OrchestratorError(f"{s.cwd} is not a git repository with a commit, which --worktree needs")
+        branch = self.host.git(s.cwd, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        if branch == "HEAD":
+            raise OrchestratorError(f"{s.cwd} is on a detached HEAD; --worktree bases the run on the checked-out "
+                                    f"branch, so check one out")
+        if self.host.git_run(s.cwd, "remote", "get-url", REMOTE).returncode != 0:
+            raise OrchestratorError(f"--worktree starts the run from {REMOTE}'s branch, and {s.cwd} has no {REMOTE}")
+        # Kept once recorded, as _check_repo keeps it.
+        s.base_branch = s.base_branch or branch
+        # A resume before the first editing step: the run's worktree holds nothing it needs to keep.
+        if self.host.is_worktree(s.cwd, s.worktree):
+            log(f"run {s.run_id} resumes in worktree {s.worktree}")
+            return
+        self.host.add_worktree(s.cwd, s.worktree, self.host.fetch(s.cwd, s.base_branch))
+        log(f"run {s.run_id} in worktree {s.worktree}, at {REMOTE}/{s.base_branch}")
+        self._save()
+
+    def _check_worktree(self) -> None:
+        """Fail if the run's worktree, which holds its change, is gone; unless the pull request has the change."""
+        s = self.state
+        if s.pr_url or self.host.is_worktree(s.cwd, s.worktree):
+            return
+        raise OrchestratorError(f"the worktree of run {s.run_id}, {s.worktree}, is gone or no longer a git "
+                                f"worktree, and with it the run's change; the run cannot go on")
+
     def _check_branch(self) -> None:
         """Fail if HEAD is not the run's branch, which holds the Builder's uncommitted change until publishing.
 
@@ -2303,10 +2387,10 @@ class Workflow:
         s = self.state
         if not s.pull_request or not s.branch or s.pr_url:
             return
-        current = self.host.git(s.cwd, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        current = self.host.git(s.work_dir, "rev-parse", "--abbrev-ref", "HEAD").strip()
         if current != s.branch:
             # A detached HEAD reads as "HEAD", so it never matches.
-            raise OrchestratorError(f"{s.cwd} is on {current}, not {s.branch}, which holds this run's change; "
+            raise OrchestratorError(f"{s.work_dir} is on {current}, not {s.branch}, which holds this run's change; "
                                     f"check out {s.branch} and resume")
 
     def _check_gate(self) -> None:
@@ -2314,7 +2398,7 @@ class Workflow:
         s = self.state
         if self.host.git_head(s.cwd) is None:
             raise OrchestratorError(f"the quality gate needs a git repository, and {s.cwd} is not one with a commit")
-        # _check_repo checks both for a pull-request run.
+        # _check_repo checks both for a pull-request run, and a worktree run's worktree starts out clean.
         if not s.pull_request:
             # A snapshot takes every change in the tree, so the tree must start with none.
             self._require_clean()
@@ -2324,10 +2408,11 @@ class Workflow:
 
     def _require_clean(self) -> None:
         # The commit takes every change in the working tree, so it must hold only the Builder's.
-        dirty = self.host.git(self.state.cwd, "status", "--porcelain")
+        work_dir = self.state.work_dir
+        dirty = self.host.git(work_dir, "status", "--porcelain")
         if dirty.strip():
             raise OrchestratorError(
-                f"{self.state.cwd} has uncommitted changes; commit or stash them first:\n{dirty.rstrip()}")
+                f"{work_dir} has uncommitted changes; commit or stash them first:\n{dirty.rstrip()}")
 
     def _prepare(self) -> None:
         s = self.state
@@ -2341,7 +2426,7 @@ class Workflow:
             for agent in s.agents.values():
                 agent["pane"] = ""
         label = f"{s.key} {s.task}"[:40]
-        s.workspace_id, s.root_pane = self.herdr.create_workspace(s.cwd, label)
+        s.workspace_id, s.root_pane = self.herdr.create_workspace(s.work_dir, label)
         log(f"run {s.run_id} in herdr workspace {s.workspace_id}")
         self._save()
 
@@ -2403,7 +2488,7 @@ class Workflow:
             # Only here, before the first editing step and after the base branch was fast-forwarded:
             # every later step, resumed or not, diffs against this base, even if the human commits
             # the Builder's work meanwhile.
-            s.base = self.host.git_head(s.cwd)
+            s.base = self.host.git_head(s.work_dir)
             n = 1
         s.phase, s.round = step.id, n
         self._save()
@@ -2458,7 +2543,7 @@ class Workflow:
     def _placeholder(self, name: str, step: Step, n: int) -> str:
         """The value of a prompt placeholder (see Step) in the step's turn in round n."""
         s = self.state
-        fixed = {"task": s.task, "cwd": s.cwd, "n": str(n), "approve": APPROVE, "changes": CHANGES_REQUESTED}
+        fixed = {"task": s.task, "cwd": s.work_dir, "n": str(n), "approve": APPROVE, "changes": CHANGES_REQUESTED}
         if name in fixed:
             return fixed[name]
         if name == "change":
@@ -2489,16 +2574,21 @@ class Workflow:
         spec = self._last_text(self.pipeline.contract, 0)
         s.branch = branch_name(spec_title(spec) or s.task, s.run_id)
         # Already there when an earlier orchestrator stopped between the switch and saving the next phase.
-        current = self.host.git(s.cwd, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        current = self.host.git(s.work_dir, "rev-parse", "--abbrev-ref", "HEAD").strip()
         if current != s.branch:
             # Checked again: the human may have touched the tree during the interview.
             self._require_clean()
-            if current != s.base_branch:
-                raise OrchestratorError(f"{s.cwd} is on {current}, not {s.base_branch}, which the pull request "
-                                        f"targets; check out {s.base_branch} and resume")
             # Again, because the interview can take hours: the branch starts from origin's latest base.
-            self.host.fast_forward(s.cwd, s.base_branch)
-            self.host.git(s.cwd, "switch", "-c", s.branch)
+            if s.worktree:
+                # From origin's base itself: the worktree's detached HEAD is where it was before the interview,
+                # and the project's own base branch is the human's.
+                self.host.git(s.work_dir, "switch", "-c", s.branch, self.host.fetch(s.work_dir, s.base_branch))
+            else:
+                if current != s.base_branch:
+                    raise OrchestratorError(f"{s.cwd} is on {current}, not {s.base_branch}, which the pull request "
+                                            f"targets; check out {s.base_branch} and resume")
+                self.host.fast_forward(s.cwd, s.base_branch)
+                self.host.git(s.cwd, "switch", "-c", s.branch)
         log(f"building on branch {s.branch}")
 
     def _publish(self) -> None:
@@ -2511,38 +2601,57 @@ class Workflow:
         s.phase = PUBLISH
         self._save()
         if not s.pr_url:
+            wd = s.work_dir
             # Again: the human may have switched branches during a turn.
             self._check_branch()
             # An earlier orchestrator stopped mid-merge: committing now would commit the conflict markers.
-            if self.host.abort_merge(s.cwd):
-                log(f"aborted the merge an earlier orchestrator left in {s.cwd}")
+            if self.host.abort_merge(wd):
+                log(f"aborted the merge an earlier orchestrator left in {wd}")
             spec = self._last_text(p.contract, 0)
             title = (spec_title(spec) or s.task.strip().split("\n", 1)[0] or s.run_id)[:72]
-            if self.host.git(s.cwd, "status", "--porcelain").strip():
-                self.host.git(s.cwd, "add", "--all")
-                self.host.git(s.cwd, "commit", "--quiet", "-m", title, "-m", commit_note(s))
-            elif self.host.git_head(s.cwd) == s.base:
+            if self.host.git(wd, "status", "--porcelain").strip():
+                self.host.git(wd, "add", "--all")
+                self.host.git(wd, "commit", "--quiet", "-m", title, "-m", commit_note(s))
+            elif self.host.git_head(wd) == s.base:
                 raise OrchestratorError(f"the Builder changed no files; there is nothing to commit on {s.branch}")
             # The base moved on while the run built and reviewed. A conflict is left to the human:
             # the branch is pushed without the merge and the pull request says what conflicts.
-            s.conflicts = self.host.merge_upstream(s.cwd, s.base_branch)
+            s.conflicts = self.host.merge_upstream(wd, s.base_branch)
             self._save()
             if s.conflicts:
                 log(f"{s.branch} conflicts with {REMOTE}/{s.base_branch} in {', '.join(s.conflicts)}; "
                     f"the pull request will be a draft")
-            self.host.git(s.cwd, "push", "--quiet", "--set-upstream", REMOTE, s.branch, timeout=NETWORK_TIMEOUT)
+            self.host.git(wd, "push", "--quiet", "--set-upstream", REMOTE, s.branch, timeout=NETWORK_TIMEOUT)
             quality = self.host.read(s.quality_path(s.round, s.quality_round)) if s.quality_round else None
             report = self._last_text(p.last_edit, s.round)
             verdict = self._last_text(p.verdict_step, s.round)
             body = pr_body(s, spec, report, verdict, quality)
-            s.pr_url = self.host.create_pr(s.cwd, s.base_branch, s.branch, title, body,
+            s.pr_url = self.host.create_pr(wd, s.base_branch, s.branch, title, body,
                                            draft=s.verdict not in SUCCEEDED or bool(s.conflicts))
             self._save()
             log(f"opened {s.pr_url}")
             if s.conflicts:
                 self.notify(f"Pull request conflicts with {s.base_branch}", s.pr_url)
-        # Leaves the checkout where the human had it, so the next run branches from there too.
-        self.host.git(s.cwd, "switch", "--quiet", s.base_branch)
+        self._leave_work_dir()
+
+    def _leave_work_dir(self) -> None:
+        """Once the pull request has the change: check the base branch out again, or remove the run's worktree.
+
+        The base branch leaves the checkout where the human had it, so the next run branches from there too.
+        The worktree goes without --force, which git refuses for one with untracked or modified files. _publish
+        has committed them all, so a refusal means someone changed the worktree since; that, like any failure in
+        removing it, is only logged. The run's branch stays either way.
+        """
+        s = self.state
+        if not s.worktree:
+            self.host.git(s.cwd, "switch", "--quiet", s.base_branch)
+            return
+        try:
+            if self.host.is_worktree(s.cwd, s.worktree):
+                self.host.remove_worktree(s.cwd, s.worktree)
+                log(f"removed worktree {s.worktree}")
+        except OrchestratorError as e:
+            log(f"could not remove worktree {s.worktree}: {e}")
 
     def _last_text(self, step: Step | None, n: int) -> str:
         """The step's last file of round n, or "" for no step or no file."""
@@ -2593,7 +2702,7 @@ class Workflow:
             self._quality_baseline(deadline)
             message = f"Orchestrator run {s.run_id}: round {n}, quality round {q}"
             build, result, analysis = self._analyse(
-                ref, "change", deadline, lambda: self.host.snapshot(s.cwd, s.base, message))
+                ref, "change", deadline, lambda: self.host.snapshot(s.work_dir, s.base, message))
             text = self.ci.mask(self._quality_report(n, q, build, result, analysis, deadline))
             self.host.write(path, text)
         gate = parse_gate(text)
@@ -2641,7 +2750,7 @@ class Workflow:
             if s.ci.get("ref"):
                 self._delete_ci_ref(s.ci["ref"])
             sha = commit()
-            self.host.push_ref(s.cwd, sha, ref)
+            self.host.push_ref(s.work_dir, sha, ref)
             s.ci = {"ref": ref, "sha": sha}
             self._save()
         result = None
@@ -2734,7 +2843,7 @@ class Workflow:
                         deadline: float) -> str:
         s = self.state
         sha = s.ci["sha"]
-        diff = self.host.change_diff(s.cwd, s.base, sha)
+        diff = self.host.change_diff(s.work_dir, s.base, sha)
         changed = changed_lines(diff)
         edited = edited_config(diff, changed)
         where = f"round {n}, quality round {q} of {s.max_quality_rounds}"
@@ -3000,7 +3109,7 @@ class Workflow:
         survivors = [parent, s.root_pane, *(a["pane"] for a in s.agents.values())]
         for pane in dict.fromkeys(p for p in survivors if p and p != old):
             if self.herdr.pane_exists(pane):
-                return self.herdr.split(pane, direction, s.cwd)
+                return self.herdr.split(pane, direction, s.work_dir)
         raise OrchestratorError(f"no pane of run {s.run_id} is left in herdr workspace {s.workspace_id}")
 
     def _pane_order(self, role: str) -> list[str]:
@@ -3027,7 +3136,10 @@ class Workflow:
             self._told_dropped.add(role)
             log(f"[{role}] {kind} has no equivalent of --permission-mode {mode}; starting it without one")
         self.herdr.rename_pane(pane, self.pipeline.roles[role])
-        ready = self.herdr.start_agent(name, pane, kind, launch_args(kind, mode, s.models.get(role), session))
+        # The handoff files are outside a worktree run's working directory.
+        extra_dir = s.dir if s.worktree else None
+        args = launch_args(kind, mode, s.models.get(role), session, extra_dir)
+        ready = self.herdr.start_agent(name, pane, kind, args)
         s.agents[role] = {"name": name, "pane": pane, "kind": kind}
         self._save()
         if not ready:
@@ -3065,10 +3177,10 @@ class Workflow:
         log(f"[{role}] {what} (pane {pane})")
 
     def _change_description(self) -> str:
-        if self.state.base:
-            return (f"`git diff {self.state.base}` in {self.state.cwd}, "
-                    f"plus the untracked files `git status --porcelain` lists")
-        return f"the files the Builder's report lists, in {self.state.cwd} (not a git repository)"
+        s = self.state
+        if s.base:
+            return f"`git diff {s.base}` in {s.work_dir}, plus the untracked files `git status --porcelain` lists"
+        return f"the files the Builder's report lists, in {s.work_dir} (not a git repository)"
 
     @property
     def _state_path(self) -> str:
@@ -3179,6 +3291,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     run.add_argument("--no-pr", action="store_true",
                      help="leave the change uncommitted in the working tree and the workspace open, "
                           "instead of opening a pull request")
+    # Run only: a run keeps where it works, its worktree or the checkout.
+    run.add_argument("--worktree", action="store_true",
+                     help=f"build in a git worktree of the run's own, {WORKTREES_DIR}/<key>, from {REMOTE}'s "
+                          f"version of the checked-out branch, instead of in the checkout itself, which then "
+                          f"need not be clean and stays free to use. Needs a branch checked out and an {REMOTE}. "
+                          f"The worktree is removed once the pull request is open; with --no-pr, or when the "
+                          f"run fails, it stays")
     # Run only: turning the gate on or off in the middle of a run is not supported yet.
     run.add_argument("--quality-gate", metavar="JOB",
                      help="after each Builder turn, analyse the change with this Jenkins job (its full name, "
@@ -3380,7 +3499,8 @@ def show_run(host: Host, cwd: str, ref: str, local_host: str, pid_alive, target:
         print(f"workflow   {workflow}: {workflow_shape(pipeline)}")
     else:
         print(f"workflow   {workflow}: this orchestrator cannot load it")
-    for label, value in (("branch", s.get("branch")), ("base", s.get("base_branch")), ("pr", s.get("pr_url")),
+    for label, value in (("worktree", s.get("worktree")), ("branch", s.get("branch")),
+                         ("base", s.get("base_branch")), ("pr", s.get("pr_url")),
                          ("cleanup", s.get("branch_cleanup")),
                          ("conflicts", ", ".join(s.get("conflicts") or [])), ("workspace", s.get("workspace_id"))):
         if value:
@@ -3810,6 +3930,8 @@ def new_state(args: argparse.Namespace, cwd: str, spec: SpecFile | None = None) 
     state.models = {**pipeline.models, **role_models(args, pipeline.roles)}
     state.agent_kinds = {**pipeline.agents, **role_agents(args, pipeline.roles)}
     state.pull_request = not args.no_pr
+    # Its path from the start, so round 0 creates the worktree there.
+    state.worktree = f"{cwd}/{WORKTREES_DIR}/{state.key}" if args.worktree else None
     state.quality_job = args.quality_gate
     state.max_quality_rounds = args.max_quality_rounds or DEFAULT_MAX_QUALITY_ROUNDS
     return state, pipeline

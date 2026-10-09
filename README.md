@@ -58,7 +58,8 @@ Each harness a run uses needs its CLI and its herdr integration where the agents
 - The CLI of each harness a run uses on `PATH` where the agents run: `claude` by default, and `codex`, `gemini`,
   `opencode` or `pi` for a role that runs in one of those
 - Where the agents run, unless you use `--no-pr`: a git checkout with an `origin` it can push to, and
-  [`gh`](https://cli.github.com) logged in (`gh auth status`)
+  [`gh`](https://cli.github.com) logged in (`gh auth status`); with `--worktree`, a branch checked out and an
+  `origin` even with `--no-pr`
 - Python 3.13+, standard library only, unless you use a [binary](#install), which brings its own; tkinter for the
   [GUI](#gui); [uv](https://github.com/astral-sh/uv) only for the tests and the build
 - For `--machine`: the machine saved in herdr and non-interactive SSH to its target; see
@@ -145,6 +146,9 @@ python orchestrator.py resume e292fb --machine <machine> --cwd ~/GitHub/myprojec
 python orchestrator.py run --workflow tdd "add a token-bucket rate limiter"
 python orchestrator.py run --workflow-file examples/workflows/quick.toml "fix the off-by-one in the pager"
 
+# In a git worktree of the run's own, so the checkout stays yours and several runs can work at once
+python orchestrator.py run --worktree "add a token-bucket rate limiter"
+
 # Skip the interview: a spec you already have is the contract, and the Builder starts on it
 python orchestrator.py run --spec docs/specs/rate-limiter.md
 
@@ -173,12 +177,13 @@ python orchestrator.py gui
 | `--workflow-file FILE` | `run` only: like `--workflow`, for the workflow file at `FILE`, such as one kept in the project. |
 | `--spec FILE` | `run` only: skip the interview. `FILE`, read on this machine (a relative path is from the current directory, not `--cwd`), is copied into the run as the handoff file of the workflow's first step, `spec.md` in `default`, and the run starts at the step after it. The task is then optional: without one it is the spec's `# ` title, or else `FILE`'s name. Needs a workflow whose first step writes the spec, such as `default` or `tdd`, not `quick`. |
 | `--no-pr` | `run` only: leave the change uncommitted and the workspace open instead of opening a pull request. Works outside git. |
+| `--worktree` | `run` only: work in a git worktree of the run's own, `.orchestrator/worktrees/<key>`, checked out from `origin`'s version of the branch the project is on, instead of in the project's checkout, which then need not be clean and stays yours to use. Needs a branch checked out and an `origin`, also with `--no-pr`. See [Worktree runs](#worktree-runs). |
 | `--quality-gate JOB` | `run` only: after each Builder turn, analyse the change with this Jenkins job, by its full name with folders, and SonarQube, and send the findings back to the Builder before the Reviewer. Needs `JENKINS_URL`, `JENKINS_USER`, `JENKINS_TOKEN`, `SONAR_HOST_URL` and `SONAR_TOKEN`, from the environment or `~/.config/ai-agents-orchestrator/ci.env`. |
 | `--max-quality-rounds N` | With the gate: SonarQube analyses per review round before the Reviewer gets the change anyway (default 3). |
 | `--force` | `resume` only: take over a run that still looks alive. |
 | `--dry-run` | `prune` only: print what would become of each branch, and delete and record nothing. |
 
-A run saves its settings. `resume` takes the same flags as `run` except `--no-pr`, `--quality-gate`,
+A run saves its settings. `resume` takes the same flags as `run` except `--no-pr`, `--worktree`, `--quality-gate`,
 `--workflow`, `--workflow-file` and `--spec`, and a flag given to `resume` overrides the saved value; one left out keeps it.
 A harness changed by `resume` applies to each role's next agent; one still running keeps its own.
 
@@ -219,15 +224,19 @@ since, the agent starts a fresh session instead.
 1. **Workspace.** The run gets its own herdr workspace, with a pane per role. The project must be on a branch
    with a clean working tree; the pull request targets that branch. That branch is fetched from `origin` and
    fast-forwarded, so the Spec Collector reads current code. If that fails, for example offline or because the
-   local branch has diverged from `origin`'s, the run stops before the interview. Before all that, a run that
+   local branch has diverged from `origin`'s, the run stops before the interview. A `--worktree` run instead
+   fetches that branch and checks `origin`'s version of it out, on a detached HEAD, in its own worktree
+   `.orchestrator/worktrees/<key>`, where its panes open; the checkout need not be clean and is never switched
+   or fast-forwarded. Before all that, a run that
    will open a pull request deletes the branches of earlier runs whose pull request is done, as `prune` does,
    skipping any it kept before; a failure there is logged and the run goes on.
 2. **Spec Collector.** A notification tells you it is waiting. Answer its questions in its pane; once you
    approve the spec, it writes `spec.md`. With `--spec FILE` there is no interview: `FILE` is copied to
    `spec.md`, no Spec Collector starts, and the Builder takes the root pane.
 3. **Builder.** The orchestrator fetches and fast-forwards the base branch again, since the interview can take
-   hours, and creates the branch `orchestrator/<spec title>-<id>` from it. The Builder implements the spec
-   there, verifies it, and writes `build-N.md` without committing.
+   hours, and creates the branch `orchestrator/<spec title>-<id>` from it; a `--worktree` run creates it in its
+   worktree, from `origin`'s base branch. The Builder implements the spec there, verifies it, and writes
+   `build-N.md` without committing.
 4. **Quality gate**, with `--quality-gate`. The orchestrator snapshots the working tree, pushes it to a
    throwaway branch `orchestrator-ci/<id>-N-qQ`, and has the Jenkins job analyse it into the run's own
    SonarQube project, after analysing the base once per run. It writes `quality-N-Q.md`, which starts with
@@ -243,11 +252,13 @@ since, the agent starts a fresh session instead.
    a draft if changes were still requested after the last round. If the merge conflicts, it is aborted, the
    branch is pushed without it, and the pull request is a draft whose description starts with a warning listing
    the conflicting files; you resolve them. The project goes back to its starting branch, and the workspace is
-   closed. The branch stays, locally and on `origin`, until a later run's sweep or `prune` deletes it.
+   closed; a `--worktree` run removes its worktree instead, and leaves the checkout alone. The branch stays,
+   locally and on `origin`, until a later run's sweep or `prune` deletes it.
 
 One run at a time per checkout: runs in one project directory share its working tree, so a run, `--no-pr`
 or not, refuses to start or resume while another run there is `running` (see `list`). A stale, finished or
-failed run does not count. To run in parallel, give each run its own clone.
+failed run does not count. A `--worktree` run has a working tree of its own, so it neither refuses nor is
+refused by any other run. To run in parallel, use `--worktree`, or give each run its own clone.
 
 Everything a run writes stays in `<project>/.orchestrator/runs/<run-id>/`: the handoff files and `state.json`,
 which records the phase, round, panes, branch, pull request, verdict and any error. `.orchestrator/` ignores
@@ -267,6 +278,22 @@ worktree; a later `prune` looks at kept branches again
 for 3 minutes ([When the orchestrator needs you](docs/design.md#when-the-orchestrator-needs-you)).
 See also [design decisions](docs/design.md), [architecture](docs/architecture.md), [roadmap](docs/roadmap.md)
 and [quality gate](docs/quality-gate.md).
+
+### Worktree runs
+
+A `--worktree` run's worktree holds what git tracks, as `origin` has it. Untracked and ignored files in the
+project, such as a gitignored `CLAUDE.md` or a `.venv`, are not in it; Claude Code still reads the project's
+`CLAUDE.md`, since the worktree is inside the project and Claude Code reads the `CLAUDE.md` of each
+parent directory too. The handoff files stay in the project's run
+directory, outside the worktree: claude and codex get it with `--add-dir`, gemini with `--include-directories`.
+opencode and pi have no such flag and may ask before writing a handoff file there; herdr's notification that the
+agent is blocked brings you in to allow it.
+
+The worktree is removed once the pull request is open. A `--no-pr` run leaves its change uncommitted in the
+worktree, whose path it logs and `show` prints, and a failed run keeps its worktree, as an in-place run keeps its
+branch. A `--worktree` run whose worktree is gone cannot be resumed, unless its pull request is already open.
+Remove a worktree you are done with by `git worktree remove .orchestrator/worktrees/<key>` in the project
+(`--force` to discard its changes).
 
 ## Your own workflows
 
