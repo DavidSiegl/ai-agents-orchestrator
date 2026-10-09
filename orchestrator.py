@@ -2044,9 +2044,11 @@ class Workflow:
                 self._check_gate()
             if s.pull_request:
                 self._check_repo()
-        elif self.ci and s.phase in (self.pipeline.gated.id, QUALITY):
-            # Before a turn of the gated step that may take half an hour, not after it.
-            self.ci.check_credentials()
+        else:
+            self._check_branch()
+            if self.ci and s.phase in (self.pipeline.gated.id, QUALITY):
+                # Before a turn of the gated step that may take half an hour, not after it.
+                self.ci.check_credentials()
 
     def _claim(self) -> None:
         s = self.state
@@ -2084,6 +2086,20 @@ class Workflow:
         # leaves it to _switch_to_branch.
         if branch == s.base_branch:
             self.host.fast_forward(s.cwd, s.base_branch)
+
+    def _check_branch(self) -> None:
+        """Fail if HEAD is not the run's branch, which holds the Builder's uncommitted change until publishing.
+
+        Otherwise the commit lands on whatever the human checked out, and the run's branch is pushed without it.
+        """
+        s = self.state
+        if not s.pull_request or not s.branch or s.pr_url:
+            return
+        current = self.host.git(s.cwd, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        if current != s.branch:
+            # A detached HEAD reads as "HEAD", so it never matches.
+            raise OrchestratorError(f"{s.cwd} is on {current}, not {s.branch}, which holds this run's change; "
+                                    f"check out {s.branch} and resume")
 
     def _check_gate(self) -> None:
         """Fail before the interview if the quality gate could not run."""
@@ -2288,6 +2304,8 @@ class Workflow:
         s.phase = PUBLISH
         self._save()
         if not s.pr_url:
+            # Again: the human may have switched branches during a turn.
+            self._check_branch()
             # An earlier orchestrator stopped mid-merge: committing now would commit the conflict markers.
             if self.host.abort_merge(s.cwd):
                 log(f"aborted the merge an earlier orchestrator left in {s.cwd}")

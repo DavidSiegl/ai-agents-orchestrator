@@ -22,6 +22,10 @@ the process that drives them. `resume` picks the run up where `state.json` says 
 - A run stopped while opening its pull request does not commit twice, merge the base branch twice, or open a
   second pull request. A merge it left half done is aborted before anything is committed, so conflict markers
   never are.
+- Past the spec phase, the Builder's change lives uncommitted on the run's branch until the pull request. A
+  resume refuses to start, and publishing refuses to commit, while HEAD is another branch or detached; the error
+  names the branch to check out, and nothing is switched or stashed for you. Once you check it out, `resume`
+  goes on.
 - An empty handoff file or a review without a verdict stops the resume with the file's name: fix it, or delete
   it to have the role write it again.
 
