@@ -177,10 +177,11 @@ class FakeHost(Host):
                 self.head += "+commit"
             case ("worktree", "add", "--detach", path, _):
                 self.worktrees[path] = "HEAD"
-            case ("worktree", "remove", path):
+            case ("worktree", "remove", path) | ("worktree", "remove", "--force", path):
                 if self.remove_error:
                     return completed(stderr=self.remove_error, returncode=128)
                 del self.worktrees[path]
+                self.changed = {p for p in self.changed if not p.startswith(f"{path}/")}
             case ("fetch", "--quiet", "origin", _) if self.fetch_error:
                 return completed(stderr=self.fetch_error, returncode=128)
             case ("merge-base", "--is-ancestor", "HEAD", _):
@@ -346,6 +347,7 @@ class FakeHerdr:
 
     def close_workspace(self, workspace):
         self.calls.append(("close", workspace))
+        self.workspaces.discard(workspace)
 
 
 def resumed_session(kind, args):
@@ -1341,6 +1343,39 @@ class TestHostGit(unittest.TestCase):
         self.assertIsNone(self.host.remote_branch_commit(self.a, "orchestrator/x-a1b2c3"))
         self.assertEqual(json.loads(self.host.read(f"{state.dir}/state.json"))["branch_cleanup"], "deleted")
 
+    def test_close_on_real_git(self):
+        """A failed --worktree run: its dirty worktree is removed by force, and its branch, at base, deleted."""
+        os.makedirs(f"{self.a}/.orchestrator")
+        with open(f"{self.a}/.orchestrator/.gitignore", "w") as f:
+            f.write("*\n")
+        base = self.head(self.a)
+        wt = f"{self.a}/{orchestrator.WORKTREES_DIR}/a1b2c3"
+        self.host.add_worktree(self.a, wt, base)
+        self.sh("git", "-C", wt, "switch", "--quiet", "-c", "orchestrator/x-a1b2c3")
+        with open(f"{wt}/app.py", "w") as f:
+            f.write("changed\n")
+        with open(f"{wt}/new.py", "w") as f:
+            f.write("new\n")
+        state = RunState("20261001-120000-a1b2c3", "x", self.a, None, phase="build", round=1, workspace_id="w1",
+                         base=base, base_branch="main", branch="orchestrator/x-a1b2c3", error="interrupted",
+                         worktree=wt)
+        path = f"{state.dir}/state.json"
+        self.host.write(path, json.dumps(asdict(state)) + "\n")
+        os.utime(path, (1_000_000_000, 1_000_000_000))
+        herdr = MagicMock()
+        herdr.workspace_exists.return_value = False
+
+        with patch("sys.stdout", new_callable=io.StringIO) as out:
+            closed = orchestrator.close_run(herdr, self.host, self.a, "a1b2c3", "here", lambda pid: False)
+        self.assertEqual(closed, "workspace already gone; worktree deleted; branch deleted")
+        self.assertIn(f"discarding in {wt}:\n     M app.py\n    ?? new.py\n", out.getvalue())
+        self.assertFalse(os.path.exists(wt))
+        self.assertNotIn(wt, self.sh("git", "-C", self.a, "worktree", "list", "--porcelain"))
+        self.assertIsNone(self.host.branch_commit(self.a, "orchestrator/x-a1b2c3"))
+        self.assertEqual(json.loads(self.host.read(path))["closed"], closed)
+        self.assertEqual(os.stat(path).st_mtime, 1_000_000_000)
+        herdr.close_workspace.assert_not_called()
+
 
     def test_worktree_steps(self):
         os.makedirs(f"{self.a}/.orchestrator")
@@ -2127,6 +2162,24 @@ class TestRunHealth(unittest.TestCase):
             "20260930-070000-c0ffee  build    round 1  running: pid 4242 on here, beat 40s ago",
             f"20260930-070000-c0ffee  done     round 1  {APPROVE}",
             "20260930-070000-c0ffee  build    round 1  error: interrupted",
+        ])
+
+    def test_print_closed_runs(self):
+        closed = "workspace closed; worktree deleted"
+        runs = [
+            (STALE_SECONDS + 1, {**run_record(phase="build"), "closed": closed}),
+            (10**6, {**run_record(phase="done", verdict=APPROVE), "closed": "workspace closed"}),
+            (10**6, {**run_record(phase="done", verdict=None), "closed": "workspace already gone"}),
+            (10**6, {**run_record(error="interrupted"), "closed": closed}),
+        ]
+        with patch("builtins.print") as out:
+            orchestrator.print_runs(runs, "here", lambda pid: True, [])
+        lines = [c.args[0] for c in out.call_args_list][::2]
+        self.assertEqual(lines, [
+            f"20260930-070000-c0ffee  build    round 1  closed: {closed}",
+            f"20260930-070000-c0ffee  done     round 1  {APPROVE}; closed: workspace closed",
+            "20260930-070000-c0ffee  done     round 1  closed: workspace already gone",
+            f"20260930-070000-c0ffee  build    round 1  error: interrupted; closed: {closed}",
         ])
 
 
@@ -6037,6 +6090,8 @@ class TestStatusTag(unittest.TestCase):
                             ("stale: no heartbeat for 6m; resume: orchestrator.py resume c0ffee", "warn"),
                             ("error: herdr: no such pane", "error"), ("error: boom  [quick workflow]", "error"),
                             ("running: pid 4242 on here", None), ("FINISHED", None), ("", None),
+                            ("closed: workspace closed", None), ("error: interrupted; closed: workspace closed", "error"),
+                            (f"APPROVE; closed: workspace closed{url}", "ok"),
                             ("[quick workflow]", None)):
             with self.subTest(status=status):
                 self.assertEqual(orchestrator.status_tag(status), tag)
@@ -6450,6 +6505,13 @@ class TestShow(unittest.TestCase):
         for saved in (published, {**published, "branch_cleanup": None}):
             _, out, _ = self.show(ShowHost(saved))
             self.assertNotRegex(out, r"(?m)^cleanup ")
+
+    def test_closed_once_set(self):
+        _, out, _ = self.show(ShowHost(show_state(closed="workspace closed; worktree deleted; branch deleted")))
+        self.assertIn("\nworkspace  w1\nclosed     workspace closed; worktree deleted; branch deleted\n", out)
+        for saved in (show_state(), show_state(closed=None)):
+            _, out, _ = self.show(ShowHost(saved))
+            self.assertNotRegex(out, r"(?m)^closed ")
 
     def test_worktree_of_a_worktree_run(self):
         _, out, _ = self.show(ShowHost(show_state(worktree=WORKTREE, branch="orchestrator/x-a1b2c3")))
@@ -7227,6 +7289,262 @@ class TestPruneCLI(PruneTest):
         self.assertFalse(parse_args(["prune"]).dry_run)
         with self.assertRaises(SystemExit), patch("sys.stderr"):
             parse_args(["prune", "--machine", "m"])
+
+
+CLOSE_ID = "20261001-120000-a1b2c3"
+CLOSE_STATE = f"/proj/.orchestrator/runs/{CLOSE_ID}/state.json"
+CLOSE_BRANCH = "orchestrator/x-a1b2c3"
+
+
+@patch.dict("os.environ", {"HERDR_ENV": "1"})
+class TestClose(unittest.TestCase):
+    """close on a FakeHost and a FakeHerdr whose workspace w1 is open."""
+
+    def setUp(self):
+        self.host = FakeHost()
+        self.herdr = FakeHerdr(self.host, None, {})
+        self.herdr.workspaces.add("w1")
+
+    def add_run(self, *, age=0, worktree=True, **kw):
+        """A run in workspace w1 that failed, by default a --worktree run whose worktree holds a.py uncommitted
+        and whose branch is at its base; returns its saved state."""
+        state = RunState(CLOSE_ID, "a task", "/proj", None, phase="build", round=1, workspace_id="w1",
+                         base="base1", base_branch="main", branch=CLOSE_BRANCH, error="interrupted",
+                         worktree=WORKTREE if worktree else None)
+        saved = {**asdict(state), **kw}
+        self.host.files[CLOSE_STATE] = json.dumps(saved) + "\n"
+        self.host.ages[CLOSE_ID] = age
+        if worktree:
+            self.host.worktrees[WORKTREE] = CLOSE_BRANCH
+            self.host.changed.add(f"{WORKTREE}/a.py")
+            self.host.branches[CLOSE_BRANCH] = "base1"
+        else:
+            self.host.branch = CLOSE_BRANCH
+            self.host.changed.add("/proj/a.py")
+        self.host.ahead[CLOSE_BRANCH] = 0
+        return saved
+
+    def close(self, *argv):
+        with patch.object(orchestrator, "connect", return_value=(self.herdr, self.host)) as connect, \
+                patch.object(Host, "resolve_dir", return_value="/proj"), \
+                patch.object(socket, "gethostname", return_value="here"), \
+                patch.object(orchestrator, "pid_alive", return_value=False), \
+                patch("sys.stdout", new_callable=io.StringIO) as out, \
+                patch("sys.stderr", new_callable=io.StringIO) as err:
+            code = main(["close", *(argv or ["a1b2c3"])])
+        self.connect = connect
+        self.err = err.getvalue()
+        return code, out.getvalue()
+
+    def saved(self):
+        return json.loads(self.host.files[CLOSE_STATE])
+
+    def project(self):
+        """Everything of the project close might change: files, worktrees, branches and uncommitted changes."""
+        return dict(self.host.files), dict(self.host.worktrees), dict(self.host.branches), set(self.host.changed)
+
+    def assert_closed(self, line):
+        self.assertEqual(self.saved()["closed"], line)
+        self.assertEqual(self.host.mtime_kept, [CLOSE_STATE])
+
+    def test_running_run_is_refused_untouched(self):
+        self.add_run(error=None, owner=ME)
+        before = self.project()
+        code, out = self.close()
+        self.assertEqual((code, out), (orchestrator.EXIT_ERROR, ""))
+        self.assertEqual(self.err, f"error: run {CLOSE_ID} is still running (pid 4242 on here, beat 0s ago); "
+                                   f"stop it before closing it\n")
+        self.assertEqual((self.herdr.calls, self.host.git_calls, self.host.writes), ([], [], []))
+        self.assertEqual(self.project(), before)
+
+    def test_failed_worktree_run_loses_workspace_worktree_and_branch(self):
+        self.add_run()
+        code, out = self.close()
+        self.assertEqual(code, 0)
+        self.assertEqual(out, f"closed workspace w1\n"
+                              f"discarding in {WORKTREE}:\n"
+                              f"    ?? {WORKTREE}/a.py\n"
+                              f"deleted worktree {WORKTREE}\n"
+                              f"deleted branch {CLOSE_BRANCH}\n"
+                              f"closed run {CLOSE_ID}: workspace closed; worktree deleted; branch deleted\n")
+        self.assertEqual(self.herdr.calls, [("close", "w1")])
+        self.assertIn(("/proj", ("worktree", "remove", "--force", WORKTREE)), self.host.git_log)
+        self.assertEqual((self.host.worktrees, self.host.changed, self.host.branches), ({}, set(), {}))
+        self.assert_closed("workspace closed; worktree deleted; branch deleted")
+
+    def test_a_clean_worktree_lists_nothing_to_discard(self):
+        self.add_run()
+        self.host.changed.clear()
+        _, out = self.close()
+        self.assertNotIn("discarding", out)
+
+    def test_branch_with_commits_beyond_base_is_kept(self):
+        for n, why in ((1, "1 commit beyond base"), (3, "3 commits beyond base")):
+            with self.subTest(n=n):
+                self.setUp()
+                self.add_run()
+                self.host.ahead[CLOSE_BRANCH] = n
+                code, out = self.close()
+                self.assertEqual(code, 0)
+                self.assertIn(f"kept branch {CLOSE_BRANCH}: {why}\n", out)
+                self.assertIn(CLOSE_BRANCH, self.host.branches)
+                self.assertEqual(self.host.worktrees, {})
+                self.assert_closed(f"workspace closed; worktree deleted; branch kept: {why}")
+
+    def test_branch_of_a_run_without_a_base_is_kept(self):
+        self.add_run(base=None)
+        self.close()
+        self.assertIn(CLOSE_BRANCH, self.host.branches)
+        self.assert_closed("workspace closed; worktree deleted; branch kept: the run has no base to compare it with")
+
+    def test_stale_runs_are_cleaned_up_as_failed_ones(self):
+        cases = {"no heartbeat": dict(age=STALE_SECONDS + 1),
+                 "dead pid on this host": dict(age=HEARTBEAT_SECONDS + 1, owner=ME)}
+        for why, kw in cases.items():
+            with self.subTest(why):
+                self.setUp()
+                self.add_run(error=None, **kw)
+                self.assertEqual(self.close()[0], 0)
+                self.assertEqual(self.herdr.calls, [("close", "w1")])
+                self.assertEqual((self.host.worktrees, self.host.branches), ({}, {}))
+                self.assert_closed("workspace closed; worktree deleted; branch deleted")
+
+    def test_failed_in_place_run_only_loses_its_workspace(self):
+        self.add_run(worktree=False)
+        code, out = self.close()
+        self.assertEqual((code, out), (0, f"closed workspace w1\nclosed run {CLOSE_ID}: workspace closed\n"))
+        self.assertEqual(self.herdr.calls, [("close", "w1")])
+        self.assertEqual(self.host.git_calls, [])
+        self.assertEqual((self.host.branch, self.host.changed), (CLOSE_BRANCH, {"/proj/a.py"}))
+        self.assert_closed("workspace closed")
+
+    def test_finished_no_pr_worktree_run_keeps_its_worktree(self):
+        self.add_run(phase="done", error=None, verdict=APPROVE)
+        code, out = self.close()
+        self.assertEqual(code, 0)
+        self.assertIn(f"worktree kept: {WORKTREE}", out)
+        self.assertEqual(self.herdr.calls, [("close", "w1")])
+        self.assertEqual(self.host.worktrees, {WORKTREE: CLOSE_BRANCH})
+        self.assertEqual(self.host.changed, {f"{WORKTREE}/a.py"})
+        self.assertIn(CLOSE_BRANCH, self.host.branches)
+        self.assert_closed(f"workspace closed; worktree kept: {WORKTREE}")
+
+    def test_finished_worktree_run_whose_worktree_went_with_its_pull_request(self):
+        self.add_run(phase="done", error=None, verdict=APPROVE, pr_url="https://github.com/o/r/pull/7")
+        self.host.worktrees.clear()
+        self.close()
+        self.assert_closed("workspace closed")
+
+    def test_a_workspace_herdr_lacks_is_already_gone(self):
+        for workspace in ("w1", ""):
+            with self.subTest(workspace=workspace):
+                self.setUp()
+                self.herdr.workspaces.clear()
+                self.add_run(workspace_id=workspace)
+                code, out = self.close()
+                self.assertEqual(code, 0)
+                self.assertNotIn("closed workspace", out)
+                self.assertEqual(self.herdr.calls, [])
+                self.assert_closed("workspace already gone; worktree deleted; branch deleted")
+
+    def test_a_worktree_already_gone_still_has_its_branch_deleted(self):
+        self.add_run()
+        self.host.worktrees.clear()
+        self.close()
+        self.assertEqual(self.host.branches, {})
+        self.assert_closed("workspace closed; worktree already gone; branch deleted")
+        self.setUp()
+        self.add_run()
+        self.host.worktrees.clear()
+        self.host.branches.clear()
+        self.close()
+        self.assert_closed("workspace closed; worktree already gone")
+
+    def test_second_close_only_prints_the_record(self):
+        self.add_run()
+        self.close()
+        self.herdr.calls.clear()
+        self.host.git_calls.clear()
+        writes = list(self.host.writes)
+        code, out = self.close()
+        self.assertEqual((code, out), (0, f"run {CLOSE_ID} is already closed: "
+                                          f"workspace closed; worktree deleted; branch deleted\n"))
+        self.assertEqual((self.herdr.calls, self.host.git_calls, self.host.writes), ([], [], writes))
+
+    def test_resume_refuses_a_closed_run_even_with_force(self):
+        saved = {**asdict(saved_run("build", 1, agents=("spec", "build"))), "closed": "workspace closed"}
+        for flags in ([], ["--force"]):
+            args = parse_args(["resume", "a1b2c3", *flags])
+            with self.subTest(flags=flags), self.assertRaisesRegex(
+                    OrchestratorError, f"run {saved['run_id']} was closed; start a new run"):
+                orchestrator.resumable_state([(0, saved)], args, "/proj", "here", lambda pid: True)
+
+    def test_resume_of_a_closed_run_exits_1(self):
+        self.add_run()
+        self.close()
+        for flags in ([], ["--force"]):
+            with self.subTest(flags=flags), \
+                    patch.object(orchestrator, "connect", return_value=(self.herdr, self.host)), \
+                    patch.object(Host, "resolve_dir", return_value="/proj"), \
+                    patch("sys.stderr", new_callable=io.StringIO) as err:
+                self.assertEqual(main(["resume", "a1b2c3", *flags]), orchestrator.EXIT_ERROR)
+            self.assertIn(f"run {CLOSE_ID} was closed; start a new run", err.getvalue())
+
+    def test_state_saved_before_close_existed_loads_and_resumes(self):
+        saved = asdict(saved_run("build", 1, agents=("spec", "build")))
+        del saved["closed"]
+        state = orchestrator.resumable_state([(10**4, saved)], parse_args(["resume", "a1b2c3"]), "/proj", "here",
+                                             lambda pid: True)
+        self.assertIsNone(state.closed)
+
+    def test_state_saved_meanwhile_is_not_overwritten(self):
+        self.add_run()
+        close_workspace = self.herdr.close_workspace
+
+        def resumed_meanwhile(workspace):
+            close_workspace(workspace)
+            self.host.files[CLOSE_STATE] = json.dumps({**self.saved(), "round": 2})
+        self.herdr.close_workspace = resumed_meanwhile
+        code, _ = self.close()
+        self.assertEqual(code, orchestrator.EXIT_ERROR)
+        self.assertEqual(self.err, f"error: {CLOSE_STATE} changed while the run was closed; closed is not recorded\n")
+        self.assertEqual((self.saved()["round"], self.saved()["closed"]), (2, None))
+
+    def test_herdr_failure_records_nothing(self):
+        self.add_run()
+        self.herdr.close_workspace = MagicMock(side_effect=HerdrError("server_error", "herdr is down"))
+        code, _ = self.close()
+        self.assertEqual(code, orchestrator.EXIT_ERROR)
+        self.assertIn("herdr is down", self.err)
+        self.assertEqual((self.host.git_calls, self.host.writes), ([], []))
+        self.assertIsNone(self.saved()["closed"])
+
+    def test_git_failure_records_nothing_and_a_second_close_finishes(self):
+        self.add_run()
+        self.host.remove_error = "fatal: cannot remove a locked working tree"
+        code, _ = self.close()
+        self.assertEqual(code, orchestrator.EXIT_ERROR)
+        self.assertIn("cannot remove a locked working tree", self.err)
+        self.assertEqual(self.host.writes, [])
+        self.assertIsNone(self.saved()["closed"])
+        self.assertIn(CLOSE_BRANCH, self.host.branches)
+
+        self.host.remove_error = None
+        self.assertEqual(self.close()[0], 0)
+        self.assert_closed("workspace already gone; worktree deleted; branch deleted")
+
+    def test_on_a_machine(self):
+        self.add_run()
+        self.assertEqual(self.close("a1b2c3", "--machine", "m", "--cwd", "~/proj")[0], 0)
+        self.connect.assert_called_once_with("m")
+
+    def test_args(self):
+        args = parse_args(["close", "a1b2c3", "--machine", "m", "--cwd", "~/proj"])
+        self.assertEqual((args.command, args.run_ref, args.machine, args.cwd), ("close", "a1b2c3", "m", "~/proj"))
+        with self.assertRaises(SystemExit), patch("sys.stderr"):
+            parse_args(["close", "a1b2c3", "--machine", "m"])
+        with self.assertRaises(SystemExit), patch("sys.stderr"):
+            parse_args(["close"])
 
 
 NEW_RUN = "20261009-120000-c0ffee"

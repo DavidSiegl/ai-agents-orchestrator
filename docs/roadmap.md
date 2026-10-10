@@ -3,8 +3,6 @@
 Ideas for what comes next, in no particular order. The designs behind what has shipped are in
 [design.md](design.md).
 
-- **`close <run-id>`**: close the run's herdr workspace from its saved `workspace_id`, instead of by hand. Only
-  runs that failed or used `--no-pr` need it; the others close their workspace after the pull request.
 - **Per-role permission mode**: give each role its own permission mode. Today one `--permission-mode` applies to
   every role.
 - **Overridable prompts**: load the role prompts from `.orchestrator/prompts/*.md` when those files exist, with

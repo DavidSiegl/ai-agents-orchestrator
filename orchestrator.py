@@ -1322,9 +1322,9 @@ class Host:
         return any(r and r[0] == f"worktree {proc.stdout.strip()}" and not any(x.startswith("prunable") for x in r)
                    for r in records)
 
-    def remove_worktree(self, cwd: str, path: str) -> None:
-        """Remove the worktree at path; without --force, git refuses one with changes it would lose."""
-        self.git(cwd, "worktree", "remove", path)
+    def remove_worktree(self, cwd: str, path: str, force: bool = False) -> None:
+        """Remove the worktree at path; without force, git refuses one with changes it would lose."""
+        self.git(cwd, "worktree", "remove", *(["--force"] if force else []), path)
 
     def checked_out_branches(self, cwd: str) -> dict[str, str]:
         """The branches checked out in the repository's worktrees, the main checkout's included, with each path."""
@@ -1756,6 +1756,9 @@ class RunState:
     # A run --worktree run's own git worktree, by its absolute path, from the run's start on: round 0 creates it
     # there. None for a run in the project's checkout, cwd. cwd stays the project, where the run directory is.
     worktree: str | None = None
+    # What close did, one line such as "workspace closed; worktree deleted; branch deleted". Written by close_run,
+    # never by the run itself; a closed run is not resumed.
+    closed: str | None = None
 
     @classmethod
     def from_dict(cls, saved: dict) -> "RunState":
@@ -3225,6 +3228,10 @@ class Workflow:
 # CLI
 # ---------------------------------------------------------------------------
 
+# The RUN argument of every command that takes one; find_run looks it up.
+RUN_REF_HELP = "the run id, or the six-character key at its end"
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="orchestrator.py",
@@ -3309,7 +3316,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "resume", parents=[target, settings], help="continue a run whose orchestrator has stopped",
         description="Continue a run whose orchestrator has stopped. A settings flag overrides what the run "
                     "was started with; an unset one keeps it, not the default shown.")
-    resume.add_argument("run_ref", metavar="RUN", help="the run id, or the six-character key at its end")
+    resume.add_argument("run_ref", metavar="RUN", help=RUN_REF_HELP)
     resume.add_argument("--force", action="store_true", help="take over a run that still looks alive")
     # Hidden and refused below: argparse would otherwise take --spec for an abbreviation of --spec-model.
     resume.add_argument("--spec", nargs="?", const="", help=argparse.SUPPRESS)
@@ -3320,7 +3327,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "show", parents=[target], help="print one run in full: its state, files and last review",
         description="Print one run: its line as list shows it and its whole task, its workflow, branch and "
                     "pull request, each role's agent, the files in its run directory, and the last review.")
-    show.add_argument("run_ref", metavar="RUN", help="the run id, or the six-character key at its end")
+    show.add_argument("run_ref", metavar="RUN", help=RUN_REF_HELP)
 
     prune = sub.add_parser(
         "prune", parents=[target], help="delete the branches of runs whose pull request is done",
@@ -3329,6 +3336,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                     f"A branch with commits its pull request lacks, or one checked out, is kept. Every run "
                     f"that opens a pull request does this first, except for branches kept before.")
     prune.add_argument("--dry-run", action="store_true", help="print what would be deleted, and delete nothing")
+
+    close = sub.add_parser(
+        "close", parents=[target], help="clean up after a finished or failed run: its workspace, worktree and branch",
+        description="Clean up after a run that is finished, failed or stale, and record it in the run's state, so "
+                    "that resume refuses it. Closes the run's herdr workspace. A failed or stale --worktree run "
+                    "also loses its worktree, uncommitted changes included, which are listed first, and its "
+                    "branch, unless that has commits beyond the run's base. A finished run keeps its worktree; "
+                    "an in-place run keeps its checkout and branch. A running run is refused.")
+    close.add_argument("run_ref", metavar="RUN", help=RUN_REF_HELP)
 
     workflows = sub.add_parser(
         "workflows", help="list the workflows, or print one as a workflow file",
@@ -3502,7 +3518,8 @@ def show_run(host: Host, cwd: str, ref: str, local_host: str, pid_alive, target:
     for label, value in (("worktree", s.get("worktree")), ("branch", s.get("branch")),
                          ("base", s.get("base_branch")), ("pr", s.get("pr_url")),
                          ("cleanup", s.get("branch_cleanup")),
-                         ("conflicts", ", ".join(s.get("conflicts") or [])), ("workspace", s.get("workspace_id"))):
+                         ("conflicts", ", ".join(s.get("conflicts") or [])), ("workspace", s.get("workspace_id")),
+                         ("closed", s.get("closed"))):
         if value:
             print(f"{label:<9}  {value}")
     agents = s.get("agents") or {}
@@ -3556,10 +3573,15 @@ def run_outcome(s: dict, age: int, local_host: str, pid_alive, target: list[str]
         outcome = f"error: {s['error']}"
     elif health is None:
         outcome = s.get("verdict") or ""
+    elif s.get("closed"):
+        # Stale by its heartbeat, but resume refuses it, so neither its staleness nor the command is worth showing.
+        outcome = ""
     else:
         outcome = f"{health[0]}: {health[1]}"
         if health[0] == STALE:
             outcome += f"; resume: {resume_command(s['run_id'], target)}"
+    if s.get("closed"):
+        outcome = "; ".join(part for part in (outcome, f"closed: {s['closed']}") if part)
     if s.get("pr_url"):
         outcome += f"  {s['pr_url']}"
     if (workflow := s.get("workflow", DEFAULT_WORKFLOW.name)) != DEFAULT_WORKFLOW.name:
@@ -3596,6 +3618,9 @@ def resumable_state(runs: list[tuple[int, dict]], args: argparse.Namespace, cwd:
     """The saved state of the run to resume, with the flags given to resume applied."""
     age, saved = find_run(runs, args.run_ref, cwd)
     state = RunState.from_dict(saved)
+    # Not even with --force: close may have deleted its worktree and branch.
+    if state.closed:
+        raise OrchestratorError(f"run {state.run_id} was closed; start a new run")
     pipeline = run_pipeline(state.workflow, state.workflow_definition)
     health = run_health(saved, age, local_host, pid_alive)
     if health and health[0] == RUNNING and not args.force:
@@ -3710,7 +3735,8 @@ def prune_run(host: Host, cwd: str, saved: dict, run: PrunedRun, now: float, che
     kept = [why for why in (local_kept, remote_kept) if why]
     run.cleanup = BRANCH_KEPT + "; ".join(kept) if kept else BRANCH_DELETED
     if not dry_run:
-        record_cleanup(host, f"{cwd}/{RUNS_DIR}/{state.run_id}/state.json", saved, run.cleanup)
+        record_in_state(host, f"{cwd}/{RUNS_DIR}/{state.run_id}/state.json", saved,
+                        "branch_cleanup", run.cleanup, "its branch was pruned")
 
 
 def pull_request_pending(pr: dict, number: str, now: float) -> str | None:
@@ -3770,10 +3796,11 @@ def deletion(dry_run: bool) -> str:
     return "would be deleted" if dry_run else BRANCH_DELETED
 
 
-def record_cleanup(host: Host, path: str, saved: dict, cleanup: str) -> None:
-    """Add branch_cleanup to the run's state.json, unless the run has saved since it was read.
+def record_in_state(host: Host, path: str, saved: dict, key: str, value: str, meanwhile: str) -> None:
+    """Add key to the run's state.json, unless the run has saved since it was read as saved.
 
-    The file keeps its modification time, which is the run's heartbeat: a stale run must not look live.
+    For what prune and close write about a run they do not drive. The file keeps its modification time,
+    which is the run's heartbeat: a stale run must not look live.
     """
     text = host.read(path)
     try:
@@ -3781,8 +3808,8 @@ def record_cleanup(host: Host, path: str, saved: dict, cleanup: str) -> None:
     except ValueError as e:
         raise OrchestratorError(f"corrupt {path}: {e}") from e
     if not unchanged:
-        raise OrchestratorError(f"{path} changed while its branch was pruned; branch_cleanup is not recorded")
-    host.write(path, json.dumps({**saved, "branch_cleanup": cleanup}) + "\n", keep_mtime=True)
+        raise OrchestratorError(f"{path} changed while {meanwhile}; {key} is not recorded")
+    host.write(path, json.dumps({**saved, key: value}) + "\n", keep_mtime=True)
 
 
 def print_pruned(pruned: list[PrunedRun]) -> None:
@@ -3817,6 +3844,76 @@ def sweep_branches(host: Host, cwd: str) -> None:
         return
     if line := sweep_summary(pruned):
         log(line)
+
+
+def close_run(herdr: Herdr, host: Host, cwd: str, ref: str, local_host: str, pid_alive) -> str:
+    """Clean up after a run that nothing drives any more, record what was done as its closed, and return that.
+
+    Every run loses its workspace. A failed or stale --worktree run also loses its worktree, changes and all,
+    and its branch if that holds no commit beyond the run's base: the Builder never commits, so such a branch
+    has nothing to lose. A finished run's worktree is a --no-pr run's change, and an in-place run's checkout
+    and branch are the human's to sort out, so both stay. Each step skips what is already gone, so a close
+    that failed part way can be run again; closed is recorded only once every step has succeeded.
+    """
+    age, saved = find_run(host.run_states(cwd), ref, cwd)
+    state = RunState.from_dict(saved)
+    if state.closed:
+        print(f"run {state.run_id} is already closed: {state.closed}")
+        return state.closed
+    health = run_health(saved, age, local_host, pid_alive)
+    if health and health[0] == RUNNING:
+        raise OrchestratorError(f"run {state.run_id} is still running ({health[1]}); stop it before closing it")
+    failed = bool(state.error) or health is not None
+    done = [close_run_workspace(herdr, state.workspace_id)]
+    if state.worktree and failed:
+        done += discard_run_worktree(host, cwd, state)
+    elif state.worktree and host.is_worktree(cwd, state.worktree):
+        done.append(f"worktree kept: {state.worktree}")
+    closed = "; ".join(done)
+    record_in_state(host, f"{cwd}/{RUNS_DIR}/{state.run_id}/state.json", saved, "closed", closed,
+                    "the run was closed")
+    print(f"closed run {state.run_id}: {closed}")
+    return closed
+
+
+def close_run_workspace(herdr: Herdr, workspace: str) -> str:
+    if workspace and herdr.workspace_exists(workspace):
+        herdr.close_workspace(workspace)
+        print(f"closed workspace {workspace}")
+        return "workspace closed"
+    return "workspace already gone"
+
+
+def discard_run_worktree(host: Host, cwd: str, state: RunState) -> list[str]:
+    """Force-remove a failed run's worktree of cwd, after listing the changes that go with it, then its branch."""
+    done = []
+    if host.is_worktree(cwd, state.worktree):
+        if changes := host.git(state.worktree, "status", "--porcelain").splitlines():
+            print(f"discarding in {state.worktree}:")
+            for line in changes:
+                print(f"    {line}")
+        host.remove_worktree(cwd, state.worktree, force=True)
+        print(f"deleted worktree {state.worktree}")
+        done.append("worktree deleted")
+    else:
+        done.append("worktree already gone")
+    # Even with the worktree gone: a close that failed at the branch must find it again.
+    if state.branch and host.branch_commit(cwd, state.branch) is not None:
+        done.append(discard_run_branch(host, cwd, state))
+    return done
+
+
+def discard_run_branch(host: Host, cwd: str, state: RunState) -> str:
+    if state.base is None:
+        why = "the run has no base to compare it with"
+    elif n := host.commits_beyond(cwd, state.base, state.branch):
+        why = f"{n} commit{'s' if n != 1 else ''} beyond base"
+    else:
+        host.delete_branch(cwd, state.branch)
+        print(f"deleted branch {state.branch}")
+        return "branch deleted"
+    print(f"kept branch {state.branch}: {why}")
+    return f"branch kept: {why}"
 
 
 def print_workflows() -> None:
@@ -3858,7 +3955,7 @@ def main(argv: list[str]) -> int:
         herdr, host = connect(args.machine)
         cwd = host.resolve_dir(args.cwd or os.getcwd())
         if args.command in RUNS_COMMANDS:
-            runs_command(args, host, cwd)
+            runs_command(args, herdr, host, cwd)
             return 0
         spec = read_spec_file(args.spec) if args.command == "run" and args.spec is not None else None
         # Only a run that opens a pull request: a --no-pr run's project may have no gh.
@@ -3884,15 +3981,17 @@ def main(argv: list[str]) -> int:
 
 
 # The commands about a project's runs, which start none.
-RUNS_COMMANDS = ("list", "show", "prune")
+RUNS_COMMANDS = ("list", "show", "prune", "close")
 
 
-def runs_command(args: argparse.Namespace, host: Host, cwd: str) -> None:
+def runs_command(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str) -> None:
     local_host = socket.gethostname()
     if args.command == "list":
         print_runs(host.run_states(cwd), local_host, pid_alive, target_args(args))
     elif args.command == "show":
         show_run(host, cwd, args.run_ref, local_host, pid_alive, target_args(args))
+    elif args.command == "close":
+        close_run(herdr, host, cwd, args.run_ref, local_host, pid_alive)
     else:
         print_pruned(prune_branches(host, cwd, time.time, local_host, pid_alive, dry_run=args.dry_run, revisit=True))
 
