@@ -28,6 +28,12 @@ the process that drives them. `resume` picks the run up where `state.json` says 
   goes on.
 - An empty handoff file stops the resume with the file's name: fix it, or delete it to have the role write it
   again.
+- A run that stopped while a `BLOCKED:` report waited for your answer goes back to waiting: it notifies you
+  again and focuses the pane, and prompts the agent as for any turn, but with the blocked prompt in place of the
+  step's own: a live agent already given it is only waited on, an agent relaunched into its session is told to
+  continue, and a fresh one gets the blocked prompt. The block is saved before the report is moved aside, and a
+  resume finishes a move it finds undone, so a resume never loses the report, counts it twice, or skips the
+  wait.
 - A verdict file, the default's `review-N.md`, that is empty or does not start with a `VERDICT` line is moved
   aside to `review-N.rejected.md`, and the role is asked once to write it again, with the path of the rejected
   file so it can reuse its findings. The retry uses no review round. Each verdict file gets one retry, saved in
@@ -63,6 +69,8 @@ and model of its agent (none for a quality analysis, whose role is `quality`), w
   orchestrator ran still ends its turn when it was written, not when a resume found it.
 - A rejected verdict file keeps its record, renamed to `review-N.rejected.md`; the retry gets a record of its
   own.
+- A `BLOCKED:` report keeps its record too, renamed to `build-N.blocked-K.md`. The wait for your answer and the
+  rewrite that follows are a new record, human-paced, since its time is yours as much as the agent's.
 - A file without an open record, as one an older run wrote before turns were recorded, gets a record with no
   start and no duration. A spec copied with `--spec` gets none, since no turn ran.
 
@@ -126,9 +134,30 @@ does. So the
 orchestrator polls for the file, and sends a herdr notification when a role:
 
 - is **blocked** on a permission prompt, a question, or a startup dialog such as folder trust;
-- has sat **idle for 3 minutes** without writing its file (not the Spec Collector, which waits on you by design).
+- has sat **idle for 3 minutes** without writing its file (not the Spec Collector, which waits on you by design);
+- writes a report whose first non-blank line starts with **`BLOCKED:`**, because it cannot go on without a
+  decision from you.
 
 Notifications appear in the herdr where the orchestrator runs. Answer in the named pane, and the run continues.
+
+A `BLOCKED:` report is the agent asking, rather than herdr noticing. Every step but a human-paced one, such as
+the interview, and the verdict step can report it; in the default workflow that is the Builder, both for
+`build-N.md` and for its answers to the quality gate, `build-N-qQ.md`. Each prompt those steps get ends with a
+sentence saying how, added at run time, so workflow definitions and `workflows default` do not contain it. The
+match is case-sensitive, as for `VERDICT:`, and the question is the rest of the line, `(no question given)` when
+there is none. A verdict file that starts with `BLOCKED:` gets the verdict retry, like any other without a
+verdict. When a report is blocked, the orchestrator:
+
+1. moves it aside to `<stem>.blocked-K<ext>`, such as `build-1.blocked-1.md`, K counting from 1 per file;
+2. records the block in `state.json` as `blocked`: the file, the question and K;
+3. notifies you, "Builder is blocked: <question>", with the pane, and focuses that pane;
+4. tells the agent that you have been notified and will answer in its pane, and that it should then finish the
+   work and write its file again;
+5. waits for that file with no timeout and no idle notice, as for the interview.
+
+The new file goes on as the first would have, to the Reviewer in the same round; one that starts with
+`BLOCKED:` again is moved to K+1 and waited for again, with no limit. While a running run waits, `list` and
+`show` print `blocked: <question> (pane …)` in place of `running`, and the GUI colors it as it does `stale`.
 
 ## Running the agents on another machine
 
@@ -201,6 +230,10 @@ check.
   against today's HEAD, and if you had committed the Builder's work the Reviewer would see an empty diff.
 - **A resumed turn gets a fresh timeout.** The downtime is not the role's fault, and a saved deadline would
   often expire at once.
+- **A block is saved before its report is moved, and the move is finished on resume.** Saving after the move,
+  as the verdict retry does, would leave a resume that died in between with neither the report nor the block,
+  and it would send the step's own prompt in place of the wait. Saved first, the block names the K the report
+  goes to, so finishing the move cannot count it twice.
 - **An invalid handoff file stops the resume and is named.** Resume does not judge a role's output. Stopping
   also clears `prompted`, so once you delete the file the role is prompted again instead of waited on.
 - **`done` is a no-op.** Resume is idempotent, so a script can call it without checking the phase first. A run

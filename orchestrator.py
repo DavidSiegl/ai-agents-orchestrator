@@ -87,6 +87,10 @@ CHANGES_REQUESTED = "CHANGES_REQUESTED"
 FINISHED = "FINISHED"
 QUALITY_GATE_FAILED = "QUALITY_GATE_FAILED"
 SUCCEEDED = (APPROVE, FINISHED)
+# The first line of a report whose agent cannot go on without the human (parse_blocked).
+BLOCKED = "BLOCKED:"
+# How a BLOCKED line with nothing after the colon shows its question.
+NO_QUESTION = "(no question given)"
 
 # The quality gate. Requests time out below STALE_SECONDS, so a hung one cannot make a live run look stale.
 DEFAULT_MAX_QUALITY_ROUNDS = 3
@@ -275,6 +279,18 @@ It has been moved to {rejected_path}; reuse its findings, if it has any. \
 Write the file again to {path} in a single write. Its first line must be exactly `VERDICT: {approve}` \
 or `VERDICT: {changes}`, followed by the numbered findings."""
 
+# Appended at run time to every prompt of a step that can block (Step.can_block), so workflow definitions,
+# and what `workflows` prints, never contain it.
+BLOCKED_NOTE = """\
+If you cannot continue without a decision from the human, write the report with a first line \
+`BLOCKED: <your question>` instead."""
+
+# For an agent whose report was BLOCKED, while the human answers it in the agent's pane.
+BLOCKED_PROMPT = """\
+Your report asked the human a question and has been moved to {blocked_path}. \
+The human has been notified and will answer you in this pane. \
+Once the question is resolved, finish the work and write {path} again in a single write."""
+
 # Appended for a Builder or Reviewer that starts a fresh session in a later round: it has not seen the earlier ones.
 REBUILD_NOTE = """\
 This is round {n}, and you are a fresh session. An earlier Builder session did the earlier turns; \
@@ -352,6 +368,12 @@ class Step:
     @property
     def per_round(self) -> bool:
         return "n" in _fields_of(self.file)
+
+    @property
+    def can_block(self) -> bool:
+        """Whether a BLOCKED report pauses the turn for the human. A human-paced step has the human at hand
+        already, and the verdict step's file must start with its verdict."""
+        return not self.human_paced and self.loop_to is None
 
     def path(self, run_dir: str, n: int, q: int = 0) -> str:
         """The handoff file of round n; with q, the answer to quality round q."""
@@ -1784,6 +1806,9 @@ class RunState:
     # when its prompt is delivered, or a quality analysis starts, and closes when its file is found. Absent from a
     # run saved before them.
     turns: list[dict] = field(default_factory=list)
+    # The BLOCKED report the current turn waits on the human for, {"file", "question", "k"}: file is the handoff
+    # file's basename, and the report was moved to its k-th blocked name (Workflow._blocked_path). None otherwise.
+    blocked: dict | None = None
 
     @classmethod
     def from_dict(cls, saved: dict) -> "RunState":
@@ -1863,6 +1888,16 @@ def parse_verdict(review: str) -> str | None:
         if line.strip():
             m = re.search(rf"VERDICT:\s*({APPROVE}|{CHANGES_REQUESTED})\b", line)
             return m.group(1) if m else None
+    return None
+
+
+def parse_blocked(report: str) -> str | None:
+    """The question of a report whose first non-blank line starts with BLOCKED:, or None for any other report."""
+    for line in report.splitlines():
+        if line.strip():
+            if not line.lstrip().startswith(BLOCKED):
+                return None
+            return line.lstrip().removeprefix(BLOCKED).strip() or NO_QUESTION
     return None
 
 
@@ -2654,7 +2689,8 @@ class Workflow:
         path = self._own_path(step, n)
         verdict = step.loop_to is not None
         if not step.human_paced:
-            return self._turn(step.role, text, path, s.turn_timeout, fresh_text=fresh, verdict=verdict)
+            return self._turn(step.role, text, path, s.turn_timeout, fresh_text=fresh, verdict=verdict,
+                              blocks=step.can_block)
         label = self.pipeline.roles[step.role]
 
         def announce(how: str) -> None:
@@ -2675,7 +2711,14 @@ class Workflow:
 
     def _prompts(self, step: Step, n: int) -> tuple[str, str | None]:
         """The step's prompt for its turn in round n, and the one for a fresh session that has not seen the turns
-        before it."""
+        before it; each ends with BLOCKED_NOTE when the step can block."""
+        text, fresh = self._step_prompts(step, n)
+        if not step.can_block:
+            return text, fresh
+        return f"{text}\n\n{BLOCKED_NOTE}", fresh and f"{fresh}\n\n{BLOCKED_NOTE}"
+
+    def _step_prompts(self, step: Step, n: int) -> tuple[str, str | None]:
+        """_prompts as the step's definition words them."""
         s = self.state
         q = s.quality_round if step.quality_gated else 0
         fill = {name: self._placeholder(name, step, n) for name in step.placeholders()}
@@ -3100,30 +3143,52 @@ class Workflow:
             else:
                 s.quality_project = None
 
-    def _turn(self, role: str, text: str, path: str, timeout: int | None, *,
-              fresh_text: str | None = None, watch_stalls: bool = True, announce=None, verdict: bool = False) -> str:
+    def _turn(self, role: str, text: str, path: str, timeout: int | None, *, fresh_text: str | None = None,
+              watch_stalls: bool = True, announce=None, verdict: bool = False, blocks: bool = False) -> str:
         """Return the handoff file that ends the role's turn, prompting the role only if it still owes it.
 
         fresh_text replaces text for an agent in a new session, which has not seen the role's
         earlier turns. announce(how) runs once the agent is ready, before any prompt. A verdict
         file without a VERDICT first line is asked for once more (_retry) before it ends the run.
+        With blocks, a BLOCKED report waits for the human (_block) as often as it comes.
         """
+        if verdict:
+            return self._verdict_turn(role, text, path, timeout, fresh_text, watch_stalls, announce)
+        s = self.state
+        if blocks and s.blocked is not None and s.blocked["file"] == os.path.basename(path):
+            # A resume in the middle of a block.
+            self._finish_block(path)
+            out = self._unblocked(role, path)
+        else:
+            out = self._written(role, text, path, timeout, fresh_text, watch_stalls, announce)
+            if blocks and (question := parse_blocked(out)) is not None:
+                self._block(role, path, question)
+                out = self._unblocked(role, path)
+        if not out.strip():
+            self._reject(path, f"was written empty by the {self.pipeline.roles[role]}")
+        return out
+
+    def _verdict_turn(self, role: str, text: str, path: str, timeout: int | None, fresh_text: str | None,
+                      watch_stalls: bool, announce) -> str:
+        """_turn for the verdict step: its file, once it starts with a VERDICT line."""
         s = self.state
         file = os.path.basename(path)
         if s.retrying == file:
             text = fresh_text = self._retry_prompt(path)
-        while True:
-            out = self._written(role, text, path, timeout, fresh_text, watch_stalls, announce)
-            if not verdict:
-                if not out.strip():
-                    self._reject(path, f"was written empty by the {self.pipeline.roles[role]}")
-                return out
-            if parse_verdict(out):
-                if s.retrying == file:
-                    s.retrying = None
-                return out
+        while not parse_verdict(out := self._written(role, text, path, timeout, fresh_text, watch_stalls, announce)):
             self._retry(role, path, out)
             text = fresh_text = self._retry_prompt(path)
+        if s.retrying == file:
+            s.retrying = None
+        return out
+
+    def _unblocked(self, role: str, path: str) -> str:
+        """The report of a blocked turn once it is no longer BLOCKED; each that still is waits again (_block)."""
+        while (question := parse_blocked(out := self._block_answer(role, path))) is not None:
+            self._block(role, path, question)
+        self.state.blocked = None
+        self._save()
+        return out
 
     def _written(self, role: str, text: str, path: str, timeout: int | None, fresh_text: str | None,
                  watch_stalls: bool, announce) -> str:
@@ -3178,6 +3243,50 @@ class Workflow:
         next(t for t in reversed(s.turns) if t["file"] == file)["file"] = os.path.basename(rejected)
         self._save()
         log(f"[{role}] {file} {why}; moved it to {os.path.basename(rejected)}, prompting once more")
+
+    def _block(self, role: str, path: str, question: str) -> None:
+        """Move a BLOCKED report aside to its next blocked name, and record the block, so that the turn waits for
+        the human's answer and then for the report again."""
+        s, file = self.state, os.path.basename(path)
+        k = s.blocked["k"] + 1 if s.blocked and s.blocked["file"] == file else 1
+        blocked = self._blocked_path(path, k)
+        # Everything is saved before the rename, which a resume finishes (_finish_block): dying at any point leaves
+        # the report to be judged again, as block k once more, or the wait under way, never a report lost or
+        # counted twice. No prompt counts as delivered, so even an agent that is alive gets BLOCKED_PROMPT.
+        s.prompted = None
+        s.blocked = {"file": file, "question": question, "k": k}
+        # The turn's record, which _written closed, goes with the file, as in _retry; the wait opens a record of
+        # its own, human-paced (_turn_record).
+        next(t for t in reversed(s.turns) if t["file"] == file)["file"] = os.path.basename(blocked)
+        self._save()
+        self.host.rename(path, blocked)
+        log(f"[{role}] {file} is blocked: {question}; moved it to {os.path.basename(blocked)}")
+
+    def _finish_block(self, path: str) -> None:
+        """Make the rename of a block the orchestrator saved but may have died before making."""
+        blocked = self._blocked_path(path, self.state.blocked["k"])
+        if self.host.read(blocked) is None and self.host.read(path) is not None:
+            self.host.rename(path, blocked)
+
+    def _block_answer(self, role: str, path: str) -> str:
+        """The role's report once the human has answered its BLOCKED question in its pane.
+
+        As for the interview: no turn timeout and no stall notice, since the agent waits for the human. A resumed
+        wait announces itself again, and prompts as _prompt_for does, with BLOCKED_PROMPT in place of the step's.
+        """
+        s = self.state
+        prompt = BLOCKED_PROMPT.format(path=path, blocked_path=self._blocked_path(path, s.blocked["k"]))
+
+        def announce(_how: str) -> None:
+            self.herdr.focus(s.agents[role]["name"])
+            self._ask_human(role, f"is blocked: {s.blocked['question']}")
+
+        return self._written(role, prompt, path, None, prompt, False, announce)
+
+    @staticmethod
+    def _blocked_path(path: str, k: int) -> str:
+        stem, ext = os.path.splitext(path)
+        return f"{stem}.blocked-{k}{ext}"
 
     @staticmethod
     def _rejected_path(path: str) -> str:
@@ -3237,8 +3346,8 @@ class Workflow:
     def _reject(self, path: str, why: str) -> None:
         # Resume does not judge a role's output; the human fixes the file or deletes it,
         # and a deleted file is asked for again, so the prompt no longer counts as delivered,
-        # and neither does a retry: the deleted file is asked for with the step's own prompt.
-        self.state.prompted = self.state.retrying = None
+        # and neither does a retry or a block: the deleted file is asked for with the step's own prompt.
+        self.state.prompted = self.state.retrying = self.state.blocked = None
         raise OrchestratorError(f"{path} {why}; fix it, or delete it to have it written again, then resume")
 
     def _open_turn(self, file: str) -> dict | None:
@@ -3256,7 +3365,9 @@ class Workflow:
             model = s.models.get(role)
         return {"step": s.phase, "role": role, "round": s.round,
                 "quality_round": s.quality_round if step is None or step.quality_gated else 0,
-                "file": file, "agent": agent, "model": model, "human_paced": bool(step and step.human_paced),
+                "file": file, "agent": agent, "model": model,
+                # A blocked turn's wait for the human's answer, and the rewrite after it, is paced by the human too.
+                "human_paced": bool(step and step.human_paced) or bool(s.blocked and s.blocked["file"] == file),
                 "started_at": None if started is None else iso_utc(started), "ended_at": None, "seconds": None}
 
     def _end_turn(self, role: str, path: str) -> None:
@@ -3666,6 +3777,8 @@ def format_age(seconds: int) -> str:
 
 RUNNING = "running"
 STALE = "stale"
+# The outcome of a running run whose turn waits on a BLOCKED report (blocked_outcome).
+BLOCKED_STATUS = "blocked"
 
 
 def run_health(state: dict, age: int, local_host: str, pid_alive) -> tuple[str, str] | None:
@@ -3778,6 +3891,8 @@ def run_outcome(s: dict, age: int, local_host: str, pid_alive, target: list[str]
     elif s.get("closed"):
         # Stale by its heartbeat, but resume refuses it, so neither its staleness nor the command is worth showing.
         outcome = ""
+    elif health[0] == RUNNING and s.get("blocked"):
+        outcome = blocked_outcome(s)
     else:
         outcome = f"{health[0]}: {health[1]}"
         if health[0] == STALE:
@@ -3788,6 +3903,16 @@ def run_outcome(s: dict, age: int, local_host: str, pid_alive, target: list[str]
         outcome += f"  {s['pr_url']}"
     if (workflow := s.get("workflow", DEFAULT_WORKFLOW.name)) != DEFAULT_WORKFLOW.name:
         outcome += f"  [{workflow} workflow]"
+    return outcome
+
+
+def blocked_outcome(s: dict) -> str:
+    """A running run's outcome while its current step waits for the human's answer, and the pane to answer in."""
+    outcome = f"{BLOCKED_STATUS}: {s['blocked']['question']}"
+    pipeline = saved_pipeline(s)
+    step = pipeline.step(s["phase"]) if pipeline else None
+    if step and (pane := (s.get("agents") or {}).get(step.role, {}).get("pane")):
+        outcome += f" (pane {pane})"
     return outcome
 
 
@@ -4409,7 +4534,7 @@ def status_tag(status: str) -> str | None:
     """The run list's color for a Status as run_outcome words it: ok, warn, error, or None for the text's own."""
     if status.startswith(APPROVE):
         return "ok"
-    if status.startswith((CHANGES_REQUESTED, STALE)):
+    if status.startswith((CHANGES_REQUESTED, STALE, BLOCKED_STATUS)):
         return "warn"
     if status.startswith("error"):
         return "error"
