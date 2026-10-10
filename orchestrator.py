@@ -539,8 +539,10 @@ class Pipeline:
         return self.verdict_step or self.steps[-1]
 
 
+# Written into the run directory whenever the run ends: what it did, and where its time went.
+SUMMARY_FILE = "summary.md"
 # Files the run writes into its directory itself, beside the steps' handoff files.
-RUN_FILE = re.compile(r"state\.json|quality-.*")
+RUN_FILE = re.compile(r"state\.json|summary\.md|quality-.*")
 
 
 def _fill_problem(step: Step, known: set[str]) -> str | None:
@@ -551,8 +553,8 @@ def _fill_problem(step: Step, known: set[str]) -> str | None:
         return f"handoff file {step.file} may use {{n}} only as it is, with no format spec or conversion"
     name = step.file.format(n=1)
     if "/" in name or name in ("", ".", "..") or RUN_FILE.fullmatch(name):
-        return f"handoff file {step.file} must be a plain file name, and not state.json or quality-*, " \
-               f"which the run writes itself"
+        return f"handoff file {step.file} must be a plain file name, and not state.json, {SUMMARY_FILE} " \
+               f"or quality-*, which the run writes itself"
     # Every value a prompt is filled in with is a string.
     values = dict.fromkeys(known, "")
     for field_name in ("prompt", "again", "fresh_note"):
@@ -1148,6 +1150,25 @@ class Host:
 
     def rename(self, path: str, new_path: str) -> None:
         self.check(["mv", "-f", "--", path, new_path])
+
+    # now and mtime read this host's clock, the one that stamps the handoff files, so a turn's start and end
+    # come from one clock and skew between the machines involved cannot distort its duration.
+    def now(self) -> int:
+        """The time on this host, in seconds since the epoch."""
+        return self._seconds(self.check(["date", "+%s"]), "date +%s")
+
+    def mtime(self, path: str) -> int:
+        """When the file was last modified, in seconds since the epoch."""
+        # stat -c is GNU, stat -f is BSD.
+        script = 'stat -c %Y -- "$1" 2>/dev/null || stat -f %m -- "$1"'
+        return self._seconds(self.check(["sh", "-c", script, "_", path]), f"stat of {path}")
+
+    @staticmethod
+    def _seconds(out: str, what: str) -> int:
+        try:
+            return int(out.strip())
+        except ValueError as e:
+            raise OrchestratorError(f"{what} printed {out.strip()!r}, not a time") from e
 
     def resolve_dir(self, path: str) -> str:
         """Absolute form of a directory path, expanding a leading ~ on the host."""
@@ -1759,6 +1780,10 @@ class RunState:
     # What close did, one line such as "workspace closed; worktree deleted; branch deleted". Written by close_run,
     # never by the run itself; a closed run is not resumed.
     closed: str | None = None
+    # One record per handoff file, in the order the turns started (Workflow._turn_record). A turn's record opens
+    # when its prompt is delivered, or a quality analysis starts, and closes when its file is found. Absent from a
+    # run saved before them.
+    turns: list[dict] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, saved: dict) -> "RunState":
@@ -2095,7 +2120,104 @@ def pr_body(state: "RunState", spec: str, report: str, review: str, quality: str
         *([_details(f"Quality gate (round {state.round})", quality)] if quality else []),
         *([] if state.verdict in (FINISHED, QUALITY_GATE_FAILED) else
           [_details(f"Review (round {state.round})", review, open_=not approved)]),
+        *([_details("Run timings", turns_table(state.turns))] if state.turns else []),
     ]) + "\n"
+
+
+# -- Turn records: RunState.turns, as summary.md, the pull request and show print them ------------------------
+
+def iso_utc(seconds: float) -> str:
+    return datetime.fromtimestamp(seconds, timezone.utc).isoformat(timespec="seconds")
+
+
+def epoch_seconds(iso: str) -> int:
+    return int(datetime.fromisoformat(iso).timestamp())
+
+
+def format_duration(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60:02d}s"
+    return f"{seconds // 3600}h {seconds % 3600 // 60:02d}m"
+
+
+def turn_cells(t: dict) -> dict[str, str]:
+    """A turn record's values as the tables show them. A start or duration that is not known shows as ?: a file
+    written before turns were recorded, or a turn still open. A quality analysis runs in no harness."""
+    harness = t.get("agent")
+    return {
+        "step": t["step"],
+        "role": t["role"],
+        "round": f"{t['round']} q{t['quality_round']}" if t.get("quality_round") else str(t["round"]),
+        "harness": harness or "-",
+        "model": t.get("model") or ("default" if harness else "-"),
+        "start": t["started_at"].replace("T", " ").removesuffix("+00:00") if t.get("started_at") else "?",
+        "duration": "?" if t.get("seconds") is None else format_duration(t["seconds"]),
+        "file": t["file"],
+    }
+
+
+def turns_table(turns: list[dict]) -> str:
+    """The turns as a Markdown table, the human-paced ones marked: their time is the human's as much as the agent's."""
+    head = ["step", "role", "round", "harness", "model", "start (UTC)", "duration", "file"]
+    rows = []
+    for t in turns:
+        cells = turn_cells(t)
+        if t.get("human_paced"):
+            cells["step"] += " (human-paced)"
+        rows.append([cells[k] for k in ("step", "role", "round", "harness", "model", "start", "duration", "file")])
+    return "\n".join("| " + " | ".join(c.replace("|", "\\|") for c in row) + " |"
+                     for row in [head, ["---"] * len(head), *rows])
+
+
+def turn_lines(turns: list[dict]) -> list[str]:
+    """The turns as show prints them, a line each, in columns."""
+    keys = ("step", "round", "harness", "start", "duration", "file")
+    rows = [turn_cells(t) for t in turns]
+    widths = {k: max((len(r[k]) for r in rows), default=0) for k in keys}
+    return ["  ".join(f"{r[k]:<{widths[k]}}" for k in keys).rstrip() for r in rows]
+
+
+def run_summary(state: "RunState", pipeline: Pipeline, rounds: list[str], now: int) -> str:
+    """summary.md of a run that ended at now: how it turned out, who played each role, and where its time went.
+
+    rounds holds a line per round, with what its handoff files say (Workflow._round_results).
+    """
+    s = state
+    outcome = f"error: {s.error}" if s.error else s.verdict or "unfinished"
+    starts = [epoch_seconds(t["started_at"]) for t in s.turns if t.get("started_at")]
+    wall = format_duration(now - min(starts)) if starts else "?"
+    roles = []
+    for role, label in pipeline.roles.items():
+        harness = (s.agents.get(role) or {}).get("kind") or s.agent_kinds.get(role, DEFAULT_AGENT)
+        roles.append(f"| {label} ({role}) | {harness} | {s.models.get(role) or 'default'} |")
+    lines = [
+        f"# Run {s.run_id}",
+        "",
+        f"- **Workflow:** {s.workflow}",
+        f"- **Outcome:** {outcome}",
+        f"- **Pull request:** {s.pr_url or 'none'}",
+        f"- **Branch:** {f'`{s.branch}`' if s.branch else 'none'}",
+        f"- **Wall time:** {wall}, from the first turn's start to {iso_utc(now)}",
+        "",
+        "## Task",
+        "",
+        s.task.strip(),
+        "",
+        "## Roles",
+        "",
+        "| role | harness | model |",
+        "| --- | --- | --- |",
+        *roles,
+        "",
+        "## Turns",
+        "",
+        turns_table(s.turns) if s.turns else "No turns were recorded.",
+    ]
+    if rounds:
+        lines += ["", "## Rounds", "", *(f"- {line}" for line in rounds)]
+    return "\n".join(lines) + "\n"
 
 
 def log(msg: str) -> None:
@@ -2242,6 +2364,7 @@ class Workflow:
         s.phase = DONE
         s.owner = None
         self._save()
+        self._write_summary()
         if s.worktree and not s.pull_request:
             log(f"the change is in worktree {s.worktree}")
         self.notify(f"Run finished: {s.verdict}", s.pr_url or s.task)
@@ -2332,6 +2455,35 @@ class Workflow:
             self._save()
         except OrchestratorError as e:
             log(f"could not record the failure in state.json: {e}")
+            if isinstance(e, RunTakenOver):
+                return  # the run is another orchestrator's now, and so is its summary
+        self._write_summary()
+
+    def _write_summary(self) -> None:
+        """Write summary.md for a run that just ended; a failure costs only the summary, so it is only logged."""
+        s = self.state
+        try:
+            self.host.write(f"{s.dir}/{SUMMARY_FILE}",
+                            run_summary(s, self.pipeline, self._round_results(), self.host.now()))
+        except OrchestratorError as e:
+            log(f"could not write {SUMMARY_FILE}: {e}")
+
+    def _round_results(self) -> list[str]:
+        """Per round, its quality gates and its verdict, as its handoff files say."""
+        s, verdict_step = self.state, self.pipeline.verdict_step
+        lines = []
+        for n in range(1, s.round + 1):
+            parts = []
+            gates, q = [], 1
+            while s.quality_job and (text := self.host.read(s.quality_path(n, q))) is not None:
+                gates.append(parse_gate(text) or "?")
+                q += 1
+            if gates:
+                parts.append(f"quality gate {', '.join(gates)}")
+            if verdict_step and (text := self.host.read(verdict_step.path(s.dir, n))) is not None:
+                parts.append(f"{verdict_step.id} {parse_verdict(text) or '?'}")
+            lines.append(f"Round {n}: {'; '.join(parts) or 'no verdict'}")
+        return lines
 
     def _check_repo(self) -> None:
         """Fail before the interview if the change could not become a pull request."""
@@ -2699,6 +2851,9 @@ class Workflow:
         if (text := self.host.read(path)) is not None:
             log(f"[quality] {os.path.basename(path)} is already written")
         else:
+            if not self._open_turn(os.path.basename(path)):
+                s.turns.append(self._turn_record(QUALITY, os.path.basename(path), self.host.now()))
+                self._save()
             # Per round, and afresh on a resume.
             deadline = self.clock() + QUALITY_TIMEOUT
             self._quality_project(deadline)
@@ -2708,6 +2863,7 @@ class Workflow:
                 ref, "change", deadline, lambda: self.host.snapshot(s.work_dir, s.base, message))
             text = self.ci.mask(self._quality_report(n, q, build, result, analysis, deadline))
             self.host.write(path, text)
+        self._end_turn(QUALITY, path)
         gate = parse_gate(text)
         if gate is None:
             self._reject(path, "does not start with a GATE line")
@@ -2977,6 +3133,7 @@ class Workflow:
         # First, because the role may have written it while no orchestrator was watching.
         if (out := self.host.read(path)) is not None:
             log(f"[{role}] {file} is already written")
+            self._end_turn(role, path)
             return out
 
         how = self._agent(role)
@@ -2985,13 +3142,19 @@ class Workflow:
             announce(how)
         log(f"[{role}] working in pane {agent['pane']}")
         if (message := self._prompt_for(how, file, text, fresh_text, path)) is not None:
+            # A resumed or restarted turn keeps its record and start. Read before the prompt goes out, so that
+            # no agent can write its file before its turn started.
+            started = None if self._open_turn(file) else self.host.now()
             self.herdr.prompt(agent["name"], message)
             # Recorded only once the prompt is delivered. Dying in between costs one duplicate
             # prompt, which the role answers by writing the same file again.
             s.prompted = file
+            if started is not None:
+                s.turns.append(self._turn_record(role, file, started))
             self._save()
         out = self._await_handoff(role, path, timeout, watch_stalls)
         log(f"[{role}] wrote {file}")
+        self._end_turn(role, path)
         return out
 
     def _retry(self, role: str, path: str, out: str) -> None:
@@ -3010,6 +3173,9 @@ class Workflow:
         self.host.rename(path, rejected)
         s.retried.append(file)
         s.retrying = file
+        # The turn's record, which _written closed, goes with the file, whose mtime the rename kept; the retry opens
+        # a record of its own.
+        next(t for t in reversed(s.turns) if t["file"] == file)["file"] = os.path.basename(rejected)
         self._save()
         log(f"[{role}] {file} {why}; moved it to {os.path.basename(rejected)}, prompting once more")
 
@@ -3074,6 +3240,41 @@ class Workflow:
         # and neither does a retry: the deleted file is asked for with the step's own prompt.
         self.state.prompted = self.state.retrying = None
         raise OrchestratorError(f"{path} {why}; fix it, or delete it to have it written again, then resume")
+
+    def _open_turn(self, file: str) -> dict | None:
+        """The record of the turn under way that writes file; None when there is none."""
+        return next((t for t in self.state.turns if t["file"] == file and t["ended_at"] is None), None)
+
+    def _turn_record(self, role: str, file: str, started: int | None) -> dict:
+        """An open record of the current phase's turn that writes file: the current step's, or with role QUALITY
+        a quality analysis, which runs no agent. started is None when the turn's start is not known."""
+        s = self.state
+        step = self.pipeline.step(s.phase)
+        agent = model = None
+        if step:
+            agent = (s.agents.get(role) or {}).get("kind") or s.agent_kinds.get(role, DEFAULT_AGENT)
+            model = s.models.get(role)
+        return {"step": s.phase, "role": role, "round": s.round,
+                "quality_round": s.quality_round if step is None or step.quality_gated else 0,
+                "file": file, "agent": agent, "model": model, "human_paced": bool(step and step.human_paced),
+                "started_at": None if started is None else iso_utc(started), "ended_at": None, "seconds": None}
+
+    def _end_turn(self, role: str, path: str) -> None:
+        """Close the record of the turn that wrote path, found written, at the file's mtime: the turn ended then,
+        even if no orchestrator was watching. A file whose turn has no record, as one written before turns were
+        recorded, gets one with no start."""
+        s, file = self.state, os.path.basename(path)
+        record = self._open_turn(file)
+        if record is None:
+            if any(t["file"] == file for t in s.turns):
+                return  # closed already, by an orchestrator that stopped before the run moved on
+            record = self._turn_record(role, file, None)
+            s.turns.append(record)
+        ended = self.host.mtime(path)
+        record["ended_at"] = iso_utc(ended)
+        if record["started_at"] is not None:
+            record["seconds"] = ended - epoch_seconds(record["started_at"])
+        self._save()
 
     def _agent(self, role: str) -> str:
         """Make sure the role's agent is running, and say how: NEW, ALIVE, RESUMED or RESTARTED."""
@@ -3221,7 +3422,7 @@ class Workflow:
             self._last_write = self.clock()
 
     def _timestamp(self) -> str:
-        return datetime.fromtimestamp(self.wallclock(), timezone.utc).isoformat(timespec="seconds")
+        return iso_utc(self.wallclock())
 
 
 # ---------------------------------------------------------------------------
@@ -3501,7 +3702,7 @@ def run_line(run_id: str, phase: str, rnd: str, outcome: str) -> str:
 
 
 def show_run(host: Host, cwd: str, ref: str, local_host: str, pid_alive, target: list[str]) -> None:
-    """Print one run in full: its list line and task, workflow, branch, agents, files and last review."""
+    """Print one run in full: its list line and task, workflow, branch, agents, turns, files and last review."""
     age, s = find_run(host.run_states(cwd), ref, cwd)
     run_id, phase, rnd, outcome, _ = run_rows([(age, s)], local_host, pid_alive, target)[0]
     print(run_line(run_id, phase, rnd, outcome))
@@ -3526,6 +3727,7 @@ def show_run(host: Host, cwd: str, ref: str, local_host: str, pid_alive, target:
     width = max((len(role) for role in agents), default=0)
     print_section("agents", [f"{role:<{width}}  {a.get('kind') or DEFAULT_AGENT:<8}  {a.get('pane', '')}"
                              for role, a in agents.items()])
+    print_section("turns", turn_lines(s.get("turns") or []))
     print_section("files", host.run_files(run_dir))
     review = last_review(host, run_dir, pipeline, s.get("round", 0)) if pipeline else None
     if review:
