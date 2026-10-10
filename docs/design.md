@@ -71,6 +71,29 @@ without changing its modification time, so a stale run does not look live again.
 from its pull request: with the pull request's "Restore branch" button, or with
 `git fetch origin pull/<n>/head:<branch>`.
 
+## Closing a run
+
+A run that opens a pull request closes its workspace and removes its worktree itself. A failed or stale run, and
+a `--no-pr` one, leave them, and `close` cleans up after one of them. It refuses a run that is `running`, since an
+orchestrator still drives it. Every run it accepts loses its herdr workspace. What happens to the files depends on
+whose they are:
+
+- **A failed or stale `--worktree` run**: the worktree is the run's own, so it is removed with
+  `git worktree remove --force` after `close` lists the files `git status --porcelain` shows, which go with it.
+  The branch is deleted only when it has no commit beyond the run's `base`. The Builder never commits, so such a
+  branch holds nothing; one with commits is kept, and the reason recorded. The branch is looked at even when the
+  worktree is already gone, so a `close` that failed after removing the worktree finishes the job the next time.
+- **A failed or stale in-place run**: the checkout and its branch are the human's, so they stay as they are.
+- **A finished run**: a `--no-pr` run's worktree holds the change, so it stays, and `close` prints its path.
+
+Each step passes over what is already gone, a workspace herdr no longer has included, and any herdr or git
+failure stops `close` with an error before anything is recorded. Once every step has succeeded, what was done is
+recorded as one line, the run's `closed`, such as `workspace closed; worktree deleted; branch deleted`. As with
+`branch_cleanup`, it is added to `state.json` without changing its modification time, and only if the file has
+not changed since `close` read it. `list` and `show` print it, a second `close` only prints it again, and
+`resume` refuses a closed run, `--force` or not, since its worktree and branch may be gone. A closed run that was
+stale is no longer marked `stale` in `list`, and its line offers no `resume` command, which would be refused.
+
 ## When the orchestrator needs you
 
 A role's turn ends when it writes its handoff file, not when herdr reports it `idle` or `done`: an agent can

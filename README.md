@@ -142,6 +142,9 @@ python orchestrator.py prune --dry-run --machine <machine> --cwd ~/GitHub/myproj
 # Continue a stopped run, by its run id or the six-character key at its end
 python orchestrator.py resume e292fb --machine <machine> --cwd ~/GitHub/myproject
 
+# Done with a failed or finished run: close its workspace, and a failed --worktree run's worktree and branch
+python orchestrator.py close e292fb --machine <machine> --cwd ~/GitHub/myproject
+
 # Another workflow: one of yours by name, or a workflow file anywhere; `workflows` lists them
 python orchestrator.py run --workflow tdd "add a token-bucket rate limiter"
 python orchestrator.py run --workflow-file examples/workflows/quick.toml "fix the off-by-one in the pager"
@@ -263,14 +266,19 @@ refused by any other run. To run in parallel, use `--worktree`, or give each run
 Everything a run writes stays in `<project>/.orchestrator/runs/<run-id>/`: the handoff files and `state.json`,
 which records the phase, round, panes, branch, pull request, verdict and any error. `.orchestrator/` ignores
 itself, so it never shows up in the diff or the commit. A failed run keeps its workspace open and stays on its
-branch; close the workspace in herdr when done.
+branch, and a `--no-pr` run keeps its workspace open too. `close` closes it when you are done, and records that
+in `state.json`; `resume` then refuses the run. A failed or stale `--worktree` run also loses its worktree,
+uncommitted changes included, which `close` lists first, and its branch, unless the branch has commits beyond the
+run's base. A finished run keeps its worktree, and an in-place run its checkout and branch. `close` refuses a run
+that is `running`. `list` ends a closed run's line with what `close` did, in place of `stale` and its `resume`
+command ([Closing a run](docs/design.md#closing-a-run)).
 
 `resume` continues a run whose orchestrator stopped where `state.json` says, reusing or relaunching its agents
 ([Resuming a run](docs/design.md#resuming-a-run)). It refuses while another branch than the run's is checked
 out, and names the one to check out. `list` marks a run `stale` after five minutes without a
 heartbeat ([Stale runs](docs/design.md#stale-runs)). `show` prints one run in full, without opening
 `state.json`: its `list` line and whole task, its workflow, branch and pull request, each role's agent and pane,
-the paths of its handoff files, the last review, and what `prune` did with its branch. `prune` deletes the
+the paths of its handoff files, the last review, what `prune` did with its branch, and what `close` did. `prune` deletes the
 branch of each run whose pull request is merged, or closed for 14 days, locally and on `origin`, and prints a
 line per run. It keeps a side that has commits the pull request lacks, and a local branch checked out in any
 worktree; a later `prune` looks at kept branches again
@@ -292,8 +300,9 @@ agent is blocked brings you in to allow it.
 The worktree is removed once the pull request is open. A `--no-pr` run leaves its change uncommitted in the
 worktree, whose path it logs and `show` prints, and a failed run keeps its worktree, as an in-place run keeps its
 branch. A `--worktree` run whose worktree is gone cannot be resumed, unless its pull request is already open.
-Remove a worktree you are done with by `git worktree remove .orchestrator/worktrees/<key>` in the project
-(`--force` to discard its changes).
+`close` removes a failed run's worktree, discarding its changes. A finished `--no-pr` run's worktree holds the
+change, so `close` keeps it and prints its path; remove it by `git worktree remove .orchestrator/worktrees/<key>`
+in the project once you have taken the change.
 
 ## Your own workflows
 
