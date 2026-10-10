@@ -70,9 +70,14 @@ that already exists, and otherwise gets the agent ready through `_agent` (`NEW`,
 `RESTARTED`; an exited agent is resumed into its saved session only if its record's `kind` is the role's
 harness now, and otherwise starts fresh), prompts it with what `_prompt_for` picks, and polls for the file in `_await_handoff`, where
 `_tell_human` notifies the human of a blocked or stalled agent once. A verdict step's file without a `VERDICT`
-first line goes to `_retry`, which moves it aside and, once per file (`retried`), prompts the role again with
+first line goes to `_retry` (in `_verdict_turn`), which moves it aside and, once per file (`retried`), prompts the role again with
 `RETRY_VERDICT_PROMPT`; `retrying` names the file while that turn is under way, so a resume sends the retry prompt,
-not the step's own. `_save` checks the owner before every write and raises
+not the step's own. A file of a step that can block (`Step.can_block`: neither human-paced nor the verdict step)
+whose first line is `BLOCKED:` (`parse_blocked`) goes to `_block`, which saves `blocked` and then moves it aside to
+`.blocked-K`; `_unblocked` then has `_block_answer` notify the human and wait for the file again, as often as it
+comes back `BLOCKED:`, with `BLOCKED_PROMPT`, no
+timeout and no stall notice, and a resume with `blocked` set finishes an undone move (`_finish_block`) and goes
+back into that wait. `_prompts` appends `BLOCKED_NOTE` to every prompt of such a step. `_save` checks the owner before every write and raises
 `RunTakenOver` after a takeover; `_heartbeat` keeps `state.json` fresh while a turn runs. `_written` and
 `_quality` open a turn's record in `turns` (`_turn_record`, started by `Host.now`) and `_end_turn` closes it at
 the handoff file's `Host.mtime`; both read the project host's clock. The end of `run` and `_release` write

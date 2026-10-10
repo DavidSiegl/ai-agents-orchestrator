@@ -239,7 +239,13 @@ since, the agent starts a fresh session instead.
 3. **Builder.** The orchestrator fetches and fast-forwards the base branch again, since the interview can take
    hours, and creates the branch `orchestrator/<spec title>-<id>` from it; a `--worktree` run creates it in its
    worktree, from `origin`'s base branch. The Builder implements the spec there, verifies it, and writes
-   `build-N.md` without committing.
+   `build-N.md` without committing. If it cannot go on without a decision from you, it writes a report whose
+   first line is `BLOCKED: <question>` instead. The orchestrator moves that report aside to
+   `build-N.blocked-K.md`, notifies you with the question, focuses the Builder's pane, and waits, with no timeout,
+   for you to answer there; `list` shows the run as `blocked: <question> (pane …)`. Once the question is
+   resolved, the Builder writes `build-N.md` again and the run goes on, in the same round. Any step but the
+   interview and the verdict step can block like this, a step of your own workflow and an answer to the quality
+   gate included.
 4. **Quality gate**, with `--quality-gate`. The orchestrator snapshots the working tree, pushes it to a
    throwaway branch `orchestrator-ci/<id>-N-qQ`, and has the Jenkins job analyse it into the run's own
    SonarQube project, after analysing the base once per run. It writes `quality-N-Q.md`, which starts with
@@ -293,8 +299,9 @@ with its branch, and what `close` did. `prune` deletes the
 branch of each run whose pull request is merged, or closed for 14 days, locally and on `origin`, and prints a
 line per run. It keeps a side that has commits the pull request lacks, and a local branch checked out in any
 worktree; a later `prune` looks at kept branches again
-([Deleting run branches](docs/design.md#deleting-run-branches)). You get a herdr notification when a role is blocked or idle
-for 3 minutes ([When the orchestrator needs you](docs/design.md#when-the-orchestrator-needs-you)).
+([Deleting run branches](docs/design.md#deleting-run-branches)). You get a herdr notification when a role is blocked, idle
+for 3 minutes, or reports `BLOCKED:` with a question for you
+([When the orchestrator needs you](docs/design.md#when-the-orchestrator-needs-you)).
 See also [design decisions](docs/design.md), [architecture](docs/architecture.md), [roadmap](docs/roadmap.md)
 and [quality gate](docs/quality-gate.md).
 

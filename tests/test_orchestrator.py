@@ -441,6 +441,10 @@ def malformed_review(n, text="looks fine"):
     return writes(lambda s: s.review_path(n), text)
 
 
+# What every prompt of a step that can block ends with.
+NOTE = "\n\n" + orchestrator.BLOCKED_NOTE
+
+
 def retry_prompt(path):
     return orchestrator.RETRY_VERDICT_PROMPT.format(
         path=path, rejected_path=path.removesuffix(".md") + ".rejected.md", approve=APPROVE, changes=CHANGES_REQUESTED)
@@ -3125,7 +3129,7 @@ class TestQualityGate(unittest.TestCase):
         self.assertNotIn("did not add", quality)
         self.assertIn("`new_coverage` is 50.0; the gate wants at least 80.", quality)
         self.assertEqual(builds, [orchestrator.QUALITY_FIX_PROMPT.format(
-            quality_path=state.quality_path(1, 1), report_path=state.quality_build_path(1, 1))])
+            quality_path=state.quality_path(1, 1), report_path=state.quality_build_path(1, 1)) + NOTE])
         self.assertIn(f"The Builder's report is in {state.quality_build_path(1, 1)}", reviews[0])
         self.assertIn(orchestrator.QUALITY_PASSED_NOTE.format(quality_path=state.quality_path(1, 2)), reviews[0])
         self.assertTrue(host.files[state.quality_path(1, 2)].startswith("GATE: OK"))
@@ -3588,7 +3592,7 @@ class TestQualityResume(unittest.TestCase):
         self.assertIn(f"you are a fresh session. An earlier Builder session did the earlier turns; its changes are "
                       f"already in the working tree, and its reports are {state.build_path(1)}.", seen[0])
         self.assertTrue(seen[0].endswith(orchestrator.QUALITY_FIX_PROMPT.format(
-            quality_path=state.quality_path(1, 1), report_path=state.quality_build_path(1, 1))))
+            quality_path=state.quality_path(1, 1), report_path=state.quality_build_path(1, 1)) + NOTE))
         self.assertEqual(wf.state.quality_round, 2)
 
     def test_fresh_builder_in_a_later_round_hears_of_every_earlier_report(self):
@@ -4093,7 +4097,8 @@ D = "/proj/.orchestrator/runs/20260929-120000-a1b2c3"
 
 # The default workflow's prompts and pull request body as commit d6bb100 sent them, recorded by
 # running the scenarios of TestDefaultWorkflowPrompts on that commit's code.
-# Since then, only SPEC_PROMPT's "Separate Claude Code sessions" became "Separate agent sessions".
+# Since then, SPEC_PROMPT's "Separate Claude Code sessions" became "Separate agent sessions", and every prompt
+# the Builder gets ends with BLOCKED_NOTE.
 GOLDEN = {
     'spec': (
         'You are the Spec Collector, the first of three roles (Spec Collector -> Builder -> Reviewer). Separate agent sessions play the Builder and the Reviewer; they will know only what you write down. A human is at this terminal and answers you directly.\n'
@@ -4109,9 +4114,15 @@ GOLDEN = {
         '\n'
         "Implement it in /proj, following the conventions of the surrounding code. Verify the change the way the spec's Verification section says, and run the tests. Do not commit, push or switch branches; leave the changes in the working tree for the Reviewer. If the spec is wrong or cannot be met, do not deviate silently: say so in your report.\n"
         '\n'
-        f'As your last step, write a report to {D}/build-1.md in a single write; it hands the work to the Reviewer: the files you changed and why, how you verified the change (commands and a summary of their results), and any acceptance criterion you did not meet, with the reason.'),
+        f'As your last step, write a report to {D}/build-1.md in a single write; it hands the work to the Reviewer: the files you changed and why, how you verified the change (commands and a summary of their results), and any acceptance criterion you did not meet, with the reason.'
+        '\n'
+        '\n'
+        'If you cannot continue without a decision from the human, write the report with a first line `BLOCKED: <your question>` instead.'),
     'quality_fix_1_1': (
-        f'The SonarQube quality gate did not pass on your change; the findings are in {D}/quality-1-1.md. Fix each numbered issue, the failed conditions, the failing tests and a failed build, or explain in your report why one should stand. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-1-q1.md in a single write, in the same shape as before, answering each numbered issue by its number.'),
+        f'The SonarQube quality gate did not pass on your change; the findings are in {D}/quality-1-1.md. Fix each numbered issue, the failed conditions, the failing tests and a failed build, or explain in your report why one should stand. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-1-q1.md in a single write, in the same shape as before, answering each numbered issue by its number.'
+        '\n'
+        '\n'
+        'If you cannot continue without a decision from the human, write the report with a first line `BLOCKED: <your question>` instead.'),
     'review_1_passed': (
         f'You are the Reviewer, the last of three roles (Spec Collector -> Builder -> Reviewer). You did not write this change. Judge it only against the spec in {D}/spec.md and the code itself.\n'
         '\n'
@@ -4122,9 +4133,15 @@ GOLDEN = {
         '\n'
         f'The SonarQube quality gate passed on this change; its report is in {D}/quality-1-2.md.'),
     'fix_2': (
-        f'The Reviewer requested changes; the findings are in {D}/review-1.md. Fix each finding, or explain in your report why it is wrong. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2.md in a single write, in the same shape as before, answering each finding by its number.'),
+        f'The Reviewer requested changes; the findings are in {D}/review-1.md. Fix each finding, or explain in your report why it is wrong. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2.md in a single write, in the same shape as before, answering each finding by its number.'
+        '\n'
+        '\n'
+        'If you cannot continue without a decision from the human, write the report with a first line `BLOCKED: <your question>` instead.'),
     'quality_fix_2_1': (
-        f'The SonarQube quality gate did not pass on your change; the findings are in {D}/quality-2-1.md. Fix each numbered issue, the failed conditions, the failing tests and a failed build, or explain in your report why one should stand. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2-q1.md in a single write, in the same shape as before, answering each numbered issue by its number.'),
+        f'The SonarQube quality gate did not pass on your change; the findings are in {D}/quality-2-1.md. Fix each numbered issue, the failed conditions, the failing tests and a failed build, or explain in your report why one should stand. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2-q1.md in a single write, in the same shape as before, answering each numbered issue by its number.'
+        '\n'
+        '\n'
+        'If you cannot continue without a decision from the human, write the report with a first line `BLOCKED: <your question>` instead.'),
     'recheck_2_unresolved': (
         f"The Builder has answered your review; the new report is in {D}/build-2-q1.md. Review the change again (`git diff abc123` in /proj, plus the untracked files `git status --porcelain` lists) against the spec in {D}/spec.md and your previous findings, checking the Builder's claims rather than trusting them. As your last step, write the review to {D}/review-2.md in a single write, with the same first-line verdict and numbered findings as before.\n"
         '\n'
@@ -4151,7 +4168,10 @@ GOLDEN = {
         '\n'
         f'This is round 2, and you are a fresh session. An earlier Builder session did the earlier turns; its changes are already in the working tree, and its reports are {D}/build-1.md.\n'
         '\n'
-        f'The Reviewer requested changes; the findings are in {D}/review-1.md. Fix each finding, or explain in your report why it is wrong. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2.md in a single write, in the same shape as before, answering each finding by its number.'),
+        f'The Reviewer requested changes; the findings are in {D}/review-1.md. Fix each finding, or explain in your report why it is wrong. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2.md in a single write, in the same shape as before, answering each finding by its number.'
+        '\n'
+        '\n'
+        'If you cannot continue without a decision from the human, write the report with a first line `BLOCKED: <your question>` instead.'),
     'fresh_build_2_after_quality_rounds': (
         f'You are the Builder, the second of three roles (Spec Collector -> Builder -> Reviewer). The spec in {D}/spec.md was agreed with the human by a separate session; it is your contract.\n'
         '\n'
@@ -4161,7 +4181,10 @@ GOLDEN = {
         '\n'
         f'This is round 2, and you are a fresh session. An earlier Builder session did the earlier turns; its changes are already in the working tree, and its reports are {D}/build-1.md, {D}/build-1-q1.md, {D}/build-1-q2.md.\n'
         '\n'
-        f'The Reviewer requested changes; the findings are in {D}/review-1.md. Fix each finding, or explain in your report why it is wrong. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2.md in a single write, in the same shape as before, answering each finding by its number.'),
+        f'The Reviewer requested changes; the findings are in {D}/review-1.md. Fix each finding, or explain in your report why it is wrong. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2.md in a single write, in the same shape as before, answering each finding by its number.'
+        '\n'
+        '\n'
+        'If you cannot continue without a decision from the human, write the report with a first line `BLOCKED: <your question>` instead.'),
     'fresh_quality_fix_2_1': (
         f'You are the Builder, the second of three roles (Spec Collector -> Builder -> Reviewer). The spec in {D}/spec.md was agreed with the human by a separate session; it is your contract.\n'
         '\n'
@@ -4171,7 +4194,10 @@ GOLDEN = {
         '\n'
         f'This is round 2, and you are a fresh session. An earlier Builder session did the earlier turns; its changes are already in the working tree, and its reports are {D}/build-1.md, {D}/build-1-q1.md, {D}/build-2.md.\n'
         '\n'
-        f'The SonarQube quality gate did not pass on your change; the findings are in {D}/quality-2-1.md. Fix each numbered issue, the failed conditions, the failing tests and a failed build, or explain in your report why one should stand. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2-q1.md in a single write, in the same shape as before, answering each numbered issue by its number.'),
+        f'The SonarQube quality gate did not pass on your change; the findings are in {D}/quality-2-1.md. Fix each numbered issue, the failed conditions, the failing tests and a failed build, or explain in your report why one should stand. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2-q1.md in a single write, in the same shape as before, answering each numbered issue by its number.'
+        '\n'
+        '\n'
+        'If you cannot continue without a decision from the human, write the report with a first line `BLOCKED: <your question>` instead.'),
     'fresh_review_2': (
         f'You are the Reviewer, the last of three roles (Spec Collector -> Builder -> Reviewer). You did not write this change. Judge it only against the spec in {D}/spec.md and the code itself.\n'
         '\n'
@@ -4523,7 +4549,7 @@ class TestOtherWorkflows(unittest.TestCase):
         self.assertEqual(wf.run(), APPROVE)
         branch = "orchestrator/add-a-rate-limiter-a1b2c3"
         self.assertEqual(at_first_build, [("abc123", branch, 1)])
-        self.assertEqual(seen, [f"Build add a rate limiter in /proj; report to {D}/build-1.md.",
+        self.assertEqual(seen, [f"Build add a rate limiter in /proj; report to {D}/build-1.md.{NOTE}",
                                 f"Review {CHANGE} against add a rate limiter; write {D}/review-1.md."])
         self.assertEqual([c[1] for c in herdr.calls if c[0] == "start"], ["build-a1b2c3", "review-a1b2c3"])
         self.assertEqual([c for c in herdr.calls if c[0] == "split"], [("split", "w1:p1", "right")])
@@ -4568,8 +4594,8 @@ class TestOtherWorkflows(unittest.TestCase):
                          [("split", "w1:p1", "right"), ("split", "w1:p2", "down"), ("split", "w1:p3", "down")])
         self.assertEqual([c[2] for c in herdr.calls if c[0] == "rename"],
                          ["Spec Collector", "Test Writer", "Builder", "Reviewer"])
-        self.assertEqual(seen, [f"Build {D}/spec.md against {D}/tests.md; report to {D}/build-1.md.",
-                                f"Fix {D}/review-1.md; report to {D}/build-2.md."])
+        self.assertEqual(seen, [f"Build {D}/spec.md against {D}/tests.md; report to {D}/build-1.md.{NOTE}",
+                                f"Fix {D}/review-1.md; report to {D}/build-2.md.{NOTE}"])
         self.assertEqual(notes[0], "Spec Collector is waiting for you")
         self.assertEqual(host.prs[0]["title"], "Add a token-bucket rate limiter")
         self.assertIn("<summary>Builder report (round 2)</summary>\n\nreport 2", host.prs[0]["body"])
@@ -4610,8 +4636,9 @@ class TestOtherWorkflows(unittest.TestCase):
 
         self.assertEqual(wf.run(), APPROVE)
         self.assertEqual(impls, [
-            f"Implement add a rate limiter; report to {D}/impl-1.md.",
-            orchestrator.QUALITY_FIX_PROMPT.format(quality_path=f"{D}/quality-1-1.md", report_path=f"{D}/impl-1-q1.md")])
+            f"Implement add a rate limiter; report to {D}/impl-1.md.{NOTE}",
+            orchestrator.QUALITY_FIX_PROMPT.format(quality_path=f"{D}/quality-1-1.md", report_path=f"{D}/impl-1-q1.md")
+            + NOTE])
         self.assertEqual(reviews, [f"Review {CHANGE} with {D}/impl-1-q1.md; write {D}/review-1.md.\n\n" +
                                    orchestrator.QUALITY_PASSED_NOTE.format(quality_path=f"{D}/quality-1-2.md")])
         written = [p.rsplit("/", 1)[-1] for p in host.writes if p.startswith(D) and not p.endswith("state.json")]
@@ -4639,7 +4666,7 @@ class TestOtherWorkflows(unittest.TestCase):
         self.assertEqual(seen, [f"Implement add a rate limiter; report to {D}/impl-1-q1.md.\n\n"
                                 f"Earlier reports: {D}/impl-1.md.\n\n" +
                                 orchestrator.QUALITY_FIX_PROMPT.format(quality_path=f"{D}/quality-1-1.md",
-                                                                       report_path=f"{D}/impl-1-q1.md")])
+                                                                       report_path=f"{D}/impl-1-q1.md") + NOTE])
         # The second role goes to the right of the first.
         self.assertEqual([c for c in herdr.calls if c[0] == "split"], [("split", "w1:p1", "right")])
         self.assertEqual(wf.state.quality_round, 2)
@@ -6820,7 +6847,7 @@ class TestSeededSpec(unittest.TestCase):
         }, pipeline=planned)
 
         self.assertEqual(verdict, APPROVE)
-        self.assertEqual(seen, [f"Build {D}/plan.md; report to {D}/build-1.md."])
+        self.assertEqual(seen, [f"Build {D}/plan.md; report to {D}/build-1.md.{NOTE}"])
         self.assertEqual([c[1:3] for c in herdr.calls if c[0] == "start"],
                          [("build-a1b2c3", "w1:p1"), ("plan-a1b2c3", "w1:p2")])
         self.assertEqual([c for c in herdr.calls if c[0] == "split"], [("split", "w1:p1", "right")])
@@ -8013,6 +8040,453 @@ class TestTurnTimings(unittest.TestCase):
     def test_a_pipe_in_a_cell_does_not_split_it(self):
         table = orchestrator.turns_table([turn("build", "a|b.md", 0, 5, model="x|y")])
         self.assertTrue(table.endswith("| build | build | 1 | claude | x\\|y | 2026-10-03 04:00:00 | 5s | a\\|b.md |"))
+
+
+
+# ---------------------------------------------------------------------------
+# Blocked turns
+# ---------------------------------------------------------------------------
+
+QUESTION = "which database?"
+BUILD_1 = f"{D}/build-1.md"
+BLOCKED_1 = f"{D}/build-1.blocked-1.md"
+
+
+def blocked_report(path_of, question=QUESTION):
+    """A turn whose agent cannot go on without the human: it writes a BLOCKED report and waits."""
+    return writes(path_of, f"BLOCKED: {question}\n\nThe spec names no database.", status="idle")
+
+
+def answered(path_of, text, after=10 * orchestrator.STALL_SECONDS):
+    """A turn whose agent waits for the human's answer in its pane, idle, then finishes the work and writes text
+    `after` seconds later."""
+    def turn(prompt, state, host):
+        due, done = host.clock.now + after, []
+
+        def write():
+            if not done and host.clock.now >= due:
+                done.append(True)
+                host.write("/proj/limiter.py", "answered")
+                host.write(path_of(state), text)
+        host.clock.hooks.append(write)
+        return "idle"
+    return turn
+
+
+def blocked_prompt(path, k=1):
+    stem, ext = os.path.splitext(path)
+    return orchestrator.BLOCKED_PROMPT.format(path=path, blocked_path=f"{stem}.blocked-{k}{ext}")
+
+
+def blocked_files(host):
+    return sorted(p.rsplit("/", 1)[-1] for p in host.files if ".blocked-" in p)
+
+
+def bounded(wf, limit=100 * orchestrator.STALL_SECONDS):
+    """Fail, rather than poll forever, a run that is still waiting after `limit` seconds: no turn here takes that
+    long, and a blocked turn has no timeout of its own."""
+    def give_up():
+        if wf.clock.now > limit:
+            raise AssertionError(f"the run is still waiting after {limit}s")
+    wf.clock.hooks.append(give_up)
+    return wf
+
+
+class Killed(BaseException):
+    """The orchestrator process dies here: no handler of the workflow's sees it, and it saves nothing more."""
+
+
+class KillingHost(FakeHost):
+    """A FakeHost whose orchestrator is killed at the first write or rename `kill_at(what, path, text)` picks."""
+
+    def __init__(self, kill_at):
+        super().__init__()
+        self.kill_at = kill_at
+        self.dead = False
+
+    def _check(self, what, path, text=None):
+        if self.dead or self.kill_at(what, path, text):
+            self.dead = True
+            raise Killed(what)
+
+    def write(self, path, text, keep_mtime=False):
+        self._check("write", path, text)
+        super().write(path, text, keep_mtime)
+
+    def rename(self, path, new_path):
+        self._check("rename", path)
+        super().rename(path, new_path)
+
+
+def saving_a_block(what, path, text):
+    return what == "write" and path.endswith("state.json") and json.loads(text).get("blocked") is not None
+
+
+def renaming_a_report(what, path, text):
+    return what == "rename" and path == BUILD_1
+
+
+class TestParseBlocked(unittest.TestCase):
+    def test_question(self):
+        cases = [("BLOCKED: which database?\nmore", QUESTION), ("\n\n  BLOCKED:which database?  \n", QUESTION),
+                 ("BLOCKED:", orchestrator.NO_QUESTION), ("BLOCKED:   \nwhy", orchestrator.NO_QUESTION),
+                 ("blocked: which database?", None), ("Done.\nBLOCKED: which database?", None),
+                 ("**BLOCKED:** which database?", None), ("", None), ("\n \n", None)]
+        for text, question in cases:
+            with self.subTest(text=text):
+                self.assertEqual(orchestrator.parse_blocked(text), question)
+
+    def test_which_steps_can_block(self):
+        spec, build, review = orchestrator.DEFAULT_WORKFLOW.steps
+        self.assertEqual((spec.can_block, build.can_block, review.can_block), (False, True, False))
+
+
+class TestBlocked(unittest.TestCase):
+    def run_blocked(self, build, review=None, **kw):
+        """A default run whose Builder takes the turns in build; its notifications as (title, body), and the
+        prompts the Builder and the Reviewer saw, with the state saved as the Reviewer got its prompt."""
+        seen, reviews, at_review = [], [], []
+
+        def review_turn_1(prompt, state, host):
+            at_review.append(json.loads(host.files[f"{D}/state.json"]))
+            return review_turn(1, APPROVE)(prompt, state, host)
+        wf, herdr, host, _ = make_workflow({
+            "spec": [spec_turn], "build": [recording(b, seen) for b in build],
+            "review": [recording(r, reviews) for r in (review or [review_turn_1])]}, **kw)
+        notes = []
+        wf.notify = lambda title, body: notes.append((title, body))
+        return bounded(wf), herdr, host, notes, seen, reviews, at_review
+
+    def test_a_blocked_report_waits_for_the_human_then_goes_to_the_reviewer(self):
+        wf, herdr, host, notes, seen, reviews, at_review = self.run_blocked(
+            [blocked_report(lambda s: BUILD_1), answered(lambda s: BUILD_1, "report 1")], turn_timeout=60)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertTrue(host.files[BLOCKED_1].startswith(f"BLOCKED: {QUESTION}\n"))
+        self.assertEqual(host.files[BUILD_1], "report 1")
+        self.assertEqual(blocked_files(host), ["build-1.blocked-1.md"])
+        self.assertEqual(seen[1], blocked_prompt(BUILD_1))
+        self.assertIn(("Builder is blocked: which database?", "pane w1:p2"), notes)
+        # Focused, then prompted; the Reviewer only once the Builder has written its report again.
+        prompts = [c for c in herdr.calls if c[0] in ("prompt", "focus")]
+        self.assertEqual(prompts, [("focus", "spec-a1b2c3"), ("prompt", "spec-a1b2c3"), ("prompt", "build-a1b2c3"),
+                                   ("focus", "build-a1b2c3"), ("prompt", "build-a1b2c3"),
+                                   ("prompt", "review-a1b2c3")])
+        # The wait outlasted --timeout and STALL_SECONDS, unremarked.
+        self.assertGreaterEqual(wf.clock.now, 10 * orchestrator.STALL_SECONDS)
+        self.assertFalse([t for t, _ in notes if "idle" in t])
+        self.assertEqual((at_review[0]["blocked"], at_review[0]["round"]), (None, 1))
+        self.assertIn(f"The Builder's report is in {BUILD_1}.", reviews[0])
+        self.assertIsNone(wf.state.blocked)
+
+    def test_the_wait_is_saved_and_listed(self):
+        during = []
+
+        def wait(prompt, state, host):
+            during.append(json.loads(host.files[f"{D}/state.json"]))
+            return answered(lambda s: BUILD_1, "report 1")(prompt, state, host)
+        wf, *_ = self.run_blocked([blocked_report(lambda s: BUILD_1), wait])
+
+        self.assertEqual(wf.run(), APPROVE)
+        saved = during[0]
+        self.assertEqual(saved["blocked"], {"file": "build-1.md", "question": QUESTION, "k": 1})
+        self.assertIsNone(saved["prompted"])
+        with patch("builtins.print") as out:
+            orchestrator.print_runs([(40, saved)], saved["owner"]["host"], lambda pid: True, [])
+        self.assertEqual(out.call_args_list[0].args[0],
+                         f"{saved['run_id']}  build    round 1  blocked: {QUESTION} (pane w1:p2)")
+
+    def test_a_question_left_out(self):
+        wf, _, _, notes, *_ = self.run_blocked([blocked_report(lambda s: BUILD_1, question=""),
+                                                answered(lambda s: BUILD_1, "report 1")])
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertIn(("Builder is blocked: (no question given)", "pane w1:p2"), notes)
+
+    def test_blocking_again_waits_again(self):
+        wf, herdr, host, notes, seen, *_ = self.run_blocked([
+            blocked_report(lambda s: BUILD_1), answered(lambda s: BUILD_1, "BLOCKED: postgres or sqlite?"),
+            answered(lambda s: BUILD_1, "report 1")])
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(blocked_files(host), ["build-1.blocked-1.md", "build-1.blocked-2.md"])
+        self.assertEqual(host.files[f"{D}/build-1.blocked-2.md"], "BLOCKED: postgres or sqlite?")
+        self.assertEqual(seen[1:], [blocked_prompt(BUILD_1), blocked_prompt(BUILD_1, 2)])
+        self.assertEqual([t for t, _ in notes if "blocked" in t],
+                         ["Builder is blocked: which database?", "Builder is blocked: postgres or sqlite?"])
+        self.assertEqual(herdr.calls.count(("prompt", "review-a1b2c3")), 1)
+
+    def test_each_rounds_report_has_its_own_count(self):
+        wf, _, host, *_ = self.run_blocked(
+            [blocked_report(lambda s: BUILD_1), answered(lambda s: BUILD_1, "report 1"),
+             blocked_report(lambda s: s.build_path(2)), answered(lambda s: s.build_path(2), "report 2")],
+            review=[review_turn(1, CHANGES_REQUESTED), review_turn(2, APPROVE)])
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(blocked_files(host), ["build-1.blocked-1.md", "build-2.blocked-1.md"])
+        self.assertEqual(wf.state.round, 2)
+
+    def test_an_empty_report_after_a_block_aborts_and_ends_the_block(self):
+        wf, _, host, *_ = self.run_blocked([blocked_report(lambda s: BUILD_1), answered(lambda s: BUILD_1, "\n")])
+
+        with self.assertRaisesRegex(OrchestratorError, "build-1.md was written empty by the Builder"):
+            wf.run()
+        saved = json.loads(host.files[f"{D}/state.json"])
+        self.assertEqual((saved["blocked"], saved["prompted"]), (None, None))
+
+    def test_a_blocked_quality_answer_waits_then_goes_back_to_the_quality_round(self):
+        fake = FakeCI()
+        fake.outcomes = [outcome(**RED), outcome()]
+        seen, reviews, notes = [], [], []
+        def q1(s):
+            return s.quality_build_path(1, 1)
+        wf, _, host, fake, _ = gated({
+            "spec": [spec_turn],
+            "build": [build_turn(1), recording(blocked_report(q1), seen), recording(answered(q1, "report 1 q1"), seen)],
+            "review": [recording(review_turn(1, APPROVE), reviews)]}, fake=fake)
+        wf.notify = lambda title, body: notes.append(title)
+        bounded(wf)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(blocked_files(host), ["build-1-q1.blocked-1.md"])
+        self.assertTrue(seen[0].endswith(NOTE))
+        self.assertEqual(seen[1], blocked_prompt(f"{D}/build-1-q1.md"))
+        self.assertIn("Builder is blocked: which database?", notes)
+        self.assertTrue(host.files[f"{D}/quality-1-2.md"].startswith("GATE: OK\n"))
+        self.assertIn(f"The Builder's report is in {D}/build-1-q1.md.", reviews[0])
+        self.assertEqual((wf.state.round, wf.state.quality_round, wf.state.blocked), (1, 2, None))
+
+    def test_a_step_from_a_workflow_file_can_block(self):
+        tdd = orchestrator.load_workflow_file(f"{EXAMPLES}/tdd.toml")
+        def tests_md(s):
+            return f"{s.dir}/tests.md"
+        seen, specs, notes = [], [], []
+        wf, _, host, _ = make_workflow({
+            "spec": [recording(spec_turn, specs)],
+            "tests": [recording(blocked_report(tests_md, "which test runner?"), seen),
+                      recording(answered(tests_md, "tests written"), seen)],
+            "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, state=new_run(tdd), pipeline=tdd)
+        wf.notify = lambda title, body: notes.append((title, body))
+        bounded(wf)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(blocked_files(host), ["tests.blocked-1.md"])
+        self.assertTrue(seen[0].endswith(NOTE))
+        self.assertEqual(seen[1], blocked_prompt(f"{D}/tests.md"))
+        self.assertIn(("Test Writer is blocked: which test runner?", "pane w1:p2"), notes)
+        self.assertNotIn("BLOCKED", specs[0])
+
+    def test_a_blocked_verdict_file_gets_the_verdict_retry(self):
+        wf, _, host, notes, _, reviews, _ = self.run_blocked(
+            [build_turn(1)], review=[writes(lambda s: s.review_path(1), "BLOCKED: should I approve?"),
+                                     review_turn(1, APPROVE)])
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(reviews[1], retry_prompt(wf.state.review_path(1)))
+        self.assertEqual(host.files[f"{D}/review-1.rejected.md"], "BLOCKED: should I approve?")
+        self.assertEqual(blocked_files(host), [])
+        self.assertFalse([t for t, _ in notes if "blocked" in t])
+
+    def test_the_note_is_in_every_prompt_of_the_steps_that_can_block_only(self):
+        fake = FakeCI()
+        fake.outcomes = [outcome(**RED), outcome(), outcome()]
+        prompts = {"spec": [], "build": [], "review": []}
+        wf, *_ = gated({
+            "spec": [recording(spec_turn, prompts["spec"])],
+            "build": [recording(t, prompts["build"]) for t in (build_turn(1), fix_turn(1, 1), build_turn(2))],
+            "review": [recording(t, prompts["review"])
+                       for t in (malformed_review(1), review_turn(1, CHANGES_REQUESTED), review_turn(2, APPROVE))]},
+            fake=fake)
+
+        self.assertEqual(wf.run(), APPROVE)
+        # First, quality fix and again; the fresh prompts are in GOLDEN.
+        self.assertEqual(len(prompts["build"]), 3)
+        for prompt in prompts["build"]:
+            self.assertTrue(prompt.endswith(NOTE))
+            self.assertEqual(prompt.count(orchestrator.BLOCKED_NOTE), 1)
+        # The Reviewer's first, retry and again.
+        self.assertEqual(len(prompts["review"]), 3)
+        for prompt in prompts["spec"] + prompts["review"]:
+            self.assertNotIn("BLOCKED", prompt)
+        self.assertEqual(GOLDEN["fresh_build_2"].count(orchestrator.BLOCKED_NOTE), 1)
+
+    def test_workflow_definitions_do_not_contain_the_note(self):
+        default = orchestrator.DEFAULT_WORKFLOW
+        self.assertNotIn("BLOCKED", orchestrator.workflow_toml(default))
+        self.assertNotIn("BLOCKED", "".join(t for st in default.steps for t in st.templates()))
+
+    def test_the_wait_and_the_rewrite_are_a_human_paced_turn(self):
+        wf, _, host, *_ = self.run_blocked(
+            [taking(600, blocked_report(lambda s: BUILD_1)), answered(lambda s: BUILD_1, "report 1")])
+
+        self.assertEqual(wf.run(), APPROVE)
+        end = host.mtimes[BUILD_1] - HOST_EPOCH
+        self.assertEqual(wf.state.turns[1:3], [turn("build", "build-1.blocked-1.md", 0, 600),
+                                               turn("build", "build-1.md", 600, end, human_paced=True)])
+        self.assertEqual(host.mtimes[BLOCKED_1], HOST_EPOCH + 600)
+        summary = host.files[f"{D}/summary.md"]
+        self.assertIn("| build | build | 1 | claude | default | 2026-10-03 04:00:00 | 10m 00s | "
+                      "build-1.blocked-1.md |\n| build (human-paced) | build | 1 | claude | default | "
+                      "2026-10-03 04:10:00 |", summary)
+
+    def test_a_state_saved_before_blocks_loads_and_resumes(self):
+        saved = asdict(saved_run("build", 1, agents=("spec", "build"), prompted="build-1.md"))
+        del saved["blocked"]
+        state = RunState.from_dict(saved)
+        self.assertIsNone(state.blocked)
+        wf, herdr, *_ = resume(state, {"review": [review_turn(1, APPROVE)]}, alive=["build"])
+        wf.clock.hooks.append(lambda: build_turn(1)("", state, wf.host))
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertNotIn(("prompt", "build-a1b2c3"), herdr.calls)
+
+
+class TestBlockedResume(unittest.TestCase):
+    """The orchestrator dies at each point of a block, and a resume carries on from there."""
+
+    def kill(self, host, *, at_focus=False, in_wait=False):
+        """Run until the kill; the state.json it left."""
+        wait = []
+
+        def waits(prompt, state, h):
+            wait.append(prompt)
+            return "idle"
+        wf, herdr, host, _ = make_workflow({
+            "spec": [spec_turn], "build": [blocked_report(lambda s: BUILD_1), waits]}, host=host)
+        if at_focus:
+            def focus(name):
+                if name == "build-a1b2c3":
+                    host.dead = True
+                    raise Killed("focus")
+            herdr.focus = focus
+
+        def die_waiting():
+            if in_wait and wait:
+                host.dead = True
+                raise Killed("wait")
+        wf.clock.hooks.append(die_waiting)
+        bounded(wf)
+        with self.assertRaises(Killed):
+            wf.run()
+        host.dead, host.kill_at = False, lambda *a: False
+        return RunState.from_dict(json.loads(host.files[f"{D}/state.json"])), wait
+
+    def resume_blocked(self, state, host, **kw):
+        """Resume, the Builder writing its report once the wait is under way; what it was prompted with."""
+        seen, notes = [], []
+        wf, herdr, host, _ = resume(state, {"build": [recording(idle, seen)], "review": [review_turn(1, APPROVE)]},
+                                    host=host, **kw)
+        wf.notify = lambda title, body: notes.append((title, body))
+
+        def answer():
+            if blocked_files(host) and BUILD_1 not in host.files:
+                build_turn(1)("", state, host)
+        wf.clock.hooks.append(answer)
+        self.assertEqual(bounded(wf).run(), APPROVE)
+        self.assertEqual(blocked_files(host), ["build-1.blocked-1.md"])
+        self.assertTrue(host.files[BLOCKED_1].startswith("BLOCKED: "))
+        self.assertIn(("Builder is blocked: which database?", "pane w1:p2"), notes)
+        self.assertIn(("focus", "build-a1b2c3"), herdr.calls)
+        self.assertEqual([t["file"] for t in wf.state.turns if t["step"] == "build"],
+                         ["build-1.blocked-1.md", "build-1.md"])
+        self.assertTrue(wf.state.turns[2]["human_paced"])
+        self.assertIsNone(wf.state.blocked)
+        return seen
+
+    def test_killed_before_saving_the_block(self):
+        host = KillingHost(saving_a_block)
+        state, _ = self.kill(host)
+        self.assertIsNone(state.blocked)
+        self.assertIn(BUILD_1, host.files)
+
+        self.assertEqual(self.resume_blocked(state, host, alive=["build"]), [blocked_prompt(BUILD_1)])
+
+    def test_killed_between_saving_the_block_and_the_rename(self):
+        host = KillingHost(renaming_a_report)
+        state, _ = self.kill(host)
+        self.assertEqual(state.blocked, {"file": "build-1.md", "question": QUESTION, "k": 1})
+        self.assertIn(BUILD_1, host.files)
+        self.assertNotIn(BLOCKED_1, host.files)
+
+        self.assertEqual(self.resume_blocked(state, host, alive=["build"]), [blocked_prompt(BUILD_1)])
+
+    def test_killed_after_the_rename_before_the_prompt(self):
+        host = KillingHost(lambda *a: False)
+        state, wait = self.kill(host, at_focus=True)
+        self.assertEqual((state.blocked["k"], state.prompted, wait), (1, None, []))
+        self.assertNotIn(BUILD_1, host.files)
+
+        self.assertEqual(self.resume_blocked(state, host, alive=["build"]), [blocked_prompt(BUILD_1)])
+
+    def killed_waiting(self):
+        host = KillingHost(lambda *a: False)
+        state, wait = self.kill(host, in_wait=True)
+        self.assertEqual((state.blocked["k"], state.prompted, wait), (1, "build-1.md", [blocked_prompt(BUILD_1)]))
+        return state, host
+
+    def test_killed_waiting_with_the_agent_alive_only_waits(self):
+        self.assertEqual(self.resume_blocked(*self.killed_waiting(), alive=["build"]), [])
+
+    def test_killed_waiting_with_the_agent_resumed_continues(self):
+        state, host = self.killed_waiting()
+        self.assertEqual(self.resume_blocked(state, host, sessions={"build": "s-build"}),
+                         [orchestrator.CONTINUE_PROMPT.format(path=BUILD_1)])
+
+    def test_killed_waiting_with_the_agent_restarted_gets_the_blocked_prompt(self):
+        state, host = self.killed_waiting()
+        del state.agents["build"]["session"]
+        self.assertEqual(self.resume_blocked(state, host), [blocked_prompt(BUILD_1)])
+
+    def test_a_report_written_while_no_orchestrator_watched_ends_the_wait(self):
+        state, host = self.killed_waiting()
+        build_turn(1)("", state, host)
+        wf, herdr, host, notes = resume(state, {"review": [review_turn(1, APPROVE)]}, host=host, alive=["build"])
+
+        self.assertEqual(bounded(wf).run(), APPROVE)
+        self.assertEqual(notes, [f"Run finished: {APPROVE}"])
+        self.assertNotIn(("prompt", "build-a1b2c3"), herdr.calls)
+        self.assertEqual(blocked_files(host), ["build-1.blocked-1.md"])
+        self.assertIsNone(wf.state.blocked)
+
+
+BLOCK = {"file": "build-1.md", "question": QUESTION, "k": 1}
+
+
+class TestBlockedListing(unittest.TestCase):
+
+    def lines(self, *runs):
+        with patch("builtins.print") as out:
+            orchestrator.print_runs(list(runs), "here", lambda pid: True, [])
+        return [c.args[0] for c in out.call_args_list][::2]
+
+    def test_a_running_blocked_run_shows_its_question_and_pane(self):
+        record = {**run_record(owner=ME), "blocked": BLOCK, "agents": {"build": {"pane": "w1:p2"}}}
+        stale = {**record, "phase": "build"}
+        self.assertEqual(self.lines((40, record), (STALE_SECONDS + 1, stale)), [
+            f"20260930-070000-c0ffee  build    round 1  blocked: {QUESTION} (pane w1:p2)",
+            "20260930-070000-c0ffee  build    round 1  stale: no heartbeat for 5m; resume: orchestrator.py resume c0ffee",
+        ])
+
+    def test_without_a_known_pane_only_the_question(self):
+        unknown = {**run_record(owner=ME), "blocked": BLOCK, "workflow": "nosuch"}
+        no_agent = {**run_record(owner=ME), "blocked": BLOCK}
+        self.assertEqual(self.lines((40, unknown), (40, no_agent)), [
+            f"20260930-070000-c0ffee  build    round 1  blocked: {QUESTION}  [nosuch workflow]",
+            f"20260930-070000-c0ffee  build    round 1  blocked: {QUESTION}",
+        ])
+
+    @patch.dict("os.environ", {"HERDR_ENV": "1"})
+    def test_show(self):
+        host = ShowHost(show_state(phase="build", owner=ME, verdict=None, blocked=BLOCK))
+        host.states = [(40, s) for _, s in host.states]
+        with patch.object(orchestrator, "connect", return_value=(None, host)), \
+                patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(main(["show", "a1b2c3"]), 0)
+        self.assertEqual(out.getvalue().splitlines()[0],
+                         f"{SHOW_ID}  build    round 1  blocked: {QUESTION} (pane w1:p2)")
+
+    def test_status_tag(self):
+        self.assertEqual(orchestrator.status_tag(f"blocked: {QUESTION} (pane w1:p2)"), "warn")
 
 
 if __name__ == "__main__":
