@@ -41,6 +41,9 @@ def no_processes(argv, **kw):
 
 
 HOST_RUN_STATES = Host.run_states
+# What a FakeHost's clock reads when the workflow's clock reads 0: far from it, so a time taken from the wrong
+# clock shows.
+HOST_EPOCH = 1_791_000_000
 
 
 class FakeHost(Host):
@@ -59,6 +62,9 @@ class FakeHost(Host):
     - `diff`: what `git diff -U0` from the base to a snapshot prints.
     - `has_origin`: whether the checkout has an origin at all.
     - `ages`: the seconds since each run's state.json was written, by run id; 0 for one not listed.
+    - `clock`: a FakeClock, which make_workflow sets to the workflow's. The host's own time is HOST_EPOCH later:
+      now() reads it, and write() stamps each file's mtime with it. A file put straight into `files` has no mtime
+      of its own, so mtime() gives the time now; `mtimes` sets one.
 
     For prune, which also reads `remote`:
 
@@ -103,6 +109,14 @@ class FakeHost(Host):
         self.remove_error = None
         self.gh_calls = []
         self.mtime_kept = []  # every path written with keep_mtime
+        self.clock = None
+        self.mtimes = {}
+
+    def now(self):
+        return HOST_EPOCH + int(self.clock() if self.clock else 0)
+
+    def mtime(self, path):
+        return self.mtimes.get(path, self.now())
 
     def snapshot(self, cwd, parent, message):
         self.snapshots.append((parent, message))
@@ -116,11 +130,15 @@ class FakeHost(Host):
         if keep_mtime:
             self.mtime_kept.append(path)
         self.files[path] = text
+        if not keep_mtime:
+            self.mtimes[path] = self.now()
         if not path.startswith("/proj/.orchestrator/") or path.startswith(f"/proj/{orchestrator.WORKTREES_DIR}/"):
             self.changed.add(path)
 
     def rename(self, path, new_path):
         self.files[new_path] = self.files.pop(path)
+        if path in self.mtimes:
+            self.mtimes[new_path] = self.mtimes.pop(path)
 
     def git_head(self, cwd):
         return self.head
@@ -397,6 +415,8 @@ def make_workflow(script, host=None, max_rounds=3, state=None, *, permission_mod
     herdr = FakeHerdr(host, state, script)
     notes = []
     clock = FakeClock()
+    if host.clock is None:
+        host.clock = clock
     agents = orchestrator.AgentSettings(permission_mode, models or {}, agent_kinds or {})
     wf = Workflow(herdr, host, state, notify=lambda t, b: notes.append(t), max_rounds=max_rounds, agents=agents,
                   clocks=orchestrator.Clocks(clock.sleep, clock, clock), **kw)
@@ -1151,6 +1171,31 @@ class TestHost(unittest.TestCase):
             host.rename(path, f"{d}/nested/file.rejected.md")
             self.assertIsNone(host.read(path))
             self.assertEqual(host.read(f"{d}/nested/file.rejected.md"), "hello")
+
+    def test_now_and_mtime_on_the_real_host(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = f"{d}/review 1.md"
+            host = Host()
+            host.write(path, "x")
+            os.utime(path, (1_700_000_000, 1_700_000_000))
+            self.assertEqual(host.mtime(path), 1_700_000_000)
+            self.assertLessEqual(abs(host.now() - time.time()), 5)
+            with self.assertRaisesRegex(OrchestratorError, "stat"):
+                host.mtime(f"{d}/missing.md")
+
+    def test_now_and_mtime_over_ssh(self):
+        run = MagicMock(return_value=completed("1791000000\n"))
+        host = Host("remote-host", run=run)
+        self.assertEqual(host.now(), 1_791_000_000)
+        self.assertEqual(run.call_args.args[0], ["ssh", "-o", "BatchMode=yes", "remote-host", "date +%s"])
+        self.assertEqual(host.mtime("/x/review-1.md"), 1_791_000_000)
+        self.assertEqual(run.call_args.args[0][:4], ["ssh", "-o", "BatchMode=yes", "remote-host"])
+        self.assertTrue(run.call_args.args[0][4].endswith(" _ /x/review-1.md"))
+
+    def test_a_time_that_is_no_number_raises(self):
+        host = Host(run=MagicMock(return_value=completed("soon\n")))
+        with self.assertRaisesRegex(OrchestratorError, "date \\+%s printed 'soon', not a time"):
+            host.now()
 
     def test_rename_over_ssh(self):
         run = MagicMock(return_value=completed())
@@ -4201,6 +4246,25 @@ GOLDEN_PR_BODY = (
     '**VERDICT: APPROVE**\n'
     '1. finding\n'
     '\n'
+    '</details>\n'
+    '\n'
+    '<details>\n'
+    '<summary>Run timings</summary>\n'
+    '\n'
+    '| step | role | round | harness | model | start (UTC) | duration | file |\n'
+    '| --- | --- | --- | --- | --- | --- | --- | --- |\n'
+    '| spec (human-paced) | spec | 0 | claude | default | 2026-10-03 04:00:00 | 0s | spec.md |\n'
+    '| build | build | 1 | claude | default | 2026-10-03 04:00:00 | 0s | build-1.md |\n'
+    '| quality | quality | 1 q1 | - | - | 2026-10-03 04:00:00 | 1m 20s | quality-1-1.md |\n'
+    '| build | build | 1 q1 | claude | default | 2026-10-03 04:01:20 | 0s | build-1-q1.md |\n'
+    '| quality | quality | 1 q2 | - | - | 2026-10-03 04:01:20 | 40s | quality-1-2.md |\n'
+    '| review | review | 1 | claude | default | 2026-10-03 04:02:00 | 0s | review-1.md |\n'
+    '| build | build | 2 | claude | default | 2026-10-03 04:02:00 | 0s | build-2.md |\n'
+    '| quality | quality | 2 q1 | - | - | 2026-10-03 04:02:00 | 40s | quality-2-1.md |\n'
+    '| build | build | 2 q1 | claude | default | 2026-10-03 04:02:40 | 0s | build-2-q1.md |\n'
+    '| quality | quality | 2 q2 | - | - | 2026-10-03 04:02:40 | 40s | quality-2-2.md |\n'
+    '| review | review | 2 | claude | default | 2026-10-03 04:03:20 | 0s | review-2.md |\n'
+    '\n'
     '</details>\n')
 
 
@@ -4240,7 +4304,7 @@ class TestDefaultWorkflowPrompts(unittest.TestCase):
         written = [p.rsplit("/", 1)[-1] for p in host.writes if p.startswith(D) and not p.endswith("state.json")]
         self.assertEqual(written, ["spec.md", "build-1.md", "quality-1-1.md", "build-1-q1.md", "quality-1-2.md",
                                    "review-1.md", "build-2.md", "quality-2-1.md", "build-2-q1.md", "quality-2-2.md",
-                                   "review-2.md"])
+                                   "review-2.md", "summary.md"])
         self.assertEqual([c for c in herdr.calls if c[0] in ("rename", "split")], [
             ("rename", "w1:p1", "Spec Collector"), ("split", "w1:p1", "right"), ("rename", "w1:p2", "Builder"),
             ("split", "w1:p2", "down"), ("rename", "w1:p3", "Reviewer")])
@@ -4551,7 +4615,8 @@ class TestOtherWorkflows(unittest.TestCase):
         self.assertEqual(reviews, [f"Review {CHANGE} with {D}/impl-1-q1.md; write {D}/review-1.md.\n\n" +
                                    orchestrator.QUALITY_PASSED_NOTE.format(quality_path=f"{D}/quality-1-2.md")])
         written = [p.rsplit("/", 1)[-1] for p in host.writes if p.startswith(D) and not p.endswith("state.json")]
-        self.assertEqual(written, ["impl-1.md", "quality-1-1.md", "impl-1-q1.md", "quality-1-2.md", "review-1.md"])
+        self.assertEqual(written, ["impl-1.md", "quality-1-1.md", "impl-1-q1.md", "quality-1-2.md", "review-1.md",
+                                   "summary.md"])
         self.assertTrue(host.files[f"{D}/quality-1-1.md"].startswith("GATE: ERROR\n"))
         self.assertTrue(host.files[f"{D}/quality-1-2.md"].startswith("GATE: OK\n"))
         self.assertEqual([b["ref"] for b in fake.triggered("change")], [REF_1_1, "orchestrator-ci/a1b2c3-1-q2"])
@@ -4850,9 +4915,10 @@ class TestWorkflowFiles(unittest.TestCase):
         for name in ("b-{n!s}.md", "b-{n:d}.md", "b-{n:{x}}.md"):
             cases.append((f"step build: handoff file {name} may use {{n}} only as it is, with no format spec or "
                           f"conversion", "[[steps]]\n" + step.replace("b-{n}.md", name)))
-        for name in ("state.json", "quality-{n}-1.md", "../b-{n}.md", "/tmp/b-{n}.md", ".."):
-            cases.append((f"step build: handoff file {name} must be a plain file name, and not state.json or "
-                          f"quality-*, which the run writes itself", "[[steps]]\n" + step.replace("b-{n}.md", name)))
+        for name in ("state.json", "summary.md", "quality-{n}-1.md", "../b-{n}.md", "/tmp/b-{n}.md", ".."):
+            cases.append((f"step build: handoff file {name} must be a plain file name, and not state.json, "
+                          f"summary.md or quality-*, which the run writes itself",
+                          "[[steps]]\n" + step.replace("b-{n}.md", name)))
         for message, text in cases:
             with self.subTest(message=message):
                 path = self.file("bad", text)
@@ -6513,6 +6579,23 @@ class TestShow(unittest.TestCase):
             _, out, _ = self.show(ShowHost(saved))
             self.assertNotRegex(out, r"(?m)^closed ")
 
+    def test_turns_once_recorded(self):
+        turns = [turn("spec", "spec.md", 0, 4000, rnd=0, human_paced=True),
+                 turn("build", "build-1.md", 4000, 4600, agent="codex"),
+                 turn("quality", "quality-1-1.md", 4600, 4650, q=1, agent=None),
+                 turn("review", "review-1.md", None, 4700),
+                 turn("build", "build-2.md", 4800, None, rnd=2, agent="codex")]
+        _, out, _ = self.show(ShowHost(show_state(turns=turns)))
+        self.assertIn("\nturns\n"
+                      "    spec     0     claude  2026-10-03 04:00:00  1h 06m   spec.md\n"
+                      "    build    1     codex   2026-10-03 05:06:40  10m 00s  build-1.md\n"
+                      "    quality  1 q1  -       2026-10-03 05:16:40  50s      quality-1-1.md\n"
+                      "    review   1     claude  ?                    ?        review-1.md\n"
+                      "    build    2     codex   2026-10-03 05:20:00  ?        build-2.md\n", out)
+        for saved in (show_state(), show_state(turns=[])):
+            _, out, _ = self.show(ShowHost(saved))
+            self.assertNotRegex(out, r"(?m)^turns")
+
     def test_worktree_of_a_worktree_run(self):
         _, out, _ = self.show(ShowHost(show_state(worktree=WORKTREE, branch="orchestrator/x-a1b2c3")))
         self.assertIn(f"\nworktree   {WORKTREE}\nbranch     orchestrator/x-a1b2c3\n", out)
@@ -7611,6 +7694,325 @@ class TestSweepOnRun(PruneTest):
 
         self.run_main("run", "task")
         self.assertEqual(len(self.host.gh_calls), 1)
+
+
+def taking(seconds, turn):
+    """turn, its agent working for `seconds` of the host's time before it writes its file."""
+    def slow(prompt, state, host):
+        host.clock.now += seconds
+        return turn(prompt, state, host)
+    return slow
+
+
+def working(prompt, state, host):
+    """A turn whose agent works on and writes nothing, until the test writes its file."""
+    return "working"
+
+
+def at(seconds):
+    """The time on a FakeHost whose clock reads `seconds`, as a turn record has it."""
+    return orchestrator.iso_utc(HOST_EPOCH + seconds)
+
+
+def turn(step, file, start, end, *, role=None, rnd=1, q=0, agent="claude", model=None, human_paced=False):
+    """A turn record that started and ended at these host clock readings; None for one not known."""
+    return {"step": step, "role": role or step, "round": rnd, "quality_round": q, "file": file, "agent": agent,
+            "model": model, "human_paced": human_paced,
+            "started_at": None if start is None else at(start), "ended_at": None if end is None else at(end),
+            "seconds": None if start is None or end is None else end - start}
+
+
+GOLDEN_SUMMARY = """\
+# Run 20260929-120000-a1b2c3
+
+- **Workflow:** default
+- **Outcome:** APPROVE
+- **Pull request:** https://github.com/o/r/pull/7
+- **Branch:** `orchestrator/add-a-token-bucket-rate-limiter-a1b2c3`
+- **Wall time:** 35m 00s, from the first turn's start to 2026-10-03T04:35:00+00:00
+
+## Task
+
+add a rate limiter
+
+## Roles
+
+| role | harness | model |
+| --- | --- | --- |
+| Spec Collector (spec) | claude | default |
+| Builder (build) | codex | default |
+| Reviewer (review) | claude | opus |
+
+## Turns
+
+| step | role | round | harness | model | start (UTC) | duration | file |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| spec (human-paced) | spec | 0 | claude | default | 2026-10-03 04:00:00 | 10m 00s | spec.md |
+| build | build | 1 | codex | default | 2026-10-03 04:10:00 | 20m 00s | build-1.md |
+| review | review | 1 | claude | opus | 2026-10-03 04:30:00 | 5m 00s | review-1.md |
+
+## Rounds
+
+- Round 1: review APPROVE
+"""
+
+
+class TestTurnTimings(unittest.TestCase):
+    def summary(self, host):
+        return host.files.get(f"{D}/summary.md")
+
+    def test_each_turn_of_an_approved_run_is_recorded_on_the_host_clock(self):
+        wf, herdr, host, _ = make_workflow({
+            "spec": [taking(600, spec_turn)], "build": [taking(1200, build_turn(1))],
+            "review": [taking(300, review_turn(1, APPROVE))]}, models={"review": "opus"}, agent_kinds={"build": "codex"})
+
+        self.assertEqual(wf.run(), APPROVE)
+        expected = [turn("spec", "spec.md", 0, 600, rnd=0, human_paced=True),
+                    turn("build", "build-1.md", 600, 1800, agent="codex"),
+                    turn("review", "review-1.md", 1800, 2100, model="opus")]
+        self.assertEqual(wf.state.turns, expected)
+        saved = json.loads(host.files[f"{D}/state.json"])
+        self.assertEqual(saved["turns"], expected)
+        # The workflow's own clock, which stamps the heartbeat, is HOST_EPOCH behind the host's.
+        self.assertEqual(saved["heartbeat_at"], "1970-01-01T00:35:00+00:00")
+        self.assertEqual(self.summary(host), GOLDEN_SUMMARY)
+        body = host.prs[0]["body"]
+        timings = GOLDEN_SUMMARY.split("## Turns\n\n")[1].split("\n\n")[0]
+        self.assertTrue(body.endswith(f"<details>\n<summary>Run timings</summary>\n\n{timings}\n\n</details>\n"))
+
+    def test_the_end_is_the_files_mtime_even_when_no_orchestrator_watched(self):
+        wf, herdr, host, _ = make_workflow({"spec": [spec_turn], "build": [working]})
+        clock = wf.clock
+
+        def interrupt():
+            if clock.now >= 900:
+                raise KeyboardInterrupt
+        clock.hooks.append(interrupt)
+        with patch("sys.stderr"), self.assertRaises(KeyboardInterrupt):
+            wf.run()
+        saved = RunState.from_dict(json.loads(host.files[f"{D}/state.json"]))
+        self.assertEqual(saved.turns[-1], turn("build", "build-1.md", 0, None))
+        self.assertIn("- **Outcome:** error: interrupted\n", self.summary(host))
+        self.assertIn("| build | build | 1 | claude | default | 2026-10-03 04:00:00 | ? | build-1.md |\n",
+                      self.summary(host))
+
+        # The Builder finishes while no orchestrator runs, and one resumes the run much later.
+        clock.hooks.clear()
+        clock.now = 1200
+        build_turn(1)("", saved, host)
+        clock.now = 5000
+        wf, herdr, host, _ = resume(saved, {"review": [taking(100, review_turn(1, APPROVE))]}, alive=["build"],
+                                    host=host, pull_request=saved.pull_request)
+        self.assertEqual(wf.run(), APPROVE)
+
+        self.assertEqual([t for t in wf.state.turns if t["file"] == "build-1.md"],
+                         [turn("build", "build-1.md", 0, 1200)])
+        self.assertEqual(wf.state.turns[-1], turn("review", "review-1.md", 5000, 5100))
+        summary = self.summary(host)
+        self.assertIn("- **Outcome:** APPROVE\n", summary)
+        self.assertIn("| build | build | 1 | claude | default | 2026-10-03 04:00:00 | 20m 00s | build-1.md |\n"
+                      "| review | review | 1 | claude | default | 2026-10-03 05:23:20 | 1m 40s | review-1.md |\n",
+                      summary)
+
+    def test_a_restarted_agent_keeps_its_turns_record(self):
+        state = saved_run("build", 2, agents=("spec", "build", "review"), prompted="build-2.md",
+                          turns=[turn("build", "build-2.md", -1000, None, rnd=2)])
+        wf, herdr, host, _ = resume(state, {"build": [taking(50, build_turn(2))], "review": [review_turn(2, APPROVE)]},
+                                    alive=["review"])
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertIn(("prompt", "build-a1b2c3"), herdr.calls)
+        self.assertEqual([t["file"] for t in wf.state.turns], ["build-2.md", "review-2.md"])
+        self.assertEqual(wf.state.turns[0], turn("build", "build-2.md", -1000, 50, rnd=2))
+
+    def test_a_record_closed_before_the_run_moved_on_is_not_recorded_again(self):
+        closed = turn("build", "build-1.md", -100, -50)
+        state = saved_run("build", 1, agents=("spec", "build"), prompted="build-1.md", turns=[closed])
+        wf, *_ = resume(state, {"review": [review_turn(1, APPROVE)]}, files={lambda s: s.build_path(1): "report"})
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(wf.state.turns[:-1], [closed])
+        self.assertEqual(wf.state.turns[-1]["file"], "review-1.md")
+
+    def test_quality_rounds_and_answers_have_records_of_their_own(self):
+        fake = FakeCI()
+        fake.outcomes = [outcome(**RED), outcome()]
+        wf, herdr, host, fake, _ = gated({"spec": [spec_turn], "build": [build_turn(1), fix_turn(1, 1)],
+                                          "review": [review_turn(1, APPROVE)]}, fake=fake)
+
+        self.assertEqual(wf.run(), APPROVE)
+        turns = wf.state.turns
+        self.assertEqual([(t["file"], t["step"], t["role"], t["round"], t["quality_round"]) for t in turns], [
+            ("spec.md", "spec", "spec", 0, 0), ("build-1.md", "build", "build", 1, 0),
+            ("quality-1-1.md", "quality", "quality", 1, 1), ("build-1-q1.md", "build", "build", 1, 1),
+            ("quality-1-2.md", "quality", "quality", 1, 2), ("review-1.md", "review", "review", 1, 0)])
+        quality = [t for t in turns if t["role"] == "quality"]
+        self.assertEqual({(t["agent"], t["model"], t["human_paced"]) for t in quality}, {(None, None, False)})
+        for t in turns:
+            self.assertLessEqual(t["started_at"], t["ended_at"])
+            self.assertEqual(t["seconds"], orchestrator.epoch_seconds(t["ended_at"]) -
+                             orchestrator.epoch_seconds(t["started_at"]))
+        # Each analysis polls Jenkins and SonarQube, which takes the host's time too.
+        self.assertGreater(quality[0]["seconds"], 0)
+        self.assertIn("| quality | quality | 1 q1 | - | - |", self.summary(host))
+        self.assertIn("- Round 1: quality gate ERROR, OK; review APPROVE\n", self.summary(host))
+
+    def test_a_resumed_analysis_keeps_its_start(self):
+        fake = FakeCI()
+        n = fake.add_build(REF_1_1, "change", outcome())
+        state = quality_state(ci={"ref": REF_1_1, "sha": "snap9", "queue_url": f"{JENKINS}/queue/item/1/",
+                                  "build": n, "ce_task": f"task-{n}"},
+                              turns=[turn("quality", "quality-1-1.md", -500, None, q=1, agent=None)])
+        wf, *_ = resume_gated(state, {"review": [review_turn(1, APPROVE)]}, fake)
+
+        self.assertEqual(wf.run(), APPROVE)
+        # build-1.md was written before turns were recorded.
+        self.assertEqual([t["file"] for t in wf.state.turns], ["quality-1-1.md", "review-1.md"])
+        self.assertEqual(wf.state.turns[0]["started_at"], at(-500))
+
+    def test_a_rejected_verdict_keeps_its_record_under_its_new_name(self):
+        wf, herdr, host, _ = make_workflow({
+            "spec": [spec_turn], "build": [build_turn(1)],
+            "review": [taking(60, malformed_review(1)), taking(30, review_turn(1, APPROVE))]})
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(wf.state.turns[2:], [turn("review", "review-1.rejected.md", 0, 60),
+                                              turn("review", "review-1.md", 60, 90)])
+        self.assertEqual(host.mtimes[f"{D}/review-1.rejected.md"], HOST_EPOCH + 60)
+
+    def test_a_state_saved_before_turns_resumes_and_records_its_files_without_a_start(self):
+        saved = asdict(saved_run("review", 1, agents=("spec", "build", "review"), prompted="review-1.md",
+                                 pull_request=True, base_branch="main", branch="orchestrator/x-a1b2c3"))
+        del saved["turns"]
+        state = RunState.from_dict(saved)
+        self.assertEqual(state.turns, [])
+        wf, herdr, host, _ = resume(state, {}, alive=["review"], host=FakeHost(head="def456", branch=state.branch),
+                                    files={lambda s: s.review_path(1): f"VERDICT: {APPROVE}\n"})
+        host.mtimes[state.review_path(1)] = HOST_EPOCH - 60
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(wf.state.turns, [turn("review", "review-1.md", None, -60)])
+        summary = self.summary(host)
+        self.assertIn("- **Wall time:** ?, from the first turn's start", summary)
+        self.assertIn("| review | review | 1 | claude | default | ? | ? | review-1.md |\n", summary)
+        self.assertIn("| review | review | 1 | claude | default | ? | ? | review-1.md |", host.prs[0]["body"])
+
+    def test_a_seeded_spec_has_no_record(self):
+        wf, herdr, host, _ = make_workflow({"build": [build_turn(1)], "review": [review_turn(1, APPROVE)]},
+                                           state=seeded_run(), spec=orchestrator.SpecFile(SPEC_SOURCE, GIVEN_SPEC))
+        with patch("sys.stderr"):
+            self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual([t["file"] for t in wf.state.turns], ["build-1.md", "review-1.md"])
+
+    def test_every_end_writes_a_summary(self):
+        def ended(script, **kw):
+            wf, herdr, host, _ = make_workflow(script, **kw)
+            with patch("sys.stderr"):
+                try:
+                    wf.run()
+                except OrchestratorError:
+                    pass
+            return self.summary(host)
+
+        cases = [
+            ("changes requested", dict(script={"spec": [spec_turn], "build": [build_turn(1)],
+                                               "review": [review_turn(1, CHANGES_REQUESTED)]}, max_rounds=1),
+             ["- **Outcome:** CHANGES_REQUESTED\n", "- Round 1: review CHANGES_REQUESTED\n",
+              "- **Pull request:** https://github.com/o/r/pull/7\n"]),
+            ("finished", dict(script={"build": [solo_turn]}, state=new_run(SOLO), pipeline=SOLO, pull_request=False),
+             ["- **Workflow:** solo\n", "- **Outcome:** FINISHED\n", "| Builder (build) | claude | default |\n",
+              "- **Pull request:** none\n- **Branch:** none\n", "- Round 1: no verdict\n"]),
+            ("failed", dict(script={"spec": [spec_turn], "build": [idle]}, turn_timeout=60),
+             [f"- **Outcome:** error: the Builder did not write {D}/build-1.md within 60s; see pane w1:p2\n",
+              "| build | build | 1 | claude | default | 2026-10-03 04:00:00 | ? | build-1.md |\n",
+              "- Round 1: no verdict\n"]),
+        ]
+        for name, kw, parts in cases:
+            with self.subTest(name):
+                summary = ended(**kw)
+                for part in parts:
+                    self.assertIn(part, summary)
+
+    def test_a_run_without_turns_says_so(self):
+        state = saved_run("publish", 1, agents=("build",), base_branch="main", branch="orchestrator/x-a1b2c3",
+                          verdict=orchestrator.FINISHED, workflow="solo")
+        wf, _, host, _ = resume(state, {}, pipeline=SOLO)
+        self.assertEqual(wf.run(), orchestrator.FINISHED)
+        self.assertIn("## Turns\n\nNo turns were recorded.\n", self.summary(host))
+
+    def test_a_run_taken_over_writes_no_summary(self):
+        other = {"host": "laptop", "pid": 4242, "started_at": "2026-09-30T07:00:00+00:00"}
+        for interrupted in (False, True):
+            with self.subTest(interrupted=interrupted):
+                wf, herdr, host, _ = make_workflow({"spec": [spec_turn], "build": [idle]})
+                path = f"{D}/state.json"
+
+                def take_over():
+                    if wf.clock.now > 30 and json.loads(host.files[path])["owner"] != other:
+                        host.files[path] = json.dumps({**json.loads(host.files[path]), "owner": other})
+                        if interrupted:
+                            raise KeyboardInterrupt
+                wf.clock.hooks.append(take_over)
+
+                with patch("sys.stderr", new_callable=io.StringIO) as err, \
+                        self.assertRaises(KeyboardInterrupt if interrupted else RunTakenOver):
+                    wf.run()
+                self.assertIsNone(self.summary(host))
+                if interrupted:
+                    self.assertIn("could not record the failure in state.json: run 20260929-120000-a1b2c3 was taken "
+                                  "over by pid 4242 on laptop", err.getvalue())
+
+    def test_a_failure_that_cannot_be_saved_still_writes_a_summary(self):
+        wf, herdr, host, _ = make_workflow({"spec": [spec_turn], "build": [idle]}, turn_timeout=60)
+        write = host.write
+
+        def failing(path, text, keep_mtime=False):
+            if path.endswith("/state.json") and json.loads(text)["error"]:
+                raise OrchestratorError("ssh: connection reset")
+            write(path, text, keep_mtime)
+        host.write = failing
+
+        with patch("sys.stderr", new_callable=io.StringIO) as err, \
+                self.assertRaisesRegex(OrchestratorError, "did not write"):
+            wf.run()
+        self.assertIn("could not record the failure in state.json: ", err.getvalue())
+        self.assertIn("- **Outcome:** error: the Builder did not write", self.summary(host))
+
+    def test_a_summary_that_cannot_be_written_changes_no_outcome(self):
+        def failing_summary(host):
+            write = host.write
+
+            def failing(path, text, keep_mtime=False):
+                if path.endswith("/summary.md"):
+                    raise OrchestratorError("disk full")
+                write(path, text, keep_mtime)
+            host.write = failing
+
+        approved = FakeHost()
+        failing_summary(approved)
+        wf, *_ = make_workflow({"spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]},
+                               host=approved)
+        with patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(wf.run(), APPROVE)
+        self.assertIn("could not write summary.md: disk full", err.getvalue())
+        self.assertEqual(json.loads(approved.files[f"{D}/state.json"])["phase"], "done")
+
+        failed = FakeHost()
+        failing_summary(failed)
+        wf, *_ = make_workflow({"spec": [spec_turn], "build": [idle]}, host=failed, turn_timeout=60)
+        with patch("sys.stderr", new_callable=io.StringIO) as err, \
+                self.assertRaisesRegex(OrchestratorError, "did not write"):
+            wf.run()
+        self.assertIn("could not write summary.md: disk full", err.getvalue())
+
+    def test_durations(self):
+        for seconds, text in ((0, "0s"), (59, "59s"), (65, "1m 05s"), (3599, "59m 59s"), (3725, "1h 02m")):
+            with self.subTest(seconds=seconds):
+                self.assertEqual(orchestrator.format_duration(seconds), text)
+
+    def test_a_pipe_in_a_cell_does_not_split_it(self):
+        table = orchestrator.turns_table([turn("build", "a|b.md", 0, 5, model="x|y")])
+        self.assertTrue(table.endswith("| build | build | 1 | claude | x\\|y | 2026-10-03 04:00:00 | 5s | a\\|b.md |"))
 
 
 if __name__ == "__main__":

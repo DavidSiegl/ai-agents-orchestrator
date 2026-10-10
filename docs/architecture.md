@@ -73,7 +73,11 @@ harness now, and otherwise starts fresh), prompts it with what `_prompt_for` pic
 first line goes to `_retry`, which moves it aside and, once per file (`retried`), prompts the role again with
 `RETRY_VERDICT_PROMPT`; `retrying` names the file while that turn is under way, so a resume sends the retry prompt,
 not the step's own. `_save` checks the owner before every write and raises
-`RunTakenOver` after a takeover; `_heartbeat` keeps `state.json` fresh while a turn runs.
+`RunTakenOver` after a takeover; `_heartbeat` keeps `state.json` fresh while a turn runs. `_written` and
+`_quality` open a turn's record in `turns` (`_turn_record`, started by `Host.now`) and `_end_turn` closes it at
+the handoff file's `Host.mtime`; both read the project host's clock. The end of `run` and `_release` write
+`summary.md` (`run_summary`, with `turns_table`), except after a takeover; `pr_body` adds the same table and
+`show` prints `turn_lines`.
 
 ## Workflows
 
@@ -100,7 +104,7 @@ workflow's label for its key, or else is named after the key; a role's `model` s
 and its `agent` (`Pipeline.agents`, one of `AGENT_KINDS`) under `--agent` and `--role-agent`. A
 file cannot take a built-in workflow's name. `Pipeline` also rejects a prompt or file that could not be filled
 in at run time (`_fill_problem`), and a handoff file outside the run directory or named like the run's own
-`state.json` and `quality-*` files, and two steps whose files can share a name in some round (`Step.name_forms`,
+`state.json`, `summary.md` and `quality-*` files, and two steps whose files can share a name in some round (`Step.name_forms`,
 `_shared_name` and `_collision_problem`, an exact check). `state.json` saves
 the workflow's name and, for one that is not built in, its canonical definition (`workflow_definition`), which
 a resume rebuilds the `Pipeline` from, so editing or deleting the file does not change a started run. One saved

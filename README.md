@@ -257,15 +257,25 @@ since, the agent starts a fresh session instead.
    the conflicting files; you resolve them. The project goes back to its starting branch, and the workspace is
    closed; a `--worktree` run removes its worktree instead, and leaves the checkout alone. The branch stays,
    locally and on `origin`, until a later run's sweep or `prune` deletes it.
+7. **Summary.** Every turn is timed: an agent's from the moment its prompt is delivered, a quality analysis from
+   the moment it starts, each until its handoff file's modification time, all by the clock of the machine the
+   agents run on. Whenever the run ends, done, failed or interrupted, the orchestrator writes `summary.md`: the
+   task, the outcome or the error, the pull request and branch, each role's harness and model, the total wall
+   time, a table of the turns with their start and duration, and each round's quality gates and verdict. A
+   resume that ends again rewrites it. The pull request gets the same table, collapsed under "Run timings".
 
 One run at a time per checkout: runs in one project directory share its working tree, so a run, `--no-pr`
 or not, refuses to start or resume while another run there is `running` (see `list`). A stale, finished or
 failed run does not count. A `--worktree` run has a working tree of its own, so it neither refuses nor is
 refused by any other run. To run in parallel, use `--worktree`, or give each run its own clone.
 
-Everything a run writes stays in `<project>/.orchestrator/runs/<run-id>/`: the handoff files and `state.json`,
-which records the phase, round, panes, branch, pull request, verdict and any error. `.orchestrator/` ignores
-itself, so it never shows up in the diff or the commit. A failed run keeps its workspace open and stays on its
+Everything a run writes stays in `<project>/.orchestrator/runs/<run-id>/`: the handoff files, `state.json`,
+which records the phase, round, panes, branch, pull request, verdict, any error, and in `turns` each handoff
+file's turn (step, role, round, harness, model, start, end and seconds), and `summary.md` once the run has
+ended ([Turn timings and the summary](docs/design.md#turn-timings-and-the-summary)). A turn whose file was
+written before turns were recorded has no start, and the tables show `?` for it; a spec given with `--spec` has
+no turn. A workflow's step cannot name its file `summary.md`. `.orchestrator/` ignores itself, so it never
+shows up in the diff or the commit. A failed run keeps its workspace open and stays on its
 branch, and a `--no-pr` run keeps its workspace open too. `close` closes it when you are done, and records that
 in `state.json`; `resume` then refuses the run. A failed or stale `--worktree` run also loses its worktree,
 uncommitted changes included, which `close` lists first, and its branch, unless the branch has commits beyond the
@@ -278,7 +288,8 @@ command ([Closing a run](docs/design.md#closing-a-run)).
 out, and names the one to check out. `list` marks a run `stale` after five minutes without a
 heartbeat ([Stale runs](docs/design.md#stale-runs)). `show` prints one run in full, without opening
 `state.json`: its `list` line and whole task, its workflow, branch and pull request, each role's agent and pane,
-the paths of its handoff files, the last review, what `prune` did with its branch, and what `close` did. `prune` deletes the
+its turns with their start and duration, the paths of its handoff files, the last review, what `prune` did
+with its branch, and what `close` did. `prune` deletes the
 branch of each run whose pull request is merged, or closed for 14 days, locally and on `origin`, and prints a
 line per run. It keeps a side that has commits the pull request lacks, and a local branch checked out in any
 worktree; a later `prune` looks at kept branches again

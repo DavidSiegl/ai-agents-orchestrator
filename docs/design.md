@@ -1,7 +1,7 @@
 # Design
 
-How resuming, stale-run detection, notifications, remote machines, the GUI and the release builds work, and
-why. The [README](../README.md) covers installing and running the orchestrator.
+How resuming, stale-run detection, turn timings, notifications, remote machines, the GUI and the release
+builds work, and why. The [README](../README.md) covers installing and running the orchestrator.
 
 ## Resuming a run
 
@@ -49,6 +49,30 @@ A running run also blocks every other run in its checkout, since they would shar
 after claiming its own `state.json`, a run that starts or resumes stops with an error if another run there is
 `running`. A stale, finished or failed run does not block, and `--force` does not override the check, which is
 about a different run. Two runs that start together each see the other's claim and both stop.
+
+## Turn timings and the summary
+
+`state.json` keeps a record per handoff file in `turns`: its step, role, round and quality round, the harness
+and model of its agent (none for a quality analysis, whose role is `quality`), whether it is human-paced, and
+`started_at`, `ended_at` and `seconds`.
+
+- An agent's turn starts when its prompt is delivered: the record is opened and saved together with
+  `prompted`. A quality analysis starts when the orchestrator starts analysing.
+- A resume, or an agent restarted mid-turn and prompted again, keeps the open record and its start.
+- A turn ends when its handoff file is found, at the file's modification time, so a file written while no
+  orchestrator ran still ends its turn when it was written, not when a resume found it.
+- A rejected verdict file keeps its record, renamed to `review-N.rejected.md`; the retry gets a record of its
+  own.
+- A file without an open record, as one an older run wrote before turns were recorded, gets a record with no
+  start and no duration. A spec copied with `--spec` gets none, since no turn ran.
+
+When a run ends, done, failed or interrupted, it writes `summary.md` in its run directory: the task, run id and
+workflow, each role's harness and model, the outcome (verdict or error), the pull request and branch, the wall
+time from the first known start to the end, a Markdown table of the turns (`?` for what is not known, the
+interview marked as human-paced), and each round's quality gates and verdict, read from the handoff files. A
+resume that ends again rewrites it with every turn; a run that is already `done` is not rewritten. The pull
+request's body ends with the same table up to publishing, collapsed under "Run timings", and `show` prints a
+line per turn.
 
 ## Deleting run branches
 
@@ -229,3 +253,19 @@ check.
   and pids are reused.
 - **Ctrl-C is recorded as the error `interrupted`.** `list` already shows errors, and resume already treats a
   run with an error as resumable, so no separate status field is needed.
+
+### Turn timings
+
+- **Both ends of a turn come from the project host's clock.** The start is that host's `date +%s`, read over
+  SSH with `--machine` just before the prompt goes out, and the end is the handoff file's mtime there, which
+  the same clock stamped. As for staleness, one clock means no skew between machines can distort a duration,
+  and no agent can seem to finish before its turn started.
+- **The end is the file's mtime, not when the orchestrator saw it.** A turn finished while no orchestrator ran
+  would otherwise last until the resume.
+- **A file with no open record still gets one.** Without a start it has no duration, but the table lists every
+  handoff file, also those of a run started before turns were recorded.
+- **`summary.md` is written on every end but a takeover.** A failure or Ctrl-C is when a summary helps most. A
+  run taken over by another orchestrator is that one's to summarize. A failure to write it is only logged: it
+  never changes the run's outcome or exit status.
+- **`summary.md` is a reserved file name**, like `state.json` and `quality-*`, so a workflow file whose step
+  writes it fails to load, naming the step.

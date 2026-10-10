@@ -9,8 +9,6 @@ Ideas for what comes next, in no particular order. The designs behind what has s
   the same placeholders.
 - **Builder `BLOCKED` escalation**: a build report that starts with `BLOCKED:` notifies the human and pauses the
   run, instead of going to the Reviewer.
-- **`summary.md` and per-turn timings**: write `summary.md` at the end of a run, and record in `state.json` when
-  each turn started and ended.
 - **`resume --quality-gate JOB` and `resume --no-quality-gate`**: turn the [quality gate](quality-gate.md) on
   for a run started without it, from its next Builder turn and after the preflight, or off for good, a run in
   `quality` then going on to `review` with any quality file named as unresolved. Today the gate is fixed when
