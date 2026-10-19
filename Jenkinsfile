@@ -1,5 +1,7 @@
 pipeline {
-    agent any
+    // Agents wrote the code this builds, so it runs where they already do: the agent on their own box.
+    // Never on the agents that deploy the homelab. Jenkins enforces that per node, not this label.
+    agent { label 'untrusted' }
 
     // All empty in an ordinary build, which then behaves as before.
     parameters {
