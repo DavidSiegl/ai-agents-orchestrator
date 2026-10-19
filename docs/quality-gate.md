@@ -21,12 +21,25 @@ analyses one snapshot into one run's own project.
 - **A SonarQube webhook** to `<jenkins-url>/sonarqube-webhook/`, under Administration → Configuration → Webhooks
   in SonarQube. `waitForQualityGate` waits for it, and without it the Quality Gate stage times out after 5
   minutes.
+- **An agent labelled `untrusted`**, which the `Jenkinsfile` asks for. Builds run code the agents wrote, so the
+  agent must hold nothing an agent should not have: in the homelab it is a container on the agents' own box,
+  restricted to this folder's jobs, while the agents that deploy accept no job from this folder. A label alone
+  does not enforce that - a pushed branch's `Jenkinsfile` can ask for any label - so the restriction sits on
+  the nodes, with the Job Restrictions plugin.
 - **`uv` and `git` on the agent**: the Install stage runs `uv sync --frozen`, and `uv` brings the Python of
   `.python-version`.
 - **`gh` on the agent, and a GitHub token** for the Release stage: a Secret text credential with the ID
   `GitHub-Agents`, holding a token with *Contents: read and write* on this repository. It is the agents' own
   `gh` token, so when that is rotated the credential must be too, or every build of `main` fails at Release.
   Only builds of `main` use it.
+- **A checkout credential of the same token**: GitHub Branch Source and Git need a Username with password
+  credential, so both jobs check out with `GitHub-Agents-scm` (username and the agents' token as password).
+  Jenkins also reports each pull request's `continuous-integration/jenkins/pr-head` status with it, so the
+  token needs *Commit statuses: read and write* - without it the build passes and the required check waits
+  forever, the log saying `Could not update commit status ... 403`. The agents can therefore post that
+  status themselves too: the required check shows that a status was set, not that Jenkins set it.
+  Keep both credentials in this folder's own store, not the global one: any build can bind any credential it
+  can see by ID, and a pushed branch's `Jenkinsfile` is a build.
 
 ### The two jobs
 
