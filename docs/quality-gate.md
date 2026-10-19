@@ -34,6 +34,10 @@ analyses one snapshot into one run's own project.
   Only builds of `main` use it.
 - **A checkout credential of the same token**: GitHub Branch Source and Git need a Username with password
   credential, so both jobs check out with `GitHub-Agents-scm` (username and the agents' token as password).
+  Jenkins also reports each pull request's `continuous-integration/jenkins/pr-head` status with it, so the
+  token needs *Commit statuses: read and write* - without it the build passes and the required check waits
+  forever, the log saying `Could not update commit status ... 403`. The agents can therefore post that
+  status themselves too: the required check shows that a status was set, not that Jenkins set it.
   Keep both credentials in this folder's own store, not the global one: any build can bind any credential it
   can see by ID, and a pushed branch's `Jenkinsfile` is a build.
 
