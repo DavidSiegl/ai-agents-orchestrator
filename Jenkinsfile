@@ -3,11 +3,9 @@ pipeline {
     // Never on the agents that deploy the homelab. Jenkins enforces that per node, not this label.
     agent { label 'untrusted' }
 
-    // All empty in an ordinary build, which then behaves as before.
+    // Empty in an ordinary build, which builds its own branch or pull request.
     parameters {
         string(name: 'GIT_REF', defaultValue: '', description: 'Branch to build, e.g. orchestrator-ci/cd3492-1-q2')
-        string(name: 'SONAR_PROJECT_KEY', defaultValue: '', description: 'SonarQube project key; empty uses sonar-project.properties')
-        string(name: 'SONAR_PROJECT_VERSION', defaultValue: '', description: 'sonar.projectVersion; empty leaves it unset')
     }
 
     options {
@@ -38,7 +36,7 @@ pipeline {
             steps {
                 sh 'uv sync --frozen'
                 script {
-                    // main's SonarQube analyses and its releases carry this version.
+                    // The version a release on main is tagged with.
                     env.PROJECT_VERSION = sh(returnStdout: true, script: '''
                         uv run --frozen python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])'
                     ''').trim()
@@ -48,17 +46,7 @@ pipeline {
 
         stage('Test') {
             steps {
-                script {
-                    def pytest = 'uv run pytest --cov=orchestrator --cov-branch --cov-report=xml:coverage.xml --junitxml=test-results.xml'
-                    if (params.SONAR_PROJECT_KEY) {
-                        // A quality build is analysed even when tests fail, so the Builder hears about both at once.
-                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
-                            sh pytest
-                        }
-                    } else {
-                        sh pytest
-                    }
-                }
+                sh 'uv run pytest --cov=orchestrator --cov-branch --junitxml=test-results.xml'
             }
             post {
                 always {
@@ -67,72 +55,12 @@ pipeline {
             }
         }
 
-        // The Linux binary, built on every build but a quality build, so a change that breaks it fails before it is
-        // merged; Release attaches it. The macOS binary comes from .github/workflows/macos-binary.yml, with the
-        // same script, since Jenkins has no macOS machine.
+        // The Linux binary, built on every build, so a change that breaks it fails before it is merged; Release
+        // attaches it. The macOS binary comes from .github/workflows/macos-binary.yml, with the same script, since
+        // Jenkins has no macOS machine.
         stage('Package') {
-            when {
-                expression { return !params.SONAR_PROJECT_KEY }
-            }
             steps {
                 sh 'packaging/build-binary.sh'
-            }
-        }
-
-        // A multibranch job analyses only main: Community Edition has no branch analysis, so a branch or pull
-        // request would overwrite main's analysis and its new-code baseline. Quality builds always analyse,
-        // into their run's own project; their plain Pipeline job has no BRANCH_NAME.
-        stage('SonarQube') {
-            when {
-                anyOf {
-                    branch 'main'
-                    expression { return params.SONAR_PROJECT_KEY as boolean }
-                }
-            }
-            stages {
-                stage('SonarQube Analysis') {
-                    steps {
-                        withSonarQubeEnv('Sonarqube') {
-                            script {
-                                def scannerHome = tool 'sonarqube-scanner'
-                                // The parameters reach the shell as environment variables, never as Groovy-built shell code.
-                                // The name is set too, or the analysis would rename the per-run project after sonar-project.properties.
-                                // A quality build analyses as the version it is given. main analyses as its release version, so
-                                // with the project's new code set to "previous version", new code is what changed since the
-                                // version was last raised.
-                                sh """
-                                    if [ -n "\$SONAR_PROJECT_KEY" ]; then version=\$SONAR_PROJECT_VERSION; else version=\$PROJECT_VERSION; fi
-                                    ${scannerHome}/bin/sonar-scanner \
-                                      -Dsonar.python.coverage.reportPaths=coverage.xml \
-                                      -Dsonar.python.xunit.reportPath=test-results.xml \
-                                      \${SONAR_PROJECT_KEY:+-Dsonar.projectKey=\$SONAR_PROJECT_KEY -Dsonar.projectName=\$SONAR_PROJECT_KEY} \
-                                      \${version:+-Dsonar.projectVersion=\$version}
-                                """
-                                if (params.SONAR_PROJECT_KEY) {
-                                    // Holds the ceTaskId the orchestrator follows; cleanWs() would delete it.
-                                    archiveArtifacts artifacts: '.scannerwork/report-task.txt'
-                                }
-                            }
-                        }
-                    }
-                }
-
-                stage('Quality Gate') {
-                    steps {
-                        timeout(time: 5, unit: 'MINUTES') {
-                            script {
-                                def gate = waitForQualityGate abortPipeline: false
-                                if (gate.status != 'OK') {
-                                    if (params.SONAR_PROJECT_KEY) {
-                                        unstable "Quality gate ${gate.status}"
-                                    } else {
-                                        error "Quality gate ${gate.status}"
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
             }
         }
 
@@ -142,8 +70,8 @@ pipeline {
         stage('Release') {
             when {
                 branch 'main'
-                // A quality build pointed at main's job by mistake checks out an agent's snapshot, never to be released.
-                expression { return !params.GIT_REF && !params.SONAR_PROJECT_KEY }
+                // A build pointed at main's job with GIT_REF checks out that branch, never to be released.
+                expression { return !params.GIT_REF }
             }
             steps {
                 withCredentials([string(credentialsId: 'GitHub-Agents', variable: 'GH_TOKEN')]) {

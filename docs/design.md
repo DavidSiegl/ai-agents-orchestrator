@@ -199,8 +199,8 @@ tkinter is imported only when the window opens, so the CLI keeps running on a Py
 
 ## Builds and releases
 
-Jenkins does the building and releasing: the tests, the SonarQube gate, the Linux binary (on every build but a
-quality build, so a change that breaks it fails before it is merged) and, on a merge into `main` that raises the
+Jenkins does the building and releasing: the tests, the Linux binary (on every build, so a change that breaks
+it fails before it is merged) and, on a merge into `main` that raises the
 version, the release with `orchestrator.pyz` and the Linux binary. Jenkins has no Mac, so one GitHub Action
 builds the macOS binary when that release is published and uploads it there. It can only add files to a release
 that exists. Both build with `packaging/build-binary.sh`, so the binaries cannot be built or smoke-tested
