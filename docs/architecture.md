@@ -162,17 +162,15 @@ running `after` callbacks on `tick`), and `TestRunProcess` runs real child proce
   `workflows` lists `default`, and `gui --smoke-test` where there is a display. On Linux it builds with the
   system `python3` (`python3-tk` installed) in `build/binary-venv`, not uv's Python, whose Tk lacks Xft and so
   draws every font in one fixed bitmap size; it refuses a Tk without libXft.
-- `Jenkinsfile`: `uv sync --frozen`, `uv run pytest` with branch coverage of `orchestrator`, a Package stage that
-  runs `packaging/build-binary.sh` on every build but a quality build, and on `main` or in a quality build a
-  SonarQube analysis and a quality gate. On `main` a Release stage publishes a new `pyproject.toml` version as a
-  GitHub release, with `orchestrator.py` attached as the zipapp `orchestrator.pyz` and the Linux binary, each
-  with its `.sha256`, in one `gh release create`. Its parameters `GIT_REF`, `SONAR_PROJECT_KEY` and
-  `SONAR_PROJECT_VERSION` are for quality builds: with `SONAR_PROJECT_KEY` set, a red gate does not abort the
-  pipeline but marks it UNSTABLE.
+- `Jenkinsfile`: `uv sync --frozen`, `uv run pytest` with branch coverage of `orchestrator`, and a Package stage
+  that runs `packaging/build-binary.sh` on every build. On `main` a Release stage publishes a new
+  `pyproject.toml` version as a GitHub release, with `orchestrator.py` attached as the zipapp `orchestrator.pyz`
+  and the Linux binary, each with its `.sha256`, in one `gh release create`. Its parameter `GIT_REF` builds
+  another branch; such a build never releases. The SonarQube analysis and gate are gone since 2026-10-21, so
+  the quality loop (`CI`) refuses at its preflight.
 - `.github/workflows/macos-binary.yml`, the only GitHub Action: Jenkins has no Mac, so when a release is
   published, or by hand for an existing tag, it runs `packaging/build-binary.sh` on `macos-latest` and uploads
   `orchestrator-macos-arm64` and its `.sha256` to that release with `gh release upload --clobber`. With only
   `contents: write`, it never creates a release or a tag; everything else stays in Jenkins.
-- `sonar-project.properties`: the SonarQube project key, the sources (`orchestrator.py`) and the tests (`tests`).
 
 How to set Jenkins up for it is in [quality-gate.md](quality-gate.md).

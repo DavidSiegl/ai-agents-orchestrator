@@ -13,7 +13,8 @@ Spec Collector ──spec.md──▶ Builder ──build-N.md──▶ Reviewer
 ```
 
 With `--quality-gate`, a SonarQube analysis through Jenkins sits between the Builder and the Reviewer, and
-sends its findings back to the Builder first.
+sends its findings back to the Builder first. SonarQube was retired on 2026-10-21, so `--quality-gate` refuses at its preflight until a replacement gate lands
+([quality gate](docs/quality-gate.md)).
 
 Each role is a separate interactive agent session in its own herdr pane, so no role judges its own
 work, and you can watch or step into any of them. The agents run on this machine or on another one saved in

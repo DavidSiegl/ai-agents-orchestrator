@@ -1,5 +1,9 @@
 # Quality gate
 
+> **Unavailable since 2026-10-21.** The homelab's SonarQube was retired and the `Jenkinsfile` no longer analyses
+> or has the `SONAR_PROJECT_KEY`/`SONAR_PROJECT_VERSION` parameters, so `run --quality-gate` refuses at its
+> preflight. What follows describes the gate as it was; a replacement that Jenkins computes itself is planned.
+
 How Jenkins builds this repository with a SonarQube quality gate, and how `orchestrator.py run --quality-gate`
 uses it: the [Jenkins setup](#jenkins-setup), the [credentials and permissions](#credentials-and-permissions)
 the orchestrator needs, and the [orchestrator loop](#orchestrator-loop) itself.
