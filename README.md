@@ -12,8 +12,8 @@ Spec Collector ──spec.md──▶ Builder ──build-N.md──▶ Reviewer
                                └──────── CHANGES_REQUESTED ────────┘
 ```
 
-With `--quality-gate`, a SonarQube analysis through Jenkins sits between the Builder and the Reviewer, and
-sends its findings back to the Builder first. SonarQube was retired on 2026-10-21, so `--quality-gate` refuses at its preflight until a replacement gate lands
+With `--quality-gate`, a Jenkins build running `orchestrator.py gate` (linters, tests and coverage of new code)
+sits between the Builder and the Reviewer, and sends its findings back to the Builder first
 ([quality gate](docs/quality-gate.md)).
 
 Each role is a separate interactive agent session in its own herdr pane, so no role judges its own
@@ -65,8 +65,8 @@ Each harness a run uses needs its CLI and its herdr integration where the agents
   [GUI](#gui); [uv](https://github.com/astral-sh/uv) only for the tests and the build
 - For `--machine`: the machine saved in herdr and non-interactive SSH to its target; see
   [Running the agents on another machine](docs/design.md#running-the-agents-on-another-machine)
-- For `--quality-gate`: a Jenkins quality job and SonarQube set up as in [quality gate](docs/quality-gate.md),
-  their credentials in `~/.config/ai-agents-orchestrator/ci.env` or the environment, and a git checkout with an
+- For `--quality-gate`: a Jenkins quality job set up as in [quality gate](docs/quality-gate.md), its
+  credentials in `~/.config/ai-agents-orchestrator/ci.env` or the environment, and a git checkout with an
   `origin`
 
 ## Install
@@ -156,7 +156,7 @@ python orchestrator.py run --worktree "add a token-bucket rate limiter"
 # Skip the interview: a spec you already have is the contract, and the Builder starts on it
 python orchestrator.py run --spec docs/specs/rate-limiter.md
 
-# With the SonarQube quality gate after each Builder turn; credentials from ~/.config/ai-agents-orchestrator/ci.env
+# With the quality gate after each Builder turn; credentials from ~/.config/ai-agents-orchestrator/ci.env
 python orchestrator.py run --quality-gate AI-Agents-Orchestrator/py-ai-agents-orchestrator-quality "add a token-bucket rate limiter"
 
 # The window to start, list and resume runs in; no arguments open it too where there is a display
@@ -186,8 +186,8 @@ uv run python orchestrator.py gate --base main --coverage coverage.xml --out qua
 | `--spec FILE` | `run` only: skip the interview. `FILE`, read on this machine (a relative path is from the current directory, not `--cwd`), is copied into the run as the handoff file of the workflow's first step, `spec.md` in `default`, and the run starts at the step after it. The task is then optional: without one it is the spec's `# ` title, or else `FILE`'s name. Needs a workflow whose first step writes the spec, such as `default` or `tdd`, not `quick`. |
 | `--no-pr` | `run` only: leave the change uncommitted and the workspace open instead of opening a pull request. Works outside git. |
 | `--worktree` | `run` only: work in a git worktree of the run's own, `.orchestrator/worktrees/<key>`, checked out from `origin`'s version of the branch the project is on, instead of in the project's checkout, which then need not be clean and stays yours to use. Needs a branch checked out and an `origin`, also with `--no-pr`. See [Worktree runs](#worktree-runs). |
-| `--quality-gate JOB` | `run` only: after each Builder turn, analyse the change with this Jenkins job, by its full name with folders, and SonarQube, and send the findings back to the Builder before the Reviewer. Needs `JENKINS_URL`, `JENKINS_USER`, `JENKINS_TOKEN`, `SONAR_HOST_URL` and `SONAR_TOKEN`, from the environment or `~/.config/ai-agents-orchestrator/ci.env`. |
-| `--max-quality-rounds N` | With the gate: SonarQube analyses per review round before the Reviewer gets the change anyway (default 3). |
+| `--quality-gate JOB` | `run` only: after each Builder turn, have this Jenkins job, by its full name with folders, judge the change with `orchestrator.py gate`, and send the findings back to the Builder before the Reviewer. Needs `JENKINS_URL`, `JENKINS_USER` and `JENKINS_TOKEN`, from the environment or `~/.config/ai-agents-orchestrator/ci.env`. |
+| `--max-quality-rounds N` | With the gate: quality builds per review round before the Reviewer gets the change anyway (default 3). |
 | `--force` | `resume` only: take over a run that still looks alive. |
 | `--dry-run` | `prune` only: print what would become of each branch, and delete and record nothing. |
 
@@ -252,12 +252,12 @@ since, the agent starts a fresh session instead.
    interview and the verdict step can block like this, a step of your own workflow and an answer to the quality
    gate included.
 4. **Quality gate**, with `--quality-gate`. The orchestrator snapshots the working tree, pushes it to a
-   throwaway branch `orchestrator-ci/<id>-N-qQ`, and has the Jenkins job analyse it into the run's own
-   SonarQube project, after analysing the base once per run. It writes `quality-N-Q.md`, which starts with
-   `GATE: OK`, `GATE: ERROR` or `GATE: BUILD_FAILED` and lists the issues on the lines the change added. If the
-   gate does not pass, the Builder answers it in `build-N-qQ.md` and the change is analysed again, up to
+   throwaway branch `orchestrator-ci/<id>-N-qQ`, and has the Jenkins job judge it with `orchestrator.py gate`.
+   It writes `quality-N-Q.md`, the build's own quality file, which starts with `GATE: OK`, `GATE: ERROR` or
+   `GATE: BUILD_FAILED` and lists the findings on the lines the change added and the failing tests. If the gate
+   does not pass, the Builder answers it in `build-N-qQ.md` and the change is judged again, up to
    `--max-quality-rounds` times; then it goes to the Reviewer either way, who is told whether the gate passed.
-   The throwaway branches and the project are deleted when the run finishes; see
+   The throwaway branches are deleted when the run finishes; see
    [quality gate](docs/quality-gate.md).
 5. **Reviewer.** A fresh session checks the change against the spec and writes `review-N.md`, which starts with
    `VERDICT: APPROVE` or `VERDICT: CHANGES_REQUESTED`; requested changes go back to the Builder.
