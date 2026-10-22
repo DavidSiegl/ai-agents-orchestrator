@@ -15,6 +15,36 @@ build = [
     "pyinstaller>=6.22.3",
 ]
 dev = [
+    "mypy>=2.4.0",
+    "pymarkdownlnt>=0.9.41",
     "pytest>=9.0.3",
     "pytest-cov>=6.0.0",
+    "ruff>=0.17.2",
 ]
+
+# The rules `orchestrator.py gate` judges a change by. In a quality build the gate reads them from main's copy of
+# this file (--config), so a change cannot loosen the rules it is judged by. Only findings on lines a change adds
+# count, so the findings already on main do not block.
+
+[tool.ruff.lint]
+# The defaults, plus bugbear, simplifications, pyupgrade, bandit's security checks, complexity and pylint's errors
+# and warnings. No E501: the code wraps at 120 by eye, not by rule.
+extend-select = ["B", "SIM", "UP", "S", "C90", "PLE", "PLW"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.per-file-ignores]
+# assert is how pytest checks; the tokens and /tmp paths are fakes; unused unpacked fixtures, dict() calls, class-level
+# fake data and the size of the fake servers are how the tests read best.
+"tests/**" = ["S101", "S105", "S106", "S108", "RUF059", "RUF012", "C408", "C901"]
+
+[tool.mypy]
+# The tests are untyped by design; the orchestrator is the typed surface.
+files = ["orchestrator.py"]
+
+[tool.pymarkdown]
+# The docs wrap at 120, by eye. README.md opens with its logo in HTML, which also keeps a heading off its first line.
+plugins.md013.enabled = false
+plugins.md033.enabled = false
+plugins.md041.enabled = false

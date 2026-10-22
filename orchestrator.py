@@ -32,9 +32,11 @@ window over the same CLI: it starts run and resume as child processes.
 import argparse
 import base64
 import collections
+import contextlib
 import difflib
 import http.client
 import json
+import math
 import os
 import queue
 import re
@@ -55,6 +57,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from xml.etree import ElementTree
 
 RUNS_DIR = ".orchestrator/runs"
 # Where run --worktree puts each run's worktree, named by the run's key.
@@ -107,7 +110,7 @@ SONAR_PROJECT = "py-ai-agents-orchestrator"
 # Snapshots are pushed to orchestrator-ci/<key>-<round>-q<quality round>, the base to orchestrator-ci/<key>-base.
 CI_REF_PREFIX = "orchestrator-ci/"
 # Files a change may edit that alter how Jenkins and the scanner judge it.
-BUILD_CONFIG_FILES = ("Jenkinsfile", "sonar-project.properties")
+BUILD_CONFIG_FILES = ("Jenkinsfile", "pyproject.toml", "uv.lock", "sonar-project.properties")
 QUALITY_ISSUE_LIMIT = 50
 CONSOLE_TAIL_LINES = 60
 ISSUE_PAGE_SIZE = 500
@@ -118,6 +121,14 @@ COVERAGE_METRICS = ("new_coverage", "new_lines_to_cover", "new_uncovered_lines")
 GATE_OK = "OK"
 GATE_ERROR = "ERROR"
 GATE_BUILD_FAILED = "BUILD_FAILED"
+# `orchestrator.py gate`: coverage of new code below GATE_MIN_COVERAGE percent fails the gate once a change has
+# GATE_MIN_NEW_LINES or more new lines to cover; a smaller change is not judged on coverage. As Sonar way does.
+GATE_MIN_COVERAGE = 80.0
+GATE_MIN_NEW_LINES = 20
+# Seconds one linter may take before the gate counts it as failed.
+GATE_TOOL_TIMEOUT = 600
+# The gate's exit status when it could not judge the change, and so wrote no quality file.
+EXIT_GATE_UNJUDGED = 2
 
 # The default workflow's roles. Each has its own --ROLE-model flag; another workflow's roles take --model.
 ROLE_LABELS = {"spec": "Spec Collector", "build": "Builder", "review": "Reviewer"}
@@ -1284,10 +1295,11 @@ class Host:
             raise OrchestratorError(f"snapshot of {cwd}: git commit-tree printed {sha!r}, not a commit")
         return sha
 
-    def change_diff(self, cwd: str, base: str, commit: str) -> str:
-        """`git diff -U0` from base to commit, in the one shape changed_lines parses, whatever the user's git config."""
+    def change_diff(self, cwd: str, base: str, commit: str | None = None) -> str:
+        """`git diff -U0` from base to commit, or to the working tree's tracked files without one, in the one shape
+        changed_lines parses, whatever the user's git config."""
         return self.git(cwd, "-c", "core.quotePath=false", "diff", "-U0", "-M", "--no-color", "--no-ext-diff",
-                        "--src-prefix=a/", "--dst-prefix=b/", base, commit)
+                        "--src-prefix=a/", "--dst-prefix=b/", base, *([commit] if commit else []))
 
     def push_ref(self, cwd: str, commit: str, branch: str) -> None:
         # --force replaces what a failed attempt left under the same name.
@@ -1710,6 +1722,21 @@ class CI:
         return values
 
 
+def _sonar_condition(c: dict) -> str:
+    """A failed condition of a SonarQube quality gate, as a sentence of the quality file."""
+    wants = "at least" if c.get("comparator") == "LT" else "at most"
+    return f"`{c.get('metricKey')}` is {c.get('actualValue')}; the gate wants {wants} {c.get('errorThreshold')}."
+
+
+def _sonar_coverage(coverage: dict[str, str]) -> str:
+    """SonarQube's coverage measures of new code, as the quality file's sentence about them."""
+    to_cover = coverage.get("new_lines_to_cover")
+    if to_cover in (None, "0"):
+        return "No new lines to cover."
+    return (f"{coverage.get('new_coverage', '?')}% of {to_cover} new lines to cover; "
+            f"{coverage.get('new_uncovered_lines', '?')} are not covered.")
+
+
 def _server_message(e: urllib.error.HTTPError) -> str:
     """SonarQube's reason for refusing a request, from its {"errors": [{"msg"}]} body; "" for anything else."""
     try:
@@ -1983,44 +2010,54 @@ def _unquote(name: str) -> str:
                   name[1:-1])
 
 
-def quality_report(gate: str, intro: str, changed: dict[str, set[int]], *, conditions=(), issues=(),
-                   tests: list[tuple[str, str]] | None = None, coverage: dict[str, str] | None = None,
-                   console: str = "", edited=()) -> str:
+# quality_report's default for tests: the file has no tests section, as when the gate wrote it, which runs no tests.
+_NO_TESTS_SECTION: list = []
+
+
+def quality_report(gate: str, intro: str, changed: dict[str, set[int]], *, conditions: list[str] | tuple = (),
+                   issues=(), tests: list[tuple[str, str]] | None = _NO_TESTS_SECTION, coverage: str | None = None,
+                   suppressions: list[tuple[str, int, str]] | tuple = (), console: str = "", edited=(),
+                   rules_from: str | None = None) -> str:
     """The quality file: the gate on its first line, then what the Builder has to answer.
 
-    Only the issues on lines the change added, and the lineless ones on files it touched, are
-    numbered, at most QUALITY_ISSUE_LIMIT of them; the rest are counted.
+    conditions are the failed ones, each a sentence. Only the issues on lines the change added, and the
+    lineless ones on files it touched, are numbered, at most QUALITY_ISSUE_LIMIT of them; the rest are
+    counted. tests are the failing tests Jenkins reported, None when it has no test report; left out, the
+    file has no tests section. coverage is the sentence about coverage of new code, None for no such
+    section. suppressions are the (path, line, text) of lint suppressions the change added. edited are the
+    BUILD_CONFIG_FILES the change edits; rules_from names the file the gate took its rules from when that
+    was not the edited pyproject.toml.
     """
     out = [f"GATE: {gate}", "", intro]
     if conditions:
-        out += _conditions_section(conditions)
+        out += ["", "## Failed conditions", "", *(f"- {c}" for c in conditions)]
     if gate != GATE_BUILD_FAILED:
         out += _issues_section(issues, changed)
-    out += _tests_section(tests)
+    if tests is not _NO_TESTS_SECTION:
+        out += _tests_section(tests)
     if coverage is not None:
-        out += _coverage_section(coverage)
+        out += ["", "## Coverage on new code", "", coverage]
+    if suppressions:
+        out += ["", "## Suppressions added", "",
+                *(f"- `{path}:{line}` `{text}`" for path, line, text in suppressions)]
     if console:
         out += ["", f"## The last {CONSOLE_TAIL_LINES} lines of the build's console", "", "````", console, "````"]
     if edited:
-        out += _config_section(edited)
+        out += _config_section(edited, rules_from)
     return "\n".join(out) + "\n"
 
 
 # The sections of quality_report after its first, each as lines that start with a blank one.
 
-def _conditions_section(conditions) -> list[str]:
-    out = ["", "## Failed conditions", ""]
-    for c in conditions:
-        wants = "at least" if c.get("comparator") == "LT" else "at most"
-        out.append(f"- `{c.get('metricKey')}` is {c.get('actualValue')}; the gate wants {wants} "
-                   f"{c.get('errorThreshold')}.")
-    return out
+def on_changed_lines(issues, changed: dict[str, set[int]]) -> list[dict]:
+    """The issues on lines the change added, and the lineless ones on files it touched, by path and line."""
+    return sorted((i for i in issues if i["path"] in changed
+                   and (i["line"] is None or i["line"] in changed[i["path"]])),
+                  key=lambda i: (i["path"], i["line"] or 0))
 
 
 def _issues_section(issues, changed: dict[str, set[int]]) -> list[str]:
-    on_change = sorted((i for i in issues if i["path"] in changed
-                        and (i["line"] is None or i["line"] in changed[i["path"]])),
-                       key=lambda i: (i["path"], i["line"] or 0))
+    on_change = on_changed_lines(issues, changed)
     out = ["", "## Issues on changed lines", ""]
     for k, i in enumerate(on_change[:QUALITY_ISSUE_LIMIT], 1):
         where = f"{i['path']}:{i['line']}" if i["line"] is not None else f"{i['path']} (the whole file)"
@@ -2046,20 +2083,18 @@ def _tests_section(tests: list[tuple[str, str]] | None) -> list[str]:
     return out
 
 
-def _coverage_section(coverage: dict[str, str]) -> list[str]:
-    to_cover = coverage.get("new_lines_to_cover")
-    if to_cover in (None, "0"):
-        return ["", "## Coverage on new code", "", "No new lines to cover."]
-    return ["", "## Coverage on new code", "",
-            f"{coverage.get('new_coverage', '?')}% of {to_cover} new lines to cover; "
-            f"{coverage.get('new_uncovered_lines', '?')} are not covered."]
-
-
-def _config_section(edited) -> list[str]:
+def _config_section(edited, rules_from: str | None) -> list[str]:
     out = ["", "## Build configuration", ""]
     if "Jenkinsfile" in edited:
         out.append("- The change edits `Jenkinsfile`. The quality job reads it from `main`, "
                    "so this analysis ran without the edit.")
+    if "pyproject.toml" in edited:
+        out.append(f"- The change edits `pyproject.toml`. The gate took its rules from {rules_from}, so the edit "
+                   f"did not change how the change was judged." if rules_from else
+                   "- The change edits `pyproject.toml`, which holds the gate's rules; the change was judged by "
+                   "the edited rules.")
+    if "uv.lock" in edited:
+        out.append("- The change edits `uv.lock`, which pins the versions of the linters the gate ran.")
     if "sonar-project.properties" in edited:
         out.append("- The change edits `sonar-project.properties`. The scanner read the edited file "
                    "from the snapshot.")
@@ -2070,6 +2105,242 @@ def edited_config(diff: str, changed: dict[str, set[int]]) -> list[str]:
     """The BUILD_CONFIG_FILES the diff changes, deletes or renames away."""
     return [f for f in BUILD_CONFIG_FILES
             if f in changed or re.search(rf"^(--- a/|rename from ){re.escape(f)}\t?$", diff, re.M)]
+
+
+# ---------------------------------------------------------------------------
+# The quality gate: `orchestrator.py gate`
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class GateTool:
+    """A linter the gate runs, and how it reads what the linter prints.
+
+    Each prints a finding a line as `path:line[:col]: detail`, with detail matching the tool's pattern: groups
+    rule and message, and severity where the tool grades its findings.
+    """
+    name: str
+    # git pathspecs of the tracked files it reads; the gate does not run a tool that none of them match.
+    pathspecs: tuple[str, ...]
+    # The command line, given the pyproject.toml whose rules decide and the tracked files the pathspecs match.
+    command: Callable[[str, list[str]], list[str]]
+    detail: re.Pattern
+    # Exit status 0 means it found nothing, this one that it found something, any other that it failed.
+    findings_status: int = 1
+
+
+GATE_TOOLS = (
+    GateTool("ruff", ("*.py",),
+             lambda rules, files: ["ruff", "check", "--config", rules, "--output-format", "concise", "--no-cache",
+                                   *files],
+             re.compile(r"(?P<rule>[\w-]+):? (?:\[\*\] )?(?P<message>.+)")),
+    # Which files mypy checks is one of its rules, [tool.mypy] files. A note elaborates an error; it is not one.
+    GateTool("mypy", ("*.py",),
+             lambda rules, files: ["mypy", "--config-file", rules, "--show-column-numbers", "--no-error-summary",
+                                   "--cache-dir", os.devnull],
+             re.compile(r"(?P<severity>error): (?P<message>.+?)(?:  \[(?P<rule>[\w-]+)\])?")),
+    GateTool("pymarkdown", ("*.md",),
+             lambda rules, files: ["pymarkdown", "--config", rules, "--strict-config", "scan", *files],
+             re.compile(r"(?P<rule>MD\d+): (?P<message>.+)")),
+    # shellcheck and actionlint have no table in pyproject.toml, so they run on their defaults: --norc and an empty
+    # config file keep a .shellcheckrc or .github/actionlint.yaml, which a change could add, from loosening them.
+    GateTool("shellcheck", ("*.sh",),
+             lambda rules, files: ["shellcheck", "--norc", "-f", "gcc", *files],
+             re.compile(r"(?P<severity>error|warning|note): (?P<message>.+) \[(?P<rule>SC\d+)\]")),
+    GateTool("actionlint", (".github/workflows/*.yml", ".github/workflows/*.yaml"),
+             lambda rules, files: ["actionlint", "-config-file", os.devnull, *files],
+             re.compile(r"(?P<message>.+) \[(?P<rule>[\w-]+)\]")),
+)
+
+# A finding's location, before the tool's own part; lineless when the tool names only the file.
+_FINDING_AT = re.compile(r"(?P<path>[^:]+):(?:(?P<line>\d+):(?:\d+:)?)? (?P<detail>.+)")
+
+# Comments that silence a linter or exempt lines from coverage, which the quality file lists for the Reviewer.
+_SUPPRESSION = re.compile(r"#.*\b(?:noqa|type:\s*ignore|shellcheck\s+disable|pragma:\s*no\s*(?:cover|branch))\b"
+                          r"|<!--\s*pyml\s+disable")
+
+
+@dataclass(frozen=True)
+class NewCoverage:
+    """Coverage of the lines a change added, counted as SonarQube counts new_coverage."""
+    lines: int  # added lines the coverage report can cover
+    covered_lines: int
+    conditions: int  # branch outcomes on those lines
+    covered_conditions: int
+
+    def percent(self) -> float:
+        """(covered conditions + covered lines) / (conditions + lines), in percent; 100 with nothing to cover."""
+        total = self.lines + self.conditions
+        return 100.0 * (self.covered_lines + self.covered_conditions) / total if total else 100.0
+
+
+def judge_change(cwd: str, base: str, *, rules: str | None = None, coverage: str | None = None) -> str:
+    """The quality file for the change from base to the working tree of the git repository at cwd.
+
+    Runs each GATE_TOOLS linter whose files the repository tracks over those files, with the rules of the
+    pyproject.toml at rules, or the tree's own, and lists the findings on lines the change added and the
+    lineless ones on files it touched. The gate is ERROR when there is such a finding, when a linter is
+    missing, fails or prints nothing readable, or when coverage, a Cobertura report of the tree such as
+    pytest-cov's coverage.xml, puts new code below GATE_MIN_COVERAGE percent on GATE_MIN_NEW_LINES or more new
+    lines to cover; else OK. Suppressions the change added are listed, not counted against it. Paths are
+    absolute or relative to the process's working directory.
+
+    Raises OrchestratorError when it cannot judge: cwd is not in a git work tree, base names no commit, there
+    is no rules file, or the coverage report cannot be read.
+    """
+    host = Host()
+    proc = host.git_run(cwd, "rev-parse", "--show-toplevel")
+    if proc.returncode != 0:
+        raise OrchestratorError(f"{cwd} is not in a git work tree")
+    root = proc.stdout.strip()
+    proc = host.git_run(root, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}")
+    if proc.returncode != 0:
+        raise OrchestratorError(f"{base} names no commit in {root}")
+    base_sha = proc.stdout.strip()
+    rules_path = os.path.abspath(rules) if rules else os.path.join(root, "pyproject.toml")
+    if not os.path.isfile(rules_path):
+        raise OrchestratorError(f"no rules: {rules_path} is not a file")
+
+    diff = host.change_diff(root, base_sha)
+    changed = changed_lines(diff)
+    tracked = {f for f in host.git(root, "ls-files", "-z").split("\0") if f}
+    conditions, findings = [], []
+    for tool in GATE_TOOLS:
+        files = [f for f in host.git(root, "ls-files", "-z", "--", *tool.pathspecs).split("\0") if f]
+        if files:
+            found, problem = _run_gate_tool(tool, root, rules_path, files, tracked)
+            findings += found
+            if problem:
+                conditions.append(problem)
+    if on_change := on_changed_lines(findings, changed):
+        conditions.insert(0, f"{len(on_change)} findings on lines the change added; each is listed below.")
+
+    covered, coverage_sentence = None, None
+    if coverage:
+        covered = new_coverage(os.path.abspath(coverage), root, changed)
+        coverage_sentence = _coverage_sentence(covered)
+        if covered.lines >= GATE_MIN_NEW_LINES and covered.percent() < GATE_MIN_COVERAGE:
+            conditions.append(f"Coverage of new code is {_floor_tenth(covered.percent())}%; the gate wants at "
+                              f"least {GATE_MIN_COVERAGE:g}% once a change has {GATE_MIN_NEW_LINES} or more new "
+                              f"lines to cover.")
+
+    head = host.git(root, "rev-parse", "HEAD").strip()
+    intro = (f"`orchestrator.py gate` judged the working tree at `{head}` against the base `{base_sha}`"
+             + (f", by the rules in `{rules}`." if rules else "."))
+    return quality_report(GATE_ERROR if conditions else GATE_OK, intro, changed, conditions=conditions,
+                          issues=findings, coverage=coverage_sentence,
+                          suppressions=added_suppressions(root, changed), edited=edited_config(diff, changed),
+                          rules_from=f"`{rules}`" if rules else None)
+
+
+def _run_gate_tool(tool: GateTool, root: str, rules: str, files: list[str],
+                   tracked: set[str]) -> tuple[list[dict], str | None]:
+    """The tool's findings over files, and the failed condition it caused, None when it ran as it should."""
+    try:
+        # The command is a fixed tool's, and the files are git's list of tracked ones; no shell reads either.
+        proc = subprocess.run(tool.command(rules, files), cwd=root, capture_output=True, text=True,  # noqa: S603
+                              errors="replace", timeout=GATE_TOOL_TIMEOUT, env=child_env(), check=False)
+    except FileNotFoundError:
+        return [], f"`{tool.name}` is not installed: it is not on PATH."
+    except subprocess.TimeoutExpired:
+        return [], f"`{tool.name}` did not finish within {GATE_TOOL_TIMEOUT} seconds."
+    except OSError as e:
+        return [], f"`{tool.name}` could not be started: {e}."
+    found = tool_findings(tool, proc.stdout, root, tracked)
+    if proc.returncode == 0 or (proc.returncode == tool.findings_status and found):
+        return found, None
+    said = next((line.strip() for line in (proc.stderr + proc.stdout).splitlines() if line.strip()), "")
+    if proc.returncode == tool.findings_status:
+        return [], f"`{tool.name}` reported findings, but none the gate could read: {said[:200]}"
+    return [], f"`{tool.name}` failed with exit status {proc.returncode}: {said[:200]}"
+
+
+def tool_findings(tool: GateTool, output: str, root: str, tracked: set[str]) -> list[dict]:
+    """The findings in what the tool printed, as the {path, line, severity, rule, message} the quality file lists.
+
+    A line that is not a finding on a tracked file, such as a summary, is skipped. Paths become relative to root,
+    the repository's top level; rule starts with the tool's name, so the Builder knows which tool said it.
+    """
+    out = []
+    for text in output.splitlines():
+        at = _FINDING_AT.fullmatch(text.strip())
+        if not at:
+            continue
+        path = os.path.relpath(os.path.join(root, at["path"]), root)
+        detail = tool.detail.fullmatch(at["detail"])
+        if path not in tracked or not detail:
+            continue
+        out.append({"path": path, "line": int(at["line"]) if at["line"] else None,
+                    "severity": detail.groupdict().get("severity") or "error",
+                    "rule": f"{tool.name} {detail['rule']}" if detail["rule"] else tool.name,
+                    "message": detail["message"].strip()})
+    return out
+
+
+def new_coverage(report: str, root: str, changed: dict[str, set[int]]) -> NewCoverage:
+    """Coverage of the changed lines, from a Cobertura report such as pytest-cov's coverage.xml.
+
+    The report's paths are relative to its <source> directories; a changed line it does not list is not
+    coverable, like a comment. Raises OrchestratorError when the report cannot be read or parsed.
+    """
+    try:
+        # The report comes from the build's own test run, and the expat Python 3.13 bundles refuses the entity
+        # expansion attacks S314 is about (https://docs.python.org/3/library/xml.html#xml-vulnerabilities).
+        tree = ElementTree.parse(report)  # noqa: S314
+    except (OSError, ElementTree.ParseError) as e:
+        raise OrchestratorError(f"cannot read the coverage report {report}: {e}") from e
+    sources = [s.text.strip() for s in tree.iterfind("sources/source") if s.text and s.text.strip()] or [root]
+    real_root = os.path.realpath(root)
+    lines = covered_lines = conditions = covered_conditions = 0
+    for cls in tree.iterfind(".//class"):
+        candidates = (os.path.relpath(os.path.realpath(os.path.join(source, cls.get("filename", ""))), real_root)
+                      for source in sources)
+        path = next((c for c in candidates if c in changed), None)
+        if path is None:
+            continue
+        for line in cls.iterfind("lines/line"):
+            try:
+                if int(line.get("number", "")) not in changed[path]:
+                    continue
+                lines += 1
+                covered_lines += int(line.get("hits", "0")) > 0
+                if line.get("branch") == "true" and (m := re.search(r"\((\d+)/(\d+)\)",
+                                                                     line.get("condition-coverage", ""))):
+                    covered_conditions += int(m.group(1))
+                    conditions += int(m.group(2))
+            except ValueError as e:
+                raise OrchestratorError(f"the coverage report {report} has a line it cannot read: {e}") from e
+    return NewCoverage(lines, covered_lines, conditions, covered_conditions)
+
+
+def _coverage_sentence(c: NewCoverage) -> str:
+    if not c.lines:
+        return "No new lines to cover."
+    branches = f", counting their {c.conditions} branch outcomes" if c.conditions else ""
+    return (f"{_floor_tenth(c.percent())}% of {c.lines} new lines to cover{branches}; "
+            f"{c.lines - c.covered_lines} lines are not covered.")
+
+
+def _floor_tenth(percent: float) -> str:
+    """percent to one decimal, rounded down, so a value just below a threshold never prints as the threshold."""
+    return f"{math.floor(percent * 10) / 10:.1f}"
+
+
+def added_suppressions(root: str, changed: dict[str, set[int]]) -> list[tuple[str, int, str]]:
+    """The (path, line, text) of each added line, in the working tree at root, that silences a linter or coverage."""
+    out = []
+    for path, added in sorted(changed.items()):
+        if not added:
+            continue
+        try:
+            with open(os.path.join(root, path), encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except IsADirectoryError:
+            continue  # a submodule: its commit changed, no line of ours
+        except OSError as e:
+            raise OrchestratorError(f"cannot read {path}, which the change edits: {e}") from e
+        out += [(path, n, line.strip()[:160]) for n, line in enumerate(text.splitlines(), 1)
+                if n in added and _SUPPRESSION.search(line)]
+    return out
 
 
 def spec_title(spec: str) -> str | None:
@@ -3067,9 +3338,9 @@ class Workflow:
         sonar = status.get("status")
         intro = (f"SonarQube analysed snapshot `{sha}` ({where}) in Jenkins build #{build}, "
                  f"against the base `{s.base}`: quality gate {sonar}.")
-        failed = [c for c in status.get("conditions") or [] if c.get("status") == "ERROR"]
+        failed = [_sonar_condition(c) for c in status.get("conditions") or [] if c.get("status") == "ERROR"]
         return quality_report(GATE_OK if sonar == "OK" else GATE_ERROR, intro, changed, conditions=failed,
-                              issues=issues, tests=tests, coverage=coverage, edited=edited)
+                              issues=issues, tests=tests, coverage=_sonar_coverage(coverage), edited=edited)
 
     def _poll(self, step: str, deadline: float, poll):
         """Call poll() every CI_POLL_SECONDS until it returns something other than None, and return that.
@@ -3664,6 +3935,23 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                     f"the workflow files in {workflows_dir()}. With it, print that workflow, or the file "
                     f"at that path, as a workflow file, a starting point for your own.")
     workflows.add_argument("workflow", nargs="?", metavar="WORKFLOW", help="a workflow's name, or a file's path")
+
+    gate = sub.add_parser(
+        "gate", help="judge the change since a commit as the quality job does, and write the quality file",
+        description=f"Run ruff, mypy, pymarkdown, shellcheck and actionlint over the files the repository tracks and "
+                    f"write the quality file: GATE: OK or GATE: ERROR on its first line, then the failed "
+                    f"conditions, the findings on lines added since --base, coverage of new code, suppressions "
+                    f"added and edited build configuration. Any finding on an added line fails the gate, and so "
+                    f"does a linter that is missing or fails, and coverage below {GATE_MIN_COVERAGE:g}% on "
+                    f"{GATE_MIN_NEW_LINES} or more new lines to cover. Exit status 0 for OK, 1 for ERROR, "
+                    f"{EXIT_GATE_UNJUDGED} when it could not judge, writing no quality file.")
+    gate.add_argument("--base", required=True, metavar="REV", help="the commit the change is measured from")
+    gate.add_argument("--config", metavar="PYPROJECT",
+                      help="take the linters' rules from this pyproject.toml instead of the tree's own")
+    gate.add_argument("--coverage", metavar="XML",
+                      help="a Cobertura coverage report of the tree, such as pytest-cov's coverage.xml; without "
+                           "it, coverage is not judged")
+    gate.add_argument("--out", metavar="FILE", help="write the quality file here instead of to standard output")
 
     gui = sub.add_parser(
         "gui", help="open a window to start, list and resume runs; the default with no arguments where there "
@@ -4279,6 +4567,9 @@ def main(argv: list[str]) -> int:
             return 0
         if args.command == "gui":
             return gui_command(args.smoke_test)
+        # The gate judges the tree it runs in: no herdr, no agents.
+        if args.command == "gate":
+            return gate_command(args.base, args.config, args.coverage, args.out)
         herdr, host = connect(args.machine)
         cwd = host.resolve_dir(args.cwd or os.getcwd())
         if args.command in RUNS_COMMANDS:
@@ -4321,6 +4612,36 @@ def runs_command(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str) -
         close_run(herdr, host, cwd, args.run_ref, local_host, pid_alive)
     else:
         print_pruned(prune_branches(host, cwd, time.time, local_host, pid_alive, dry_run=args.dry_run, revisit=True))
+
+
+def gate_command(base: str, rules: str | None, coverage: str | None, out: str | None) -> int:
+    """Write the quality file judge_change gives for the current directory, to out or standard output.
+
+    Returns 0 for GATE: OK and 1 for GATE: ERROR; EXIT_GATE_UNJUDGED, having written nothing, when the change
+    could not be judged or out could not be written.
+    """
+    try:
+        text = judge_change(os.getcwd(), base, rules=rules, coverage=coverage)
+        if out:
+            # Written aside and renamed into place, so a failed write leaves no half a quality file.
+            tmp = f"{out}.tmp.{os.getpid()}"
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    f.write(text)
+                os.replace(tmp, out)
+            except OSError as e:
+                with contextlib.suppress(OSError):
+                    os.remove(tmp)
+                raise OrchestratorError(f"cannot write {out}: {e}") from e
+    except OrchestratorError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return EXIT_GATE_UNJUDGED
+    gate = parse_gate(text)
+    if out:
+        print(f"GATE: {gate}, in {out}", file=sys.stderr)
+    else:
+        print(text, end="")
+    return 0 if gate == GATE_OK else 1
 
 
 def workflows_command(ref: str | None) -> None:

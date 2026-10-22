@@ -161,6 +161,10 @@ python orchestrator.py run --quality-gate AI-Agents-Orchestrator/py-ai-agents-or
 
 # The window to start, list and resume runs in; no arguments open it too where there is a display
 python orchestrator.py gui
+
+# Judge the change since a commit as the quality gate does, by the rules in pyproject.toml; exit status 0 for
+# GATE: OK, 1 for GATE: ERROR. Needs ruff, mypy and pymarkdown (uv's dev group), shellcheck and actionlint on PATH
+uv run python orchestrator.py gate --base main --coverage coverage.xml --out quality.md
 ```
 
 | Flag | Description |
@@ -381,6 +385,7 @@ started. See [Workflows](docs/architecture.md#workflows) for the rules.
 
 ```bash
 uv run pytest
+uv run pytest --cov=orchestrator --cov-branch --cov-report=xml && uv run python orchestrator.py gate --base main --coverage coverage.xml
 ```
 
 `packaging/build-binary.sh` builds the binary for the machine it runs on into `dist/`, with PyInstaller from the
