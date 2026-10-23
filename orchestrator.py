@@ -35,7 +35,6 @@ import base64
 import bisect
 import collections
 import contextlib
-import copy
 import difflib
 import fnmatch
 import functools
@@ -2605,13 +2604,22 @@ def _body_fingerprint(definition: ast.FunctionDef | ast.AsyncFunctionDef | ast.C
     """What a function's or class's body does, without its name, where it is, its comments or its layout: the same
     text for two bodies whose syntax trees are equal, so that a test or a function moved or renamed matches its old
     self."""
-    # Not ast.dump, which recurses as deep as the tree goes and overflows the stack on valid code, such as a sum of a
-    # few thousand terms. ast.walk goes breadth first with a queue; each node's type, and each field with every item
-    # of a list in its place, a node standing as "@" and coming later in the walk, fix the tree's shape.
+    return _tree_fingerprint(ast.Module(body=definition.body, type_ignores=[]))
+
+
+def _tree_fingerprint(root: ast.AST, *, blank_literals: bool = False) -> str:
+    """The syntax tree at root as text, without positions: the same text for two equal trees, and different text for
+    two that differ. With blank_literals, each constant's value is left out, so trees that differ only in their literals
+    give the same text."""
+    # Not ast.dump or copy.deepcopy, which recurse as deep as the tree goes and overflow the stack on valid code, such
+    # as a sum of a few thousand terms. ast.walk goes breadth first with a queue; each node's type, and each field with
+    # every item of a list in its place, a node standing as "@" and coming later in the walk, fix the tree's shape.
     parts = []
-    for node in ast.walk(ast.Module(body=definition.body, type_ignores=[])):
+    for node in ast.walk(root):
         parts.append(type(node).__name__)
         for field_name, value in ast.iter_fields(node):
+            if blank_literals and isinstance(node, ast.Constant) and field_name == "value":
+                continue
             items = value if isinstance(value, list) else [value]
             parts.append(f"{field_name}{'[]' if isinstance(value, list) else ''}="
                          + ",".join(_fingerprint_value(item) for item in items))
@@ -2619,7 +2627,7 @@ def _body_fingerprint(definition: ast.FunctionDef | ast.AsyncFunctionDef | ast.C
 
 
 def _fingerprint_value(value: object) -> str:
-    """value, a field of a syntax node or an item of one, as _body_fingerprint writes it: "@" for a node, else its
+    """value, a field of a syntax node or an item of one, as _tree_fingerprint writes it: "@" for a node, else its
     type and value, in a form that cannot fail. An int is in hex, since repr refuses one past sys.get_int_max_str_digits
     decimal digits, which a hex literal can hold."""
     if isinstance(value, ast.AST):
@@ -2886,11 +2894,7 @@ def _changed_literals(was: list[ast.Assert | ast.Call],
 
 def _shape(node: ast.AST) -> str:
     """node with every literal blanked, so that two assertions differing only in literals have one shape."""
-    blank = copy.deepcopy(node)
-    for n in ast.walk(blank):
-        if isinstance(n, ast.Constant):
-            n.value = None
-    return ast.dump(blank)
+    return _tree_fingerprint(node, blank_literals=True)
 
 
 def _literals(node: ast.AST) -> list:

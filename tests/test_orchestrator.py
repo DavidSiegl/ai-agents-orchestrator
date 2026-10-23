@@ -4246,6 +4246,16 @@ class TestWeakenedTests(unittest.TestCase):
         self.edit("tests/test_deep.py", "def test_deep():", "def test_deeper():")
         self.assertEqual(self.found()[0], [])
 
+    def test_a_test_deeper_than_python_s_recursion_limit_is_compared_with_its_base(self):
+        # Changing a literal while the code changes too compares the test's assertions by their shape.
+        deep = "def test_deep():\n    x = 1\n    assert x + " + " + ".join(["1"] * 3000) + " == 3001\n"
+        self.put("tests/test_deep.py", deep)
+        self.git("add", "tests/test_deep.py")
+        self.git("commit", "--quiet", "-m", "deep")
+        self.edit("tests/test_deep.py", "    x = 1\n", "    x = 2\n")
+        self.edit("calc.py", "return a + b", "return b + a")
+        self.assertEqual(self.found()[0], [])
+
     def test_tests_moved_to_a_renamed_file_are_not_removed(self):
         self.git("mv", "tests/test_other.py", "tests/test_moved.py")
         self.edit("tests/test_moved.py", "def test_b():", "def test_bee():")
