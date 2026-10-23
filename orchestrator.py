@@ -3205,12 +3205,14 @@ def _mutation_test(change: GateChange, functions: list[_ChangedFunction], budget
         tmp = tempfile.mkdtemp(prefix="gate-mutmut-")
     except OSError as e:
         return [*out, _mutation_not_run(f"could not make a directory to copy the tree into: {e}")]
-    out += _mutmut_on_copy(change.root, tmp, mutated, table, budget)
     try:
-        shutil.rmtree(tmp)
-    except OSError as e:
-        out.append(_finding(None, None, "cleanup", f"the copy of the tree mutmut ran in, `{tmp}`, could not be "
-                                                   f"removed: {e}"))
+        out += _mutmut_on_copy(change.root, tmp, mutated, table, budget)
+    finally:
+        try:
+            shutil.rmtree(tmp)
+        except OSError as e:
+            out.append(_finding(None, None, "cleanup", f"the copy of the tree mutmut ran in, `{tmp}`, could not be "
+                                                       f"removed: {e}"))
     return out
 
 
@@ -3221,8 +3223,6 @@ def _mutmut_on_copy(root: str, tmp: str, functions: list[_ChangedFunction], tabl
     the copy, and returns what it found."""
     tree_copy = os.path.join(tmp, "tree")
     added = table.get("pytest_add_cli_args", [])
-    if not isinstance(added, list) or not isinstance(table.get("also_copy", []), list):
-        return [_mutation_not_run("[tool.mutmut] pytest_add_cli_args or also_copy is not a list")]
     try:
         _copy_tracked(root, tree_copy)
         _mark_for_mutmut(tree_copy, {(f.path, f.name) for f in functions})
@@ -3303,7 +3303,8 @@ def _changed_python_functions(change: GateChange) -> tuple[list[_ChangedFunction
 
 def _mutmut_table(rules: str) -> tuple[dict, str | None]:
     """The [tool.mutmut] table of the pyproject.toml at rules, {} when it has none; or {} and the problem, a clause,
-    when it cannot be read or names no source_paths, without which what mutmut mutates cannot be told."""
+    when it cannot be read, names no source_paths, without which what mutmut mutates cannot be told, or holds an
+    only_mutate, do_not_mutate, also_copy or pytest_add_cli_args that is not a list of strings."""
     try:
         with open(rules, "rb") as f:
             table = tomllib.load(f).get("tool", {}).get("mutmut", {})
@@ -3313,6 +3314,11 @@ def _mutmut_table(rules: str) -> tuple[dict, str | None]:
     if not isinstance(sources, list) or not sources or not all(isinstance(p, str) for p in sources):
         return {}, (f"[tool.mutmut] in {rules} names no source_paths as a list of paths, so what mutmut mutates is "
                     f"unknown")
+    # The other keys the gate reads or adds to.
+    for key in ("only_mutate", "do_not_mutate", "also_copy", "pytest_add_cli_args"):
+        setting = table.get(key, [])
+        if not isinstance(setting, list) or not all(isinstance(p, str) for p in setting):
+            return {}, f"[tool.mutmut] {key} in {rules} is not a list of strings"
     return table, None
 
 
@@ -3359,9 +3365,15 @@ def _use_mutmut_table(tree_copy: str, table: dict) -> None:
             inside = header.group(1) == "tool.mutmut"
         if not inside:
             kept.append(line)
-    # JSON's strings, numbers, booleans and arrays of them are TOML's too, and a quoted key is a key.
-    text = ("\n".join(kept).rstrip("\n") + "\n\n[tool.mutmut]\n"
-            + "".join(f"{json.dumps(key)} = {json.dumps(value)}\n" for key, value in table.items()))
+    # JSON's strings, numbers, booleans and arrays of them are TOML's too, and a quoted key is a key. What JSON
+    # cannot write, such as a TOML date, cannot be put back.
+    options = []
+    for name, setting in table.items():
+        try:
+            options.append(f"{json.dumps(name)} = {json.dumps(setting)}\n")
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"[tool.mutmut] {name} in the rules cannot be written back for mutmut: {e}") from e
+    text = "\n".join(kept).rstrip("\n") + "\n\n[tool.mutmut]\n" + "".join(options)
     try:
         replaced = tomllib.loads(text).get("tool", {}).get("mutmut") == table
     except tomllib.TOMLDecodeError:

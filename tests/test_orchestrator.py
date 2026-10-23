@@ -5080,6 +5080,24 @@ class TestSurvivingMutants(unittest.TestCase):
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in self.found()],
                          [("calc.py", 5, "untested"), ("calc.py", 13, "untested"), ("calc.py", 18, "untested")])
 
+    def test_a_mutmut_table_of_the_wrong_shape_is_a_finding_and_leaves_nothing_behind(self):
+        self.change_the_functions()
+        tables = [("only_mutate", "only_mutate = 5"), ("only_mutate", 'only_mutate = "calc.py"'),
+                  ("do_not_mutate", "do_not_mutate = [1]"), ("when", "when = 1979-05-27")]
+        for key, line in tables:
+            with self.subTest(line=line):
+                tmp = tempfile.mkdtemp(dir=self.bin)
+                self.fake_mutmut(f"touch {self.bin}/ran")
+                rules = os.path.join(self.bin, "rules.toml")
+                with open(rules, "w") as f:
+                    f.write(f'[tool.mutmut]\nsource_paths = ["calc.py"]\n{line}\n')
+                with patch.object(orchestrator.tempfile, "tempdir", tmp):
+                    found = self.found(rules=rules)
+                self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
+                self.assertIn(f"[tool.mutmut] {key}", found[0]["message"])
+                self.assertFalse(os.path.exists(os.path.join(self.bin, "ran")))
+                self.assertEqual(os.listdir(tmp), [])
+
     def test_a_change_to_a_help_text_alone_makes_no_mutant(self):
         # The second line of the help text does not say help=, but its string starts on the line that does.
         self.put("calc.py", self.BASE.replace(" to make", " to build"))

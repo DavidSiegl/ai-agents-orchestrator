@@ -116,8 +116,8 @@ altered, an argument dropped - and runs each of these mutants against the tests 
   `@staticmethod` or `@classmethod` alone; or it is `__new__`, `__getattribute__` or `__setattr__`. And a function
   mutmut was given but made no mutant of: one with nothing to mutate, or one a `# pragma: no mutate` keeps out;
 - `not-run`: mutmut could not start, failed, as it does when a test fails, or left results the gate could not read; the
-  rules name no `source_paths`; the directory to copy the tree into could not be made; or a changed file could not be
-  read or parsed;
+  rules name no `source_paths`, or give a key the gate reads or writes a value of another shape; the directory to copy
+  the tree into could not be made; or a changed file could not be read or parsed;
 - `cleanup`: the copy mutmut ran in could not be removed afterwards, named so that it can be.
 
 mutmut runs in the gate's own interpreter, on a copy of the files git tracks, so the working tree stays as it was; its
