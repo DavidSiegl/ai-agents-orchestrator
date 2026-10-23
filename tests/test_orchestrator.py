@@ -4953,6 +4953,45 @@ class TestSurvivingMutants(unittest.TestCase):
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
         self.assertIn("source_paths", found[0]["message"])
 
+    def test_a_function_mutmut_does_not_mutate_is_said_so(self):
+        # mutmut 3.8.0 mutates no decorated function but one decorated with @staticmethod or @classmethod alone, and
+        # never __new__, __setattr__ or __getattribute__.
+        text = (self.BASE + "\n\n"
+                "import functools\n\n\n"
+                "@functools.cache\n"
+                "def cached(a):\n    return a + 1\n\n\n"
+                "class Made:\n"
+                "    def __new__(cls):\n        return super().__new__(cls)\n\n"
+                "    @staticmethod\n"
+                "    def make():\n        return 1\n")
+        self.put("calc.py", text)
+        lines = text.split("\n")
+        self.fake_mutmut(f"touch {self.bin}/ran")
+        found = self.found()
+        self.assertTrue(os.path.exists(os.path.join(self.bin, "ran")))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                         [("calc.py", lines.index("def cached(a):") + 1, "not-mutated"),
+                          ("calc.py", lines.index("    def __new__(cls):") + 1, "not-mutated")])
+        self.assertIn("`cached` was not mutation-tested: mutmut does not mutate a decorated function",
+                      found[0]["message"])
+        self.assertIn("`Made.__new__` was not mutation-tested: mutmut never mutates `__new__`", found[1]["message"])
+
+    def test_a_change_to_a_decorated_function_alone_runs_nothing_and_says_so(self):
+        self.put("calc.py", self.BASE + "\n\n@property\ndef shown(self):\n    return 1\n")
+        self.fake_mutmut(f"touch {self.bin}/ran")
+        self.assertEqual([(f["path"], f["rule"]) for f in self.found()], [("calc.py", "not-mutated")])
+        self.assertFalse(os.path.exists(os.path.join(self.bin, "ran")))
+
+    def test_the_budget_counts_tried_mutants_as_each_function_does(self):
+        self.change_the_functions()
+        self.fake_mutmut("exec sleep 30", results="    calc.x_checked__mutmut_1: killed\n"
+                                                  "    calc.x_orphan__mutmut_1: no tests\n"
+                                                  "    calc.x_unchecked__mutmut_1: not checked\n")
+        found = self.found(budget=1)
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                         [(None, None, "budget-reached"), ("calc.py", 13, "untested")])
+        self.assertTrue(found[0]["message"].startswith("budget reached after 1 of 3 mutants"), found[0]["message"])
+
     def test_a_change_to_a_help_text_alone_makes_no_mutant(self):
         # The second line of the help text does not say help=, but its string starts on the line that does.
         self.put("calc.py", self.BASE.replace(" to make", " to build"))

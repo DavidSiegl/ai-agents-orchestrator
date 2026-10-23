@@ -109,10 +109,11 @@ altered, an argument dropped - and runs each of these mutants against the tests 
 - `survived`: a function with mutants no test failed on, at its `def`: how many of its mutants survived out of how many
   were tried, and what the first three change, each as a line before and after. No test checks what those lines do;
 - `untested`: a changed function that no test calls, at its `def`, with how many mutants it has;
-- `budget-reached`: mutmut ran out of time, as "budget reached after N of M mutants". What the N showed is listed; the
-  others may survive too;
+- `budget-reached`: mutmut ran out of time, as "budget reached after N of M mutants", N counting the mutants it tried
+  against a test, as the `survived` counts do. What the N showed is listed; the others may survive too;
 - `not-mutated`: a changed function mutmut does not mutate, at its `def`, with the reason: its file is outside
-  `[tool.mutmut]`'s `source_paths`, or left out by `only_mutate` or `do_not_mutate`;
+  `[tool.mutmut]`'s `source_paths`, or left out by `only_mutate` or `do_not_mutate`; it is decorated, other than with
+  `@staticmethod` or `@classmethod` alone; or it is `__new__`, `__getattribute__` or `__setattr__`;
 - `not-run`: mutmut could not start, failed, as it does when a test fails, or left results the gate could not read; the
   rules name no `source_paths`; or a changed file could not be read or parsed.
 

@@ -3143,8 +3143,9 @@ def _seeds(seeds: list[int]) -> str:
 # where it was, and mutmut writes its state, mutants/, into the copy, so the working tree is never written to.
 _MUTMUT_SKIP = "  # pragma: no mutate block"
 
-# How `mutmut results` words a mutant it never ran, because the budget stopped it first.
-_MUTMUT_UNTRIED = frozenset({"not checked", "check was interrupted by user"})
+# How `mutmut results` words a mutant it did not try against a test: one the budget stopped it before, and one of a
+# function no test calls.
+_MUTMUT_UNTRIED = frozenset({"not checked", "check was interrupted by user", "no tests"})
 
 # What mutmut 3.8.0 says, exiting with status 1 before it tries any mutant, when no test calls any function it
 # mutated, or it made no mutant at all; the mutants it made are then left not checked.
@@ -3184,7 +3185,7 @@ def _mutation_test(change: GateChange, functions: list[_ChangedFunction], budget
         return [_mutation_not_run(problem)]
     out, mutated = [], []
     for f in functions:
-        why = _outside_mutmut(f.path, table)
+        why = _outside_mutmut(f.path, table) or _unmutatable(f)
         if why:
             out.append(_finding(f.path, f.line, "not-mutated", f"`{f.name}` was not mutation-tested: {why}."))
         else:
@@ -3229,8 +3230,7 @@ def _mutmut_findings(tree_copy: str, functions: list[_ChangedFunction], run: sub
             mutants.setdefault(owner, {}).setdefault(status, []).append(mutant)
     out = []
     for f, by_status in mutants.items():
-        tried = sum(len(names) for status, names in by_status.items()
-                    if status not in _MUTMUT_UNTRIED and status != "no tests")
+        tried = sum(len(names) for status, names in by_status.items() if status not in _MUTMUT_UNTRIED)
         if by_status.get("survived"):
             out.append(_survivors(tree_copy, f, by_status["survived"], tried, deadline))
         if by_status.get("no tests"):
@@ -3283,6 +3283,16 @@ def _outside_mutmut(path: str, table: dict) -> str | None:
         return f"[tool.mutmut] only_mutate ({', '.join(only)}) leaves it out"
     excluded = [g for g in table.get("do_not_mutate", []) if fnmatch.fnmatch(path, g)]
     return f"[tool.mutmut] do_not_mutate excludes it ({', '.join(excluded)})" if excluded else None
+
+
+def _unmutatable(f: _ChangedFunction) -> str | None:
+    """Why mutmut 3.8.0 makes no mutant of f whatever it holds, as its file_mutation.py decides; None when it may."""
+    name = f.name.rpartition(".")[2]
+    if name in ("__new__", "__getattribute__", "__setattr__"):
+        return f"mutmut never mutates `{name}`"
+    if f.decorators and f.decorators not in (("staticmethod",), ("classmethod",)):
+        return "mutmut does not mutate a decorated function, unless @staticmethod or @classmethod is its one decorator"
+    return None
 
 
 def _use_mutmut_table(tree_copy: str, table: dict) -> None:
