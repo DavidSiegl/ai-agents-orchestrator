@@ -1,4 +1,5 @@
 import base64
+import contextlib
 import io
 import itertools
 import json
@@ -3705,11 +3706,32 @@ class TestQualityReport(unittest.TestCase):
         self.assertIn("````\nlast\nlines\n````", text)
         self.assertNotIn("Issues on changed lines", text)
         text = quality_report("OK", "intro", {}, tests=[("t.T.test_x", "AssertionError\ntraceback")],
-                              coverage={"new_coverage": "62.5", "new_lines_to_cover": "40", "new_uncovered_lines": "15"})
+                              coverage="62.5% of 40 new lines to cover.")
         self.assertIn("- `t.T.test_x`: AssertionError\n", text)
-        self.assertIn("62.5% of 40 new lines to cover; 15 are not covered.", text)
+        self.assertIn("## Coverage on new code\n\n62.5% of 40 new lines to cover.\n", text)
         self.assertIn("None.", text)
-        self.assertIn("No new lines to cover.", quality_report("OK", "i", {}, tests=[], coverage={}))
+
+    def test_sections_left_out_by_default(self):
+        text = quality_report("OK", "intro", {})
+        self.assertNotIn("## Failing tests", text)
+        self.assertNotIn("## Coverage on new code", text)
+        self.assertNotIn("## Suppressions added", text)
+        self.assertNotIn("## Failed conditions", text)
+
+    def test_conditions_and_suppressions_are_listed(self):
+        text = quality_report("ERROR", "intro", {}, conditions=["`ruff` is not installed."],
+                              suppressions=[("f.py", 3, "x = 1  # noqa: F401")])
+        self.assertIn("## Failed conditions\n\n- `ruff` is not installed.\n", text)
+        self.assertIn("## Suppressions added\n\n- `f.py:3` `x = 1  # noqa: F401`\n", text)
+
+    def test_sonar_sentences(self):
+        self.assertEqual(orchestrator._sonar_coverage(
+            {"new_coverage": "62.5", "new_lines_to_cover": "40", "new_uncovered_lines": "15"}),
+            "62.5% of 40 new lines to cover; 15 are not covered.")
+        self.assertEqual(orchestrator._sonar_coverage({}), "No new lines to cover.")
+        self.assertEqual(orchestrator._sonar_condition(
+            {"metricKey": "new_coverage", "comparator": "LT", "actualValue": "40", "errorThreshold": "80"}),
+            "`new_coverage` is 40; the gate wants at least 80.")
 
     def test_failing_tests_beyond_the_limit_are_counted(self):
         tests = [(f"t.T.test_{k}", "") for k in range(orchestrator.QUALITY_ISSUE_LIMIT + 3)]
@@ -3728,10 +3750,263 @@ class TestQualityReport(unittest.TestCase):
                 self.assertIn(f"The change edits `{only}`", text)
                 self.assertNotIn(f"The change edits `{other}`", text)
 
+    def test_gate_config_edits_are_named(self):
+        text = quality_report("OK", "i", {}, edited=["pyproject.toml", "uv.lock"])
+        self.assertIn("The change edits `pyproject.toml`, which holds the gate's rules; the change was judged by "
+                      "the edited rules.", text)
+        self.assertIn("The change edits `uv.lock`, which pins the versions of the linters the gate ran.", text)
+        text = quality_report("OK", "i", {}, edited=["pyproject.toml"], rules_from="`main`'s `pyproject.toml`")
+        self.assertIn("The gate took its rules from `main`'s `pyproject.toml`, so the edit did not change", text)
+
     def test_tokens_are_masked(self):
         ci = CI(JOB, env=CREDENTIALS)
         self.assertEqual(ci.mask(f"a {JENKINS_TOKEN} b {SONAR_TOKEN}"), "a **** b ****")
         self.assertEqual(CI(JOB, env={}).mask("text"), "text")
+
+
+class TestGate(unittest.TestCase):
+    """`orchestrator.py gate` over a real git repository, with stub linters on PATH that print what each one does."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo, self.bin, self.stubs = (os.path.join(tmp.name, d) for d in ("repo", "bin", "stubs"))
+        for d in (self.repo, self.bin, self.stubs):
+            os.mkdir(d)
+        for tool in ("ruff", "mypy", "pymarkdown", "shellcheck", "actionlint"):
+            self.stub(tool)
+        env = patch.dict(os.environ, {"PATH": f"{self.bin}:{os.path.dirname(shutil.which('git'))}",
+                                      "STUB_DIR": self.stubs})
+        env.start()
+        self.addCleanup(env.stop)
+        self.host = Host()
+        self.git("init", "--quiet", "-b", "main")
+        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
+            self.git("config", key, value)
+        self.put("pyproject.toml", "[tool.ruff]\n")
+        self.put("f.py", "".join(f"line{n} = {n}\n" for n in range(1, 4)))
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "base")
+
+    def stub(self, tool):
+        """A stub tool that records its arguments and prints $STUB_DIR/<tool>.out and .err, exiting with .status."""
+        path = os.path.join(self.bin, tool)
+        with open(path, "w") as f:
+            f.write(f'#!/bin/sh\nd="$STUB_DIR/{tool}"\nprintf "%s\\n" "$@" > "$d.argv"\n'
+                    f'[ -f "$d.out" ] && cat "$d.out"\n[ -f "$d.err" ] && cat "$d.err" >&2\n'
+                    f'exit "$(cat "$d.status" 2>/dev/null || echo 0)"\n')
+        os.chmod(path, 0o700)
+
+    def says(self, tool, out="", status=1, err=""):
+        for ext, text in (("out", out), ("err", err), ("status", str(status))):
+            with open(os.path.join(self.stubs, f"{tool}.{ext}"), "w") as f:
+                f.write(text)
+
+    def argv(self, tool):
+        with open(os.path.join(self.stubs, f"{tool}.argv")) as f:
+            return f.read().splitlines()
+
+    def git(self, *args):
+        return self.host.git(self.repo, *args)
+
+    def put(self, name, text):
+        path = os.path.join(self.repo, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    def gate(self, *args):
+        """The exit status, standard output and standard error of `orchestrator.py gate --base HEAD ARGS` in the repo."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.chdir(self.repo), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            status = main(["gate", "--base", "HEAD", *args])
+        return status, out.getvalue(), err.getvalue()
+
+    def add_lines(self, n, start=4):
+        with open(os.path.join(self.repo, "f.py"), "a") as f:
+            f.write("".join(f"new{k} = {k}\n" for k in range(start, start + n)))
+
+    def test_a_clean_change_passes(self):
+        self.add_lines(1)
+        status, out, _ = self.gate()
+        self.assertEqual(status, 0)
+        self.assertTrue(out.startswith("GATE: OK\n"))
+        self.assertNotIn("## Failed conditions", out)
+
+    def test_only_findings_on_added_lines_count(self):
+        self.add_lines(1)
+        self.says("ruff", "f.py:2:1: F401 `os` imported but unused\n"
+                          "f.py:4:7: B023 Function definition does not bind loop variable `x`\nFound 2 errors.\n")
+        status, out, _ = self.gate()
+        self.assertEqual(status, 1)
+        self.assertTrue(out.startswith("GATE: ERROR\n"))
+        self.assertIn("- 1 findings on lines the change added; each is listed below.\n", out)
+        self.assertIn("1. `f.py:4` error ruff B023: Function definition does not bind loop variable `x`\n", out)
+        self.assertNotIn("f.py:2", out)
+        self.assertIn("1 other open issues in the project", out)
+
+    def test_a_finding_on_an_old_line_alone_passes(self):
+        self.add_lines(1)
+        self.says("ruff", "f.py:2:1: F401 `os` imported but unused\n")
+        self.assertEqual(self.gate()[0], 0)
+
+    def test_a_missing_tool_fails_naming_it(self):
+        self.put("run.sh", "#!/bin/sh\n")
+        self.git("add", "run.sh")
+        os.remove(os.path.join(self.bin, "shellcheck"))
+        status, out, _ = self.gate()
+        self.assertEqual(status, 1)
+        self.assertIn("- `shellcheck` is not installed: it is not on PATH.\n", out)
+
+    def test_only_tracked_files_are_linted(self):
+        self.put("run.sh", "#!/bin/sh\n")
+        os.remove(os.path.join(self.bin, "shellcheck"))
+        self.assertEqual(self.gate()[0], 0)
+        self.assertFalse(os.path.exists(os.path.join(self.stubs, "actionlint.argv")))
+
+    def test_a_failing_or_unreadable_tool_fails_the_gate(self):
+        self.put("README.md", "# r\n")
+        self.git("add", "README.md")
+        self.says("ruff", status=2, err="ruff failed\n  Cause: invalid config\n")
+        self.says("pymarkdown", "WARNING:pymarkdown.main:Specified configuration file does not exist.\n")
+        status, out, _ = self.gate()
+        self.assertEqual(status, 1)
+        self.assertIn("- `ruff` failed with exit status 2: ruff failed\n", out)
+        self.assertIn("- `pymarkdown` reported findings, but none the gate could read: WARNING:pymarkdown", out)
+
+    def test_an_unresolvable_base_writes_nothing(self):
+        out = os.path.join(self.repo, "quality.md")
+        status, stdout, err = self.gate("--base", "no-such-rev", "--out", out)
+        self.assertEqual(status, orchestrator.EXIT_GATE_UNJUDGED)
+        self.assertIn("no-such-rev names no commit", err)
+        self.assertEqual(stdout, "")
+        self.assertFalse(os.path.exists(out))
+
+    def test_outside_a_git_tree_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as d, contextlib.chdir(d), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(main(["gate", "--base", "HEAD"]), orchestrator.EXIT_GATE_UNJUDGED)
+        self.assertIn("is not in a git work tree", err.getvalue())
+
+    def test_out_gets_the_file_and_stderr_the_gate(self):
+        self.add_lines(1)
+        status, stdout, err = self.gate("--out", "quality.md")
+        self.assertEqual((status, stdout), (0, ""))
+        self.assertEqual(err, "GATE: OK, in quality.md\n")
+        with open(os.path.join(self.repo, "quality.md")) as f:
+            self.assertTrue(f.read().startswith("GATE: OK\n"))
+
+    def coverage(self, lines):
+        """A Cobertura report of f.py: lines maps a line number to its hits, or to (hits, "covered/total" branches)."""
+        rows = "".join(f'<line number="{n}" hits="{h[0] if isinstance(h, tuple) else h}"'
+                       + (f' branch="true" condition-coverage="50% ({h[1]})"' if isinstance(h, tuple) else "")
+                       + "/>" for n, h in lines.items())
+        self.put("coverage.xml", f'<?xml version="1.0" ?><coverage><sources><source>{self.repo}</source></sources>'
+                                 f'<packages><package name="."><classes><class name="f.py" filename="f.py"><lines>'
+                                 f'{rows}</lines></class></classes></package></packages></coverage>')
+        return os.path.join(self.repo, "coverage.xml")
+
+    def test_coverage_below_the_minimum_fails_from_twenty_new_lines(self):
+        self.add_lines(20)
+        xml = self.coverage({n: int(n < 14) for n in range(1, 24)})
+        status, out, _ = self.gate("--coverage", xml)
+        self.assertEqual(status, 1)
+        self.assertIn("- Coverage of new code is 50.0%; the gate wants at least 80% once a change has 20 or more", out)
+        self.assertIn("50.0% of 20 new lines to cover; 10 lines are not covered.", out)
+
+    def test_coverage_is_not_judged_on_nineteen_new_lines(self):
+        self.add_lines(19)
+        status, out, _ = self.gate("--coverage", self.coverage({n: 0 for n in range(1, 23)}))
+        self.assertEqual(status, 0)
+        self.assertIn("0.0% of 19 new lines to cover; 19 lines are not covered.", out)
+
+    def test_coverage_counts_branches_as_sonar_does(self):
+        self.add_lines(2)
+        _, out, _ = self.gate("--coverage", self.coverage({4: (1, "1/2"), 5: 0, 2: 1}))
+        # (1 covered condition + 1 covered line) / (2 conditions + 2 lines); line 2 is not new.
+        self.assertIn("50.0% of 2 new lines to cover, counting their 2 branch outcomes; 1 lines are not covered.", out)
+
+    def test_an_unreadable_coverage_report_writes_nothing(self):
+        self.add_lines(1)
+        self.put("coverage.xml", "<coverage")
+        status, stdout, err = self.gate("--coverage", "coverage.xml")
+        self.assertEqual((status, stdout), (orchestrator.EXIT_GATE_UNJUDGED, ""))
+        self.assertIn("cannot read the coverage report", err)
+
+    def test_added_suppressions_are_listed_not_failed(self):
+        with open(os.path.join(self.repo, "f.py"), "a") as f:
+            f.write("import os  # noqa: F401\n")
+        self.put("run.sh", "# shellcheck disable=SC2086\n")
+        self.git("add", "run.sh")
+        status, out, _ = self.gate()
+        self.assertEqual(status, 0)
+        self.assertIn("## Suppressions added\n\n- `f.py:4` `import os  # noqa: F401`\n"
+                      "- `run.sh:1` `# shellcheck disable=SC2086`\n", out)
+
+    def test_config_replaces_the_tree_s_rules(self):
+        self.put("pyproject.toml", "[tool.ruff]\nline-length = 1\n")
+        self.gate()
+        self.assertIn(os.path.join(self.repo, "pyproject.toml"), self.argv("ruff"))
+        main_rules = os.path.join(self.stubs, "main.toml")
+        with open(main_rules, "w") as f:
+            f.write("[tool.ruff]\n")
+        _, out, _ = self.gate("--config", main_rules)
+        for tool in ("ruff", "mypy", "pymarkdown"):
+            with self.subTest(tool=tool):
+                if tool != "pymarkdown":
+                    self.assertIn(main_rules, self.argv(tool))
+        self.assertIn(f"by the rules in `{main_rules}`.", out)
+        self.assertIn(f"The gate took its rules from `{main_rules}`, so the edit did not change", out)
+
+    def test_no_rules_file_writes_nothing(self):
+        status, _, err = self.gate("--config", "missing.toml")
+        self.assertEqual(status, orchestrator.EXIT_GATE_UNJUDGED)
+        self.assertIn("is not a file", err)
+
+
+class TestToolFindings(unittest.TestCase):
+    """What each linter really prints, as captured from it, read into the quality file's findings."""
+
+    TRACKED = {"orchestrator.py", "README.md", "a.sh", ".github/workflows/w.yml"}
+
+    def read(self, name, output):
+        tool = next(t for t in orchestrator.GATE_TOOLS if t.name == name)
+        return orchestrator.tool_findings(tool, output, "/repo", self.TRACKED)
+
+    def test_ruff(self):
+        self.assertEqual(self.read("ruff", "orchestrator.py:595:18: F402 Import `field` from line 55 shadowed\n"
+                                           "orchestrator.py:1:8: invalid-syntax: Expected an expression\nFound 2 errors.\n"),
+                         [{"path": "orchestrator.py", "line": 595, "severity": "error", "rule": "ruff F402",
+                           "message": "Import `field` from line 55 shadowed"},
+                          {"path": "orchestrator.py", "line": 1, "severity": "error", "rule": "ruff invalid-syntax",
+                           "message": "Expected an expression"}])
+
+    def test_mypy_drops_notes(self):
+        self.assertEqual(self.read("mypy", 'orchestrator.py:594:5: error: Need type annotation for "tokens"  '
+                                           '[var-annotated]\norchestrator.py:594:5: note: See https://x\n'),
+                         [{"path": "orchestrator.py", "line": 594, "severity": "error", "rule": "mypy var-annotated",
+                           "message": 'Need type annotation for "tokens"'}])
+
+    def test_pymarkdown_with_absolute_paths(self):
+        self.assertEqual(self.read("pymarkdown", "/repo/README.md:3:1: MD040: Fenced code blocks should have a "
+                                                 "language specified (fenced-code-language)\n"),
+                         [{"path": "README.md", "line": 3, "severity": "error", "rule": "pymarkdown MD040",
+                           "message": "Fenced code blocks should have a language specified (fenced-code-language)"}])
+
+    def test_shellcheck(self):
+        self.assertEqual([(f["line"], f["severity"], f["rule"]) for f in self.read("shellcheck",
+                         "a.sh:2:6: note: Double quote to prevent globbing and word splitting. [SC2086]\n"
+                         "a.sh:3:1: warning: Use 'cd ... || exit' in case cd fails. [SC2164]\n")],
+                         [(2, "note", "shellcheck SC2086"), (3, "warning", "shellcheck SC2164")])
+
+    def test_actionlint_skips_its_snippets(self):
+        found = self.read("actionlint", '.github/workflows/w.yml:6:23: "github.event.issue.title" is potentially '
+                                        'untrusted. [expression]\n  |\n6 |       - run: echo ${{ x }}\n  |   ^~~\n')
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                         [(".github/workflows/w.yml", 6, "actionlint expression")])
+
+    def test_untracked_paths_are_skipped(self):
+        self.assertEqual(self.read("ruff", "build/x.py:1:1: F401 unused\n"), [])
 
 
 class TestCIEnvFile(unittest.TestCase):

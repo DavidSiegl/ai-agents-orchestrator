@@ -12,3 +12,7 @@ wheels/
 # Notes for coding agents, kept on disk but out of the repository
 CLAUDE.md
 TESTING.md
+
+# What `uv run pytest --cov ... --cov-report=xml` and `orchestrator.py gate --out` write
+coverage.xml
+quality.md
