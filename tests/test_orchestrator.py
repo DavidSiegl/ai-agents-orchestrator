@@ -5857,15 +5857,39 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.assertEqual([f["message"] for f in self.found()[1]],
                          ["`big`: cognitive complexity 22, a new function; the limit is 15."])
 
-    def test_a_file_renamed_from_any_name_or_directory_is_compared_with_its_base(self):
-        for old, new in [("bin/tool", "bin/tool.py"), ("tests/helpers.py", "lib/helpers.py")]:
-            with self.subTest(old=old):
-                self.commit_file(old, flat("helper", 20))
-                os.makedirs(os.path.join(self.repo, os.path.dirname(new)), exist_ok=True)
-                self.git("mv", old, new)
-                self.edit(new, "x += 3\n", "x += 30\n")  # still 20
-                self.assertEqual(self.found()[0], [])
-                self.git("commit", "--quiet", "-am", "renamed")
+    def test_a_file_renamed_from_any_name_is_compared_with_its_base(self):
+        self.commit_file("bin/tool", flat("helper", 20))
+        self.git("mv", "bin/tool", "bin/tool.py")
+        self.edit("bin/tool.py", "x += 3\n", "x += 30\n")  # still 20
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_function_out_of_tests_is_judged_as_new_as_tests_were_never_held_to_the_limit(self):
+        self.commit_file("tests/helpers.py", flat("helper", 20) + "\n\n" + flat("other_helper", 20))
+        os.makedirs(os.path.join(self.repo, "lib"))
+        self.git("mv", "tests/helpers.py", "lib/helpers.py")  # renamed, with both functions
+        self.edit("lib/helpers.py", "'helper 3':\n        x += 3\n", "'helper 3':\n        x += 30\n")  # still 20
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`helper`: cognitive complexity 20, a new function; the limit is 15."])
+        self.git("commit", "--quiet", "-am", "renamed")
+        self.put("lib/helpers.py", flat("helper", 20))
+        self.put("lib/more.py", flat("other_helper", 20))  # moved out of the old test file's lines
+        self.git("add", "lib/more.py")
+        self.assertEqual(self.found()[0], [])  # lib/helpers.py's base is lib/, now held to the limit
+
+    def test_one_base_function_is_the_base_of_one_function_only(self):
+        big = flat("big", 20)
+        copy = big.replace("def big(", "def copied(")
+        new = ["`copied`: cognitive complexity 20, a new function; the limit is 15."]
+        with self.subTest("the original edited in place, beside a copy of its old self"):
+            self.put("calc.py", self.BASE.replace("'big 3':\n        x += 3\n", "'big 3':\n        x += 30\n")
+                     + "\n\n" + copy)
+            self.assertEqual([f["message"] for f in self.found()[1]], new)
+        self.put("calc.py", self.BASE.replace("\n\n" + big, ""))
+        self.put("other.py", big)
+        self.put("third.py", copy)
+        self.git("add", "other.py", "third.py")
+        with self.subTest("the original moved unchanged, and a copy of it elsewhere"):
+            self.assertEqual([f["message"] for f in self.found()[1]], new)
 
     def test_a_name_defined_twice_is_compared_with_the_same_definition_at_the_base(self):
         # A property's getter, scoring 21, then its setter, which scores nothing, under the same name.

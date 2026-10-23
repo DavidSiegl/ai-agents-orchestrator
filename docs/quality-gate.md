@@ -78,16 +78,20 @@ that nest. The comment above `COGNITIVE_COMPLEXITY_LIMIT` in `orchestrator.py` s
 the paper's rules. Each of these is a finding:
 
 - `over-limit`: a function over 15, at its `def` line, when it is new or the change raised its score, as
-  "`_poll`: cognitive complexity 19, 14 at the base; the limit is 15". Its base is in the file's base, under the file's
-  old name, whatever its name or directory, when the change renamed it: the function of the same name and classes with
-  the same body, which it is unchanged from, else the highest-scoring of the others of that name. So with a name
-  defined more than once, as a property's getter and setter or `@singledispatch` registrations named `_` are, adding
-  or removing one never makes a function the change left no worse a finding; the cost is that a rise below a
-  higher-scoring namesake goes unseen.
-  Failing that, it is a function with the same body in the base of any Python file the change touches that is no
-  longer in its file under its name: so a function moved to another module, renamed or made a method, but otherwise
-  unchanged, keeps its score. A copy, whose original is still in place, is new, and so is a function moved and edited.
-  A function already over 15 that the change leaves no worse is not a finding, since the gate judges the change;
+  "`_poll`: cognitive complexity 19, 14 at the base; the limit is 15". A function already over 15 that the change
+  leaves no worse is not a finding, since the gate judges the change. Its base is a function of the base, and each
+  base function is the base of one function at most:
+  - in the file's base, under the file's old name, whatever that name, when the change renamed it: the function of the
+    same name and classes with the same body, which it is unchanged from, else the highest-scoring of the others of
+    that name left. So with a name defined more than once, as a property's getter and setter or `@singledispatch`
+    registrations named `_` are, adding or removing one never makes a function the change left no worse a finding;
+    the cost is that a rise below a higher-scoring namesake goes unseen;
+  - failing that, a function with the same body in the base of any Python file the change touches that no function
+    took in its file and that is no longer there under its name: so a function moved to another module, renamed or
+    made a method, but otherwise unchanged, keeps its score. Of a function moved unchanged and a copy of it, the one
+    that kept the name takes it;
+  - failing that, the function is new: a copy whose original is still in place, even edited, a function moved and
+    edited, and a function whose base is under `tests/`, which was never held to the limit.
 - `not-scored`: a changed file that could not be read or parsed, or changed files git could not list. Like any finding
   of the check, it fails the gate: a check that cannot do its work says so rather than pass. A base that cannot be read
   or parsed is not a finding: its file's functions are judged as new, as `test-integrity` takes a base that does not
