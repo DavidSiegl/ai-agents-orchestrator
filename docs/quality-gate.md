@@ -65,7 +65,10 @@ the order is caught. A test counts when the change adds or removes a line of its
 test file; lines removed right above it count, since they may have been a decorator, and right below it. pytest
 decides which of those are tests. It runs them five times, alone, under pytest-randomly with seeds 1 to 5
 (`-p randomly -p no:cacheprovider --randomly-seed=N`), each run in the gate's own interpreter (`python -m pytest`,
-so the project's environment that `uv run` gives, whatever `pytest` is on `PATH`) and within 30 seconds:
+so the project's environment that `uv run` gives, whatever `pytest` is on `PATH`) and within 30 seconds. They run in
+a temporary copy of the files git tracks, so a report the project's `addopts` write, such as `coverage.xml`, lands in
+the copy and the build's own stays as the gate reads it; a test that needs an untracked file, such as a build
+product, does not find it there:
 
 - `mixed-results`: a test that failed under some seeds and passed under the others, at its `def`, naming the seeds
   of each. It depends on the order of the tests, on state another test leaves, or on randomness pytest-randomly
@@ -73,11 +76,11 @@ so the project's environment that `uv run` gives, whatever `pytest` is on `PATH`
   skips a test, or leaves it out of its report (an `addopts` with `--maxfail`, say), neither passed nor failed it;
 - `not-rerun`: the reruns could not judge the tests: pytest could not start, took longer than 30 seconds, ended in a
   usage or collection error, or collected tests without listing their ids; a changed test file could not be read or
-  parsed; or the temporary directory for the runs' reports could not be made. After a run that went wrong, the
+  parsed; or the temporary copy could not be made. After a run that went wrong, the
   finding says which earlier runs were judged. A test that is not mixed and that fewer than two runs passed or
   failed is one of these too, at its `def`. pytest runs at `--verbosity=-1`, which a `-v` or `-q` in the project's
   `addopts` or `PYTEST_ADDOPTS` does not change;
-- `reports-left`: that directory could not be removed afterwards; the reruns' results stand.
+- `not-removed`: the copy could not be removed afterwards; the reruns' results stand.
 
 A change to a helper or fixture outside the tests' `def`s reruns nothing. The check adds at most six pytest runs of
 30 seconds to the gate, the collection included, and only when the change touches a test. pytest-randomly is in the

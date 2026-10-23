@@ -2740,44 +2740,58 @@ def flaky_tests(change: GateChange) -> list[dict]:
     some seeds and passed under the others, naming both. A test that fails under every seed is not reported: it
     fails, and the failing-tests section says so.
 
-    A run that skips a test, or does not report it, as when the project's addopts stop at the first failure, neither
-    passed nor failed it. A test that is not mixed, which fewer than two runs passed or failed, is reported as one
-    that too few runs judged.
+    The tests run in a temporary copy of the files git tracks, so that what the project's addopts write, such as a
+    coverage report, does not replace the build's own; a test that needs an untracked file, such as a build product,
+    cannot find it there. A run that skips a test, or does not report it, as when the project's addopts stop at the
+    first failure, neither passed nor failed it. A test that is not mixed, which fewer than two runs passed or
+    failed, is reported as one that too few runs judged.
 
     pytest decides which of those defs are tests, so a helper named test_* that it does not collect is not rerun.
     pytest and pytest-randomly must be importable by the gate's own interpreter, as a `uv run` of the project makes
     them. A pytest run that cannot start, takes longer than FLAKY_RUN_TIMEOUT, ends in a usage or collection error
     or writes no readable report ends the reruns with a finding saying so, after what the runs before it showed; so
-    does a changed test file that cannot be read or parsed, and a temporary directory for the reports that cannot be
-    made. One that cannot be removed afterwards is a finding of its own, beside the results.
+    does a changed test file that cannot be read or parsed, and a copy that cannot be made. One that cannot be
+    removed afterwards is a finding of its own, beside the results.
     """
     tests, out = _changed_python_tests(change)
-    if not tests:
-        return out
-    ids, problem = _collect_python_tests(change.root, tests)
-    # Each test's outcome by the seed of a run that reported it as passed or failed.
-    outcomes: dict[str, dict[int, str]] = {i: {} for i in ids}
-    seeds: list[int] = []
-    tmp = None
-    if ids:
+    if tests:
         try:
             tmp = tempfile.mkdtemp(prefix="flaky-tests-")
         except OSError as e:
-            problem = f"could not make a directory for the reruns' reports: {e}"
-    if tmp is not None:
-        for seed in FLAKY_SEEDS:
-            reported, problem = _rerun_python_tests(change.root, ids, seed, os.path.join(tmp, f"seed-{seed}.xml"))
-            if problem:
-                break
-            seeds.append(seed)
-            for i, outcome in reported.items():
-                if outcome != "skipped":
-                    outcomes[i][seed] = outcome
-        try:
-            shutil.rmtree(tmp)
-        except OSError as e:
-            out.append(_flaky_finding(None, None, "reports-left",
-                                      f"could not remove the reruns' reports in {tmp}: {e}"))
+            out.append(_flaky_finding(None, None, "not-rerun", f"could not make a directory to rerun the changed "
+                                                               f"tests in: {e}; the changed tests were not rerun."))
+        else:
+            out += _rerun_findings(change.root, tmp, tests)
+            try:
+                shutil.rmtree(tmp)
+            except OSError as e:
+                out.append(_flaky_finding(None, None, "not-removed", f"could not remove the directory the changed "
+                                                                     f"tests were rerun in, {tmp}: {e}"))
+    return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
+
+
+def _rerun_findings(root: str, tmp: str, tests: dict[tuple[str, str], int]) -> list[dict]:
+    """flaky_tests' findings on tests, as _changed_python_tests gives them, rerun in a copy of root's tracked files
+    that it makes in tmp, an empty directory, beside the runs' reports."""
+    tree = os.path.join(tmp, "tree")
+    try:
+        _copy_tracked(root, tree)
+    except (OSError, OrchestratorError) as e:
+        return [_flaky_finding(None, None, "not-rerun", f"could not copy the tracked files to rerun the changed "
+                                                        f"tests in: {e}; the changed tests were not rerun.")]
+    out = []
+    ids, problem = _collect_python_tests(tree, tests)
+    # Each test's outcome by the seed of a run that reported it as passed or failed.
+    outcomes: dict[str, dict[int, str]] = {i: {} for i in ids}
+    seeds: list[int] = []
+    for seed in FLAKY_SEEDS if ids else ():
+        reported, problem = _rerun_python_tests(tree, ids, seed, os.path.join(tmp, f"seed-{seed}.xml"))
+        if problem:
+            break
+        seeds.append(seed)
+        for i, outcome in reported.items():
+            if outcome != "skipped":
+                outcomes[i][seed] = outcome
     for i, by_seed in outcomes.items():
         path, *names = i.split("::")
         failed = [s for s in seeds if by_seed.get(s) == "failed"]
@@ -2801,7 +2815,25 @@ def flaky_tests(change: GateChange) -> list[dict]:
     if problem:
         out.append(_flaky_finding(None, None, "not-rerun", f"{problem}; " + (
             f"only the reruns under {_seeds(seeds)} were judged." if seeds else "the changed tests were not rerun.")))
-    return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
+    return out
+
+
+def _copy_tracked(root: str, dest: str) -> None:
+    """Copy the files git tracks in the working tree at root, as they are there, to the same paths under dest, a
+    directory it makes, with its parents. A symbolic link is copied as a link and a submodule as its directory; a
+    tracked file missing from the working tree is left out. Raises OrchestratorError when git cannot list the files,
+    and OSError when dest exists or a file cannot be copied; dest may then hold part of the copy."""
+    names = sorted({n for n in Host().git(root, "ls-files", "-z", verbatim=True).split("\0") if n})
+    os.makedirs(dest)
+    for name in names:
+        src, dst = os.path.join(root, name), os.path.join(dest, name)
+        if not os.path.lexists(src):
+            continue
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        if os.path.isdir(src) and not os.path.islink(src):
+            shutil.copytree(src, dst, symlinks=True)
+        else:
+            shutil.copy2(src, dst, follow_symlinks=False)
 
 
 def _changed_python_tests(change: GateChange) -> tuple[dict[tuple[str, str], int], list[dict]]:

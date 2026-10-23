@@ -4386,8 +4386,7 @@ class TestFlakyTests(unittest.TestCase):
         for addopts, env in (("-v", ""), ("-qq", ""), ("", "-q")):
             with self.subTest(addopts=addopts, env=env), seeds, patch.dict(os.environ, {"PYTEST_ADDOPTS": env}):
                 self.put("pytest.ini", f"[pytest]\naddopts = {addopts}\n")
-                with contextlib.suppress(FileNotFoundError):
-                    os.remove(os.path.join(self.repo, "tests", "runs"))
+                self.git("add", "pytest.ini")
                 self.assertIn("`TestRuns.test_alternates` failed under seed 2 and passed under seed 1: ",
                               "\n".join(f["message"] for f in self.found()))
 
@@ -4404,6 +4403,7 @@ class TestFlakyTests(unittest.TestCase):
         # --maxfail=1 ends each run at its first failure, so of four tests that always fail, each run reports one.
         # None is flaky; some must be reported under fewer than two seeds, as five runs report five failures in all.
         self.put("pytest.ini", "[pytest]\naddopts = --maxfail=1\n")
+        self.git("add", "pytest.ini")
         text = self.BASE + "".join(f"\n\ndef test_fails_{k}():\n    assert False\n" for k in range(4))
         self.put("tests/test_state.py", text)
         found = self.found()
@@ -4458,7 +4458,6 @@ class TestFlakyTests(unittest.TestCase):
                 self.assertEqual([(f["path"], f["line"], f["rule"]) for f in self.found()],
                                  [(name, 15, "mixed-results")])
                 self.git("checkout", "--", name)
-                os.remove(os.path.join(self.repo, "tests", "runs"))
 
     def test_a_change_to_no_test_reruns_nothing(self):
         self.put("calc.py", "def add(a, b):\n    return b + a\n")
@@ -4482,15 +4481,54 @@ class TestFlakyTests(unittest.TestCase):
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-rerun")])
         self.assertIn(f"did not finish within {orchestrator.FLAKY_RUN_TIMEOUT} seconds", found[0]["message"])
 
-    def test_no_room_for_the_reports_is_a_finding(self):
+    def test_no_room_for_the_reruns_is_a_finding(self):
         self.change_the_tests()
         with patch.object(tempfile, "tempdir", os.path.join(self.repo, "no-such-dir")):
             found = self.found()
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-rerun")])
-        self.assertRegex(found[0]["message"], r"^could not make a directory for the reruns' reports: .*No such file.*; "
-                                              r"the changed tests were not rerun\.$")
+        self.assertRegex(found[0]["message"], r"^could not make a directory to rerun the changed tests in: .*No such "
+                                              r"file.*; the changed tests were not rerun\.$")
 
-    def test_reports_left_behind_are_a_finding_beside_the_results(self):
+    def test_the_reruns_leave_the_build_s_reports_alone(self):
+        # The project's addopts write a coverage report, as the build's own run did before the gate reads it.
+        self.put("pytest.ini", "[pytest]\naddopts = --cov=calc --cov-report=xml\n")
+        self.git("add", "pytest.ini")
+        self.git("commit", "--quiet", "-m", "coverage")
+        self.put("coverage.xml", "the build's report\n")
+        self.put("tests/test_state.py", self.BASE.replace("self.skipTest('not yet')", "self.assertIsNotNone(RUNS)"))
+        with patch.object(orchestrator, "FLAKY_SEEDS", (1, 2)):
+            self.assertEqual([(f["line"], f["rule"]) for f in self.found()], [(15, "mixed-results")])
+        with open(os.path.join(self.repo, "coverage.xml")) as f:
+            self.assertEqual(f.read(), "the build's report\n")
+        self.assertEqual(sorted(os.listdir(self.repo)), [".git", "calc.py", "coverage.xml", "pytest.ini", "tests"])
+        self.assertEqual(sorted(os.listdir(os.path.join(self.repo, "tests"))), ["test_state.py"])
+
+    def test_tracked_files_that_cannot_be_copied_are_a_finding(self):
+        self.change_the_tests()
+        with patch.object(orchestrator.shutil, "copy2", side_effect=PermissionError(13, "Permission denied")):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-rerun")])
+        self.assertRegex(found[0]["message"], r"^could not copy the tracked files to rerun the changed tests in: .*"
+                                              r"Permission denied.*; the changed tests were not rerun\.$")
+
+    def test_copy_tracked_copies_what_git_tracks_as_it_is(self):
+        self.put("tests/data/a.txt", "a\n")
+        os.symlink("data/a.txt", os.path.join(self.repo, "tests", "link"))
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "data")
+        self.put("tests/data/a.txt", "edited\n")
+        self.put("untracked.txt", "x\n")
+        os.remove(os.path.join(self.repo, "calc.py"))
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = os.path.join(tmp, "copy")
+            orchestrator._copy_tracked(self.repo, dest)
+            found = sorted(os.path.relpath(os.path.join(d, f), dest) for d, _, fs in os.walk(dest) for f in fs)
+            self.assertEqual(found, ["tests/data/a.txt", "tests/link", "tests/test_state.py"])
+            self.assertEqual(os.readlink(os.path.join(dest, "tests", "link")), "data/a.txt")
+            with open(os.path.join(dest, "tests", "data", "a.txt")) as f:
+                self.assertEqual(f.read(), "edited\n")
+
+    def test_a_rerun_directory_left_behind_is_a_finding_beside_the_results(self):
         self.change_the_tests()
         rmtree = shutil.rmtree
 
@@ -4500,9 +4538,10 @@ class TestFlakyTests(unittest.TestCase):
         with patch.object(orchestrator, "FLAKY_SEEDS", (1, 2)), patch.object(orchestrator.shutil, "rmtree", refuse):
             found = self.found()
         self.assertIn((15, "mixed-results"), [(f["line"], f["rule"]) for f in found])
-        [left] = [f for f in found if f["rule"] == "reports-left"]
+        [left] = [f for f in found if f["rule"] == "not-removed"]
         self.assertEqual((left["path"], left["line"]), (None, None))
-        self.assertRegex(left["message"], r"^could not remove the reruns' reports in .+: .*Permission denied")
+        self.assertRegex(left["message"], r"^could not remove the directory the changed tests were rerun in, .+: "
+                                          r".*Permission denied")
 
     def test_a_test_file_that_does_not_collect_is_a_finding(self):
         self.change_the_tests()
