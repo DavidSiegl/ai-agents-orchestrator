@@ -21,6 +21,15 @@ was done.
   `TestFlakyTests`' tests start nested pytest runs. A run over the limit makes `flaky_tests` report `not-rerun`,
   not a wrong verdict. Not measured on the Jenkins agent. Closes with a measured limit, or a lighter
   `TestFlakyTests`.
+- **A pytest configuration below the copy's top directory is not used, so its tests are never rerun.**
+  `_pytest_inifile` looks only in the top directory of `flaky_tests`' copy, and `_pytest` passes what it finds with
+  `-c`, or an empty `pytest.ini`. A project whose pytest configuration is in a subdirectory (`pkg/pyproject.toml`,
+  `tests/pytest.ini`) loses that configuration's `pythonpath`, `addopts`, plugins and markers, so every change to
+  its tests gets `not-rerun` (typically a collection error) and no test is rerun. Before `-c`, pytest's
+  `locate_config` walked up from the changed test files and found it, but it also walked past the copy into
+  `TMPDIR` (review F12). Raised by the cross-review of `flaky-tests` (F13, 2026-10-23). Closes when each changed
+  test's configuration is found by walking from its directory up to the copy's top and no further, in
+  `locate_config`'s order, and the reruns run once per configuration found.
 - **A file name that holds a line separator breaks its list item in the quality file.** `quality_report` writes
   names as they are, so `\r` or U+2028 in one shows as a line break in some renderers. The finding is still
   matched to the right file. Closes with names escaped when the quality file is written.

@@ -69,11 +69,13 @@ tests. It runs them five times, alone, under pytest-randomly with seeds 1 to 5
 so the project's environment that `uv run` gives, whatever `pytest` is on `PATH`) and within 30 seconds. They run in
 a temporary copy of the files git tracks, so a report the project's `addopts` write, such as `coverage.xml`, lands in
 the copy and the build's own stays as the gate reads it; a test that needs an untracked file, such as a build
-product, does not find it there. pytest takes its configuration only from the copy's top directory, where the build's
-own run takes it, in pytest's order (`pytest.toml`, `.pytest.toml`, `pytest.ini`, `.pytest.ini`, then
-`pyproject.toml`, `tox.ini` and `setup.cfg` with a pytest table or section), given with `-c`, or an empty one when it
-has none; `--confcutdir` is the copy. So no `pytest.ini` or `conftest.py` that another account put above the
-temporary directory is read:
+product, does not find it there. pytest takes its configuration only from the copy's top directory, in pytest's
+order (`pytest.toml`, `.pytest.toml`, `pytest.ini`, `.pytest.ini`, then `pyproject.toml`, `tox.ini` and `setup.cfg`
+with a pytest table or section), given with `-c`, or an empty one when it has none; `--confcutdir` is the copy. So
+no `pytest.ini` or `conftest.py` that another account put above the temporary directory is read. The top directory
+is where a build that runs pytest there takes its configuration; a project whose pytest configuration is in a
+subdirectory, such as `pkg/pyproject.toml` or `tests/pytest.ini`, gets the empty one instead, and its tests are
+usually `not-rerun` (see `TODO.md`):
 
 - `mixed-results`: a test that failed under some seeds and passed under the others, at its `def`, naming the seeds
   of each. It depends on the order of the tests, on state another test leaves, or on randomness pytest-randomly
