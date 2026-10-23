@@ -51,3 +51,9 @@ was done.
   or changes only the comments or blank lines above it, is not mutation-tested, unlike flaky-tests' selection
   (`_edits_test`). Kept as the ticket states it. Closes with a decision to pass `_edits_test`-like counting to
   `_changed_python_functions`, which the cognitive-complexity check also uses.
+- **A run the budget stops can leave mutmut's results unreadable.** mutmut 3.8.0 saves a module's results by
+  rewriting `mutants/<path>.meta` in place after each mutant (`SourceFileMutationData.save`, `open(..., "w")` then
+  `json.dump`), so the SIGINT at the budget, or the kill after `MUTMUT_STOP_GRACE`, can land mid-write. `mutmut results`
+  then exits with a `JSONDecodeError`, and `_mutmut_findings` reports `not-run`, "mutmut could not list its results",
+  without the `budget-reached` finding or anything the run had shown. Seen once in another branch's gate run. Closes
+  with the stop waiting for a save to end, or with the gate reading what remains and saying the budget stopped it.

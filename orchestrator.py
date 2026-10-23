@@ -3279,16 +3279,14 @@ def _mutmut_findings(tree_copy: str, functions: list[_ChangedFunction], run: sub
     # Each function's mutants, in the order mutmut lists them, which is the order it made them in, by status.
     mutants: dict[_ChangedFunction, dict[str, list[str]]] = {}
     for mutant, status in statuses.items():
-        # The last __mutmut_: one named _mutmut_x has one in its own name, as x__mutmut_x.
-        owner = by_prefix.get(mutant.rpartition("__mutmut_")[0])
+        owner = by_prefix.get(_prefix_of(mutant))
         if owner is not None:
             mutants.setdefault(owner, {}).setdefault(status, []).append(mutant)
-    # A function mutmut was given but listed no mutant of. mutmut writes a module's mutants once it has made them all,
-    # so one in a module with a listed mutant was reached; stopped by the budget, mutmut may not have reached the
-    # others' modules. _mutant_prefix is a module's name, a dot, and a name without one.
-    reached = {mutant.rpartition("__mutmut_")[0].rpartition(".")[0] for mutant in statuses}
+    # A function mutmut was given but listed no mutant of. mutmut saves a module's mutants, none or more, in
+    # mutants/<path>.meta once it has made them all, so stopped by the budget it had not reached a module without one.
     unlisted = [f for f in functions if f not in mutants]
-    unreached = [f for f in unlisted if stopped and _mutant_prefix(f).rpartition(".")[0] not in reached]
+    unreached = [f for f in unlisted
+                 if stopped and not os.path.exists(os.path.join(tree_copy, "mutants", f"{f.path}.meta"))]
     out = [_finding(f.path, f.line, "not-mutated",
                     f"`{f.name}` was not mutation-tested: mutmut made no mutant of it; {_why_no_mutant(f, table)}.")
            for f in unlisted if f not in unreached]
@@ -3321,8 +3319,10 @@ def _why_no_mutant(f: _ChangedFunction, table: dict) -> str:
     if not isinstance(unit, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return _EVERY_CAUSE
     ends, comments = _logical_line_ends(text)
-    # mutmut skips a function whole only for `block` in the comment of the line its header ends on, with the body on
-    # the lines below (pragma_handling.py, PragmaVisitor._visit_compound_header).
+    # The one form of mutmut's pragmas that keeps a function out whole that the gate tells: `block` in the comment of
+    # the line its header ends on, with the body on the lines below (pragma_handling.py, _visit_compound_header). A
+    # block pragma on a line of its own above the def or atop its body, one on its class, or a start/end pair around
+    # it keep it out too, and get _EVERY_CAUSE, which names a pragma among the causes.
     header = ends[bisect.bisect_left(ends, unit.lineno)] if ends and ends[-1] >= unit.lineno else None
     if header is not None and unit.body[0].lineno > header and _mutmut_pragma(comments.get(header, "")) == "block":
         return "a `# pragma: no mutate block` where its header ends keeps it out"
@@ -3513,10 +3513,17 @@ def _skip_unchanged(path: str, text: str, changed: set[tuple[str, str]]) -> str:
 
 def _mutant_prefix(f: _ChangedFunction) -> str:
     """The name mutmut 3 gives f's mutants before their `__mutmut_<n>`: f's module, from its path as mutmut's
-    get_mutant_name makes it, then x_<function> or xǁ<class>ǁ<method>."""
+    get_mutant_name makes it, a dot, then x_<function> or xǁ<class>ǁ<method>, which holds no dot. _prefix_of reads it
+    back from a mutant's name."""
     module = f.path.removesuffix(".py").replace("/", ".").removeprefix("src.")
     cls, _, name = f.name.rpartition(".")
     return f"{module}.{f'xǁ{cls}ǁ{name}' if cls else f'x_{name}'}".replace(".__init__.", ".")
+
+
+def _prefix_of(mutant: str) -> str:
+    """The part of a mutant's name, as `mutmut results` lists it, that _mutant_prefix gives its function: all before
+    its last `__mutmut_`, since a function named _mutmut_x has one in its own name, as x__mutmut_x."""
+    return mutant.rpartition("__mutmut_")[0]
 
 
 def _run_mutmut(tree_copy: str, args: list[str], timeout: float) -> tuple[subprocess.CompletedProcess, bool]:

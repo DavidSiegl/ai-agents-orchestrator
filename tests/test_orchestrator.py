@@ -5172,10 +5172,26 @@ class TestSurvivingMutants(unittest.TestCase):
         # mutmut writes a file's mutants once it has made them all, so calc.py was reached whole.
         self.put("calc.py", self.BASE.replace("b + a", "a + b")
                  .replace("def unchecked(a, b):", "def unchecked(a, b):  # pragma: no mutate block"))
-        self.fake_mutmut("exec sleep 30", results="    calc.x_checked__mutmut_1: not checked\n")
+        self.fake_mutmut("mkdir -p mutants; touch mutants/calc.py.meta; exec sleep 30",
+                         results="    calc.x_checked__mutmut_1: not checked\n")
         found = self.found(budget=1)
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
                          [(None, None, "budget-reached"), ("calc.py", 5, "not-mutated")])
+        self.assertNotIn("before the budget ran out", found[0]["message"])
+        self.assertIn("a `# pragma: no mutate block` where its header ends keeps it out", found[1]["message"])
+
+    def test_a_module_mutmut_saved_without_mutants_was_reached(self):
+        # mutmut saves a module's .meta once it has made its mutants, none or more.
+        self.put("more.py", "def g(a):\n    return a + 1\n")
+        self.git("add", "more.py")
+        self.git("commit", "--quiet", "-m", "more")
+        self.put("more.py", "def g(a):  # pragma: no mutate block\n    return a + 2\n")
+        self.change_the_functions("checked")
+        self.fake_mutmut("mkdir -p mutants; touch mutants/calc.py.meta mutants/more.py.meta; exec sleep 30",
+                         results="    calc.x_checked__mutmut_1: not checked\n")
+        found = self.found(budget=1, rules=self.rules({"source_paths": ["calc.py", "more.py"]}))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                         [(None, None, "budget-reached"), ("more.py", 1, "not-mutated")])
         self.assertNotIn("before the budget ran out", found[0]["message"])
         self.assertIn("a `# pragma: no mutate block` where its header ends keeps it out", found[1]["message"])
 
