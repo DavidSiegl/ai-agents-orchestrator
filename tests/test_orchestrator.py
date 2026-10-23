@@ -3862,6 +3862,14 @@ class TestNewDependencies(unittest.TestCase):
             ("unchecked", "PyPI could not be asked about `rich`, `attrs`: the quality round had too little time left "
                           "to ask; whether they exist is not known.")])
 
+    def test_a_dependency_is_found_on_the_line_that_names_it_whole(self):
+        pypi = FakePyPI(**{"zope-interface": pypi_project(), "zope": pypi_project()})
+        reqs = ("zope.interface>=5", "zope")
+        _, to_weigh = self.find(run_change(pyproject_diff(*reqs), pyproject_files(*reqs, base="base", commit="new"),
+                                           spec="zope and zope.interface"), pypi)
+        self.assertEqual([(f["line"], f["message"][:16]) for f in to_weigh],
+                         [(5, "`zope-interface`"), (6, "`zope`, which th")])
+
     def test_a_dependency_from_a_url_is_not_looked_up(self):
         url = "git+https://example.com/limits.git@v3"
         pypi = FakePyPI()

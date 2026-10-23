@@ -4819,9 +4819,10 @@ def _unreadable(e: ManifestError, where: str, severity: str) -> dict:
 
 
 def _line_naming(text: str, added: set[int], key: str) -> int | None:
-    """The first of the added lines of text that names the package key, as spec_names reads a name."""
-    pattern = re.compile(r"(?<![A-Za-z0-9._-])" + "[-_.]+".join(map(re.escape, key.split("-"))) + r"(?![A-Za-z0-9_-])",
-                         re.IGNORECASE)
+    """The first of the added lines of text that names the package key, as spec_names reads a name: a ., - or _ that
+    goes on into more of a name makes it another name, as zope.interface is not zope."""
+    pattern = re.compile(r"(?<![A-Za-z0-9._-])" + "[-_.]+".join(map(re.escape, key.split("-")))
+                         + r"(?![-_.]*[A-Za-z0-9])", re.IGNORECASE)
     lines = text.split("\n")
     return next((n for n in sorted(added) if n <= len(lines) and pattern.search(lines[n - 1])), None)
 
