@@ -64,13 +64,13 @@ The gate is `GATE: ERROR` when any of these holds, and `GATE: OK` otherwise:
 - a finding on a line the change adds, or a finding of a failing check;
 - a linter that is missing, fails, or exits "found something" with nothing the gate can read. A gate that cannot
   run a check never reports it as passed;
-- a file a linter reads, by the pathspecs in the table above, with a character that linter ends a line at and git
-  does not, on any line up to the last one the change adds to it, whichever commit put it there. For every linter
-  that is a carriage return not followed by a newline; for actionlint, whose YAML parser follows YAML 1.1, also
-  NEL (U+0085), U+2028 and U+2029. Each linter declares its own set in `GateTool.line_ends`. ruff, mypy, pymarkdown
-  and actionlint number every later line of the file past git's, and shellcheck stops reading there. Either way the
-  gate cannot judge their findings below it. The condition names the file, the first such line and the character.
-  A file no linter reads, such as a text file with old Mac line ends, is not held to this;
+- a file a linter reads, by the pathspecs in the table above, with a character that linter ends a line at and git does
+  not, on any line up to the last one the change adds to it, whichever commit put it there. For every linter that is a
+  carriage return not followed by a newline; actionlint also ends a line at NEL (U+0085), U+2028 and U+2029, though YAML
+  1.2 does not (see the comment on its `GateTool.line_ends`). Each linter declares its own set. ruff, mypy, pymarkdown
+  and actionlint number every later line of the file past git's, and shellcheck stops reading there. Either way the gate
+  cannot judge their findings below it. The condition names the file, the first such line and the character. A file no
+  linter reads, such as a text file with old Mac line ends, is not held to this;
 - with `--tests`, a failing test in that JUnit report;
 - with `--coverage`, coverage of new code below 80%, once the change has 20 or more new lines to cover. Coverage
   of new code is (covered branch outcomes + covered lines) / (branch outcomes + coverable lines), over the added

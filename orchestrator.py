@@ -2102,7 +2102,9 @@ GATE_TOOLS = (
     GateTool("actionlint", (".github/workflows/*.yml", ".github/workflows/*.yaml"),
              lambda rules, files: ["actionlint", "-config-file", os.devnull, *files],
              re.compile(r"(?P<message>.+) \[(?P<rule>[\w-]+)\]"),
-             # go-yaml ends a line where YAML 1.1 does (https://yaml.org/spec/1.1/), at NEL, U+2028 and U+2029 too.
+             # Its YAML parser, ported from libyaml, also ends a line at NEL, U+2028 and U+2029, although YAML 1.2
+             # does not (https://yaml.org/spec/1.2.2/#54-line-break-characters). Observed with actionlint 1.7.12
+             # (go.yaml.in/yaml/v4 v4.0.0-rc.3); the tests stub actionlint, so recheck this on an upgrade.
              ("\r", "\x85", "\u2028", "\u2029")),
 )
 

@@ -3794,7 +3794,8 @@ class TestGate(unittest.TestCase):
             f.write(b"\x03\n")
         status, out, _ = self.gate()
         self.assertEqual(status, 0)
-        self.assertNotIn("carriage return", out)
+        self.assertNotIn("`notes.txt:", out)
+        self.assertNotIn("`data.bin:", out)
 
     def test_a_carriage_return_above_an_added_line_fails_the_gate_in_any_file_a_linter_reads(self):
         # The \r lines are the base's, and d.md is pymarkdown's: each linter's line after them is one past git's.
