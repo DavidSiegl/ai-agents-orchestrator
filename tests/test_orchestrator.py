@@ -4066,6 +4066,16 @@ class TestGate(unittest.TestCase):
         with self.assertRaises(SystemExit), patch("sys.stderr"):
             self.gate("--mutation-budget", "0")
 
+    def test_the_checks_are_told_whose_rules_judge_the_change(self):
+        seen = []
+        self.checks(orchestrator.GateCheck("rules", fails=False, find=lambda change: seen.append(change.rules) or []))
+        main_rules = os.path.join(self.stubs, "main.toml")
+        with open(main_rules, "w") as f:
+            f.write("[tool.ruff]\n")
+        self.gate()
+        self.gate("--config", main_rules)
+        self.assertEqual(seen, [os.path.join(self.repo, "pyproject.toml"), main_rules])
+
     def test_config_replaces_the_tree_s_rules(self):
         self.put("pyproject.toml", "[tool.ruff]\nline-length = 1\n")
         self.gate()
@@ -4832,11 +4842,18 @@ class TestSurvivingMutants(unittest.TestCase):
         with open(path, "w") as f:
             f.write(text)
 
-    def found(self, budget=60):
+    def found(self, budget=60, rules=None):
         base = self.git("rev-parse", "HEAD").strip()
         diff = self.host.change_diff(self.repo, base)
-        return orchestrator.surviving_mutants(orchestrator.GateChange(self.repo, base, diff, changed_lines(diff)),
-                                              budget=budget)
+        return orchestrator.surviving_mutants(
+            orchestrator.GateChange(self.repo, base, diff, changed_lines(diff), rules), budget=budget)
+
+    def rules(self, table):
+        """A rules file outside the tree, as `gate --config` names one, with table as its [tool.mutmut]."""
+        path = os.path.join(self.bin, "rules.toml")
+        with open(path, "w") as f:
+            f.write("[tool.mutmut]\n" + "".join(f"{key} = {json.dumps(value)}\n" for key, value in table.items()))
+        return path
 
     def change_the_functions(self):
         """Edit checked, unchecked, orphan and Box.size, leaving untouched and Box.other as they were."""
@@ -4899,6 +4916,42 @@ class TestSurvivingMutants(unittest.TestCase):
             return statuses, problem
         with patch.object(orchestrator, "_mutant_statuses", results):
             return made, self.found(budget)
+
+    def test_the_rules_mutmut_table_judges_the_change_not_the_tree_s(self):
+        self.change_the_functions()
+        # The change tells mutmut to leave every line alone; the rules it is judged by do not.
+        with open(os.path.join(self.repo, "pyproject.toml"), "a") as f:
+            f.write("do_not_mutate_patterns = ['.']\n")
+        rules = self.rules({"source_paths": ["calc.py"], "pytest_add_cli_args_test_selection": ["tests/"]})
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in self.found(rules=rules)],
+                         [("calc.py", 5, "survived"), ("calc.py", 13, "untested"), ("calc.py", 18, "survived")])
+
+    def test_a_function_outside_source_paths_is_not_mutated_and_said_so(self):
+        self.put("tools/extra.py", "def extra():\n    return 1\n")
+        self.git("add", "tools/extra.py")
+        self.fake_mutmut(f"touch {self.bin}/ran")
+        found = self.found()
+        self.assertFalse(os.path.exists(os.path.join(self.bin, "ran")))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("tools/extra.py", 1, "not-mutated")])
+        self.assertIn("`extra`", found[0]["message"])
+        self.assertIn("outside [tool.mutmut] source_paths", found[0]["message"])
+
+    def test_a_file_do_not_mutate_names_is_not_mutated_and_said_so(self):
+        self.put("calc.py", self.BASE.replace("return 1", "return 2"))
+        self.fake_mutmut(f"touch {self.bin}/ran")
+        rules = self.rules({"source_paths": ["."], "do_not_mutate": ["calc*"]})
+        found = self.found(rules=rules)
+        self.assertFalse(os.path.exists(os.path.join(self.bin, "ran")))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 13, "not-mutated")])
+        self.assertIn("do_not_mutate", found[0]["message"])
+
+    def test_rules_that_name_no_source_paths_are_a_finding(self):
+        self.change_the_functions()
+        self.fake_mutmut(f"touch {self.bin}/ran")
+        found = self.found(rules=self.rules({"also_copy": ["docs/"]}))
+        self.assertFalse(os.path.exists(os.path.join(self.bin, "ran")))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
+        self.assertIn("source_paths", found[0]["message"])
 
     def test_a_change_to_a_help_text_alone_makes_no_mutant(self):
         # The second line of the help text does not say help=, but its string starts on the line that does.

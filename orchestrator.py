@@ -37,6 +37,7 @@ import collections
 import contextlib
 import copy
 import difflib
+import fnmatch
 import functools
 import http.client
 import io
@@ -2157,6 +2158,8 @@ class GateChange:
     base: str  # the commit the change is judged against, a full sha
     diff: str  # Host.change_diff from base to the working tree
     changed: dict[str, set[int]]  # changed_lines(diff)
+    # The pyproject.toml whose rules judge the change, `gate --config`'s or the tree's own; None for the tree's own.
+    rules: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2256,7 +2259,7 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
                    f"write it as an escape in a string."
                    for path, n, end in stray_line_ends(root, changed, reads)]
     to_weigh: list[dict] = []
-    change = GateChange(root, base_sha, diff, changed)
+    change = GateChange(root, base_sha, diff, changed, rules_path)
     for check in checks:
         found = [{**f, "rule": f"{check.name} {f['rule']}" if f["rule"] else check.name} for f in check.find(change)]
         if not check.fails:
@@ -3157,47 +3160,82 @@ def surviving_mutants(change: GateChange, *, budget: float) -> list[dict]:
     tests did not notice, with how many of its mutants they were and what the first _SURVIVOR_EXAMPLES change, as a
     line before and after; and each such function that no test calls.
 
-    mutmut runs in the gate's own interpreter, as flaky_tests runs pytest, on a copy of the files git tracks, by that
-    copy's [tool.mutmut]: its source_paths decide which files can be mutated and its test selection which tests run,
-    and each mutant is tried against the tests that called its function on a clean run. It may run budget seconds; a
-    run stopped there is a finding that says how many of the mutants it tried, beside what those showed. A mutmut that
-    cannot start, fails, or whose results cannot be listed is a finding saying so, and so is a changed file that cannot
-    be read or parsed.
+    mutmut runs in the gate's own interpreter, as flaky_tests runs pytest, on a copy of the files git tracks, by the
+    [tool.mutmut] of change.rules, whatever the copy's says: its source_paths, only_mutate and do_not_mutate decide
+    which files can be mutated, and a changed function outside them is a finding saying so; its test selection says
+    which tests run. Each mutant is tried against the tests that called its function on a clean run. mutmut may run
+    budget seconds; a run stopped there is a finding that says how many of the mutants it tried, beside what those
+    showed. A mutmut that cannot start, fails, or whose results cannot be listed is a finding saying so, and so are
+    rules that name no source_paths and a changed file that cannot be read or parsed.
     """
     functions, out = _changed_python_functions(change)
-    if not functions:
+    if functions:
+        out += _mutation_test(change, functions, budget)
+    return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
+
+
+def _mutation_test(change: GateChange, functions: list[_ChangedFunction], budget: float) -> list[dict]:
+    """surviving_mutants's findings on functions, the change's changed functions: those mutmut does not mutate, then
+    what a run of mutmut, by the rules' [tool.mutmut], of budget seconds found of the others."""
+    tree_rules = os.path.join(change.root, "pyproject.toml")
+    rules = change.rules or tree_rules
+    table, problem = _mutmut_table(rules)
+    if problem:
+        return [_mutation_not_run(problem)]
+    out, mutated = [], []
+    for f in functions:
+        why = _outside_mutmut(f.path, table)
+        if why:
+            out.append(_finding(f.path, f.line, "not-mutated", f"`{f.name}` was not mutation-tested: {why}."))
+        else:
+            mutated.append(f)
+    if not mutated:
         return out
     with tempfile.TemporaryDirectory() as tree_copy:
         try:
-            _copy_for_mutmut(change.root, tree_copy, {(f.path, f.name) for f in functions})
-            proc, stopped = _run_mutmut(tree_copy, ["run"], budget)
+            _copy_for_mutmut(change.root, tree_copy, {(f.path, f.name) for f in mutated})
+            # The tree's own table may loosen the rules it is judged by; the rest of its pyproject.toml is how its
+            # tests run.
+            if os.path.abspath(rules) != tree_rules:
+                _use_mutmut_table(tree_copy, table)
+            run, stopped = _run_mutmut(tree_copy, ["run"], budget)
         except (OSError, OrchestratorError) as e:
             return [*out, _mutation_not_run(f"could not start mutmut: {e}")]
-        no_tests = proc.returncode != 0 and _MUTMUT_NO_TESTS in proc.stdout
-        if proc.returncode != 0 and not stopped and not no_tests:
-            return [*out, _mutation_not_run(f"mutmut exited with status {proc.returncode}: "
-                                            f"{_said(proc)}")]
-        deadline = time.monotonic() + MUTMUT_REPORT_TIMEOUT
-        statuses, problem = _mutant_statuses(tree_copy, deadline)
-        if problem:
-            return [*out, _mutation_not_run(problem)]
-        by_prefix = {_mutant_prefix(f): f for f in functions}
-        # Each function's mutants, in the order mutmut lists them, which is the order it made them in, by status.
-        mutants: dict[_ChangedFunction, dict[str, list[str]]] = {}
-        for mutant, status in statuses.items():
-            # The last __mutmut_: one named _mutmut_x has one in its own name, as x__mutmut_x.
-            f = by_prefix.get(mutant.rpartition("__mutmut_")[0])
-            if f is not None:
-                mutants.setdefault(f, {}).setdefault("no tests" if no_tests else status, []).append(mutant)
-        for f, by_status in mutants.items():
-            tried = sum(len(names) for status, names in by_status.items()
-                        if status not in _MUTMUT_UNTRIED and status != "no tests")
-            if by_status.get("survived"):
-                out.append(_survivors(tree_copy, f, by_status["survived"], tried, deadline))
-            if by_status.get("no tests"):
-                out.append(_finding(f.path, f.line, "untested",
-                                    f"no test calls `{f.name}`, so none of its {len(by_status['no tests'])} "
-                                    f"mutants can make one fail."))
+        except ValueError as e:
+            return [*out, _mutation_not_run(str(e))]
+        return out + _mutmut_findings(tree_copy, mutated, run, stopped, budget)
+
+
+def _mutmut_findings(tree_copy: str, functions: list[_ChangedFunction], run: subprocess.CompletedProcess,
+                     stopped: bool, budget: float) -> list[dict]:
+    """What the run of mutmut in tree_copy found of functions, as `mutmut results` and `mutmut show` tell it: run is
+    how it ended, and stopped whether the budget of budget seconds stopped it."""
+    no_tests = run.returncode != 0 and _MUTMUT_NO_TESTS in run.stdout
+    if run.returncode != 0 and not stopped and not no_tests:
+        return [_mutation_not_run(f"mutmut exited with status {run.returncode}: {_said(run)}")]
+    deadline = time.monotonic() + MUTMUT_REPORT_TIMEOUT
+    statuses, problem = _mutant_statuses(tree_copy, deadline)
+    if problem:
+        return [_mutation_not_run(problem)]
+    if no_tests:
+        statuses = dict.fromkeys(statuses, "no tests")
+    by_prefix = {_mutant_prefix(f): f for f in functions}
+    # Each function's mutants, in the order mutmut lists them, which is the order it made them in, by status.
+    mutants: dict[_ChangedFunction, dict[str, list[str]]] = {}
+    for mutant, status in statuses.items():
+        # The last __mutmut_: one named _mutmut_x has one in its own name, as x__mutmut_x.
+        owner = by_prefix.get(mutant.rpartition("__mutmut_")[0])
+        if owner is not None:
+            mutants.setdefault(owner, {}).setdefault(status, []).append(mutant)
+    out = []
+    for f, by_status in mutants.items():
+        tried = sum(len(names) for status, names in by_status.items()
+                    if status not in _MUTMUT_UNTRIED and status != "no tests")
+        if by_status.get("survived"):
+            out.append(_survivors(tree_copy, f, by_status["survived"], tried, deadline))
+        if by_status.get("no tests"):
+            out.append(_finding(f.path, f.line, "untested", f"no test calls `{f.name}`, so none of its "
+                                                            f"{len(by_status['no tests'])} mutants can make one fail."))
     if stopped:
         tried = sum(1 for status in statuses.values() if status not in _MUTMUT_UNTRIED)
         out.append(_finding(None, None, "budget-reached", (
@@ -3205,7 +3243,7 @@ def surviving_mutants(change: GateChange, *, budget: float) -> list[dict]:
             else "budget reached before mutmut had made its mutants")
             + f": mutmut was stopped at {budget:g} seconds (`--mutation-budget`), so the mutants it did not try may "
               f"survive too."))
-    return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
+    return out
 
 
 def _changed_python_functions(change: GateChange) -> tuple[list[_ChangedFunction], list[dict]]:
@@ -3215,6 +3253,67 @@ def _changed_python_functions(change: GateChange) -> tuple[list[_ChangedFunction
     functions, unreadable = _changed_python_units(change, lambda path: not _python_test_file(path))
     return functions, [_finding(path, None, "not-run", f"{why}, so its functions were not mutation-tested.")
                        for path, why in unreadable]
+
+
+def _mutmut_table(rules: str) -> tuple[dict, str | None]:
+    """The [tool.mutmut] table of the pyproject.toml at rules, {} when it has none; or {} and the problem, a clause,
+    when it cannot be read or names no source_paths, without which what mutmut mutates cannot be told."""
+    try:
+        with open(rules, "rb") as f:
+            table = tomllib.load(f).get("tool", {}).get("mutmut", {})
+    except (OSError, tomllib.TOMLDecodeError, AttributeError) as e:
+        return {}, f"could not read [tool.mutmut] in {rules}: {e}"
+    sources = (table.get("source_paths") or table.get("paths_to_mutate")) if isinstance(table, dict) else None
+    if not isinstance(sources, list) or not sources or not all(isinstance(p, str) for p in sources):
+        return {}, (f"[tool.mutmut] in {rules} names no source_paths as a list of paths, so what mutmut mutates is "
+                    f"unknown")
+    return table, None
+
+
+def _outside_mutmut(path: str, table: dict) -> str | None:
+    """Why mutmut, set up by table, a [tool.mutmut] with source_paths, mutates nothing in the file at path, relative to
+    the tree's top; None when it may. As mutmut 3.8.0 decides it, by walking source_paths, then Config.should_mutate's
+    only_mutate and do_not_mutate globs."""
+    sources: list[str] = table.get("source_paths") or table.get("paths_to_mutate") or []
+    roots = [os.path.normpath(p) for p in sources]
+    if not any(r == "." or path == r or path.startswith(f"{r}/") for r in roots):
+        return f"it is outside [tool.mutmut] source_paths ({', '.join(sources)})"
+    only = table.get("only_mutate", [])
+    if only and not any(fnmatch.fnmatch(path, g) for g in only):
+        return f"[tool.mutmut] only_mutate ({', '.join(only)}) leaves it out"
+    excluded = [g for g in table.get("do_not_mutate", []) if fnmatch.fnmatch(path, g)]
+    return f"[tool.mutmut] do_not_mutate excludes it ({', '.join(excluded)})" if excluded else None
+
+
+def _use_mutmut_table(tree_copy: str, table: dict) -> None:
+    """Puts table in place of the [tool.mutmut] of tree_copy's pyproject.toml, leaving the rest of the file, the
+    tests' own settings among it, as the tree has it. Raises OSError when the file cannot be read or written, and
+    ValueError when the result does not read back as table, as when table holds a value TOML's flat form cannot take
+    or the file defines the table other than under a [tool.mutmut] header."""
+    path = os.path.join(tree_copy, "pyproject.toml")
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        text = ""
+    kept, inside = [], False
+    for line in text.split("\n"):
+        header = re.fullmatch(r"\s*\[\[?\s*([^\[\],=#]+?)\s*\]\]?\s*(?:#.*)?", line)
+        if header:
+            inside = header.group(1) == "tool.mutmut"
+        if not inside:
+            kept.append(line)
+    # JSON's strings, numbers, booleans and arrays of them are TOML's too, and a quoted key is a key.
+    text = ("\n".join(kept).rstrip("\n") + "\n\n[tool.mutmut]\n"
+            + "".join(f"{json.dumps(key)} = {json.dumps(value)}\n" for key, value in table.items()))
+    try:
+        replaced = tomllib.loads(text).get("tool", {}).get("mutmut") == table
+    except tomllib.TOMLDecodeError:
+        replaced = False
+    if not replaced:
+        raise ValueError("the rules' [tool.mutmut] could not be put in place of the tree's in its pyproject.toml")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
 
 
 def _copy_for_mutmut(root: str, tree_copy: str, changed: set[tuple[str, str]]) -> None:

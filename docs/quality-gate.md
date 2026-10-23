@@ -111,18 +111,21 @@ altered, an argument dropped - and runs each of these mutants against the tests 
 - `untested`: a changed function that no test calls, at its `def`, with how many mutants it has;
 - `budget-reached`: mutmut ran out of time, as "budget reached after N of M mutants". What the N showed is listed; the
   others may survive too;
-- `not-run`: mutmut could not start, failed, as it does when a test fails, or left results the gate could not read; or a
-  changed file could not be read or parsed.
+- `not-mutated`: a changed function mutmut does not mutate, at its `def`, with the reason: its file is outside
+  `[tool.mutmut]`'s `source_paths`, or left out by `only_mutate` or `do_not_mutate`;
+- `not-run`: mutmut could not start, failed, as it does when a test fails, or left results the gate could not read; the
+  rules name no `source_paths`; or a changed file could not be read or parsed.
 
 mutmut runs in the gate's own interpreter, on a copy of the files git tracks, so the working tree stays as it was; its
 state, `mutants/`, goes into the copy too. Its own selector, mutant names such as
 `orchestrator.x_judge_change__mutmut_*`, picks which mutants run only after mutmut has made a mutant of every function,
 which takes minutes for `orchestrator.py`. So in the copy, each function and class the change does not touch gets
-mutmut's `# pragma: no mutate block` at the end of its header, and mutmut skips it. The copy's `[tool.mutmut]` says what
-can be mutated (`source_paths`), which tests run (`pytest_add_cli_args_test_selection`), and what the tests read beside
-the code (`also_copy`), and which lines are left alone (`do_not_mutate_patterns`): in a quality build that is the
-snapshot's own table, not `main`'s, and an edit to it shows under build configuration. In a repository without mutmut, a
-change to a function gets a `not-run` finding.
+mutmut's `# pragma: no mutate block` at the end of its header, and mutmut skips it. The rules' `[tool.mutmut]` says
+what can be mutated (`source_paths`, `only_mutate`, `do_not_mutate`), which tests run
+(`pytest_add_cli_args_test_selection`), what the tests read beside the code (`also_copy`), and which lines are left
+alone (`do_not_mutate_patterns`); see [whose rules judge a change](#whose-rules-judge-a-change). Python files are read
+as Python reads them, by a byte order mark or a coding cookie. In a repository without mutmut, a change to a function
+gets a `not-run` finding.
 
 `--mutation-budget SECONDS`, 600 by default, bounds mutmut's run; listing its results and showing the survivors take at
 most a minute more. With the flaky-tests check's three minutes and the test run, a quality build stays inside the
@@ -197,6 +200,11 @@ so that a `.shellcheckrc` or `.github/actionlint.yaml` added to the tree cannot 
 snapshot still controls is visible in its quality file: tool versions through `uv.lock` (noted under build
 configuration), and inline suppressions (listed). shellcheck and actionlint versions live in the agent image,
 outside this repository.
+
+The surviving-mutants check takes `[tool.mutmut]` from the same file, so a change cannot tell mutmut to leave its
+code alone. In the copy mutmut runs on, that table replaces the tree's own, and only that table: the rest of the
+tree's `pyproject.toml`, such as `[tool.pytest.ini_options]`, is how its tests run, which a change may need to alter.
+Without `--config`, the tree's table judges it, as the linters' do.
 
 The rule sets were tuned until `main` gave a short list of real findings: ruff's defaults plus bugbear,
 simplifications, pyupgrade, bandit, complexity (`max-complexity = 15`) and pylint's errors and warnings, with the
