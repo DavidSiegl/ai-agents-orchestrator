@@ -4442,7 +4442,9 @@ class TestFlakyTests(unittest.TestCase):
         self.git("commit", "--quiet", "-am", "decorated")
         self.put("tests/test_state.py", decorated.replace("    @unittest.skip('not yet')\n", "").replace(
             "    @unittest.expectedFailure\n", ""))
-        self.assertEqual([f["line"] for f in self.found()], [15])
+        # Two seeds are enough for test_alternates to fail under one, and keep this test quick.
+        with patch.object(orchestrator, "FLAKY_SEEDS", (1, 2)):
+            self.assertEqual([(f["line"], f["rule"]) for f in self.found()], [(15, "mixed-results")])
 
     def test_a_change_to_no_test_reruns_nothing(self):
         self.put("calc.py", "def add(a, b):\n    return b + a\n")
@@ -4476,9 +4478,14 @@ class TestFlakyTests(unittest.TestCase):
 
     def test_reports_left_behind_are_a_finding_beside_the_results(self):
         self.change_the_tests()
-        with patch.object(orchestrator.shutil, "rmtree", side_effect=PermissionError(13, "Permission denied")):
+        rmtree = shutil.rmtree
+
+        def refuse(path):
+            self.addCleanup(rmtree, path)
+            raise PermissionError(13, "Permission denied", path)
+        with patch.object(orchestrator, "FLAKY_SEEDS", (1, 2)), patch.object(orchestrator.shutil, "rmtree", refuse):
             found = self.found()
-        self.assertIn(self.alternates(), [f["message"] for f in found])
+        self.assertIn((15, "mixed-results"), [(f["line"], f["rule"]) for f in found])
         [left] = [f for f in found if f["rule"] == "reports-left"]
         self.assertEqual((left["path"], left["line"]), (None, None))
         self.assertRegex(left["message"], r"^could not remove the reruns' reports in .+: .*Permission denied")
