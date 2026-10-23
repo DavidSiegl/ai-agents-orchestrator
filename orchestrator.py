@@ -3777,15 +3777,52 @@ def _mutation_not_run(problem: str) -> dict:
 # default for S3776.
 COGNITIVE_COMPLEXITY_LIMIT = 15
 
+# Where the check judges no function: the tests, as `per-file-ignores` in pyproject.toml exempts them from ruff's C901.
+_COMPLEXITY_EXEMPT = "tests/"
+
+
+@dataclass(frozen=True)
+class _ScoredFunction:
+    """A function the cognitive-complexity check judges as one, and its score: a function no other function holds,
+    whether at the top of its module, in a class at any depth, or under a module-level statement such as an if or a
+    try. A function nested in another is part of that one."""
+    name: str  # its name qualified by its classes: f, C.f or C.D.f
+    first: int  # the line it starts on, its decorators included
+    last: int  # the line it ends on
+    line: int  # the line of its def
+    score: int  # its cognitive_complexity
+
+
+def _scored_functions(tree: ast.Module) -> list[_ScoredFunction]:
+    """Each function of tree that the cognitive-complexity check judges as one, scored, in the order they are
+    written."""
+    out = []
+    # The nodes whose statements are still to be read, each with the qualified-name prefix there and the class a
+    # function there is a method of. A stack rather than recursion, as cognitive_complexity has.
+    todo: list[tuple[ast.AST, str, str | None]] = [(tree, "", None)]
+    while todo:
+        node, prefix, cls = todo.pop()
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                first = min([child.lineno, *(d.lineno for d in child.decorator_list)])
+                out.append(_ScoredFunction(prefix + child.name, first, child.end_lineno or child.lineno, child.lineno,
+                                           cognitive_complexity(child, cls)))
+            elif isinstance(child, ast.ClassDef):
+                todo.append((child, f"{prefix}{child.name}.", child.name))
+            elif isinstance(child, ast.stmt | ast.excepthandler | ast.match_case):
+                todo.append((child, prefix, cls))
+    return sorted(out, key=lambda f: f.first)
+
 
 def too_complex_functions(change: GateChange) -> list[dict]:
-    """The cognitive-complexity check's find: each top-level function and method the change adds a line to, in a Python
-    file outside the tests, whose cognitive_complexity is over COGNITIVE_COMPLEXITY_LIMIT and higher than at the base,
-    or which the base does not have; at its def line, with both scores. A function over the limit that the change
-    leaves no worse is not a finding: the gate judges the change, not the codebase.
+    """The cognitive-complexity check's find: each function the change adds a line to, in a Python file outside
+    _COMPLEXITY_EXEMPT, whose cognitive_complexity is over COGNITIVE_COMPLEXITY_LIMIT and higher than at the base, or
+    which the base does not have; at its def line, with both scores. A function over the limit that the change leaves
+    no worse is not a finding: the gate judges the change, not the codebase. The functions judged are those
+    _ScoredFunction describes.
 
-    A function's base is the one with its name, in its class, in the file's base; for a file the change renamed, under
-    the file's old name. A changed file that cannot be read or parsed is a finding saying so, and so is one that has a
+    A function's base is the one with its qualified name in the file's base; for a file the change renamed, under the
+    file's old name. A changed file that cannot be read or parsed is a finding saying so, and so is one that has a
     function over the limit and whose base cannot be read or parsed.
     """
     out, over = _changed_over_limit(change)
@@ -3794,30 +3831,29 @@ def too_complex_functions(change: GateChange) -> list[dict]:
     try:
         old_paths = {new: old for old, new in Host().changed_files(change.root, change.base) if new}
     except OrchestratorError as e:
-        return [*out, _finding(None, None, "not-scored", f"the files the change edits could not be listed ({e}), so no "
-                                                         f"function was compared with its base.", severity="error")]
-    at_base = {path: _base_complexities(change, old_paths.get(path, path)) for path, *_ in over}
-    for path, cls, node, n in over:
+        return [*out, _finding(None, None, "not-scored", f"the files the change edits could not be listed "
+                                                                    f"({e}), so no function was compared with its "
+                                                                    f"base.", severity="error")]
+    at_base = {path: _base_complexities(change, old_paths.get(path, path)) for path in {path for path, _ in over}}
+    for path, f in over:
         scores, problem = at_base[path]
-        was = scores.get((cls, node.name))
-        if problem is None and (was is None or n > was):
-            name = f"{cls}.{node.name}" if cls else node.name
-            out.append(_finding(path, node.lineno, "over-limit", (
-                f"`{name}`: cognitive complexity {n}, {'a new function' if was is None else f'{was} at the base'}; "
+        was = scores.get(f.name)
+        if problem is None and (was is None or f.score > was):
+            out.append(_finding(path, f.line, "over-limit", (
+                f"`{f.name}`: cognitive complexity {f.score}, "
+                f"{'a new function' if was is None else f'{was} at the base'}; "
                 f"the limit is {COGNITIVE_COMPLEXITY_LIMIT}."), severity="error"))
-    out += [_finding(path, None, "not-scored", problem, severity="error")
-            for path, (_, problem) in at_base.items() if problem]
+    out += [_finding(path, None, "not-scored", problem, severity="error") for path, (_, problem) in at_base.items() if problem]
     return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
 
 
-def _changed_over_limit(change: GateChange) -> tuple[list[dict], list[tuple[str, str | None, ast.FunctionDef |
-                                                                              ast.AsyncFunctionDef, int]]]:
-    """A finding for each Python file outside the tests that the change adds lines to and that cannot be read or
-    parsed; and (path, class, function, score) for each top-level function or method of a top-level class in the
-    others that the change adds a line to, decorators included, and that scores over COGNITIVE_COMPLEXITY_LIMIT."""
+def _changed_over_limit(change: GateChange) -> tuple[list[dict], list[tuple[str, _ScoredFunction]]]:
+    """A finding for each Python file outside _COMPLEXITY_EXEMPT that the change adds lines to and that cannot be read
+    or parsed; and (path, function) for each function in the others that the change adds a line to, decorators
+    included, and that scores over COGNITIVE_COMPLEXITY_LIMIT."""
     out, over = [], []
     for path, added in change.changed.items():
-        if not added or not path.endswith(".py") or _python_test_file(path):
+        if not added or not path.endswith(".py") or path.startswith(_COMPLEXITY_EXEMPT):
             continue
         full = os.path.join(change.root, path)
         # A symlink's change is the name it points to, and a submodule's its commit: neither is a line of code.
@@ -3826,38 +3862,22 @@ def _changed_over_limit(change: GateChange) -> tuple[list[dict], list[tuple[str,
         try:
             text = _read_text(full)
         except (OSError, UnicodeDecodeError) as e:
-            out.append(_finding(path, None, "not-scored", f"could not be read ({e}), so its functions were not scored.",
-                                severity="error"))
+            out.append(_finding(path, None, "not-scored",
+                                           f"could not be read ({e}), so its functions were not scored.", severity="error"))
             continue
         tree = _parse_python(text)
         if tree is None:
-            out.append(_finding(path, None, "not-scored", "does not parse as Python, so its functions were not scored.",
-                                severity="error"))
+            out.append(_finding(path, None, "not-scored",
+                                           "does not parse as Python, so its functions were not scored.", severity="error"))
             continue
-        for cls, node in _python_functions(tree):
-            first = min([node.lineno, *(d.lineno for d in node.decorator_list)])
-            n = cognitive_complexity(node, cls)
-            if n > COGNITIVE_COMPLEXITY_LIMIT and any(first <= k <= (node.end_lineno or node.lineno) for k in added):
-                over.append((path, cls, node, n))
+        over += [(path, f) for f in _scored_functions(tree)
+                 if f.score > COGNITIVE_COMPLEXITY_LIMIT and any(f.first <= n <= f.last for n in added)]
     return out, over
 
 
-def _python_functions(tree: ast.Module) -> list[tuple[str | None, ast.FunctionDef | ast.AsyncFunctionDef]]:
-    """(class, function) for each top-level function of tree, with class None, and each method of a top-level class,
-    with that class's name: the functions the check judges as one."""
-    defs = (ast.FunctionDef, ast.AsyncFunctionDef)
-    out: list[tuple[str | None, ast.FunctionDef | ast.AsyncFunctionDef]] = []
-    for node in tree.body:
-        if isinstance(node, defs):
-            out.append((None, node))
-        elif isinstance(node, ast.ClassDef):
-            out += [(node.name, m) for m in node.body if isinstance(m, defs)]
-    return out
-
-
-def _base_complexities(change: GateChange, path: str | None) -> tuple[dict[tuple[str | None, str], int], str | None]:
-    """The cognitive complexity at the change's base of each function the check judges as one in the file at path, by
-    (class, name), and None; {} for path None, a file the change adds. Or {} and why they could not be scored, a
+def _base_complexities(change: GateChange, path: str | None) -> tuple[dict[str, int], str | None]:
+    """The cognitive complexity at the change's base of each function of the file at path that the check judges as one,
+    by qualified name, and None; {} for path None, a file the change adds. Or {} and why they could not be scored, a
     sentence."""
     if path is None:
         return {}, None
@@ -3868,7 +3888,13 @@ def _base_complexities(change: GateChange, path: str | None) -> tuple[dict[tuple
     tree = _parse_python(text)
     if tree is None:
         return {}, "its base does not parse as Python, so its functions could not be compared with theirs."
-    return {(cls, node.name): cognitive_complexity(node, cls) for cls, node in _python_functions(tree)}, None
+    return {f.name: f.score for f in _scored_functions(tree)}, None
+
+
+# What a node holds, each with the nesting level it is scored at; None stands for a part the node goes without.
+_Held = list[tuple[ast.AST | None, int]]
+# A rule of cognitive_complexity's: the points a node of one type scores by itself at a nesting level, and _Held.
+_CognitiveRule = Callable[[Any, int], tuple[int, _Held]]
 
 
 def cognitive_complexity(function: ast.FunctionDef | ast.AsyncFunctionDef, cls: str | None = None) -> int:

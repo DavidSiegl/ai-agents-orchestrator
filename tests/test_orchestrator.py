@@ -5762,11 +5762,31 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.edit("shapes.py", "x += 3\n", "x += 30\n")
         self.assertEqual(self.found()[0], [])
 
-    def test_a_test_function_is_not_judged(self):
+    def test_only_the_tests_directory_is_exempt_as_from_ruff_s_c901(self):
         self.put("tests/test_calc.py", flat("test_big", 16))
+        self.put("tests/unit/helpers.py", flat("helper", 16))
         self.put("test_top.py", flat("test_big", 16))
-        self.git("add", "tests/test_calc.py", "test_top.py")
-        self.assertEqual(self.found()[0], [])
+        self.put("src/test_utils.py", flat("util", 16))
+        self.git("add", "tests", "test_top.py", "src")
+        self.assertEqual(self.found()[0], [("src/test_utils.py", 1, "over-limit"), ("test_top.py", 1, "over-limit")])
+
+    def test_methods_of_nested_classes_and_functions_under_module_level_statements_are_judged(self):
+        self.put("more.py", (
+            "class Outer:\n"
+            "    class Inner:\n"
+            + flat("method", 16, indent="        ")
+            + "if True:\n"
+            + flat("under_if", 16, indent="    ")
+            + "try:\n"
+            "    import json\n"
+            "except ImportError:\n"
+            + flat("under_except", 16, indent="    ")))
+        self.git("add", "more.py")
+        where, found = self.found()
+        self.assertEqual(where, [("more.py", self.def_line(name, "more.py"), "over-limit")
+                                 for name in ("method", "under_if", "under_except")])
+        self.assertEqual([f["message"].split(":")[0] for f in found],
+                         ["`Outer.Inner.method`", "`under_if`", "`under_except`"])
 
     def test_a_renamed_file_is_compared_with_its_base_under_its_old_name(self):
         self.git("mv", "calc.py", "lib.py")
