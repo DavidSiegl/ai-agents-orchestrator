@@ -4857,10 +4857,17 @@ class TestSurvivingMutants(unittest.TestCase):
             f.write("[tool.mutmut]\n" + "".join(f"{key} = {json.dumps(value)}\n" for key, value in table.items()))
         return path
 
-    def change_the_functions(self):
-        """Edit checked, unchecked, orphan and Box.size, leaving untouched and Box.other as they were."""
-        self.put("calc.py", self.BASE.replace("b + a", "a + b").replace("b * a", "a * b")
-                 .replace("return 1", "return 2").replace("return 3", "return 5"))
+    # How change_the_functions edits each function it edits.
+    EDITS = {"checked": ("b + a", "a + b"), "unchecked": ("b * a", "a * b"), "orphan": ("return 1", "return 2"),
+             "Box.size": ("return 3", "return 5")}
+
+    def change_the_functions(self, *names):
+        """Edit the functions names, by default checked, unchecked, orphan and Box.size, leaving untouched and
+        Box.other as they were."""
+        text = self.BASE
+        for name in names or self.EDITS:
+            text = text.replace(*self.EDITS[name])
+        self.put("calc.py", text)
 
     def fake_mutmut(self, run, results="", show=None, listing=None):
         """Make the gate's interpreter a fake that answers `mutmut run` with the shell code run, `results` by
@@ -4969,7 +4976,8 @@ class TestSurvivingMutants(unittest.TestCase):
                 "    def make():\n        return 1\n")
         self.put("calc.py", text)
         lines = text.split("\n")
-        self.fake_mutmut(f"touch {self.bin}/ran")
+        # mutmut is run for Made.make, the one function it mutates, and lists its mutant.
+        self.fake_mutmut(f"touch {self.bin}/ran", results="    calc.xǁMadeǁmake__mutmut_1: killed\n")
         found = self.found()
         self.assertTrue(os.path.exists(os.path.join(self.bin, "ran")))
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
@@ -4986,7 +4994,7 @@ class TestSurvivingMutants(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.bin, "ran")))
 
     def test_the_budget_counts_tried_mutants_as_each_function_does(self):
-        self.change_the_functions()
+        self.change_the_functions("checked", "orphan", "unchecked")
         self.fake_mutmut("exec sleep 30", results="    calc.x_checked__mutmut_1: killed\n"
                                                   "    calc.x_orphan__mutmut_1: no tests\n"
                                                   "    calc.x_unchecked__mutmut_1: not checked\n")
@@ -5003,7 +5011,7 @@ class TestSurvivingMutants(unittest.TestCase):
         self.assertIn("No space left on device", found[0]["message"])
 
     def test_a_copy_that_cannot_be_removed_is_a_finding_beside_the_others(self):
-        self.change_the_functions()
+        self.change_the_functions("orphan")
         self.fake_mutmut("exit 0", results="    calc.x_orphan__mutmut_1: no tests\n")
         rmtree = shutil.rmtree
         with patch.object(orchestrator.shutil, "rmtree", side_effect=OSError(16, "Device or resource busy")):
@@ -5076,8 +5084,21 @@ class TestSurvivingMutants(unittest.TestCase):
         # The second line of the help text does not say help=, but its string starts on the line that does.
         self.put("calc.py", self.BASE.replace(" to make", " to build"))
         made, found = self.found_and_made()
-        self.assertEqual(found, [])
         self.assertEqual(made, [])
+        # mutmut made no mutant of describe, and the finding says so rather than nothing.
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 25, "not-mutated")])
+        self.assertIn("mutmut made no mutant of it", found[0]["message"])
+
+    def test_a_function_a_mutmut_pragma_opts_out_is_said_so_and_its_pragma_listed(self):
+        text = self.BASE.replace("def unchecked(a, b):", "def unchecked(a, b):  # pragma: no mutate block")
+        self.put("calc.py", text)
+        made, found = self.found_and_made()
+        self.assertEqual(made, [])
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 5, "not-mutated")])
+        self.assertIn("`unchecked` was not mutation-tested: mutmut made no mutant of it", found[0]["message"])
+        diff = self.host.change_diff(self.repo, self.git("rev-parse", "HEAD").strip())
+        self.assertEqual(orchestrator.added_suppressions(self.repo, changed_lines(diff)),
+                         [("calc.py", 5, "def unchecked(a, b):  # pragma: no mutate block")])
 
     def test_a_change_to_untested_functions_alone_is_reported_as_untested(self):
         # mutmut stops early when no test calls any function it mutated.
@@ -5092,7 +5113,7 @@ class TestSurvivingMutants(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.bin, "ran")))
 
     def test_a_run_stopped_by_the_budget_says_so_with_what_it_found(self):
-        self.change_the_functions()
+        self.change_the_functions("checked", "unchecked")
         self.fake_mutmut("exec sleep 30",
                          results="    calc.x_checked__mutmut_1: killed\n    calc.x_unchecked__mutmut_1: survived\n"
                                  "    calc.x_unchecked__mutmut_2: not checked\n",
@@ -5127,7 +5148,7 @@ class TestSurvivingMutants(unittest.TestCase):
         self.assertIn("exited with status 1: ModuleNotFoundError: No module named 'mutmut'", found[0]["message"])
 
     def test_the_survivors_of_a_function_are_one_finding_with_examples(self):
-        self.change_the_functions()
+        self.change_the_functions("unchecked")
         self.fake_mutmut("exit 0", results="    calc.x_unchecked__mutmut_1: survived\n"
                                            "    calc.x_unchecked__mutmut_2: killed\n"
                                            "    calc.x_unchecked__mutmut_3: survived\n",
@@ -5149,7 +5170,7 @@ class TestSurvivingMutants(unittest.TestCase):
                                              "`return 'a\u2028b'` became `return 'XXa\u2028bXX'`.")
 
     def test_a_function_s_first_three_survivors_are_its_examples(self):
-        self.change_the_functions()
+        self.change_the_functions("unchecked")
         names = [f"calc.x_unchecked__mutmut_{n}" for n in range(1, 5)]
         self.fake_mutmut("exit 0", results="".join(f"    {name}: survived\n" for name in names),
                          show={name: self.unchecked_mutant(f"{n}") for n, name in enumerate(names)})

@@ -113,7 +113,8 @@ altered, an argument dropped - and runs each of these mutants against the tests 
   against a test, as the `survived` counts do. What the N showed is listed; the others may survive too;
 - `not-mutated`: a changed function mutmut does not mutate, at its `def`, with the reason: its file is outside
   `[tool.mutmut]`'s `source_paths`, or left out by `only_mutate` or `do_not_mutate`; it is decorated, other than with
-  `@staticmethod` or `@classmethod` alone; or it is `__new__`, `__getattribute__` or `__setattr__`;
+  `@staticmethod` or `@classmethod` alone; or it is `__new__`, `__getattribute__` or `__setattr__`. And a function
+  mutmut was given but made no mutant of: one with nothing to mutate, or one a `# pragma: no mutate` keeps out;
 - `not-run`: mutmut could not start, failed, as it does when a test fails, or left results the gate could not read; the
   rules name no `source_paths`; the directory to copy the tree into could not be made; or a changed file could not be
   read or parsed;
@@ -195,8 +196,9 @@ the change adds, and the build configuration it edits. Issues and findings to we
 first, at most 50 in all, then a count:
 
 - **Suppressions added** (`# noqa`, `# type: ignore`, `# shellcheck disable`, `<!-- pyml disable`,
-  `# pragma: no cover`) are listed, not failed, so the Reviewer weighs each one. A `# pragma: no cover` is listed
-  because it takes lines out of the coverage condition.
+  `# pragma: no cover`, `# pragma: no mutate`) are listed, not failed, so the Reviewer weighs each one. A
+  `# pragma: no cover` is listed because it takes lines out of the coverage condition, and a `# pragma: no mutate`
+  because it takes them out of the surviving-mutants check.
 - **Build configuration**: an edit to `Jenkinsfile`, `pyproject.toml` or `uv.lock` is noted, since each can
   change how the change was judged.
 

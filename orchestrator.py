@@ -2185,7 +2185,7 @@ class GateCheck:
 _FINDING_AT = re.compile(r"(?P<path>[^:]+):(?:(?P<line>\d+):(?:\d+:)?)? (?P<detail>.+)")
 
 # Comments that silence a linter or exempt lines from coverage, which the quality file lists for the Reviewer.
-_SUPPRESSION = re.compile(r"#.*\b(?:noqa|type:\s*ignore|shellcheck\s+disable|pragma:\s*no\s*(?:cover|branch))\b"
+_SUPPRESSION = re.compile(r"#.*\b(?:noqa|type:\s*ignore|shellcheck\s+disable|pragma:\s*no\s*(?:cover|branch|mutate))\b"
                           r"|<!--\s*pyml\s+disable")
 
 
@@ -3268,7 +3268,13 @@ def _mutmut_findings(tree_copy: str, functions: list[_ChangedFunction], run: sub
         owner = by_prefix.get(mutant.rpartition("__mutmut_")[0])
         if owner is not None:
             mutants.setdefault(owner, {}).setdefault(status, []).append(mutant)
-    out = []
+    # A function that mutmut was given but made no mutant of: one with nothing to mutate, one a `# pragma: no
+    # mutate` keeps out, or one whose mutants mutmut names otherwise than _mutant_prefix expects. Unless the budget
+    # stopped mutmut before it had made any.
+    out = [_finding(f.path, f.line, "not-mutated", f"`{f.name}` was not mutation-tested: mutmut made no mutant of it, "
+                                                   f"as of a function with nothing to mutate or one a `# pragma: no "
+                                                   f"mutate` keeps out")
+           for f in functions if f not in mutants and (statuses or not stopped)]
     for f, by_status in mutants.items():
         tried = sum(len(names) for status, names in by_status.items() if status not in _MUTMUT_UNTRIED)
         if by_status.get("survived"):
