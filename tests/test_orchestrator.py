@@ -5789,13 +5789,32 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.edit("shapes.py", "x += 3\n", "x += 30\n")
         self.assertEqual(self.found()[0], [])
 
-    def test_an_unchanged_function_moved_or_renamed_is_compared_with_its_old_self(self):
+    def test_an_unchanged_function_moved_and_renamed_is_compared_with_its_old_self(self):
         big = flat("big", 20)
         self.edit("calc.py", "\n\n" + big, "")
-        # Moved to another module and renamed there, and copied into a class as a method.
-        self.put("other.py", big.replace("def big(", "def huge(") + "\n\nclass Box:\n" + flat("big", 20, indent="    "))
+        self.put("other.py", big.replace("def big(", "def huge("))
         self.git("add", "other.py")
         self.assertEqual(self.found()[0], [])
+
+    def test_an_unchanged_function_made_a_method_in_its_file_is_compared_with_its_old_self(self):
+        big = flat("big", 20)
+        self.edit("calc.py", big, "class Box:\n" + flat("big", 20, indent="    "))
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_copy_of_a_function_over_the_limit_is_new_wherever_it_goes(self):
+        copy = flat("big", 20).replace("def big(", "def copied(")
+        new = ["`copied`: cognitive complexity 20, a new function; the limit is 15."]
+        with self.subTest("beside the original, in its file"):
+            self.put("calc.py", self.BASE + "\n\n" + copy)
+            self.assertEqual([f["message"] for f in self.found()[1]], new)
+        self.put("calc.py", self.BASE)
+        self.put("other.py", copy)
+        self.git("add", "other.py")
+        with self.subTest("in another file, the original's file untouched"):
+            self.assertEqual([f["message"] for f in self.found()[1]], new)
+        with self.subTest("in another file, the original's file edited elsewhere"):
+            self.edit("calc.py", "'small 2':\n        x += 2\n", "'small 2':\n        x += 20\n")
+            self.assertEqual([f["message"] for f in self.found()[1]], new)
 
     def test_a_function_moved_and_made_more_complex_is_judged_as_new(self):
         big = flat("big", 20)

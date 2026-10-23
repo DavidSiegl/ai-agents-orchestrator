@@ -83,10 +83,10 @@ the paper's rules. Each of these is a finding:
   unchanged from, else the highest-scoring of the others of that name. So with a name defined more than once, as a
   property's getter and setter or `@singledispatch` registrations named `_` are, adding or removing one never makes a
   function the change left no worse a finding; the cost is that a rise below a higher-scoring namesake goes unseen.
-  Failing that, it is a function with the same body in
-  the base of any Python file the change touches, so a function moved to another module, renamed or made a method,
-  but otherwise unchanged, keeps its score; one moved and edited is new. A function already over 15 that the change
-  leaves no worse is not a finding, since the gate judges the change;
+  Failing that, it is a function with the same body in the base of any Python file the change touches that is no
+  longer in its file under its name: so a function moved to another module, renamed or made a method, but otherwise
+  unchanged, keeps its score. A copy, whose original is still in place, is new, and so is a function moved and edited.
+  A function already over 15 that the change leaves no worse is not a finding, since the gate judges the change;
 - `not-scored`: a changed file that could not be read or parsed, or changed files git could not list. Like any finding
   of the check, it fails the gate: a check that cannot do its work says so rather than pass. A base that cannot be read
   or parsed is not a finding: its file's functions are judged as new, as `test-integrity` takes a base that does not

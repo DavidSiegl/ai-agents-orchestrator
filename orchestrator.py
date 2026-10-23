@@ -3860,11 +3860,11 @@ def too_complex_functions(change: GateChange) -> list[dict]:
                                                          f"function was compared with its base.", severity="error")]
     bases = {old: _base_functions(change, old) for old, _ in pairs
              if old and old.endswith(".py") and not old.startswith(_COMPLEXITY_EXEMPT)}
-    by_body = {g.body: g.score for functions in bases.values() for g in functions}
+    moved = _moved_scores(change, pairs, bases, judged)
     old_paths = {new: old for old, new in pairs if new}
     for path, (functions, added) in judged.items():
         old = old_paths.get(path, path)
-        out += _worse_than_base(path, functions, added, bases.get(old, []) if old else [], by_body)
+        out += _worse_than_base(path, functions, added, bases.get(old, []) if old else [], moved)
     return sorted(out, key=lambda finding: (finding["path"] or "", finding["line"] or 0))
 
 
@@ -3907,6 +3907,29 @@ def _worse_than_base(path: str, functions: list[_ScoredFunction], added: set[int
     return out
 
 
+def _moved_scores(change: GateChange, pairs: list[tuple[str | None, str | None]],
+                  bases: dict[str, list[_ScoredFunction]],
+                  judged: dict[str, tuple[list[_ScoredFunction], set[int]]]) -> dict[str, int]:
+    """By body, the base score of each function the change moved or renamed. bases holds the base functions of the
+    change's files by old path, and pairs is the change's (old path, new path) list. A base function was moved when
+    its file, if the change kept it, has no function of its name and body in the working tree; one that still has
+    it was copied, and its copy is new. judged gives the working tree's functions of the files it holds; the others
+    are read here."""
+    new_paths = {old: new for old, new in pairs if old}
+    out: dict[str, int] = {}
+    for old, functions in bases.items():
+        new = new_paths.get(old)
+        if new is None:
+            now = []
+        elif new in judged:
+            now = judged[new][0]
+        else:
+            now = _working_functions(change, new)[0] or []
+        still_there = {(scored.name, scored.body) for scored in now}
+        out.update({g.body: g.score for g in functions if (g.name, g.body) not in still_there})
+    return out
+
+
 def _judged_files(change: GateChange) -> tuple[list[dict], dict[str, tuple[list[_ScoredFunction], set[int]]]]:
     """A finding for each Python file outside _COMPLEXITY_EXEMPT that the change adds lines to and that cannot be read
     or parsed; and, by path, the scored functions of each of the others, with the lines the change adds to it."""
@@ -3919,21 +3942,27 @@ def _judged_files(change: GateChange) -> tuple[list[dict], dict[str, tuple[list[
         # A symlink's change is the name it points to, and a submodule's its commit: neither is a line of code.
         if os.path.islink(full) or os.path.isdir(full):
             continue
-        try:
-            with open(full, "rb") as source:
-                text, _ = _decode_python(source.read())
-        # LookupError: a coding cookie that names a codec which does not decode bytes to text, such as rot13.
-        except (OSError, SyntaxError, UnicodeDecodeError, LookupError) as e:
-            out.append(_finding(path, None, "not-scored", f"could not be read ({e}), so its functions were not scored.",
-                                severity="error"))
+        functions, why = _working_functions(change, path)
+        if functions is None:
+            out.append(_finding(path, None, "not-scored", f"{why}, so its functions were not scored.", severity="error"))
             continue
-        tree = _parse_python(text)
-        if tree is None:
-            out.append(_finding(path, None, "not-scored", "does not parse as Python, so its functions were not scored.",
-                                severity="error"))
-            continue
-        judged[path] = (_scored_functions(tree), added)
+        judged[path] = (functions, added)
     return out, judged
+
+
+def _working_functions(change: GateChange, path: str) -> tuple[list[_ScoredFunction] | None, str]:
+    """The scored functions of the working tree's file at path, and ""; or None and why there are none, a clause:
+    it could not be read, or does not parse as Python."""
+    try:
+        with open(os.path.join(change.root, path), "rb") as source:
+            text, _ = _decode_python(source.read())
+    # LookupError: a coding cookie that names a codec which does not decode bytes to text, such as rot13.
+    except (OSError, SyntaxError, UnicodeDecodeError, LookupError) as e:
+        return None, f"could not be read ({e})"
+    tree = _parse_python(text)
+    if tree is None:
+        return None, "does not parse as Python"
+    return _scored_functions(tree), ""
 
 
 def _base_functions(change: GateChange, path: str) -> list[_ScoredFunction]:
@@ -3943,7 +3972,7 @@ def _base_functions(change: GateChange, path: str) -> list[_ScoredFunction]:
         # Verbatim, so that os.fsencode gives back the bytes git stores, which _decode_python decodes as Python would.
         tree = _parse_python(_decode_python(os.fsencode(
             Host().git(change.root, "cat-file", "blob", f"{change.base}:{path}", verbatim=True)))[0])
-    except (OrchestratorError, SyntaxError, UnicodeDecodeError, LookupError):  # LookupError: as _changed_over_limit
+    except (OrchestratorError, SyntaxError, UnicodeDecodeError, LookupError):  # LookupError: as _working_functions
         return []
     return _scored_functions(tree) if tree else []
 
