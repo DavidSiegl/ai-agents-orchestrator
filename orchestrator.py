@@ -3351,7 +3351,7 @@ def _copy_for_mutmut(root: str, tree_copy: str, changed: set[tuple[str, str]]) -
 
     Raises OSError when a file cannot be copied, and OrchestratorError when git cannot list them.
     """
-    for path in filter(None, Host().git(root, "ls-files", "-z").split("\0")):
+    for path in filter(None, Host().git(root, "ls-files", "-z", verbatim=True).split("\0")):
         src, dst = os.path.join(root, path), os.path.join(tree_copy, path)
         # A file the change deleted is gone from the tree, and a submodule is a directory.
         if not (os.path.isfile(src) or os.path.islink(src)):
@@ -3418,7 +3418,8 @@ def _run_mutmut(tree_copy: str, args: list[str], timeout: float) -> tuple[subpro
     MUTMUT_KILL_WAIT seconds more, and lost when a process outside the group holds its output open. So it returns
     within timeout + MUTMUT_STOP_GRACE + MUTMUT_KILL_WAIT seconds, every process in its group gone. Its temporary
     files, and those of the tests it runs, go into tree_copy's .tmp, so that what a test it killed left goes with
-    it. Raises OSError when it cannot be started.
+    it. Its output is decoded as Host.run's verbatim output is, since its mutant names and diffs hold paths and
+    source lines: only "\n" ends a line. Raises OSError when it cannot be started.
     """
     # `mutmut`, its console script, runs this line. `python -m mutmut` would import its __main__ a second time in each
     # forked worker, which mutmut warns against.
@@ -3428,8 +3429,7 @@ def _run_mutmut(tree_copy: str, args: list[str], timeout: float) -> tuple[subpro
     # A fixed command over mutant names mutmut itself listed; no shell reads it. Its own session puts its workers in
     # its process group, so that they can be killed with it.
     proc = subprocess.Popen(argv, cwd=tree_copy, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,  # noqa: S603
-                            stderr=subprocess.PIPE, text=True, errors="replace", env={**child_env(), "TMPDIR": tmp},
-                            start_new_session=True)
+                            stderr=subprocess.PIPE, env={**child_env(), "TMPDIR": tmp}, start_new_session=True)
     stopped = False
     try:
         try:
@@ -3448,11 +3448,12 @@ def _run_mutmut(tree_copy: str, args: list[str], timeout: float) -> tuple[subpro
             os.killpg(proc.pid, signal.SIGKILL)
     # A process still unreaped was killed with its group a moment ago.
     returncode = proc.poll()
-    return subprocess.CompletedProcess(argv, -signal.SIGKILL if returncode is None else returncode, out, err), stopped
+    return subprocess.CompletedProcess(argv, -signal.SIGKILL if returncode is None else returncode, os.fsdecode(out),
+                                       os.fsdecode(err)), stopped
 
 
-def _abandon(proc: subprocess.Popen) -> tuple[str, str]:
-    """What proc, just killed, printed, read for at most MUTMUT_KILL_WAIT seconds; "" for both when something else,
+def _abandon(proc: subprocess.Popen) -> tuple[bytes, bytes]:
+    """What proc, just killed, printed, read for at most MUTMUT_KILL_WAIT seconds; b"" for both when something else,
     such as a test's helper in a session of its own, still holds its output open, whose pipes are then closed."""
     try:
         return proc.communicate(timeout=MUTMUT_KILL_WAIT)
@@ -3461,7 +3462,7 @@ def _abandon(proc: subprocess.Popen) -> tuple[str, str]:
             if pipe is not None:
                 with contextlib.suppress(OSError):
                     pipe.close()
-        return "", ""
+        return b"", b""
 
 
 def _time_left(deadline: float) -> float:
@@ -3518,7 +3519,7 @@ def _example(tree_copy: str, f: _ChangedFunction, mutant: str, deadline: float) 
 def _mutation(diff: str) -> tuple[int, list[str], list[str]] | None:
     """What the first hunk of `mutmut show`'s diff of a function and its mutant changes: the line of the function's code
     where it starts, 1 for the first, and the lines it removes and adds there, stripped; None when it removes none."""
-    lines = diff.splitlines()
+    lines = diff.split("\n")
     hunk = next((i for i, line in enumerate(lines) if line.startswith("@@")), len(lines))
     m = re.match(r"@@ -(\d+)", lines[hunk]) if hunk < len(lines) else None
     if not m:

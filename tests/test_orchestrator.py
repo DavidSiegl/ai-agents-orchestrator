@@ -5113,6 +5113,16 @@ class TestSurvivingMutants(unittest.TestCase):
             "message": "2 of 3 mutants of `unchecked` survived its tests: line 6, `return a * b` became "
                        "`return a / b`; line 6, `return a * b` became `return None`."}])
 
+    def test_an_example_keeps_a_line_that_holds_a_line_separator_whole(self):
+        # Only "\n" ends a line of mutmut's output, as of git's; U+2028 in a string is part of the line.
+        self.put("calc.py", self.BASE.replace("return b * a", "return 'a\u2028b'"))
+        self.fake_mutmut("exit 0", results="    calc.x_unchecked__mutmut_1: survived\n",
+                         show={"calc.x_unchecked__mutmut_1": self.unchecked_mutant("'XXa\u2028bXX'").replace(
+                             "return a * b", "return 'a\u2028b'")})
+        [finding] = self.found()
+        self.assertEqual(finding["message"], "1 of 1 mutants of `unchecked` survived its tests: line 6, "
+                                             "`return 'a\u2028b'` became `return 'XXa\u2028bXX'`.")
+
     def test_a_function_s_first_three_survivors_are_its_examples(self):
         self.change_the_functions()
         names = [f"calc.x_unchecked__mutmut_{n}" for n in range(1, 5)]
