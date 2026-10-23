@@ -3974,15 +3974,46 @@ class TestNewDependencies(unittest.TestCase):
             ("uv.lock", "pulled-in", f"1 new packages that the change's dependencies pull in: `corp-lib` ({whence}).")])
         self.assertNotIn("on PyPI since", json.dumps(issues + to_weigh))
 
+    def test_a_dependency_moved_to_another_source_is_reported(self):
+        evil = "https://evil.example/simple"
+        new = pyproject_with("requests") + textwrap.dedent(f"""\
+            [[tool.uv.index]]
+            name = "evil"
+            url = "{evil}"
+            [tool.uv.sources]
+            requests = {{ index = "evil" }}
+        """)
+
+        def lock(registry):
+            return 'version = 1\n' + "".join(
+                f'\n[[package]]\nname = "{n}"\nversion = "1.0"\nsource = {{ registry = "{url}" }}\n'
+                for n, url in (("requests", registry), ("idna", registry), ("httpx", "https://pypi.org/simple")))
+        files = {("base", "pyproject.toml"): pyproject_with("requests"), ("new", "pyproject.toml"): new,
+                 ("base", "uv.lock"): lock("https://pypi.org/simple"), ("new", "uv.lock"): lock(evil)}
+        diff = ("diff --git a/pyproject.toml b/pyproject.toml\n--- a/pyproject.toml\n+++ b/pyproject.toml\n"
+                "@@ -6,0 +7,5 @@\n")
+        pypi = FakePyPI()
+
+        issues, to_weigh = self.find(run_change(diff, files), pypi)
+
+        self.assertEqual((issues, pypi.asked), ([], []))
+        whence = f"from the index {evil}, not checked against PyPI"
+        self.assertEqual([(f["path"], f["line"], f["severity"], f["rule"], f["message"]) for f in to_weigh], [
+            ("pyproject.toml", 11, "warning", "source-changed",
+             f"`requests`: at the base, from PyPI; in the change, {whence}."),
+            ("uv.lock", None, "warning", "source-changed", f"`idna`: at the base, from PyPI; in the change, {whence}.")])
+
     def test_a_default_index_replaces_pypi(self):
         new = pyproject_with("rich") + '[[tool.uv.index]]\nname = "mirror"\nurl = "https://mirror.example/simple"\n' \
                                        "default = true\n"
         pypi = FakePyPI(rich=pypi_project())
         issues, to_weigh = self.find(self.changed_manifests(pyproject_with(), new), pypi)
         self.assertEqual((issues, pypi.asked), ([], []))
+        whence = "from the index https://mirror.example/simple, not checked against PyPI"
+        # The default index takes every dependency, httpx too.
         self.assertEqual([(f["rule"], f["message"]) for f in to_weigh], [
-            ("other-index", ("`rich`, which the spec names: from the index https://mirror.example/simple, not "
-                             "checked against PyPI."))])
+            ("source-changed", f"`httpx`: at the base, from PyPI; in the change, {whence}."),
+            ("other-index", f"`rich`, which the spec names: {whence}.")])
 
     def test_only_the_manifests_at_the_top_level_count(self):
         files = {("base", "tests/fixtures/x/pyproject.toml"): pyproject_with(),

@@ -4721,7 +4721,8 @@ def new_dependencies(change: RunChange, *, pypi: "PyPI") -> CheckFindings:
     read. Reports a direct dependency the spec names, or a workspace member, with where it comes from: what PyPI knows
     of it, flagged when its first release is under YOUNG_PACKAGE_DAYS days old, or its source, other-index for an
     index other than PyPI's; the packages a lock file alone adds, those the direct ones pull in, in one finding per
-    lock file; and a manifest that cannot be read at the base, which leaves its ecosystem unchecked. PyPI is asked
+    lock file; a dependency of the base's that the change takes from another source (source-changed); and a
+    manifest that cannot be read at the base, which leaves its ecosystem unchecked. PyPI is asked
     only while change.in_time(), and no more after the first request it gives no usable answer to.
     """
     packages, issues, to_weigh = _new_packages(change)
@@ -4803,13 +4804,35 @@ def _new_packages(change: RunChange) -> tuple[list[_NewPackage], list[dict], lis
             to_weigh.append(_unreadable(before_error or after_error, "at the base", "warning"))
         else:
             added = change.changed.get(ecosystem.manifest, set())
-            found += [_NewPackage(key, ecosystem.manifest,
-                                  _line_naming(new_text(ecosystem.manifest) or "", added, key), True, source)
-                      for key, source in after.direct.items() if key not in before.direct]
-            found += [_NewPackage(key, ecosystem.lock_file, None, False, source)
-                      for key, source in after.locked.items() if key not in before.locked and key not in after.direct]
+            new, moved = _compare_dependencies(ecosystem, before, after, functools.partial(
+                _line_naming, new_text(ecosystem.manifest) or "", added))
+            found += new
+            to_weigh += moved
     found.sort(key=lambda p: not p.direct)
     return found, issues, to_weigh
+
+
+def _compare_dependencies(ecosystem: DependencyEcosystem, before: Dependencies, after: Dependencies,
+                          line_naming: Callable[[str], int | None]) -> tuple[list[_NewPackage], list[dict]]:
+    """The packages the project depends on after and not before, a package of its direct dependencies counted as one
+    of them only; and a source-changed finding to weigh for each that it depended on before from another source.
+    line_naming gives the added line of the manifest that names a package, by its key."""
+    lock_only = {key: source for key, source in after.locked.items() if key not in after.direct}
+    new = [_NewPackage(key, ecosystem.manifest, line_naming(key), True, source)
+           for key, source in after.direct.items() if key not in before.direct]
+    new += [_NewPackage(key, ecosystem.lock_file, None, False, source)
+            for key, source in lock_only.items() if key not in before.locked]
+    moved = []
+    for path, was, now, line in ((ecosystem.manifest, before.direct, after.direct, line_naming),
+                                 (ecosystem.lock_file, before.locked, lock_only, lambda key: None)):
+        moved += [_finding(path, line(key), "source-changed", (
+                      f"`{key}`: at the base, {_source_text(was[key])}; in the change, {_source_text(source)}."))
+                  for key, source in now.items() if key in was and was[key] != source]
+    return new, moved
+
+
+def _source_text(source: PackageSource | None) -> str:
+    return "from PyPI" if source is None else source.describe()
 
 
 def _read_ecosystem(ecosystem: DependencyEcosystem,

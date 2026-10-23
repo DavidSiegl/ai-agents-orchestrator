@@ -515,7 +515,10 @@ dependency-confusion case, and the finding names the index instead.
   first release is less than 14 days old (`YOUNG_PACKAGE_DAYS`), or it has no release files: few have used it yet.
   `other-index` instead for one from an index other than PyPI's, naming the index;
 - `pulled-in` (reports): one finding per `uv.lock`, listing with the same facts the packages it alone adds, those the
-  new dependencies pull in. The spec cannot be expected to name them.
+  new dependencies pull in. The spec cannot be expected to name them;
+- `source-changed` (reports): a dependency the project already had, direct or locked, that the change takes from
+  another source, naming both: `requests` moved from PyPI to `{ index = "evil" }` is the dependency-confusion move
+  without a new name. A new default index moves every dependency without a source of its own.
 
 **Diff budget** counts the files the change touches and the lines it adds and removes, from `git diff --numstat -M`
 (`Host.changed_line_counts`); a rename counts as one file, with the lines it changes, and a binary file as a file of
