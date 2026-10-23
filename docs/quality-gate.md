@@ -36,6 +36,29 @@ judges without the gate failing. Either kind is listed wherever it is, not only 
 check that raised it. A check that cannot run says so as one of its findings, so a failing check that cannot
 run fails the gate.
 
+| Check | Fails? | Finds |
+|---|---|---|
+| `test-integrity` | yes | tests the change weakened, in test files (`tests/**`, `test_*.py`, `*_test.py`) |
+
+**Test integrity** compares each test file the change touches with its base, so a change cannot pass by
+weakening its tests. Each of these is a finding:
+
+- `removed-test`: a test function, method or class is gone, at its line at the base. A class whose tests all
+  went is one finding, and so is a deleted file. A test that reappears with the same body under another name or
+  in another file was renamed or moved, not removed. A test removed together with the code it tested is still a
+  finding: the gate cannot see the spec, so the Builder says why in its report and the Reviewer judges;
+- `skip`: a `skip`, `skipIf`, `skipUnless`, `skipTest`, `SkipTest`, `xfail` or `expectedFailure` on an added
+  line;
+- `fewer-assertions`: a test with fewer `assert` statements, `self.assert*` calls and `pytest.raises` calls than at
+  the base;
+- `swallowed-error`: a bare `except:`, or an `except Exception:` that does nothing, on an added line;
+- `expected-value-changed`: an assertion whose literals changed while the rest of it stayed, in a change that also
+  edits code outside the tests: the "update the expected value to match the output" move. The finding names the
+  assertion before and after.
+
+It reads Python only; another language is a `WeakenedTestsDetector` beside the Python one in
+`WEAKENED_TESTS_DETECTORS`.
+
 The gate is `GATE: ERROR` when any of these holds, and `GATE: OK` otherwise:
 
 - a finding on a line the change adds, or a finding of a failing check;

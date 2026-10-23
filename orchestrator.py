@@ -30,9 +30,11 @@ window over the same CLI: it starts run and resume as child processes.
 """
 
 import argparse
+import ast
 import base64
 import collections
 import contextlib
+import copy
 import difflib
 import http.client
 import json
@@ -1296,6 +1298,24 @@ class Host:
         return self.git(cwd, "-c", "core.quotePath=false", "diff", "-U0", "-M", "--no-color", "--no-ext-diff",
                         "--src-prefix=a/", "--dst-prefix=b/", base, *([commit] if commit else []))
 
+    def changed_files(self, cwd: str, base: str) -> list[tuple[str | None, str | None]]:
+        """(path at base, path in the working tree) of each tracked file changed since base, a rename paired as
+        change_diff pairs it; None on the side where the file does not exist."""
+        fields = self.git(cwd, "diff", "--name-status", "-z", "-M", "--no-ext-diff", base).split("\0")
+        out: list[tuple[str | None, str | None]] = []
+        i = 0
+        # -z gives each entry as its status, then one path, or two for a rename; the list ends with an empty field.
+        while i + 1 < len(fields):
+            status = fields[i]
+            if status.startswith("R"):
+                out.append((fields[i + 1], fields[i + 2]))
+                i += 3
+                continue
+            path = fields[i + 1]
+            out.append((None, path) if status == "A" else (path, None) if status == "D" else (path, path))
+            i += 2
+        return out
+
     def push_ref(self, cwd: str, commit: str, branch: str) -> None:
         # --force replaces what a failed attempt left under the same name.
         self.git(cwd, "push", "--quiet", "--force", REMOTE, f"{commit}:refs/heads/{branch}", timeout=NETWORK_TIMEOUT)
@@ -2079,10 +2099,6 @@ class GateCheck:
     fails: bool
     find: Callable[[GateChange], list[dict]]
 
-
-# The checks judge_change runs after the linters, in this order.
-GATE_CHECKS: tuple[GateCheck, ...] = ()
-
 # A finding's location, before the tool's own part; lineless when the tool names only the file.
 _FINDING_AT = re.compile(r"(?P<path>[^:]+):(?:(?P<line>\d+):(?:\d+:)?)? (?P<detail>.+)")
 
@@ -2311,6 +2327,271 @@ def added_suppressions(root: str, changed: dict[str, set[int]]) -> list[tuple[st
         out += [(path, n, line.strip()[:160]) for n, line in enumerate(text.splitlines(), 1)
                 if n in added and _SUPPRESSION.search(line)]
     return out
+
+
+# Test integrity: the tests a change removed or weakened, which no linter sees and which make a gate easier to pass.
+
+@dataclass(frozen=True)
+class ChangedTestFile:
+    """A test file the change touches, as it was at the base and as the working tree has it."""
+    old_path: str | None  # None for a file the change adds
+    new_path: str | None  # None for a file the change deletes
+    before: str  # the text at the base; "" for an added file
+    after: str  # the text in the working tree; "" for a deleted file
+    added: set[int]  # the lines of after that the change added
+
+
+@dataclass(frozen=True)
+class WeakenedTestsDetector:
+    """How the test-integrity check reads one language's tests."""
+    language: str
+    # Whether a repository path is one of the language's test files, and whether it is the language's at all.
+    is_test: Callable[[str], bool]
+    is_source: Callable[[str], bool]
+    # The findings on every one of the language's test files the change touched, as GateCheck.find returns them,
+    # given whether the change also edits the language's code outside its tests.
+    find: Callable[[list[ChangedTestFile], bool], list[dict]]
+
+
+def weakened_tests(change: GateChange) -> list[dict]:
+    """The test-integrity check's find: in each WEAKENED_TESTS_DETECTORS language, the tests the change removed,
+    skipped, stripped of assertions or wrapped in a swallowed error, and the expected values it changed together
+    with the code under test."""
+    host = Host()
+    pairs = host.changed_files(change.root, change.base)
+    out: list[dict] = []
+    for detector in WEAKENED_TESTS_DETECTORS:
+        files, unreadable = [], []
+        for old, new in pairs:
+            if not any(p is not None and detector.is_test(p) for p in (old, new)):
+                continue
+            try:
+                files.append(ChangedTestFile(
+                    old, new, before=host.git(change.root, "show", f"{change.base}:{old}") if old else "",
+                    after=_read_text(os.path.join(change.root, new)) if new else "",
+                    added=change.changed.get(new, set()) if new else set()))
+            except (OrchestratorError, OSError, UnicodeDecodeError) as e:
+                unreadable.append(_integrity_finding(new or old, None, "unreadable",
+                                                     f"could not be read, so its tests were not checked: {e}"))
+        code_changed = any(detector.is_source(p) and not detector.is_test(p) for pair in pairs for p in pair if p)
+        out += unreadable + (detector.find(files, code_changed) if files else [])
+    return out
+
+
+def _read_text(path: str) -> str:
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def _integrity_finding(path: str | None, line: int | None, rule: str, message: str) -> dict:
+    return {"path": path, "line": line, "severity": "error", "rule": rule, "message": message}
+
+
+def _python_test_file(path: str) -> bool:
+    """pytest's and unittest's usual places: under a tests directory, test_*.py or *_test.py."""
+    *dirs, name = path.split("/")
+    return name.endswith(".py") and ("tests" in dirs or name.startswith("test_") or name.endswith("_test.py"))
+
+
+@dataclass(frozen=True)
+class _PythonTest:
+    """A test function or method, or a class holding tests, in one side of a ChangedTestFile."""
+    file: int  # the ChangedTestFile's index in the list find was given
+    name: str  # its qualified name in the module: test_x, TestX or TestX.test_x
+    node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
+
+    def key(self) -> tuple[int, str]:
+        return self.file, self.name
+
+    def body(self) -> str:
+        """What it does, without its name or where it is, so that a test renamed or moved matches its old self."""
+        return ast.dump(ast.Module(body=self.node.body, type_ignores=[]))
+
+
+# The last part of a name that skips a test or expects it to fail, in unittest and pytest.
+_SKIP_NAMES = frozenset({"skip", "skipIf", "skipUnless", "skipif", "skipTest", "SkipTest", "xfail",
+                         "expectedFailure"})
+
+
+def python_weakened_tests(files: list[ChangedTestFile], code_changed: bool) -> list[dict]:
+    """WeakenedTestsDetector.find for Python: tests removed (renamed or moved ones match their old selves by
+    body), skips and swallowed errors on added lines, fewer assertions in a test, and, when code_changed, an
+    assertion whose literals changed while the rest of it stayed."""
+    out: list[dict] = []
+    before: list[_PythonTest] = []
+    after: list[_PythonTest] = []
+    for k, f in enumerate(files):
+        new_tree = _parse_python(f.after)
+        if new_tree is None:
+            out.append(_integrity_finding(f.new_path, None, "unparsable",
+                                          "does not parse as Python, so its tests were not checked."))
+            continue
+        # A base that does not parse has no tests to lose.
+        before += _python_tests(k, _parse_python(f.before) or ast.Module(body=[], type_ignores=[]))
+        after += _python_tests(k, new_tree)
+        out += _python_added_weakenings(f.new_path, new_tree, f.added) if f.new_path else []
+    out += _python_removed_tests(files, before, after)
+    at_base = {t.key(): t for t in before}
+    for t in after:
+        if isinstance(t.node, ast.ClassDef) or t.key() not in at_base:
+            continue
+        was, now = _python_assertions(at_base[t.key()].node), _python_assertions(t.node)
+        path = files[t.file].new_path
+        if len(now) < len(was):
+            out.append(_integrity_finding(path, t.node.lineno, "fewer-assertions",
+                                          f"`{t.name}` has {len(now)} assertions, {len(was)} at the base."))
+        if code_changed:
+            out += [_integrity_finding(path, b.lineno, "expected-value-changed",
+                                       f"`{t.name}`: `{_clip(ast.unparse(a))}` became `{_clip(ast.unparse(b))}`, "
+                                       f"in a change that also edits the code under test.")
+                    for a, b in _changed_literals(was, now)]
+    return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
+
+
+def _parse_python(text: str) -> ast.Module | None:
+    try:
+        return ast.parse(text)
+    except (SyntaxError, ValueError):
+        return None
+
+
+def _python_tests(k: int, tree: ast.Module) -> list[_PythonTest]:
+    """The module-level test functions, the classes holding test methods or named Test*, and their test methods."""
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef)
+    out = []
+    for node in tree.body:
+        if isinstance(node, defs) and node.name.startswith("test"):
+            out.append(_PythonTest(k, node.name, node))
+        elif isinstance(node, ast.ClassDef):
+            methods = [_PythonTest(k, f"{node.name}.{m.name}", m) for m in node.body
+                       if isinstance(m, defs) and m.name.startswith("test")]
+            if methods or node.name.startswith("Test"):
+                out += [_PythonTest(k, node.name, node), *methods]
+    return out
+
+
+def _python_removed_tests(files: list[ChangedTestFile], before: list[_PythonTest],
+                          after: list[_PythonTest]) -> list[dict]:
+    """One finding per test the change removed, a class with every test in it counting as one, and a deleted
+    file as one; a test whose body reappears under another name or in another file is not removed."""
+    now = {t.key() for t in after}
+    was = {t.key() for t in before}
+    bodies = collections.Counter(t.body() for t in after if t.key() not in was)
+    removed = []
+    for t in before:
+        if t.key() in now:
+            continue
+        if bodies[t.body()]:
+            bodies[t.body()] -= 1
+        else:
+            removed.append(t)
+    gone = {t.key() for t in removed}
+    out = []
+    for k, f in enumerate(files):
+        mine = [t for t in removed if t.file == k]
+        tests = [t for t in mine if not isinstance(t.node, ast.ClassDef)]
+        if f.new_path is None and mine:
+            out.append(_integrity_finding(f.old_path, None, "removed-test",
+                                          f"deleted, with its {len(tests)} tests: {_names(tests)}."))
+            continue
+        # A class whose tests are all removed is one finding; a class that keeps or moved any is not.
+        whole = {t.name for t in mine if isinstance(t.node, ast.ClassDef)
+                 and all((k, m.name) in gone for m in before if m.file == k and m.name.startswith(f"{t.name}."))}
+        for t in mine:
+            cls = t.name.split(".")[0]
+            if t.name in whole:
+                n = sum(1 for m in tests if m.name.startswith(f"{t.name}."))
+                out.append(_integrity_finding(f.old_path, t.node.lineno, "removed-test",
+                                              f"`{t.name}` and its {n} tests are gone; this was line "
+                                              f"{t.node.lineno} at the base."))
+            elif cls not in whole and not isinstance(t.node, ast.ClassDef):
+                out.append(_integrity_finding(f.old_path, t.node.lineno, "removed-test",
+                                              f"`{t.name}` is gone; this was line {t.node.lineno} at the base."))
+    return out
+
+
+def _names(tests: list[_PythonTest], limit: int = 5) -> str:
+    shown = ", ".join(f"`{t.name}`" for t in tests[:limit])
+    return shown + (f" and {len(tests) - limit} more" if len(tests) > limit else "")
+
+
+def _python_added_weakenings(path: str, tree: ast.Module, added: set[int]) -> list[dict]:
+    """The skips and swallowed errors on the lines the change added to a test file."""
+    out = []
+    seen = set()
+    for node in ast.walk(tree):
+        line = getattr(node, "lineno", None)
+        if line not in added:
+            continue
+        name = node.attr if isinstance(node, ast.Attribute) else node.id if isinstance(node, ast.Name) else None
+        if name in _SKIP_NAMES and (line, name) not in seen:
+            seen.add((line, name))
+            out.append(_integrity_finding(path, line, "skip", f"`{_clip(ast.unparse(node))}` added: it skips a "
+                                                              f"test or expects it to fail."))
+        elif isinstance(node, ast.ExceptHandler) and _swallows(node):
+            out.append(_integrity_finding(path, line, "swallowed-error",
+                                          f"`{_clip(ast.unparse(node).splitlines()[0])}` added in a test: "
+                                          f"it hides the failure it catches."))
+    return out
+
+
+def _swallows(handler: ast.ExceptHandler) -> bool:
+    """A bare except, or one catching Exception or BaseException that does nothing."""
+    if handler.type is None:
+        return True
+    catches_all = isinstance(handler.type, ast.Name) and handler.type.id in ("Exception", "BaseException")
+    return catches_all and all(isinstance(s, ast.Pass)
+                               or (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant)) for s in handler.body)
+
+
+def _python_assertions(test: ast.AST) -> list[ast.Assert | ast.Call]:
+    """A test's assertions in source order: assert statements, self.assert* calls and pytest.raises calls."""
+    out: list[ast.Assert | ast.Call] = []
+    for n in ast.walk(test):
+        if isinstance(n, ast.Assert) or (
+                isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                and ((n.func.value.id == "self" and n.func.attr.startswith("assert"))
+                     or (n.func.value.id == "pytest" and n.func.attr == "raises"))):
+            out.append(n)
+    return sorted(out, key=lambda n: (n.lineno, n.col_offset))
+
+
+def _changed_literals(was: list[ast.Assert | ast.Call],
+                      now: list[ast.Assert | ast.Call]) -> list[tuple[ast.Assert | ast.Call, ast.Assert | ast.Call]]:
+    """The (before, after) pairs of assertions that kept their shape but not their literals, the assertions of
+    each side aligned by shape."""
+    blocks = difflib.SequenceMatcher(None, [_shape(a) for a in was], [_shape(b) for b in now],
+                                     autojunk=False).get_matching_blocks()
+    return [(was[i + d], now[j + d]) for i, j, n in blocks for d in range(n)
+            if _literals(was[i + d]) != _literals(now[j + d])]
+
+
+def _shape(node: ast.AST) -> str:
+    """node with every literal blanked, so that two assertions differing only in literals have one shape."""
+    blank = copy.deepcopy(node)
+    for n in ast.walk(blank):
+        if isinstance(n, ast.Constant):
+            n.value = None
+    return ast.dump(blank)
+
+
+def _literals(node: ast.AST) -> list:
+    return [n.value for n in ast.walk(node) if isinstance(n, ast.Constant)]
+
+
+def _clip(text: str, n: int = 160) -> str:
+    return text if len(text) <= n else text[:n - 1] + "…"
+
+
+WEAKENED_TESTS_DETECTORS = (
+    WeakenedTestsDetector("python", is_test=_python_test_file, is_source=lambda path: path.endswith(".py"),
+                          find=python_weakened_tests),
+)
+
+# The checks judge_change runs after the linters, in this order.
+GATE_CHECKS: tuple[GateCheck, ...] = (
+    GateCheck("test-integrity", fails=True, find=weakened_tests),
+)
 
 
 def spec_title(spec: str) -> str | None:
