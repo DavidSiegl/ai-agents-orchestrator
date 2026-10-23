@@ -43,6 +43,7 @@ moved out of it counts as added. The linters and the build configuration listing
 | Check | Fails? | Finds |
 |---|---|---|
 | `test-integrity` | yes | tests the change weakened, in test files (`tests/**`, `test_*.py`, `*_test.py`) |
+| `cognitive-complexity` | yes | functions the change edits or adds that it takes over a cognitive complexity of 15 |
 | `flaky-tests` | no | tests the change adds or edits that pass in one order and fail in another |
 | `surviving-mutants` | no | changes to the functions the change edits that no test notices |
 
@@ -64,6 +65,27 @@ change cannot pass by weakening its tests. Each of these is a finding:
 
 It reads Python only; another language is a `WeakenedTestsDetector` beside the Python one in
 `WEAKENED_TESTS_DETECTORS`.
+
+**Cognitive complexity** scores the functions the change edits, so that a change cannot pile branches into the
+function it is editing rather than split it. A function counts when the change adds a line to it, decorators
+included: a top-level function, or a method of a top-level class, in a Python file outside the test files; a function
+nested in it is part of it. Its score is G. Ann Campbell's
+[cognitive complexity](https://www.sonarsource.com/docs/CognitiveComplexity.pdf), which SonarQube's rule S3776
+measured: a point for each `if`, `elif`, `else`, ternary, loop, `except`, `match`, sequence of like boolean operators
+and call of a function to itself, and one more for each level of nesting on those that nest. The comment above
+`COGNITIVE_COMPLEXITY_LIMIT` in `orchestrator.py` says how each Python construct maps to the paper's rules. Each of
+these is a finding:
+
+- `over-limit`: a function over 15, at its `def` line, when it is new or the change raised its score, as
+  "`_poll`: cognitive complexity 19, 14 at the base; the limit is 15". Its base is the function of the same name and
+  class in the file's base, under the file's old name when the change renamed it. A function already over 15 that the
+  change leaves no worse is not a finding, since the gate judges the change;
+- `not-scored`: a changed file that could not be read or parsed, or the base of one with a function over 15.
+
+ruff's `C90` stays beside it. It counts branches without their nesting, so it misses a deeply nested function that
+cognitive complexity catches, and it reports at the `def` line, which a change that grows an existing function does not
+add; but it still catches a flat function of many branches, which cognitive complexity scores lower. A function both
+flag is two findings at its `def`.
 
 **Flaky tests** reruns the tests the change adds or edits, so a test that passed the build's one run by luck of
 the order is caught. A test counts when the change adds or removes a line of it in a test file outside `mutants/`, as
@@ -235,10 +257,10 @@ and cache of results, is left out of that copy, so mutmut starts afresh and a ch
 a change that adds or edits files there is listed under build configuration.
 
 The rule sets were tuned until `main` gave a short list of real findings: ruff's defaults plus bugbear,
-simplifications, pyupgrade, bandit, complexity (`max-complexity = 15`) and pylint's errors and warnings, with the
-fake tokens, paths and fixtures of `tests/` exempt; mypy at its default strictness on `orchestrator.py`;
-pymarkdown without the line-length and inline-HTML rules. Only lines a change adds count, so what `main` already
-has does not block.
+simplifications, pyupgrade, bandit, cyclomatic complexity (`C90`, `max-complexity = 15`; nesting is the
+`cognitive-complexity` check's) and pylint's errors and warnings, with the fake tokens, paths and fixtures of `tests/`
+exempt; mypy at its default strictness on `orchestrator.py`; pymarkdown without the line-length and inline-HTML rules.
+Only lines a change adds count, so what `main` already has does not block.
 
 ## Jenkins setup
 

@@ -41,6 +41,7 @@ import fnmatch
 import functools
 import http.client
 import io
+import itertools
 import json
 import math
 import os
@@ -3730,11 +3731,260 @@ def _mutation_not_run(problem: str) -> dict:
     return _finding(None, None, "not-run", f"{problem}; the change's functions were not mutation-tested.")
 
 
+# Cognitive complexity: how hard a function is to follow, which a change raises when it piles branches into the
+# function it edits rather than splitting it. ruff's C90 does not see that: it counts branches without their nesting,
+# and reports at a def line, which a change that grows a function does not add.
+#
+# The score is G. Ann Campbell's, "Cognitive Complexity", SonarSource, 2017, version 1.7
+# (https://www.sonarsource.com/docs/CognitiveComplexity.pdf), which SonarQube's rule S3776 implements. Its rules, as
+# they apply in Python:
+#
+# - One point for each break in the linear flow: `if`, `elif`, `else`, a ternary `x if c else y`, `for`, `while`,
+#   `except`, `match`, each sequence of like boolean operators, and a function that calls itself. Python has no
+#   `goto` and no labelled `break` or `continue`, so the paper's points for those never apply; a plain `break` or
+#   `continue` is free, as in the paper.
+# - One more for each level of nesting it sits at, on `if`, a ternary, `for`, `while`, `except` and `match`; not on
+#   `elif` and `else`, whose `if` has paid it.
+# - The level rises by one in the bodies of `if`, `elif`, `else`, `for`, `while`, `except` and `match`'s cases, in
+#   what a ternary holds, its condition included, and in a nested function or lambda. `try`, `finally` and `with`
+#   add neither a point nor a level. A statement's condition, a loop's iterable and a nested function's decorators
+#   and defaults are at the statement's level, outside its body.
+#
+# Where the paper leaves Python open, these are the choices. Sonar's own Python analyzer (sonar-python's
+# CognitiveComplexityVisitor) is named where it chose otherwise:
+#
+# - `match` is the paper's `switch`: one point and its nesting for the whole statement, however many cases, which
+#   nest their bodies. A case's guard adds only its own operators. Sonar's analyzer gives `match` no point.
+# - The `else` of a loop or of a `try` counts as an `if`'s does, as in Sonar's analyzer: it runs on a condition the
+#   reader must keep in mind, that no `break`, or no exception, came first.
+# - A comprehension adds nothing, its `for` and `if` clauses included, as in Sonar's analyzer: it is the kind of
+#   shorthand the paper exempts, a loop written as one expression and read left to right. What it holds, such as a
+#   ternary or an `and`, counts as anywhere.
+# - A nested function or lambda raises the level of its body, as the paper says of nested methods and lambdas, and
+#   its points count toward the function it is in. Sonar's analyzer leaves a lambda's level alone, and a decorator's
+#   wrapper function at its decorator's; this does neither. A class nested in a function raises nothing itself: its
+#   methods are nested functions.
+# - Boolean operators are read as written: `a and b or c` is the sequence `and`, `or`, two points, and an operand that
+#   is itself an `and` or `or` continues its parent's sequence. The syntax tree keeps no parentheses, so
+#   `a and (b and c)` is one sequence, one point, where Sonar's analyzer, which sees them, gives two. `not` starts a
+#   sequence of its own.
+# - Recursion is one point for each function, the judged one or one nested in it, that calls itself, however often:
+#   by its name, or a method `m` of a class `C` as `self.m`, `cls.m` or `C.m`. A cycle through other functions, which
+#   the paper also counts, is not found. Sonar's analyzer counts no recursion.
+
+# The cognitive-complexity check's limit: a function the change edits fails the gate above it, as with SonarQube's
+# default for S3776.
+COGNITIVE_COMPLEXITY_LIMIT = 15
+
+
+def too_complex_functions(change: GateChange) -> list[dict]:
+    """The cognitive-complexity check's find: each top-level function and method the change adds a line to, in a Python
+    file outside the tests, whose cognitive_complexity is over COGNITIVE_COMPLEXITY_LIMIT and higher than at the base,
+    or which the base does not have; at its def line, with both scores. A function over the limit that the change
+    leaves no worse is not a finding: the gate judges the change, not the codebase.
+
+    A function's base is the one with its name, in its class, in the file's base; for a file the change renamed, under
+    the file's old name. A changed file that cannot be read or parsed is a finding saying so, and so is one that has a
+    function over the limit and whose base cannot be read or parsed.
+    """
+    out, over = _changed_over_limit(change)
+    if not over:
+        return out
+    try:
+        old_paths = {new: old for old, new in Host().changed_files(change.root, change.base) if new}
+    except OrchestratorError as e:
+        return [*out, _finding(None, None, "not-scored", f"the files the change edits could not be listed ({e}), so no "
+                                                         f"function was compared with its base.", severity="error")]
+    at_base = {path: _base_complexities(change, old_paths.get(path, path)) for path, *_ in over}
+    for path, cls, node, n in over:
+        scores, problem = at_base[path]
+        was = scores.get((cls, node.name))
+        if problem is None and (was is None or n > was):
+            name = f"{cls}.{node.name}" if cls else node.name
+            out.append(_finding(path, node.lineno, "over-limit", (
+                f"`{name}`: cognitive complexity {n}, {'a new function' if was is None else f'{was} at the base'}; "
+                f"the limit is {COGNITIVE_COMPLEXITY_LIMIT}."), severity="error"))
+    out += [_finding(path, None, "not-scored", problem, severity="error")
+            for path, (_, problem) in at_base.items() if problem]
+    return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
+
+
+def _changed_over_limit(change: GateChange) -> tuple[list[dict], list[tuple[str, str | None, ast.FunctionDef |
+                                                                              ast.AsyncFunctionDef, int]]]:
+    """A finding for each Python file outside the tests that the change adds lines to and that cannot be read or
+    parsed; and (path, class, function, score) for each top-level function or method of a top-level class in the
+    others that the change adds a line to, decorators included, and that scores over COGNITIVE_COMPLEXITY_LIMIT."""
+    out, over = [], []
+    for path, added in change.changed.items():
+        if not added or not path.endswith(".py") or _python_test_file(path):
+            continue
+        full = os.path.join(change.root, path)
+        # A symlink's change is the name it points to, and a submodule's its commit: neither is a line of code.
+        if os.path.islink(full) or os.path.isdir(full):
+            continue
+        try:
+            text = _read_text(full)
+        except (OSError, UnicodeDecodeError) as e:
+            out.append(_finding(path, None, "not-scored", f"could not be read ({e}), so its functions were not scored.",
+                                severity="error"))
+            continue
+        tree = _parse_python(text)
+        if tree is None:
+            out.append(_finding(path, None, "not-scored", "does not parse as Python, so its functions were not scored.",
+                                severity="error"))
+            continue
+        for cls, node in _python_functions(tree):
+            first = min([node.lineno, *(d.lineno for d in node.decorator_list)])
+            n = cognitive_complexity(node, cls)
+            if n > COGNITIVE_COMPLEXITY_LIMIT and any(first <= k <= (node.end_lineno or node.lineno) for k in added):
+                over.append((path, cls, node, n))
+    return out, over
+
+
+def _python_functions(tree: ast.Module) -> list[tuple[str | None, ast.FunctionDef | ast.AsyncFunctionDef]]:
+    """(class, function) for each top-level function of tree, with class None, and each method of a top-level class,
+    with that class's name: the functions the check judges as one."""
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef)
+    out: list[tuple[str | None, ast.FunctionDef | ast.AsyncFunctionDef]] = []
+    for node in tree.body:
+        if isinstance(node, defs):
+            out.append((None, node))
+        elif isinstance(node, ast.ClassDef):
+            out += [(node.name, m) for m in node.body if isinstance(m, defs)]
+    return out
+
+
+def _base_complexities(change: GateChange, path: str | None) -> tuple[dict[tuple[str | None, str], int], str | None]:
+    """The cognitive complexity at the change's base of each function the check judges as one in the file at path, by
+    (class, name), and None; {} for path None, a file the change adds. Or {} and why they could not be scored, a
+    sentence."""
+    if path is None:
+        return {}, None
+    try:
+        text = Host().git(change.root, "show", f"{change.base}:{path}", verbatim=True)
+    except OrchestratorError as e:
+        return {}, f"its base could not be read ({e}), so its functions could not be compared with theirs."
+    tree = _parse_python(text)
+    if tree is None:
+        return {}, "its base does not parse as Python, so its functions could not be compared with theirs."
+    return {(cls, node.name): cognitive_complexity(node, cls) for cls, node in _python_functions(tree)}, None
+
+
+def cognitive_complexity(function: ast.FunctionDef | ast.AsyncFunctionDef, cls: str | None = None) -> int:
+    """function's cognitive complexity, by the rules above, the functions nested in it included. cls is the name of
+    the class function is a method of, None for one outside a class; it decides which calls are recursive. function's
+    own decorators and defaults are not scored: they run where it is defined, not when it is called."""
+    return int(_calls_itself(function, cls)) + _cognitive_all(function.body, 0)
+
+
+def _cognitive(node: ast.AST, nesting: int) -> int:
+    """The points of node, and of what it holds, at nesting levels deep."""
+    rule = _COGNITIVE_RULES.get(type(node))
+    return rule(node, nesting) if rule else _cognitive_all(ast.iter_child_nodes(node), nesting)
+
+
+def _cognitive_all(nodes: Iterable[ast.AST | None], nesting: int) -> int:
+    """The points of nodes, each at nesting levels deep; None, a part a node goes without, has none."""
+    return sum(_cognitive(n, nesting) for n in nodes if n is not None)
+
+
+def _cognitive_if(node: ast.If, nesting: int, *, elif_: bool = False) -> int:
+    """An if, or with elif_ an elif, with the elif and else branches that follow it."""
+    out = (1 if elif_ else 1 + nesting) + _cognitive(node.test, nesting) + _cognitive_all(node.body, nesting + 1)
+    # ast writes an elif as an else that holds just an if. That if starts in the elif's column; an if written inside an
+    # else is indented further.
+    orelse = node.orelse
+    if len(orelse) == 1 and isinstance(orelse[0], ast.If) and orelse[0].col_offset == node.col_offset:
+        return out + _cognitive_if(orelse[0], nesting, elif_=True)
+    return out + _cognitive_else(orelse, nesting)
+
+
+def _cognitive_else(body: list[ast.stmt], nesting: int) -> int:
+    """The else of an if, a loop or a try, whose body is body: none for an empty body, which is no else."""
+    return 1 + _cognitive_all(body, nesting + 1) if body else 0
+
+
+def _cognitive_loop(node: ast.For | ast.AsyncFor | ast.While, nesting: int) -> int:
+    head = [node.test] if isinstance(node, ast.While) else [node.target, node.iter]
+    return (1 + nesting + _cognitive_all(head, nesting) + _cognitive_all(node.body, nesting + 1)
+            + _cognitive_else(node.orelse, nesting))
+
+
+def _cognitive_try(node: ast.Try | ast.TryStar, nesting: int) -> int:
+    handlers = sum(1 + nesting + _cognitive_all([h.type], nesting) + _cognitive_all(h.body, nesting + 1)
+                   for h in node.handlers)
+    return (_cognitive_all(node.body, nesting) + handlers + _cognitive_else(node.orelse, nesting)
+            + _cognitive_all(node.finalbody, nesting))
+
+
+def _cognitive_match(node: ast.Match, nesting: int) -> int:
+    # A case's pattern holds no operators and no branches; its guard and body are what can.
+    cases = sum(_cognitive_all([c.guard, *c.body], nesting + 1) for c in node.cases)
+    return 1 + nesting + _cognitive(node.subject, nesting) + cases
+
+
+def _cognitive_ternary(node: ast.IfExp, nesting: int) -> int:
+    return 1 + nesting + _cognitive_all([node.test, node.body, node.orelse], nesting + 1)
+
+
+def _cognitive_boolean(node: ast.BoolOp, nesting: int) -> int:
+    """A sequence of boolean operators, its operands that are themselves and or or included: one point for its first
+    operator and one for each that differs from the one before it."""
+    ops, operands = _boolean_sequence(node)
+    return 1 + sum(a is not b for a, b in itertools.pairwise(ops)) + _cognitive_all(operands, nesting)
+
+
+def _boolean_sequence(node: ast.BoolOp) -> tuple[list[type[ast.boolop]], list[ast.expr]]:
+    """The operators of node in the order they are written, those of an operand that is an and or or spliced in, and
+    the operands that are neither."""
+    ops: list[type[ast.boolop]] = []
+    operands: list[ast.expr] = []
+    for k, value in enumerate(node.values):
+        if k:
+            ops.append(type(node.op))
+        if isinstance(value, ast.BoolOp):
+            inner_ops, inner_operands = _boolean_sequence(value)
+            ops += inner_ops
+            operands += inner_operands
+        else:
+            operands.append(value)
+    return ops, operands
+
+
+def _cognitive_function(node: ast.FunctionDef | ast.AsyncFunctionDef, nesting: int) -> int:
+    """A function nested in the one judged, or a method of a class nested in it."""
+    outside = [*node.decorator_list, *node.args.defaults, *node.args.kw_defaults]
+    return int(_calls_itself(node, None)) + _cognitive_all(outside, nesting) + _cognitive_all(node.body, nesting + 1)
+
+
+def _cognitive_lambda(node: ast.Lambda, nesting: int) -> int:
+    return _cognitive_all([*node.args.defaults, *node.args.kw_defaults], nesting) + _cognitive(node.body, nesting + 1)
+
+
+# The node types that cognitive_complexity scores by a rule of their own; any other adds only the points of what it
+# holds, at its own level.
+_COGNITIVE_RULES: dict[type[ast.AST], Callable[..., int]] = {
+    ast.If: _cognitive_if, ast.For: _cognitive_loop, ast.AsyncFor: _cognitive_loop, ast.While: _cognitive_loop,
+    ast.Try: _cognitive_try, ast.TryStar: _cognitive_try, ast.Match: _cognitive_match, ast.IfExp: _cognitive_ternary,
+    ast.BoolOp: _cognitive_boolean, ast.FunctionDef: _cognitive_function, ast.AsyncFunctionDef: _cognitive_function,
+    ast.Lambda: _cognitive_lambda,
+}
+
+
+def _calls_itself(function: ast.FunctionDef | ast.AsyncFunctionDef, cls: str | None) -> bool:
+    """Whether function's body calls function: by its name, or as self.m, cls.m or C.m when it is the method m of the
+    class C, cls."""
+    me = {f"{owner}.{function.name}" for owner in ("self", "cls", cls)} if cls else {function.name}
+    return any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name | ast.Attribute) and ast.unparse(n.func) in me
+               for statement in function.body for n in ast.walk(statement))
+
+
 def gate_checks(mutation_budget: float) -> tuple[GateCheck, ...]:
     """The checks judge_change runs after the linters, in this order, the surviving-mutants check letting mutmut run
     for mutation_budget seconds."""
     return (
         GateCheck("test-integrity", fails=True, find=weakened_tests),
+        GateCheck("cognitive-complexity", fails=True, find=too_complex_functions),
         GateCheck("flaky-tests", fails=False, find=flaky_tests),
         GateCheck("surviving-mutants", fails=False, find=functools.partial(surviving_mutants, budget=mutation_budget)),
     )

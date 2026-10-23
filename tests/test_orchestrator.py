@@ -1,3 +1,4 @@
+import ast
 import base64
 import contextlib
 import copy
@@ -6,14 +7,15 @@ import itertools
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
-import subprocess
-import shlex
 import struct
+import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import tomllib
@@ -26,9 +28,28 @@ from unittest.mock import MagicMock, patch
 
 import orchestrator
 from orchestrator import (
-    APPROVE, CHANGES_REQUESTED, CI, HEARTBEAT_SECONDS, STALE_SECONDS, CIError, Herdr, HerdrError, Host,
-    OrchestratorError, RunState, RunTakenOver, Workflow, branch_name, changed_lines, main, parse_args,
-    parse_gate, parse_verdict, pr_body, quality_report, spec_title,
+    APPROVE,
+    CHANGES_REQUESTED,
+    CI,
+    HEARTBEAT_SECONDS,
+    STALE_SECONDS,
+    CIError,
+    Herdr,
+    HerdrError,
+    Host,
+    OrchestratorError,
+    RunState,
+    RunTakenOver,
+    Workflow,
+    branch_name,
+    changed_lines,
+    main,
+    parse_args,
+    parse_gate,
+    parse_verdict,
+    pr_body,
+    quality_report,
+    spec_title,
 )
 
 
@@ -5425,6 +5446,375 @@ class TestSurvivingMutants(unittest.TestCase):
             check.find("change")
         self.assertFalse(check.fails)
         find.assert_called_once_with("change", budget=42)
+
+
+# The seven functions S3776 flagged, as orchestrator.py had them before 84e87e7 split them.
+S3776_FUNCTIONS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "s3776_at_84e87e7.py.txt")
+
+
+def score(source, cls=None):
+    """The cognitive complexity of the first function in source, or of its class cls's first method."""
+    tree = ast.parse(textwrap.dedent(source))
+    if cls is not None:
+        [owner] = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls]
+        tree = owner
+    function = next(n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
+    return orchestrator.cognitive_complexity(function, cls)
+
+
+class TestCognitiveComplexity(unittest.TestCase):
+    """cognitive_complexity, after G. Ann Campbell's paper, in its mapping to Python. Each expected score is
+    added up in the comments, one increment per line."""
+
+    def test_loops_and_ifs_add_one_and_their_nesting(self):
+        # The paper's sumOfPrimes, whose labelled `continue OUT` Python writes as a loop's else.
+        self.assertEqual(score("""
+            def sum_of_primes(top):
+                total = 0
+                for i in range(1, top + 1):  # +1
+                    for j in range(2, i):    # +2
+                        if i % j == 0:       # +3
+                            break
+                    else:                    # +1
+                        total += i
+                return total
+        """), 7)
+
+    def test_elif_and_else_add_one_and_nest_their_bodies(self):
+        self.assertEqual(score("""
+            def f(a):
+                if a == 1:      # +1
+                    return 1
+                elif a == 2:    # +1
+                    if a:       # +2
+                        return 2
+                else:           # +1
+                    if a:       # +2
+                        return 3
+                return 0
+        """), 7)
+
+    def test_a_while_and_its_else(self):
+        self.assertEqual(score("""
+            def f(n):
+                while n:      # +1
+                    n -= 1
+                else:         # +1
+                    n = 0
+                return n
+        """), 2)
+
+    def test_match_adds_one_for_all_its_cases_and_nests_them(self):
+        # The paper's getWords: a switch is one increment, however many cases it has.
+        self.assertEqual(score("""
+            def get_words(n):
+                match n:              # +1
+                    case 1:
+                        return "one"
+                    case 2 if n > 0:  # a guard adds nothing of its own
+                        return "a couple"
+                    case _:
+                        if n:         # +2
+                            return "lots"
+        """), 3)
+
+    def test_except_adds_one_and_its_nesting_while_try_finally_and_with_add_nothing(self):
+        self.assertEqual(score("""
+            def f(path):
+                try:
+                    with open(path) as f:  # neither try nor with nests
+                        if f:              # +1
+                            pass
+                except OSError:            # +1
+                    if path:               # +2
+                        pass
+                except ValueError:         # +1
+                    pass
+                else:                      # +1
+                    pass
+                finally:
+                    if path:               # +1
+                        pass
+        """), 7)
+
+    def test_each_sequence_of_like_boolean_operators_adds_one(self):
+        self.assertEqual(score("""
+            def f(a, b, c, d):
+                if a and b and c:       # +1 if, +1 and
+                    pass
+                if a and b or c and d:  # +1 if, +1 and, +1 or, +1 and
+                    pass
+                x = a or b and c or d   # +1 or, +1 and, +1 or
+                y = a or not (b or c)   # +1 or, +1 or: not starts a sequence of its own
+                z = (1 if a else 0) or b and c  # +1 or, +1 and, +1 ternary
+                return a and (b and c)  # +1: the parentheses do not show in the syntax tree
+        """), 15)
+
+    def test_except_and_match_take_their_nesting_too(self):
+        self.assertEqual(score("""
+            def f(xs):
+                for x in xs:            # +1
+                    try:
+                        pass
+                    except ValueError:  # +2
+                        pass
+                    match x:            # +2
+                        case _:
+                            pass
+        """), 5)
+
+    def test_a_ternary_adds_one_and_its_nesting_and_nests_what_it_holds(self):
+        self.assertEqual(score("""
+            def f(a, b):
+                for x in a:                          # +1
+                    y = 1 if x else (2 if b else 3)  # +2, +3
+                return y
+        """), 6)
+
+    def test_what_a_statement_reads_before_its_body_counts_at_the_statement_s_level(self):
+        self.assertEqual(score("""
+            def f(xs, key=lambda x: 1 if x else 0):  # the judged function's own defaults count for nothing
+                for x in (xs if xs else []):         # +1 for, +1 ternary
+                    while (x if x else 0):           # +2 while, +2 ternary
+                        if (x if x else 0):          # +3 if, +3 ternary
+                            x -= 1
+                        elif x:                      # +1
+                            x += 1
+                match (xs if xs else None):          # +1 match, +1 ternary
+                    case _:
+                        pass
+                try:
+                    pass
+                except (ValueError if xs else TypeError):  # +1 except, +1 ternary
+                    pass
+                def g(y=(1 if xs else 2)):           # +1 ternary
+                    return y
+                h = lambda y=(1 if xs else 2): y     # +1 ternary
+                return g, h
+        """), 19)
+
+    def test_comprehensions_add_nothing_and_lambdas_and_nested_functions_nest(self):
+        self.assertEqual(score("""
+            def f(xs):
+                ys = [x for x in xs if x for y in x if not y]
+                key = lambda x: 1 if x else 2          # +2
+                def inner(x):
+                    if x:                              # +2
+                        return [y for y in x if y and x]  # +1
+                    return inner(x - 1)                # +1, recursion
+                class Box:
+                    def size(self):
+                        return 3 if self else 4        # +2
+                return sorted(ys, key=key), inner, Box
+        """), 8)
+
+    def test_a_function_that_calls_itself_adds_one(self):
+        self.assertEqual(score("""
+            def walk(node):
+                if node is None:                      # +1
+                    return 0
+                return walk(node.left) + walk(node.right)  # +1, once
+        """), 2)
+
+    def test_a_method_calls_itself_through_self_cls_or_its_class(self):
+        source = """
+            class Tree:
+                def depth(self, node):
+                    return max(self.depth(c) for c in node)  # +1
+                def size(self, node):
+                    return Tree.size(self, node)            # +1
+                def leaves(self, node):
+                    return leaves(node)                     # a module-level function, not this method
+                @classmethod
+                def build(cls, n):
+                    return cls.build(n - 1)                 # +1
+        """
+        self.assertEqual(score(source, "Tree"), 1)
+        tree = ast.parse(textwrap.dedent(source)).body[0]
+        self.assertEqual([orchestrator.cognitive_complexity(m, "Tree") for m in tree.body], [1, 1, 0, 1])
+
+    def test_the_seven_functions_sonarqube_flagged_score_over_the_limit(self):
+        with open(S3776_FUNCTIONS) as f:
+            tree = ast.parse(f.read())
+        scores = {}
+        for node in tree.body:
+            cls = node.name if isinstance(node, ast.ClassDef) else None
+            for function in node.body if cls else [node]:
+                scores[function.name] = orchestrator.cognitive_complexity(function, cls)
+        self.assertEqual(sorted(scores), sorted(["main", "_turn", "_poll", "quality_report", "changed_lines",
+                                                 "_shared_name", "_parse_step"]))
+        for name, n in scores.items():
+            self.assertGreater(n, orchestrator.COGNITIVE_COMPLEXITY_LIMIT, name)
+
+
+def flat(name, n, indent=""):
+    """A function of n ifs one after the other, so of cognitive complexity n, which returns at its last line."""
+    body = "".join(f"{indent}    if x == '{name} {k}':\n{indent}        x += {k}\n" for k in range(n))
+    return f"{indent}def {name}(x):\n{body}{indent}    return x\n"
+
+
+class TestTooComplexFunctions(unittest.TestCase):
+    """The cognitive-complexity check over a real git repository: a base commit, then the change in its working tree."""
+
+    BASE = flat("grow", 14) + "\n\n" + flat("big", 20) + "\n\n" + flat("small", 3)
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = tmp.name
+        self.host = Host()
+        self.git("init", "--quiet", "-b", "main")
+        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
+            self.git("config", key, value)
+        self.put("calc.py", self.BASE)
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "base")
+
+    def git(self, *args):
+        return self.host.git(self.repo, *args)
+
+    def put(self, name, text):
+        path = os.path.join(self.repo, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    def edit(self, name, old, new):
+        with open(os.path.join(self.repo, name)) as f:
+            text = f.read()
+        self.assertEqual(text.count(old), 1, old)
+        self.put(name, text.replace(old, new))
+
+    def change(self):
+        base = self.git("rev-parse", "HEAD").strip()
+        diff = self.host.change_diff(self.repo, base)
+        return orchestrator.GateChange(self.repo, base, diff, changed_lines(diff))
+
+    def found(self):
+        """(path, line, rule) of each finding on the working tree's change, and the findings themselves."""
+        found = orchestrator.too_complex_functions(self.change())
+        return [(f["path"], f["line"], f["rule"]) for f in found], found
+
+    def def_line(self, name, path="calc.py"):
+        with open(os.path.join(self.repo, path)) as f:
+            return next(n for n, line in enumerate(f, 1) if line.lstrip().startswith(f"def {name}("))
+
+    def nest_under(self, name, k):
+        """Add an if inside the kth if of calc.py's function name: 2 more for it, at nesting 1."""
+        self.edit("calc.py", f"    if x == '{name} {k}':\n        x += {k}\n",
+                  f"    if x == '{name} {k}':\n        x += {k}\n        if x:\n            x -= 1\n")
+
+    def test_an_unchanged_tree_has_no_findings(self):
+        self.assertEqual(self.found()[0], [])
+
+    def test_nesting_added_inside_a_function_is_found_at_its_def_line_which_the_change_does_not_add(self):
+        self.nest_under("grow", 13)  # its last if: 14 becomes 16
+        where, found = self.found()
+        self.assertEqual(where, [("calc.py", 1, "over-limit")])
+        self.assertNotIn(1, self.change().changed["calc.py"])
+        self.assertEqual(found[0]["message"], "`grow`: cognitive complexity 16, 14 at the base; the limit is 15.")
+        self.assertEqual(found[0]["severity"], "error")
+
+    def test_a_function_over_the_limit_whose_score_the_change_leaves_alone_is_not_found(self):
+        self.edit("calc.py", "        x += 19\n", "        x += 190\n")  # big's last if, still 20
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_function_over_the_limit_whose_score_the_change_raises_is_found(self):
+        self.nest_under("big", 19)  # its last if: 20 becomes 22
+        where, found = self.found()
+        self.assertEqual(where, [("calc.py", self.def_line("big"), "over-limit")])
+        self.assertEqual(found[0]["message"], "`big`: cognitive complexity 22, 20 at the base; the limit is 15.")
+
+    def test_a_score_that_rises_to_the_limit_is_not_found(self):
+        self.edit("calc.py", "    if x == 'grow 13':\n", "    if x == 'grow 13' and x:\n")  # grow: 14 becomes 15
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_new_function_over_the_limit_is_found_and_one_at_it_is_not(self):
+        self.put("calc.py", self.BASE + "\n\n" + flat("new_big", 16) + "\n\n" + flat("new_ok", 15))
+        where, found = self.found()
+        self.assertEqual(where, [("calc.py", self.def_line("new_big"), "over-limit")])
+        self.assertEqual(found[0]["message"], "`new_big`: cognitive complexity 16, a new function; the limit is 15.")
+
+    def test_a_method_is_named_and_scored_with_its_class(self):
+        # 15 ifs, and a call of itself through self: 16.
+        self.put("shapes.py", "class Box:\n" + flat("size", 15, indent="    ").replace("return x", "return self.size(x)"))
+        self.git("add", "shapes.py")
+        where, found = self.found()
+        self.assertEqual(where, [("shapes.py", 2, "over-limit")])
+        self.assertTrue(found[0]["message"].startswith("`Box.size`: cognitive complexity 16, a new function"))
+
+    def test_a_method_is_scored_with_its_class_at_the_base_too(self):
+        # 15 ifs, and a call of itself through self: 16 at the base and after an edit that adds no point.
+        self.put("shapes.py", "class Box:\n" + flat("size", 15, indent="    ").replace("return x", "return self.size(x)"))
+        self.git("add", "shapes.py")
+        self.git("commit", "--quiet", "-m", "box")
+        self.edit("shapes.py", "x += 3\n", "x += 30\n")
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_test_function_is_not_judged(self):
+        self.put("tests/test_calc.py", flat("test_big", 16))
+        self.put("test_top.py", flat("test_big", 16))
+        self.git("add", "tests/test_calc.py", "test_top.py")
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_renamed_file_is_compared_with_its_base_under_its_old_name(self):
+        self.git("mv", "calc.py", "lib.py")
+        self.edit("lib.py", "        x += 19\n", "        x += 190\n")
+        self.assertEqual(self.found()[0], [])
+
+    def test_an_unparsable_file_is_a_finding(self):
+        self.put("calc.py", self.BASE + "def broken(:\n")
+        where, found = self.found()
+        self.assertEqual(where, [("calc.py", None, "not-scored")])
+        self.assertEqual(found[0]["message"], "does not parse as Python, so its functions were not scored.")
+
+    def test_files_that_cannot_be_read_or_parsed_are_findings_and_the_others_are_still_judged(self):
+        with open(os.path.join(self.repo, "a_latin1.py"), "wb") as f:
+            f.write(b"x = 'caf\xe9'\n")
+        self.put("b_broken.py", "def broken(:\n")
+        self.put("0_notes.txt", "not Python\n")
+        self.git("add", "a_latin1.py", "b_broken.py", "0_notes.txt")
+        self.nest_under("big", 19)
+        where, found = self.found()
+        self.assertEqual(where, [("a_latin1.py", None, "not-scored"), ("b_broken.py", None, "not-scored"),
+                                 ("calc.py", self.def_line("big"), "over-limit")])
+        self.assertTrue(found[0]["message"].startswith("could not be read ("), found[0]["message"])
+
+    def test_a_base_that_cannot_be_read_is_a_finding(self):
+        self.nest_under("big", 19)
+        git = Host.git
+
+        def no_show(host, cwd, *args, **kw):
+            if args[0] == "show":
+                raise OrchestratorError("git show failed")
+            return git(host, cwd, *args, **kw)
+
+        with patch.object(Host, "git", no_show):
+            where, found = self.found()
+        self.assertEqual(where, [("calc.py", None, "not-scored")])
+        self.assertEqual(found[0]["message"], "its base could not be read (git show failed), so its functions could "
+                                              "not be compared with theirs.")
+
+    def test_a_change_whose_files_git_cannot_list_is_a_finding(self):
+        self.nest_under("big", 19)
+        with patch.object(Host, "changed_files", side_effect=OrchestratorError("git diff failed")):
+            where, found = self.found()
+        self.assertEqual(where, [(None, None, "not-scored")])
+        self.assertIn("could not be listed (git diff failed)", found[0]["message"])
+
+    def test_a_base_that_does_not_parse_is_a_finding_when_a_function_is_over_the_limit(self):
+        self.put("broken.py", "def big(:\n")
+        self.git("add", "broken.py")
+        self.git("commit", "--quiet", "-m", "broken")
+        self.put("broken.py", flat("big", 16))
+        where, found = self.found()
+        self.assertEqual(where, [("broken.py", None, "not-scored")])
+        self.assertEqual(found[0]["message"], "its base does not parse as Python, so its functions could not be "
+                                              "compared with theirs.")
+
+    def test_it_fails_the_gate(self):
+        [check] = [c for c in orchestrator.gate_checks(orchestrator.MUTATION_BUDGET) if c.name == "cognitive-complexity"]
+        self.assertEqual((check.fails, check.find), (True, orchestrator.too_complex_functions))
 
 
 class TestToolFindings(unittest.TestCase):
