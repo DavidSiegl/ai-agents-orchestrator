@@ -4446,6 +4446,20 @@ class TestFlakyTests(unittest.TestCase):
         with patch.object(orchestrator, "FLAKY_SEEDS", (1, 2)):
             self.assertEqual([(f["line"], f["rule"]) for f in self.found()], [(15, "mixed-results")])
 
+    def test_a_test_file_whose_name_holds_a_line_end_is_rerun(self):
+        # A carriage return breaks text mode's reading of pytest's list of node ids, and U+2028 str.splitlines'.
+        old = "tests/test_state.py"
+        for name in ("tests/test_st\u2028ate.py", "tests/test_st\rate.py"):
+            with self.subTest(name=name), patch.object(orchestrator, "FLAKY_SEEDS", (1, 2)):
+                self.git("mv", old, name)
+                self.git("commit", "--quiet", "-m", "renamed")
+                old = name
+                self.put(name, self.BASE.replace("self.skipTest('not yet')", "self.assertIsNotNone(RUNS)"))
+                self.assertEqual([(f["path"], f["line"], f["rule"]) for f in self.found()],
+                                 [(name, 15, "mixed-results")])
+                self.git("checkout", "--", name)
+                os.remove(os.path.join(self.repo, "tests", "runs"))
+
     def test_a_change_to_no_test_reruns_nothing(self):
         self.put("calc.py", "def add(a, b):\n    return b + a\n")
         self.put("tests/test_state.py", self.BASE.replace("import unittest\n", "import unittest  # edited\n"))

@@ -2853,7 +2853,7 @@ def _collect_python_tests(root: str, tests: dict[tuple[str, str], int]) -> tuple
         return [], problem
     # At verbosity -1 pytest lists one node id a line, unindented, before its summary; a warnings summary repeats
     # some, indented or not. A collection that found tests but listed none in that form cannot be judged.
-    ids = {line for line in proc.stdout.splitlines() if line.split("::")[0] in files}
+    ids = {line for line in proc.stdout.split("\n") if line.split("::")[0] in files}
     if proc.returncode == 0 and not ids:
         return [], f"pytest, collecting the changed tests, printed no node id the gate could read: {_pytest_said(proc)}"
     return sorted(i for i in ids if (i.split("::")[0], _python_test_name(i)) in tests), None
@@ -2894,18 +2894,20 @@ def _pytest(root: str, doing: str, args: list[str],
             ok: tuple[int, ...] = (0, 1)) -> tuple[subprocess.CompletedProcess | None, str | None]:
     """pytest run at verbosity -1 in the gate's own interpreter at root, without its cache, with args; or None and
     the problem, a clause naming doing, when it could not start, took longer than FLAKY_RUN_TIMEOUT or exited with a
-    status outside ok (by default 0, all passed, and 1, some failed)."""
+    status outside ok (by default 0, all passed, and 1, some failed). Its output is decoded as Host.run's verbatim
+    output is, so the node ids in it hold paths as git's do, and only "\n" ends a line."""
     # --verbosity sets the level outright, and pytest reads the project's addopts and PYTEST_ADDOPTS before the
     # command line, so a -v or -q of theirs cannot change what the collection prints.
     argv = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "--rootdir", root, "--verbosity=-1", *args]
     try:
         # A fixed command over the node ids pytest itself collected; no shell reads it.
-        proc = subprocess.run(argv, cwd=root, capture_output=True, text=True, errors="replace",  # noqa: S603
-                              timeout=FLAKY_RUN_TIMEOUT, env=child_env(), check=False)
+        raw = subprocess.run(argv, cwd=root, capture_output=True, timeout=FLAKY_RUN_TIMEOUT,  # noqa: S603
+                             env=child_env(), check=False)
     except subprocess.TimeoutExpired:
         return None, f"pytest, {doing}, did not finish within {FLAKY_RUN_TIMEOUT} seconds"
     except OSError as e:
         return None, f"could not start pytest, {doing}: {e}"
+    proc = subprocess.CompletedProcess(raw.args, raw.returncode, os.fsdecode(raw.stdout), os.fsdecode(raw.stderr))
     if proc.returncode not in ok:
         return None, f"pytest, {doing}, exited with status {proc.returncode}: {_pytest_said(proc)}"
     return proc, None
@@ -2913,8 +2915,8 @@ def _pytest(root: str, doing: str, args: list[str],
 
 def _pytest_said(proc: subprocess.CompletedProcess) -> str:
     """What a pytest that went wrong said last: the first line of its standard error, else the last of its output."""
-    err = [line.strip() for line in proc.stderr.splitlines() if line.strip()]
-    out = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    err = [line.strip() for line in proc.stderr.split("\n") if line.strip()]
+    out = [line.strip() for line in proc.stdout.split("\n") if line.strip()]
     return _clip(err[0] if err else out[-1] if out else "nothing")
 
 
