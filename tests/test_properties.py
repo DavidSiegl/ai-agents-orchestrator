@@ -182,13 +182,14 @@ class TestUnquote(unittest.TestCase):
 # The env file: ci_credentials, so parse_env_file as the file reaches it
 # ---------------------------------------------------------------------------
 
-# Names under one prefix, so that none is a variable the shell sets or refuses itself: PWD, IFS, BASH_*.
-env_names = st.from_regex(r"V[A-Za-z0-9_]{0,8}", fullmatch=True)
-# The characters an unquoted value may not hold: blanks, quotes, and what sh treats as syntax there.
-NOT_UNQUOTED = " \t'\"\\$`;&|<>()"
+# Names under one prefix, so that none is a variable the shell sets or refuses itself: PWD, IFS, BASH_*. Some
+# start with "export", which makes them another name, not the keyword.
+env_names = st.from_regex(r"(export)?V[A-Za-z0-9_]{0,8}", fullmatch=True)
+# The characters an unquoted value may not hold: blanks, quotes, a ~, and what sh treats as syntax there.
+NOT_UNQUOTED = " \t'\"\\$`;&|<>()~"
 # A value in each form parse_env_file accepts: unquoted, single-quoted, and double-quoted without what expands inside
 # double quotes. Any line break but "\n" may be in it; a carriage return may not (test_refuses_a_carriage_return).
-unquoted_values = text_without(NOT_UNQUOTED + "\n\r").filter(lambda v: not v.startswith("~"))
+unquoted_values = text_without(NOT_UNQUOTED + "\n\r")
 env_values = st.one_of(
     unquoted_values,
     text_without("'\n\r").map(lambda v: f"'{v}'"),
@@ -220,16 +221,19 @@ def env_files(draw) -> tuple[str, set[str]]:
 
 @st.composite
 def misread_lines(draw) -> str:
-    """An assignment that sh reads otherwise, or not at all: a blank, a quote or shell syntax in an unquoted value,
-    text after a closing quote, a leading ~, or a blank beside the "="."""
+    """An assignment that sh reads otherwise, or not at all, or may: a blank, a quote, a ~ or shell syntax in an
+    unquoted value, what expands inside double quotes, text after a closing quote, a NUL, or a blank beside
+    the "="."""
     name, value = draw(env_names), draw(unquoted_values)
-    form = draw(st.sampled_from(["inside", "after quote", "tilde", "blank before", "blank after"]))
+    form = draw(st.sampled_from(["inside", "double quoted", "after quote", "nul", "blank before", "blank after"]))
     if form == "inside":
         return f"{name}={value}{draw(st.sampled_from(list(NOT_UNQUOTED)))}x"
+    if form == "double quoted":
+        return f'{name}="{value}{draw(st.sampled_from(list("\\$`")))}x"'
+    if form == "nul":
+        return draw(st.sampled_from([f"{name}={value}\0x", f"{name}='{value}\0x'", f'{name}="{value}\0x"']))
     if form == "after quote":
         return f"{name}='{draw(text_without(chr(39) + '\n\r'))}'x{value}"
-    if form == "tilde":
-        return f"{name}=~{value}"
     if form == "blank before":
         return f"{name} ={value}"
     return f"{name}= x{value}"
@@ -272,6 +276,9 @@ class TestEnvFile(unittest.TestCase):
     @given(misread_lines())
     @example("V=x y")
     @example("V='a'b")
+    @example("V=a:~")  # sh expands the ~ after a ":" too
+    @example('V="a$x"')
+    @example("V=a\0b")
     def test_refuses_what_sh_reads_otherwise(self, line):
         with tempfile.TemporaryDirectory() as d:
             path = write_env_file(d, line + "\n")
