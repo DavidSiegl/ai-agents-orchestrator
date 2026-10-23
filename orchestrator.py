@@ -3894,7 +3894,8 @@ def _changed_over_limit(change: GateChange) -> tuple[list[dict], list[tuple[str,
         try:
             with open(full, "rb") as source:
                 text, _ = _decode_python(source.read())
-        except (OSError, SyntaxError, UnicodeDecodeError) as e:
+        # LookupError: a coding cookie that names a codec which does not decode bytes to text, such as rot13.
+        except (OSError, SyntaxError, UnicodeDecodeError, LookupError) as e:
             out.append(_finding(path, None, "not-scored", f"could not be read ({e}), so its functions were not scored.",
                                 severity="error"))
             continue
@@ -3915,7 +3916,7 @@ def _base_functions(change: GateChange, path: str) -> list[_ScoredFunction]:
         # Verbatim, so that os.fsencode gives back the bytes git stores, which _decode_python decodes as Python would.
         tree = _parse_python(_decode_python(os.fsencode(
             Host().git(change.root, "cat-file", "blob", f"{change.base}:{path}", verbatim=True)))[0])
-    except (OrchestratorError, SyntaxError, UnicodeDecodeError):
+    except (OrchestratorError, SyntaxError, UnicodeDecodeError, LookupError):  # LookupError: as _changed_over_limit
         return []
     return _scored_functions(tree) if tree else []
 

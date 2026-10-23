@@ -5869,6 +5869,22 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.git("add", "bom.py", "latin.py")
         self.assertEqual(self.found()[0], [("bom.py", 1, "over-limit"), ("latin.py", 3, "over-limit")])
 
+    def test_a_file_whose_coding_cookie_names_no_text_encoding_could_not_be_read(self):
+        # rot13 is a codec, but not one that decodes bytes to text; Python refuses such a file.
+        self.put("rot.py", "# coding: rot13\n" + flat("rotated", 16))
+        self.git("add", "rot.py")
+        where, found = self.found()
+        self.assertEqual(where, [("rot.py", None, "not-scored")])
+        self.assertTrue(found[0]["message"].startswith("could not be read ("), found[0]["message"])
+
+    def test_a_base_whose_coding_cookie_names_no_text_encoding_leaves_its_functions_judged_as_new(self):
+        self.put("rot.py", "# coding: rot13\n" + flat("rotated", 20))
+        self.git("add", "rot.py")
+        self.git("commit", "--quiet", "-m", "rot13")
+        self.put("rot.py", flat("rotated", 20).replace("x += 3\n", "x += 30\n"))
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`rotated`: cognitive complexity 20, a new function; the limit is 15."])
+
     def test_a_base_with_a_byte_order_mark_or_a_coding_cookie_is_compared_as_python_reads_it(self):
         bom, cookie = b"\xef\xbb\xbf", b"# -*- coding: latin-1 -*-\nCAFE = 'caf\xe9'\n"
         self.put_bytes("bom.py", bom + flat("marked", 20).encode())
