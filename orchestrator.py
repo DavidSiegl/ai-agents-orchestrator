@@ -2198,6 +2198,10 @@ def judge_change(cwd: str, base: str, *, rules: str | None = None, coverage: str
     elsewhere = len(findings) - len(issues)
     if issues:
         conditions.insert(0, f"{len(issues)} findings on lines the change added; each is listed below.")
+    conditions += [f"`{path}:{n}` holds a carriage return that does not end the line. Python's tools end a line "
+                   f"there and git does not, so they number the lines after it differently and the gate cannot "
+                   f"tell which of their findings are on the change; remove it, or write it as `\\r` in a string."
+                   for path, n in lone_carriage_returns(root, changed)]
     to_weigh: list[dict] = []
     change = GateChange(root, base_sha, diff, changed)
     for check in GATE_CHECKS:
@@ -2369,6 +2373,24 @@ def added_suppressions(root: str, changed: dict[str, set[int]]) -> list[tuple[st
             raise OrchestratorError(f"cannot read {path}, which the change edits: {e}") from e
         out += [(path, n, line.strip()[:160]) for n, line in enumerate(text.splitlines(), 1)
                 if n in added and _SUPPRESSION.search(line)]
+    return out
+
+
+def lone_carriage_returns(root: str, changed: dict[str, set[int]]) -> list[tuple[str, int]]:
+    """The (path, line) of each line the change added to a `*.py` file, in the working tree at root, that holds a
+    carriage return not followed by a newline. Python's tokenizer ends a line there and git does not, so the line
+    numbers Python's linters give after it are not git's. Raises OrchestratorError when such a file cannot be read.
+    """
+    out = []
+    for path, added in sorted(changed.items()):
+        if not added or not path.endswith(".py"):
+            continue
+        try:
+            with open(os.path.join(root, path), "rb") as f:
+                lines = f.read().split(b"\n")
+        except OSError as e:
+            raise OrchestratorError(f"cannot read {path}, which the change edits: {e}") from e
+        out += [(path, n) for n, line in enumerate(lines, 1) if n in added and b"\r" in line.removesuffix(b"\r")]
     return out
 
 

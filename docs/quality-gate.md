@@ -64,6 +64,9 @@ The gate is `GATE: ERROR` when any of these holds, and `GATE: OK` otherwise:
 - a finding on a line the change adds, or a finding of a failing check;
 - a linter that is missing, fails, or exits "found something" with nothing the gate can read. A gate that cannot
   run a check never reports it as passed;
+- a line the change adds to a `*.py` file that holds a carriage return not followed by a newline. Python's tools
+  end a line there and git does not, so they number the lines after it differently, and the gate cannot tell which
+  of their findings are on the change. The condition names the file and line;
 - with `--tests`, a failing test in that JUnit report;
 - with `--coverage`, coverage of new code below 80%, once the change has 20 or more new lines to cover. Coverage
   of new code is (covered branch outcomes + covered lines) / (branch outcomes + coverable lines), over the added

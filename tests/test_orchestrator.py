@@ -3770,6 +3770,19 @@ class TestGate(unittest.TestCase):
         base = self.git("rev-parse", "HEAD").strip()
         self.assertEqual(changed_lines(self.host.change_diff(self.repo, base)), {"f.py": {4, 5, 6}})
 
+    def test_a_carriage_return_inside_an_added_python_line_fails_the_gate(self):
+        # Python ends a line at the lone \r and git does not, so ruff's line 6 is git's line 5, the second added
+        # line. Without the condition, the finding sits on no added line and the gate passes. A \r\n is one end.
+        with open(os.path.join(self.repo, "f.py"), "ab") as f:
+            f.write(b"crlf = 1\r\npass\rimport os\n")
+        self.says("ruff", "f.py:6:8: F401 [*] `os` imported but unused\n")
+        status, out, _ = self.gate()
+        self.assertEqual(status, 1)
+        self.assertIn("- `f.py:5` holds a carriage return that does not end the line", out)
+        self.assertNotIn("`f.py:4`", out)
+        with self.assertRaisesRegex(OrchestratorError, "cannot read gone.py, which the change edits"):
+            orchestrator.lone_carriage_returns(self.repo, {"gone.py": {1}})
+
     def test_a_file_name_that_is_not_utf8_is_judged(self):
         name = os.fsdecode(b"f\xe9.py")
         self.put(name, "a = 1\n")
