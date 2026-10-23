@@ -4379,6 +4379,27 @@ class TestFlakyTests(unittest.TestCase):
             self.assertTrue(failed and passed)
             self.assertEqual(failed | passed, set(orchestrator.FLAKY_SEEDS))
 
+    def test_the_project_s_verbosity_does_not_hide_the_tests(self):
+        self.change_the_tests()
+        # Two seeds are enough for test_alternates to fail under one, and keep this test quick.
+        seeds = patch.object(orchestrator, "FLAKY_SEEDS", (1, 2))
+        for addopts, env in (("-v", ""), ("-qq", ""), ("", "-q")):
+            with self.subTest(addopts=addopts, env=env), seeds, patch.dict(os.environ, {"PYTEST_ADDOPTS": env}):
+                self.put("pytest.ini", f"[pytest]\naddopts = {addopts}\n")
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(os.path.join(self.repo, "tests", "runs"))
+                self.assertIn("`TestRuns.test_alternates` failed under seed 2 and passed under seed 1: ",
+                              "\n".join(f["message"] for f in self.found()))
+
+    def test_a_collection_the_gate_cannot_read_is_a_finding(self):
+        self.change_the_tests()
+        printed = subprocess.CompletedProcess([], 0, stdout="tests/test_state.py: 20\n\n20 tests collected\n",
+                                              stderr="")
+        with patch.object(orchestrator.subprocess, "run", return_value=printed):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-rerun")])
+        self.assertIn("printed no node id the gate could read: 20 tests collected", found[0]["message"])
+
     def test_a_change_to_no_test_reruns_nothing(self):
         self.put("calc.py", "def add(a, b):\n    return b + a\n")
         self.put("tests/test_state.py", self.BASE.replace("import unittest\n", "import unittest  # edited\n"))

@@ -70,8 +70,9 @@ so the project's environment that `uv run` gives, whatever `pytest` is on `PATH`
   of each. It depends on the order of the tests, on state another test leaves, or on randomness pytest-randomly
   seeds. A test that fails under every seed is not reported here: it fails, and the failing tests say so;
 - `not-rerun`: the reruns could not judge the tests: pytest could not start, took longer than 30 seconds, ended in a
-  usage or collection error, or a changed test file could not be read or parsed. After a run that went wrong, the
-  finding says which earlier runs were judged.
+  usage or collection error, or collected tests without listing their ids, or a changed test file could not be read
+  or parsed. After a run that went wrong, the finding says which earlier runs were judged. pytest runs at
+  `--verbosity=-1`, which a `-v` or `-q` in the project's `addopts` or `PYTEST_ADDOPTS` does not change.
 
 A change to a helper or fixture outside the tests' `def`s reruns nothing. The check adds at most six pytest runs of
 30 seconds to the gate, the collection included, and only when the change touches a test. pytest-randomly is in the

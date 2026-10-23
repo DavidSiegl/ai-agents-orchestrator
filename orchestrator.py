@@ -2784,8 +2784,11 @@ def _collect_python_tests(root: str, tests: dict[tuple[str, str], int]) -> tuple
     proc, problem = _pytest(root, "collecting the changed tests", ["--collect-only", *files], ok=(0, 5))
     if proc is None:
         return [], problem
-    # -q lists one node id a line, unindented, before its summary; a warnings summary repeats some, indented or not.
+    # At verbosity -1 pytest lists one node id a line, unindented, before its summary; a warnings summary repeats
+    # some, indented or not. A collection that found tests but listed none in that form cannot be judged.
     ids = {line for line in proc.stdout.splitlines() if line.split("::")[0] in files}
+    if proc.returncode == 0 and not ids:
+        return [], f"pytest, collecting the changed tests, printed no node id the gate could read: {_pytest_said(proc)}"
     return sorted(i for i in ids if (i.split("::")[0], _python_test_name(i)) in tests), None
 
 
@@ -2814,10 +2817,12 @@ def _junit_case(node_id: str) -> str:
 
 def _pytest(root: str, doing: str, args: list[str],
             ok: tuple[int, ...] = (0, 1)) -> tuple[subprocess.CompletedProcess | None, str | None]:
-    """pytest run quietly in the gate's own interpreter at root, without its cache, with args; or None and the
-    problem, a clause naming doing, when it could not start, took longer than FLAKY_RUN_TIMEOUT or exited with a
+    """pytest run at verbosity -1 in the gate's own interpreter at root, without its cache, with args; or None and
+    the problem, a clause naming doing, when it could not start, took longer than FLAKY_RUN_TIMEOUT or exited with a
     status outside ok (by default 0, all passed, and 1, some failed)."""
-    argv = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--rootdir", root, *args]
+    # --verbosity sets the level outright, and pytest reads the project's addopts and PYTEST_ADDOPTS before the
+    # command line, so a -v or -q of theirs cannot change what the collection prints.
+    argv = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "--rootdir", root, "--verbosity=-1", *args]
     try:
         # A fixed command over the node ids pytest itself collected; no shell reads it.
         proc = subprocess.run(argv, cwd=root, capture_output=True, text=True, errors="replace",  # noqa: S603
