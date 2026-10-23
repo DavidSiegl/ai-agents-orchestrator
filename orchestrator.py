@@ -2153,13 +2153,22 @@ def new_run_id() -> str:
     return f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}"
 
 
-def parse_verdict(review: str) -> str | None:
-    """The verdict on the review's first non-blank line, tolerating Markdown emphasis around it."""
-    for line in review.splitlines():
+def _first_line_word(text: str, label: str, words: tuple[str, ...]) -> str | None:
+    """The one of words that follows `label:` on text's first non-blank line, Markdown emphasis around them
+    tolerated; None when that line has none of them, or when text is blank."""
+    # The word must end there: a word character after it continues it into another word, unless it is one of
+    # the underscores that close emphasis, as in `_VERDICT: APPROVE_`.
+    pattern = rf"{label}:\s*({'|'.join(map(re.escape, words))})(?=_*(?!\w))"
+    for line in text.splitlines():
         if line.strip():
-            m = re.search(rf"VERDICT:\s*({APPROVE}|{CHANGES_REQUESTED})\b", line)
+            m = re.search(pattern, line)
             return m.group(1) if m else None
     return None
+
+
+def parse_verdict(review: str) -> str | None:
+    """The verdict on the review's first non-blank line, tolerating Markdown emphasis around it."""
+    return _first_line_word(review, "VERDICT", (APPROVE, CHANGES_REQUESTED))
 
 
 def parse_blocked(report: str) -> str | None:
@@ -2174,11 +2183,7 @@ def parse_blocked(report: str) -> str | None:
 
 def parse_gate(quality: str) -> str | None:
     """The gate on the quality file's first non-blank line, tolerating Markdown emphasis around it."""
-    for line in quality.splitlines():
-        if line.strip():
-            m = re.search(rf"GATE:\s*({GATE_OK}|{GATE_ERROR}|{GATE_BUILD_FAILED})\b", line)
-            return m.group(1) if m else None
-    return None
+    return _first_line_word(quality, "GATE", (GATE_OK, GATE_ERROR, GATE_BUILD_FAILED))
 
 
 def _under_gate_line(quality: str, line: str) -> str:

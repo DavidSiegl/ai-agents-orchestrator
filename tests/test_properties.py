@@ -238,6 +238,9 @@ class TestEnvFile(unittest.TestCase):
 GATES = (GATE_OK, GATE_ERROR, GATE_BUILD_FAILED)
 VERDICTS = (APPROVE, CHANGES_REQUESTED)
 blank_lines = st.lists(padding).map(lambda ls: "".join(line + "\n" for line in ls))
+emphasis = st.sampled_from([("", ""), ("**", "**"), ("_", "_"), ("`", "`"), ("# ", ""), ("> ", "")])
+# What may follow the word on its line: nothing, or text after a space.
+after_word = st.one_of(st.just(""), text_without(LINE_BREAKS).map(lambda t: " " + t))
 non_blank_line = text_without(LINE_BREAKS, min_size=1).filter(str.strip)
 
 
@@ -248,6 +251,13 @@ class TestFirstLineParsers(unittest.TestCase):
     def test_never_raise_and_return_only_their_words(self, text):
         self.assertIn(parse_gate(text), (*GATES, None))
         self.assertIn(parse_verdict(text), (*VERDICTS, None))
+
+    @given(blank_lines, emphasis, st.sampled_from(GATES), st.sampled_from(VERDICTS), after_word, st.text())
+    @example("", ("_", "_"), GATE_OK, APPROVE, "", "")  # the closing underscore read as the word going on
+    def test_read_the_word_on_the_first_non_blank_line(self, blanks, marks, gate, verdict, after, rest):
+        before, behind = marks
+        self.assertEqual(parse_gate(f"{blanks}{before}GATE: {gate}{behind}{after}\n{rest}"), gate)
+        self.assertEqual(parse_verdict(f"{blanks}{before}VERDICT: {verdict}{behind}{after}\n{rest}"), verdict)
 
     @given(blank_lines, non_blank_line, st.text())
     def test_ignore_every_line_below_the_first_non_blank_one(self, blanks, first, rest):
