@@ -56,7 +56,7 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -1880,6 +1880,19 @@ def changed_lines(diff: str) -> dict[str, set[int]]:
     `@@` lines are read inside a hunk, since an added line can itself start with `+++ `. Only "\n" ends a
     line, as in git's output: an added line can hold a carriage return, a form feed or U+2028.
     """
+    return _hunk_positions(diff, _hunk_lines)
+
+
+def _removal_points(diff: str) -> dict[str, set[int]]:
+    """For each file of a `git diff -U0`, by its path in the new tree, the new tree's lines after which a hunk that
+    only removes lines removed them, 0 for the top of the file. The files are changed_lines'; one without such a
+    hunk maps to an empty set."""
+    return _hunk_positions(diff, _hunk_removal_point)
+
+
+def _hunk_positions(diff: str, positions: Callable[[str], Iterable[int]]) -> dict[str, set[int]]:
+    """The new tree's lines that positions gives for each `@@` line of each file of a `git diff -U0`, by its path in
+    the new tree, the files as changed_lines says."""
     out: dict[str, set[int]] = {}
     path, in_hunk = None, False
     for line in diff.split("\n"):
@@ -1888,7 +1901,7 @@ def changed_lines(diff: str) -> dict[str, set[int]]:
         elif line.startswith("@@"):
             in_hunk = True
             if path is not None:
-                out[path].update(_hunk_lines(line))
+                out[path].update(positions(line))
         elif not in_hunk:
             path = _header_path(out, path, line)
     return out
@@ -1908,6 +1921,13 @@ def _hunk_lines(line: str) -> range:
         return range(0)
     start = int(m.group(1))
     return range(start, start + (1 if m.group(2) is None else int(m.group(2))))
+
+
+def _hunk_removal_point(line: str) -> list[int]:
+    """The new tree's line after which a `@@` line's hunk removes lines when it adds none, which git gives as the
+    hunk's new start with a count of 0; [] for a hunk that adds lines."""
+    m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+),0 @@", line)
+    return [int(m.group(1))] if m else []
 
 
 def _header_path(out: dict[str, set[int]], path: str | None, line: str) -> str | None:
@@ -2714,9 +2734,10 @@ WEAKENED_TESTS_DETECTORS = (
 # green run does not show.
 
 def flaky_tests(change: GateChange) -> list[dict]:
-    """The flaky-tests check's find: reruns the Python tests the change adds lines to, once under each of FLAKY_SEEDS
-    with pytest-randomly, and reports at its def each test that failed under some seeds and passed under the others,
-    naming both. A test that fails under every seed is not reported: it fails, and the failing-tests section says so.
+    """The flaky-tests check's find: reruns the Python tests the change adds or removes lines of, decorators
+    included, once under each of FLAKY_SEEDS with pytest-randomly, and reports at its def each test that failed under
+    some seeds and passed under the others, naming both. A test that fails under every seed is not reported: it
+    fails, and the failing-tests section says so.
 
     A run that skips a test, or does not report it, as when the project's addopts stop at the first failure, neither
     passed nor failed it. A test that is not mixed, which fewer than two runs passed or failed, is reported as one
@@ -2771,13 +2792,18 @@ def flaky_tests(change: GateChange) -> list[dict]:
 
 
 def _changed_python_tests(change: GateChange) -> tuple[dict[tuple[str, str], int], list[dict]]:
-    """The test functions and methods the change added lines to, decorators included, in the test files it left in
-    the working tree: (path, qualified name as _python_tests gives it) to the line of its def. And a finding for each
-    such file that could not be read or parsed."""
+    """The test functions and methods the change added lines to or removed lines from, decorators included, in the
+    test files it left in the working tree: (path, qualified name as _python_tests gives it) to the line of its def.
+    And a finding for each such file that could not be read or parsed.
+
+    Lines removed right above the first decorator or the def count: they may have been a decorator of the test.
+    Lines removed right after its last line count too, though they may have been the blank lines below it."""
     tests: dict[tuple[str, str], int] = {}
     out = []
+    removed = _removal_points(change.diff)
     for path, added in change.changed.items():
-        if not added or not _python_test_file(path):
+        points = removed.get(path, set())
+        if not (added or points) or not _python_test_file(path):
             continue
         try:
             tree = _parse_python(_read_text(os.path.join(change.root, path)))
@@ -2793,7 +2819,8 @@ def _changed_python_tests(change: GateChange) -> tuple[dict[tuple[str, str], int
             if isinstance(t.node, ast.ClassDef):
                 continue
             first = min([t.node.lineno, *(d.lineno for d in t.node.decorator_list)])
-            if any(first <= n <= (t.node.end_lineno or t.node.lineno) for n in added):
+            last = t.node.end_lineno or t.node.lineno
+            if any(first <= n <= last for n in added) or any(first - 1 <= n <= last for n in points):
                 tests[(path, t.name)] = t.node.lineno
     return tests, out
 

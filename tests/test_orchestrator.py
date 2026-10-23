@@ -4430,6 +4430,20 @@ class TestFlakyTests(unittest.TestCase):
             f"{s[4]}, and was skipped or not run under seed {s[2]}: it depends on the order the tests run in, or on "
             f"state or randomness that one run does not share with another.")])
 
+    def test_a_test_that_only_lost_lines_is_rerun(self):
+        self.put("tests/test_state.py", self.BASE.replace("        self.skipTest('not yet')\n", ""))
+        self.assertEqual([(f["line"], f["message"]) for f in self.found()], [(15, self.alternates())])
+
+    def test_a_decorator_removed_above_the_others_reruns_its_test(self):
+        decorated = self.BASE.replace("        self.skipTest('not yet')\n", "").replace(
+            "    def test_alternates(self):\n",
+            "    @unittest.skip('not yet')\n    @unittest.expectedFailure\n    def test_alternates(self):\n")
+        self.put("tests/test_state.py", decorated)
+        self.git("commit", "--quiet", "-am", "decorated")
+        self.put("tests/test_state.py", decorated.replace("    @unittest.skip('not yet')\n", "").replace(
+            "    @unittest.expectedFailure\n", ""))
+        self.assertEqual([f["line"] for f in self.found()], [15])
+
     def test_a_change_to_no_test_reruns_nothing(self):
         self.put("calc.py", "def add(a, b):\n    return b + a\n")
         self.put("tests/test_state.py", self.BASE.replace("import unittest\n", "import unittest  # edited\n"))
