@@ -29,7 +29,7 @@ listed and never held against the change, so the gate judges the change rather t
 ruff, mypy and pymarkdownlnt are in uv's `dev` group, so `uv run` puts them on `PATH`; shellcheck and actionlint
 come from the Jenkins agent image. The orchestrator itself stays stdlib-only: the gate runs them as processes.
 
-After the linters come the checks in `GATE_CHECKS`, which judge what the change did rather than how the tree
+After the linters come the checks `gate_checks` gives, which judge what the change did rather than how the tree
 reads. Each is a `GateCheck` that either fails the gate or only reports: a failing check's findings are issues,
 like the linters', and a reporting check's are findings to weigh, which the Builder answers and the Reviewer
 judges without the gate failing. Either kind is listed wherever it is, not only on added lines, and names the
@@ -40,6 +40,7 @@ run fails the gate.
 |---|---|---|
 | `test-integrity` | yes | tests the change weakened, in test files (`tests/**`, `test_*.py`, `*_test.py`) |
 | `flaky-tests` | no | tests the change adds or edits that pass in one order and fail in another |
+| `surviving-mutants` | no | changes to the functions the change edits that no test notices |
 
 **Test integrity** compares each test file the change touches with its base, so a change cannot pass by
 weakening its tests. Each of these is a finding:
@@ -98,6 +99,34 @@ A change to a helper or fixture outside the tests' `def`s reruns nothing. The ch
 30 seconds to the gate, the collection included, and only when the change touches a test. pytest-randomly is in the
 `dev` group, so every `uv run pytest` shuffles the tests too, printing the seed it used; `-p no:randomly` turns it
 off, and `--randomly-seed=N` repeats an order.
+
+**Surviving mutants** mutation-tests the functions the change edits, so that code its tests run without checking
+what it does is found; coverage counts such code as tested. A function counts when the change adds a line to it,
+decorators included: a top-level function, or a method of a top-level class, in a Python file outside the test files.
+mutmut, in the `dev` group, makes small changes to each, one at a time - an operator swapped, a number or a string
+altered, an argument dropped - and runs each of these mutants against the tests that call the function:
+
+- `survived`: a mutant no test failed on, at the line it changes, with that line before and after. No test checks what
+  the line does. What the first 50 survivors change is shown; the rest are listed at their function, by mutant name;
+- `untested`: a changed function that no test calls, with how many mutants it has;
+- `budget-reached`: mutmut ran out of time, as "budget reached after N of M mutants". What the N showed is listed; the
+  others may survive too;
+- `not-run`: mutmut could not start, failed, as it does when a test fails, or left results the gate could not read; or a
+  changed file could not be read or parsed.
+
+mutmut runs in the gate's own interpreter, on a copy of the files git tracks, so the working tree stays as it was; its
+state, `mutants/`, goes into the copy too. Its own selector, mutant names such as
+`orchestrator.x_judge_change__mutmut_*`, picks which mutants run only after mutmut has made a mutant of every function,
+which takes minutes for `orchestrator.py`. So in the copy, each function and class the change does not touch gets
+mutmut's `# pragma: no mutate block` at the end of its header, and mutmut skips it. The copy's `[tool.mutmut]` says what
+can be mutated (`source_paths`), which tests run (`pytest_add_cli_args_test_selection`), and what the tests read beside
+the code (`also_copy`): in a quality build that is the snapshot's own table, not `main`'s, and an edit to it shows under
+build configuration. In a repository without mutmut, a change to a function gets a `not-run` finding.
+
+`--mutation-budget SECONDS`, 600 by default, bounds mutmut's run; listing its results and showing the survivors take at
+most a minute more. With the flaky-tests check's three minutes and the test run, a quality build stays inside the
+orchestrator's `QUALITY_TIMEOUT` of 1200 seconds. A function full of strings, such as `parse_args` with its help texts,
+has many survivors: each string is a mutant, and few tests check a text word for word.
 
 The gate is `GATE: ERROR` when any of these holds, and `GATE: OK` otherwise:
 

@@ -3994,8 +3994,8 @@ class TestGate(unittest.TestCase):
                       "- `run.sh:1` `# shellcheck disable=SC2086`\n", out)
 
     def checks(self, *checks):
-        """Run the gate with checks in place of GATE_CHECKS."""
-        p = patch.object(orchestrator, "GATE_CHECKS", checks)
+        """Run the gate with checks in place of gate_checks's."""
+        p = patch.object(orchestrator, "gate_checks", lambda mutation_budget: checks)
         p.start()
         self.addCleanup(p.stop)
 
@@ -4051,6 +4051,20 @@ class TestGate(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertNotIn("quiet", out)
         self.assertNotIn("Findings to weigh", out)
+
+    def test_mutation_budget_bounds_the_surviving_mutants_check(self):
+        budgets = []
+
+        def find(change, budget):
+            budgets.append(budget)
+            return []
+        self.add_lines(1)
+        with patch.object(orchestrator, "surviving_mutants", find):
+            self.gate()
+            self.gate("--mutation-budget", "45")
+        self.assertEqual(budgets, [orchestrator.MUTATION_BUDGET, 45])
+        with self.assertRaises(SystemExit), patch("sys.stderr"):
+            self.gate("--mutation-budget", "0")
 
     def test_config_replaces_the_tree_s_rules(self):
         self.put("pyproject.toml", "[tool.ruff]\nline-length = 1\n")
@@ -4743,8 +4757,188 @@ class TestFlakyTests(unittest.TestCase):
                          [("tests/test_state.py", None, "not-rerun")])
 
     def test_it_reports_without_failing_the_gate(self):
-        [check] = [c for c in orchestrator.GATE_CHECKS if c.name == "flaky-tests"]
+        [check] = [c for c in orchestrator.gate_checks(orchestrator.MUTATION_BUDGET) if c.name == "flaky-tests"]
         self.assertEqual((check.fails, check.find), (False, orchestrator.flaky_tests))
+
+
+class TestSurvivingMutants(unittest.TestCase):
+    """The surviving-mutants check over a real git repository, with this suite's own mutmut, or a fake one."""
+
+    BASE = (
+        "def checked(a, b):\n"          # 1
+        "    return b + a\n"            # 2
+        "\n"                            # 3
+        "\n"                            # 4
+        "def unchecked(a, b):\n"        # 5
+        "    return b * a\n"            # 6
+        "\n"                            # 7
+        "\n"                            # 8
+        "def untouched(a, b):\n"        # 9
+        "    return a - b\n"            # 10
+        "\n"                            # 11
+        "\n"                            # 12
+        "def orphan():\n"               # 13
+        "    return 1\n"                # 14
+        "\n"                            # 15
+        "\n"                            # 16
+        "class Box:\n"                  # 17
+        "    def size(self):\n"         # 18
+        "        return 3\n"            # 19
+        "\n"                            # 20
+        "    def other(self):\n"        # 21
+        "        return 4\n"            # 22
+    )
+    # Each test calls one function; only test_checked looks at what it returns.
+    TESTS = (
+        "import calc\n\n\n"
+        "def test_checked():\n    assert calc.checked(2, 3) == 5\n\n\n"
+        "def test_unchecked():\n    calc.unchecked(2, 3)\n\n\n"
+        "def test_untouched():\n    calc.untouched(2, 3)\n\n\n"
+        "def test_box():\n    calc.Box().size()\n    calc.Box().other()\n"
+    )
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo, self.bin = (os.path.join(tmp.name, d) for d in ("repo", "bin"))
+        os.mkdir(self.repo)
+        os.mkdir(self.bin)
+        self.host = Host()
+        self.git("init", "--quiet", "-b", "main")
+        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
+            self.git("config", key, value)
+        self.put("pyproject.toml", '[tool.mutmut]\nsource_paths = ["calc.py"]\n'
+                                   'pytest_add_cli_args_test_selection = ["tests/"]\n')
+        self.put("calc.py", self.BASE)
+        self.put("tests/test_calc.py", self.TESTS)
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "base")
+
+    def git(self, *args):
+        return self.host.git(self.repo, *args)
+
+    def put(self, name, text):
+        path = os.path.join(self.repo, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    def found(self, budget=60):
+        base = self.git("rev-parse", "HEAD").strip()
+        diff = self.host.change_diff(self.repo, base)
+        return orchestrator.surviving_mutants(orchestrator.GateChange(self.repo, base, diff, changed_lines(diff)),
+                                              budget=budget)
+
+    def change_the_functions(self):
+        """Edit checked, unchecked, orphan and Box.size, leaving untouched and Box.other as they were."""
+        self.put("calc.py", self.BASE.replace("b + a", "a + b").replace("b * a", "a * b")
+                 .replace("return 1", "return 2").replace("return 3", "return 5"))
+
+    def fake_mutmut(self, run, results="", show=""):
+        """Make the gate's interpreter a fake that answers `mutmut run` with the shell code run, and `results` and
+        `show` by printing results and show."""
+        python = os.path.join(self.bin, "python")
+        # The gate starts mutmut as `python -c CODE ARGS`, so the command is the third argument.
+        with open(python, "w") as f:
+            f.write(f'#!/bin/sh\ncase "$3" in\nrun) {run};;\nresults) printf %s {shlex.quote(results)};;\n'
+                    f'show) printf %s {shlex.quote(show)};;\nesac\n')
+        os.chmod(python, 0o700)
+        p = patch.object(orchestrator.sys, "executable", python)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_a_mutant_the_tests_do_not_notice_is_reported_and_a_killed_one_is_not(self):
+        self.change_the_functions()
+        made, list_results = [], orchestrator._mutant_statuses
+
+        def results(copy, deadline):
+            statuses, problem = list_results(copy, deadline)
+            made.extend(statuses)
+            return statuses, problem
+        with patch.object(orchestrator, "_mutant_statuses", results):
+            found = self.found()
+        # untouched and Box.other are as weakly tested as unchecked, but the change left them alone, so mutmut made
+        # no mutant of them.
+        self.assertEqual({re.sub(r"__mutmut_\d+$", "", m) for m in made},
+                         {"calc.x_checked", "calc.x_unchecked", "calc.x_orphan", "calc.xǁBoxǁsize"})
+        # unchecked's test never looks at what it returns, nor does Box.size's; checked's does.
+        self.assertEqual([(f["path"], f["line"], f["severity"], f["rule"]) for f in found],
+                         [("calc.py", 6, "warning", "survived"), ("calc.py", 13, "warning", "untested"),
+                          ("calc.py", 19, "warning", "survived")])
+        self.assertIn("`unchecked`", found[0]["message"])
+        self.assertIn("`return a * b` changed to `return a / b`", found[0]["message"])
+        self.assertIn("`orphan`", found[1]["message"])
+        self.assertIn("`Box.size`", found[2]["message"])
+        self.assertEqual(self.git("status", "--porcelain", "--ignored"), " M calc.py\n")
+
+    def test_a_change_to_no_function_runs_nothing(self):
+        self.put("calc.py", self.BASE + "\nLIMIT = 3\n")
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_more():\n    calc.checked(1, 1)\n")
+        self.fake_mutmut(f"touch {self.bin}/ran")
+        self.assertEqual(self.found(), [])
+        self.assertFalse(os.path.exists(os.path.join(self.bin, "ran")))
+
+    def test_a_run_stopped_by_the_budget_says_so_with_what_it_found(self):
+        self.change_the_functions()
+        self.fake_mutmut("exec sleep 30",
+                         results="    calc.x_checked__mutmut_1: killed\n    calc.x_unchecked__mutmut_1: survived\n"
+                                 "    calc.x_unchecked__mutmut_2: not checked\n",
+                         show="# calc.x_unchecked__mutmut_1: survived\n--- calc.py\n+++ calc.py\n@@ -1,2 +1,2 @@\n"
+                              " def unchecked(a, b):\n-    return a * b\n+    return a / b\n")
+        started = time.monotonic()
+        found = self.found(budget=1)
+        self.assertLess(time.monotonic() - started, 15)
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                         [(None, None, "budget-reached"), ("calc.py", 6, "survived")])
+        self.assertTrue(found[0]["message"].startswith("budget reached after 2 of 3 mutants"), found[0]["message"])
+
+    def test_a_run_that_fails_is_a_finding(self):
+        self.change_the_functions()
+        self.fake_mutmut("echo 'failed to collect stats. runner returned 1'; exit 1")
+        found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
+        self.assertIn("exited with status 1: failed to collect stats. runner returned 1", found[0]["message"])
+
+    def test_a_project_without_mutmut_gets_a_finding_naming_the_import_error(self):
+        self.change_the_functions()
+        self.fake_mutmut("echo 'Traceback (most recent call last):' >&2; "
+                         "echo \"ModuleNotFoundError: No module named 'mutmut'\" >&2; exit 1")
+        found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
+        self.assertIn("exited with status 1: ModuleNotFoundError: No module named 'mutmut'", found[0]["message"])
+
+    def test_past_the_quality_file_s_limit_a_survivor_is_listed_at_its_function(self):
+        self.change_the_functions()
+        self.fake_mutmut("exit 0", results="    calc.x_unchecked__mutmut_1: survived\n"
+                                           "    calc.x_unchecked__mutmut_2: survived\n",
+                         show="--- calc.py\n+++ calc.py\n@@ -1,2 +1,2 @@\n def unchecked(a, b):\n"
+                              "-    return a * b\n+    return a / b\n")
+        with patch.object(orchestrator, "QUALITY_ISSUE_LIMIT", 1):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                         [("calc.py", 5, "survived"), ("calc.py", 6, "survived")])
+        self.assertIn("`calc.x_unchecked__mutmut_2`, a mutant of `unchecked`", found[0]["message"])
+
+    def test_a_mutmut_that_cannot_start_is_a_finding(self):
+        self.change_the_functions()
+        with patch.object(orchestrator.sys, "executable", os.path.join(self.repo, "no-python")):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
+        self.assertIn("could not start mutmut", found[0]["message"])
+
+    def test_an_unparsable_source_file_is_a_finding(self):
+        self.put("calc.py", self.BASE + "def broken(:\n")
+        self.fake_mutmut(f"touch {self.bin}/ran")
+        found = self.found()
+        self.assertFalse(os.path.exists(os.path.join(self.bin, "ran")))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", None, "not-run")])
+
+    def test_it_reports_without_failing_the_gate_within_its_budget(self):
+        with patch.object(orchestrator, "surviving_mutants", return_value=[]) as find:
+            [check] = [c for c in orchestrator.gate_checks(42) if c.name == "surviving-mutants"]
+            check.find("change")
+        self.assertFalse(check.fails)
+        find.assert_called_once_with("change", budget=42)
 
 
 class TestToolFindings(unittest.TestCase):

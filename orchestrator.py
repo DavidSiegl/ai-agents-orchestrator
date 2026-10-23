@@ -32,11 +32,14 @@ window over the same CLI: it starts run and resume as child processes.
 import argparse
 import ast
 import base64
+import bisect
 import collections
 import contextlib
 import copy
 import difflib
+import functools
 import http.client
+import io
 import json
 import math
 import os
@@ -53,6 +56,7 @@ import sys
 import tempfile
 import threading
 import time
+import tokenize
 import tomllib
 import urllib.error
 import urllib.parse
@@ -130,6 +134,14 @@ GATE_TOOL_TIMEOUT = 600
 # (1 + len(FLAKY_SEEDS)) * FLAKY_RUN_TIMEOUT seconds to the gate, well inside a build's QUALITY_TIMEOUT.
 FLAKY_SEEDS = (1, 2, 3, 4, 5)
 FLAKY_RUN_TIMEOUT = 30
+# The surviving-mutants check lets mutmut run for `gate --mutation-budget` seconds, MUTATION_BUDGET by default, then
+# stops it and gives it MUTMUT_STOP_GRACE seconds to exit. Listing its results and showing what the first
+# QUALITY_ISSUE_LIMIT survivors change, about a third of a second each, then get MUTMUT_REPORT_TIMEOUT seconds in all.
+# So it adds at most the budget and 70 seconds to the gate: with the flaky-tests check's 180 and the test run, about
+# 900 of a quality round's QUALITY_TIMEOUT, leaving the rest to the queue and the install.
+MUTATION_BUDGET = 600
+MUTMUT_STOP_GRACE = 10
+MUTMUT_REPORT_TIMEOUT = 60
 # The gate's exit status when it could not judge the change, and so wrote no quality file.
 EXIT_GATE_UNJUDGED = 2
 
@@ -2187,22 +2199,21 @@ class NewCoverage:
         return 100.0 * (self.covered_lines + self.covered_conditions) / total if total else 100.0
 
 
-def judge_change(cwd: str, base: str, *, rules: str | None = None, coverage: str | None = None,
-                 tests: str | None = None) -> str:
+def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: str | None = None,
+                 coverage: str | None = None, tests: str | None = None) -> str:
     """The quality file for the change from base to the working tree of the git repository at cwd.
 
     Runs each GATE_TOOLS linter whose files the repository tracks over those files, with the rules of the
-    pyproject.toml at rules, or the tree's own, and lists the findings on lines the change added and the
-    lineless ones on files it touched. Then runs each of GATE_CHECKS and lists what it finds, as an issue or
-    as a finding to weigh as its fails says. The gate is ERROR when there is such a linter finding or a
-    failing check's finding, when a linter is missing, fails or prints nothing readable, when a file a linter
-    reads and the change adds lines to holds a line end that git does not count, as stray_line_ends finds,
-    when tests, a JUnit report of the tree's tests such as pytest's --junitxml, has a failing test, or when
-    coverage, a Cobertura report of the tree such as pytest-cov's coverage.xml, puts new code below
-    GATE_MIN_COVERAGE percent on GATE_MIN_NEW_LINES or more new lines to cover; else OK. Suppressions the
-    change added are listed, not counted against it. Paths are absolute or relative to the process's working
-    directory. A file name that is not UTF-8 appears in the quality file with each byte it cannot decode as
-    `\\xNN`.
+    pyproject.toml at rules, or the tree's own, and lists the findings on lines the change added and the lineless
+    ones on files it touched. Then runs each of checks, such as gate_checks gives, and lists what it finds, as an
+    issue or as a finding to weigh as its fails says. The gate is ERROR when there is such a linter finding or a
+    failing check's finding, when a linter is missing, fails or prints nothing readable, when a file a linter reads
+    and the change adds lines to holds a line end that git does not count, as stray_line_ends finds, when tests, a
+    JUnit report of the tree's tests such as pytest's --junitxml, has a failing test, or when coverage, a Cobertura
+    report of the tree such as pytest-cov's coverage.xml, puts new code below GATE_MIN_COVERAGE percent on
+    GATE_MIN_NEW_LINES or more new lines to cover; else OK. Suppressions the change added are listed, not counted
+    against it. Paths are absolute or relative to the process's working directory. A file name that is not UTF-8
+    appears in the quality file with each byte it cannot decode as `\\xNN`.
 
     Raises OrchestratorError when it cannot judge: cwd is not in a git work tree, base names no commit, there
     is no rules file, the test or coverage report cannot be read, or git prints what it cannot decode outside
@@ -2246,7 +2257,7 @@ def judge_change(cwd: str, base: str, *, rules: str | None = None, coverage: str
                    for path, n, end in stray_line_ends(root, changed, reads)]
     to_weigh: list[dict] = []
     change = GateChange(root, base_sha, diff, changed)
-    for check in GATE_CHECKS:
+    for check in checks:
         found = [{**f, "rule": f"{check.name} {f['rule']}" if f["rule"] else check.name} for f in check.find(change)]
         if not check.fails:
             to_weigh += found
@@ -3060,11 +3071,315 @@ def _seeds(seeds: list[int]) -> str:
     return f"seeds {', '.join(map(str, seeds[:-1]))} and {seeds[-1]}"
 
 
-# The checks judge_change runs after the linters, in this order.
-GATE_CHECKS: tuple[GateCheck, ...] = (
-    GateCheck("test-integrity", fails=True, find=weakened_tests),
-    GateCheck("flaky-tests", fails=False, find=flaky_tests),
-)
+# Surviving mutants: the code a change adds that its tests run without checking what it does, which coverage counts
+# as tested.
+#
+# mutmut 3 (3.8.0 here) is bounded to the functions the change edits like this. Its own selector, `mutmut run` with
+# mutant names or globs such as `orchestrator.x_flaky_tests__mutmut_*`, only picks which mutants run: it first makes a
+# mutant of every function in its source_paths, which for orchestrator.py takes minutes and makes a 25 MB module the
+# tests then crawl through. So mutmut runs on a copy of the tree, and in the copy every function and class that holds
+# no changed function gets `# pragma: no mutate block` at the end of the line its header ends on. mutmut skips such a
+# function whole: no mutants, and none of the call tracing that slows the tests. Appending a comment keeps every line
+# where it was, and mutmut writes its state, mutants/, into the copy, so the working tree is never written to.
+_MUTMUT_SKIP = "  # pragma: no mutate block"
+
+# How `mutmut results` words a mutant it never ran, because the budget stopped it first.
+_MUTMUT_UNTRIED = frozenset({"not checked", "check was interrupted by user"})
+
+
+@dataclass(frozen=True)
+class _ChangedFunction:
+    """A function mutmut mutates as one, a top-level function or a method of a top-level class, that the change added
+    a line to."""
+    path: str
+    name: str  # f, or C.f for a method
+    first: int  # the line it starts on, its decorators included
+    source: tuple[str, ...]  # its lines, from first on, as the working tree has them
+
+
+def surviving_mutants(change: GateChange, *, budget: float) -> list[dict]:
+    """The surviving-mutants check's find: mutation-tests with mutmut each top-level function and method the change
+    adds a line to in a Python file outside the tests, and reports each mutant the tests did not notice, at the line
+    it changes, as that line before and after; and each such function that no test calls.
+
+    mutmut runs in the gate's own interpreter, as flaky_tests runs pytest, on a copy of the files git tracks, by that
+    copy's [tool.mutmut]: its source_paths decide which files can be mutated and its test selection which tests run,
+    and each mutant is tried against the tests that called its function on a clean run. It may run budget seconds; a
+    run stopped there is a finding that says how many of the mutants it tried, beside what those showed. A mutmut that
+    cannot start, fails, or whose results cannot be listed is a finding saying so, and so is a changed file that cannot
+    be read or parsed.
+    """
+    functions, out = _changed_python_functions(change)
+    if not functions:
+        return out
+    with tempfile.TemporaryDirectory() as copy:
+        try:
+            _copy_for_mutmut(change.root, copy, {(f.path, f.name) for f in functions})
+            proc, stopped = _run_mutmut(copy, ["run"], budget)
+        except (OSError, OrchestratorError) as e:
+            return [*out, _mutation_not_run(f"could not start mutmut: {e}")]
+        if proc.returncode != 0 and not stopped:
+            return [*out, _mutation_not_run(f"mutmut exited with status {proc.returncode}: "
+                                            f"{_said_by_mutmut(proc)}")]
+        deadline = time.monotonic() + MUTMUT_REPORT_TIMEOUT
+        statuses, problem = _mutant_statuses(copy, deadline)
+        if problem:
+            return [*out, _mutation_not_run(problem)]
+        by_prefix = {_mutant_prefix(f): f for f in functions}
+        survivors: list[tuple[_ChangedFunction, str]] = []
+        untested: collections.Counter[_ChangedFunction] = collections.Counter()
+        for mutant, status in statuses.items():
+            # The last __mutmut_: one named _mutmut_x has one in its own name, as x__mutmut_x.
+            f = by_prefix.get(mutant.rpartition("__mutmut_")[0])
+            if f is None:
+                continue
+            if status == "survived":
+                survivors.append((f, mutant))
+            elif status == "no tests":
+                untested[f] += 1
+        # mutmut lists each function's mutants in the order it made them, which is their order in the function. Only
+        # as many survivors as a quality file lists findings are shown.
+        survivors.sort(key=lambda s: (s[0].path, s[0].first))
+        out += [_survivor(copy, f, mutant, deadline if k < QUALITY_ISSUE_LIMIT else None)
+                for k, (f, mutant) in enumerate(survivors)]
+    out += [_mutation_finding(f.path, f.first, "untested", f"no test calls `{f.name}`, so none of its {n} mutants "
+                                                           f"can make one fail.") for f, n in untested.items()]
+    if stopped:
+        tried = sum(1 for status in statuses.values() if status not in _MUTMUT_UNTRIED)
+        out.append(_mutation_finding(None, None, "budget-reached", (
+            f"budget reached after {tried} of {len(statuses)} mutants" if statuses
+            else "budget reached before mutmut had made its mutants")
+            + f": mutmut was stopped at {budget:g} seconds (`--mutation-budget`), so the mutants it did not try may "
+              f"survive too."))
+    return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
+
+
+def _changed_python_functions(change: GateChange) -> tuple[list[_ChangedFunction], list[dict]]:
+    """The functions mutmut mutates as one that the change added lines to, decorators included, in the Python files
+    outside the tests that it left in the working tree; and a finding for each such file that could not be read or
+    parsed."""
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef)
+    functions, out = [], []
+    for path, added in change.changed.items():
+        if not added or not path.endswith(".py") or _python_test_file(path):
+            continue
+        try:
+            text = _read_text(os.path.join(change.root, path))
+        except (OSError, UnicodeDecodeError) as e:
+            out.append(_mutation_finding(path, None, "not-run",
+                                         f"could not be read, so its functions were not mutation-tested: {e}"))
+            continue
+        tree = _parse_python(text)
+        if tree is None:
+            out.append(_mutation_finding(path, None, "not-run",
+                                         "does not parse as Python, so its functions were not mutation-tested."))
+            continue
+        lines = text.split("\n")
+        for node in tree.body:
+            units = [(node.name, node)] if isinstance(node, defs) else []
+            if isinstance(node, ast.ClassDef):
+                units = [(f"{node.name}.{m.name}", m) for m in node.body if isinstance(m, defs)]
+            for name, unit in units:
+                first = min([unit.lineno, *(d.lineno for d in unit.decorator_list)])
+                last = unit.end_lineno or unit.lineno
+                if any(first <= n <= last for n in added):
+                    functions.append(_ChangedFunction(path, name, first, tuple(lines[first - 1:last])))
+    return functions, out
+
+
+def _copy_for_mutmut(root: str, copy: str, changed: set[tuple[str, str]]) -> None:
+    """Copies the files git tracks in root's working tree into copy, marking for mutmut to skip each top-level function
+    and class of their Python files that is not, and holds no method, in changed: (path, name as _ChangedFunction
+    gives it). A Python file that cannot be read or parsed is copied as it is.
+
+    Raises OSError when a file cannot be copied, and OrchestratorError when git cannot list them.
+    """
+    for path in filter(None, Host().git(root, "ls-files", "-z").split("\0")):
+        src, dst = os.path.join(root, path), os.path.join(copy, path)
+        # A file the change deleted is gone from the tree, and a submodule is a directory.
+        if not (os.path.isfile(src) or os.path.islink(src)):
+            continue
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(src, dst, follow_symlinks=False)
+        if not path.endswith(".py") or os.path.islink(src):
+            continue
+        try:
+            # newline="" keeps the file's own line endings.
+            with open(src, encoding="utf-8", newline="") as f:
+                text = f.read()
+        except UnicodeDecodeError:
+            continue
+        marked = _skip_unchanged(path, text, changed)
+        if marked != text:
+            with open(dst, "w", encoding="utf-8", newline="") as f:
+                f.write(marked)
+
+
+def _skip_unchanged(path: str, text: str, changed: set[tuple[str, str]]) -> str:
+    """text, the Python file at path, with _MUTMUT_SKIP on the line each header ends on of each top-level function and
+    class that is not, and holds no method, in changed, and of each method or nested class beside one that is. text
+    as it is when it does not parse."""
+    tree = _parse_python(text)
+    if tree is None:
+        return text
+    try:
+        # Each header ends with the first NEWLINE token on or after the line of its def or class: the logical line
+        # that starts there ends at the colon, whatever brackets or decorators it spans.
+        ends = [t.start[0] for t in tokenize.generate_tokens(io.StringIO(text).readline) if t.type == tokenize.NEWLINE]
+    except (tokenize.TokenError, SyntaxError):
+        return text
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    skipped: list[ast.stmt] = []
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            inner = [m for m in node.body if isinstance(m, defs)]
+            kept = [m for m in inner if (path, f"{node.name}.{m.name}") in changed]
+            skipped += [m for m in inner if m not in kept] if kept else [node]
+        elif isinstance(node, defs) and (path, node.name) not in changed:
+            skipped.append(node)
+    lines = text.split("\n")
+    for node in skipped:
+        i = ends[bisect.bisect_left(ends, node.lineno)] - 1
+        line, cr = (lines[i][:-1], "\r") if lines[i].endswith("\r") else (lines[i], "")
+        lines[i] = line + _MUTMUT_SKIP + cr
+    return "\n".join(lines)
+
+
+def _mutant_prefix(f: _ChangedFunction) -> str:
+    """The name mutmut 3 gives f's mutants before their `__mutmut_<n>`: f's module, from its path as mutmut's
+    get_mutant_name makes it, then x_<function> or xǁ<class>ǁ<method>."""
+    module = f.path.removesuffix(".py").replace("/", ".").removeprefix("src.")
+    cls, _, name = f.name.rpartition(".")
+    return f"{module}.{f'xǁ{cls}ǁ{name}' if cls else f'x_{name}'}".replace(".__init__.", ".")
+
+
+def _run_mutmut(copy: str, args: list[str], timeout: float) -> tuple[subprocess.CompletedProcess, bool]:
+    """mutmut with args, run in the gate's own interpreter at copy, and whether it was stopped at timeout seconds.
+
+    Stopped, it gets SIGINT, on which mutmut stops trying mutants and keeps the results it has, and MUTMUT_STOP_GRACE
+    seconds to exit before it is killed. Every process it started is gone when this returns. Its temporary files, and
+    those of the tests it runs, go into copy's .tmp, so that what a test it killed left goes with copy. Raises OSError
+    when it cannot be started.
+    """
+    # `mutmut`, its console script, runs this line. `python -m mutmut` would import its __main__ a second time in each
+    # forked worker, which mutmut warns against.
+    argv = [sys.executable, "-c", "from mutmut.__main__ import cli; cli()", *args]
+    tmp = os.path.join(copy, ".tmp")
+    os.makedirs(tmp, exist_ok=True)
+    # A fixed command over mutant names mutmut itself listed; no shell reads it. Its own session puts its workers in
+    # its process group, so that they can be killed with it.
+    proc = subprocess.Popen(argv, cwd=copy, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,  # noqa: S603
+                            stderr=subprocess.PIPE, text=True, errors="replace", env={**child_env(), "TMPDIR": tmp},
+                            start_new_session=True)
+    stopped = False
+    try:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            stopped = True
+            proc.send_signal(signal.SIGINT)
+            try:
+                out, err = proc.communicate(timeout=MUTMUT_STOP_GRACE)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                out, err = proc.communicate()
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err), stopped
+
+
+def _mutant_statuses(copy: str, deadline: float) -> tuple[dict[str, str], str | None]:
+    """Each mutant mutmut made in copy, by name, with its status in the words of `mutmut results`, such as killed,
+    survived, no tests or not checked; or {} and the problem, a clause, when they could not be listed by deadline, a
+    time.monotonic() time."""
+    try:
+        proc, stopped = _run_mutmut(copy, ["results", "--all", "true"], max(0.0, deadline - time.monotonic()))
+    except OSError as e:
+        return {}, f"could not start mutmut to list its results: {e}"
+    if stopped:
+        return {}, f"mutmut did not list its results within {MUTMUT_REPORT_TIMEOUT} seconds"
+    if proc.returncode != 0:
+        return {}, (f"mutmut could not list its results, exiting with status {proc.returncode}: "
+                    f"{_said_by_mutmut(proc)}")
+    return dict(re.findall(r"^\s*(\S+): (.+?)\s*$", proc.stdout, re.MULTILINE)), None
+
+
+def _survivor(copy: str, f: _ChangedFunction, mutant: str, deadline: float | None) -> dict:
+    """The finding for mutant, a mutant of f that survived: what it changes, at that line, as `mutmut show` gives it
+    by deadline, a time.monotonic() time. At f's first line, naming the mutant, when mutmut does not show it in time,
+    or without a deadline."""
+    if deadline is None:
+        return _mutation_finding(f.path, f.first, "survived", f"`{mutant}`, a mutant of `{f.name}`, survived its "
+                                                              f"tests; what it changes is shown for the first "
+                                                              f"{QUALITY_ISSUE_LIMIT} survivors only.")
+    shown = None
+    if deadline > time.monotonic():
+        with contextlib.suppress(OSError):
+            proc, stopped = _run_mutmut(copy, ["show", mutant], deadline - time.monotonic())
+            shown = None if stopped or proc.returncode != 0 else _mutation(proc.stdout)
+    if shown is None:
+        return _mutation_finding(f.path, f.first, "survived", f"`{mutant}`, a mutant of `{f.name}`, survived its "
+                                                              f"tests; mutmut did not show in time what it changes.")
+    at, old, new = shown
+    # at counts from the first line of the function's code as mutmut prints it, which takes in the comments right
+    # above it, so the line is the nearest one that reads as the mutant's removed one.
+    expected = f.first + at - 1
+    hits = [f.first + k for k, line in enumerate(f.source) if line.strip() == old[0]]
+    return _mutation_finding(f.path, min(hits, key=lambda n: abs(n - expected), default=f.first), "survived",
+                             f"a mutant of `{f.name}` survived: its tests still pass with `{_clip(' '.join(old))}` "
+                             f"changed to `{_clip(' '.join(new))}`.")
+
+
+def _mutation(diff: str) -> tuple[int, list[str], list[str]] | None:
+    """What the first hunk of `mutmut show`'s diff of a function and its mutant changes: the line of the function's code
+    where it starts, 1 for the first, and the lines it removes and adds there, stripped; None when it removes none."""
+    lines = diff.splitlines()
+    hunk = next((i for i, line in enumerate(lines) if line.startswith("@@")), len(lines))
+    m = re.match(r"@@ -(\d+)", lines[hunk]) if hunk < len(lines) else None
+    if not m:
+        return None
+    n, at = int(m.group(1)), None
+    old: list[str] = []
+    new: list[str] = []
+    for line in lines[hunk + 1:]:
+        if line.startswith("@@"):
+            break
+        if line.startswith("+"):
+            new.append(line[1:].strip())
+            continue
+        if line.startswith("-"):
+            at = at or n
+            old.append(line[1:].strip())
+        n += 1
+    return (at, old, new) if at else None
+
+
+def _said_by_mutmut(proc: subprocess.CompletedProcess) -> str:
+    """What a mutmut that went wrong said last: the exception that ended it, else the last line of its output, whose
+    progress lines end in carriage returns."""
+    err = [line.strip() for line in proc.stderr.splitlines() if line.strip()]
+    out = [line.strip() for line in re.split(r"[\r\n]", proc.stdout) if line.strip()]
+    return _clip(err[-1] if err and ("Traceback" in proc.stderr or not out) else out[-1] if out else "nothing")
+
+
+def _mutation_not_run(problem: str) -> dict:
+    return _mutation_finding(None, None, "not-run", f"{problem}; the change's functions were not mutation-tested.")
+
+
+def _mutation_finding(path: str | None, line: int | None, rule: str, message: str) -> dict:
+    return {"path": path, "line": line, "severity": "warning", "rule": rule, "message": message}
+
+
+def gate_checks(mutation_budget: float) -> tuple[GateCheck, ...]:
+    """The checks judge_change runs after the linters, in this order, the surviving-mutants check letting mutmut run
+    for mutation_budget seconds."""
+    return (
+        GateCheck("test-integrity", fails=True, find=weakened_tests),
+        GateCheck("flaky-tests", fails=False, find=flaky_tests),
+        GateCheck("surviving-mutants", fails=False, find=functools.partial(surviving_mutants, budget=mutation_budget)),
+    )
 
 
 def spec_title(spec: str) -> str | None:
@@ -4623,6 +4938,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                       help="a JUnit report of the tree's tests, such as pytest's --junitxml; without it, tests are "
                            "not judged")
     gate.add_argument("--out", metavar="FILE", help="write the quality file here instead of to standard output")
+    gate.add_argument("--mutation-budget", type=int, default=MUTATION_BUDGET, metavar="SECONDS",
+                      help=f"stop mutmut, which mutation-tests the functions the change edits, after this long, "
+                           f"and report how many of its mutants it tried; default {MUTATION_BUDGET}")
 
     gui = sub.add_parser(
         "gui", help="open a window to start, list and resume runs; the default with no arguments where there "
@@ -4635,6 +4953,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         p.error("--cwd is required with --machine")
     if getattr(args, "max_rounds", None) is not None and args.max_rounds < 1:
         p.error("--max-rounds must be at least 1")
+    if getattr(args, "mutation_budget", 1) < 1:
+        p.error("--mutation-budget must be at least 1")
     if getattr(args, "max_quality_rounds", None) is not None:
         if args.max_quality_rounds < 1:
             p.error("--max-quality-rounds must be at least 1")
@@ -5240,7 +5560,7 @@ def main(argv: list[str]) -> int:
             return gui_command(args.smoke_test)
         # The gate judges the tree it runs in: no herdr, no agents.
         if args.command == "gate":
-            return gate_command(args.base, args.config, args.coverage, args.tests, args.out)
+            return gate_command(args.base, args.config, args.coverage, args.tests, args.out, args.mutation_budget)
         herdr, host = connect(args.machine)
         cwd = host.resolve_dir(args.cwd or os.getcwd())
         if args.command in RUNS_COMMANDS:
@@ -5285,14 +5605,17 @@ def runs_command(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str) -
         print_pruned(prune_branches(host, cwd, time.time, local_host, pid_alive, dry_run=args.dry_run, revisit=True))
 
 
-def gate_command(base: str, rules: str | None, coverage: str | None, tests: str | None, out: str | None) -> int:
-    """Write the quality file judge_change gives for the current directory, to out or standard output.
+def gate_command(base: str, rules: str | None, coverage: str | None, tests: str | None, out: str | None,
+                 mutation_budget: float) -> int:
+    """Write the quality file judge_change gives for the current directory, with gate_checks's checks, to out or
+    standard output.
 
     Returns 0 for GATE: OK and 1 for GATE: ERROR; EXIT_GATE_UNJUDGED, having written nothing, when the change
     could not be judged or out could not be written.
     """
     try:
-        text = judge_change(os.getcwd(), base, rules=rules, coverage=coverage, tests=tests)
+        text = judge_change(os.getcwd(), base, gate_checks(mutation_budget), rules=rules, coverage=coverage,
+                            tests=tests)
         if out:
             # Written aside and renamed into place, so a failed write leaves no half a quality file.
             tmp = f"{out}.tmp.{os.getpid()}"
