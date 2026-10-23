@@ -33,3 +33,21 @@ was done.
 - **A file name that holds a line separator breaks its list item in the quality file.** `quality_report` writes
   names as they are, so `\r` or U+2028 in one shows as a line break in some renderers. The finding is still
   matched to the right file. Closes with names escaped when the quality file is written.
+- **The mutation budget's default is not measured on the Jenkins agent.** `MUTATION_BUDGET` is 600 s, which fits
+  `QUALITY_TIMEOUT` by the arithmetic beside it (budget + 75 s, flaky-tests' 180 s, the test run). mutmut runs one
+  worker per CPU: on this branch's own change it made 1702 mutants in 221 s on 24 cores, so an agent with fewer cores
+  ends at the budget, reported as `budget-reached`. Closes with a real quality build's timings, and the default
+  lowered if the build does not fit.
+- **`parse_args` still yields many survivors after `do_not_mutate_patterns = ['\bhelp=']`.** Its `description=` texts
+  and flag names are mutated, and few tests check them word for word: 105 of 305 mutants survived on this branch's
+  change. Reported per function, so it is one finding. Closes with a decision to add `'\bdescription='` to the
+  pattern, or to leave it.
+- **Mutation-testing the code that runs mutmut leaves processes behind.** When mutmut stops a mutant at its own
+  timeout it kills the worker, and a real mutmut that `TestSurvivingMutants` started in its own session lives on as
+  an orphan group of one process per CPU. It only happens when a change edits that code. Jenkins' process-tree
+  killer should end them with the build; not checked. Closes with a check on a PR build, or with that test run
+  without its own session under mutmut.
+- **The surviving-mutants check selects functions by added lines only.** A function whose edit only removes lines,
+  or changes only the comments or blank lines above it, is not mutation-tested, unlike flaky-tests' selection
+  (`_edits_test`). Kept as the ticket states it. Closes with a decision to pass `_edits_test`-like counting to
+  `_changed_python_functions`, which the cognitive-complexity check also uses.
