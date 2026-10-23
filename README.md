@@ -1,5 +1,13 @@
 <p align="center"><img src="docs/logo.svg" alt="An octopus holding a terminal, a robot and a chat bubble" width="200"></p>
 
+<p align="center">
+  <a href="https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest"><img src="https://img.shields.io/github/v/release/DavidSiegl/ai-agents-orchestrator" alt="Latest release"></a>
+  <a href="pyproject.toml"><img src="https://img.shields.io/python/required-version-toml?tomlFilePath=https://raw.githubusercontent.com/DavidSiegl/ai-agents-orchestrator/main/pyproject.toml" alt="Python version"></a>
+  <a href="https://github.com/DavidSiegl/ai-agents-orchestrator/actions/workflows/macos-binary.yml"><img src="https://img.shields.io/github/actions/workflow/status/DavidSiegl/ai-agents-orchestrator/macos-binary.yml?label=macOS%20binary" alt="macOS binary build"></a>
+  <a href="https://github.com/DavidSiegl/ai-agents-orchestrator/commits/main"><img src="https://img.shields.io/github/last-commit/DavidSiegl/ai-agents-orchestrator" alt="Last commit"></a>
+  <a href="https://ko-fi.com/davidsiegl"><img src="https://img.shields.io/badge/Ko--fi-support%20me-FF5E5B?logo=kofi&logoColor=white" alt="Support me on Ko-fi"></a>
+</p>
+
 # ai-agents-orchestrator
 
 A role-based handoff workflow for coding agents running in [herdr](https://herdr.dev), each role in the agent
