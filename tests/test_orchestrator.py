@@ -2764,15 +2764,10 @@ class TestAtomicWrite(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 JENKINS = "https://jenkins.example"
-SONAR = "https://sonar.example"
 JENKINS_TOKEN = "jenkins-secret-token"
-SONAR_TOKEN = "sonar-secret-token"
-CREDENTIALS = {"JENKINS_URL": f"{JENKINS}/", "JENKINS_USER": "agents", "JENKINS_TOKEN": JENKINS_TOKEN,
-               "SONAR_HOST_URL": SONAR, "SONAR_TOKEN": SONAR_TOKEN}
+CREDENTIALS = {"JENKINS_URL": f"{JENKINS}/", "JENKINS_USER": "agents", "JENKINS_TOKEN": JENKINS_TOKEN}
 JOB = "AI-Agents-Orchestrator/py-ai-agents-orchestrator-quality"
 JOB_PATH = "/job/AI-Agents-Orchestrator/job/py-ai-agents-orchestrator-quality/"
-PROJECT = "py-ai-agents-orchestrator-a1b2c3"
-BASE_REF = "orchestrator-ci/a1b2c3-base"
 REF_1_1 = "orchestrator-ci/a1b2c3-1-q1"
 
 
@@ -2791,40 +2786,32 @@ class FakeResponse:
         return False
 
 
-def outcome(gate="OK", *, report=True, result=None, task="SUCCESS", issues=(), conditions=(), tests=(),
-            test_report=True, console="", coverage=None, polls=2):
-    """What one Jenkins build does, and the SonarQube analysis it makes.
+def outcome(gate="OK", *, archived=True, result=None, findings=(), tests=(), test_report=True, console="", polls=2):
+    """What one Jenkins build does.
 
-    report: whether it archives report-task.txt; result defaults to what the Jenkinsfile ends with.
-    task: how its SonarQube task ends. tests: (className, name, errorDetails) of each failing test.
-    polls: how many polls still see it building.
+    gate: the GATE of the quality.md its Gate stage archives; archived=False for a build that ended before that
+    stage. result defaults to what the Jenkinsfile ends with. findings: the numbered lines of quality.md.
+    tests: (className, name, errorDetails) of each failing test in Jenkins's test report. polls: how many polls
+    still see it building.
     """
     if result is None:
-        result = ("SUCCESS" if gate == "OK" else "UNSTABLE") if report else "FAILURE"
-    return dict(gate=gate, report=report, result=result, task=task, issues=list(issues),
-                conditions=list(conditions), tests=list(tests), test_report=test_report, console=console,
-                polls=polls,
-                coverage=coverage or {"new_coverage": "87.5", "new_lines_to_cover": "8", "new_uncovered_lines": "1"})
+        result = ("SUCCESS" if gate == "OK" else "UNSTABLE") if archived else "FAILURE"
+    quality = None
+    if archived:
+        numbered = "\n".join(f"{k}. {f}" for k, f in enumerate(findings, 1)) or "None."
+        quality = (f"GATE: {gate}\n\n`orchestrator.py gate` judged the working tree.\n\n"
+                   f"## Issues on changed lines\n\n{numbered}\n")
+    return dict(result=result, quality=quality, tests=list(tests), test_report=test_report, console=console,
+                polls=polls)
 
 
-RED = dict(gate="ERROR", conditions=[{"status": "ERROR", "metricKey": "new_coverage", "comparator": "LT",
-                                      "errorThreshold": "80", "actualValue": "50.0"}])
-
-
-def issue(path, line=None, message="fix this", severity="MAJOR", rule="python:S1"):
-    out = {"component": f"{PROJECT}:{path}" if path else PROJECT, "message": message, "rule": rule,
-           "severity": severity}
-    if line is not None:
-        out["line"] = line
-    return out
+RED = dict(gate="ERROR", findings=["`limiter.py:3` error ruff F401: `os` imported but unused"])
 
 
 class FakeCI:
-    """Jenkins and SonarQube behind urlopen; each triggered build plays the next scripted outcome.
+    """Jenkins behind urlopen; each triggered build plays the next scripted outcome, OK once they run out.
 
-    - `base`: the outcome of a build of the base; `outcomes`: those of the change's builds in order, OK once
-      they run out.
-    - `down`: the servers, "jenkins" or "sonar", that do not answer.
+    - `down`: holds "jenkins" while Jenkins does not answer.
     - `fail`: {(method, path): status} for requests answered with an HTTP error.
     - `job_gone`: the job was deleted; `forgotten`: Jenkins forgot its queue items.
 
@@ -2834,7 +2821,6 @@ class FakeCI:
     def __init__(self):
         self.requests, self.names, self.auth = [], [], []
         self.parameters = list(orchestrator.JOB_PARAMETERS)
-        self.base = outcome()
         self.outcomes = []
         self.down = set()
         self.fail = {}
@@ -2842,25 +2828,17 @@ class FakeCI:
         self.forgotten = False
         self.builds = {}
         self.queue = {}
-        self.tasks = {}
-        self.projects = {orchestrator.SONAR_PROJECT}
-        self.current = None  # the outcome whose issues and measures the project shows
         self.number = 40
 
-    def add_build(self, ref, version, out):
-        """A build as Jenkins has it; returns its number n, whose SonarQube task is task-<n>."""
+    def add_build(self, ref, out):
+        """A build of ref as Jenkins has it; returns its number."""
         self.number += 1
-        n = self.number
-        self.builds[n] = {"ref": ref, "version": version, "left": out["polls"], **out}
-        if out["report"]:
-            self.tasks[f"task-{n}"] = {"left": 1, "status": out["task"], "analysis": f"analysis-{n}", "out": out}
-        return n
+        self.builds[self.number] = {"ref": ref, "left": out["polls"], **out}
+        return self.number
 
-    def triggered(self, version):
-        return [b for b in self.builds.values() if b["version"] == version]
-
-    def jenkins_requests(self):
-        return [url for _, url, _ in self.requests if url.startswith(JENKINS)]
+    def triggered(self):
+        """The refs of the builds, in the order they were triggered or added."""
+        return [b["ref"] for _, b in sorted(self.builds.items())]
 
     def __call__(self, req, timeout=None):
         assert timeout == orchestrator.HTTP_TIMEOUT
@@ -2870,25 +2848,20 @@ class FakeCI:
         self.auth.append(req.get_header("Authorization"))
         parts = urllib.parse.urlsplit(url)
         query = dict(urllib.parse.parse_qsl(parts.query))
-        server = "jenkins" if url.startswith(JENKINS) else "sonar"
-        if server in self.down:
+        if "jenkins" in self.down:
             # A reason that quotes a token, to show it never gets any further.
-            self.names.append(f"{server} down")
+            self.names.append("jenkins down")
             raise urllib.error.URLError(f"[Errno 111] Connection refused (token {JENKINS_TOKEN})")
         if (method, parts.path) in self.fail:
             self.names.append(f"{method} {parts.path} failing")
-            return self.error(url, self.fail[(method, parts.path)])
-        name, answer = (self.jenkins if server == "jenkins" else self.sonar)(method, parts.path, query, form)
+            raise urllib.error.HTTPError(url, self.fail[(method, parts.path)], "Error", {}, io.BytesIO(b"<html>"))
+        name, answer = self.jenkins(method, parts.path, query, form)
         self.names.append(name)
         if isinstance(answer, int):
-            return self.error(url, answer)
+            raise urllib.error.HTTPError(url, answer, "Error", {}, io.BytesIO(b"<html>"))
         if isinstance(answer, FakeResponse):
             return answer
-        return FakeResponse(b"" if answer is None else json.dumps(answer))
-
-    def error(self, url, status):
-        body = json.dumps({"errors": [{"msg": f"refused with {status}"}]}).encode()
-        raise urllib.error.HTTPError(url, status, "Error", {}, io.BytesIO(body))
+        return FakeResponse(json.dumps(answer))
 
     def jenkins(self, method, path, query, form):
         if path.startswith("/queue/item/"):
@@ -2910,11 +2883,9 @@ class FakeCI:
             return "find", {"builds": [{"number": n, "actions": [{}, {"parameters": [
                 {"name": "GIT_REF", "value": b["ref"]}]}]} for n, b in builds]}
         if rest == "buildWithParameters" and method == "POST":
-            version = form["SONAR_PROJECT_VERSION"]
-            out = self.base if version == "base" else (self.outcomes.pop(0) if self.outcomes else outcome())
-            n = self.add_build(form["GIT_REF"], version, out)
+            n = self.add_build(form["GIT_REF"], self.outcomes.pop(0) if self.outcomes else outcome())
             self.queue[900 + n] = {"left": 1, "number": n}
-            return f"trigger {version}", FakeResponse(headers={"Location": f"{JENKINS}/queue/item/{900 + n}/"})
+            return "trigger", FakeResponse(headers={"Location": f"{JENKINS}/queue/item/{900 + n}/"})
         n, _, what = rest.partition("/")
         build = self.builds.get(int(n)) if n.isdigit() else None
         if build is None:
@@ -2924,10 +2895,8 @@ class FakeCI:
                 build["left"] -= 1
                 return "build", {"building": True, "result": None}
             return "build", {"building": False, "result": build["result"]}
-        if what == "artifact/.scannerwork/report-task.txt":
-            if not build["report"]:
-                return "report", 404
-            return "report", FakeResponse(f"projectKey={PROJECT}\nceTaskId=task-{n}\n")
+        if what == "artifact/quality.md":
+            return "quality", 404 if build["quality"] is None else FakeResponse(build["quality"])
         if what == "testReport/api/json":
             if not build["test_report"]:
                 return "tests", 404
@@ -2935,52 +2904,6 @@ class FakeCI:
             return "tests", {"suites": [{"cases": [*cases, {"className": "t", "name": "ok", "status": "PASSED"}]}]}
         if what == "consoleText":
             return "console", FakeResponse(build["console"])
-        return f"{method} {path}", 404
-
-    def sonar(self, method, path, query, form):
-        match path:
-            case "/api/authentication/validate":
-                return "validate", {"valid": True}
-            case "/api/qualitygates/get_by_project":
-                return "template gate", {"qualityGate": {"name": "Sonar way", "default": True}}
-            case "/api/projects/create":
-                if form["project"] in self.projects:
-                    return "create", 400
-                self.projects.add(form["project"])
-                return "create", {"project": {"key": form["project"]}}
-            case "/api/components/show":
-                return "show", {"component": {}} if query["component"] in self.projects else 404
-            case "/api/qualitygates/select":
-                return "select gate", None
-            case "/api/new_code_periods/set":
-                return f"new code {form['type']}", None
-            case "/api/ce/task":
-                task = self.tasks[query["id"]]
-                if task["left"]:
-                    task["left"] -= 1
-                    return "task", {"task": {"id": query["id"], "status": "IN_PROGRESS"}}
-                answer = {"id": query["id"], "status": task["status"]}
-                if task["status"] == "SUCCESS":
-                    answer["analysisId"] = task["analysis"]
-                else:
-                    answer["errorMessage"] = f"the report was rejected for {SONAR_TOKEN}"
-                return "task", {"task": answer}
-            case "/api/qualitygates/project_status":
-                self.current = next(t["out"] for t in self.tasks.values() if t["analysis"] == query["analysisId"])
-                return "gate", {"projectStatus": {"status": self.current["gate"],
-                                                  "conditions": self.current["conditions"]}}
-            case "/api/issues/search":
-                found = self.current["issues"]
-                size, page = int(query["ps"]), int(query["p"])
-                return "issues", {"paging": {"pageIndex": page, "pageSize": size, "total": len(found)},
-                                  "issues": found[(page - 1) * size:page * size]}
-            case "/api/measures/component":
-                measures = [{"metric": k, "period": {"index": 1, "value": v}}
-                            for k, v in self.current["coverage"].items()]
-                return "coverage", {"component": {"key": query["component"], "measures": measures}}
-            case "/api/projects/delete":
-                self.projects.discard(form["project"])
-                return "delete project", None
         return f"{method} {path}", 404
 
 
@@ -3009,10 +2932,8 @@ def collapsed(names):
 
 
 def quality_state(q=1, ci=None, **kw):
-    """A run saved in quality round q of round 1, its project and baseline in place."""
-    kw.setdefault("quality_baseline", "analysis-base")
-    return saved_run("quality", 1, agents=("spec", "build"), quality_job=JOB, quality_round=q,
-                     quality_project=PROJECT, ci=ci or {}, **kw)
+    """A run saved in quality round q of round 1."""
+    return saved_run("quality", 1, agents=("spec", "build"), quality_job=JOB, quality_round=q, ci=ci or {}, **kw)
 
 
 def resume_gated(state, script, fake, **kw):
@@ -3025,7 +2946,7 @@ def resume_gated(state, script, fake, **kw):
 
 
 def leaks(text):
-    return [t for t in (JENKINS_TOKEN, SONAR_TOKEN) if t in text]
+    return JENKINS_TOKEN in text
 
 
 class TestQualityGate(unittest.TestCase):
@@ -3047,41 +2968,31 @@ class TestQualityGate(unittest.TestCase):
 
         self.assertEqual(wf.run(), APPROVE)
 
-        self.assertEqual(collapsed(fake.names), [
-            "parameters", "validate",
-            "template gate", "create", "select gate", "new code PREVIOUS_VERSION",
-            "trigger base", "queue", "build", "report", "task",
-            "trigger change", "queue", "build", "report", "task", "gate", "issues", "coverage", "tests",
-            "delete project"])
+        self.assertEqual(collapsed(fake.names), ["parameters", "trigger", "queue", "build", "quality"])
         triggers = [form for method, url, form in fake.requests if url.endswith("/buildWithParameters")]
-        self.assertEqual(triggers, [
-            {"GIT_REF": BASE_REF, "SONAR_PROJECT_KEY": PROJECT, "SONAR_PROJECT_VERSION": "base"},
-            {"GIT_REF": REF_1_1, "SONAR_PROJECT_KEY": PROJECT, "SONAR_PROJECT_VERSION": "change"}])
-        self.assertIn(("push", "--quiet", "--force", "origin", f"abc123:refs/heads/{BASE_REF}"), host.git_calls)
+        self.assertEqual(triggers, [{"GIT_REF": REF_1_1}])
         self.assertIn(("push", "--quiet", "--force", "origin", f"snap1:refs/heads/{REF_1_1}"), host.git_calls)
         self.assertEqual(host.snapshots[0][0], "abc123")
         state = wf.state
-        self.assertTrue(host.files[state.quality_path(1, 1)].startswith("GATE: OK\n"))
+        self.assertEqual(host.files[state.quality_path(1, 1)], (
+            "GATE: OK\n\nJenkins build #41 judged snapshot `snap1` (round 1, quality round 1 of 3) and ended SUCCESS.\n"
+            "\n`orchestrator.py gate` judged the working tree.\n\n## Issues on changed lines\n\nNone.\n"))
         self.assertIn(orchestrator.QUALITY_PASSED_NOTE.format(quality_path=state.quality_path(1, 1)), seen[0])
         self.assertIn(f"The Builder's report is in {state.build_path(1)}", seen[0])
         self.assertIn("<summary>Quality gate (round 1)</summary>", host.prs[0]["body"])
-        # done: the refs and the run's project are gone.
+        # done: the refs are gone.
         self.assertEqual(host.remote, {})
-        self.assertNotIn(PROJECT, fake.projects)
         saved = json.loads(host.files[f"{state.dir}/state.json"])
-        self.assertEqual((saved["phase"], saved["quality_project"], saved["ci"]), ("done", None, {}))
-        self.assertEqual(saved["quality_baseline"], "analysis-41")
+        self.assertEqual((saved["phase"], saved["ci"]), ("done", {}))
 
     def test_credentials_travel_only_in_the_authorization_header(self):
         wf, herdr, host, fake, _ = gated({
             "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]})
         wf.run()
 
-        import base64
         jenkins = "Basic " + base64.b64encode(f"agents:{JENKINS_TOKEN}".encode()).decode()
-        sonar = "Basic " + base64.b64encode(f"{SONAR_TOKEN}:".encode()).decode()
-        for (method, url, form), auth in zip(fake.requests, fake.auth):
-            self.assertEqual(auth, jenkins if url.startswith(JENKINS) else sonar)
+        for (_, url, form), auth in zip(fake.requests, fake.auth, strict=True):
+            self.assertEqual(auth, jenkins)
             self.assertFalse(leaks(url + json.dumps(form)))
         for path, text in host.files.items():
             self.assertFalse(leaks(text), path)
@@ -3092,50 +3003,33 @@ class TestQualityGate(unittest.TestCase):
         wf.run()
 
         job = f"{JENKINS}{JOB_PATH}"
-        urls = fake.jenkins_requests()
+        urls = [url for _, url, _ in fake.requests]
         # The queue items Jenkins names in Location are its own, outside any job.
         self.assertEqual([u for u in urls if not u.startswith(job)],
                          [u for u in urls if u.startswith(f"{JENKINS}/queue/item/")])
         self.assertTrue(any(u.startswith(job) for u in urls))
 
     def test_gate_fails_then_passes(self):
-        host = FakeHost()
-        host.diff = ("diff --git a/limiter.py b/limiter.py\n--- a/limiter.py\n+++ b/limiter.py\n"
-                     "@@ -2 +2,2 @@\n-old\n+new\n+newer\n"
-                     "diff --git a/new_module.py b/new_module.py\nnew file mode 100644\n--- /dev/null\n"
-                     "+++ b/new_module.py\n@@ -0,0 +1 @@\n+x\n")
         fake = FakeCI()
-        fake.outcomes = [outcome(**RED, issues=[
-            issue("limiter.py", 9, "on a line the change did not add"),
-            issue("limiter.py", 3, "on an added line"),
-            issue("new_module.py", 1, "in a file the Builder created"),
-            issue("limiter.py", None, "on a touched file"),
-            issue("other.py", None, "on an untouched file"),
-            issue(None, None, "on the project"),
-        ]), outcome()]
+        fake.outcomes = [outcome(**RED), outcome()]
         builds, reviews = [], []
         wf, herdr, host, fake, _ = gated({
             "spec": [spec_turn], "build": [build_turn(1), recording(fix_turn(1, 1), builds)],
-            "review": [recording(review_turn(1, APPROVE), reviews)]}, fake=fake, host=host)
+            "review": [recording(review_turn(1, APPROVE), reviews)]}, fake=fake)
 
         self.assertEqual(wf.run(), APPROVE)
 
         state = wf.state
         quality = host.files[state.quality_path(1, 1)]
-        self.assertTrue(quality.startswith("GATE: ERROR\n"))
-        self.assertIn("1. `limiter.py (the whole file)` MAJOR python:S1: on a touched file\n"
-                      "2. `limiter.py:3` MAJOR python:S1: on an added line\n"
-                      "3. `new_module.py:1` MAJOR python:S1: in a file the Builder created\n", quality)
-        self.assertIn("3 other open issues in the project are not on lines this change added", quality)
-        self.assertNotIn("did not add", quality)
-        self.assertIn("`new_coverage` is 50.0; the gate wants at least 80.", quality)
+        self.assertTrue(quality.startswith("GATE: ERROR\n\nJenkins build #41 judged snapshot `snap1` "
+                                           "(round 1, quality round 1 of 3) and ended UNSTABLE.\n"))
+        self.assertIn("1. `limiter.py:3` error ruff F401: `os` imported but unused\n", quality)
         self.assertEqual(builds, [orchestrator.QUALITY_FIX_PROMPT.format(
             quality_path=state.quality_path(1, 1), report_path=state.quality_build_path(1, 1)) + NOTE])
         self.assertIn(f"The Builder's report is in {state.quality_build_path(1, 1)}", reviews[0])
         self.assertIn(orchestrator.QUALITY_PASSED_NOTE.format(quality_path=state.quality_path(1, 2)), reviews[0])
         self.assertTrue(host.files[state.quality_path(1, 2)].startswith("GATE: OK"))
-        self.assertEqual([b["ref"] for b in fake.triggered("change")], [REF_1_1, "orchestrator-ci/a1b2c3-1-q2"])
-        self.assertEqual(len(fake.triggered("base")), 1)
+        self.assertEqual(fake.triggered(), [REF_1_1, "orchestrator-ci/a1b2c3-1-q2"])
 
     def test_rounds_run_out(self):
         fake = FakeCI()
@@ -3151,9 +3045,9 @@ class TestQualityGate(unittest.TestCase):
         state = wf.state
         self.assertIn(orchestrator.QUALITY_UNRESOLVED_NOTE.format(quality_path=state.quality_path(1, 2)), reviews[0])
         self.assertIn(f"The Builder's report is in {state.quality_build_path(1, 1)}", reviews[0])
-        self.assertTrue(host.prs[0]["body"].count("GATE: ERROR"), 1)
+        self.assertEqual(host.prs[0]["body"].count("GATE: ERROR"), 1)
 
-    def test_a_later_round_has_its_own_quality_rounds_and_no_new_baseline(self):
+    def test_a_later_round_has_its_own_quality_rounds(self):
         reviews = []
         wf, herdr, host, fake, _ = gated({
             "spec": [spec_turn], "build": [build_turn(1), build_turn(2)],
@@ -3163,7 +3057,7 @@ class TestQualityGate(unittest.TestCase):
 
         self.assertIn(("push", "--quiet", "--force", "origin", "snap2:refs/heads/orchestrator-ci/a1b2c3-2-q1"),
                       host.git_calls)
-        self.assertEqual(len(fake.triggered("base")), 1)
+        self.assertEqual(fake.triggered(), [REF_1_1, "orchestrator-ci/a1b2c3-2-q1"])
         self.assertIn(f"the new report is in {wf.state.build_path(2)}", reviews[0])
         self.assertIn(orchestrator.QUALITY_PASSED_NOTE.format(quality_path=wf.state.quality_path(2, 1)), reviews[0])
 
@@ -3177,8 +3071,8 @@ class TestQualityGate(unittest.TestCase):
         return fake
 
     def test_missing_credentials_fail_before_the_interview(self):
-        env = {k: v for k, v in CREDENTIALS.items() if k not in ("JENKINS_USER", "SONAR_TOKEN")}
-        fake = self.preflight_fails("the quality gate needs JENKINS_USER, SONAR_TOKEN in", env=env)
+        env = {k: v for k, v in CREDENTIALS.items() if k != "JENKINS_USER"}
+        fake = self.preflight_fails("the quality gate needs JENKINS_USER in", env=env)
         self.assertEqual(fake.requests, [])
 
     def test_unreachable_jenkins_fails_before_the_interview(self):
@@ -3186,16 +3080,10 @@ class TestQualityGate(unittest.TestCase):
         fake.down = {"jenkins"}
         self.preflight_fails("Jenkins at JENKINS_URL failed the preflight: GET .*Connection refused", fake=fake)
 
-    def test_unreachable_sonarqube_fails_before_the_interview(self):
+    def test_job_without_the_parameter_fails_before_the_interview(self):
         fake = FakeCI()
-        fake.down = {"sonar"}
-        self.preflight_fails("SonarQube at SONAR_HOST_URL failed the preflight", fake=fake)
-
-    def test_job_without_the_parameters_fails_before_the_interview(self):
-        fake = FakeCI()
-        fake.parameters = ["GIT_REF"]
-        self.preflight_fails("lacks the parameters SONAR_PROJECT_KEY, SONAR_PROJECT_VERSION; build it once by hand",
-                             fake=fake)
+        fake.parameters = []
+        self.preflight_fails("lacks the parameters GIT_REF; build it once by hand", fake=fake)
 
     def test_missing_job_fails_before_the_interview(self):
         fake = FakeCI()
@@ -3227,7 +3115,6 @@ class TestQualityGate(unittest.TestCase):
         self.assertFalse([c for c in host.git_calls if c[0] in ("switch", "commit", "add")])
         self.assertEqual(host.changed, {"/proj/limiter.py"})
         self.assertEqual(host.remote, {})
-        self.assertNotIn(PROJECT, fake.projects)
 
     def test_job_deleted_mid_run_fails_at_once(self):
         fake = FakeCI()
@@ -3245,7 +3132,7 @@ class TestQualityGate(unittest.TestCase):
         down_at = []
 
         def flaky():
-            if fake.triggered("change") and not down_at:
+            if fake.triggered() and not down_at:
                 fake.down.add("jenkins")
                 down_at.append(wf.clock.now)
             elif back_after and down_at and wf.clock.now >= down_at[0] + back_after:
@@ -3269,14 +3156,12 @@ class TestQualityGate(unittest.TestCase):
                                     f"{REF_1_1} did not finish within 1200s") as cm:
             wf.run()
         self.assertIn("Connection refused (token ****)", str(cm.exception))
-        saved_text = host.files[f"{wf.state.dir}/state.json"]
-        saved = json.loads(saved_text)
-        self.assertEqual(saved["ci"], {"ref": REF_1_1, "sha": "snap1", "queue_url": f"{JENKINS}/queue/item/942/"})
+        saved = json.loads(host.files[f"{wf.state.dir}/state.json"])
+        self.assertEqual(saved["ci"], {"ref": REF_1_1, "sha": "snap1", "queue_url": f"{JENKINS}/queue/item/941/"})
         self.assertEqual(saved["phase"], "quality")
         for path, text in host.files.items():
             self.assertFalse(leaks(text), path)
-        # A failed run keeps its project and the ref in flight, for a resume.
-        self.assertIn(PROJECT, fake.projects)
+        # A failed run keeps the ref in flight, for a resume.
         self.assertIn(REF_1_1, host.remote)
 
     def test_heartbeat_during_a_twenty_minute_build(self):
@@ -3295,13 +3180,13 @@ class TestQualityGate(unittest.TestCase):
 
         self.assertEqual(wf.run(), APPROVE)
         self.assertGreater(wf.clock.now, 1100)
-        gaps = [b - a for a, b in zip(beats, beats[1:])]
+        gaps = [b - a for a, b in itertools.pairwise(beats)]
         self.assertLessEqual(max(gaps), HEARTBEAT_SECONDS + orchestrator.CI_POLL_SECONDS)
 
-    def test_build_failed_before_the_analysis_goes_back_to_the_builder(self):
+    def test_build_failed_before_the_gate_goes_back_to_the_builder(self):
         fake = FakeCI()
-        console = "\n".join(f"line {i}" for i in range(100)) + f"\nSONAR_TOKEN={SONAR_TOKEN}\nSyntaxError: bad"
-        fake.outcomes = [outcome(report=False, console=console, test_report=False), outcome()]
+        console = "\n".join(f"line {i}" for i in range(100)) + f"\nJENKINS_TOKEN={JENKINS_TOKEN}\nSyntaxError: bad"
+        fake.outcomes = [outcome(archived=False, console=console, test_report=False), outcome()]
         builds = []
         wf, herdr, host, fake, _ = gated({
             "spec": [spec_turn], "build": [build_turn(1), recording(fix_turn(1, 1), builds)],
@@ -3310,18 +3195,18 @@ class TestQualityGate(unittest.TestCase):
         self.assertEqual(wf.run(), APPROVE)
         quality = host.files[wf.state.quality_path(1, 1)]
         self.assertTrue(quality.startswith("GATE: BUILD_FAILED\n"))
-        self.assertIn("ended FAILURE before the SonarQube analysis", quality)
-        self.assertIn("SONAR_TOKEN=****\nSyntaxError: bad", quality)
+        self.assertIn("Jenkins build #41 of snapshot `snap1` (round 1, quality round 1 of 3) ended FAILURE before the "
+                      "quality gate ran", quality)
+        self.assertIn("JENKINS_TOKEN=****\nSyntaxError: bad", quality)
         self.assertNotIn("line 41\n", quality)
         self.assertIn("````\nline 42\n", quality)
         self.assertFalse(leaks(quality))
         self.assertIn(wf.state.quality_path(1, 1), builds[0])
-        # Only the second change build was analysed.
-        self.assertEqual(fake.names.count("gate"), 1)
+        self.assertTrue(host.files[wf.state.quality_path(1, 2)].startswith("GATE: OK"))
 
     def test_build_failed_with_failing_tests_has_no_console(self):
         fake = FakeCI()
-        fake.outcomes = [outcome(report=False, console="x", tests=[("tests.t", "test_a", "AssertionError: 1 != 2")])]
+        fake.outcomes = [outcome(archived=False, console="x", tests=[("tests.t", "test_a", "AssertionError: 1 != 2")])]
         wf, herdr, host, fake, _ = gated({
             "spec": [spec_turn], "build": [build_turn(1), fix_turn(1, 1)], "review": [review_turn(1, APPROVE)]},
             fake=fake)
@@ -3332,37 +3217,19 @@ class TestQualityGate(unittest.TestCase):
         self.assertNotIn("console", quality)
         self.assertNotIn("console", fake.names)
 
-    def test_base_build_failed_fails_the_run(self):
+    def test_aborted_build_without_a_quality_file_fails_the_run(self):
         fake = FakeCI()
-        fake.base = outcome(report=False)
+        fake.outcomes = [outcome(archived=False, result="ABORTED")]
         wf, herdr, host, fake, _ = gated({"spec": [spec_turn], "build": [build_turn(1)]}, fake=fake)
 
-        with self.assertRaisesRegex(OrchestratorError, "build #41 of the base commit abc123 ended FAILURE"):
+        with self.assertRaisesRegex(OrchestratorError, f"build #41 of {REF_1_1} was aborted before the quality gate"):
             wf.run()
         saved = json.loads(host.files[f"{wf.state.dir}/state.json"])
-        self.assertEqual(saved["ci"], {"ref": BASE_REF, "sha": "abc123", "rejected": [41]})
-        self.assertIsNone(saved["quality_baseline"])
-
-        # Once the base builds, a resume triggers a new build rather than adopting the failed one.
-        fake.base = outcome()
-        wf2, herdr2, *_ = resume_gated(RunState.from_dict(saved), {"review": [review_turn(1, APPROVE)]}, fake,
-                                       host=host)
-        self.assertEqual(wf2.run(), APPROVE)
-        self.assertEqual(len(fake.triggered("base")), 2)
-
-    def test_aborted_build_without_a_report_fails_the_run(self):
-        fake = FakeCI()
-        fake.outcomes = [outcome(report=False, result="ABORTED")]
-        wf, herdr, host, fake, _ = gated({"spec": [spec_turn], "build": [build_turn(1)]}, fake=fake)
-
-        with self.assertRaisesRegex(OrchestratorError, f"build #42 of {REF_1_1} was aborted before"):
-            wf.run()
-        saved = json.loads(host.files[f"{wf.state.dir}/state.json"])
-        self.assertEqual(saved["ci"], {"ref": REF_1_1, "sha": "snap1", "rejected": [42]})
+        self.assertEqual(saved["ci"], {"ref": REF_1_1, "sha": "snap1", "rejected": [41]})
         self.assertNotIn(wf.state.quality_path(1, 1), host.files)
         self.assertEqual(herdr.calls.count(("prompt", "build-a1b2c3")), 1)
 
-    def test_report_is_followed_whatever_the_result(self):
+    def test_quality_file_is_followed_whatever_the_result(self):
         for result in ("FAILURE", "ABORTED"):
             with self.subTest(result=result):
                 fake = FakeCI()
@@ -3372,24 +3239,13 @@ class TestQualityGate(unittest.TestCase):
                 self.assertEqual(wf.run(), APPROVE)
                 self.assertTrue(host.files[wf.state.quality_path(1, 1)].startswith("GATE: OK"))
 
-    def test_failed_sonarqube_task_fails_the_run(self):
-        fake = FakeCI()
-        fake.outcomes = [outcome(task="FAILED")]
-        wf, herdr, host, fake, _ = gated({"spec": [spec_turn], "build": [build_turn(1)]}, fake=fake)
-
-        with self.assertRaisesRegex(OrchestratorError, "SonarQube task task-42 of Jenkins build #42 ended FAILED: "
-                                    r"the report was rejected for \*\*\*\*"):
-            wf.run()
-        saved = json.loads(host.files[f"{wf.state.dir}/state.json"])
-        self.assertEqual(saved["ci"], {"ref": REF_1_1, "sha": "snap1", "rejected": [42]})
-
     def test_queue_item_cancelled_fails_the_run(self):
         fake = FakeCI()
         wf, herdr, host, fake, _ = gated({"spec": [spec_turn], "build": [build_turn(1)]}, fake=fake)
         orig = fake.jenkins
 
         def cancelled(method, path, query, form):
-            if path.startswith("/queue/item/") and fake.triggered("change"):
+            if path.startswith("/queue/item/") and fake.triggered():
                 return "queue", {"cancelled": True}
             return orig(method, path, query, form)
         fake.jenkins = cancelled
@@ -3398,32 +3254,26 @@ class TestQualityGate(unittest.TestCase):
             wf.run()
         self.assertEqual(json.loads(host.files[f"{wf.state.dir}/state.json"])["ci"], {"ref": REF_1_1, "sha": "snap1"})
 
-    def test_failed_cleanup_is_only_logged(self):
-        fake = FakeCI()
-        fake.fail[("POST", "/api/projects/delete")] = 403
+    def test_done_deletes_only_this_runs_refs(self):
         wf, herdr, host, fake, _ = gated({
-            "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, fake=fake)
+            "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]})
         host.remote["orchestrator-ci/a1b2c3-1-q7"] = "left-over"
         host.remote["orchestrator-ci/ffffff-1-q1"] = "another-run"
 
-        with patch("sys.stderr") as err:
-            self.assertEqual(wf.run(), APPROVE)
-        self.assertIn("could not delete SonarQube project", "".join(c.args[0] for c in err.write.call_args_list))
+        self.assertEqual(wf.run(), APPROVE)
         self.assertEqual(wf.state.phase, "done")
-        self.assertEqual(wf.state.quality_project, PROJECT)
         self.assertEqual(host.remote, {"orchestrator-ci/ffffff-1-q1": "another-run"})
-
 
     def test_refused_request_mid_round_fails_at_once_naming_the_step(self):
         fake = FakeCI()
-        fake.fail[("GET", "/api/issues/search")] = 403
+        fake.fail[("GET", f"{JOB_PATH}41/artifact/quality.md")] = 403
         wf, herdr, host, fake, _ = gated({"spec": [spec_turn], "build": [build_turn(1)]}, fake=fake)
 
-        with self.assertRaisesRegex(OrchestratorError, f"quality gate: reading the issues of {PROJECT}: "
-                                    r"GET .*/api/issues/search\?.*: HTTP 403 \(refused with 403\)"):
+        with self.assertRaisesRegex(OrchestratorError, "quality gate: reading quality.md of Jenkins build #41: "
+                                    r"GET .*/41/artifact/quality.md: HTTP 403"):
             wf.run()
         self.assertLess(wf.clock.now, 200)
-        self.assertEqual(json.loads(host.files[f"{wf.state.dir}/state.json"])["ci"]["ce_task"], "task-42")
+        self.assertEqual(json.loads(host.files[f"{wf.state.dir}/state.json"])["ci"]["build"], 41)
 
     def test_cleanup_without_origin_listing_is_only_logged(self):
         wf, herdr, host, fake, _ = gated({
@@ -3433,45 +3283,50 @@ class TestQualityGate(unittest.TestCase):
         with patch("sys.stderr") as err:
             self.assertEqual(wf.run(), APPROVE)
         self.assertIn("could not list the orchestrator-ci/ branches", "".join(c.args[0] for c in err.write.call_args_list))
-        self.assertNotIn(PROJECT, fake.projects)
 
 
 class TestQualityResume(unittest.TestCase):
     def test_resume_with_a_build_only_polls_it(self):
         fake = FakeCI()
-        n = fake.add_build(REF_1_1, "change", outcome())
+        n = fake.add_build(REF_1_1, outcome())
         state = quality_state(ci={"ref": REF_1_1, "sha": "snap9", "queue_url": f"{JENKINS}/queue/item/1/", "build": n})
         wf, herdr, host, _ = resume_gated(state, {"review": [review_turn(1, APPROVE)]}, fake)
 
         self.assertEqual(wf.run(), APPROVE)
         self.assertFalse(host.snapshots)
         self.assertFalse([c for c in host.git_calls if c[:3] == ("push", "--quiet", "--force")])
-        self.assertNotIn("trigger change", fake.names)
-        self.assertNotIn("queue", fake.names)
-        self.assertEqual(collapsed(fake.names)[:3], ["build", "report", "task"])
-        self.assertIn(f"`snap9`", host.files[state.quality_path(1, 1)])
+        self.assertEqual(collapsed(fake.names), ["build", "quality"])
+        self.assertIn("`snap9`", host.files[state.quality_path(1, 1)])
 
-    def test_resume_with_a_task_asks_jenkins_only_for_the_test_report(self):
+    def test_resume_of_a_state_saved_with_sonarqube(self):
         fake = FakeCI()
-        n = fake.add_build(REF_1_1, "change", outcome())
-        state = quality_state(ci={"ref": REF_1_1, "sha": "snap9", "queue_url": f"{JENKINS}/queue/item/1/",
-                                  "build": n, "ce_task": f"task-{n}"})
-        wf, herdr, host, _ = resume_gated(state, {"review": [review_turn(1, APPROVE)]}, fake)
+        # A SonarQube-era build of the snapshot: it archived no quality.md.
+        n = fake.add_build(REF_1_1, outcome(archived=False, result="SUCCESS"))
+        saved = asdict(quality_state(ci={"ref": REF_1_1, "sha": "snap9", "queue_url": f"{JENKINS}/queue/item/1/",
+                                         "build": n, "ce_task": f"task-{n}"}))
+        saved.update(quality_project="py-ai-agents-orchestrator-a1b2c3", quality_baseline="analysis-base")
+        builds = []
+        wf, herdr, host, _ = resume_gated(RunState.from_dict(saved), {
+            "build": [recording(fix_turn(1, 1), builds)], "review": [review_turn(1, APPROVE)]}, fake)
 
         self.assertEqual(wf.run(), APPROVE)
-        self.assertEqual(fake.jenkins_requests(),
-                         [f"{JENKINS}{JOB_PATH}{n}/testReport/api/json?tree="
-                          "suites%5Bcases%5BclassName%2Cname%2Cstatus%2CerrorDetails%5D%5D"])
+        quality = host.files[wf.state.quality_path(1, 1)]
+        self.assertTrue(quality.startswith("GATE: BUILD_FAILED\n"))
+        self.assertIn(f"Jenkins build #{n} of snapshot `snap9` (round 1, quality round 1 of 3) ended SUCCESS before "
+                      f"the quality gate ran", quality)
+        self.assertEqual(len(builds), 1)
+        self.assertTrue(host.files[wf.state.quality_path(1, 2)].startswith("GATE: OK"))
+        self.assertNotIn("quality_project", json.loads(host.files[f"{wf.state.dir}/state.json"]))
 
     def test_resume_with_only_the_ref_adopts_its_build(self):
         fake = FakeCI()
-        n = fake.add_build(REF_1_1, "change", outcome())
-        fake.add_build("orchestrator-ci/a1b2c3-1-q2", "change", outcome())
+        n = fake.add_build(REF_1_1, outcome())
+        fake.add_build("orchestrator-ci/a1b2c3-1-q2", outcome())
         state = quality_state(ci={"ref": REF_1_1, "sha": "snap9"})
         wf, herdr, host, _ = resume_gated(state, {"review": [review_turn(1, APPROVE)]}, fake)
 
         self.assertEqual(wf.run(), APPROVE)
-        self.assertNotIn("trigger change", fake.names)
+        self.assertNotIn("trigger", fake.names)
         self.assertFalse(host.snapshots)
         self.assertIn(f"Jenkins build #{n}", host.files[state.quality_path(1, 1)])
 
@@ -3481,12 +3336,12 @@ class TestQualityResume(unittest.TestCase):
         wf, herdr, host, _ = resume_gated(state, {"review": [review_turn(1, APPROVE)]}, fake)
 
         self.assertEqual(wf.run(), APPROVE)
-        self.assertEqual(collapsed(fake.names)[:2], ["find", "trigger change"])
+        self.assertEqual(collapsed(fake.names)[:2], ["find", "trigger"])
         self.assertFalse(host.snapshots)
 
     def test_forgotten_queue_item_finds_its_build(self):
         fake = FakeCI()
-        n = fake.add_build(REF_1_1, "change", outcome())
+        n = fake.add_build(REF_1_1, outcome())
         fake.forgotten = True
         state = quality_state(ci={"ref": REF_1_1, "sha": "snap9", "queue_url": f"{JENKINS}/queue/item/1/"})
         wf, herdr, host, _ = resume_gated(state, {"review": [review_turn(1, APPROVE)]}, fake)
@@ -3513,17 +3368,16 @@ class TestQualityResume(unittest.TestCase):
 
         self.assertEqual(wf.run(), APPROVE)
         self.assertNotIn(REF_1_1, host.remote)
-        self.assertEqual([b["ref"] for b in fake.triggered("change")], ["orchestrator-ci/a1b2c3-1-q2"])
+        self.assertEqual(fake.triggered(), ["orchestrator-ci/a1b2c3-1-q2"])
 
     def test_resume_with_the_quality_file_makes_no_request(self):
         fake = FakeCI()
         state = quality_state()
         wf, herdr, host, _ = resume_gated(state, {"review": [review_turn(1, APPROVE)]}, fake,
                                           files={lambda s: s.quality_path(1, 1): "GATE: OK\n"})
-        fake.fail[("POST", "/api/projects/delete")] = 500  # done's cleanup is not the round's
 
         self.assertEqual(wf.run(), APPROVE)
-        self.assertEqual(fake.names, ["POST /api/projects/delete failing"])
+        self.assertEqual(fake.requests, [])
 
     def test_quality_file_without_a_gate_is_refused(self):
         fake = FakeCI()
@@ -3534,29 +3388,16 @@ class TestQualityResume(unittest.TestCase):
             wf.run()
         self.assertEqual(fake.requests, [])
 
-    def test_resume_mid_baseline_continues_it(self):
-        fake = FakeCI()
-        n = fake.add_build(BASE_REF, "base", outcome())
-        state = quality_state(quality_baseline=None,
-                              ci={"ref": BASE_REF, "sha": "abc123", "queue_url": f"{JENKINS}/queue/item/1/",
-                                  "build": n})
-        wf, herdr, host, _ = resume_gated(state, {"review": [review_turn(1, APPROVE)]}, fake)
-
-        self.assertEqual(wf.run(), APPROVE)
-        self.assertEqual(fake.triggered("base"), [fake.builds[n]])
-        self.assertEqual(wf.state.quality_baseline, f"analysis-{n}")
-        self.assertEqual(len(fake.triggered("change")), 1)
-
     def test_build_ends_alike_live_and_resumed(self):
         cases = [
-            ("no report", outcome(report=False), "GATE: BUILD_FAILED"),
-            ("report after FAILURE", outcome(result="FAILURE"), "GATE: OK"),
-            ("aborted, no report", outcome(report=False, result="ABORTED"), "was aborted before"),
+            ("no quality file", outcome(archived=False), "GATE: BUILD_FAILED"),
+            ("quality file after FAILURE", outcome(result="FAILURE"), "GATE: OK"),
+            ("aborted, no quality file", outcome(archived=False, result="ABORTED"), "was aborted before"),
         ]
         for name, out, expected in cases:
             with self.subTest(name):
                 fake = FakeCI()
-                n = fake.add_build(REF_1_1, "change", out)
+                n = fake.add_build(REF_1_1, out)
                 state = quality_state(ci={"ref": REF_1_1, "sha": "snap9",
                                           "queue_url": f"{JENKINS}/queue/item/1/", "build": n})
                 wf, herdr, host, _ = resume_gated(state, {"build": [fix_turn(1, 1)],
@@ -3569,21 +3410,11 @@ class TestQualityResume(unittest.TestCase):
                         wf.run()
                     self.assertEqual(wf.state.ci, {"ref": REF_1_1, "sha": "snap9", "rejected": [n]})
 
-    def test_resumed_base_build_failed_fails_the_run(self):
-        fake = FakeCI()
-        n = fake.add_build(BASE_REF, "base", outcome(report=False))
-        state = quality_state(quality_baseline=None,
-                              ci={"ref": BASE_REF, "sha": "abc123", "queue_url": f"{JENKINS}/queue/item/1/",
-                                  "build": n})
-        wf, *_ = resume_gated(state, {}, fake)
-        with self.assertRaisesRegex(OrchestratorError, "of the base commit abc123 ended FAILURE"):
-            wf.run()
-
     def test_fresh_builder_answering_a_quality_round_is_briefed(self):
         fake = FakeCI()
         seen = []
         state = saved_run("build", 1, agents=("spec", "build", "review"), quality_job=JOB, quality_round=1,
-                          quality_project=PROJECT, quality_baseline="analysis-base", prompted="build-1-q1.md")
+                          prompted="build-1-q1.md")
         wf, herdr, host, _ = resume_gated(state, {"build": [recording(fix_turn(1, 1), seen)],
                                                   "review": [review_turn(1, APPROVE)]}, fake,
                                           alive=["review"], files={lambda s: s.quality_path(1, 1): "GATE: ERROR\n"})
@@ -3599,8 +3430,7 @@ class TestQualityResume(unittest.TestCase):
     def test_fresh_builder_in_a_later_round_hears_of_every_earlier_report(self):
         fake = FakeCI()
         seen = []
-        state = saved_run("build", 2, agents=("spec", "build", "review"), quality_job=JOB,
-                          quality_project=PROJECT, quality_baseline="analysis-base")
+        state = saved_run("build", 2, agents=("spec", "build", "review"), quality_job=JOB)
         wf, *_ = resume_gated(state, {"build": [recording(build_turn(2), seen)],
                                       "review": [review_turn(2, APPROVE)]}, fake, alive=["review"],
                               files={lambda s: s.quality_build_path(1, 1): "r", lambda s: s.quality_build_path(1, 2): "r"})
@@ -3674,10 +3504,9 @@ class TestChangedLines(unittest.TestCase):
 
     def test_build_config_edits(self):
         diff = ("diff --git a/Jenkinsfile b/Jenkinsfile\n--- a/Jenkinsfile\n+++ b/Jenkinsfile\n@@ -1 +1 @@\n-a\n+b\n"
-                "diff --git a/sonar-project.properties b/sonar-project.properties\ndeleted file mode 100644\n"
-                "--- a/sonar-project.properties\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n")
-        self.assertEqual(orchestrator.edited_config(diff, changed_lines(diff)),
-                         ["Jenkinsfile", "sonar-project.properties"])
+                "diff --git a/uv.lock b/uv.lock\ndeleted file mode 100644\n"
+                "--- a/uv.lock\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n")
+        self.assertEqual(orchestrator.edited_config(diff, changed_lines(diff)), ["Jenkinsfile", "uv.lock"])
         self.assertEqual(orchestrator.edited_config("", {}), [])
 
 
@@ -3724,15 +3553,6 @@ class TestQualityReport(unittest.TestCase):
         self.assertIn("## Failed conditions\n\n- `ruff` is not installed.\n", text)
         self.assertIn("## Suppressions added\n\n- `f.py:3` `x = 1  # noqa: F401`\n", text)
 
-    def test_sonar_sentences(self):
-        self.assertEqual(orchestrator._sonar_coverage(
-            {"new_coverage": "62.5", "new_lines_to_cover": "40", "new_uncovered_lines": "15"}),
-            "62.5% of 40 new lines to cover; 15 are not covered.")
-        self.assertEqual(orchestrator._sonar_coverage({}), "No new lines to cover.")
-        self.assertEqual(orchestrator._sonar_condition(
-            {"metricKey": "new_coverage", "comparator": "LT", "actualValue": "40", "errorThreshold": "80"}),
-            "`new_coverage` is 40; the gate wants at least 80.")
-
     def test_failing_tests_beyond_the_limit_are_counted(self):
         tests = [(f"t.T.test_{k}", "") for k in range(orchestrator.QUALITY_ISSUE_LIMIT + 3)]
         text = quality_report("ERROR", "intro", {}, tests=tests)
@@ -3741,10 +3561,9 @@ class TestQualityReport(unittest.TestCase):
         self.assertNotIn(f"test_{orchestrator.QUALITY_ISSUE_LIMIT}`", text)
 
     def test_build_config_edits_are_named(self):
-        text = quality_report("OK", "i", {}, tests=[], edited=["Jenkinsfile", "sonar-project.properties"])
+        text = quality_report("OK", "i", {}, tests=[], edited=["Jenkinsfile", "uv.lock"])
         self.assertIn("The change edits `Jenkinsfile`. The quality job reads it from `main`", text)
-        self.assertIn("The change edits `sonar-project.properties`. The scanner read the edited file", text)
-        for only, other in (("Jenkinsfile", "sonar-project.properties"), ("sonar-project.properties", "Jenkinsfile")):
+        for only, other in (("Jenkinsfile", "uv.lock"), ("uv.lock", "Jenkinsfile")):
             with self.subTest(only=only):
                 text = quality_report("OK", "i", {}, tests=[], edited=[only])
                 self.assertIn(f"The change edits `{only}`", text)
@@ -3760,7 +3579,7 @@ class TestQualityReport(unittest.TestCase):
 
     def test_tokens_are_masked(self):
         ci = CI(JOB, env=CREDENTIALS)
-        self.assertEqual(ci.mask(f"a {JENKINS_TOKEN} b {SONAR_TOKEN}"), "a **** b ****")
+        self.assertEqual(ci.mask(f"a {JENKINS_TOKEN} b {JENKINS_TOKEN}"), "a **** b ****")
         self.assertEqual(CI(JOB, env={}).mask("text"), "text")
 
 
@@ -3920,7 +3739,7 @@ class TestGate(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertIn("0.0% of 19 new lines to cover; 19 lines are not covered.", out)
 
-    def test_coverage_counts_branches_as_sonar_does(self):
+    def test_coverage_counts_branch_outcomes_too(self):
         self.add_lines(2)
         _, out, _ = self.gate("--coverage", self.coverage({4: (1, "1/2"), 5: 0, 2: 1}))
         # (1 covered condition + 1 covered line) / (2 conditions + 2 lines); line 2 is not new.
@@ -3932,6 +3751,33 @@ class TestGate(unittest.TestCase):
         status, stdout, err = self.gate("--coverage", "coverage.xml")
         self.assertEqual((status, stdout), (orchestrator.EXIT_GATE_UNJUDGED, ""))
         self.assertIn("cannot read the coverage report", err)
+
+    def junit(self, *failing):
+        """A pytest --junitxml report with one passing test and each of failing as (name, message)."""
+        cases = "".join(f'<testcase classname="tests.T" name="{n}"><failure message="{m}">trace</failure></testcase>'
+                        for n, m in failing)
+        self.put("results.xml", f'<?xml version="1.0"?><testsuites><testsuite name="pytest">'
+                                f'<testcase classname="tests.T" name="test_ok"/>{cases}</testsuite></testsuites>')
+        return "results.xml"
+
+    def test_failing_tests_fail_the_gate_and_are_listed(self):
+        self.add_lines(1)
+        status, out, _ = self.gate("--tests", self.junit(("test_limit", "AssertionError: 3 != 2")))
+        self.assertEqual(status, 1)
+        self.assertIn("- 1 tests fail; each is listed below.\n", out)
+        self.assertIn("## Failing tests\n\n- `tests.T.test_limit`: AssertionError: 3 != 2\n", out)
+
+    def test_passing_tests_are_said_to_pass(self):
+        self.add_lines(1)
+        status, out, _ = self.gate("--tests", self.junit())
+        self.assertEqual(status, 0)
+        self.assertIn("## Failing tests\n\nNone.\n", out)
+
+    def test_an_unreadable_test_report_writes_nothing(self):
+        self.put("results.xml", "<testsuites")
+        status, stdout, err = self.gate("--tests", "results.xml")
+        self.assertEqual((status, stdout), (orchestrator.EXIT_GATE_UNJUDGED, ""))
+        self.assertIn("cannot read the test report", err)
 
     def test_added_suppressions_are_listed_not_failed(self):
         with open(os.path.join(self.repo, "f.py"), "a") as f:
@@ -4026,7 +3872,7 @@ class TestCIEnvFile(unittest.TestCase):
 
     def test_the_file_fills_what_the_environment_lacks(self):
         self.write("".join(f"{k}=file-{k}\n" for k in orchestrator.CI_ENV))
-        env = {"JENKINS_USER": "from-env", "SONAR_TOKEN": ""}
+        env = {"JENKINS_USER": "from-env", "JENKINS_TOKEN": ""}
         self.assertEqual(orchestrator.ci_credentials(env, self.path),
                          {**{k: f"file-{k}" for k in orchestrator.CI_ENV}, "JENKINS_USER": "from-env"})
 
@@ -4038,16 +3884,16 @@ class TestCIEnvFile(unittest.TestCase):
         self.assertEqual(orchestrator.ci_credentials({"JENKINS_URL": JENKINS}, self.path), {"JENKINS_URL": JENKINS})
 
     def test_a_file_others_may_read_is_refused(self):
-        self.write(f"SONAR_TOKEN={SONAR_TOKEN}\n", mode=0o640)
+        self.write(f"JENKINS_TOKEN={JENKINS_TOKEN}\n", mode=0o640)
         with self.assertRaisesRegex(OrchestratorError, f"others may read it; run: chmod 600 {self.path}"):
             orchestrator.ci_credentials({}, self.path)
 
     def test_shell_syntax(self):
         self.write("# Jenkins\n\nexport JENKINS_URL=https://jenkins.example/\n"
-                   f"  JENKINS_TOKEN = '{JENKINS_TOKEN}'\nSONAR_TOKEN=old\nSONAR_TOKEN=\"{SONAR_TOKEN}\"\n")
+                   f"  JENKINS_USER = 'agents'\nJENKINS_TOKEN=old\nJENKINS_TOKEN=\"{JENKINS_TOKEN}\"\n")
         self.assertEqual(orchestrator.ci_credentials({}, self.path),
-                         {"JENKINS_URL": "https://jenkins.example/", "JENKINS_TOKEN": JENKINS_TOKEN,
-                          "SONAR_TOKEN": SONAR_TOKEN})
+                         {"JENKINS_URL": "https://jenkins.example/", "JENKINS_USER": "agents",
+                          "JENKINS_TOKEN": JENKINS_TOKEN})
 
     def test_a_malformed_line_is_named_without_its_content(self):
         self.write(f"JENKINS_URL={JENKINS}\n{JENKINS_TOKEN}\n")
@@ -4097,32 +3943,27 @@ class TestCI(unittest.TestCase):
 
     def test_preflight_sends_basic_auth_in_the_header_only(self):
         params = {"property": [{"parameterDefinitions": [{"name": p} for p in orchestrator.JOB_PARAMETERS]}]}
-        ci, urlopen = self.ci(FakeResponse(json.dumps(params)), FakeResponse('{"valid": true}'))
+        ci, urlopen = self.ci(FakeResponse(json.dumps(params)))
         ci.preflight()
 
-        import base64
-        jenkins, sonar = [c.args[0] for c in urlopen.call_args_list]
-        self.assertEqual(jenkins.get_header("Authorization"),
+        (req,) = [c.args[0] for c in urlopen.call_args_list]
+        self.assertEqual(req.get_header("Authorization"),
                          "Basic " + base64.b64encode(f"agents:{JENKINS_TOKEN}".encode()).decode())
-        self.assertEqual(sonar.get_header("Authorization"),
-                         "Basic " + base64.b64encode(f"{SONAR_TOKEN}:".encode()).decode())
         # Kept from a redirect to another server.
-        self.assertNotIn("Authorization", jenkins.headers)
-        for req in (jenkins, sonar):
-            self.assertFalse(leaks(req.full_url))
-        self.assertEqual(sonar.full_url, f"{SONAR}/api/authentication/validate")
+        self.assertNotIn("Authorization", req.headers)
+        self.assertFalse(leaks(req.full_url))
         self.assertEqual(urlopen.call_args.kwargs["timeout"], orchestrator.HTTP_TIMEOUT)
 
     def test_errors_name_method_url_and_status(self):
-        ci, _ = self.ci(self.http_error(403, b'{"errors": [{"msg": "Insufficient privileges"}]}'))
+        ci, _ = self.ci(self.http_error(403))
         with self.assertRaises(CIError) as cm:
-            ci.delete_project(PROJECT)
-        self.assertEqual(str(cm.exception), f"POST {SONAR}/api/projects/delete: HTTP 403 (Insufficient privileges)")
+            ci.build_result(7)
+        self.assertEqual(str(cm.exception), f"GET {JENKINS}{JOB_PATH}7/api/json?tree=building%2Cresult: HTTP 403")
         self.assertEqual(cm.exception.status, 403)
         self.assertFalse(cm.exception.transient)
 
     def test_network_errors_are_transient_and_masked(self):
-        ci, _ = self.ci(urllib.error.URLError(f"refused {SONAR_TOKEN}"), TimeoutError("timed out"),
+        ci, _ = self.ci(urllib.error.URLError(f"refused {JENKINS_TOKEN}"), TimeoutError("timed out"),
                         self.http_error(503))
         for _ in range(3):
             with self.assertRaises(CIError) as cm:
@@ -4133,82 +3974,42 @@ class TestCI(unittest.TestCase):
 
     def test_trigger_returns_the_queue_item(self):
         ci, urlopen = self.ci(FakeResponse(headers={"Location": "http://internal:8080/queue/item/77/"}))
-        self.assertEqual(ci.trigger(REF_1_1, PROJECT, "change"), f"{JENKINS}/queue/item/77/")
+        self.assertEqual(ci.trigger(REF_1_1), f"{JENKINS}/queue/item/77/")
         req = urlopen.call_args.args[0]
         self.assertEqual((req.get_method(), req.full_url), ("POST", f"{JENKINS}{JOB_PATH}buildWithParameters"))
-        self.assertEqual(dict(urllib.parse.parse_qsl(req.data.decode())),
-                         {"GIT_REF": REF_1_1, "SONAR_PROJECT_KEY": PROJECT, "SONAR_PROJECT_VERSION": "change"})
+        self.assertEqual(dict(urllib.parse.parse_qsl(req.data.decode())), {"GIT_REF": REF_1_1})
 
     def test_trigger_on_a_deleted_job_is_not_retried(self):
         ci, _ = self.ci(self.http_error(404))
         with self.assertRaises(OrchestratorError) as cm:
-            ci.trigger(REF_1_1, PROJECT, "change")
+            ci.trigger(REF_1_1)
         self.assertNotIsInstance(cm.exception, CIError)
         self.assertRegex(str(cm.exception), f"Jenkins job {JOB} is gone: POST .*buildWithParameters: HTTP 404")
 
     def test_missing_credentials_are_named_before_any_request(self):
         ci, urlopen = self.ci(env={"JENKINS_URL": JENKINS})
-        with self.assertRaisesRegex(OrchestratorError,
-                                    "needs JENKINS_USER, JENKINS_TOKEN, SONAR_HOST_URL, SONAR_TOKEN in"):
+        with self.assertRaisesRegex(OrchestratorError, "needs JENKINS_USER, JENKINS_TOKEN in"):
             ci.build_result(1)
         urlopen.assert_not_called()
 
-    def test_issues_page_by_page(self):
-        page1 = {"paging": {"total": 3}, "issues": [
-            {"component": f"{PROJECT}:a.py", "line": 3, "rule": "r1", "message": "m1", "severity": "MINOR",
-             "impacts": [{"softwareQuality": "MAINTAINABILITY", "severity": "LOW"},
-                         {"softwareQuality": "RELIABILITY", "severity": "HIGH"}]},
-            {"component": PROJECT, "rule": "r2", "message": "m2", "severity": "MAJOR"}]}
-        page2 = {"paging": {"total": 3}, "issues": [
-            {"component": f"{PROJECT}:dir/b.py", "rule": "r3", "message": "m3", "severity": "CRITICAL", "impacts": []}]}
-        ci, urlopen = self.ci(FakeResponse(json.dumps(page1)), FakeResponse(json.dumps(page2)))
-
-        self.assertEqual(ci.issues(PROJECT), [
-            {"path": "a.py", "line": 3, "severity": "HIGH", "rule": "r1", "message": "m1"},
-            {"path": None, "line": None, "severity": "MAJOR", "rule": "r2", "message": "m2"},
-            {"path": "dir/b.py", "line": None, "severity": "CRITICAL", "rule": "r3", "message": "m3"}])
-        query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(urlopen.call_args.args[0].full_url).query))
-        self.assertEqual(query, {"components": PROJECT, "resolved": "false", "ps": "500", "p": "2"})
-
-    def test_coverage_in_either_shape(self):
-        body = {"component": {"measures": [{"metric": "new_coverage", "period": {"value": "50.0"}},
-                                           {"metric": "new_lines_to_cover", "value": "4"},
-                                           {"metric": "new_uncovered_lines", "periods": [{"value": "2"}]}]}}
-        ci, _ = self.ci(FakeResponse(json.dumps(body)))
-        self.assertEqual(ci.coverage(PROJECT),
-                         {"new_coverage": "50.0", "new_lines_to_cover": "4", "new_uncovered_lines": "2"})
+    def test_quality_file_is_the_archived_quality_md(self):
+        ci, urlopen = self.ci(FakeResponse("GATE: OK\n\nintro\n"))
+        self.assertEqual(ci.quality_file(3), "GATE: OK\n\nintro\n")
+        self.assertEqual(urlopen.call_args.args[0].full_url, f"{JENKINS}{JOB_PATH}3/artifact/quality.md")
 
     def test_missing_artifact_and_test_report(self):
         ci, _ = self.ci(self.http_error(404), self.http_error(404))
-        self.assertIsNone(ci.report_task(3))
+        self.assertIsNone(ci.quality_file(3))
         self.assertIsNone(ci.failed_tests(3))
 
     def test_malformed_answers(self):
-        ci, _ = self.ci(FakeResponse("<html>proxy error</html>"), FakeResponse("[1]"), FakeResponse(),
-                        FakeResponse("projectKey=x\n"), FakeResponse('{"qualityGate": null}'))
+        ci, _ = self.ci(FakeResponse("<html>proxy error</html>"), FakeResponse("[1]"), FakeResponse())
         for call in (lambda: ci.build_result(1), lambda: ci.build_result(1)):
             with self.assertRaisesRegex(CIError, "the answer is not") as cm:
                 call()
             self.assertTrue(cm.exception.transient)
         with self.assertRaisesRegex(OrchestratorError, "named no queue item"):
-            ci.trigger(REF_1_1, PROJECT, "change")
-        self.assertIsNone(ci.report_task(1))
-        with self.assertRaisesRegex(OrchestratorError, "names no quality gate for py-ai-agents-orchestrator"):
-            ci.create_project(PROJECT, "py-ai-agents-orchestrator")
-
-    def test_create_project_refused_is_raised(self):
-        ci, _ = self.ci(FakeResponse('{"qualityGate": {"name": "Sonar way"}}'), self.http_error(400),
-                        self.http_error(404))
-        with self.assertRaisesRegex(CIError, "projects/create: HTTP 400"):
-            ci.create_project(PROJECT, "py-ai-agents-orchestrator")
-
-    def test_create_project_adopts_one_already_there(self):
-        ci, urlopen = self.ci(FakeResponse('{"qualityGate": {"name": "Sonar way"}}'), self.http_error(400),
-                              FakeResponse('{"component": {}}'), FakeResponse(), FakeResponse())
-        ci.create_project(PROJECT, "py-ai-agents-orchestrator")
-        select = urlopen.call_args_list[3].args[0]
-        self.assertEqual(dict(urllib.parse.parse_qsl(select.data.decode())),
-                         {"gateName": "Sonar way", "projectKey": PROJECT})
+            ci.trigger(REF_1_1)
 
 
 class TestHostSnapshot(unittest.TestCase):
@@ -4337,7 +4138,7 @@ class TestQualityCLI(unittest.TestCase):
 
     def test_state_saved_before_the_gate_has_none(self):
         saved = asdict(saved_run("review", 1))
-        for key in ("quality_job", "max_quality_rounds", "quality_round", "quality_project", "quality_baseline", "ci"):
+        for key in ("quality_job", "max_quality_rounds", "quality_round", "ci"):
             del saved[key]
         state = RunState.from_dict(saved)
         self.assertEqual((state.quality_job, state.quality_round, state.ci), (None, 0, {}))
@@ -4394,7 +4195,7 @@ GOLDEN = {
         '\n'
         'If you cannot continue without a decision from the human, write the report with a first line `BLOCKED: <your question>` instead.'),
     'quality_fix_1_1': (
-        f'The SonarQube quality gate did not pass on your change; the findings are in {D}/quality-1-1.md. Fix each numbered issue, the failed conditions, the failing tests and a failed build, or explain in your report why one should stand. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-1-q1.md in a single write, in the same shape as before, answering each numbered issue by its number.'
+        f'The quality gate did not pass on your change; the findings are in {D}/quality-1-1.md. Fix each numbered issue, the failed conditions, the failing tests and a failed build, or explain in your report why one should stand. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-1-q1.md in a single write, in the same shape as before, answering each numbered issue by its number.'
         '\n'
         '\n'
         'If you cannot continue without a decision from the human, write the report with a first line `BLOCKED: <your question>` instead.'),
@@ -4406,21 +4207,21 @@ GOLDEN = {
         '\n'
         f'As your last step, write your review to {D}/review-1.md in a single write. Its first line must be exactly `VERDICT: APPROVE` or `VERDICT: CHANGES_REQUESTED`. Then list numbered findings, each with file:line, what is wrong, and which acceptance criterion it violates or what failure it causes. Request changes only for defects: an unmet acceptance criterion, a bug, a broken test. Style preferences are not defects.\n'
         '\n'
-        f'The SonarQube quality gate passed on this change; its report is in {D}/quality-1-2.md.'),
+        f'The quality gate passed on this change; its report is in {D}/quality-1-2.md.'),
     'fix_2': (
         f'The Reviewer requested changes; the findings are in {D}/review-1.md. Fix each finding, or explain in your report why it is wrong. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2.md in a single write, in the same shape as before, answering each finding by its number.'
         '\n'
         '\n'
         'If you cannot continue without a decision from the human, write the report with a first line `BLOCKED: <your question>` instead.'),
     'quality_fix_2_1': (
-        f'The SonarQube quality gate did not pass on your change; the findings are in {D}/quality-2-1.md. Fix each numbered issue, the failed conditions, the failing tests and a failed build, or explain in your report why one should stand. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2-q1.md in a single write, in the same shape as before, answering each numbered issue by its number.'
+        f'The quality gate did not pass on your change; the findings are in {D}/quality-2-1.md. Fix each numbered issue, the failed conditions, the failing tests and a failed build, or explain in your report why one should stand. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2-q1.md in a single write, in the same shape as before, answering each numbered issue by its number.'
         '\n'
         '\n'
         'If you cannot continue without a decision from the human, write the report with a first line `BLOCKED: <your question>` instead.'),
     'recheck_2_unresolved': (
         f"The Builder has answered your review; the new report is in {D}/build-2-q1.md. Review the change again (`git diff abc123` in /proj, plus the untracked files `git status --porcelain` lists) against the spec in {D}/spec.md and your previous findings, checking the Builder's claims rather than trusting them. As your last step, write the review to {D}/review-2.md in a single write, with the same first-line verdict and numbered findings as before.\n"
         '\n'
-        f"The SonarQube quality gate still did not pass after the Builder's last quality round; its unresolved findings are in {D}/quality-2-2.md. Weigh them as you would your own."),
+        f"The quality gate still did not pass after the Builder's last quality round; its unresolved findings are in {D}/quality-2-2.md. Weigh them as you would your own."),
     'review_1_unresolved': (
         f'You are the Reviewer, the last of three roles (Spec Collector -> Builder -> Reviewer). You did not write this change. Judge it only against the spec in {D}/spec.md and the code itself.\n'
         '\n'
@@ -4429,11 +4230,11 @@ GOLDEN = {
         '\n'
         f'As your last step, write your review to {D}/review-1.md in a single write. Its first line must be exactly `VERDICT: APPROVE` or `VERDICT: CHANGES_REQUESTED`. Then list numbered findings, each with file:line, what is wrong, and which acceptance criterion it violates or what failure it causes. Request changes only for defects: an unmet acceptance criterion, a bug, a broken test. Style preferences are not defects.\n'
         '\n'
-        f"The SonarQube quality gate still did not pass after the Builder's last quality round; its unresolved findings are in {D}/quality-1-2.md. Weigh them as you would your own."),
+        f"The quality gate still did not pass after the Builder's last quality round; its unresolved findings are in {D}/quality-1-2.md. Weigh them as you would your own."),
     'recheck_2_passed': (
         f"The Builder has answered your review; the new report is in {D}/build-2.md. Review the change again (`git diff abc123` in /proj, plus the untracked files `git status --porcelain` lists) against the spec in {D}/spec.md and your previous findings, checking the Builder's claims rather than trusting them. As your last step, write the review to {D}/review-2.md in a single write, with the same first-line verdict and numbered findings as before.\n"
         '\n'
-        f'The SonarQube quality gate passed on this change; its report is in {D}/quality-2-1.md.'),
+        f'The quality gate passed on this change; its report is in {D}/quality-2-1.md.'),
     'fresh_build_2': (
         f'You are the Builder, the second of three roles (Spec Collector -> Builder -> Reviewer). The spec in {D}/spec.md was agreed with the human by a separate session; it is your contract.\n'
         '\n'
@@ -4469,7 +4270,7 @@ GOLDEN = {
         '\n'
         f'This is round 2, and you are a fresh session. An earlier Builder session did the earlier turns; its changes are already in the working tree, and its reports are {D}/build-1.md, {D}/build-1-q1.md, {D}/build-2.md.\n'
         '\n'
-        f'The SonarQube quality gate did not pass on your change; the findings are in {D}/quality-2-1.md. Fix each numbered issue, the failed conditions, the failing tests and a failed build, or explain in your report why one should stand. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2-q1.md in a single write, in the same shape as before, answering each numbered issue by its number.'
+        f'The quality gate did not pass on your change; the findings are in {D}/quality-2-1.md. Fix each numbered issue, the failed conditions, the failing tests and a failed build, or explain in your report why one should stand. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2-q1.md in a single write, in the same shape as before, answering each numbered issue by its number.'
         '\n'
         '\n'
         'If you cannot continue without a decision from the human, write the report with a first line `BLOCKED: <your question>` instead.'),
@@ -4490,7 +4291,7 @@ GOLDEN = {
         '\n'
         f'As your last step, write your review to {D}/review-2.md in a single write. Its first line must be exactly `VERDICT: APPROVE` or `VERDICT: CHANGES_REQUESTED`. Then list numbered findings, each with file:line, what is wrong, and which acceptance criterion it violates or what failure it causes. Request changes only for defects: an unmet acceptance criterion, a bug, a broken test. Style preferences are not defects.\n'
         '\n'
-        f'The SonarQube quality gate passed on this change; its report is in {D}/quality-2-1.md.\n'
+        f'The quality gate passed on this change; its report is in {D}/quality-2-1.md.\n'
         '\n'
         f'This is round 2, and you are a fresh session. The earlier reviews of this change are {D}/review-1.md; check that the Builder has answered each of their findings.'),
     'continue_build_2': (
@@ -4521,23 +4322,13 @@ GOLDEN_PR_BODY = (
     '\n'
     'GATE: ERROR\n'
     '\n'
-    'SonarQube analysed snapshot `snap4` (round 2, quality round 2 of 2) in Jenkins build #45, against the base `abc123`: quality gate ERROR.\n'
+    'Jenkins build #44 judged snapshot `snap4` (round 2, quality round 2 of 2) and ended UNSTABLE.\n'
     '\n'
-    '## Failed conditions\n'
-    '\n'
-    '- `new_coverage` is 50.0; the gate wants at least 80.\n'
+    '`orchestrator.py gate` judged the working tree.\n'
     '\n'
     '## Issues on changed lines\n'
     '\n'
-    'None.\n'
-    '\n'
-    '## Failing tests\n'
-    '\n'
-    'None.\n'
-    '\n'
-    '## Coverage on new code\n'
-    '\n'
-    '87.5% of 8 new lines to cover; 1 are not covered.\n'
+    '1. `limiter.py:3` error ruff F401: `os` imported but unused\n'
     '\n'
     '</details>\n'
     '\n'
@@ -4556,15 +4347,15 @@ GOLDEN_PR_BODY = (
     '| --- | --- | --- | --- | --- | --- | --- | --- |\n'
     '| spec (human-paced) | spec | 0 | claude | default | 2026-10-03 04:00:00 | 0s | spec.md |\n'
     '| build | build | 1 | claude | default | 2026-10-03 04:00:00 | 0s | build-1.md |\n'
-    '| quality | quality | 1 q1 | - | - | 2026-10-03 04:00:00 | 1m 20s | quality-1-1.md |\n'
-    '| build | build | 1 q1 | claude | default | 2026-10-03 04:01:20 | 0s | build-1-q1.md |\n'
-    '| quality | quality | 1 q2 | - | - | 2026-10-03 04:01:20 | 40s | quality-1-2.md |\n'
-    '| review | review | 1 | claude | default | 2026-10-03 04:02:00 | 0s | review-1.md |\n'
-    '| build | build | 2 | claude | default | 2026-10-03 04:02:00 | 0s | build-2.md |\n'
-    '| quality | quality | 2 q1 | - | - | 2026-10-03 04:02:00 | 40s | quality-2-1.md |\n'
-    '| build | build | 2 q1 | claude | default | 2026-10-03 04:02:40 | 0s | build-2-q1.md |\n'
-    '| quality | quality | 2 q2 | - | - | 2026-10-03 04:02:40 | 40s | quality-2-2.md |\n'
-    '| review | review | 2 | claude | default | 2026-10-03 04:03:20 | 0s | review-2.md |\n'
+    '| quality | quality | 1 q1 | - | - | 2026-10-03 04:00:00 | 30s | quality-1-1.md |\n'
+    '| build | build | 1 q1 | claude | default | 2026-10-03 04:00:30 | 0s | build-1-q1.md |\n'
+    '| quality | quality | 1 q2 | - | - | 2026-10-03 04:00:30 | 30s | quality-1-2.md |\n'
+    '| review | review | 1 | claude | default | 2026-10-03 04:01:00 | 0s | review-1.md |\n'
+    '| build | build | 2 | claude | default | 2026-10-03 04:01:00 | 0s | build-2.md |\n'
+    '| quality | quality | 2 q1 | - | - | 2026-10-03 04:01:00 | 30s | quality-2-1.md |\n'
+    '| build | build | 2 q1 | claude | default | 2026-10-03 04:01:30 | 0s | build-2-q1.md |\n'
+    '| quality | quality | 2 q2 | - | - | 2026-10-03 04:01:30 | 30s | quality-2-2.md |\n'
+    '| review | review | 2 | claude | default | 2026-10-03 04:02:00 | 0s | review-2.md |\n'
     '\n'
     '</details>\n')
 
@@ -4630,8 +4421,7 @@ class TestDefaultWorkflowPrompts(unittest.TestCase):
 
     def test_fresh_builder_in_round_two_after_quality_rounds(self):
         seen = []
-        state = saved_run("build", 2, agents=("spec", "build", "review"), quality_job=JOB,
-                          quality_project=PROJECT, quality_baseline="analysis-base")
+        state = saved_run("build", 2, agents=("spec", "build", "review"), quality_job=JOB)
         wf, *_ = resume_gated(state, {"build": [recording(build_turn(2), seen)], "review": [review_turn(2, APPROVE)]},
                               FakeCI(), alive=["review"], files={lambda s: s.quality_build_path(1, 1): "r",
                                                                  lambda s: s.quality_build_path(1, 2): "r"})
@@ -4640,8 +4430,7 @@ class TestDefaultWorkflowPrompts(unittest.TestCase):
 
     def test_fresh_builder_answering_a_quality_round_in_round_two(self):
         seen = []
-        state = saved_run("build", 2, agents=("spec", "build", "review"), quality_job=JOB, quality_round=1,
-                          quality_project=PROJECT, quality_baseline="analysis-base", prompted="build-2-q1.md")
+        state = saved_run("build", 2, agents=("spec", "build", "review"), quality_job=JOB, quality_round=1, prompted="build-2-q1.md")
         wf, *_ = resume_gated(state, {"build": [recording(fix_turn(2, 1), seen)], "review": [review_turn(2, APPROVE)]},
                               FakeCI(), alive=["review"],
                               files={lambda s: s.quality_build_path(1, 1): "r", lambda s: s.build_path(2): "r",
@@ -4659,8 +4448,7 @@ class TestDefaultWorkflowPrompts(unittest.TestCase):
 
     def test_fresh_reviewer_in_round_two_with_the_gate(self):
         seen = []
-        state = saved_run("review", 2, agents=("spec", "build", "review"), quality_job=JOB, quality_round=1,
-                          quality_project=PROJECT, quality_baseline="analysis-base")
+        state = saved_run("review", 2, agents=("spec", "build", "review"), quality_job=JOB, quality_round=1)
         wf, *_ = resume_gated(state, {"review": [recording(review_turn(2, APPROVE), seen)]}, FakeCI(),
                               files={lambda s: s.build_path(2): "r", lambda s: s.quality_path(2, 1): "GATE: OK\n"})
         wf.run()
@@ -4921,7 +4709,7 @@ class TestOtherWorkflows(unittest.TestCase):
                                    "summary.md"])
         self.assertTrue(host.files[f"{D}/quality-1-1.md"].startswith("GATE: ERROR\n"))
         self.assertTrue(host.files[f"{D}/quality-1-2.md"].startswith("GATE: OK\n"))
-        self.assertEqual([b["ref"] for b in fake.triggered("change")], [REF_1_1, "orchestrator-ci/a1b2c3-1-q2"])
+        self.assertEqual(fake.triggered(), [REF_1_1, "orchestrator-ci/a1b2c3-1-q2"])
         body = host.prs[0]["body"]
         self.assertIn("<summary>Builder report (round 1)</summary>\n\nimpl 1 q1", body)
         self.assertIn("<summary>Quality gate (round 1)</summary>\n\nGATE: OK", body)
@@ -4929,8 +4717,7 @@ class TestOtherWorkflows(unittest.TestCase):
 
     def test_fresh_gated_step_answering_a_quality_round(self):
         seen = []
-        state = saved_run("impl", 1, agents=(), quality_job=JOB, quality_round=1, quality_project=PROJECT,
-                          quality_baseline="analysis-base", prompted="impl-1-q1.md", workflow="impl")
+        state = saved_run("impl", 1, agents=(), quality_job=JOB, quality_round=1, prompted="impl-1-q1.md", workflow="impl")
         state.agents = {"impl": {"name": "impl-a1b2c3", "pane": "w1:p1"}}
         wf, herdr, host, _ = resume_gated(state, {"impl": [recording(impl_turn(1, 1), seen)],
                                                   "review": [review_turn(1, APPROVE)]}, FakeCI(), pipeline=IMPL,
@@ -5495,7 +5282,7 @@ class TestWorkflowWithoutAVerdict(unittest.TestCase):
         self.assertTrue(pr["draft"])
         self.assertTrue(pr["body"].startswith(
             "Opened by ai-agents-orchestrator run `20260929-120000-a1b2c3`. **QUALITY_GATE_FAILED**: its workflow has "
-            "no review step, and the SonarQube quality gate still did not pass after the last quality round, so this "
+            "no review step, and the quality gate still did not pass after the last quality round, so this "
             "is a draft.\n\n<details open>"))
         self.assertNotIn("Reviewer", pr["body"])
         self.assertIn("<summary>Quality gate (round 1)</summary>\n\nGATE: ERROR", pr["body"])
@@ -8154,16 +7941,16 @@ class TestTurnTimings(unittest.TestCase):
             self.assertLessEqual(t["started_at"], t["ended_at"])
             self.assertEqual(t["seconds"], orchestrator.epoch_seconds(t["ended_at"]) -
                              orchestrator.epoch_seconds(t["started_at"]))
-        # Each analysis polls Jenkins and SonarQube, which takes the host's time too.
+        # Each quality round polls Jenkins, which takes the host's time too.
         self.assertGreater(quality[0]["seconds"], 0)
         self.assertIn("| quality | quality | 1 q1 | - | - |", self.summary(host))
         self.assertIn("- Round 1: quality gate ERROR, OK; review APPROVE\n", self.summary(host))
 
     def test_a_resumed_analysis_keeps_its_start(self):
         fake = FakeCI()
-        n = fake.add_build(REF_1_1, "change", outcome())
+        n = fake.add_build(REF_1_1, outcome())
         state = quality_state(ci={"ref": REF_1_1, "sha": "snap9", "queue_url": f"{JENKINS}/queue/item/1/",
-                                  "build": n, "ce_task": f"task-{n}"},
+                                  "build": n},
                               turns=[turn("quality", "quality-1-1.md", -500, None, q=1, agent=None)])
         wf, *_ = resume_gated(state, {"review": [review_turn(1, APPROVE)]}, fake)
 

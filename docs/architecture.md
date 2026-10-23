@@ -17,8 +17,8 @@ One standard-library module, in these sections:
 | Agent harnesses | `AgentSettings` is how each role's agent starts: the permission mode, and per role its model and harness; `Workflow` takes one and saves it in `state.json`. `launch_args` builds the arguments an agent starts with in its harness: `permission_args` translates `--permission-mode` through `PERMISSION_ARGS` (claude takes every mode as it is; `None` means the harness has no equivalent), `RESUME_ARGS` names each harness's way into a saved session (codex's `resume` is a subcommand, so it goes first), the model goes after it as `--model`, and `ADD_DIR_ARGS` grants a worktree run's agents its run directory last (claude and codex `--add-dir`, gemini `--include-directories`; opencode and pi have no such flag). |
 | `Herdr` | A thin wrapper around the `herdr` CLI, one method per command, forwarding `--machine` when one is given. `start_agent` takes the harness as herdr's `--kind`. |
 | `Host` | The project's filesystem and git checkout, run locally or over `ssh -o BatchMode=yes`. `write` is atomic; `run_states` ages each `state.json` by the host's clock; `fast_forward`, `merge_upstream` and `abort_merge` keep the branch up to date with `origin`. For the quality gate, `snapshot` commits the working tree through a temporary index without moving a ref, `push_ref`, `delete_remote_branch` and `remote_branches` handle the throwaway branches, and `change_diff` is the `git diff -U0` that `changed_lines` parses. For `prune`, `pull_request` reads a pull request's state, head commit and closing time with `gh` (`gh_run` runs gh in the project directory, and `GhUnusable` means gh is missing or logged out), `remote_branch_commit` and `delete_remote_branch_at` read and delete `origin`'s branch under a lease, `delete_tracking_ref` drops `origin/<branch>`, `branch_commit`, `has_commit`, `is_ancestor`, `commits_beyond` and `delete_branch` decide on and delete the local branch, and `checked_out_branches` parses `git worktree list --porcelain`. For `run --worktree`, `add_worktree` checks a commit out on a detached HEAD in a new worktree, `is_worktree` tells whether a path is one of the repository's worktrees and still there (by its physical path, as git lists it), and `remove_worktree` removes one without `--force`. `write` with `keep_mtime` keeps a `state.json`'s age. |
-| `CI` | Jenkins's quality job and SonarQube over HTTP, from the orchestrator's machine, one method per call, over an injected `urlopen`. The credentials come from the environment or `ci.env` and go only into the `Authorization` header; `mask` replaces the tokens in text from either server. `CIError` carries the HTTP status, and `transient` says whether a retry may help. |
-| `RunState` and helpers | `RunState` is `state.json`; it saves `permission_mode` as given and each role's harness in `agent_kinds`, and `from_dict` reads a 0.3.0 state's `agent_args` as its permission mode. `worktree` is a `--worktree` run's worktree, set from the start (`None` in place, as for a state saved before it); `work_dir` is that, or else `cwd`, and is where the agents work and every git step of the run runs, while `cwd` stays the project, which holds the run directory (`dir`) and `.orchestrator/.gitignore`. The pure helpers are `parse_verdict`, `parse_gate`, `spec_title`, `branch_name`, `pr_body` (with `verdict_line`; `commit_note` for the commit message), and for the quality file `changed_lines`, `edited_config`, `issue_severity` and `quality_report`. |
+| `CI` | Jenkins's quality job over HTTP, from the orchestrator's machine, one method per call, over an injected `urlopen`. The credentials come from the environment or `ci.env` and go only into the `Authorization` header; `mask` replaces the token in text from Jenkins. `CIError` carries the HTTP status, and `transient` says whether a retry may help. |
+| `RunState` and helpers | `RunState` is `state.json`; it saves `permission_mode` as given and each role's harness in `agent_kinds`, and `from_dict` reads a 0.3.0 state's `agent_args` as its permission mode. `worktree` is a `--worktree` run's worktree, set from the start (`None` in place, as for a state saved before it); `work_dir` is that, or else `cwd`, and is where the agents work and every git step of the run runs, while `cwd` stays the project, which holds the run directory (`dir`) and `.orchestrator/.gitignore`. The pure helpers are `parse_verdict`, `parse_gate`, `spec_title`, `branch_name`, `pr_body` (with `verdict_line`; `commit_note` for the commit message), and for the quality file `changed_lines`, `edited_config` and `quality_report`. |
 | `Workflow` | Drives one run through its `pipeline`. Its collaborators (`herdr`, `host`, `ci`, `notify`, and `clocks`, a `Clocks` of `sleep`, `monotonic` and `wall`) are arguments, which is what lets the tests use fakes. |
 | CLI | `parse_args` (which turns no arguments into `gui` when `gui_by_default` finds a display), `offered_workflows`, `role_models` (with `role_model_arg`), `role_agents` (with `role_agent_arg`), `print_workflows`, `workflow_arg`, `run_health`, `print_runs` (with `run_rows`, `run_outcome` and `run_round`), `find_run`, `resumable_state`, `prune_branches` (with `is_prune_candidate`, `prune_run`, `pull_request_pending`, `prune_remote`, `prune_local` and `record_in_state`, returning a `PrunedRun` per run), which `prune` prints with `print_pruned` and `run` calls first through `sweep_branches`, which logs `sweep_summary`, `close_run` (with `close_run_workspace`, `discard_run_worktree`, `discard_run_branch` and `record_in_state`), and `main` with `runs_command` (`list`, `show`, `prune` and `close`), `workflows_command`, `connect`, `new_state`, `resumed_state` and `finish`. |
 | GUI | `gui_command` and `RunWindow`, a tkinter window over the CLI; see [GUI](#gui). |
@@ -49,9 +49,9 @@ order, in `work_dir`:
   `origin`'s base branch fetched again, without touching the checkout), `base` is taken from HEAD and round 1
   starts.
 - `quality`, after each turn of the quality-gated step when the gate is on: `_quality` writes `quality-N-Q.md`.
-  It creates the run's SonarQube project and analyses the base once per run, then `_analyse` snapshots, pushes
-  and has Jenkins analyse the change, saving each id of the chain in `ci` as it learns it, so a resume continues
-  from the furthest one. `_poll` retries a failed request until `QUALITY_TIMEOUT` and keeps the heartbeat going.
+  `_analyse` snapshots, pushes and has Jenkins judge the change, saving each link of the chain in `ci` as it
+  learns it, so a resume continues from the furthest one, and the round's quality file is the `quality.md` the
+  build archived. `_poll` retries a failed request until `QUALITY_TIMEOUT` and keeps the heartbeat going.
   A gate that does not pass goes back to the gated step, whose answer is `build-N-qQ.md` in the default.
 - The verdict step, the default's `review`, records `verdict`; `CHANGES_REQUESTED` goes back to its loop target
   in the next round until `max_rounds`, resetting `quality_round`. A workflow without a verdict step records
@@ -62,7 +62,7 @@ order, in `work_dir`:
   `conflicts` and aborting when it conflicts), pushes and records `pr_url`, skipping any step already done.
   Then `_leave_work_dir` checks the base branch out again, or in a worktree run removes the worktree, only
   logging a failure.
-- `done`: `_clean_up_quality` deletes the run's throwaway branches and SonarQube project, `owner` is cleared,
+- `done`: `_clean_up_quality` deletes the run's throwaway branches, `owner` is cleared,
   and with a pull request `_close_workspace` closes the workspace.
 
 A failure goes through `_release`, which records `error`. Each role's turn is `_turn`: it takes a handoff file
@@ -141,7 +141,7 @@ fakes:
 
 `tests/test_orchestrator.py` runs `Workflow` on in-memory fakes: `FakeHost` (filesystem and git, played one git
 command at a time so `Host`'s own git steps run on it, with origin scripted by its attributes), `FakeHerdr`
-(scripted roles, one callable per turn), `FakeCI` (Jenkins and SonarQube behind `urlopen`, each triggered build
+(scripted roles, one callable per turn), `FakeCI` (Jenkins behind `urlopen`, each triggered build
 playing a scripted `outcome`) and `FakeClock` (time that passes only when the workflow sleeps).
 `make_workflow` builds a new run on them; `saved_run` and `resume` build one from a saved state. Test classes
 are named after what they cover, e.g. `TestWorkflow`, `TestPullRequest`, `TestResume`, `TestHeartbeat`,
@@ -162,12 +162,12 @@ running `after` callbacks on `tick`), and `TestRunProcess` runs real child proce
   `workflows` lists `default`, and `gui --smoke-test` where there is a display. On Linux it builds with the
   system `python3` (`python3-tk` installed) in `build/binary-venv`, not uv's Python, whose Tk lacks Xft and so
   draws every font in one fixed bitmap size; it refuses a Tk without libXft.
-- `Jenkinsfile`: `uv sync --frozen`, `uv run pytest` with branch coverage of `orchestrator`, and a Package stage
+- `Jenkinsfile`: `uv sync --frozen`, `uv run pytest` with branch coverage of `orchestrator`, a Gate stage that
+  runs `orchestrator.py gate` and archives `quality.md` (see [quality gate](quality-gate.md)), and a Package stage
   that runs `packaging/build-binary.sh` on every build. On `main` a Release stage publishes a new
   `pyproject.toml` version as a GitHub release, with `orchestrator.py` attached as the zipapp `orchestrator.pyz`
   and the Linux binary, each with its `.sha256`, in one `gh release create`. Its parameter `GIT_REF` builds
-  another branch; such a build never releases. The SonarQube analysis and gate are gone since 2026-10-21, so
-  the quality loop (`CI`) refuses at its preflight.
+  another branch; such a build never releases.
 - `.github/workflows/macos-binary.yml`, the only GitHub Action: Jenkins has no Mac, so when a release is
   published, or by hand for an existing tag, it runs `packaging/build-binary.sh` on `macos-latest` and uploads
   `orchestrator-macos-arm64` and its `.sha256` to that release with `gh release upload --clobber`. With only
