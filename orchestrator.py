@@ -2749,7 +2749,8 @@ def flaky_tests(change: GateChange) -> list[dict]:
     coverage report, does not replace the build's own; a test that needs an untracked file, such as a build product,
     cannot find it there. A run that skips a test, or does not report it, as when the project's addopts stop at the
     first failure, neither passed nor failed it. A test that is not mixed, which fewer than two runs passed or
-    failed, is reported as one that too few runs judged.
+    failed although the runs went on, is reported as one that too few runs judged; when a run goes wrong, the
+    reruns stop and the finding about that run is the only one.
 
     pytest decides which of those defs are tests, so a helper named test_* that it does not collect is not rerun.
     pytest and pytest-randomly must be importable by the gate's own interpreter, as a `uv run` of the project makes

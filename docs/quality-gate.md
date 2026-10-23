@@ -73,9 +73,9 @@ product, does not find it there. pytest takes its configuration only from the co
 order (`pytest.toml`, `.pytest.toml`, `pytest.ini`, `.pytest.ini`, then `pyproject.toml`, `tox.ini` and `setup.cfg`
 with a pytest table or section), given with `-c`, or an empty one when it has none; `--confcutdir` is the copy. So
 no `pytest.ini` or `conftest.py` that another account put above the temporary directory is read. The top directory
-is where a build that runs pytest there takes its configuration; a project whose pytest configuration is in a
-subdirectory, such as `pkg/pyproject.toml` or `tests/pytest.ini`, gets the empty one instead, and its tests are
-usually `not-rerun` (see `TODO.md`):
+is where a build that runs pytest there takes its configuration. A configuration in a subdirectory, such as
+`pkg/pyproject.toml` or `tests/pytest.ini`, is not used: the reruns get the top directory's, or the empty one when
+the top has none, and a project that needs the subdirectory's usually gets `not-rerun` (see `TODO.md`):
 
 - `mixed-results`: a test that failed under some seeds and passed under the others, at its `def`, naming the seeds
   of each. It depends on the order of the tests, on state another test leaves, or on randomness pytest-randomly
@@ -89,8 +89,9 @@ usually `not-rerun` (see `TODO.md`):
 - `not-rerun`: the reruns could not judge the tests: pytest could not start, took longer than 30 seconds, ended in a
   usage or collection error, or collected tests without listing their ids; a changed test file could not be read or
   parsed; or the temporary copy could not be made. After a run that went wrong, the finding says which earlier runs
-  were judged. A test that is not mixed and that fewer than two runs passed or failed is one of these too, at its
-  `def`. pytest runs at `--verbosity=-1`, which a `-v` or `-q` in the project's
+  were judged, and the reruns stop there. A test that is not mixed, and that fewer than two of the runs that did
+  report on it passed or failed, is one of these too, at its `def`; when the reruns stopped early, the finding
+  about the run is the only one. pytest runs at `--verbosity=-1`, which a `-v` or `-q` in the project's
   `addopts` or `PYTEST_ADDOPTS` does not change, nor its `verbosity_test_cases`;
 - `not-removed`: the copy could not be removed afterwards; the reruns' results stand.
 
