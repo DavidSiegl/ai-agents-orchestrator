@@ -197,6 +197,9 @@ colors each status, and the output pane is terminal-like. Tk 8.6 loads no SVG, s
 
 tkinter is imported only when the window opens, so the CLI keeps running on a Python without it.
 
+Its likely successor, a live UI that also lets you answer the agents, is compared and proposed in
+[ui-options.md](ui-options.md).
+
 ## Builds and releases
 
 Jenkins does the building and releasing: the tests, the Linux binary (on every build, so a change that breaks
