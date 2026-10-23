@@ -3787,6 +3787,9 @@ class _ScoredFunction:
     whether at the top of its module, in a class at any depth, or under a module-level statement such as an if or a
     try. A function nested in another is part of that one."""
     name: str  # its name qualified by its classes: f, C.f or C.D.f
+    # How many functions of the same name come before it in its module, as a property's getter comes before its setter,
+    # or one @singledispatch registration named _ before the next. With name, it tells a function from the others.
+    occurrence: int
     first: int  # the line it starts on, its decorators included
     last: int  # the line it ends on
     line: int  # the line of its def
@@ -3796,7 +3799,7 @@ class _ScoredFunction:
 def _scored_functions(tree: ast.Module) -> list[_ScoredFunction]:
     """Each function of tree that the cognitive-complexity check judges as one, scored, in the order they are
     written."""
-    out = []
+    found: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef, str | None]] = []
     # The nodes whose statements are still to be read, each with the qualified-name prefix there and the class a
     # function there is a method of. A stack rather than recursion, as cognitive_complexity has.
     todo: list[tuple[ast.AST, str, str | None]] = [(tree, "", None)]
@@ -3804,14 +3807,19 @@ def _scored_functions(tree: ast.Module) -> list[_ScoredFunction]:
         node, prefix, cls = todo.pop()
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
-                first = min([child.lineno, *(d.lineno for d in child.decorator_list)])
-                out.append(_ScoredFunction(prefix + child.name, first, child.end_lineno or child.lineno, child.lineno,
-                                           cognitive_complexity(child, cls)))
+                found.append((prefix + child.name, child, cls))
             elif isinstance(child, ast.ClassDef):
                 todo.append((child, f"{prefix}{child.name}.", child.name))
             elif isinstance(child, ast.stmt | ast.excepthandler | ast.match_case):
                 todo.append((child, prefix, cls))
-    return sorted(out, key=lambda f: f.first)
+    out = []
+    seen: collections.Counter[str] = collections.Counter()
+    for name, node, cls in sorted(found, key=lambda x: x[1].lineno):
+        first = min([node.lineno, *(d.lineno for d in node.decorator_list)])
+        out.append(_ScoredFunction(name, seen[name], first, node.end_lineno or node.lineno, node.lineno,
+                                   cognitive_complexity(node, cls)))
+        seen[name] += 1
+    return out
 
 
 def too_complex_functions(change: GateChange) -> list[dict]:
@@ -3821,8 +3829,8 @@ def too_complex_functions(change: GateChange) -> list[dict]:
     no worse is not a finding: the gate judges the change, not the codebase. The functions judged are those
     _ScoredFunction describes.
 
-    A function's base is the one with its qualified name in the file's base; for a file the change renamed, under the
-    file's old name. A changed file that cannot be read or parsed is a finding saying so, and so is one that has a
+    A function's base is the one with its qualified name and occurrence in the file's base; for a file the change
+    renamed, under the file's old name. A changed file that cannot be read or parsed is a finding saying so, and so is one that has a
     function over the limit and whose base cannot be read or parsed.
     """
     out, over = _changed_over_limit(change)
@@ -3837,7 +3845,7 @@ def too_complex_functions(change: GateChange) -> list[dict]:
     at_base = {path: _base_complexities(change, old_paths.get(path, path)) for path in {path for path, _ in over}}
     for path, f in over:
         scores, problem = at_base[path]
-        was = scores.get(f.name)
+        was = scores.get((f.name, f.occurrence))
         if problem is None and (was is None or f.score > was):
             out.append(_finding(path, f.line, "over-limit", (
                 f"`{f.name}`: cognitive complexity {f.score}, "
@@ -3875,9 +3883,9 @@ def _changed_over_limit(change: GateChange) -> tuple[list[dict], list[tuple[str,
     return out, over
 
 
-def _base_complexities(change: GateChange, path: str | None) -> tuple[dict[str, int], str | None]:
+def _base_complexities(change: GateChange, path: str | None) -> tuple[dict[tuple[str, int], int], str | None]:
     """The cognitive complexity at the change's base of each function of the file at path that the check judges as one,
-    by qualified name, and None; {} for path None, a file the change adds. Or {} and why they could not be scored, a
+    by qualified name and occurrence, and None; {} for path None, a file the change adds. Or {} and why they could not be scored, a
     sentence."""
     if path is None:
         return {}, None
@@ -3888,7 +3896,7 @@ def _base_complexities(change: GateChange, path: str | None) -> tuple[dict[str, 
     tree = _parse_python(text)
     if tree is None:
         return {}, "its base does not parse as Python, so its functions could not be compared with theirs."
-    return {f.name: f.score for f in _scored_functions(tree)}, None
+    return {(f.name, f.occurrence): f.score for f in _scored_functions(tree)}, None
 
 
 # What a node holds, each with the nesting level it is scored at; None stands for a part the node goes without.

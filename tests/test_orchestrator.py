@@ -5762,6 +5762,18 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.edit("shapes.py", "x += 3\n", "x += 30\n")
         self.assertEqual(self.found()[0], [])
 
+    def test_a_name_defined_twice_is_compared_with_the_same_definition_at_the_base(self):
+        # A property's getter, scoring 21, then its setter, which scores nothing, under the same name.
+        getter = flat("x", 21, indent="    ").replace("    def x(x):\n", "    @property\n    def x(self):\n")
+        self.put("props.py", "class C:\n" + getter + "\n    @x.setter\n    def x(self, value):\n        pass\n")
+        self.git("add", "props.py")
+        self.git("commit", "--quiet", "-m", "property")
+        self.edit("props.py", "x += 3\n", "x += 30\n")  # the getter's, still 21
+        self.assertEqual(self.found()[0], [])
+        self.edit("props.py", "x += 30\n", "x += 30\n        if x:\n            x -= 1\n")  # 21 becomes 22
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`C.x`: cognitive complexity 22, 21 at the base; the limit is 15."])
+
     def test_only_the_tests_directory_is_exempt_as_from_ruff_s_c901(self):
         self.put("tests/test_calc.py", flat("test_big", 16))
         self.put("tests/unit/helpers.py", flat("helper", 16))

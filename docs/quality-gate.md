@@ -79,8 +79,9 @@ these is a finding:
 
 - `over-limit`: a function over 15, at its `def` line, when it is new or the change raised its score, as
   "`_poll`: cognitive complexity 19, 14 at the base; the limit is 15". Its base is the function of the same name and
-  class in the file's base, under the file's old name when the change renamed it. A function already over 15 that the
-  change leaves no worse is not a finding, since the gate judges the change;
+  classes in the file's base, under the file's old name when the change renamed it; of a name defined more than once,
+  as a property's getter and setter are, the same one in order. A function already over 15 that the change leaves no
+  worse is not a finding, since the gate judges the change;
 - `not-scored`: a changed file that could not be read or parsed, or the base of one with a function over 15.
 
 ruff's `C90` stays beside it. It counts branches without their nesting, so it misses a deeply nested function that
