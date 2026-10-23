@@ -22,6 +22,7 @@ from orchestrator import (
     GATE_ERROR,
     GATE_OK,
     Host,
+    OrchestratorError,
     _unquote,
     changed_lines,
     ci_credentials,
@@ -182,12 +183,12 @@ class TestUnquote(unittest.TestCase):
 # Names under one prefix, so that none is a variable the shell sets or refuses itself: PWD, IFS, BASH_*.
 env_names = st.from_regex(r"V[A-Za-z0-9_]{0,8}", fullmatch=True)
 # A value in each form the documentation allows that a shell reads literally: unquoted from characters no shell
-# expands, single-quoted, and double-quoted without what expands inside double quotes. None holds a line break: a
-# value that does is not one line of the file.
+# expands, single-quoted, and double-quoted without what expands inside double quotes. Any other line break than
+# "\n" may be in it; a carriage return may not, which parse_env_file refuses (test_refuses_a_carriage_return).
 env_values = st.one_of(
     st.from_regex(r"[A-Za-z0-9_./:@%+,=#-]*", fullmatch=True),
-    text_without("'" + LINE_BREAKS).map(lambda v: f"'{v}'"),
-    text_without('"\\$`' + LINE_BREAKS).map(lambda v: f'"{v}"'),
+    text_without("'\n\r").map(lambda v: f"'{v}'"),
+    text_without('"\\$`\n\r').map(lambda v: f'"{v}"'),
 )
 padding = st.from_regex(r"[ \t]*", fullmatch=True)
 
@@ -201,7 +202,7 @@ def env_files(draw) -> tuple[str, set[str]]:
         if kind == "blank":
             lines.append(draw(padding))
         elif kind == "comment":
-            lines.append(draw(padding) + "#" + draw(text_without(LINE_BREAKS)))
+            lines.append(draw(padding) + "#" + draw(text_without("\n")))
         else:
             name = draw(env_names)
             names.add(name)
@@ -210,11 +211,21 @@ def env_files(draw) -> tuple[str, set[str]]:
     return "\n".join(lines) + "\n", names
 
 
+def write_env_file(directory: str, text: str) -> str:
+    """The path of a ci.env in directory holding text as it is, mode 600 as ci_credentials demands."""
+    path = os.path.join(directory, "ci.env")
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600), "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+    return path
+
+
 def sh_exports(path: str, names: set[str]) -> dict[str, str]:
     """names as a POSIX shell has them after sourcing the file at path with `set -a`. The shell inherits the
     environment, which cannot matter: the file assigns every one of names."""
-    out = Host().check(["sh", "-c", 'set -a; . "$1"; exec env -0', "sh", path])
-    exported = dict(entry.partition("=")[::2] for entry in out.split("\0") if entry)
+    proc = Host().run(["sh", "-c", 'set -a; . "$1"; exec env -0', "sh", path], verbatim=True)
+    if proc.returncode != 0:
+        raise AssertionError(f"sh could not source {path}: {proc.stderr}")
+    exported = dict(entry.partition("=")[::2] for entry in proc.stdout.split("\0") if entry)
     return {name: exported[name] for name in names}
 
 
@@ -222,13 +233,23 @@ class TestEnvFile(unittest.TestCase):
     """ci_credentials reads an env file as sh sources it. Runs sh."""
 
     @given(env_files())
+    # Line breaks str.splitlines knows and sh does not: a comment that went on as an assignment, and values that
+    # were refused.
+    @example(("# note\x85V=evil\n", set()))
+    @example(("V='a\x0cb'\n", {"V"}))
+    @example(("V='a\u2028b'\n", {"V"}))
     def test_reads_what_sh_exports(self, file):
         text, names = file
         with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "ci.env")
-            with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600), "w", encoding="utf-8", newline="") as f:
-                f.write(text)
+            path = write_env_file(d, text)
             self.assertEqual(ci_credentials({}, path), sh_exports(path, names))
+
+    @given(padding, env_names, env_values, st.sampled_from(["\r", "\r\n"]))
+    def test_refuses_a_carriage_return(self, indent, name, value, line_end):
+        with tempfile.TemporaryDirectory() as d:
+            path = write_env_file(d, f"{indent}{name}={value}{line_end}")
+            with self.assertRaisesRegex(OrchestratorError, ":1: a carriage return"):
+                ci_credentials({}, path)
 
 
 # ---------------------------------------------------------------------------

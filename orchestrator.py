@@ -260,7 +260,8 @@ def ci_credentials(environ, path: str) -> dict[str, str]:
     if len(found) == len(CI_ENV):
         return found
     try:
-        with open(path, encoding="utf-8") as f:
+        # newline="": parse_env_file must see a carriage return to refuse it.
+        with open(path, encoding="utf-8", newline="") as f:
             if os.fstat(f.fileno()).st_mode & 0o077:
                 raise OrchestratorError(f"{path} holds tokens but others may read it; run: chmod 600 {path}")
             text = f.read()
@@ -272,14 +273,23 @@ def ci_credentials(environ, path: str) -> dict[str, str]:
 
 
 def parse_env_file(text: str, path: str) -> dict[str, str]:
-    """The NAME=value lines of text, with the quotes and `export ` that a file also sourced by a shell has."""
+    """The NAME=value lines of text, with the quotes and `export ` that a file also sourced by a shell has.
+
+    A file in that form means the same to the orchestrator as to sh: a line ends at "\n" alone, and only spaces
+    and tabs are blanks. Raises OrchestratorError, naming path and line, for a line that is not blank, a comment
+    or a NAME=value, and for a carriage return outside a comment: sh keeps it in the value, so a file with Windows
+    line ends would give it tokens that do not work.
+    """
     values = {}
-    for i, line in enumerate(text.splitlines(), 1):
-        line = line.strip()
+    for i, raw in enumerate(text.split("\n"), 1):
+        line = raw.strip(" \t")
         if not line or line.startswith("#"):
             continue
+        if "\r" in line:
+            raise OrchestratorError(f"{path}:{i}: a carriage return, which sh would keep in the value; "
+                                    "save the file with Unix line ends")
         name, sep, value = line.removeprefix("export ").partition("=")
-        name, value = name.strip(), value.strip()
+        name, value = name.strip(" \t"), value.strip(" \t")
         if not sep or not re.fullmatch(r"[A-Za-z_]\w*", name, re.ASCII):
             raise OrchestratorError(f"{path}:{i}: expected NAME=value")
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
