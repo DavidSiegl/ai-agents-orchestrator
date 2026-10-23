@@ -2942,13 +2942,17 @@ def _junit_case(node_id: str) -> str:
 
 def _pytest(root: str, doing: str, args: list[str],
             ok: tuple[int, ...] = (0, 1)) -> tuple[subprocess.CompletedProcess | None, str | None]:
-    """pytest run at verbosity -1 in the gate's own interpreter at root, without its cache, with args; or None and
-    the problem, a clause naming doing, when it could not start, took longer than FLAKY_RUN_TIMEOUT or exited with a
-    status outside ok (by default 0, all passed, and 1, some failed). Its output is decoded as Host.run's verbatim
-    output is, so the node ids in it hold paths as git's do, and only "\n" ends a line."""
+    """pytest run at verbosity -1, for test cases too, in the gate's own interpreter at root, without its cache, with
+    args; or None and the problem, a clause naming doing, when it could not start, took longer than
+    FLAKY_RUN_TIMEOUT or exited with a status outside ok (by default 0, all passed, and 1, some failed). Its
+    output is decoded as Host.run's verbatim output is, so the node ids in it hold paths as git's do, and only "\n"
+    ends a line."""
     # --verbosity sets the level outright, and pytest reads the project's addopts and PYTEST_ADDOPTS before the
-    # command line, so a -v or -q of theirs cannot change what the collection prints.
-    argv = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "--rootdir", root, "--verbosity=-1", *args]
+    # command line, so a -v or -q of theirs cannot change what the collection prints. The list of collected tests
+    # follows verbosity_test_cases where the project's configuration sets it, and -o overrides that; in pytest 9.0
+    # no other option changes the list.
+    argv = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "--rootdir", root, "--verbosity=-1",
+            "-o", "verbosity_test_cases=-1", *args]
     try:
         # A fixed command over the node ids pytest itself collected; no shell reads it.
         raw = subprocess.run(argv, cwd=root, capture_output=True, timeout=FLAKY_RUN_TIMEOUT,  # noqa: S603

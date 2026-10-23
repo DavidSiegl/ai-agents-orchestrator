@@ -4383,9 +4383,9 @@ class TestFlakyTests(unittest.TestCase):
         self.change_the_tests()
         # Two seeds are enough for test_alternates to fail under one, and keep this test quick.
         seeds = patch.object(orchestrator, "FLAKY_SEEDS", (1, 2))
-        for addopts, env in (("-v", ""), ("-qq", ""), ("", "-q")):
-            with self.subTest(addopts=addopts, env=env), seeds, patch.dict(os.environ, {"PYTEST_ADDOPTS": env}):
-                self.put("pytest.ini", f"[pytest]\naddopts = {addopts}\n")
+        for ini, env in (("addopts = -v", ""), ("addopts = -qq", ""), ("", "-q"), ("verbosity_test_cases = 2", "")):
+            with self.subTest(ini=ini, env=env), seeds, patch.dict(os.environ, {"PYTEST_ADDOPTS": env}):
+                self.put("pytest.ini", f"[pytest]\n{ini}\n")
                 self.git("add", "pytest.ini")
                 self.assertIn("`TestRuns.test_alternates` failed under seed 2 and passed under seed 1: ",
                               "\n".join(f["message"] for f in self.found()))

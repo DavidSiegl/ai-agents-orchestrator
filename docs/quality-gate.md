@@ -80,7 +80,7 @@ product, does not find it there:
   parsed; or the temporary copy could not be made. After a run that went wrong, the
   finding says which earlier runs were judged. A test that is not mixed and that fewer than two runs passed or
   failed is one of these too, at its `def`. pytest runs at `--verbosity=-1`, which a `-v` or `-q` in the project's
-  `addopts` or `PYTEST_ADDOPTS` does not change;
+  `addopts` or `PYTEST_ADDOPTS` does not change, nor its `verbosity_test_cases`;
 - `not-removed`: the copy could not be removed afterwards; the reruns' results stand.
 
 A change to a helper or fixture outside the tests' `def`s reruns nothing. The check adds at most six pytest runs of
