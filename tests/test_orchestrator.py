@@ -5047,6 +5047,31 @@ class TestSurvivingMutants(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 5)
         self.assertEqual([f["rule"] for f in found], ["not-run"])
 
+    def test_a_pytest_configuration_above_the_copy_is_not_read(self):
+        # The project has no pytest configuration of its own, so pytest under mutmut would look for one in every
+        # directory above the copy, where another account may plant one, and a conftest.py beside it.
+        self.change_the_functions()
+        above, ran = os.path.join(self.bin, "tmp"), os.path.join(self.bin, "planted-ran")
+        os.mkdir(above)
+        with open(os.path.join(above, "pytest.ini"), "w") as f:
+            f.write("[pytest]\n")
+        with open(os.path.join(above, "conftest.py"), "w") as f:
+            f.write(f"open({ran!r}, 'w').close()\n")
+        with patch.object(orchestrator.tempfile, "tempdir", above):
+            found = self.found()
+        self.assertFalse(os.path.exists(ran))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                         [("calc.py", 5, "survived"), ("calc.py", 13, "untested"), ("calc.py", 18, "survived")])
+
+    def test_the_project_s_own_pytest_configuration_still_applies(self):
+        self.change_the_functions()
+        # Its addopts run only test_checked, so no test calls the other changed functions. Its pythonpath, relative to
+        # the configuration's directory, must name mutmut's copy of the code, or checked's mutants go untested too.
+        with open(os.path.join(self.repo, "pyproject.toml"), "a") as f:
+            f.write('\n[tool.pytest.ini_options]\naddopts = "-k test_checked"\npythonpath = ["."]\n')
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in self.found()],
+                         [("calc.py", 5, "untested"), ("calc.py", 13, "untested"), ("calc.py", 18, "untested")])
+
     def test_a_change_to_a_help_text_alone_makes_no_mutant(self):
         # The second line of the help text does not say help=, but its string starts on the line that does.
         self.put("calc.py", self.BASE.replace(" to make", " to build"))

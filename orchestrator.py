@@ -2880,16 +2880,11 @@ def _rerun_findings(root: str, tmp: str, tests: dict[tuple[str, str], int]) -> l
     except (OSError, OrchestratorError) as e:
         return [_finding(None, None, "not-rerun", f"could not copy the tracked files to rerun the changed "
                                                   f"tests in: {e}; the changed tests were not rerun.")]
-    inifile = _pytest_inifile(tree)
-    if inifile is None:
-        # pytest's configuration even when it is empty, so that pytest does not look for one above the copy.
-        inifile = os.path.join(tmp, "pytest.ini")
-        try:
-            with open(inifile, "x", encoding="utf-8"):
-                pass
-        except OSError as e:
-            return [_finding(None, None, "not-rerun", f"could not write an empty pytest configuration for the "
-                                                      f"reruns: {e}; the changed tests were not rerun.")]
+    try:
+        inifile = _pytest_config(tree, tmp)
+    except OSError as e:
+        return [_finding(None, None, "not-rerun", f"could not write an empty pytest configuration for the "
+                                                  f"reruns: {e}; the changed tests were not rerun.")]
     out = []
     ids, problem = _collect_python_tests(tree, inifile, tests)
     # Each test's outcome by the seed of a run that reported it as passed or failed.
@@ -2966,6 +2961,19 @@ def _pytest_inifile(tree: str) -> str | None:
         except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
             return path
     return None
+
+
+def _pytest_config(tree: str, tmp: str) -> str:
+    """The pytest configuration to run the tests of tree, a copy of a tree, by: its own, as _pytest_inifile finds
+    it, else an empty pytest.ini that this writes in tmp, the private directory beside tree, so that pytest, given it
+    with -c, does not look for one above the copy, where another account may write. Raises OSError when that file
+    cannot be written."""
+    inifile = _pytest_inifile(tree)
+    if inifile is None:
+        inifile = os.path.join(tmp, "pytest.ini")
+        with open(inifile, "x", encoding="utf-8"):
+            pass
+    return inifile
 
 
 def _ini_sections(text: str) -> list[str]:
@@ -3180,8 +3188,7 @@ def surviving_mutants(change: GateChange, *, budget: float) -> list[dict]:
 def _mutation_test(change: GateChange, functions: list[_ChangedFunction], budget: float) -> list[dict]:
     """surviving_mutants's findings on functions, the change's changed functions: those mutmut does not mutate, then
     what a run of mutmut, by the rules' [tool.mutmut], of budget seconds found of the others."""
-    tree_rules = os.path.join(change.root, "pyproject.toml")
-    rules = change.rules or tree_rules
+    rules = change.rules or os.path.join(change.root, "pyproject.toml")
     table, problem = _mutmut_table(rules)
     if problem:
         return [_mutation_not_run(problem)]
@@ -3198,8 +3205,7 @@ def _mutation_test(change: GateChange, functions: list[_ChangedFunction], budget
         tmp = tempfile.mkdtemp(prefix="gate-mutmut-")
     except OSError as e:
         return [*out, _mutation_not_run(f"could not make a directory to copy the tree into: {e}")]
-    # The tree's own table may loosen the rules it is judged by.
-    out += _mutmut_on_copy(change.root, tmp, mutated, table if os.path.abspath(rules) != tree_rules else None, budget)
+    out += _mutmut_on_copy(change.root, tmp, mutated, table, budget)
     try:
         shutil.rmtree(tmp)
     except OSError as e:
@@ -3208,17 +3214,31 @@ def _mutation_test(change: GateChange, functions: list[_ChangedFunction], budget
     return out
 
 
-def _mutmut_on_copy(root: str, tmp: str, functions: list[_ChangedFunction], table: dict | None,
-                    budget: float) -> list[dict]:
-    """Copies the files git tracks in root's working tree into tmp, an empty directory, as _copy_tracked does, marked
-    for mutmut to skip all but functions, with table, when given, in place of its [tool.mutmut]; runs mutmut there on
-    functions for budget seconds, and returns what it found."""
+def _mutmut_on_copy(root: str, tmp: str, functions: list[_ChangedFunction], table: dict, budget: float) -> list[dict]:
+    """Copies the files git tracks in root's working tree into tmp, an empty private directory, as _copy_tracked does,
+    marked for mutmut to skip all but functions, with table, the rules' [tool.mutmut], in place of its own; runs
+    mutmut there on functions for budget seconds, its pytest runs taking no configuration or conftest.py from above
+    the copy, and returns what it found."""
     tree_copy = os.path.join(tmp, "tree")
+    added = table.get("pytest_add_cli_args", [])
+    if not isinstance(added, list) or not isinstance(table.get("also_copy", []), list):
+        return [_mutation_not_run("[tool.mutmut] pytest_add_cli_args or also_copy is not a list")]
     try:
         _copy_tracked(root, tree_copy)
         _mark_for_mutmut(tree_copy, {(f.path, f.name) for f in functions})
-        if table is not None:
-            _use_mutmut_table(tree_copy, table)
+        # mutmut runs pytest in the copy's mutants/, with --rootdir=. and these after its own arguments. Without -c,
+        # pytest looks for its configuration in each directory above, up to one that another account may write to
+        # when the project has none; --confcutdir keeps it from importing a conftest.py from above mutants/. The
+        # project's own configuration is read from mutmut's copy of it in mutants/, which also_copy makes, since
+        # pytest takes paths in it, such as pythonpath, from where it is: there they name the mutated code.
+        config = _pytest_config(tree_copy, tmp)
+        mutants = os.path.join(tree_copy, "mutants")
+        also_copy = table.get("also_copy", [])
+        if os.path.dirname(config) == tree_copy:
+            also_copy = [*also_copy, os.path.basename(config)]
+            config = os.path.join(mutants, os.path.basename(config))
+        _use_mutmut_table(tree_copy, {**table, "also_copy": also_copy,
+                                      "pytest_add_cli_args": [*added, "-c", config, "--confcutdir", mutants]})
         run, stopped = _run_mutmut(tree_copy, ["run"], budget)
     except (OSError, OrchestratorError) as e:
         return [_mutation_not_run(f"could not start mutmut: {e}")]

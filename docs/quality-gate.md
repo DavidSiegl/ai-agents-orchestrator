@@ -127,8 +127,12 @@ mutmut's `# pragma: no mutate block` at the end of its header, and mutmut skips 
 what can be mutated (`source_paths`, `only_mutate`, `do_not_mutate`), which tests run
 (`pytest_add_cli_args_test_selection`), what the tests read beside the code (`also_copy`), and which lines are left
 alone (`do_not_mutate_patterns`); see [whose rules judge a change](#whose-rules-judge-a-change). Python files are read
-as Python reads them, by a byte order mark or a coding cookie. In a repository without mutmut, a change to a function
-gets a `not-run` finding.
+as Python reads them, by a byte order mark or a coding cookie. mutmut runs pytest in the copy's `mutants/`, where it
+puts the mutated code. Its runs get the configuration flaky-tests' reruns get, with `-c`: the project's own, which
+`also_copy` puts in `mutants/` so that paths in it, such as `pythonpath`, name the mutated code, or an empty one; and
+`--confcutdir` is `mutants/`. Both are added to the table's `pytest_add_cli_args`, so these runs too read no
+`pytest.ini` or `conftest.py` from above the copy. In a repository without mutmut, a change to a function gets a
+`not-run` finding.
 
 `--mutation-budget SECONDS`, 600 by default, bounds mutmut's run. Stopping it takes at most 15 seconds more: SIGINT,
 10 seconds to exit, a kill of its process group, and 5 seconds to read what it printed. Listing its results and showing
