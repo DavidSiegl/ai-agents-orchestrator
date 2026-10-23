@@ -3195,26 +3195,28 @@ def _mutation_test(change: GateChange, functions: list[_ChangedFunction], budget
     if not mutated:
         return out
     try:
-        tree_copy = tempfile.mkdtemp(prefix="gate-mutmut-")
+        tmp = tempfile.mkdtemp(prefix="gate-mutmut-")
     except OSError as e:
         return [*out, _mutation_not_run(f"could not make a directory to copy the tree into: {e}")]
     # The tree's own table may loosen the rules it is judged by.
-    out += _mutmut_on_copy(change.root, tree_copy, mutated, table if os.path.abspath(rules) != tree_rules else None,
-                           budget)
+    out += _mutmut_on_copy(change.root, tmp, mutated, table if os.path.abspath(rules) != tree_rules else None, budget)
     try:
-        shutil.rmtree(tree_copy)
+        shutil.rmtree(tmp)
     except OSError as e:
-        out.append(_finding(None, None, "cleanup", f"the copy of the tree mutmut ran in, `{tree_copy}`, could not be "
+        out.append(_finding(None, None, "cleanup", f"the copy of the tree mutmut ran in, `{tmp}`, could not be "
                                                    f"removed: {e}"))
     return out
 
 
-def _mutmut_on_copy(root: str, tree_copy: str, functions: list[_ChangedFunction], table: dict | None,
+def _mutmut_on_copy(root: str, tmp: str, functions: list[_ChangedFunction], table: dict | None,
                     budget: float) -> list[dict]:
-    """Copies the files git tracks in root's working tree into tree_copy, an empty directory, with table, when given,
-    in place of its [tool.mutmut]; runs mutmut there on functions for budget seconds, and returns what it found."""
+    """Copies the files git tracks in root's working tree into tmp, an empty directory, as _copy_tracked does, marked
+    for mutmut to skip all but functions, with table, when given, in place of its [tool.mutmut]; runs mutmut there on
+    functions for budget seconds, and returns what it found."""
+    tree_copy = os.path.join(tmp, "tree")
     try:
-        _copy_for_mutmut(root, tree_copy, {(f.path, f.name) for f in functions})
+        _copy_tracked(root, tree_copy)
+        _mark_for_mutmut(tree_copy, {(f.path, f.name) for f in functions})
         if table is not None:
             _use_mutmut_table(tree_copy, table)
         run, stopped = _run_mutmut(tree_copy, ["run"], budget)
@@ -3344,32 +3346,26 @@ def _use_mutmut_table(tree_copy: str, table: dict) -> None:
         f.write(text)
 
 
-def _copy_for_mutmut(root: str, tree_copy: str, changed: set[tuple[str, str]]) -> None:
-    """Copies the files git tracks in root's working tree into tree_copy, marking for mutmut to skip each top-level
-    function and class of their Python files that is not, and holds no method, in changed: (path, name as
-    _ChangedFunction gives it). A Python file that cannot be decoded or parsed is copied as it is.
-
-    Raises OSError when a file cannot be copied, and OrchestratorError when git cannot list them.
-    """
-    for path in filter(None, Host().git(root, "ls-files", "-z", verbatim=True).split("\0")):
-        src, dst = os.path.join(root, path), os.path.join(tree_copy, path)
-        # A file the change deleted is gone from the tree, and a submodule is a directory.
-        if not (os.path.isfile(src) or os.path.islink(src)):
-            continue
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copy2(src, dst, follow_symlinks=False)
-        if not path.endswith(".py") or os.path.islink(src):
-            continue
-        with open(src, "rb") as f:
-            data = f.read()
-        try:
-            text, encoding = _decode_python(data)
-        except (SyntaxError, UnicodeDecodeError):
-            continue
-        marked = _skip_unchanged(path, text, changed)
-        if marked != text:
-            with open(dst, "wb") as f:
-                f.write(marked.encode(encoding))
+def _mark_for_mutmut(tree_copy: str, changed: set[tuple[str, str]]) -> None:
+    """Marks for mutmut to skip each top-level function and class of the Python files in tree_copy, a copy of a tree,
+    that is not, and holds no method, in changed: (path, name as _ChangedFunction gives it). A Python file that cannot
+    be decoded or parsed, and a symbolic link, are left as they are. Raises OSError when a file cannot be read or
+    written."""
+    for top, _, names in os.walk(tree_copy):
+        for name in names:
+            path = os.path.join(top, name)
+            if not name.endswith(".py") or os.path.islink(path):
+                continue
+            with open(path, "rb") as f:
+                data = f.read()
+            try:
+                text, encoding = _decode_python(data)
+            except (SyntaxError, UnicodeDecodeError):
+                continue
+            marked = _skip_unchanged(os.path.relpath(path, tree_copy).replace(os.sep, "/"), text, changed)
+            if marked != text:
+                with open(path, "wb") as f:
+                    f.write(marked.encode(encoding))
 
 
 def _skip_unchanged(path: str, text: str, changed: set[tuple[str, str]]) -> str:
