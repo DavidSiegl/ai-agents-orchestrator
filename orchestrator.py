@@ -2783,13 +2783,23 @@ def _rerun_findings(root: str, tmp: str, tests: dict[tuple[str, str], int]) -> l
     except (OSError, OrchestratorError) as e:
         return [_flaky_finding(None, None, "not-rerun", f"could not copy the tracked files to rerun the changed "
                                                         f"tests in: {e}; the changed tests were not rerun.")]
+    inifile = _pytest_inifile(tree)
+    if inifile is None:
+        # pytest's configuration even when it is empty, so that pytest does not look for one above the copy.
+        inifile = os.path.join(tmp, "pytest.ini")
+        try:
+            with open(inifile, "x", encoding="utf-8"):
+                pass
+        except OSError as e:
+            return [_flaky_finding(None, None, "not-rerun", f"could not write an empty pytest configuration for the "
+                                                            f"reruns: {e}; the changed tests were not rerun.")]
     out = []
-    ids, problem = _collect_python_tests(tree, tests)
+    ids, problem = _collect_python_tests(tree, inifile, tests)
     # Each test's outcome by the seed of a run that reported it as passed or failed.
     outcomes: dict[str, dict[int, str]] = {i: {} for i in ids}
     seeds: list[int] = []
     for seed in FLAKY_SEEDS if ids else ():
-        reported, problem = _rerun_python_tests(tree, ids, seed, os.path.join(tmp, f"seed-{seed}.xml"))
+        reported, problem = _rerun_python_tests(tree, inifile, ids, seed, os.path.join(tmp, f"seed-{seed}.xml"))
         if problem:
             break
         seeds.append(seed)
@@ -2821,6 +2831,35 @@ def _rerun_findings(root: str, tmp: str, tests: dict[tuple[str, str], int]) -> l
         out.append(_flaky_finding(None, None, "not-rerun", f"{problem}; " + (
             f"only the reruns under {_seeds(seeds)} were judged." if seeds else "the changed tests were not rerun.")))
     return out
+
+
+def _pytest_inifile(tree: str) -> str | None:
+    """The file in the top directory of tree that pytest 9 takes its configuration from when run there: the first of
+    pytest.toml, .pytest.toml, pytest.ini and .pytest.ini, a pyproject.toml with a [tool.pytest] table, a tox.ini
+    with a [pytest] section and a setup.cfg with [tool:pytest], as pytest's locate_config orders them. None when it
+    has none. A candidate that cannot be read or parsed is taken, so that pytest reports what is wrong with it."""
+    for name in ("pytest.toml", ".pytest.toml", "pytest.ini", ".pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg"):
+        path = os.path.join(tree, name)
+        if not os.path.isfile(path):
+            continue
+        if name in ("pytest.toml", ".pytest.toml", "pytest.ini", ".pytest.ini"):
+            return path
+        try:
+            text = _read_text(path)
+            if name == "pyproject.toml":
+                # An empty [tool.pytest] table is not one; an empty [tool.pytest.ini_options] is, and fills it.
+                if tomllib.loads(text).get("tool", {}).get("pytest"):
+                    return path
+            elif {"tox.ini": "pytest", "setup.cfg": "tool:pytest"}[name] in _ini_sections(text):
+                return path
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+            return path
+    return None
+
+
+def _ini_sections(text: str) -> list[str]:
+    """The names of an ini file's sections, as its [name] lines give them."""
+    return re.findall(r"^\[\s*([^]\n]*?)\s*]", text, re.MULTILINE)
 
 
 def _copy_tracked(root: str, dest: str) -> None:
@@ -2891,14 +2930,14 @@ def _node_parts(node_id: str) -> tuple[str, list[str], str]:
     return path, names, bracket + params
 
 
-def _collect_python_tests(root: str, tests: dict[tuple[str, str], int]) -> tuple[list[str], str | None]:
-    """The pytest node ids of tests, one per parameter set, and the problem, a clause, when pytest could not collect
-    them; then the ids are []."""
+def _collect_python_tests(root: str, inifile: str, tests: dict[tuple[str, str], int]) -> tuple[list[str], str | None]:
+    """The pytest node ids of tests, one per parameter set, collected at root with the configuration in inifile,
+    and the problem, a clause, when pytest could not collect them; then the ids are []."""
     files = sorted({path for path, _ in tests})
     # Exit status 5: pytest collected no test from the files, as for a file of helpers named test_*.
     # Without pytest-randomly, which only shuffles the list, and cannot hash a node id that is not UTF-8.
-    proc, problem = _pytest(root, "collecting the changed tests", ["-p", "no:randomly", "--collect-only", *files],
-                            ok=(0, 5))
+    proc, problem = _pytest(root, inifile, "collecting the changed tests",
+                            ["-p", "no:randomly", "--collect-only", *files], ok=(0, 5))
     if proc is None:
         return [], problem
     # At verbosity -1 pytest lists one node id a line, unindented, before its summary; a warnings summary repeats
@@ -2914,13 +2953,15 @@ def _collect_python_tests(root: str, tests: dict[tuple[str, str], int]) -> tuple
     return wanted, None
 
 
-def _rerun_python_tests(root: str, ids: list[str], seed: int, report: str) -> tuple[dict[str, str], str | None]:
-    """The outcome, as junit_outcomes gives it, of each of ids that pytest reported when it ran them in the order
-    pytest-randomly's seed gives, writing its JUnit report to report; a test reported more than once takes the
-    first of failed, xfailed and passed that any of its cases has, else skipped. And the problem, a clause, when
-    that run told nothing, then with {}."""
+def _rerun_python_tests(root: str, inifile: str, ids: list[str], seed: int,
+                        report: str) -> tuple[dict[str, str], str | None]:
+    """The outcome, as junit_outcomes gives it, of each of ids that pytest reported when it ran them at root, with
+    the configuration in inifile, in the order pytest-randomly's seed gives, writing its JUnit report to report; a
+    test reported more than once takes the first of failed, xfailed and passed that any of its cases has, else
+    skipped. And the problem, a clause, when that run told nothing, then with {}."""
     doing = f"rerunning them under seed {seed}"
-    proc, problem = _pytest(root, doing, ["-p", "randomly", f"--randomly-seed={seed}", f"--junitxml={report}", *ids])
+    proc, problem = _pytest(root, inifile, doing,
+                            ["-p", "randomly", f"--randomly-seed={seed}", f"--junitxml={report}", *ids])
     if proc is None:
         return {}, problem
     if not os.path.isfile(report):
@@ -2946,11 +2987,12 @@ def _junit_case(node_id: str) -> str:
     return ".".join([re.sub(r"\.py$", "", path).replace("/", "."), *names]) + params
 
 
-def _pytest(root: str, doing: str, args: list[str],
+def _pytest(root: str, inifile: str, doing: str, args: list[str],
             ok: tuple[int, ...] = (0, 1)) -> tuple[subprocess.CompletedProcess | None, str | None]:
     """pytest run at verbosity -1, for test cases too, in the gate's own interpreter at root, without its cache, with
-    args; or None and the problem, a clause naming doing, when it could not start, took longer than
-    FLAKY_RUN_TIMEOUT or exited with a status outside ok (by default 0, all passed, and 1, some failed). pytest
+    the configuration in inifile and args, taking no configuration or conftest.py from above root; or None and the
+    problem, a clause naming doing, when it could not start, took longer than FLAKY_RUN_TIMEOUT or exited with a
+    status outside ok (by default 0, all passed, and 1, some failed). pytest
     writes a name that is not UTF-8 as its bytes, and its output is decoded as Host.run's verbatim output is, so the
     node ids in it hold paths as git's do, and only "\n" ends a line. pytest-randomly 5.0.0 cannot shuffle such a
     name: under -p randomly pytest stops with an internal error."""
@@ -2958,8 +3000,11 @@ def _pytest(root: str, doing: str, args: list[str],
     # command line, so a -v or -q of theirs cannot change what the collection prints. The list of collected tests
     # follows verbosity_test_cases where the project's configuration sets it, and -o overrides that; in pytest 9.0
     # no other option changes the list.
-    argv = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "--rootdir", root, "--verbosity=-1",
-            "-o", "verbosity_test_cases=-1", *args]
+    # Without -c pytest looks for its configuration in every directory above the test files, and the copy is in a
+    # temporary directory another account may write to, along with a conftest.py beside it: -c ends that search,
+    # and --confcutdir keeps conftest.py files above root from being imported.
+    argv = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-c", inifile, "--rootdir", root,
+            "--confcutdir", root, "--verbosity=-1", "-o", "verbosity_test_cases=-1", *args]
     try:
         # A fixed command over the node ids pytest itself collected; no shell reads it.
         raw = subprocess.run(argv, cwd=root, capture_output=True, timeout=FLAKY_RUN_TIMEOUT,  # noqa: S603

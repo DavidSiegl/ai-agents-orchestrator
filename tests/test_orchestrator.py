@@ -4535,6 +4535,55 @@ class TestFlakyTests(unittest.TestCase):
         else:
             self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(name, 15, "mixed-results")])
 
+    def test_no_config_or_conftest_above_the_copy_is_loaded(self):
+        # Another account can write the directory the copy is made in; pytest must not take its pytest.ini, which
+        # would make that directory confcutdir, nor so import its conftest.py.
+        shared = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, shared)
+        pwned = os.path.join(shared, "PWNED")
+        with open(os.path.join(shared, "pytest.ini"), "w") as f:
+            f.write("[pytest]\n")
+        with open(os.path.join(shared, "conftest.py"), "w") as f:
+            f.write(f"with open({pwned!r}, 'a') as f:\n    f.write('conftest ran\\n')\n")
+        self.put("tests/test_state.py", self.BASE.replace("self.skipTest('not yet')", "self.assertIsNotNone(RUNS)"))
+        with patch.object(tempfile, "tempdir", shared), patch.object(orchestrator, "FLAKY_SEEDS", (1, 2)):
+            self.assertEqual([(f["line"], f["rule"]) for f in self.found()], [(15, "mixed-results")])
+        self.assertFalse(os.path.exists(pwned))
+
+    def test_the_project_s_pyproject_toml_configures_the_reruns(self):
+        # --maxfail=1 in the project's own table leaves each of four always failing tests judged by few runs.
+        text = self.BASE + "".join(f"\n\ndef test_fails_{k}():\n    assert False\n" for k in range(4))
+        for table in ('[tool.pytest.ini_options]\naddopts = "--maxfail=1"\n',
+                      '[tool.pytest]\naddopts = ["--maxfail=1"]\n'):
+            with self.subTest(table=table):
+                self.put("pyproject.toml", f"[project]\nname = 'p'\n\n{table}")
+                self.git("add", "pyproject.toml")
+                self.put("tests/test_state.py", text)
+                found = self.found()
+                self.assertTrue(found)
+                self.assertEqual({f["rule"] for f in found}, {"not-rerun"})
+
+    def test_the_project_s_pytest_config_is_found_as_pytest_finds_it(self):
+        cases = [
+            ({}, None),
+            ({"pyproject.toml": "[project]\nname = 'p'\n", "tox.ini": "[tox]\n", "setup.cfg": "[metadata]\n"}, None),
+            ({"pyproject.toml": "[tool.pytest]\n"}, None),
+            ({"pyproject.toml": "[tool.pytest.ini_options]\n", "pytest.ini": ""}, "pytest.ini"),
+            ({"pyproject.toml": "[tool.pytest.ini_options]\n", "tox.ini": "[pytest]\n"}, "pyproject.toml"),
+            ({"pyproject.toml": "[tool.pytest]\naddopts = []\n"}, "pyproject.toml"),
+            ({"tox.ini": "[pytest]\n", "setup.cfg": "[tool:pytest]\n"}, "tox.ini"),
+            ({"tox.ini": "[tool:pytest]\n", "setup.cfg": "[tool:pytest]\n"}, "setup.cfg"),
+            ({".pytest.ini": "", "pytest.toml": ""}, "pytest.toml"),
+            ({"pyproject.toml": "not toml ["}, "pyproject.toml"),
+        ]
+        for files, expected in cases:
+            with self.subTest(files=files), tempfile.TemporaryDirectory() as tree:
+                for name, text in files.items():
+                    with open(os.path.join(tree, name), "w") as f:
+                        f.write(text)
+                found = orchestrator._pytest_inifile(tree)
+                self.assertEqual(found and os.path.basename(found), expected)
+
     def test_a_change_to_no_test_reruns_nothing(self):
         self.put("calc.py", "def add(a, b):\n    return b + a\n")
         self.put("tests/test_state.py", self.BASE.replace("import unittest\n", "import unittest  # edited\n"))
