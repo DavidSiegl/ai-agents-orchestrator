@@ -4382,6 +4382,9 @@ def gate_checks(mutation_budget: float) -> tuple[GateCheck, ...]:
 # A new dependency whose first release is fewer days old than this is flagged: few have used it yet, and a name
 # registered for the occasion is the slopsquatting move.
 YOUNG_PACKAGE_DAYS = 14
+# Seconds of a quality round's QUALITY_TIMEOUT that an orchestrator check leaves unused: it starts no slow step, such
+# as a request to PyPI, with less left. A request can take PYPI_TIMEOUT more than once, to connect and to read.
+SLOW_STEP_MARGIN = 4 * PYPI_TIMEOUT
 
 
 @dataclass(frozen=True)
@@ -4397,6 +4400,9 @@ class RunChange:
     # Host.file_at gives it; None where it has none. Raises OrchestratorError when git fails on the agents' machine.
     file_at: Callable[[str, str], str | None]
     now: float  # when the round judges it, in seconds since the epoch
+    # Called before each step of a check that may be slow, such as a request to PyPI: it keeps the run's heartbeat
+    # going, and is False once the quality round has too little time left to start one (SLOW_STEP_MARGIN).
+    in_time: Callable[[], bool]
 
 
 class CheckFindings(NamedTuple):
@@ -4713,11 +4719,11 @@ def new_dependencies(change: RunChange, *, pypi: "PyPI") -> CheckFindings:
     read. Reports a direct dependency the spec names, or a workspace member, with where it comes from: what PyPI knows
     of it, flagged when its first release is under YOUNG_PACKAGE_DAYS days old, or its source, other-index for an
     index other than PyPI's; the packages a lock file alone adds, those the direct ones pull in, in one finding per
-    lock file; and a manifest that cannot be read at the base, which leaves its ecosystem unchecked. After the first
-    request PyPI gives no usable answer to, it is asked no more.
+    lock file; and a manifest that cannot be read at the base, which leaves its ecosystem unchecked. PyPI is asked
+    only while change.in_time(), and no more after the first request it gives no usable answer to.
     """
     packages, issues, to_weigh = _new_packages(change)
-    known, failure = _ask_pypi(packages, pypi)
+    known, failure = _ask_pypi(packages, pypi, change.in_time)
     named = spec_names(change.spec)
     pulled_in: dict[str, list[str]] = {}
     for p in packages:
@@ -4818,12 +4824,16 @@ def _line_naming(text: str, added: set[int], key: str) -> int | None:
     return next((n for n in sorted(added) if n <= len(lines) and pattern.search(lines[n - 1])), None)
 
 
-def _ask_pypi(packages: list[_NewPackage], pypi: "PyPI") -> tuple[dict[str, PyPIProject | None], str | None]:
-    """What pypi knows of each package from PyPI, by key, None for one it does not know; and its error for the first
-    one it gave no usable answer about, which leaves that one and every later one out."""
+def _ask_pypi(packages: list[_NewPackage], pypi: "PyPI",
+              in_time: Callable[[], bool]) -> tuple[dict[str, PyPIProject | None], str | None]:
+    """What pypi knows of each package from PyPI, by key, None for one it does not know; and why the rest were not
+    asked: in_time() said no before a request, or pypi gave no usable answer to one, which leaves that one and every
+    later one out."""
     known: dict[str, PyPIProject | None] = {}
     for p in packages:
         if p.source is None and p.key not in known:
+            if not in_time():
+                return known, "the quality round had too little time left to ask"
             try:
                 known[p.key] = pypi.project(p.key)
             except PyPIError as e:
@@ -5817,7 +5827,7 @@ class Workflow:
         sha = s.ci["sha"]
         where = f"round {n}, quality round {q} of {s.max_quality_rounds}"
         if quality is not None:
-            return _under_gate_line(self._judged_by_orchestrator(quality, sha),
+            return _under_gate_line(self._judged_by_orchestrator(quality, sha, deadline),
                                     f"Jenkins build #{build} judged snapshot `{sha}` ({where}) and ended {result}.")
         diff = self.host.change_diff(s.work_dir, s.base, sha)
         changed = changed_lines(diff)
@@ -5830,8 +5840,9 @@ class Workflow:
         return quality_report(GATE_BUILD_FAILED, intro, tests=tests, console=console,
                               edited=edited_config(diff, changed), mutmut_state=mutmut_state_files(changed))
 
-    def _judged_by_orchestrator(self, quality: str, sha: str) -> str:
-        """The build's quality file with what orchestrator_checks find in snapshot sha added (judge_run)."""
+    def _judged_by_orchestrator(self, quality: str, sha: str, deadline: float) -> str:
+        """The build's quality file with what orchestrator_checks find in snapshot sha added (judge_run), their slow
+        steps kept to the round's deadline, a clock() time."""
         s = self.state
         base = s.base
         if base is None:
@@ -5840,8 +5851,14 @@ class Workflow:
         spec = self._last_text(self.pipeline.contract, 0) or s.task
         change = RunChange(spec, base, sha, changed_lines(self.host.change_diff(s.work_dir, base, sha)),
                            self.host.changed_line_counts(s.work_dir, base, sha),
-                           functools.partial(self.host.file_at, s.work_dir), self.wallclock())
+                           functools.partial(self.host.file_at, s.work_dir), self.wallclock(),
+                           functools.partial(self._in_time, deadline))
         return judge_run(quality, orchestrator_checks(self.pipeline, self.pypi), change)
+
+    def _in_time(self, deadline: float) -> bool:
+        """RunChange.in_time for a round that ends at deadline, a clock() time."""
+        self._heartbeat()
+        return self.clock() < deadline - SLOW_STEP_MARGIN
 
     def _poll(self, step: str, deadline: float, poll):
         """Call poll() every CI_POLL_SECONDS until it returns something other than None, and return that.

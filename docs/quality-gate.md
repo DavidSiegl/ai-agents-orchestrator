@@ -500,9 +500,11 @@ dependency-confusion case, and the finding names the index instead.
 - `not-on-pypi` (fails): a package from PyPI that PyPI answers 404 for. That is the slopsquatting case: a name an
   agent made up, which anyone could register;
 - `unchecked` (fails): the packages from PyPI that PyPI was not asked about, because a request got no usable answer
-  (no answer, a timeout, an HTTP error other than 404, an answer that is not PyPI's JSON). PyPI is asked no more after
-  the first such request. A package that could not be checked is never reported as passed, so the next quality round
-  asks again;
+  (no answer, a timeout, an HTTP error other than 404, an answer that is not PyPI's JSON), or because the quality
+  round had too little time left. PyPI is asked no more after the first such request, and none is started with less
+  than 60 seconds (`SLOW_STEP_MARGIN`) of the round's `QUALITY_TIMEOUT` left. The run's heartbeat is kept between
+  requests, so a long list of new packages cannot make a live run look stale. A package that could not be checked is
+  never reported as passed, so the next quality round asks again;
 - `unreadable` (fails): a manifest in the change that is not UTF-8 TOML, or not in the shape above. One that cannot
   be read at the base is a finding to weigh instead, since the Builder did not write it; either way that ecosystem's
   new dependencies are not checked;

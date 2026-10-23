@@ -3557,12 +3557,14 @@ def pypi_project(first="2015-01-03", latest="2024-06-22", version="3.13.0", lice
 
 class FakePyPI:
     """PyPI behind urlopen: each project in `projects` answers its JSON, any other 404; `down` makes every request
-    time out. `asked` lists the project names requested, in order."""
+    time out. `asked` lists the project names requested, in order. With `clock`, a FakeClock, each request takes
+    `seconds` of its time, and is logged as ("ask", name) in `events`."""
 
     def __init__(self, **projects):
         self.projects = projects
         self.down = False
         self.asked = []
+        self.clock, self.seconds, self.events = None, 0, []
 
     def __call__(self, req, timeout=None):
         assert timeout == orchestrator.PYPI_TIMEOUT
@@ -3570,6 +3572,9 @@ class FakePyPI:
         m = re.fullmatch(r"https://pypi\.org/pypi/([^/]+)/json", url)
         assert m, url
         self.asked.append(m.group(1))
+        self.events.append(("ask", m.group(1)))
+        if self.clock:
+            self.clock.now += self.seconds
         if self.down:
             raise TimeoutError("timed out")
         if m.group(1) not in self.projects:
@@ -3604,13 +3609,13 @@ def touched(diff):
     return [orchestrator.ChangedFile(path, path, len(lines), 0) for path, lines in changed_lines(diff).items()]
 
 
-def run_change(diff, files=None, spec=SPEC_NAMING_LIMITS, now=TODAY, counts=None):
+def run_change(diff, files=None, spec=SPEC_NAMING_LIMITS, now=TODAY, counts=None, in_time=lambda: True):
     """The RunChange of a quality round from base to new; files holds each file's text by (commit, path), and counts
     the ChangedFiles, touched(diff) by default."""
     files = files or {}
     return orchestrator.RunChange(spec=spec, base="base", commit="new", changed=changed_lines(diff),
                                   files=touched(diff) if counts is None else counts,
-                                  file_at=lambda commit, path: files.get((commit, path)), now=now)
+                                  file_at=lambda commit, path: files.get((commit, path)), now=now, in_time=in_time)
 
 
 def new_file_diff(path, lines):
@@ -3729,6 +3734,36 @@ class TestOrchestratorChecks(unittest.TestCase):
         self.assertNotIn("orchestrator's checks", quality)
         self.assertEqual(pypi.asked, [])
 
+    def test_slow_pypi_keeps_the_run_alive_and_stops_at_the_rounds_deadline(self):
+        pypi = FakePyPI(limits=pypi_project(), rich=pypi_project(), attrs=pypi_project())
+        host = FakeHost()
+        host.diff = pyproject_diff("limits", "rich", "attrs")
+        host.committed = pyproject_files("limits", "rich", "attrs")
+        spec = "# Throttle\n\nUse limits, rich and attrs, in pyproject.toml.\n"
+        wf, herdr, host, fake, _ = gated({
+            "spec": [writes(lambda s: s.spec_path, spec)], "build": [build_turn(1), fix_turn(1, 1)],
+            "review": [review_turn(1, APPROVE)]}, host=host, max_quality_rounds=1,
+            pypi=orchestrator.PyPI(urlopen=pypi))
+        wf.wallclock = lambda: TODAY
+        # Each request takes half the round's time.
+        pypi.clock, pypi.seconds = wf.clock, orchestrator.QUALITY_TIMEOUT / 2
+        beat = wf._heartbeat
+
+        def heartbeat():
+            pypi.events.append("beat")
+            beat()
+        wf._heartbeat = heartbeat
+
+        self.assertEqual(wf.run(), APPROVE)
+
+        quality = host.files[wf.state.quality_path(1, 1)]
+        self.assertEqual(pypi.asked, ["limits", "rich"])
+        self.assertIn("unchecked: PyPI could not be asked about `attrs`: the quality round had too little time left to "
+                      "ask;", quality)
+        self.assertTrue(quality.startswith("GATE: ERROR\n"))
+        asks = [i for i, e in enumerate(pypi.events) if e != "beat"]
+        self.assertIn("beat", pypi.events[asks[0]:asks[1]])
+
     def test_without_the_quality_gate_none_of_this_runs(self):
         pypi = FakePyPI(limits=pypi_project())
         host = FakeHost()
@@ -3811,6 +3846,21 @@ class TestNewDependencies(unittest.TestCase):
         self.assertEqual(issues[0]["message"], "`requests` is a new dependency that the spec does not name.")
         self.assertIn("about `limits`, `requests`: GET", issues[1]["message"])
         self.assertEqual(to_weigh, [])
+
+    def test_pypi_is_asked_only_while_the_round_has_time(self):
+        pypi = FakePyPI(limits=pypi_project(), rich=pypi_project())
+        answers = iter([True, False])
+        change = run_change(pyproject_diff("limits", "rich", "attrs"),
+                            pyproject_files("limits", "rich", "attrs", base="base", commit="new"),
+                            spec="limits, rich and attrs", in_time=lambda: next(answers))
+
+        issues, to_weigh = self.find(change, pypi)
+
+        self.assertEqual(pypi.asked, ["limits"])
+        self.assertEqual([f["rule"] for f in to_weigh], ["added"])
+        self.assertEqual([(f["rule"], f["message"]) for f in issues], [
+            ("unchecked", "PyPI could not be asked about `rich`, `attrs`: the quality round had too little time left "
+                          "to ask; whether they exist is not known.")])
 
     def test_a_dependency_from_a_url_is_not_looked_up(self):
         url = "git+https://example.com/limits.git@v3"
