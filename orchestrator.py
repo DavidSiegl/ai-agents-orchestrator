@@ -4515,9 +4515,10 @@ PYPI_INDEX_URL = "https://pypi.org/simple"
 @dataclass(frozen=True)
 class PackageSource:
     """Where a package comes from when it is not PyPI, as uv's sources name it."""
-    # workspace, path, git, url or index; source for one uv names in a way this reader does not know.
+    # workspace, path, git, url or index; unknown for one uv names in a way this reader does not know.
     kind: str
-    where: str  # the path, repository, URL or index URL, as the manifest gives it
+    # The path, repository, URL or index URL, as the manifest gives it; for unknown, the whole entry, as TOML.
+    where: str
 
     def describe(self) -> str:
         """Where it comes from, as a finding says it."""
@@ -4525,7 +4526,10 @@ class PackageSource:
             return "a member of the project's workspace, not from PyPI"
         if self.kind == "index":
             return f"from the index {self.where}, not checked against PyPI"
-        place = {"path": "the path ", "git": "the repository ", "source": "the source "}.get(self.kind, "")
+        if self.kind == "unknown":
+            return (f"from the uv source {self.where}, which this check does not know, so where it comes from is not "
+                    f"checked")
+        place = {"path": "the path ", "git": "the repository "}.get(self.kind, "")
         return f"from {place}{self.where}, not from PyPI"
 
 
@@ -4649,7 +4653,14 @@ def _uv_source(entry: dict, indexes: dict) -> PackageSource | None:
     if "index" in entry:
         return _index_source(indexes.get(entry["index"]) or entry["index"])
     kind = next((k for k in ("path", "git", "url") if k in entry), None)
-    return PackageSource(kind, str(entry[kind])) if kind else PackageSource("source", str(entry))
+    if kind is None:
+        return _unknown_source(entry)
+    return PackageSource(kind, str(entry[kind]))
+
+
+def _unknown_source(table: dict) -> PackageSource:
+    """The PackageSource of a source table of a shape this reader does not know, written as an inline table."""
+    return PackageSource("unknown", "{ " + ", ".join(f"{k} = {json.dumps(v)}" for k, v in table.items()) + " }")
 
 
 def _index_source(url) -> PackageSource | None:
@@ -4674,7 +4685,7 @@ def _lock_source(source: dict) -> PackageSource | None:
         return _index_source(source["registry"])
     kind = next((k for k in ("path", "directory", "git", "url") if k in source), None)
     if kind is None:
-        return PackageSource("source", str(source))
+        return _unknown_source(source)
     return PackageSource("path" if kind == "directory" else kind, str(source[kind]))
 
 
@@ -4767,8 +4778,8 @@ def _package_finding(p: _NewPackage, named: set[str], known: dict[str, PyPIProje
 
 def _added_rule(p: _NewPackage, project: PyPIProject | None, now: float) -> str:
     """The rule of a direct dependency new_dependencies only reports."""
-    if p.source is not None and p.source.kind == "index":
-        return "other-index"
+    if rule := {"index": "other-index", "unknown": "unknown-source"}.get(p.source.kind if p.source else ""):
+        return rule
     return "young" if project and _young(project, now) else "added"
 
 

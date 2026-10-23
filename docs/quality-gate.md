@@ -494,10 +494,11 @@ the `[[tool.uv.index]]` marked `default = true`, else the registry `uv.lock` has
 `source` in `uv.lock`. Only a package from PyPI's own index (`https://pypi.org/simple`) is looked up, at
 `https://pypi.org/pypi/<name>/json`, with a timeout of 15 seconds (`PYPI_TIMEOUT`). A package from another index is
 never looked up on pypi.org, so a name someone squatted there cannot lend it pypi.org's metadata: that is the
-dependency-confusion case, and the finding names the index instead.
+dependency-confusion case, and the finding names the index instead. Such a package is therefore never `not-on-pypi`;
+only the spec rule can fail it.
 
 - `not-in-spec` (fails): a new direct dependency the spec does not name, with where it comes from, unless it is a
-  member of the project's workspace;
+  member of the project's workspace (`{ workspace = true }`): the project's own code, not a package from outside;
 - `not-on-pypi` (fails): a package from PyPI that PyPI answers 404 for. That is the slopsquatting case: a name an
   agent made up, which anyone could register;
 - `unchecked` (fails): the packages from PyPI that PyPI was not asked about, because a request got no usable answer
@@ -513,7 +514,9 @@ dependency-confusion case, and the finding names the index instead.
 - `added` (reports): a new direct dependency the spec names, or a workspace member, with its first release date, its
   latest version and its date, and its license, or the path, repository or URL it comes from. `young` instead when its
   first release is less than 14 days old (`YOUNG_PACKAGE_DAYS`), or it has no release files: few have used it yet.
-  `other-index` instead for one from an index other than PyPI's, naming the index;
+  `other-index` instead for one from an index other than PyPI's, naming the index, and `unknown-source` for one whose
+  `[tool.uv.sources]` entry has a shape this check does not know (none of `workspace`, `path`, `git`, `url` or
+  `index`), quoting the entry: where it comes from is not checked, so it is reported rather than passed in silence;
 - `pulled-in` (reports): one finding per `uv.lock`, listing with the same facts the packages it alone adds, those the
   new dependencies pull in. The spec cannot be expected to name them;
 - `source-changed` (reports): a dependency the project already had, direct or locked, that the change takes from
@@ -538,10 +541,12 @@ from the run's base, so it holds every editing step's work, a Test Writer's as w
 whole nor by its file name.
 
 The findings go into the quality file as the gate's do, with `{path, line, severity, rule, message}` and the rule
-prefixed by the check's name, in a last section, `## The orchestrator's checks`. They are numbered on from the build's
-last number, failing ones first, then the findings to weigh under the same lead sentence as the gate's. The limit of
-50 is the whole file's: they are listed only while the file holds fewer, and the rest are counted. A check with failing findings is a failed condition, added to the build's, and turns `GATE: OK` into `GATE: ERROR`.
-Findings to weigh never change the gate. The Builder answers them all by number, as it answers the gate's.
+prefixed by the check's name, in one last section, `## The orchestrator's checks`, which holds both the failing ones
+and those to weigh. They are numbered on from the build's last number, failing ones first, then the findings to weigh
+under the same lead sentence as the gate's. The limit of 50 is the whole file's: they are listed only while the file
+holds fewer, and the rest are counted. A check with failing findings is a failed condition, added to the build's, and
+turns `GATE: OK` into `GATE: ERROR`. Findings to weigh never change the gate. The Builder answers them all by number,
+as it answers the gate's.
 
 ### What goes to the Builder
 

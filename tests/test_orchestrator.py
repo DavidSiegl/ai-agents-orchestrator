@@ -4003,6 +4003,23 @@ class TestNewDependencies(unittest.TestCase):
              f"`requests`: at the base, from PyPI; in the change, {whence}."),
             ("uv.lock", None, "warning", "source-changed", f"`idna`: at the base, from PyPI; in the change, {whence}.")])
 
+    def test_a_uv_source_of_a_shape_this_check_does_not_know_is_reported(self):
+        new = pyproject_with("forked", "local") + textwrap.dedent("""\
+            [tool.uv.sources]
+            forked = { mirror = "https://example.com/forked", tag = "v1" }
+            local = { mirror = "../local" }
+        """)
+        pypi = FakePyPI(forked=pypi_project(), local=pypi_project())
+        issues, to_weigh = self.find(self.changed_manifests(pyproject_with(), new), pypi)
+        self.assertEqual(pypi.asked, [])
+        self.assertEqual([(f["rule"], f["message"]) for f in to_weigh], [
+            ("unknown-source", ('`forked`, which the spec names: from the uv source { mirror = '
+                                '"https://example.com/forked", tag = "v1" }, which this check does not know, so where '
+                                'it comes from is not checked.'))])
+        self.assertEqual([(f["rule"], f["message"]) for f in issues], [
+            ("not-in-spec", ('`local` is a new dependency that the spec does not name; from the uv source { mirror = '
+                             '"../local" }, which this check does not know, so where it comes from is not checked.'))])
+
     def test_a_default_index_replaces_pypi(self):
         new = pyproject_with("rich") + '[[tool.uv.index]]\nname = "mirror"\nurl = "https://mirror.example/simple"\n' \
                                        "default = true\n"
