@@ -209,7 +209,8 @@ first, at most 50 in all, then a count:
   because it takes them out of the surviving-mutants check.
 - **Build configuration**: an edit to `Jenkinsfile`, `pyproject.toml` or `uv.lock` is noted, since each can
   change how the change was judged, and so is each file the change adds or edits under `mutants/`, where mutmut keeps
-  its state, though the gate ignores them.
+  its state: the surviving-mutants check runs mutmut without them and mutates no function in them, though the linters
+  read them as they read any tracked file.
 
 ### Whose rules judge a change
 
@@ -225,8 +226,8 @@ The surviving-mutants check takes `[tool.mutmut]` from the same file, so a chang
 alone. In the copy mutmut runs on, that table replaces the tree's own, and only that table: the rest of the tree's
 `pyproject.toml`, such as `[tool.pytest.ini_options]`, is how its tests run, which a change may need to alter. Without
 `--config`, the tree's table judges it, as the linters' do. What the tree holds under `mutants/`, mutmut's own state
-and cache of results, is left out of that copy, so mutmut starts afresh and a change cannot mark its mutants killed; a
-change that adds or edits files there is listed under build configuration.
+and cache of results, is left out of that copy, so mutmut starts afresh and a change cannot mark its mutants killed,
+and the check mutates no function in it; a change that adds or edits files there is listed under build configuration.
 
 The rule sets were tuned until `main` gave a short list of real findings: ruff's defaults plus bugbear,
 simplifications, pyupgrade, bandit, complexity (`max-complexity = 15`) and pylint's errors and warnings, with the

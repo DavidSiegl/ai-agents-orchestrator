@@ -1990,7 +1990,7 @@ _NO_TESTS_SECTION: list = []
 def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (), issues=(), to_weigh=(),
                    elsewhere: int = 0, tests: list[tuple[str, str]] | None = _NO_TESTS_SECTION,
                    coverage: str | None = None, suppressions: list[tuple[str, int, str]] | tuple = (),
-                   console: str = "", edited=(), rules_from: str | None = None) -> str:
+                   console: str = "", edited=(), rules_from: str | None = None, mutmut_state=()) -> str:
     """The quality file: the gate on its first line, then what the Builder has to answer.
 
     conditions are the failed ones, each a sentence. issues, the findings that fail the gate, and to_weigh,
@@ -2003,7 +2003,8 @@ def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (),
     coverage is the sentence about coverage of new code, None for no such section. suppressions are the
     (path, line, text) of lint suppressions the change added. edited are the BUILD_CONFIG_FILES the change
     edits; rules_from names the file the gate took its rules from when that was not the edited
-    pyproject.toml.
+    pyproject.toml. mutmut_state are the files the change adds or edits under mutmut's state, as mutmut_state_files
+    gives them.
     """
     out = [f"GATE: {gate}", "", intro]
     if conditions:
@@ -2021,8 +2022,8 @@ def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (),
                 *(f"- `{path}:{line}` `{text}`" for path, line, text in suppressions)]
     if console:
         out += ["", f"## The last {CONSOLE_TAIL_LINES} lines of the build's console", "", "````", console, "````"]
-    if edited:
-        out += _config_section(edited, rules_from)
+    if edited or mutmut_state:
+        out += _config_section(edited, rules_from, mutmut_state)
     return "\n".join(out) + "\n"
 
 
@@ -2080,7 +2081,7 @@ def _tests_section(tests: list[tuple[str, str]] | None) -> list[str]:
     return out
 
 
-def _config_section(edited, rules_from: str | None) -> list[str]:
+def _config_section(edited, rules_from: str | None, mutmut_state) -> list[str]:
     out = ["", "## Build configuration", ""]
     if "Jenkinsfile" in edited:
         out.append("- The change edits `Jenkinsfile`. The quality job reads it from `main`, "
@@ -2092,20 +2093,28 @@ def _config_section(edited, rules_from: str | None) -> list[str]:
                    "the edited rules.")
     if "uv.lock" in edited:
         out.append("- The change edits `uv.lock`, which pins the versions of the linters the gate ran.")
-    state = [f"`{f}`" for f in edited if f.startswith(f"{_MUTMUT_STATE}/")]
-    if state:
-        out.append(f"- The change adds or edits {_series(state, limit=5)} under `{_MUTMUT_STATE}/`, where mutmut keeps "
-                   f"its state. The surviving-mutants check runs mutmut without them, so they did not change what it "
-                   f"found.")
+    if mutmut_state:
+        out.append(f"- The change adds or edits {_series([f'`{f}`' for f in mutmut_state], limit=5)} under "
+                   f"`{_MUTMUT_STATE}/`, where mutmut keeps its state. The surviving-mutants check runs mutmut without "
+                   f"them and mutates no function in them.")
     return out
 
 
 def edited_config(diff: str, changed: dict[str, set[int]]) -> list[str]:
-    """The BUILD_CONFIG_FILES the diff changes, deletes or renames away, then the files it adds or edits under
-    _MUTMUT_STATE, by path."""
-    return [*(f for f in BUILD_CONFIG_FILES
-              if f in changed or re.search(rf"^(--- a/|rename from ){re.escape(f)}\t?$", diff, re.MULTILINE)),
-            *sorted(f for f in changed if f.startswith(f"{_MUTMUT_STATE}/"))]
+    """The BUILD_CONFIG_FILES the diff changes, deletes or renames away."""
+    return [f for f in BUILD_CONFIG_FILES
+            if f in changed or re.search(rf"^(--- a/|rename from ){re.escape(f)}\t?$", diff, re.M)]
+
+
+def mutmut_state_files(changed: dict[str, set[int]]) -> list[str]:
+    """The files a change adds or edits under mutmut's state, by path, of changed as changed_lines gives it."""
+    return sorted(f for f in changed if _is_mutmut_state(f))
+
+
+def _is_mutmut_state(path: str) -> bool:
+    """Whether path, relative to the tree's top, is under _MUTMUT_STATE: mutmut's, which the surviving-mutants
+    check neither copies for mutmut nor selects functions from."""
+    return path == _MUTMUT_STATE or path.startswith(f"{_MUTMUT_STATE}/")
 
 
 # ---------------------------------------------------------------------------
@@ -2300,6 +2309,7 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
     text = quality_report(GATE_ERROR if conditions else GATE_OK, intro, conditions=conditions, issues=issues,
                           to_weigh=to_weigh, elsewhere=elsewhere, tests=failing, coverage=coverage_sentence,
                           suppressions=added_suppressions(root, changed), edited=edited_config(diff, changed),
+                          mutmut_state=mutmut_state_files(changed),
                           rules_from=f"`{rules}`" if rules else None)
     # Paths and linter output come verbatim, so a name that is not UTF-8 holds lone surrogates, which no file or
     # terminal can take: give their bytes back, then write each byte that is not UTF-8 as \xNN.
@@ -3197,13 +3207,14 @@ def surviving_mutants(change: GateChange, *, budget: float) -> list[dict]:
     tests did not notice, with how many of its mutants they were and what the first _SURVIVOR_EXAMPLES change, as a
     line before and after; and each such function that no test calls.
 
-    mutmut runs in the gate's own interpreter, as flaky_tests runs pytest, on a copy of the files git tracks, by the
-    [tool.mutmut] of change.rules, whatever the copy's says: its source_paths, only_mutate and do_not_mutate decide
-    which files can be mutated, and a changed function outside them is a finding saying so; its test selection says
-    which tests run. Each mutant is tried against the tests that called its function on a clean run. mutmut may run
-    budget seconds; a run stopped there is a finding that says how many of the mutants it tried, beside what those
-    showed. A mutmut that cannot start, fails, or whose results cannot be listed is a finding saying so, and so are
-    rules that name no source_paths and a changed file that cannot be read or parsed.
+    mutmut runs in the gate's own interpreter, as flaky_tests runs pytest, on a copy of the files git tracks, but
+    for those under mutmut's state, which it selects no function from either, by the [tool.mutmut] of change.rules,
+    whatever the copy's says: its source_paths, only_mutate and do_not_mutate decide which files can be mutated, and
+    a changed function outside them is a finding saying so; its test selection says which tests run. Each mutant is
+    tried against the tests that called its function on a clean run. mutmut may run budget seconds; a run stopped
+    there is a finding that says how many of the mutants it tried, beside what those showed. A mutmut that cannot
+    start, fails, or whose results cannot be listed is a finding saying so, and so are rules that name no
+    source_paths and a changed file that cannot be read or parsed.
     """
     functions, out = _changed_python_functions(change)
     if functions:
@@ -3243,16 +3254,17 @@ def _mutation_test(change: GateChange, functions: list[_ChangedFunction], budget
 
 
 def _mutmut_on_copy(root: str, tmp: str, functions: list[_ChangedFunction], table: dict, budget: float) -> list[dict]:
-    """Copies the files git tracks in root's working tree into tmp, an empty private directory, as _copy_tracked does,
-    marked for mutmut to skip all but functions, with table, the rules' [tool.mutmut], in place of its own; runs
-    mutmut there on functions for budget seconds, its pytest runs taking no configuration or conftest.py from above
-    the copy, and returns what it found."""
+    """Copies the files git tracks in root's working tree into tmp, an empty private directory, as _copy_tracked
+    does, but for what it tracks under mutmut's state, _MUTMUT_STATE, marked for mutmut to skip all but
+    functions, with table, the rules' [tool.mutmut], in place of its own; runs mutmut there on functions for
+    budget seconds, its pytest runs taking no configuration or conftest.py from above the copy, and returns what
+    it found."""
     tree_copy = os.path.join(tmp, "tree")
     added = table.get("pytest_add_cli_args", [])
     try:
         _copy_tracked(root, tree_copy)
-        # mutmut takes what it finds there for its own cache, results included, so it starts without what the tree
-        # tracks there.
+        # mutmut takes what it finds under its state for its own cache, results included, so it starts without what
+        # the tree tracks there.
         state = os.path.join(tree_copy, _MUTMUT_STATE)
         if os.path.isdir(state) and not os.path.islink(state):
             shutil.rmtree(state)
@@ -3389,9 +3401,10 @@ def _logical_line_ends(text: str) -> tuple[list[int], dict[int, str]]:
 
 def _changed_python_functions(change: GateChange) -> tuple[list[_ChangedFunction], list[dict]]:
     """The functions mutmut mutates as one that the change added lines to, decorators included, in the Python files
-    outside the tests that it left in the working tree; and a finding for each such file that could not be read or
-    parsed."""
-    functions, unreadable = _changed_python_units(change, lambda path: not _python_test_file(path))
+    outside the tests and mutmut's state (_is_mutmut_state) that it left in the working tree; and a finding for each
+    such file that could not be read or parsed."""
+    functions, unreadable = _changed_python_units(
+        change, lambda path: not _python_test_file(path) and not _is_mutmut_state(path))
     return functions, [_finding(path, None, "not-run", f"{why}, so its functions were not mutation-tested.")
                        for path, why in unreadable]
 
@@ -4646,7 +4659,7 @@ class Workflow:
         intro = (f"Jenkins build #{build} of snapshot `{sha}` ({where}) ended {result} before the quality gate "
                  f"ran, so nothing judged the change. Make it build first.")
         return quality_report(GATE_BUILD_FAILED, intro, tests=tests, console=console,
-                              edited=edited_config(diff, changed))
+                              edited=edited_config(diff, changed), mutmut_state=mutmut_state_files(changed))
 
     def _poll(self, step: str, deadline: float, poll):
         """Call poll() every CI_POLL_SECONDS until it returns something other than None, and return that.

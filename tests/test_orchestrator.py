@@ -3632,6 +3632,13 @@ class TestQualityReport(unittest.TestCase):
         text = quality_report("OK", "i", edited=["pyproject.toml"], rules_from="`main`'s `pyproject.toml`")
         self.assertIn("The gate took its rules from `main`'s `pyproject.toml`, so the edit did not change", text)
 
+    def test_files_under_mutmut_s_state_are_named_apart_from_build_config(self):
+        text = quality_report("OK", "i", mutmut_state=["mutants/calc.py", "mutants/calc.py.meta"])
+        self.assertIn("## Build configuration\n\n- The change adds or edits `mutants/calc.py` and "
+                      "`mutants/calc.py.meta` under `mutants/`, where mutmut keeps its state. The surviving-mutants "
+                      "check runs mutmut without them and mutates no function in them.\n", text)
+        self.assertNotIn("The change edits", text)
+
     def test_tokens_are_masked(self):
         ci = CI(JOB, env=CREDENTIALS)
         self.assertEqual(ci.mask(f"a {JENKINS_TOKEN} b {JENKINS_TOKEN}"), "a **** b ****")
@@ -5214,7 +5221,16 @@ class TestSurvivingMutants(unittest.TestCase):
         found = self.found()
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 5, "survived")])
         diff = self.host.change_diff(self.repo, self.git("rev-parse", "HEAD").strip())
-        self.assertEqual(orchestrator.edited_config(diff, changed_lines(diff)), ["mutants/calc.py.meta"])
+        self.assertEqual(orchestrator.edited_config(diff, changed_lines(diff)), [])
+        self.assertEqual(orchestrator.mutmut_state_files(changed_lines(diff)), ["mutants/calc.py.meta"])
+
+    def test_a_function_under_mutmut_s_state_is_not_selected(self):
+        self.put("mutants/calc.py", "def x_checked__mutmut_1(a, b):\n    return a - b\n")
+        self.git("add", "mutants/calc.py")
+        self.fake_mutmut(f"touch {self.bin}/ran")
+        found = self.found(rules=self.rules({"source_paths": ["."]}))
+        self.assertEqual(found, [])
+        self.assertFalse(os.path.exists(os.path.join(self.bin, "ran")))
 
     def test_unreached_functions_are_named_with_their_files(self):
         for name in ("a.py", "b.py"):
