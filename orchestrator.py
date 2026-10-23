@@ -272,13 +272,22 @@ def ci_credentials(environ, path: str) -> dict[str, str]:
     return {**parse_env_file(text, path), **found}
 
 
-def parse_env_file(text: str, path: str) -> dict[str, str]:
-    """The NAME=value lines of text, with the quotes and `export ` that a file also sourced by a shell has.
+# An assignment line of an env file, blanks at its ends removed, in the forms sh reads literally: `export ` or
+# not, NAME=, then a value that is single-quoted, double-quoted without what expands inside double quotes, or
+# unquoted without blanks, quotes or what sh treats as syntax there, and not starting with ~; then nothing, or
+# blanks and a comment. Group 1 is the name, 2 to 4 the value in its form.
+_ENV_ASSIGNMENT = re.compile(r"""(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)="""
+                             r"""(?:'([^']*)'|"([^"\\$`]*)"|(?!~)([^ \t'"\\$`;&|<>()]*))"""
+                             r"""(?:[ \t]+(?:#.*)?)?""", re.DOTALL)
 
-    A file in that form means the same to the orchestrator as to sh: a line ends at "\n" alone, and only spaces
-    and tabs are blanks. Raises OrchestratorError, naming path and line, for a line that is not blank, a comment
-    or a NAME=value, and for a carriage return outside a comment: sh keeps it in the value, so a file with Windows
-    line ends would give it tokens that do not work.
+
+def parse_env_file(text: str, path: str) -> dict[str, str]:
+    """The NAME=value lines of text, with the quotes, `export ` and comments that a file also sourced by a shell has.
+
+    Whatever it accepts means the same to sh: a line ends at "\n" alone, only spaces and tabs are blanks, and a
+    value is quoted, or unquoted without blanks, quotes or shell syntax. Raises OrchestratorError, naming path and
+    line but never its content, for a line in any other form, which sh would read otherwise or not at all, and
+    for a carriage return outside a comment, which a file with Windows line ends puts at the end of every value.
     """
     values = {}
     for i, raw in enumerate(text.split("\n"), 1):
@@ -286,15 +295,11 @@ def parse_env_file(text: str, path: str) -> dict[str, str]:
         if not line or line.startswith("#"):
             continue
         if "\r" in line:
-            raise OrchestratorError(f"{path}:{i}: a carriage return, which sh would keep in the value; "
-                                    "save the file with Unix line ends")
-        name, sep, value = line.removeprefix("export ").partition("=")
-        name, value = name.strip(" \t"), value.strip(" \t")
-        if not sep or not re.fullmatch(r"[A-Za-z_]\w*", name, re.ASCII):
+            raise OrchestratorError(f"{path}:{i}: a carriage return; save the file with Unix line ends")
+        m = _ENV_ASSIGNMENT.fullmatch(line)
+        if not m:
             raise OrchestratorError(f"{path}:{i}: expected NAME=value")
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-            value = value[1:-1]
-        values[name] = value
+        values[m.group(1)] = next(v for v in m.group(2, 3, 4) if v is not None)
     return values
 
 

@@ -184,21 +184,26 @@ class TestUnquote(unittest.TestCase):
 
 # Names under one prefix, so that none is a variable the shell sets or refuses itself: PWD, IFS, BASH_*.
 env_names = st.from_regex(r"V[A-Za-z0-9_]{0,8}", fullmatch=True)
-# A value in each form the documentation allows that a shell reads literally: unquoted from characters no shell
-# expands, single-quoted, and double-quoted without what expands inside double quotes. Any other line break than
-# "\n" may be in it; a carriage return may not, which parse_env_file refuses (test_refuses_a_carriage_return).
+# The characters an unquoted value may not hold: blanks, quotes, and what sh treats as syntax there.
+NOT_UNQUOTED = " \t'\"\\$`;&|<>()"
+# A value in each form parse_env_file accepts: unquoted, single-quoted, and double-quoted without what expands inside
+# double quotes. Any line break but "\n" may be in it; a carriage return may not (test_refuses_a_carriage_return).
+unquoted_values = text_without(NOT_UNQUOTED + "\n\r").filter(lambda v: not v.startswith("~"))
 env_values = st.one_of(
-    st.from_regex(r"[A-Za-z0-9_./:@%+,=#-]*", fullmatch=True),
+    unquoted_values,
     text_without("'\n\r").map(lambda v: f"'{v}'"),
     text_without('"\\$`\n\r').map(lambda v: f'"{v}"'),
 )
 padding = st.from_regex(r"[ \t]*", fullmatch=True)
+# What may follow a value: blanks, then perhaps a comment.
+after_value = st.one_of(padding, st.tuples(st.from_regex(r"[ \t]+", fullmatch=True), text_without("\n\r")).map(
+    lambda t: f"{t[0]}#{t[1]}"))
 
 
 @st.composite
 def env_files(draw) -> tuple[str, set[str]]:
-    """(text, names): an env file of blank lines, comments and assignments, with or without `export `, and the names
-    it assigns."""
+    """(text, names): an env file of blank lines, comments and assignments, with or without `export ` and a
+    comment after the value, and the names it assigns."""
     lines, names = [], set()
     for kind in draw(st.lists(st.sampled_from(["blank", "comment", "assignment"]), max_size=8)):
         if kind == "blank":
@@ -208,9 +213,26 @@ def env_files(draw) -> tuple[str, set[str]]:
         else:
             name = draw(env_names)
             names.add(name)
-            lines.append(draw(padding) + draw(st.sampled_from(["", "export "])) + name + "=" + draw(env_values)
-                         + draw(padding))
+            lines.append(draw(padding) + draw(st.sampled_from(["", "export ", "export\t"])) + name + "="
+                         + draw(env_values) + draw(after_value))
     return "\n".join(lines) + "\n", names
+
+
+@st.composite
+def misread_lines(draw) -> str:
+    """An assignment that sh reads otherwise, or not at all: a blank, a quote or shell syntax in an unquoted value,
+    text after a closing quote, a leading ~, or a blank beside the "="."""
+    name, value = draw(env_names), draw(unquoted_values)
+    form = draw(st.sampled_from(["inside", "after quote", "tilde", "blank before", "blank after"]))
+    if form == "inside":
+        return f"{name}={value}{draw(st.sampled_from(list(NOT_UNQUOTED)))}x"
+    if form == "after quote":
+        return f"{name}='{draw(text_without(chr(39) + '\n\r'))}'x{value}"
+    if form == "tilde":
+        return f"{name}=~{value}"
+    if form == "blank before":
+        return f"{name} ={value}"
+    return f"{name}= x{value}"
 
 
 def write_env_file(directory: str, text: str) -> str:
@@ -236,8 +258,9 @@ class TestEnvFile(unittest.TestCase):
 
     @given(env_files())
     # Line breaks str.splitlines knows and sh does not: a comment that went on as an assignment, and values that
-    # were refused.
+    # were refused. Then a comment after a value, which was read as part of it.
     @example(("# note\x85V=evil\n", set()))
+    @example(("V=x # c\n", {"V"}))
     @example(("V='a\x0cb'\n", {"V"}))
     @example(("V='a\u2028b'\n", {"V"}))
     def test_reads_what_sh_exports(self, file):
@@ -245,6 +268,15 @@ class TestEnvFile(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = write_env_file(d, text)
             self.assertEqual(ci_credentials({}, path), sh_exports(path, names))
+
+    @given(misread_lines())
+    @example("V=x y")
+    @example("V='a'b")
+    def test_refuses_what_sh_reads_otherwise(self, line):
+        with tempfile.TemporaryDirectory() as d:
+            path = write_env_file(d, line + "\n")
+            with self.assertRaisesRegex(OrchestratorError, ":1: expected NAME=value"):
+                ci_credentials({}, path)
 
     @given(padding, env_names, env_values, st.sampled_from(["\r", "\r\n"]))
     def test_refuses_a_carriage_return(self, indent, name, value, line_end):

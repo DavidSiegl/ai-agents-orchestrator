@@ -8062,7 +8062,7 @@ class TestCIEnvFile(unittest.TestCase):
 
     def test_shell_syntax(self):
         self.write("# Jenkins\n\nexport JENKINS_URL=https://jenkins.example/\n"
-                   f"  JENKINS_USER = 'agents'\nJENKINS_TOKEN=old\nJENKINS_TOKEN=\"{JENKINS_TOKEN}\"\n")
+                   f"  JENKINS_USER='agents'  # the technical user\nJENKINS_TOKEN=old\nJENKINS_TOKEN=\"{JENKINS_TOKEN}\"\n")
         self.assertEqual(orchestrator.ci_credentials({}, self.path),
                          {"JENKINS_URL": "https://jenkins.example/", "JENKINS_USER": "agents",
                           "JENKINS_TOKEN": JENKINS_TOKEN})
