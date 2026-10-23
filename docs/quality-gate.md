@@ -517,7 +517,8 @@ dependency-confusion case, and the finding names the index instead.
 
 **Diff budget** counts the files the change touches and the lines it adds and removes, from `git diff --numstat -M`
 (`Host.changed_line_counts`); a rename counts as one file, with the lines it changes, and a binary file as a file of
-no lines. Over either limit it is one finding about the change as a whole. The
+no lines. Over either limit it is one finding about the change as a whole, naming each count over its limit; within
+both it reports nothing, so the counts of a change of usual size do not take a number the Builder must answer. The
 limits are workflow keys, a whole number of at least 1 each, in a workflow file next to `description`:
 
 ```toml
