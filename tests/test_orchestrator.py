@@ -5108,6 +5108,15 @@ class TestSurvivingMutants(unittest.TestCase):
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
         self.assertIn("failed to collect stats", found[0]["message"])
 
+    def test_a_failed_run_is_named_by_mutmut_s_message_not_its_config_warning(self):
+        # paths_to_mutate makes mutmut warn that it is deprecated, on standard error, before the failing test stops it.
+        self.change_the_functions("unchecked")
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_failing():\n    assert False\n")
+        found = self.found(rules=self.rules({"paths_to_mutate": ["calc.py"],
+                                             "pytest_add_cli_args_test_selection": ["tests/"]}))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
+        self.assertIn("exited with status 1: failed to collect stats. runner returned 1", found[0]["message"])
+
     def test_a_change_to_a_help_text_alone_makes_no_mutant(self):
         # The second line of the help text does not say help=, but its string starts on the line that does.
         self.put("calc.py", self.BASE.replace(" to make", " to build"))

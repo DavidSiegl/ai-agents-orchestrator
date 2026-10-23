@@ -3255,7 +3255,7 @@ def _mutmut_findings(tree_copy: str, functions: list[_ChangedFunction], run: sub
     how it ended, and stopped whether the budget of budget seconds stopped it."""
     no_tests = run.returncode != 0 and _MUTMUT_NO_TESTS.search(run.stdout) is not None
     if run.returncode != 0 and not stopped and not no_tests:
-        return [_mutation_not_run(f"mutmut exited with status {run.returncode}: {_said(run)}")]
+        return [_mutation_not_run(f"mutmut exited with status {run.returncode}: {_said_by_mutmut(run)}")]
     deadline = time.monotonic() + MUTMUT_REPORT_TIMEOUT
     statuses, problem = _mutant_statuses(tree_copy, deadline)
     if problem:
@@ -3518,7 +3518,7 @@ def _mutant_statuses(tree_copy: str, deadline: float) -> tuple[dict[str, str], s
         return {}, f"mutmut did not list its results within {MUTMUT_REPORT_TIMEOUT} seconds"
     if proc.returncode != 0:
         return {}, (f"mutmut could not list its results, exiting with status {proc.returncode}: "
-                    f"{_said(proc)}")
+                    f"{_said_by_mutmut(proc)}")
     return dict(re.findall(r"^\s*(\S+): (.+?)\s*$", proc.stdout, re.MULTILINE)), None
 
 
@@ -3574,6 +3574,18 @@ def _mutation(diff: str) -> tuple[int, list[str], list[str]] | None:
             old.append(line[1:].strip())
         n += 1
     return (at, old, new) if at else None
+
+
+# A Python warning as the warnings module writes it to standard error: where, its category and message, then the
+# source line it is about, indented.
+_PYTHON_WARNING = re.compile(r"^\S.*:\d+: \w*Warning: .*\n(?:[ \t].*(?:\n|$))?", re.MULTILINE)
+
+
+def _said_by_mutmut(proc: subprocess.CompletedProcess) -> str:
+    """_said of a mutmut that went wrong, leaving out the Python warnings it writes to standard error, such as that a
+    [tool.mutmut] key is deprecated, which come before its own message on standard output."""
+    return _said(subprocess.CompletedProcess(proc.args, proc.returncode, proc.stdout,
+                                             _PYTHON_WARNING.sub("", proc.stderr)))
 
 
 def _mutation_not_run(problem: str) -> dict:
