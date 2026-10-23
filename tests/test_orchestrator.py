@@ -5762,6 +5762,22 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.edit("shapes.py", "x += 3\n", "x += 30\n")
         self.assertEqual(self.found()[0], [])
 
+    def test_an_unchanged_function_moved_or_renamed_is_compared_with_its_old_self(self):
+        big = flat("big", 20)
+        self.edit("calc.py", "\n\n" + big, "")
+        # Moved to another module and renamed there, and copied into a class as a method.
+        self.put("other.py", big.replace("def big(", "def huge(") + "\n\nclass Box:\n" + flat("big", 20, indent="    "))
+        self.git("add", "other.py")
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_function_moved_and_made_more_complex_is_judged_as_new(self):
+        big = flat("big", 20)
+        self.edit("calc.py", "\n\n" + big, "")
+        self.put("other.py", big.replace("        x += 19\n", "        x += 19\n        if x:\n            x -= 1\n"))
+        self.git("add", "other.py")
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`big`: cognitive complexity 22, a new function; the limit is 15."])
+
     def test_a_name_defined_twice_is_compared_with_the_same_definition_at_the_base(self):
         # A property's getter, scoring 21, then its setter, which scores nothing, under the same name.
         getter = flat("x", 21, indent="    ").replace("    def x(x):\n", "    @property\n    def x(self):\n")

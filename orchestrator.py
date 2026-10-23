@@ -3795,6 +3795,7 @@ class _ScoredFunction:
     last: int  # the line it ends on
     line: int  # the line of its def
     score: int  # its cognitive_complexity
+    body: str  # what its body does, as _body_fingerprint gives it: equal for a function moved or renamed unchanged
 
 
 def _scored_functions(tree: ast.Module) -> list[_ScoredFunction]:
@@ -3818,9 +3819,26 @@ def _scored_functions(tree: ast.Module) -> list[_ScoredFunction]:
     for name, node, cls in sorted(found, key=lambda x: x[1].lineno):
         first = min([node.lineno, *(d.lineno for d in node.decorator_list)])
         out.append(_ScoredFunction(name, seen[name], first, node.end_lineno or node.lineno, node.lineno,
-                                   cognitive_complexity(node, cls)))
+                                   cognitive_complexity(node, cls), _body_fingerprint(node)))
         seen[name] += 1
     return out
+
+
+def _body_fingerprint(function: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+    """What function's body does, without its name, where it is, its comments or its layout: the same text for two
+    bodies whose syntax trees are equal, as test-integrity's _PythonTest.body compares tests."""
+    # Not ast.dump, which recurses as deep as the tree goes (see cognitive_complexity). ast.walk goes breadth first
+    # with a queue; each node's type and fields, with the number of nodes in each list, fix the tree's shape.
+    parts = []
+    for node in ast.walk(ast.Module(body=function.body, type_ignores=[])):
+        parts.append(type(node).__name__)
+        for field_name, value in ast.iter_fields(node):
+            if isinstance(value, list):
+                parts.append(f"{field_name}[{len(value)}]"
+                             + "".join(repr(v) for v in value if not isinstance(v, ast.AST)))
+            elif not isinstance(value, ast.AST):
+                parts.append(f"{field_name}={value!r}")
+    return "\0".join(parts)
 
 
 def too_complex_functions(change: GateChange) -> list[dict]:
@@ -3831,7 +3849,9 @@ def too_complex_functions(change: GateChange) -> list[dict]:
     _ScoredFunction describes.
 
     A function's base is the one with its qualified name and occurrence in the file's base; for a file the change
-    renamed, under the file's old name. A base that cannot be read or parsed has no functions, so each function of its
+    renamed, under the file's old name. Failing that, it is a function with the same body in the base of any Python
+    file the change touches outside _COMPLEXITY_EXEMPT, so that one moved or renamed unchanged is no worse; one moved
+    or renamed and edited is new. A base that cannot be read or parsed has no functions, so each function of its
     file is judged as new. A changed file that cannot be read or parsed, and changed files git cannot list, are each a
     finding saying so, as GateCheck asks of a check that cannot do its work, and fail the gate as any other does.
     """
@@ -3839,14 +3859,19 @@ def too_complex_functions(change: GateChange) -> list[dict]:
     if not over:
         return out
     try:
-        old_paths = {new: old for old, new in Host().changed_files(change.root, change.base) if new}
+        pairs = Host().changed_files(change.root, change.base)
     except OrchestratorError as e:
         return [*out, _finding(None, None, "not-scored", f"the files the change edits could not be listed "
                                                                     f"({e}), so no function was compared with its "
                                                                     f"base.", severity="error")]
-    at_base = {path: _base_complexities(change, old_paths.get(path, path)) for path in {path for path, _ in over}}
+    bases = {old: _base_functions(change, old) for old, _ in pairs
+             if old and old.endswith(".py") and not old.startswith(_COMPLEXITY_EXEMPT)}
+    by_body = {g.body: g.score for functions in bases.values() for g in functions}
+    old_paths = {new: old for old, new in pairs if new}
     for path, f in over:
-        was = at_base[path].get((f.name, f.occurrence))
+        old = old_paths.get(path, path)
+        same_file = {(g.name, g.occurrence): g.score for g in (bases.get(old, []) if old else [])}
+        was = same_file.get((f.name, f.occurrence), by_body.get(f.body))
         if was is None or f.score > was:
             out.append(_finding(path, f.line, "over-limit", (
                 f"`{f.name}`: cognitive complexity {f.score}, "
@@ -3884,19 +3909,16 @@ def _changed_over_limit(change: GateChange) -> tuple[list[dict], list[tuple[str,
     return out, over
 
 
-def _base_complexities(change: GateChange, path: str | None) -> dict[tuple[str, int], int]:
-    """The cognitive complexity at the change's base of each function of the file at path that the check judges as one,
-    by qualified name and occurrence; {} for path None, a file the change adds, and for a base that cannot be read or
-    parsed, whose functions the change can then only be judged as adding."""
-    if path is None:
-        return {}
+def _base_functions(change: GateChange, path: str) -> list[_ScoredFunction]:
+    """The functions the check judges as one in the file at path at the change's base, scored; none for a base that
+    cannot be read or parsed, whose functions the change can then only be judged as adding."""
     try:
         # Verbatim, so that os.fsencode gives back the bytes git stores, which _decode_python decodes as Python would.
         tree = _parse_python(_decode_python(os.fsencode(
             Host().git(change.root, "cat-file", "blob", f"{change.base}:{path}", verbatim=True)))[0])
     except (OrchestratorError, SyntaxError, UnicodeDecodeError):
-        return {}
-    return {(f.name, f.occurrence): f.score for f in _scored_functions(tree)} if tree else {}
+        return []
+    return _scored_functions(tree) if tree else []
 
 
 # What a node holds, each with the nesting level it is scored at; None stands for a part the node goes without.

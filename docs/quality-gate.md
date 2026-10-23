@@ -80,8 +80,10 @@ these is a finding:
 - `over-limit`: a function over 15, at its `def` line, when it is new or the change raised its score, as
   "`_poll`: cognitive complexity 19, 14 at the base; the limit is 15". Its base is the function of the same name and
   classes in the file's base, under the file's old name when the change renamed it; of a name defined more than once,
-  as a property's getter and setter are, the same one in order. A function already over 15 that the change leaves no
-  worse is not a finding, since the gate judges the change;
+  as a property's getter and setter are, the same one in order. Failing that, it is a function with the same body in
+  the base of any Python file the change touches, so a function moved to another module, renamed or made a method,
+  but otherwise unchanged, keeps its score; one moved and edited is new. A function already over 15 that the change
+  leaves no worse is not a finding, since the gate judges the change;
 - `not-scored`: a changed file that could not be read or parsed, or changed files git could not list. Like any finding
   of the check, it fails the gate: a check that cannot do its work says so rather than pass. A base that cannot be read
   or parsed is not a finding: its file's functions are judged as new, as `test-integrity` takes a base that does not
