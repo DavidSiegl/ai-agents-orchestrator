@@ -4616,19 +4616,34 @@ class TestFlakyTests(unittest.TestCase):
                                          {".gitignore": "settings.local\n", "settings.local": "x = 1\n"})
         self.assertEqual([(f["line"], f["rule"]) for f in found], [(4, "failed-every-run")])
 
-    def test_a_test_one_run_failed_before_the_next_went_wrong_is_not_failing_every_run(self):
-        self.put("tests/test_state.py", self.BASE + "\n\ndef test_one():\n    assert False\n")
+    def stopped_at(self, seed, extra):
+        """The findings on the change that adds extra to the test file, when the rerun under seed times out."""
+        self.put("tests/test_state.py", self.BASE + extra)
         rerun = orchestrator._rerun_python_tests
 
-        def second_times_out(tree, inifile, ids, seed, report):
-            if seed == 2:
-                return {}, "pytest, rerunning them under seed 2, did not finish within 30 seconds"
-            return rerun(tree, inifile, ids, seed, report)
-        with patch.object(orchestrator, "_rerun_python_tests", second_times_out):
-            found = self.found()
-        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-rerun")])
-        self.assertTrue(found[0]["message"].endswith("; only the reruns under seed 1 were judged."),
-                        found[0]["message"])
+        def times_out(tree, inifile, ids, s, report):
+            if s == seed:
+                return {}, f"pytest, rerunning them under seed {seed}, did not finish within 30 seconds"
+            return rerun(tree, inifile, ids, s, report)
+        with patch.object(orchestrator, "_rerun_python_tests", times_out):
+            return {(f["line"], f["rule"]): f["message"] for f in self.found()}
+
+    def test_a_test_one_run_failed_before_the_next_went_wrong_is_not_failing_every_run(self):
+        found = self.stopped_at(2, "\n\ndef test_one():\n    assert False\n")
+        self.assertEqual(found, {
+            (23, "not-rerun"): "`test_one` failed under seed 1 only; the reruns stopped when the run under seed 2 "
+                               "went wrong, so too few runs tell whether it is flaky.",
+            (None, "not-rerun"): "pytest, rerunning them under seed 2, did not finish within 30 seconds; only the "
+                                 "reruns under seed 1 were judged."})
+
+    def test_a_test_the_runs_before_a_stop_skipped_is_judged_by_too_few(self):
+        found = self.stopped_at(3, "\n\nimport pytest\n\n\ndef test_skipped():\n    pytest.skip('x')\n"
+                                   "\n\ndef test_fails():\n    assert False\n")
+        self.assertEqual(set(found), {(None, "not-rerun"), (26, "not-rerun"), (30, "failed-every-run")})
+        self.assertEqual(found[(26, "not-rerun")],
+                         "`test_skipped` neither passed nor failed under any seed; the reports of seeds 1 and 2 have "
+                         "it skipped or not at all; the reruns stopped when the run under seed 3 went wrong, so too "
+                         "few runs tell whether it is flaky.")
 
     def test_a_change_to_no_test_reruns_nothing(self):
         self.put("calc.py", "def add(a, b):\n    return b + a\n")

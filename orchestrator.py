@@ -2749,8 +2749,8 @@ def flaky_tests(change: GateChange) -> list[dict]:
     coverage report, does not replace the build's own; a test that needs an untracked file, such as a build product,
     cannot find it there. A run that skips a test, or does not report it, as when the project's addopts stop at the
     first failure, neither passed nor failed it. A test that is not mixed, which fewer than two runs passed or
-    failed although the runs went on, is reported as one that too few runs judged; when a run goes wrong, the
-    reruns stop and the finding about that run is the only one.
+    failed, is reported as one that too few runs judged, whether runs skipped it or the reruns stopped early; when
+    no run told anything, the finding about the run that went wrong stands for them all.
 
     pytest decides which of those defs are tests, so a helper named test_* that it does not collect is not rerun.
     pytest and pytest-randomly must be importable by the gate's own interpreter, as a `uv run` of the project makes
@@ -2800,9 +2800,12 @@ def _rerun_findings(root: str, tmp: str, tests: dict[tuple[str, str], int]) -> l
     # Each test's outcome by the seed of a run that reported it as passed or failed.
     outcomes: dict[str, dict[int, str]] = {i: {} for i in ids}
     seeds: list[int] = []
+    # The seed whose run went wrong and ended the reruns; None when every run told something.
+    stopped: int | None = None
     for seed in FLAKY_SEEDS if ids else ():
         reported, problem = _rerun_python_tests(tree, inifile, ids, seed, os.path.join(tmp, f"seed-{seed}.xml"))
         if problem:
+            stopped = seed
             break
         seeds.append(seed)
         for i, outcome in reported.items():
@@ -2821,10 +2824,12 @@ def _rerun_findings(root: str, tmp: str, tests: dict[tuple[str, str], int]) -> l
                        + ": it depends on the order the tests run in, or on state or randomness that one run does "
                          "not share with another.")
             rule = "mixed-results"
-        elif len(by_seed) < 2 and unjudged:
-            judged = f"{did[0]} only" if did else "neither passed nor failed under any seed"
-            message = (f"`{name}` {judged}; the reports of {_seeds(unjudged)} have it skipped or not at "
-                       f"all, so too few runs tell whether it is flaky.")
+        elif seeds and len(by_seed) < 2:
+            # Without a run that told something, the finding about the run already says no test was rerun.
+            message = (f"`{name}` " + (f"{did[0]} only" if did else "neither passed nor failed under any seed")
+                       + (f"; the reports of {_seeds(unjudged)} have it skipped or not at all" if unjudged else "")
+                       + (f"; the reruns stopped when the run under seed {stopped} went wrong" if stopped else "")
+                       + ", so too few runs tell whether it is flaky.")
             rule = "not-rerun"
         elif len(by_seed) >= 2 and set(by_seed.values()) == {"failed"}:
             # Not flaky, but the gate cannot tell a test the build fails too from one that needs what the copy lacks.

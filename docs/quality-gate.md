@@ -89,10 +89,9 @@ the top has none, and a project that needs the subdirectory's usually gets `not-
 - `not-rerun`: the reruns could not judge the tests: pytest could not start, took longer than 30 seconds, ended in a
   usage or collection error, or collected tests without listing their ids; a changed test file could not be read or
   parsed; or the temporary copy could not be made. After a run that went wrong, the finding says which earlier runs
-  were judged, and the reruns stop there. A test that is not mixed, and that fewer than two of the runs that did
-  report on it passed or failed, is one of these too, at its `def`; when the reruns stopped early, the finding
-  about the run is the only one. pytest runs at `--verbosity=-1`, which a `-v` or `-q` in the project's
-  `addopts` or `PYTEST_ADDOPTS` does not change, nor its `verbosity_test_cases`;
+  were judged, and the reruns stop there. A test that is not mixed and that fewer than two runs passed or failed is
+  one of these too, at its `def`, once any run has told something. pytest runs at `--verbosity=-1`, which a `-v`
+  or `-q` in the project's `addopts` or `PYTEST_ADDOPTS` does not change, nor its `verbosity_test_cases`;
 - `not-removed`: the copy could not be removed afterwards; the reruns' results stand.
 
 A change to a helper or fixture outside the tests' `def`s reruns nothing. The check adds at most six pytest runs of
