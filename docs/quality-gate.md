@@ -87,9 +87,10 @@ the paper's rules. Each of these is a finding:
     registrations named `_` are, adding or removing one never makes a function the change left no worse a finding;
     the cost is that a rise below a higher-scoring namesake goes unseen;
   - failing that, a function with the same body in the base of any Python file the change touches that no function
-    took in its file and that is no longer there under its name: so a function moved to another module, renamed or
-    made a method, but otherwise unchanged, keeps its score. Of a function moved unchanged and a copy of it, the one
-    that kept the name takes it;
+    took in its file, that is no longer there under its name, and that was not moved unchanged into a file the check
+    does not judge, such as one under `tests/`: so a function moved to another module, renamed or made a method, but
+    otherwise unchanged, keeps its score. Of a function moved unchanged and a copy of it, the one that kept the name
+    takes it;
   - failing that, the function is new: a copy whose original is still in place, even edited, a function moved and
     edited, and a function whose base is under `tests/`, which was never held to the limit.
 - `not-scored`: a changed file that could not be read or parsed, or changed files git could not list. Like any finding

@@ -3953,23 +3953,23 @@ def _pair_in_file(functions: list[_ScoredFunction], added: set[int],
 def _moved_candidates(change: GateChange, pairs: list[tuple[str | None, str | None]],
                       bases: dict[str, list[_ScoredFunction]],
                       judged: dict[str, tuple[list[_ScoredFunction], set[int]]]) -> list[_ScoredFunction]:
-    """The base functions the change moved or renamed, as far as their files tell: those of bases, the base functions
-    of the change's files by old path that no function took in its file, whose file, if the change kept it, has no
-    function of their name and body in the working tree. One that still has it was copied, and its copy is new. pairs
-    is the change's (old path, new path) list; judged gives the working tree's functions of the files it holds, and
-    the others are read here."""
+    """The base functions the change moved or renamed, as far as the files tell, that a judged function may take as
+    its base: those of bases, the base functions of the change's files by old path that no function took in its file,
+    whose file, if the change kept it, has no function of their name and body in the working tree. One that still has
+    it was copied, and its copy is new. Nor is one that a file the change touches but does not judge, such as one
+    under tests/, holds under its name and body: it was moved there, unchanged, and is still itself. pairs is the
+    change's (old path, new path) list; judged gives the working tree's functions of the files it holds, and the
+    others are read here."""
     new_paths = {old: new for old, new in pairs if old}
+    unjudged = {new: _working_functions(change, new)[0] or [] for _, new in pairs
+                if new and new not in judged and new.endswith(".py")}
+    moved_unjudged = {(scored.name, scored.body) for functions in unjudged.values() for scored in functions}
     out: list[_ScoredFunction] = []
     for old, functions in bases.items():
         new = new_paths.get(old)
-        if new is None:
-            now = []
-        elif new in judged:
-            now = judged[new][0]
-        else:
-            now = _working_functions(change, new)[0] or []
-        still_there = {(scored.name, scored.body) for scored in now}
-        out += [g for g in functions if (g.name, g.body) not in still_there]
+        now = [] if new is None else judged[new][0] if new in judged else unjudged.get(new, [])
+        kept = {(scored.name, scored.body) for scored in now} | moved_unjudged
+        out += [g for g in functions if (g.name, g.body) not in kept]
     return out
 
 

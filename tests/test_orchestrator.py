@@ -5887,6 +5887,15 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.git("add", "lib/more.py")
         self.assertEqual(self.found()[0], [])  # lib/helpers.py's base is lib/, now held to the limit
 
+    def test_a_function_moved_unchanged_into_tests_keeps_its_base_from_a_copy_elsewhere(self):
+        big = flat("big", 20)
+        self.put("calc.py", self.BASE.replace("\n\n" + big, ""))
+        self.put("tests/helpers.py", big)  # the original, moved where nothing is judged
+        self.put("lib.py", big.replace("def big(", "def copied("))
+        self.git("add", "tests/helpers.py", "lib.py")
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`copied`: cognitive complexity 20, a new function; the limit is 15."])
+
     def test_a_function_whose_decorator_the_change_adds_is_compared_with_its_unchanged_self(self):
         self.edit("calc.py", "def big(x):\n", "@staticmethod\ndef big(x):\n")  # touched, its body as it was
         self.assertEqual(self.found()[0], [])
