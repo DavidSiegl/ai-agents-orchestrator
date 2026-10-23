@@ -55,6 +55,7 @@ import string
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import tokenize
@@ -3252,13 +3253,13 @@ def _mutmut_on_copy(root: str, tmp: str, functions: list[_ChangedFunction], tabl
         return [_mutation_not_run(f"could not start mutmut: {e}")]
     except ValueError as e:
         return [_mutation_not_run(str(e))]
-    return _mutmut_findings(tree_copy, functions, run, stopped, budget)
+    return _mutmut_findings(tree_copy, functions, run, stopped, budget, table)
 
 
 def _mutmut_findings(tree_copy: str, functions: list[_ChangedFunction], run: subprocess.CompletedProcess,
-                     stopped: bool, budget: float) -> list[dict]:
+                     stopped: bool, budget: float, table: dict) -> list[dict]:
     """What the run of mutmut in tree_copy found of functions, as `mutmut results` and `mutmut show` tell it: run is
-    how it ended, and stopped whether the budget of budget seconds stopped it."""
+    how it ended, stopped whether the budget of budget seconds stopped it, and table the [tool.mutmut] it ran by."""
     no_tests = run.returncode != 0 and _MUTMUT_NO_TESTS.search(run.stdout) is not None
     if run.returncode != 0 and not stopped and not no_tests:
         return [_mutation_not_run(f"mutmut exited with status {run.returncode}: {_said_by_mutmut(run)}")]
@@ -3276,13 +3277,13 @@ def _mutmut_findings(tree_copy: str, functions: list[_ChangedFunction], run: sub
         owner = by_prefix.get(mutant.rpartition("__mutmut_")[0])
         if owner is not None:
             mutants.setdefault(owner, {}).setdefault(status, []).append(mutant)
-    # A function that mutmut was given but made no mutant of: one with nothing to mutate, one a `# pragma: no
-    # mutate` keeps out, or one whose mutants mutmut names otherwise than _mutant_prefix expects. Unless the budget
-    # stopped mutmut before it had made any.
-    out = [_finding(f.path, f.line, "not-mutated", f"`{f.name}` was not mutation-tested: mutmut made no mutant of it, "
-                                                   f"as of a function with nothing to mutate or one a `# pragma: no "
-                                                   f"mutate` keeps out")
-           for f in functions if f not in mutants and (statuses or not stopped)]
+    # A function mutmut was given but listed no mutant of. Stopped by the budget, mutmut may not have reached its
+    # file: it makes and saves mutants file by file.
+    unlisted = [f for f in functions if f not in mutants]
+    out = [] if stopped else [
+        _finding(f.path, f.line, "not-mutated",
+                 f"`{f.name}` was not mutation-tested: mutmut made no mutant of it; {_why_no_mutant(f, table)}.")
+        for f in unlisted]
     for f, by_status in mutants.items():
         tried = sum(len(names) for status, names in by_status.items() if status not in _MUTMUT_UNTRIED)
         if by_status.get("survived"):
@@ -3296,8 +3297,40 @@ def _mutmut_findings(tree_copy: str, functions: list[_ChangedFunction], run: sub
             f"budget reached after {tried} of {len(statuses)} mutants" if statuses
             else "budget reached before mutmut had made its mutants")
             + f": mutmut was stopped at {budget:g} seconds (`--mutation-budget`), so the mutants it did not try may "
-              f"survive too."))
+              f"survive too"
+            + (f"; mutmut made no mutant of {_names_of(unlisted)} before the budget ran out." if unlisted else ".")))
     return out
+
+
+def _names_of(functions: list[_ChangedFunction], limit: int = 5) -> str:
+    """'`f`', '`f` and `g`', or '`f`, `g`, ... and 3 more'."""
+    names = [f"`{f.name}`" for f in functions[:limit]]
+    more = len(functions) - len(names)
+    if more:
+        names.append(f"{more} more")
+    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+def _why_no_mutant(f: _ChangedFunction, table: dict) -> str:
+    """Why mutmut 3.8.0 made no mutant of f, a function it was given, as a clause: the one cause the gate can tell
+    cheaply, a `# pragma: no mutate` on its def or table's do_not_mutate_patterns matching each statement in it, else
+    every cause there can be."""
+    if re.search(r"#\s*pragma:.*no mutate", f.source[f.line - f.first]):
+        return "a `# pragma: no mutate` on its def keeps it out"
+    patterns = table.get("do_not_mutate_patterns", [])
+    tree = _parse_python(textwrap.dedent("\n".join(f.source)))
+    unit = tree.body[0] if tree is not None and tree.body else None
+    if patterns and isinstance(unit, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        # mutmut skips every expression that starts on a line a pattern matches; a statement with a block of its own
+        # holds lines of other statements, which this does not look into.
+        body = unit.body[1:] if ast.get_docstring(unit) is not None else unit.body
+        starts = [f.source[stmt.lineno - 1] for stmt in body if not hasattr(stmt, "body")]
+        with contextlib.suppress(re.error):
+            if body and len(starts) == len(body) and all(any(re.search(p, line) for p in patterns) for line in starts):
+                return "the rules' do_not_mutate_patterns match each statement in it"
+    return ("either it has nothing mutmut mutates, the rules' do_not_mutate_patterns or mutate_only_covered_lines "
+            "leave its lines out, a `# pragma: no mutate` keeps them out, or the gate could not read mutmut's names "
+            "for its mutants")
 
 
 def _changed_python_functions(change: GateChange) -> tuple[list[_ChangedFunction], list[dict]]:
@@ -3312,7 +3345,8 @@ def _changed_python_functions(change: GateChange) -> tuple[list[_ChangedFunction
 def _mutmut_table(rules: str) -> tuple[dict, str | None]:
     """The [tool.mutmut] table of the pyproject.toml at rules, {} when it has none; or {} and the problem, a clause,
     when it cannot be read, names no source_paths, without which what mutmut mutates cannot be told, or holds an
-    only_mutate, do_not_mutate, also_copy or pytest_add_cli_args that is not a list of strings."""
+    only_mutate, do_not_mutate, do_not_mutate_patterns, also_copy or pytest_add_cli_args that is not a list of
+    strings."""
     try:
         with open(rules, "rb") as f:
             table = tomllib.load(f).get("tool", {}).get("mutmut", {})
@@ -3323,7 +3357,7 @@ def _mutmut_table(rules: str) -> tuple[dict, str | None]:
         return {}, (f"[tool.mutmut] in {rules} names no source_paths as a list of paths, so what mutmut mutates is "
                     f"unknown")
     # The other keys the gate reads or adds to.
-    for key in ("only_mutate", "do_not_mutate", "also_copy", "pytest_add_cli_args"):
+    for key in ("only_mutate", "do_not_mutate", "do_not_mutate_patterns", "also_copy", "pytest_add_cli_args"):
         setting = table.get(key, [])
         if not isinstance(setting, list) or not all(isinstance(p, str) for p in setting):
             return {}, f"[tool.mutmut] {key} in {rules} is not a list of strings"

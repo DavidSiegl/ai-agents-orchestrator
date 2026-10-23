@@ -5133,14 +5133,27 @@ class TestSurvivingMutants(unittest.TestCase):
             self.fake_mutmut("exit 0", results="    calc.x_checked__mutmut_1: killed\n")
             self.assertEqual(self.found(), [])
 
+    def test_a_function_whose_file_the_budget_kept_mutmut_from_is_part_of_the_budget(self):
+        # mutmut makes and saves mutants file by file, so a run stopped while making them lists only some files'.
+        self.put("more.py", "def g(a):\n    return a + 1\n")
+        self.git("add", "more.py")
+        self.git("commit", "--quiet", "-m", "more")
+        self.put("more.py", "def g(a):\n    return a + 2\n")
+        self.change_the_functions("checked")
+        self.fake_mutmut("exec sleep 30", results="    calc.x_checked__mutmut_1: not checked\n")
+        found = self.found(budget=1, rules=self.rules({"source_paths": ["calc.py", "more.py"]}))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "budget-reached")])
+        self.assertIn("mutmut made no mutant of `g` before the budget ran out", found[0]["message"])
+
     def test_a_change_to_a_help_text_alone_makes_no_mutant(self):
         # The second line of the help text does not say help=, but its string starts on the line that does.
         self.put("calc.py", self.BASE.replace(" to make", " to build"))
         made, found = self.found_and_made()
         self.assertEqual(made, [])
-        # mutmut made no mutant of describe, and the finding says so rather than nothing.
+        # mutmut made no mutant of describe, and the finding says why rather than nothing.
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 25, "not-mutated")])
-        self.assertIn("mutmut made no mutant of it", found[0]["message"])
+        self.assertEqual(found[0]["message"], "`describe` was not mutation-tested: mutmut made no mutant of it; the "
+                                              "rules' do_not_mutate_patterns match each statement in it.")
 
     def test_a_function_a_mutmut_pragma_opts_out_is_said_so_and_its_pragma_listed(self):
         text = self.BASE.replace("def unchecked(a, b):", "def unchecked(a, b):  # pragma: no mutate block")
@@ -5148,7 +5161,8 @@ class TestSurvivingMutants(unittest.TestCase):
         made, found = self.found_and_made()
         self.assertEqual(made, [])
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 5, "not-mutated")])
-        self.assertIn("`unchecked` was not mutation-tested: mutmut made no mutant of it", found[0]["message"])
+        self.assertEqual(found[0]["message"], "`unchecked` was not mutation-tested: mutmut made no mutant of it; a "
+                                              "`# pragma: no mutate` on its def keeps it out.")
         diff = self.host.change_diff(self.repo, self.git("rev-parse", "HEAD").strip())
         self.assertEqual(orchestrator.added_suppressions(self.repo, changed_lines(diff)),
                          [("calc.py", 5, "def unchecked(a, b):  # pragma: no mutate block")])

@@ -110,11 +110,16 @@ altered, an argument dropped - and runs each of these mutants against the tests 
   were tried, and what the first three change, each as a line before and after. No test checks what those lines do;
 - `untested`: a changed function that no test calls, at its `def`, with how many mutants it has;
 - `budget-reached`: mutmut ran out of time, as "budget reached after N of M mutants", N counting the mutants it tried
-  against a test, as the `survived` counts do. What the N showed is listed; the others may survive too;
+  against a test, as the `survived` counts do. What the N showed is listed; the others may survive too. It also names
+  the changed functions mutmut had listed no mutant of when it was stopped: it makes mutants file by file, so it may
+  not have reached theirs;
 - `not-mutated`: a changed function mutmut does not mutate, at its `def`, with the reason: its file is outside
   `[tool.mutmut]`'s `source_paths`, or left out by `only_mutate` or `do_not_mutate`; it is decorated, other than with
   `@staticmethod` or `@classmethod` alone; or it is `__new__`, `__getattribute__` or `__setattr__`. And a function
-  mutmut was given but made no mutant of: one with nothing to mutate, or one a `# pragma: no mutate` keeps out;
+  mutmut was given but made no mutant of, with the cause where the gate can tell it, a `# pragma: no mutate` on its
+  `def` or `do_not_mutate_patterns` matching each statement in it, else every cause there can be: it has nothing
+  mutmut mutates, `do_not_mutate_patterns` or `mutate_only_covered_lines` leave its lines out, a `# pragma: no mutate`
+  keeps them out, or the gate could not read mutmut's names for its mutants;
 - `not-run`: mutmut could not start, failed, as it does when a test fails, or left results the gate could not read; the
   rules name no `source_paths`, or give a key the gate reads or writes a value of another shape; the directory to copy
   the tree into could not be made; or a changed file could not be read or parsed;
