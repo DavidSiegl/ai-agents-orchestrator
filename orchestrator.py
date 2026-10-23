@@ -116,8 +116,8 @@ DEFAULT_MAX_LINES = 600
 # The workflow keys that hold them; a workflow file sets each to a whole number of at least 1.
 BUDGET_KEYS = ("max_files", "max_lines")
 HTTP_TIMEOUT = 30
-# Seconds a request to PyPI may take. The new-dependencies check stops asking once one fails, so it adds at most this
-# much to a quality round that cannot reach PyPI.
+# Seconds each blocking step of a request to PyPI may take, to connect or to read, so one request can take it more
+# than once. What bounds the new-dependencies check as a whole is the quality round's deadline (SLOW_STEP_MARGIN).
 PYPI_TIMEOUT = 15
 CI_POLL_SECONDS = 10
 # How long one quality round may wait on Jenkins, failed requests retried, before the run fails.
@@ -1434,18 +1434,18 @@ class Host:
     def changed_line_counts(self, cwd: str, base: str, commit: str) -> list[ChangedFile]:
         """Each file the change from base to commit touches, a rename paired as change_diff pairs it, with the lines it
         adds and removes, from `git diff --numstat`. The paths are verbatim, as Host.run says."""
-        fields = self.git(cwd, "diff", "--numstat", "-z", "-M", "--no-ext-diff", base, commit,
-                          verbatim=True).split("\0")
+        numstat = self.git(cwd, "diff", "--numstat", "-z", "-M", "--no-ext-diff", base, commit,
+                           verbatim=True).split("\0")
         out = []
         i = 0
         # -z gives each entry as `added<TAB>removed<TAB>path`, or for a rename `added<TAB>removed<TAB>` and then the
         # old and new paths as fields of their own; a binary file counts "-". The list ends with an empty field.
-        while i < len(fields) and fields[i]:
-            added, removed, path = fields[i].split("\t", 2)
+        while i < len(numstat) and numstat[i]:
+            added, removed, path = numstat[i].split("\t", 2)
             if path:
                 base_path, i = path, i + 1
             else:
-                base_path, path, i = fields[i + 1], fields[i + 2], i + 3
+                base_path, path, i = numstat[i + 1], numstat[i + 2], i + 3
             out.append(ChangedFile(base_path, path, 0 if added == "-" else int(added),
                                    0 if removed == "-" else int(removed)))
         return out
@@ -1836,13 +1836,14 @@ class PyPI:
             raise PyPIError(f"GET {url}: the answer is not PyPI's JSON: {e}") from e
 
 
-def _pypi_project(data) -> PyPIProject:
-    """The project of PyPI's JSON; ValueError, TypeError, AttributeError or KeyError for JSON of another shape."""
-    info = data["info"] if isinstance(data, dict) else None
+def _pypi_project(answer) -> PyPIProject:
+    """The project of PyPI's JSON answer, parsed; ValueError, TypeError, AttributeError or KeyError for JSON of
+    another shape."""
+    info = answer["info"] if isinstance(answer, dict) else None
     if not isinstance(info, dict) or not isinstance(info.get("version"), str):
         raise TypeError("it has no info.version")
-    first = _first_upload(f for files in (data.get("releases") or {}).values() for f in files or [])
-    return PyPIProject(first, info["version"], _first_upload(data.get("urls") or []), _license(info))
+    first = _first_upload(f for files in (answer.get("releases") or {}).values() for f in files or [])
+    return PyPIProject(first, info["version"], _first_upload(answer.get("urls") or []), _license(info))
 
 
 def _first_upload(files: Iterable[dict]) -> datetime | None:
@@ -4599,16 +4600,16 @@ def _toml_manifest(read: Callable[[str], str | None], path: str) -> dict:
         raise ValueError(f"it is not TOML: {e}") from e
 
 
-def _pyproject_dependencies(data: dict) -> dict[str, PackageSource | None]:
-    """python_dependencies's direct dependencies of a pyproject.toml's table; ValueError or TypeError, saying why, for
+def _pyproject_dependencies(pyproject: dict) -> dict[str, PackageSource | None]:
+    """python_dependencies's direct dependencies of a pyproject.toml, parsed; ValueError or TypeError, saying why, for
     one of another shape."""
-    project = _toml_table(data, "project")
-    uv = _toml_table(_toml_table(data, "tool"), "uv")
+    project = _toml_table(pyproject, "project")
+    uv = _toml_table(_toml_table(pyproject, "tool"), "uv")
     sources = _uv_sources(uv)
     default = next((_index_source(i.get("url")) for i in _uv_indexes(uv) if i.get("default") is True), None)
     own = package_key(project.get("name") or "")
     out: dict[str, PackageSource | None] = {}
-    for where, requirements in _requirement_lists(project, data):
+    for where, requirements in _requirement_lists(project, pyproject):
         if not isinstance(requirements, list):
             raise TypeError(f"{where} is not a list")
         for key, url in (_requirement(r) for r in requirements if not isinstance(r, dict)):
@@ -4617,12 +4618,12 @@ def _pyproject_dependencies(data: dict) -> dict[str, PackageSource | None]:
     return out
 
 
-def _requirement_lists(project: dict, data: dict) -> list[tuple[str, object]]:
-    """(where, its list) of each list of requirements in a pyproject.toml's table."""
+def _requirement_lists(project: dict, pyproject: dict) -> list[tuple[str, object]]:
+    """(where, its list) of each list of requirements in a pyproject.toml, parsed, whose [project] table is project."""
     return [("[project] dependencies", project.get("dependencies", [])),
             *((f"[project.optional-dependencies] {k}", v)
               for k, v in _toml_table(project, "optional-dependencies").items()),
-            *((f"[dependency-groups] {k}", v) for k, v in _toml_table(data, "dependency-groups").items())]
+            *((f"[dependency-groups] {k}", v) for k, v in _toml_table(pyproject, "dependency-groups").items())]
 
 
 def _uv_indexes(uv: dict) -> list[dict]:
@@ -4668,9 +4669,9 @@ def _index_source(url) -> PackageSource | None:
     return None if str(url).rstrip("/") == PYPI_INDEX_URL else PackageSource("index", str(url))
 
 
-def _uv_lock_packages(data: dict) -> dict[str, PackageSource | None]:
-    """python_dependencies's locked packages of a uv.lock's table; TypeError for one of another shape."""
-    packages = data.get("package", [])
+def _uv_lock_packages(lock: dict) -> dict[str, PackageSource | None]:
+    """python_dependencies's locked packages of a uv.lock, parsed; TypeError for one of another shape."""
+    packages = lock.get("package", [])
     if not isinstance(packages, list) or not all(isinstance(p, dict) and isinstance(p.get("name"), str)
                                                  and isinstance(p.get("source", {}), dict) for p in packages):
         raise TypeError("[[package]] is not a list of tables with a name")
@@ -4689,9 +4690,9 @@ def _lock_source(source: dict) -> PackageSource | None:
     return PackageSource("path" if kind == "directory" else kind, str(source[kind]))
 
 
-def _toml_table(data: dict, key: str) -> dict:
-    """data's table key, {} when it has none; TypeError when key is not a table."""
-    table = data.get(key, {})
+def _toml_table(parent: dict, key: str) -> dict:
+    """The table key of the TOML table parent, {} when it has none; TypeError when key is not a table."""
+    table = parent.get(key, {})
     if not isinstance(table, dict):
         raise TypeError(f"{key} is not a table")
     return table
@@ -4926,8 +4927,9 @@ def diff_budget(change: RunChange, *, max_files: int, max_lines: int) -> CheckFi
 
 
 def unexpected_paths(change: RunChange) -> CheckFindings:
-    """A finding to weigh for each path the change touches, at its path in the change, that the spec mentions neither
-    as a whole nor by its file name, as a plain substring."""
+    """A finding to weigh for each path the change touches that the spec mentions neither as a whole nor by its file
+    name. A rename is judged at its new path only, and a path or name counts as mentioned only where it appears whole
+    in the spec, as a plain substring: naming a directory does not cover the files in it."""
     return CheckFindings([], [
         _finding(path, None, "", "the spec mentions neither this path nor its file name.")
         for path in sorted({f.path for f in change.files})

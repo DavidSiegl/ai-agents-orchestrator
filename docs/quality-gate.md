@@ -538,7 +538,8 @@ They belong to the workflow rather than to the quality-gated step, because the c
 from the run's base, so it holds every editing step's work, a Test Writer's as well as the Builder's.
 
 **Unexpected paths** is a finding for each path the change touches, or deletes, that the spec mentions neither as a
-whole nor by its file name.
+whole nor by its file name. A rename is judged at its new path only. A path or name counts as mentioned only where it
+appears whole in the spec, as a plain substring: naming `docs/` does not cover `docs/x.md`.
 
 The findings go into the quality file as the gate's do, with `{path, line, severity, rule, message}` and the rule
 prefixed by the check's name, in one last section, `## The orchestrator's checks`, which holds both the failing ones
