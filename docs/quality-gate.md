@@ -81,18 +81,22 @@ the paper's rules. Each of these is a finding:
   "`_poll`: cognitive complexity 19, 14 at the base; the limit is 15". A function already over 15 that the change
   leaves no worse is not a finding, since the gate judges the change. Its base is a function of the base, and each
   base function is the base of one function at most:
-  - in the file's base, under the file's old name, whatever that name, when the change renamed it: the function of the
-    same name and classes with the same body, which it is unchanged from, else the highest-scoring of the others of
-    that name left. So with a name defined more than once, as a property's getter and setter or `@singledispatch`
-    registrations named `_` are, adding or removing one never makes a function the change left no worse a finding;
-    the cost is that a rise below a higher-scoring namesake goes unseen;
-  - failing that, a function with the same body in the base of any Python file the change touches that no function
-    took in its file, that is no longer there under its name, and that was not moved unchanged into a file the check
-    does not judge, such as one under `tests/`: so a function moved to another module, renamed or made a method, but
-    otherwise unchanged, keeps its score. Of a function moved unchanged and a copy of it, the one that kept the name
-    takes it;
-  - failing that, the function is new: a copy whose original is still in place, even edited, a function moved and
-    edited, and a function whose base is under `tests/`, which was never held to the limit.
+  - first, one with the same body, since an unchanged function is that function whatever its name: of its name in
+    its file's base, then of its name in the base of another Python file the change touches, then of any name in its
+    file's base, then elsewhere. So a function moved to another module, renamed or made a method, but otherwise
+    unchanged, keeps its score, and a new function given its old name is new. Of a function moved unchanged and a
+    copy of it, the one that kept the name takes it, and a function moved unchanged into a file the check does not
+    judge, such as one under `tests/`, still takes its own;
+  - failing that, the highest-scoring function of its name left in its file's base, under the file's old name,
+    whatever that name, when the change renamed it. So with a name defined more than once, as a property's getter and
+    setter or `@singledispatch` registrations named `_` are, adding or removing one never makes a function the change
+    left no worse a finding; the cost is that a rise below a higher-scoring namesake goes unseen;
+  - failing that, the function is new: a copy whose original is still in place, a function moved and edited, and a
+    function whose base is under `tests/`, which was never held to the limit.
+
+  Bodies pairing first has a cost: a copy of a function whose original the change edits keeps the old score and
+  passes, as if it were the original renamed and the edited one new, even when the edit takes the original below the
+  limit. `TODO.md` holds it.
 - `not-scored`: a changed file that could not be read or parsed, or changed files git could not list. Like any finding
   of the check, it fails the gate: a check that cannot do its work says so rather than pass. A base that cannot be read
   or parsed is not a finding: its file's functions are judged as new, as `test-integrity` takes a base that does not
