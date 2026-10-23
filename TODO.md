@@ -70,8 +70,13 @@ was done.
   pathspecs match, so a change that commits `mutants/calc.py`, mutmut's mutated copy with its trampolines, has its
   added lines there linted, and their findings can fail the gate. Whether such files should be linted, left out, or
   refused is open. Closes with that decision.
-- **The cognitive-complexity check reads and parses changed files in a loop of its own.** `_changed_over_limit`
-  repeats `_changed_python_units`' reading, decoding and unreadable-file handling, because that walker yields only
-  top-level functions and methods of top-level classes, the units mutmut names, while the check judges every function
-  that no other function holds (`_scored_functions`). Closes with `_changed_python_units` taking the walker as a
-  parameter, or handing its callers the parsed trees.
+- **The cognitive-complexity check reads and parses changed files in a loop of its own.** `_judged_files` and
+  `_working_functions` repeat `_changed_python_units`' reading, decoding and unreadable-file handling, because that
+  walker yields only top-level functions and methods of top-level classes, the units mutmut names, while the check
+  judges every function that no other function holds (`_scored_functions`). The two copies of the except clause
+  have to be kept alike, as a coding cookie naming an odd codec has shown twice. Closes with `_changed_python_units`
+  taking the walker as a parameter, or handing its callers the parsed trees.
+- **Cognitive complexity scores direct recursion only.** Campbell's paper gives a point to each function in a
+  recursion cycle; `_calls_itself` sees a function calling itself by name, or a method as `self.m`, `cls.m` or
+  `C.m`, but not a cycle through other functions, nor a call through an alias. A function that recurses through a
+  helper scores a point less than the paper says. Closes with a call graph of the module, scored per cycle.
