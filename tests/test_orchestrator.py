@@ -4616,6 +4616,20 @@ class TestFlakyTests(unittest.TestCase):
                                          {".gitignore": "settings.local\n", "settings.local": "x = 1\n"})
         self.assertEqual([(f["line"], f["rule"]) for f in found], [(4, "failed-every-run")])
 
+    def test_a_test_one_run_failed_before_the_next_went_wrong_is_not_failing_every_run(self):
+        self.put("tests/test_state.py", self.BASE + "\n\ndef test_one():\n    assert False\n")
+        rerun = orchestrator._rerun_python_tests
+
+        def second_times_out(tree, inifile, ids, seed, report):
+            if seed == 2:
+                return {}, "pytest, rerunning them under seed 2, did not finish within 30 seconds"
+            return rerun(tree, inifile, ids, seed, report)
+        with patch.object(orchestrator, "_rerun_python_tests", second_times_out):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-rerun")])
+        self.assertTrue(found[0]["message"].endswith("; only the reruns under seed 1 were judged."),
+                        found[0]["message"])
+
     def test_a_change_to_no_test_reruns_nothing(self):
         self.put("calc.py", "def add(a, b):\n    return b + a\n")
         self.put("tests/test_state.py", self.BASE.replace("import unittest\n", "import unittest  # edited\n"))
