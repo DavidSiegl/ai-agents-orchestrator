@@ -5817,6 +5817,30 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.assertEqual([f["message"] for f in self.found()[1]],
                          ["`C.x`: cognitive complexity 22, 21 at the base; the limit is 15."])
 
+    # A function named _ that does nothing, as one @singledispatch registration or @overload stub can be.
+    TRIVIAL = "def _(a):\n    return a\n\n\n"
+
+    def commit_file(self, name, text):
+        self.put(name, text)
+        self.git("add", name)
+        self.git("commit", "--quiet", "-m", name)
+
+    def test_a_namesake_removed_above_a_function_leaves_it_compared_with_its_own_base(self):
+        self.commit_file("disp.py", self.TRIVIAL + flat("_", 20))
+        self.put("disp.py", flat("_", 20).replace("x += 3\n", "x += 30\n"))  # the trivial one gone; still 20
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_namesake_added_above_a_function_leaves_it_compared_with_its_own_base(self):
+        self.commit_file("disp.py", flat("_", 20))
+        self.put("disp.py", self.TRIVIAL + flat("_", 20).replace("x += 3\n", "x += 30\n"))  # still 20
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_rise_of_a_function_whose_name_others_share_is_found(self):
+        self.commit_file("disp.py", flat("_", 20))
+        self.put("disp.py", flat("_", 20).replace("        x += 19\n", "        x += 19\n        if x:\n            x -= 1\n"))
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`_`: cognitive complexity 22, 20 at the base; the limit is 15."])
+
     def test_only_the_tests_directory_is_exempt_as_from_ruff_s_c901(self):
         self.put("tests/test_calc.py", flat("test_big", 16))
         self.put("tests/unit/helpers.py", flat("helper", 16))

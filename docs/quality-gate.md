@@ -78,9 +78,12 @@ that nest. The comment above `COGNITIVE_COMPLEXITY_LIMIT` in `orchestrator.py` s
 the paper's rules. Each of these is a finding:
 
 - `over-limit`: a function over 15, at its `def` line, when it is new or the change raised its score, as
-  "`_poll`: cognitive complexity 19, 14 at the base; the limit is 15". Its base is the function of the same name and
-  classes in the file's base, under the file's old name when the change renamed it; of a name defined more than once,
-  as a property's getter and setter are, the same one in order. Failing that, it is a function with the same body in
+  "`_poll`: cognitive complexity 19, 14 at the base; the limit is 15". Its base is in the file's base, under the file's
+  old name when the change renamed it: the function of the same name and classes with the same body, which it is
+  unchanged from, else the highest-scoring of the others of that name. So with a name defined more than once, as a
+  property's getter and setter or `@singledispatch` registrations named `_` are, adding or removing one never makes a
+  function the change left no worse a finding; the cost is that a rise below a higher-scoring namesake goes unseen.
+  Failing that, it is a function with the same body in
   the base of any Python file the change touches, so a function moved to another module, renamed or made a method,
   but otherwise unchanged, keeps its score; one moved and edited is new. A function already over 15 that the change
   leaves no worse is not a finding, since the gate judges the change;

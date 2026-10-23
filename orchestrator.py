@@ -3806,10 +3806,7 @@ class _ScoredFunction:
     """A function the cognitive-complexity check judges as one, and its score: a function no other function holds,
     whether at the top of its module, in a class at any depth, or under a module-level statement such as an if or a
     try. A function nested in another is part of that one."""
-    name: str  # its name qualified by its classes: f, C.f or C.D.f
-    # How many functions of the same name come before it in its module, as a property's getter comes before its setter,
-    # or one @singledispatch registration named _ before the next. With name, it tells a function from the others.
-    occurrence: int
+    name: str  # its name qualified by its classes: f, C.f or C.D.f; a property's getter and setter share one
     first: int  # the line it starts on, its decorators included
     last: int  # the line it ends on
     line: int  # the line of its def
@@ -3834,12 +3831,10 @@ def _scored_functions(tree: ast.Module) -> list[_ScoredFunction]:
             elif isinstance(child, ast.stmt | ast.excepthandler | ast.match_case):
                 todo.append((child, prefix, cls))
     out = []
-    seen: collections.Counter[str] = collections.Counter()
     for name, node, cls in sorted(found, key=lambda x: x[1].lineno):
         first = min([node.lineno, *(d.lineno for d in node.decorator_list)])
-        out.append(_ScoredFunction(name, seen[name], first, node.end_lineno or node.lineno, node.lineno,
+        out.append(_ScoredFunction(name, first, node.end_lineno or node.lineno, node.lineno,
                                    cognitive_complexity(node, cls), _body_fingerprint(node)))
-        seen[name] += 1
     return out
 
 
@@ -3848,17 +3843,15 @@ def too_complex_functions(change: GateChange) -> list[dict]:
     _COMPLEXITY_EXEMPT, whose cognitive_complexity is over COGNITIVE_COMPLEXITY_LIMIT and higher than at the base, or
     which the base does not have; at its def line, with both scores. A function over the limit that the change leaves
     no worse is not a finding: the gate judges the change, not the codebase. The functions judged are those
-    _ScoredFunction describes.
+    _ScoredFunction describes, and their bases are as _worse_than_base pairs them, in the file's base, under the
+    file's old name for a file the change renamed. A base that cannot be read or parsed has no functions, so each
+    function of its file is judged as new.
 
-    A function's base is the one with its qualified name and occurrence in the file's base; for a file the change
-    renamed, under the file's old name. Failing that, it is a function with the same body in the base of any Python
-    file the change touches outside _COMPLEXITY_EXEMPT, so that one moved or renamed unchanged is no worse; one moved
-    or renamed and edited is new. A base that cannot be read or parsed has no functions, so each function of its
-    file is judged as new. A changed file that cannot be read or parsed, and changed files git cannot list, are each a
-    finding saying so, as GateCheck asks of a check that cannot do its work, and fail the gate as any other does.
+    A changed file that cannot be read or parsed, and changed files git cannot list, are each a finding saying so, as
+    GateCheck asks of a check that cannot do its work, and fail the gate as any other does.
     """
-    out, over = _changed_over_limit(change)
-    if not over:
+    out, judged = _judged_files(change)
+    if not any(_over_limit(functions, added) for functions, added in judged.values()):
         return out
     try:
         pairs = Host().changed_files(change.root, change.base)
@@ -3869,23 +3862,56 @@ def too_complex_functions(change: GateChange) -> list[dict]:
              if old and old.endswith(".py") and not old.startswith(_COMPLEXITY_EXEMPT)}
     by_body = {g.body: g.score for functions in bases.values() for g in functions}
     old_paths = {new: old for old, new in pairs if new}
-    for path, scored in over:
+    for path, (functions, added) in judged.items():
         old = old_paths.get(path, path)
-        same_file = {(g.name, g.occurrence): g.score for g in (bases.get(old, []) if old else [])}
-        was = same_file.get((scored.name, scored.occurrence), by_body.get(scored.body))
+        out += _worse_than_base(path, functions, added, bases.get(old, []) if old else [], by_body)
+    return sorted(out, key=lambda finding: (finding["path"] or "", finding["line"] or 0))
+
+
+def _over_limit(functions: list[_ScoredFunction], added: set[int]) -> list[_ScoredFunction]:
+    """Those of functions that score over COGNITIVE_COMPLEXITY_LIMIT and that the change adds a line to, decorators
+    included; added is the lines it adds to their file."""
+    return [scored for scored in functions if scored.score > COGNITIVE_COMPLEXITY_LIMIT
+            and any(scored.first <= line <= scored.last for line in added)]
+
+
+def _worse_than_base(path: str, functions: list[_ScoredFunction], added: set[int], base: list[_ScoredFunction],
+                     moved: dict[str, int]) -> list[dict]:
+    """An over-limit finding for each of _over_limit(functions, added), the working tree's functions in the file at
+    path, that is worse than its base among base, the base's functions of that file; moved gives, by body, the base
+    score of a function moved there from elsewhere.
+
+    A function pairs first with a base function of its name and body, which it is unchanged from, each base function
+    pairing once. Otherwise its base score is the highest of the base functions of its name left unpaired, so that a
+    namesake added or removed beside it, as a @singledispatch registration named _ can be, never makes a function the
+    change left no worse a finding; the cost is that a rise below a higher-scoring namesake goes unseen. Failing that,
+    its score in moved, else it is new.
+    """
+    unpaired = list(base)
+    # The base score of each function the change left unchanged, by its def line.
+    twins: dict[int, int] = {}
+    for scored in functions:
+        twin = next((g for g in unpaired if (g.name, g.body) == (scored.name, scored.body)), None)
+        if twin is not None:
+            unpaired.remove(twin)
+            twins[scored.line] = twin.score
+    out = []
+    for scored in _over_limit(functions, added):
+        namesakes = [g.score for g in unpaired if g.name == scored.name]
+        was = twins.get(scored.line, max(namesakes) if namesakes else moved.get(scored.body))
         if was is None or scored.score > was:
             out.append(_finding(path, scored.line, "over-limit", (
                 f"`{scored.name}`: cognitive complexity {scored.score}, "
                 f"{'a new function' if was is None else f'{was} at the base'}; "
                 f"the limit is {COGNITIVE_COMPLEXITY_LIMIT}."), severity="error"))
-    return sorted(out, key=lambda finding: (finding["path"] or "", finding["line"] or 0))
+    return out
 
 
-def _changed_over_limit(change: GateChange) -> tuple[list[dict], list[tuple[str, _ScoredFunction]]]:
+def _judged_files(change: GateChange) -> tuple[list[dict], dict[str, tuple[list[_ScoredFunction], set[int]]]]:
     """A finding for each Python file outside _COMPLEXITY_EXEMPT that the change adds lines to and that cannot be read
-    or parsed; and (path, function) for each function in the others that the change adds a line to, decorators
-    included, and that scores over COGNITIVE_COMPLEXITY_LIMIT."""
-    out, over = [], []
+    or parsed; and, by path, the scored functions of each of the others, with the lines the change adds to it."""
+    out: list[dict] = []
+    judged: dict[str, tuple[list[_ScoredFunction], set[int]]] = {}
     for path, added in change.changed.items():
         if not added or not path.endswith(".py") or path.startswith(_COMPLEXITY_EXEMPT):
             continue
@@ -3906,9 +3932,8 @@ def _changed_over_limit(change: GateChange) -> tuple[list[dict], list[tuple[str,
             out.append(_finding(path, None, "not-scored", "does not parse as Python, so its functions were not scored.",
                                 severity="error"))
             continue
-        over += [(path, scored) for scored in _scored_functions(tree) if scored.score > COGNITIVE_COMPLEXITY_LIMIT
-                 and any(scored.first <= line <= scored.last for line in added)]
-    return out, over
+        judged[path] = (_scored_functions(tree), added)
+    return out, judged
 
 
 def _base_functions(change: GateChange, path: str) -> list[_ScoredFunction]:
