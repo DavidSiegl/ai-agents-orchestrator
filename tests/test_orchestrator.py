@@ -5824,6 +5824,16 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.assertEqual([f["message"] for f in self.found()[1]],
                          ["`big`: cognitive complexity 22, a new function; the limit is 15."])
 
+    def test_a_file_renamed_from_any_name_or_directory_is_compared_with_its_base(self):
+        for old, new in [("bin/tool", "bin/tool.py"), ("tests/helpers.py", "lib/helpers.py")]:
+            with self.subTest(old=old):
+                self.commit_file(old, flat("helper", 20))
+                os.makedirs(os.path.join(self.repo, os.path.dirname(new)), exist_ok=True)
+                self.git("mv", old, new)
+                self.edit(new, "x += 3\n", "x += 30\n")  # still 20
+                self.assertEqual(self.found()[0], [])
+                self.git("commit", "--quiet", "-am", "renamed")
+
     def test_a_name_defined_twice_is_compared_with_the_same_definition_at_the_base(self):
         # A property's getter, scoring 21, then its setter, which scores nothing, under the same name.
         getter = flat("x", 21, indent="    ").replace("    def x(x):\n", "    @property\n    def x(self):\n")

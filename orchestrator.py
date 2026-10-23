@@ -3858,8 +3858,10 @@ def too_complex_functions(change: GateChange) -> list[dict]:
     except OrchestratorError as e:
         return [*out, _finding(None, None, "not-scored", f"the files the change edits could not be listed ({e}), so no "
                                                          f"function was compared with its base.", severity="error")]
-    bases = {old: _base_functions(change, old) for old, _ in pairs
-             if old and old.endswith(".py") and not old.startswith(_COMPLEXITY_EXEMPT)}
+    # A judged file's base whatever its old name or directory, as for bin/tool renamed bin/tool.py or a helper moved
+    # out of tests/; and any other Python file's, as where a function may have moved from.
+    bases = {old: _base_functions(change, old) for old, new in pairs
+             if old and (new in judged or old.endswith(".py"))}
     moved = _moved_scores(change, pairs, bases, judged)
     old_paths = {new: old for old, new in pairs if new}
     for path, (functions, added) in judged.items():

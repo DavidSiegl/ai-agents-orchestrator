@@ -79,10 +79,11 @@ the paper's rules. Each of these is a finding:
 
 - `over-limit`: a function over 15, at its `def` line, when it is new or the change raised its score, as
   "`_poll`: cognitive complexity 19, 14 at the base; the limit is 15". Its base is in the file's base, under the file's
-  old name when the change renamed it: the function of the same name and classes with the same body, which it is
-  unchanged from, else the highest-scoring of the others of that name. So with a name defined more than once, as a
-  property's getter and setter or `@singledispatch` registrations named `_` are, adding or removing one never makes a
-  function the change left no worse a finding; the cost is that a rise below a higher-scoring namesake goes unseen.
+  old name, whatever its name or directory, when the change renamed it: the function of the same name and classes with
+  the same body, which it is unchanged from, else the highest-scoring of the others of that name. So with a name
+  defined more than once, as a property's getter and setter or `@singledispatch` registrations named `_` are, adding
+  or removing one never makes a function the change left no worse a finding; the cost is that a rise below a
+  higher-scoring namesake goes unseen.
   Failing that, it is a function with the same body in the base of any Python file the change touches that is no
   longer in its file under its name: so a function moved to another module, renamed or made a method, but otherwise
   unchanged, keeps its score. A copy, whose original is still in place, is new, and so is a function moved and edited.
