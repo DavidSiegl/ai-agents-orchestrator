@@ -2305,13 +2305,22 @@ def _diff_git_path(names: str) -> str | None:
 
 
 def _unquote(name: str) -> str:
-    """A path as git quotes it when it holds a quote, a backslash or a control character."""
+    """A path as git quotes it when it holds a quote, a backslash or a control character, or, with core.quotePath
+    on, a byte above 0x7f; any other name as it is. The path comes back as os.fsdecode makes it."""
     if len(name) < 2 or not (name.startswith('"') and name.endswith('"')):
         return name
     escapes = {"a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v", '"': '"', "\\": "\\"}
-    return re.sub(r'\\([0-7]{3}|.)',
-                  lambda m: chr(int(m.group(1), 8)) if len(m.group(1)) == 3 else escapes.get(m.group(1), m.group(1)),
-                  name[1:-1])
+    # An octal escape is one byte of the name, so a character above 0x7f is a run of them: gather the bytes and
+    # decode them together.
+    raw = bytearray()
+    for m in re.finditer(r'\\([0-3][0-7]{2}|.)|[^\\]+|\\', name[1:-1], re.DOTALL):
+        if m.group(1) is None:
+            raw += os.fsencode(m.group(0))
+        elif len(m.group(1)) == 3:
+            raw.append(int(m.group(1), 8))
+        else:
+            raw += os.fsencode(escapes.get(m.group(1), m.group(1)))
+    return os.fsdecode(bytes(raw))
 
 
 # quality_report's default for tests: the file has no tests section, as when the gate wrote it, which runs no tests.

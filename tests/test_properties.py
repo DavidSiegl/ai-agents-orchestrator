@@ -22,6 +22,7 @@ from orchestrator import (
     GATE_ERROR,
     GATE_OK,
     Host,
+    _unquote,
     changed_lines,
     ci_credentials,
     parse_gate,
@@ -156,6 +157,22 @@ class TestChangedLines(unittest.TestCase):
             # one it was renamed from or, for a file new to the tree, none.
             kept = [line for n, line in enumerate(lines, 1) if n not in added]
             self.assertTrue(not kept or any(is_subsequence(kept, file_lines(c)) for c in base.values()), path)
+
+
+class TestUnquote(unittest.TestCase):
+    """_unquote against git's own quoting of a file name, with core.quotePath on and off. Runs git."""
+
+    @given(file_names)
+    @example("\x80")  # quoted as two octal escapes, one per byte of its UTF-8, which became two characters
+    def test_undoes_gits_quoting(self, name):
+        with tempfile.TemporaryDirectory() as repo, patch.dict(os.environ, GIT_ENV):
+            git(repo, "init", "-q")
+            with open(os.path.join(repo, name), "w"):
+                pass
+            git(repo, "add", "-A")
+            for quote_path in ("true", "false"):
+                listed = git(repo, "-c", f"core.quotePath={quote_path}", "ls-files").removesuffix("\n")
+                self.assertEqual(_unquote(listed), name, f"core.quotePath={quote_path}: {listed}")
 
 
 # ---------------------------------------------------------------------------
