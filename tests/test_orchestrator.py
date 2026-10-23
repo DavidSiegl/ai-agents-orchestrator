@@ -3859,8 +3859,8 @@ class TestNewDependencies(unittest.TestCase):
         self.assertEqual(pypi.asked, ["limits"])
         self.assertEqual([f["rule"] for f in to_weigh], ["added"])
         self.assertEqual([(f["rule"], f["message"]) for f in issues], [
-            ("unchecked", "PyPI could not be asked about `rich`, `attrs`: the quality round had too little time left "
-                          "to ask; whether they exist is not known.")])
+            ("unchecked", ("PyPI could not be asked about `rich`, `attrs`: the quality round had too little time "
+                           "left to ask; whether they exist is not known."))])
 
     def test_a_dependency_is_found_on_the_line_that_names_it_whole(self):
         pypi = FakePyPI(**{"zope-interface": pypi_project(), "zope": pypi_project()})
@@ -3929,14 +3929,14 @@ class TestNewDependencies(unittest.TestCase):
 
         self.assertEqual(pypi.asked, [])
         self.assertEqual([(f["rule"], f["message"]) for f in issues], [
-            ("not-in-spec", "`local` is a new dependency that the spec does not name; from the path ../local, not "
-                            "from PyPI.")])
+            ("not-in-spec", ("`local` is a new dependency that the spec does not name; from the path ../local, not "
+                             "from PyPI."))])
         self.assertEqual([(f["rule"], f["message"]) for f in to_weigh], [
             ("added", "`member`: a member of the project's workspace, not from PyPI."),
-            ("added", "`forked`, which the spec names: from the repository https://github.com/x/forked, not from "
-                      "PyPI."),
-            ("added", "`wheel-pkg`, which the spec names: from https://example.com/wheel_pkg-1.0-py3-none-any.whl, "
-                      "not from PyPI.")])
+            ("added", ("`forked`, which the spec names: from the repository https://github.com/x/forked, not from "
+                       "PyPI.")),
+            ("added", ("`wheel-pkg`, which the spec names: from https://example.com/wheel_pkg-1.0-py3-none-any.whl, "
+                       "not from PyPI."))])
 
     def test_a_package_from_another_index_is_never_checked_against_pypi(self):
         corp = "https://pypi.internal.example/simple"
@@ -3981,8 +3981,8 @@ class TestNewDependencies(unittest.TestCase):
         issues, to_weigh = self.find(self.changed_manifests(pyproject_with(), new), pypi)
         self.assertEqual((issues, pypi.asked), ([], []))
         self.assertEqual([(f["rule"], f["message"]) for f in to_weigh], [
-            ("other-index", "`rich`, which the spec names: from the index https://mirror.example/simple, not checked "
-                            "against PyPI.")])
+            ("other-index", ("`rich`, which the spec names: from the index https://mirror.example/simple, not "
+                             "checked against PyPI."))])
 
     def test_only_the_manifests_at_the_top_level_count(self):
         files = {("base", "tests/fixtures/x/pyproject.toml"): pyproject_with(),
