@@ -44,6 +44,7 @@ import itertools
 import json
 import math
 import os
+import posixpath
 import queue
 import re
 import secrets
@@ -68,7 +69,7 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, NamedTuple
 from xml.etree import ElementTree
 
 RUNS_DIR = ".orchestrator/runs"
@@ -109,7 +110,15 @@ NO_QUESTION = "(no question given)"
 
 # The quality gate. Requests time out below STALE_SECONDS, so a hung one cannot make a live run look stale.
 DEFAULT_MAX_QUALITY_ROUNDS = 3
+# A workflow's max_files and max_lines when it sets none (Pipeline).
+DEFAULT_MAX_FILES = 15
+DEFAULT_MAX_LINES = 600
+# The workflow keys that hold them; a workflow file sets each to a whole number of at least 1.
+BUDGET_KEYS = ("max_files", "max_lines")
 HTTP_TIMEOUT = 30
+# Seconds a request to PyPI may take. The new-dependencies check stops asking once one fails, so it adds at most this
+# much to a quality round that cannot reach PyPI.
+PYPI_TIMEOUT = 15
 CI_POLL_SECONDS = 10
 # How long one quality round may wait on Jenkins, failed requests retried, before the run fails.
 QUALITY_TIMEOUT = 1200
@@ -467,6 +476,11 @@ class Pipeline:
     description: str = ""
     # Role key -> the harness its agent runs in when no agent flag names one; else DEFAULT_AGENT.
     agents: dict[str, str] = field(default_factory=dict)
+    # The size of change past which a quality round asks the Builder why (diff_budget): files touched, and lines
+    # added plus lines removed. The workflow's, not the gated step's: the change a quality round judges runs from the
+    # run's base to the snapshot, so it holds every editing step's work, not only the gated step's.
+    max_files: int = DEFAULT_MAX_FILES
+    max_lines: int = DEFAULT_MAX_LINES
 
     def __post_init__(self):
         if problem := self._problem():
@@ -477,8 +491,14 @@ class Pipeline:
         if not self.steps:
             return "has no steps"
         checks = (self._name_problem, self._role_problem, self._uniqueness_problem, self._step_problem,
-                  self._collision_problem, self._loop_problem)
+                  self._collision_problem, self._loop_problem, self._budget_problem)
         return next((problem for check in checks if (problem := check())), None)
+
+    def _budget_problem(self) -> str | None:
+        for key in BUDGET_KEYS:
+            if getattr(self, key) < 1:
+                return f"{key} must be at least 1"
+        return None
 
     def _name_problem(self) -> str | None:
         ids, files = [st.id for st in self.steps], [st.file for st in self.steps]
@@ -725,6 +745,8 @@ def find_workflow(name: str) -> Pipeline:
 # A workflow file is TOML holding a workflow's definition, named after the file:
 #
 #   description = "..."                      # optional, shown by `workflows`
+#   max_files = 15                           # optional: the change's budget (Pipeline), 15 files and 600 lines
+#   max_lines = 600                          # when left out
 #   [roles]                                  # optional
 #   build = "Builder"                        # a role's pane label,
 #   tests = { label = "Test Writer", model = "sonnet", agent = "codex" }   # or its label, default model
@@ -738,7 +760,7 @@ def find_workflow(name: str) -> Pipeline:
 # first use the roles. workflow_definition writes the canonical form, which
 # such a file may also be: every role with its label, and every step with its fields.
 
-WORKFLOW_KEYS = {"description", "roles", "steps"}
+WORKFLOW_KEYS = {"description", "roles", "steps", *BUDGET_KEYS}
 ROLE_KEYS = {"label", "model", "agent"}
 STEP_KEYS = {f.name for f in fields(Step)}
 STEP_FLAGS = {f.name for f in fields(Step) if f.default is False}
@@ -814,8 +836,13 @@ def parse_workflow(name: str, data: dict) -> Pipeline:
     description = data.get("description", "")
     if not isinstance(description, str):
         raise ValueError("description must be a string")
+    budget = {key: data[key] for key in BUDGET_KEYS if key in data}
+    for key, value in budget.items():
+        # type(), not isinstance: true is an int to isinstance, but no number of lines.
+        if type(value) is not int:
+            raise ValueError(f"{key} must be a whole number")
     return Pipeline(name, labels, tuple(Step(**st) for st in steps), models=models, description=description,
-                    agents=agents)
+                    agents=agents, **budget)
 
 
 def _parse_role(role: str, raw) -> dict[str, str]:
@@ -898,7 +925,9 @@ def workflow_definition(p: Pipeline) -> dict:
     roles = {role: {"label": label, **{key: table[role] for key, table in (("model", p.models), ("agent", p.agents))
                                        if role in table}}
              for role, label in p.roles.items()}
-    return {**({"description": p.description} if p.description else {}),
+    budget = {f.name: getattr(p, f.name) for f in fields(Pipeline)
+              if f.name in BUDGET_KEYS and getattr(p, f.name) != f.default}
+    return {**({"description": p.description} if p.description else {}), **budget,
             "roles": roles, "steps": [step_fields(st) for st in p.steps]}
 
 
@@ -906,6 +935,7 @@ def workflow_toml(p: Pipeline) -> str:
     """The workflow as a workflow file."""
     d = workflow_definition(p)
     lines = [f"description = {_toml_string(d['description'])}"] if "description" in d else []
+    lines += [f"{key} = {d[key]}" for key in BUDGET_KEYS if key in d]
     for role, table in d["roles"].items():
         lines += ["", f"[roles.{role}]", *(f"{k} = {_toml_string(v)}" for k, v in table.items())]
     for st in d["steps"]:
@@ -1362,6 +1392,16 @@ class Host:
                         "--src-prefix=a/", "--dst-prefix=b/", base, *([commit] if commit else []), "--", *pathspecs,
                         verbatim=True)
 
+    def file_at(self, cwd: str, commit: str, path: str) -> str | None:
+        """The file at path, relative to the repository's top level, as commit has it, verbatim as Host.run says, so
+        os.fsencode gives back the bytes git stores; None where commit has no file there. Raises OrchestratorError
+        when git cannot read commit, or cwd is not in a git repository."""
+        # Each entry is `<mode> <type> <object>\t<path>`; a directory's type is tree.
+        entry = self.git(cwd, "ls-tree", "--full-tree", "-z", commit, "--", path, verbatim=True).split("\0")[0]
+        if entry.split("\t")[0].split(" ")[1:2] != ["blob"]:
+            return None
+        return self.git(cwd, "cat-file", "blob", f"{commit}:{path}", verbatim=True)
+
     def changed_files(self, cwd: str, base: str, *,
                       pathspecs: tuple[str, ...] = ()) -> list[tuple[str | None, str | None]]:
         """(path at base, path in the working tree) of each tracked file changed since base, a rename paired as
@@ -1722,6 +1762,76 @@ class CI:
         body, _ = self._jenkins("GET", self._build_url(number, "consoleText"))
         return "\n".join(body.decode(errors="replace").splitlines()[-CONSOLE_TAIL_LINES:])
 
+
+class PyPIError(OrchestratorError):
+    """PyPI gave no answer the orchestrator could use: none at all, an HTTP error other than 404, or something that
+    is not its JSON."""
+
+
+@dataclass(frozen=True)
+class PyPIProject:
+    """What PyPI knows of a project."""
+    first_release: datetime | None  # the upload of its earliest file, in UTC; None when no release has a file
+    version: str  # its latest version
+    latest_release: datetime | None  # the upload of that version's earliest file, in UTC; None when it has none
+    # Its license expression, else the first line of its license field, else its license classifier's last part;
+    # None when it states none.
+    license: str | None
+
+
+class PyPI:
+    """The Python Package Index's JSON API (https://docs.pypi.org/api/json/), over HTTPS from the orchestrator's own
+    machine, through urlopen, which the tests replace."""
+
+    def __init__(self, urlopen=None):
+        self._urlopen = urlopen or urllib.request.urlopen
+
+    def project(self, name: str) -> PyPIProject | None:
+        """What PyPI knows of the project name, None when it has no such project (HTTP 404). Raises PyPIError, naming
+        the URL, when it gives no usable answer within PYPI_TIMEOUT seconds."""
+        url = f"https://pypi.org/pypi/{urllib.parse.quote(name, safe='')}/json"
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        try:
+            with self._urlopen(req, timeout=PYPI_TIMEOUT) as resp:
+                body = resp.read()
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None
+            raise PyPIError(f"GET {url}: HTTP {e.code}") from e
+        # URLError, a timeout and a dropped connection are all OSErrors.
+        except (OSError, http.client.HTTPException) as e:
+            reason = e.reason if isinstance(e, urllib.error.URLError) else e
+            raise PyPIError(f"GET {url}: {reason}") from e
+        try:
+            return _pypi_project(json.loads(body))
+        # JSON of another shape raises any of these; JSONDecodeError and UnicodeDecodeError are ValueErrors.
+        except (ValueError, TypeError, AttributeError, KeyError) as e:
+            raise PyPIError(f"GET {url}: the answer is not PyPI's JSON: {e}") from e
+
+
+def _pypi_project(data) -> PyPIProject:
+    """The project of PyPI's JSON; ValueError, TypeError, AttributeError or KeyError for JSON of another shape."""
+    info = data["info"] if isinstance(data, dict) else None
+    if not isinstance(info, dict) or not isinstance(info.get("version"), str):
+        raise TypeError("it has no info.version")
+    first = _first_upload(f for files in (data.get("releases") or {}).values() for f in files or [])
+    return PyPIProject(first, info["version"], _first_upload(data.get("urls") or []), _license(info))
+
+
+def _first_upload(files: Iterable[dict]) -> datetime | None:
+    """The earliest upload_time_iso_8601 of PyPI's files, None for none."""
+    times = [datetime.fromisoformat(f["upload_time_iso_8601"]) for f in files]
+    return min(times, default=None)
+
+
+def _license(info: dict) -> str | None:
+    if expression := (info.get("license_expression") or "").strip():
+        return expression
+    if text := (info.get("license") or "").strip():
+        return _clip(text.splitlines()[0], 80)
+    classifiers = [c for c in info.get("classifiers") or [] if c.startswith("License :: ")]
+    return classifiers[0].rsplit(" :: ", 1)[1] if classifiers else None
+
 # ---------------------------------------------------------------------------
 # Workflow
 # ---------------------------------------------------------------------------
@@ -2062,13 +2172,17 @@ def _issues_section(issues, elsewhere: int) -> list[str]:
     return out
 
 
+# Leads the findings to weigh, in a section of the gate's or the orchestrator's checks'.
+TO_WEIGH_NOTE = "These do not fail the gate. Fix each, or say in your report why it should stand."
+
+
 def _to_weigh_section(to_weigh, after: int) -> list[str]:
     """The findings to weigh, numbered on from after, the last issue's number, within QUALITY_ISSUE_LIMIT."""
     out = ["", "## Findings to weigh", ""]
     room = QUALITY_ISSUE_LIMIT - after
     if room <= 0:
         return out + [f"{len(to_weigh)} findings to weigh are not listed; answer the issues above first."]
-    out += ["These do not fail the gate. Fix each, or say in your report why it should stand.", "",
+    out += [TO_WEIGH_NOTE, "",
             *(_numbered(k, i) for k, i in enumerate(to_weigh[:room], after + 1))]
     if (more := len(to_weigh) - room) > 0:
         out += ["", f"{more} more findings to weigh are not listed."]
@@ -2313,7 +2427,7 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
             to_weigh += found
         elif found:
             issues += found
-            conditions.append(f"{len(found)} findings of the `{check.name}` check; each is listed below.")
+            conditions.append(_check_condition(check.name, len(found)))
 
     failing = _NO_TESTS_SECTION
     if tests:
@@ -4234,6 +4348,424 @@ def gate_checks(mutation_budget: float) -> tuple[GateCheck, ...]:
     )
 
 
+# ---------------------------------------------------------------------------
+# Orchestrator checks: the quality round's own, after the build's gate
+# ---------------------------------------------------------------------------
+
+# A new dependency whose first release is fewer days old than this is flagged: few have used it yet, and a name
+# registered for the occasion is the slopsquatting move.
+YOUNG_PACKAGE_DAYS = 14
+
+
+@dataclass(frozen=True)
+class RunChange:
+    """The change a quality round judges, as each OrchestratorCheck is given it: what the build's gate saw, and what
+    only the run has."""
+    spec: str  # the run's spec: its contract step's file, or its task for a workflow without one
+    base: str  # the run's base commit
+    commit: str  # the snapshot the round judges, whose only parent is base
+    diff: str  # Host.change_diff from base to commit
+    changed: dict[str, set[int]]  # changed_lines(diff)
+    # (commit, path) -> the file at path, relative to the repository's top level, as commit has it, verbatim as
+    # Host.file_at gives it; None where it has none. Raises OrchestratorError when git fails on the agents' machine.
+    file_at: Callable[[str, str], str | None]
+    now: float  # when the round judges it, in seconds since the epoch
+
+
+class CheckFindings(NamedTuple):
+    """What an OrchestratorCheck found, each finding {path, line, severity, rule, message} as GateCheck's."""
+    issues: list[dict]  # the findings that fail the gate
+    to_weigh: list[dict]  # those that do not
+
+
+@dataclass(frozen=True)
+class OrchestratorCheck:
+    """A check the orchestrator runs itself, in each quality round after the build's gate, because it needs what the
+    build never sees: the run's spec and its workflow. The first, fixed form of roadmap gap I.
+
+    find returns what it found; a finding's rule is the check's own, which judge_run prefixes with name ("" for
+    none), and its path None for one about the change as a whole. A check that cannot do its work says so in a
+    finding, never by finding nothing. It raises nothing but OrchestratorError, from RunChange.file_at, which fails
+    the round as a Jenkins failure does.
+    """
+    name: str
+    find: Callable[[RunChange], CheckFindings]
+
+
+def orchestrator_checks(pipeline: Pipeline, pypi: "PyPI") -> tuple[OrchestratorCheck, ...]:
+    """The checks a quality round of a run of pipeline runs, in this order: the new dependencies, which it asks pypi
+    about, and the change's size against the workflow's max_files and max_lines, and its paths against the spec."""
+    return (
+        OrchestratorCheck("new-dependencies", functools.partial(new_dependencies, pypi=pypi)),
+        OrchestratorCheck("diff-budget", functools.partial(diff_budget, max_files=pipeline.max_files,
+                                                           max_lines=pipeline.max_lines)),
+        OrchestratorCheck("unexpected-paths", unexpected_paths),
+    )
+
+
+def judge_run(quality: str, checks: tuple[OrchestratorCheck, ...], change: RunChange) -> str:
+    """The quality file the build's gate wrote, quality, with what checks find in change added.
+
+    A check with failing findings is a failed condition, which turns GATE: OK into GATE: ERROR. Every finding is
+    listed in a section of their own at the end, failing ones first, numbered on from the file's last number, at
+    most QUALITY_ISSUE_LIMIT; the rest are counted. quality comes back as it is when they find nothing.
+    """
+    conditions, issues, to_weigh = [], [], []
+    for check in checks:
+        found, weigh = (_named_findings(check.name, part) for part in check.find(change))
+        if found:
+            issues += found
+            conditions.append(_check_condition(check.name, len(found)))
+        to_weigh += weigh
+    if not issues and not to_weigh:
+        return quality
+    if conditions:
+        quality = _failed_by(quality, conditions)
+    numbers = [int(n) for n in re.findall(r"^(\d+)\. ", quality, re.MULTILINE)]
+    return quality.rstrip("\n") + "\n" + "\n".join(_orchestrator_section(issues, to_weigh, max(numbers, default=0))) \
+        + "\n"
+
+
+def _named_findings(name: str, findings: list[dict]) -> list[dict]:
+    """findings with their rules prefixed by the check's name."""
+    return [{**f, "rule": f"{name} {f['rule']}" if f["rule"] else name} for f in findings]
+
+
+def _check_condition(name: str, n: int) -> str:
+    """The failed condition of a check that fails the gate with n findings."""
+    return f"{n} findings of the `{name}` check; each is listed below."
+
+
+def _failed_by(quality: str, conditions: list[str]) -> str:
+    """quality with GATE: ERROR, and conditions last among its failed conditions, a section it gains, before its
+    first other one, when it has none."""
+    lines = quality.split("\n")
+    at = next((i for i, x in enumerate(lines) if x.strip()), 0)
+    lines[at] = re.sub(rf"(GATE:\s*){GATE_OK}\b", rf"\g<1>{GATE_ERROR}", lines[at], count=1)
+    bullets = [f"- {c}" for c in conditions]
+    if "## Failed conditions" in lines:
+        end = lines.index("## Failed conditions") + 2
+        while end < len(lines) and lines[end].startswith("- "):
+            end += 1
+        lines[end:end] = bullets
+    else:
+        first = next((i for i, x in enumerate(lines) if x.startswith("## ")), len(lines))
+        lines[first:first] = ["## Failed conditions", "", *bullets, ""]
+    return "\n".join(lines)
+
+
+def _orchestrator_section(issues: list[dict], to_weigh: list[dict], after: int) -> list[str]:
+    """judge_run's section, numbered on from after, as lines that start with a blank one."""
+    out = ["", "## The orchestrator's checks", "",
+           ("The orchestrator ran these itself after the build, with what the build does not see: the run's spec and "
+            "its workflow.")]
+    listed_issues = issues[:QUALITY_ISSUE_LIMIT]
+    listed_weigh = to_weigh[:QUALITY_ISSUE_LIMIT - len(listed_issues)]
+    if listed_issues:
+        out += ["", *(_numbered(k, f) for k, f in enumerate(listed_issues, after + 1))]
+    if listed_weigh:
+        out += ["", TO_WEIGH_NOTE, "",
+                *(_numbered(k, f) for k, f in enumerate(listed_weigh, after + len(listed_issues) + 1))]
+    if more := len(issues) + len(to_weigh) - len(listed_issues) - len(listed_weigh):
+        out += ["", f"{more} more findings of the orchestrator's checks are not listed."]
+    return out
+
+
+# -- New dependencies ------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DependencyManifest:
+    """A kind of file that lists a project's dependencies, by its name, and how to read it."""
+    basename: str
+    # The packages the file's text names, by package_key, each with the URL it comes from instead of the index,
+    # None for the index. Raises ValueError, or TypeError for a value of the wrong type, saying why, for text it
+    # cannot read.
+    packages: Callable[[str], dict[str, str | None]]
+    # True: its packages are the project's own choice, which the spec must name. False: a lock file, whose new
+    # packages beyond those are what the chosen ones pull in.
+    direct: bool
+
+
+def package_key(name: str) -> str:
+    """A Python package's name as PyPI compares names (PEP 503): lower case, each run of -, _ and . one -."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def pyproject_dependencies(text: str) -> dict[str, str | None]:
+    """DependencyManifest.packages of a pyproject.toml: [project] dependencies and optional-dependencies, and
+    [dependency-groups], an {include-group} entry left out."""
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f"it is not TOML: {e}") from e
+    project = _toml_table(data, "project")
+    lists = [("[project] dependencies", project.get("dependencies", []))]
+    lists += [(f"[project.optional-dependencies] {k}", v)
+              for k, v in _toml_table(project, "optional-dependencies").items()]
+    lists += [(f"[dependency-groups] {k}", v) for k, v in _toml_table(data, "dependency-groups").items()]
+    out: dict[str, str | None] = {}
+    for where, requirements in lists:
+        if not isinstance(requirements, list):
+            raise TypeError(f"{where} is not a list")
+        out.update(_requirement(r) for r in requirements if not isinstance(r, dict))
+    return out
+
+
+def _toml_table(data: dict, key: str) -> dict:
+    """data's table key, {} when it has none; TypeError when key is not a table."""
+    table = data.get(key, {})
+    if not isinstance(table, dict):
+        raise TypeError(f"{key} is not a table")
+    return table
+
+
+# A PEP 508 requirement's name, extras and direct URL: `name[extra] @ url ; marker`, or a version after the name.
+_REQUIREMENT = re.compile(r"\s*([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)\s*(?:\[[^\]]*\]\s*)?(?:@\s*(\S+))?")
+
+
+def _requirement(requirement) -> tuple[str, str | None]:
+    """(package_key, direct URL or None) of a PEP 508 requirement; ValueError for something else."""
+    m = _REQUIREMENT.match(requirement) if isinstance(requirement, str) else None
+    if not m:
+        raise ValueError(f"{requirement!r} is not a requirement")
+    return package_key(m.group(1)), m.group(2)
+
+
+def uv_lock_packages(text: str) -> dict[str, str | None]:
+    """DependencyManifest.packages of a uv.lock: its [[package]]s from a registry. The project itself, and a package
+    from a path, git or a URL, are left out; a direct dependency from a URL is pyproject.toml's to name."""
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f"it is not TOML: {e}") from e
+    packages = data.get("package", [])
+    if not isinstance(packages, list) or not all(isinstance(p, dict) and isinstance(p.get("name"), str)
+                                                 for p in packages):
+        raise TypeError("[[package]] is not a list of tables with a name")
+    return {package_key(p["name"]): None for p in packages
+            if isinstance(p.get("source"), dict) and "registry" in p["source"]}
+
+
+# The files whose new packages the new-dependencies check judges, by their name anywhere in the repository. Python's
+# so far, whose index is PyPI; another ecosystem's needs its own index too.
+DEPENDENCY_MANIFESTS = (
+    DependencyManifest("pyproject.toml", pyproject_dependencies, direct=True),
+    DependencyManifest("uv.lock", uv_lock_packages, direct=False),
+)
+
+
+@dataclass(frozen=True)
+class _NewPackage:
+    """A package a manifest names after the change and not before it."""
+    key: str  # package_key
+    path: str  # the manifest
+    line: int | None  # the first line the change added to it that names the package; None when none does
+    direct: bool  # DependencyManifest.direct
+    url: str | None  # where it comes from instead of the index
+
+
+def new_dependencies(change: RunChange, *, pypi: "PyPI") -> CheckFindings:
+    """The packages that the change adds to a DEPENDENCY_MANIFESTS file, each asked of pypi.
+
+    Fails a direct dependency the spec does not name (spec_names), a package PyPI does not know, one PyPI could not
+    be asked about, and a manifest that cannot be read. Reports a direct dependency the spec names with what PyPI
+    knows of it, flagged when its first release is under YOUNG_PACKAGE_DAYS days old; and the packages a lock file
+    alone adds, those the direct ones pull in, in one finding per lock file. After the first request PyPI gives no
+    usable answer to, it is asked no more.
+    """
+    packages, issues = _new_packages(change)
+    known, failure = _ask_pypi(packages, pypi)
+    named = spec_names(change.spec)
+    to_weigh: list[dict] = []
+    pulled_in: dict[str, list[str]] = {}
+    for p in packages:
+        if not p.direct and known.get(p.key):
+            pulled_in.setdefault(p.path, []).append(f"`{p.key}` ({_whence(p, known, change.now)})")
+        elif judged := _package_finding(p, named, known, change.now):
+            fails, finding = judged
+            (issues if fails else to_weigh).append(finding)
+    for path, described in pulled_in.items():
+        to_weigh.append(_finding(path, None, "pulled-in", (
+            f"{len(described)} new packages that the change's dependencies pull in: {', '.join(described)}.")))
+    if unasked := list(dict.fromkeys(p.key for p in packages if not p.url and p.key not in known)):
+        issues.append(_finding(None, None, "unchecked", (
+            f"PyPI could not be asked about {', '.join(f'`{k}`' for k in unasked)}: {failure}; whether they exist is "
+            f"not known."), severity="error"))
+    return CheckFindings(issues, to_weigh)
+
+
+def _package_finding(p: _NewPackage, named: set[str], known: dict[str, PyPIProject | None],
+                     now: float) -> tuple[bool, dict] | None:
+    """Whether new_dependencies's finding on package p fails the gate, and the finding; None for a package of a lock
+    file that PyPI knows, which is described with the others the lock file adds, or one that PyPI was not asked
+    about, which is unchecked."""
+    if p.direct and p.key not in named:
+        return True, _finding(p.path, p.line, "not-in-spec", (
+            f"`{p.key}` is a new dependency that the spec does not name{_whence(p, known, now, '; ')}."),
+            severity="error")
+    if p.key in known and known[p.key] is None:
+        return True, _finding(p.path, p.line, "not-on-pypi", (
+            f"PyPI does not know `{p.key}`: the name may be mistyped, or name a package that does not exist yet, "
+            f"which anyone could register (slopsquatting)."), severity="error")
+    if p.direct and (p.url or p.key in known):
+        project = known.get(p.key)
+        rule = "young" if project and _young(project, now) else "added"
+        return False, _finding(p.path, p.line, rule, f"`{p.key}`, which the spec names: {_whence(p, known, now)}.")
+    return None
+
+
+def spec_names(spec: str) -> set[str]:
+    """The package_keys of the words in spec that could be a package's name, so a spec names a package when it holds
+    the name as a word, in any case and with -, _ or . in any of their places; a longer name holding it does not."""
+    return {package_key(w.rstrip("._-")) for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9._-]*", spec)}
+
+
+def _new_packages(change: RunChange) -> tuple[list[_NewPackage], list[dict]]:
+    """The packages the change adds to its manifests, those of direct ones first, a package a direct manifest adds
+    left out of the lock files'; and an unreadable finding for each manifest that cannot be read."""
+    manifests = {m.basename: m for m in DEPENDENCY_MANIFESTS}
+    found: list[_NewPackage] = []
+    problems = []
+    # A manifest the change deletes adds nothing, and is not in changed.
+    for path, added in change.changed.items():
+        manifest = manifests.get(posixpath.basename(path))
+        if manifest is None:
+            continue
+        try:
+            before = _manifest_packages(manifest, change.file_at(change.base, path), "at the base")
+            text = change.file_at(change.commit, path)
+            after = _manifest_packages(manifest, text, "in the change")
+        except ValueError as e:
+            problems.append(_finding(path, None, "unreadable", f"{e}; its new dependencies were not checked.",
+                                     severity="error"))
+            continue
+        found += [_NewPackage(key, path, _line_naming(text or "", added, key), manifest.direct, url)
+                  for key, url in after.items() if key not in before]
+    direct = {p.key for p in found if p.direct}
+    found.sort(key=lambda p: not p.direct)
+    return [p for p in found if p.direct or p.key not in direct], problems
+
+
+def _manifest_packages(manifest: DependencyManifest, text: str | None, where: str) -> dict[str, str | None]:
+    """manifest.packages of text, verbatim as Host.file_at gives it, none for no file; ValueError saying where it
+    cannot be read."""
+    if text is None:
+        return {}
+    try:
+        # TOML, the only manifest format so far, is UTF-8.
+        return manifest.packages(os.fsencode(text).decode("utf-8"))
+    except (ValueError, TypeError) as e:  # UnicodeDecodeError is a ValueError
+        raise ValueError(f"`{manifest.basename}` cannot be read {where}: {e}") from e
+
+
+def _line_naming(text: str, added: set[int], key: str) -> int | None:
+    """The first of the added lines of text that names the package key, as spec_names reads a name."""
+    pattern = re.compile(r"(?<![A-Za-z0-9._-])" + "[-_.]+".join(map(re.escape, key.split("-"))) + r"(?![A-Za-z0-9_-])",
+                         re.IGNORECASE)
+    lines = text.split("\n")
+    return next((n for n in sorted(added) if n <= len(lines) and pattern.search(lines[n - 1])), None)
+
+
+def _ask_pypi(packages: list[_NewPackage], pypi: "PyPI") -> tuple[dict[str, PyPIProject | None], str | None]:
+    """What pypi knows of each package that is not from a URL, by key, None for one it does not know; and its error
+    for the first one it gave no usable answer about, which leaves that one and every later one out."""
+    known: dict[str, PyPIProject | None] = {}
+    for p in packages:
+        if p.url is None and p.key not in known:
+            try:
+                known[p.key] = pypi.project(p.key)
+            except PyPIError as e:
+                return known, str(e)
+    return known, None
+
+
+def _whence(p: _NewPackage, known: dict[str, PyPIProject | None], now: float, lead: str = "") -> str:
+    """Where package p comes from, after lead: its URL, or what PyPI knows of it; "" when PyPI was not asked."""
+    if p.url:
+        return f"{lead}from {p.url}, not from PyPI"
+    if p.key not in known:
+        return ""
+    project = known[p.key]
+    if project is None:
+        return f"{lead}PyPI does not know it either"
+    since = f"since {project.first_release:%Y-%m-%d}" if project.first_release else "with no release files"
+    latest = f" of {project.latest_release:%Y-%m-%d}" if project.latest_release else ""
+    young = f"; it is younger than {YOUNG_PACKAGE_DAYS} days, so few have used it yet" if _young(project, now) else ""
+    return f"{lead}on PyPI {since}, latest {project.version}{latest}, license {project.license or 'not stated'}{young}"
+
+
+def _young(project: PyPIProject, now: float) -> bool:
+    """Whether the project's first release is under YOUNG_PACKAGE_DAYS days before now; one with none is."""
+    return project.first_release is None or now - project.first_release.timestamp() < YOUNG_PACKAGE_DAYS * 86400
+
+
+# -- Diff budget and unexpected paths --------------------------------------
+
+
+def diff_sizes(diff: str) -> dict[str, tuple[int, int]]:
+    """(lines added, lines removed) of each file a `git diff -U0` touches, by its path in the new tree, or at the
+    base for a file the diff deletes. A pure rename, a mode change or a binary file counts (0, 0). Only "\n" ends a
+    line, as for changed_lines."""
+    # [path at the base, path in the new tree, added, removed] per file, a side None where the file is not.
+    files: list[list] = []
+    in_hunk = False
+    for line in diff.split("\n"):
+        if line.startswith("diff --git "):
+            path = _diff_git_path(line[len("diff --git "):])
+            files.append([path, path, 0, 0])
+            in_hunk = False
+        elif files and line.startswith("@@"):
+            in_hunk = True
+            _count_hunk(files[-1], line)
+        elif files and not in_hunk:
+            _note_sides(files[-1], line)
+    return {new or old: (added, removed) for old, new, added, removed in files if new or old}
+
+
+def _count_hunk(file: list, line: str) -> None:
+    """Add the lines a `@@` line's hunk adds and removes to file, as diff_sizes keeps it."""
+    if m := re.match(r"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", line):
+        # A count left out is 1.
+        file[2] += 1 if m.group(2) is None else int(m.group(2))
+        file[3] += 1 if m.group(1) is None else int(m.group(1))
+
+
+def _note_sides(file: list, line: str) -> None:
+    """Set the paths in file, as diff_sizes keeps it, that a header line before the file's first hunk names."""
+    for prefix, side, strip in (("rename from ", 0, ""), ("rename to ", 1, ""), ("--- ", 0, "a/"), ("+++ ", 1, "b/")):
+        if line.startswith(prefix):
+            # git ends the name with a tab when it holds a space.
+            name = _unquote(line[len(prefix):].removesuffix("\t"))
+            file[side] = None if name == "/dev/null" else name.removeprefix(strip)
+
+
+def diff_budget(change: RunChange, *, max_files: int, max_lines: int) -> CheckFindings:
+    """A finding to weigh when the change touches more than max_files files, or adds and removes more than max_lines
+    lines between them (diff_sizes); none otherwise."""
+    sizes = diff_sizes(change.diff)
+    added, removed = sum(a for a, _ in sizes.values()), sum(r for _, r in sizes.values())
+    over = []
+    if len(sizes) > max_files:
+        over.append(f"{len(sizes)} files, over the workflow's max_files of {max_files}")
+    if added + removed > max_lines:
+        whose = "its" if over else "the workflow's"
+        over.append(f"{added + removed} lines ({added} added, {removed} removed), over {whose} max_lines of {max_lines}")
+    if not over:
+        return CheckFindings([], [])
+    return CheckFindings([], [_finding(None, None, "", (
+        f"The change touches {', and '.join(over)}. Say in your report why it cannot be smaller."))])
+
+
+def unexpected_paths(change: RunChange) -> CheckFindings:
+    """A finding to weigh for each path the change touches (diff_sizes) that the spec mentions neither as a whole nor
+    by its file name, as a plain substring."""
+    return CheckFindings([], [
+        _finding(path, None, "", "the spec mentions neither this path nor its file name.")
+        for path in sorted(diff_sizes(change.diff))
+        if path not in change.spec and posixpath.basename(path) not in change.spec])
+
+
 def spec_title(spec: str) -> str | None:
     """The `# ` heading on the spec's first non-blank line."""
     for line in spec.splitlines():
@@ -4489,11 +5021,13 @@ class Workflow:
                  max_quality_rounds: int = DEFAULT_MAX_QUALITY_ROUNDS,
                  pipeline: Pipeline | None = None,
                  clocks: Clocks | None = None,
-                 spec: SpecFile | None = None):
+                 spec: SpecFile | None = None,
+                 pypi: PyPI | None = None):
         """pipeline is the run's workflow; without it, the one the state names.
 
         spec, from run --spec, is written as the contract step's file before the run starts, for a state
-        that starts at the step after it (seeded_start).
+        that starts at the step after it (seeded_start). pypi is what the quality rounds' new-dependencies check
+        asks; PyPI() without it.
         """
         self.herdr = herdr
         self.host = host
@@ -4501,6 +5035,7 @@ class Workflow:
         self.notify = notify
         self.ci = ci
         self.spec = spec
+        self.pypi = pypi or PyPI()
         self.pipeline = pipeline = pipeline or run_pipeline(state.workflow, state.workflow_definition)
         if ci and pipeline.gated is None:
             raise OrchestratorError(f"workflow {pipeline.name} has no quality-gated step, "
@@ -5169,8 +5704,8 @@ class Workflow:
         sha = s.ci["sha"]
         where = f"round {n}, quality round {q} of {s.max_quality_rounds}"
         if quality is not None:
-            return _under_gate_line(quality, f"Jenkins build #{build} judged snapshot `{sha}` ({where}) "
-                                             f"and ended {result}.")
+            return _under_gate_line(self._judged_by_orchestrator(quality, sha),
+                                    f"Jenkins build #{build} judged snapshot `{sha}` ({where}) and ended {result}.")
         diff = self.host.change_diff(s.work_dir, s.base, sha)
         changed = changed_lines(diff)
         tests = self._once(f"reading the test report of Jenkins build #{build}", deadline,
@@ -5181,6 +5716,19 @@ class Workflow:
                  f"ran, so nothing judged the change. Make it build first.")
         return quality_report(GATE_BUILD_FAILED, intro, tests=tests, console=console,
                               edited=edited_config(diff, changed), mutmut_state=mutmut_state_files(changed))
+
+    def _judged_by_orchestrator(self, quality: str, sha: str) -> str:
+        """The build's quality file with what orchestrator_checks find in snapshot sha added (judge_run)."""
+        s = self.state
+        base = s.base
+        if base is None:
+            raise OrchestratorError("a quality round before the run has a base")
+        diff = self.host.change_diff(s.work_dir, base, sha)
+        # A workflow without a contract step has only its task to say what the change is for.
+        spec = self._last_text(self.pipeline.contract, 0) or s.task
+        change = RunChange(spec, base, sha, diff, changed_lines(diff),
+                           functools.partial(self.host.file_at, s.work_dir), self.wallclock())
+        return judge_run(quality, orchestrator_checks(self.pipeline, self.pypi), change)
 
     def _poll(self, step: str, deadline: float, poll):
         """Call poll() every CI_POLL_SECONDS until it returns something other than None, and return that.

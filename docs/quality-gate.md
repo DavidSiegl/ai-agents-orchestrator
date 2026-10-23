@@ -2,8 +2,9 @@
 
 How Jenkins judges this repository with `orchestrator.py gate`, and how `orchestrator.py run --quality-gate` uses
 it: the [gate](#the-gate) itself, the [Jenkins setup](#jenkins-setup), the
-[credentials and permissions](#credentials-and-permissions) the orchestrator needs, and the
-[orchestrator loop](#orchestrator-loop).
+[credentials and permissions](#credentials-and-permissions) the orchestrator needs, the
+[orchestrator loop](#orchestrator-loop), and the [orchestrator's own checks](#the-orchestrators-checks), which
+need the run's spec.
 
 ## The gate
 
@@ -447,8 +448,9 @@ becomes `/job/` in its URL, so `AI-Agents-Orchestrator/py-ai-agents-orchestrator
   without one: (5) `<job>/<number>/testReport/api/json`, and (6) the last 60 lines of
   `<job>/<number>/consoleText` when no test failed.
 
-**Once a build ends**, live or resumed: with `quality.md`, whatever the result, that file is the round's, with a
-line under its `GATE:` line naming the build, the snapshot and the round. Without it and ABORTED, or cancelled in
+**Once a build ends**, live or resumed: with `quality.md`, whatever the result, that file is the round's, with
+[the orchestrator's checks](#the-orchestrators-checks) added and a line under its `GATE:` line naming the build,
+the snapshot and the round. Without it and ABORTED, or cancelled in
 the queue, nothing judged the change: the run fails with `ci` cut back to `ref` and `sha`, and the Builder gets no
 fix turn. Without it otherwise: `GATE: BUILD_FAILED`, with the failing tests or the console's end, and a fix turn.
 A build cut back that way is recorded in `ci.rejected`, so a resume builds the snapshot again instead of adopting
@@ -459,6 +461,64 @@ that build.
 the step and keeping `ci`, and a resume gets a fresh timeout. Any other answer, such as 401, 403 or 404, fails the
 run at once, naming the step, method, URL and status. A 404 on the trigger means the job was deleted. The poll
 loops call `_heartbeat`, so a long build does not make the run look stale.
+
+### The orchestrator's checks
+
+Some checks need the run's spec, which lives in the run directory (`.orchestrator/`, ignored, so never in a
+snapshot) and so never reaches Jenkins. The orchestrator runs these itself, in each quality round, after it reads
+the build's `quality.md` and before it writes `quality-<n>-<q>.md`; a build that ended before its Gate stage gets
+none of them. They run only with `--quality-gate`. The spec is the contract step's file, `spec.md` in the default
+workflow, or the run's task for a workflow without one. Each check is an `OrchestratorCheck` in
+`orchestrator_checks`, and judges the change from the run's base to the round's snapshot:
+
+| Check | Fails? | Finds |
+|---|---|---|
+| `new-dependencies` | yes | packages the change adds that the spec does not name or PyPI does not know |
+| `diff-budget` | no | a change over the workflow's `max_files` or `max_lines` |
+| `unexpected-paths` | no | changed paths the spec never mentions |
+
+**New dependencies** reads each manifest the change adds lines to, at the base and in the snapshot: in a
+`pyproject.toml`, `[project] dependencies` and `optional-dependencies` and `[dependency-groups]`; in a `uv.lock`,
+the packages from a registry. A package is new when the snapshot's file names it and the base's does not. Names
+compare as PyPI compares them (PEP 503), and the spec names a package when it holds the name as a word, in any case,
+so `pytest_randomly` names `pytest-randomly` and `pytest-randomly` does not name `pytest`. The spec was agreed with
+the human, so naming a package there is the approval. Each new package not from a URL is looked up at
+`https://pypi.org/pypi/<name>/json`, with a timeout of 15 seconds (`PYPI_TIMEOUT`):
+
+- `not-in-spec` (fails): a package new in a `pyproject.toml` that the spec does not name, with what PyPI knows of it;
+- `not-on-pypi` (fails): a package PyPI answers 404 for. That is the slopsquatting case: a name an agent made up,
+  which anyone could register;
+- `unchecked` (fails): the packages PyPI was not asked about, because a request got no usable answer (no answer, a
+  timeout, an HTTP error other than 404, an answer that is not PyPI's JSON). PyPI is asked no more after the first
+  such request, so it adds at most 15 seconds to the round. A package that could not be checked is never reported as
+  passed, so the next quality round asks again;
+- `unreadable` (fails): a manifest that is not TOML or not in the shape above, at the base or in the change;
+- `added` (reports): a package the spec names, with its first release date, its latest version and its date, and its
+  license, or the URL it comes from. `young` instead when its first release is less than 14 days old
+  (`YOUNG_PACKAGE_DAYS`), or it has no release files: few have used it yet;
+- `pulled-in` (reports): one finding per `uv.lock`, listing with the same facts the packages it alone adds, those the
+  new dependencies pull in. The spec cannot be expected to name them.
+
+**Diff budget** counts the files the change touches and the lines it adds and removes, from `git diff -U0`; a rename
+or a binary file counts as a file of no lines. Over either limit it is one finding about the change as a whole. The
+limits are workflow keys, a whole number of at least 1 each, in a workflow file next to `description`:
+
+```toml
+max_files = 15   # the defaults
+max_lines = 600
+```
+
+They belong to the workflow rather than to the quality-gated step, because the change a quality round judges runs
+from the run's base, so it holds every editing step's work, a Test Writer's as well as the Builder's.
+
+**Unexpected paths** is a finding for each path the change touches, or deletes, that the spec mentions neither as a
+whole nor by its file name.
+
+The findings go into the quality file as the gate's do, with `{path, line, severity, rule, message}` and the rule
+prefixed by the check's name, in a last section, `## The orchestrator's checks`. They are numbered on from the build's
+last number, failing ones first, then the findings to weigh under the same lead sentence as the gate's, at most 50.
+A check with failing findings is a failed condition, added to the build's, and turns `GATE: OK` into `GATE: ERROR`.
+Findings to weigh never change the gate. The Builder answers them all by number, as it answers the gate's.
 
 ### What goes to the Builder
 
