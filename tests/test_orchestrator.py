@@ -5876,6 +5876,10 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.git("add", "lib/more.py")
         self.assertEqual(self.found()[0], [])  # lib/helpers.py's base is lib/, now held to the limit
 
+    def test_a_function_whose_decorator_the_change_adds_is_compared_with_its_unchanged_self(self):
+        self.edit("calc.py", "def big(x):\n", "@staticmethod\ndef big(x):\n")  # touched, its body as it was
+        self.assertEqual(self.found()[0], [])
+
     def test_one_base_function_is_the_base_of_one_function_only(self):
         big = flat("big", 20)
         copy = big.replace("def big(", "def copied(")
