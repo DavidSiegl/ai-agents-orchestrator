@@ -4503,6 +4503,22 @@ class TestFlakyTests(unittest.TestCase):
                                         "# Alternates between runs.\n"),
                          [("tests/test_r.py", 9, "mixed-results")])
 
+    def test_a_test_that_xfails_under_every_seed_is_consistent(self):
+        old = "import pytest\n\n\n@pytest.mark.xfail(strict=True, reason='bug 12')\ndef test_a():\n    assert 1 == 2\n"
+        self.put("tests/test_x.py", old)
+        self.git("add", "tests/test_x.py")
+        self.git("commit", "--quiet", "-m", "xfail")
+        self.put("tests/test_x.py", old.replace("1 == 2", "1 == 3"))
+        self.assertEqual(self.found(), [])
+
+    def test_a_test_that_xfails_under_some_seeds_and_passes_under_others_is_mixed(self):
+        self.assertEqual(self.decorated("", "@pytest.mark.xfail(reason='#12')\n"),
+                         [("tests/test_r.py", 9, "mixed-results")])
+        with patch.object(orchestrator, "FLAKY_SEEDS", (1, 2)):
+            [found] = self.found()
+        self.assertTrue(found["message"].startswith("`test_r` failed as its xfail mark expects under seed 2 and passed "
+                                                    "under seed 1: "), found["message"])
+
     def test_a_change_to_no_test_reruns_nothing(self):
         self.put("calc.py", "def add(a, b):\n    return b + a\n")
         self.put("tests/test_state.py", self.BASE.replace("import unittest\n", "import unittest  # edited\n"))

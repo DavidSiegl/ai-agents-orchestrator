@@ -2346,8 +2346,9 @@ def failing_tests(report: str) -> list[tuple[str, str]]:
 
 def junit_outcomes(report: str) -> list[tuple[str, str, str]]:
     """(test, outcome, what failed) for each test case of a JUnit XML report, such as pytest's --junitxml, test
-    named classname.name. outcome is "failed" for a failure or an error, with its message; else "skipped" or
-    "passed", with "". Raises OrchestratorError when the report cannot be read or parsed."""
+    named classname.name. outcome is "failed" for a failure or an error, with its message; else, with "",
+    "xfailed" for a test that failed as an xfail mark expected (pytest's <skipped type="pytest.xfail">), "skipped"
+    for any other skip, or "passed". Raises OrchestratorError when the report cannot be read or parsed."""
     try:
         # As for new_coverage: the build's own test run wrote it, and expat refuses the S314 attacks.
         tree = ElementTree.parse(report)  # noqa: S314
@@ -2359,8 +2360,10 @@ def junit_outcomes(report: str) -> list[tuple[str, str, str]]:
         failed = next((e for e in (case.find("failure"), case.find("error")) if e is not None), None)
         if failed is not None:
             out.append((name, "failed", failed.get("message") or failed.text or ""))
+        elif (skipped := case.find("skipped")) is not None:
+            out.append((name, "xfailed" if skipped.get("type") == "pytest.xfail" else "skipped", ""))
         else:
-            out.append((name, "skipped" if case.find("skipped") is not None else "passed", ""))
+            out.append((name, "passed", ""))
     return out
 
 
@@ -2736,9 +2739,10 @@ WEAKENED_TESTS_DETECTORS = (
 
 def flaky_tests(change: GateChange) -> list[dict]:
     """The flaky-tests check's find: reruns the Python tests the change adds or removes lines of, decorators
-    included, once under each of FLAKY_SEEDS with pytest-randomly, and reports at its def each test that failed under
-    some seeds and passed under the others, naming both. A test that fails under every seed is not reported: it
-    fails, and the failing-tests section says so.
+    included, once under each of FLAKY_SEEDS with pytest-randomly, and reports at its def each test whose outcome,
+    failed, xfailed (failed as its xfail mark expects) or passed, differs between seeds, naming the seeds of each. A
+    test that fails under every seed is not reported: it fails, and the failing-tests section says so; nor is one
+    that xfails under every seed.
 
     The tests run in a temporary copy of the files git tracks, so that what the project's addopts write, such as a
     coverage report, does not replace the build's own; a test that needs an untracked file, such as a build product,
@@ -2795,18 +2799,18 @@ def _rerun_findings(root: str, tmp: str, tests: dict[tuple[str, str], int]) -> l
     for i, by_seed in outcomes.items():
         path, names, params = _node_parts(i)
         name = ".".join(names) + params
-        failed = [s for s in seeds if by_seed.get(s) == "failed"]
-        passed = [s for s in seeds if by_seed.get(s) == "passed"]
+        # What it did under which seeds, for each outcome it had.
+        did = [f"{_OUTCOME_VERBS[o]} under {_seeds(under)}" for o in _OUTCOME_VERBS
+               if (under := [s for s in seeds if by_seed.get(s) == o])]
         unjudged = [s for s in seeds if s not in by_seed]
-        if failed and passed:
-            message = (f"`{name}` failed under {_seeds(failed)} and passed under {_seeds(passed)}"
+        if len(did) > 1:
+            message = (f"`{name}` {', '.join(did[:-1])} and {did[-1]}"
                        + (f", and was skipped or not run under {_seeds(unjudged)}" if unjudged else "")
                        + ": it depends on the order the tests run in, or on state or randomness that one run does "
                          "not share with another.")
             rule = "mixed-results"
         elif len(by_seed) < 2 and unjudged:
-            judged = (f"{'failed' if failed else 'passed'} under {_seeds(failed or passed)} only" if by_seed
-                      else "neither passed nor failed under any seed")
+            judged = f"{did[0]} only" if did else "neither passed nor failed under any seed"
             message = (f"`{name}` {judged}; the reports of {_seeds(unjudged)} have it skipped or not at "
                        f"all, so too few runs tell whether it is flaky.")
             rule = "not-rerun"
@@ -2910,9 +2914,9 @@ def _collect_python_tests(root: str, tests: dict[tuple[str, str], int]) -> tuple
 
 def _rerun_python_tests(root: str, ids: list[str], seed: int, report: str) -> tuple[dict[str, str], str | None]:
     """The outcome, as junit_outcomes gives it, of each of ids that pytest reported when it ran them in the order
-    pytest-randomly's seed gives, writing its JUnit report to report; a test reported more than once failed if any
-    of its cases did, and passed if any other did. And the problem, a clause, when that run told nothing, then with
-    {}."""
+    pytest-randomly's seed gives, writing its JUnit report to report; a test reported more than once takes the
+    first of failed, xfailed and passed that any of its cases has, else skipped. And the problem, a clause, when
+    that run told nothing, then with {}."""
     doing = f"rerunning them under seed {seed}"
     proc, problem = _pytest(root, doing, ["-p", "randomly", f"--randomly-seed={seed}", f"--junitxml={report}", *ids])
     if proc is None:
@@ -2924,7 +2928,7 @@ def _rerun_python_tests(root: str, ids: list[str], seed: int, report: str) -> tu
     except OrchestratorError as e:
         return {}, f"pytest, {doing}, wrote a report the gate cannot read: {e}"
     by_case = {_junit_case(i): i for i in ids}
-    rank = ("skipped", "passed", "failed")
+    rank = ("skipped", "passed", "xfailed", "failed")
     out: dict[str, str] = {}
     for name, outcome, _ in cases:
         if (i := by_case.get(name)) is not None and rank.index(outcome) >= rank.index(out.get(i, "skipped")):
@@ -2972,6 +2976,11 @@ def _pytest_said(proc: subprocess.CompletedProcess) -> str:
     err = [line.strip() for line in proc.stderr.split("\n") if line.strip()]
     out = [line.strip() for line in proc.stdout.split("\n") if line.strip()]
     return _clip(err[0] if err else out[-1] if out else "nothing")
+
+
+# How a mixed-results finding says what a test did under some seeds, by its outcome as junit_outcomes gives it; a
+# skip judges nothing, so it has none.
+_OUTCOME_VERBS = {"failed": "failed", "xfailed": "failed as its xfail mark expects", "passed": "passed"}
 
 
 def _flaky_finding(path: str | None, line: int | None, rule: str, message: str) -> dict:

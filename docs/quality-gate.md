@@ -73,8 +73,10 @@ product, does not find it there:
 
 - `mixed-results`: a test that failed under some seeds and passed under the others, at its `def`, naming the seeds
   of each. It depends on the order of the tests, on state another test leaves, or on randomness pytest-randomly
-  seeds. A test that fails under every seed is not reported here: it fails, and the failing tests say so. A run that
-  skips a test, or leaves it out of its report (an `addopts` with `--maxfail`, say), neither passed nor failed it;
+  seeds. A test that fails under every seed is not reported here: it fails, and the failing tests say so. An xfail
+  counts as an outcome of its own, so a test that xfails under every seed is consistent, and one that xfails under
+  some seeds and passes or xpasses under others is mixed. A run that skips a test, or leaves it out of its report
+  (an `addopts` with `--maxfail`, say), neither passed nor failed it;
 - `not-rerun`: the reruns could not judge the tests: pytest could not start, took longer than 30 seconds, ended in a
   usage or collection error, or collected tests without listing their ids; a changed test file could not be read or
   parsed; or the temporary copy could not be made. After a run that went wrong, the
