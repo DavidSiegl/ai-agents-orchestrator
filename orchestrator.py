@@ -4812,8 +4812,8 @@ def _new_packages(change: RunChange) -> tuple[list[_NewPackage], list[dict], lis
         before, before_error = _read_ecosystem(ecosystem, lambda path: change.file_at(change.base, path))
         if after_error and not (before_error and before_error.path == after_error.path):
             issues.append(_unreadable(after_error, "in the change", "error"))
-        elif after_error or before_error:
-            to_weigh.append(_unreadable(before_error or after_error, "at the base", "warning"))
+        elif error := before_error or after_error:
+            to_weigh.append(_unreadable(error, "at the base", "warning"))
         else:
             added = change.changed.get(ecosystem.manifest, set())
             new, moved = _compare_dependencies(ecosystem, before, after, functools.partial(
