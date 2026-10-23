@@ -165,7 +165,7 @@ class FakeHost(Host):
             return {p for p in self.changed if p.startswith(f"{cwd}/")}
         return {p for p in self.changed if not any(p.startswith(f"{w}/") for w in self.worktrees)}
 
-    def git_run(self, cwd, *args, timeout=60, errors="strict"):
+    def git_run(self, cwd, *args, timeout=60, verbatim=False):
         self.git_calls.append(args)
         self.git_log.append((cwd, args))
         if cwd in self.worktrees:
@@ -3502,6 +3502,14 @@ class TestChangedLines(unittest.TestCase):
                 "+++ b/evil.md\n+--- a/x\n+rename to y\n")
         self.assertEqual(changed_lines(diff), {"f.md": {2, 3, 4}})
 
+    def test_only_a_newline_ends_a_line(self):
+        # Each of these ends a line for str.splitlines, which would read the rest of the added line as a header.
+        for sep in ("\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", " ", " "):
+            with self.subTest(sep=repr(sep)):
+                diff = (f"diff --git a/f.py b/f.py\n--- a/f.py\n+++ b/f.py\n@@ -3,0 +4,3 @@\n"
+                        f"+x = 1{sep}diff --git a/g.py b/g.py{sep}@@ -5,0 +6,2 @@\n+y\n+z\n")
+                self.assertEqual(changed_lines(diff), {"f.py": {4, 5, 6}})
+
     def test_build_config_edits(self):
         diff = ("diff --git a/Jenkinsfile b/Jenkinsfile\n--- a/Jenkinsfile\n+++ b/Jenkinsfile\n@@ -1 +1 @@\n-a\n+b\n"
                 "diff --git a/uv.lock b/uv.lock\ndeleted file mode 100644\n"
@@ -3750,6 +3758,12 @@ class TestGate(unittest.TestCase):
             self.git("add", name)
         status, _, err = self.gate("--out", "quality.md")
         self.assertEqual((status, err), (0, "GATE: OK, in quality.md\n"))
+
+    def test_a_carriage_return_in_an_added_line_does_not_end_it(self):
+        with open(os.path.join(self.repo, "f.py"), "ab") as f:
+            f.write(b"x = 1\rdiff --git a/g.py b/g.py\r@@ -5,0 +6,2 @@\ny = 2\nz = 3\n")
+        base = self.git("rev-parse", "HEAD").strip()
+        self.assertEqual(changed_lines(self.host.change_diff(self.repo, base)), {"f.py": {4, 5, 6}})
 
     def test_an_unresolvable_base_writes_nothing(self):
         out = os.path.join(self.repo, "quality.md")
