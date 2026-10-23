@@ -15,6 +15,8 @@ pipeline {
     environment {
         UV_NO_PROGRESS = '1'
         COVERAGE_FILE  = '.coverage'
+        // tests/conftest.py's larger profile: a build tries ten times the examples a local run does.
+        HYPOTHESIS_PROFILE = 'ci'
     }
 
     stages {

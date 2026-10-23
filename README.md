@@ -404,5 +404,8 @@ uv run pytest
 uv run pytest --cov=orchestrator --cov-branch --cov-report=xml && uv run python orchestrator.py gate --base main --coverage coverage.xml
 ```
 
+`tests/test_properties.py` holds property-based tests, which Hypothesis feeds generated inputs: 25 per test by
+default, 250 with `HYPOTHESIS_PROFILE=ci`, as Jenkins runs them (`tests/conftest.py`).
+
 `packaging/build-binary.sh` builds the binary for the machine it runs on into `dist/`, with PyInstaller from the
 `build` dependency group, and smoke-tests it; see [Tooling](docs/architecture.md#tooling).

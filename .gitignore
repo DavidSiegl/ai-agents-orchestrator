@@ -17,3 +17,6 @@ TESTING.md
 .coverage
 coverage.xml
 quality.md
+
+# What Hypothesis keeps of the examples it tried
+.hypothesis/
