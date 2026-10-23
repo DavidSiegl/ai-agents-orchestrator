@@ -4466,6 +4466,23 @@ class TestFlakyTests(unittest.TestCase):
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-rerun")])
         self.assertIn(f"did not finish within {orchestrator.FLAKY_RUN_TIMEOUT} seconds", found[0]["message"])
 
+    def test_no_room_for_the_reports_is_a_finding(self):
+        self.change_the_tests()
+        with patch.object(tempfile, "tempdir", os.path.join(self.repo, "no-such-dir")):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-rerun")])
+        self.assertRegex(found[0]["message"], r"^could not make a directory for the reruns' reports: .*No such file.*; "
+                                              r"the changed tests were not rerun\.$")
+
+    def test_reports_left_behind_are_a_finding_beside_the_results(self):
+        self.change_the_tests()
+        with patch.object(orchestrator.shutil, "rmtree", side_effect=PermissionError(13, "Permission denied")):
+            found = self.found()
+        self.assertIn(self.alternates(), [f["message"] for f in found])
+        [left] = [f for f in found if f["rule"] == "reports-left"]
+        self.assertEqual((left["path"], left["line"]), (None, None))
+        self.assertRegex(left["message"], r"^could not remove the reruns' reports in .+: .*Permission denied")
+
     def test_a_test_file_that_does_not_collect_is_a_finding(self):
         self.change_the_tests()
         with open(os.path.join(self.repo, "tests/test_state.py"), "a") as f:

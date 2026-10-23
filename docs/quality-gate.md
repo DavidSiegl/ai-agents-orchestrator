@@ -72,10 +72,12 @@ so the project's environment that `uv run` gives, whatever `pytest` is on `PATH`
   seeds. A test that fails under every seed is not reported here: it fails, and the failing tests say so. A run that
   skips a test, or leaves it out of its report (an `addopts` with `--maxfail`, say), neither passed nor failed it;
 - `not-rerun`: the reruns could not judge the tests: pytest could not start, took longer than 30 seconds, ended in a
-  usage or collection error, or collected tests without listing their ids, or a changed test file could not be read
-  or parsed. After a run that went wrong, the finding says which earlier runs were judged. A test that fewer than
-  two runs passed or failed, and that is not mixed, is one of these too, at its `def`. pytest runs at
-  `--verbosity=-1`, which a `-v` or `-q` in the project's `addopts` or `PYTEST_ADDOPTS` does not change.
+  usage or collection error, or collected tests without listing their ids; a changed test file could not be read or
+  parsed; or the temporary directory for the runs' reports could not be made. After a run that went wrong, the
+  finding says which earlier runs were judged. A test that is not mixed and that fewer than two runs passed or
+  failed is one of these too, at its `def`. pytest runs at `--verbosity=-1`, which a `-v` or `-q` in the project's
+  `addopts` or `PYTEST_ADDOPTS` does not change;
+- `reports-left`: that directory could not be removed afterwards; the reruns' results stand.
 
 A change to a helper or fixture outside the tests' `def`s reruns nothing. The check adds at most six pytest runs of
 30 seconds to the gate, the collection included, and only when the change touches a test. pytest-randomly is in the

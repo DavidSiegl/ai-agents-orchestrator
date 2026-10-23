@@ -44,6 +44,7 @@ import queue
 import re
 import secrets
 import shlex
+import shutil
 import signal
 import socket
 import string
@@ -2747,7 +2748,8 @@ def flaky_tests(change: GateChange) -> list[dict]:
     pytest and pytest-randomly must be importable by the gate's own interpreter, as a `uv run` of the project makes
     them. A pytest run that cannot start, takes longer than FLAKY_RUN_TIMEOUT, ends in a usage or collection error
     or writes no readable report ends the reruns with a finding saying so, after what the runs before it showed; so
-    does a changed test file that cannot be read or parsed.
+    does a changed test file that cannot be read or parsed, and a temporary directory for the reports that cannot be
+    made. One that cannot be removed afterwards is a finding of its own, beside the results.
     """
     tests, out = _changed_python_tests(change)
     if not tests:
@@ -2756,8 +2758,14 @@ def flaky_tests(change: GateChange) -> list[dict]:
     # Each test's outcome by the seed of a run that reported it as passed or failed.
     outcomes: dict[str, dict[int, str]] = {i: {} for i in ids}
     seeds: list[int] = []
-    with tempfile.TemporaryDirectory() as tmp:
-        for seed in FLAKY_SEEDS if ids else ():
+    tmp = None
+    if ids:
+        try:
+            tmp = tempfile.mkdtemp(prefix="flaky-tests-")
+        except OSError as e:
+            problem = f"could not make a directory for the reruns' reports: {e}"
+    if tmp is not None:
+        for seed in FLAKY_SEEDS:
             reported, problem = _rerun_python_tests(change.root, ids, seed, os.path.join(tmp, f"seed-{seed}.xml"))
             if problem:
                 break
@@ -2765,6 +2773,11 @@ def flaky_tests(change: GateChange) -> list[dict]:
             for i, outcome in reported.items():
                 if outcome != "skipped":
                     outcomes[i][seed] = outcome
+        try:
+            shutil.rmtree(tmp)
+        except OSError as e:
+            out.append(_flaky_finding(None, None, "reports-left",
+                                      f"could not remove the reruns' reports in {tmp}: {e}"))
     for i, by_seed in outcomes.items():
         path, *names = i.split("::")
         failed = [s for s in seeds if by_seed.get(s) == "failed"]
