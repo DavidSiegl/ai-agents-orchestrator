@@ -2741,8 +2741,9 @@ def flaky_tests(change: GateChange) -> list[dict]:
     """The flaky-tests check's find: reruns the Python tests the change adds or removes lines of, decorators
     included, once under each of FLAKY_SEEDS with pytest-randomly, and reports at its def each test whose outcome,
     failed, xfailed (failed as its xfail mark expects) or passed, differs between seeds, naming the seeds of each. A
-    test that fails under every seed is not reported: it fails, and the failing-tests section says so; nor is one
-    that xfails under every seed.
+    test that fails under every seed is not flaky, but is a finding of its own: the build may fail it too, which the
+    failing-tests section lists, or it may need what the copy below lacks, so that the reruns could not judge it.
+    One that xfails under every seed is not reported.
 
     The tests run in a temporary copy of the files git tracks, so that what the project's addopts write, such as a
     coverage report, does not replace the build's own; a test that needs an untracked file, such as a build product,
@@ -2824,6 +2825,15 @@ def _rerun_findings(root: str, tmp: str, tests: dict[tuple[str, str], int]) -> l
             message = (f"`{name}` {judged}; the reports of {_seeds(unjudged)} have it skipped or not at "
                        f"all, so too few runs tell whether it is flaky.")
             rule = "not-rerun"
+        elif set(by_seed.values()) == {"failed"}:
+            # Not flaky, but the gate cannot tell a test the build fails too from one that needs what the copy lacks.
+            message = (f"`{name}` failed under {_seeds(list(by_seed))}, every rerun"
+                       + (f" that did not skip it or leave it out ({_seeds(unjudged)} did)" if unjudged else "")
+                       + ", which ran in a copy of the tracked files. If the build failed it too, the failing tests "
+                         "list it. If the build passed it, it needs something the copy lacks, such as git's "
+                         "metadata, an untracked or ignored file or a build product, so whether it is flaky could "
+                         "not be judged here.")
+            rule = "failed-every-run"
         else:
             continue
         out.append(_flaky_finding(path, tests[(path, ".".join(names))], rule, message))

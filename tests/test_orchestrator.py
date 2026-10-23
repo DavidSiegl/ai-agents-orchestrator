@@ -4359,15 +4359,16 @@ class TestFlakyTests(unittest.TestCase):
         text = self.change_the_tests()
         found = self.found()
         by_line = {f["line"]: f for f in found}
-        self.assertEqual({(f["path"], f["severity"], f["rule"]) for f in found},
-                         {("tests/test_state.py", "warning", "mixed-results")})
+        self.assertEqual({(f["path"], f["severity"]) for f in found}, {("tests/test_state.py", "warning")})
         # test_alternates fails on the second and fourth run, in any order of the tests.
         self.assertEqual(by_line.pop(15)["message"], self.alternates())
+        # test_broken fails under every seed: not flaky, but reported, since the copy may be what it lacks.
+        self.assertEqual(by_line.pop(self.line_of(text, "def test_broken():"))["rule"], "failed-every-run")
         # Each seed orders each pair one way or the other. Five seeds that split none of eight independent pairs
         # have a chance of 16 ** -8 under a uniform shuffle, so some reader is reported whatever pytest-randomly's
-        # version. No writer is, nor test_broken, which fails under every seed and is the failing tests' to report,
-        # nor test_stable. test_old_reads depends on test_write_0 as test_read_0 does, but the change left it alone,
-        # so it is not rerun.
+        # version. No writer is, nor test_stable. test_old_reads depends on test_write_0 as test_read_0 does, but
+        # the change left it alone, so it is not rerun.
+        self.assertEqual({f["rule"] for f in by_line.values()}, {"mixed-results"})
         readers = {self.line_of(text, f"def test_read_{k}():"): k for k in range(self.PAIRS)}
         self.assertTrue(by_line)
         self.assertLessEqual(set(by_line), set(readers))
@@ -4402,14 +4403,16 @@ class TestFlakyTests(unittest.TestCase):
     def test_a_test_missing_from_a_run_s_report_is_not_counted_as_passed(self):
         # --maxfail=1 ends each run at its first failure, so of four tests that always fail, each run reports one.
         # None is flaky; some must be reported under fewer than two seeds, as five runs report five failures in all.
+        # One that two or more runs failed is reported as failing under every seed that judged it.
         self.put("pytest.ini", "[pytest]\naddopts = --maxfail=1\n")
         self.git("add", "pytest.ini")
         text = self.BASE + "".join(f"\n\ndef test_fails_{k}():\n    assert False\n" for k in range(4))
         self.put("tests/test_state.py", text)
         found = self.found()
-        self.assertEqual({f["rule"] for f in found}, {"not-rerun"})
+        self.assertIn("not-rerun", {f["rule"] for f in found})
+        self.assertLessEqual({f["rule"] for f in found}, {"not-rerun", "failed-every-run"})
         lines = {self.line_of(text, f"def test_fails_{k}():") for k in range(4)}
-        for f in found:
+        for f in (f for f in found if f["rule"] == "not-rerun"):
             self.assertIn(f["line"], lines)
             self.assertRegex(f["message"], r"^`test_fails_\d` (failed under seed \d only|neither passed nor failed "
                                            r"under any seed); the reports of seeds? [\d, and]+ have it skipped or not "
@@ -4559,9 +4562,8 @@ class TestFlakyTests(unittest.TestCase):
                 self.put("pyproject.toml", f"[project]\nname = 'p'\n\n{table}")
                 self.git("add", "pyproject.toml")
                 self.put("tests/test_state.py", text)
-                found = self.found()
-                self.assertTrue(found)
-                self.assertEqual({f["rule"] for f in found}, {"not-rerun"})
+                # Without the table, each of them would fail under every seed, and none would be judged too seldom.
+                self.assertIn("not-rerun", {f["rule"] for f in self.found()})
 
     def test_the_project_s_pytest_config_is_found_as_pytest_finds_it(self):
         cases = [
@@ -4583,6 +4585,36 @@ class TestFlakyTests(unittest.TestCase):
                         f.write(text)
                 found = orchestrator._pytest_inifile(tree)
                 self.assertEqual(found and os.path.basename(found), expected)
+
+    def failing_in_the_copy(self, base, changed, extra=None):
+        """The findings on tests/test_g.py changed from base to changed, with extra files beside it untracked."""
+        self.put("tests/test_g.py", base)
+        self.git("add", "tests/test_g.py")
+        self.git("commit", "--quiet", "-m", "test_g")
+        for name, text in (extra or {}).items():
+            self.put(name, text)
+        self.put("tests/test_g.py", changed)
+        with patch.object(orchestrator, "FLAKY_SEEDS", (1, 2)):
+            return self.found()
+
+    def test_a_test_that_needs_git_s_metadata_fails_every_run_in_the_copy(self):
+        test = ("import os\nimport subprocess\n\n\ndef test_head():\n"
+                "    subprocess.run(['git', 'rev-parse', 'HEAD'], check=True, cwd=os.path.dirname(__file__))\n")
+        [found] = self.failing_in_the_copy(test.replace("check=True", "check=False"), test)
+        self.assertEqual((found["path"], found["line"], found["severity"], found["rule"]),
+                         ("tests/test_g.py", 5, "warning", "failed-every-run"))
+        self.assertEqual(found["message"],
+                         "`test_head` failed under seeds 1 and 2, every rerun, which ran in a copy of the tracked "
+                         "files. If the build failed it too, the failing tests list it. If the build passed it, it "
+                         "needs something the copy lacks, such as git's metadata, an untracked or ignored file or a "
+                         "build product, so whether it is flaky could not be judged here.")
+
+    def test_a_test_that_needs_an_ignored_file_fails_every_run_in_the_copy(self):
+        test = ("import os\n\n\ndef test_settings():\n"
+                "    assert os.path.exists(os.path.join(os.path.dirname(__file__), '..', 'settings.local'))\n")
+        found = self.failing_in_the_copy(test.replace("assert ", "assert True or "), test,
+                                         {".gitignore": "settings.local\n", "settings.local": "x = 1\n"})
+        self.assertEqual([(f["line"], f["rule"]) for f in found], [(4, "failed-every-run")])
 
     def test_a_change_to_no_test_reruns_nothing(self):
         self.put("calc.py", "def add(a, b):\n    return b + a\n")
