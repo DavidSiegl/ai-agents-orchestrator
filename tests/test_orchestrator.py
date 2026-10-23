@@ -4280,20 +4280,29 @@ class TestFlakyTests(unittest.TestCase):
     """The flaky-tests check over a real git repository, rerunning its tests with this suite's own pytest."""
 
     BASE = (
-        "import unittest\n"                                 # 1
-        "\n"                                                # 2
-        "# test_writes fills it; the tests that read it pass only before that.\n"  # 3
-        "STATE = []\n"                                      # 4
-        "\n"                                                # 5
-        "\n"                                                # 6
-        "def test_old_reads():\n"                           # 7
-        "    assert STATE == []\n"                          # 8
-        "\n"                                                # 9
-        "\n"                                                # 10
-        "class TestState(unittest.TestCase):\n"             # 11
-        "    def test_reads(self):\n"                       # 12
-        "        self.assertEqual(STATE, STATE)\n"          # 13
+        "import os\n"                                      # 1
+        "import unittest\n"                                # 2
+        "\n"                                               # 3
+        "# test_write_<k> adds k; test_read_<k> passes only before it.\n"  # 4
+        "WRITTEN = set()\n"                                # 5
+        "# A character for each run of TestRuns.test_alternates in this checkout.\n"  # 6
+        "RUNS = os.path.join(os.path.dirname(__file__), 'runs')\n"  # 7
+        "\n"                                               # 8
+        "\n"                                               # 9
+        "def test_old_reads():\n"                          # 10
+        "    assert 0 not in WRITTEN\n"                    # 11
+        "\n"                                               # 12
+        "\n"                                               # 13
+        "class TestRuns(unittest.TestCase):\n"             # 14
+        "    def test_alternates(self):\n"                 # 15
+        "        self.skipTest('not yet')\n"               # 16
+        "        with open(RUNS, 'a') as f:\n"             # 17
+        "            f.write('x')\n"                       # 18
+        "        with open(RUNS) as f:\n"                  # 19
+        "            self.assertEqual(len(f.read()) % 2, 1)\n"  # 20
     )
+    # The reader and writer pairs change_the_tests adds.
+    PAIRS = 8
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -4322,28 +4331,53 @@ class TestFlakyTests(unittest.TestCase):
         diff = self.host.change_diff(self.repo, base)
         return orchestrator.flaky_tests(orchestrator.GateChange(self.repo, base, diff, changed_lines(diff)))
 
-    def change_the_tests(self):
-        """Edit TestState.test_reads to depend on test order, and add a writer, a stable and a broken test."""
-        self.put("tests/test_state.py",
-                 self.BASE.replace("self.assertEqual(STATE, STATE)", "self.assertEqual(STATE, [])")
-                 + "\n\ndef test_writes():\n    STATE.append(1)\n"
-                   "\n\ndef test_stable():\n    assert STATE == STATE\n"
-                   "\n\ndef test_broken():\n    assert False\n")
+    def change_the_tests(self, extra=""):
+        """Edit TestRuns.test_alternates to fail on every second run, whatever the order, and add PAIRS writers and
+        readers, a stable test, a broken one and extra; returns the new text of the test file."""
+        text = self.BASE.replace("self.skipTest('not yet')", "self.assertIsNotNone(RUNS)")
+        for k in range(self.PAIRS):
+            text += (f"\n\ndef test_write_{k}():\n    WRITTEN.add({k})\n"
+                     f"\n\ndef test_read_{k}():\n    assert {k} not in WRITTEN\n")
+        text += ("\n\ndef test_stable():\n    assert WRITTEN == WRITTEN\n"
+                 "\n\ndef test_broken():\n    assert False\n" + extra)
+        self.put("tests/test_state.py", text)
+        return text
+
+    @staticmethod
+    def line_of(text, definition):
+        return text.splitlines().index(definition) + 1
+
+    @staticmethod
+    def alternates():
+        """The finding's message on TestRuns.test_alternates, which fails on the second and fourth run."""
+        s = orchestrator.FLAKY_SEEDS
+        return (f"`TestRuns.test_alternates` failed under seeds {s[1]} and {s[3]} and passed under seeds {s[0]}, "
+                f"{s[2]} and {s[4]}: it depends on the order the tests run in, or on state or randomness that one run "
+                f"does not share with another.")
 
     def test_an_order_dependent_test_is_reported_with_the_seeds_it_failed_under(self):
-        self.change_the_tests()
+        text = self.change_the_tests()
         found = self.found()
-        # test_broken fails under every seed, which the failing-tests section reports, and test_stable under none.
-        # test_old_reads depends on the order as much as test_reads does, but the change left it alone, so it is not
-        # rerun: with pytest-randomly 5.0.0 it would fail under seeds 1 and 3 among these tests.
-        self.assertEqual([(f["path"], f["line"], f["severity"], f["rule"]) for f in found],
-                         [("tests/test_state.py", 12, "warning", "mixed-results")])
-        m = re.fullmatch(r"`TestState\.test_reads` failed under seeds? ([\d, and]+) and passed under seeds? "
-                         r"([\d, and]+): .+", found[0]["message"])
-        self.assertIsNotNone(m, found[0]["message"])
-        failed, passed = ({int(s) for s in re.findall(r"\d+", g)} for g in m.groups())
-        self.assertTrue(failed and passed)
-        self.assertEqual(failed | passed, set(orchestrator.FLAKY_SEEDS))
+        by_line = {f["line"]: f for f in found}
+        self.assertEqual({(f["path"], f["severity"], f["rule"]) for f in found},
+                         {("tests/test_state.py", "warning", "mixed-results")})
+        # test_alternates fails on the second and fourth run, in any order of the tests.
+        self.assertEqual(by_line.pop(15)["message"], self.alternates())
+        # Each seed orders each pair one way or the other. Five seeds that split none of eight independent pairs
+        # have a chance of 16 ** -8 under a uniform shuffle, so some reader is reported whatever pytest-randomly's
+        # version. No writer is, nor test_broken, which fails under every seed and is the failing tests' to report,
+        # nor test_stable. test_old_reads depends on test_write_0 as test_read_0 does, but the change left it alone,
+        # so it is not rerun.
+        readers = {self.line_of(text, f"def test_read_{k}():"): k for k in range(self.PAIRS)}
+        self.assertTrue(by_line)
+        self.assertLessEqual(set(by_line), set(readers))
+        for line, f in by_line.items():
+            m = re.fullmatch(rf"`test_read_{readers[line]}` failed under seeds? ([\d, and]+) and passed under seeds? "
+                             r"([\d, and]+): .+", f["message"])
+            self.assertIsNotNone(m, f["message"])
+            failed, passed = ({int(s) for s in re.findall(r"\d+", g)} for g in m.groups())
+            self.assertTrue(failed and passed)
+            self.assertEqual(failed | passed, set(orchestrator.FLAKY_SEEDS))
 
     def test_a_change_to_no_test_reruns_nothing(self):
         self.put("calc.py", "def add(a, b):\n    return b + a\n")
