@@ -2320,6 +2320,13 @@ def tool_findings(tool: GateTool, output: str, root: str, tracked: set[str]) -> 
 def failing_tests(report: str) -> list[tuple[str, str]]:
     """(test, what failed) for each failing or erroring test case of a JUnit XML report, such as pytest's
     --junitxml. Raises OrchestratorError when the report cannot be read or parsed."""
+    return [(name, detail) for name, outcome, detail in junit_outcomes(report) if outcome == "failed"]
+
+
+def junit_outcomes(report: str) -> list[tuple[str, str, str]]:
+    """(test, outcome, what failed) for each test case of a JUnit XML report, such as pytest's --junitxml, test
+    named classname.name. outcome is "failed" for a failure or an error, with its message; else "skipped" or
+    "passed", with "". Raises OrchestratorError when the report cannot be read or parsed."""
     try:
         # As for new_coverage: the build's own test run wrote it, and expat refuses the S314 attacks.
         tree = ElementTree.parse(report)  # noqa: S314
@@ -2327,10 +2334,12 @@ def failing_tests(report: str) -> list[tuple[str, str]]:
         raise OrchestratorError(f"cannot read the test report {report}: {e}") from e
     out = []
     for case in tree.iter("testcase"):
+        name = f"{case.get('classname', '')}.{case.get('name', '')}".strip(".")
         failed = next((e for e in (case.find("failure"), case.find("error")) if e is not None), None)
         if failed is not None:
-            out.append((f"{case.get('classname', '')}.{case.get('name', '')}".strip("."),
-                        failed.get("message") or failed.text or ""))
+            out.append((name, "failed", failed.get("message") or failed.text or ""))
+        else:
+            out.append((name, "skipped" if case.find("skipped") is not None else "passed", ""))
     return out
 
 
@@ -2709,6 +2718,10 @@ def flaky_tests(change: GateChange) -> list[dict]:
     with pytest-randomly, and reports at its def each test that failed under some seeds and passed under the others,
     naming both. A test that fails under every seed is not reported: it fails, and the failing-tests section says so.
 
+    A run that skips a test, or does not report it, as when the project's addopts stop at the first failure, neither
+    passed nor failed it. A test that is not mixed, which fewer than two runs passed or failed, is reported as one
+    that too few runs judged.
+
     pytest decides which of those defs are tests, so a helper named test_* that it does not collect is not rerun.
     pytest and pytest-randomly must be importable by the gate's own interpreter, as a `uv run` of the project makes
     them. A pytest run that cannot start, takes longer than FLAKY_RUN_TIMEOUT, ends in a usage or collection error
@@ -2719,24 +2732,38 @@ def flaky_tests(change: GateChange) -> list[dict]:
     if not tests:
         return out
     ids, problem = _collect_python_tests(change.root, tests)
-    failed_under: dict[str, list[int]] = {i: [] for i in ids}
+    # Each test's outcome by the seed of a run that reported it as passed or failed.
+    outcomes: dict[str, dict[int, str]] = {i: {} for i in ids}
     seeds: list[int] = []
     with tempfile.TemporaryDirectory() as tmp:
         for seed in FLAKY_SEEDS if ids else ():
-            failed, problem = _rerun_python_tests(change.root, ids, seed, os.path.join(tmp, f"seed-{seed}.xml"))
+            reported, problem = _rerun_python_tests(change.root, ids, seed, os.path.join(tmp, f"seed-{seed}.xml"))
             if problem:
                 break
             seeds.append(seed)
-            for i in failed:
-                failed_under[i].append(seed)
-    for i, failed_seeds in failed_under.items():
-        if 0 < len(failed_seeds) < len(seeds):
-            path, *names = i.split("::")
-            passed = [s for s in seeds if s not in failed_seeds]
-            out.append(_flaky_finding(path, tests[(path, _python_test_name(i))], "mixed-results",
-                                      f"`{'.'.join(names)}` failed under {_seeds(failed_seeds)} and passed under "
-                                      f"{_seeds(passed)}: it depends on the order the tests run in, or on state or "
-                                      f"randomness that one run does not share with another."))
+            for i, outcome in reported.items():
+                if outcome != "skipped":
+                    outcomes[i][seed] = outcome
+    for i, by_seed in outcomes.items():
+        path, *names = i.split("::")
+        failed = [s for s in seeds if by_seed.get(s) == "failed"]
+        passed = [s for s in seeds if by_seed.get(s) == "passed"]
+        unjudged = [s for s in seeds if s not in by_seed]
+        if failed and passed:
+            message = (f"`{'.'.join(names)}` failed under {_seeds(failed)} and passed under {_seeds(passed)}"
+                       + (f", and was skipped or not run under {_seeds(unjudged)}" if unjudged else "")
+                       + ": it depends on the order the tests run in, or on state or randomness that one run does "
+                         "not share with another.")
+            rule = "mixed-results"
+        elif len(by_seed) < 2 and unjudged:
+            judged = (f"{'failed' if failed else 'passed'} under {_seeds(failed or passed)} only" if by_seed
+                      else "neither passed nor failed under any seed")
+            message = (f"`{'.'.join(names)}` {judged}; the reports of {_seeds(unjudged)} have it skipped or not at "
+                       f"all, so too few runs tell whether it is flaky.")
+            rule = "not-rerun"
+        else:
+            continue
+        out.append(_flaky_finding(path, tests[(path, _python_test_name(i))], rule, message))
     if problem:
         out.append(_flaky_finding(None, None, "not-rerun", f"{problem}; " + (
             f"only the reruns under {_seeds(seeds)} were judged." if seeds else "the changed tests were not rerun.")))
@@ -2792,24 +2819,32 @@ def _collect_python_tests(root: str, tests: dict[tuple[str, str], int]) -> tuple
     return sorted(i for i in ids if (i.split("::")[0], _python_test_name(i)) in tests), None
 
 
-def _rerun_python_tests(root: str, ids: list[str], seed: int, report: str) -> tuple[list[str], str | None]:
-    """The node ids among ids that failed or errored when pytest ran them in the order pytest-randomly's seed gives,
-    writing its JUnit report to report; and the problem, a clause, when that run told nothing, then with []."""
+def _rerun_python_tests(root: str, ids: list[str], seed: int, report: str) -> tuple[dict[str, str], str | None]:
+    """The outcome, as junit_outcomes gives it, of each of ids that pytest reported when it ran them in the order
+    pytest-randomly's seed gives, writing its JUnit report to report; a test reported more than once failed if any
+    of its cases did, and passed if any other did. And the problem, a clause, when that run told nothing, then with
+    {}."""
     doing = f"rerunning them under seed {seed}"
     proc, problem = _pytest(root, doing, ["-p", "randomly", f"--randomly-seed={seed}", f"--junitxml={report}", *ids])
     if proc is None:
-        return [], problem
+        return {}, problem
     if not os.path.isfile(report):
-        return [], f"pytest, {doing}, wrote no test report: {_pytest_said(proc)}"
+        return {}, f"pytest, {doing}, wrote no test report: {_pytest_said(proc)}"
     try:
-        failed = {name for name, _ in failing_tests(report)}
+        cases = junit_outcomes(report)
     except OrchestratorError as e:
-        return [], f"pytest, {doing}, wrote a report the gate cannot read: {e}"
-    return [i for i in ids if _junit_case(i) in failed], None
+        return {}, f"pytest, {doing}, wrote a report the gate cannot read: {e}"
+    by_case = {_junit_case(i): i for i in ids}
+    rank = ("skipped", "passed", "failed")
+    out: dict[str, str] = {}
+    for name, outcome, _ in cases:
+        if (i := by_case.get(name)) is not None and rank.index(outcome) >= rank.index(out.get(i, "skipped")):
+            out[i] = outcome
+    return out, None
 
 
 def _junit_case(node_id: str) -> str:
-    """How failing_tests names the test of a pytest node id: pytest's JUnit classname, the path dotted without .py
+    """How junit_outcomes names the test of a pytest node id: pytest's JUnit classname, the path dotted without .py
     and the classes after it, then a dot and the test's name with its parameters."""
     path, *names = node_id.split("::")
     return ".".join([re.sub(r"\.py$", "", path).replace("/", "."), *names])

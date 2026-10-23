@@ -68,10 +68,12 @@ so the project's environment that `uv run` gives, whatever `pytest` is on `PATH`
 
 - `mixed-results`: a test that failed under some seeds and passed under the others, at its `def`, naming the seeds
   of each. It depends on the order of the tests, on state another test leaves, or on randomness pytest-randomly
-  seeds. A test that fails under every seed is not reported here: it fails, and the failing tests say so;
+  seeds. A test that fails under every seed is not reported here: it fails, and the failing tests say so. A run that
+  skips a test, or leaves it out of its report (an `addopts` with `--maxfail`, say), neither passed nor failed it;
 - `not-rerun`: the reruns could not judge the tests: pytest could not start, took longer than 30 seconds, ended in a
   usage or collection error, or collected tests without listing their ids, or a changed test file could not be read
-  or parsed. After a run that went wrong, the finding says which earlier runs were judged. pytest runs at
+  or parsed. After a run that went wrong, the finding says which earlier runs were judged. A test that fewer than
+  two runs passed or failed, and that is not mixed, is one of these too, at its `def`. pytest runs at
   `--verbosity=-1`, which a `-v` or `-q` in the project's `addopts` or `PYTEST_ADDOPTS` does not change.
 
 A change to a helper or fixture outside the tests' `def`s reruns nothing. The check adds at most six pytest runs of

@@ -4400,6 +4400,36 @@ class TestFlakyTests(unittest.TestCase):
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-rerun")])
         self.assertIn("printed no node id the gate could read: 20 tests collected", found[0]["message"])
 
+    def test_a_test_missing_from_a_run_s_report_is_not_counted_as_passed(self):
+        # --maxfail=1 ends each run at its first failure, so of four tests that always fail, each run reports one.
+        # None is flaky; some must be reported under fewer than two seeds, as five runs report five failures in all.
+        self.put("pytest.ini", "[pytest]\naddopts = --maxfail=1\n")
+        text = self.BASE + "".join(f"\n\ndef test_fails_{k}():\n    assert False\n" for k in range(4))
+        self.put("tests/test_state.py", text)
+        found = self.found()
+        self.assertEqual({f["rule"] for f in found}, {"not-rerun"})
+        lines = {self.line_of(text, f"def test_fails_{k}():") for k in range(4)}
+        for f in found:
+            self.assertIn(f["line"], lines)
+            self.assertRegex(f["message"], r"^`test_fails_\d` (failed under seed \d only|neither passed nor failed "
+                                           r"under any seed); the reports of seeds? [\d, and]+ have it skipped or not "
+                                           r"at all, so too few runs tell whether it is flaky\.$")
+
+    def test_a_test_skipped_under_some_seeds_is_judged_by_the_others(self):
+        # Skipped on the third run, failing on the second and fourth: the third is neither a pass nor a failure.
+        text = self.BASE.replace("self.skipTest('not yet')", "self.assertIsNotNone(RUNS)").replace(
+            "            self.assertEqual(len(f.read()) % 2, 1)\n",
+            "            runs = len(f.read())\n"
+            "        if runs == 3:\n"
+            "            self.skipTest('the third run')\n"
+            "        self.assertEqual(runs % 2, 1)\n")
+        self.put("tests/test_state.py", text)
+        s = orchestrator.FLAKY_SEEDS
+        self.assertEqual([f["message"] for f in self.found()], [(
+            f"`TestRuns.test_alternates` failed under seeds {s[1]} and {s[3]} and passed under seeds {s[0]} and "
+            f"{s[4]}, and was skipped or not run under seed {s[2]}: it depends on the order the tests run in, or on "
+            f"state or randomness that one run does not share with another.")])
+
     def test_a_change_to_no_test_reruns_nothing(self):
         self.put("calc.py", "def add(a, b):\n    return b + a\n")
         self.put("tests/test_state.py", self.BASE.replace("import unittest\n", "import unittest  # edited\n"))
