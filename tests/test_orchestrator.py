@@ -1213,6 +1213,11 @@ class TestHost(unittest.TestCase):
         with self.assertRaisesRegex(OrchestratorError, "No such file or directory"):
             host.rename("/x/review-1.md", "/x/review-1.rejected.md")
 
+    def test_output_that_is_not_utf8_raises_naming_the_command(self):
+        with self.assertRaisesRegex(OrchestratorError, r"^printf '\\351': printed what is not UTF-8"):
+            Host().run(["printf", "\\351"])
+        self.assertEqual(Host().run(["printf", "\\351"], verbatim=True).stdout, os.fsdecode(b"\xe9"))
+
 
 class TestHostGit(unittest.TestCase):
     """Host's fetch, fast-forward and merge steps on real git: a bare origin, our checkout A and someone else's B."""
@@ -3765,6 +3770,27 @@ class TestGate(unittest.TestCase):
         base = self.git("rev-parse", "HEAD").strip()
         self.assertEqual(changed_lines(self.host.change_diff(self.repo, base)), {"f.py": {4, 5, 6}})
 
+    def test_a_file_name_that_is_not_utf8_is_judged(self):
+        name = os.fsdecode(b"f\xe9.py")
+        self.put(name, "a = 1\n")
+        self.git("add", name)
+        self.git("commit", "--quiet", "-m", "latin-1 name")
+        with open(os.path.join(self.repo, name), "a") as f:
+            f.write("b = 2  # noqa: E501\n")
+        # A Python tool prints the name's bytes; ruff prints U+FFFD for each one that is not UTF-8.
+        for printed in (b"f\xe9.py", "f�.py".encode()):
+            with self.subTest(printed=printed):
+                with open(os.path.join(self.stubs, "ruff.out"), "wb") as f:
+                    f.write(printed + b":2:1: E501 Line too long (130 > 120)\n")
+                status, _, _ = self.gate("--out", "quality.md")
+                self.assertEqual(status, 1)
+                # Strict UTF-8: the name's undecodable byte is written as an escape.
+                with open(os.path.join(self.repo, "quality.md"), encoding="utf-8") as f:
+                    text = f.read()
+                self.assertIn("1. `f\\xe9.py:2` error ruff E501: Line too long (130 > 120)\n", text)
+                self.assertNotIn("none the gate could read", text)
+                self.assertIn("f\\xe9.py:2", text.split("## Suppressions", 1)[1])
+
     def test_an_unresolvable_base_writes_nothing(self):
         out = os.path.join(self.repo, "quality.md")
         status, stdout, err = self.gate("--base", "no-such-rev", "--out", out)
@@ -4166,6 +4192,12 @@ class TestToolFindings(unittest.TestCase):
                                            '[var-annotated]\norchestrator.py:594:5: note: See https://x\n'),
                          [{"path": "orchestrator.py", "line": 594, "severity": "error", "rule": "mypy var-annotated",
                            "message": 'Need type annotation for "tokens"'}])
+
+    def test_a_name_ruff_prints_lossily_is_not_guessed_between_two_files(self):
+        ruff = next(t for t in orchestrator.GATE_TOOLS if t.name == "ruff")
+        tracked = {os.fsdecode(b"a\xe9.py"), os.fsdecode(b"a\xe8.py")}
+        self.assertEqual(orchestrator.tool_findings(ruff, "a�.py:1:8: F401 `os` imported but unused\n",
+                                                    "/repo", tracked), [])
 
     def test_pymarkdown_with_absolute_paths(self):
         self.assertEqual(self.read("pymarkdown", "/repo/README.md:3:1: MD040: Fenced code blocks should have a "

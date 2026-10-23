@@ -72,8 +72,10 @@ The gate is `GATE: ERROR` when any of these holds, and `GATE: OK` otherwise:
 Exit status 0 means `GATE: OK`, 1 `GATE: ERROR`, and 2 that the gate could not judge (`REV` names no commit, not a
 git tree, no rules file, an unreadable report), in which case it writes nothing.
 
-A change to a file that is not UTF-8, such as a Latin-1 line or a binary file that git diffs as text, is judged
-like any other. The gate reads the diff as git printed it, keeping the bytes it cannot decode, and only a newline
+A change to a file that is not UTF-8, such as a Latin-1 line or a binary file that git diffs as text, or to a
+file whose name is not UTF-8, is judged like any other. The gate reads the diff, git's file lists and the linters'
+output as they were printed, keeping the bytes it cannot decode, and the quality file writes each such byte of a
+file name as `\xNN`. Any other git output it cannot decode leaves the change unjudged (exit 2). Only a newline
 ends a diff line: a carriage return or form feed inside an added line cannot pass for a header that would move the
 lines after it to another file. A test file that `test-integrity` cannot decode is an `unreadable` finding of that
 check, since its tests cannot be compared.

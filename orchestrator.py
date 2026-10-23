@@ -1146,8 +1146,8 @@ class Host:
         line end made "\n", which suits output that is parsed, such as JSON or a state file. verbatim keeps it as
         the command printed it, for output that carries paths or file contents: line ends stay as they are, and
         bytes the file system's encoding cannot decode become lone surrogates, as os.fsdecode makes them, so a
-        path in it opens the file it names. Raises OrchestratorError when the command cannot be started or runs
-        longer than timeout seconds.
+        path in it opens the file it names. Raises OrchestratorError when the command cannot be started, runs
+        longer than timeout seconds, or, without verbatim, prints what the locale's encoding cannot decode.
         """
         if self.ssh_target:
             # BatchMode fails fast instead of hanging on a password prompt nobody can see.
@@ -1160,6 +1160,8 @@ class Host:
                              timeout=timeout, env=child_env())
         except (OSError, subprocess.TimeoutExpired) as e:
             raise OrchestratorError(f"{shlex.join(argv)}: {e}") from e
+        except UnicodeDecodeError as e:
+            raise OrchestratorError(f"{shlex.join(argv)}: printed what is not {e.encoding.upper()}: {e}") from e
         return subprocess.CompletedProcess(proc.args, proc.returncode, os.fsdecode(proc.stdout),
                                            os.fsdecode(proc.stderr))
 
@@ -1324,8 +1326,9 @@ class Host:
 
     def changed_files(self, cwd: str, base: str) -> list[tuple[str | None, str | None]]:
         """(path at base, path in the working tree) of each tracked file changed since base, a rename paired as
-        change_diff pairs it; None on the side where the file does not exist."""
-        fields = self.git(cwd, "diff", "--name-status", "-z", "-M", "--no-ext-diff", base).split("\0")
+        change_diff pairs it; None on the side where the file does not exist. The paths are verbatim, as Host.run
+        says, so each opens the file it names."""
+        fields = self.git(cwd, "diff", "--name-status", "-z", "-M", "--no-ext-diff", base, verbatim=True).split("\0")
         out: list[tuple[str | None, str | None]] = []
         i = 0
         # -z gives each entry as its status, then one path, or two for a rename; the list ends with an empty field.
@@ -2159,10 +2162,12 @@ def judge_change(cwd: str, base: str, *, rules: str | None = None, coverage: str
     report of the tree's tests such as pytest's --junitxml, has a failing test, or when coverage, a Cobertura
     report of the tree such as pytest-cov's coverage.xml, puts new code below GATE_MIN_COVERAGE percent on
     GATE_MIN_NEW_LINES or more new lines to cover; else OK. Suppressions the change added are listed, not counted against it. Paths are
-    absolute or relative to the process's working directory.
+    absolute or relative to the process's working directory. A file name that is not UTF-8 appears in the
+    quality file with each byte it cannot decode as `\\xNN`.
 
     Raises OrchestratorError when it cannot judge: cwd is not in a git work tree, base names no commit, there
-    is no rules file, or the test or coverage report cannot be read.
+    is no rules file, the test or coverage report cannot be read, or git prints what it cannot decode outside
+    the paths and diffs it reads verbatim, such as a work tree whose own path is not UTF-8.
     """
     host = Host()
     proc = host.git_run(cwd, "rev-parse", "--show-toplevel")
@@ -2179,10 +2184,11 @@ def judge_change(cwd: str, base: str, *, rules: str | None = None, coverage: str
 
     diff = host.change_diff(root, base_sha)
     changed = changed_lines(diff)
-    tracked = {f for f in host.git(root, "ls-files", "-z").split("\0") if f}
+    tracked = {f for f in host.git(root, "ls-files", "-z", verbatim=True).split("\0") if f}
     conditions, findings = [], []
     for tool in GATE_TOOLS:
-        files = [f for f in host.git(root, "ls-files", "-z", "--", *tool.pathspecs).split("\0") if f]
+        files = [f for f in host.git(root, "ls-files", "-z", "--", *tool.pathspecs, verbatim=True).split("\0")
+                 if f]
         if files:
             found, problem = _run_gate_tool(tool, root, rules_path, files, tracked)
             findings += found
@@ -2220,10 +2226,13 @@ def judge_change(cwd: str, base: str, *, rules: str | None = None, coverage: str
     head = host.git(root, "rev-parse", "HEAD").strip()
     intro = (f"`orchestrator.py gate` judged the working tree at `{head}` against the base `{base_sha}`"
              + (f", by the rules in `{rules}`." if rules else "."))
-    return quality_report(GATE_ERROR if conditions else GATE_OK, intro, conditions=conditions, issues=issues,
+    text = quality_report(GATE_ERROR if conditions else GATE_OK, intro, conditions=conditions, issues=issues,
                           to_weigh=to_weigh, elsewhere=elsewhere, tests=failing, coverage=coverage_sentence,
                           suppressions=added_suppressions(root, changed), edited=edited_config(diff, changed),
                           rules_from=f"`{rules}`" if rules else None)
+    # Paths and linter output come verbatim, so a name that is not UTF-8 holds lone surrogates, which no file or
+    # terminal can take: give their bytes back, then write each byte that is not UTF-8 as \xNN.
+    return text.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
 
 
 def _run_gate_tool(tool: GateTool, root: str, rules: str, files: list[str],
@@ -2231,8 +2240,9 @@ def _run_gate_tool(tool: GateTool, root: str, rules: str, files: list[str],
     """The tool's findings over files, and the failed condition it caused, None when it ran as it should."""
     try:
         # The command is a fixed tool's, and the files are git's list of tracked ones; no shell reads either.
+        # surrogateescape decodes the paths it prints as git's verbatim ones are, so they match the tracked files.
         proc = subprocess.run(tool.command(rules, files), cwd=root, capture_output=True, text=True,  # noqa: S603
-                              errors="replace", timeout=GATE_TOOL_TIMEOUT, env=child_env(), check=False)
+                              errors="surrogateescape", timeout=GATE_TOOL_TIMEOUT, env=child_env(), check=False)
     except FileNotFoundError:
         return [], f"`{tool.name}` is not installed: it is not on PATH."
     except subprocess.TimeoutExpired:
@@ -2253,15 +2263,23 @@ def tool_findings(tool: GateTool, output: str, root: str, tracked: set[str]) -> 
 
     A line that is not a finding on a tracked file, such as a summary, is skipped. Paths become relative to root,
     the repository's top level; rule starts with the tool's name, so the Builder knows which tool said it.
+    tracked and output hold a name that is not UTF-8 as os.fsdecode does; the tool may print it so, or with
+    U+FFFD for each byte that is not, as ruff does, which names the one tracked file it can stand for.
     """
+    # Each such tracked name by how a lossy tool prints it; None where two names print alike.
+    lossy: dict[str, str | None] = {}
+    for name in tracked:
+        if (shown := os.fsencode(name).decode("utf-8", "replace")) != name:
+            lossy[shown] = None if shown in lossy else name
     out = []
     for text in output.splitlines():
         at = _FINDING_AT.fullmatch(text.strip())
         if not at:
             continue
-        path = os.path.relpath(os.path.join(root, at["path"]), root)
+        shown = os.path.relpath(os.path.join(root, at["path"]), root)
+        path = shown if shown in tracked else lossy.get(shown)
         detail = tool.detail.fullmatch(at["detail"])
-        if path not in tracked or not detail:
+        if path is None or not detail:
             continue
         out.append({"path": path, "line": int(at["line"]) if at["line"] else None,
                     "severity": detail.groupdict().get("severity") or "error",
