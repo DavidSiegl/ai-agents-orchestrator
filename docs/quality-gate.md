@@ -70,12 +70,12 @@ It reads Python only; another language is a `WeakenedTestsDetector` beside the P
 function it is editing rather than split it. A function counts when the change adds a line to it, decorators
 included, in a Python file outside `tests/`, which is exempt as it is from ruff's `C901`: any function that no other
 function holds, a method of a nested class and a function under a module-level `if` or `try` included. A function
-nested in another is part of that one. Files are read as Python reads them, by their byte order mark or coding cookie. Its score is G. Ann Campbell's
-[cognitive complexity](https://www.sonarsource.com/docs/CognitiveComplexity.pdf), which SonarQube's rule S3776
-measured: a point for each `if`, `elif`, `else`, ternary, loop, `except`, `match`, sequence of like boolean operators
-and call of a function to itself, and one more for each level of nesting on those that nest. The comment above
-`COGNITIVE_COMPLEXITY_LIMIT` in `orchestrator.py` says how each Python construct maps to the paper's rules. Each of
-these is a finding:
+nested in another is part of that one. Files are read as Python reads them, by their byte order mark or coding
+cookie. Its score is G. Ann Campbell's [cognitive complexity](https://www.sonarsource.com/docs/CognitiveComplexity.pdf),
+which SonarQube's rule S3776 measured: a point for each `if`, `elif`, `else`, ternary, loop, `except`, `match`,
+sequence of like boolean operators and call of a function to itself, and one more for each level of nesting on those
+that nest. The comment above `COGNITIVE_COMPLEXITY_LIMIT` in `orchestrator.py` says how each Python construct maps to
+the paper's rules. Each of these is a finding:
 
 - `over-limit`: a function over 15, at its `def` line, when it is new or the change raised its score, as
   "`_poll`: cognitive complexity 19, 14 at the base; the limit is 15". Its base is the function of the same name and
@@ -90,9 +90,10 @@ these is a finding:
   parse to have no tests.
 
 ruff's `C90` stays beside it. It counts branches without their nesting, so it misses a deeply nested function that
-cognitive complexity catches, and it reports at the `def` line, which a change that grows an existing function does not
-add; but it still catches a flat function of many branches, which cognitive complexity scores lower. A function both
-flag is two findings at its `def`.
+cognitive complexity catches, but it still catches a flat function of many branches, which cognitive complexity scores
+lower. It reports at the `def` line, and the gate keeps a linter's finding only on a line the change adds: when a change
+grows an existing function, only this check reports it. A function whose `def` line the change adds, such as a new
+one, and that both flag, is two findings at its `def`.
 
 **Flaky tests** reruns the tests the change adds or edits, so a test that passed the build's one run by luck of
 the order is caught. A test counts when the change adds or removes a line of it in a test file outside `mutants/`, as
