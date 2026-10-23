@@ -169,9 +169,38 @@ pipeline {
         }
     }
 
+    // Mail on a failure and on the first green build after one, never on a run that merely succeeded again. Not for
+    // a quality build: the orchestrator run that triggered it hands its result to the Builder.
     post {
         always {
             cleanWs()
+        }
+        failure {
+            script {
+                if (!params.GIT_REF) {
+                    emailext(
+                        to: 'david.siegl95@gmail.com',
+                        subject: "FAILED  ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                        body: """Failed - see the attached log.
+
+Gate report, if the build reached the Gate stage: ${env.BUILD_URL}artifact/quality.md
+${env.BUILD_URL}console""",
+                        attachLog: true,
+                        compressLog: true
+                    )
+                }
+            }
+        }
+        fixed {
+            script {
+                if (!params.GIT_REF) {
+                    emailext(
+                        to: 'david.siegl95@gmail.com',
+                        subject: "RECOVERED  ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                        body: "${env.BUILD_URL}"
+                    )
+                }
+            }
         }
     }
 }
