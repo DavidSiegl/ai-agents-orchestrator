@@ -55,7 +55,7 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -2363,20 +2363,13 @@ def _floor_tenth(percent: float) -> str:
 
 
 def added_suppressions(root: str, changed: dict[str, set[int]]) -> list[tuple[str, int, str]]:
-    """The (path, line, text) of each added line, in the working tree at root, that silences a linter or coverage."""
+    """The (path, line, text) of each added line, in the working tree at root, that silences a linter or coverage.
+    Raises OrchestratorError when a file the change adds lines to cannot be read."""
     out = []
-    for path, added in sorted(changed.items()):
-        if not added:
-            continue
-        try:
-            with open(os.path.join(root, path), encoding="utf-8", errors="replace") as f:
-                text = f.read()
-        except IsADirectoryError:
-            continue  # a submodule: its commit changed, no line of ours
-        except OSError as e:
-            raise OrchestratorError(f"cannot read {path}, which the change edits: {e}") from e
-        out += [(path, n, line.strip()[:160]) for n, line in enumerate(text.splitlines(), 1)
-                if n in added and _SUPPRESSION.search(line)]
+    for path, added, lines in _files_with_added_lines(root, changed):
+        for n, line in enumerate(lines, 1):
+            if n in added and _SUPPRESSION.search(text := line.decode("utf-8", "replace")):
+                out.append((path, n, text.strip()[:160]))
     return out
 
 
@@ -2386,16 +2379,37 @@ def lone_carriage_returns(root: str, changed: dict[str, set[int]]) -> list[tuple
     numbers Python's linters give after it are not git's. Raises OrchestratorError when such a file cannot be read.
     """
     out = []
+    for path, added, lines in _files_with_added_lines(root, changed):
+        if path.endswith(".py"):
+            out += [(path, n) for n, line in enumerate(lines, 1)
+                    if n in added and b"\r" in line.removesuffix(b"\r")]
+    return out
+
+
+def _files_with_added_lines(root: str, changed: dict[str, set[int]]) -> Iterator[tuple[str, set[int], list[bytes]]]:
+    """(path, the lines changed says the change added to it, its lines) for each file in changed with added lines,
+    in path order, as the working tree at root has it.
+
+    The lines are numbered as git numbers them: split at b"\n" alone, each without it, so line n is lines[n - 1].
+    A symlink's one line is the name it points to, which is what git diffs, not its target's text. A directory,
+    such as a submodule, whose commit is what changed, is left out. Raises OrchestratorError when a file cannot be
+    read.
+    """
     for path, added in sorted(changed.items()):
-        if not added or not path.endswith(".py"):
+        if not added:
             continue
+        full = os.path.join(root, path)
         try:
-            with open(os.path.join(root, path), "rb") as f:
-                lines = f.read().split(b"\n")
+            if os.path.islink(full):
+                text = os.fsencode(os.readlink(full))
+            else:
+                with open(full, "rb") as f:
+                    text = f.read()
+        except IsADirectoryError:
+            continue
         except OSError as e:
             raise OrchestratorError(f"cannot read {path}, which the change edits: {e}") from e
-        out += [(path, n) for n, line in enumerate(lines, 1) if n in added and b"\r" in line.removesuffix(b"\r")]
-    return out
+        yield path, added, text.split(b"\n")
 
 
 # Test integrity: the tests a change removed or weakened, which no linter sees and which make a gate easier to pass.

@@ -3783,6 +3783,37 @@ class TestGate(unittest.TestCase):
         with self.assertRaisesRegex(OrchestratorError, "cannot read gone.py, which the change edits"):
             orchestrator.lone_carriage_returns(self.repo, {"gone.py": {1}})
 
+    def test_a_suppression_after_a_form_feed_is_listed_at_gits_line(self):
+        self.put("f.py", "a = 1\x0c\n")
+        self.git("commit", "--quiet", "-am", "form feed")
+        self.put("f.py", "a = 1\x0c\nimport os  # noqa: F401\n")
+        self.assertIn("- `f.py:2` `import os  # noqa: F401`", self.gate()[1])
+
+    def test_a_symlink_to_a_directory_is_judged(self):
+        self.put("pkg/m.py", "x = 1\n")
+        self.git("add", "pkg")
+        self.git("commit", "--quiet", "-m", "pkg")
+        os.symlink("pkg", os.path.join(self.repo, "lib.py"))
+        self.git("add", "lib.py")
+        status, out, _ = self.gate()
+        self.assertIn(status, (0, 1))
+        self.assertTrue(out.startswith("GATE: "))
+
+    def test_a_submodule_is_judged(self):
+        os.mkdir(os.path.join(self.repo, "sub.py"))
+        self.git("update-index", "--add", "--cacheinfo", f"160000,{self.git('rev-parse', 'HEAD').strip()},sub.py")
+        status, out, _ = self.gate()
+        self.assertEqual(status, 0)
+        self.assertTrue(out.startswith("GATE: OK\n"))
+
+    def test_a_symlink_is_read_as_git_diffs_it_its_target_name(self):
+        self.put("target.py", "x = 1  # noqa: E501\n")
+        self.git("add", "target.py")
+        self.git("commit", "--quiet", "-m", "target")
+        os.symlink("target.py", os.path.join(self.repo, "link.py"))
+        self.git("add", "link.py")
+        self.assertNotIn("## Suppressions added", self.gate()[1])
+
     def test_a_file_name_that_holds_a_line_separator_keeps_its_findings(self):
         # Each ends a line for str.splitlines, and the \r one for text mode as well; the tool's line ends at "\n".
         names = ["a\x85b.py", "a b.py", "a\x1cb.py", "a\rb.py"]
