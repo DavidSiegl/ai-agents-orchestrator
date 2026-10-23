@@ -5823,7 +5823,7 @@ class TestTooComplexFunctions(unittest.TestCase):
                                  ("calc.py", self.def_line("big"), "over-limit")])
         self.assertTrue(found[0]["message"].startswith("could not be read ("), found[0]["message"])
 
-    def test_a_base_that_cannot_be_read_is_a_finding(self):
+    def test_a_base_that_cannot_be_read_leaves_its_functions_judged_as_new(self):
         self.nest_under("big", 19)
         git = Host.git
 
@@ -5834,9 +5834,8 @@ class TestTooComplexFunctions(unittest.TestCase):
 
         with patch.object(Host, "git", no_show):
             where, found = self.found()
-        self.assertEqual(where, [("calc.py", None, "not-scored")])
-        self.assertEqual(found[0]["message"], "its base could not be read (git show failed), so its functions could "
-                                              "not be compared with theirs.")
+        self.assertEqual(where, [("calc.py", self.def_line("big"), "over-limit")])
+        self.assertEqual(found[0]["message"], "`big`: cognitive complexity 22, a new function; the limit is 15.")
 
     def test_a_change_whose_files_git_cannot_list_is_a_finding(self):
         self.nest_under("big", 19)
@@ -5845,15 +5844,14 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.assertEqual(where, [(None, None, "not-scored")])
         self.assertIn("could not be listed (git diff failed)", found[0]["message"])
 
-    def test_a_base_that_does_not_parse_is_a_finding_when_a_function_is_over_the_limit(self):
+    def test_a_base_that_does_not_parse_leaves_its_functions_judged_as_new(self):
         self.put("broken.py", "def big(:\n")
         self.git("add", "broken.py")
         self.git("commit", "--quiet", "-m", "broken")
         self.put("broken.py", flat("big", 16))
         where, found = self.found()
-        self.assertEqual(where, [("broken.py", None, "not-scored")])
-        self.assertEqual(found[0]["message"], "its base does not parse as Python, so its functions could not be "
-                                              "compared with theirs.")
+        self.assertEqual(where, [("broken.py", 1, "over-limit")])
+        self.assertEqual(found[0]["message"], "`big`: cognitive complexity 16, a new function; the limit is 15.")
 
     def test_code_deeper_than_python_s_recursion_limit_is_judged_in_the_change_and_at_the_base(self):
         self.put("deep.py", LONG_SUM + "\n\n" + LONG_ELIF)

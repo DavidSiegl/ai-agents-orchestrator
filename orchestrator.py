@@ -3830,8 +3830,9 @@ def too_complex_functions(change: GateChange) -> list[dict]:
     _ScoredFunction describes.
 
     A function's base is the one with its qualified name and occurrence in the file's base; for a file the change
-    renamed, under the file's old name. A changed file that cannot be read or parsed is a finding saying so, and so is one that has a
-    function over the limit and whose base cannot be read or parsed.
+    renamed, under the file's old name. A base that cannot be read or parsed has no functions, so each function of its
+    file is judged as new. A changed file that cannot be read or parsed, and changed files git cannot list, are each a
+    finding saying so, as GateCheck asks of a check that cannot do its work, and fail the gate as any other does.
     """
     out, over = _changed_over_limit(change)
     if not over:
@@ -3844,14 +3845,12 @@ def too_complex_functions(change: GateChange) -> list[dict]:
                                                                     f"base.", severity="error")]
     at_base = {path: _base_complexities(change, old_paths.get(path, path)) for path in {path for path, _ in over}}
     for path, f in over:
-        scores, problem = at_base[path]
-        was = scores.get((f.name, f.occurrence))
-        if problem is None and (was is None or f.score > was):
+        was = at_base[path].get((f.name, f.occurrence))
+        if was is None or f.score > was:
             out.append(_finding(path, f.line, "over-limit", (
                 f"`{f.name}`: cognitive complexity {f.score}, "
                 f"{'a new function' if was is None else f'{was} at the base'}; "
                 f"the limit is {COGNITIVE_COMPLEXITY_LIMIT}."), severity="error"))
-    out += [_finding(path, None, "not-scored", problem, severity="error") for path, (_, problem) in at_base.items() if problem]
     return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
 
 
@@ -3883,20 +3882,18 @@ def _changed_over_limit(change: GateChange) -> tuple[list[dict], list[tuple[str,
     return out, over
 
 
-def _base_complexities(change: GateChange, path: str | None) -> tuple[dict[tuple[str, int], int], str | None]:
+def _base_complexities(change: GateChange, path: str | None) -> dict[tuple[str, int], int]:
     """The cognitive complexity at the change's base of each function of the file at path that the check judges as one,
-    by qualified name and occurrence, and None; {} for path None, a file the change adds. Or {} and why they could not be scored, a
-    sentence."""
+    by qualified name and occurrence; {} for path None, a file the change adds, and for a base that cannot be read or
+    parsed, whose functions the change can then only be judged as adding."""
     if path is None:
-        return {}, None
+        return {}
     try:
         text = Host().git(change.root, "show", f"{change.base}:{path}", verbatim=True)
-    except OrchestratorError as e:
-        return {}, f"its base could not be read ({e}), so its functions could not be compared with theirs."
+    except OrchestratorError:
+        return {}
     tree = _parse_python(text)
-    if tree is None:
-        return {}, "its base does not parse as Python, so its functions could not be compared with theirs."
-    return {(f.name, f.occurrence): f.score for f in _scored_functions(tree)}, None
+    return {(f.name, f.occurrence): f.score for f in _scored_functions(tree)} if tree else {}
 
 
 # What a node holds, each with the nesting level it is scored at; None stands for a part the node goes without.

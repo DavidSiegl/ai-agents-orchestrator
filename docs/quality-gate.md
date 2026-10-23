@@ -82,7 +82,10 @@ these is a finding:
   classes in the file's base, under the file's old name when the change renamed it; of a name defined more than once,
   as a property's getter and setter are, the same one in order. A function already over 15 that the change leaves no
   worse is not a finding, since the gate judges the change;
-- `not-scored`: a changed file that could not be read or parsed, or the base of one with a function over 15.
+- `not-scored`: a changed file that could not be read or parsed, or changed files git could not list. Like any finding
+  of the check, it fails the gate: a check that cannot do its work says so rather than pass. A base that cannot be read
+  or parsed is not a finding: its file's functions are judged as new, as `test-integrity` takes a base that does not
+  parse to have no tests.
 
 ruff's `C90` stays beside it. It counts branches without their nesting, so it misses a deeply nested function that
 cognitive complexity catches, and it reports at the `def` line, which a change that grows an existing function does not
