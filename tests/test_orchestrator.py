@@ -3805,7 +3805,7 @@ class TestGate(unittest.TestCase):
         self.git("commit", "--quiet", "-m", "latin-1 name")
         with open(os.path.join(self.repo, name), "a") as f:
             f.write("b = 2  # noqa: E501\n")
-        # A Python tool prints the name's bytes; ruff prints U+FFFD for each one that is not UTF-8.
+        # ruff prints U+FFFD for each byte of the name that is not UTF-8; a tool may also print the bytes themselves.
         for printed in (b"f\xe9.py", "f�.py".encode()):
             with self.subTest(printed=printed):
                 with open(os.path.join(self.stubs, "ruff.out"), "wb") as f:

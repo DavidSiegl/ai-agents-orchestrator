@@ -75,13 +75,27 @@ The gate is `GATE: ERROR` when any of these holds, and `GATE: OK` otherwise:
 Exit status 0 means `GATE: OK`, 1 `GATE: ERROR`, and 2 that the gate could not judge (`REV` names no commit, not a
 git tree, no rules file, an unreadable report), in which case it writes nothing.
 
-A change to a file that is not UTF-8, such as a Latin-1 line or a binary file that git diffs as text, or to a
-file whose name is not UTF-8, is judged like any other. The gate reads the diff, git's file lists and the linters'
-output as they were printed, keeping the bytes it cannot decode, and the quality file writes each such byte of a
-file name as `\xNN`. Any other git output it cannot decode leaves the change unjudged (exit 2). Only a newline
-ends a diff line: a carriage return or form feed inside an added line cannot pass for a header that would move the
-lines after it to another file. A test file that `test-integrity` cannot decode is an `unreadable` finding of that
-check, since its tests cannot be compared.
+A change to a file whose contents are not UTF-8, such as a Latin-1 line or a binary file that git diffs as text,
+is judged like any other. The gate reads the diff, git's file lists and the linters' output as they were printed,
+keeping the bytes it cannot decode, and only a newline ends a line of them. So a carriage return or form feed
+inside an added line cannot pass for a diff header that would move the lines after it to another file, and a file
+name that holds one keeps its linter findings. In a `*.py` file, a lone carriage return in an added line is still
+the failed condition above, since the linters' numbering is what it shifts. A test file that `test-integrity` cannot decode is an `unreadable`
+finding of that check, since its tests cannot be compared.
+
+A file whose name is not UTF-8 is read the same way, and the quality file writes each byte it cannot decode as
+`\xNN`. Not every tool can read such a name:
+
+- ruff prints it with U+FFFD for each such byte, which the gate matches to the tracked file, so ruff's findings
+  on it are listed as usual.
+- mypy stops with `INTERNAL ERROR` (exit status 2) whenever the file is among its `[tool.mypy] files`, and
+  pymarkdown stops with `Configuration Error: 'utf-8' codec can't encode character` when it has a finding in such
+  a `.md` file. Either is a failed condition quoting the tool's first line, which need not name the file; mypy's
+  comes back on every change until the file has a UTF-8 name.
+- coverage.py collects no data for such a file, so its added lines count as not coverable.
+
+Any other git output the gate cannot decode, such as a work tree whose own path is not UTF-8, leaves the change
+unjudged (exit 2).
 
 The quality file starts with the `GATE:` line, then has the failed conditions, the issues (the findings on added
 lines, then the failing checks'), the findings to weigh, the failing tests, coverage of new code, the suppressions
