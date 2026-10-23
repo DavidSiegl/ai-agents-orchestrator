@@ -2244,19 +2244,20 @@ def _run_gate_tool(tool: GateTool, root: str, rules: str, files: list[str],
     """The tool's findings over files, and the failed condition it caused, None when it ran as it should."""
     try:
         # The command is a fixed tool's, and the files are git's list of tracked ones; no shell reads either.
-        # surrogateescape decodes the paths it prints as git's verbatim ones are, so they match the tracked files.
-        proc = subprocess.run(tool.command(rules, files), cwd=root, capture_output=True, text=True,  # noqa: S603
-                              errors="surrogateescape", timeout=GATE_TOOL_TIMEOUT, env=child_env(), check=False)
+        proc = subprocess.run(tool.command(rules, files), cwd=root, capture_output=True,  # noqa: S603
+                              timeout=GATE_TOOL_TIMEOUT, env=child_env(), check=False)
     except FileNotFoundError:
         return [], f"`{tool.name}` is not installed: it is not on PATH."
     except subprocess.TimeoutExpired:
         return [], f"`{tool.name}` did not finish within {GATE_TOOL_TIMEOUT} seconds."
     except OSError as e:
         return [], f"`{tool.name}` could not be started: {e}."
-    found = tool_findings(tool, proc.stdout, root, tracked)
+    # Decoded as Host.run's verbatim output is, so the paths it prints match git's and keep their line ends.
+    stdout, stderr = os.fsdecode(proc.stdout), os.fsdecode(proc.stderr)
+    found = tool_findings(tool, stdout, root, tracked)
     if proc.returncode == 0 or (proc.returncode == tool.findings_status and found):
         return found, None
-    said = next((line.strip() for line in (proc.stderr + proc.stdout).splitlines() if line.strip()), "")
+    said = next((line.strip() for line in (stderr + stdout).split("\n") if line.strip()), "")
     if proc.returncode == tool.findings_status:
         return [], f"`{tool.name}` reported findings, but none the gate could read: {said[:200]}"
     return [], f"`{tool.name}` failed with exit status {proc.returncode}: {said[:200]}"
@@ -2267,8 +2268,10 @@ def tool_findings(tool: GateTool, output: str, root: str, tracked: set[str]) -> 
 
     A line that is not a finding on a tracked file, such as a summary, is skipped. Paths become relative to root,
     the repository's top level; rule starts with the tool's name, so the Builder knows which tool said it.
-    tracked and output hold a name that is not UTF-8 as os.fsdecode does; the tool may print it so, or with
-    U+FFFD for each byte that is not, as ruff does, which names the one tracked file it can stand for.
+    output is decoded as os.fsdecode decodes, line ends untouched: only "\n" ends a line, so a name that holds a
+    carriage return, U+2028 or another line separator stays whole. tracked and output hold a name that is not
+    UTF-8 as os.fsdecode does; the tool may print it so, or with U+FFFD for each byte that is not, as ruff does,
+    which names the one tracked file it can stand for.
     """
     # Each such tracked name by how a lossy tool prints it; None where two names print alike.
     lossy: dict[str, str | None] = {}
@@ -2276,8 +2279,9 @@ def tool_findings(tool: GateTool, output: str, root: str, tracked: set[str]) -> 
         if (shown := os.fsencode(name).decode("utf-8", "replace")) != name:
             lossy[shown] = None if shown in lossy else name
     out = []
-    for text in output.splitlines():
-        at = _FINDING_AT.fullmatch(text.strip())
+    for text in output.split("\n"):
+        # Spaces, tabs and the \r of a \r\n only: other whitespace, such as U+2028, can be part of a name.
+        at = _FINDING_AT.fullmatch(text.strip(" \t\r"))
         if not at:
             continue
         shown = os.path.relpath(os.path.join(root, at["path"]), root)

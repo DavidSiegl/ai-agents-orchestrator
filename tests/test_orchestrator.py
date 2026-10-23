@@ -3783,6 +3783,21 @@ class TestGate(unittest.TestCase):
         with self.assertRaisesRegex(OrchestratorError, "cannot read gone.py, which the change edits"):
             orchestrator.lone_carriage_returns(self.repo, {"gone.py": {1}})
 
+    def test_a_file_name_that_holds_a_line_separator_keeps_its_findings(self):
+        # Each ends a line for str.splitlines, and the \r one for text mode as well; the tool's line ends at "\n".
+        names = ["a\x85b.py", "a b.py", "a\x1cb.py", "a\rb.py"]
+        for name in names:
+            self.put(name, "x = 1\n")
+            self.git("add", name)
+        self.says("ruff", "".join(f"{name}:1:1: F401 `os` imported but unused\n" for name in names))
+        status, _, _ = self.gate("--out", "quality.md")
+        self.assertEqual(status, 1)
+        with open(os.path.join(self.repo, "quality.md"), encoding="utf-8", newline="") as f:
+            text = f.read()
+        self.assertIn("- 4 findings on lines the change added", text)
+        for name in names:
+            self.assertIn(f"`{name}:1` error ruff F401", text)
+
     def test_a_file_name_that_is_not_utf8_is_judged(self):
         name = os.fsdecode(b"f\xe9.py")
         self.put(name, "a = 1\n")
