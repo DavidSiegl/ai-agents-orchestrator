@@ -135,8 +135,8 @@ GATE_TOOL_TIMEOUT = 600
 FLAKY_SEEDS = (1, 2, 3, 4, 5)
 FLAKY_RUN_TIMEOUT = 30
 # The surviving-mutants check lets mutmut run for `gate --mutation-budget` seconds, MUTATION_BUDGET by default, then
-# stops it and gives it MUTMUT_STOP_GRACE seconds to exit. Listing its results and showing what the first
-# QUALITY_ISSUE_LIMIT survivors change, about a third of a second each, then get MUTMUT_REPORT_TIMEOUT seconds in all.
+# stops it and gives it MUTMUT_STOP_GRACE seconds to exit. Listing its results and showing what a few survivors of each
+# function change, about a third of a second each, then get MUTMUT_REPORT_TIMEOUT seconds in all.
 # So it adds at most the budget and 70 seconds to the gate: with the flaky-tests check's 180 and the test run, about
 # 900 of a quality round's QUALITY_TIMEOUT, leaving the rest to the queue and the install.
 MUTATION_BUDGET = 600
@@ -3086,6 +3086,13 @@ _MUTMUT_SKIP = "  # pragma: no mutate block"
 # How `mutmut results` words a mutant it never ran, because the budget stopped it first.
 _MUTMUT_UNTRIED = frozenset({"not checked", "check was interrupted by user"})
 
+# What mutmut 3.8.0 says, exiting with status 1 before it tries any mutant, when no test calls any function it
+# mutated, or it made no mutant at all; the mutants it made are then left not checked.
+_MUTMUT_NO_TESTS = "could not find any test case for any mutant"
+
+# How many of a function's surviving mutants its finding shows, in the order mutmut made them.
+_SURVIVOR_EXAMPLES = 3
+
 
 @dataclass(frozen=True)
 class _ChangedFunction:
@@ -3093,14 +3100,16 @@ class _ChangedFunction:
     a line to."""
     path: str
     name: str  # f, or C.f for a method
+    line: int  # the line of its def
     first: int  # the line it starts on, its decorators included
     source: tuple[str, ...]  # its lines, from first on, as the working tree has them
 
 
 def surviving_mutants(change: GateChange, *, budget: float) -> list[dict]:
     """The surviving-mutants check's find: mutation-tests with mutmut each top-level function and method the change
-    adds a line to in a Python file outside the tests, and reports each mutant the tests did not notice, at the line
-    it changes, as that line before and after; and each such function that no test calls.
+    adds a line to in a Python file outside the tests. Reports at its def each such function that has mutants the
+    tests did not notice, with how many of its mutants they were and what the first _SURVIVOR_EXAMPLES change, as a
+    line before and after; and each such function that no test calls.
 
     mutmut runs in the gate's own interpreter, as flaky_tests runs pytest, on a copy of the files git tracks, by that
     copy's [tool.mutmut]: its source_paths decide which files can be mutated and its test selection which tests run,
@@ -3118,7 +3127,8 @@ def surviving_mutants(change: GateChange, *, budget: float) -> list[dict]:
             proc, stopped = _run_mutmut(copy, ["run"], budget)
         except (OSError, OrchestratorError) as e:
             return [*out, _mutation_not_run(f"could not start mutmut: {e}")]
-        if proc.returncode != 0 and not stopped:
+        no_tests = proc.returncode != 0 and _MUTMUT_NO_TESTS in proc.stdout
+        if proc.returncode != 0 and not stopped and not no_tests:
             return [*out, _mutation_not_run(f"mutmut exited with status {proc.returncode}: "
                                             f"{_said_by_mutmut(proc)}")]
         deadline = time.monotonic() + MUTMUT_REPORT_TIMEOUT
@@ -3126,24 +3136,22 @@ def surviving_mutants(change: GateChange, *, budget: float) -> list[dict]:
         if problem:
             return [*out, _mutation_not_run(problem)]
         by_prefix = {_mutant_prefix(f): f for f in functions}
-        survivors: list[tuple[_ChangedFunction, str]] = []
-        untested: collections.Counter[_ChangedFunction] = collections.Counter()
+        # Each function's mutants, in the order mutmut lists them, which is the order it made them in, by status.
+        mutants: dict[_ChangedFunction, dict[str, list[str]]] = {}
         for mutant, status in statuses.items():
             # The last __mutmut_: one named _mutmut_x has one in its own name, as x__mutmut_x.
             f = by_prefix.get(mutant.rpartition("__mutmut_")[0])
-            if f is None:
-                continue
-            if status == "survived":
-                survivors.append((f, mutant))
-            elif status == "no tests":
-                untested[f] += 1
-        # mutmut lists each function's mutants in the order it made them, which is their order in the function. Only
-        # as many survivors as a quality file lists findings are shown.
-        survivors.sort(key=lambda s: (s[0].path, s[0].first))
-        out += [_survivor(copy, f, mutant, deadline if k < QUALITY_ISSUE_LIMIT else None)
-                for k, (f, mutant) in enumerate(survivors)]
-    out += [_mutation_finding(f.path, f.first, "untested", f"no test calls `{f.name}`, so none of its {n} mutants "
-                                                           f"can make one fail.") for f, n in untested.items()]
+            if f is not None:
+                mutants.setdefault(f, {}).setdefault("no tests" if no_tests else status, []).append(mutant)
+        for f, by_status in mutants.items():
+            tried = sum(len(names) for status, names in by_status.items()
+                        if status not in _MUTMUT_UNTRIED and status != "no tests")
+            if by_status.get("survived"):
+                out.append(_survivors(copy, f, by_status["survived"], tried, deadline))
+            if by_status.get("no tests"):
+                out.append(_mutation_finding(f.path, f.line, "untested",
+                                             f"no test calls `{f.name}`, so none of its {len(by_status['no tests'])} "
+                                             f"mutants can make one fail."))
     if stopped:
         tried = sum(1 for status in statuses.values() if status not in _MUTMUT_UNTRIED)
         out.append(_mutation_finding(None, None, "budget-reached", (
@@ -3183,7 +3191,7 @@ def _changed_python_functions(change: GateChange) -> tuple[list[_ChangedFunction
                 first = min([unit.lineno, *(d.lineno for d in unit.decorator_list)])
                 last = unit.end_lineno or unit.lineno
                 if any(first <= n <= last for n in added):
-                    functions.append(_ChangedFunction(path, name, first, tuple(lines[first - 1:last])))
+                    functions.append(_ChangedFunction(path, name, unit.lineno, first, tuple(lines[first - 1:last])))
     return functions, out
 
 
@@ -3306,30 +3314,34 @@ def _mutant_statuses(copy: str, deadline: float) -> tuple[dict[str, str], str | 
     return dict(re.findall(r"^\s*(\S+): (.+?)\s*$", proc.stdout, re.MULTILINE)), None
 
 
-def _survivor(copy: str, f: _ChangedFunction, mutant: str, deadline: float | None) -> dict:
-    """The finding for mutant, a mutant of f that survived: what it changes, at that line, as `mutmut show` gives it
-    by deadline, a time.monotonic() time. At f's first line, naming the mutant, when mutmut does not show it in time,
-    or without a deadline."""
-    if deadline is None:
-        return _mutation_finding(f.path, f.first, "survived", f"`{mutant}`, a mutant of `{f.name}`, survived its "
-                                                              f"tests; what it changes is shown for the first "
-                                                              f"{QUALITY_ISSUE_LIMIT} survivors only.")
-    shown = None
-    if deadline > time.monotonic():
-        with contextlib.suppress(OSError):
-            proc, stopped = _run_mutmut(copy, ["show", mutant], deadline - time.monotonic())
-            shown = None if stopped or proc.returncode != 0 else _mutation(proc.stdout)
+def _survivors(copy: str, f: _ChangedFunction, survived: list[str], tried: int, deadline: float) -> dict:
+    """The finding for f's survived mutants, of the tried ones mutmut ran against f's tests: how many, and what the
+    first _SURVIVOR_EXAMPLES of them change, each as `mutmut show` gives it by deadline, a time.monotonic() time."""
+    examples = [e for e in (_example(copy, f, m, deadline) for m in survived[:_SURVIVOR_EXAMPLES]) if e]
+    said = f"{len(survived)} of {tried} mutants of `{f.name}` survived its tests"
+    return _mutation_finding(f.path, f.line, "survived", f"{said}: {'; '.join(examples)}." if examples
+                             else f"{said}; mutmut did not show in time what they change.")
+
+
+def _example(copy: str, f: _ChangedFunction, mutant: str, deadline: float) -> str | None:
+    """What mutant, a mutant of f, changes, as `line N, `before` became `after``; None when mutmut does not show it by
+    deadline, a time.monotonic() time."""
+    if deadline <= time.monotonic():
+        return None
+    try:
+        proc, stopped = _run_mutmut(copy, ["show", mutant], deadline - time.monotonic())
+    except OSError:
+        return None
+    shown = None if stopped or proc.returncode != 0 else _mutation(proc.stdout)
     if shown is None:
-        return _mutation_finding(f.path, f.first, "survived", f"`{mutant}`, a mutant of `{f.name}`, survived its "
-                                                              f"tests; mutmut did not show in time what it changes.")
+        return None
     at, old, new = shown
     # at counts from the first line of the function's code as mutmut prints it, which takes in the comments right
     # above it, so the line is the nearest one that reads as the mutant's removed one.
     expected = f.first + at - 1
     hits = [f.first + k for k, line in enumerate(f.source) if line.strip() == old[0]]
-    return _mutation_finding(f.path, min(hits, key=lambda n: abs(n - expected), default=f.first), "survived",
-                             f"a mutant of `{f.name}` survived: its tests still pass with `{_clip(' '.join(old))}` "
-                             f"changed to `{_clip(' '.join(new))}`.")
+    line = min(hits, key=lambda n: abs(n - expected), default=expected)
+    return f"line {line}, `{_clip(' '.join(old))}` became `{_clip(' '.join(new))}`"
 
 
 def _mutation(diff: str) -> tuple[int, list[str], list[str]] | None:

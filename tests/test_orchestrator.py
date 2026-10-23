@@ -4787,7 +4787,15 @@ class TestSurvivingMutants(unittest.TestCase):
         "\n"                            # 20
         "    def other(self):\n"        # 21
         "        return 4\n"            # 22
+        "\n"                            # 23
+        "\n"                            # 24
+        "def describe(parser):\n"       # 25
+        "    parser.add_argument('--count', help='how many'\n"   # 26
+        "                                     ' to make')\n"    # 27
     )
+    # The repository's own [tool.mutmut] do_not_mutate_patterns, which keep mutmut off argparse's help texts.
+    with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pyproject.toml"), "rb") as f:
+        PATTERNS = tomllib.load(f)["tool"]["mutmut"].get("do_not_mutate_patterns", [])
     # Each test calls one function; only test_checked looks at what it returns.
     TESTS = (
         "import calc\n\n\n"
@@ -4808,7 +4816,8 @@ class TestSurvivingMutants(unittest.TestCase):
         for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
             self.git("config", key, value)
         self.put("pyproject.toml", '[tool.mutmut]\nsource_paths = ["calc.py"]\n'
-                                   'pytest_add_cli_args_test_selection = ["tests/"]\n')
+                                   'pytest_add_cli_args_test_selection = ["tests/"]\n'
+                                   f'do_not_mutate_patterns = {json.dumps(self.PATTERNS)}\n')
         self.put("calc.py", self.BASE)
         self.put("tests/test_calc.py", self.TESTS)
         self.git("add", "-A")
@@ -4834,14 +4843,16 @@ class TestSurvivingMutants(unittest.TestCase):
         self.put("calc.py", self.BASE.replace("b + a", "a + b").replace("b * a", "a * b")
                  .replace("return 1", "return 2").replace("return 3", "return 5"))
 
-    def fake_mutmut(self, run, results="", show=""):
-        """Make the gate's interpreter a fake that answers `mutmut run` with the shell code run, and `results` and
-        `show` by printing results and show."""
+    def fake_mutmut(self, run, results="", show=None):
+        """Make the gate's interpreter a fake that answers `mutmut run` with the shell code run, `results` by
+        printing results, and `show NAME` by printing show[NAME]."""
         python = os.path.join(self.bin, "python")
+        shows = "".join(f"{shlex.quote(name)}) printf %s {shlex.quote(diff)};;\n"
+                        for name, diff in (show or {}).items())
         # The gate starts mutmut as `python -c CODE ARGS`, so the command is the third argument.
         with open(python, "w") as f:
             f.write(f'#!/bin/sh\ncase "$3" in\nrun) {run};;\nresults) printf %s {shlex.quote(results)};;\n'
-                    f'show) printf %s {shlex.quote(show)};;\nesac\n')
+                    f'show) case "$4" in\n{shows}esac;;\nesac\n')
         os.chmod(python, 0o700)
         p = patch.object(orchestrator.sys, "executable", python)
         p.start()
@@ -4863,13 +4874,32 @@ class TestSurvivingMutants(unittest.TestCase):
                          {"calc.x_checked", "calc.x_unchecked", "calc.x_orphan", "calc.xǁBoxǁsize"})
         # unchecked's test never looks at what it returns, nor does Box.size's; checked's does.
         self.assertEqual([(f["path"], f["line"], f["severity"], f["rule"]) for f in found],
-                         [("calc.py", 6, "warning", "survived"), ("calc.py", 13, "warning", "untested"),
-                          ("calc.py", 19, "warning", "survived")])
-        self.assertIn("`unchecked`", found[0]["message"])
-        self.assertIn("`return a * b` changed to `return a / b`", found[0]["message"])
+                         [("calc.py", 5, "warning", "survived"), ("calc.py", 13, "warning", "untested"),
+                          ("calc.py", 18, "warning", "survived")])
+        self.assertEqual(found[0]["message"], "1 of 1 mutants of `unchecked` survived its tests: line 6, "
+                                              "`return a * b` became `return a / b`.")
         self.assertIn("`orphan`", found[1]["message"])
-        self.assertIn("`Box.size`", found[2]["message"])
+        self.assertIn("1 of 1 mutants of `Box.size` survived its tests: line 19, `return 5` became ",
+                      found[2]["message"])
         self.assertEqual(self.git("status", "--porcelain", "--ignored"), " M calc.py\n")
+
+    def test_a_change_to_a_help_text_alone_makes_no_mutant(self):
+        # The second line of the help text does not say help=, but its string starts on the line that does.
+        self.put("calc.py", self.BASE.replace(" to make", " to build"))
+        made, list_results = [], orchestrator._mutant_statuses
+
+        def results(copy, deadline):
+            statuses, problem = list_results(copy, deadline)
+            made.extend(statuses)
+            return statuses, problem
+        with patch.object(orchestrator, "_mutant_statuses", results):
+            self.assertEqual(self.found(), [])
+        self.assertEqual(made, [])
+
+    def test_a_change_to_untested_functions_alone_is_reported_as_untested(self):
+        # mutmut stops early when no test calls any function it mutated.
+        self.put("calc.py", self.BASE.replace("return 1", "return 2"))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in self.found()], [("calc.py", 13, "untested")])
 
     def test_a_change_to_no_function_runs_nothing(self):
         self.put("calc.py", self.BASE + "\nLIMIT = 3\n")
@@ -4883,14 +4913,20 @@ class TestSurvivingMutants(unittest.TestCase):
         self.fake_mutmut("exec sleep 30",
                          results="    calc.x_checked__mutmut_1: killed\n    calc.x_unchecked__mutmut_1: survived\n"
                                  "    calc.x_unchecked__mutmut_2: not checked\n",
-                         show="# calc.x_unchecked__mutmut_1: survived\n--- calc.py\n+++ calc.py\n@@ -1,2 +1,2 @@\n"
-                              " def unchecked(a, b):\n-    return a * b\n+    return a / b\n")
+                         show={"calc.x_unchecked__mutmut_1": self.unchecked_mutant("a / b")})
         started = time.monotonic()
         found = self.found(budget=1)
         self.assertLess(time.monotonic() - started, 15)
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
-                         [(None, None, "budget-reached"), ("calc.py", 6, "survived")])
+                         [(None, None, "budget-reached"), ("calc.py", 5, "survived")])
         self.assertTrue(found[0]["message"].startswith("budget reached after 2 of 3 mutants"), found[0]["message"])
+        self.assertTrue(found[1]["message"].startswith("1 of 1 mutants of `unchecked`"), found[1]["message"])
+
+    @staticmethod
+    def unchecked_mutant(new):
+        """What `mutmut show` prints for a mutant of unchecked that returns new."""
+        return (f"# a mutant: survived\n--- calc.py\n+++ calc.py\n@@ -1,2 +1,2 @@\n def unchecked(a, b):\n"
+                f"-    return a * b\n+    return {new}\n")
 
     def test_a_run_that_fails_is_a_finding(self):
         self.change_the_functions()
@@ -4907,17 +4943,27 @@ class TestSurvivingMutants(unittest.TestCase):
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
         self.assertIn("exited with status 1: ModuleNotFoundError: No module named 'mutmut'", found[0]["message"])
 
-    def test_past_the_quality_file_s_limit_a_survivor_is_listed_at_its_function(self):
+    def test_the_survivors_of_a_function_are_one_finding_with_examples(self):
         self.change_the_functions()
         self.fake_mutmut("exit 0", results="    calc.x_unchecked__mutmut_1: survived\n"
-                                           "    calc.x_unchecked__mutmut_2: survived\n",
-                         show="--- calc.py\n+++ calc.py\n@@ -1,2 +1,2 @@\n def unchecked(a, b):\n"
-                              "-    return a * b\n+    return a / b\n")
-        with patch.object(orchestrator, "QUALITY_ISSUE_LIMIT", 1):
-            found = self.found()
-        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
-                         [("calc.py", 5, "survived"), ("calc.py", 6, "survived")])
-        self.assertIn("`calc.x_unchecked__mutmut_2`, a mutant of `unchecked`", found[0]["message"])
+                                           "    calc.x_unchecked__mutmut_2: killed\n"
+                                           "    calc.x_unchecked__mutmut_3: survived\n",
+                         show={"calc.x_unchecked__mutmut_1": self.unchecked_mutant("a / b"),
+                               "calc.x_unchecked__mutmut_3": self.unchecked_mutant("None")})
+        self.assertEqual(self.found(), [{
+            "path": "calc.py", "line": 5, "severity": "warning", "rule": "survived",
+            "message": "2 of 3 mutants of `unchecked` survived its tests: line 6, `return a * b` became "
+                       "`return a / b`; line 6, `return a * b` became `return None`."}])
+
+    def test_a_function_s_first_three_survivors_are_its_examples(self):
+        self.change_the_functions()
+        names = [f"calc.x_unchecked__mutmut_{n}" for n in range(1, 5)]
+        self.fake_mutmut("exit 0", results="".join(f"    {name}: survived\n" for name in names),
+                         show={name: self.unchecked_mutant(f"{n}") for n, name in enumerate(names)})
+        [finding] = self.found()
+        self.assertTrue(finding["message"].startswith("4 of 4 mutants of `unchecked` survived its tests: "),
+                        finding["message"])
+        self.assertEqual(re.findall(r"became `return (\d)`", finding["message"]), ["0", "1", "2"])
 
     def test_a_mutmut_that_cannot_start_is_a_finding(self):
         self.change_the_functions()

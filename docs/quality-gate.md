@@ -106,9 +106,9 @@ decorators included: a top-level function, or a method of a top-level class, in 
 mutmut, in the `dev` group, makes small changes to each, one at a time - an operator swapped, a number or a string
 altered, an argument dropped - and runs each of these mutants against the tests that call the function:
 
-- `survived`: a mutant no test failed on, at the line it changes, with that line before and after. No test checks what
-  the line does. What the first 50 survivors change is shown; the rest are listed at their function, by mutant name;
-- `untested`: a changed function that no test calls, with how many mutants it has;
+- `survived`: a function with mutants no test failed on, at its `def`: how many of its mutants survived out of how many
+  were tried, and what the first three change, each as a line before and after. No test checks what those lines do;
+- `untested`: a changed function that no test calls, at its `def`, with how many mutants it has;
 - `budget-reached`: mutmut ran out of time, as "budget reached after N of M mutants". What the N showed is listed; the
   others may survive too;
 - `not-run`: mutmut could not start, failed, as it does when a test fails, or left results the gate could not read; or a
@@ -120,13 +120,18 @@ state, `mutants/`, goes into the copy too. Its own selector, mutant names such a
 which takes minutes for `orchestrator.py`. So in the copy, each function and class the change does not touch gets
 mutmut's `# pragma: no mutate block` at the end of its header, and mutmut skips it. The copy's `[tool.mutmut]` says what
 can be mutated (`source_paths`), which tests run (`pytest_add_cli_args_test_selection`), and what the tests read beside
-the code (`also_copy`): in a quality build that is the snapshot's own table, not `main`'s, and an edit to it shows under
-build configuration. In a repository without mutmut, a change to a function gets a `not-run` finding.
+the code (`also_copy`), and which lines are left alone (`do_not_mutate_patterns`): in a quality build that is the
+snapshot's own table, not `main`'s, and an edit to it shows under build configuration. In a repository without mutmut, a
+change to a function gets a `not-run` finding.
 
 `--mutation-budget SECONDS`, 600 by default, bounds mutmut's run; listing its results and showing the survivors take at
 most a minute more. With the flaky-tests check's three minutes and the test run, a quality build stays inside the
-orchestrator's `QUALITY_TIMEOUT` of 1200 seconds. A function full of strings, such as `parse_args` with its help texts,
-has many survivors: each string is a mutant, and few tests check a text word for word.
+orchestrator's `QUALITY_TIMEOUT` of 1200 seconds.
+
+This repository's table keeps mutmut off argparse's help texts, which no test reads word for word:
+`do_not_mutate_patterns = ['\bhelp=']`. mutmut matches each pattern against each source line and skips every expression
+that starts on a matching line, with all it holds, so a help text's later lines are skipped too, and so is a whole
+`add_argument(...)` call that starts on its `help=` line. A change to a help text alone makes no mutant.
 
 The gate is `GATE: ERROR` when any of these holds, and `GATE: OK` otherwise:
 

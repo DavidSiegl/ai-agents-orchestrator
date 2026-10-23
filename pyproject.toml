@@ -56,6 +56,9 @@ files = ["orchestrator.py"]
 source_paths = ["orchestrator.py"]
 pytest_add_cli_args_test_selection = ["tests/"]
 also_copy = ["examples/", "docs/"]
+# argparse's help texts, which no test reads word for word. mutmut matches each pattern against each source line and
+# skips every expression that starts on a matching line, with what it holds, the following lines of a help text too.
+do_not_mutate_patterns = ['\bhelp=']
 
 [tool.pymarkdown]
 # The docs wrap at 120, by eye. README.md opens with its logo in HTML, which also keeps a heading off its first line.
