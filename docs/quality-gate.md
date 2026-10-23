@@ -477,26 +477,39 @@ workflow, or the run's task for a workflow without one. Each check is an `Orches
 | `diff-budget` | no | a change over the workflow's `max_files` or `max_lines` |
 | `unexpected-paths` | no | changed paths the spec never mentions |
 
-**New dependencies** reads each manifest the change touches, in the snapshot and at the base, at its old path when the
-change moved it: in a
-`pyproject.toml`, `[project] dependencies` and `optional-dependencies` and `[dependency-groups]`; in a `uv.lock`,
-the packages from a registry. A package is new when the snapshot's file names it and the base's does not. Names
-compare as PyPI compares them (PEP 503), and the spec names a package when it holds the name as a word, in any case,
-so `pytest_randomly` names `pytest-randomly` and `pytest-randomly` does not name `pytest`. The spec was agreed with
-the human, so naming a package there is the approval. Each new package not from a URL is looked up at
-`https://pypi.org/pypi/<name>/json`, with a timeout of 15 seconds (`PYPI_TIMEOUT`):
+**New dependencies** reads the project's manifests at the repository's top level only, `pyproject.toml` and the
+`uv.lock` beside it, when the change touches either: a manifest anywhere else, such as a test fixture, is not the
+project's. It reads them in the snapshot and at the base, a file the change moved at its old path. The direct
+dependencies are `pyproject.toml`'s `[project] dependencies` and `optional-dependencies` and its
+`[dependency-groups]`, the project itself left out, so `all = ["myproj[a,b]"]` adds nothing; the locked packages are
+`uv.lock`'s, the project and its workspace members left out. A package is new when the snapshot's files name it and
+the base's do not. Names compare as PyPI compares them (PEP 503), and the spec names a package when it holds the name as
+a word, in any case, so `pytest_randomly` names `pytest-randomly` and `pytest-randomly` does not name `pytest`. The
+spec was agreed with the human, so naming a package there is the approval.
 
-- `not-in-spec` (fails): a package new in a `pyproject.toml` that the spec does not name, with what PyPI knows of it;
-- `not-on-pypi` (fails): a package PyPI answers 404 for. That is the slopsquatting case: a name an agent made up,
-  which anyone could register;
-- `unchecked` (fails): the packages PyPI was not asked about, because a request got no usable answer (no answer, a
-  timeout, an HTTP error other than 404, an answer that is not PyPI's JSON). PyPI is asked no more after the first
-  such request, so it adds at most 15 seconds to the round. A package that could not be checked is never reported as
-  passed, so the next quality round asks again;
-- `unreadable` (fails): a manifest that is not TOML or not in the shape above, at the base or in the change;
-- `added` (reports): a package the spec names, with its first release date, its latest version and its date, and its
-  license, or the URL it comes from. `young` instead when its first release is less than 14 days old
-  (`YOUNG_PACKAGE_DAYS`), or it has no release files: few have used it yet;
+Where a package comes from decides whether PyPI is asked about it. A direct dependency's source is its
+`[tool.uv.sources]` entry (`workspace`, `path`, `git`, `url` or `index`), else its PEP 508 URL (`name @ url`), else
+the `[[tool.uv.index]]` marked `default = true`, else the registry `uv.lock` has it from; a locked package's is its
+`source` in `uv.lock`. Only a package from PyPI's own index (`https://pypi.org/simple`) is looked up, at
+`https://pypi.org/pypi/<name>/json`, with a timeout of 15 seconds (`PYPI_TIMEOUT`). A package from another index is
+never looked up on pypi.org, so a name someone squatted there cannot lend it pypi.org's metadata: that is the
+dependency-confusion case, and the finding names the index instead.
+
+- `not-in-spec` (fails): a new direct dependency the spec does not name, with where it comes from, unless it is a
+  member of the project's workspace;
+- `not-on-pypi` (fails): a package from PyPI that PyPI answers 404 for. That is the slopsquatting case: a name an
+  agent made up, which anyone could register;
+- `unchecked` (fails): the packages from PyPI that PyPI was not asked about, because a request got no usable answer
+  (no answer, a timeout, an HTTP error other than 404, an answer that is not PyPI's JSON). PyPI is asked no more after
+  the first such request. A package that could not be checked is never reported as passed, so the next quality round
+  asks again;
+- `unreadable` (fails): a manifest in the change that is not UTF-8 TOML, or not in the shape above. One that cannot
+  be read at the base is a finding to weigh instead, since the Builder did not write it; either way that ecosystem's
+  new dependencies are not checked;
+- `added` (reports): a new direct dependency the spec names, or a workspace member, with its first release date, its
+  latest version and its date, and its license, or the path, repository or URL it comes from. `young` instead when its
+  first release is less than 14 days old (`YOUNG_PACKAGE_DAYS`), or it has no release files: few have used it yet.
+  `other-index` instead for one from an index other than PyPI's, naming the index;
 - `pulled-in` (reports): one finding per `uv.lock`, listing with the same facts the packages it alone adds, those the
   new dependencies pull in. The spec cannot be expected to name them.
 

@@ -3793,9 +3793,9 @@ class TestNewDependencies(unittest.TestCase):
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in to_weigh],
                          [("pyproject.toml", 5, "added"), ("uv.lock", None, "pulled-in")])
         self.assertEqual(to_weigh[1]["message"], (
-            "2 new packages that the change's dependencies pull in: `deprecated` (on PyPI since 2016-11-01, latest "
+            "3 new packages that the change's dependencies pull in: `deprecated` (on PyPI since 2016-11-01, latest "
             "1.2.18 of 2026-10-20, license MIT License), `packaging` (on PyPI since 2015-01-03, latest 3.13.0 of "
-            "2024-06-22, license Apache-2.0 OR BSD-2-Clause)."))
+            "2024-06-22, license Apache-2.0 OR BSD-2-Clause), `vendored` (from the path vendor/x, not from PyPI)."))
         self.assertEqual(pypi.asked, ["limits", "deprecated", "packaging"])
 
     def test_pypi_is_asked_no_more_once_it_failed(self):
@@ -3820,20 +3820,132 @@ class TestNewDependencies(unittest.TestCase):
         self.assertEqual((issues, pypi.asked), ([], []))
         self.assertEqual(to_weigh[0]["message"], f"`limits`, which the spec names: from {url}, not from PyPI.")
 
-    def test_dependency_lists_of_every_kind_are_read(self):
+    def test_dependency_lists_of_every_kind_are_read_without_the_project_itself(self):
         text = textwrap.dedent("""\
             [project]
+            name = "My_Proj"
             dependencies = ["Foo.Bar[extra] >=1; python_version>'3'", "baz @ https://example.com/baz.whl"]
             [project.optional-dependencies]
             docs = ["sphinx"]
+            all = ["my-proj[docs]"]
             [dependency-groups]
-            dev = ["pytest", {include-group = "lint"}]
+            dev = ["pytest", {include-group = "lint"}, "my.proj[docs]"]
             lint = ["ruff==0.5"]
             [tool.uv]
             dev-dependencies = ["ignored"]
         """)
-        self.assertEqual(orchestrator.pyproject_dependencies(text), {
-            "foo-bar": None, "baz": "https://example.com/baz.whl", "sphinx": None, "pytest": None, "ruff": None})
+        self.assertEqual(orchestrator.python_dependencies({"pyproject.toml": text}.get).direct, {
+            "foo-bar": None, "baz": orchestrator.PackageSource("url", "https://example.com/baz.whl"), "sphinx": None,
+            "pytest": None, "ruff": None})
+
+    def test_the_project_itself_in_an_extra_is_no_new_dependency(self):
+        new = pyproject_with() + '[project.optional-dependencies]\nall = ["limiter[a,b]"]\n'
+        pypi = FakePyPI()
+        found = self.find(run_change("", {("base", "pyproject.toml"): pyproject_with(), ("new", "pyproject.toml"): new},
+                                     counts=[orchestrator.ChangedFile("pyproject.toml", "pyproject.toml", 2, 0)]), pypi)
+        self.assertEqual((found, pypi.asked), (([], []), []))
+
+    def changed_manifests(self, base, new, lock_base=None, lock=None):
+        """A RunChange whose pyproject.toml, and uv.lock when given, go from base to new."""
+        files = {("base", "pyproject.toml"): base, ("new", "pyproject.toml"): new,
+                 ("base", "uv.lock"): lock_base, ("new", "uv.lock"): lock}
+        counts = [orchestrator.ChangedFile(p, p, 1, 0) for p in ("pyproject.toml", "uv.lock")]
+        return run_change("", files, spec="Use `forked`, `wheel-pkg`, `corp-utils`, `corp-auth` and `rich`.",
+                          counts=counts)
+
+    def test_a_package_with_a_uv_source_is_not_looked_up_on_pypi(self):
+        new = textwrap.dedent("""\
+            [project]
+            name = "limiter"
+            dependencies = ["httpx>=0.27", "member", "local", "forked", "wheel-pkg"]
+            [tool.uv.sources]
+            member = { workspace = true }
+            local = { path = "../local", editable = true }
+            forked = [{ git = "https://github.com/x/forked", rev = "v1" }]
+            wheel-pkg = { url = "https://example.com/wheel_pkg-1.0-py3-none-any.whl" }
+        """)
+        # Each name squatted on PyPI: none of their metadata may show.
+        pypi = FakePyPI(**{n: pypi_project() for n in ("member", "local", "forked", "wheel-pkg")})
+
+        issues, to_weigh = self.find(self.changed_manifests(pyproject_with(), new), pypi)
+
+        self.assertEqual(pypi.asked, [])
+        self.assertEqual([(f["rule"], f["message"]) for f in issues], [
+            ("not-in-spec", "`local` is a new dependency that the spec does not name; from the path ../local, not "
+                            "from PyPI.")])
+        self.assertEqual([(f["rule"], f["message"]) for f in to_weigh], [
+            ("added", "`member`: a member of the project's workspace, not from PyPI."),
+            ("added", "`forked`, which the spec names: from the repository https://github.com/x/forked, not from "
+                      "PyPI."),
+            ("added", "`wheel-pkg`, which the spec names: from https://example.com/wheel_pkg-1.0-py3-none-any.whl, "
+                      "not from PyPI.")])
+
+    def test_a_package_from_another_index_is_never_checked_against_pypi(self):
+        corp = "https://pypi.internal.example/simple"
+        new = textwrap.dedent(f"""\
+            [project]
+            name = "limiter"
+            dependencies = ["httpx>=0.27", "corp-utils", "corp-auth", "corp-secret"]
+            [[tool.uv.index]]
+            name = "corp"
+            url = "{corp}"
+            explicit = true
+            [tool.uv.sources]
+            corp-utils = {{ index = "corp" }}
+            corp-secret = {{ index = "corp" }}
+        """)
+
+        def lock(*packages):
+            return 'version = 1\n' + "".join(
+                f'\n[[package]]\nname = "{n}"\nversion = "1.0"\nsource = {{ registry = "{url}" }}\n'
+                for n, url in packages)
+        lock_base = lock(("httpx", "https://pypi.org/simple"))
+        lock_new = lock(("httpx", "https://pypi.org/simple"), ("corp-utils", corp), ("corp-auth", corp),
+                        ("corp-secret", corp), ("corp-lib", corp))
+        squatted = FakePyPI(**{n: pypi_project() for n in ("corp-utils", "corp-auth", "corp-secret", "corp-lib")})
+
+        issues, to_weigh = self.find(self.changed_manifests(pyproject_with(), new, lock_base, lock_new), squatted)
+
+        self.assertEqual(squatted.asked, [])
+        whence = f"from the index {corp}, not checked against PyPI"
+        self.assertEqual([(f["rule"], f["message"]) for f in issues], [
+            ("not-in-spec", f"`corp-secret` is a new dependency that the spec does not name; {whence}.")])
+        self.assertEqual([(f["path"], f["rule"], f["message"]) for f in to_weigh], [
+            ("pyproject.toml", "other-index", f"`corp-utils`, which the spec names: {whence}."),
+            ("pyproject.toml", "other-index", f"`corp-auth`, which the spec names: {whence}."),
+            ("uv.lock", "pulled-in", f"1 new packages that the change's dependencies pull in: `corp-lib` ({whence}).")])
+        self.assertNotIn("on PyPI since", json.dumps(issues + to_weigh))
+
+    def test_a_default_index_replaces_pypi(self):
+        new = pyproject_with("rich") + '[[tool.uv.index]]\nname = "mirror"\nurl = "https://mirror.example/simple"\n' \
+                                       "default = true\n"
+        pypi = FakePyPI(rich=pypi_project())
+        issues, to_weigh = self.find(self.changed_manifests(pyproject_with(), new), pypi)
+        self.assertEqual((issues, pypi.asked), ([], []))
+        self.assertEqual([(f["rule"], f["message"]) for f in to_weigh], [
+            ("other-index", "`rich`, which the spec names: from the index https://mirror.example/simple, not checked "
+                            "against PyPI.")])
+
+    def test_only_the_manifests_at_the_top_level_count(self):
+        files = {("base", "tests/fixtures/x/pyproject.toml"): pyproject_with(),
+                 ("new", "tests/fixtures/x/pyproject.toml"): pyproject_with("made-up-package"),
+                 ("new", "tests/fixtures/bad/uv.lock"): "[[package\n"}
+        counts = [orchestrator.ChangedFile(p, p, 1, 0) for p in ("tests/fixtures/x/pyproject.toml",
+                                                               "tests/fixtures/bad/uv.lock")]
+        pypi = FakePyPI()
+        self.assertEqual(self.find(run_change("", files, counts=counts), pypi), ([], []))
+        self.assertEqual(pypi.asked, [])
+
+    def test_a_manifest_unreadable_at_the_base_is_weighed_not_failed(self):
+        files = {("base", "pyproject.toml"): "[project\n", ("new", "pyproject.toml"): pyproject_with("rich")}
+        pypi = FakePyPI()
+        issues, to_weigh = self.find(run_change(pyproject_diff("rich"), files), pypi)
+        self.assertEqual((issues, pypi.asked), ([], []))
+        self.assertEqual([(f["path"], f["line"], f["severity"], f["rule"]) for f in to_weigh],
+                         [("pyproject.toml", None, "warning", "unreadable")])
+        self.assertTrue(to_weigh[0]["message"].startswith("`pyproject.toml` cannot be read at the base: it is not "
+                                                          "TOML: "), to_weigh[0]["message"])
+        self.assertTrue(to_weigh[0]["message"].endswith("; the change's new dependencies were not checked."))
 
     def test_a_manifest_that_cannot_be_read_fails_unchecked(self):
         files = {("base", "pyproject.toml"): pyproject_with(), ("new", "pyproject.toml"): "[project\n"}
@@ -3847,7 +3959,8 @@ class TestNewDependencies(unittest.TestCase):
                 self.assertEqual([(f["path"], f["line"], f["rule"]) for f in issues],
                                  [("pyproject.toml", None, "unreadable")])
                 self.assertIn(why, issues[0]["message"])
-                self.assertTrue(issues[0]["message"].endswith("; its new dependencies were not checked."))
+                self.assertTrue(issues[0]["message"].startswith("`pyproject.toml` cannot be read in the change: "))
+                self.assertTrue(issues[0]["message"].endswith("; the change's new dependencies were not checked."))
 
     def test_a_deleted_or_untouched_manifest_adds_nothing(self):
         diff = ("diff --git a/pyproject.toml b/pyproject.toml\ndeleted file mode 100644\n--- a/pyproject.toml\n"
@@ -3869,10 +3982,10 @@ class TestNewDependencies(unittest.TestCase):
                 self.assertEqual((found, pypi.asked), (([], []), []))
 
     def test_a_new_manifest_adds_all_it_names(self):
-        files = {("new", "sub/pyproject.toml"): pyproject_with()}
-        issues, _ = self.find(run_change(new_file_diff("sub/pyproject.toml", 6), files), FakePyPI(
+        files = {("new", "pyproject.toml"): pyproject_with()}
+        issues, _ = self.find(run_change(new_file_diff("pyproject.toml", 6), files), FakePyPI(
             httpx=pypi_project()))
-        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in issues], [("sub/pyproject.toml", 4, "not-in-spec")])
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in issues], [("pyproject.toml", 4, "not-in-spec")])
 
 
 class TestPyPI(unittest.TestCase):

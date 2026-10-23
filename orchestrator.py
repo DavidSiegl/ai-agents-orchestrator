@@ -4500,18 +4500,53 @@ def _orchestrator_section(issues: list[dict], to_weigh: list[dict], after: int) 
 
 # -- New dependencies ------------------------------------------------------
 
+# PyPI's index as uv.lock and [[tool.uv.index]] name it; a package from any other index is not PyPI's to vouch for.
+PYPI_INDEX_URL = "https://pypi.org/simple"
+
 
 @dataclass(frozen=True)
-class DependencyManifest:
-    """A kind of file that lists a project's dependencies, by its name, and how to read it."""
-    basename: str
-    # The packages the file's text names, by package_key, each with the URL it comes from instead of the index,
-    # None for the index. Raises ValueError, or TypeError for a value of the wrong type, saying why, for text it
-    # cannot read.
-    packages: Callable[[str], dict[str, str | None]]
-    # True: its packages are the project's own choice, which the spec must name. False: a lock file, whose new
-    # packages beyond those are what the chosen ones pull in.
-    direct: bool
+class PackageSource:
+    """Where a package comes from when it is not PyPI, as uv's sources name it."""
+    # workspace, path, git, url or index; source for one uv names in a way this reader does not know.
+    kind: str
+    where: str  # the path, repository, URL or index URL, as the manifest gives it
+
+    def describe(self) -> str:
+        """Where it comes from, as a finding says it."""
+        if self.kind == "workspace":
+            return "a member of the project's workspace, not from PyPI"
+        if self.kind == "index":
+            return f"from the index {self.where}, not checked against PyPI"
+        place = {"path": "the path ", "git": "the repository ", "source": "the source "}.get(self.kind, "")
+        return f"from {place}{self.where}, not from PyPI"
+
+
+@dataclass(frozen=True)
+class Dependencies:
+    """What a project's manifests say it depends on, each package by package_key with its PackageSource, None for
+    PyPI."""
+    direct: dict[str, PackageSource | None]  # the project's own choice, which the spec must name
+    locked: dict[str, PackageSource | None]  # every package its lock file pins, the project and its workspace aside
+
+
+class ManifestError(ValueError):
+    """A manifest that cannot be read: path is the manifest's, why says what is wrong with it."""
+
+    def __init__(self, path: str, why: str):
+        super().__init__(f"`{path}`: {why}")
+        self.path = path
+        self.why = why
+
+
+@dataclass(frozen=True)
+class DependencyEcosystem:
+    """A kind of project's dependency manifests, at the repository's top level, and how to read them. Manifests
+    anywhere else, such as test fixtures, are not the project's."""
+    manifest: str  # the file that lists the project's own dependencies
+    lock_file: str  # the file beside it that pins every package they pull in
+    # The project's Dependencies, given (path) -> that file's text, None where there is none. Raises ManifestError for
+    # a manifest it cannot read.
+    read: Callable[[Callable[[str], str | None]], Dependencies]
 
 
 def package_key(name: str) -> str:
@@ -4519,24 +4554,120 @@ def package_key(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def pyproject_dependencies(text: str) -> dict[str, str | None]:
-    """DependencyManifest.packages of a pyproject.toml: [project] dependencies and optional-dependencies, and
-    [dependency-groups], an {include-group} entry left out."""
+def python_dependencies(read: Callable[[str], str | None]) -> Dependencies:
+    """DependencyEcosystem.read of a Python project with uv.
+
+    Its direct dependencies are pyproject.toml's [project] dependencies and optional-dependencies and its
+    [dependency-groups], an {include-group} entry and the project itself left out. A dependency's source is its
+    [tool.uv.sources] entry, else its PEP 508 URL, else the [[tool.uv.index]] marked default, else the index uv.lock
+    has it from. The locked packages are uv.lock's, the project and its workspace members left out.
+    """
     try:
-        data = tomllib.loads(text)
+        locked = _uv_lock_packages(_toml_manifest(read, "uv.lock"))
+    except (ValueError, TypeError) as e:
+        raise ManifestError("uv.lock", str(e)) from e
+    try:
+        direct = _pyproject_dependencies(_toml_manifest(read, "pyproject.toml"))
+    except (ValueError, TypeError) as e:
+        raise ManifestError("pyproject.toml", str(e)) from e
+    return Dependencies({key: source or locked.get(key) for key, source in direct.items()}, locked)
+
+
+def _toml_manifest(read: Callable[[str], str | None], path: str) -> dict:
+    """The table of the TOML file at path, read verbatim as Host.file_at gives it; {} where there is none. ValueError
+    for one that is not UTF-8, as TOML must be, or not TOML."""
+    text = read(path)
+    if text is None:
+        return {}
+    try:
+        return tomllib.loads(os.fsencode(text).decode("utf-8"))
+    except UnicodeDecodeError as e:
+        raise ValueError(f"it is not UTF-8: {e}") from e
     except tomllib.TOMLDecodeError as e:
         raise ValueError(f"it is not TOML: {e}") from e
+
+
+def _pyproject_dependencies(data: dict) -> dict[str, PackageSource | None]:
+    """python_dependencies's direct dependencies of a pyproject.toml's table; ValueError or TypeError, saying why, for
+    one of another shape."""
     project = _toml_table(data, "project")
-    lists = [("[project] dependencies", project.get("dependencies", []))]
-    lists += [(f"[project.optional-dependencies] {k}", v)
-              for k, v in _toml_table(project, "optional-dependencies").items()]
-    lists += [(f"[dependency-groups] {k}", v) for k, v in _toml_table(data, "dependency-groups").items()]
-    out: dict[str, str | None] = {}
-    for where, requirements in lists:
+    uv = _toml_table(_toml_table(data, "tool"), "uv")
+    sources = _uv_sources(uv)
+    default = next((_index_source(i.get("url")) for i in _uv_indexes(uv) if i.get("default") is True), None)
+    own = package_key(project.get("name") or "")
+    out: dict[str, PackageSource | None] = {}
+    for where, requirements in _requirement_lists(project, data):
         if not isinstance(requirements, list):
             raise TypeError(f"{where} is not a list")
-        out.update(_requirement(r) for r in requirements if not isinstance(r, dict))
+        for key, url in (_requirement(r) for r in requirements if not isinstance(r, dict)):
+            if key != own:
+                out[key] = sources.get(key) or (PackageSource("url", url) if url else default)
     return out
+
+
+def _requirement_lists(project: dict, data: dict) -> list[tuple[str, object]]:
+    """(where, its list) of each list of requirements in a pyproject.toml's table."""
+    return [("[project] dependencies", project.get("dependencies", [])),
+            *((f"[project.optional-dependencies] {k}", v)
+              for k, v in _toml_table(project, "optional-dependencies").items()),
+            *((f"[dependency-groups] {k}", v) for k, v in _toml_table(data, "dependency-groups").items())]
+
+
+def _uv_indexes(uv: dict) -> list[dict]:
+    """[tool.uv]'s [[index]] tables."""
+    indexes = uv.get("index", [])
+    if not isinstance(indexes, list) or not all(isinstance(i, dict) for i in indexes):
+        raise TypeError("[[tool.uv.index]] is not a list of tables")
+    return indexes
+
+
+def _uv_sources(uv: dict) -> dict[str, PackageSource | None]:
+    """The PackageSource of each package [tool.uv.sources] names, by package_key; None for one from PyPI's index. Of
+    a package with several sources, each for some platforms, the first."""
+    indexes = {i.get("name"): i.get("url") for i in _uv_indexes(uv)}
+    out = {}
+    for name, entry in _toml_table(uv, "sources").items():
+        first = entry[0] if isinstance(entry, list) and entry else entry
+        if not isinstance(first, dict):
+            raise TypeError(f"[tool.uv.sources] {name} is not a table")
+        out[package_key(name)] = _uv_source(first, indexes)
+    return out
+
+
+def _uv_source(entry: dict, indexes: dict) -> PackageSource | None:
+    """The PackageSource of a [tool.uv.sources] entry, given the indexes' URLs by name."""
+    if entry.get("workspace") is True:
+        return PackageSource("workspace", "")
+    if "index" in entry:
+        return _index_source(indexes.get(entry["index"]) or entry["index"])
+    kind = next((k for k in ("path", "git", "url") if k in entry), None)
+    return PackageSource(kind, str(entry[kind])) if kind else PackageSource("source", str(entry))
+
+
+def _index_source(url) -> PackageSource | None:
+    """The PackageSource of a package from the index at url; None for PyPI's."""
+    return None if str(url).rstrip("/") == PYPI_INDEX_URL else PackageSource("index", str(url))
+
+
+def _uv_lock_packages(data: dict) -> dict[str, PackageSource | None]:
+    """python_dependencies's locked packages of a uv.lock's table; TypeError for one of another shape."""
+    packages = data.get("package", [])
+    if not isinstance(packages, list) or not all(isinstance(p, dict) and isinstance(p.get("name"), str)
+                                                 and isinstance(p.get("source", {}), dict) for p in packages):
+        raise TypeError("[[package]] is not a list of tables with a name")
+    # editable and virtual: the project itself and its workspace members.
+    return {package_key(p["name"]): _lock_source(p.get("source", {})) for p in packages
+            if not {"editable", "virtual"} & p.get("source", {}).keys()}
+
+
+def _lock_source(source: dict) -> PackageSource | None:
+    """The PackageSource of a uv.lock package's source table."""
+    if "registry" in source:
+        return _index_source(source["registry"])
+    kind = next((k for k in ("path", "directory", "git", "url") if k in source), None)
+    if kind is None:
+        return PackageSource("source", str(source))
+    return PackageSource("path" if kind == "directory" else kind, str(source[kind]))
 
 
 def _toml_table(data: dict, key: str) -> dict:
@@ -4559,55 +4690,38 @@ def _requirement(requirement) -> tuple[str, str | None]:
     return package_key(m.group(1)), m.group(2)
 
 
-def uv_lock_packages(text: str) -> dict[str, str | None]:
-    """DependencyManifest.packages of a uv.lock: its [[package]]s from a registry. The project itself, and a package
-    from a path, git or a URL, are left out; a direct dependency from a URL is pyproject.toml's to name."""
-    try:
-        data = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as e:
-        raise ValueError(f"it is not TOML: {e}") from e
-    packages = data.get("package", [])
-    if not isinstance(packages, list) or not all(isinstance(p, dict) and isinstance(p.get("name"), str)
-                                                 for p in packages):
-        raise TypeError("[[package]] is not a list of tables with a name")
-    return {package_key(p["name"]): None for p in packages
-            if isinstance(p.get("source"), dict) and "registry" in p["source"]}
-
-
-# The files whose new packages the new-dependencies check judges, by their name anywhere in the repository. Python's
-# so far, whose index is PyPI; another ecosystem's needs its own index too.
-DEPENDENCY_MANIFESTS = (
-    DependencyManifest("pyproject.toml", pyproject_dependencies, direct=True),
-    DependencyManifest("uv.lock", uv_lock_packages, direct=False),
-)
+# The ecosystems whose new packages the new-dependencies check judges. Python's so far, whose index is PyPI; another
+# ecosystem's needs its own index too.
+DEPENDENCY_ECOSYSTEMS = (DependencyEcosystem("pyproject.toml", "uv.lock", python_dependencies),)
 
 
 @dataclass(frozen=True)
 class _NewPackage:
-    """A package a manifest names after the change and not before it."""
+    """A package a project depends on after the change and not before it."""
     key: str  # package_key
-    path: str  # the manifest
+    path: str  # the manifest that names it: its ecosystem's manifest for a direct one, else its lock file
     line: int | None  # the first line the change added to it that names the package; None when none does
-    direct: bool  # DependencyManifest.direct
-    url: str | None  # where it comes from instead of the index
+    direct: bool  # one of Dependencies.direct; else a package the lock file alone adds
+    source: PackageSource | None  # None for PyPI
 
 
 def new_dependencies(change: RunChange, *, pypi: "PyPI") -> CheckFindings:
-    """The packages that the change adds to a DEPENDENCY_MANIFESTS file, each asked of pypi.
+    """The packages that the change adds to a DEPENDENCY_ECOSYSTEMS project, each from PyPI asked of pypi.
 
-    Fails a direct dependency the spec does not name (spec_names), a package PyPI does not know, one PyPI could not
-    be asked about, and a manifest that cannot be read. Reports a direct dependency the spec names with what PyPI
-    knows of it, flagged when its first release is under YOUNG_PACKAGE_DAYS days old; and the packages a lock file
-    alone adds, those the direct ones pull in, in one finding per lock file. After the first request PyPI gives no
-    usable answer to, it is asked no more.
+    Fails a direct dependency the spec does not name (spec_names), unless it is a member of the project's workspace;
+    a package PyPI does not know; those PyPI could not be asked about; and a manifest in the change that cannot be
+    read. Reports a direct dependency the spec names, or a workspace member, with where it comes from: what PyPI knows
+    of it, flagged when its first release is under YOUNG_PACKAGE_DAYS days old, or its source, other-index for an
+    index other than PyPI's; the packages a lock file alone adds, those the direct ones pull in, in one finding per
+    lock file; and a manifest that cannot be read at the base, which leaves its ecosystem unchecked. After the first
+    request PyPI gives no usable answer to, it is asked no more.
     """
-    packages, issues = _new_packages(change)
+    packages, issues, to_weigh = _new_packages(change)
     known, failure = _ask_pypi(packages, pypi)
     named = spec_names(change.spec)
-    to_weigh: list[dict] = []
     pulled_in: dict[str, list[str]] = {}
     for p in packages:
-        if not p.direct and known.get(p.key):
+        if not p.direct and (p.source or known.get(p.key)):
             pulled_in.setdefault(p.path, []).append(f"`{p.key}` ({_whence(p, known, change.now)})")
         elif judged := _package_finding(p, named, known, change.now):
             fails, finding = judged
@@ -4615,7 +4729,7 @@ def new_dependencies(change: RunChange, *, pypi: "PyPI") -> CheckFindings:
     for path, described in pulled_in.items():
         to_weigh.append(_finding(path, None, "pulled-in", (
             f"{len(described)} new packages that the change's dependencies pull in: {', '.join(described)}.")))
-    if unasked := list(dict.fromkeys(p.key for p in packages if not p.url and p.key not in known)):
+    if unasked := list(dict.fromkeys(p.key for p in packages if not p.source and p.key not in known)):
         issues.append(_finding(None, None, "unchecked", (
             f"PyPI could not be asked about {', '.join(f'`{k}`' for k in unasked)}: {failure}; whether they exist is "
             f"not known."), severity="error"))
@@ -4625,9 +4739,10 @@ def new_dependencies(change: RunChange, *, pypi: "PyPI") -> CheckFindings:
 def _package_finding(p: _NewPackage, named: set[str], known: dict[str, PyPIProject | None],
                      now: float) -> tuple[bool, dict] | None:
     """Whether new_dependencies's finding on package p fails the gate, and the finding; None for a package of a lock
-    file that PyPI knows, which is described with the others the lock file adds, or one that PyPI was not asked
-    about, which is unchecked."""
-    if p.direct and p.key not in named:
+    file that comes from elsewhere than PyPI or that PyPI knows, which is described with the others the lock file
+    adds, or one that PyPI was not asked about, which is unchecked."""
+    member = p.source is not None and p.source.kind == "workspace"
+    if p.direct and p.key not in named and not member:
         return True, _finding(p.path, p.line, "not-in-spec", (
             f"`{p.key}` is a new dependency that the spec does not name{_whence(p, known, now, '; ')}."),
             severity="error")
@@ -4635,11 +4750,17 @@ def _package_finding(p: _NewPackage, named: set[str], known: dict[str, PyPIProje
         return True, _finding(p.path, p.line, "not-on-pypi", (
             f"PyPI does not know `{p.key}`: the name may be mistyped, or name a package that does not exist yet, "
             f"which anyone could register (slopsquatting)."), severity="error")
-    if p.direct and (p.url or p.key in known):
-        project = known.get(p.key)
-        rule = "young" if project and _young(project, now) else "added"
-        return False, _finding(p.path, p.line, rule, f"`{p.key}`, which the spec names: {_whence(p, known, now)}.")
+    if p.direct and (p.source or p.key in known):
+        return False, _finding(p.path, p.line, _added_rule(p, known.get(p.key), now), (
+            f"`{p.key}`{', which the spec names' if p.key in named else ''}: {_whence(p, known, now)}."))
     return None
+
+
+def _added_rule(p: _NewPackage, project: PyPIProject | None, now: float) -> str:
+    """The rule of a direct dependency new_dependencies only reports."""
+    if p.source is not None and p.source.kind == "index":
+        return "other-index"
+    return "young" if project and _young(project, now) else "added"
 
 
 def spec_names(spec: str) -> set[str]:
@@ -4648,44 +4769,45 @@ def spec_names(spec: str) -> set[str]:
     return {package_key(w.rstrip("._-")) for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9._-]*", spec)}
 
 
-def _new_packages(change: RunChange) -> tuple[list[_NewPackage], list[dict]]:
-    """The packages the change adds to its manifests, those of direct ones first, a package a direct manifest adds
-    left out of the lock files'; and an unreadable finding for each manifest that cannot be read."""
-    manifests = {m.basename: m for m in DEPENDENCY_MANIFESTS}
+def _new_packages(change: RunChange) -> tuple[list[_NewPackage], list[dict], list[dict]]:
+    """The packages the change adds to each DEPENDENCY_ECOSYSTEMS project whose manifest or lock file it touches,
+    direct ones first; and an unreadable finding for each project whose manifests cannot be read, failing when that is
+    in the change and to weigh when it is at the base."""
+    base_paths = {f.path: f.base_path for f in change.files}
     found: list[_NewPackage] = []
-    problems = []
-    # A manifest the change deletes adds nothing: it has no text in the change. One it moves is compared with itself
-    # at its old path.
-    for f in change.files:
-        manifest = manifests.get(posixpath.basename(f.path))
-        if manifest is None:
+    issues, to_weigh = [], []
+
+    # Read once, for the ecosystem and for the lines that name its packages.
+    @functools.cache
+    def new_text(path: str) -> str | None:
+        return change.file_at(change.commit, path)
+
+    for ecosystem in DEPENDENCY_ECOSYSTEMS:
+        if ecosystem.manifest not in base_paths and ecosystem.lock_file not in base_paths:
             continue
-        path, added = f.path, change.changed.get(f.path, set())
         try:
-            before = _manifest_packages(manifest, change.file_at(change.base, f.base_path), "at the base")
-            text = change.file_at(change.commit, path)
-            after = _manifest_packages(manifest, text, "in the change")
-        except ValueError as e:
-            problems.append(_finding(path, None, "unreadable", f"{e}; its new dependencies were not checked.",
-                                     severity="error"))
+            after = ecosystem.read(new_text)
+        except ManifestError as e:
+            issues.append(_unreadable(e, "in the change", "error"))
             continue
-        found += [_NewPackage(key, path, _line_naming(text or "", added, key), manifest.direct, url)
-                  for key, url in after.items() if key not in before]
-    direct = {p.key for p in found if p.direct}
+        try:
+            # A file the change moved is compared with itself at its old path.
+            before = ecosystem.read(lambda path: change.file_at(change.base, base_paths.get(path, path)))
+        except ManifestError as e:
+            to_weigh.append(_unreadable(e, "at the base", "warning"))
+            continue
+        added = change.changed.get(ecosystem.manifest, set())
+        found += [_NewPackage(key, ecosystem.manifest, _line_naming(new_text(ecosystem.manifest) or "", added, key),
+                              True, source) for key, source in after.direct.items() if key not in before.direct]
+        found += [_NewPackage(key, ecosystem.lock_file, None, False, source) for key, source in after.locked.items()
+                  if key not in before.locked and key not in after.direct]
     found.sort(key=lambda p: not p.direct)
-    return [p for p in found if p.direct or p.key not in direct], problems
+    return found, issues, to_weigh
 
 
-def _manifest_packages(manifest: DependencyManifest, text: str | None, where: str) -> dict[str, str | None]:
-    """manifest.packages of text, verbatim as Host.file_at gives it, none for no file; ValueError saying where it
-    cannot be read."""
-    if text is None:
-        return {}
-    try:
-        # TOML, the only manifest format so far, is UTF-8.
-        return manifest.packages(os.fsencode(text).decode("utf-8"))
-    except (ValueError, TypeError) as e:  # UnicodeDecodeError is a ValueError
-        raise ValueError(f"`{manifest.basename}` cannot be read {where}: {e}") from e
+def _unreadable(e: ManifestError, where: str, severity: str) -> dict:
+    return _finding(e.path, None, "unreadable", (f"`{e.path}` cannot be read {where}: {e.why}; the change's new "
+                                                  f"dependencies were not checked."), severity=severity)
 
 
 def _line_naming(text: str, added: set[int], key: str) -> int | None:
@@ -4697,11 +4819,11 @@ def _line_naming(text: str, added: set[int], key: str) -> int | None:
 
 
 def _ask_pypi(packages: list[_NewPackage], pypi: "PyPI") -> tuple[dict[str, PyPIProject | None], str | None]:
-    """What pypi knows of each package that is not from a URL, by key, None for one it does not know; and its error
-    for the first one it gave no usable answer about, which leaves that one and every later one out."""
+    """What pypi knows of each package from PyPI, by key, None for one it does not know; and its error for the first
+    one it gave no usable answer about, which leaves that one and every later one out."""
     known: dict[str, PyPIProject | None] = {}
     for p in packages:
-        if p.url is None and p.key not in known:
+        if p.source is None and p.key not in known:
             try:
                 known[p.key] = pypi.project(p.key)
             except PyPIError as e:
@@ -4710,9 +4832,9 @@ def _ask_pypi(packages: list[_NewPackage], pypi: "PyPI") -> tuple[dict[str, PyPI
 
 
 def _whence(p: _NewPackage, known: dict[str, PyPIProject | None], now: float, lead: str = "") -> str:
-    """Where package p comes from, after lead: its URL, or what PyPI knows of it; "" when PyPI was not asked."""
-    if p.url:
-        return f"{lead}from {p.url}, not from PyPI"
+    """Where package p comes from, after lead: its source, or what PyPI knows of it; "" when PyPI was not asked."""
+    if p.source:
+        return f"{lead}{p.source.describe()}"
     if p.key not in known:
         return ""
     project = known[p.key]
