@@ -2158,12 +2158,13 @@ def judge_change(cwd: str, base: str, *, rules: str | None = None, coverage: str
     pyproject.toml at rules, or the tree's own, and lists the findings on lines the change added and the
     lineless ones on files it touched. Then runs each of GATE_CHECKS and lists what it finds, as an issue or
     as a finding to weigh as its fails says. The gate is ERROR when there is such a linter finding or a
-    failing check's finding, when a linter is missing, fails or prints nothing readable, when tests, a JUnit
-    report of the tree's tests such as pytest's --junitxml, has a failing test, or when coverage, a Cobertura
-    report of the tree such as pytest-cov's coverage.xml, puts new code below GATE_MIN_COVERAGE percent on
-    GATE_MIN_NEW_LINES or more new lines to cover; else OK. Suppressions the change added are listed, not counted against it. Paths are
-    absolute or relative to the process's working directory. A file name that is not UTF-8 appears in the
-    quality file with each byte it cannot decode as `\\xNN`.
+    failing check's finding, when a linter is missing, fails or prints nothing readable, when a file the change
+    adds lines to holds a carriage return as lone_carriage_returns finds, when tests, a JUnit report of the
+    tree's tests such as pytest's --junitxml, has a failing test, or when coverage, a Cobertura report of the
+    tree such as pytest-cov's coverage.xml, puts new code below GATE_MIN_COVERAGE percent on GATE_MIN_NEW_LINES
+    or more new lines to cover; else OK. Suppressions the change added are listed, not counted against it.
+    Paths are absolute or relative to the process's working directory. A file name that is not UTF-8 appears in
+    the quality file with each byte it cannot decode as `\\xNN`.
 
     Raises OrchestratorError when it cannot judge: cwd is not in a git work tree, base names no commit, there
     is no rules file, the test or coverage report cannot be read, or git prints what it cannot decode outside
@@ -2198,9 +2199,10 @@ def judge_change(cwd: str, base: str, *, rules: str | None = None, coverage: str
     elsewhere = len(findings) - len(issues)
     if issues:
         conditions.insert(0, f"{len(issues)} findings on lines the change added; each is listed below.")
-    conditions += [f"`{path}:{n}` holds a carriage return that does not end the line. Python's tools end a line "
-                   f"there and git does not, so they number the lines after it differently and the gate cannot "
-                   f"tell which of their findings are on the change; remove it, or write it as `\\r` in a string."
+    conditions += [f"`{path}:{n}` holds a carriage return that does not end the line. Linters such as ruff, mypy "
+                   f"and pymarkdown end a line there and git does not, so they number every later line of the file "
+                   f"past git's, and the gate cannot tell which of their findings are on the change; remove it, "
+                   f"end the line there, or write it as `\\r` in a string."
                    for path, n in lone_carriage_returns(root, changed)]
     to_weigh: list[dict] = []
     change = GateChange(root, base_sha, diff, changed)
@@ -2374,15 +2376,19 @@ def added_suppressions(root: str, changed: dict[str, set[int]]) -> list[tuple[st
 
 
 def lone_carriage_returns(root: str, changed: dict[str, set[int]]) -> list[tuple[str, int]]:
-    """The (path, line) of each line the change added to a `*.py` file, in the working tree at root, that holds a
-    carriage return not followed by a newline. Python's tokenizer ends a line there and git does not, so the line
-    numbers Python's linters give after it are not git's. Raises OrchestratorError when such a file cannot be read.
+    """(path, line) for each file the change adds lines to whose working tree at root has a carriage return not
+    followed by a newline at or before the last added line: the first line that holds one, whichever commit
+    added it.
+
+    Python's tokenizer, pymarkdown and YAML parsers end a line there and git does not, so they number every line
+    after it past git's, and their findings on the file cannot be placed on the change's lines. Raises
+    OrchestratorError when such a file cannot be read.
     """
     out = []
     for path, added, lines in _files_with_added_lines(root, changed):
-        if path.endswith(".py"):
-            out += [(path, n) for n, line in enumerate(lines, 1)
-                    if n in added and b"\r" in line.removesuffix(b"\r")]
+        lone = (n for n, line in enumerate(lines[:max(added)], 1) if b"\r" in line.removesuffix(b"\r"))
+        if (n := next(lone, None)) is not None:
+            out.append((path, n))
     return out
 
 

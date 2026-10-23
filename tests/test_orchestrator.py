@@ -3783,6 +3783,21 @@ class TestGate(unittest.TestCase):
         with self.assertRaisesRegex(OrchestratorError, "cannot read gone.py, which the change edits"):
             orchestrator.lone_carriage_returns(self.repo, {"gone.py": {1}})
 
+    def test_a_carriage_return_above_an_added_line_fails_the_gate_in_any_file(self):
+        # The \r lines are the base's, and d.md is pymarkdown's: each linter's line after them is one past git's.
+        self.put("f.py", "a = 1\rb = 2\n")
+        self.put("d.md", "# T\n\nok\r more text\n")
+        self.git("add", "d.md")
+        self.git("commit", "--quiet", "-am", "carriage returns")
+        self.put("f.py", "a = 1\rb = 2\nimport os\n")
+        self.put("d.md", "# T\n\nok\r more text\n\n# T\n")
+        self.says("ruff", "f.py:3:8: F401 [*] `os` imported but unused\n")
+        self.says("pymarkdown", "d.md:6:1: MD025: Multiple top-level headings in the same document\n")
+        status, out, _ = self.gate()
+        self.assertEqual(status, 1)
+        self.assertIn("- `f.py:1` holds a carriage return that does not end the line", out)
+        self.assertIn("- `d.md:3` holds a carriage return that does not end the line", out)
+
     def test_a_suppression_after_a_form_feed_is_listed_at_gits_line(self):
         self.put("f.py", "a = 1\x0c\n")
         self.git("commit", "--quiet", "-am", "form feed")
