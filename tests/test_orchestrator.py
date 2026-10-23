@@ -3868,6 +3868,16 @@ class TestGate(unittest.TestCase):
         self.assertIn("1. `f.py:4` error ruff F401: `os` imported but unused\n", out)
         self.assertIn("2. `f.py:4` warning flaky seeds 3 5: test_b\n", out)
 
+    def test_a_removed_test_fails_the_gate(self):
+        self.put("tests/test_f.py", "def test_one():\n    assert 1\n\n\ndef test_two():\n    assert 2\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "tests")
+        self.put("tests/test_f.py", "def test_one():\n    assert 1\n")
+        status, out, _ = self.gate()
+        self.assertEqual(status, 1)
+        self.assertIn("- 1 findings of the `test-integrity` check; each is listed below.\n", out)
+        self.assertIn("1. `tests/test_f.py:5` error test-integrity removed-test: ", out)
+
     def test_a_check_with_nothing_to_say_adds_nothing(self):
         self.checks(orchestrator.GateCheck("quiet", fails=True, find=lambda change: []),
                     orchestrator.GateCheck("hush", fails=False, find=lambda change: []))
@@ -3896,6 +3906,214 @@ class TestGate(unittest.TestCase):
         status, _, err = self.gate("--config", "missing.toml")
         self.assertEqual(status, orchestrator.EXIT_GATE_UNJUDGED)
         self.assertIn("is not a file", err)
+
+
+class TestWeakenedTests(unittest.TestCase):
+    """The test-integrity check over a real git repository: a base commit, then the change in its working tree."""
+
+    BASE = {
+        "tests/test_calc.py": (
+            "import unittest\n"                                # 1
+            "\n"                                               # 2
+            "from calc import add\n"                           # 3
+            "\n"                                               # 4
+            "\n"                                               # 5
+            "class TestAdd(unittest.TestCase):\n"              # 6
+            "    def test_small(self):\n"                      # 7
+            "        self.assertEqual(add(1, 2), 3)\n"         # 8
+            "        self.assertEqual(add(0, 0), 0)\n"         # 9
+            "\n"                                               # 10
+            "    def test_large(self):\n"                      # 11
+            "        assert add(10, 20) == 30\n"               # 12
+            "\n"                                               # 13
+            "\n"                                               # 14
+            "class TestNegative(unittest.TestCase):\n"         # 15
+            "    def test_one(self):\n"                        # 16
+            "        assert add(-1, -1) == -2\n"               # 17
+            "\n"                                               # 18
+            "    def test_two(self):\n"                        # 19
+            "        with self.assertRaises(TypeError):\n"     # 20
+            "            add(None, 1)\n"                       # 21
+            "\n"                                               # 22
+            "\n"                                               # 23
+            "def test_function():\n"                           # 24
+            "    assert add(2, 2) == 4\n"                      # 25
+        ),
+        "tests/test_other.py": "def test_a():\n    assert True\n\n\ndef test_b():\n    assert 1\n",
+        "calc.py": "def add(a, b):\n    return a + b\n",
+    }
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = tmp.name
+        self.host = Host()
+        self.git("init", "--quiet", "-b", "main")
+        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
+            self.git("config", key, value)
+        for name, text in self.BASE.items():
+            self.put(name, text)
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "base")
+
+    def git(self, *args):
+        return self.host.git(self.repo, *args)
+
+    def put(self, name, text):
+        path = os.path.join(self.repo, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    def edit(self, name, old, new):
+        with open(os.path.join(self.repo, name)) as f:
+            text = f.read()
+        self.assertEqual(text.count(old), 1, old)
+        self.put(name, text.replace(old, new))
+
+    def found(self):
+        """(path, line, rule) of each finding on the working tree's change, and the findings themselves."""
+        base = self.git("rev-parse", "HEAD").strip()
+        diff = self.host.change_diff(self.repo, base)
+        found = orchestrator.weakened_tests(orchestrator.GateChange(self.repo, base, diff, changed_lines(diff)))
+        return [(f["path"], f["line"], f["rule"]) for f in found], found
+
+    def test_an_unchanged_tree_has_no_findings(self):
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_removed_test_is_found_at_its_line_at_the_base(self):
+        self.edit("tests/test_calc.py", "    def test_large(self):\n        assert add(10, 20) == 30\n\n", "")
+        where, found = self.found()
+        self.assertEqual(where, [("tests/test_calc.py", 11, "removed-test")])
+        self.assertIn("`TestAdd.test_large`", found[0]["message"])
+        self.assertIn("line 11 at the base", found[0]["message"])
+
+    def test_a_removed_class_is_one_finding_with_its_tests(self):
+        self.edit("tests/test_calc.py", self.BASE["tests/test_calc.py"][
+            self.BASE["tests/test_calc.py"].index("class TestNegative"):
+            self.BASE["tests/test_calc.py"].index("def test_function")], "")
+        where, found = self.found()
+        self.assertEqual(where, [("tests/test_calc.py", 15, "removed-test")])
+        self.assertIn("`TestNegative` and its 2 tests", found[0]["message"])
+
+    def test_a_deleted_test_file_is_one_finding(self):
+        os.remove(os.path.join(self.repo, "tests/test_other.py"))
+        where, found = self.found()
+        self.assertEqual(where, [("tests/test_other.py", None, "removed-test")])
+        self.assertIn("2 tests", found[0]["message"])
+
+    def test_a_renamed_test_with_the_same_body_is_not_removed(self):
+        self.edit("tests/test_calc.py", "def test_large(self):", "def test_big(self):")
+        self.assertEqual(self.found()[0], [])
+
+    def test_tests_moved_to_a_renamed_file_are_not_removed(self):
+        self.git("mv", "tests/test_other.py", "tests/test_moved.py")
+        self.edit("tests/test_moved.py", "def test_b():", "def test_bee():")
+        self.assertEqual(self.found()[0], [])
+
+    def test_tests_moved_into_another_file_are_not_removed(self):
+        os.remove(os.path.join(self.repo, "tests/test_other.py"))
+        self.put("tests/test_new.py", "def test_a():\n    assert True\n\n\ndef test_b():\n    assert 1\n")
+        self.git("add", "-A")
+        self.assertEqual(self.found()[0], [])
+
+    def test_added_skips_are_found_at_their_lines(self):
+        self.edit("tests/test_calc.py", "    def test_small(self):\n",
+                  "    @unittest.skip('later')\n    def test_small(self):\n")                     # line 7
+        self.edit("tests/test_calc.py", "    def test_one(self):\n        assert",
+                  "    def test_one(self):\n        self.skipTest('flaky')\n        assert")     # line 18
+        self.edit("tests/test_other.py", "def test_b():\n",
+                  "import pytest\n\n\n@pytest.mark.xfail\ndef test_b():\n    pytest.skip('no')\n")
+        where, _ = self.found()
+        self.assertEqual(where, [("tests/test_calc.py", 7, "skip"), ("tests/test_calc.py", 18, "skip"),
+                                 ("tests/test_other.py", 8, "skip"), ("tests/test_other.py", 10, "skip")])
+
+    def test_skips_already_at_the_base_are_not_found(self):
+        self.put("tests/test_skipped.py", "import pytest\n\n\n@pytest.mark.skipif(True, reason='x')\n"
+                                          "def test_x():\n    assert 1\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "skipped")
+        self.edit("tests/test_skipped.py", "assert 1", "assert 2")
+        self.assertEqual(self.found()[0], [])
+
+    def test_fewer_assertions_are_found_at_the_test(self):
+        self.edit("tests/test_calc.py", "        self.assertEqual(add(0, 0), 0)\n", "")
+        self.edit("tests/test_calc.py", "        with self.assertRaises(TypeError):\n            add(None, 1)\n",
+                  "        add(None, 1)\n")
+        where, found = self.found()
+        self.assertEqual(where, [("tests/test_calc.py", 7, "fewer-assertions"),
+                                 ("tests/test_calc.py", 18, "fewer-assertions")])
+        self.assertIn("`TestAdd.test_small` has 1 assertions, 2 at the base", found[0]["message"])
+
+    def test_more_assertions_and_new_tests_are_not_found(self):
+        self.edit("tests/test_calc.py", "        assert add(10, 20) == 30\n",
+                  "        assert add(10, 20) == 30\n        assert add(20, 10) == 30\n")
+        self.edit("tests/test_other.py", "def test_a():", "def test_new():\n    assert 3\n\n\ndef test_a():")
+        self.assertEqual(self.found()[0], [])
+
+    def test_swallowed_errors_are_found(self):
+        self.edit("tests/test_calc.py", "        assert add(-1, -1) == -2\n",
+                  "        try:\n            assert add(-1, -1) == -2\n        except:\n            pass\n")
+        self.edit("tests/test_calc.py", "    assert add(2, 2) == 4\n",
+                  "    try:\n        assert add(2, 2) == 4\n    except Exception:\n        pass\n"
+                  "    try:\n        add(1, 1)\n    except ValueError:\n        pass\n")
+        where, _ = self.found()
+        self.assertEqual(where, [("tests/test_calc.py", 19, "swallowed-error"),
+                                 ("tests/test_calc.py", 30, "swallowed-error")])
+
+    def test_an_expected_value_changed_with_the_code_is_reported_as_the_pair(self):
+        self.edit("calc.py", "return a + b", "return a + b + 1")
+        self.edit("tests/test_calc.py", "assert add(10, 20) == 30", "assert add(10, 20) == 31")
+        where, found = self.found()
+        self.assertEqual(where, [("tests/test_calc.py", 12, "expected-value-changed")])
+        self.assertIn("`assert add(10, 20) == 30` became `assert add(10, 20) == 31`", found[0]["message"])
+
+    def test_an_expected_value_changed_alone_is_not_found(self):
+        self.edit("tests/test_calc.py", "assert add(10, 20) == 30", "assert add(10, 20) == 31")
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_test_file_that_does_not_parse_says_so(self):
+        self.edit("tests/test_other.py", "def test_b():", "def test_b(:")
+        where, _ = self.found()
+        self.assertEqual(where, [("tests/test_other.py", None, "unparsable")])
+
+    def test_a_test_file_that_cannot_be_read_says_so(self):
+        self.edit("tests/test_other.py", "assert True", "assert False")
+        base = self.git("rev-parse", "HEAD").strip()
+        diff = self.host.change_diff(self.repo, base)
+        # Not UTF-8 once the diff is taken: change_diff itself cannot read such a file.
+        with open(os.path.join(self.repo, "tests/test_other.py"), "wb") as f:
+            f.write(b"def test_a():\n    assert '\xff'\n")
+        found = orchestrator.weakened_tests(orchestrator.GateChange(self.repo, base, diff, changed_lines(diff)))
+        where = [(f["path"], f["line"], f["rule"]) for f in found]
+        self.assertEqual(where, [("tests/test_other.py", None, "unreadable")])
+        self.assertIn("so its tests were not checked", found[0]["message"])
+
+    def test_a_removed_helper_class_is_not_a_test(self):
+        self.put("tests/test_help.py", "class Helper:\n    def make(self):\n        return 1\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "helper")
+        self.put("tests/test_help.py", "")
+        self.assertEqual(self.found()[0], [])
+
+    def test_only_test_files_are_read(self):
+        self.put("helpers.py", "def test_helper():\n    assert 1\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "helper")
+        os.remove(os.path.join(self.repo, "helpers.py"))
+        self.put("pkg/sub_test.py", "def test_x():\n    pass\n")
+        self.git("add", "-A")
+        self.assertEqual(self.found()[0], [])
+
+    def test_changed_files_pairs_each_side(self):
+        self.git("mv", "tests/test_other.py", "tests/test_renamed.py")
+        os.remove(os.path.join(self.repo, "calc.py"))
+        self.put("new.py", "x = 1\n")
+        self.git("add", "new.py")
+        self.edit("tests/test_calc.py", "import unittest\n", "import unittest  # edited\n")
+        self.assertEqual(sorted(self.host.changed_files(self.repo, "HEAD"), key=str),
+                         sorted([("calc.py", None), (None, "new.py"), ("tests/test_calc.py", "tests/test_calc.py"),
+                                 ("tests/test_other.py", "tests/test_renamed.py")], key=str))
 
 
 class TestToolFindings(unittest.TestCase):
