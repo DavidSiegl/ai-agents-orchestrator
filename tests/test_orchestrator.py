@@ -5118,20 +5118,25 @@ class TestSurvivingMutants(unittest.TestCase):
         self.assertIn("exited with status 1: failed to collect stats. runner returned 1", found[0]["message"])
 
     def test_a_file_whose_coding_cookie_names_no_text_encoding_is_not_read(self):
-        # rot13 is a codec of str to str: Python finds it by name, but decodes no source with it.
-        self.put("tools/rot.py", "# coding: rot13\n")
-        self.git("add", "tools/rot.py")
-        self.git("commit", "--quiet", "-m", "rot13")
-        with self.subTest("changed"):
-            self.put("tools/rot.py", "# coding: rot13\nqrs s():\n    erghea 1\n")
-            found = self.found()
-            self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("tools/rot.py", None, "not-run")])
-            self.assertIn("could not be read", found[0]["message"])
-        with self.subTest("copied"):
-            self.put("tools/rot.py", "# coding: rot13\n")
-            self.change_the_functions("checked")
-            self.fake_mutmut("exit 0", results="    calc.x_checked__mutmut_1: killed\n")
-            self.assertEqual(self.found(), [])
+        # Python finds rot13, a codec of str to str, and undefined, which refuses to decode anything, by name, but
+        # decodes no source with either.
+        for codec in ("rot13", "undefined"):
+            with self.subTest(codec=codec, file="changed"):
+                self.put(f"tools/{codec}.py", f"# coding: {codec}\n")
+                self.git("add", f"tools/{codec}.py")
+                self.git("commit", "--quiet", "-m", codec)
+                self.put("calc.py", self.BASE)
+                self.put(f"tools/{codec}.py", f"# coding: {codec}\nqrs s():\n    erghea 1\n")
+                found = self.found()
+                self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                                 [(f"tools/{codec}.py", None, "not-run")])
+                self.assertIn("could not be read", found[0]["message"])
+            with self.subTest(codec=codec, file="copied"):
+                self.put(f"tools/{codec}.py", f"# coding: {codec}\n")
+                self.change_the_functions("checked")
+                self.fake_mutmut("exit 0", results="    calc.x_checked__mutmut_1: killed\n")
+                self.assertEqual(self.found(), [])
+                self.git("checkout", "--quiet", "--", ".")
 
     def test_a_function_whose_file_the_budget_kept_mutmut_from_is_part_of_the_budget(self):
         # mutmut makes and saves mutants file by file, so a run stopped while making them lists only some files'.

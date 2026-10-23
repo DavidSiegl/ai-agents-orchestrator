@@ -2622,14 +2622,14 @@ def _parse_python(text: str) -> ast.Module | None:
 def _decode_python(raw: bytes) -> tuple[str, str]:
     """raw, the bytes of a Python source file, as text, decoded as Python decodes them: by a byte order mark or a PEP
     263 coding cookie, else as UTF-8, with the line endings left as they are; and the encoding that took. Raises
-    SyntaxError for an encoding that is unknown or not a text encoding, such as rot13, and UnicodeDecodeError for bytes
-    the encoding cannot decode."""
+    SyntaxError, and only that, when raw cannot be decoded so: its cookie names an encoding that is unknown, not a text
+    encoding, such as rot13, or one that decodes nothing, such as undefined, or it holds bytes the encoding cannot
+    decode."""
     try:
         encoding, _ = tokenize.detect_encoding(io.BytesIO(raw).readline)
         return raw.decode(encoding), encoding
-    except LookupError as e:
-        # A codec Python knows by name that is not a text encoding: it decodes no source.
-        raise SyntaxError(f"the coding cookie names no text encoding: {e}") from e
+    except (LookupError, UnicodeError) as e:
+        raise SyntaxError(f"cannot be decoded as its coding cookie or UTF-8 says: {e}") from e
 
 
 @dataclass(frozen=True)
@@ -2675,7 +2675,7 @@ def _changed_python_units(change: GateChange, in_scope: Callable[[str], bool],
         try:
             with open(os.path.join(change.root, path), "rb") as f:
                 text, _ = _decode_python(f.read())
-        except (OSError, SyntaxError, UnicodeDecodeError) as e:
+        except (OSError, SyntaxError) as e:
             unreadable.append((path, f"could not be read ({e})"))
             continue
         tree = _parse_python(text)
@@ -3476,7 +3476,7 @@ def _mark_for_mutmut(tree_copy: str, changed: set[tuple[str, str]]) -> None:
                 raw = f.read()
             try:
                 text, encoding = _decode_python(raw)
-            except (SyntaxError, UnicodeDecodeError):
+            except SyntaxError:
                 continue
             marked = _skip_unchanged(os.path.relpath(path, tree_copy).replace(os.sep, "/"), text, changed)
             if marked != text:
