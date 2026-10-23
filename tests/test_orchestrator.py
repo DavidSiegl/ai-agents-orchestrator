@@ -4163,6 +4163,19 @@ class TestJudgeRun(unittest.TestCase):
         self.assertNotIn("\n51. ", text)
         self.assertTrue(text.endswith("\n10 more findings of the orchestrator's checks are not listed.\n"))
 
+    def test_the_limit_of_fifty_is_the_whole_files(self):
+        checks = (self.check("c", issues=[self.finding("r")] * 2, to_weigh=[self.finding("w")] * 3),)
+        # The build's file lists its first 50 of 60 issues, or all of its 48.
+        for issues, shown in ((60, 0), (48, 2)):
+            with self.subTest(issues=issues):
+                built = quality_report("ERROR", "intro", issues=[self.finding("ruff F401", "a.py")] * issues)
+                text = orchestrator.judge_run(built, checks, run_change(""))
+                section = text[text.index("## The orchestrator's checks"):]
+                self.assertEqual(re.findall(r"^(\d+)\. ", section, re.MULTILINE), [str(n) for n in range(49, 51)][:shown])
+                self.assertTrue(section.endswith(f"\n{5 - shown} more findings of the orchestrator's checks are not "
+                                                 "listed.\n"), section)
+                self.assertIn("- 2 findings of the `c` check; each is listed below.", text)
+
     def test_checks_come_from_the_workflow(self):
         p = Pipeline("budget", QUICK.roles, QUICK.steps, max_files=3, max_lines=40)
         checks = orchestrator.orchestrator_checks(p, orchestrator.PyPI(urlopen=FakePyPI()))

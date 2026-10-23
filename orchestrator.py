@@ -4440,8 +4440,8 @@ def judge_run(quality: str, checks: tuple[OrchestratorCheck, ...], change: RunCh
     """The quality file the build's gate wrote, quality, with what checks find in change added.
 
     A check with failing findings is a failed condition, which turns GATE: OK into GATE: ERROR. Every finding is
-    listed in a section of their own at the end, failing ones first, numbered on from the file's last number, at
-    most QUALITY_ISSUE_LIMIT; the rest are counted. quality comes back as it is when they find nothing.
+    listed in a section of their own at the end, failing ones first, numbered on from the file's last number while
+    the file lists at most QUALITY_ISSUE_LIMIT in all; the rest are counted. quality comes back as it is when they find nothing.
     """
     conditions, issues, to_weigh = [], [], []
     for check in checks:
@@ -4492,8 +4492,10 @@ def _orchestrator_section(issues: list[dict], to_weigh: list[dict], after: int) 
     out = ["", "## The orchestrator's checks", "",
            ("The orchestrator ran these itself after the build, with what the build does not see: the run's spec and "
             "its workflow.")]
-    listed_issues = issues[:QUALITY_ISSUE_LIMIT]
-    listed_weigh = to_weigh[:QUALITY_ISSUE_LIMIT - len(listed_issues)]
+    # The limit is the whole file's, the build's findings included.
+    room = max(QUALITY_ISSUE_LIMIT - after, 0)
+    listed_issues = issues[:room]
+    listed_weigh = to_weigh[:room - len(listed_issues)]
     if listed_issues:
         out += ["", *(_numbered(k, f) for k, f in enumerate(listed_issues, after + 1))]
     if listed_weigh:

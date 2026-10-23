@@ -533,8 +533,8 @@ whole nor by its file name.
 
 The findings go into the quality file as the gate's do, with `{path, line, severity, rule, message}` and the rule
 prefixed by the check's name, in a last section, `## The orchestrator's checks`. They are numbered on from the build's
-last number, failing ones first, then the findings to weigh under the same lead sentence as the gate's, at most 50.
-A check with failing findings is a failed condition, added to the build's, and turns `GATE: OK` into `GATE: ERROR`.
+last number, failing ones first, then the findings to weigh under the same lead sentence as the gate's. The limit of
+50 is the whole file's: they are listed only while the file holds fewer, and the rest are counted. A check with failing findings is a failed condition, added to the build's, and turns `GATE: OK` into `GATE: ERROR`.
 Findings to weigh never change the gate. The Builder answers them all by number, as it answers the gate's.
 
 ### What goes to the Builder
