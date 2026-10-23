@@ -3867,16 +3867,16 @@ def too_complex_functions(change: GateChange) -> list[dict]:
              if old and old.endswith(".py") and not old.startswith(_COMPLEXITY_EXEMPT)}
     by_body = {g.body: g.score for functions in bases.values() for g in functions}
     old_paths = {new: old for old, new in pairs if new}
-    for path, f in over:
+    for path, scored in over:
         old = old_paths.get(path, path)
         same_file = {(g.name, g.occurrence): g.score for g in (bases.get(old, []) if old else [])}
-        was = same_file.get((f.name, f.occurrence), by_body.get(f.body))
-        if was is None or f.score > was:
-            out.append(_finding(path, f.line, "over-limit", (
-                f"`{f.name}`: cognitive complexity {f.score}, "
+        was = same_file.get((scored.name, scored.occurrence), by_body.get(scored.body))
+        if was is None or scored.score > was:
+            out.append(_finding(path, scored.line, "over-limit", (
+                f"`{scored.name}`: cognitive complexity {scored.score}, "
                 f"{'a new function' if was is None else f'{was} at the base'}; "
                 f"the limit is {COGNITIVE_COMPLEXITY_LIMIT}."), severity="error"))
-    return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
+    return sorted(out, key=lambda finding: (finding["path"] or "", finding["line"] or 0))
 
 
 def _changed_over_limit(change: GateChange) -> tuple[list[dict], list[tuple[str, _ScoredFunction]]]:
@@ -3892,8 +3892,8 @@ def _changed_over_limit(change: GateChange) -> tuple[list[dict], list[tuple[str,
         if os.path.islink(full) or os.path.isdir(full):
             continue
         try:
-            with open(full, "rb") as f:
-                text, _ = _decode_python(f.read())
+            with open(full, "rb") as source:
+                text, _ = _decode_python(source.read())
         except (OSError, SyntaxError, UnicodeDecodeError) as e:
             out.append(_finding(path, None, "not-scored", f"could not be read ({e}), so its functions were not scored.",
                                 severity="error"))
@@ -3903,8 +3903,8 @@ def _changed_over_limit(change: GateChange) -> tuple[list[dict], list[tuple[str,
             out.append(_finding(path, None, "not-scored", "does not parse as Python, so its functions were not scored.",
                                 severity="error"))
             continue
-        over += [(path, f) for f in _scored_functions(tree)
-                 if f.score > COGNITIVE_COMPLEXITY_LIMIT and any(f.first <= n <= f.last for n in added)]
+        over += [(path, scored) for scored in _scored_functions(tree) if scored.score > COGNITIVE_COMPLEXITY_LIMIT
+                 and any(scored.first <= line <= scored.last for line in added)]
     return out, over
 
 
@@ -4047,14 +4047,14 @@ _COGNITIVE_RULES: dict[type[ast.AST], _CognitiveRule] = {
 def _calls_itself(function: ast.FunctionDef | ast.AsyncFunctionDef, cls: str | None) -> bool:
     """Whether function's body calls function: by its name, or as self.m, cls.m or C.m when it is the method m of the
     class C, cls."""
-    for n in (n for statement in function.body for n in ast.walk(statement)):
-        if not isinstance(n, ast.Call):
+    for node in (node for statement in function.body for node in ast.walk(statement)):
+        if not isinstance(node, ast.Call):
             continue
-        f = n.func
-        if cls is None and isinstance(f, ast.Name) and f.id == function.name:
+        callee = node.func
+        if cls is None and isinstance(callee, ast.Name) and callee.id == function.name:
             return True
-        if (cls is not None and isinstance(f, ast.Attribute) and f.attr == function.name
-                and isinstance(f.value, ast.Name) and f.value.id in ("self", "cls", cls)):
+        if (cls is not None and isinstance(callee, ast.Attribute) and callee.attr == function.name
+                and isinstance(callee.value, ast.Name) and callee.value.id in ("self", "cls", cls)):
             return True
     return False
 
