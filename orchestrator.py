@@ -3157,9 +3157,11 @@ _MUTMUT_SKIP = "  # pragma: no mutate block"
 # function no test calls.
 _MUTMUT_UNTRIED = frozenset({"not checked", "check was interrupted by user", "no tests"})
 
-# What mutmut 3.8.0 says, exiting with status 1 before it tries any mutant, when no test calls any function it
-# mutated, or it made no mutant at all; the mutants it made are then left not checked.
-_MUTMUT_NO_TESTS = "could not find any test case for any mutant"
+# The line mutmut 3.8.0 prints, exiting with status 1 before it tries any mutant, when no test calls any function it
+# mutated, or it made no mutant at all; the mutants it made are then left not checked. Only the whole line counts: the
+# output of a failing test, which mutmut prints before its own, may hold its words.
+_MUTMUT_NO_TESTS = re.compile(r"^Stopping early, because we could not find any test case for any mutant\. It seems "
+                              r"that the selected tests do not cover any code that we mutated\.$", re.MULTILINE)
 
 # How many of a function's surviving mutants its finding shows, in the order mutmut made them.
 _SURVIVOR_EXAMPLES = 3
@@ -3251,7 +3253,7 @@ def _mutmut_findings(tree_copy: str, functions: list[_ChangedFunction], run: sub
                      stopped: bool, budget: float) -> list[dict]:
     """What the run of mutmut in tree_copy found of functions, as `mutmut results` and `mutmut show` tell it: run is
     how it ended, and stopped whether the budget of budget seconds stopped it."""
-    no_tests = run.returncode != 0 and _MUTMUT_NO_TESTS in run.stdout
+    no_tests = run.returncode != 0 and _MUTMUT_NO_TESTS.search(run.stdout) is not None
     if run.returncode != 0 and not stopped and not no_tests:
         return [_mutation_not_run(f"mutmut exited with status {run.returncode}: {_said(run)}")]
     deadline = time.monotonic() + MUTMUT_REPORT_TIMEOUT

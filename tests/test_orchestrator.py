@@ -5098,6 +5098,16 @@ class TestSurvivingMutants(unittest.TestCase):
                 self.assertFalse(os.path.exists(os.path.join(self.bin, "ran")))
                 self.assertEqual(os.listdir(tmp), [])
 
+    def test_a_failing_test_that_prints_mutmut_s_words_is_not_taken_for_mutmut(self):
+        # The clean run fails, and mutmut prints the test's output before its own "failed to collect stats".
+        self.change_the_functions("unchecked")
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_loud():\n    calc.unchecked(1, 1)\n"
+                                                  "    print('could not find any test case for any mutant')\n"
+                                                  "    assert False\n")
+        found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
+        self.assertIn("failed to collect stats", found[0]["message"])
+
     def test_a_change_to_a_help_text_alone_makes_no_mutant(self):
         # The second line of the help text does not say help=, but its string starts on the line that does.
         self.put("calc.py", self.BASE.replace(" to make", " to build"))
