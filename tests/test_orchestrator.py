@@ -3783,7 +3783,20 @@ class TestGate(unittest.TestCase):
         with self.assertRaisesRegex(OrchestratorError, "cannot read gone.py, which the change edits"):
             orchestrator.lone_carriage_returns(self.repo, {"gone.py": {1}})
 
-    def test_a_carriage_return_above_an_added_line_fails_the_gate_in_any_file(self):
+    def test_a_carriage_return_in_a_file_no_linter_reads_passes(self):
+        self.put("notes.txt", "a\rb\n")
+        with open(os.path.join(self.repo, "data.bin"), "wb") as f:
+            f.write(b"\x01\r\x02\n")
+        self.git("add", "notes.txt", "data.bin")
+        self.git("commit", "--quiet", "-m", "carriage returns")
+        self.put("notes.txt", "a\rb\nc\n")
+        with open(os.path.join(self.repo, "data.bin"), "ab") as f:
+            f.write(b"\x03\n")
+        status, out, _ = self.gate()
+        self.assertEqual(status, 0)
+        self.assertNotIn("carriage return", out)
+
+    def test_a_carriage_return_above_an_added_line_fails_the_gate_in_any_file_a_linter_reads(self):
         # The \r lines are the base's, and d.md is pymarkdown's: each linter's line after them is one past git's.
         self.put("f.py", "a = 1\rb = 2\n")
         self.put("d.md", "# T\n\nok\r more text\n")
