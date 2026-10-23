@@ -1,5 +1,6 @@
 import base64
 import contextlib
+import copy
 import io
 import itertools
 import json
@@ -6051,6 +6052,16 @@ class TestHarnessFlags(unittest.TestCase):
         with self.assertRaisesRegex(OrchestratorError, r"has agent_args \['--model', 'x'\], which name no permission"):
             RunState.from_dict(saved)
 
+
+    def test_launch_args_leave_the_permission_table_alone(self):
+        # Without a session, codex's and gemini's arguments start as their table's list; extending that list in place
+        # gave every later agent of that kind the earlier one's --model as well.
+        table = copy.deepcopy(orchestrator.PERMISSION_ARGS)
+        for kind in KINDS:
+            with self.subTest(kind=kind):
+                first = orchestrator.launch_args(kind, "acceptEdits", "m", None, "/run")
+                self.assertEqual(orchestrator.launch_args(kind, "acceptEdits", "m", None, "/run"), first)
+        self.assertEqual(orchestrator.PERMISSION_ARGS, table)
 
     def test_run_dir_granted_in_worktree_runs_only(self):
         d = "/proj/.orchestrator/runs/r"

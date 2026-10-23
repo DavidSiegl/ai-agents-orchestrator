@@ -19,6 +19,7 @@ dev = [
     "pymarkdownlnt>=0.9.41",
     "pytest>=9.0.3",
     "pytest-cov>=6.0.0",
+    "pytest-randomly>=5.0.0",
     "ruff>=0.17.2",
 ]
 

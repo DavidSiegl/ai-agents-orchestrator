@@ -950,10 +950,12 @@ class AgentSettings:
 
 
 def permission_args(kind: str, mode: str) -> list[str] | None:
-    """The harness's arguments for a --permission-mode, or None when it has no equivalent."""
+    """The harness's arguments for a --permission-mode, as a new list the caller may extend, or None when it has
+    no equivalent."""
     if kind == "claude":
         return ["--permission-mode", mode]
-    return PERMISSION_ARGS[kind].get(mode)
+    args = PERMISSION_ARGS[kind].get(mode)
+    return None if args is None else list(args)
 
 
 def launch_args(kind: str, permission_mode: str | None, model: str | None, session: str | None,
