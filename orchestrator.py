@@ -49,6 +49,7 @@ import socket
 import string
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tomllib
@@ -123,6 +124,11 @@ GATE_MIN_COVERAGE = 80.0
 GATE_MIN_NEW_LINES = 20
 # Seconds one linter may take before the gate counts it as failed.
 GATE_TOOL_TIMEOUT = 600
+# The flaky-tests check reruns the tests a change adds or edits once under each of these pytest-randomly seeds,
+# each pytest run, the collection before them included, within FLAKY_RUN_TIMEOUT seconds; so it adds at most
+# (1 + len(FLAKY_SEEDS)) * FLAKY_RUN_TIMEOUT seconds to the gate, well inside a build's QUALITY_TIMEOUT.
+FLAKY_SEEDS = (1, 2, 3, 4, 5)
+FLAKY_RUN_TIMEOUT = 30
 # The gate's exit status when it could not judge the change, and so wrote no quality file.
 EXIT_GATE_UNJUDGED = 2
 
@@ -2694,9 +2700,159 @@ WEAKENED_TESTS_DETECTORS = (
                           find=python_weakened_tests),
 )
 
+
+# Flaky tests: the tests a change adds or edits that pass in one order and fail in another, which the build's one
+# green run does not show.
+
+def flaky_tests(change: GateChange) -> list[dict]:
+    """The flaky-tests check's find: reruns the Python tests the change adds lines to, once under each of FLAKY_SEEDS
+    with pytest-randomly, and reports at its def each test that failed under some seeds and passed under the others,
+    naming both. A test that fails under every seed is not reported: it fails, and the failing-tests section says so.
+
+    pytest decides which of those defs are tests, so a helper named test_* that it does not collect is not rerun.
+    pytest and pytest-randomly must be importable by the gate's own interpreter, as a `uv run` of the project makes
+    them. A pytest run that cannot start, takes longer than FLAKY_RUN_TIMEOUT, ends in a usage or collection error
+    or writes no readable report ends the reruns with a finding saying so, after what the runs before it showed; so
+    does a changed test file that cannot be read or parsed.
+    """
+    tests, out = _changed_python_tests(change)
+    if not tests:
+        return out
+    ids, problem = _collect_python_tests(change.root, tests)
+    failed_under: dict[str, list[int]] = {i: [] for i in ids}
+    seeds: list[int] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for seed in FLAKY_SEEDS if ids else ():
+            failed, problem = _rerun_python_tests(change.root, ids, seed, os.path.join(tmp, f"seed-{seed}.xml"))
+            if problem:
+                break
+            seeds.append(seed)
+            for i in failed:
+                failed_under[i].append(seed)
+    for i, failed_seeds in failed_under.items():
+        if 0 < len(failed_seeds) < len(seeds):
+            path, *names = i.split("::")
+            passed = [s for s in seeds if s not in failed_seeds]
+            out.append(_flaky_finding(path, tests[(path, _python_test_name(i))], "mixed-results",
+                                      f"`{'.'.join(names)}` failed under {_seeds(failed_seeds)} and passed under "
+                                      f"{_seeds(passed)}: it depends on the order the tests run in, or on state or "
+                                      f"randomness that one run does not share with another."))
+    if problem:
+        out.append(_flaky_finding(None, None, "not-rerun", f"{problem}; " + (
+            f"only the reruns under {_seeds(seeds)} were judged." if seeds else "the changed tests were not rerun.")))
+    return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
+
+
+def _changed_python_tests(change: GateChange) -> tuple[dict[tuple[str, str], int], list[dict]]:
+    """The test functions and methods the change added lines to, decorators included, in the test files it left in
+    the working tree: (path, qualified name as _python_tests gives it) to the line of its def. And a finding for each
+    such file that could not be read or parsed."""
+    tests: dict[tuple[str, str], int] = {}
+    out = []
+    for path, added in change.changed.items():
+        if not added or not _python_test_file(path):
+            continue
+        try:
+            tree = _parse_python(_read_text(os.path.join(change.root, path)))
+        except (OSError, UnicodeDecodeError) as e:
+            out.append(_flaky_finding(path, None, "not-rerun", f"could not be read, so its tests were not rerun: {e}"))
+            continue
+        if tree is None:
+            out.append(_flaky_finding(path, None, "not-rerun",
+                                      "does not parse as Python, so its tests were not rerun."))
+            continue
+        # _python_tests numbers the files it is given; here each is read on its own.
+        for t in _python_tests(0, tree):
+            if isinstance(t.node, ast.ClassDef):
+                continue
+            first = min([t.node.lineno, *(d.lineno for d in t.node.decorator_list)])
+            if any(first <= n <= (t.node.end_lineno or t.node.lineno) for n in added):
+                tests[(path, t.name)] = t.node.lineno
+    return tests, out
+
+
+def _python_test_name(node_id: str) -> str:
+    """The qualified name _python_tests gives the test of a pytest node id, without the node's parameters."""
+    return re.sub(r"\[.*\]$", "", ".".join(node_id.split("::")[1:]))
+
+
+def _collect_python_tests(root: str, tests: dict[tuple[str, str], int]) -> tuple[list[str], str | None]:
+    """The pytest node ids of tests, one per parameter set, and the problem, a clause, when pytest could not collect
+    them; then the ids are []."""
+    files = sorted({path for path, _ in tests})
+    # Exit status 5: pytest collected no test from the files, as for a file of helpers named test_*.
+    proc, problem = _pytest(root, "collecting the changed tests", ["--collect-only", *files], ok=(0, 5))
+    if proc is None:
+        return [], problem
+    # -q lists one node id a line, unindented, before its summary; a warnings summary repeats some, indented or not.
+    ids = {line for line in proc.stdout.splitlines() if line.split("::")[0] in files}
+    return sorted(i for i in ids if (i.split("::")[0], _python_test_name(i)) in tests), None
+
+
+def _rerun_python_tests(root: str, ids: list[str], seed: int, report: str) -> tuple[list[str], str | None]:
+    """The node ids among ids that failed or errored when pytest ran them in the order pytest-randomly's seed gives,
+    writing its JUnit report to report; and the problem, a clause, when that run told nothing, then with []."""
+    doing = f"rerunning them under seed {seed}"
+    proc, problem = _pytest(root, doing, ["-p", "randomly", f"--randomly-seed={seed}", f"--junitxml={report}", *ids])
+    if proc is None:
+        return [], problem
+    if not os.path.isfile(report):
+        return [], f"pytest, {doing}, wrote no test report: {_pytest_said(proc)}"
+    try:
+        failed = {name for name, _ in failing_tests(report)}
+    except OrchestratorError as e:
+        return [], f"pytest, {doing}, wrote a report the gate cannot read: {e}"
+    return [i for i in ids if _junit_case(i) in failed], None
+
+
+def _junit_case(node_id: str) -> str:
+    """How failing_tests names the test of a pytest node id: pytest's JUnit classname, the path dotted without .py
+    and the classes after it, then a dot and the test's name with its parameters."""
+    path, *names = node_id.split("::")
+    return ".".join([re.sub(r"\.py$", "", path).replace("/", "."), *names])
+
+
+def _pytest(root: str, doing: str, args: list[str],
+            ok: tuple[int, ...] = (0, 1)) -> tuple[subprocess.CompletedProcess | None, str | None]:
+    """pytest run quietly in the gate's own interpreter at root, without its cache, with args; or None and the
+    problem, a clause naming doing, when it could not start, took longer than FLAKY_RUN_TIMEOUT or exited with a
+    status outside ok (by default 0, all passed, and 1, some failed)."""
+    argv = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--rootdir", root, *args]
+    try:
+        # A fixed command over the node ids pytest itself collected; no shell reads it.
+        proc = subprocess.run(argv, cwd=root, capture_output=True, text=True, errors="replace",  # noqa: S603
+                              timeout=FLAKY_RUN_TIMEOUT, env=child_env(), check=False)
+    except subprocess.TimeoutExpired:
+        return None, f"pytest, {doing}, did not finish within {FLAKY_RUN_TIMEOUT} seconds"
+    except OSError as e:
+        return None, f"could not start pytest, {doing}: {e}"
+    if proc.returncode not in ok:
+        return None, f"pytest, {doing}, exited with status {proc.returncode}: {_pytest_said(proc)}"
+    return proc, None
+
+
+def _pytest_said(proc: subprocess.CompletedProcess) -> str:
+    """What a pytest that went wrong said last: the first line of its standard error, else the last of its output."""
+    err = [line.strip() for line in proc.stderr.splitlines() if line.strip()]
+    out = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    return _clip(err[0] if err else out[-1] if out else "nothing")
+
+
+def _flaky_finding(path: str | None, line: int | None, rule: str, message: str) -> dict:
+    return {"path": path, "line": line, "severity": "warning", "rule": rule, "message": message}
+
+
+def _seeds(seeds: list[int]) -> str:
+    """'seed 3', 'seeds 2 and 4' or 'seeds 1, 3 and 5'."""
+    if len(seeds) == 1:
+        return f"seed {seeds[0]}"
+    return f"seeds {', '.join(map(str, seeds[:-1]))} and {seeds[-1]}"
+
+
 # The checks judge_change runs after the linters, in this order.
 GATE_CHECKS: tuple[GateCheck, ...] = (
     GateCheck("test-integrity", fails=True, find=weakened_tests),
+    GateCheck("flaky-tests", fails=False, find=flaky_tests),
 )
 
 

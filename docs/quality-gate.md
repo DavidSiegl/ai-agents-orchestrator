@@ -39,6 +39,7 @@ run fails the gate.
 | Check | Fails? | Finds |
 |---|---|---|
 | `test-integrity` | yes | tests the change weakened, in test files (`tests/**`, `test_*.py`, `*_test.py`) |
+| `flaky-tests` | no | tests the change adds or edits that pass in one order and fail in another |
 
 **Test integrity** compares each test file the change touches with its base, so a change cannot pass by
 weakening its tests. Each of these is a finding:
@@ -58,6 +59,24 @@ weakening its tests. Each of these is a finding:
 
 It reads Python only; another language is a `WeakenedTestsDetector` beside the Python one in
 `WEAKENED_TESTS_DETECTORS`.
+
+**Flaky tests** reruns the tests the change adds or edits, so a test that passed the build's one run by luck of
+the order is caught. A test counts when the change adds a line to its `def`, decorators included, in a test file;
+pytest decides which of those are tests. It runs them five times, alone, under pytest-randomly with seeds 1 to 5
+(`-p randomly -p no:cacheprovider --randomly-seed=N`), each run in the gate's own interpreter (`python -m pytest`,
+so the project's environment that `uv run` gives, whatever `pytest` is on `PATH`) and within 30 seconds:
+
+- `mixed-results`: a test that failed under some seeds and passed under the others, at its `def`, naming the seeds
+  of each. It depends on the order of the tests, on state another test leaves, or on randomness pytest-randomly
+  seeds. A test that fails under every seed is not reported here: it fails, and the failing tests say so;
+- `not-rerun`: the reruns could not judge the tests: pytest could not start, took longer than 30 seconds, ended in a
+  usage or collection error, or a changed test file could not be read or parsed. After a run that went wrong, the
+  finding says which earlier runs were judged.
+
+A change to a helper or fixture outside the tests' `def`s reruns nothing. The check adds at most six pytest runs of
+30 seconds to the gate, the collection included, and only when the change touches a test. pytest-randomly is in the
+`dev` group, so every `uv run pytest` shuffles the tests too, printing the seed it used; `-p no:randomly` turns it
+off, and `--randomly-seed=N` repeats an order.
 
 The gate is `GATE: ERROR` when any of these holds, and `GATE: OK` otherwise:
 

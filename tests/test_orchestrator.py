@@ -4276,6 +4276,115 @@ class TestWeakenedTests(unittest.TestCase):
                                  ("tests/test_other.py", "tests/test_renamed.py")], key=str))
 
 
+class TestFlakyTests(unittest.TestCase):
+    """The flaky-tests check over a real git repository, rerunning its tests with this suite's own pytest."""
+
+    BASE = (
+        "import unittest\n"                                 # 1
+        "\n"                                                # 2
+        "# test_writes fills it; the tests that read it pass only before that.\n"  # 3
+        "STATE = []\n"                                      # 4
+        "\n"                                                # 5
+        "\n"                                                # 6
+        "def test_old_reads():\n"                           # 7
+        "    assert STATE == []\n"                          # 8
+        "\n"                                                # 9
+        "\n"                                                # 10
+        "class TestState(unittest.TestCase):\n"             # 11
+        "    def test_reads(self):\n"                       # 12
+        "        self.assertEqual(STATE, STATE)\n"          # 13
+    )
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = tmp.name
+        self.host = Host()
+        self.git("init", "--quiet", "-b", "main")
+        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
+            self.git("config", key, value)
+        self.put("tests/test_state.py", self.BASE)
+        self.put("calc.py", "def add(a, b):\n    return a + b\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "base")
+
+    def git(self, *args):
+        return self.host.git(self.repo, *args)
+
+    def put(self, name, text):
+        path = os.path.join(self.repo, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    def found(self):
+        base = self.git("rev-parse", "HEAD").strip()
+        diff = self.host.change_diff(self.repo, base)
+        return orchestrator.flaky_tests(orchestrator.GateChange(self.repo, base, diff, changed_lines(diff)))
+
+    def change_the_tests(self):
+        """Edit TestState.test_reads to depend on test order, and add a writer, a stable and a broken test."""
+        self.put("tests/test_state.py",
+                 self.BASE.replace("self.assertEqual(STATE, STATE)", "self.assertEqual(STATE, [])")
+                 + "\n\ndef test_writes():\n    STATE.append(1)\n"
+                   "\n\ndef test_stable():\n    assert STATE == STATE\n"
+                   "\n\ndef test_broken():\n    assert False\n")
+
+    def test_an_order_dependent_test_is_reported_with_the_seeds_it_failed_under(self):
+        self.change_the_tests()
+        found = self.found()
+        # test_broken fails under every seed, which the failing-tests section reports, and test_stable under none.
+        # test_old_reads depends on the order as much as test_reads does, but the change left it alone, so it is not
+        # rerun: with pytest-randomly 5.0.0 it would fail under seeds 1 and 3 among these tests.
+        self.assertEqual([(f["path"], f["line"], f["severity"], f["rule"]) for f in found],
+                         [("tests/test_state.py", 12, "warning", "mixed-results")])
+        m = re.fullmatch(r"`TestState\.test_reads` failed under seeds? ([\d, and]+) and passed under seeds? "
+                         r"([\d, and]+): .+", found[0]["message"])
+        self.assertIsNotNone(m, found[0]["message"])
+        failed, passed = ({int(s) for s in re.findall(r"\d+", g)} for g in m.groups())
+        self.assertTrue(failed and passed)
+        self.assertEqual(failed | passed, set(orchestrator.FLAKY_SEEDS))
+
+    def test_a_change_to_no_test_reruns_nothing(self):
+        self.put("calc.py", "def add(a, b):\n    return b + a\n")
+        self.put("tests/test_state.py", self.BASE.replace("import unittest\n", "import unittest  # edited\n"))
+        with patch.object(orchestrator.subprocess, "run") as run:
+            self.assertEqual(self.found(), [])
+        run.assert_not_called()
+
+    def test_a_rerun_that_cannot_start_is_a_finding(self):
+        self.change_the_tests()
+        with patch.object(orchestrator.sys, "executable", os.path.join(self.repo, "no-python")):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-rerun")])
+        self.assertIn("could not start pytest", found[0]["message"])
+
+    def test_a_rerun_that_times_out_is_a_finding(self):
+        self.change_the_tests()
+        timeout = subprocess.TimeoutExpired(["pytest"], orchestrator.FLAKY_RUN_TIMEOUT)
+        with patch.object(orchestrator.subprocess, "run", side_effect=timeout):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-rerun")])
+        self.assertIn(f"did not finish within {orchestrator.FLAKY_RUN_TIMEOUT} seconds", found[0]["message"])
+
+    def test_a_test_file_that_does_not_collect_is_a_finding(self):
+        self.change_the_tests()
+        with open(os.path.join(self.repo, "tests/test_state.py"), "a") as f:
+            f.write("\nimport no_such_module\n")
+        found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-rerun")])
+        self.assertIn("exited with status 2", found[0]["message"])
+
+    def test_an_unparsable_test_file_is_a_finding(self):
+        self.put("tests/test_state.py", self.BASE + "def test_new(:\n")
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in self.found()],
+                         [("tests/test_state.py", None, "not-rerun")])
+
+    def test_it_reports_without_failing_the_gate(self):
+        [check] = [c for c in orchestrator.GATE_CHECKS if c.name == "flaky-tests"]
+        self.assertEqual((check.fails, check.find), (False, orchestrator.flaky_tests))
+
+
 class TestToolFindings(unittest.TestCase):
     """What each linter really prints, as captured from it, read into the quality file's findings."""
 
