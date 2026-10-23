@@ -2793,12 +2793,13 @@ def _rerun_findings(root: str, tmp: str, tests: dict[tuple[str, str], int]) -> l
             if outcome != "skipped":
                 outcomes[i][seed] = outcome
     for i, by_seed in outcomes.items():
-        path, *names = i.split("::")
+        path, names, params = _node_parts(i)
+        name = ".".join(names) + params
         failed = [s for s in seeds if by_seed.get(s) == "failed"]
         passed = [s for s in seeds if by_seed.get(s) == "passed"]
         unjudged = [s for s in seeds if s not in by_seed]
         if failed and passed:
-            message = (f"`{'.'.join(names)}` failed under {_seeds(failed)} and passed under {_seeds(passed)}"
+            message = (f"`{name}` failed under {_seeds(failed)} and passed under {_seeds(passed)}"
                        + (f", and was skipped or not run under {_seeds(unjudged)}" if unjudged else "")
                        + ": it depends on the order the tests run in, or on state or randomness that one run does "
                          "not share with another.")
@@ -2806,12 +2807,12 @@ def _rerun_findings(root: str, tmp: str, tests: dict[tuple[str, str], int]) -> l
         elif len(by_seed) < 2 and unjudged:
             judged = (f"{'failed' if failed else 'passed'} under {_seeds(failed or passed)} only" if by_seed
                       else "neither passed nor failed under any seed")
-            message = (f"`{'.'.join(names)}` {judged}; the reports of {_seeds(unjudged)} have it skipped or not at "
+            message = (f"`{name}` {judged}; the reports of {_seeds(unjudged)} have it skipped or not at "
                        f"all, so too few runs tell whether it is flaky.")
             rule = "not-rerun"
         else:
             continue
-        out.append(_flaky_finding(path, tests[(path, _python_test_name(i))], rule, message))
+        out.append(_flaky_finding(path, tests[(path, ".".join(names))], rule, message))
     if problem:
         out.append(_flaky_finding(None, None, "not-rerun", f"{problem}; " + (
             f"only the reruns under {_seeds(seeds)} were judged." if seeds else "the changed tests were not rerun.")))
@@ -2870,9 +2871,14 @@ def _changed_python_tests(change: GateChange) -> tuple[dict[tuple[str, str], int
     return tests, out
 
 
-def _python_test_name(node_id: str) -> str:
-    """The qualified name _python_tests gives the test of a pytest node id, without the node's parameters."""
-    return re.sub(r"\[.*\]$", "", ".".join(node_id.split("::")[1:]))
+def _node_parts(node_id: str) -> tuple[str, list[str], str]:
+    """The path, the names after it and the parameters of a pytest node id, such as `tests/t.py`, ["TestX", "test_y"]
+    and "[a::b]" for `tests/t.py::TestX::test_y[a::b]`; "" for a node without parameters. As pytest's JUnit report
+    splits it: the parameters start at the first "[", and only the "::" before them separate names. ".".join of the
+    names is the qualified name _python_tests gives the test."""
+    head, bracket, params = node_id.partition("[")
+    path, *names = head.split("::")
+    return path, names, bracket + params
 
 
 def _collect_python_tests(root: str, tests: dict[tuple[str, str], int]) -> tuple[list[str], str | None]:
@@ -2885,10 +2891,15 @@ def _collect_python_tests(root: str, tests: dict[tuple[str, str], int]) -> tuple
         return [], problem
     # At verbosity -1 pytest lists one node id a line, unindented, before its summary; a warnings summary repeats
     # some, indented or not. A collection that found tests but listed none in that form cannot be judged.
-    ids = {line for line in proc.stdout.split("\n") if line.split("::")[0] in files}
+    ids = {line for line in proc.stdout.split("\n") if "::" in line and _node_parts(line)[0] in files}
     if proc.returncode == 0 and not ids:
         return [], f"pytest, collecting the changed tests, printed no node id the gate could read: {_pytest_said(proc)}"
-    return sorted(i for i in ids if (i.split("::")[0], _python_test_name(i)) in tests), None
+    wanted = []
+    for i in sorted(ids):
+        path, names, _ = _node_parts(i)
+        if (path, ".".join(names)) in tests:
+            wanted.append(i)
+    return wanted, None
 
 
 def _rerun_python_tests(root: str, ids: list[str], seed: int, report: str) -> tuple[dict[str, str], str | None]:
@@ -2917,9 +2928,10 @@ def _rerun_python_tests(root: str, ids: list[str], seed: int, report: str) -> tu
 
 def _junit_case(node_id: str) -> str:
     """How junit_outcomes names the test of a pytest node id: pytest's JUnit classname, the path dotted without .py
-    and the classes after it, then a dot and the test's name with its parameters."""
-    path, *names = node_id.split("::")
-    return ".".join([re.sub(r"\.py$", "", path).replace("/", "."), *names])
+    and the classes after it, then a dot and the test's name with its parameters, as pytest's mangle_test_address
+    makes them."""
+    path, names, params = _node_parts(node_id)
+    return ".".join([re.sub(r"\.py$", "", path).replace("/", "."), *names]) + params
 
 
 def _pytest(root: str, doing: str, args: list[str],

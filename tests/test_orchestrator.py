@@ -4459,6 +4459,29 @@ class TestFlakyTests(unittest.TestCase):
                                  [(name, 15, "mixed-results")])
                 self.git("checkout", "--", name)
 
+    # A module-level test like TestRuns.test_alternates, failing on every second run; line 9 is its def.
+    ALTERNATING = ("import os\n"
+                   "\n"
+                   "import pytest\n"
+                   "\n"
+                   "RUNS = os.path.join(os.path.dirname(__file__), 'runs')\n"
+                   "\n"
+                   "\n"
+                   "@pytest.mark.parametrize('x', ['a::b'])\n"
+                   "def test_p(x):\n"
+                   "    with open(RUNS, 'a') as f:\n"
+                   "        f.write('x')\n"
+                   "    with open(RUNS) as f:\n"
+                   "        assert len(f.read()) % 2 == 1\n")
+
+    def test_a_parameter_id_that_holds_colons_is_judged(self):
+        self.put("tests/test_p.py", self.ALTERNATING)
+        self.git("add", "tests/test_p.py")
+        with patch.object(orchestrator, "FLAKY_SEEDS", (1, 2)):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("tests/test_p.py", 9, "mixed-results")])
+        self.assertTrue(found[0]["message"].startswith("`test_p[a::b]` failed under seed 2 and passed under seed 1: "))
+
     def test_a_change_to_no_test_reruns_nothing(self):
         self.put("calc.py", "def add(a, b):\n    return b + a\n")
         self.put("tests/test_state.py", self.BASE.replace("import unittest\n", "import unittest  # edited\n"))
