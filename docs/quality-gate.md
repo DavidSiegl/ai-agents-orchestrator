@@ -61,9 +61,10 @@ It reads Python only; another language is a `WeakenedTestsDetector` beside the P
 `WEAKENED_TESTS_DETECTORS`.
 
 **Flaky tests** reruns the tests the change adds or edits, so a test that passed the build's one run by luck of
-the order is caught. A test counts when the change adds or removes a line of its `def`, decorators included, in a
-test file; lines removed right above it count, since they may have been a decorator, and right below it. pytest
-decides which of those are tests. It runs them five times, alone, under pytest-randomly with seeds 1 to 5
+the order is caught. A test counts when the change adds or removes a line of it in a test file, from the line after
+the statement before it to its last: its decorators and the comments above its `def` count, since a decorator
+replaced or removed changes the test, and so do lines removed right below it. pytest decides which of those are
+tests. It runs them five times, alone, under pytest-randomly with seeds 1 to 5
 (`-p randomly -p no:cacheprovider --randomly-seed=N`), each run in the gate's own interpreter (`python -m pytest`,
 so the project's environment that `uv run` gives, whatever `pytest` is on `PATH`) and within 30 seconds. They run in
 a temporary copy of the files git tracks, so a report the project's `addopts` write, such as `coverage.xml`, lands in

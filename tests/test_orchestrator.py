@@ -4482,6 +4482,27 @@ class TestFlakyTests(unittest.TestCase):
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("tests/test_p.py", 9, "mixed-results")])
         self.assertTrue(found[0]["message"].startswith("`test_p[a::b]` failed under seed 2 and passed under seed 1: "))
 
+    def decorated(self, old_above, new_above):
+        """The lines of test_r's def found on a change from old_above to new_above, the lines above it."""
+        head = "import os\n\nimport pytest\n\nRUNS = os.path.join(os.path.dirname(__file__), 'runs')\n\n\n"
+        body = ("def test_r():\n    with open(RUNS, 'a') as f:\n        f.write('x')\n"
+                "    with open(RUNS) as f:\n        assert len(f.read()) % 2 == 1\n")
+        self.put("tests/test_r.py", head + old_above + body)
+        self.git("add", "tests/test_r.py")
+        self.git("commit", "--quiet", "-m", "test_r")
+        self.put("tests/test_r.py", head + new_above + body)
+        with patch.object(orchestrator, "FLAKY_SEEDS", (1, 2)):
+            return [(f["path"], f["line"], f["rule"]) for f in self.found()]
+
+    def test_a_decorator_replaced_by_a_comment_reruns_its_test(self):
+        self.assertEqual(self.decorated("@pytest.mark.skip(reason='alternates, #12')\n", "# Was skipped for #12.\n"),
+                         [("tests/test_r.py", 9, "mixed-results")])
+
+    def test_a_decorator_removed_above_a_comment_reruns_its_test(self):
+        self.assertEqual(self.decorated("@pytest.mark.skip(reason='#12')\n# Alternates between runs.\n",
+                                        "# Alternates between runs.\n"),
+                         [("tests/test_r.py", 9, "mixed-results")])
+
     def test_a_change_to_no_test_reruns_nothing(self):
         self.put("calc.py", "def add(a, b):\n    return b + a\n")
         self.put("tests/test_state.py", self.BASE.replace("import unittest\n", "import unittest  # edited\n"))

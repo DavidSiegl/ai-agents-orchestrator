@@ -2842,8 +2842,10 @@ def _changed_python_tests(change: GateChange) -> tuple[dict[tuple[str, str], int
     test files it left in the working tree: (path, qualified name as _python_tests gives it) to the line of its def.
     And a finding for each such file that could not be read or parsed.
 
-    Lines removed right above the first decorator or the def count: they may have been a decorator of the test.
-    Lines removed right after its last line count too, though they may have been the blank lines below it."""
+    A test's lines run from the line after the statement before it in its module or class, or after the class's
+    first line, to its last: what lies above its def, such as its decorators and comments, may have changed it, and
+    a decorator replaced or removed leaves no line of the def itself changed. Lines removed right after its last line
+    count too, though they may have been the blank lines below it."""
     tests: dict[tuple[str, str], int] = {}
     out = []
     removed = _removal_points(change.diff)
@@ -2860,13 +2862,17 @@ def _changed_python_tests(change: GateChange) -> tuple[dict[tuple[str, str], int
             out.append(_flaky_finding(path, None, "not-rerun",
                                       "does not parse as Python, so its tests were not rerun."))
             continue
+        # The last line of the statement before each statement in its block, or the line that opens the block.
+        above: dict[ast.stmt, int] = {}
+        for block, opener in [(tree.body, 0), *((c.body, c.lineno) for c in tree.body if isinstance(c, ast.ClassDef))]:
+            ends = [opener, *(stmt.end_lineno or stmt.lineno for stmt in block)]
+            above.update(zip(block, ends, strict=False))
         # _python_tests numbers the files it is given; here each is read on its own.
         for t in _python_tests(0, tree):
             if isinstance(t.node, ast.ClassDef):
                 continue
-            first = min([t.node.lineno, *(d.lineno for d in t.node.decorator_list)])
-            last = t.node.end_lineno or t.node.lineno
-            if any(first <= n <= last for n in added) or any(first - 1 <= n <= last for n in points):
+            floor, last = above[t.node], t.node.end_lineno or t.node.lineno
+            if any(floor < n <= last for n in added) or any(floor <= n <= last for n in points):
                 tests[(path, t.name)] = t.node.lineno
     return tests, out
 
