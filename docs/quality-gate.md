@@ -106,8 +106,8 @@ gate and archives `quality.md`, and builds the Linux binary; a build of `main` t
 
 ### What Jenkins needs
 
-- **Plugins**: Pipeline, Git, JUnit, Workspace Cleanup and Credentials Binding, and GitHub Branch Source for the
-  multibranch job.
+- **Plugins**: Pipeline, Git, JUnit, Workspace Cleanup, Credentials Binding and Email Extension, and GitHub Branch
+  Source for the multibranch job. Email Extension sends with Jenkins's own SMTP settings.
 - **An agent labelled `untrusted`**, which the `Jenkinsfile` asks for. Builds run code the agents wrote, so the
   agent must hold nothing an agent should not have: in the homelab it is a container on the agents' own box,
   restricted to this folder's jobs, while the agents that deploy accept no job from this folder. A label alone
@@ -167,6 +167,9 @@ stops only when pytest itself could not run. The gate's exit status then decides
   as far as the gate, and its quality file is `GATE: BUILD_FAILED`.
 - **A pull request or `main`** fails on `GATE: ERROR`, so a red gate blocks the merge and `main`'s release.
 - **Any build** fails when the gate could not judge.
+
+The multibranch job mails a failed build of `main` or a pull request, with the log attached, and the first build
+that passes after one. The quality job mails nothing: its result goes to the orchestrator run that asked for it.
 
 A build of `main` that passes then releases the version in `pyproject.toml`: if GitHub has no release
 `v<version>` yet, `gh release create` makes one, with the tag at the commit built, notes generated from the pull
