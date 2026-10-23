@@ -3511,6 +3511,11 @@ class TestChangedLines(unittest.TestCase):
 
 
 class TestQualityReport(unittest.TestCase):
+    def test_the_fix_prompt_asks_for_findings_to_weigh_by_number(self):
+        prompt = orchestrator.QUALITY_FIX_PROMPT
+        self.assertIn("finding to weigh", prompt)
+        self.assertIn("never fail the gate", prompt)
+
     def test_gate_line(self):
         self.assertEqual(parse_gate("\n**GATE: BUILD_FAILED**\n"), "BUILD_FAILED")
         self.assertEqual(parse_gate("GATE: OK"), "OK")
@@ -3522,59 +3527,93 @@ class TestQualityReport(unittest.TestCase):
         return [{"path": "f.py", "line": i, "severity": "HIGH", "rule": "r", "message": f"m{i}"} for i in range(1, n + 1)]
 
     def test_numbers_at_most_fifty_issues(self):
-        text = quality_report("ERROR", "intro", {"f.py": set(range(1, 61))}, issues=self.issues(70), tests=[])
+        text = quality_report("ERROR", "intro", issues=self.issues(60), elsewhere=10, tests=[])
         self.assertTrue(text.startswith("GATE: ERROR\n\nintro\n"))
         self.assertIn("50. `f.py:50` HIGH r: m50\n", text)
         self.assertNotIn("51. ", text)
         self.assertIn("10 more issues on changed lines are not listed", text)
         self.assertIn("10 other open issues in the project", text)
 
+    def finding(self, path, line, rule="flaky test_x"):
+        return {"path": path, "line": line, "severity": "warning", "rule": rule, "message": "m"}
+
+    def test_findings_to_weigh_alone_leave_the_gate_ok(self):
+        text = quality_report("OK", "intro", to_weigh=[self.finding("t.py", 3), self.finding("t.py", None),
+                                                        self.finding(None, None, "mutants budget")])
+        self.assertTrue(text.startswith("GATE: OK\n"))
+        self.assertIn("## Issues on changed lines\n\nNone.\n", text)
+        self.assertIn("## Findings to weigh\n\nThese do not fail the gate. Fix each, or say in your report why it "
+                      "should stand.\n\n1. `t.py:3` warning flaky test_x: m\n"
+                      "2. `t.py (the whole file)` warning flaky test_x: m\n"
+                      "3. The change as a whole: warning mutants budget: m\n", text)
+
+    def test_findings_to_weigh_are_numbered_after_the_issues(self):
+        text = quality_report("ERROR", "intro", issues=self.issues(2), to_weigh=[self.finding("t.py", 9)])
+        self.assertLess(text.index("2. `f.py:2` HIGH r: m2"), text.index("## Findings to weigh"))
+        self.assertIn("3. `t.py:9` warning flaky test_x: m\n", text)
+
+    def test_the_limit_takes_issues_first_then_findings_to_weigh(self):
+        limit = orchestrator.QUALITY_ISSUE_LIMIT
+        text = quality_report("ERROR", "intro", issues=self.issues(limit - 2),
+                              to_weigh=[self.finding("t.py", n) for n in range(1, 6)])
+        self.assertIn(f"{limit}. `t.py:2` ", text)
+        self.assertNotIn(f"{limit + 1}. ", text)
+        self.assertIn("3 more findings to weigh are not listed.", text)
+        text = quality_report("ERROR", "intro", issues=self.issues(limit + 1), to_weigh=[self.finding("t.py", 1)])
+        self.assertIn("## Findings to weigh\n\n1 findings to weigh are not listed; answer the issues above first.\n",
+                      text)
+        self.assertNotIn("`t.py:1`", text)
+
+    def test_no_findings_to_weigh_no_section(self):
+        self.assertNotIn("Findings to weigh", quality_report("OK", "intro"))
+        self.assertNotIn("Findings to weigh", quality_report("BUILD_FAILED", "intro", to_weigh=[self.finding("t", 1)]))
+
     def test_tests_coverage_and_console(self):
-        text = quality_report("BUILD_FAILED", "intro", {}, tests=None, console="last\nlines")
+        text = quality_report("BUILD_FAILED", "intro", tests=None, console="last\nlines")
         self.assertIn("Jenkins has no test report for this build.", text)
         self.assertIn("````\nlast\nlines\n````", text)
         self.assertNotIn("Issues on changed lines", text)
-        text = quality_report("OK", "intro", {}, tests=[("t.T.test_x", "AssertionError\ntraceback")],
+        text = quality_report("OK", "intro", tests=[("t.T.test_x", "AssertionError\ntraceback")],
                               coverage="62.5% of 40 new lines to cover.")
         self.assertIn("- `t.T.test_x`: AssertionError\n", text)
         self.assertIn("## Coverage on new code\n\n62.5% of 40 new lines to cover.\n", text)
         self.assertIn("None.", text)
 
     def test_sections_left_out_by_default(self):
-        text = quality_report("OK", "intro", {})
+        text = quality_report("OK", "intro")
         self.assertNotIn("## Failing tests", text)
         self.assertNotIn("## Coverage on new code", text)
         self.assertNotIn("## Suppressions added", text)
         self.assertNotIn("## Failed conditions", text)
 
     def test_conditions_and_suppressions_are_listed(self):
-        text = quality_report("ERROR", "intro", {}, conditions=["`ruff` is not installed."],
+        text = quality_report("ERROR", "intro", conditions=["`ruff` is not installed."],
                               suppressions=[("f.py", 3, "x = 1  # noqa: F401")])
         self.assertIn("## Failed conditions\n\n- `ruff` is not installed.\n", text)
         self.assertIn("## Suppressions added\n\n- `f.py:3` `x = 1  # noqa: F401`\n", text)
 
     def test_failing_tests_beyond_the_limit_are_counted(self):
         tests = [(f"t.T.test_{k}", "") for k in range(orchestrator.QUALITY_ISSUE_LIMIT + 3)]
-        text = quality_report("ERROR", "intro", {}, tests=tests)
+        text = quality_report("ERROR", "intro", tests=tests)
         self.assertIn("- `t.T.test_0`: failed\n", text)
         self.assertIn("- and 3 more.\n", text)
         self.assertNotIn(f"test_{orchestrator.QUALITY_ISSUE_LIMIT}`", text)
 
     def test_build_config_edits_are_named(self):
-        text = quality_report("OK", "i", {}, tests=[], edited=["Jenkinsfile", "uv.lock"])
+        text = quality_report("OK", "i", tests=[], edited=["Jenkinsfile", "uv.lock"])
         self.assertIn("The change edits `Jenkinsfile`. The quality job reads it from `main`", text)
         for only, other in (("Jenkinsfile", "uv.lock"), ("uv.lock", "Jenkinsfile")):
             with self.subTest(only=only):
-                text = quality_report("OK", "i", {}, tests=[], edited=[only])
+                text = quality_report("OK", "i", tests=[], edited=[only])
                 self.assertIn(f"The change edits `{only}`", text)
                 self.assertNotIn(f"The change edits `{other}`", text)
 
     def test_gate_config_edits_are_named(self):
-        text = quality_report("OK", "i", {}, edited=["pyproject.toml", "uv.lock"])
+        text = quality_report("OK", "i", edited=["pyproject.toml", "uv.lock"])
         self.assertIn("The change edits `pyproject.toml`, which holds the gate's rules; the change was judged by "
                       "the edited rules.", text)
         self.assertIn("The change edits `uv.lock`, which pins the versions of the linters the gate ran.", text)
-        text = quality_report("OK", "i", {}, edited=["pyproject.toml"], rules_from="`main`'s `pyproject.toml`")
+        text = quality_report("OK", "i", edited=["pyproject.toml"], rules_from="`main`'s `pyproject.toml`")
         self.assertIn("The gate took its rules from `main`'s `pyproject.toml`, so the edit did not change", text)
 
     def test_tokens_are_masked(self):
@@ -3788,6 +3827,55 @@ class TestGate(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertIn("## Suppressions added\n\n- `f.py:4` `import os  # noqa: F401`\n"
                       "- `run.sh:1` `# shellcheck disable=SC2086`\n", out)
+
+    def checks(self, *checks):
+        """Run the gate with checks in place of GATE_CHECKS."""
+        p = patch.object(orchestrator, "GATE_CHECKS", checks)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_a_failing_check_fails_the_gate_wherever_its_findings_are(self):
+        seen = []
+
+        def find(change):
+            seen.append(change)
+            # Line 2 is not one the change added; a check's findings are listed anyway.
+            return [{"path": "f.py", "line": 2, "severity": "error", "rule": "removed-test", "message": "test_a"},
+                    {"path": None, "line": None, "severity": "error", "rule": "", "message": "could not run"}]
+        self.checks(orchestrator.GateCheck("integrity", fails=True, find=find))
+        self.add_lines(1)
+        status, out, _ = self.gate()
+        self.assertEqual(status, 1)
+        self.assertIn("- 2 findings of the `integrity` check; each is listed below.\n", out)
+        self.assertIn("1. `f.py:2` error integrity removed-test: test_a\n"
+                      "2. The change as a whole: error integrity: could not run\n", out)
+        [change] = seen
+        self.assertEqual((change.root, change.base, change.changed),
+                         (os.path.realpath(self.repo), self.git("rev-parse", "HEAD").strip(), {"f.py": {4}}))
+        self.assertIn("+new4 = 4", change.diff)
+
+    def test_a_reporting_check_is_weighed_after_the_issues_and_passes(self):
+        self.checks(orchestrator.GateCheck("flaky", fails=False, find=lambda change: [
+            {"path": "f.py", "line": 4, "severity": "warning", "rule": "seeds 3 5", "message": "test_b"}]))
+        self.add_lines(1)
+        status, out, _ = self.gate()
+        self.assertEqual(status, 0)
+        self.assertIn("## Findings to weigh\n\nThese do not fail the gate. Fix each, or say in your report why it "
+                      "should stand.\n\n1. `f.py:4` warning flaky seeds 3 5: test_b\n", out)
+        self.says("ruff", "f.py:4:1: F401 `os` imported but unused\n")
+        status, out, _ = self.gate()
+        self.assertEqual(status, 1)
+        self.assertIn("1. `f.py:4` error ruff F401: `os` imported but unused\n", out)
+        self.assertIn("2. `f.py:4` warning flaky seeds 3 5: test_b\n", out)
+
+    def test_a_check_with_nothing_to_say_adds_nothing(self):
+        self.checks(orchestrator.GateCheck("quiet", fails=True, find=lambda change: []),
+                    orchestrator.GateCheck("hush", fails=False, find=lambda change: []))
+        self.add_lines(1)
+        status, out, _ = self.gate()
+        self.assertEqual(status, 0)
+        self.assertNotIn("quiet", out)
+        self.assertNotIn("Findings to weigh", out)
 
     def test_config_replaces_the_tree_s_rules(self):
         self.put("pyproject.toml", "[tool.ruff]\nline-length = 1\n")
@@ -4195,7 +4283,7 @@ GOLDEN = {
         '\n'
         'If you cannot continue without a decision from the human, write the report with a first line `BLOCKED: <your question>` instead.'),
     'quality_fix_1_1': (
-        f'The quality gate did not pass on your change; the findings are in {D}/quality-1-1.md. Fix each numbered issue, the failed conditions, the failing tests and a failed build, or explain in your report why one should stand. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-1-q1.md in a single write, in the same shape as before, answering each numbered issue by its number.'
+        f'The quality gate did not pass on your change; the findings are in {D}/quality-1-1.md. Fix each numbered issue, the failed conditions, the failing tests and a failed build, or explain in your report why one should stand. Answer each numbered finding to weigh the same way; those never fail the gate, but the Reviewer reads your answers. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-1-q1.md in a single write, in the same shape as before, answering each numbered issue and finding to weigh by its number.'
         '\n'
         '\n'
         'If you cannot continue without a decision from the human, write the report with a first line `BLOCKED: <your question>` instead.'),
@@ -4214,7 +4302,7 @@ GOLDEN = {
         '\n'
         'If you cannot continue without a decision from the human, write the report with a first line `BLOCKED: <your question>` instead.'),
     'quality_fix_2_1': (
-        f'The quality gate did not pass on your change; the findings are in {D}/quality-2-1.md. Fix each numbered issue, the failed conditions, the failing tests and a failed build, or explain in your report why one should stand. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2-q1.md in a single write, in the same shape as before, answering each numbered issue by its number.'
+        f'The quality gate did not pass on your change; the findings are in {D}/quality-2-1.md. Fix each numbered issue, the failed conditions, the failing tests and a failed build, or explain in your report why one should stand. Answer each numbered finding to weigh the same way; those never fail the gate, but the Reviewer reads your answers. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2-q1.md in a single write, in the same shape as before, answering each numbered issue and finding to weigh by its number.'
         '\n'
         '\n'
         'If you cannot continue without a decision from the human, write the report with a first line `BLOCKED: <your question>` instead.'),
@@ -4270,7 +4358,7 @@ GOLDEN = {
         '\n'
         f'This is round 2, and you are a fresh session. An earlier Builder session did the earlier turns; its changes are already in the working tree, and its reports are {D}/build-1.md, {D}/build-1-q1.md, {D}/build-2.md.\n'
         '\n'
-        f'The quality gate did not pass on your change; the findings are in {D}/quality-2-1.md. Fix each numbered issue, the failed conditions, the failing tests and a failed build, or explain in your report why one should stand. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2-q1.md in a single write, in the same shape as before, answering each numbered issue by its number.'
+        f'The quality gate did not pass on your change; the findings are in {D}/quality-2-1.md. Fix each numbered issue, the failed conditions, the failing tests and a failed build, or explain in your report why one should stand. Answer each numbered finding to weigh the same way; those never fail the gate, but the Reviewer reads your answers. Re-run the verification. Do not commit, push or switch branches. As your last step, write a new report to {D}/build-2-q1.md in a single write, in the same shape as before, answering each numbered issue and finding to weigh by its number.'
         '\n'
         '\n'
         'If you cannot continue without a decision from the human, write the report with a first line `BLOCKED: <your question>` instead.'),

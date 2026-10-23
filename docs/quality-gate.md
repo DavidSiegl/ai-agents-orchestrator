@@ -29,9 +29,16 @@ listed and never held against the change, so the gate judges the change rather t
 ruff, mypy and pymarkdownlnt are in uv's `dev` group, so `uv run` puts them on `PATH`; shellcheck and actionlint
 come from the Jenkins agent image. The orchestrator itself stays stdlib-only: the gate runs them as processes.
 
+After the linters come the checks in `GATE_CHECKS`, which judge what the change did rather than how the tree
+reads. Each is a `GateCheck` that either fails the gate or only reports: a failing check's findings are issues,
+like the linters', and a reporting check's are findings to weigh, which the Builder answers and the Reviewer
+judges without the gate failing. Either kind is listed wherever it is, not only on added lines, and names the
+check that raised it. A check that cannot run says so as one of its findings, so a failing check that cannot
+run fails the gate.
+
 The gate is `GATE: ERROR` when any of these holds, and `GATE: OK` otherwise:
 
-- a finding on a line the change adds;
+- a finding on a line the change adds, or a finding of a failing check;
 - a linter that is missing, fails, or exits "found something" with nothing the gate can read. A gate that cannot
   run a check never reports it as passed;
 - with `--tests`, a failing test in that JUnit report;
@@ -42,9 +49,10 @@ The gate is `GATE: ERROR` when any of these holds, and `GATE: OK` otherwise:
 Exit status 0 means `GATE: OK`, 1 `GATE: ERROR`, and 2 that the gate could not judge (`REV` names no commit, not a
 git tree, no rules file, an unreadable report), in which case it writes nothing.
 
-The quality file starts with the `GATE:` line, then has the failed conditions, the findings on added lines
-(numbered, at most 50, then a count), the failing tests, coverage of new code, the suppressions the change adds,
-and the build configuration it edits:
+The quality file starts with the `GATE:` line, then has the failed conditions, the issues (the findings on added
+lines, then the failing checks'), the findings to weigh, the failing tests, coverage of new code, the suppressions
+the change adds, and the build configuration it edits. Issues and findings to weigh are numbered as one list, issues
+first, at most 50 in all, then a count:
 
 - **Suppressions added** (`# noqa`, `# type: ignore`, `# shellcheck disable`, `<!-- pyml disable`,
   `# pragma: no cover`) are listed, not failed, so the Reviewer weighs each one. A `# pragma: no cover` is listed
