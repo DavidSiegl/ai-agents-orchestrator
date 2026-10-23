@@ -2160,7 +2160,8 @@ class GateChange:
     base: str  # the commit the change is judged against, a full sha
     diff: str  # Host.change_diff from base to the working tree
     changed: dict[str, set[int]]  # changed_lines(diff)
-    # The pyproject.toml whose rules judge the change, `gate --config`'s or the tree's own; None for the tree's own.
+    # The path of the pyproject.toml whose rules judge the change, as judge_change passes it: `gate --config`'s, else
+    # the tree's own. None, which only a caller other than judge_change passes, also means the tree's own.
     rules: str | None = None
 
 
