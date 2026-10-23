@@ -477,7 +477,8 @@ workflow, or the run's task for a workflow without one. Each check is an `Orches
 | `diff-budget` | no | a change over the workflow's `max_files` or `max_lines` |
 | `unexpected-paths` | no | changed paths the spec never mentions |
 
-**New dependencies** reads each manifest the change adds lines to, at the base and in the snapshot: in a
+**New dependencies** reads each manifest the change touches, in the snapshot and at the base, at its old path when the
+change moved it: in a
 `pyproject.toml`, `[project] dependencies` and `optional-dependencies` and `[dependency-groups]`; in a `uv.lock`,
 the packages from a registry. A package is new when the snapshot's file names it and the base's does not. Names
 compare as PyPI compares them (PEP 503), and the spec names a package when it holds the name as a word, in any case,
@@ -499,8 +500,9 @@ the human, so naming a package there is the approval. Each new package not from 
 - `pulled-in` (reports): one finding per `uv.lock`, listing with the same facts the packages it alone adds, those the
   new dependencies pull in. The spec cannot be expected to name them.
 
-**Diff budget** counts the files the change touches and the lines it adds and removes, from `git diff -U0`; a rename
-or a binary file counts as a file of no lines. Over either limit it is one finding about the change as a whole. The
+**Diff budget** counts the files the change touches and the lines it adds and removes, from `git diff --numstat -M`
+(`Host.changed_line_counts`); a rename counts as one file, with the lines it changes, and a binary file as a file of
+no lines. Over either limit it is one finding about the change as a whole. The
 limits are workflow keys, a whole number of at least 1 each, in a workflow file next to `description`:
 
 ```toml

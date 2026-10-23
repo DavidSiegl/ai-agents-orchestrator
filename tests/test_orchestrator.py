@@ -87,6 +87,8 @@ class FakeHost(Host):
     - `diff`: what `git diff -U0` from the base to a snapshot prints.
     - `committed`: the text of each file in a commit, by (commit, path); file_at reads it, and records each read in
       `file_reads`.
+    - `line_counts`: what changed_line_counts gives; None gives each file changed_lines finds in `diff`, under its
+      own path, with the lines it adds and none removed.
     - `has_origin`: whether the checkout has an origin at all.
     - `ages`: the seconds since each run's state.json was written, by run id; 0 for one not listed.
     - `clock`: a FakeClock, which make_workflow sets to the workflow's. The host's own time is HOST_EPOCH later:
@@ -140,6 +142,7 @@ class FakeHost(Host):
         self.mtimes = {}
         self.committed = {}
         self.file_reads = []
+        self.line_counts = None
 
     def now(self):
         return HOST_EPOCH + int(self.clock() if self.clock else 0)
@@ -175,6 +178,11 @@ class FakeHost(Host):
     def file_at(self, cwd, commit, path):
         self.file_reads.append((commit, path))
         return self.committed.get((commit, path))
+
+    def changed_line_counts(self, cwd, base, commit):
+        if self.line_counts is not None:
+            return self.line_counts
+        return touched(self.diff)
 
     def run_states(self, cwd):
         # A test that patches Host.run_states, for main to find the run to resume, decides it here too.
@@ -1302,6 +1310,27 @@ class TestHostGit(unittest.TestCase):
         self.assertEqual(self.host.file_at(self.a, first, "app.py"), "one\n")
         with self.assertRaises(OrchestratorError):
             self.host.file_at(self.a, "0" * 40, "app.py")
+
+    def test_changed_line_counts_pair_renames_and_count_binary_files_as_none(self):
+        self.commit(self.a, "gone.py", "x\ny\n")
+        base = self.commit(self.a, "lib.py", "".join(f"line {i}\n" for i in range(20)))
+        self.sh("git", "-C", self.a, "rm", "--quiet", "gone.py")
+        os.makedirs(f"{self.a}/sub dir")
+        self.sh("git", "-C", self.a, "mv", "lib.py", "sub dir/lib.py")
+        with open(f"{self.a}/sub dir/lib.py", "a") as f:
+            f.write("added\n")
+        with open(f"{self.a}/app.py", "w") as f:
+            f.write("two\n")
+        with open(f"{self.a}/logo.png", "wb") as f:
+            f.write(b"\x00\x01\x02")
+        self.sh("git", "-C", self.a, "add", "-A")
+        self.sh("git", "-C", self.a, "commit", "--quiet", "-m", "change")
+        counts = self.host.changed_line_counts(self.a, base, self.head(self.a))
+        self.assertEqual(sorted(counts), [
+            orchestrator.ChangedFile("app.py", "app.py", 1, 1),
+            orchestrator.ChangedFile("gone.py", "gone.py", 0, 2),
+            orchestrator.ChangedFile("lib.py", "sub dir/lib.py", 1, 0),
+            orchestrator.ChangedFile("logo.png", "logo.png", 0, 0)])
 
     def test_fast_forward_moves_the_base_to_origins(self):
         upstream = self.push_from_b("lib.py", "new\n")
@@ -3569,10 +3598,18 @@ SPEC_NAMING_LIMITS = ("# Add a token-bucket rate limiter\n\n## Goal\nThrottle th
                       "declared in pyproject.toml.\n")
 
 
-def run_change(diff, files=None, spec=SPEC_NAMING_LIMITS, now=TODAY):
-    """The RunChange of a quality round from base to new; files holds each file's text by (commit, path)."""
+def touched(diff):
+    """The ChangedFiles of the files changed_lines finds in diff, each under its own path, with the lines it adds and
+    none removed."""
+    return [orchestrator.ChangedFile(path, path, len(lines), 0) for path, lines in changed_lines(diff).items()]
+
+
+def run_change(diff, files=None, spec=SPEC_NAMING_LIMITS, now=TODAY, counts=None):
+    """The RunChange of a quality round from base to new; files holds each file's text by (commit, path), and counts
+    the ChangedFiles, touched(diff) by default."""
     files = files or {}
-    return orchestrator.RunChange(spec=spec, base="base", commit="new", diff=diff, changed=changed_lines(diff),
+    return orchestrator.RunChange(spec=spec, base="base", commit="new", changed=changed_lines(diff),
+                                  files=touched(diff) if counts is None else counts,
                                   file_at=lambda commit, path: files.get((commit, path)), now=now)
 
 
@@ -3816,10 +3853,20 @@ class TestNewDependencies(unittest.TestCase):
         diff = ("diff --git a/pyproject.toml b/pyproject.toml\ndeleted file mode 100644\n--- a/pyproject.toml\n"
                 "+++ /dev/null\n@@ -1,5 +0,0 @@\n")
         pypi = FakePyPI()
-        self.assertEqual(self.find(run_change(diff, {("base", "pyproject.toml"): pyproject_with("x")}), pypi),
-                         ([], []))
+        deleted = [orchestrator.ChangedFile("pyproject.toml", "pyproject.toml", 0, 5)]
+        self.assertEqual(self.find(run_change(diff, {("base", "pyproject.toml"): pyproject_with("x")},
+                                              counts=deleted), pypi), ([], []))
         self.assertEqual(self.find(run_change(new_file_diff("app.py", 3)), pypi), ([], []))
         self.assertEqual(pypi.asked, [])
+
+    def test_a_moved_manifest_is_compared_with_itself_at_its_old_path(self):
+        moved = pyproject_with("requests", "rich")
+        for old, new in (("pyproject.toml", "backend/pyproject.toml"), ("backend/pyproject.toml", "pyproject.toml")):
+            with self.subTest(new=new):
+                files = {("base", old): moved, ("new", new): moved}
+                pypi = FakePyPI()
+                found = self.find(run_change("", files, counts=[orchestrator.ChangedFile(old, new, 0, 0)]), pypi)
+                self.assertEqual((found, pypi.asked), (([], []), []))
 
     def test_a_new_manifest_adds_all_it_names(self):
         files = {("new", "sub/pyproject.toml"): pyproject_with()}
@@ -3877,30 +3924,16 @@ class TestPyPI(unittest.TestCase):
                 self.assertTrue(str(cm.exception).startswith(message), str(cm.exception))
 
 
-class TestDiffSizes(unittest.TestCase):
-    def test_counts_each_files_added_and_removed_lines(self):
-        diff = (
-            "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -3 +3 @@ def f():\n-x\n+y\n"
-            "@@ -10,0 +11,2 @@\n+++ an added line that looks like a header\n+z\n"
-            "diff --git a/gone.py b/gone.py\ndeleted file mode 100644\n--- a/gone.py\n+++ /dev/null\n@@ -1,4 +0,0 @@\n"
-            "diff --git a/old name.py b/new name.py\nsimilarity index 100%\nrename from old name.py\n"
-            "rename to new name.py\n"
-            "diff --git a/logo.png b/logo.png\nnew file mode 100644\nBinary files /dev/null and b/logo.png differ\n"
-            'diff --git "a/t\\303\\251.py" "b/t\\303\\251.py"\n--- "a/t\\303\\251.py"\n+++ "b/t\\303\\251.py"\n'
-            "@@ -1,2 +1 @@\n")
-        self.assertEqual(orchestrator.diff_sizes(diff), {
-            "a.py": (3, 1), "gone.py": (0, 4), "new name.py": (0, 0), "logo.png": (0, 0),
-            "tÃ©.py": (1, 2)})
-
+class TestDiffBudget(unittest.TestCase):
     def test_the_budget_counts_files_and_lines_against_the_workflows(self):
-        diff = (new_file_diff("a.py", 10) + new_file_diff("b.py", 10)
-                + "diff --git a/c.py b/c.py\n--- a/c.py\n+++ b/c.py\n@@ -1,5 +1 @@\n")
+        counts = [orchestrator.ChangedFile("a.py", "a.py", 10, 0), orchestrator.ChangedFile("b.py", "b.py", 10, 0),
+                  orchestrator.ChangedFile("old.py", "c.py", 1, 5)]
         budget = orchestrator.diff_budget
-        self.assertEqual(budget(run_change(diff), max_files=3, max_lines=26), ([], []))
-        (finding,) = budget(run_change(diff), max_files=2, max_lines=26).to_weigh
+        self.assertEqual(budget(run_change("", counts=counts), max_files=3, max_lines=26), ([], []))
+        (finding,) = budget(run_change("", counts=counts), max_files=2, max_lines=26).to_weigh
         self.assertEqual(finding["message"], "The change touches 3 files, over the workflow's max_files of 2. Say in "
                                              "your report why it cannot be smaller.")
-        (finding,) = budget(run_change(diff), max_files=3, max_lines=25).to_weigh
+        (finding,) = budget(run_change("", counts=counts), max_files=3, max_lines=25).to_weigh
         self.assertEqual(finding["message"], "The change touches 26 lines (21 added, 5 removed), over the workflow's "
                                              "max_lines of 25. Say in your report why it cannot be smaller.")
 

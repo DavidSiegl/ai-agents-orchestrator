@@ -1197,6 +1197,14 @@ class GhUnusable(OrchestratorError):
     """gh is missing or logged out where the project is, so no gh call can succeed."""
 
 
+class ChangedFile(NamedTuple):
+    """A file a change touches, as Host.changed_line_counts gives it."""
+    base_path: str  # its path at the base: path, unless git paired the file with another as a rename
+    path: str  # its path in the change; for a file the change adds or deletes, the side without it has no file there
+    added: int  # lines; 0 for a binary file
+    removed: int
+
+
 class Host:
     """Runs commands on the machine where the agents run: locally, or over SSH."""
 
@@ -1421,6 +1429,25 @@ class Host:
             path = fields[i + 1]
             out.append((None, path) if status == "A" else (path, None) if status == "D" else (path, path))
             i += 2
+        return out
+
+    def changed_line_counts(self, cwd: str, base: str, commit: str) -> list[ChangedFile]:
+        """Each file the change from base to commit touches, a rename paired as change_diff pairs it, with the lines it
+        adds and removes, from `git diff --numstat`. The paths are verbatim, as Host.run says."""
+        fields = self.git(cwd, "diff", "--numstat", "-z", "-M", "--no-ext-diff", base, commit,
+                          verbatim=True).split("\0")
+        out = []
+        i = 0
+        # -z gives each entry as `added<TAB>removed<TAB>path`, or for a rename `added<TAB>removed<TAB>` and then the
+        # old and new paths as fields of their own; a binary file counts "-". The list ends with an empty field.
+        while i < len(fields) and fields[i]:
+            added, removed, path = fields[i].split("\t", 2)
+            if path:
+                base_path, i = path, i + 1
+            else:
+                base_path, path, i = fields[i + 1], fields[i + 2], i + 3
+            out.append(ChangedFile(base_path, path, 0 if added == "-" else int(added),
+                                   0 if removed == "-" else int(removed)))
         return out
 
     def push_ref(self, cwd: str, commit: str, branch: str) -> None:
@@ -4364,8 +4391,8 @@ class RunChange:
     spec: str  # the run's spec: its contract step's file, or its task for a workflow without one
     base: str  # the run's base commit
     commit: str  # the snapshot the round judges, whose only parent is base
-    diff: str  # Host.change_diff from base to commit
-    changed: dict[str, set[int]]  # changed_lines(diff)
+    changed: dict[str, set[int]]  # changed_lines of Host.change_diff from base to commit: the lines each file gains
+    files: list[ChangedFile]  # Host.changed_line_counts from base to commit: every file the change touches
     # (commit, path) -> the file at path, relative to the repository's top level, as commit has it, verbatim as
     # Host.file_at gives it; None where it has none. Raises OrchestratorError when git fails on the agents' machine.
     file_at: Callable[[str, str], str | None]
@@ -4627,13 +4654,15 @@ def _new_packages(change: RunChange) -> tuple[list[_NewPackage], list[dict]]:
     manifests = {m.basename: m for m in DEPENDENCY_MANIFESTS}
     found: list[_NewPackage] = []
     problems = []
-    # A manifest the change deletes adds nothing, and is not in changed.
-    for path, added in change.changed.items():
-        manifest = manifests.get(posixpath.basename(path))
+    # A manifest the change deletes adds nothing: it has no text in the change. One it moves is compared with itself
+    # at its old path.
+    for f in change.files:
+        manifest = manifests.get(posixpath.basename(f.path))
         if manifest is None:
             continue
+        path, added = f.path, change.changed.get(f.path, set())
         try:
-            before = _manifest_packages(manifest, change.file_at(change.base, path), "at the base")
+            before = _manifest_packages(manifest, change.file_at(change.base, f.base_path), "at the base")
             text = change.file_at(change.commit, path)
             after = _manifest_packages(manifest, text, "in the change")
         except ValueError as e:
@@ -4703,51 +4732,13 @@ def _young(project: PyPIProject, now: float) -> bool:
 # -- Diff budget and unexpected paths --------------------------------------
 
 
-def diff_sizes(diff: str) -> dict[str, tuple[int, int]]:
-    """(lines added, lines removed) of each file a `git diff -U0` touches, by its path in the new tree, or at the
-    base for a file the diff deletes. A pure rename, a mode change or a binary file counts (0, 0). Only "\n" ends a
-    line, as for changed_lines."""
-    # [path at the base, path in the new tree, added, removed] per file, a side None where the file is not.
-    files: list[list] = []
-    in_hunk = False
-    for line in diff.split("\n"):
-        if line.startswith("diff --git "):
-            path = _diff_git_path(line[len("diff --git "):])
-            files.append([path, path, 0, 0])
-            in_hunk = False
-        elif files and line.startswith("@@"):
-            in_hunk = True
-            _count_hunk(files[-1], line)
-        elif files and not in_hunk:
-            _note_sides(files[-1], line)
-    return {new or old: (added, removed) for old, new, added, removed in files if new or old}
-
-
-def _count_hunk(file: list, line: str) -> None:
-    """Add the lines a `@@` line's hunk adds and removes to file, as diff_sizes keeps it."""
-    if m := re.match(r"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", line):
-        # A count left out is 1.
-        file[2] += 1 if m.group(2) is None else int(m.group(2))
-        file[3] += 1 if m.group(1) is None else int(m.group(1))
-
-
-def _note_sides(file: list, line: str) -> None:
-    """Set the paths in file, as diff_sizes keeps it, that a header line before the file's first hunk names."""
-    for prefix, side, strip in (("rename from ", 0, ""), ("rename to ", 1, ""), ("--- ", 0, "a/"), ("+++ ", 1, "b/")):
-        if line.startswith(prefix):
-            # git ends the name with a tab when it holds a space.
-            name = _unquote(line[len(prefix):].removesuffix("\t"))
-            file[side] = None if name == "/dev/null" else name.removeprefix(strip)
-
-
 def diff_budget(change: RunChange, *, max_files: int, max_lines: int) -> CheckFindings:
     """A finding to weigh when the change touches more than max_files files, or adds and removes more than max_lines
-    lines between them (diff_sizes); none otherwise."""
-    sizes = diff_sizes(change.diff)
-    added, removed = sum(a for a, _ in sizes.values()), sum(r for _, r in sizes.values())
+    lines between them; none otherwise."""
+    added, removed = sum(f.added for f in change.files), sum(f.removed for f in change.files)
     over = []
-    if len(sizes) > max_files:
-        over.append(f"{len(sizes)} files, over the workflow's max_files of {max_files}")
+    if len(change.files) > max_files:
+        over.append(f"{len(change.files)} files, over the workflow's max_files of {max_files}")
     if added + removed > max_lines:
         whose = "its" if over else "the workflow's"
         over.append(f"{added + removed} lines ({added} added, {removed} removed), over {whose} max_lines of {max_lines}")
@@ -4758,11 +4749,11 @@ def diff_budget(change: RunChange, *, max_files: int, max_lines: int) -> CheckFi
 
 
 def unexpected_paths(change: RunChange) -> CheckFindings:
-    """A finding to weigh for each path the change touches (diff_sizes) that the spec mentions neither as a whole nor
-    by its file name, as a plain substring."""
+    """A finding to weigh for each path the change touches, at its path in the change, that the spec mentions neither
+    as a whole nor by its file name, as a plain substring."""
     return CheckFindings([], [
         _finding(path, None, "", "the spec mentions neither this path nor its file name.")
-        for path in sorted(diff_sizes(change.diff))
+        for path in sorted({f.path for f in change.files})
         if path not in change.spec and posixpath.basename(path) not in change.spec])
 
 
@@ -5723,10 +5714,10 @@ class Workflow:
         base = s.base
         if base is None:
             raise OrchestratorError("a quality round before the run has a base")
-        diff = self.host.change_diff(s.work_dir, base, sha)
         # A workflow without a contract step has only its task to say what the change is for.
         spec = self._last_text(self.pipeline.contract, 0) or s.task
-        change = RunChange(spec, base, sha, diff, changed_lines(diff),
+        change = RunChange(spec, base, sha, changed_lines(self.host.change_diff(s.work_dir, base, sha)),
+                           self.host.changed_line_counts(s.work_dir, base, sha),
                            functools.partial(self.host.file_at, s.work_dir), self.wallclock())
         return judge_run(quality, orchestrator_checks(self.pipeline, self.pypi), change)
 
