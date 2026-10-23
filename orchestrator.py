@@ -2606,18 +2606,25 @@ def _body_fingerprint(definition: ast.FunctionDef | ast.AsyncFunctionDef | ast.C
     text for two bodies whose syntax trees are equal, so that a test or a function moved or renamed matches its old
     self."""
     # Not ast.dump, which recurses as deep as the tree goes and overflows the stack on valid code, such as a sum of a
-    # few thousand terms. ast.walk goes breadth first with a queue; each node's type and fields, with the number of
-    # nodes in each list, fix the tree's shape.
+    # few thousand terms. ast.walk goes breadth first with a queue; each node's type, and each field with every item
+    # of a list in its place, a node standing as "@" and coming later in the walk, fix the tree's shape.
     parts = []
     for node in ast.walk(ast.Module(body=definition.body, type_ignores=[])):
         parts.append(type(node).__name__)
         for field_name, value in ast.iter_fields(node):
-            if isinstance(value, list):
-                parts.append(f"{field_name}[{len(value)}]"
-                             + "".join(repr(v) for v in value if not isinstance(v, ast.AST)))
-            elif not isinstance(value, ast.AST):
-                parts.append(f"{field_name}={value!r}")
+            items = value if isinstance(value, list) else [value]
+            parts.append(f"{field_name}{'[]' if isinstance(value, list) else ''}="
+                         + ",".join(_fingerprint_value(item) for item in items))
     return "\0".join(parts)
+
+
+def _fingerprint_value(value: object) -> str:
+    """value, a field of a syntax node or an item of one, as _body_fingerprint writes it: "@" for a node, else its
+    type and value, in a form that cannot fail. An int is in hex, since repr refuses one past sys.get_int_max_str_digits
+    decimal digits, which a hex literal can hold."""
+    if isinstance(value, ast.AST):
+        return "@"
+    return f"{type(value).__name__}:{hex(value) if isinstance(value, int) else repr(value)}"
 
 
 @dataclass(frozen=True)

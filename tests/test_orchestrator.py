@@ -5664,6 +5664,21 @@ class TestCognitiveComplexity(unittest.TestCase):
         self.assertEqual(score(LONG_SUM), 0)
         self.assertEqual(score(LONG_ELIF), 1001)  # the if, and one for each elif
 
+    def fingerprint(self, source):
+        return orchestrator._body_fingerprint(ast.parse(textwrap.dedent(source)).body[0])
+
+    def test_a_body_fingerprint_keeps_where_each_absent_part_sits(self):
+        # Dict.keys holds None for a ** entry, and kw_defaults None for a keyword-only argument without a default.
+        self.assertNotEqual(self.fingerprint("def f(a, b, c):\n    return {**a, b: c}\n"),
+                            self.fingerprint("def f(a, b, c):\n    return {b: a, **c}\n"))
+        self.assertNotEqual(self.fingerprint("def f():\n    def g(*, a=1, b):\n        pass\n"),
+                            self.fingerprint("def f():\n    def g(*, a, b=1):\n        pass\n"))
+
+    def test_a_body_fingerprint_takes_an_integer_too_long_to_print_in_decimal(self):
+        # 4000 hex digits are about 4800 decimal ones, past the 4300 that int's repr allows.
+        huge = "def f():\n    return 0x" + "f" * 4000 + "\n"
+        self.assertNotEqual(self.fingerprint(huge), self.fingerprint(huge.replace("0xf", "0xe", 1)))
+
     def test_the_seven_functions_sonarqube_flagged_score_over_the_limit(self):
         with open(S3776_FUNCTIONS) as f:
             tree = ast.parse(f.read())
@@ -6003,6 +6018,11 @@ class TestTooComplexFunctions(unittest.TestCase):
         found = self.found()[1]
         self.assertEqual([f["message"] for f in found],
                          ["`long_elif`: cognitive complexity 1002, 1001 at the base; the limit is 15."])
+
+    def test_an_integer_too_long_to_print_in_decimal_is_judged_like_any_code(self):
+        self.put("huge.py", "def h():\n    return 0x" + "f" * 4000 + "\n\n\n" + flat("big_one", 16))
+        self.git("add", "huge.py")
+        self.assertEqual(self.found()[0], [("huge.py", 5, "over-limit")])
 
     def test_it_fails_the_gate(self):
         [check] = [c for c in orchestrator.gate_checks(orchestrator.MUTATION_BUDGET) if c.name == "cognitive-complexity"]
