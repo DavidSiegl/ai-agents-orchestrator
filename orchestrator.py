@@ -4020,7 +4020,7 @@ def _working_functions(change: GateChange, path: str) -> tuple[list[_ScoredFunct
     try:
         with open(os.path.join(change.root, path), "rb") as source:
             text, _ = _decode_python(source.read())
-    except (OSError, SyntaxError, UnicodeDecodeError) as e:
+    except (OSError, SyntaxError) as e:
         return None, f"could not be read ({e})"
     tree = _parse_python(text)
     if tree is None:
@@ -4035,7 +4035,7 @@ def _base_functions(change: GateChange, path: str) -> list[_ScoredFunction]:
         # Verbatim, so that os.fsencode gives back the bytes git stores, which _decode_python decodes as Python would.
         tree = _parse_python(_decode_python(os.fsencode(
             Host().git(change.root, "cat-file", "blob", f"{change.base}:{path}", verbatim=True)))[0])
-    except (OrchestratorError, SyntaxError, UnicodeDecodeError):
+    except (OrchestratorError, SyntaxError):
         return []
     return _scored_functions(tree) if tree else []
 
