@@ -479,7 +479,8 @@ workflow, or the run's task for a workflow without one. Each check is an `Orches
 
 **New dependencies** reads the project's manifests at the repository's top level only, `pyproject.toml` and the
 `uv.lock` beside it, when the change touches either: a manifest anywhere else, such as a test fixture, is not the
-project's. It reads them in the snapshot and at the base, a file the change moved at its old path. The direct
+project's. It reads them in the snapshot and at the base, both at the top level: a file the change moves there, such
+as a fixture's `pyproject.toml`, was not the project's at the base, so what it lists is new. The direct
 dependencies are `pyproject.toml`'s `[project] dependencies` and `optional-dependencies` and its
 `[dependency-groups]`, the project itself left out, so `all = ["myproj[a,b]"]` adds nothing; the locked packages are
 `uv.lock`'s, the project and its workspace members left out. A package is new when the snapshot's files name it and
@@ -506,8 +507,9 @@ dependency-confusion case, and the finding names the index instead.
   requests, so a long list of new packages cannot make a live run look stale. A package that could not be checked is
   never reported as passed, so the next quality round asks again;
 - `unreadable` (fails): a manifest in the change that is not UTF-8 TOML, or not in the shape above. One that cannot
-  be read at the base is a finding to weigh instead, since the Builder did not write it; either way that ecosystem's
-  new dependencies are not checked;
+  be read at the base is a finding to weigh instead, since the Builder did not write it, and so is one that cannot be
+  read in the change because it could not at the base either; either way that ecosystem's new dependencies are not
+  checked;
 - `added` (reports): a new direct dependency the spec names, or a workspace member, with its first release date, its
   latest version and its date, and its license, or the path, repository or URL it comes from. `young` instead when its
   first release is less than 14 days old (`YOUNG_PACKAGE_DAYS`), or it has no release files: few have used it yet.

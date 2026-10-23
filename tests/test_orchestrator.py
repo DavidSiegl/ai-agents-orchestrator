@@ -3994,6 +3994,24 @@ class TestNewDependencies(unittest.TestCase):
         self.assertEqual(self.find(run_change("", files, counts=counts), pypi), ([], []))
         self.assertEqual(pypi.asked, [])
 
+    def test_a_manifest_broken_at_the_base_and_left_alone_is_weighed_not_failed(self):
+        broken = "[[package\n"
+        files = {("base", "pyproject.toml"): pyproject_with(), ("new", "pyproject.toml"): pyproject_with("rich"),
+                 ("base", "uv.lock"): broken, ("new", "uv.lock"): broken}
+        pypi = FakePyPI()
+        issues, to_weigh = self.find(run_change(pyproject_diff("rich"), files), pypi)
+        self.assertEqual((issues, pypi.asked), ([], []))
+        self.assertEqual([(f["path"], f["severity"], f["rule"]) for f in to_weigh],
+                         [("uv.lock", "warning", "unreadable")])
+        self.assertTrue(to_weigh[0]["message"].startswith("`uv.lock` cannot be read at the base: it is not TOML: "))
+
+    def test_a_manifest_the_change_breaks_fails_whatever_the_base(self):
+        files = {("base", "pyproject.toml"): "[project\n", ("new", "pyproject.toml"): "[project\n",
+                 ("base", "uv.lock"): None, ("new", "uv.lock"): "[[package\n"}
+        issues, to_weigh = self.find(run_change(pyproject_diff("rich"), files), FakePyPI())
+        self.assertEqual(([(f["path"], f["rule"]) for f in issues], to_weigh), ([("uv.lock", "unreadable")], []))
+        self.assertIn("cannot be read in the change", issues[0]["message"])
+
     def test_a_manifest_unreadable_at_the_base_is_weighed_not_failed(self):
         files = {("base", "pyproject.toml"): "[project\n", ("new", "pyproject.toml"): pyproject_with("rich")}
         pypi = FakePyPI()
@@ -4030,14 +4048,21 @@ class TestNewDependencies(unittest.TestCase):
         self.assertEqual(self.find(run_change(new_file_diff("app.py", 3)), pypi), ([], []))
         self.assertEqual(pypi.asked, [])
 
-    def test_a_moved_manifest_is_compared_with_itself_at_its_old_path(self):
+    def test_a_manifest_moved_out_of_the_top_level_adds_nothing(self):
         moved = pyproject_with("requests", "rich")
-        for old, new in (("pyproject.toml", "backend/pyproject.toml"), ("backend/pyproject.toml", "pyproject.toml")):
-            with self.subTest(new=new):
-                files = {("base", old): moved, ("new", new): moved}
-                pypi = FakePyPI()
-                found = self.find(run_change("", files, counts=[orchestrator.ChangedFile(old, new, 0, 0)]), pypi)
-                self.assertEqual((found, pypi.asked), (([], []), []))
+        files = {("base", "pyproject.toml"): moved, ("new", "backend/pyproject.toml"): moved}
+        pypi = FakePyPI()
+        found = self.find(run_change("", files, counts=[
+            orchestrator.ChangedFile("pyproject.toml", "backend/pyproject.toml", 0, 0)]), pypi)
+        self.assertEqual((found, pypi.asked), (([], []), []))
+
+    def test_a_manifest_moved_to_the_top_level_brings_no_base_of_its_own(self):
+        fixture = pyproject_with("evilpkg")
+        files = {("base", "tests/fixtures/pyproject.toml"): fixture, ("new", "pyproject.toml"): fixture}
+        issues, _ = self.find(run_change("", files, counts=[
+            orchestrator.ChangedFile("tests/fixtures/pyproject.toml", "pyproject.toml", 0, 0)]), FakePyPI())
+        self.assertEqual([(f["path"], f["rule"], f["message"][:9]) for f in issues],
+                         [("pyproject.toml", "not-in-spec", "`httpx` i"), ("pyproject.toml", "not-in-spec", "`evilpkg`")])
 
     def test_a_new_manifest_adds_all_it_names(self):
         files = {("new", "pyproject.toml"): pyproject_with()}

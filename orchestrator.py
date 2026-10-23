@@ -4779,9 +4779,9 @@ def spec_names(spec: str) -> set[str]:
 
 def _new_packages(change: RunChange) -> tuple[list[_NewPackage], list[dict], list[dict]]:
     """The packages the change adds to each DEPENDENCY_ECOSYSTEMS project whose manifest or lock file it touches,
-    direct ones first; and an unreadable finding for each project whose manifests cannot be read, failing when that is
-    in the change and to weigh when it is at the base."""
-    base_paths = {f.path: f.base_path for f in change.files}
+    direct ones first; and an unreadable finding for each project whose manifests cannot be read, failing when the
+    change made them so and to weigh when they cannot be read at the base either."""
+    touched = {f.path for f in change.files} | {f.base_path for f in change.files}
     found: list[_NewPackage] = []
     issues, to_weigh = [], []
 
@@ -4791,26 +4791,34 @@ def _new_packages(change: RunChange) -> tuple[list[_NewPackage], list[dict], lis
         return change.file_at(change.commit, path)
 
     for ecosystem in DEPENDENCY_ECOSYSTEMS:
-        if ecosystem.manifest not in base_paths and ecosystem.lock_file not in base_paths:
+        if ecosystem.manifest not in touched and ecosystem.lock_file not in touched:
             continue
-        try:
-            after = ecosystem.read(new_text)
-        except ManifestError as e:
-            issues.append(_unreadable(e, "in the change", "error"))
-            continue
-        try:
-            # A file the change moved is compared with itself at its old path.
-            before = ecosystem.read(lambda path: change.file_at(change.base, base_paths.get(path, path)))
-        except ManifestError as e:
-            to_weigh.append(_unreadable(e, "at the base", "warning"))
-            continue
-        added = change.changed.get(ecosystem.manifest, set())
-        found += [_NewPackage(key, ecosystem.manifest, _line_naming(new_text(ecosystem.manifest) or "", added, key),
-                              True, source) for key, source in after.direct.items() if key not in before.direct]
-        found += [_NewPackage(key, ecosystem.lock_file, None, False, source) for key, source in after.locked.items()
-                  if key not in before.locked and key not in after.direct]
+        # Both sides at the top level, where the project's manifests are: a file the change moves there was not the
+        # project's at the base.
+        after, after_error = _read_ecosystem(ecosystem, new_text)
+        before, before_error = _read_ecosystem(ecosystem, lambda path: change.file_at(change.base, path))
+        if after_error and not (before_error and before_error.path == after_error.path):
+            issues.append(_unreadable(after_error, "in the change", "error"))
+        elif after_error or before_error:
+            to_weigh.append(_unreadable(before_error or after_error, "at the base", "warning"))
+        else:
+            added = change.changed.get(ecosystem.manifest, set())
+            found += [_NewPackage(key, ecosystem.manifest,
+                                  _line_naming(new_text(ecosystem.manifest) or "", added, key), True, source)
+                      for key, source in after.direct.items() if key not in before.direct]
+            found += [_NewPackage(key, ecosystem.lock_file, None, False, source)
+                      for key, source in after.locked.items() if key not in before.locked and key not in after.direct]
     found.sort(key=lambda p: not p.direct)
     return found, issues, to_weigh
+
+
+def _read_ecosystem(ecosystem: DependencyEcosystem,
+                    read: Callable[[str], str | None]) -> tuple[Dependencies, ManifestError | None]:
+    """ecosystem.read(read), or no dependencies and why it cannot be read."""
+    try:
+        return ecosystem.read(read), None
+    except ManifestError as e:
+        return Dependencies({}, {}), e
 
 
 def _unreadable(e: ManifestError, where: str, severity: str) -> dict:
