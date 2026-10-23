@@ -4519,6 +4519,22 @@ class TestFlakyTests(unittest.TestCase):
         self.assertTrue(found["message"].startswith("`test_r` failed as its xfail mark expects under seed 2 and passed "
                                                     "under seed 1: "), found["message"])
 
+    def test_a_test_file_whose_name_is_not_utf8_is_rerun(self):
+        name = os.fsdecode(b"tests/test_\xff.py")
+        self.git("mv", "tests/test_state.py", name)
+        self.git("commit", "--quiet", "-m", "renamed")
+        self.put(name, self.BASE.replace("self.skipTest('not yet')", "self.assertIsNotNone(RUNS)"))
+        with patch.object(orchestrator, "FLAKY_SEEDS", (1, 2)):
+            found = self.found()
+        if [f["rule"] for f in found] == ["not-rerun"]:
+            # pytest collects and lists the test, but pytest-randomly 5.0.0 hashes each node id as strict UTF-8
+            # (pytest_randomly._crc32), so the first rerun stops with an internal error, which the finding quotes.
+            self.assertRegex(found[0]["message"], r"^pytest, rerunning them under seed 1, exited with status 3: "
+                                                  r"UnicodeEncodeError: .*surrogates not allowed; the changed tests "
+                                                  r"were not rerun\.$")
+        else:
+            self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(name, 15, "mixed-results")])
+
     def test_a_change_to_no_test_reruns_nothing(self):
         self.put("calc.py", "def add(a, b):\n    return b + a\n")
         self.put("tests/test_state.py", self.BASE.replace("import unittest\n", "import unittest  # edited\n"))

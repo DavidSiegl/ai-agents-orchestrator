@@ -2896,7 +2896,9 @@ def _collect_python_tests(root: str, tests: dict[tuple[str, str], int]) -> tuple
     them; then the ids are []."""
     files = sorted({path for path, _ in tests})
     # Exit status 5: pytest collected no test from the files, as for a file of helpers named test_*.
-    proc, problem = _pytest(root, "collecting the changed tests", ["--collect-only", *files], ok=(0, 5))
+    # Without pytest-randomly, which only shuffles the list, and cannot hash a node id that is not UTF-8.
+    proc, problem = _pytest(root, "collecting the changed tests", ["-p", "no:randomly", "--collect-only", *files],
+                            ok=(0, 5))
     if proc is None:
         return [], problem
     # At verbosity -1 pytest lists one node id a line, unindented, before its summary; a warnings summary repeats
@@ -2948,9 +2950,10 @@ def _pytest(root: str, doing: str, args: list[str],
             ok: tuple[int, ...] = (0, 1)) -> tuple[subprocess.CompletedProcess | None, str | None]:
     """pytest run at verbosity -1, for test cases too, in the gate's own interpreter at root, without its cache, with
     args; or None and the problem, a clause naming doing, when it could not start, took longer than
-    FLAKY_RUN_TIMEOUT or exited with a status outside ok (by default 0, all passed, and 1, some failed). Its
-    output is decoded as Host.run's verbatim output is, so the node ids in it hold paths as git's do, and only "\n"
-    ends a line."""
+    FLAKY_RUN_TIMEOUT or exited with a status outside ok (by default 0, all passed, and 1, some failed). pytest
+    writes a name that is not UTF-8 as its bytes, and its output is decoded as Host.run's verbatim output is, so the
+    node ids in it hold paths as git's do, and only "\n" ends a line. pytest-randomly 5.0.0 cannot shuffle such a
+    name: under -p randomly pytest stops with an internal error."""
     # --verbosity sets the level outright, and pytest reads the project's addopts and PYTEST_ADDOPTS before the
     # command line, so a -v or -q of theirs cannot change what the collection prints. The list of collected tests
     # follows verbosity_test_cases where the project's configuration sets it, and -o overrides that; in pytest 9.0
@@ -2960,7 +2963,7 @@ def _pytest(root: str, doing: str, args: list[str],
     try:
         # A fixed command over the node ids pytest itself collected; no shell reads it.
         raw = subprocess.run(argv, cwd=root, capture_output=True, timeout=FLAKY_RUN_TIMEOUT,  # noqa: S603
-                             env=child_env(), check=False)
+                             env={**child_env(), "PYTHONIOENCODING": "utf-8:surrogateescape"}, check=False)
     except subprocess.TimeoutExpired:
         return None, f"pytest, {doing}, did not finish within {FLAKY_RUN_TIMEOUT} seconds"
     except OSError as e:
@@ -2972,10 +2975,12 @@ def _pytest(root: str, doing: str, args: list[str],
 
 
 def _pytest_said(proc: subprocess.CompletedProcess) -> str:
-    """What a pytest that went wrong said last: the first line of its standard error, else the last of its output."""
+    """What a pytest that went wrong said last: the exception of an internal error, else the first line of its
+    standard error, else the last of its output."""
     err = [line.strip() for line in proc.stderr.split("\n") if line.strip()]
     out = [line.strip() for line in proc.stdout.split("\n") if line.strip()]
-    return _clip(err[0] if err else out[-1] if out else "nothing")
+    internal = [line.removeprefix("INTERNALERROR>").strip() for line in out if line.startswith("INTERNALERROR>")]
+    return _clip(internal[-1] if internal else err[0] if err else out[-1] if out else "nothing")
 
 
 # How a mixed-results finding says what a test did under some seeds, by its outcome as junit_outcomes gives it; a
