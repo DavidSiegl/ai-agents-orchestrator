@@ -509,8 +509,9 @@ only the spec rule can fail it.
   never reported as passed, so the next quality round asks again;
 - `unreadable` (fails): a manifest in the change that is not UTF-8 TOML, or not in the shape above. One that cannot
   be read at the base is a finding to weigh instead, since the Builder did not write it, and so is one that cannot be
-  read in the change because it could not at the base either; either way that ecosystem's new dependencies are not
-  checked;
+  read in the change because it could not at the base either. Each manifest is judged by its own two sides, so a
+  `pyproject.toml` the change breaks fails even beside a `uv.lock` broken all along. Either way that ecosystem's new
+  dependencies are not checked;
 - `added` (reports): a new direct dependency the spec names, or a workspace member, with its first release date, its
   latest version and its date, and its license, or the path, repository or URL it comes from. `young` instead when its
   first release is less than 14 days old (`YOUNG_PACKAGE_DAYS`), or it has no release files: few have used it yet.

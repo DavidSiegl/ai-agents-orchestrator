@@ -4540,15 +4540,8 @@ class Dependencies:
     PyPI."""
     direct: dict[str, PackageSource | None]  # the project's own choice, which the spec must name
     locked: dict[str, PackageSource | None]  # every package its lock file pins, the project and its workspace aside
-
-
-class ManifestError(ValueError):
-    """A manifest that cannot be read: path is the manifest's, why says what is wrong with it."""
-
-    def __init__(self, path: str, why: str):
-        super().__init__(f"`{path}`: {why}")
-        self.path = path
-        self.why = why
+    # Path -> why, for each manifest that cannot be read; what direct and locked say then comes from the others only.
+    unreadable: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -4557,8 +4550,8 @@ class DependencyEcosystem:
     anywhere else, such as test fixtures, are not the project's."""
     manifest: str  # the file that lists the project's own dependencies
     lock_file: str  # the file beside it that pins every package they pull in
-    # The project's Dependencies, given (path) -> that file's text, None where there is none. Raises ManifestError for
-    # a manifest it cannot read.
+    # The project's Dependencies, given (path) -> that file's text, None where there is none; each manifest it cannot
+    # read is in their unreadable, and the others are still read.
     read: Callable[[Callable[[str], str | None]], Dependencies]
 
 
@@ -4575,15 +4568,18 @@ def python_dependencies(read: Callable[[str], str | None]) -> Dependencies:
     [tool.uv.sources] entry, else its PEP 508 URL, else the [[tool.uv.index]] marked default, else the index uv.lock
     has it from. The locked packages are uv.lock's, the project and its workspace members left out.
     """
+    unreadable = {}
+    locked: dict[str, PackageSource | None] = {}
+    direct: dict[str, PackageSource | None] = {}
     try:
         locked = _uv_lock_packages(_toml_manifest(read, "uv.lock"))
     except (ValueError, TypeError) as e:
-        raise ManifestError("uv.lock", str(e)) from e
+        unreadable["uv.lock"] = str(e)
     try:
         direct = _pyproject_dependencies(_toml_manifest(read, "pyproject.toml"))
     except (ValueError, TypeError) as e:
-        raise ManifestError("pyproject.toml", str(e)) from e
-    return Dependencies({key: source or locked.get(key) for key, source in direct.items()}, locked)
+        unreadable["pyproject.toml"] = str(e)
+    return Dependencies({key: source or locked.get(key) for key, source in direct.items()}, locked, unreadable)
 
 
 def _toml_manifest(read: Callable[[str], str | None], path: str) -> dict:
@@ -4792,8 +4788,8 @@ def spec_names(spec: str) -> set[str]:
 
 def _new_packages(change: RunChange) -> tuple[list[_NewPackage], list[dict], list[dict]]:
     """The packages the change adds to each DEPENDENCY_ECOSYSTEMS project whose manifest or lock file it touches,
-    direct ones first; and an unreadable finding for each project whose manifests cannot be read, failing when the
-    change made them so and to weigh when they cannot be read at the base either."""
+    direct ones first; and an unreadable finding for each manifest that cannot be read, which leaves its project
+    unchecked: failing when the change made it so, and to weigh when it cannot be read at the base either."""
     touched = {f.path for f in change.files} | {f.base_path for f in change.files}
     found: list[_NewPackage] = []
     issues, to_weigh = [], []
@@ -4808,13 +4804,13 @@ def _new_packages(change: RunChange) -> tuple[list[_NewPackage], list[dict], lis
             continue
         # Both sides at the top level, where the project's manifests are: a file the change moves there was not the
         # project's at the base.
-        after, after_error = _read_ecosystem(ecosystem, new_text)
-        before, before_error = _read_ecosystem(ecosystem, lambda path: change.file_at(change.base, path))
-        if after_error and not (before_error and before_error.path == after_error.path):
-            issues.append(_unreadable(after_error, "in the change", "error"))
-        elif error := before_error or after_error:
-            to_weigh.append(_unreadable(error, "at the base", "warning"))
-        else:
+        after = ecosystem.read(new_text)
+        before = ecosystem.read(lambda path: change.file_at(change.base, path))
+        # Each manifest by its own two sides: the Builder broke only what the base could read.
+        issues += [_unreadable(path, why, "in the change", "error") for path, why in after.unreadable.items()
+                   if path not in before.unreadable]
+        to_weigh += [_unreadable(path, why, "at the base", "warning") for path, why in before.unreadable.items()]
+        if not after.unreadable and not before.unreadable:
             added = change.changed.get(ecosystem.manifest, set())
             new, moved = _compare_dependencies(ecosystem, before, after, functools.partial(
                 _line_naming, new_text(ecosystem.manifest) or "", added))
@@ -4847,18 +4843,9 @@ def _source_text(source: PackageSource | None) -> str:
     return "from PyPI" if source is None else source.describe()
 
 
-def _read_ecosystem(ecosystem: DependencyEcosystem,
-                    read: Callable[[str], str | None]) -> tuple[Dependencies, ManifestError | None]:
-    """ecosystem.read(read), or no dependencies and why it cannot be read."""
-    try:
-        return ecosystem.read(read), None
-    except ManifestError as e:
-        return Dependencies({}, {}), e
-
-
-def _unreadable(e: ManifestError, where: str, severity: str) -> dict:
-    return _finding(e.path, None, "unreadable", (f"`{e.path}` cannot be read {where}: {e.why}; the change's new "
-                                                  f"dependencies were not checked."), severity=severity)
+def _unreadable(path: str, why: str, where: str, severity: str) -> dict:
+    return _finding(path, None, "unreadable", (f"`{path}` cannot be read {where}: {why}; the change's new "
+                                                f"dependencies were not checked."), severity=severity)
 
 
 def _line_naming(text: str, added: set[int], key: str) -> int | None:

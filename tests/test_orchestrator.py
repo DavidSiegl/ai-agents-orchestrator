@@ -4053,11 +4053,25 @@ class TestNewDependencies(unittest.TestCase):
                          [("uv.lock", "warning", "unreadable")])
         self.assertTrue(to_weigh[0]["message"].startswith("`uv.lock` cannot be read at the base: it is not TOML: "))
 
+    def test_each_manifest_is_judged_by_its_own_base(self):
+        broken = "[[package\n"
+        files = {("base", "pyproject.toml"): pyproject_with(), ("new", "pyproject.toml"): "[project\n",
+                 ("base", "uv.lock"): broken, ("new", "uv.lock"): broken}
+        pypi = FakePyPI()
+        issues, to_weigh = self.find(run_change(pyproject_diff("rich"), files), pypi)
+        self.assertEqual([(f["path"], f["severity"], f["rule"]) for f in issues],
+                         [("pyproject.toml", "error", "unreadable")])
+        self.assertIn("cannot be read in the change", issues[0]["message"])
+        self.assertEqual([(f["path"], f["severity"], f["rule"]) for f in to_weigh],
+                         [("uv.lock", "warning", "unreadable")])
+        self.assertEqual(pypi.asked, [])
+
     def test_a_manifest_the_change_breaks_fails_whatever_the_base(self):
         files = {("base", "pyproject.toml"): "[project\n", ("new", "pyproject.toml"): "[project\n",
                  ("base", "uv.lock"): None, ("new", "uv.lock"): "[[package\n"}
         issues, to_weigh = self.find(run_change(pyproject_diff("rich"), files), FakePyPI())
-        self.assertEqual(([(f["path"], f["rule"]) for f in issues], to_weigh), ([("uv.lock", "unreadable")], []))
+        self.assertEqual(([(f["path"], f["rule"]) for f in issues], [(f["path"], f["rule"]) for f in to_weigh]),
+                         ([("uv.lock", "unreadable")], [("pyproject.toml", "unreadable")]))
         self.assertIn("cannot be read in the change", issues[0]["message"])
 
     def test_a_manifest_unreadable_at_the_base_is_weighed_not_failed(self):
