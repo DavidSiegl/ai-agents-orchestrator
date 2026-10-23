@@ -3778,10 +3778,10 @@ class TestGate(unittest.TestCase):
         self.says("ruff", "f.py:6:8: F401 [*] `os` imported but unused\n")
         status, out, _ = self.gate()
         self.assertEqual(status, 1)
-        self.assertIn("- `f.py:5` holds a carriage return that does not end the line", out)
+        self.assertIn("- `f.py:5` holds `\\r`, which a linter that reads the file ends a line at", out)
         self.assertNotIn("`f.py:4`", out)
         with self.assertRaisesRegex(OrchestratorError, "cannot read gone.py, which the change edits"):
-            orchestrator.lone_carriage_returns(self.repo, {"gone.py": {1}})
+            orchestrator.stray_line_ends(self.repo, {"gone.py": {1}}, [(orchestrator.GATE_TOOLS[0], ["gone.py"])])
 
     def test_a_carriage_return_in_a_file_no_linter_reads_passes(self):
         self.put("notes.txt", "a\rb\n")
@@ -3808,8 +3808,25 @@ class TestGate(unittest.TestCase):
         self.says("pymarkdown", "d.md:6:1: MD025: Multiple top-level headings in the same document\n")
         status, out, _ = self.gate()
         self.assertEqual(status, 1)
-        self.assertIn("- `f.py:1` holds a carriage return that does not end the line", out)
-        self.assertIn("- `d.md:3` holds a carriage return that does not end the line", out)
+        self.assertIn("- `f.py:1` holds `\\r`, which a linter that reads the file ends a line at", out)
+        self.assertIn("- `d.md:3` holds `\\r`, which a linter that reads the file ends a line at", out)
+
+    def test_a_line_separator_above_an_added_line_fails_the_gate_only_where_a_linter_ends_a_line_at_it(self):
+        # actionlint's YAML parser ends a line at U+2028, so its line 9 is git's line 8; ruff numbers like git.
+        workflow = ("on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      # c\u2028# d\n"
+                    "      - run: echo hi\n")
+        self.put(".github/workflows/w.yml", workflow)
+        self.put("f.py", "# c\u2028# d\n")
+        self.git("add", ".github")
+        self.git("commit", "--quiet", "-am", "line separators")
+        self.put(".github/workflows/w.yml", workflow + "      - run: echo ${{ github.nope }}\n")
+        self.put("f.py", "# c\u2028# d\nx = 1\n")
+        self.says("actionlint", '.github/workflows/w.yml:9:23: property "nope" is not defined [expression]\n')
+        status, out, _ = self.gate()
+        self.assertEqual(status, 1)
+        self.assertIn("- `.github/workflows/w.yml:6` holds `\\u2028`, which a linter that reads the file ends a "
+                      "line at", out)
+        self.assertNotIn("`f.py:", out)
 
     def test_a_suppression_after_a_form_feed_is_listed_at_gits_line(self):
         self.put("f.py", "a = 1\x0c\n")

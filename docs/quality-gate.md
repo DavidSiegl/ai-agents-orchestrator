@@ -64,11 +64,13 @@ The gate is `GATE: ERROR` when any of these holds, and `GATE: OK` otherwise:
 - a finding on a line the change adds, or a finding of a failing check;
 - a linter that is missing, fails, or exits "found something" with nothing the gate can read. A gate that cannot
   run a check never reports it as passed;
-- a file a linter reads, by the pathspecs in the table above, with a carriage return not followed by a newline on
-  any line up to the last one the change adds to it, whichever commit put it there. ruff, mypy and pymarkdown end a
-  line there, and YAML parsers do too, but git does not. So they number every later line of the file past git's,
-  and the gate cannot tell which of their findings are on the change. The condition names the file and the first
-  such line. A file no linter reads, such as a text file with old Mac line ends, is not held to this;
+- a file a linter reads, by the pathspecs in the table above, with a character that linter ends a line at and git
+  does not, on any line up to the last one the change adds to it, whichever commit put it there. For every linter
+  that is a carriage return not followed by a newline; for actionlint, whose YAML parser follows YAML 1.1, also
+  NEL (U+0085), U+2028 and U+2029. Each linter declares its own set in `GateTool.line_ends`. ruff, mypy, pymarkdown
+  and actionlint number every later line of the file past git's, and shellcheck stops reading there. Either way the
+  gate cannot judge their findings below it. The condition names the file, the first such line and the character.
+  A file no linter reads, such as a text file with old Mac line ends, is not held to this;
 - with `--tests`, a failing test in that JUnit report;
 - with `--coverage`, coverage of new code below 80%, once the change has 20 or more new lines to cover. Coverage
   of new code is (covered branch outcomes + covered lines) / (branch outcomes + coverable lines), over the added
@@ -81,9 +83,9 @@ A change to a file whose contents are not UTF-8, such as a Latin-1 line or a bin
 is judged like any other. The gate reads the diff, git's file lists and the linters' output as they were printed,
 keeping the bytes it cannot decode, and only a newline ends a line of them. So a carriage return or form feed
 inside an added line cannot pass for a diff header that would move the lines after it to another file, and a file
-name that holds one keeps its linter findings. A lone carriage return in the contents of a file a linter reads is
-still the failed condition above, since it shifts that linter's numbering. A test file that `test-integrity` cannot
-decode is an `unreadable` finding of that check, since its tests cannot be compared.
+name that holds one keeps its linter findings. In the contents of a file a linter reads, a character that linter
+ends a line at is still the failed condition above. A test file that `test-integrity` cannot decode is an
+`unreadable` finding of that check, since its tests cannot be compared.
 
 A file whose name is not UTF-8 is read the same way, and the quality file writes each byte it cannot decode as
 `\xNN`. Not every tool can read such a name:

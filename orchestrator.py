@@ -2073,6 +2073,10 @@ class GateTool:
     # The command line, given the pyproject.toml whose rules decide and the tracked files the pathspecs match.
     command: Callable[[str, list[str]], list[str]]
     detail: re.Pattern
+    # The characters besides "\n" at which the tool ends a line of a file it reads and git does not; a "\r" counts
+    # only where no "\n" follows it. Below one, the tool's line numbers are not git's, or it stops reading, so the
+    # gate refuses a change below one (stray_line_ends).
+    line_ends: tuple[str, ...]
     # Exit status 0 means it found nothing, this one that it found something, any other that it failed.
     findings_status: int = 1
 
@@ -2081,23 +2085,25 @@ GATE_TOOLS = (
     GateTool("ruff", ("*.py",),
              lambda rules, files: ["ruff", "check", "--config", rules, "--output-format", "concise", "--no-cache",
                                    *files],
-             re.compile(r"(?P<rule>[\w-]+):? (?:\[\*\] )?(?P<message>.+)")),
+             re.compile(r"(?P<rule>[\w-]+):? (?:\[\*\] )?(?P<message>.+)"), ("\r",)),
     # Which files mypy checks is one of its rules, [tool.mypy] files. A note elaborates an error; it is not one.
     GateTool("mypy", ("*.py",),
              lambda rules, files: ["mypy", "--config-file", rules, "--show-column-numbers", "--no-error-summary",
                                    "--cache-dir", os.devnull],
-             re.compile(r"(?P<severity>error): (?P<message>.+?)(?:  \[(?P<rule>[\w-]+)\])?")),
+             re.compile(r"(?P<severity>error): (?P<message>.+?)(?:  \[(?P<rule>[\w-]+)\])?"), ("\r",)),
     GateTool("pymarkdown", ("*.md",),
              lambda rules, files: ["pymarkdown", "--config", rules, "--strict-config", "scan", *files],
-             re.compile(r"(?P<rule>MD\d+): (?P<message>.+)")),
+             re.compile(r"(?P<rule>MD\d+): (?P<message>.+)"), ("\r",)),
     # shellcheck and actionlint have no table in pyproject.toml, so they run on their defaults: --norc and an empty
     # config file keep a .shellcheckrc or .github/actionlint.yaml, which a change could add, from loosening them.
     GateTool("shellcheck", ("*.sh",),
              lambda rules, files: ["shellcheck", "--norc", "-f", "gcc", *files],
-             re.compile(r"(?P<severity>error|warning|note): (?P<message>.+) \[(?P<rule>SC\d+)\]")),
+             re.compile(r"(?P<severity>error|warning|note): (?P<message>.+) \[(?P<rule>SC\d+)\]"), ("\r",)),
     GateTool("actionlint", (".github/workflows/*.yml", ".github/workflows/*.yaml"),
              lambda rules, files: ["actionlint", "-config-file", os.devnull, *files],
-             re.compile(r"(?P<message>.+) \[(?P<rule>[\w-]+)\]")),
+             re.compile(r"(?P<message>.+) \[(?P<rule>[\w-]+)\]"),
+             # go-yaml ends a line where YAML 1.1 does (https://yaml.org/spec/1.1/), at NEL, U+2028 and U+2029 too.
+             ("\r", "\x85", "\u2028", "\u2029")),
 )
 
 
@@ -2159,12 +2165,13 @@ def judge_change(cwd: str, base: str, *, rules: str | None = None, coverage: str
     lineless ones on files it touched. Then runs each of GATE_CHECKS and lists what it finds, as an issue or
     as a finding to weigh as its fails says. The gate is ERROR when there is such a linter finding or a
     failing check's finding, when a linter is missing, fails or prints nothing readable, when a file a linter
-    reads and the change adds lines to holds a carriage return as lone_carriage_returns finds, when tests, a
-    JUnit report of the tree's tests such as pytest's --junitxml, has a failing test, or when coverage, a
-    Cobertura report of the tree such as pytest-cov's coverage.xml, puts new code below GATE_MIN_COVERAGE
-    percent on GATE_MIN_NEW_LINES or more new lines to cover; else OK. Suppressions the change added are listed, not counted against it.
-    Paths are absolute or relative to the process's working directory. A file name that is not UTF-8 appears in
-    the quality file with each byte it cannot decode as `\\xNN`.
+    reads and the change adds lines to holds a line end that git does not count, as stray_line_ends finds,
+    when tests, a JUnit report of the tree's tests such as pytest's --junitxml, has a failing test, or when
+    coverage, a Cobertura report of the tree such as pytest-cov's coverage.xml, puts new code below
+    GATE_MIN_COVERAGE percent on GATE_MIN_NEW_LINES or more new lines to cover; else OK. Suppressions the
+    change added are listed, not counted against it. Paths are absolute or relative to the process's working
+    directory. A file name that is not UTF-8 appears in the quality file with each byte it cannot decode as
+    `\\xNN`.
 
     Raises OrchestratorError when it cannot judge: cwd is not in a git work tree, base names no commit, there
     is no rules file, the test or coverage report cannot be read, or git prints what it cannot decode outside
@@ -2187,11 +2194,11 @@ def judge_change(cwd: str, base: str, *, rules: str | None = None, coverage: str
     changed = changed_lines(diff)
     tracked = {f for f in host.git(root, "ls-files", "-z", verbatim=True).split("\0") if f}
     conditions, findings = [], []
-    linted: set[str] = set()  # the tracked files some linter reads
+    reads: list[tuple[GateTool, list[str]]] = []  # each linter, with the tracked files it reads
     for tool in GATE_TOOLS:
         files = [f for f in host.git(root, "ls-files", "-z", "--", *tool.pathspecs, verbatim=True).split("\0")
                  if f]
-        linted.update(files)
+        reads.append((tool, files))
         if files:
             found, problem = _run_gate_tool(tool, root, rules_path, files, tracked)
             findings += found
@@ -2201,12 +2208,11 @@ def judge_change(cwd: str, base: str, *, rules: str | None = None, coverage: str
     elsewhere = len(findings) - len(issues)
     if issues:
         conditions.insert(0, f"{len(issues)} findings on lines the change added; each is listed below.")
-    # Only a linter's numbering is shifted, so a file none of them reads is not held to this.
-    conditions += [f"`{path}:{n}` holds a carriage return that does not end the line. The linters that read the "
-                   f"file end a line there and git does not, so they number every later line of it past git's, and "
-                   f"the gate cannot tell which of their findings are on the change; remove it, end the line there, "
-                   f"or write it as `\\r` in a string."
-                   for path, n in lone_carriage_returns(root, {p: a for p, a in changed.items() if p in linted})]
+    conditions += [f"`{path}:{n}` holds `{ascii(end)[1:-1]}`, which a linter that reads the file ends a line at and "
+                   f"git does not. Such a linter numbers every later line past git's, or stops reading there; "
+                   f"either way the gate cannot judge its findings below it. Remove it, end the line there, or "
+                   f"write it as an escape in a string."
+                   for path, n, end in stray_line_ends(root, changed, reads)]
     to_weigh: list[dict] = []
     change = GateChange(root, base_sha, diff, changed)
     for check in GATE_CHECKS:
@@ -2378,20 +2384,24 @@ def added_suppressions(root: str, changed: dict[str, set[int]]) -> list[tuple[st
     return out
 
 
-def lone_carriage_returns(root: str, changed: dict[str, set[int]]) -> list[tuple[str, int]]:
-    """(path, line) for each file the change adds lines to whose working tree at root has a carriage return not
-    followed by a newline at or before the last added line: the first line that holds one, whichever commit
-    added it.
-
-    Python's tokenizer, pymarkdown and YAML parsers end a line there and git does not, so they number every line
-    after it past git's, and their findings on the file cannot be placed on the change's lines. Raises
+def stray_line_ends(root: str, changed: dict[str, set[int]],
+                    reads: list[tuple[GateTool, list[str]]]) -> list[tuple[str, int, str]]:
+    """(path, line, the character) for each file in changed that a linter reads and whose working tree at root
+    holds one of that linter's GateTool.line_ends at or before the last line the change added: the first line that
+    holds one, whichever commit added it. reads pairs each linter with the tracked files it reads. Raises
     OrchestratorError when such a file cannot be read.
     """
+    line_ends: dict[str, set[str]] = {}
+    for tool, files in reads:
+        for f in files:
+            line_ends.setdefault(f, set()).update(tool.line_ends)
     out = []
-    for path, added, lines in _files_with_added_lines(root, changed):
-        lone = (n for n, line in enumerate(lines[:max(added)], 1) if b"\r" in line.removesuffix(b"\r"))
-        if (n := next(lone, None)) is not None:
-            out.append((path, n))
+    for path, added, lines in _files_with_added_lines(root, {p: a for p, a in changed.items() if p in line_ends}):
+        ends = [(c, c.encode()) for c in sorted(line_ends[path])]
+        found = ((n, c) for n, line in enumerate(lines[:max(added)], 1) for c, raw in ends
+                 if raw in line.removesuffix(b"\r"))
+        if (first := next(found, None)) is not None:
+            out.append((path, *first))
     return out
 
 
