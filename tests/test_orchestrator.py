@@ -5633,6 +5633,24 @@ class TestCognitiveComplexity(unittest.TestCase):
         tree = ast.parse(textwrap.dedent(source)).body[0]
         self.assertEqual([orchestrator.cognitive_complexity(m, "Tree") for m in tree.body], [1, 1, 0, 1])
 
+    def test_a_method_of_a_class_nested_in_the_function_recurses_as_a_method_does(self):
+        self.assertEqual(score("""
+            def outer():
+                class K:
+                    def m(self):
+                        return m()       # a module-level m, not this method
+                return K
+        """), 0)
+        self.assertEqual(score("""
+            def outer():
+                class K:
+                    def m(self):
+                        if self:
+                            return self.m()  # +1 recursion
+                        return K.m(self)
+                return K
+        """), 3)  # the if, nested in m: +2
+
     def test_code_deeper_than_python_s_recursion_limit_is_scored(self):
         self.assertEqual(score(LONG_SUM), 0)
         self.assertEqual(score(LONG_ELIF), 1001)  # the if, and one for each elif

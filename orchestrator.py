@@ -3933,20 +3933,32 @@ def cognitive_complexity(function: ast.FunctionDef | ast.AsyncFunctionDef, cls: 
     own decorators and defaults are not scored: they run where it is defined, not when it is called."""
     # A walk with a stack of its own rather than recursion: a syntax tree can be deeper than the interpreter lets a
     # recursive walk go, as a sum of a few hundred terms or an if with a thousand elifs are. Each node's points do not
-    # depend on what it holds, so the order nodes are taken in does not matter.
+    # depend on what it holds, so the order nodes are taken in does not matter. Each node goes with its nesting level
+    # and the class whose body holds it directly, None outside one, which decides how a nested function recurses.
     points = int(_calls_itself(function, cls))
-    todo: _Held = [(s, 0) for s in function.body]
+    todo: list[tuple[ast.AST | None, int, str | None]] = [(s, 0, None) for s in function.body]
     while todo:
-        node, nesting = todo.pop()
+        node, nesting, owner = todo.pop()
         if node is None:
+            continue
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            # A function nested in the one judged, or a method of a class nested in it: its body one level deeper.
+            points += int(_calls_itself(node, owner))
+            outside = [*node.decorator_list, *node.args.defaults, *node.args.kw_defaults]
+            todo += [*((o, nesting, owner) for o in outside), *((s, nesting + 1, None) for s in node.body)]
+            continue
+        if isinstance(node, ast.ClassDef):
+            # A class nested in the one judged raises no level itself; its methods are nested functions.
+            todo += [*((c, nesting, owner) for c in [*node.decorator_list, *node.bases, *node.keywords]),
+                     *((s, nesting, node.name) for s in node.body)]
             continue
         rule = _COGNITIVE_RULES.get(type(node))
         if rule is None:
-            todo += [(child, nesting) for child in ast.iter_child_nodes(node)]
+            todo += [(child, nesting, owner) for child in ast.iter_child_nodes(node)]
             continue
         own, held = rule(node, nesting)
         points += own
-        todo += held
+        todo += [(child, level, owner) for child, level in held]
     return points
 
 
@@ -4025,23 +4037,16 @@ def _boolean_sequence(node: ast.BoolOp) -> tuple[list[type[ast.boolop]], list[as
     return ops, operands
 
 
-def _cognitive_function(node: ast.FunctionDef | ast.AsyncFunctionDef, nesting: int) -> tuple[int, _Held]:
-    """A function nested in the one judged, or a method of a class nested in it."""
-    outside = [*node.decorator_list, *node.args.defaults, *node.args.kw_defaults]
-    return int(_calls_itself(node, None)), [*((o, nesting) for o in outside), *((s, nesting + 1) for s in node.body)]
-
-
 def _cognitive_lambda(node: ast.Lambda, nesting: int) -> tuple[int, _Held]:
     return 0, [*((d, nesting) for d in [*node.args.defaults, *node.args.kw_defaults]), (node.body, nesting + 1)]
 
 
-# The node types that cognitive_complexity scores by a rule of their own; any other scores nothing itself, and what it
-# holds is scored at its level.
+# The node types that cognitive_complexity scores by a rule of their own, beside the functions and classes nested in the
+# judged one, which its walk takes itself; any other scores nothing itself, and what it holds is scored at its level.
 _COGNITIVE_RULES: dict[type[ast.AST], _CognitiveRule] = {
     ast.If: _cognitive_if, ast.For: _cognitive_loop, ast.AsyncFor: _cognitive_loop, ast.While: _cognitive_loop,
     ast.Try: _cognitive_try, ast.TryStar: _cognitive_try, ast.Match: _cognitive_match, ast.IfExp: _cognitive_ternary,
-    ast.BoolOp: _cognitive_boolean, ast.FunctionDef: _cognitive_function, ast.AsyncFunctionDef: _cognitive_function,
-    ast.Lambda: _cognitive_lambda,
+    ast.BoolOp: _cognitive_boolean, ast.Lambda: _cognitive_lambda,
 }
 
 
