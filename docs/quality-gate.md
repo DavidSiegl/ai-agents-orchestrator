@@ -117,11 +117,12 @@ altered, an argument dropped - and runs each of these mutants against the tests 
   `[tool.mutmut]`'s `source_paths`, or left out by `only_mutate` or `do_not_mutate`; it is decorated, other than with
   `@staticmethod` or `@classmethod` alone; or it is `__new__`, `__getattribute__` or `__setattr__`. And a function
   mutmut was given but made no mutant of, with the cause where the gate can tell it, a `# pragma: no mutate block` on
-  the line its header ends on, the one form of mutmut's pragmas the gate tells, or `do_not_mutate_patterns` matching
-  each statement in it, else every cause there can be: it has nothing mutmut mutates, `do_not_mutate_patterns` or
-  `mutate_only_covered_lines` leave its lines out, a `# pragma: no mutate` keeps them out, or the gate could not read
-  mutmut's names for its mutants. A block pragma on a line of its own above the `def` or atop its body, one on its
-  class, and a `start`/`end` pair around it keep a function out too, and get that list;
+  the line its header ends on, the one form of mutmut's pragmas the gate recognises and names as the cause, or
+  `do_not_mutate_patterns` matching each statement in it, else every cause there can be: it has nothing mutmut
+  mutates, `do_not_mutate_patterns` or `mutate_only_covered_lines` leave its lines out, a `# pragma: no mutate` keeps
+  them out, or the gate could not read mutmut's names for its mutants. A block pragma on a line of its own above the
+  `def` or atop its body, one on its class, and a `start`/`end` pair around it keep a function out too, and get that
+  list;
 - `not-run`: mutmut could not start, failed, as it does when a test fails, or left results the gate could not read; the
   rules name no `source_paths`, or give a key the gate reads or writes a value of another shape; the directory to copy
   the tree into could not be made; or a changed file could not be read or parsed;
@@ -207,7 +208,8 @@ first, at most 50 in all, then a count:
   `# pragma: no cover` is listed because it takes lines out of the coverage condition, and a `# pragma: no mutate`
   because it takes them out of the surviving-mutants check.
 - **Build configuration**: an edit to `Jenkinsfile`, `pyproject.toml` or `uv.lock` is noted, since each can
-  change how the change was judged.
+  change how the change was judged, and so is each file the change adds or edits under `mutants/`, where mutmut keeps
+  its state, though the gate ignores them.
 
 ### Whose rules judge a change
 
@@ -219,10 +221,12 @@ snapshot still controls is visible in its quality file: tool versions through `u
 configuration), and inline suppressions (listed). shellcheck and actionlint versions live in the agent image,
 outside this repository.
 
-The surviving-mutants check takes `[tool.mutmut]` from the same file, so a change cannot tell mutmut to leave its
-code alone. In the copy mutmut runs on, that table replaces the tree's own, and only that table: the rest of the
-tree's `pyproject.toml`, such as `[tool.pytest.ini_options]`, is how its tests run, which a change may need to alter.
-Without `--config`, the tree's table judges it, as the linters' do.
+The surviving-mutants check takes `[tool.mutmut]` from the same file, so a change cannot tell mutmut to leave its code
+alone. In the copy mutmut runs on, that table replaces the tree's own, and only that table: the rest of the tree's
+`pyproject.toml`, such as `[tool.pytest.ini_options]`, is how its tests run, which a change may need to alter. Without
+`--config`, the tree's table judges it, as the linters' do. What the tree holds under `mutants/`, mutmut's own state
+and cache of results, is left out of that copy, so mutmut starts afresh and a change cannot mark its mutants killed; a
+change that adds or edits files there is listed under build configuration.
 
 The rule sets were tuned until `main` gave a short list of real findings: ruff's defaults plus bugbear,
 simplifications, pyupgrade, bandit, complexity (`max-complexity = 15`) and pylint's errors and warnings, with the

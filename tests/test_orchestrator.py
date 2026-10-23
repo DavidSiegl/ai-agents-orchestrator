@@ -5169,7 +5169,8 @@ class TestSurvivingMutants(unittest.TestCase):
         self.assertIn("a `# pragma: no mutate block` where its header ends keeps it out", found[0]["message"])
 
     def test_a_function_in_a_file_mutmut_listed_mutants_of_keeps_its_cause_after_a_budget_stop(self):
-        # mutmut writes a file's mutants once it has made them all, so calc.py was reached whole.
+        # The fake saves mutants/calc.py.meta, as mutmut does once it has made calc.py's mutants, which is how the
+        # gate knows calc.py was reached.
         self.put("calc.py", self.BASE.replace("b + a", "a + b")
                  .replace("def unchecked(a, b):", "def unchecked(a, b):  # pragma: no mutate block"))
         self.fake_mutmut("mkdir -p mutants; touch mutants/calc.py.meta; exec sleep 30",
@@ -5194,6 +5195,26 @@ class TestSurvivingMutants(unittest.TestCase):
                          [(None, None, "budget-reached"), ("more.py", 1, "not-mutated")])
         self.assertNotIn("before the budget ran out", found[0]["message"])
         self.assertIn("a `# pragma: no mutate block` where its header ends keeps it out", found[1]["message"])
+
+    def test_mutmut_s_state_in_the_change_is_left_out_and_listed(self):
+        self.change_the_functions("unchecked")
+        # The .meta mutmut writes for this change, kept from a first run, with every mutant marked killed.
+        kept, run = os.path.join(self.bin, "calc.py.meta"), orchestrator._mutmut_findings
+
+        def keep(tree_copy, *args):
+            shutil.copy(os.path.join(tree_copy, "mutants", "calc.py.meta"), kept)
+            return run(tree_copy, *args)
+        with patch.object(orchestrator, "_mutmut_findings", keep):
+            self.assertEqual([f["rule"] for f in self.found()], ["survived"])
+        with open(kept) as f:
+            meta = json.load(f)
+        meta["exit_code_by_key"] = dict.fromkeys(meta["exit_code_by_key"], 1)
+        self.put("mutants/calc.py.meta", json.dumps(meta))
+        self.git("add", "mutants/calc.py.meta")
+        found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 5, "survived")])
+        diff = self.host.change_diff(self.repo, self.git("rev-parse", "HEAD").strip())
+        self.assertEqual(orchestrator.edited_config(diff, changed_lines(diff)), ["mutants/calc.py.meta"])
 
     def test_unreached_functions_are_named_with_their_files(self):
         for name in ("a.py", "b.py"):

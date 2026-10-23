@@ -2092,13 +2092,20 @@ def _config_section(edited, rules_from: str | None) -> list[str]:
                    "the edited rules.")
     if "uv.lock" in edited:
         out.append("- The change edits `uv.lock`, which pins the versions of the linters the gate ran.")
+    state = [f"`{f}`" for f in edited if f.startswith(f"{_MUTMUT_STATE}/")]
+    if state:
+        out.append(f"- The change adds or edits {_series(state, limit=5)} under `{_MUTMUT_STATE}/`, where mutmut keeps "
+                   f"its state. The surviving-mutants check runs mutmut without them, so they did not change what it "
+                   f"found.")
     return out
 
 
 def edited_config(diff: str, changed: dict[str, set[int]]) -> list[str]:
-    """The BUILD_CONFIG_FILES the diff changes, deletes or renames away."""
-    return [f for f in BUILD_CONFIG_FILES
-            if f in changed or re.search(rf"^(--- a/|rename from ){re.escape(f)}\t?$", diff, re.M)]
+    """The BUILD_CONFIG_FILES the diff changes, deletes or renames away, then the files it adds or edits under
+    _MUTMUT_STATE, by path."""
+    return [*(f for f in BUILD_CONFIG_FILES
+              if f in changed or re.search(rf"^(--- a/|rename from ){re.escape(f)}\t?$", diff, re.MULTILINE)),
+            *sorted(f for f in changed if f.startswith(f"{_MUTMUT_STATE}/"))]
 
 
 # ---------------------------------------------------------------------------
@@ -3166,6 +3173,10 @@ def _series(items: list[str], limit: int | None = None) -> str:
 # where it was, and mutmut writes its state, mutants/, into the copy, so the working tree is never written to.
 _MUTMUT_SKIP = "  # pragma: no mutate block"
 
+# The directory in the tree mutmut runs in where it keeps its state: its copy of the code with the mutants, and each
+# module's results in <path>.meta beside it.
+_MUTMUT_STATE = "mutants"
+
 # How `mutmut results` words a mutant it did not try against a test: one the budget stopped it before, and one of a
 # function no test calls.
 _MUTMUT_UNTRIED = frozenset({"not checked", "check was interrupted by user", "no tests"})
@@ -3240,6 +3251,13 @@ def _mutmut_on_copy(root: str, tmp: str, functions: list[_ChangedFunction], tabl
     added = table.get("pytest_add_cli_args", [])
     try:
         _copy_tracked(root, tree_copy)
+        # mutmut takes what it finds there for its own cache, results included, so it starts without what the tree
+        # tracks there.
+        state = os.path.join(tree_copy, _MUTMUT_STATE)
+        if os.path.isdir(state) and not os.path.islink(state):
+            shutil.rmtree(state)
+        elif os.path.lexists(state):
+            os.remove(state)
         _mark_for_mutmut(tree_copy, {(f.path, f.name) for f in functions})
         # mutmut runs pytest in the copy's mutants/, with --rootdir=. and these after its own arguments. Without -c,
         # pytest looks for its configuration in each directory above, up to one that another account may write to
@@ -3247,7 +3265,7 @@ def _mutmut_on_copy(root: str, tmp: str, functions: list[_ChangedFunction], tabl
         # project's own configuration is read from mutmut's copy of it in mutants/, which also_copy makes, since
         # pytest takes paths in it, such as pythonpath, from where it is: there they name the mutated code.
         config = _pytest_config(tree_copy, tmp)
-        mutants = os.path.join(tree_copy, "mutants")
+        mutants = os.path.join(tree_copy, _MUTMUT_STATE)
         also_copy = table.get("also_copy", [])
         if os.path.dirname(config) == tree_copy:
             also_copy = [*also_copy, os.path.basename(config)]
@@ -3286,7 +3304,7 @@ def _mutmut_findings(tree_copy: str, functions: list[_ChangedFunction], run: sub
     # mutants/<path>.meta once it has made them all, so stopped by the budget it had not reached a module without one.
     unlisted = [f for f in functions if f not in mutants]
     unreached = [f for f in unlisted
-                 if stopped and not os.path.exists(os.path.join(tree_copy, "mutants", f"{f.path}.meta"))]
+                 if stopped and not os.path.exists(os.path.join(tree_copy, _MUTMUT_STATE, f"{f.path}.meta"))]
     out = [_finding(f.path, f.line, "not-mutated",
                     f"`{f.name}` was not mutation-tested: mutmut made no mutant of it; {_why_no_mutant(f, table)}.")
            for f in unlisted if f not in unreached]
@@ -3319,7 +3337,7 @@ def _why_no_mutant(f: _ChangedFunction, table: dict) -> str:
     if not isinstance(unit, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return _EVERY_CAUSE
     ends, comments = _logical_line_ends(text)
-    # The one form of mutmut's pragmas that keeps a function out whole that the gate tells: `block` in the comment of
+    # The one form of mutmut's pragmas that the gate recognises and names as the cause: `block` in the comment of
     # the line its header ends on, with the body on the lines below (pragma_handling.py, _visit_compound_header). A
     # block pragma on a line of its own above the def or atop its body, one on its class, or a start/end pair around
     # it keep it out too, and get _EVERY_CAUSE, which names a pragma among the causes.
