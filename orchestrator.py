@@ -2601,6 +2601,25 @@ def _python_test_file(path: str) -> bool:
     return name.endswith(".py") and ("tests" in dirs or name.startswith("test_") or name.endswith("_test.py"))
 
 
+def _body_fingerprint(definition: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> str:
+    """What a function's or class's body does, without its name, where it is, its comments or its layout: the same
+    text for two bodies whose syntax trees are equal, so that a test or a function moved or renamed matches its old
+    self."""
+    # Not ast.dump, which recurses as deep as the tree goes and overflows the stack on valid code, such as a sum of a
+    # few thousand terms. ast.walk goes breadth first with a queue; each node's type and fields, with the number of
+    # nodes in each list, fix the tree's shape.
+    parts = []
+    for node in ast.walk(ast.Module(body=definition.body, type_ignores=[])):
+        parts.append(type(node).__name__)
+        for field_name, value in ast.iter_fields(node):
+            if isinstance(value, list):
+                parts.append(f"{field_name}[{len(value)}]"
+                             + "".join(repr(v) for v in value if not isinstance(v, ast.AST)))
+            elif not isinstance(value, ast.AST):
+                parts.append(f"{field_name}={value!r}")
+    return "\0".join(parts)
+
+
 @dataclass(frozen=True)
 class _PythonTest:
     """A test function or method, or a class holding tests, in one side of a ChangedTestFile."""
@@ -2613,7 +2632,7 @@ class _PythonTest:
 
     def body(self) -> str:
         """What it does, without its name or where it is, so that a test renamed or moved matches its old self."""
-        return ast.dump(ast.Module(body=self.node.body, type_ignores=[]))
+        return _body_fingerprint(self.node)
 
 
 # The last part of a name that skips a test or expects it to fail, in unittest and pytest.
@@ -3822,23 +3841,6 @@ def _scored_functions(tree: ast.Module) -> list[_ScoredFunction]:
                                    cognitive_complexity(node, cls), _body_fingerprint(node)))
         seen[name] += 1
     return out
-
-
-def _body_fingerprint(function: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
-    """What function's body does, without its name, where it is, its comments or its layout: the same text for two
-    bodies whose syntax trees are equal, as test-integrity's _PythonTest.body compares tests."""
-    # Not ast.dump, which recurses as deep as the tree goes (see cognitive_complexity). ast.walk goes breadth first
-    # with a queue; each node's type and fields, with the number of nodes in each list, fix the tree's shape.
-    parts = []
-    for node in ast.walk(ast.Module(body=function.body, type_ignores=[])):
-        parts.append(type(node).__name__)
-        for field_name, value in ast.iter_fields(node):
-            if isinstance(value, list):
-                parts.append(f"{field_name}[{len(value)}]"
-                             + "".join(repr(v) for v in value if not isinstance(v, ast.AST)))
-            elif not isinstance(value, ast.AST):
-                parts.append(f"{field_name}={value!r}")
-    return "\0".join(parts)
 
 
 def too_complex_functions(change: GateChange) -> list[dict]:

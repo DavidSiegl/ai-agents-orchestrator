@@ -4237,6 +4237,15 @@ class TestWeakenedTests(unittest.TestCase):
         self.edit("tests/test_calc.py", "def test_large(self):", "def test_big(self):")
         self.assertEqual(self.found()[0], [])
 
+    def test_a_renamed_test_deeper_than_python_s_recursion_limit_is_matched(self):
+        # A sum of 3000 terms parses, but a recursive walk of it, as ast.dump makes, overflows the stack.
+        deep = "def test_deep():\n    assert " + " + ".join(["1"] * 3000) + " == 3000\n"
+        self.put("tests/test_deep.py", deep)
+        self.git("add", "tests/test_deep.py")
+        self.git("commit", "--quiet", "-m", "deep")
+        self.edit("tests/test_deep.py", "def test_deep():", "def test_deeper():")
+        self.assertEqual(self.found()[0], [])
+
     def test_tests_moved_to_a_renamed_file_are_not_removed(self):
         self.git("mv", "tests/test_other.py", "tests/test_moved.py")
         self.edit("tests/test_moved.py", "def test_b():", "def test_bee():")
