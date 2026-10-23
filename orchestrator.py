@@ -2916,7 +2916,7 @@ def _rerun_findings(root: str, tmp: str, tests: dict[tuple[str, str], int]) -> l
                if (under := [s for s in seeds if by_seed.get(s) == o])]
         unjudged = [s for s in seeds if s not in by_seed]
         if len(did) > 1:
-            message = (f"`{name}` {', '.join(did[:-1])} and {did[-1]}"
+            message = (f"`{name}` {_series(did)}"
                        + (f", and was skipped or not run under {_seeds(unjudged)}" if unjudged else "")
                        + ": it depends on the order the tests run in, or on state or randomness that one run does "
                          "not share with another.")
@@ -3143,9 +3143,15 @@ _OUTCOME_VERBS = {"failed": "failed", "xfailed": "failed as its xfail mark expec
 
 def _seeds(seeds: list[int]) -> str:
     """'seed 3', 'seeds 2 and 4' or 'seeds 1, 3 and 5'."""
-    if len(seeds) == 1:
-        return f"seed {seeds[0]}"
-    return f"seeds {', '.join(map(str, seeds[:-1]))} and {seeds[-1]}"
+    return f"seed{'s' if len(seeds) > 1 else ''} {_series([str(s) for s in seeds])}"
+
+
+def _series(items: list[str], limit: int | None = None) -> str:
+    """items as a list in prose: "a", "a and b" or "a, b and c"; "" for none. With limit, at most that many items are
+    named, then how many are not, as "a, b and 3 more"."""
+    if limit is not None and len(items) > limit:
+        items = [*items[:limit], f"{len(items) - limit} more"]
+    return " and ".join([", ".join(items[:-1]), items[-1]]) if len(items) > 1 else "".join(items)
 
 
 # Surviving mutants: the code a change adds that its tests run without checking what it does, which coverage counts
@@ -3277,13 +3283,15 @@ def _mutmut_findings(tree_copy: str, functions: list[_ChangedFunction], run: sub
         owner = by_prefix.get(mutant.rpartition("__mutmut_")[0])
         if owner is not None:
             mutants.setdefault(owner, {}).setdefault(status, []).append(mutant)
-    # A function mutmut was given but listed no mutant of. Stopped by the budget, mutmut may not have reached its
-    # file: it makes and saves mutants file by file.
+    # A function mutmut was given but listed no mutant of. mutmut writes a module's mutants once it has made them all,
+    # so one in a module with a listed mutant was reached; stopped by the budget, mutmut may not have reached the
+    # others' modules. _mutant_prefix is a module's name, a dot, and a name without one.
+    reached = {mutant.rpartition("__mutmut_")[0].rpartition(".")[0] for mutant in statuses}
     unlisted = [f for f in functions if f not in mutants]
-    out = [] if stopped else [
-        _finding(f.path, f.line, "not-mutated",
-                 f"`{f.name}` was not mutation-tested: mutmut made no mutant of it; {_why_no_mutant(f, table)}.")
-        for f in unlisted]
+    unreached = [f for f in unlisted if stopped and _mutant_prefix(f).rpartition(".")[0] not in reached]
+    out = [_finding(f.path, f.line, "not-mutated",
+                    f"`{f.name}` was not mutation-tested: mutmut made no mutant of it; {_why_no_mutant(f, table)}.")
+           for f in unlisted if f not in unreached]
     for f, by_status in mutants.items():
         tried = sum(len(names) for status, names in by_status.items() if status not in _MUTMUT_UNTRIED)
         if by_status.get("survived"):
@@ -3298,29 +3306,28 @@ def _mutmut_findings(tree_copy: str, functions: list[_ChangedFunction], run: sub
             else "budget reached before mutmut had made its mutants")
             + f": mutmut was stopped at {budget:g} seconds (`--mutation-budget`), so the mutants it did not try may "
               f"survive too"
-            + (f"; mutmut made no mutant of {_names_of(unlisted)} before the budget ran out." if unlisted else ".")))
+            + (f"; mutmut made no mutant of {_series([f'`{f.name}` in {f.path}' for f in unreached], limit=5)} "
+               f"before the budget ran out." if unreached else ".")))
     return out
-
-
-def _names_of(functions: list[_ChangedFunction], limit: int = 5) -> str:
-    """'`f`', '`f` and `g`', or '`f`, `g`, ... and 3 more'."""
-    names = [f"`{f.name}`" for f in functions[:limit]]
-    more = len(functions) - len(names)
-    if more:
-        names.append(f"{more} more")
-    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
 
 
 def _why_no_mutant(f: _ChangedFunction, table: dict) -> str:
     """Why mutmut 3.8.0 made no mutant of f, a function it was given, as a clause: the one cause the gate can tell
-    cheaply, a `# pragma: no mutate` on its def or table's do_not_mutate_patterns matching each statement in it, else
-    every cause there can be."""
-    if re.search(r"#\s*pragma:.*no mutate", f.source[f.line - f.first]):
-        return "a `# pragma: no mutate` on its def keeps it out"
-    patterns = table.get("do_not_mutate_patterns", [])
-    tree = _parse_python(textwrap.dedent("\n".join(f.source)))
+    cheaply, a `# pragma: no mutate block` where its header ends or table's do_not_mutate_patterns matching each
+    statement in it, else every cause there can be."""
+    text = textwrap.dedent("\n".join(f.source))
+    tree = _parse_python(text)
     unit = tree.body[0] if tree is not None and tree.body else None
-    if patterns and isinstance(unit, (ast.FunctionDef, ast.AsyncFunctionDef)):
+    if not isinstance(unit, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return _EVERY_CAUSE
+    ends, comments = _logical_line_ends(text)
+    # mutmut skips a function whole only for `block` in the comment of the line its header ends on, with the body on
+    # the lines below (pragma_handling.py, PragmaVisitor._visit_compound_header).
+    header = ends[bisect.bisect_left(ends, unit.lineno)] if ends and ends[-1] >= unit.lineno else None
+    if header is not None and unit.body[0].lineno > header and _mutmut_pragma(comments.get(header, "")) == "block":
+        return "a `# pragma: no mutate block` where its header ends keeps it out"
+    patterns = table.get("do_not_mutate_patterns", [])
+    if patterns:
         # mutmut skips every expression that starts on a line a pattern matches; a statement with a block of its own
         # holds lines of other statements, which this does not look into.
         body = unit.body[1:] if ast.get_docstring(unit) is not None else unit.body
@@ -3328,9 +3335,38 @@ def _why_no_mutant(f: _ChangedFunction, table: dict) -> str:
         with contextlib.suppress(re.error):
             if body and len(starts) == len(body) and all(any(re.search(p, line) for p in patterns) for line in starts):
                 return "the rules' do_not_mutate_patterns match each statement in it"
-    return ("either it has nothing mutmut mutates, the rules' do_not_mutate_patterns or mutate_only_covered_lines "
-            "leave its lines out, a `# pragma: no mutate` keeps them out, or the gate could not read mutmut's names "
-            "for its mutants")
+    return _EVERY_CAUSE
+
+
+# Why mutmut made no mutant of a function it was given, when the gate cannot tell which cause it was.
+_EVERY_CAUSE = ("either it has nothing mutmut mutates, the rules' do_not_mutate_patterns or mutate_only_covered_lines "
+                "leave its lines out, a `# pragma: no mutate` keeps them out, or the gate could not read mutmut's "
+                "names for its mutants")
+
+
+def _mutmut_pragma(comment: str) -> str | None:
+    """What a comment says to mutmut 3.8.0, as its _parse_pragma_token reads it: "block", "start", "end" or "bare"
+    for a `# pragma: no mutate` comment of each form; None for any other comment."""
+    if "# pragma:" not in comment or "no mutate" not in comment:
+        return None
+    words = comment.partition("no mutate")[2].strip().lstrip(": ").split(",", 1)[0].split()
+    return words[0] if words and words[0] in ("block", "start", "end") else "bare"
+
+
+def _logical_line_ends(text: str) -> tuple[list[int], dict[int, str]]:
+    """The lines of Python source text on which a logical line ends, in order, and each line's comment by its
+    number; ([], {}) when text does not tokenize. A def's or a class's header ends on the first of those lines on or
+    after the line of its def or class, whatever brackets or decorators it spans."""
+    ends, comments = [], {}
+    try:
+        for t in tokenize.generate_tokens(io.StringIO(text).readline):
+            if t.type == tokenize.NEWLINE:
+                ends.append(t.start[0])
+            elif t.type == tokenize.COMMENT:
+                comments[t.start[0]] = t.string
+    except (tokenize.TokenError, SyntaxError):
+        return [], {}
+    return ends, comments
 
 
 def _changed_python_functions(change: GateChange) -> tuple[list[_ChangedFunction], list[dict]]:
@@ -3455,11 +3491,8 @@ def _skip_unchanged(path: str, text: str, changed: set[tuple[str, str]]) -> str:
     tree = _parse_python(text)
     if tree is None:
         return text
-    try:
-        # Each header ends with the first NEWLINE token on or after the line of its def or class: the logical line
-        # that starts there ends at the colon, whatever brackets or decorators it spans.
-        ends = [t.start[0] for t in tokenize.generate_tokens(io.StringIO(text).readline) if t.type == tokenize.NEWLINE]
-    except (tokenize.TokenError, SyntaxError):
+    ends, _ = _logical_line_ends(text)
+    if not ends:
         return text
     defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
     skipped: list[ast.stmt] = []

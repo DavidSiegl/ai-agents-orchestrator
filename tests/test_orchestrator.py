@@ -5143,7 +5143,56 @@ class TestSurvivingMutants(unittest.TestCase):
         self.fake_mutmut("exec sleep 30", results="    calc.x_checked__mutmut_1: not checked\n")
         found = self.found(budget=1, rules=self.rules({"source_paths": ["calc.py", "more.py"]}))
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "budget-reached")])
-        self.assertIn("mutmut made no mutant of `g` before the budget ran out", found[0]["message"])
+        self.assertIn("mutmut made no mutant of `g` in more.py before the budget ran out", found[0]["message"])
+
+    def test_a_pragma_mutmut_does_not_honour_is_not_given_as_the_cause(self):
+        # A bare `no mutate` on the def keeps only that line out; under mutate_only_covered_lines the function no test
+        # calls gets no mutant for that reason instead.
+        self.put("calc.py", self.BASE.replace("def orphan():", "def orphan():  # pragma: no mutate")
+                 .replace("return 1", "return 2"))
+        found = self.found(rules=self.rules({"source_paths": ["calc.py"], "mutate_only_covered_lines": True,
+                                             "pytest_add_cli_args_test_selection": ["tests/"]}))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 13, "not-mutated")])
+        self.assertNotIn("on its def keeps it out", found[0]["message"])
+        self.assertIn("either it has nothing mutmut mutates", found[0]["message"])
+
+    def test_a_block_pragma_where_a_long_header_ends_is_given_as_the_cause(self):
+        self.put("calc.py", self.BASE.replace("def unchecked(a, b):",
+                                              "def unchecked(\n        a, b):  # pragma: no mutate block"))
+        found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 5, "not-mutated")])
+        self.assertIn("a `# pragma: no mutate block` where its header ends keeps it out", found[0]["message"])
+
+    def test_a_function_in_a_file_mutmut_listed_mutants_of_keeps_its_cause_after_a_budget_stop(self):
+        # mutmut writes a file's mutants once it has made them all, so calc.py was reached whole.
+        self.put("calc.py", self.BASE.replace("b + a", "a + b")
+                 .replace("def unchecked(a, b):", "def unchecked(a, b):  # pragma: no mutate block"))
+        self.fake_mutmut("exec sleep 30", results="    calc.x_checked__mutmut_1: not checked\n")
+        found = self.found(budget=1)
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                         [(None, None, "budget-reached"), ("calc.py", 5, "not-mutated")])
+        self.assertNotIn("before the budget ran out", found[0]["message"])
+        self.assertIn("a `# pragma: no mutate block` where its header ends keeps it out", found[1]["message"])
+
+    def test_unreached_functions_are_named_with_their_files(self):
+        for name in ("a.py", "b.py"):
+            self.put(name, "def run():\n    return 1\n")
+            self.git("add", name)
+        self.git("commit", "--quiet", "-m", "run twice")
+        for name in ("a.py", "b.py"):
+            self.put(name, "def run():\n    return 2\n")
+        self.fake_mutmut("exec sleep 30")
+        found = self.found(budget=1, rules=self.rules({"source_paths": ["a.py", "b.py"]}))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "budget-reached")])
+        self.assertIn("mutmut made no mutant of `run` in a.py and `run` in b.py before the budget ran out",
+                      found[0]["message"])
+
+    def test_a_series_reads_as_a_list_in_prose(self):
+        series = orchestrator._series
+        self.assertEqual([series([]), series(["a"]), series(["a", "b"]), series(["a", "b", "c"])],
+                         ["", "a", "a and b", "a, b and c"])
+        self.assertEqual(series(["a", "b", "c", "d"], limit=2), "a, b and 2 more")
+        self.assertEqual(series(["a", "b"], limit=2), "a and b")
 
     def test_a_change_to_a_help_text_alone_makes_no_mutant(self):
         # The second line of the help text does not say help=, but its string starts on the line that does.
@@ -5162,7 +5211,7 @@ class TestSurvivingMutants(unittest.TestCase):
         self.assertEqual(made, [])
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 5, "not-mutated")])
         self.assertEqual(found[0]["message"], "`unchecked` was not mutation-tested: mutmut made no mutant of it; a "
-                                              "`# pragma: no mutate` on its def keeps it out.")
+                                              "`# pragma: no mutate block` where its header ends keeps it out.")
         diff = self.host.change_diff(self.repo, self.git("rev-parse", "HEAD").strip())
         self.assertEqual(orchestrator.added_suppressions(self.repo, changed_lines(diff)),
                          [("calc.py", 5, "def unchecked(a, b):  # pragma: no mutate block")])
