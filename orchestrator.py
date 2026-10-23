@@ -3861,9 +3861,8 @@ def too_complex_functions(change: GateChange) -> list[dict]:
     try:
         pairs = Host().changed_files(change.root, change.base)
     except OrchestratorError as e:
-        return [*out, _finding(None, None, "not-scored", f"the files the change edits could not be listed "
-                                                                    f"({e}), so no function was compared with its "
-                                                                    f"base.", severity="error")]
+        return [*out, _finding(None, None, "not-scored", f"the files the change edits could not be listed ({e}), so no "
+                                                         f"function was compared with its base.", severity="error")]
     bases = {old: _base_functions(change, old) for old, _ in pairs
              if old and old.endswith(".py") and not old.startswith(_COMPLEXITY_EXEMPT)}
     by_body = {g.body: g.score for functions in bases.values() for g in functions}

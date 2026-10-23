@@ -50,20 +50,28 @@ was done.
 - **The surviving-mutants check selects functions by added lines only.** A function whose edit only removes lines,
   or changes only the comments or blank lines above it, is not mutation-tested, unlike flaky-tests' selection
   (`_edits_test`). Kept as the ticket states it. Closes with a decision to pass `_edits_test`-like counting to
-  `_changed_python_functions`, which the cognitive-complexity check also uses.
+  `_changed_python_functions`. The cognitive-complexity check has a walker of its own (`_scored_functions`), so it
+  is not affected.
 - **A run the budget stops can leave mutmut's results unreadable.** mutmut 3.8.0 saves a module's results by
   rewriting `mutants/<path>.meta` in place after each mutant (`SourceFileMutationData.save`, `open(..., "w")` then
   `json.dump`), so the SIGINT at the budget, or the kill after `MUTMUT_STOP_GRACE`, can land mid-write. `mutmut results`
   then exits with a `JSONDecodeError`, and `_mutmut_findings` reports `not-run`, "mutmut could not list its results",
   without the `budget-reached` finding or anything the run had shown. Seen once in another branch's gate run. Closes
   with the stop waiting for a save to end, or with the gate reading what remains and saying the budget stopped it.
-- **Committed mutmut output is read as the change's own code by the linters.** The checks leave `mutants/` out, by the
-  user's decision of 2026-10-24 (review round 9, F33): `GateChange.from_tree` diffs the tree without it, so no check
-  (test-integrity, flaky-tests, surviving-mutants) selects a test, a function or a changed line there or counts an edit
-  there as a change to the code, and the build configuration listing still names such files. That filter does not reach
-  the linters: `judge_change` runs them over every tracked file their pathspecs match and keeps their findings on its
-  own, unfiltered `changed_lines`, so a change that commits `mutants/calc.py`, mutmut's mutated copy with its
-  trampolines, has its added lines there linted, and their findings can fail the gate. The same unfiltered lines feed
-  the suppressions list, the stray-line-end refusal and the coverage condition; coverage counts such files only when the
-  project's coverage measures them, since `new_coverage` reads only the files the Cobertura report lists. Whether the
-  linters should read them, leave them out, or the gate refuse them is open. Closes with that decision.
+- **Committed mutmut output is read as the change's own code by the linters.** Neither check selects anything under
+  `mutants/` (`_changed_python_units`): the surviving-mutants check leaves it out of mutmut's copy and mutates no
+  function in it, and the flaky-tests check reruns no test there, such as the `mutants/tests/` mutmut copies beside
+  its mutated code. But the linters read every tracked file their pathspecs match, so a change that commits
+  `mutants/calc.py`, mutmut's mutated copy with its trampolines, has its added lines there linted, and their findings
+  can fail the gate. Whether the coverage condition counts such files was not traced. Whether they should be linted,
+  left out, or refused is open. Closes with that decision.
+- **Committed mutmut output is linted as the change's own code.** The surviving-mutants check leaves the tree's
+  `mutants/` out of mutmut's copy and mutates no function in it, but the linters read every tracked file their
+  pathspecs match, so a change that commits `mutants/calc.py`, mutmut's mutated copy with its trampolines, has its
+  added lines there linted, and their findings can fail the gate. Whether such files should be linted, left out, or
+  refused is open. Closes with that decision.
+- **The cognitive-complexity check reads and parses changed files in a loop of its own.** `_changed_over_limit`
+  repeats `_changed_python_units`' reading, decoding and unreadable-file handling, because that walker yields only
+  top-level functions and methods of top-level classes, the units mutmut names, while the check judges every function
+  that no other function holds (`_scored_functions`). Closes with `_changed_python_units` taking the walker as a
+  parameter, or handing its callers the parsed trees.
