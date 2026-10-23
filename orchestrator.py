@@ -308,9 +308,10 @@ check that the Builder has answered each of their findings."""
 QUALITY_FIX_PROMPT = """\
 The quality gate did not pass on your change; the findings are in {quality_path}. \
 Fix each numbered issue, the failed conditions, the failing tests and a failed build, \
-or explain in your report why one should stand. Re-run the verification. \
+or explain in your report why one should stand. Answer each numbered finding to weigh the same way; \
+those never fail the gate, but the Reviewer reads your answers. Re-run the verification. \
 Do not commit, push or switch branches. As your last step, write a new report to {report_path} in a single write, \
-in the same shape as before, answering each numbered issue by its number."""
+in the same shape as before, answering each numbered issue and finding to weigh by its number."""
 
 # Appended to the Reviewer's prompt in a run with the quality gate.
 QUALITY_PASSED_NOTE = """\
@@ -1893,25 +1894,31 @@ def _unquote(name: str) -> str:
 _NO_TESTS_SECTION: list = []
 
 
-def quality_report(gate: str, intro: str, changed: dict[str, set[int]], *, conditions: list[str] | tuple = (),
-                   issues=(), tests: list[tuple[str, str]] | None = _NO_TESTS_SECTION, coverage: str | None = None,
-                   suppressions: list[tuple[str, int, str]] | tuple = (), console: str = "", edited=(),
-                   rules_from: str | None = None) -> str:
+def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (), issues=(), to_weigh=(),
+                   elsewhere: int = 0, tests: list[tuple[str, str]] | None = _NO_TESTS_SECTION,
+                   coverage: str | None = None, suppressions: list[tuple[str, int, str]] | tuple = (),
+                   console: str = "", edited=(), rules_from: str | None = None) -> str:
     """The quality file: the gate on its first line, then what the Builder has to answer.
 
-    conditions are the failed ones, each a sentence. Only the issues on lines the change added, and the
-    lineless ones on files it touched, are numbered, at most QUALITY_ISSUE_LIMIT of them; the rest are
-    counted. tests are the failing tests Jenkins reported, None when it has no test report; left out, the
-    file has no tests section. coverage is the sentence about coverage of new code, None for no such
-    section. suppressions are the (path, line, text) of lint suppressions the change added. edited are the
-    BUILD_CONFIG_FILES the change edits; rules_from names the file the gate took its rules from when that
-    was not the edited pyproject.toml.
+    conditions are the failed ones, each a sentence. issues, the findings that fail the gate, and to_weigh,
+    the ones that do not, are {path, line, severity, rule, message} as tool_findings gives them, line None
+    for one about the whole file and path None for one about the whole change. Both are listed in the order
+    given and numbered as one list, issues first, at most QUALITY_ISSUE_LIMIT in all; the rest are counted.
+    elsewhere counts the linter findings left out for not being on lines the change added. With gate
+    BUILD_FAILED, nothing judged the change, so neither list nor the count appears. tests are the failing
+    tests Jenkins reported, None when it has no test report; left out, the file has no tests section.
+    coverage is the sentence about coverage of new code, None for no such section. suppressions are the
+    (path, line, text) of lint suppressions the change added. edited are the BUILD_CONFIG_FILES the change
+    edits; rules_from names the file the gate took its rules from when that was not the edited
+    pyproject.toml.
     """
     out = [f"GATE: {gate}", "", intro]
     if conditions:
         out += ["", "## Failed conditions", "", *(f"- {c}" for c in conditions)]
     if gate != GATE_BUILD_FAILED:
-        out += _issues_section(issues, changed)
+        out += _issues_section(issues, elsewhere)
+        if to_weigh:
+            out += _to_weigh_section(to_weigh, after=min(len(issues), QUALITY_ISSUE_LIMIT))
     if tests is not _NO_TESTS_SECTION:
         out += _tests_section(tests)
     if coverage is not None:
@@ -1935,20 +1942,38 @@ def on_changed_lines(issues, changed: dict[str, set[int]]) -> list[dict]:
                   key=lambda i: (i["path"], i["line"] or 0))
 
 
-def _issues_section(issues, changed: dict[str, set[int]]) -> list[str]:
-    on_change = on_changed_lines(issues, changed)
+def _issues_section(issues, elsewhere: int) -> list[str]:
     out = ["", "## Issues on changed lines", ""]
-    for k, i in enumerate(on_change[:QUALITY_ISSUE_LIMIT], 1):
-        where = f"{i['path']}:{i['line']}" if i["line"] is not None else f"{i['path']} (the whole file)"
-        out.append(f"{k}. `{where}` {i['severity']} {i['rule']}: {i['message']}")
-    if not on_change:
-        out.append("None.")
-    if (more := len(on_change) - QUALITY_ISSUE_LIMIT) > 0:
+    out += [_numbered(k, i) for k, i in enumerate(issues[:QUALITY_ISSUE_LIMIT], 1)] or ["None."]
+    if (more := len(issues) - QUALITY_ISSUE_LIMIT) > 0:
         out += ["", f"{more} more issues on changed lines are not listed; fix the ones above first."]
-    if others := len(issues) - len(on_change):
-        out += ["", f"{others} other open issues in the project are not on lines this change added, "
-                    "so they are not listed."]
+    if elsewhere:
+        out += ["", (f"{elsewhere} other open issues in the project are not on lines this change added, "
+                     "so they are not listed.")]
     return out
+
+
+def _to_weigh_section(to_weigh, after: int) -> list[str]:
+    """The findings to weigh, numbered on from after, the last issue's number, within QUALITY_ISSUE_LIMIT."""
+    out = ["", "## Findings to weigh", ""]
+    room = QUALITY_ISSUE_LIMIT - after
+    if room <= 0:
+        return out + [f"{len(to_weigh)} findings to weigh are not listed; answer the issues above first."]
+    out += ["These do not fail the gate. Fix each, or say in your report why it should stand.", "",
+            *(_numbered(k, i) for k, i in enumerate(to_weigh[:room], after + 1))]
+    if (more := len(to_weigh) - room) > 0:
+        out += ["", f"{more} more findings to weigh are not listed."]
+    return out
+
+
+def _numbered(k: int, finding: dict) -> str:
+    if finding["path"] is None:
+        where = "The change as a whole:"
+    elif finding["line"] is None:
+        where = f"`{finding['path']} (the whole file)`"
+    else:
+        where = f"`{finding['path']}:{finding['line']}`"
+    return f"{k}. {where} {finding['severity']} {finding['rule']}: {finding['message']}"
 
 
 def _tests_section(tests: list[tuple[str, str]] | None) -> list[str]:
@@ -2027,6 +2052,37 @@ GATE_TOOLS = (
              re.compile(r"(?P<message>.+) \[(?P<rule>[\w-]+)\]")),
 )
 
+
+@dataclass(frozen=True)
+class GateChange:
+    """The change the gate judges, as each GateCheck is given it."""
+    root: str  # the repository's top level; its working tree is the change's new side
+    base: str  # the commit the change is judged against, a full sha
+    diff: str  # Host.change_diff from base to the working tree
+    changed: dict[str, set[int]]  # changed_lines(diff)
+
+
+@dataclass(frozen=True)
+class GateCheck:
+    """A check of the change beside the linters, which judges what the change did rather than how the tree
+    reads, such as the tests it weakened.
+
+    find returns its findings as {path, line, severity, rule, message}, like tool_findings's, but with rule
+    the check's own, which the gate prefixes with name ("" for none), and path None for one about the change
+    as a whole. They are listed wherever they are, unlike linter findings, which count only on added lines.
+    A check that cannot do its work returns a finding saying so, never an empty list, so that it is not read
+    as having found nothing. It must not raise: an exception ends the gate with a traceback and no quality file.
+    """
+    name: str
+    # True: each finding fails the gate, numbered with the linters' issues. False: each is a finding to weigh,
+    # numbered after them, which the Builder answers and the Reviewer judges but which leaves the gate as it is.
+    fails: bool
+    find: Callable[[GateChange], list[dict]]
+
+
+# The checks judge_change runs after the linters, in this order.
+GATE_CHECKS: tuple[GateCheck, ...] = ()
+
 # A finding's location, before the tool's own part; lineless when the tool names only the file.
 _FINDING_AT = re.compile(r"(?P<path>[^:]+):(?:(?P<line>\d+):(?:\d+:)?)? (?P<detail>.+)")
 
@@ -2056,11 +2112,12 @@ def judge_change(cwd: str, base: str, *, rules: str | None = None, coverage: str
 
     Runs each GATE_TOOLS linter whose files the repository tracks over those files, with the rules of the
     pyproject.toml at rules, or the tree's own, and lists the findings on lines the change added and the
-    lineless ones on files it touched. The gate is ERROR when there is such a finding, when a linter is
-    missing, fails or prints nothing readable, when tests, a JUnit report of the tree's tests such as
-    pytest's --junitxml, has a failing test, or when coverage, a Cobertura report of the tree such as
-    pytest-cov's coverage.xml, puts new code below GATE_MIN_COVERAGE percent on GATE_MIN_NEW_LINES or more new
-    lines to cover; else OK. Suppressions the change added are listed, not counted against it. Paths are
+    lineless ones on files it touched. Then runs each of GATE_CHECKS and lists what it finds, as an issue or
+    as a finding to weigh as its fails says. The gate is ERROR when there is such a linter finding or a
+    failing check's finding, when a linter is missing, fails or prints nothing readable, when tests, a JUnit
+    report of the tree's tests such as pytest's --junitxml, has a failing test, or when coverage, a Cobertura
+    report of the tree such as pytest-cov's coverage.xml, puts new code below GATE_MIN_COVERAGE percent on
+    GATE_MIN_NEW_LINES or more new lines to cover; else OK. Suppressions the change added are listed, not counted against it. Paths are
     absolute or relative to the process's working directory.
 
     Raises OrchestratorError when it cannot judge: cwd is not in a git work tree, base names no commit, there
@@ -2090,8 +2147,19 @@ def judge_change(cwd: str, base: str, *, rules: str | None = None, coverage: str
             findings += found
             if problem:
                 conditions.append(problem)
-    if on_change := on_changed_lines(findings, changed):
-        conditions.insert(0, f"{len(on_change)} findings on lines the change added; each is listed below.")
+    issues = on_changed_lines(findings, changed)
+    elsewhere = len(findings) - len(issues)
+    if issues:
+        conditions.insert(0, f"{len(issues)} findings on lines the change added; each is listed below.")
+    to_weigh: list[dict] = []
+    change = GateChange(root, base_sha, diff, changed)
+    for check in GATE_CHECKS:
+        found = [{**f, "rule": f"{check.name} {f['rule']}" if f["rule"] else check.name} for f in check.find(change)]
+        if not check.fails:
+            to_weigh += found
+        elif found:
+            issues += found
+            conditions.append(f"{len(found)} findings of the `{check.name}` check; each is listed below.")
 
     failing = _NO_TESTS_SECTION
     if tests:
@@ -2111,8 +2179,8 @@ def judge_change(cwd: str, base: str, *, rules: str | None = None, coverage: str
     head = host.git(root, "rev-parse", "HEAD").strip()
     intro = (f"`orchestrator.py gate` judged the working tree at `{head}` against the base `{base_sha}`"
              + (f", by the rules in `{rules}`." if rules else "."))
-    return quality_report(GATE_ERROR if conditions else GATE_OK, intro, changed, conditions=conditions,
-                          issues=findings, tests=failing, coverage=coverage_sentence,
+    return quality_report(GATE_ERROR if conditions else GATE_OK, intro, conditions=conditions, issues=issues,
+                          to_weigh=to_weigh, elsewhere=elsewhere, tests=failing, coverage=coverage_sentence,
                           suppressions=added_suppressions(root, changed), edited=edited_config(diff, changed),
                           rules_from=f"`{rules}`" if rules else None)
 
@@ -3190,7 +3258,7 @@ class Workflow:
                                               lambda: self._jenkins.console_tail(build))
         intro = (f"Jenkins build #{build} of snapshot `{sha}` ({where}) ended {result} before the quality gate "
                  f"ran, so nothing judged the change. Make it build first.")
-        return quality_report(GATE_BUILD_FAILED, intro, changed, tests=tests, console=console,
+        return quality_report(GATE_BUILD_FAILED, intro, tests=tests, console=console,
                               edited=edited_config(diff, changed))
 
     def _poll(self, step: str, deadline: float, poll):
@@ -3784,9 +3852,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "gate", help="judge the change since a commit as the quality job does, and write the quality file",
         description=f"Run ruff, mypy, pymarkdown, shellcheck and actionlint over the files the repository tracks and "
                     f"write the quality file: GATE: OK or GATE: ERROR on its first line, then the failed "
-                    f"conditions, the findings on lines added since --base, failing tests, coverage of new code, "
-                    f"suppressions added and edited build configuration. Any finding on an added line fails the "
-                    f"gate, and so do a linter that is missing or fails, a failing test, and coverage below "
+                    f"conditions, the findings on lines added since --base and of the failing checks, the findings "
+                    f"to weigh, failing tests, coverage of new code, suppressions added and edited build "
+                    f"configuration. Any finding on an added line or of a failing check fails the gate, and so do "
+                    f"a linter that is missing or fails, a failing test, and coverage below "
                     f"{GATE_MIN_COVERAGE:g}% on "
                     f"{GATE_MIN_NEW_LINES} or more new lines to cover. Exit status 0 for OK, 1 for ERROR, "
                     f"{EXIT_GATE_UNJUDGED} when it could not judge, writing no quality file.")
