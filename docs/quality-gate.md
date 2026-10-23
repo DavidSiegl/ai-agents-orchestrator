@@ -70,7 +70,7 @@ It reads Python only; another language is a `WeakenedTestsDetector` beside the P
 function it is editing rather than split it. A function counts when the change adds a line to it, decorators
 included, in a Python file outside `tests/`, which is exempt as it is from ruff's `C901`: any function that no other
 function holds, a method of a nested class and a function under a module-level `if` or `try` included. A function
-nested in another is part of that one. Its score is G. Ann Campbell's
+nested in another is part of that one. Files are read as Python reads them, by their byte order mark or coding cookie. Its score is G. Ann Campbell's
 [cognitive complexity](https://www.sonarsource.com/docs/CognitiveComplexity.pdf), which SonarQube's rule S3776
 measured: a point for each `if`, `elif`, `else`, ternary, loop, `except`, `match`, sequence of like boolean operators
 and call of a function to itself, and one more for each level of nesting on those that nest. The comment above

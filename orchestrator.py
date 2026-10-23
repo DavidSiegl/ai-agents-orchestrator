@@ -2659,7 +2659,8 @@ def python_weakened_tests(files: list[ChangedTestFile], code_changed: bool) -> l
 def _parse_python(text: str) -> ast.Module | None:
     try:
         return ast.parse(text)
-    except (SyntaxError, ValueError):
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        # ValueError: a null byte. RecursionError and MemoryError: the parser's own limits on nesting.
         return None
 
 
@@ -3867,15 +3868,16 @@ def _changed_over_limit(change: GateChange) -> tuple[list[dict], list[tuple[str,
         if os.path.islink(full) or os.path.isdir(full):
             continue
         try:
-            text = _read_text(full)
-        except (OSError, UnicodeDecodeError) as e:
-            out.append(_finding(path, None, "not-scored",
-                                           f"could not be read ({e}), so its functions were not scored.", severity="error"))
+            with open(full, "rb") as f:
+                text, _ = _decode_python(f.read())
+        except (OSError, SyntaxError, UnicodeDecodeError) as e:
+            out.append(_finding(path, None, "not-scored", f"could not be read ({e}), so its functions were not scored.",
+                                severity="error"))
             continue
         tree = _parse_python(text)
         if tree is None:
-            out.append(_finding(path, None, "not-scored",
-                                           "does not parse as Python, so its functions were not scored.", severity="error"))
+            out.append(_finding(path, None, "not-scored", "does not parse as Python, so its functions were not scored.",
+                                severity="error"))
             continue
         over += [(path, f) for f in _scored_functions(tree)
                  if f.score > COGNITIVE_COMPLEXITY_LIMIT and any(f.first <= n <= f.last for n in added)]
@@ -3889,10 +3891,11 @@ def _base_complexities(change: GateChange, path: str | None) -> dict[tuple[str, 
     if path is None:
         return {}
     try:
-        text = Host().git(change.root, "show", f"{change.base}:{path}", verbatim=True)
-    except OrchestratorError:
+        # Verbatim, so that os.fsencode gives back the bytes git stores, which _decode_python decodes as Python would.
+        tree = _parse_python(_decode_python(os.fsencode(
+            Host().git(change.root, "cat-file", "blob", f"{change.base}:{path}", verbatim=True)))[0])
+    except (OrchestratorError, SyntaxError, UnicodeDecodeError):
         return {}
-    tree = _parse_python(text)
     return {(f.name, f.occurrence): f.score for f in _scored_functions(tree)} if tree else {}
 
 

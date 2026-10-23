@@ -5812,14 +5812,13 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.assertEqual(found[0]["message"], "does not parse as Python, so its functions were not scored.")
 
     def test_files_that_cannot_be_read_or_parsed_are_findings_and_the_others_are_still_judged(self):
-        with open(os.path.join(self.repo, "a_latin1.py"), "wb") as f:
-            f.write(b"x = 'caf\xe9'\n")
+        self.put("a_unknown.py", "# -*- coding: nonsense -*-\n")  # an encoding Python does not know
         self.put("b_broken.py", "def broken(:\n")
         self.put("0_notes.txt", "not Python\n")
-        self.git("add", "a_latin1.py", "b_broken.py", "0_notes.txt")
+        self.git("add", "a_unknown.py", "b_broken.py", "0_notes.txt")
         self.nest_under("big", 19)
         where, found = self.found()
-        self.assertEqual(where, [("a_latin1.py", None, "not-scored"), ("b_broken.py", None, "not-scored"),
+        self.assertEqual(where, [("a_unknown.py", None, "not-scored"), ("b_broken.py", None, "not-scored"),
                                  ("calc.py", self.def_line("big"), "over-limit")])
         self.assertTrue(found[0]["message"].startswith("could not be read ("), found[0]["message"])
 
@@ -5827,12 +5826,12 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.nest_under("big", 19)
         git = Host.git
 
-        def no_show(host, cwd, *args, **kw):
-            if args[0] == "show":
-                raise OrchestratorError("git show failed")
+        def no_blob(host, cwd, *args, **kw):
+            if "cat-file" in args:
+                raise OrchestratorError("git cat-file failed")
             return git(host, cwd, *args, **kw)
 
-        with patch.object(Host, "git", no_show):
+        with patch.object(Host, "git", no_blob):
             where, found = self.found()
         self.assertEqual(where, [("calc.py", self.def_line("big"), "over-limit")])
         self.assertEqual(found[0]["message"], "`big`: cognitive complexity 22, a new function; the limit is 15.")
@@ -5843,6 +5842,27 @@ class TestTooComplexFunctions(unittest.TestCase):
             where, found = self.found()
         self.assertEqual(where, [(None, None, "not-scored")])
         self.assertIn("could not be listed (git diff failed)", found[0]["message"])
+
+    def put_bytes(self, name, data):
+        with open(os.path.join(self.repo, name), "wb") as f:
+            f.write(data)
+
+    def test_a_file_with_a_byte_order_mark_or_a_coding_cookie_is_judged_as_python_reads_it(self):
+        self.put_bytes("bom.py", b"\xef\xbb\xbf" + flat("marked", 16).encode())
+        self.put_bytes("latin.py", b"# -*- coding: latin-1 -*-\nCAFE = 'caf\xe9'\n" + flat("declared", 16).encode())
+        self.git("add", "bom.py", "latin.py")
+        self.assertEqual(self.found()[0], [("bom.py", 1, "over-limit"), ("latin.py", 3, "over-limit")])
+
+    def test_a_base_with_a_byte_order_mark_or_a_coding_cookie_is_compared_as_python_reads_it(self):
+        bom, cookie = b"\xef\xbb\xbf", b"# -*- coding: latin-1 -*-\nCAFE = 'caf\xe9'\n"
+        self.put_bytes("bom.py", bom + flat("marked", 20).encode())
+        self.put_bytes("latin.py", cookie + flat("declared", 20).encode())
+        self.git("add", "bom.py", "latin.py")
+        self.git("commit", "--quiet", "-m", "encodings")
+        # Edits that leave both at 20.
+        self.put_bytes("bom.py", bom + flat("marked", 20).replace("x += 3\n", "x += 30\n").encode())
+        self.put_bytes("latin.py", cookie + flat("declared", 20).replace("x += 3\n", "x += 30\n").encode())
+        self.assertEqual(self.found()[0], [])
 
     def test_a_base_that_does_not_parse_leaves_its_functions_judged_as_new(self):
         self.put("broken.py", "def big(:\n")
