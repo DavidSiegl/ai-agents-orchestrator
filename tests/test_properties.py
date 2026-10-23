@@ -154,10 +154,12 @@ class TestChangedLines(unittest.TestCase):
             lines = file_lines(new[path])
             self.assertLessEqual(added, set(range(1, len(lines) + 1)), path)
             self.assertEqual(len(added), counts[path], path)
-            # Whichever lines git chose to call added, the others must be a file's lines at the base, in order: the
-            # one it was renamed from or, for a file new to the tree, none.
+            # Whichever lines git chose to call added, the others must be the file's own lines at the base, in
+            # order: those at its path, or, for a path new to the tree, those of a file the change deleted, which
+            # git may pair with it as a rename.
             kept = [line for n, line in enumerate(lines, 1) if n not in added]
-            self.assertTrue(not kept or any(is_subsequence(kept, file_lines(c)) for c in base.values()), path)
+            before = [base[path]] if path in base else [c for p, c in base.items() if p not in new]
+            self.assertTrue(not kept or any(is_subsequence(kept, file_lines(c)) for c in before), path)
 
 
 class TestUnquote(unittest.TestCase):
@@ -263,6 +265,11 @@ emphasis = st.sampled_from([("", ""), ("**", "**"), ("_", "_"), ("`", "`"), ("# 
 # What may follow the word on its line: nothing, or text after a space.
 after_word = st.one_of(st.just(""), text_without(LINE_BREAKS).map(lambda t: " " + t))
 non_blank_line = text_without(LINE_BREAKS, min_size=1).filter(str.strip)
+# What turns the word into another word: a letter or digit right after it, perhaps behind underscores, as in
+# APPROVED or OK_X. Never a second label, which would hold a word of its own.
+word_going_on = st.tuples(st.integers(0, 2), st.from_regex(r"[A-Za-z0-9]", fullmatch=True),
+                          text_without(LINE_BREAKS)).map(lambda t: "_" * t[0] + t[1] + t[2]).filter(
+    lambda t: "GATE:" not in t and "VERDICT:" not in t)
 
 
 class TestFirstLineParsers(unittest.TestCase):
@@ -279,6 +286,12 @@ class TestFirstLineParsers(unittest.TestCase):
         before, behind = marks
         self.assertEqual(parse_gate(f"{blanks}{before}GATE: {gate}{behind}{after}\n{rest}"), gate)
         self.assertEqual(parse_verdict(f"{blanks}{before}VERDICT: {verdict}{behind}{after}\n{rest}"), verdict)
+
+    @given(blank_lines, st.sampled_from(GATES), st.sampled_from(VERDICTS), word_going_on, st.text())
+    @example("", GATE_OK, APPROVE, "D_WITH_CHANGES", "")
+    def test_refuse_a_word_that_goes_on(self, blanks, gate, verdict, going_on, rest):
+        self.assertIsNone(parse_gate(f"{blanks}GATE: {gate}{going_on}\n{rest}"))
+        self.assertIsNone(parse_verdict(f"{blanks}VERDICT: {verdict}{going_on}\n{rest}"))
 
     @given(blank_lines, non_blank_line, st.text())
     def test_ignore_every_line_below_the_first_non_blank_one(self, blanks, first, rest):
