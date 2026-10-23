@@ -185,8 +185,8 @@ class TestUnquote(unittest.TestCase):
 # Names under one prefix, so that none is a variable the shell sets or refuses itself: PWD, IFS, BASH_*. Some
 # start with "export", which makes them another name, not the keyword.
 env_names = st.from_regex(r"(export)?V[A-Za-z0-9_]{0,8}", fullmatch=True)
-# The characters an unquoted value may not hold: blanks, quotes, a ~, and what sh treats as syntax there.
-NOT_UNQUOTED = " \t'\"\\$`;&|<>()~"
+# The characters an unquoted value may not hold: blanks, quotes, a ~ or a {, and what sh treats as syntax there.
+NOT_UNQUOTED = " \t'\"\\$`;&|<>()~{"
 # A value in each form parse_env_file accepts: unquoted, single-quoted, and double-quoted without what expands inside
 # double quotes. Any line break but "\n" may be in it; a carriage return may not (test_refuses_a_carriage_return).
 unquoted_values = text_without(NOT_UNQUOTED + "\n\r")
@@ -221,9 +221,9 @@ def env_files(draw) -> tuple[str, set[str]]:
 
 @st.composite
 def misread_lines(draw) -> str:
-    """An assignment that sh reads otherwise, or not at all, or may: a blank, a quote, a ~ or shell syntax in an
-    unquoted value, what expands inside double quotes, text after a closing quote, a NUL, or a blank beside
-    the "="."""
+    """An assignment that parse_env_file refuses because sh reads it otherwise, or not at all, in some of its
+    forms: a blank, a quote, a ~, a { or shell syntax in an unquoted value, what expands inside double quotes,
+    text after a closing quote, a NUL, or a blank beside the "="."""
     name, value = draw(env_names), draw(unquoted_values)
     form = draw(st.sampled_from(["inside", "double quoted", "after quote", "nul", "blank before", "blank after"]))
     if form == "inside":
@@ -279,6 +279,7 @@ class TestEnvFile(unittest.TestCase):
     @example("V=a:~")  # sh expands the ~ after a ":" too
     @example('V="a$x"')
     @example("V=a\0b")
+    @example("export V={a,b}")  # bash brace-expands an argument of export
     def test_refuses_what_sh_reads_otherwise(self, line):
         with tempfile.TemporaryDirectory() as d:
             path = write_env_file(d, line + "\n")

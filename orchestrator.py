@@ -274,11 +274,11 @@ def ci_credentials(environ, path: str) -> dict[str, str]:
 
 # An assignment line of an env file, blanks at its ends removed, in the forms sh reads literally: `export ` or
 # not, NAME=, then a value that is single-quoted, double-quoted without what expands inside double quotes, or
-# unquoted without blanks, quotes, a ~ (expanded at the start and after a ":") or what sh treats as syntax there;
-# then nothing, or blanks and a comment. No value holds a NUL, which sh drops. Group 1 is the name, 2 to 4 the
+# unquoted without blanks, quotes, a ~ (expanded at the start and after a ":"), a { (brace-expanded in an
+# argument of export) or what sh treats as syntax there; then nothing, or blanks and a comment. No value holds a NUL, which sh drops. Group 1 is the name, 2 to 4 the
 # value in its form.
 _ENV_ASSIGNMENT = re.compile(r"""(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)="""
-                             r"""(?:'([^'\x00]*)'|"([^"\\$`\x00]*)"|([^ \t'"\\$`;&|<>()~\x00]*))"""
+                             r"""(?:'([^'\x00]*)'|"([^"\\$`\x00]*)"|([^ \t'"\\$`;&|<>()~{\x00]*))"""
                              r"""(?:[ \t]+(?:#.*)?)?""", re.DOTALL)
 
 
