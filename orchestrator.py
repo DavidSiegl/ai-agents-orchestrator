@@ -2684,7 +2684,7 @@ def python_weakened_tests(files: list[ChangedTestFile], code_changed: bool) -> l
                                 f"`{t.name}` has {len(now)} assertions, {len(was)} at the base.", severity="error"))
         if code_changed:
             out += [_finding(path, b.lineno, "expected-value-changed",
-                             f"`{t.name}`: `{_clip(ast.unparse(a))}` became `{_clip(ast.unparse(b))}`, "
+                             f"`{t.name}`: `{_code(a)}` became `{_code(b)}`, "
                              f"in a change that also edits the code under test.", severity="error")
                     for a, b in _changed_literals(was, now)]
     return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
@@ -2852,11 +2852,11 @@ def _python_added_weakenings(path: str, tree: ast.Module, added: set[int]) -> li
         name = node.attr if isinstance(node, ast.Attribute) else node.id if isinstance(node, ast.Name) else None
         if name in _SKIP_NAMES and (line, name) not in seen:
             seen.add((line, name))
-            out.append(_finding(path, line, "skip", f"`{_clip(ast.unparse(node))}` added: it skips a "
+            out.append(_finding(path, line, "skip", f"`{_code(node)}` added: it skips a "
                                                     f"test or expects it to fail.", severity="error"))
         elif isinstance(node, ast.ExceptHandler) and _swallows(node):
             out.append(_finding(path, line, "swallowed-error",
-                                f"`{_clip(ast.unparse(node).splitlines()[0])}` added in a test: "
+                                f"`{_code(node)}` added in a test: "
                                 f"it hides the failure it catches.", severity="error"))
     return out
 
@@ -2899,6 +2899,17 @@ def _shape(node: ast.AST) -> str:
 
 def _literals(node: ast.AST) -> list:
     return [n.value for n in ast.walk(node) if isinstance(n, ast.Constant)]
+
+
+def _code(node: ast.AST) -> str:
+    """node as Python source, for a finding's message: its first line, clipped; or a note that it is too deep to
+    print, as ast.unparse recurses as deep as the tree goes and overflows the stack on valid code, such as a sum of a
+    few thousand terms."""
+    try:
+        text = ast.unparse(node)
+    except RecursionError:
+        return f"(code at line {getattr(node, 'lineno', '?')}, too deep to print)"
+    return _clip(text.splitlines()[0] if text else text)
 
 
 def _clip(text: str, n: int = 160) -> str:

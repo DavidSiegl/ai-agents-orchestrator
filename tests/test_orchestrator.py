@@ -4256,6 +4256,17 @@ class TestWeakenedTests(unittest.TestCase):
         self.edit("calc.py", "return a + b", "return b + a")
         self.assertEqual(self.found()[0], [])
 
+    def test_a_deep_assertion_whose_expected_value_changes_is_reported_without_its_text(self):
+        deep = "def test_deep():\n    assert " + " + ".join(["1"] * 3000) + " == 3001\n"
+        self.put("tests/test_deep.py", deep)
+        self.git("add", "tests/test_deep.py")
+        self.git("commit", "--quiet", "-m", "deep")
+        self.edit("tests/test_deep.py", "== 3001", "== 3002")
+        self.edit("calc.py", "return a + b", "return b + a")
+        where, found = self.found()
+        self.assertEqual(where, [("tests/test_deep.py", 2, "expected-value-changed")])
+        self.assertIn("too deep to print", found[0]["message"])
+
     def test_tests_moved_to_a_renamed_file_are_not_removed(self):
         self.git("mv", "tests/test_other.py", "tests/test_moved.py")
         self.edit("tests/test_moved.py", "def test_b():", "def test_bee():")
