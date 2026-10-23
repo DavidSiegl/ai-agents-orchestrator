@@ -7,10 +7,12 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import shlex
 import struct
+import sys
 import tempfile
 import threading
 import time
@@ -4860,15 +4862,16 @@ class TestSurvivingMutants(unittest.TestCase):
         self.put("calc.py", self.BASE.replace("b + a", "a + b").replace("b * a", "a * b")
                  .replace("return 1", "return 2").replace("return 3", "return 5"))
 
-    def fake_mutmut(self, run, results="", show=None):
+    def fake_mutmut(self, run, results="", show=None, listing=None):
         """Make the gate's interpreter a fake that answers `mutmut run` with the shell code run, `results` by
-        printing results, and `show NAME` by printing show[NAME]."""
+        printing results, or with the shell code listing, and `show NAME` by printing show[NAME]."""
         python = os.path.join(self.bin, "python")
         shows = "".join(f"{shlex.quote(name)}) printf %s {shlex.quote(diff)};;\n"
                         for name, diff in (show or {}).items())
         # The gate starts mutmut as `python -c CODE ARGS`, so the command is the third argument.
         with open(python, "w") as f:
-            f.write(f'#!/bin/sh\ncase "$3" in\nrun) {run};;\nresults) printf %s {shlex.quote(results)};;\n'
+            f.write(f'#!/bin/sh\ncase "$3" in\nrun) {run};;\n'
+                    f'results) {listing or "printf %s " + shlex.quote(results)};;\n'
                     f'show) case "$4" in\n{shows}esac;;\nesac\n')
         os.chmod(python, 0o700)
         p = patch.object(orchestrator.sys, "executable", python)
@@ -4991,6 +4994,58 @@ class TestSurvivingMutants(unittest.TestCase):
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
                          [(None, None, "budget-reached"), ("calc.py", 13, "untested")])
         self.assertTrue(found[0]["message"].startswith("budget reached after 1 of 3 mutants"), found[0]["message"])
+
+    def test_a_directory_for_the_copy_that_cannot_be_made_is_a_finding(self):
+        self.change_the_functions()
+        with patch.object(orchestrator.tempfile, "mkdtemp", side_effect=OSError(28, "No space left on device")):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
+        self.assertIn("No space left on device", found[0]["message"])
+
+    def test_a_copy_that_cannot_be_removed_is_a_finding_beside_the_others(self):
+        self.change_the_functions()
+        self.fake_mutmut("exit 0", results="    calc.x_orphan__mutmut_1: no tests\n")
+        rmtree = shutil.rmtree
+        with patch.object(orchestrator.shutil, "rmtree", side_effect=OSError(16, "Device or resource busy")):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                         [(None, None, "cleanup"), ("calc.py", 13, "untested")])
+        self.assertIn("Device or resource busy", found[0]["message"])
+        left = re.search(r"`([^`]+)`", found[0]["message"]).group(1)
+        self.assertTrue(os.path.isdir(left))
+        rmtree(left)
+
+    def helper_holding_the_output(self):
+        """Shell code that starts a process in a session of its own, which keeps the fake mutmut's output open after
+        mutmut's process group is killed, and that the test kills when it ends."""
+        pid = os.path.join(self.bin, "helper.pid")
+
+        def kill():
+            with contextlib.suppress(FileNotFoundError, ProcessLookupError), open(pid) as f:
+                os.kill(int(f.read()), signal.SIGKILL)
+        self.addCleanup(kill)
+        code = f"import os, time; os.setsid(); open({pid!r}, 'w').write(str(os.getpid())); time.sleep(30)"
+        return f"{shlex.quote(sys.executable)} -c {shlex.quote(code)} &"
+
+    def test_a_run_whose_output_outlives_it_ends_within_the_stated_bound(self):
+        self.change_the_functions()
+        # mutmut ignores SIGINT here, so it is killed after the grace, and a helper keeps its output open after that.
+        self.fake_mutmut(f"trap '' INT; {self.helper_holding_the_output()} exec sleep 30")
+        started = time.monotonic()
+        with patch.multiple(orchestrator, MUTMUT_STOP_GRACE=0.5, MUTMUT_KILL_WAIT=0.5):
+            found = self.found(budget=1)
+        self.assertLess(time.monotonic() - started, 6)
+        self.assertEqual([f["rule"] for f in found], ["budget-reached"])
+
+    def test_the_report_ends_within_its_time_whatever_mutmut_does(self):
+        self.change_the_functions()
+        self.fake_mutmut("exit 0", listing="trap '' INT; exec sleep 30")
+        started = time.monotonic()
+        # Without its stop counted in, the listing would get all 4 seconds, and then the grace on top.
+        with patch.multiple(orchestrator, MUTMUT_REPORT_TIMEOUT=4, MUTMUT_STOP_GRACE=1.5, MUTMUT_KILL_WAIT=0.5):
+            found = self.found()
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual([f["rule"] for f in found], ["not-run"])
 
     def test_a_change_to_a_help_text_alone_makes_no_mutant(self):
         # The second line of the help text does not say help=, but its string starts on the line that does.

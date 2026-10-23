@@ -115,7 +115,9 @@ altered, an argument dropped - and runs each of these mutants against the tests 
   `[tool.mutmut]`'s `source_paths`, or left out by `only_mutate` or `do_not_mutate`; it is decorated, other than with
   `@staticmethod` or `@classmethod` alone; or it is `__new__`, `__getattribute__` or `__setattr__`;
 - `not-run`: mutmut could not start, failed, as it does when a test fails, or left results the gate could not read; the
-  rules name no `source_paths`; or a changed file could not be read or parsed.
+  rules name no `source_paths`; the directory to copy the tree into could not be made; or a changed file could not be
+  read or parsed;
+- `cleanup`: the copy mutmut ran in could not be removed afterwards, named so that it can be.
 
 mutmut runs in the gate's own interpreter, on a copy of the files git tracks, so the working tree stays as it was; its
 state, `mutants/`, goes into the copy too. Its own selector, mutant names such as
@@ -128,9 +130,11 @@ alone (`do_not_mutate_patterns`); see [whose rules judge a change](#whose-rules-
 as Python reads them, by a byte order mark or a coding cookie. In a repository without mutmut, a change to a function
 gets a `not-run` finding.
 
-`--mutation-budget SECONDS`, 600 by default, bounds mutmut's run; listing its results and showing the survivors take at
-most a minute more. With the flaky-tests check's three minutes and the test run, a quality build stays inside the
-orchestrator's `QUALITY_TIMEOUT` of 1200 seconds.
+`--mutation-budget SECONDS`, 600 by default, bounds mutmut's run. Stopping it takes at most 15 seconds more: SIGINT,
+10 seconds to exit, a kill of its process group, and 5 seconds to read what it printed. Listing its results and showing
+the survivors then take at most 60 seconds, each call's stop included. So the check takes at most the budget and 75
+seconds, and the few it takes to copy the tree. With the flaky-tests check's three minutes and the test run, a quality
+build stays inside the orchestrator's `QUALITY_TIMEOUT` of 1200 seconds.
 
 This repository's table keeps mutmut off argparse's help texts, which no test reads word for word:
 `do_not_mutate_patterns = ['\bhelp=']`. mutmut matches each pattern against each source line and skips every expression

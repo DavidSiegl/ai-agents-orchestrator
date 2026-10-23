@@ -136,12 +136,14 @@ GATE_TOOL_TIMEOUT = 600
 FLAKY_SEEDS = (1, 2, 3, 4, 5)
 FLAKY_RUN_TIMEOUT = 30
 # The surviving-mutants check lets mutmut run for `gate --mutation-budget` seconds, MUTATION_BUDGET by default, then
-# stops it and gives it MUTMUT_STOP_GRACE seconds to exit. Listing its results and showing what a few survivors of each
-# function change, about a third of a second each, then get MUTMUT_REPORT_TIMEOUT seconds in all.
-# So it adds at most the budget and 70 seconds to the gate: with the flaky-tests check's 180 and the test run, about
-# 900 of a quality round's QUALITY_TIMEOUT, leaving the rest to the queue and the install.
+# stops it: SIGINT, MUTMUT_STOP_GRACE seconds to exit, a kill, and MUTMUT_KILL_WAIT seconds to read what it printed.
+# Listing its results and showing what a few survivors of each function change, about a third of a second each, then
+# get MUTMUT_REPORT_TIMEOUT seconds in all, each call's stop included. So mutmut adds at most the budget and 75 seconds
+# to the gate, and copying the tree a few more: with the flaky-tests check's 180 and the test run, about 870 of a
+# quality round's QUALITY_TIMEOUT, leaving the rest to the queue and the install.
 MUTATION_BUDGET = 600
 MUTMUT_STOP_GRACE = 10
+MUTMUT_KILL_WAIT = 5
 MUTMUT_REPORT_TIMEOUT = 60
 # The gate's exit status when it could not judge the change, and so wrote no quality file.
 EXIT_GATE_UNJUDGED = 2
@@ -3192,19 +3194,35 @@ def _mutation_test(change: GateChange, functions: list[_ChangedFunction], budget
             mutated.append(f)
     if not mutated:
         return out
-    with tempfile.TemporaryDirectory() as tree_copy:
-        try:
-            _copy_for_mutmut(change.root, tree_copy, {(f.path, f.name) for f in mutated})
-            # The tree's own table may loosen the rules it is judged by; the rest of its pyproject.toml is how its
-            # tests run.
-            if os.path.abspath(rules) != tree_rules:
-                _use_mutmut_table(tree_copy, table)
-            run, stopped = _run_mutmut(tree_copy, ["run"], budget)
-        except (OSError, OrchestratorError) as e:
-            return [*out, _mutation_not_run(f"could not start mutmut: {e}")]
-        except ValueError as e:
-            return [*out, _mutation_not_run(str(e))]
-        return out + _mutmut_findings(tree_copy, mutated, run, stopped, budget)
+    try:
+        tree_copy = tempfile.mkdtemp(prefix="gate-mutmut-")
+    except OSError as e:
+        return [*out, _mutation_not_run(f"could not make a directory to copy the tree into: {e}")]
+    # The tree's own table may loosen the rules it is judged by.
+    out += _mutmut_on_copy(change.root, tree_copy, mutated, table if os.path.abspath(rules) != tree_rules else None,
+                           budget)
+    try:
+        shutil.rmtree(tree_copy)
+    except OSError as e:
+        out.append(_finding(None, None, "cleanup", f"the copy of the tree mutmut ran in, `{tree_copy}`, could not be "
+                                                   f"removed: {e}"))
+    return out
+
+
+def _mutmut_on_copy(root: str, tree_copy: str, functions: list[_ChangedFunction], table: dict | None,
+                    budget: float) -> list[dict]:
+    """Copies the files git tracks in root's working tree into tree_copy, an empty directory, with table, when given,
+    in place of its [tool.mutmut]; runs mutmut there on functions for budget seconds, and returns what it found."""
+    try:
+        _copy_for_mutmut(root, tree_copy, {(f.path, f.name) for f in functions})
+        if table is not None:
+            _use_mutmut_table(tree_copy, table)
+        run, stopped = _run_mutmut(tree_copy, ["run"], budget)
+    except (OSError, OrchestratorError) as e:
+        return [_mutation_not_run(f"could not start mutmut: {e}")]
+    except ValueError as e:
+        return [_mutation_not_run(str(e))]
+    return _mutmut_findings(tree_copy, functions, run, stopped, budget)
 
 
 def _mutmut_findings(tree_copy: str, functions: list[_ChangedFunction], run: subprocess.CompletedProcess,
@@ -3395,10 +3413,12 @@ def _mutant_prefix(f: _ChangedFunction) -> str:
 def _run_mutmut(tree_copy: str, args: list[str], timeout: float) -> tuple[subprocess.CompletedProcess, bool]:
     """mutmut with args, run in the gate's own interpreter at tree_copy, and whether it was stopped at timeout seconds.
 
-    Stopped, it gets SIGINT, on which mutmut stops trying mutants and keeps the results it has, and MUTMUT_STOP_GRACE
-    seconds to exit before it is killed. Every process it started is gone when this returns. Its temporary files, and
-    those of the tests it runs, go into tree_copy's .tmp, so that what a test it killed left goes with it. Raises
-    OSError when it cannot be started.
+    Stopped, it gets SIGINT, on which mutmut stops trying mutants and keeps the results it has, and
+    MUTMUT_STOP_GRACE seconds to exit before its process group is killed; what it printed is then read for at most
+    MUTMUT_KILL_WAIT seconds more, and lost when a process outside the group holds its output open. So it returns
+    within timeout + MUTMUT_STOP_GRACE + MUTMUT_KILL_WAIT seconds, every process in its group gone. Its temporary
+    files, and those of the tests it runs, go into tree_copy's .tmp, so that what a test it killed left goes with
+    it. Raises OSError when it cannot be started.
     """
     # `mutmut`, its console script, runs this line. `python -m mutmut` would import its __main__ a second time in each
     # forked worker, which mutmut warns against.
@@ -3422,19 +3442,39 @@ def _run_mutmut(tree_copy: str, args: list[str], timeout: float) -> tuple[subpro
             except subprocess.TimeoutExpired:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(proc.pid, signal.SIGKILL)
-                out, err = proc.communicate()
+                out, err = _abandon(proc)
     finally:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(proc.pid, signal.SIGKILL)
-    return subprocess.CompletedProcess(argv, proc.returncode, out, err), stopped
+    # A process still unreaped was killed with its group a moment ago.
+    returncode = proc.poll()
+    return subprocess.CompletedProcess(argv, -signal.SIGKILL if returncode is None else returncode, out, err), stopped
+
+
+def _abandon(proc: subprocess.Popen) -> tuple[str, str]:
+    """What proc, just killed, printed, read for at most MUTMUT_KILL_WAIT seconds; "" for both when something else,
+    such as a test's helper in a session of its own, still holds its output open, whose pipes are then closed."""
+    try:
+        return proc.communicate(timeout=MUTMUT_KILL_WAIT)
+    except subprocess.TimeoutExpired:
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is not None:
+                with contextlib.suppress(OSError):
+                    pipe.close()
+        return "", ""
+
+
+def _time_left(deadline: float) -> float:
+    """The seconds a mutmut run may be given that must end by deadline, a time.monotonic() time, stop included."""
+    return deadline - time.monotonic() - MUTMUT_STOP_GRACE - MUTMUT_KILL_WAIT
 
 
 def _mutant_statuses(tree_copy: str, deadline: float) -> tuple[dict[str, str], str | None]:
     """Each mutant mutmut made in tree_copy, by name, with its status, mutmut's word for what became of a mutant, as
     `mutmut results` words it: killed, survived, no tests, not checked and the like. Or {} and the problem, a clause,
-    when they could not be listed by deadline, a time.monotonic() time."""
+    when they could not be listed by deadline, a time.monotonic() time that mutmut's stop is kept within."""
     try:
-        proc, stopped = _run_mutmut(tree_copy, ["results", "--all", "true"], max(0.0, deadline - time.monotonic()))
+        proc, stopped = _run_mutmut(tree_copy, ["results", "--all", "true"], max(0.0, _time_left(deadline)))
     except OSError as e:
         return {}, f"could not start mutmut to list its results: {e}"
     if stopped:
@@ -3456,11 +3496,11 @@ def _survivors(tree_copy: str, f: _ChangedFunction, survived: list[str], tried: 
 
 def _example(tree_copy: str, f: _ChangedFunction, mutant: str, deadline: float) -> str | None:
     """What mutant, a mutant of f, changes, as `line N, `before` became `after``; None when mutmut does not show it by
-    deadline, a time.monotonic() time."""
-    if deadline <= time.monotonic():
+    deadline, a time.monotonic() time that mutmut's stop is kept within."""
+    if _time_left(deadline) <= 0:
         return None
     try:
-        proc, stopped = _run_mutmut(tree_copy, ["show", mutant], deadline - time.monotonic())
+        proc, stopped = _run_mutmut(tree_copy, ["show", mutant], _time_left(deadline))
     except OSError:
         return None
     shown = None if stopped or proc.returncode != 0 else _mutation(proc.stdout)
