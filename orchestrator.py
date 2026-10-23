@@ -1138,13 +1138,22 @@ class Host:
         self.ssh_target = ssh_target
         self._run = run
 
-    def run(self, argv: list[str], stdin: str | None = None,
-            timeout: float = 60) -> subprocess.CompletedProcess:
+    def run(self, argv: list[str], stdin: str | None = None, timeout: float = 60, *,
+            errors: str = "strict") -> subprocess.CompletedProcess:
+        """argv's exit status, standard output and standard error, as text, run here or over SSH on ssh_target.
+
+        stdin, when given, is its standard input. errors says what becomes of text the locale's encoding cannot
+        carry, in stdin or in the output, as open()'s errors does: "strict" raises UnicodeError, which suits
+        output that is parsed, such as JSON or a state file; "replace" puts a replacement character in its place,
+        U+FFFD in the output. Raises OrchestratorError when the command cannot be started or runs longer than
+        timeout seconds.
+        """
         if self.ssh_target:
             # BatchMode fails fast instead of hanging on a password prompt nobody can see.
             argv = ["ssh", "-o", "BatchMode=yes", self.ssh_target, shlex.join(argv)]
         try:
-            return self._run(argv, input=stdin, capture_output=True, text=True, timeout=timeout, env=child_env())
+            return self._run(argv, input=stdin, capture_output=True, text=True, errors=errors, timeout=timeout,
+                             env=child_env())
         except (OSError, subprocess.TimeoutExpired) as e:
             raise OrchestratorError(f"{shlex.join(argv)}: {e}") from e
 
@@ -1213,12 +1222,16 @@ class Host:
         proc = self.run(["git", "-C", cwd, "rev-parse", "--verify", "HEAD"])
         return proc.stdout.strip() if proc.returncode == 0 else None
 
-    def git(self, cwd: str, *args: str, timeout: float = 60) -> str:
-        return self._checked(["git", "-C", cwd, *args], self.git_run(cwd, *args, timeout=timeout))
+    def git(self, cwd: str, *args: str, timeout: float = 60, errors: str = "strict") -> str:
+        """The standard output of git args in cwd; timeout and errors as for run. Raises OrchestratorError when
+        git exits with a status other than 0."""
+        return self._checked(["git", "-C", cwd, *args], self.git_run(cwd, *args, timeout=timeout, errors=errors))
 
-    def git_run(self, cwd: str, *args: str, timeout: float = 60) -> subprocess.CompletedProcess:
-        """A git command whose failure the caller interprets; git uses exit status 1 for answers such as "no"."""
-        return self.run(["git", "-C", cwd, *args], timeout=timeout)
+    def git_run(self, cwd: str, *args: str, timeout: float = 60,
+                errors: str = "strict") -> subprocess.CompletedProcess:
+        """A git command whose failure the caller interprets; git uses exit status 1 for answers such as "no".
+        timeout and errors are as for run."""
+        return self.run(["git", "-C", cwd, *args], timeout=timeout, errors=errors)
 
     def _git_test(self, cwd: str, *args: str) -> bool:
         """Whether a yes-or-no git command answers yes: status 0 is yes, 1 is no, anything else an error."""
@@ -1294,9 +1307,14 @@ class Host:
 
     def change_diff(self, cwd: str, base: str, commit: str | None = None) -> str:
         """`git diff -U0` from base to commit, or to the working tree's tracked files without one, in the one shape
-        changed_lines parses, whatever the user's git config."""
+        changed_lines parses, whatever the user's git config.
+
+        Bytes the locale's encoding cannot decode, such as a Latin-1 line or a binary file that git diffs as text,
+        become U+FFFD, so a change to such a file is judged like any other: what is read from a diff is its paths
+        and hunk headers, not the text of its lines.
+        """
         return self.git(cwd, "-c", "core.quotePath=false", "diff", "-U0", "-M", "--no-color", "--no-ext-diff",
-                        "--src-prefix=a/", "--dst-prefix=b/", base, *([commit] if commit else []))
+                        "--src-prefix=a/", "--dst-prefix=b/", base, *([commit] if commit else []), errors="replace")
 
     def changed_files(self, cwd: str, base: str) -> list[tuple[str | None, str | None]]:
         """(path at base, path in the working tree) of each tracked file changed since base, a rename paired as

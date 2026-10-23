@@ -165,7 +165,7 @@ class FakeHost(Host):
             return {p for p in self.changed if p.startswith(f"{cwd}/")}
         return {p for p in self.changed if not any(p.startswith(f"{w}/") for w in self.worktrees)}
 
-    def git_run(self, cwd, *args, timeout=60):
+    def git_run(self, cwd, *args, timeout=60, errors="strict"):
         self.git_calls.append(args)
         self.git_log.append((cwd, args))
         if cwd in self.worktrees:
@@ -3733,6 +3733,24 @@ class TestGate(unittest.TestCase):
         self.assertIn("- `ruff` failed with exit status 2: ruff failed\n", out)
         self.assertIn("- `pymarkdown` reported findings, but none the gate could read: WARNING:pymarkdown", out)
 
+    def test_a_line_that_is_not_utf8_counts_like_any_other(self):
+        with open(os.path.join(self.repo, "f.py"), "ab") as f:
+            f.write("name = 'Größe'\n".encode("latin-1"))
+        self.says("ruff", "f.py:4:1: E501 Line too long (130 > 120)\n")
+        status, out, _ = self.gate("--out", "quality.md")
+        self.assertEqual(status, 1)
+        with open(os.path.join(self.repo, "quality.md"), encoding="utf-8") as f:
+            self.assertIn("1. `f.py:4` error ruff E501: Line too long (130 > 120)\n", f.read())
+
+    def test_an_added_binary_file_is_judged(self):
+        # git diffs the first as text, since it has no NUL byte, and the second as binary.
+        for name, raw in (("logo.png", b"\x89PNG\r\n\x1a\n\xff\xd8\xff\xe0\n"), ("blob.bin", b"\x00\xff\xfe\n")):
+            with open(os.path.join(self.repo, name), "wb") as f:
+                f.write(raw)
+            self.git("add", name)
+        status, _, err = self.gate("--out", "quality.md")
+        self.assertEqual((status, err), (0, "GATE: OK, in quality.md\n"))
+
     def test_an_unresolvable_base_writes_nothing(self):
         out = os.path.join(self.repo, "quality.md")
         status, stdout, err = self.gate("--base", "no-such-rev", "--out", out)
@@ -4079,14 +4097,9 @@ class TestWeakenedTests(unittest.TestCase):
         self.assertEqual(where, [("tests/test_other.py", None, "unparsable")])
 
     def test_a_test_file_that_cannot_be_read_says_so(self):
-        self.edit("tests/test_other.py", "assert True", "assert False")
-        base = self.git("rev-parse", "HEAD").strip()
-        diff = self.host.change_diff(self.repo, base)
-        # Not UTF-8 once the diff is taken: change_diff itself cannot read such a file.
         with open(os.path.join(self.repo, "tests/test_other.py"), "wb") as f:
             f.write(b"def test_a():\n    assert '\xff'\n")
-        found = orchestrator.weakened_tests(orchestrator.GateChange(self.repo, base, diff, changed_lines(diff)))
-        where = [(f["path"], f["line"], f["rule"]) for f in found]
+        where, found = self.found()
         self.assertEqual(where, [("tests/test_other.py", None, "unreadable")])
         self.assertIn("so its tests were not checked", found[0]["message"])
 

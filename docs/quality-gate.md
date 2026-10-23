@@ -72,6 +72,11 @@ The gate is `GATE: ERROR` when any of these holds, and `GATE: OK` otherwise:
 Exit status 0 means `GATE: OK`, 1 `GATE: ERROR`, and 2 that the gate could not judge (`REV` names no commit, not a
 git tree, no rules file, an unreadable report), in which case it writes nothing.
 
+A change to a file that is not UTF-8, such as a Latin-1 line or a binary file that git diffs as text, is judged
+like any other. The gate takes the lines a change adds from the diff's paths and hunk headers, so it replaces the
+bytes it cannot decode and counts those lines as usual. A test file that `test-integrity` cannot decode is an
+`unreadable` finding of that check, since its tests cannot be compared.
+
 The quality file starts with the `GATE:` line, then has the failed conditions, the issues (the findings on added
 lines, then the failing checks'), the findings to weigh, the failing tests, coverage of new code, the suppressions
 the change adds, and the build configuration it edits. Issues and findings to weigh are numbered as one list, issues
