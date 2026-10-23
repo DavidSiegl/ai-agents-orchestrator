@@ -2527,8 +2527,8 @@ def weakened_tests(change: GateChange) -> list[dict]:
                     after=_read_text(os.path.join(change.root, new)) if new else "",
                     added=change.changed.get(new, set()) if new else set()))
             except (OrchestratorError, OSError, UnicodeDecodeError) as e:
-                unreadable.append(_integrity_finding(new or old, None, "unreadable",
-                                                     f"could not be read, so its tests were not checked: {e}"))
+                unreadable.append(_finding(new or old, None, "unreadable",
+                                           f"could not be read, so its tests were not checked: {e}", severity="error"))
         code_changed = any(detector.is_source(p) and not detector.is_test(p) for pair in pairs for p in pair if p)
         out += unreadable + (detector.find(files, code_changed) if files else [])
     return out
@@ -2539,8 +2539,9 @@ def _read_text(path: str) -> str:
         return f.read()
 
 
-def _integrity_finding(path: str | None, line: int | None, rule: str, message: str) -> dict:
-    return {"path": path, "line": line, "severity": "error", "rule": rule, "message": message}
+def _finding(path: str | None, line: int | None, rule: str, message: str, severity: str = "warning") -> dict:
+    """A finding as GateCheck.find returns it: a check that only reports gives warnings, and one that fails errors."""
+    return {"path": path, "line": line, "severity": severity, "rule": rule, "message": message}
 
 
 def _python_test_file(path: str) -> bool:
@@ -2579,8 +2580,8 @@ def python_weakened_tests(files: list[ChangedTestFile], code_changed: bool) -> l
     for k, f in enumerate(files):
         new_tree = _parse_python(f.after)
         if new_tree is None:
-            out.append(_integrity_finding(f.new_path, None, "unparsable",
-                                          "does not parse as Python, so its tests were not checked."))
+            out.append(_finding(f.new_path, None, "unparsable",
+                                "does not parse as Python, so its tests were not checked.", severity="error"))
             continue
         # A base that does not parse has no tests to lose.
         before += _python_tests(k, _parse_python(f.before) or ast.Module(body=[], type_ignores=[]))
@@ -2594,12 +2595,12 @@ def python_weakened_tests(files: list[ChangedTestFile], code_changed: bool) -> l
         was, now = _python_assertions(at_base[t.key()].node), _python_assertions(t.node)
         path = files[t.file].new_path
         if len(now) < len(was):
-            out.append(_integrity_finding(path, t.node.lineno, "fewer-assertions",
-                                          f"`{t.name}` has {len(now)} assertions, {len(was)} at the base."))
+            out.append(_finding(path, t.node.lineno, "fewer-assertions",
+                                f"`{t.name}` has {len(now)} assertions, {len(was)} at the base.", severity="error"))
         if code_changed:
-            out += [_integrity_finding(path, b.lineno, "expected-value-changed",
-                                       f"`{t.name}`: `{_clip(ast.unparse(a))}` became `{_clip(ast.unparse(b))}`, "
-                                       f"in a change that also edits the code under test.")
+            out += [_finding(path, b.lineno, "expected-value-changed",
+                             f"`{t.name}`: `{_clip(ast.unparse(a))}` became `{_clip(ast.unparse(b))}`, "
+                             f"in a change that also edits the code under test.", severity="error")
                     for a, b in _changed_literals(was, now)]
     return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
 
@@ -2609,6 +2610,83 @@ def _parse_python(text: str) -> ast.Module | None:
         return ast.parse(text)
     except (SyntaxError, ValueError):
         return None
+
+
+def _decode_python(data: bytes) -> tuple[str, str]:
+    """The bytes of a Python source file as text, decoded as Python decodes them: by a byte order mark or a PEP 263
+    coding cookie, else as UTF-8, with the line endings left as they are; and the encoding that took. Raises
+    SyntaxError for an unknown encoding and UnicodeDecodeError for bytes the encoding cannot decode."""
+    encoding, _ = tokenize.detect_encoding(io.BytesIO(data).readline)
+    return data.decode(encoding), encoding
+
+
+@dataclass(frozen=True)
+class _ChangedFunction:
+    """A top-level function or a method of a top-level class, the unit mutmut mutates and pytest runs as a test, that
+    the change touched, as the predicate _changed_python_units was given says."""
+    path: str
+    name: str  # f, or C.f for a method
+    line: int  # the line of its def
+    first: int  # the line it starts on, its decorators included
+    source: tuple[str, ...]  # its lines, from first on, as the working tree has them
+    decorators: tuple[str, ...] = ()  # each as written, without its @
+    # The last line of the statement before it in its module or class, else its class's first line, else 0.
+    floor: int = 0
+
+    @property
+    def last(self) -> int:
+        """The line it ends on."""
+        return self.first + len(self.source) - 1
+
+
+def _adds_to(f: _ChangedFunction, added: set[int], removed: set[int]) -> bool:
+    """Whether the change added a line to f, decorators included, as _changed_python_units's touched; lines it only
+    removed do not count."""
+    return any(f.first <= n <= f.last for n in added)
+
+
+def _changed_python_units(change: GateChange, in_scope: Callable[[str], bool],
+                          touched: Callable[[_ChangedFunction, set[int], set[int]], bool] = _adds_to,
+                          ) -> tuple[list[_ChangedFunction], list[tuple[str, str]]]:
+    """The top-level functions and methods of top-level classes, in the Python files of the working tree whose paths
+    in_scope accepts, that the change touched: touched(unit, added, removed) says so, added being the lines the
+    change added to its file and removed the lines after which a hunk that only removes lines removed them, 0 for the
+    top, as _removal_points gives them. And (path, why) for each such file that could not be read or parsed, why a
+    clause such as "does not parse as Python"."""
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef)
+    functions, unreadable = [], []
+    removed = _removal_points(change.diff)
+    for path, added in change.changed.items():
+        points = removed.get(path, set())
+        if not (added or points) or not path.endswith(".py") or not in_scope(path):
+            continue
+        try:
+            with open(os.path.join(change.root, path), "rb") as f:
+                text, _ = _decode_python(f.read())
+        except (OSError, SyntaxError, UnicodeDecodeError) as e:
+            unreadable.append((path, f"could not be read ({e})"))
+            continue
+        tree = _parse_python(text)
+        if tree is None:
+            unreadable.append((path, "does not parse as Python"))
+            continue
+        lines = text.split("\n")
+        # Each unit with the last line of the statement before it in its block, or the line that opens the block.
+        units: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef, int]] = []
+        for block, opener, prefix in [(tree.body, 0, ""),
+                                      *((c.body, c.lineno, f"{c.name}.") for c in tree.body
+                                        if isinstance(c, ast.ClassDef))]:
+            ends = [opener, *(stmt.end_lineno or stmt.lineno for stmt in block)]
+            units += [(prefix + stmt.name, stmt, floor) for stmt, floor in zip(block, ends, strict=False)
+                      if isinstance(stmt, defs)]
+        for name, unit, floor in units:
+            first = min([unit.lineno, *(d.lineno for d in unit.decorator_list)])
+            candidate = _ChangedFunction(path, name, unit.lineno, first,
+                                         tuple(lines[first - 1:unit.end_lineno or unit.lineno]),
+                                         tuple(ast.unparse(d) for d in unit.decorator_list), floor)
+            if touched(candidate, added, points):
+                functions.append(candidate)
+    return functions, unreadable
 
 
 def _python_tests(k: int, tree: ast.Module) -> list[_PythonTest]:
@@ -2647,8 +2725,8 @@ def _python_removed_tests(files: list[ChangedTestFile], before: list[_PythonTest
         mine = [t for t in removed if t.file == k]
         tests = [t for t in mine if not isinstance(t.node, ast.ClassDef)]
         if f.new_path is None and mine:
-            out.append(_integrity_finding(f.old_path, None, "removed-test",
-                                          f"deleted, with its {len(tests)} tests: {_names(tests)}."))
+            out.append(_finding(f.old_path, None, "removed-test",
+                                f"deleted, with its {len(tests)} tests: {_names(tests)}.", severity="error"))
             continue
         # A class whose tests are all removed is one finding; a class that keeps or moved any is not.
         whole = {t.name for t in mine if isinstance(t.node, ast.ClassDef)
@@ -2657,12 +2735,13 @@ def _python_removed_tests(files: list[ChangedTestFile], before: list[_PythonTest
             cls = t.name.split(".")[0]
             if t.name in whole:
                 n = sum(1 for m in tests if m.name.startswith(f"{t.name}."))
-                out.append(_integrity_finding(f.old_path, t.node.lineno, "removed-test",
-                                              f"`{t.name}` and its {n} tests are gone; this was line "
-                                              f"{t.node.lineno} at the base."))
+                out.append(_finding(f.old_path, t.node.lineno, "removed-test",
+                                    f"`{t.name}` and its {n} tests are gone; this was line "
+                                    f"{t.node.lineno} at the base.", severity="error"))
             elif cls not in whole and not isinstance(t.node, ast.ClassDef):
-                out.append(_integrity_finding(f.old_path, t.node.lineno, "removed-test",
-                                              f"`{t.name}` is gone; this was line {t.node.lineno} at the base."))
+                out.append(_finding(f.old_path, t.node.lineno, "removed-test",
+                                    f"`{t.name}` is gone; this was line {t.node.lineno} at the base.",
+                                    severity="error"))
     return out
 
 
@@ -2682,12 +2761,12 @@ def _python_added_weakenings(path: str, tree: ast.Module, added: set[int]) -> li
         name = node.attr if isinstance(node, ast.Attribute) else node.id if isinstance(node, ast.Name) else None
         if name in _SKIP_NAMES and (line, name) not in seen:
             seen.add((line, name))
-            out.append(_integrity_finding(path, line, "skip", f"`{_clip(ast.unparse(node))}` added: it skips a "
-                                                              f"test or expects it to fail."))
+            out.append(_finding(path, line, "skip", f"`{_clip(ast.unparse(node))}` added: it skips a "
+                                                    f"test or expects it to fail.", severity="error"))
         elif isinstance(node, ast.ExceptHandler) and _swallows(node):
-            out.append(_integrity_finding(path, line, "swallowed-error",
-                                          f"`{_clip(ast.unparse(node).splitlines()[0])}` added in a test: "
-                                          f"it hides the failure it catches."))
+            out.append(_finding(path, line, "swallowed-error",
+                                f"`{_clip(ast.unparse(node).splitlines()[0])}` added in a test: "
+                                f"it hides the failure it catches.", severity="error"))
     return out
 
 
@@ -2775,15 +2854,15 @@ def flaky_tests(change: GateChange) -> list[dict]:
         try:
             tmp = tempfile.mkdtemp(prefix="flaky-tests-")
         except OSError as e:
-            out.append(_flaky_finding(None, None, "not-rerun", f"could not make a directory to rerun the changed "
-                                                               f"tests in: {e}; the changed tests were not rerun."))
+            out.append(_finding(None, None, "not-rerun", f"could not make a directory to rerun the changed "
+                                                         f"tests in: {e}; the changed tests were not rerun."))
         else:
             out += _rerun_findings(change.root, tmp, tests)
             try:
                 shutil.rmtree(tmp)
             except OSError as e:
-                out.append(_flaky_finding(None, None, "not-removed", f"could not remove the directory the changed "
-                                                                     f"tests were rerun in, {tmp}: {e}"))
+                out.append(_finding(None, None, "not-removed", f"could not remove the directory the changed "
+                                                               f"tests were rerun in, {tmp}: {e}"))
     return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
 
 
@@ -2794,8 +2873,8 @@ def _rerun_findings(root: str, tmp: str, tests: dict[tuple[str, str], int]) -> l
     try:
         _copy_tracked(root, tree)
     except (OSError, OrchestratorError) as e:
-        return [_flaky_finding(None, None, "not-rerun", f"could not copy the tracked files to rerun the changed "
-                                                        f"tests in: {e}; the changed tests were not rerun.")]
+        return [_finding(None, None, "not-rerun", f"could not copy the tracked files to rerun the changed "
+                                                  f"tests in: {e}; the changed tests were not rerun.")]
     inifile = _pytest_inifile(tree)
     if inifile is None:
         # pytest's configuration even when it is empty, so that pytest does not look for one above the copy.
@@ -2804,8 +2883,8 @@ def _rerun_findings(root: str, tmp: str, tests: dict[tuple[str, str], int]) -> l
             with open(inifile, "x", encoding="utf-8"):
                 pass
         except OSError as e:
-            return [_flaky_finding(None, None, "not-rerun", f"could not write an empty pytest configuration for the "
-                                                            f"reruns: {e}; the changed tests were not rerun.")]
+            return [_finding(None, None, "not-rerun", f"could not write an empty pytest configuration for the "
+                                                      f"reruns: {e}; the changed tests were not rerun.")]
     out = []
     ids, problem = _collect_python_tests(tree, inifile, tests)
     # Each test's outcome by the seed of a run that reported it as passed or failed.
@@ -2853,9 +2932,9 @@ def _rerun_findings(root: str, tmp: str, tests: dict[tuple[str, str], int]) -> l
             rule = "failed-every-run"
         else:
             continue
-        out.append(_flaky_finding(path, tests[(path, ".".join(names))], rule, message))
+        out.append(_finding(path, tests[(path, ".".join(names))], rule, message))
     if problem:
-        out.append(_flaky_finding(None, None, "not-rerun", f"{problem}; " + (
+        out.append(_finding(None, None, "not-rerun", f"{problem}; " + (
             f"only the reruns under {_seeds(seeds)} were judged." if seeds else "the changed tests were not rerun.")))
     return out
 
@@ -2910,41 +2989,20 @@ def _copy_tracked(root: str, dest: str) -> None:
 def _changed_python_tests(change: GateChange) -> tuple[dict[tuple[str, str], int], list[dict]]:
     """The test functions and methods the change added lines to or removed lines from, decorators included, in the
     test files it left in the working tree: (path, qualified name as _python_tests gives it) to the line of its def.
-    And a finding for each such file that could not be read or parsed.
+    And a finding for each such file that could not be read or parsed. Which lines count is as _edits_test says."""
+    functions, unreadable = _changed_python_units(change, _python_test_file, _edits_test)
+    tests = {(f.path, f.name): f.line for f in functions if f.name.rpartition(".")[2].startswith("test")}
+    return tests, [_finding(path, None, "not-rerun", f"{why}, so its tests were not rerun.")
+                   for path, why in unreadable]
 
-    A test's lines run from the line after the statement before it in its module or class, or after the class's
-    first line, to its last: what lies above its def, such as its decorators and comments, may have changed it, and
-    a decorator replaced or removed leaves no line of the def itself changed. Lines removed right after its last line
-    count too, though they may have been the blank lines below it."""
-    tests: dict[tuple[str, str], int] = {}
-    out = []
-    removed = _removal_points(change.diff)
-    for path, added in change.changed.items():
-        points = removed.get(path, set())
-        if not (added or points) or not _python_test_file(path):
-            continue
-        try:
-            tree = _parse_python(_read_text(os.path.join(change.root, path)))
-        except (OSError, UnicodeDecodeError) as e:
-            out.append(_flaky_finding(path, None, "not-rerun", f"could not be read, so its tests were not rerun: {e}"))
-            continue
-        if tree is None:
-            out.append(_flaky_finding(path, None, "not-rerun",
-                                      "does not parse as Python, so its tests were not rerun."))
-            continue
-        # The last line of the statement before each statement in its block, or the line that opens the block.
-        above: dict[ast.stmt, int] = {}
-        for block, opener in [(tree.body, 0), *((c.body, c.lineno) for c in tree.body if isinstance(c, ast.ClassDef))]:
-            ends = [opener, *(stmt.end_lineno or stmt.lineno for stmt in block)]
-            above.update(zip(block, ends, strict=False))
-        # _python_tests numbers the files it is given; here each is read on its own.
-        for t in _python_tests(0, tree):
-            if isinstance(t.node, ast.ClassDef):
-                continue
-            floor, last = above[t.node], t.node.end_lineno or t.node.lineno
-            if any(floor < n <= last for n in added) or any(floor <= n <= last for n in points):
-                tests[(path, t.name)] = t.node.lineno
-    return tests, out
+
+def _edits_test(f: _ChangedFunction, added: set[int], removed: set[int]) -> bool:
+    """Whether the change added lines to f, a test, or removed lines from it, as _changed_python_units's touched.
+    Its lines run from the line after the statement before it, f.floor, to its last: what lies above its def, such
+    as its decorators and comments, may have changed it, and a decorator replaced or removed leaves no line of the
+    def itself changed. Lines removed right after its last line count too, though they may have been the blank lines
+    below it."""
+    return any(f.floor < n <= f.last for n in added) or any(f.floor <= n <= f.last for n in removed)
 
 
 def _node_parts(node_id: str) -> tuple[str, list[str], str]:
@@ -2971,7 +3029,7 @@ def _collect_python_tests(root: str, inifile: str, tests: dict[tuple[str, str], 
     # some, indented or not. A collection that found tests but listed none in that form cannot be judged.
     ids = {line for line in proc.stdout.split("\n") if "::" in line and _node_parts(line)[0] in files}
     if proc.returncode == 0 and not ids:
-        return [], f"pytest, collecting the changed tests, printed no node id the gate could read: {_pytest_said(proc)}"
+        return [], f"pytest, collecting the changed tests, printed no node id the gate could read: {_said(proc)}"
     wanted = []
     for i in sorted(ids):
         path, names, _ = _node_parts(i)
@@ -2992,7 +3050,7 @@ def _rerun_python_tests(root: str, inifile: str, ids: list[str], seed: int,
     if proc is None:
         return {}, problem
     if not os.path.isfile(report):
-        return {}, f"pytest, {doing}, wrote no test report: {_pytest_said(proc)}"
+        return {}, f"pytest, {doing}, wrote no test report: {_said(proc)}"
     try:
         cases = junit_outcomes(report)
     except OrchestratorError as e:
@@ -3042,26 +3100,25 @@ def _pytest(root: str, inifile: str, doing: str, args: list[str],
         return None, f"could not start pytest, {doing}: {e}"
     proc = subprocess.CompletedProcess(raw.args, raw.returncode, os.fsdecode(raw.stdout), os.fsdecode(raw.stderr))
     if proc.returncode not in ok:
-        return None, f"pytest, {doing}, exited with status {proc.returncode}: {_pytest_said(proc)}"
+        return None, f"pytest, {doing}, exited with status {proc.returncode}: {_said(proc)}"
     return proc, None
 
 
-def _pytest_said(proc: subprocess.CompletedProcess) -> str:
-    """What a pytest that went wrong said last: the exception of an internal error, else the first line of its
-    standard error, else the last of its output."""
+def _said(proc: subprocess.CompletedProcess) -> str:
+    """What a tool that went wrong, such as pytest or mutmut, said about it, in a line: the exception of a pytest
+    internal error, else the exception that ended it when it printed a traceback, else the first line of its
+    standard error, else the last line of its output. Only "\n" ends a line, as in the verbatim output of Host.run,
+    so a path in it stays whole."""
     err = [line.strip() for line in proc.stderr.split("\n") if line.strip()]
     out = [line.strip() for line in proc.stdout.split("\n") if line.strip()]
     internal = [line.removeprefix("INTERNALERROR>").strip() for line in out if line.startswith("INTERNALERROR>")]
-    return _clip(internal[-1] if internal else err[0] if err else out[-1] if out else "nothing")
+    return _clip(internal[-1] if internal else err[-1] if err and "Traceback" in proc.stderr else err[0] if err
+                 else out[-1] if out else "nothing")
 
 
 # How a mixed-results finding says what a test did under some seeds, by its outcome as junit_outcomes gives it; a
 # skip judges nothing, so it has none.
 _OUTCOME_VERBS = {"failed": "failed", "xfailed": "failed as its xfail mark expects", "passed": "passed"}
-
-
-def _flaky_finding(path: str | None, line: int | None, rule: str, message: str) -> dict:
-    return {"path": path, "line": line, "severity": "warning", "rule": rule, "message": message}
 
 
 def _seeds(seeds: list[int]) -> str:
@@ -3094,17 +3151,6 @@ _MUTMUT_NO_TESTS = "could not find any test case for any mutant"
 _SURVIVOR_EXAMPLES = 3
 
 
-@dataclass(frozen=True)
-class _ChangedFunction:
-    """A function mutmut mutates as one, a top-level function or a method of a top-level class, that the change added
-    a line to."""
-    path: str
-    name: str  # f, or C.f for a method
-    line: int  # the line of its def
-    first: int  # the line it starts on, its decorators included
-    source: tuple[str, ...]  # its lines, from first on, as the working tree has them
-
-
 def surviving_mutants(change: GateChange, *, budget: float) -> list[dict]:
     """The surviving-mutants check's find: mutation-tests with mutmut each top-level function and method the change
     adds a line to in a Python file outside the tests. Reports at its def each such function that has mutants the
@@ -3121,18 +3167,18 @@ def surviving_mutants(change: GateChange, *, budget: float) -> list[dict]:
     functions, out = _changed_python_functions(change)
     if not functions:
         return out
-    with tempfile.TemporaryDirectory() as copy:
+    with tempfile.TemporaryDirectory() as tree_copy:
         try:
-            _copy_for_mutmut(change.root, copy, {(f.path, f.name) for f in functions})
-            proc, stopped = _run_mutmut(copy, ["run"], budget)
+            _copy_for_mutmut(change.root, tree_copy, {(f.path, f.name) for f in functions})
+            proc, stopped = _run_mutmut(tree_copy, ["run"], budget)
         except (OSError, OrchestratorError) as e:
             return [*out, _mutation_not_run(f"could not start mutmut: {e}")]
         no_tests = proc.returncode != 0 and _MUTMUT_NO_TESTS in proc.stdout
         if proc.returncode != 0 and not stopped and not no_tests:
             return [*out, _mutation_not_run(f"mutmut exited with status {proc.returncode}: "
-                                            f"{_said_by_mutmut(proc)}")]
+                                            f"{_said(proc)}")]
         deadline = time.monotonic() + MUTMUT_REPORT_TIMEOUT
-        statuses, problem = _mutant_statuses(copy, deadline)
+        statuses, problem = _mutant_statuses(tree_copy, deadline)
         if problem:
             return [*out, _mutation_not_run(problem)]
         by_prefix = {_mutant_prefix(f): f for f in functions}
@@ -3147,14 +3193,14 @@ def surviving_mutants(change: GateChange, *, budget: float) -> list[dict]:
             tried = sum(len(names) for status, names in by_status.items()
                         if status not in _MUTMUT_UNTRIED and status != "no tests")
             if by_status.get("survived"):
-                out.append(_survivors(copy, f, by_status["survived"], tried, deadline))
+                out.append(_survivors(tree_copy, f, by_status["survived"], tried, deadline))
             if by_status.get("no tests"):
-                out.append(_mutation_finding(f.path, f.line, "untested",
-                                             f"no test calls `{f.name}`, so none of its {len(by_status['no tests'])} "
-                                             f"mutants can make one fail."))
+                out.append(_finding(f.path, f.line, "untested",
+                                    f"no test calls `{f.name}`, so none of its {len(by_status['no tests'])} "
+                                    f"mutants can make one fail."))
     if stopped:
         tried = sum(1 for status in statuses.values() if status not in _MUTMUT_UNTRIED)
-        out.append(_mutation_finding(None, None, "budget-reached", (
+        out.append(_finding(None, None, "budget-reached", (
             f"budget reached after {tried} of {len(statuses)} mutants" if statuses
             else "budget reached before mutmut had made its mutants")
             + f": mutmut was stopped at {budget:g} seconds (`--mutation-budget`), so the mutants it did not try may "
@@ -3166,44 +3212,20 @@ def _changed_python_functions(change: GateChange) -> tuple[list[_ChangedFunction
     """The functions mutmut mutates as one that the change added lines to, decorators included, in the Python files
     outside the tests that it left in the working tree; and a finding for each such file that could not be read or
     parsed."""
-    defs = (ast.FunctionDef, ast.AsyncFunctionDef)
-    functions, out = [], []
-    for path, added in change.changed.items():
-        if not added or not path.endswith(".py") or _python_test_file(path):
-            continue
-        try:
-            text = _read_text(os.path.join(change.root, path))
-        except (OSError, UnicodeDecodeError) as e:
-            out.append(_mutation_finding(path, None, "not-run",
-                                         f"could not be read, so its functions were not mutation-tested: {e}"))
-            continue
-        tree = _parse_python(text)
-        if tree is None:
-            out.append(_mutation_finding(path, None, "not-run",
-                                         "does not parse as Python, so its functions were not mutation-tested."))
-            continue
-        lines = text.split("\n")
-        for node in tree.body:
-            units = [(node.name, node)] if isinstance(node, defs) else []
-            if isinstance(node, ast.ClassDef):
-                units = [(f"{node.name}.{m.name}", m) for m in node.body if isinstance(m, defs)]
-            for name, unit in units:
-                first = min([unit.lineno, *(d.lineno for d in unit.decorator_list)])
-                last = unit.end_lineno or unit.lineno
-                if any(first <= n <= last for n in added):
-                    functions.append(_ChangedFunction(path, name, unit.lineno, first, tuple(lines[first - 1:last])))
-    return functions, out
+    functions, unreadable = _changed_python_units(change, lambda path: not _python_test_file(path))
+    return functions, [_finding(path, None, "not-run", f"{why}, so its functions were not mutation-tested.")
+                       for path, why in unreadable]
 
 
-def _copy_for_mutmut(root: str, copy: str, changed: set[tuple[str, str]]) -> None:
-    """Copies the files git tracks in root's working tree into copy, marking for mutmut to skip each top-level function
-    and class of their Python files that is not, and holds no method, in changed: (path, name as _ChangedFunction
-    gives it). A Python file that cannot be read or parsed is copied as it is.
+def _copy_for_mutmut(root: str, tree_copy: str, changed: set[tuple[str, str]]) -> None:
+    """Copies the files git tracks in root's working tree into tree_copy, marking for mutmut to skip each top-level
+    function and class of their Python files that is not, and holds no method, in changed: (path, name as
+    _ChangedFunction gives it). A Python file that cannot be decoded or parsed is copied as it is.
 
     Raises OSError when a file cannot be copied, and OrchestratorError when git cannot list them.
     """
     for path in filter(None, Host().git(root, "ls-files", "-z").split("\0")):
-        src, dst = os.path.join(root, path), os.path.join(copy, path)
+        src, dst = os.path.join(root, path), os.path.join(tree_copy, path)
         # A file the change deleted is gone from the tree, and a submodule is a directory.
         if not (os.path.isfile(src) or os.path.islink(src)):
             continue
@@ -3211,16 +3233,16 @@ def _copy_for_mutmut(root: str, copy: str, changed: set[tuple[str, str]]) -> Non
         shutil.copy2(src, dst, follow_symlinks=False)
         if not path.endswith(".py") or os.path.islink(src):
             continue
+        with open(src, "rb") as f:
+            data = f.read()
         try:
-            # newline="" keeps the file's own line endings.
-            with open(src, encoding="utf-8", newline="") as f:
-                text = f.read()
-        except UnicodeDecodeError:
+            text, encoding = _decode_python(data)
+        except (SyntaxError, UnicodeDecodeError):
             continue
         marked = _skip_unchanged(path, text, changed)
         if marked != text:
-            with open(dst, "w", encoding="utf-8", newline="") as f:
-                f.write(marked)
+            with open(dst, "wb") as f:
+                f.write(marked.encode(encoding))
 
 
 def _skip_unchanged(path: str, text: str, changed: set[tuple[str, str]]) -> str:
@@ -3261,22 +3283,22 @@ def _mutant_prefix(f: _ChangedFunction) -> str:
     return f"{module}.{f'xǁ{cls}ǁ{name}' if cls else f'x_{name}'}".replace(".__init__.", ".")
 
 
-def _run_mutmut(copy: str, args: list[str], timeout: float) -> tuple[subprocess.CompletedProcess, bool]:
-    """mutmut with args, run in the gate's own interpreter at copy, and whether it was stopped at timeout seconds.
+def _run_mutmut(tree_copy: str, args: list[str], timeout: float) -> tuple[subprocess.CompletedProcess, bool]:
+    """mutmut with args, run in the gate's own interpreter at tree_copy, and whether it was stopped at timeout seconds.
 
     Stopped, it gets SIGINT, on which mutmut stops trying mutants and keeps the results it has, and MUTMUT_STOP_GRACE
     seconds to exit before it is killed. Every process it started is gone when this returns. Its temporary files, and
-    those of the tests it runs, go into copy's .tmp, so that what a test it killed left goes with copy. Raises OSError
-    when it cannot be started.
+    those of the tests it runs, go into tree_copy's .tmp, so that what a test it killed left goes with it. Raises
+    OSError when it cannot be started.
     """
     # `mutmut`, its console script, runs this line. `python -m mutmut` would import its __main__ a second time in each
     # forked worker, which mutmut warns against.
     argv = [sys.executable, "-c", "from mutmut.__main__ import cli; cli()", *args]
-    tmp = os.path.join(copy, ".tmp")
+    tmp = os.path.join(tree_copy, ".tmp")
     os.makedirs(tmp, exist_ok=True)
     # A fixed command over mutant names mutmut itself listed; no shell reads it. Its own session puts its workers in
     # its process group, so that they can be killed with it.
-    proc = subprocess.Popen(argv, cwd=copy, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,  # noqa: S603
+    proc = subprocess.Popen(argv, cwd=tree_copy, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,  # noqa: S603
                             stderr=subprocess.PIPE, text=True, errors="replace", env={**child_env(), "TMPDIR": tmp},
                             start_new_session=True)
     stopped = False
@@ -3298,38 +3320,38 @@ def _run_mutmut(copy: str, args: list[str], timeout: float) -> tuple[subprocess.
     return subprocess.CompletedProcess(argv, proc.returncode, out, err), stopped
 
 
-def _mutant_statuses(copy: str, deadline: float) -> tuple[dict[str, str], str | None]:
-    """Each mutant mutmut made in copy, by name, with its status in the words of `mutmut results`, such as killed,
-    survived, no tests or not checked; or {} and the problem, a clause, when they could not be listed by deadline, a
-    time.monotonic() time."""
+def _mutant_statuses(tree_copy: str, deadline: float) -> tuple[dict[str, str], str | None]:
+    """Each mutant mutmut made in tree_copy, by name, with its status, mutmut's word for what became of a mutant, as
+    `mutmut results` words it: killed, survived, no tests, not checked and the like. Or {} and the problem, a clause,
+    when they could not be listed by deadline, a time.monotonic() time."""
     try:
-        proc, stopped = _run_mutmut(copy, ["results", "--all", "true"], max(0.0, deadline - time.monotonic()))
+        proc, stopped = _run_mutmut(tree_copy, ["results", "--all", "true"], max(0.0, deadline - time.monotonic()))
     except OSError as e:
         return {}, f"could not start mutmut to list its results: {e}"
     if stopped:
         return {}, f"mutmut did not list its results within {MUTMUT_REPORT_TIMEOUT} seconds"
     if proc.returncode != 0:
         return {}, (f"mutmut could not list its results, exiting with status {proc.returncode}: "
-                    f"{_said_by_mutmut(proc)}")
+                    f"{_said(proc)}")
     return dict(re.findall(r"^\s*(\S+): (.+?)\s*$", proc.stdout, re.MULTILINE)), None
 
 
-def _survivors(copy: str, f: _ChangedFunction, survived: list[str], tried: int, deadline: float) -> dict:
+def _survivors(tree_copy: str, f: _ChangedFunction, survived: list[str], tried: int, deadline: float) -> dict:
     """The finding for f's survived mutants, of the tried ones mutmut ran against f's tests: how many, and what the
     first _SURVIVOR_EXAMPLES of them change, each as `mutmut show` gives it by deadline, a time.monotonic() time."""
-    examples = [e for e in (_example(copy, f, m, deadline) for m in survived[:_SURVIVOR_EXAMPLES]) if e]
+    examples = [e for e in (_example(tree_copy, f, m, deadline) for m in survived[:_SURVIVOR_EXAMPLES]) if e]
     said = f"{len(survived)} of {tried} mutants of `{f.name}` survived its tests"
-    return _mutation_finding(f.path, f.line, "survived", f"{said}: {'; '.join(examples)}." if examples
-                             else f"{said}; mutmut did not show in time what they change.")
+    return _finding(f.path, f.line, "survived", f"{said}: {'; '.join(examples)}." if examples
+                    else f"{said}; mutmut did not show in time what they change.")
 
 
-def _example(copy: str, f: _ChangedFunction, mutant: str, deadline: float) -> str | None:
+def _example(tree_copy: str, f: _ChangedFunction, mutant: str, deadline: float) -> str | None:
     """What mutant, a mutant of f, changes, as `line N, `before` became `after``; None when mutmut does not show it by
     deadline, a time.monotonic() time."""
     if deadline <= time.monotonic():
         return None
     try:
-        proc, stopped = _run_mutmut(copy, ["show", mutant], deadline - time.monotonic())
+        proc, stopped = _run_mutmut(tree_copy, ["show", mutant], deadline - time.monotonic())
     except OSError:
         return None
     shown = None if stopped or proc.returncode != 0 else _mutation(proc.stdout)
@@ -3368,20 +3390,8 @@ def _mutation(diff: str) -> tuple[int, list[str], list[str]] | None:
     return (at, old, new) if at else None
 
 
-def _said_by_mutmut(proc: subprocess.CompletedProcess) -> str:
-    """What a mutmut that went wrong said last: the exception that ended it, else the last line of its output, whose
-    progress lines end in carriage returns."""
-    err = [line.strip() for line in proc.stderr.splitlines() if line.strip()]
-    out = [line.strip() for line in re.split(r"[\r\n]", proc.stdout) if line.strip()]
-    return _clip(err[-1] if err and ("Traceback" in proc.stderr or not out) else out[-1] if out else "nothing")
-
-
 def _mutation_not_run(problem: str) -> dict:
-    return _mutation_finding(None, None, "not-run", f"{problem}; the change's functions were not mutation-tested.")
-
-
-def _mutation_finding(path: str | None, line: int | None, rule: str, message: str) -> dict:
-    return {"path": path, "line": line, "severity": "warning", "rule": rule, "message": message}
+    return _finding(None, None, "not-run", f"{problem}; the change's functions were not mutation-tested.")
 
 
 def gate_checks(mutation_budget: float) -> tuple[GateCheck, ...]:

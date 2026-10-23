@@ -4860,14 +4860,7 @@ class TestSurvivingMutants(unittest.TestCase):
 
     def test_a_mutant_the_tests_do_not_notice_is_reported_and_a_killed_one_is_not(self):
         self.change_the_functions()
-        made, list_results = [], orchestrator._mutant_statuses
-
-        def results(copy, deadline):
-            statuses, problem = list_results(copy, deadline)
-            made.extend(statuses)
-            return statuses, problem
-        with patch.object(orchestrator, "_mutant_statuses", results):
-            found = self.found()
+        made, found = self.found_and_made()
         # untouched and Box.other are as weakly tested as unchecked, but the change left them alone, so mutmut made
         # no mutant of them.
         self.assertEqual({re.sub(r"__mutmut_\d+$", "", m) for m in made},
@@ -4883,17 +4876,35 @@ class TestSurvivingMutants(unittest.TestCase):
                       found[2]["message"])
         self.assertEqual(self.git("status", "--porcelain", "--ignored"), " M calc.py\n")
 
-    def test_a_change_to_a_help_text_alone_makes_no_mutant(self):
-        # The second line of the help text does not say help=, but its string starts on the line that does.
-        self.put("calc.py", self.BASE.replace(" to make", " to build"))
+    def test_a_source_file_with_a_byte_order_mark_is_read_as_python_reads_it(self):
+        self.change_the_functions()
+        with open(os.path.join(self.repo, "calc.py"), encoding="utf-8") as f:
+            text = f.read()
+        with open(os.path.join(self.repo, "calc.py"), "w", encoding="utf-8-sig") as f:
+            f.write(text)
+        made, found = self.found_and_made()
+        # untouched and Box.other are marked to be skipped in the copy as in a file without the mark.
+        self.assertEqual({re.sub(r"__mutmut_\d+$", "", m) for m in made},
+                         {"calc.x_checked", "calc.x_unchecked", "calc.x_orphan", "calc.xǁBoxǁsize"})
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                         [("calc.py", 5, "survived"), ("calc.py", 13, "untested"), ("calc.py", 18, "survived")])
+
+    def found_and_made(self, budget=60):
+        """found(budget), and the names of the mutants mutmut made."""
         made, list_results = [], orchestrator._mutant_statuses
 
-        def results(copy, deadline):
-            statuses, problem = list_results(copy, deadline)
+        def results(*args):
+            statuses, problem = list_results(*args)
             made.extend(statuses)
             return statuses, problem
         with patch.object(orchestrator, "_mutant_statuses", results):
-            self.assertEqual(self.found(), [])
+            return made, self.found(budget)
+
+    def test_a_change_to_a_help_text_alone_makes_no_mutant(self):
+        # The second line of the help text does not say help=, but its string starts on the line that does.
+        self.put("calc.py", self.BASE.replace(" to make", " to build"))
+        made, found = self.found_and_made()
+        self.assertEqual(found, [])
         self.assertEqual(made, [])
 
     def test_a_change_to_untested_functions_alone_is_reported_as_untested(self):
