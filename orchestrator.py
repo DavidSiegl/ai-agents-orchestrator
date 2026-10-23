@@ -68,6 +68,7 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from typing import Any
 from xml.etree import ElementTree
 
 RUNS_DIR = ".orchestrator/runs"
@@ -3874,64 +3875,77 @@ def cognitive_complexity(function: ast.FunctionDef | ast.AsyncFunctionDef, cls: 
     """function's cognitive complexity, by the rules above, the functions nested in it included. cls is the name of
     the class function is a method of, None for one outside a class; it decides which calls are recursive. function's
     own decorators and defaults are not scored: they run where it is defined, not when it is called."""
-    return int(_calls_itself(function, cls)) + _cognitive_all(function.body, 0)
+    # A walk with a stack of its own rather than recursion: a syntax tree can be deeper than the interpreter lets a
+    # recursive walk go, as a sum of a few hundred terms or an if with a thousand elifs are. Each node's points do not
+    # depend on what it holds, so the order nodes are taken in does not matter.
+    points = int(_calls_itself(function, cls))
+    todo: _Held = [(s, 0) for s in function.body]
+    while todo:
+        node, nesting = todo.pop()
+        if node is None:
+            continue
+        rule = _COGNITIVE_RULES.get(type(node))
+        if rule is None:
+            todo += [(child, nesting) for child in ast.iter_child_nodes(node)]
+            continue
+        own, held = rule(node, nesting)
+        points += own
+        todo += held
+    return points
 
 
-def _cognitive(node: ast.AST, nesting: int) -> int:
-    """The points of node, and of what it holds, at nesting levels deep."""
-    rule = _COGNITIVE_RULES.get(type(node))
-    return rule(node, nesting) if rule else _cognitive_all(ast.iter_child_nodes(node), nesting)
+def _cognitive_if(node: ast.If, nesting: int) -> tuple[int, _Held]:
+    """An if, with the elifs and the else that follow it."""
+    points = 1 + nesting
+    held: _Held = []
+    while True:
+        held += [(node.test, nesting), *((s, nesting + 1) for s in node.body)]
+        orelse = node.orelse
+        # ast writes an elif as an else that holds just an if. That if starts in the elif's column; an if written
+        # inside an else is indented further.
+        if not (len(orelse) == 1 and isinstance(orelse[0], ast.If) and orelse[0].col_offset == node.col_offset):
+            break
+        node = orelse[0]
+        points += 1
+    return _with_else(points, held, orelse, nesting)
 
 
-def _cognitive_all(nodes: Iterable[ast.AST | None], nesting: int) -> int:
-    """The points of nodes, each at nesting levels deep; None, a part a node goes without, has none."""
-    return sum(_cognitive(n, nesting) for n in nodes if n is not None)
+def _with_else(points: int, held: _Held, orelse: list[ast.stmt], nesting: int) -> tuple[int, _Held]:
+    """points and held, with the else of an if, a loop or a try whose body is orelse: one point, and its body one level
+    deeper; nothing for an empty orelse, which is no else."""
+    if not orelse:
+        return points, held
+    return points + 1, held + [(s, nesting + 1) for s in orelse]
 
 
-def _cognitive_if(node: ast.If, nesting: int, *, elif_: bool = False) -> int:
-    """An if, or with elif_ an elif, with the elif and else branches that follow it."""
-    out = (1 if elif_ else 1 + nesting) + _cognitive(node.test, nesting) + _cognitive_all(node.body, nesting + 1)
-    # ast writes an elif as an else that holds just an if. That if starts in the elif's column; an if written inside an
-    # else is indented further.
-    orelse = node.orelse
-    if len(orelse) == 1 and isinstance(orelse[0], ast.If) and orelse[0].col_offset == node.col_offset:
-        return out + _cognitive_if(orelse[0], nesting, elif_=True)
-    return out + _cognitive_else(orelse, nesting)
-
-
-def _cognitive_else(body: list[ast.stmt], nesting: int) -> int:
-    """The else of an if, a loop or a try, whose body is body: none for an empty body, which is no else."""
-    return 1 + _cognitive_all(body, nesting + 1) if body else 0
-
-
-def _cognitive_loop(node: ast.For | ast.AsyncFor | ast.While, nesting: int) -> int:
+def _cognitive_loop(node: ast.For | ast.AsyncFor | ast.While, nesting: int) -> tuple[int, _Held]:
     head = [node.test] if isinstance(node, ast.While) else [node.target, node.iter]
-    return (1 + nesting + _cognitive_all(head, nesting) + _cognitive_all(node.body, nesting + 1)
-            + _cognitive_else(node.orelse, nesting))
+    held: _Held = [*((h, nesting) for h in head), *((s, nesting + 1) for s in node.body)]
+    return _with_else(1 + nesting, held, node.orelse, nesting)
 
 
-def _cognitive_try(node: ast.Try | ast.TryStar, nesting: int) -> int:
-    handlers = sum(1 + nesting + _cognitive_all([h.type], nesting) + _cognitive_all(h.body, nesting + 1)
-                   for h in node.handlers)
-    return (_cognitive_all(node.body, nesting) + handlers + _cognitive_else(node.orelse, nesting)
-            + _cognitive_all(node.finalbody, nesting))
+def _cognitive_try(node: ast.Try | ast.TryStar, nesting: int) -> tuple[int, _Held]:
+    held: _Held = [(s, nesting) for s in [*node.body, *node.finalbody]]
+    for h in node.handlers:
+        held += [(h.type, nesting), *((s, nesting + 1) for s in h.body)]
+    return _with_else(len(node.handlers) * (1 + nesting), held, node.orelse, nesting)
 
 
-def _cognitive_match(node: ast.Match, nesting: int) -> int:
+def _cognitive_match(node: ast.Match, nesting: int) -> tuple[int, _Held]:
     # A case's pattern holds no operators and no branches; its guard and body are what can.
-    cases = sum(_cognitive_all([c.guard, *c.body], nesting + 1) for c in node.cases)
-    return 1 + nesting + _cognitive(node.subject, nesting) + cases
+    return 1 + nesting, [(node.subject, nesting),
+                         *((part, nesting + 1) for c in node.cases for part in [c.guard, *c.body])]
 
 
-def _cognitive_ternary(node: ast.IfExp, nesting: int) -> int:
-    return 1 + nesting + _cognitive_all([node.test, node.body, node.orelse], nesting + 1)
+def _cognitive_ternary(node: ast.IfExp, nesting: int) -> tuple[int, _Held]:
+    return 1 + nesting, [(node.test, nesting + 1), (node.body, nesting + 1), (node.orelse, nesting + 1)]
 
 
-def _cognitive_boolean(node: ast.BoolOp, nesting: int) -> int:
+def _cognitive_boolean(node: ast.BoolOp, nesting: int) -> tuple[int, _Held]:
     """A sequence of boolean operators, its operands that are themselves and or or included: one point for its first
     operator and one for each that differs from the one before it."""
     ops, operands = _boolean_sequence(node)
-    return 1 + sum(a is not b for a, b in itertools.pairwise(ops)) + _cognitive_all(operands, nesting)
+    return 1 + sum(a is not b for a, b in itertools.pairwise(ops)), [(o, nesting) for o in operands]
 
 
 def _boolean_sequence(node: ast.BoolOp) -> tuple[list[type[ast.boolop]], list[ast.expr]]:
@@ -3939,31 +3953,35 @@ def _boolean_sequence(node: ast.BoolOp) -> tuple[list[type[ast.boolop]], list[as
     the operands that are neither."""
     ops: list[type[ast.boolop]] = []
     operands: list[ast.expr] = []
-    for k, value in enumerate(node.values):
-        if k:
-            ops.append(type(node.op))
-        if isinstance(value, ast.BoolOp):
-            inner_ops, inner_operands = _boolean_sequence(value)
-            ops += inner_ops
-            operands += inner_operands
+    # A stack of what is still to be read, the next item last: operands, and the operator types between them.
+    todo: list[ast.expr | type[ast.boolop]] = [node]
+    while todo:
+        item = todo.pop()
+        if isinstance(item, ast.BoolOp):
+            written: list[ast.expr | type[ast.boolop]] = []
+            for k, value in enumerate(item.values):
+                written += [type(item.op), value] if k else [value]
+            todo += reversed(written)
+        elif isinstance(item, ast.expr):
+            operands.append(item)
         else:
-            operands.append(value)
+            ops.append(item)
     return ops, operands
 
 
-def _cognitive_function(node: ast.FunctionDef | ast.AsyncFunctionDef, nesting: int) -> int:
+def _cognitive_function(node: ast.FunctionDef | ast.AsyncFunctionDef, nesting: int) -> tuple[int, _Held]:
     """A function nested in the one judged, or a method of a class nested in it."""
     outside = [*node.decorator_list, *node.args.defaults, *node.args.kw_defaults]
-    return int(_calls_itself(node, None)) + _cognitive_all(outside, nesting) + _cognitive_all(node.body, nesting + 1)
+    return int(_calls_itself(node, None)), [*((o, nesting) for o in outside), *((s, nesting + 1) for s in node.body)]
 
 
-def _cognitive_lambda(node: ast.Lambda, nesting: int) -> int:
-    return _cognitive_all([*node.args.defaults, *node.args.kw_defaults], nesting) + _cognitive(node.body, nesting + 1)
+def _cognitive_lambda(node: ast.Lambda, nesting: int) -> tuple[int, _Held]:
+    return 0, [*((d, nesting) for d in [*node.args.defaults, *node.args.kw_defaults]), (node.body, nesting + 1)]
 
 
-# The node types that cognitive_complexity scores by a rule of their own; any other adds only the points of what it
-# holds, at its own level.
-_COGNITIVE_RULES: dict[type[ast.AST], Callable[..., int]] = {
+# The node types that cognitive_complexity scores by a rule of their own; any other scores nothing itself, and what it
+# holds is scored at its level.
+_COGNITIVE_RULES: dict[type[ast.AST], _CognitiveRule] = {
     ast.If: _cognitive_if, ast.For: _cognitive_loop, ast.AsyncFor: _cognitive_loop, ast.While: _cognitive_loop,
     ast.Try: _cognitive_try, ast.TryStar: _cognitive_try, ast.Match: _cognitive_match, ast.IfExp: _cognitive_ternary,
     ast.BoolOp: _cognitive_boolean, ast.FunctionDef: _cognitive_function, ast.AsyncFunctionDef: _cognitive_function,
@@ -3974,9 +3992,16 @@ _COGNITIVE_RULES: dict[type[ast.AST], Callable[..., int]] = {
 def _calls_itself(function: ast.FunctionDef | ast.AsyncFunctionDef, cls: str | None) -> bool:
     """Whether function's body calls function: by its name, or as self.m, cls.m or C.m when it is the method m of the
     class C, cls."""
-    me = {f"{owner}.{function.name}" for owner in ("self", "cls", cls)} if cls else {function.name}
-    return any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name | ast.Attribute) and ast.unparse(n.func) in me
-               for statement in function.body for n in ast.walk(statement))
+    for n in (n for statement in function.body for n in ast.walk(statement)):
+        if not isinstance(n, ast.Call):
+            continue
+        f = n.func
+        if cls is None and isinstance(f, ast.Name) and f.id == function.name:
+            return True
+        if (cls is not None and isinstance(f, ast.Attribute) and f.attr == function.name
+                and isinstance(f.value, ast.Name) and f.value.id in ("self", "cls", cls)):
+            return True
+    return False
 
 
 def gate_checks(mutation_budget: float) -> tuple[GateCheck, ...]:

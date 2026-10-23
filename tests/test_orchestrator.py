@@ -5633,6 +5633,10 @@ class TestCognitiveComplexity(unittest.TestCase):
         tree = ast.parse(textwrap.dedent(source)).body[0]
         self.assertEqual([orchestrator.cognitive_complexity(m, "Tree") for m in tree.body], [1, 1, 0, 1])
 
+    def test_code_deeper_than_python_s_recursion_limit_is_scored(self):
+        self.assertEqual(score(LONG_SUM), 0)
+        self.assertEqual(score(LONG_ELIF), 1001)  # the if, and one for each elif
+
     def test_the_seven_functions_sonarqube_flagged_score_over_the_limit(self):
         with open(S3776_FUNCTIONS) as f:
             tree = ast.parse(f.read())
@@ -5645,6 +5649,13 @@ class TestCognitiveComplexity(unittest.TestCase):
                                                  "_shared_name", "_parse_step"]))
         for name, n in scores.items():
             self.assertGreater(n, orchestrator.COGNITIVE_COMPLEXITY_LIMIT, name)
+
+
+# Valid Python whose syntax tree is deeper than the interpreter's recursion limit lets a recursive walk go: a sum of 350
+# terms, and an if with 1000 elifs.
+LONG_SUM = "def long_sum(a):\n    return " + " + ".join(["a"] * 350) + "\n"
+LONG_ELIF = ("def long_elif(x):\n    if x == 0:\n        pass\n"
+             + "".join(f"    elif x == {k}:\n        pass\n" for k in range(1, 1001)))
 
 
 def flat(name, n, indent=""):
@@ -5811,6 +5822,17 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.assertEqual(where, [("broken.py", None, "not-scored")])
         self.assertEqual(found[0]["message"], "its base does not parse as Python, so its functions could not be "
                                               "compared with theirs.")
+
+    def test_code_deeper_than_python_s_recursion_limit_is_judged_in_the_change_and_at_the_base(self):
+        self.put("deep.py", LONG_SUM + "\n\n" + LONG_ELIF)
+        self.git("add", "deep.py")
+        self.assertEqual(self.found()[0], [("deep.py", self.def_line("long_elif", "deep.py"), "over-limit")])
+        self.git("commit", "--quiet", "-m", "deep")
+        self.edit("deep.py", "    elif x == 1000:\n        pass\n",
+                  "    elif x == 1000:\n        pass\n    else:\n        pass\n")  # 1001 becomes 1002
+        found = self.found()[1]
+        self.assertEqual([f["message"] for f in found],
+                         ["`long_elif`: cognitive complexity 1002, 1001 at the base; the limit is 15."])
 
     def test_it_fails_the_gate(self):
         [check] = [c for c in orchestrator.gate_checks(orchestrator.MUTATION_BUDGET) if c.name == "cognitive-complexity"]
