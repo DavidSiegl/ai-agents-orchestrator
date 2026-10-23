@@ -5796,6 +5796,14 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.git("add", "other.py")
         self.assertEqual(self.found()[0], [])
 
+    def test_an_unchanged_function_moved_out_of_a_deleted_file_is_compared_with_its_old_self(self):
+        self.git("rm", "--quiet", "calc.py")
+        # Lines enough of its own that git does not take other.py for calc.py renamed.
+        self.put("other.py", "".join(f"CONSTANT_{k} = {k}\n" for k in range(200)) + "\n\n" + flat("big", 20))
+        self.git("add", "other.py")
+        self.assertIn(("calc.py", None), self.host.changed_files(self.repo, self.git("rev-parse", "HEAD").strip()))
+        self.assertEqual(self.found()[0], [])
+
     def test_an_unchanged_function_made_a_method_in_its_file_is_compared_with_its_old_self(self):
         big = flat("big", 20)
         self.edit("calc.py", big, "class Box:\n" + flat("big", 20, indent="    "))
