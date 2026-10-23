@@ -2618,12 +2618,17 @@ def _parse_python(text: str) -> ast.Module | None:
         return None
 
 
-def _decode_python(data: bytes) -> tuple[str, str]:
-    """The bytes of a Python source file as text, decoded as Python decodes them: by a byte order mark or a PEP 263
-    coding cookie, else as UTF-8, with the line endings left as they are; and the encoding that took. Raises
-    SyntaxError for an unknown encoding and UnicodeDecodeError for bytes the encoding cannot decode."""
-    encoding, _ = tokenize.detect_encoding(io.BytesIO(data).readline)
-    return data.decode(encoding), encoding
+def _decode_python(raw: bytes) -> tuple[str, str]:
+    """raw, the bytes of a Python source file, as text, decoded as Python decodes them: by a byte order mark or a PEP
+    263 coding cookie, else as UTF-8, with the line endings left as they are; and the encoding that took. Raises
+    SyntaxError for an encoding that is unknown or not a text encoding, such as rot13, and UnicodeDecodeError for bytes
+    the encoding cannot decode."""
+    try:
+        encoding, _ = tokenize.detect_encoding(io.BytesIO(raw).readline)
+        return raw.decode(encoding), encoding
+    except LookupError as e:
+        # A codec Python knows by name that is not a text encoding: it decodes no source.
+        raise SyntaxError(f"the coding cookie names no text encoding: {e}") from e
 
 
 @dataclass(frozen=True)
@@ -3353,7 +3358,7 @@ def _unmutatable(f: _ChangedFunction) -> str | None:
 def _use_mutmut_table(tree_copy: str, table: dict) -> None:
     """Puts table in place of the [tool.mutmut] of tree_copy's pyproject.toml, leaving the rest of the file, the
     tests' own settings among it, as the tree has it. Raises OSError when the file cannot be read or written, and
-    ValueError when the result does not read back as table, as when table holds a value TOML's flat form cannot take
+    ValueError when the result does not read back as table, as when table holds a setting TOML's flat form cannot take
     or the file defines the table other than under a [tool.mutmut] header."""
     path = os.path.join(tree_copy, "pyproject.toml")
     try:
@@ -3398,9 +3403,9 @@ def _mark_for_mutmut(tree_copy: str, changed: set[tuple[str, str]]) -> None:
             if not name.endswith(".py") or os.path.islink(path):
                 continue
             with open(path, "rb") as f:
-                data = f.read()
+                raw = f.read()
             try:
-                text, encoding = _decode_python(data)
+                text, encoding = _decode_python(raw)
             except (SyntaxError, UnicodeDecodeError):
                 continue
             marked = _skip_unchanged(os.path.relpath(path, tree_copy).replace(os.sep, "/"), text, changed)

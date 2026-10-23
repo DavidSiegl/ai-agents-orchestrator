@@ -5117,6 +5117,22 @@ class TestSurvivingMutants(unittest.TestCase):
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
         self.assertIn("exited with status 1: failed to collect stats. runner returned 1", found[0]["message"])
 
+    def test_a_file_whose_coding_cookie_names_no_text_encoding_is_not_read(self):
+        # rot13 is a codec of str to str: Python finds it by name, but decodes no source with it.
+        self.put("tools/rot.py", "# coding: rot13\n")
+        self.git("add", "tools/rot.py")
+        self.git("commit", "--quiet", "-m", "rot13")
+        with self.subTest("changed"):
+            self.put("tools/rot.py", "# coding: rot13\nqrs s():\n    erghea 1\n")
+            found = self.found()
+            self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("tools/rot.py", None, "not-run")])
+            self.assertIn("could not be read", found[0]["message"])
+        with self.subTest("copied"):
+            self.put("tools/rot.py", "# coding: rot13\n")
+            self.change_the_functions("checked")
+            self.fake_mutmut("exit 0", results="    calc.x_checked__mutmut_1: killed\n")
+            self.assertEqual(self.found(), [])
+
     def test_a_change_to_a_help_text_alone_makes_no_mutant(self):
         # The second line of the help text does not say help=, but its string starts on the line that does.
         self.put("calc.py", self.BASE.replace(" to make", " to build"))
