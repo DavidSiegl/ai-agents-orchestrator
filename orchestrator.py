@@ -2862,8 +2862,8 @@ def _decode_python(raw: bytes) -> tuple[str, str]:
 
 @dataclass(frozen=True)
 class _ChangedFunction:
-    """A top-level function or a method of a top-level class, the unit mutmut mutates and pytest runs as a test, that
-    the change touched, as the predicate _changed_python_units was given says."""
+    """A top-level function or a method of a top-level class, the unit mutmut mutates and pytest runs as a test, as
+    _python_units reads it from the working tree; _changed_python_units gives those the change touched."""
     path: str
     name: str  # f, or C.f for a method
     line: int  # the line of its def
@@ -2893,7 +2893,6 @@ def _changed_python_units(change: GateChange, in_scope: Callable[[str], bool],
     added to its file and removed the lines after which a hunk that only removes lines removed them, 0 for the top, as
     _removal_points gives them. And (path, why) for each such file that could not be read or parsed, why a clause such
     as "does not parse as Python"."""
-    defs = (ast.FunctionDef, ast.AsyncFunctionDef)
     functions, unreadable = [], []
     removed = _removal_points(change.diff)
     for path, added in change.changed.items():
@@ -2910,23 +2909,29 @@ def _changed_python_units(change: GateChange, in_scope: Callable[[str], bool],
         if tree is None:
             unreadable.append((path, "does not parse as Python"))
             continue
-        lines = text.split("\n")
-        # Each unit with the last line of the statement before it in its block, or the line that opens the block.
-        units: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef, int]] = []
-        for block, opener, prefix in [(tree.body, 0, ""),
-                                      *((c.body, c.lineno, f"{c.name}.") for c in tree.body
-                                        if isinstance(c, ast.ClassDef))]:
-            ends = [opener, *(stmt.end_lineno or stmt.lineno for stmt in block)]
-            units += [(prefix + stmt.name, stmt, floor) for stmt, floor in zip(block, ends, strict=False)
-                      if isinstance(stmt, defs)]
-        for name, unit, floor in units:
-            first = min([unit.lineno, *(d.lineno for d in unit.decorator_list)])
-            candidate = _ChangedFunction(path, name, unit.lineno, first,
-                                         tuple(lines[first - 1:unit.end_lineno or unit.lineno]),
-                                         tuple(ast.unparse(d) for d in unit.decorator_list), floor)
-            if touched(candidate, added, points):
-                functions.append(candidate)
+        functions += [unit for unit in _python_units(path, text, tree) if touched(unit, added, points)]
     return functions, unreadable
+
+
+def _python_units(path: str, text: str, tree: ast.Module) -> list[_ChangedFunction]:
+    """Each top-level function and method of a top-level class of tree, the module at path whose source is text,
+    as a _ChangedFunction, whether or not the change touched it; top-level ones first, then each class's."""
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef)
+    lines = text.split("\n")
+    out = []
+    # Each block with the line that opens it, and the qualified-name prefix of its functions.
+    for block, opener, prefix in [(tree.body, 0, ""),
+                                  *((c.body, c.lineno, f"{c.name}.") for c in tree.body
+                                    if isinstance(c, ast.ClassDef))]:
+        # The last line of the statement before each statement of the block, or the line that opens the block.
+        ends = [opener, *(stmt.end_lineno or stmt.lineno for stmt in block)]
+        for unit, floor in zip(block, ends, strict=False):
+            if isinstance(unit, defs):
+                first = min([unit.lineno, *(d.lineno for d in unit.decorator_list)])
+                out.append(_ChangedFunction(path, prefix + unit.name, unit.lineno, first,
+                                            tuple(lines[first - 1:unit.end_lineno or unit.lineno]),
+                                            tuple(ast.unparse(d) for d in unit.decorator_list), floor))
+    return out
 
 
 def _python_tests(k: int, tree: ast.Module) -> list[_PythonTest]:
