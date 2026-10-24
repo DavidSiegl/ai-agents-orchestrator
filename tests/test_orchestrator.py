@@ -3710,6 +3710,16 @@ class TestGate(unittest.TestCase):
         with open(os.path.join(self.repo, "f.py"), "a") as f:
             f.write("".join(f"new{k} = {k}\n" for k in range(start, start + n)))
 
+    def test_each_linter_reads_every_file_whatever_syntax_the_environment_gives_git_s_pathspecs(self):
+        # Literal and no-glob pathspecs list no file for "*.py", and glob ones only the top level's.
+        self.put("sub/g.py", "g = 1\n")
+        self.git("add", "sub/g.py")
+        self.add_lines(1)
+        for name in orchestrator.GIT_PATHSPEC_ENV:
+            with self.subTest(name), patch.dict("os.environ", {name: "1"}):
+                self.gate()
+                self.assertTrue({"f.py", "sub/g.py"} <= set(self.argv("ruff")), self.argv("ruff"))
+
     def test_a_clean_change_passes(self):
         self.add_lines(1)
         status, out, _ = self.gate()
@@ -4279,10 +4289,14 @@ class TestWeakenedTests(unittest.TestCase):
         self.git("commit", "--quiet", "-m", "mutmut's state")
 
     def test_a_removed_test_is_found_whatever_syntax_the_environment_gives_git_s_pathspecs(self):
-        self.edit("tests/test_calc.py", "    def test_large(self):\n        assert add(10, 20) == 30\n\n", "")
-        for name in orchestrator.GIT_PATHSPEC_ENV:
+        # A literal pathspec matches no file, and a case-blind one leaves out Mutants/ with mutants/.
+        self.put("Mutants/test_case.py", "def test_a():\n    assert 1\n\n\ndef test_b():\n    assert 2\n")
+        self.git("add", "Mutants")
+        self.git("commit", "--quiet", "-m", "a directory that is not mutmut's")
+        self.edit("Mutants/test_case.py", "def test_b():\n    assert 2\n", "")
+        for name in ("GIT_LITERAL_PATHSPECS", "GIT_ICASE_PATHSPECS"):
             with self.subTest(name), patch.dict("os.environ", {name: "1"}):
-                self.assertEqual(self.found()[0], [("tests/test_calc.py", 11, "removed-test")])
+                self.assertEqual(self.found()[0], [("Mutants/test_case.py", 5, "removed-test")])
 
     def test_removing_mutmut_s_state_removes_no_test(self):
         self.commit_mutmut_state()
