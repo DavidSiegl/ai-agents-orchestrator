@@ -14,6 +14,17 @@ was done.
   check reuses `Host.gitleaks_problem`, the run's pre-push check, which asks `gitleaks git --help` because a
   distribution's build may print no version number. So `doctor` shows no gitleaks version. Kept by choice
   (2026-10-24).
+- **The macOS builds are first tried on a published release.** `.github/workflows/macos-binary.yml` runs only on
+  `release: published` or by hand for an existing tag, so a change that breaks the macOS binary or
+  `packaging/build-desktop.sh` on macOS merges green, and the release then lacks those assets until it is fixed and
+  the workflow is run again for the tag. Found adding the desktop app to releases (2026-10-24), whose `.dmg` had
+  never been built before the first release with it. Closes with a macOS build of pull requests that touch
+  `packaging/` or `ui/`, or a decision that a rerun after the release is enough.
+- **The frontend's tests fail on Node 25 and later.** Node's own `localStorage` global, which is undefined without
+  `--localstorage-file`, hides jsdom's, so `ui/src/test/setup.ts`'s `localStorage.clear()` throws and every test
+  fails. Jenkins's Node 20 is unaffected; locally `NODE_OPTIONS=--no-experimental-webstorage npm test` passes.
+  Found on Node 26 (2026-10-24). Closes with tests that pass on both, e.g. jsdom's storage installed in
+  `setup.ts`, or `engines` in `ui/package.json` that rules the newer Node out.
 - **A pull request opened over a conflict stays a draft with its warning after the conflict is resolved.** When
   `Host.merge_upstream` finds conflicts with the base branch, `pr_body` opens the body with a `[!WARNING]` naming
   the conflicting files and `create_pr` opens it as a draft; nothing ever edits the body or marks it ready, and

@@ -18,11 +18,13 @@ TESTING.md
 coverage.xml
 quality.md
 
-# The desktop app's dependencies and build output, and the schemas `tauri build` generates
+# The desktop app's dependencies and build output, the schemas `tauri build` generates, and the orchestrator
+# binary packaging/build-desktop.sh copies in for it to bundle
 ui/node_modules/
 ui/dist/
 ui/src-tauri/target/
 ui/src-tauri/gen/
+ui/src-tauri/binaries/
 
 # What Hypothesis keeps of the examples it tried
 .hypothesis/

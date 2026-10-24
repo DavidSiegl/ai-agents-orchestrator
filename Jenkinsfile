@@ -15,6 +15,9 @@ pipeline {
     environment {
         UV_NO_PROGRESS = '1'
         COVERAGE_FILE  = '.coverage'
+        // For the UI and Package stages: crates are fetched into the workspace, which cleanWs empties, so no build
+        // compiles sources an earlier build left behind.
+        CARGO_HOME     = "${env.WORKSPACE}/.cargo-home"
         // The GitHub login Jenkins posts pull request statuses as, its GitHub App's "<slug>[bot]", which the agents
         // cannot post as. Empty: no build of main trusts a pull request build, and each judges itself.
         PR_STATUS_CREATOR = 'davidsiegl-jenkins[bot]'
@@ -97,11 +100,6 @@ pipeline {
         // line.
         stage('UI') {
             when { expression { return env.JUDGED_AT_PR != 'true' } }
-            environment {
-                // Crates are fetched into the workspace, which cleanWs empties, so no build compiles sources an
-                // earlier build left behind.
-                CARGO_HOME = "${env.WORKSPACE}/.cargo-home"
-            }
             steps {
                 dir('ui') {
                     sh '''
@@ -169,12 +167,13 @@ pipeline {
             }
         }
 
-        // The Linux binary, built on every build, so a change that breaks it fails before it is merged; Release
-        // attaches it. The macOS binary comes from .github/workflows/macos-binary.yml, with the same script, since
-        // Jenkins has no macOS machine.
+        // The Linux binary and the desktop app around it, built on every build, so a change that breaks either
+        // fails before it is merged; Release attaches them. The macOS ones come from
+        // .github/workflows/macos-binary.yml, with the same scripts, since Jenkins has no macOS machine.
         stage('Package') {
             steps {
                 sh 'packaging/build-binary.sh'
+                sh 'packaging/build-desktop.sh'
             }
         }
 
@@ -203,8 +202,11 @@ pipeline {
                             cat gh-release-view.err >&2
                             exit 1
                         fi
-                        # Package builds it on every build that reaches Release.
-                        [ -f dist/orchestrator-linux-x86_64.sha256 ] || { echo "no Linux binary; run the whole build" >&2; exit 1; }
+                        # Package builds them on every build that reaches Release.
+                        for f in orchestrator-linux-x86_64 orchestrator-desktop-linux-x86_64.deb \
+                                 orchestrator-desktop-linux-x86_64.AppImage; do
+                            [ -f "dist/$f.sha256" ] || { echo "no dist/$f; run the whole build" >&2; exit 1; }
+                        done
                         # orchestrator.py packed as an executable zipapp, which runs on any machine with Python 3.13+.
                         mkdir -p build/pyz dist
                         cp orchestrator.py build/pyz/
@@ -212,9 +214,12 @@ pipeline {
                         uv run --frozen python -m zipapp build/pyz -p '/usr/bin/env python3' -c -o dist/orchestrator.pyz
                         uv run --frozen python dist/orchestrator.pyz --help >/dev/null
                         (cd dist && sha256sum orchestrator.pyz > orchestrator.pyz.sha256)
-                        # Publishing it starts .github/workflows/macos-binary.yml, which adds the macOS binary.
+                        # Publishing it starts .github/workflows/macos-binary.yml, which adds the macOS binary and app.
                         gh release create "$tag" dist/orchestrator.pyz dist/orchestrator.pyz.sha256 \
                             dist/orchestrator-linux-x86_64 dist/orchestrator-linux-x86_64.sha256 \
+                            dist/orchestrator-desktop-linux-x86_64.deb dist/orchestrator-desktop-linux-x86_64.deb.sha256 \
+                            dist/orchestrator-desktop-linux-x86_64.AppImage \
+                            dist/orchestrator-desktop-linux-x86_64.AppImage.sha256 \
                             --target "$sha" --title "$tag" --generate-notes
                     '''
                 }

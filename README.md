@@ -141,8 +141,12 @@ A Python without tkinter makes `gui` exit with status 1 and the command to insta
 
 A desktop app is taking over from the window, one step at a time. So far it is read-only: it shows one
 project's runs and their handoff files live, without Refresh, and it starts no runs. It is a Tauri 2 app in
-[`ui/`](ui), a React and TypeScript frontend in a native window, and it is not released yet: run it from a
-checkout.
+[`ui/`](ui), a React and TypeScript frontend in a native window. Each release has it for Linux x86_64, as
+`orchestrator-desktop-linux-x86_64.deb` and `.AppImage`, and for Apple Silicon macOS, as
+`orchestrator-desktop-macos-arm64.dmg`, each with its `.sha256` and the orchestrator binary inside, so it needs
+neither Python nor a checkout. The `.deb` installs that binary as `/usr/bin/orchestrator` too. The macOS app is
+signed ad hoc only, not notarized: macOS refuses to open it the first time, as it does the binary (see
+[Install](#install)).
 
 - **Overview:** each run's key and task, its progress through the workflow's steps, its round and quality
   round, the current role, whether it is running or stale with the age of its heartbeat, the question it is
@@ -151,10 +155,10 @@ checkout.
   one you pick, rendered as Markdown. The list gains new files as they are written, and the file shown is shown
   again when it changes.
 - **Project bar:** a project folder and, for agents on another machine, a saved herdr machine, as in the window.
-  The app opens its own checkout first, then the project you opened last.
+  The app opens the project you opened last; until then, run from a checkout, it opens that checkout.
 
-It needs Node 20.19 or later with npm, and Rust ([rustup](https://rustup.rs)) with
-[Tauri 2's system packages](https://v2.tauri.app/start/prerequisites/). On Debian or Ubuntu those are:
+To run it from a checkout instead, it needs Node 20.19 or later with npm, and Rust ([rustup](https://rustup.rs))
+with [Tauri 2's system packages](https://v2.tauri.app/start/prerequisites/). On Debian or Ubuntu those are:
 
 ```bash
 sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev \
@@ -170,8 +174,9 @@ npm test              # the frontend's tests; npm run typecheck and npm run lint
 (cd src-tauri && cargo test)   # the shell's, which start and stop a real serve
 ```
 
-The app starts `python3 ../orchestrator.py serve` beside it and stops it when its window closes. To serve
-another copy of the orchestrator, set `ORCHESTRATOR_PY` to its path before starting the app. Projects on a
+The app starts the orchestrator's `serve` beside it and stops it when its window closes: a release's own binary,
+or from a checkout `python3 ../orchestrator.py serve`. To serve another copy of the orchestrator, set
+`ORCHESTRATOR_PY` to its path before starting the app. Projects on a
 machine are read over SSH every 5 seconds; local ones are read every second.
 
 `serve` works without the app too. It prints one JSON line, `{"url": "http://127.0.0.1:<port>", "token":
