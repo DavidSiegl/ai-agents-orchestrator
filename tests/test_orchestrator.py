@@ -14182,8 +14182,8 @@ class TestCheckSetup(unittest.TestCase):
 
     def report(self, checks):
         with patch("sys.stdout", new_callable=io.StringIO) as out:
-            status = orchestrator.report_checks(list(checks.values()))
-        return out.getvalue(), status
+            doctor_exit = orchestrator.report_checks(list(checks.values()))
+        return out.getvalue(), doctor_exit
 
     def test_all_present(self):
         checks = self.check(FakeTools(), cwd="/proj")
@@ -14196,8 +14196,8 @@ class TestCheckSetup(unittest.TestCase):
         self.assertEqual(checks["herdr"].detail, "herdr 0.9.1")
         self.assertEqual(checks["claude integration"].detail, "current (v3)")
         self.assertEqual(checks["origin"].detail, "git@github.com:me/proj.git")
-        out, status = self.report(checks)
-        self.assertEqual(status, 0)
+        out, doctor_exit = self.report(checks)
+        self.assertEqual(doctor_exit, 0)
         self.assertTrue(all(line.startswith("ok      ") for line in out.splitlines()), out)
         self.assertIn("ok      herdr: herdr 0.9.1\n", out)
 
@@ -14220,8 +14220,8 @@ class TestCheckSetup(unittest.TestCase):
                          "skipped: needs herdr; needed only for a role that runs in codex")
         self.assertTrue(checks["git"].ok and checks["gh"].ok and checks["claude CLI"].ok)
         self.assertNotIn((None, ["herdr", "integration", "status"]), tools.calls)
-        out, status = self.report(checks)
-        self.assertEqual(status, orchestrator.EXIT_ERROR)
+        out, doctor_exit = self.report(checks)
+        self.assertEqual(doctor_exit, orchestrator.EXIT_ERROR)
         self.assertIn("missing herdr: herdr is not on PATH\n"
                       "        fix: install herdr 0.9 or later, or update it with `herdr update`\n", out)
         self.assertIn("missing claude integration: skipped: needs herdr\n        fix: fix herdr first\nok      codex CLI",
@@ -14255,8 +14255,8 @@ class TestCheckSetup(unittest.TestCase):
         self.assertEqual([c.name for c in checks.values() if not c.ok],
                          ["claude integration", "codex integration", "gemini integration"])
         self.assertEqual(tools.calls.count((None, ["herdr", "integration", "status"])), 1)
-        out, status = self.report(checks)
-        self.assertEqual(status, orchestrator.EXIT_ERROR)
+        out, doctor_exit = self.report(checks)
+        self.assertEqual(doctor_exit, orchestrator.EXIT_ERROR)
         self.assertIn("missing claude integration: not installed\n        fix: herdr integration install claude\n", out)
         self.assertIn("warn    codex integration: not installed;", out)
 
@@ -14384,8 +14384,8 @@ class TestCheckSetup(unittest.TestCase):
         self.assertEqual(checks["reaching herdr"], orchestrator.Check(
             "reaching herdr", "required", False, "not inside a herdr pane", "run from a herdr pane, or pass --machine"))
         self.assertEqual([c.name for c in checks.values() if not c.ok], ["reaching herdr"])
-        out, status = self.report(checks)
-        self.assertEqual(status, orchestrator.EXIT_ERROR)
+        out, doctor_exit = self.report(checks)
+        self.assertEqual(doctor_exit, orchestrator.EXIT_ERROR)
         self.assertIn("missing reaching herdr: not inside a herdr pane\n"
                       "        fix: run from a herdr pane, or pass --machine\n", out)
 
@@ -14422,8 +14422,8 @@ class TestCheckSetup(unittest.TestCase):
                 self.assertEqual(checks["gh"].detail, "skipped: needs reaching herdr")
                 self.assertEqual(checks["origin"].detail, "skipped: needs git checkout")
                 self.assertTrue(checks["tkinter"].ok)
-                out, status = self.report(checks)
-                self.assertEqual(status, orchestrator.EXIT_ERROR)
+                out, doctor_exit = self.report(checks)
+                self.assertEqual(doctor_exit, orchestrator.EXIT_ERROR)
                 self.assertIn(f"missing reaching herdr: {detail}\n", out)
 
     def test_machine_without_local_herdr(self):

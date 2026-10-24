@@ -8642,24 +8642,13 @@ def check_setup(host: Host, herdr: Herdr, cwd: str | None = None) -> list[Check]
     """
     checks: list[Check] = []
 
-    def add(name: str, level: str, fix: str, probe: Callable[[], str], needs: Check | None = None,
-            note: str = "") -> Check:
-        # needs is the check this one is skipped without; note is added to the detail of a failed check.
-        if needs is not None and not needs.ok:
-            check = Check(name, level, False, f"skipped: needs {needs.name}", f"fix {needs.name} first")
-        else:
-            check = _run_check(name, level, fix, probe)
-        if not check.ok and note:
-            check = Check(name, level, False, f"{check.detail}; {note}", check.fix)
-        checks.append(check)
+    def add(*args, **kwargs) -> Check:
+        checks.append(check := _check_unless_skipped(*args, **kwargs))
         return check
 
     install_herdr = f"install herdr {dotted(HERDR_MIN_VERSION)} or later, or update it with `herdr update`"
     found = add("herdr", REQUIRED, install_herdr, lambda: _tool_version(host, "herdr", HERDR_MIN_VERSION))
-    if herdr.machine and not found.ok:
-        reach_host, reach = None, Check("reaching herdr", REQUIRED, False, "skipped: needs herdr", "fix herdr first")
-    else:
-        reach_host, reach = _reach_herdr(host, herdr)
+    reach_host, reach = _reach_herdr(host, herdr, found)
     checks.append(reach)
     # On a machine every check but tkinter's needs reaching it; reach_host is only used once it is.
     on_machine = reach if herdr.machine else None
@@ -8689,6 +8678,21 @@ def check_setup(host: Host, herdr: Herdr, cwd: str | None = None) -> list[Check]
     return checks
 
 
+def _check_unless_skipped(name: str, level: str, fix: str, probe: Callable[[], str], needs: Check | None = None,
+                          note: str = "") -> Check:
+    """_run_check's Check of probe, or, when needs is given and not ok, a skipped Check naming it without running
+    probe; note is added to the detail of a Check that is not ok."""
+    check = _skipped(name, level, needs) if needs is not None and not needs.ok else _run_check(name, level, fix, probe)
+    if not check.ok and note:
+        check = Check(name, level, False, f"{check.detail}; {note}", check.fix)
+    return check
+
+
+def _skipped(name: str, level: str, needs: Check) -> Check:
+    """The Check of name, skipped because needs is not ok: not ok itself, its fix pointing at needs."""
+    return Check(name, level, False, f"skipped: needs {needs.name}", f"fix {needs.name} first")
+
+
 def _run_check(name: str, level: str, fix: str, probe: Callable[[], str]) -> Check:
     """The Check of probe, which returns the detail when the requirement is met and raises OrchestratorError, such as
     _Unmet, when it is not or cannot be checked; fix is the Check's when the error brings none."""
@@ -8698,11 +8702,13 @@ def _run_check(name: str, level: str, fix: str, probe: Callable[[], str]) -> Che
         return Check(name, level, False, str(e), getattr(e, "fix", None) or fix)
 
 
-def _reach_herdr(host: Host, herdr: Herdr) -> tuple[Host | None, Check]:
+def _reach_herdr(host: Host, herdr: Herdr, local_herdr: Check) -> tuple[Host | None, Check]:
     """The Host the agents run on, None when it cannot be reached, and the Check of reaching herdr: as connect
     needs it, from a herdr pane without herdr.machine; with it, the machine saved and enabled, and its SSH target
-    answering non-interactive SSH."""
+    answering non-interactive SSH, which is skipped when local_herdr, the Check of herdr here, is not ok."""
     name = "reaching herdr"
+    if herdr.machine and not local_herdr.ok:
+        return None, _skipped(name, REQUIRED, local_herdr)
     if not herdr.machine:
         if in_herdr_pane():
             return host, Check(name, REQUIRED, True, "inside a herdr pane")
@@ -8764,12 +8770,12 @@ class _IntegrationStatus:
         return state
 
 
-def integration_states(status: str) -> dict[str, str]:
+def integration_states(listing: str) -> dict[str, str]:
     """Each harness's integration state, by its kind, from `herdr integration status`, whose lines read
     `<kind>: current (vN) (<path>)`, `<kind>: not installed (<path>)` or the like for another state, and a kind may
     carry a note, as `letta (experimental): ...`. The state is what follows the colon, the path left out."""
     states = {}
-    for line in status.splitlines():
+    for line in listing.splitlines():
         if m := re.fullmatch(r"(\S+)[^:]*: (.*?)(?: \([^()]*\))?", line.strip()):
             states[m.group(1)] = m.group(2)
     return states
