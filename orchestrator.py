@@ -3326,7 +3326,12 @@ def _listed_tests(proc: subprocess.CompletedProcess, doing: str,
     ids = {line for line in proc.stdout.split("\n") if "::" in line and _node_parts(line)[0] in files}
     if proc.returncode == 0 and not ids:
         return [], f"pytest, {doing}, printed no node id the gate could read: {_said(proc)}"
-    return [i for i in sorted(ids) if (_node_parts(i)[0], ".".join(_node_parts(i)[1])) in tests], None
+    wanted = []
+    for i in sorted(ids):
+        path, names, _ = _node_parts(i)
+        if (path, ".".join(names)) in tests:
+            wanted.append(i)
+    return wanted, None
 
 
 def _rerun_python_tests(root: str, inifile: str, ids: list[str], seed: int,
@@ -3401,7 +3406,7 @@ def _pytest(root: str, inifile: str, doing: str, args: list[str], *, timeout: fl
     try:
         out, err = raw.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        with contextlib.suppress(ProcessLookupError):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(raw.pid, signal.SIGKILL)
         out, err = _abandon(raw)
         return (_PytestStopped(argv, -signal.SIGKILL, os.fsdecode(out), os.fsdecode(err)),
@@ -3526,8 +3531,9 @@ def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str]
         return [_finding(None, None, "not-run", f"could not write an empty pytest configuration for the run at the "
                                                 f"base: {e}; the changed tests were not run there.")]
     deadline = time.monotonic() + budget
-    env = {"TMPDIR": scratch}
-    ids, stopped, problem = _collect_at_base(tree, inifile, tests, deadline - time.monotonic(), env)
+    # No bytecode: a test that imports through a tracked link out of the tree would write it there.
+    env = {"TMPDIR": scratch, "PYTHONDONTWRITEBYTECODE": "1"}
+    ids, stopped, problem = _collect_at_base(tree, inifile, tests, deadline, env)
     if stopped:
         return [_base_run_budget_reached(budget, "while it collected the changed tests")]
     if problem:
@@ -3563,29 +3569,46 @@ def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str]
             for (path, name), seen in sorted(outcomes.items()) if seen == {"passed"}]
 
 
-def _collect_at_base(tree: str, inifile: str, tests: dict[tuple[str, str], int], timeout: float,
+def _collect_at_base(tree: str, inifile: str, tests: dict[tuple[str, str], int], deadline: float,
                      env: dict[str, str]) -> tuple[list[str], bool, str | None]:
     """The node ids, one per parameter set, of those of tests that pytest collects in tree, the copy of the base, by
-    the configuration in inifile and with env, within timeout seconds; whether timeout stopped it; and the problem, a
-    clause, when it went wrong otherwise. A test file, or a conftest.py, that cannot be imported at the base gives no
-    ids and no problem: that is the expected outcome for a test of what the change adds. So does a test pytest does
-    not collect, such as a test_* method of a class not named Test*."""
+    the configuration in inifile and with env, by deadline, a time.monotonic() time; whether the deadline stopped it;
+    and the problem, a clause, when it went wrong otherwise. A test file, or a conftest.py, that cannot be imported at
+    the base gives no ids for the tests it covers and no problem: that is the expected outcome for a test of what the
+    change adds. So does a test pytest does not collect, such as a test_* method of a class not named Test*."""
+    files = sorted({path for path, _ in tests})
     # Exit status 1: some file could not be collected, which --continue-on-collection-errors lets the others outlive;
     # 4, a usage error, which a conftest.py that cannot be imported gives; 5: no test was collected.
     proc, problem = _pytest(tree, inifile, "collecting the changed tests at the base",
-                            ["-p", "no:randomly", "--collect-only", "--continue-on-collection-errors",
-                             *sorted({path for path, _ in tests})], timeout=timeout, ok=(0, 1, 4, 5), env=env)
+                            ["-p", "no:randomly", "--collect-only", "--continue-on-collection-errors", *files],
+                            timeout=deadline - time.monotonic(), ok=(0, 1, 4, 5), env=env)
     if isinstance(proc, _PytestStopped):
         return [], True, None
     if problem or proc is None:
         return [], False, problem
-    if proc.returncode == 4:
-        # pytest's ConftestImportFailure, as pytest 9 words it.
-        if "ImportError while loading conftest" in proc.stdout + proc.stderr:
-            return [], False, None
+    if proc.returncode != 4:
+        ids, problem = _listed_tests(proc, "collecting the changed tests at the base", tests)
+        return ids, False, problem
+    if not _conftest_import_failed(proc):
         return [], False, f"pytest, collecting the changed tests at the base, exited with status 4: {_said(proc)}"
-    ids, problem = _listed_tests(proc, "collecting the changed tests at the base", tests)
-    return ids, False, problem
+    # pytest loads the conftest.py files of every path it is given before it collects any, so one that cannot be
+    # imported stops them all: each file is collected on its own, and only those under it give nothing.
+    collected: list[str] = []
+    for path in files if len(files) > 1 else ():
+        found, stopped, problem = _collect_at_base(tree, inifile, {t: n for t, n in tests.items() if t[0] == path},
+                                                   deadline, env)
+        if stopped or problem:
+            return [], stopped, problem
+        collected += found
+    return collected, False, None
+
+
+def _conftest_import_failed(proc: subprocess.CompletedProcess) -> bool:
+    """Whether proc, a pytest run that exited with status 4, stopped because a conftest.py raised ImportError (or
+    ModuleNotFoundError) as it loaded, as pytest 9 words that: not for any other exception a conftest.py raises."""
+    said = proc.stdout + proc.stderr
+    return ("ImportError while loading conftest" in said
+            and re.search(r"^E\s+(?:ImportError|ModuleNotFoundError)\b", said, re.MULTILINE) is not None)
 
 
 def _base_run_budget_reached(budget: float, when: str) -> dict:
@@ -3599,7 +3622,9 @@ def _copy_base_with_tests(change: GateChange, dest: str, archive: str) -> None:
     """Write the files git tracked at change.base to dest, a directory it makes, through a tar file at archive, then
     replace each file of the change's that _beside_tests accepts with the working tree's: removed at its path at the
     base, and copied, a symbolic link as a link, to its path in the working tree. A symbolic link is written as it is,
-    wherever it points; no file is written through one. A submodule is an empty directory, as git archive leaves it.
+    wherever it points, and no file is written or removed through one: a link on the way to a replaced file is
+    replaced by a directory, as the working tree has one there. A submodule is an empty directory, as git archive
+    leaves it.
     Raises OrchestratorError when git cannot write the archive, tarfile.TarError when it cannot be unpacked, and
     OSError when dest exists or a file cannot be written."""
     Host().git(change.root, "archive", "--format=tar", f"--output={archive}", change.base, timeout=GATE_TOOL_TIMEOUT)
@@ -3609,12 +3634,27 @@ def _copy_base_with_tests(change: GateChange, dest: str, archive: str) -> None:
         # leads out of dest, through a link or otherwise.
         tar.extractall(dest, filter="tar")
     for old, _ in change.files:
-        if old is not None and _beside_tests(old) and os.path.lexists(path := os.path.join(dest, old)):
+        if old is not None and _beside_tests(old) and os.path.lexists(path := _unlinked_path(dest, old)):
             os.remove(path)
     for _, new in change.files:
         if new is not None and _beside_tests(new) and os.path.lexists(src := os.path.join(change.root, new)):
-            os.makedirs(os.path.dirname(dst := os.path.join(dest, new)), exist_ok=True)
+            if os.path.lexists(dst := _unlinked_path(dest, new)):
+                os.remove(dst)
             shutil.copy2(src, dst, follow_symlinks=False)
+
+
+def _unlinked_path(dest: str, path: str) -> str:
+    """dest/path, a repository path, after making each directory above it in dest a real one: a symbolic link there
+    is replaced by an empty directory, and a missing one made. So a file written or removed at it stays in dest.
+    Raises OSError when one cannot be."""
+    at = dest
+    for part in path.split("/")[:-1]:
+        at = os.path.join(at, part)
+        if os.path.islink(at):
+            os.remove(at)
+        if not os.path.isdir(at):
+            os.mkdir(at)
+    return os.path.join(at, path.rsplit("/", 1)[-1])
 
 
 # Surviving mutants: the code a change adds that its tests run without checking what it does, which coverage counts

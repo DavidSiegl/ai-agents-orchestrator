@@ -223,7 +223,8 @@ the changed tests it collected:
 - `passes-at-base`: a test that passed at the base, each of its parameter sets that pytest did not skip included, at
   its `def`. A test that fails or errors there tests the change and gives nothing; so does one pytest does not collect
   there: a test whose file or `conftest.py` cannot be imported at the base, typically because it imports what the
-  change adds, and a `test_*` method of a class pytest does not take for a test class. A refactor that keeps behaviour
+  change adds (a `conftest.py` that raises `ImportError` hides only the tests under it), and a `test_*` method of a
+  class pytest does not take for a test class. A refactor that keeps behaviour
   gives these findings rightly: the Builder says it is one, and the Reviewer judges;
 - `budget-reached`: `--base-run-budget SECONDS`, 120 by default, shared by the collection and the run, ran out; the
   finding says when, and how many of its test cases the run had run. pytest runs in a session of its own, and is

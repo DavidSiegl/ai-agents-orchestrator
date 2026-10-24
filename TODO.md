@@ -5,15 +5,25 @@ was done.
 
 ## Open issues
 
+- **A process a test leaves holding pytest's output keeps a finished run waiting until its timeout.** `_pytest`'s
+  `communicate` reads to the end of pytest's output, so a server a test started that inherits it keeps a run that has
+  finished going until the timeout, reported then as `budget-reached` (passes-at-base) or `not-rerun` (flaky-tests).
+  It was so before `_pytest` ran pytest in its own session. Raised by the cross-review of `passes-at-base` (round 2,
+  2026-10-24). Closes when `_pytest` waits for pytest itself, then kills its group and reads what is buffered.
+- **`_pytest` and `_run_mutmut` copy one stop-and-kill sequence.** Both start their tool in a session of its own,
+  kill its process group on a timeout and in `finally`, and read what is left with `_abandon`; the copies had already
+  drifted in which errors `killpg` may raise. Raised by the same review. Closes with one helper that runs a command in
+  its own session and stops it, which both use, mutmut's SIGINT grace an option of it.
 - **`passes-at-base` reads every changed test as passing in a project installed into the gate's interpreter.**
-  `_run_at_base` runs pytest in the gate's interpreter, so the base's code is whatever the copy's configuration puts
-  on `sys.path` (`pythonpath = ["."]` here). An editable install, as a `src/` layout under `uv sync` has, resolves
-  the package to the working tree first, so the base run tests the change and every changed test is reported. This
-  repository is not installed (no `[build-system]`), so it is unaffected. Closes when the run at the base puts the
-  copy's own package directories before site-packages, or names such a project as one it cannot judge.
+  `_base_run_findings` runs pytest in the gate's interpreter, so the base's code is whatever the copy's
+  configuration puts on `sys.path` (`pythonpath = ["."]` here). An editable install, as a `src/` layout under
+  `uv sync` has, resolves the package to the working tree first, so the base run tests the change and every changed
+  test is reported. This repository is not installed (no `[build-system]`), so it is unaffected. Closes when the run
+  at the base puts the copy's own package directories before site-packages, or names such a project as one it cannot
+  judge.
 - **A test file that cannot be imported at the base hides all its changed tests from `passes-at-base`.** A
   module-level import of something the change adds makes pytest's collection of the whole file fail at the base,
-  which `_run_at_base` takes as the expected outcome for every changed test in it, including ones that would pass
+  which `_collect_at_base` takes as the expected outcome for every changed test in it, including ones that would pass
   there. Accepted: the check reports only, and splitting the file's tests from its imports would mean rewriting
   them. Closes, if its run metrics show these files are common, by importing such names inside the tests that use
   them, or by running each test with the failing import stubbed.

@@ -6006,9 +6006,9 @@ class TestPassesAtBase(unittest.TestCase):
     def test_a_collection_past_the_budget_is_a_finding(self):
         self.fix_add()
         self.fake_pytest("exec sleep 30", "exit 0")
-        self.assertEqual([f["message"] for f in self.found(budget=1)], [
+        self.assertEqual([f["message"] for f in self.found(budget=1)], [(
             "pytest was stopped at 1 seconds (`--base-run-budget`) while it collected the changed tests, so none of "
-            "them was judged."])
+            "them was judged.")])
 
     def test_a_test_pytest_does_not_collect_leaves_the_others_judged(self):
         # pytest does not collect a test_* method of a class not named Test*; asked for it by id, it exits 4.
@@ -6023,6 +6023,36 @@ class TestPassesAtBase(unittest.TestCase):
                                       "def two():\n    return TWO\n")
         self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_two(two):\n    assert mul(two, 1) == 2\n")
         self.assertEqual(self.found(), [])
+
+    def test_a_conftest_that_cannot_be_imported_hides_only_the_tests_under_it(self):
+        self.put("calc.py", self.CALC.replace("a - b", "a + b") + "\n\nTWO = 2\n")
+        self.put("tests/b/conftest.py", "from calc import TWO\n")
+        self.put("tests/b/test_two.py", "from calc import mul\n\n\ndef test_two():\n    assert mul(2, 1) == 2\n")
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_one():\n    assert mul(1, 1) == 1\n")
+        self.assertEqual([(f["path"], f["message"].split("`")[1]) for f in self.found()],
+                         [("tests/test_calc.py", "test_mul_one")])
+
+    def test_a_conftest_broken_otherwise_is_a_finding(self):
+        self.put("calc.py", self.CALC.replace("a - b", "a + b"))
+        self.put("tests/conftest.py", "raise RuntimeError('broken')\n")
+        self.git("add", "tests/conftest.py")
+        self.git("commit", "--quiet", "-m", "broken conftest")
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_one():\n    assert mul(1, 1) == 1\n")
+        self.assertEqual([(f["rule"], "exited with status 4" in f["message"]) for f in self.found()],
+                         [("not-run", True)])
+
+    def test_nothing_is_written_through_a_link_the_change_replaces(self):
+        outside = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, outside)
+        self.git("rm", "--quiet", "-r", "tests")
+        os.symlink(outside, os.path.join(self.repo, "tests"))
+        self.git("add", "tests")
+        self.git("commit", "--quiet", "-m", "tests elsewhere")
+        os.remove(os.path.join(self.repo, "tests"))
+        self.fix_add("\n\ndef test_mul_one():\n    assert mul(1, 1) == 1\n")
+        # The whole test file is new to the change, so test_mul is changed too.
+        self.assertEqual([f["message"].split("`")[1] for f in self.found()], ["test_mul", "test_mul_one"])
+        self.assertEqual(os.listdir(outside), [])
 
     def test_a_change_to_docs_and_tests_is_not_run(self):
         self.put("TODO.md", "- nothing\n")
