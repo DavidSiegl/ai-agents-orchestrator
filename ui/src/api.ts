@@ -5,8 +5,9 @@
 export interface Connection {
   url: string;
   token: string;
-  /** The project to show first: the checkout the sidecar's orchestrator.py is in. */
-  project: string;
+  /** The project to show first: the checkout the sidecar's orchestrator.py is in; null for a release's bundled
+   * orchestrator, which is in none. */
+  project: string | null;
 }
 
 /** A project as the server takes it: a directory, on the saved herdr machine or, with machine empty, here. */

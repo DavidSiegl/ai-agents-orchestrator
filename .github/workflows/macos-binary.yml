@@ -1,5 +1,6 @@
-# Jenkins tests, builds and releases; it has no macOS machine, so this adds only the macOS binary to a release
-# Jenkins has published. It never creates a release or a tag: gh release upload fails if the release is missing.
+# Jenkins tests, builds and releases; it has no macOS machine, so this adds only the macOS binary and the desktop
+# app around it to a release Jenkins has published. It never creates a release or a tag: gh release upload fails
+# if the release is missing.
 name: macOS binary
 
 on:
@@ -35,8 +36,18 @@ jobs:
       # The script Jenkins builds the Linux binary with; it smoke-tests --help, workflows and gui --smoke-test.
       - run: packaging/build-binary.sh
 
+      # The runner's Rust builds the shell; Node is pinned to what ui/package.json's tools need, 20.19 or later.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      # The script Jenkins builds the Linux app with, around that binary.
+      - run: packaging/build-desktop.sh
+
       - name: Upload to the release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release upload "$TAG" dist/orchestrator-macos-arm64 dist/orchestrator-macos-arm64.sha256 --clobber
+        run: |
+          gh release upload "$TAG" dist/orchestrator-macos-arm64 dist/orchestrator-macos-arm64.sha256 \
+            dist/orchestrator-desktop-macos-arm64.dmg dist/orchestrator-desktop-macos-arm64.dmg.sha256 --clobber

@@ -1,7 +1,9 @@
-//! The desktop shell: a window over `orchestrator.py serve`, which it starts as its sidecar when it launches and
+//! The desktop shell: a window over `orchestrator serve`, which it starts as its sidecar when it launches and
 //! kills when it exits. The webview talks to the sidecar's server over HTTP; the shell only hands it the server's
 //! address and token, through the `server` command.
 
+use std::ffi::OsString;
+use std::fmt;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -10,8 +12,78 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, RunEvent};
 
-/// The environment variable that names the orchestrator.py to serve; without it, the checkout's own.
+/// The environment variable that names an orchestrator.py to serve, in place of the bundled binary or the
+/// checkout's own.
 const ORCHESTRATOR_ENV: &str = "ORCHESTRATOR_PY";
+
+/// The orchestrator binary's file name in a release bundle, beside the app's own executable: Tauri's
+/// `externalBin` in tauri.release.conf.json, which drops the target triple that packaging/build-desktop.sh gives
+/// it on disk.
+const BUNDLED_NAME: &str = if cfg!(windows) { "orchestrator.exe" } else { "orchestrator" };
+
+/// The orchestrator the app serves.
+#[derive(Debug, PartialEq)]
+enum Orchestrator {
+    /// An orchestrator.py, run by the python3 on PATH: $ORCHESTRATOR_PY, or the checkout the app was built in.
+    Script(PathBuf),
+    /// The PyInstaller binary a release bundle carries, which needs no Python.
+    Bundled(PathBuf),
+}
+
+impl Orchestrator {
+    /// The one to serve: $ORCHESTRATOR_PY when it is set, else the binary beside this executable when there is
+    /// one, as in a release bundle, else the orchestrator.py of the checkout this app was built in.
+    fn locate() -> Orchestrator {
+        let exe_dir = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf));
+        Orchestrator::locate_from(std::env::var_os(ORCHESTRATOR_ENV), exe_dir.as_deref())
+    }
+
+    /// locate, given $ORCHESTRATOR_PY's value and the executable's directory, None when either is unknown.
+    fn locate_from(env: Option<OsString>, exe_dir: Option<&Path>) -> Orchestrator {
+        if let Some(script) = env {
+            return Orchestrator::Script(canonical(PathBuf::from(script)));
+        }
+        if let Some(bundled) = exe_dir.map(|dir| dir.join(BUNDLED_NAME)).filter(|path| path.is_file()) {
+            return Orchestrator::Bundled(bundled);
+        }
+        Orchestrator::Script(canonical(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../orchestrator.py")))
+    }
+
+    /// A command that runs it with no arguments yet.
+    fn command(&self) -> Command {
+        match self {
+            Orchestrator::Script(script) => {
+                let mut command = Command::new("python3");
+                command.arg(script);
+                command
+            }
+            Orchestrator::Bundled(binary) => Command::new(binary),
+        }
+    }
+
+    /// The directory of the checkout it belongs to; None for the bundled binary, which belongs to none.
+    fn project(&self) -> Option<String> {
+        match self {
+            Orchestrator::Script(script) => script.parent().map(|dir| dir.display().to_string()),
+            Orchestrator::Bundled(_) => None,
+        }
+    }
+}
+
+/// How it is run, for messages: `python3 <script>` or the binary's path.
+impl fmt::Display for Orchestrator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Orchestrator::Script(script) => write!(f, "python3 {}", script.display()),
+            Orchestrator::Bundled(binary) => write!(f, "{}", binary.display()),
+        }
+    }
+}
+
+/// path made absolute with its links resolved, or path itself when it does not exist.
+fn canonical(path: PathBuf) -> PathBuf {
+    path.canonicalize().unwrap_or(path)
+}
 
 /// The line `serve` prints first: where its server listens, and the token every request needs.
 #[derive(Deserialize)]
@@ -25,8 +97,9 @@ struct Served {
 struct Connection {
     url: String,
     token: String,
-    /// The project the app opens first: the directory of the orchestrator.py served, a checkout of its own.
-    project: String,
+    /// The project the app opens first: the checkout the orchestrator served belongs to; None for the bundled
+    /// one, which belongs to none.
+    project: Option<String>,
 }
 
 /// The sidecar: its process while it runs, and how to reach it, or why it could not be started.
@@ -37,13 +110,12 @@ struct Sidecar {
 }
 
 impl Sidecar {
-    /// Start `python3 <script> serve`, answering requests from origin, and read the server's first line. A sidecar
+    /// Start orchestrator's `serve`, answering requests from origin, and read the server's first line. A sidecar
     /// that cannot be started, or prints no such line, keeps the reason as its connection.
-    fn start(script: &Path, origin: &str) -> Sidecar {
-        match spawn(script, origin) {
+    fn start(orchestrator: &Orchestrator, origin: &str) -> Sidecar {
+        match spawn(orchestrator, origin) {
             Ok((child, served)) => {
-                let project = script.parent().map(|dir| dir.display().to_string()).unwrap_or_default();
-                let connection = Connection { url: served.url, token: served.token, project };
+                let connection = Connection { url: served.url, token: served.token, project: orchestrator.project() };
                 Sidecar { child: Mutex::new(Some(child)), connection: Ok(connection) }
             }
             Err(reason) => Sidecar { child: Mutex::new(None), connection: Err(reason) },
@@ -63,15 +135,15 @@ impl Sidecar {
 
 /// The started sidecar and its first line; Err with why, the sidecar killed, when it cannot be started or that line
 /// is not `serve`'s.
-fn spawn(script: &Path, origin: &str) -> Result<(Child, Served), String> {
-    let mut child = Command::new("python3")
-        .arg(script)
+fn spawn(orchestrator: &Orchestrator, origin: &str) -> Result<(Child, Served), String> {
+    let mut child = orchestrator
+        .command()
         .args(["serve", "--origin", origin])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
-        .map_err(|e| format!("cannot run python3 {}: {e}", script.display()))?;
+        .map_err(|e| format!("cannot run {orchestrator}: {e}"))?;
     let mut line = String::new();
     let read = match child.stdout.take() {
         Some(stdout) => BufReader::new(stdout).read_line(&mut line).map_err(|e| e.to_string()),
@@ -79,7 +151,7 @@ fn spawn(script: &Path, origin: &str) -> Result<(Child, Served), String> {
     };
     let served = read.and_then(|_| {
         serde_json::from_str::<Served>(&line)
-            .map_err(|e| format!("python3 {} serve printed {:?}, not its address: {e}", script.display(), line.trim()))
+            .map_err(|e| format!("{orchestrator} serve printed {:?}, not its address: {e}", line.trim()))
     });
     match served {
         Ok(served) => Ok((child, served)),
@@ -89,14 +161,6 @@ fn spawn(script: &Path, origin: &str) -> Result<(Child, Served), String> {
             Err(reason)
         }
     }
-}
-
-/// The orchestrator.py to serve: $ORCHESTRATOR_PY, or else the one of the checkout this app was built in.
-fn orchestrator_script() -> PathBuf {
-    let path = std::env::var_os(ORCHESTRATOR_ENV)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../orchestrator.py"));
-    path.canonicalize().unwrap_or(path)
 }
 
 /// The origin of the webview's pages, which the sidecar must answer: Vite's dev server under `tauri dev`, else the
@@ -120,7 +184,7 @@ fn server(sidecar: tauri::State<'_, Sidecar>) -> Result<Connection, String> {
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            let sidecar = Sidecar::start(&orchestrator_script(), &webview_origin(app));
+            let sidecar = Sidecar::start(&Orchestrator::locate(), &webview_origin(app));
             app.manage(sidecar);
             Ok(())
         })
@@ -143,14 +207,64 @@ mod tests {
         Path::new(&format!("/proc/{pid}")).exists()
     }
 
+    /// A new empty directory of this test's own under the system's temporary directory.
+    fn scratch_dir(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("orchestrator-ui-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir
+    }
+
+    #[test]
+    fn locates_the_checkout_without_a_bundled_binary() {
+        let located = Orchestrator::locate_from(None, Some(&scratch_dir("checkout")));
+        let Orchestrator::Script(script) = &located else { panic!("{located:?}") };
+        assert!(script.ends_with("orchestrator.py") && script.is_file(), "{located}");
+        assert!(Path::new(&located.project().expect("a checkout")).join("orchestrator.py").is_file());
+    }
+
+    #[test]
+    fn locates_the_bundled_binary_beside_the_executable() {
+        let dir = scratch_dir("bundled");
+        std::fs::write(dir.join(BUNDLED_NAME), "").expect("a stand-in binary");
+        let located = Orchestrator::locate_from(None, Some(&dir));
+        assert_eq!(located, Orchestrator::Bundled(dir.join(BUNDLED_NAME)));
+        assert_eq!(located.project(), None);
+    }
+
+    #[test]
+    fn the_environment_wins_over_the_bundled_binary() {
+        let dir = scratch_dir("environment");
+        std::fs::write(dir.join(BUNDLED_NAME), "").expect("a stand-in binary");
+        let located = Orchestrator::locate_from(Some("/elsewhere/orchestrator.py".into()), Some(&dir));
+        assert_eq!(located, Orchestrator::Script(PathBuf::from("/elsewhere/orchestrator.py")));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn serves_a_bundled_binary_without_a_project() {
+        use std::os::unix::fs::PermissionsExt;
+        let binary = scratch_dir("bundled-serve").join(BUNDLED_NAME);
+        // serve's first line, then a process for stop to kill.
+        let script = "#!/bin/sh\necho '{\"url\": \"http://127.0.0.1:9\", \"token\": \"t\"}'\nexec sleep 60\n";
+        std::fs::write(&binary, script).expect("a stand-in binary");
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("an executable");
+        let sidecar = Sidecar::start(&Orchestrator::Bundled(binary), "tauri://localhost");
+        let connection = sidecar.connection.clone().expect("the sidecar started");
+        assert_eq!(connection.url, "http://127.0.0.1:9");
+        assert_eq!(connection.project, None);
+        sidecar.stop();
+    }
+
     #[test]
     #[cfg(target_os = "linux")]
     fn serves_the_checkout_and_stops() {
-        let sidecar = Sidecar::start(&orchestrator_script(), "tauri://localhost");
+        let sidecar = Sidecar::start(&Orchestrator::locate_from(None, None), "tauri://localhost");
         let connection = sidecar.connection.clone().expect("the sidecar started");
         assert!(connection.url.starts_with("http://127.0.0.1:"), "{}", connection.url);
         assert!(!connection.token.is_empty());
-        assert!(Path::new(&connection.project).join("orchestrator.py").is_file(), "{}", connection.project);
+        let project = connection.project.expect("a checkout");
+        assert!(Path::new(&project).join("orchestrator.py").is_file(), "{project}");
         let pid = sidecar.child.lock().unwrap().as_ref().expect("a child").id();
         assert!(exists(pid));
         sidecar.stop();
@@ -160,7 +274,7 @@ mod tests {
 
     #[test]
     fn a_script_that_is_not_serve_is_an_error() {
-        let sidecar = Sidecar::start(Path::new("/nonexistent/orchestrator.py"), "tauri://localhost");
+        let sidecar = Sidecar::start(&Orchestrator::Script("/nonexistent/orchestrator.py".into()), "tauri://localhost");
         let reason = sidecar.connection.err().expect("an error");
         assert!(reason.contains("/nonexistent/orchestrator.py"), "{reason}");
         assert!(sidecar.child.lock().unwrap().is_none());
