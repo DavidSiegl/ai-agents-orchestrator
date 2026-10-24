@@ -142,6 +142,10 @@ python orchestrator.py run "add a token-bucket rate limiter" --machine <machine>
 # Runs recorded for a project, and whether each one is still running
 python orchestrator.py list --machine <machine> --cwd ~/GitHub/myproject
 
+# The same runs as one JSON document for scripts, {"version": 1, "runs": [...]}; --pr-state adds each pull
+# request's state (OPEN, CLOSED or MERGED) from gh
+python orchestrator.py list --json --pr-state
+
 # One run in full: its state, branch and pull request, agents, handoff files and last review
 python orchestrator.py show e292fb --machine <machine> --cwd ~/GitHub/myproject
 
