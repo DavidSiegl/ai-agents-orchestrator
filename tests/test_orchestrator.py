@@ -106,6 +106,12 @@ class FakeHost(Host):
     - `missing_commits`: commits this clone lacks.
     - `pull_requests`: what `gh pr view` prints, by URL: a dict, or a completed process for a failure.
     - `remove_error`: the stderr of a failing `git worktree remove`.
+
+    For the secret scan before each push:
+
+    - `leaks`: what scan_unpublished finds, as Leaks; every scan finds them all. `scans` records (commit, base,
+      report) of each scan.
+    - `gitleaks_missing`: check_gitleaks fails as on a machine without gitleaks.
     """
 
     def __init__(self, head="abc123", branch="main"):
@@ -140,9 +146,24 @@ class FakeHost(Host):
         self.mtime_kept = []  # every path written with keep_mtime
         self.clock = None
         self.mtimes = {}
+        self.leaks = []
+        self.scans = []
+        self.gitleaks_missing = False
         self.committed = {}
         self.file_reads = []
         self.line_counts = None
+
+    def scan_unpublished(self, cwd, commit, base, report_path):
+        self.scans.append((commit, base, report_path))
+        if self.leaks:
+            # As a gitleaks run without --redact would write it: the report is the one place the secret may be.
+            self.files[report_path] = json.dumps([{"Secret": FAKE_TOKEN, "File": leak.file} for leak in self.leaks])
+        return list(self.leaks)
+
+    def check_gitleaks(self):
+        if self.gitleaks_missing:
+            raise OrchestratorError(f"this run pushes, and every push is scanned for secrets first: "
+                                    f"{orchestrator.GITLEAKS_INSTALL}")
 
     def now(self):
         return HOST_EPOCH + int(self.clock() if self.clock else 0)
@@ -978,8 +999,10 @@ class TestUpToDateBase(unittest.TestCase):
 
         self.assertEqual(wf.run(), APPROVE)
         push = host.git_calls.index(("push", "--quiet", "--set-upstream", "origin", self.BRANCH))
-        self.assertEqual(host.git_calls[push - 2:push],
-                         [self.FETCH, ("merge-base", "--is-ancestor", "origin/main", "HEAD")])
+        # Then the branch's commit is read, for the secret scan before the push.
+        self.assertEqual(host.git_calls[push - 3:push],
+                         [self.FETCH, ("merge-base", "--is-ancestor", "origin/main", "HEAD"),
+                          ("rev-parse", "--verify", f"refs/heads/{self.BRANCH}")])
         self.assertNotIn(self.MERGE, host.git_calls)
 
     def conflicting(self, verdict=APPROVE):
@@ -3240,6 +3263,310 @@ def resume_gated(state, script, fake, **kw):
 
 def leaks(text):
     return JENKINS_TOKEN in text
+
+
+# A token-shaped string, built so that no scanner takes this file for a leak.
+FAKE_TOKEN = "ghp_" + "Zq7" * 12
+
+# The fake gitleaks: writes its argv and the config it was given beside itself, then acts as the file `mode` says.
+FAKE_GITLEAKS = r'''#!PYTHON
+import json, os, sys
+here = os.path.dirname(os.path.abspath(__file__))
+args = sys.argv[1:]
+with open(os.path.join(here, "argv"), "w") as f:
+    json.dump(args, f)
+with open(os.path.join(here, "env"), "w") as f:
+    f.write("\n".join(f"{k}={v}" for k, v in sorted(os.environ.items()) if k.startswith("GIT_")))
+mode = open(os.path.join(here, "mode")).read().strip()
+if args[:2] == ["git", "--help"]:
+    sys.exit(1 if mode == "old" else 0)
+for flag, name in (("--config", "config-seen"), ("--gitleaks-ignore-path", "ignore-seen")):
+    with open(args[args.index(flag) + 1]) as src, open(os.path.join(here, name), "w") as dst:
+        dst.write(src.read())
+report = args[args.index("--report-path") + 1]
+commit = next(w for w in args[args.index("git") + 1].split("=", 1)[1].split() if not w.startswith("--"))
+if mode == "leak":
+    with open(report, "w") as f:
+        json.dump([{"RuleID": "github-pat", "File": "cfg.py", "StartLine": 1, "Commit": commit,
+                    "Fingerprint": f"{commit}:cfg.py:github-pat:1", "Secret": os.environ.get("TOKEN", ""),
+                    "Match": "token = " + os.environ.get("TOKEN", "")}], f)
+    sys.exit(1)
+if mode == "clean":
+    with open(report, "w") as f:
+        f.write("[]")
+    sys.exit(0)
+sys.stderr.write("FTL unable to load gitleaks config\n")
+sys.exit(2 if mode == "crash" else 1)
+'''
+
+
+class TestScanUnpublished(unittest.TestCase):
+    """Host's scan before a push, over a real repository and a bare origin, with a fake gitleaks on PATH."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+        self.repo, self.origin, self.bin = (os.path.join(self.tmp, d) for d in ("repo", "origin.git", "bin"))
+        self.run_dir = os.path.join(self.tmp, "run")
+        self.host = Host()
+        os.makedirs(self.bin)
+        self.host.git(self.tmp, "init", "--quiet", "--bare", self.origin)
+        self.host.git(self.tmp, "init", "--quiet", "-b", "main", self.repo)
+        for key, setting in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
+            self.git("config", key, setting)
+        self.commit({"a.txt": "a\n"}, "base")
+        self.git("remote", "add", "origin", self.origin)
+        self.git("push", "--quiet", "origin", "main")
+        self.base = self.git("rev-parse", "HEAD").strip()
+        path = os.path.join(self.bin, "gitleaks")
+        with open(path, "w") as f:
+            f.write(FAKE_GITLEAKS.replace("PYTHON", sys.executable))
+        os.chmod(path, 0o700)
+        self.mode("clean")
+        env = patch.dict(os.environ, {"PATH": f"{self.bin}:{os.environ['PATH']}", "TOKEN": FAKE_TOKEN})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def git(self, *args):
+        return self.host.git(self.repo, *args)
+
+    def commit(self, files, message):
+        for name, text in files.items():
+            with open(os.path.join(self.repo, name), "w") as f:
+                f.write(text)
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", message)
+        return self.git("rev-parse", "HEAD").strip()
+
+    def mode(self, mode):
+        with open(os.path.join(self.bin, "mode"), "w") as f:
+            f.write(mode)
+
+    def seen(self, name):
+        with open(os.path.join(self.bin, name)) as f:
+            return f.read()
+
+    def push(self, commit):
+        self.host.push_ref(self.repo, commit, "ci-ref", base=self.base,
+                           report_path=f"{self.run_dir}/leaks-snapshot.json")
+
+    def on_origin(self):
+        return self.host.git(self.origin, "for-each-ref", "--format=%(refname)").split()
+
+    def test_a_clean_range_is_pushed_after_its_scan(self):
+        commit = self.commit({"b.txt": "b\n"}, "clean")
+        self.push(commit)
+        self.assertIn("refs/heads/ci-ref", self.on_origin())
+        argv = json.loads(self.seen("argv"))
+        self.assertIn(f"--log-opts=--diff-merges=remerge --no-textconv {commit} --not --remotes=origin", argv)
+        # Not the working tree: gitleaks would read its .gitleaksignore.
+        self.assertEqual(argv[-1], f"{self.run_dir}/gitleaks-source")
+        self.assertIn("--redact", argv)
+
+    def test_a_secret_blocks_the_push_and_stays_out_of_the_error(self):
+        commit = self.commit({"cfg.py": f"token = '{FAKE_TOKEN}'\n"}, "leak")
+        self.mode("leak")
+        with self.assertRaises(orchestrator.LeaksFound) as caught:
+            self.push(commit)
+        self.assertEqual(caught.exception.leaks, [orchestrator.Leak("github-pat", "cfg.py", 1, commit,
+                                                                    f"{commit}:cfg.py:github-pat:1")])
+        self.assertIn(f"`cfg.py:1` github-pat in {commit[:12]}", str(caught.exception))
+        # The fake report carries the secret unredacted; nothing built from it does.
+        self.assertNotIn(FAKE_TOKEN, str(caught.exception) + repr(caught.exception.leaks))
+        self.assertNotIn("refs/heads/ci-ref", self.on_origin())
+
+    def test_the_change_s_own_gitleaks_files_do_not_judge_it(self):
+        commit = self.commit({".gitleaks.toml": "[allowlist]\npaths = ['cfg.py']\n",
+                              ".gitleaksignore": "anything\n"}, "allowlist itself")
+        self.push(commit)
+        self.assertEqual((self.seen("config-seen"), self.seen("ignore-seen")), ("[extend]\nuseDefault = true\n", ""))
+        # The base's own files are what judge a change.
+        self.git("reset", "--quiet", "--hard", self.base)
+        self.base = self.commit({".gitleaks.toml": "title = 'base rules'\n"}, "rules")
+        self.git("push", "--quiet", "origin", "main")
+        self.push(self.commit({".gitleaks.toml": "title = 'loosened'\n"}, "loosen"))
+        self.assertEqual(self.seen("config-seen"), "title = 'base rules'\n")
+
+    def test_an_added_gitleaks_allow_is_a_leak(self):
+        allowed = self.commit({"c.py": "x = 1\ny = 2  # gitleaks:allow\n"}, "allow")
+        with self.assertRaises(orchestrator.LeaksFound) as caught:
+            self.push(allowed)
+        self.assertEqual([(leak.rule, leak.file, leak.line, leak.commit) for leak in caught.exception.leaks],
+                         [("gitleaks-allow", "c.py", 2, allowed)])
+        # One already on origin publishes nothing new.
+        self.git("push", "--quiet", "origin", "HEAD:main")
+        self.push(self.commit({"d.txt": "d\n"}, "after"))
+
+    def test_an_added_line_that_looks_like_a_header_is_still_read(self):
+        commit = self.commit({"notes.md": "a\n++ token # gitleaks:allow\n"}, "header-like")
+        with self.assertRaises(orchestrator.LeaksFound) as caught:
+            self.push(commit)
+        self.assertEqual([(leak.file, leak.line) for leak in caught.exception.leaks], [("notes.md", 2)])
+
+    def test_a_merge_counts_what_it_adds_not_what_its_parents_had(self):
+        # Upstream, already on origin, adds a gitleaks:allow; merging it publishes nothing new.
+        self.git("switch", "--quiet", "-c", "upstream")
+        self.commit({"up.py": "x = 1  # gitleaks:allow\n"}, "upstream")
+        self.git("push", "--quiet", "origin", "upstream")
+        self.git("switch", "--quiet", "main")
+        self.commit({"mine.txt": "mine\n"}, "mine")
+        self.git("merge", "--quiet", "--no-edit", "upstream")
+        self.push(self.git("rev-parse", "HEAD").strip())
+        # An edit made in a merge is the merge's own.
+        self.git("switch", "--quiet", "-c", "side", "HEAD~1")
+        self.commit({"side.txt": "side\n"}, "side")
+        self.git("switch", "--quiet", "main")
+        self.git("merge", "--quiet", "--no-commit", "side")
+        merge = self.commit({"evil.py": "y = 2  # gitleaks:allow\n"}, "merge side")
+        with self.assertRaises(orchestrator.LeaksFound) as caught:
+            self.push(merge)
+        self.assertEqual([(leak.file, leak.commit) for leak in caught.exception.leaks], [("evil.py", merge)])
+
+    def test_an_octopus_merge_is_refused(self):
+        # git gives no remerge diff for three parents, so what such a merge adds cannot be scanned.
+        for name in ("s1", "s2"):
+            self.git("switch", "--quiet", "-c", name, self.base)
+            self.commit({f"{name}.txt": name}, name)
+        self.git("switch", "--quiet", "main")
+        self.commit({"mine.txt": "mine\n"}, "mine")
+        self.git("merge", "--quiet", "--no-edit", "s1", "s2")
+        with self.assertRaisesRegex(OrchestratorError, "three or more parents"):
+            self.push(self.git("rev-parse", "HEAD").strip())
+        self.assertNotIn("refs/heads/ci-ref", self.on_origin())
+
+    def test_the_change_s_gitattributes_do_not_hide_an_allow(self):
+        commit = self.commit({".gitattributes": "notes.md -diff\n", "notes.md": "x # gitleaks:allow\n"}, "hidden")
+        with self.assertRaises(orchestrator.LeaksFound) as caught:
+            self.push(commit)
+        self.assertEqual([(leak.file, leak.line) for leak in caught.exception.leaks], [("notes.md", 1)])
+
+    def test_committed_gitattributes_do_not_hide_an_allow_whatever_git_s_config(self):
+        # attr.tree=HEAD, or GIT_ATTR_SOURCE, makes git read the attributes a commit holds: the change's.
+        self.git("config", "attr.tree", "HEAD")
+        commit = self.commit({".gitattributes": "notes.md -diff\n", "notes.md": "x # gitleaks:allow\n"}, "hidden")
+        with patch.dict(os.environ, {"GIT_ATTR_SOURCE": commit}), self.assertRaises(orchestrator.LeaksFound) as caught:
+            self.push(commit)
+        self.assertEqual([(leak.file, leak.line) for leak in caught.exception.leaks], [("notes.md", 1)])
+        # gitleaks gets the same git environment, which brings back no tree's attributes.
+        env = dict(line.split("=", 1) for line in self.seen("env").splitlines())
+        self.assertEqual(env["GIT_CONFIG_VALUE_0"], self.git("hash-object", "-t", "tree", os.devnull).strip())
+        self.assertFalse({"GIT_ATTR_SOURCE", "GIT_WORK_TREE", "GIT_CONFIG_PARAMETERS"} & set(env))
+
+    def test_neither_the_base_s_attributes_nor_git_c_hide_an_allow(self):
+        # A -diff the base has for its own reasons is no allowlist; git -c exports GIT_CONFIG_PARAMETERS.
+        self.base = self.commit({".gitattributes": "package-lock.json -diff\n"}, "base attributes")
+        self.git("push", "--quiet", "origin", "main")
+        commit = self.commit({"package-lock.json": '{"t": "x"} // gitleaks:allow\n'}, "lock")
+        with patch.dict(os.environ, {"GIT_CONFIG_PARAMETERS": "'attr.tree'='HEAD'"}), \
+                self.assertRaises(orchestrator.LeaksFound) as caught:
+            self.push(commit)
+        self.assertEqual([leak.file for leak in caught.exception.leaks], ["package-lock.json"])
+
+    def test_a_nul_inside_a_line_does_not_end_the_commit_s_patch(self):
+        # git still diffs as text a file whose first 8000 bytes hold no NUL.
+        commit = self.commit({"n.txt": "x" * 9000 + "\na\0b\ny = 2  # gitleaks:allow\n"}, "nul")
+        with self.assertRaises(orchestrator.LeaksFound) as caught:
+            self.push(commit)
+        self.assertEqual([(leak.file, leak.line) for leak in caught.exception.leaks], [("n.txt", 3)])
+
+    def test_a_base_git_cannot_read_blocks_the_push(self):
+        commit = self.commit({"b.txt": "b\n"}, "clean")
+        self.base = "0" * 40
+        with self.assertRaises(OrchestratorError):
+            self.push(commit)
+        self.assertNotIn("refs/heads/ci-ref", self.on_origin())
+
+    def test_a_gitleaks_that_cannot_judge_blocks_the_push(self):
+        commit = self.commit({"b.txt": "b\n"}, "clean")
+        for mode, status in (("crash", "status 2"), ("bad-config", "status 1 and wrote no report")):
+            with self.subTest(mode=mode):
+                self.mode(mode)
+                with self.assertRaises(OrchestratorError) as caught:
+                    self.push(commit)
+                self.assertNotIsInstance(caught.exception, orchestrator.LeaksFound)
+                self.assertIn(status, str(caught.exception))
+                self.assertIn("nothing was pushed", str(caught.exception))
+                self.assertNotIn("refs/heads/ci-ref", self.on_origin())
+
+    def test_a_report_left_by_an_earlier_scan_is_not_read(self):
+        commit = self.commit({"b.txt": "b\n"}, "clean")
+        self.push(commit)
+        self.mode("bad-config")
+        with self.assertRaises(OrchestratorError):
+            self.push(commit)
+
+    def test_the_preflight_needs_gitleaks_git(self):
+        self.host.check_gitleaks()
+        self.mode("old")
+        with self.assertRaisesRegex(OrchestratorError, "`gitleaks git` does not run: install gitleaks 8.19"):
+            self.host.check_gitleaks()
+        # No gitleaks at all.
+        with patch.dict(os.environ, {"PATH": self.run_dir}), \
+                self.assertRaisesRegex(OrchestratorError, "install gitleaks 8.19"):
+            self.host.check_gitleaks()
+
+
+LEAK = orchestrator.Leak("github-pat", "limiter.py", 3, "c0ffee" * 6 + "c0ff", "c0ffee:limiter.py:github-pat:3")
+
+
+class TestSecretScanWorkflow(unittest.TestCase):
+    """The scan before each of a run's pushes, on FakeHost's scripted findings."""
+
+    def script(self):
+        return {"spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}
+
+    def test_a_secret_in_a_snapshot_ends_the_run_before_jenkins(self):
+        host = FakeHost()
+        host.leaks = [LEAK]
+        wf, herdr, host, fake, _ = gated(self.script(), host=host)
+        with self.assertRaisesRegex(orchestrator.LeaksFound, r"`limiter.py:3` github-pat"):
+            wf.run()
+        self.assertNotIn("trigger", fake.names)
+        self.assertEqual(host.remote, {})
+        self.assertEqual(host.scans, [("snap1", "abc123", f"{wf.state.dir}/leaks-snapshot.json")])
+
+    def test_a_secret_on_the_branch_stops_publish_until_it_is_rewritten(self):
+        host = FakeHost()
+        host.leaks, host.upstream = [LEAK], "u3"
+        wf, herdr, host, _ = make_workflow(self.script(), host=host)
+        with self.assertRaises(OrchestratorError) as caught, patch("sys.stderr", new_callable=io.StringIO) as err:
+            wf.run()
+        self.assertIn(f"git reset --soft {wf.state.base}", str(caught.exception))
+        self.assertIn("`limiter.py:3` github-pat", str(caught.exception))
+        # Scanned before origin's base is merged in, so the rewrite never has to undo a merge.
+        self.assertFalse([c for c in host.git_calls if c[0] == "push"])
+        self.assertNotIn(TestUpToDateBase.MERGE, host.git_calls)
+        self.assertEqual([scan[0] for scan in host.scans], [f"refs/heads/{wf.state.branch}"])
+        # The report gitleaks wrote is the only place the secret is.
+        self.assertNotIn(FAKE_TOKEN, err.getvalue() + str(caught.exception))
+        self.assertEqual([path for path, text in host.files.items() if FAKE_TOKEN in text],
+                         [wf.state.leaks_path("publish")])
+        self.assertEqual((wf.state.phase, host.prs), ("publish", []))
+        self.assertEqual(json.loads(host.files[f"{wf.state.dir}/state.json"])["phase"], "publish")
+        # Rewritten, the branch passes the scan, and the resume pushes it.
+        host.leaks = []
+        wf, *_ = make_workflow({}, host=host, state=wf.state)
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertIn(("push", "--quiet", "--set-upstream", "origin", wf.state.branch), host.git_calls)
+        self.assertEqual(len(host.prs), 1)
+
+    def test_a_run_that_pushes_needs_gitleaks_before_the_interview(self):
+        for kw in ({}, {"pull_request": False, "ci": ci_for(FakeCI())}):
+            with self.subTest(kw=list(kw)):
+                host = FakeHost()
+                host.gitleaks_missing = True
+                wf, herdr, *_ = make_workflow(self.script(), host=host, **kw)
+                with self.assertRaisesRegex(OrchestratorError, "install gitleaks 8.19"):
+                    wf.run()
+                self.assertNotIn("start", [c[0] for c in herdr.calls])
+
+    def test_a_run_that_pushes_nothing_needs_no_gitleaks(self):
+        host = FakeHost()
+        host.gitleaks_missing = True
+        wf, *_ = make_workflow(self.script(), host=host, pull_request=False)
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(host.scans, [])
 
 
 class TestQualityGate(unittest.TestCase):

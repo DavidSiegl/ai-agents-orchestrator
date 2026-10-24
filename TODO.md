@@ -5,6 +5,18 @@ was done.
 
 ## Open issues
 
+- **The secret scan does not look inside a file git takes for binary.** With no attributes, git still calls a file
+  binary when its first 8000 bytes hold a NUL, and `git log -p` prints "Binary files ... differ" for it, to gitleaks
+  and to `Host._allow_comments` alike, so a secret or a `gitleaks:allow` in such a file is pushed unscanned. gitleaks'
+  own `git` mode has the same blind spot. Raised by the cross-review of `push-secret-scan` (F15, 2026-10-24). Closes
+  with a decision in the spec whether binary content is in scope, and, if it is, a `--text` diff or a scan of the
+  blobs themselves (`gitleaks dir` over the pushed files).
+- **A base `.gitleaks.toml` that extends another file reads that file from outside the base.** `scan_unpublished`
+  writes the base's `.gitleaks.toml` into the run directory and passes it with `--config`; an `[extend] path = ...`
+  in it is resolved by gitleaks against its working directory, not against the base, so a file the change can edit
+  may supply rules. Raised by the cross-review of `push-secret-scan` (F6, 2026-10-24): "a base config using
+  `[extend] path = ...` resolves that path outside base (process cwd), which the change may control". Closes by
+  writing each extended file from the base beside the config and rewriting the path, or refusing such a config.
 - **A process a test leaves holding pytest's output keeps a finished run waiting until its timeout.** `_pytest`'s
   `communicate` reads to the end of pytest's output, so a server a test started that inherits it keeps a run that has
   finished going until the timeout, reported then as `budget-reached` (passes-at-base) or `not-rerun` (flaky-tests).

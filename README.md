@@ -73,6 +73,10 @@ Each harness a run uses needs its CLI and its herdr integration where the agents
   [GUI](#gui); [uv](https://github.com/astral-sh/uv) only for the tests and the build
 - For `--machine`: the machine saved in herdr and non-interactive SSH to its target; see
   [Running the agents on another machine](docs/design.md#running-the-agents-on-another-machine)
+- Where the agents run, for any run that pushes (a pull request, or `--quality-gate`):
+  [gitleaks](https://github.com/gitleaks/gitleaks#installing) 8.19 or later on `PATH`, and git 2.36 or later. Every push is scanned for
+  secrets first, by the base's `.gitleaks.toml` and `.gitleaksignore`, and refused on a finding; the run checks for
+  gitleaks before it starts
 - For `--quality-gate`: a Jenkins quality job set up as in [quality gate](docs/quality-gate.md), its
   credentials in `~/.config/ai-agents-orchestrator/ci.env` or the environment, and a git checkout with an
   `origin`
