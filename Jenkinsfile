@@ -17,7 +17,7 @@ pipeline {
         COVERAGE_FILE  = '.coverage'
         // The GitHub login Jenkins posts pull request statuses as, its GitHub App's "<slug>[bot]", which the agents
         // cannot post as. Empty: no build of main trusts a pull request build, and each judges itself.
-        PR_STATUS_CREATOR = ''
+        PR_STATUS_CREATOR = 'davidsiegl-jenkins[bot]'
     }
 
     stages {
