@@ -76,6 +76,11 @@ was done.
   judges every function that no other function holds (`_scored_functions`). The two copies of the except clause
   have to be kept alike, as a coding cookie naming an odd codec has shown twice. Closes with `_changed_python_units`
   taking the walker as a parameter, or handing its callers the parsed trees.
+- **A changed `.py` symlink is read through to its target by the other Python checks.** `_changed_python_units`
+  opens every changed `.py` path, and `open()` follows a symlink, so a change that adds `x.py` as a symlink to a FIFO
+  blocks the surviving-mutants and flaky-tests selection, and one to `/dev/zero` reads without end. The
+  cognitive-complexity check skips such paths (`_is_link_or_special`, review round 5 of ticket 06, R5-F1). Found by
+  reading the code, not reproduced. Closes with `_changed_python_units` skipping what `_is_link_or_special` names.
 - **Cognitive complexity scores direct recursion only.** Campbell's paper gives a point to each function in a
   recursion cycle; `_calls_itself` sees a function calling itself by name, or a method as `self.m`, `cls.m` or
   `C.m`, but not a cycle through other functions, nor a call through an alias. A function that recurses through a

@@ -51,6 +51,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import string
 import subprocess
 import sys
@@ -3929,7 +3930,7 @@ def _base_scores(change: GateChange, judged: dict[str, tuple[list[_ScoredFunctio
     """
     working = {path: functions for path, (functions, _) in judged.items()}
     working.update({new: _working_functions(change, new)[0] or [] for _, new in pairs
-                    if new and new not in working and new.endswith(".py")})
+                    if new and new not in working and new.endswith(".py") and not _is_link_or_special(change, new)})
     old_paths = {new: old for old, new in pairs if new}
     homes = {path: old_paths.get(path, path) for path in working}
     pool = _BasePool({old: _base_functions(change, old) for old, new in pairs
@@ -3989,9 +3990,7 @@ def _judged_files(change: GateChange) -> tuple[list[dict], dict[str, tuple[list[
     for path, added in change.changed.items():
         if not added or not path.endswith(".py") or path.startswith(_COMPLEXITY_EXEMPT):
             continue
-        full = os.path.join(change.root, path)
-        # A symlink's change is the name it points to, and a submodule's its commit: neither is a line of code.
-        if os.path.islink(full) or os.path.isdir(full):
+        if _is_link_or_special(change, path):
             continue
         functions, why = _working_functions(change, path)
         if functions is None:
@@ -4000,6 +3999,17 @@ def _judged_files(change: GateChange) -> tuple[list[dict], dict[str, tuple[list[
             continue
         judged[path] = (functions, added)
     return out, judged
+
+
+def _is_link_or_special(change: GateChange, path: str) -> bool:
+    """Whether the working tree's path is there as anything but a regular file: a symlink, a submodule's directory,
+    or a FIFO or device a symlink could name. The check reads none of them as code: a symlink's change is the name it
+    points to, and a submodule's its commit; and reading what one points to could block, as on a FIFO, or never end,
+    as on /dev/zero. False for a path that is not there, whose reading then fails as any other."""
+    try:
+        return not stat.S_ISREG(os.lstat(os.path.join(change.root, path)).st_mode)
+    except OSError:
+        return False
 
 
 def _working_functions(change: GateChange, path: str) -> tuple[list[_ScoredFunction] | None, str]:

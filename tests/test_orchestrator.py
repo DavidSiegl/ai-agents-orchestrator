@@ -5896,6 +5896,40 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.assertEqual([f["message"] for f in self.found()[1]],
                          ["`copied`: cognitive complexity 20, a new function; the limit is 15."])
 
+    def test_a_changed_symlink_is_not_read_so_one_to_a_fifo_cannot_block_the_check(self):
+        elsewhere = tempfile.TemporaryDirectory()
+        self.addCleanup(elsewhere.cleanup)
+        fifo = os.path.join(elsewhere.name, "pipe")
+        os.mkfifo(fifo)
+        os.symlink(fifo, os.path.join(self.repo, "x.py"))
+        self.git("add", "x.py")
+        self.nest_under("big", 19)
+        where = []
+        worker = threading.Thread(target=lambda: where.extend(self.found()[0]), daemon=True)
+        worker.start()
+        worker.join(10)
+        if worker.is_alive():
+            # Open the FIFO's other end and close it, so that the read blocked on it ends and the suite goes on.
+            with contextlib.suppress(OSError):
+                os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+            worker.join(10)
+            self.fail("the check read the FIFO a changed symlink points to")
+        self.assertEqual(where, [("calc.py", self.def_line("big"), "over-limit")])
+
+    def test_a_module_renamed_with_a_symlink_left_under_its_old_name_keeps_its_functions_bases(self):
+        self.git("mv", "calc.py", "core.py")
+        os.symlink("core.py", os.path.join(self.repo, "calc.py"))
+        self.git("add", "calc.py")
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_changed_file_gone_before_it_is_read_could_not_be_read(self):
+        self.nest_under("big", 19)
+        change = self.change()
+        os.remove(os.path.join(self.repo, "calc.py"))
+        found = orchestrator.too_complex_functions(change)
+        self.assertEqual([(f["path"], f["rule"]) for f in found], [("calc.py", "not-scored")])
+        self.assertTrue(found[0]["message"].startswith("could not be read ("), found[0]["message"])
+
     def test_a_function_whose_decorator_the_change_adds_is_compared_with_its_unchanged_self(self):
         self.edit("calc.py", "def big(x):\n", "@staticmethod\ndef big(x):\n")  # touched, its body as it was
         self.assertEqual(self.found()[0], [])
