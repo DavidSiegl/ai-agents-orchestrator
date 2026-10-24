@@ -3956,13 +3956,14 @@ class _BasePool:
 
     def __init__(self, bases: dict[str, list[_ScoredFunction]], now: dict[str, list[_ScoredFunction]]):
         """bases: the base functions of the change's files, by old path; now: the working tree's functions of the file
-        each old path became, by old path, with none for a file the change deletes or that holds no Python now."""
+        each old path became, by old path, every one of bases' included, with none for a file the change deletes or
+        that holds no Python now."""
         self._left = bases  # the base functions that have lent no score yet, by old path
         # (old path, body) of each body that the working tree's file holds fewer times than its base did: moved out of
         # it, edited or deleted, so that one of its base functions may lend to a function of another file.
         self._gone = {(old, body) for old, functions in bases.items()
                       for body, n in collections.Counter(g.body for g in functions).items()
-                      if sum(f.body == body for f in now.get(old, [])) < n}
+                      if sum(f.body == body for f in now[old]) < n}
         self.lent: dict[tuple[str, int], int] = {}  # the score lent to each function, by (path, def line)
 
     def lend_by_body(self, path: str, functions: list[_ScoredFunction], home: str | None, *, same_name: bool,

@@ -5896,6 +5896,14 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.git("add", "lib/more.py")
         self.assertEqual(self.found()[0], [])  # lib/helpers.py's base is lib/, now held to the limit
 
+    def test_a_function_moved_unchanged_out_of_tests_is_judged_as_new(self):
+        self.commit_file("tests/helpers.py", "X = 0\n\n\n" + flat("helper", 20))
+        self.put("tests/helpers.py", "X = 0\n")
+        self.put("lib.py", flat("helper", 20))
+        self.git("add", "lib.py")
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`helper`: cognitive complexity 20, a new function; the limit is 15."])
+
     def test_a_function_moved_unchanged_into_tests_keeps_its_base_from_a_copy_elsewhere(self):
         big = flat("big", 20)
         self.put("calc.py", self.BASE.replace("\n\n" + big, ""))
@@ -6069,6 +6077,10 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.git("add", "other.py", "third.py")
         self.assertEqual([f["message"] for f in self.found()[1]],
                          ["`copied`: cognitive complexity 20, a new function; the limit is 15."])
+        # The copy in a file read before the original's new one, so that only the name decides.
+        os.rename(os.path.join(self.repo, "third.py"), os.path.join(self.repo, "a_copy.py"))
+        self.git("add", "-A", "third.py", "a_copy.py")
+        self.assertEqual(self.found()[0], [("a_copy.py", 1, "over-limit")])
 
     def test_a_name_defined_twice_is_compared_with_the_same_definition_at_the_base(self):
         # A property's getter, scoring 21, then its setter, which scores nothing, under the same name.
