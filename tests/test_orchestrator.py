@@ -14395,7 +14395,6 @@ class TestCheckSetup(unittest.TestCase):
         checks = self.check(tools, machine="box", cwd="/proj")
         self.assertEqual([c.name for c in checks.values() if not c.ok], [])
         self.assertEqual(checks["reaching herdr"].detail, "herdr machine box, over SSH to me@box")
-        # Only herdr's machine list runs here; everything else goes over SSH to the machine.
         self.assertEqual((checks["herdr"].detail, checks["herdr on box"].detail), ("herdr 0.9.1", "herdr 0.9.1"))
         # Only the herdr a run drives is checked here; everything else goes over SSH to the machine.
         local = [argv for target, argv in tools.calls if target is None]
