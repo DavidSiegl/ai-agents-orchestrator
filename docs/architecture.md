@@ -170,7 +170,7 @@ running `after` callbacks on `tick`), and `TestRunProcess` runs real child proce
   another branch; such a build never releases.
 - `.github/workflows/automerge.yml`: keeps auto-merge on for a pull request into `main` from a branch of this
   repository, so it merges with a merge commit once Jenkins' required check passes; its header lists the pull
-  requests it leaves to a human (drafts, `no-automerge`, the orchestrator's own, forks).
+  requests it leaves to a human.
 - `.github/workflows/macos-binary.yml`: Jenkins has no Mac, so when a release is
   published, or by hand for an existing tag, it runs `packaging/build-binary.sh` on `macos-latest` and uploads
   `orchestrator-macos-arm64` and its `.sha256` to that release with `gh release upload --clobber`. With only

@@ -9,8 +9,9 @@ was done.
   `continuous-integration/jenkins/pr-head`, the one status the `ci-cd` ruleset requires (`docs/quality-gate.md`,
   the checkout credential), and since `automerge.yml` a pull request into `main` from a branch outside
   `orchestrator/` merges once that status is green. With *Contents: write* the token could already merge such a
-  pull request itself. Raised by the cross-review of `pr-automerge` (F5, 2026-10-24): "agent work on any branch
-  outside `orchestrator/` can now reach `main` without a human". Closes when Jenkins reports the status under an
+  pull request itself. Raised by the cross-review of `pr-automerge` (F5, 2026-10-24): "A branch the agents push
+  under any other name, once a pull request is open on it, merges into `main` (and so into a release) without a
+  human". Closes when Jenkins reports the status under an
   identity the agents do not hold, such as a GitHub App, and the ruleset requires that app's check (Homelab
   `.scratch/agent-identity`, tickets 02 and 03).
 - **The secret scan does not look inside a file git takes for binary.** With no attributes, git still calls a file
