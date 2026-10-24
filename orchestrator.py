@@ -113,11 +113,12 @@ CI_POLL_SECONDS = 10
 QUALITY_TIMEOUT = 1200
 # The orchestrator's own environment variables that hold the credentials; no process it starts inherits them.
 CI_ENV = ("JENKINS_URL", "JENKINS_USER", "JENKINS_TOKEN")
-# git's switches for how it reads every pathspec. The orchestrator writes its pathspecs in git's default syntax, globs
-# and magic such as GateChange.from_tree's exclude, which GIT_LITERAL_PATHSPECS turns into a literal path matching
-# nothing, silently.
-GIT_PATHSPEC_ENV = ("GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS")
 CI_TOKENS = ("JENKINS_TOKEN",)
+# git's switches for how it reads every pathspec, which no process the orchestrator starts inherits. Its pathspecs are
+# written in git's default syntax, and each switch breaks one of them without an error: under LITERAL the linters'
+# globs and GateChange.from_tree's exclude match nothing, under NOGLOB the globs match nothing, under GLOB "*.py"
+# matches only the top level's files, and under ICASE the exclude leaves out a Mutants/ that is not mutmut's.
+GIT_PATHSPEC_ENV = ("GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS")
 JOB_PARAMETERS = ("GIT_REF",)
 # Snapshots are pushed to orchestrator-ci/<key>-<round>-q<quality round>.
 CI_REF_PREFIX = "orchestrator-ci/"
@@ -180,10 +181,12 @@ class HerdrError(OrchestratorError):
 
 def child_env() -> dict[str, str]:
     """The environment for every process the orchestrator starts: its own, without the CI credentials and without
-    GIT_PATHSPEC_ENV, so git reads each pathspec in its default syntax.
+    GIT_PATHSPEC_ENV.
 
     So the agents, which herdr, git, ssh and gh start or reach, never inherit the tokens. They can
-    still read a file the tokens came from, as the same user.
+    still read a file the tokens came from, as the same user. And git, run by the orchestrator, an agent, a linter,
+    a test the flaky-tests check reruns or mutmut, reads each pathspec in its default syntax, whatever switch the
+    user exported. Over SSH this is the local ssh process's environment; the remote git reads the remote shell's.
     """
     return {k: v for k, v in os.environ.items() if k not in CI_ENV and k not in GIT_PATHSPEC_ENV}
 
