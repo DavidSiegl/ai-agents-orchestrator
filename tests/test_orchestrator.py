@@ -4278,6 +4278,12 @@ class TestWeakenedTests(unittest.TestCase):
         self.git("add", "mutants")
         self.git("commit", "--quiet", "-m", "mutmut's state")
 
+    def test_a_removed_test_is_found_whatever_syntax_the_environment_gives_git_s_pathspecs(self):
+        self.edit("tests/test_calc.py", "    def test_large(self):\n        assert add(10, 20) == 30\n\n", "")
+        for name in orchestrator.GIT_PATHSPEC_ENV:
+            with self.subTest(name), patch.dict("os.environ", {name: "1"}):
+                self.assertEqual(self.found()[0], [("tests/test_calc.py", 11, "removed-test")])
+
     def test_removing_mutmut_s_state_removes_no_test(self):
         self.commit_mutmut_state()
         self.git("rm", "-r", "--quiet", "mutants")

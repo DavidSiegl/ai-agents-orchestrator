@@ -113,6 +113,10 @@ CI_POLL_SECONDS = 10
 QUALITY_TIMEOUT = 1200
 # The orchestrator's own environment variables that hold the credentials; no process it starts inherits them.
 CI_ENV = ("JENKINS_URL", "JENKINS_USER", "JENKINS_TOKEN")
+# git's switches for how it reads every pathspec. The orchestrator writes its pathspecs in git's default syntax, globs
+# and magic such as GateChange.from_tree's exclude, which GIT_LITERAL_PATHSPECS turns into a literal path matching
+# nothing, silently.
+GIT_PATHSPEC_ENV = ("GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS")
 CI_TOKENS = ("JENKINS_TOKEN",)
 JOB_PARAMETERS = ("GIT_REF",)
 # Snapshots are pushed to orchestrator-ci/<key>-<round>-q<quality round>.
@@ -175,12 +179,13 @@ class HerdrError(OrchestratorError):
 
 
 def child_env() -> dict[str, str]:
-    """The environment for every process the orchestrator starts: its own, without the CI credentials.
+    """The environment for every process the orchestrator starts: its own, without the CI credentials and without
+    GIT_PATHSPEC_ENV, so git reads each pathspec in its default syntax.
 
     So the agents, which herdr, git, ssh and gh start or reach, never inherit the tokens. They can
     still read a file the tokens came from, as the same user.
     """
-    return {k: v for k, v in os.environ.items() if k not in CI_ENV}
+    return {k: v for k, v in os.environ.items() if k not in CI_ENV and k not in GIT_PATHSPEC_ENV}
 
 
 def config_dir() -> str:
