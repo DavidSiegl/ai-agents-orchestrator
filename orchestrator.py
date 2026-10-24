@@ -2239,8 +2239,9 @@ class RunState:
     # files, by the id of the step that locked them. The files were restored once the record was saved.
     restored: list[dict] = field(default_factory=list)
     # One record per proof the verdict step wrote with a review that requested changes, {"round", "file", "finding",
-    # "demonstrated"}, in the order they ran (Workflow._judge_proofs): file is the proof's basename in round's proofs
-    # directory, finding the number its name begins with, and demonstrated whether it failed against the change.
+    # "demonstrated", "said"}, in the order they ran (Workflow._judge_proofs): file is the proof's basename in the
+    # round's proofs directory, finding the first number in that name, demonstrated whether it failed against the
+    # change, and said how it exited and the last PROOF_TAIL_LINES lines it printed.
     proofs: list[dict] = field(default_factory=list)
 
     @classmethod
@@ -5959,16 +5960,18 @@ def session_usage(kind: str, session_log: str) -> list[tuple[float, dict[str, in
     return out
 
 
-def turn_tokens(turn: dict, session_log: str | None) -> dict[str, int] | str:
+def turn_tokens(turn: dict, usage: list[tuple[float, dict[str, int]]] | None) -> dict[str, int] | str:
     """The tokens of the answers the turn's agent gave from the turn's start to the second its handoff file was
-    written, summed, from the log of the session it ran in throughout (session_usage); "unknown" when there is no such
-    log, the turn's session or either end is not known, or its harness records none the orchestrator reads."""
-    if session_log is None or turn["agent"] not in SESSION_LOGS or not turn.get("session") \
-            or not turn.get("started_at") or not turn.get("ended_at"):
+    written, summed, from usage, session_usage of the session it ran in throughout; "unknown" when there is no such
+    usage, or the turn's session or either end is not known, or not a time."""
+    if usage is None or not turn.get("session") or not turn.get("started_at") or not turn.get("ended_at"):
         return "unknown"
-    start, end = epoch_seconds(turn["started_at"]), epoch_seconds(turn["ended_at"]) + 1
+    try:
+        start, end = epoch_seconds(turn["started_at"]), epoch_seconds(turn["ended_at"]) + 1
+    except (ValueError, TypeError):
+        return "unknown"
     total = dict.fromkeys(("input", "output", "cache_read", "cache_write"), 0)
-    for when, tokens in session_usage(turn["agent"], session_log):
+    for when, tokens in usage:
         if start <= when < end:
             for k, v in tokens.items():
                 total[k] += v
@@ -6003,8 +6006,8 @@ def run_metrics(state: "RunState", now: int) -> dict:
 
 # -- Proofs: the verdict step's failing tests (Pipeline.proof_command) --------------------------------------
 
-# The heading of the section _judge_proofs appends to a review; a review that has it was judged already.
-PROOFS_HEADING = "## Proofs"
+# The heading of the section _judge_proofs appends to a review, which a Reviewer's own section is unlikely to take.
+PROOFS_HEADING = "## Proofs the orchestrator ran"
 # Seconds one proof may run, and how many lines of its output the review quotes.
 PROOF_TIMEOUT = 300
 PROOF_TAIL_LINES = 10
@@ -6016,20 +6019,21 @@ def _proof_finding(file: str) -> int | None:
     return int(m.group()) if m else None
 
 
-def proofs_section(command: str, cwd: str, review: str, outcomes: list[tuple[str, bool, str]]) -> str:
-    """The section _judge_proofs appends to a review: per proof file, (its name, whether it failed against the change,
-    what it printed last), whether it demonstrates its finding, and the review's numbered findings left without
-    one, which stand as unproven."""
+def proofs_section(command: str, cwd: str, review: str, proofs: list[dict]) -> str:
+    """The section _judge_proofs appends to a review: for each of proofs, the round's records in RunState.proofs,
+    whether it demonstrates its finding, and the review's numbered findings left without one, which stand as
+    unproven."""
     out = [PROOFS_HEADING, "", (f"The orchestrator ran each proof with `{command}` in {cwd}. A proof that fails "
                                 "demonstrates its finding; one that passes or errors does not.")]
-    for file, failed, said in outcomes:
-        number = _proof_finding(file)
+    for p in proofs:
+        file, failed, said = p["file"], p["demonstrated"], p["said"]
+        number = p["finding"]
         finding = f"finding {number}" if number is not None else "no finding"
         how = said.split("\n", 1)[0].rstrip(":")
         out += ["", f"- `{file}` ({finding}): {'demonstrated' if failed else 'not demonstrated'}, {how}."]
         if "\n" in said:
             out += ["", "  ````", *(f"  {line}" for line in said.split("\n")[1:]), "  ````"]
-    proven = {_proof_finding(f) for f, _, _ in outcomes}
+    proven = {p["finding"] for p in proofs}
     unproven = [int(k) for k in re.findall(r"^(\d+)\. ", review, re.MULTILINE) if int(k) not in proven]
     if unproven:
         out += ["", f"Findings without a proof, unproven: {', '.join(map(str, unproven))}."]
@@ -6182,8 +6186,10 @@ class Workflow:
             raise
 
         s.phase = DONE
-        s.owner = None
+        # Saved first: the run is done whatever counting the tokens meets.
+        self._save()
         self._count_tokens()
+        s.owner = None
         self._save()
         self._write_summary()
         self._write_metrics()
@@ -6325,18 +6331,19 @@ class Workflow:
     def _count_tokens(self) -> None:
         """Give each agent turn the tokens its harness recorded for it (turn_tokens), "unknown" where it recorded
         none the orchestrator can read. A session log that cannot be read costs only its turns' counts."""
-        logs: dict[tuple[str, str], str | None] = {}
+        usage: dict[tuple[str, str], list[tuple[float, dict[str, int]]] | None] = {}
         for t in self.state.turns:
             if not t.get("agent"):
                 continue
             key = (t["agent"], t.get("session") or "")
-            if key not in logs:
+            if key not in usage:
+                usage[key] = None
                 try:
-                    logs[key] = self.host.session_log(*key) if key[1] else None
+                    if key[1] and (session_log := self.host.session_log(*key)) is not None:
+                        usage[key] = session_usage(key[0], session_log)
                 except OrchestratorError as e:
                     log(f"could not read the {key[0]} session log of {key[1]}: {e}")
-                    logs[key] = None
-            t["tokens"] = turn_tokens(t, logs[key])
+            t["tokens"] = turn_tokens(t, usage[key])
 
     def _round_results(self) -> list[str]:
         """Per round, its quality gates and its verdict, as its handoff files say."""
@@ -6562,34 +6569,42 @@ class Workflow:
 
     def _judge_proofs(self, step: Step, n: int, review: str) -> None:
         """Run each proof the verdict step wrote in round n with the workflow's proof_command, record which fail, and
-        append their outcomes to its review. A review that has them already, after a resume, is left as it is."""
+        append their outcomes to its review. A resume runs none that were recorded, and appends them once."""
         s, command = self.state, self.pipeline.proof_command
-        path = step.path(s.dir, n)
-        if command is None or PROOFS_HEADING in review.split("\n"):
+        if command is None:
             return
-        files = sorted(os.path.basename(f) for f in self.host.run_files(s.proofs_dir(n)))
-        if not files:
-            return
-        outcomes = [self._run_proof(command, s.proofs_dir(n), f) for f in files]
-        s.proofs = [p for p in s.proofs if p["round"] != n] + [
-            {"round": n, "file": f, "finding": _proof_finding(f), "demonstrated": failed}
-            for f, (failed, _) in zip(files, outcomes, strict=True)]
-        self._save()
-        self.host.write(path, review.rstrip("\n") + "\n\n" + proofs_section(command, s.work_dir, review, [
-            (f, failed, said) for f, (failed, said) in zip(files, outcomes, strict=True)]))
-        log(f"[{step.role}] {sum(failed for failed, _ in outcomes)} of {len(files)} proofs fail against the change")
+        records = [p for p in s.proofs if p["round"] == n]
+        if not records:
+            for f in sorted(os.path.basename(f) for f in self.host.run_files(s.proofs_dir(n))):
+                failed, said = self._run_proof(command, s.proofs_dir(n), f)
+                records.append({"round": n, "file": f, "finding": _proof_finding(f), "demonstrated": failed,
+                                "said": said})
+            if not records:
+                return
+            s.proofs += records
+            self._save()
+            log(f"[{step.role}] {sum(p['demonstrated'] for p in records)} of {len(records)} proofs fail against the "
+                f"change")
+        if PROOFS_HEADING not in review.split("\n"):
+            self.host.write(step.path(s.dir, n),
+                            review.rstrip("\n") + "\n\n" + proofs_section(command, s.work_dir, review, records))
 
     def _run_proof(self, command: str, proofs_dir: str, file: str) -> tuple[bool, str]:
         """Whether the proof fails against the working tree, as proof_command's exit status 1 says, and what it
         printed last: its output's end, how else it exited, or why it could not run."""
         cmd = command.format(proofs=shlex.quote(f"{proofs_dir}/{file}"))
+        # GNU timeout runs the proof in a process group of its own and kills all of it, so nothing a proof started
+        # goes on writing to the tree; where there is none, Host.run's limit stops only the shell.
+        script = ('cd -- "$1" || exit 125; command -v timeout >/dev/null 2>&1 && exec timeout -k 10 "$3" sh -c "$2"; '
+                  'eval "$2"')
         try:
-            proc = self.host.run(["sh", "-c", 'cd -- "$1" && eval "$2"', "_", self.state.work_dir, cmd],
-                                 timeout=PROOF_TIMEOUT, verbatim=True)
+            proc = self.host.run(["sh", "-c", script, "_", self.state.work_dir, cmd, str(PROOF_TIMEOUT)],
+                                 timeout=PROOF_TIMEOUT + 30, verbatim=True)
         except OrchestratorError as e:
             return False, f"it did not run: {e}"
         tail = "\n".join((proc.stdout + proc.stderr).rstrip().split("\n")[-PROOF_TAIL_LINES:])
-        how = {0: "it passes", 1: "it fails"}.get(proc.returncode, f"it errors, with exit status {proc.returncode}")
+        how = {0: "it passes", 1: "it fails", 124: f"it errors, running out of its {PROOF_TIMEOUT} s"}.get(
+            proc.returncode, f"it errors, with exit status {proc.returncode}")
         return proc.returncode == 1, f"{how}:\n{tail}" if tail else how
 
     def _proofs_note(self, step: Step, n: int) -> str:

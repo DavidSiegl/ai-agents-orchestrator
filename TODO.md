@@ -5,6 +5,14 @@ was done.
 
 ## Open issues
 
+- **A proof that failed is not run again in the next round.** `Workflow._judge_proofs` runs only the proofs the
+  verdict step wrote in its own round, so a Builder told to make round N's failing proofs pass (`PROOFS_NOTE`) is
+  checked only if the Reviewer writes them again; one that still fails can be approved. Raised by the code review of
+  loop-guards (2026-10-24). Closes with round N's demonstrated proofs run again after the Builder's turn of round
+  N+1 and their outcomes put before the Reviewer.
+- **Proofs run after the last round's review too.** No Builder turn follows to read them; only the draft pull
+  request's review shows them, and each may take `PROOF_TIMEOUT`. Kept: a demonstrated defect is what the human
+  most needs to see in a draft. Raised by the same review.
 - **A proof in a worktree run finds the checkout's pytest configuration.** The run directory, and with it
   `RunState.proofs_dir`, is under the project checkout, not the run's worktree, so `adversarial.toml`'s
   `python -m pytest {proofs}` takes its rootdir and `conftest.py` from the checkout while importing the code from the

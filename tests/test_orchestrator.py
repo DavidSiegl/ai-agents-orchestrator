@@ -9378,14 +9378,14 @@ class TestProofs(unittest.TestCase):
         state = wf.state
         review = host.files[state.review_path(1)]
         self.assertTrue(review.startswith("VERDICT: CHANGES_REQUESTED\n1. a bug\n"))
-        self.assertIn(f"## Proofs\n\nThe orchestrator ran each proof with `sh {{proofs}}` in {self.proj}.", review)
+        self.assertIn(f"## Proofs the orchestrator ran\n\nThe orchestrator ran each proof with `sh {{proofs}}` in {self.proj}.", review)
         self.assertIn("- `test_1_bug.sh` (finding 1): demonstrated, it fails.\n\n  ````\n  checking test_1_bug.sh\n"
                       "  ````", review)
         self.assertIn("- `test_2.sh` (finding 2): not demonstrated, it passes.", review)
         self.assertIn("- `test_3.sh` (finding 3): not demonstrated, it errors, with exit status 4.", review)
-        self.assertEqual(state.proofs, [{"round": 1, "file": "test_1_bug.sh", "finding": 1, "demonstrated": True},
-                                        {"round": 1, "file": "test_2.sh", "finding": 2, "demonstrated": False},
-                                        {"round": 1, "file": "test_3.sh", "finding": 3, "demonstrated": False}])
+        self.assertEqual([(p["file"], p["finding"], p["demonstrated"]) for p in state.proofs],
+                         [("test_1_bug.sh", 1, True), ("test_2.sh", 2, False), ("test_3.sh", 3, False)])
+        self.assertEqual(state.proofs[0]["said"], "it fails:\nchecking test_1_bug.sh")
         self.assertIn("\n\n" + orchestrator.PROOFS_NOTE.format(proofs=f"{state.proofs_dir(1)}/test_1_bug.sh"), seen[1])
         self.assertNotIn("Reviewer backed", seen[0])
 
@@ -9405,29 +9405,63 @@ class TestProofs(unittest.TestCase):
     def test_an_approval_runs_no_proof(self):
         wf, host, _ = self.run_proofs((APPROVE, {"test_1.sh": 1}), builds=1)
         self.assertEqual(wf.run(), APPROVE)
-        self.assertNotIn("## Proofs", host.files[wf.state.review_path(1)])
+        self.assertNotIn(orchestrator.PROOFS_HEADING, host.files[wf.state.review_path(1)])
         self.assertEqual(wf.state.proofs, [])
 
     def test_a_workflow_without_proof_command_runs_none(self):
         wf, host, _ = self.run_proofs((CHANGES_REQUESTED, {"test_1.sh": 1}), (APPROVE, {}), pipeline=QUICK)
         self.assertEqual(wf.run(), APPROVE)
-        self.assertNotIn("## Proofs", host.files[wf.state.review_path(1)])
+        self.assertNotIn(orchestrator.PROOFS_HEADING, host.files[wf.state.review_path(1)])
 
-    def test_a_review_judged_before_a_resume_is_not_judged_again(self):
+    def resumed_in_review(self, review, proofs):
         state = RunState("20260929-120000-a1b2c3", "add a rate limiter", self.proj, None, phase="review", round=1,
-                         workflow="quick", base="abc123",
-                         proofs=[{"round": 1, "file": "test_1.sh", "finding": 1, "demonstrated": True}])
+                         workflow="quick", base="abc123", proofs=proofs)
         host = FakeHost()
-        judged = "VERDICT: CHANGES_REQUESTED\n1. a bug\n\n## Proofs\n\nalready judged\n"
-        host.files[state.review_path(1)] = judged
+        host.files[state.review_path(1)] = review
         host.files[state.build_path(1)] = "report 1"
         seen = []
         wf, *_ = make_workflow({"build": [recording(build_turn(2), seen)], "review": [review_turn(2, APPROVE)]},
                                host=host, state=state, pipeline=self.pipeline, pull_request=False)
         self.assertEqual(wf.run(), APPROVE)
-        self.assertEqual(host.files[state.review_path(1)], judged)
-        self.assertEqual(len(wf.state.proofs), 1)
-        self.assertIn(orchestrator.PROOFS_NOTE.format(proofs=f"{state.proofs_dir(1)}/test_1.sh"), seen[0])
+        return wf, host, seen
+
+    def test_a_review_judged_before_a_resume_is_not_judged_again(self):
+        judged = f"VERDICT: CHANGES_REQUESTED\n1. a bug\n\n{orchestrator.PROOFS_HEADING}\n\nalready judged\n"
+        proof = {"round": 1, "file": "test_1.sh", "finding": 1, "demonstrated": True, "said": "it fails"}
+        wf, host, seen = self.resumed_in_review(judged, [proof])
+        self.assertEqual(host.files[wf.state.review_path(1)], judged)
+        self.assertEqual(wf.state.proofs, [proof])
+        self.assertIn(orchestrator.PROOFS_NOTE.format(proofs=f"{wf.state.proofs_dir(1)}/test_1.sh"), seen[0])
+
+    def test_proofs_recorded_before_a_resume_are_appended_without_running_again(self):
+        # No proof file is on disk: running one again would fail to find it.
+        proof = {"round": 1, "file": "test_1.sh", "finding": 1, "demonstrated": True, "said": "it fails"}
+        wf, host, _ = self.resumed_in_review("VERDICT: CHANGES_REQUESTED\n1. a bug\n", [proof])
+        self.assertIn("- `test_1.sh` (finding 1): demonstrated, it fails.", host.files[wf.state.review_path(1)])
+
+    def test_the_reviewers_own_proofs_heading_does_not_stop_the_run(self):
+        wf, host, _ = self.run_proofs((CHANGES_REQUESTED, {"test_1.sh": 1}), (APPROVE, {}))
+        real_read = host.read
+
+        def read(path):
+            text = real_read(path)
+            if path == wf.state.review_path(1) and text and orchestrator.PROOFS_HEADING not in text:
+                return text + "\n## Proofs\n\n1. test_1.sh\n"
+            return text
+        host.read = read
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual([p["demonstrated"] for p in wf.state.proofs], [True])
+
+    def test_a_proof_that_runs_too_long_is_stopped_with_what_it_started(self):
+        with patch.object(orchestrator, "PROOF_TIMEOUT", 1):
+            wf, host, _ = self.run_proofs((CHANGES_REQUESTED, {}), (APPROVE, {}))
+            os.makedirs(wf.state.proofs_dir(1))
+            with open(f"{wf.state.proofs_dir(1)}/test_1.sh", "w") as f:
+                f.write(f"(sleep 3; echo leaked > {self.proj}/leaked) &\nsleep 30\n")
+            failed, said = wf._run_proof("sh {proofs}", wf.state.proofs_dir(1), "test_1.sh")
+        self.assertEqual((failed, said), (False, "it errors, running out of its 1 s"))
+        time.sleep(4)
+        self.assertFalse(os.path.exists(f"{self.proj}/leaked"))
 
     def test_proof_command_needs_a_verdict_step_and_names_the_proof_once(self):
         with self.assertRaisesRegex(ValueError, "proof_command runs the verdict step's proofs, and the workflow has no "
@@ -13007,13 +13041,13 @@ class TestRunMetrics(unittest.TestCase):
         self.assertEqual((wf.state.turns[0]["session"], wf.state.turns[0]["tokens"]), (None, "unknown"))
 
     def test_turn_tokens_needs_a_known_window_and_a_harness_it_reads(self):
-        log = claude_log((10, 1, 1))
+        log = orchestrator.session_usage("claude", claude_log((10, 1, 1)))
         known = {"agent": "claude", "session": "s", "started_at": at(0), "ended_at": at(20)}
         self.assertEqual(orchestrator.turn_tokens(known, log),
                          {"input": 1, "output": 1, "cache_read": 7, "cache_write": 1})
         self.assertEqual(orchestrator.turn_tokens({**known, "ended_at": at(10)}, log)["input"], 1)
         self.assertEqual(orchestrator.turn_tokens({**known, "ended_at": at(9)}, log)["input"], 0)
-        for unknown in ({"started_at": None}, {"ended_at": None}, {"session": None}, {"agent": "codex"}):
+        for unknown in ({"started_at": None}, {"ended_at": None}, {"session": None}, {"started_at": "garbled"}):
             self.assertEqual(orchestrator.turn_tokens({**known, **unknown}, log), "unknown")
         self.assertEqual(orchestrator.turn_tokens(known, None), "unknown")
 
