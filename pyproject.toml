@@ -28,8 +28,12 @@ dev = [
 
 [tool.ruff.lint]
 # The defaults, plus bugbear, simplifications, pyupgrade, bandit's security checks, complexity and pylint's errors
-# and warnings. No E501: the code wraps at 120 by eye, not by rule.
-extend-select = ["B", "SIM", "UP", "S", "C90", "PLE", "PLW"]
+# and warnings, and W505 for comments and docstrings. No E501: code wraps at 120 by eye, since breaking a long
+# expression can read worse than leaving it; a line of prose never does.
+extend-select = ["B", "SIM", "UP", "S", "C90", "PLE", "PLW", "W505"]
+
+[tool.ruff.lint.pycodestyle]
+max-doc-length = 120
 
 [tool.ruff.lint.mccabe]
 max-complexity = 15

@@ -3674,7 +3674,8 @@ class TestGate(unittest.TestCase):
             f.write(text)
 
     def gate(self, *args):
-        """The exit status, standard output and standard error of `orchestrator.py gate --base HEAD ARGS` in the repo."""
+        """The exit status, standard output and standard error of `orchestrator.py gate --base HEAD ARGS` in the
+        repo."""
         out, err = io.StringIO(), io.StringIO()
         with contextlib.chdir(self.repo), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             status = main(["gate", "--base", "HEAD", *args])
