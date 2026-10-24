@@ -90,13 +90,13 @@ the `metrics` command prints every run's (`Host.run_metrics`).
 ## Workflows
 
 A workflow is data: a `Pipeline` with a name, its roles in pane order (role key to pane label) and a tuple of
-`Step`s. A step names its id (also its phase), its role, its handoff file (fixed like `spec.md`, or one per
-round like `build-{n}.md`), a first prompt, a later-round prompt (`again`) and a note for a fresh session in a
-later round (`fresh_note`), and the flags `human_paced`, `edits`, `loop_to` (which makes it the verdict step),
-`quality_gated` and `locks`. Prompts take `{task}`, `{cwd}`, `{n}`, `{change}`, `{path}` and, for every step `X`,
-`{X_path}`, `{prev_X_path}` and `{earlier_X_paths}`. `Pipeline` validates itself when constructed and raises
-`ValueError` naming the problem, such as a duplicate id, a loop target that does not come earlier, two verdict
-loops, two gated steps or an unknown placeholder.
+`Step`s, and optionally a `proof_command`. A step names its id (also its phase), its role, its handoff file (fixed
+like `spec.md`, or one per round like `build-{n}.md`), a first prompt, a later-round prompt (`again`) and a note for
+a fresh session in a later round (`fresh_note`), and the flags `human_paced`, `edits`, `loop_to` (which makes it the
+verdict step), `quality_gated` and `locks`. Prompts take `{task}`, `{cwd}`, `{n}`, `{change}`, `{path}`,
+`{proofs_dir}` and, for every step `X`, `{X_path}`, `{prev_X_path}` and `{earlier_X_paths}`. `Pipeline` validates
+itself when constructed and raises `ValueError` naming the problem, such as a duplicate id, a loop target that does
+not come earlier, two verdict loops, two gated steps or an unknown placeholder.
 
 The quality-gated step is the one the gate follows: its answer to quality round Q inserts `-qQ` before its file's
 extension, other steps' prompts name its last report of the round, and `QUALITY_PASSED_NOTE` or
@@ -113,6 +113,14 @@ saves a record of them in `RunState.restored`, and then restores the paths from 
 tree only, a path the ref lacks deleted); a resume restores a saved record again. That happens before the quality
 round, so the gate judges the locked files, and `LOCKED_NOTE` tells the verdict step which files of its round were
 restored and where the diffs are.
+
+A workflow with a `proof_command` (`examples/workflows/adversarial.toml`) has its verdict step back findings with
+tests in `{proofs_dir}`, `RunState.proofs_dir(n)` in the run directory, so they never enter the snapshot or the
+commit. After a review that requests changes, `Workflow._judge_proofs` runs each proof file with the command in the
+working tree (`_run_proof`: exit status 1 is a failing proof, which demonstrates the finding its name's first number
+names; 0 passes and anything else errors, neither demonstrating), saves the outcomes in `RunState.proofs`, and
+appends `proofs_section` under `PROOFS_HEADING` to the review, which a resume finds and does not judge again.
+`PROOFS_NOTE` ends the next round's prompt of the step the review loops back to, naming the failing proofs.
 
 `WORKFLOWS` holds only `DEFAULT_WORKFLOW`. Other workflows are TOML files: `run --workflow NAME` finds
 `NAME.toml` in `workflows_dir` (`~/.config/ai-agents-orchestrator/workflows/`), and `run --workflow-file` takes

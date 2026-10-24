@@ -408,6 +408,12 @@ The quality gate still did not pass, and its last quality round failed on nothin
 had not already failed on, so the Builder was not asked again; its unresolved findings are in {quality_path}. \
 Weigh them as you would your own."""
 
+# Appended to the prompt of the step a review loops back to, when tests the Reviewer wrote fail against the change.
+PROOFS_NOTE = """\
+The Reviewer backed findings with tests, and these fail against your change: {proofs}. \
+Make each of them pass, without changing it; you may move one into the project as a regression test. \
+If one is wrong, say so in your report instead."""
+
 # Appended to the verdict step's prompt when a turn of the round changed files that an earlier step locked.
 LOCKED_NOTE = """\
 This round changed files that step {steps} locked: {paths}. The orchestrator restored them, \
@@ -425,7 +431,7 @@ PUBLISH = "publish"
 DONE = "done"
 
 # The placeholders a step's prompts may use besides the per-step paths (see Step).
-PROMPT_FIELDS = {"task", "cwd", "n", "change", "approve", "changes", "path"}
+PROMPT_FIELDS = {"task", "cwd", "n", "change", "approve", "changes", "path", "proofs_dir"}
 # The per-step paths: (prefix, suffix) around a step's id.
 PATH_FIELDS = (("", "_path"), ("prev_", "_path"), ("earlier_", "_paths"))
 
@@ -434,8 +440,9 @@ PATH_FIELDS = (("", "_path"), ("prev_", "_path"), ("earlier_", "_paths"))
 class Step:
     """One role's turn in a workflow, which ends when the role writes its handoff file.
 
-    A prompt is formatted with PROMPT_FIELDS, where n is the round and path the turn's own
-    file, and with three paths for every step X of the workflow: X_path in round n,
+    A prompt is formatted with PROMPT_FIELDS, where n is the round, path the turn's own file and
+    proofs_dir the round's directory for the verdict step's proofs (Pipeline.proof_command), and
+    with three paths for every step X of the workflow: X_path in round n,
     prev_X_path in round n-1, and earlier_X_paths, rounds 1 to n-1 joined with commas.
 
     A quality-gated step writes more than one file a round: the answer to quality round q
@@ -533,6 +540,10 @@ class Pipeline:
     # run's base to the snapshot, so it holds every editing step's work, not only the gated step's.
     max_files: int = DEFAULT_MAX_FILES
     max_lines: int = DEFAULT_MAX_LINES
+    # A shell command, with {proofs} for one proof file's path, that runs a proof in the working tree and exits 1 when
+    # the proof fails, as pytest does. With it, each proof the verdict step writes in proofs_dir with a review that
+    # requests changes is run, and the review gains the outcomes (Workflow._judge_proofs). None runs none.
+    proof_command: str | None = None
 
     def __post_init__(self):
         if problem := self._problem():
@@ -543,13 +554,27 @@ class Pipeline:
         if not self.steps:
             return "has no steps"
         checks = (self._name_problem, self._role_problem, self._uniqueness_problem, self._step_problem,
-                  self._collision_problem, self._loop_problem, self._budget_problem, self._lock_problem)
+                  self._collision_problem, self._loop_problem, self._budget_problem, self._lock_problem,
+                  self._proof_problem)
         return next((problem for check in checks if (problem := check())), None)
 
     def _budget_problem(self) -> str | None:
         for key in BUDGET_KEYS:
             if getattr(self, key) < 1:
                 return f"{key} must be at least 1"
+        return None
+
+    def _proof_problem(self) -> str | None:
+        if self.proof_command is None:
+            return None
+        if self.verdict_step is None:
+            return "proof_command runs the verdict step's proofs, and the workflow has no verdict step"
+        try:
+            names = _fields_of(self.proof_command)
+        except ValueError as e:
+            return f"proof_command: {e}; write a literal brace as {{{{ or }}}}"
+        if names != ["proofs"]:
+            return "proof_command must name the proof file once, as {proofs}, and no other placeholder"
         return None
 
     def _lock_problem(self) -> str | None:
@@ -684,7 +709,7 @@ SUMMARY_FILE = "summary.md"
 # Written into the run directory when the run is done: run_metrics, for the metrics command.
 METRICS_FILE = "metrics.json"
 # Files the run writes into its directory itself, beside the steps' handoff files.
-RUN_FILE = re.compile(r"state\.json|summary\.md|metrics\.json|quality-.*|locked-.*")
+RUN_FILE = re.compile(r"state\.json|summary\.md|metrics\.json|quality-.*|locked-.*|proofs-.*")
 
 
 def _fill_problem(step: Step, known: set[str]) -> str | None:
@@ -696,7 +721,7 @@ def _fill_problem(step: Step, known: set[str]) -> str | None:
     name = step.file.format(n=1)
     if "/" in name or name in ("", ".", "..") or RUN_FILE.fullmatch(name):
         return f"handoff file {step.file} must be a plain file name, and not state.json, {SUMMARY_FILE}, " \
-               f"{METRICS_FILE}, quality-* or locked-*, which the run writes itself"
+               f"{METRICS_FILE}, quality-*, locked-* or proofs-*, which the run writes itself"
     # Every value a prompt is filled in with is a string.
     values = dict.fromkeys(known, "")
     for field_name in ("prompt", "again", "fresh_note"):
@@ -805,6 +830,7 @@ def find_workflow(name: str) -> Pipeline:
 #   description = "..."                      # optional, shown by `workflows`
 #   max_files = 15                           # optional: the change's budget (Pipeline), 15 files and 600 lines
 #   max_lines = 600                          # when left out
+#   proof_command = "python -m pytest {proofs}"   # optional: runs the Reviewer's proofs (Pipeline)
 #   [roles]                                  # optional
 #   build = "Builder"                        # a role's pane label,
 #   tests = { label = "Test Writer", model = "sonnet", agent = "codex" }   # or its label, default model
@@ -818,7 +844,7 @@ def find_workflow(name: str) -> Pipeline:
 # first use the roles. workflow_definition writes the canonical form, which
 # such a file may also be: every role with its label, and every step with its fields.
 
-WORKFLOW_KEYS = {"description", "roles", "steps", *BUDGET_KEYS}
+WORKFLOW_KEYS = {"description", "roles", "steps", "proof_command", *BUDGET_KEYS}
 ROLE_KEYS = {"label", "model", "agent"}
 STEP_KEYS = {f.name for f in fields(Step)}
 STEP_FLAGS = {f.name for f in fields(Step) if f.default is False}
@@ -894,13 +920,16 @@ def parse_workflow(name: str, data: dict) -> Pipeline:
     description = data.get("description", "")
     if not isinstance(description, str):
         raise ValueError("description must be a string")
+    proof_command = data.get("proof_command")
+    if proof_command is not None and not isinstance(proof_command, str):
+        raise ValueError("proof_command must be a string")
     budget = {key: data[key] for key in BUDGET_KEYS if key in data}
     for key, value in budget.items():
         # type(), not isinstance: true is an int to isinstance, but no number of lines.
         if type(value) is not int:
             raise ValueError(f"{key} must be a whole number")
     return Pipeline(name, labels, tuple(Step(**st) for st in steps), models=models, description=description,
-                    agents=agents, **budget)
+                    agents=agents, proof_command=proof_command, **budget)
 
 
 def _parse_role(role: str, raw) -> dict[str, str]:
@@ -986,6 +1015,7 @@ def workflow_definition(p: Pipeline) -> dict:
     budget = {f.name: getattr(p, f.name) for f in fields(Pipeline)
               if f.name in BUDGET_KEYS and getattr(p, f.name) != f.default}
     return {**({"description": p.description} if p.description else {}), **budget,
+            **({"proof_command": p.proof_command} if p.proof_command else {}),
             "roles": roles, "steps": [step_fields(st) for st in p.steps]}
 
 
@@ -994,6 +1024,7 @@ def workflow_toml(p: Pipeline) -> str:
     d = workflow_definition(p)
     lines = [f"description = {_toml_string(d['description'])}"] if "description" in d else []
     lines += [f"{key} = {d[key]}" for key in BUDGET_KEYS if key in d]
+    lines += [f"proof_command = {_toml_string(d['proof_command'])}"] if "proof_command" in d else []
     for role, table in d["roles"].items():
         lines += ["", f"[roles.{role}]", *(f"{k} = {_toml_string(v)}" for k, v in table.items())]
     for st in d["steps"]:
@@ -2190,6 +2221,10 @@ class RunState:
     # file is the basename of the diff of what the turn changed in them, in the run directory, and paths are the
     # files, by the id of the step that locked them. The files were restored once the record was saved.
     restored: list[dict] = field(default_factory=list)
+    # One record per proof the verdict step wrote with a review that requested changes, {"round", "file", "finding",
+    # "demonstrated"}, in the order they ran (Workflow._judge_proofs): file is the proof's basename in round's proofs
+    # directory, finding the number its name begins with, and demonstrated whether it failed against the change.
+    proofs: list[dict] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, saved: dict) -> "RunState":
@@ -2225,6 +2260,10 @@ class RunState:
     def refs_prefix(self) -> str:
         """Where the run keeps its local refs, which nothing pushes and done deletes."""
         return f"{LOCAL_REFS_PREFIX}{self.key}/"
+
+    def proofs_dir(self, n: int) -> str:
+        """Where the verdict step of round n writes its proofs (Pipeline.proof_command)."""
+        return f"{self.dir}/proofs-{n}"
 
     def lock_ref(self, step_id: str) -> str:
         """The local ref of the commit that holds the files the step locked."""
@@ -5945,6 +5984,41 @@ def run_metrics(state: "RunState", now: int) -> dict:
     }
 
 
+# -- Proofs: the verdict step's failing tests (Pipeline.proof_command) --------------------------------------
+
+# The heading of the section _judge_proofs appends to a review; a review that has it was judged already.
+PROOFS_HEADING = "## Proofs"
+# Seconds one proof may run, and how many lines of its output the review quotes.
+PROOF_TIMEOUT = 300
+PROOF_TAIL_LINES = 10
+
+
+def _proof_finding(file: str) -> int | None:
+    """The number of the finding a proof file is for: the first number in its name, as in test_3_rate.py."""
+    m = re.search(r"\d+", file)
+    return int(m.group()) if m else None
+
+
+def proofs_section(command: str, cwd: str, review: str, outcomes: list[tuple[str, bool, str]]) -> str:
+    """The section _judge_proofs appends to a review: per proof file, (its name, whether it failed against the change,
+    what it printed last), whether it demonstrates its finding, and the review's numbered findings left without
+    one, which stand as unproven."""
+    out = [PROOFS_HEADING, "", (f"The orchestrator ran each proof with `{command}` in {cwd}. A proof that fails "
+                                "demonstrates its finding; one that passes or errors does not.")]
+    for file, failed, said in outcomes:
+        number = _proof_finding(file)
+        finding = f"finding {number}" if number is not None else "no finding"
+        how = said.split("\n", 1)[0].rstrip(":")
+        out += ["", f"- `{file}` ({finding}): {'demonstrated' if failed else 'not demonstrated'}, {how}."]
+        if "\n" in said:
+            out += ["", "  ````", *(f"  {line}" for line in said.split("\n")[1:]), "  ````"]
+    proven = {_proof_finding(f) for f, _, _ in outcomes}
+    unproven = [int(k) for k in re.findall(r"^(\d+)\. ", review, re.MULTILINE) if int(k) not in proven]
+    if unproven:
+        out += ["", f"Findings without a proof, unproven: {', '.join(map(str, unproven))}."]
+    return "\n".join(out) + "\n"
+
+
 def log(msg: str) -> None:
     print(f"  {msg}", file=sys.stderr)
 
@@ -6399,6 +6473,8 @@ class Workflow:
             return True
         s.verdict = parse_verdict(out)  # _turn accepts no verdict file without one
         log(f"[{step.role}] round {n}: {s.verdict}")
+        if s.verdict == CHANGES_REQUESTED and self.pipeline.proof_command:
+            self._judge_proofs(step, n, out)
         if s.verdict != APPROVE and n < s.max_rounds:
             s.quality_round = 0
             self._goto(self.pipeline.step(step.loop_to), n + 1)
@@ -6466,6 +6542,49 @@ class Workflow:
             self.host.delete_refs(s.cwd, s.refs_prefix)
         except OrchestratorError as e:
             log(f"could not delete the refs under {s.refs_prefix}: {e}")
+
+    def _judge_proofs(self, step: Step, n: int, review: str) -> None:
+        """Run each proof the verdict step wrote in round n with the workflow's proof_command, record which fail, and
+        append their outcomes to its review. A review that has them already, after a resume, is left as it is."""
+        s, command = self.state, self.pipeline.proof_command
+        path = step.path(s.dir, n)
+        if command is None or PROOFS_HEADING in review.split("\n"):
+            return
+        files = sorted(os.path.basename(f) for f in self.host.run_files(s.proofs_dir(n)))
+        if not files:
+            return
+        outcomes = [self._run_proof(command, s.proofs_dir(n), f) for f in files]
+        s.proofs = [p for p in s.proofs if p["round"] != n] + [
+            {"round": n, "file": f, "finding": _proof_finding(f), "demonstrated": failed}
+            for f, (failed, _) in zip(files, outcomes, strict=True)]
+        self._save()
+        self.host.write(path, review.rstrip("\n") + "\n\n" + proofs_section(command, s.work_dir, review, [
+            (f, failed, said) for f, (failed, said) in zip(files, outcomes, strict=True)]))
+        log(f"[{step.role}] {sum(failed for failed, _ in outcomes)} of {len(files)} proofs fail against the change")
+
+    def _run_proof(self, command: str, proofs_dir: str, file: str) -> tuple[bool, str]:
+        """Whether the proof fails against the working tree, as proof_command's exit status 1 says, and what it
+        printed last: its output's end, how else it exited, or why it could not run."""
+        cmd = command.format(proofs=shlex.quote(f"{proofs_dir}/{file}"))
+        try:
+            proc = self.host.run(["sh", "-c", 'cd -- "$1" && eval "$2"', "_", self.state.work_dir, cmd],
+                                 timeout=PROOF_TIMEOUT, verbatim=True)
+        except OrchestratorError as e:
+            return False, f"it did not run: {e}"
+        tail = "\n".join((proc.stdout + proc.stderr).rstrip().split("\n")[-PROOF_TAIL_LINES:])
+        how = {0: "it passes", 1: "it fails"}.get(proc.returncode, f"it errors, with exit status {proc.returncode}")
+        return proc.returncode == 1, f"{how}:\n{tail}" if tail else how
+
+    def _proofs_note(self, step: Step, n: int) -> str:
+        """What the step hears in round n of the proofs the verdict step's review of round n-1 demonstrated; "" when
+        it is not the step that review loops back to, or none failed."""
+        s, verdict = self.state, self.pipeline.verdict_step
+        if verdict is None or verdict.loop_to != step.id:
+            return ""
+        failing = [f"{s.proofs_dir(n - 1)}/{p['file']}" for p in s.proofs if p["round"] == n - 1 and p["demonstrated"]]
+        if not failing:
+            return ""
+        return "\n\n" + PROOFS_NOTE.format(proofs=", ".join(failing))
 
     def _judge_quality(self, n: int) -> bool:
         """The current quality round of round n; False when its gate sends the change back to the gated step: when it
@@ -6561,12 +6680,15 @@ class Workflow:
         # A quality fix always asks for work that the first prompt does not.
         if q or step.fresh_repeats_again:
             fresh.append(follow)
-        return follow, "\n\n".join(fresh)
+        # Last, so a fresh session hears it too, whatever its prompt repeats.
+        proofs = "" if q else self._proofs_note(step, n)
+        return follow + proofs, "\n\n".join(fresh) + proofs
 
     def _placeholder(self, name: str, step: Step, n: int) -> str:
         """The value of a prompt placeholder (see Step) in the step's turn in round n."""
         s = self.state
-        fixed = {"task": s.task, "cwd": s.work_dir, "n": str(n), "approve": APPROVE, "changes": CHANGES_REQUESTED}
+        fixed = {"task": s.task, "cwd": s.work_dir, "n": str(n), "approve": APPROVE, "changes": CHANGES_REQUESTED,
+                 "proofs_dir": s.proofs_dir(n)}
         if name in fixed:
             return fixed[name]
         if name == "change":

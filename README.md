@@ -356,9 +356,10 @@ The roles, their prompts and their order are a workflow. Besides the built-in `d
 without touching the code: a TOML file in `~/.config/ai-agents-orchestrator/workflows/`, named after the
 workflow, or a file anywhere passed with `--workflow-file`. `python orchestrator.py workflows` lists them and
 shows why one does not load; `python orchestrator.py workflows default > ~/.config/ai-agents-orchestrator/workflows/mine.toml`
-gives you the default's full definition to edit. [`examples/workflows/`](examples/workflows) has three more:
+gives you the default's full definition to edit. [`examples/workflows/`](examples/workflows) has four more:
 `spec-build-review` (the built-in `default` as a file, to copy and edit), `quick` (Builder ⇄ Reviewer, the task
-as the contract) and `tdd` (a Test Writer before the Builder).
+as the contract), `tdd` (a Test Writer before the Builder) and `adversarial` (a Reviewer who backs each finding with
+a failing test).
 
 ```toml
 description = "Spec Collector -> Test Writer -> Builder <-> Reviewer"
@@ -388,23 +389,26 @@ use = "review"
 
 A step takes `id`, `role`, `file` (a plain file name in the run directory, which no other step's file can match in
 any round), `prompt`, and optionally `again` (its prompt in a later round), `fresh_note` (for a fresh session in a
-later round), `loop_to`, which makes it the verdict step that sends `CHANGES_REQUESTED` back to the step it names
-(a workflow without one ends `FINISHED` when its last step is done, and its pull request says no agent reviewed the
+later round), `loop_to`, which makes it the verdict step that sends `CHANGES_REQUESTED` back to the step it names (a
+workflow without one ends `FINISHED` when its last step is done, and its pull request says no agent reviewed the
 change; with `--quality-gate`, a gate that still failed after the last quality round ends it `QUALITY_GATE_FAILED`
 instead, a draft, as under [Exit status](#exit-status)), and the flags `human_paced`, `edits`, `quality_gated`,
 `fresh_repeats_again` (a fresh session gets `again` too) and `locks`: an editing step that locks the files it
 changes, as `tdd`'s Test Writer does, has every later turn's change to them undone, and the Reviewer told where it
-is. `use = "spec"`, `"build"` or `"review"` starts from that
-default step and overrides only the keys you give. Prompts fill in `{task}`, `{cwd}`, `{n}`, `{change}`, `{path}`
-(the step's own file), and for every step `X`: `{X_path}`, `{prev_X_path}` and `{earlier_X_paths}`; write a literal
-brace as `{{` or `}}`. A role you do not list in `[roles]`, or list without a label, keeps the default workflow's
-label for that key (`build` is "Builder"), and is otherwise labelled after its key (`test_writer` is "Test
-Writer"). The panes follow the steps: the first role to take a turn gets the root pane, the next one a split to its
-right, and each further one a split below. A role's `model` is its default, and any model flag overrides it;
-likewise its `agent`, the [harness](#harnesses) it runs in, one of `claude`, `codex`, `gemini`, `opencode` and
-`pi`, which `--agent` and `--role-agent` override. The file is checked when it loads, and an error names the step
-and key. A run saves its workflow's definition, so editing or deleting the file does not change a run already
-started. See [Workflows](docs/architecture.md#workflows) for the rules.
+is. A workflow's `proof_command`, such as `"python -m pytest -q {proofs}"`, runs each test the verdict step wrote in
+`{proofs_dir}` with a review that requests changes, in the working tree, and exits 1 when the test fails: the review
+gains which findings their tests demonstrate, and the next round's prompt tells the step it loops back to to make
+those tests pass. `use = "spec"`, `"build"` or `"review"` starts from that default step and overrides only the keys
+you give. Prompts fill in `{task}`, `{cwd}`, `{n}`, `{change}`, `{path}` (the step's own file), `{proofs_dir}` (the
+round's directory for proofs), and for every step `X`: `{X_path}`, `{prev_X_path}` and `{earlier_X_paths}`; write a
+literal brace as `{{` or `}}`. A role you do not list in `[roles]`, or list without a label, keeps the default
+workflow's label for that key (`build` is "Builder"), and is otherwise labelled after its key (`test_writer` is
+"Test Writer"). The panes follow the steps: the first role to take a turn gets the root pane, the next one a split
+to its right, and each further one a split below. A role's `model` is its default, and any model flag overrides it;
+likewise its `agent`, the [harness](#harnesses) it runs in, one of `claude`, `codex`, `gemini`, `opencode` and `pi`,
+which `--agent` and `--role-agent` override. The file is checked when it loads, and an error names the step and key.
+A run saves its workflow's definition, so editing or deleting the file does not change a run already started. See
+[Workflows](docs/architecture.md#workflows) for the rules.
 
 ## Running tests
 

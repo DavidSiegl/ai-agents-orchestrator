@@ -9319,6 +9319,123 @@ class TestLockedFiles(unittest.TestCase):
         self.assertEqual(orchestrator.parse_workflow("locking", tomllib.loads(text)), LOCKING)
 
 
+class TestProofs(unittest.TestCase):
+    """The verdict step's proofs, run for real by sh in a scratch directory that stands in for the project."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.proj = tmp.name
+        self.pipeline = replace(QUICK, proof_command="sh {proofs}")
+
+    def run_proofs(self, *reviews, builds=2, pipeline=None, state=None, host=None):
+        """A quick run in the scratch project whose Reviewer writes, per round, a review and {proof file: its exit
+        status}; returns the workflow, the host and the Builder's prompts."""
+        seen = []
+
+        def review(n, verdict, proofs):
+            def turn(prompt, state, host):
+                for name, exit_status in proofs.items():
+                    os.makedirs(state.proofs_dir(n), exist_ok=True)
+                    with open(f"{state.proofs_dir(n)}/{name}", "w") as f:
+                        f.write(f"echo checking {name}\nexit {exit_status}\n")
+                return writes(lambda s: s.review_path(n), f"VERDICT: {verdict}\n1. a bug\n2. another\n3. more\n")(
+                    prompt, state, host)
+            return turn
+        pipeline = pipeline or self.pipeline
+        state = state or RunState("20260929-120000-a1b2c3", "add a rate limiter", self.proj, None, phase="build",
+                                  workflow=pipeline.name)
+        host = host or FakeHost()
+        host._run = subprocess.run
+        wf, herdr, host, _ = make_workflow({
+            "build": [recording(build_turn(n), seen) for n in range(1, builds + 1)],
+            "review": [review(n, *r) for n, r in enumerate(reviews, 1)]},
+            host=host, state=state, pipeline=pipeline, pull_request=False)
+        return wf, host, seen
+
+    def test_a_failing_proof_demonstrates_its_finding_and_the_builder_must_make_it_pass(self):
+        wf, host, seen = self.run_proofs((CHANGES_REQUESTED, {"test_1_bug.sh": 1, "test_2.sh": 0, "test_3.sh": 4}),
+                                         (APPROVE, {}))
+        self.assertEqual(wf.run(), APPROVE)
+
+        state = wf.state
+        review = host.files[state.review_path(1)]
+        self.assertTrue(review.startswith("VERDICT: CHANGES_REQUESTED\n1. a bug\n"))
+        self.assertIn(f"## Proofs\n\nThe orchestrator ran each proof with `sh {{proofs}}` in {self.proj}.", review)
+        self.assertIn("- `test_1_bug.sh` (finding 1): demonstrated, it fails.\n\n  ````\n  checking test_1_bug.sh\n"
+                      "  ````", review)
+        self.assertIn("- `test_2.sh` (finding 2): not demonstrated, it passes.", review)
+        self.assertIn("- `test_3.sh` (finding 3): not demonstrated, it errors, with exit status 4.", review)
+        self.assertEqual(state.proofs, [{"round": 1, "file": "test_1_bug.sh", "finding": 1, "demonstrated": True},
+                                        {"round": 1, "file": "test_2.sh", "finding": 2, "demonstrated": False},
+                                        {"round": 1, "file": "test_3.sh", "finding": 3, "demonstrated": False}])
+        self.assertIn("\n\n" + orchestrator.PROOFS_NOTE.format(proofs=f"{state.proofs_dir(1)}/test_1_bug.sh"), seen[1])
+        self.assertNotIn("Reviewer backed", seen[0])
+
+    def test_findings_without_a_proof_stand_as_unproven(self):
+        wf, host, _ = self.run_proofs((CHANGES_REQUESTED, {"test_2.sh": 1}), (APPROVE, {}))
+        wf.run()
+        self.assertIn("Findings without a proof, unproven: 1, 3.", host.files[wf.state.review_path(1)])
+
+    def test_no_proofs_directory_leaves_the_review_as_it_is(self):
+        wf, host, seen = self.run_proofs((CHANGES_REQUESTED, {}), (APPROVE, {}))
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(host.files[wf.state.review_path(1)],
+                         "VERDICT: CHANGES_REQUESTED\n1. a bug\n2. another\n3. more\n")
+        self.assertEqual(wf.state.proofs, [])
+        self.assertNotIn("Reviewer backed", seen[1])
+
+    def test_an_approval_runs_no_proof(self):
+        wf, host, _ = self.run_proofs((APPROVE, {"test_1.sh": 1}), builds=1)
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertNotIn("## Proofs", host.files[wf.state.review_path(1)])
+        self.assertEqual(wf.state.proofs, [])
+
+    def test_a_workflow_without_proof_command_runs_none(self):
+        wf, host, _ = self.run_proofs((CHANGES_REQUESTED, {"test_1.sh": 1}), (APPROVE, {}), pipeline=QUICK)
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertNotIn("## Proofs", host.files[wf.state.review_path(1)])
+
+    def test_a_review_judged_before_a_resume_is_not_judged_again(self):
+        state = RunState("20260929-120000-a1b2c3", "add a rate limiter", self.proj, None, phase="review", round=1,
+                         workflow="quick", base="abc123",
+                         proofs=[{"round": 1, "file": "test_1.sh", "finding": 1, "demonstrated": True}])
+        host = FakeHost()
+        judged = "VERDICT: CHANGES_REQUESTED\n1. a bug\n\n## Proofs\n\nalready judged\n"
+        host.files[state.review_path(1)] = judged
+        host.files[state.build_path(1)] = "report 1"
+        seen = []
+        wf, *_ = make_workflow({"build": [recording(build_turn(2), seen)], "review": [review_turn(2, APPROVE)]},
+                               host=host, state=state, pipeline=self.pipeline, pull_request=False)
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(host.files[state.review_path(1)], judged)
+        self.assertEqual(len(wf.state.proofs), 1)
+        self.assertIn(orchestrator.PROOFS_NOTE.format(proofs=f"{state.proofs_dir(1)}/test_1.sh"), seen[0])
+
+    def test_proof_command_needs_a_verdict_step_and_names_the_proof_once(self):
+        with self.assertRaisesRegex(ValueError, "proof_command runs the verdict step's proofs, and the workflow has no "
+                                                "verdict step"):
+            replace(SOLO, proof_command="sh {proofs}")
+        for command in ("sh", "sh {proofs} {proofs}", "sh {proofs} {task}", "sh {proofs"):
+            with self.subTest(command=command), self.assertRaisesRegex(ValueError, "proof_command"):
+                replace(QUICK, proof_command=command)
+        with self.assertRaisesRegex(ValueError, "proof_command must be a string"):
+            orchestrator.parse_workflow("bad", {**orchestrator.workflow_definition(QUICK), "proof_command": 1})
+
+    def test_proof_command_round_trips_through_a_workflow_file(self):
+        text = orchestrator.workflow_toml(self.pipeline)
+        self.assertIn('proof_command = "sh {proofs}"', text)
+        self.assertEqual(orchestrator.parse_workflow("quick", tomllib.loads(text)), self.pipeline)
+        self.assertNotIn("proof_command", orchestrator.workflow_toml(QUICK))
+
+    def test_the_adversarial_example_loads(self):
+        adversarial = orchestrator.load_workflow_file(f"{EXAMPLES}/adversarial.toml")
+        self.assertEqual(orchestrator.workflow_shape(adversarial), "spec -> build -> review (back to build)")
+        self.assertIn("{proofs}", adversarial.proof_command)
+        self.assertIn("{proofs_dir}", adversarial.step("review").prompt)
+        self.assertIn("{proofs_dir}", adversarial.step("review").again)
+
+
 class TestSavedBeforeWorkflows(unittest.TestCase):
     """state.json as commit d6bb100 wrote it, without a workflow field."""
 
@@ -9581,10 +9698,10 @@ class TestWorkflowFiles(unittest.TestCase):
         for name in ("b-{n!s}.md", "b-{n:d}.md", "b-{n:{x}}.md"):
             cases.append((f"step build: handoff file {name} may use {{n}} only as it is, with no format spec or "
                           f"conversion", "[[steps]]\n" + step.replace("b-{n}.md", name)))
-        for name in ("state.json", "summary.md", "metrics.json", "quality-{n}-1.md", "../b-{n}.md", "/tmp/b-{n}.md",
-                     ".."):
+        for name in ("state.json", "summary.md", "metrics.json", "quality-{n}-1.md", "proofs-{n}", "../b-{n}.md",
+                     "/tmp/b-{n}.md", ".."):
             cases.append((f"step build: handoff file {name} must be a plain file name, and not state.json, "
-                          f"summary.md, metrics.json, quality-* or locked-*, which the run writes itself",
+                          f"summary.md, metrics.json, quality-*, locked-* or proofs-*, which the run writes itself",
                           "[[steps]]\n" + step.replace("b-{n}.md", name)))
         for message, text in cases:
             with self.subTest(message=message):

@@ -5,6 +5,12 @@ was done.
 
 ## Open issues
 
+- **A proof in a worktree run finds the checkout's pytest configuration.** The run directory, and with it
+  `RunState.proofs_dir`, is under the project checkout, not the run's worktree, so `adversarial.toml`'s
+  `python -m pytest {proofs}` takes its rootdir and `conftest.py` from the checkout while importing the code from the
+  worktree it runs in. Found while writing loop-guards ticket 05; not reproduced. Closes with `_run_proof` passing
+  the working tree as pytest's rootdir and conftest root, or the proofs copied into a scratch directory of the
+  worktree for their run.
 - **`test-integrity` does not see an expected value held outside the assertion.** `expected-value-changed` compares
   each assertion's literals (`_changed_literals`), so editing a golden constant the assertion names, such as the
   tests' `GOLDEN_PR_BODY` or `GOLDEN_SUMMARY`, changes what is expected without a finding, while the same edit inside
