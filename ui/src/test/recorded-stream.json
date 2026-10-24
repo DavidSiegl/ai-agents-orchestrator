@@ -1,0 +1,484 @@
+[
+ {
+  "after": "the stream opened",
+  "events": [
+   {
+    "kind": "record",
+    "run": "20261024-090000-beef00",
+    "record": {
+     "id": "20261024-090000-beef00",
+     "key": "beef00",
+     "task": "add a token-bucket rate limiter to the API client",
+     "workflow": "default",
+     "steps": [
+      {
+       "id": "spec",
+       "role": "spec"
+      },
+      {
+       "id": "build",
+       "role": "build"
+      },
+      {
+       "id": "review",
+       "role": "review"
+      }
+     ],
+     "phase": "done",
+     "round": 1,
+     "quality_round": null,
+     "role": null,
+     "pane": null,
+     "health": null,
+     "health_reason": null,
+     "heartbeat_age": 1,
+     "waiting": null,
+     "verdict": "APPROVE",
+     "error": null,
+     "closed": null,
+     "branch": null,
+     "worktree": null,
+     "pr": {
+      "url": "https://github.com/o/r/pull/7",
+      "state": null,
+      "error": null
+     },
+     "turns": [
+      {
+       "step": "spec",
+       "role": "spec",
+       "round": 1,
+       "quality_round": 0,
+       "file": "spec.md",
+       "agent": "claude",
+       "model": null,
+       "human_paced": true,
+       "started_at": "2026-10-24T14:00:00Z",
+       "ended_at": "x",
+       "seconds": 60
+      },
+      {
+       "step": "build",
+       "role": "build",
+       "round": 1,
+       "quality_round": 0,
+       "file": "build.md",
+       "agent": "claude",
+       "model": null,
+       "human_paced": false,
+       "started_at": "2026-10-24T14:00:00Z",
+       "ended_at": "x",
+       "seconds": 60
+      },
+      {
+       "step": "review",
+       "role": "review",
+       "round": 1,
+       "quality_round": 0,
+       "file": "review.md",
+       "agent": "claude",
+       "model": null,
+       "human_paced": false,
+       "started_at": "2026-10-24T14:00:00Z",
+       "ended_at": "x",
+       "seconds": 60
+      }
+     ],
+     "resume_command": null
+    }
+   },
+   {
+    "kind": "files",
+    "run": "20261024-090000-beef00",
+    "files": [
+     {
+      "name": "review-1.md",
+      "mtime": 1792848934
+     },
+     {
+      "name": "spec.md",
+      "mtime": 1792848934
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "after": "a run started its interview",
+  "events": [
+   {
+    "kind": "record",
+    "run": "20261024-140000-c0ffee",
+    "record": {
+     "id": "20261024-140000-c0ffee",
+     "key": "c0ffee",
+     "task": "add a token-bucket rate limiter to the API client",
+     "workflow": "default",
+     "steps": [
+      {
+       "id": "spec",
+       "role": "spec"
+      },
+      {
+       "id": "build",
+       "role": "build"
+      },
+      {
+       "id": "review",
+       "role": "review"
+      }
+     ],
+     "phase": "spec",
+     "round": 0,
+     "quality_round": null,
+     "role": "spec",
+     "pane": "w1:p1",
+     "health": "running",
+     "health_reason": "beat 1s ago",
+     "heartbeat_age": 1,
+     "waiting": {
+      "reason": "interview",
+      "detail": "spec"
+     },
+     "verdict": null,
+     "error": null,
+     "closed": null,
+     "branch": null,
+     "worktree": null,
+     "pr": null,
+     "turns": [
+      {
+       "step": "spec",
+       "role": "spec",
+       "round": 1,
+       "quality_round": 0,
+       "file": "spec.md",
+       "agent": "claude",
+       "model": null,
+       "human_paced": true,
+       "started_at": "2026-10-24T14:00:00Z",
+       "ended_at": null,
+       "seconds": null
+      }
+     ],
+     "resume_command": null
+    }
+   },
+   {
+    "kind": "files",
+    "run": "20261024-140000-c0ffee",
+    "files": []
+   }
+  ]
+ },
+ {
+  "after": "the spec was written and the build started",
+  "events": [
+   {
+    "kind": "record",
+    "run": "20261024-140000-c0ffee",
+    "record": {
+     "id": "20261024-140000-c0ffee",
+     "key": "c0ffee",
+     "task": "add a token-bucket rate limiter to the API client",
+     "workflow": "default",
+     "steps": [
+      {
+       "id": "spec",
+       "role": "spec"
+      },
+      {
+       "id": "build",
+       "role": "build"
+      },
+      {
+       "id": "review",
+       "role": "review"
+      }
+     ],
+     "phase": "build",
+     "round": 1,
+     "quality_round": null,
+     "role": "build",
+     "pane": "w1:p2",
+     "health": "running",
+     "health_reason": "beat 1s ago",
+     "heartbeat_age": 1,
+     "waiting": null,
+     "verdict": null,
+     "error": null,
+     "closed": null,
+     "branch": null,
+     "worktree": null,
+     "pr": null,
+     "turns": [
+      {
+       "step": "spec",
+       "role": "spec",
+       "round": 1,
+       "quality_round": 0,
+       "file": "spec.md",
+       "agent": "claude",
+       "model": null,
+       "human_paced": true,
+       "started_at": "2026-10-24T14:00:00Z",
+       "ended_at": "2026-10-24T14:05:00Z",
+       "seconds": 60
+      },
+      {
+       "step": "build",
+       "role": "build",
+       "round": 1,
+       "quality_round": 0,
+       "file": "build.md",
+       "agent": "claude",
+       "model": null,
+       "human_paced": false,
+       "started_at": "2026-10-24T14:00:00Z",
+       "ended_at": null,
+       "seconds": null
+      }
+     ],
+     "resume_command": null
+    }
+   },
+   {
+    "kind": "files",
+    "run": "20261024-140000-c0ffee",
+    "files": [
+     {
+      "name": "spec.md",
+      "mtime": 1792848938
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "after": "the Builder blocked",
+  "events": [
+   {
+    "kind": "record",
+    "run": "20261024-140000-c0ffee",
+    "record": {
+     "id": "20261024-140000-c0ffee",
+     "key": "c0ffee",
+     "task": "add a token-bucket rate limiter to the API client",
+     "workflow": "default",
+     "steps": [
+      {
+       "id": "spec",
+       "role": "spec"
+      },
+      {
+       "id": "build",
+       "role": "build"
+      },
+      {
+       "id": "review",
+       "role": "review"
+      }
+     ],
+     "phase": "build",
+     "round": 1,
+     "quality_round": null,
+     "role": "build",
+     "pane": "w1:p2",
+     "health": "running",
+     "health_reason": "beat 1s ago",
+     "heartbeat_age": 1,
+     "waiting": {
+      "reason": "blocked",
+      "detail": "should the limit be per client or global?"
+     },
+     "verdict": null,
+     "error": null,
+     "closed": null,
+     "branch": null,
+     "worktree": null,
+     "pr": null,
+     "turns": [
+      {
+       "step": "spec",
+       "role": "spec",
+       "round": 1,
+       "quality_round": 0,
+       "file": "spec.md",
+       "agent": "claude",
+       "model": null,
+       "human_paced": true,
+       "started_at": "2026-10-24T14:00:00Z",
+       "ended_at": "2026-10-24T14:05:00Z",
+       "seconds": 60
+      },
+      {
+       "step": "build",
+       "role": "build",
+       "round": 1,
+       "quality_round": 0,
+       "file": "build.md",
+       "agent": "claude",
+       "model": null,
+       "human_paced": false,
+       "started_at": "2026-10-24T14:00:00Z",
+       "ended_at": null,
+       "seconds": null
+      }
+     ],
+     "resume_command": null
+    }
+   },
+   {
+    "kind": "files",
+    "run": "20261024-140000-c0ffee",
+    "files": [
+     {
+      "name": "spec.md",
+      "mtime": 1792848938
+     },
+     {
+      "name": "build-1.blocked-1.md",
+      "mtime": 1792848939
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "after": "the build was reported and the review started",
+  "events": [
+   {
+    "kind": "record",
+    "run": "20261024-140000-c0ffee",
+    "record": {
+     "id": "20261024-140000-c0ffee",
+     "key": "c0ffee",
+     "task": "add a token-bucket rate limiter to the API client",
+     "workflow": "default",
+     "steps": [
+      {
+       "id": "spec",
+       "role": "spec"
+      },
+      {
+       "id": "build",
+       "role": "build"
+      },
+      {
+       "id": "review",
+       "role": "review"
+      }
+     ],
+     "phase": "review",
+     "round": 1,
+     "quality_round": null,
+     "role": "review",
+     "pane": "w1:p3",
+     "health": "running",
+     "health_reason": "beat 1s ago",
+     "heartbeat_age": 1,
+     "waiting": null,
+     "verdict": null,
+     "error": null,
+     "closed": null,
+     "branch": null,
+     "worktree": null,
+     "pr": null,
+     "turns": [
+      {
+       "step": "spec",
+       "role": "spec",
+       "round": 1,
+       "quality_round": 0,
+       "file": "spec.md",
+       "agent": "claude",
+       "model": null,
+       "human_paced": true,
+       "started_at": "2026-10-24T14:00:00Z",
+       "ended_at": "2026-10-24T14:05:00Z",
+       "seconds": 60
+      },
+      {
+       "step": "build",
+       "role": "build",
+       "round": 1,
+       "quality_round": 0,
+       "file": "build.md",
+       "agent": "claude",
+       "model": null,
+       "human_paced": false,
+       "started_at": "2026-10-24T14:00:00Z",
+       "ended_at": "2026-10-24T14:20:00Z",
+       "seconds": 60
+      },
+      {
+       "step": "review",
+       "role": "review",
+       "round": 1,
+       "quality_round": 0,
+       "file": "review.md",
+       "agent": "claude",
+       "model": null,
+       "human_paced": false,
+       "started_at": "2026-10-24T14:00:00Z",
+       "ended_at": null,
+       "seconds": null
+      }
+     ],
+     "resume_command": null
+    }
+   },
+   {
+    "kind": "files",
+    "run": "20261024-140000-c0ffee",
+    "files": [
+     {
+      "name": "spec.md",
+      "mtime": 1792848938
+     },
+     {
+      "name": "build-1.blocked-1.md",
+      "mtime": 1792848939
+     },
+     {
+      "name": "build-1.md",
+      "mtime": 1792848941
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "after": "the spec was edited",
+  "events": [
+   {
+    "kind": "files",
+    "run": "20261024-140000-c0ffee",
+    "files": [
+     {
+      "name": "build-1.blocked-1.md",
+      "mtime": 1792848939
+     },
+     {
+      "name": "build-1.md",
+      "mtime": 1792848941
+     },
+     {
+      "name": "spec.md",
+      "mtime": 1792848943
+     }
+    ]
+   }
+  ]
+ },
+ {
+  "after": "the finished run was deleted",
+  "events": [
+   {
+    "kind": "record",
+    "run": "20261024-090000-beef00",
+    "record": null
+   }
+  ]
+ }
+]

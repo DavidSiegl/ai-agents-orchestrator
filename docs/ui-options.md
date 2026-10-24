@@ -1,7 +1,15 @@
 # A successor to the Tk GUI
 
-Status: **Proposed.** Nothing here is decided; the human chooses after reading it, and the
-[open questions](#open-questions) list what is left to them.
+Status: **Decided on 2026-10-24: option B, a Tauri 2 desktop app, with a React + TypeScript frontend built by
+Vite.** The webview talks to the orchestrator, which runs beside it as a sidecar, over local HTTP and Server-Sent
+Events, the first of [option B's transports](#option-b-a-desktop-shell-tauri). This chooses against the
+[recommendation](#recommendation), which stays below as the assessment the human decided on. The first step is
+read-only: `orchestrator.py serve` serves a project's runs, their files and a stream of their changes, and the app
+in [`ui/`](../ui) shows them live ([README](../README.md#desktop-app), [code](architecture.md#serve)). It is
+option A's step 3 of the [staged plan](#staged-plan) with the step 2 watcher folded in, as polling inside the
+server, and a Tauri window in place of the browser tab. That step's packaging question, open question 2, does not
+come up: the frontend lives beside `orchestrator.py` in `ui/`, not inside it. The command is called `serve`
+(open question 3). The other [open questions](#open-questions) are still for the human to decide.
 
 The GUI is to become a responsive, reactive feature of its own rather than a launcher over the CLI. This
 document assesses today's window ([design](design.md#the-gui), [code](architecture.md#gui)), states what its

@@ -12,8 +12,8 @@ Ideas for what comes next, in no particular order. The designs behind what has s
   `quality` then going on to `review` with any quality file named as unresolved. Today the gate is fixed when
   the run starts.
 - **A reactive UI**: a successor to the Tk window that shows every run's progress and handoff files live, lets
-  you answer the agents in it, and starts and watches several runs from one window. The options, a proposal
-  and a staged plan are in [ui-options.md](ui-options.md).
+  you answer the agents in it, and starts and watches several runs from one window. The options and the
+  decision, a Tauri app, are in [ui-options.md](ui-options.md); its first, read-only step is in [`ui/`](../ui).
 
 ## Workflows
 
