@@ -1528,8 +1528,9 @@ class Host:
 
         The rules come from base, a commit before the change: its .gitleaks.toml (else gitleaks' defaults) and its
         .gitleaksignore (else none), and nothing the change holds, in the working tree or committed, so that the
-        change cannot allowlist itself. Every file is diffed as text, with no textconv, whatever any .gitattributes
-        says, as _scan_git_env sets git up;
+        change cannot allowlist itself. Every file git takes for text by its content is diffed as text, with no
+        textconv, whatever any .gitattributes says, as _scan_git_env sets git up; one whose first 8000 bytes hold a
+        NUL is binary to git and scanned by neither gitleaks nor the comment check (see TODO.md);
         gitleaks honours a `gitleaks:allow` comment silently, so each one an added line holds is a Leak of its own.
         gitleaks runs with --redact and writes its JSON report to report_path, a path in the run's directory, beside
         the config files and the empty directory this makes there.
@@ -2220,15 +2221,16 @@ def _hunk_positions(diff: str, positions: Callable[[str], Iterable[int]]) -> dic
 
 
 def _scan_git_env(git_dir: str, empty_tree: str) -> list[str]:
-    """The `env` prefix under which the secret scan runs git, and gitleaks, which runs git: the repository at git_dir,
-    with no tree's attributes, so that git diffs every file as text, whatever a .gitattributes the change commits or
-    the base holds says. GIT_DIR, from a directory outside the working tree, leaves out the working tree's
-    .gitattributes; attr.tree, set to empty_tree (the repository's empty tree) as GIT_CONFIG_COUNT sets config, so
-    that it reaches the git gitleaks starts, overrides an attr.tree of the user's (HEAD would read the change's);
-    GIT_WORK_TREE and GIT_ATTR_SOURCE, which would bring a tree's back, are unset, and so are GIT_CONFIG_PARAMETERS,
-    which `git -c` exports and git reads after GIT_CONFIG_COUNT, and the environment's own GIT_CONFIG_COUNT entries.
-    $GIT_DIR/info/attributes and core.attributesFile still apply: only someone with the repository's or the user's
-    files could write them, not a change. A git that knows no attr.tree reads no tree's attributes from here."""
+    """The `env` prefix under which the secret scan runs git, and gitleaks, which runs git: the repository at
+    git_dir, with no tree's attributes, so that no .gitattributes the change commits or the base holds decides how
+    git diffs a file; git diffs as text every file it takes for text by its content. empty_tree is the repository's
+    empty tree. $GIT_DIR/info/attributes and core.attributesFile still apply, which only the repository's or the
+    user's own files set, never a change.
+
+    GIT_DIR, from a directory outside the working tree, leaves out the working tree's .gitattributes. attr.tree goes
+    in as GIT_CONFIG_COUNT sets config, so that it reaches the git gitleaks starts and overrides the user's.
+    GIT_WORK_TREE, GIT_ATTR_SOURCE and GIT_CONFIG_PARAMETERS (which `git -c` exports, read after GIT_CONFIG_COUNT)
+    would bring a tree's attributes back, and are unset."""
     return ["env", "-u", "GIT_WORK_TREE", "-u", "GIT_ATTR_SOURCE", "-u", "GIT_CONFIG_PARAMETERS",
             f"GIT_DIR={git_dir}", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=attr.tree", f"GIT_CONFIG_VALUE_0={empty_tree}"]
 
