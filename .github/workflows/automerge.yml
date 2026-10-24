@@ -9,8 +9,12 @@ name: Auto-merge
 
 on:
   pull_request:
-    # edited: a changed base branch.
-    types: [opened, reopened, edited, ready_for_review, converted_to_draft, labeled, unlabeled]
+    # edited: a changed base branch. synchronize: a push, the first event a pull request with a merge conflict
+    # gets once it is resolved, since GitHub runs no pull_request workflow during a conflict. auto_merge_enabled:
+    # auto-merge turned on by hand, which a held pull request gets turned off again; the workflow's own turning it
+    # on starts no run, as nothing done with github.token does.
+    types: [opened, reopened, edited, synchronize, ready_for_review, converted_to_draft, labeled, unlabeled,
+            auto_merge_enabled]
 
 permissions: {}
 
