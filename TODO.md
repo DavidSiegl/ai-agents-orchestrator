@@ -5,6 +5,13 @@ was done.
 
 ## Open issues
 
+- **A pull request opened over a conflict stays a draft with its warning after the conflict is resolved.** When
+  `Host.merge_upstream` finds conflicts with the base branch, `pr_body` opens the body with a `[!WARNING]` naming
+  the conflicting files and `create_pr` opens it as a draft; nothing ever edits the body or marks it ready, and
+  `RunState.conflicts` keeps the files. So once someone merges the base in and pushes, the pull request still says
+  it conflicts and stays a draft until a human edits it by hand. Met on PR #61 (2026-10-24): resolved and pushed,
+  it still showed the warning and the draft. Closes when the orchestrator, or a command of its, notices that the
+  head merges cleanly and drops the warning and the conflict-only draft.
 - **A proof that failed is not run again in the next round.** `Workflow._judge_proofs` runs only the proofs the
   verdict step wrote in its own round, so a Builder told to make round N's failing proofs pass (`PROOFS_NOTE`) is
   checked only if the Reviewer writes them again; one that still fails can be approved. Raised by the code review of
