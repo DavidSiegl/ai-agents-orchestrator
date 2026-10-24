@@ -115,6 +115,16 @@ describe("the runs overview", () => {
     expect(JSON.parse(localStorage.getItem("orchestrator.project") ?? "")).toEqual({ cwd: "~/other", machine: "devbox" });
   });
 
+  it("asks for a project when the orchestrator belongs to no checkout", async () => {
+    stubServer({});
+    render(<App connect={() => Promise.resolve({ ...CONNECTION, project: null })} />);
+    expect(await screen.findByText("Open a project folder to see its runs.")).toBeInTheDocument();
+    expect(FakeEventSource.opened).toHaveLength(0);
+    fireEvent.change(screen.getByLabelText("Project folder"), { target: { value: "~/proj" } });
+    fireEvent.click(screen.getByRole("button", { name: "Open" }));
+    expect(new URL(FakeEventSource.last.url).searchParams.get("cwd")).toBe("~/proj");
+  });
+
   it("says why the orchestrator could not start", async () => {
     render(<App connect={() => Promise.reject(new Error("python3: not found"))} />);
     expect(await screen.findByText(/Could not start the orchestrator: Error: python3: not found/)).toBeInTheDocument();

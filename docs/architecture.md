@@ -205,11 +205,13 @@ the flush at exit cannot fail again. Like `gui` and
 A Vite + React + TypeScript frontend in `ui/src/`, in a Tauri 2 shell in `ui/src-tauri/` (`create-tauri-app`'s
 layout), with no Python of its own.
 
-- **Shell.** `src-tauri/src/lib.rs` starts the sidecar in `setup`: `python3 <orchestrator.py> serve --origin
-  <the webview's origin>`, where the script is `$ORCHESTRATOR_PY` or else the checkout the app was built in.
-  It reads the first line and keeps the URL, the token and the checkout's directory, or why it failed, for the
-  `server` command. It kills the sidecar on `RunEvent::Exit`. The webview's CSP allows connections only to itself,
-  Tauri's IPC and `http://127.0.0.1`.
+- **Shell.** `src-tauri/src/lib.rs` starts the sidecar in `setup`: `serve --origin <the webview's origin>` of
+  the orchestrator `Orchestrator::locate` picks, `python3 $ORCHESTRATOR_PY`, else the binary beside the app's
+  executable that a release bundles (`BUNDLED_NAME`), else `python3` with the orchestrator.py of the checkout the
+  app was built in. It reads the first line and keeps the URL, the token and the checkout's directory, null for
+  the bundled binary, or why it failed, for the `server` command. With no checkout and no project opened before,
+  the frontend asks for a project folder. It kills the sidecar on `RunEvent::Exit`. The webview's CSP allows
+  connections only to itself, Tauri's IPC and `http://127.0.0.1`.
 - **Frontend.** `api.ts` types the protocol: `RunRecord` mirrors `run_record`, and `Api` builds the URLs and
   reads `/file`. `hooks.ts`'s `useRunStream` opens the `EventSource` and folds its events into a `RunsState`
   with `runs.ts`'s `applyEvent`. Every opening starts from no runs, since the server sends every run again.
@@ -249,6 +251,11 @@ running `after` callbacks on `tick`), and `TestRunProcess` runs real child proce
 - `ui/package.json`: the desktop app's npm scripts, `dev`, `build`, `test`, `typecheck`, `lint` and `tauri`. Its
   `.npmrc` sets `legacy-peer-deps`, because npm 9.2 as Debian ships it cannot resolve Vitest's optional peers.
   Jenkins runs the frontend's `typecheck`, `lint` and `test`, and the shell's `cargo test`.
+- `packaging/build-desktop.sh`: builds the desktop app with `tauri build`, the binary `build-binary.sh` built
+  copied in as its `externalBin` sidecar and `pyproject.toml`'s version, through a release config the script
+  writes and merges over `tauri.conf.json`, which bundles nothing. It writes
+  `dist/orchestrator-desktop-<os>-<arch>` `.deb` and `.AppImage` on Linux, `.dmg` on macOS (signed ad hoc),
+  each with its `.sha256`, and refuses a bundle without the sidecar.
 - `packaging/build-binary.sh`: builds `dist/orchestrator-<os>-<arch>` (`linux-x86_64`, `macos-arm64`), a
   PyInstaller one-file binary with Python and tkinter inside, and its `.sha256`, then smoke-tests it: `--help`,
   `workflows` lists `default`, and `gui --smoke-test` where there is a display. On Linux it builds with the
@@ -258,16 +265,18 @@ running `after` callbacks on `tick`), and `TestRunProcess` runs real child proce
   `ui/`'s `npm ci`, `typecheck`, `lint` and `test` and `ui/src-tauri/`'s `cargo test --locked`, failing the build
   before the gate, a Gate stage that
   runs `orchestrator.py gate` and archives `quality.md` (see [quality gate](quality-gate.md)), and a Package stage
-  that runs `packaging/build-binary.sh` on every build. On `main` a Release stage publishes a new
-  `pyproject.toml` version as a GitHub release, with `orchestrator.py` attached as the zipapp `orchestrator.pyz`
-  and the Linux binary, each with its `.sha256`, in one `gh release create`. Its parameter `GIT_REF` builds
+  that runs `packaging/build-binary.sh` and `packaging/build-desktop.sh` on every build. On `main` a Release stage
+  publishes a new `pyproject.toml` version as a GitHub release, with `orchestrator.py` attached as the zipapp
+  `orchestrator.pyz`, the Linux binary and the Linux desktop app, each with its `.sha256`, in one
+  `gh release create`. Its parameter `GIT_REF` builds
   another branch; such a build never releases.
 - `.github/workflows/automerge.yml`: keeps auto-merge on for a pull request into `main` from a branch of this
   repository, so it merges with a merge commit once Jenkins' required check passes; its header lists the pull
   requests it leaves to a human.
 - `.github/workflows/macos-binary.yml`: Jenkins has no Mac, so when a release is
-  published, or by hand for an existing tag, it runs `packaging/build-binary.sh` on `macos-latest` and uploads
-  `orchestrator-macos-arm64` and its `.sha256` to that release with `gh release upload --clobber`. With only
+  published, or by hand for an existing tag, it runs `packaging/build-binary.sh` and `packaging/build-desktop.sh`
+  on `macos-latest` and uploads `orchestrator-macos-arm64`, `orchestrator-desktop-macos-arm64.dmg` and their
+  `.sha256` to that release with `gh release upload --clobber`. With only
   `contents: write`, it never creates a release or a tag; everything else stays in Jenkins.
 
 How to set Jenkins up for it is in [quality-gate.md](quality-gate.md).
