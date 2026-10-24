@@ -4442,7 +4442,8 @@ def judge_run(quality: str, checks: tuple[OrchestratorCheck, ...], change: RunCh
 
     A check with failing findings is a failed condition, which turns GATE: OK into GATE: ERROR. Every finding is
     listed in a section of their own at the end, failing ones first, numbered on from the file's last number while
-    the file lists at most QUALITY_ISSUE_LIMIT in all; the rest are counted. quality comes back as it is when they find nothing.
+    the file lists at most QUALITY_ISSUE_LIMIT in all; the rest are counted. quality comes back as it is when they
+    find nothing.
     """
     conditions, issues, to_weigh = [], [], []
     for check in checks:
