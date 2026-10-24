@@ -3465,17 +3465,17 @@ def passes_at_base(change: GateChange, *, budget: float) -> list[dict]:
     instead, or removed where the change removed it. pytest first collects the changed test files there, then runs
     those of the changed tests it collected. A test passes there when pytest passed each of its cases that it did not
     skip, all its parameter sets included. One that fails or errors there tests the change, which is what the check
-    expects, and gives nothing; so does one that pytest does not collect there: a test whose file, or a conftest.py,
-    cannot be imported at the base, whatever the test itself checks, and a test_* method of a class pytest does not
-    take for a test class. The base's code is what the copy's own configuration, such as pytest's pythonpath, imports;
+    expects, and gives nothing; so does one that pytest does not collect there: a test whose file cannot be imported at
+    the base, or whose conftest.py raises ImportError there, whatever the test itself checks, and a test_* method of a
+    class pytest does not take for a test class. The base's code is what the copy's own configuration, such as pytest's pythonpath, imports;
     a project installed into the gate's interpreter imports the working tree's instead, and every test of it then
     passes at the base.
 
     The collection and the run together may take budget seconds; a stop there is a budget-reached finding saying
     when, and how many test cases the run had run; none of their outcomes is reported. A pytest that cannot start,
-    stops with a usage error other than a conftest.py that cannot be imported, or writes no readable report, a changed
-    test file that cannot be read or parsed, and a copy that cannot be made are not-run findings saying so; a copy
-    that cannot be removed afterwards is a finding of its own.
+    stops before it collects, stops with a usage error other than a conftest.py's ImportError, or writes no readable
+    report, a changed test file that cannot be read or parsed, and a copy that cannot be made are not-run findings
+    saying so; a copy that cannot be removed afterwards is a finding of its own.
     """
     if not _edits_python_source(change):
         return []
@@ -3573,9 +3573,11 @@ def _collect_at_base(tree: str, inifile: str, tests: dict[tuple[str, str], int],
                      env: dict[str, str]) -> tuple[list[str], bool, str | None]:
     """The node ids, one per parameter set, of those of tests that pytest collects in tree, the copy of the base, by
     the configuration in inifile and with env, by deadline, a time.monotonic() time; whether the deadline stopped it;
-    and the problem, a clause, when it went wrong otherwise. A test file, or a conftest.py, that cannot be imported at
-    the base gives no ids for the tests it covers and no problem: that is the expected outcome for a test of what the
-    change adds. So does a test pytest does not collect, such as a test_* method of a class not named Test*."""
+    and the problem, a clause, when it went wrong otherwise. A test file that cannot be imported at the base, or a
+    conftest.py whose import raises ImportError there, gives no ids for the tests it covers and no problem: that is
+    the expected outcome for a test of what the change adds. So does a test pytest does not collect, such as a test_*
+    method of a class not named Test*. A pytest that stops before it collects, as for a plugin that cannot be
+    imported, is a problem."""
     files = sorted({path for path, _ in tests})
     # Exit status 1: some file could not be collected, which --continue-on-collection-errors lets the others outlive;
     # 4, a usage error, which a conftest.py that cannot be imported gives; 5: no test was collected.
@@ -3586,15 +3588,21 @@ def _collect_at_base(tree: str, inifile: str, tests: dict[tuple[str, str], int],
         return [], True, None
     if problem or proc is None:
         return [], False, problem
+    # pytest exits 1 too when it stops before collecting, as for a plugin a conftest.py names that cannot be imported;
+    # then it prints a traceback and no summary of what it collected.
+    if proc.returncode == 1 and not re.search(r"^(?:no tests|\d+ tests?) collected\b", proc.stdout, re.MULTILINE):
+        return [], False, f"pytest stopped before it collected the changed tests at the base: {_said(proc)}"
     if proc.returncode != 4:
         ids, problem = _listed_tests(proc, "collecting the changed tests at the base", tests)
         return ids, False, problem
     if not _conftest_import_failed(proc):
         return [], False, f"pytest, collecting the changed tests at the base, exited with status 4: {_said(proc)}"
+    if len(files) == 1:
+        return [], False, None
     # pytest loads the conftest.py files of every path it is given before it collects any, so one that cannot be
     # imported stops them all: each file is collected on its own, and only those under it give nothing.
     collected: list[str] = []
-    for path in files if len(files) > 1 else ():
+    for path in files:
         found, stopped, problem = _collect_at_base(tree, inifile, {t: n for t, n in tests.items() if t[0] == path},
                                                    deadline, env)
         if stopped or problem:
@@ -3633,12 +3641,17 @@ def _copy_base_with_tests(change: GateChange, dest: str, archive: str) -> None:
         # "tar", not "data": a tracked link out of the tree is the repository's own; both refuse a member whose path
         # leads out of dest, through a link or otherwise.
         tar.extractall(dest, filter="tar")
+    # A path the base tracks has no link above it there.
     for old, _ in change.files:
-        if old is not None and _beside_tests(old) and os.path.lexists(path := _unlinked_path(dest, old)):
+        if old is not None and _beside_tests(old) and os.path.lexists(path := os.path.join(dest, old)):
             os.remove(path)
     for _, new in change.files:
         if new is not None and _beside_tests(new) and os.path.lexists(src := os.path.join(change.root, new)):
-            if os.path.lexists(dst := _unlinked_path(dest, new)):
+            dst = _unlinked_path(dest, new)
+            # A directory the base had where the change has a file or a link: emptied by the removals above, or not.
+            if os.path.isdir(dst) and not os.path.islink(dst):
+                shutil.rmtree(dst)
+            elif os.path.lexists(dst):
                 os.remove(dst)
             shutil.copy2(src, dst, follow_symlinks=False)
 

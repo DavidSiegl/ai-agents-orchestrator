@@ -6054,6 +6054,27 @@ class TestPassesAtBase(unittest.TestCase):
         self.assertEqual([f["message"].split("`")[1] for f in self.found()], ["test_mul", "test_mul_one"])
         self.assertEqual(os.listdir(outside), [])
 
+    def test_a_pytest_that_stops_before_it_collects_is_a_finding(self):
+        # pytest exits 1 for a plugin it cannot import, as for collection errors, but collects nothing.
+        self.put("calc.py", self.CALC.replace("a - b", "a + b"))
+        self.put("conftest.py", "pytest_plugins = ['calc_plugin']\n")
+        self.put("calc_plugin.py", "")
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_one():\n    assert mul(1, 1) == 1\n")
+        found = self.found()
+        self.assertEqual([(f["path"], f["rule"]) for f in found], [(None, "not-run")])
+        self.assertIn("pytest stopped before it collected the changed tests at the base: ", found[0]["message"])
+        self.assertIn("calc_plugin", found[0]["message"])
+
+    def test_a_directory_the_change_makes_a_link_is_replaced(self):
+        self.put("tests/data/x.json", "{}\n")
+        self.git("add", "tests/data")
+        self.git("commit", "--quiet", "-m", "data")
+        self.git("rm", "--quiet", "-r", "tests/data")
+        self.put("fixtures/x.json", "{}\n")
+        os.symlink("../fixtures", os.path.join(self.repo, "tests/data"))
+        self.fix_add("\n\ndef test_mul_one():\n    assert mul(1, 1) == 1\n")
+        self.assertEqual([f["message"].split("`")[1] for f in self.found()], ["test_mul_one"])
+
     def test_a_change_to_docs_and_tests_is_not_run(self):
         self.put("TODO.md", "- nothing\n")
         self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_zero():\n    assert mul(0, 5) == 0\n")
