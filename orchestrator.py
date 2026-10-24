@@ -3973,16 +3973,23 @@ class _BasePool:
         says whether the check judges the file at path, whose functions then take no base under
         _COMPLEXITY_EXEMPT."""
         for scored in functions:
-            if (path, scored.line) in self.lent:
+            if (path, scored.line) not in self.lent:
+                found = self._twin(scored, home, same_name=same_name, same_file=same_file, judged=judged)
+                if found is not None:
+                    self._lend(path, scored, *found)
+
+    def _twin(self, scored: _ScoredFunction, home: str | None, *, same_name: bool, same_file: bool,
+              judged: bool) -> tuple[str, _ScoredFunction] | None:
+        """The old path and the first base function left there that may lend to scored in lend_by_body's step, as its
+        arguments of the same names say; None for no such function."""
+        for old, left in self._left.items():
+            if (old == home) != same_file or (judged and old.startswith(_COMPLEXITY_EXEMPT)):
                 continue
-            for old, left in self._left.items():
-                if (old == home) != same_file or (judged and old.startswith(_COMPLEXITY_EXEMPT)):
-                    continue
-                twin = next((g for g in left if g.body == scored.body and (g.name == scored.name or not same_name)
-                             and (same_file or (old, g.body) in self._gone)), None)
-                if twin is not None:
-                    self._lend(path, scored, old, twin)
-                    break
+            for base in left:
+                if (base.body == scored.body and (base.name == scored.name or not same_name)
+                        and (same_file or (old, base.body) in self._gone)):
+                    return old, base
+        return None
 
     def lend_by_name(self, path: str, scored: _ScoredFunction, home: str | None) -> None:
         """Lend to scored, a function of a judged file of the working tree at path whose old path is home, unless it
