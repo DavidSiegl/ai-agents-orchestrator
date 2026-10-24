@@ -681,8 +681,10 @@ class Pipeline:
 
 # Written into the run directory whenever the run ends: what it did, and where its time went.
 SUMMARY_FILE = "summary.md"
+# Written into the run directory when the run is done: run_metrics, for the metrics command.
+METRICS_FILE = "metrics.json"
 # Files the run writes into its directory itself, beside the steps' handoff files.
-RUN_FILE = re.compile(r"state\.json|summary\.md|quality-.*|locked-.*")
+RUN_FILE = re.compile(r"state\.json|summary\.md|metrics\.json|quality-.*|locked-.*")
 
 
 def _fill_problem(step: Step, known: set[str]) -> str | None:
@@ -694,7 +696,7 @@ def _fill_problem(step: Step, known: set[str]) -> str | None:
     name = step.file.format(n=1)
     if "/" in name or name in ("", ".", "..") or RUN_FILE.fullmatch(name):
         return f"handoff file {step.file} must be a plain file name, and not state.json, {SUMMARY_FILE}, " \
-               f"quality-* or locked-*, which the run writes itself"
+               f"{METRICS_FILE}, quality-* or locked-*, which the run writes itself"
     # Every value a prompt is filled in with is a string.
     values = dict.fromkeys(known, "")
     for field_name in ("prompt", "again", "fresh_note"):
@@ -1811,6 +1813,35 @@ class Host:
                 raise OrchestratorError(f"corrupt run state under {cwd}/{RUNS_DIR}: {e}") from e
         return runs
 
+    def session_log(self, kind: str, session: str) -> str | None:
+        """The log in which the harness kind keeps a session's token usage (SESSION_LOGS), found in the home directory
+        here; None for a harness without one, a session id that is not a plain name, or no such file. Verbatim, as
+        Host.run says."""
+        pattern = SESSION_LOGS.get(kind)
+        if pattern is None or not re.fullmatch(r"[A-Za-z0-9_-]+", session):
+            return None
+        script = (f'cd -- "$HOME" || exit 1; for f in $1; do [ -f "$f" ] && exec cat -- "$f"; done; '
+                  f'exit {MISSING_FILE_STATUS}')
+        proc = self.run(["sh", "-c", script, "_", pattern.format(session=session)], verbatim=True)
+        if proc.returncode == MISSING_FILE_STATUS:
+            return None
+        return self._checked(["sh", "-c", script], proc)
+
+    def run_metrics(self, cwd: str) -> list[dict]:
+        """The metrics.json of each run of the project at cwd that has one, oldest run first."""
+        # Each file is one line; echo ends one that lacks its line end.
+        script = (f'for f in "$1"/{RUNS_DIR}/*/{METRICS_FILE}; do [ -f "$f" ] || continue; cat -- "$f" && echo; done; '
+                  'true')
+        records = []
+        for line in self.check(["sh", "-c", script, "_", cwd]).splitlines():
+            if not line.strip():
+                continue
+            try:
+                records.append(json.loads(line))
+            except ValueError as e:
+                raise OrchestratorError(f"corrupt {METRICS_FILE} under {cwd}/{RUNS_DIR}: {e}") from e
+        return records
+
     def run_files(self, run_dir: str) -> list[str]:
         """The paths of the files in a run directory, oldest first, except state.json and write's temp files."""
         # Each entry is "<mtime> <path>" ended by a NUL, which no path holds. stat -c is GNU, stat -f is BSD.
@@ -2145,6 +2176,10 @@ class RunState:
     # when its prompt is delivered, or a quality analysis starts, and closes when its file is found. Absent from a
     # run saved before them.
     turns: list[dict] = field(default_factory=list)
+    # One record per quality round judged, in order: {"round", "quality_round", "gate", "conditions",
+    # "fingerprints_by_check"}, the last two as gate_failures reads them from its quality file. Fingerprints, never
+    # the findings' text, so that state.json stays small.
+    quality_rounds: list[dict] = field(default_factory=list)
     # The BLOCKED report the current turn waits on the human for, {"file", "question", "k"}: file is the handoff
     # file's basename, and the report was moved to its k-th blocked name (Workflow._blocked_path). None otherwise.
     blocked: dict | None = None
@@ -5826,6 +5861,90 @@ def run_summary(state: "RunState", pipeline: Pipeline, rounds: list[str], now: i
     return "\n".join(lines) + "\n"
 
 
+# -- Run metrics: metrics.json, which the metrics command prints ---------------------------------------------
+
+# The version of run_metrics' shape, raised when a key changes its meaning or goes.
+METRICS_VERSION = 1
+
+# Where each harness that records the tokens of a session on disk keeps that record, as a glob relative to the home
+# directory of the machine the agents run on, {session} standing for the session id herdr reports. A harness that is
+# not here records none the orchestrator reads, and its turns' tokens are "unknown" (docs/design.md, Token usage).
+SESSION_LOGS = {"claude": ".claude/projects/*/{session}.jsonl", "pi": ".pi/agent/sessions/*/*_{session}.jsonl"}
+
+
+def session_usage(kind: str, session_log: str) -> list[tuple[float, dict[str, int]]]:
+    """The token usage a harness's session log, as SESSION_LOGS finds it, records: (when, in seconds since the epoch;
+    {"input", "output", "cache_read", "cache_write"}) for each answer of the model, oldest first. A line that is not a
+    record of one is skipped. Claude Code writes one line per content block of an answer, each with the answer's
+    usage, so each answer counts once, at its first line."""
+    out, seen = [], set()
+    for line in session_log.split("\n"):
+        try:
+            entry = json.loads(line)
+            message = entry["message"]
+            usage = message["usage"]
+            when = datetime.fromisoformat(entry["timestamp"]).timestamp()
+            if kind == "claude":
+                if entry.get("type") != "assistant" or message.get("id") in seen:
+                    continue
+                seen.add(message.get("id"))
+                tokens = {"input": usage["input_tokens"], "output": usage["output_tokens"],
+                          "cache_read": usage.get("cache_read_input_tokens", 0),
+                          "cache_write": usage.get("cache_creation_input_tokens", 0)}
+            else:
+                if message.get("role") != "assistant":
+                    continue
+                tokens = {"input": usage["input"], "output": usage["output"], "cache_read": usage.get("cacheRead", 0),
+                          "cache_write": usage.get("cacheWrite", 0)}
+        except (ValueError, KeyError, TypeError, AttributeError):
+            continue
+        if all(type(v) is int for v in tokens.values()):
+            out.append((when, tokens))
+    return out
+
+
+def turn_tokens(turn: dict, session_log: str | None) -> dict[str, int] | str:
+    """The tokens of the answers the turn's agent gave from the turn's start to the second its handoff file was
+    written, summed, from the log of the session it ran in throughout (session_usage); "unknown" when there is no such
+    log, the turn's session or either end is not known, or its harness records none the orchestrator reads."""
+    if session_log is None or turn["agent"] not in SESSION_LOGS or not turn.get("session") \
+            or not turn.get("started_at") or not turn.get("ended_at"):
+        return "unknown"
+    start, end = epoch_seconds(turn["started_at"]), epoch_seconds(turn["ended_at"]) + 1
+    total = dict.fromkeys(("input", "output", "cache_read", "cache_write"), 0)
+    for when, tokens in session_usage(turn["agent"], session_log):
+        if start <= when < end:
+            for k, v in tokens.items():
+                total[k] += v
+    return total
+
+
+def run_metrics(state: "RunState", now: int) -> dict:
+    """metrics.json of a run that is done, at now: one object of the run's outcome, its roles, its turns with their
+    times and tokens, and its quality rounds with their fingerprints, never their findings' text. docs/design.md
+    gives every key."""
+    s = state
+    starts = [epoch_seconds(t["started_at"]) for t in s.turns if t.get("started_at")]
+    turns = [{"step": t["step"], "role": t["role"], "harness": t.get("agent"), "model": t.get("model"),
+              "round": t["round"], "quality_round": t.get("quality_round", 0),
+              "human_paced": bool(t.get("human_paced")), "started_at": t.get("started_at"),
+              "ended_at": t.get("ended_at"), "seconds": t.get("seconds"),
+              "tokens": (t.get("tokens") or "unknown") if t.get("agent") else None}
+             for t in s.turns]
+    return {
+        "version": METRICS_VERSION, "run_id": s.run_id, "workflow": s.workflow,
+        "outcome": s.verdict or ("error" if s.error else "unfinished"), "rounds": s.round,
+        "max_rounds": s.max_rounds, "quality_gate": s.quality_job is not None,
+        "max_quality_rounds": s.max_quality_rounds if s.quality_job else None, "pull_request": s.pr_url,
+        "started_at": iso_utc(min(starts)) if starts else None, "ended_at": iso_utc(now),
+        "seconds": now - min(starts) if starts else None,
+        "roles": {role: {"harness": a.get("kind", DEFAULT_AGENT), "model": s.models.get(role)}
+                  for role, a in s.agents.items()},
+        "turns": turns, "quality_rounds": s.quality_rounds,
+        "restored_locked_files": sum(len(ps) for r in s.restored for ps in r["paths"].values()),
+    }
+
+
 def log(msg: str) -> None:
     print(f"  {msg}", file=sys.stderr)
 
@@ -5973,8 +6092,10 @@ class Workflow:
 
         s.phase = DONE
         s.owner = None
+        self._count_tokens()
         self._save()
         self._write_summary()
+        self._write_metrics()
         if s.worktree and not s.pull_request:
             log(f"the change is in worktree {s.worktree}")
         self.notify(f"Run finished: {s.verdict}", s.pr_url or s.task)
@@ -6101,6 +6222,30 @@ class Workflow:
                             run_summary(s, self.pipeline, self._round_results(), self.host.now()))
         except OrchestratorError as e:
             log(f"could not write {SUMMARY_FILE}: {e}")
+
+    def _write_metrics(self) -> None:
+        """Write metrics.json for a run that is done; as for the summary, a failure is only logged."""
+        s = self.state
+        try:
+            self.host.write(f"{s.dir}/{METRICS_FILE}", json.dumps(run_metrics(s, self.host.now())) + "\n")
+        except OrchestratorError as e:
+            log(f"could not write {METRICS_FILE}: {e}")
+
+    def _count_tokens(self) -> None:
+        """Give each agent turn the tokens its harness recorded for it (turn_tokens), "unknown" where it recorded
+        none the orchestrator can read. A session log that cannot be read costs only its turns' counts."""
+        logs: dict[tuple[str, str], str | None] = {}
+        for t in self.state.turns:
+            if not t.get("agent"):
+                continue
+            key = (t["agent"], t.get("session") or "")
+            if key not in logs:
+                try:
+                    logs[key] = self.host.session_log(*key) if key[1] else None
+                except OrchestratorError as e:
+                    log(f"could not read the {key[0]} session log of {key[1]}: {e}")
+                    logs[key] = None
+            t["tokens"] = turn_tokens(t, logs[key])
 
     def _round_results(self) -> list[str]:
         """Per round, its quality gates and its verdict, as its handoff files say."""
@@ -6606,6 +6751,10 @@ class Workflow:
         gate = parse_gate(text)
         if gate is None:
             self._reject(path, "does not start with a GATE line")
+        if not any(r["round"] == n and r["quality_round"] == q for r in s.quality_rounds):
+            failures = gate_failures(text)
+            s.quality_rounds.append({"round": n, "quality_round": q, "gate": gate, "conditions": failures.conditions,
+                                     "fingerprints_by_check": failures.fingerprints})
         log(f"[quality] round {n}, quality round {q}: {gate}")
         self._finish_analysis(ref)
         return gate
@@ -7010,13 +7159,18 @@ class Workflow:
         a quality analysis, which runs no agent. started is None when the turn's start is not known."""
         s = self.state
         step = self.pipeline.step(s.phase)
-        agent = model = None
+        agent = model = session = None
         if step:
             agent = (s.agents.get(role) or {}).get("kind") or s.agent_kinds.get(role, DEFAULT_AGENT)
             model = s.models.get(role)
+            session = (s.agents.get(role) or {}).get("session")
         return {"step": s.phase, "role": role, "round": s.round,
                 "quality_round": s.quality_round if step is None or step.quality_gated else 0,
-                "file": file, "agent": agent, "model": model,
+                # The agent's session for the whole turn, None when that is not known: _end_turn clears it for a
+                # turn that ended in another session than it started in.
+                # The tokens of the turn, turn_tokens counts them once the run is done; None until then, and always
+                # for a quality analysis.
+                "file": file, "agent": agent, "model": model, "session": session, "tokens": None,
                 # A blocked turn's wait for the human's answer, and the rewrite after it, is paced by the human too.
                 "human_paced": bool(step and step.human_paced) or bool(s.blocked and s.blocked["file"] == file),
                 "started_at": None if started is None else iso_utc(started), "ended_at": None, "seconds": None}
@@ -7032,6 +7186,8 @@ class Workflow:
                 return  # closed already, by an orchestrator that stopped before the run moved on
             record = self._turn_record(role, file, None)
             s.turns.append(record)
+        if record.get("session") != (s.agents.get(role) or {}).get("session"):
+            record["session"] = None
         ended = self.host.mtime(path)
         record["ended_at"] = iso_utc(ended)
         if record["started_at"] is not None:
@@ -7292,6 +7448,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                               "with a record of each run's state")
     listing.add_argument("--pr-state", action="store_true",
                          help="with --json, ask gh for the state of each run's pull request, one call per run")
+
+    sub.add_parser(
+        "metrics", parents=[target], help="print the metrics of every run that is done, a JSON line each",
+        description=f"Print the {METRICS_FILE} of every run in the project directory that is done, one JSON object "
+                    f"per line, oldest run first, for jq or a spreadsheet: its outcome, roles, turns with their times "
+                    f"and tokens, and quality rounds. A run that is not done has none and is left out.")
 
     show = sub.add_parser(
         "show", parents=[target], help="print one run in full: its state, files and last review",
@@ -8087,7 +8249,7 @@ def main(argv: list[str]) -> int:
 
 
 # The commands about a project's runs, which start none.
-RUNS_COMMANDS = ("list", "show", "prune", "close")
+RUNS_COMMANDS = ("list", "show", "prune", "close", "metrics")
 
 
 def runs_command(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str) -> None:
@@ -8103,6 +8265,9 @@ def runs_command(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str) -
         show_run(host, cwd, args.run_ref, local_host, pid_alive, target_args(args))
     elif args.command == "close":
         close_run(herdr, host, cwd, args.run_ref, local_host, pid_alive)
+    elif args.command == "metrics":
+        for record in host.run_metrics(cwd):
+            print(json.dumps(record))
     else:
         print_pruned(prune_branches(host, cwd, time.time, local_host, pid_alive, dry_run=args.dry_run, revisit=True))
 

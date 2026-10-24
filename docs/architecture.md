@@ -65,24 +65,27 @@ order, in `work_dir`:
 - `done`: `_clean_up_quality` deletes the run's throwaway branches, `owner` is cleared,
   and with a pull request `_close_workspace` closes the workspace.
 
-A failure goes through `_release`, which records `error`. Each role's turn is `_turn`: it takes a handoff file
-that already exists, and otherwise gets the agent ready through `_agent` (`NEW`, `ALIVE`, `RESUMED` or
-`RESTARTED`; an exited agent is resumed into its saved session only if its record's `kind` is the role's
-harness now, and otherwise starts fresh), prompts it with what `_prompt_for` picks, and polls for the file in `_await_handoff`, where
-`_tell_human` notifies the human of a blocked or stalled agent once. A verdict step's file without a `VERDICT`
-first line goes to `_retry` (in `_verdict_turn`), which moves it aside and, once per file (`retried`), prompts the role again with
-`RETRY_VERDICT_PROMPT`; `retrying` names the file while that turn is under way, so a resume sends the retry prompt,
-not the step's own. A file of a step that can block (`Step.can_block`: neither human-paced nor the verdict step)
-whose first line is `BLOCKED:` (`parse_blocked`) goes to `_block`, which saves `blocked` and then moves it aside to
-`.blocked-K`; `_unblocked` then has `_block_answer` notify the human and wait for the file again, as often as it
-comes back `BLOCKED:`, with `BLOCKED_PROMPT`, no
-timeout and no stall notice, and a resume with `blocked` set finishes an undone move (`_finish_block`) and goes
-back into that wait. `_prompts` appends `BLOCKED_NOTE` to every prompt of such a step. `_save` checks the owner before every write and raises
-`RunTakenOver` after a takeover; `_heartbeat` keeps `state.json` fresh while a turn runs. `_written` and
-`_quality` open a turn's record in `turns` (`_turn_record`, started by `Host.now`) and `_end_turn` closes it at
-the handoff file's `Host.mtime`; both read the project host's clock. The end of `run` and `_release` write
-`summary.md` (`run_summary`, with `turns_table`), except after a takeover; `pr_body` adds the same table and
-`show` prints `turn_lines`.
+A failure goes through `_release`, which records `error`. Each role's turn is `_turn`: it takes a handoff file that
+already exists, and otherwise gets the agent ready through `_agent` (`NEW`, `ALIVE`, `RESUMED` or `RESTARTED`; an
+exited agent is resumed into its saved session only if its record's `kind` is the role's harness now, and otherwise
+starts fresh), prompts it with what `_prompt_for` picks, and polls for the file in `_await_handoff`, where
+`_tell_human` notifies the human of a blocked or stalled agent once. A verdict step's file without a `VERDICT` first
+line goes to `_retry` (in `_verdict_turn`), which moves it aside and, once per file (`retried`), prompts the role
+again with `RETRY_VERDICT_PROMPT`; `retrying` names the file while that turn is under way, so a resume sends the
+retry prompt, not the step's own. A file of a step that can block (`Step.can_block`: neither human-paced nor the
+verdict step) whose first line is `BLOCKED:` (`parse_blocked`) goes to `_block`, which saves `blocked` and then
+moves it aside to `.blocked-K`; `_unblocked` then has `_block_answer` notify the human and wait for the file again,
+as often as it comes back `BLOCKED:`, with `BLOCKED_PROMPT`, no timeout and no stall notice, and a resume with
+`blocked` set finishes an undone move (`_finish_block`) and goes back into that wait. `_prompts` appends
+`BLOCKED_NOTE` to every prompt of such a step. `_save` checks the owner before every write and raises `RunTakenOver`
+after a takeover; `_heartbeat` keeps `state.json` fresh while a turn runs. `_written` and `_quality` open a turn's
+record in `turns` (`_turn_record`, started by `Host.now`) and `_end_turn` closes it at the handoff file's
+`Host.mtime`; both read the project host's clock. The end of `run` and `_release` write `summary.md` (`run_summary`,
+with `turns_table`), except after a takeover; `pr_body` adds the same table and `show` prints `turn_lines`. A run
+that is done first counts each agent turn's tokens (`_count_tokens`: `Host.session_log` reads the session's log
+where `SESSION_LOGS` says its harness keeps one, and `turn_tokens` sums the answers within the turn), then writes
+`metrics.json` (`run_metrics`), with the quality rounds `_quality` records in `quality_rounds` by `gate_failures`;
+the `metrics` command prints every run's (`Host.run_metrics`).
 
 ## Workflows
 
@@ -119,7 +122,7 @@ workflow's label for its key, or else is named after the key; a role's `model` s
 and its `agent` (`Pipeline.agents`, one of `AGENT_KINDS`) under `--agent` and `--role-agent`. A
 file cannot take a built-in workflow's name. `Pipeline` also rejects a prompt or file that could not be filled
 in at run time (`_fill_problem`), and a handoff file outside the run directory or named like the run's own
-`state.json`, `summary.md`, `quality-*` and `locked-*` files, and two steps whose files can share a name in some round (`Step.name_forms`,
+`state.json`, `summary.md`, `metrics.json`, `quality-*` and `locked-*` files, and two steps whose files can share a name in some round (`Step.name_forms`,
 `_shared_name` and `_collision_problem`, an exact check). `state.json` saves
 the workflow's name and, for one that is not built in, its canonical definition (`workflow_definition`), which
 a resume rebuilds the `Pipeline` from, so editing or deleting the file does not change a started run. One saved

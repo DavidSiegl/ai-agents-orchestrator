@@ -150,6 +150,9 @@ python orchestrator.py list --machine <machine> --cwd ~/GitHub/myproject
 # request's state (OPEN, CLOSED or MERGED) from gh
 python orchestrator.py list --json --pr-state
 
+# Every finished run's metrics.json, one JSON line each: outcome, roles, turns with times and tokens, quality rounds
+python orchestrator.py metrics --machine <machine> --cwd ~/GitHub/myproject | jq -s 'map(.rounds) | add / length'
+
 # One run in full: its state, branch and pull request, agents, handoff files and last review
 python orchestrator.py show e292fb --machine <machine> --cwd ~/GitHub/myproject
 
@@ -290,26 +293,29 @@ since, the agent starts a fresh session instead.
    agents run on. Whenever the run ends, done, failed or interrupted, the orchestrator writes `summary.md`: the
    task, the outcome or the error, the pull request and branch, each role's harness and model, the total wall
    time, a table of the turns with their start and duration, and each round's quality gates and verdict. A
-   resume that ends again rewrites it. The pull request gets the same table, collapsed under "Run timings".
+   resume that ends again rewrites it. The pull request gets the same table, collapsed under "Run timings". A
+   run that is done also writes `metrics.json`, the same as one JSON object with each turn's tokens where its
+   harness records them, and each quality round's gate, failed conditions and finding fingerprints; `metrics`
+   prints every run's.
 
 One run at a time per checkout: runs in one project directory share its working tree, so a run, `--no-pr`
 or not, refuses to start or resume while another run there is `running` (see `list`). A stale, finished or
 failed run does not count. A `--worktree` run has a working tree of its own, so it neither refuses nor is
 refused by any other run. To run in parallel, use `--worktree`, or give each run its own clone.
 
-Everything a run writes stays in `<project>/.orchestrator/runs/<run-id>/`: the handoff files, `state.json`,
-which records the phase, round, panes, branch, pull request, verdict, any error, and in `turns` each handoff
-file's turn (step, role, round, harness, model, start, end and seconds), and `summary.md` once the run has
-ended ([Turn timings and the summary](docs/design.md#turn-timings-and-the-summary)). A turn whose file was
-written before turns were recorded has no start, and the tables show `?` for it; a spec given with `--spec` has
-no turn. A workflow's step cannot name its file `summary.md`. `.orchestrator/` ignores itself, so it never
-shows up in the diff or the commit. A failed run keeps its workspace open and stays on its
-branch, and a `--no-pr` run keeps its workspace open too. `close` closes it when you are done, and records that
-in `state.json`; `resume` then refuses the run. A failed or stale `--worktree` run also loses its worktree,
-uncommitted changes included, which `close` lists first, and its branch, unless the branch has commits beyond the
-run's base. A finished run keeps its worktree, and an in-place run its checkout and branch. `close` refuses a run
-that is `running`. `list` ends a closed run's line with what `close` did, in place of `stale` and its `resume`
-command ([Closing a run](docs/design.md#closing-a-run)).
+Everything a run writes stays in `<project>/.orchestrator/runs/<run-id>/`: the handoff files, `state.json`, which
+records the phase, round, panes, branch, pull request, verdict, any error, and in `turns` each handoff file's turn
+(step, role, round, harness, model, session, start, end, seconds and tokens), and `summary.md` once the run has
+ended, and `metrics.json` once it is done ([Turn timings and the summary](docs/design.md#turn-timings-and-the-
+summary)). A turn whose file was written before turns were recorded has no start, and the tables show `?` for it; a
+spec given with `--spec` has no turn. A workflow's step cannot name its file `summary.md` or `metrics.json`.
+`.orchestrator/` ignores itself, so it never shows up in the diff or the commit. A failed run keeps its workspace
+open and stays on its branch, and a `--no-pr` run keeps its workspace open too. `close` closes it when you are done,
+and records that in `state.json`; `resume` then refuses the run. A failed or stale `--worktree` run also loses its
+worktree, uncommitted changes included, which `close` lists first, and its branch, unless the branch has commits
+beyond the run's base. A finished run keeps its worktree, and an in-place run its checkout and branch. `close`
+refuses a run that is `running`. `list` ends a closed run's line with what `close` did, in place of `stale` and its
+`resume` command ([Closing a run](docs/design.md#closing-a-run)).
 
 `resume` continues a run whose orchestrator stopped where `state.json` says, reusing or relaunching its agents
 ([Resuming a run](docs/design.md#resuming-a-run)). It refuses while another branch than the run's is checked

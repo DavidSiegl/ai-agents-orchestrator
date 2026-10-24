@@ -110,6 +110,8 @@ class FakeHost(Host):
     Each snapshot keeps the changed files' text in `trees`, which lock, locked_changes and restore play the locked
     files on; `refs` holds the refs lock made, and `restores` records each restore.
 
+    `session_logs` holds each agent session's log, by (harness, session id), for the turns' tokens.
+
     For the secret scan before each push:
 
     - `leaks`: what scan_unpublished finds, as Leaks; every scan finds them all. `scans` records (commit, base,
@@ -158,6 +160,7 @@ class FakeHost(Host):
         self.trees = {}  # by snapshot: the text of each changed file then, None for a deleted one
         self.refs = {}  # the local refs lock made, with their snapshot
         self.restores = []  # (ref, paths) of each restore
+        self.session_logs = {}  # by (harness, session): what session_log reads
 
     def scan_unpublished(self, cwd, commit, base, report_path):
         self.scans.append((commit, base, report_path))
@@ -207,6 +210,9 @@ class FakeHost(Host):
                 self.files.pop(f"{cwd}/{p}", None)
             else:
                 self.files[f"{cwd}/{p}"] = tree[f"{cwd}/{p}"]
+
+    def session_log(self, kind, session):
+        return self.session_logs.get((kind, session))
 
     def delete_refs(self, cwd, prefix):
         self.refs = {ref: sha for ref, sha in self.refs.items() if not ref.startswith(prefix)}
@@ -8806,7 +8812,7 @@ class TestDefaultWorkflowPrompts(unittest.TestCase):
         written = [p.rsplit("/", 1)[-1] for p in host.writes if p.startswith(D) and not p.endswith("state.json")]
         self.assertEqual(written, ["spec.md", "build-1.md", "quality-1-1.md", "build-1-q1.md", "quality-1-2.md",
                                    "review-1.md", "build-2.md", "quality-2-1.md", "build-2-q1.md", "quality-2-2.md",
-                                   "review-2.md", "summary.md"])
+                                   "review-2.md", "summary.md", "metrics.json"])
         self.assertEqual([c for c in herdr.calls if c[0] in ("rename", "split")], [
             ("rename", "w1:p1", "Spec Collector"), ("split", "w1:p1", "right"), ("rename", "w1:p2", "Builder"),
             ("split", "w1:p2", "down"), ("rename", "w1:p3", "Reviewer")])
@@ -9116,7 +9122,7 @@ class TestOtherWorkflows(unittest.TestCase):
                                    orchestrator.QUALITY_PASSED_NOTE.format(quality_path=f"{D}/quality-1-2.md")])
         written = [p.rsplit("/", 1)[-1] for p in host.writes if p.startswith(D) and not p.endswith("state.json")]
         self.assertEqual(written, ["impl-1.md", "quality-1-1.md", "impl-1-q1.md", "quality-1-2.md", "review-1.md",
-                                   "summary.md"])
+                                   "summary.md", "metrics.json"])
         self.assertTrue(host.files[f"{D}/quality-1-1.md"].startswith("GATE: ERROR\n"))
         self.assertTrue(host.files[f"{D}/quality-1-2.md"].startswith("GATE: OK\n"))
         self.assertEqual(fake.triggered(), [REF_1_1, "orchestrator-ci/a1b2c3-1-q2"])
@@ -9575,9 +9581,10 @@ class TestWorkflowFiles(unittest.TestCase):
         for name in ("b-{n!s}.md", "b-{n:d}.md", "b-{n:{x}}.md"):
             cases.append((f"step build: handoff file {name} may use {{n}} only as it is, with no format spec or "
                           f"conversion", "[[steps]]\n" + step.replace("b-{n}.md", name)))
-        for name in ("state.json", "summary.md", "quality-{n}-1.md", "../b-{n}.md", "/tmp/b-{n}.md", ".."):
+        for name in ("state.json", "summary.md", "metrics.json", "quality-{n}-1.md", "../b-{n}.md", "/tmp/b-{n}.md",
+                     ".."):
             cases.append((f"step build: handoff file {name} must be a plain file name, and not state.json, "
-                          f"summary.md, quality-* or locked-*, which the run writes itself",
+                          f"summary.md, metrics.json, quality-* or locked-*, which the run writes itself",
                           "[[steps]]\n" + step.replace("b-{n}.md", name)))
         for message, text in cases:
             with self.subTest(message=message):
@@ -12394,12 +12401,25 @@ def at(seconds):
     return orchestrator.iso_utc(HOST_EPOCH + seconds)
 
 
-def turn(step, file, start, end, *, role=None, rnd=1, q=0, agent="claude", model=None, human_paced=False):
-    """A turn record that started and ended at these host clock readings; None for one not known."""
-    return {"step": step, "role": role or step, "round": rnd, "quality_round": q, "file": file, "agent": agent,
-            "model": model, "human_paced": human_paced,
-            "started_at": None if start is None else at(start), "ended_at": None if end is None else at(end),
-            "seconds": None if start is None or end is None else end - start}
+class Partly(dict):
+    """A dict equal to any dict that holds all of its items, whatever else that holds."""
+
+    def __eq__(self, other):
+        return isinstance(other, dict) and all(k in other and other[k] == v for k, v in self.items())
+
+    def __ne__(self, other):
+        return not self == other
+
+    __hash__ = None
+
+
+def turn(step, file, start, end, *, role=None, rnd=1, q=0, agent="claude", model=None, human_paced=False, **more):
+    """A turn record that started and ended at these host clock readings; None for one not known. It equals a record
+    with any session and tokens, unless more gives them."""
+    return Partly({"step": step, "role": role or step, "round": rnd, "quality_round": q, "file": file, "agent": agent,
+                   "model": model, "human_paced": human_paced,
+                   "started_at": None if start is None else at(start), "ended_at": None if end is None else at(end),
+                   "seconds": None if start is None or end is None else end - start, **more})
 
 
 GOLDEN_SUMMARY = """\
@@ -12496,7 +12516,7 @@ class TestTurnTimings(unittest.TestCase):
 
     def test_a_restarted_agent_keeps_its_turns_record(self):
         state = saved_run("build", 2, agents=("spec", "build", "review"), prompted="build-2.md",
-                          turns=[turn("build", "build-2.md", -1000, None, rnd=2)])
+                          turns=[dict(turn("build", "build-2.md", -1000, None, rnd=2))])
         wf, herdr, host, _ = resume(state, {"build": [taking(50, build_turn(2))], "review": [review_turn(2, APPROVE)]},
                                     alive=["review"])
 
@@ -12542,7 +12562,7 @@ class TestTurnTimings(unittest.TestCase):
         n = fake.add_build(REF_1_1, outcome())
         state = quality_state(ci={"ref": REF_1_1, "sha": "snap9", "queue_url": f"{JENKINS}/queue/item/1/",
                                   "build": n},
-                              turns=[turn("quality", "quality-1-1.md", -500, None, q=1, agent=None)])
+                              turns=[dict(turn("quality", "quality-1-1.md", -500, None, q=1, agent=None))])
         wf, *_ = resume_gated(state, {"review": [review_turn(1, APPROVE)]}, fake)
 
         self.assertEqual(wf.run(), APPROVE)
@@ -12743,6 +12763,157 @@ def bounded(wf, limit=100 * orchestrator.STALL_SECONDS):
             raise AssertionError(f"the run is still waiting after {limit}s")
     wf.clock.hooks.append(give_up)
     return wf
+
+
+def claude_log(*answers):
+    """A Claude Code session log: for each (host clock reading, input, output) an answer of the model, written as Claude
+    Code writes it, one line per content block, each with the whole answer's usage."""
+    lines = [json.dumps({"type": "user", "timestamp": at(0).replace("+00:00", "Z"), "message": {"role": "user"}})]
+    for k, (seconds, tokens_in, tokens_out) in enumerate(answers):
+        usage = {"input_tokens": tokens_in, "output_tokens": tokens_out, "cache_read_input_tokens": 7,
+                 "cache_creation_input_tokens": 1}
+        for _ in range(2):
+            lines.append(json.dumps({"type": "assistant", "timestamp": at(seconds).replace("+00:00", ".250Z"),
+                                     "message": {"id": f"msg_{k}", "usage": usage}}))
+    return "\n".join(lines) + "\n"
+
+
+class TestRunMetrics(unittest.TestCase):
+    def test_a_gated_run_of_two_rounds_records_its_turns_and_quality_rounds(self):
+        fake = FakeCI()
+        fake.outcomes = [outcome(**RED), outcome(), outcome(**RED), outcome(**RED)]
+        wf, herdr, host, fake, _ = gated({
+            "spec": [taking(600, spec_turn)], "build": [taking(100, build_turn(1)), taking(50, fix_turn(1, 1)),
+                                                        taking(100, build_turn(2)), taking(50, fix_turn(2, 1))],
+            "review": [taking(30, review_turn(1, CHANGES_REQUESTED)), taking(30, review_turn(2, APPROVE))]}, fake=fake)
+
+        self.assertEqual(wf.run(), APPROVE)
+
+        metrics = json.loads(host.files[f"{D}/metrics.json"])
+        self.assertEqual(host.files[f"{D}/metrics.json"].count("\n"), 1)
+        self.assertEqual([(t["step"], t["round"], t["quality_round"], t["harness"]) for t in metrics["turns"]], [
+            ("spec", 0, 0, "claude"), ("build", 1, 0, "claude"), ("quality", 1, 1, None), ("build", 1, 1, "claude"),
+            ("quality", 1, 2, None), ("review", 1, 0, "claude"), ("build", 2, 0, "claude"), ("quality", 2, 1, None),
+            ("build", 2, 1, "claude"), ("quality", 2, 2, None), ("review", 2, 0, "claude")])
+        self.assertEqual(metrics["turns"][0]["seconds"], 600)
+        self.assertEqual(metrics["turns"][3], {"step": "build", "role": "build", "harness": "claude", "model": None,
+                                               "round": 1, "quality_round": 1, "human_paced": False,
+                                               "started_at": at(730), "ended_at": at(780), "seconds": 50,
+                                               "tokens": "unknown"})
+        self.assertEqual(metrics["turns"][2]["tokens"], None)
+        self.assertEqual([t["tokens"] for t in metrics["turns"]][:3], ["unknown", "unknown", None])
+        ruff = [orchestrator.finding_fingerprint("limiter.py", "ruff F401", "`os` imported but unused")]
+        red, green = {"gate": "ERROR", "conditions": [], "fingerprints_by_check": {"ruff": ruff}}, \
+            {"gate": "OK", "conditions": [], "fingerprints_by_check": {}}
+        self.assertEqual(metrics["quality_rounds"], [
+            {"round": 1, "quality_round": 1, **red}, {"round": 1, "quality_round": 2, **green},
+            {"round": 2, "quality_round": 1, **red}, {"round": 2, "quality_round": 2, **red}])
+        self.assertEqual({k: metrics[k] for k in ("version", "run_id", "workflow", "outcome", "rounds", "quality_gate",
+                                                  "max_quality_rounds", "pull_request", "restored_locked_files")},
+                         {"version": 1, "run_id": "20260929-120000-a1b2c3", "workflow": "default", "outcome": APPROVE,
+                          "rounds": 2, "quality_gate": True, "max_quality_rounds": 3,
+                          "pull_request": "https://github.com/o/r/pull/7", "restored_locked_files": 0})
+        claude = {"harness": "claude", "model": None}
+        self.assertEqual(metrics["roles"], {"spec": claude, "build": claude, "review": claude})
+        self.assertEqual(metrics["started_at"], at(0))
+        self.assertEqual(metrics["seconds"], orchestrator.epoch_seconds(metrics["ended_at"]) - HOST_EPOCH)
+        self.assertEqual(json.loads(host.files[f"{D}/state.json"])["quality_rounds"], metrics["quality_rounds"])
+
+    def test_a_resumed_quality_round_is_recorded_once(self):
+        state = quality_state(quality_rounds=[{"round": 1, "quality_round": 1, "gate": "OK", "conditions": [],
+                                               "fingerprints_by_check": {}}])
+        wf, *_ = resume_gated(state, {"review": [review_turn(1, APPROVE)]}, FakeCI(),
+                              files={lambda s: s.quality_path(1, 1): "GATE: OK\n"})
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(len(wf.state.quality_rounds), 1)
+
+    def test_a_failed_run_writes_no_metrics(self):
+        wf, herdr, host, _ = make_workflow({"spec": [spec_turn], "build": [lambda *a: "done"]}, turn_timeout=5)
+        with patch("sys.stderr"), self.assertRaises(OrchestratorError):
+            wf.run()
+        self.assertIn(f"{D}/summary.md", host.files)
+        self.assertNotIn(f"{D}/metrics.json", host.files)
+
+    def test_tokens_come_from_the_session_the_turn_ran_in(self):
+        host = FakeHost()
+        wf, herdr, host, _ = make_workflow({
+            "spec": [spec_turn], "build": [taking(100, build_turn(1))],
+            "review": [taking(60, review_turn(1, APPROVE))]}, host=host, agent_kinds={"review": "pi"})
+        # Sessions are named after herdr's call count when each agent starts: spec, then build, then review.
+        herdr_sessions = {}
+
+        def logs():
+            herdr_sessions.update({role: herdr.sessions[f"{role}-a1b2c3"] for role in ("build", "review")})
+            host.session_logs[("claude", herdr_sessions["build"])] = claude_log((50, 10, 20), (90, 1, 2), (500, 9, 9))
+            host.session_logs[("pi", herdr_sessions["review"])] = "\n".join([
+                json.dumps({"type": "message", "timestamp": at(130).replace("+00:00", "Z"),
+                            "message": {"role": "assistant", "usage": {"input": 5, "output": 6, "cacheRead": 2}}}),
+                json.dumps({"type": "message", "timestamp": at(140).replace("+00:00", "Z"),
+                            "message": {"role": "user", "usage": {"input": 100, "output": 100}}}),
+                "not json"])
+        real_publish = wf._publish
+        wf._publish = lambda: (logs(), real_publish())
+
+        self.assertEqual(wf.run(), APPROVE)
+        tokens = {t["role"]: t["tokens"] for t in json.loads(host.files[f"{D}/metrics.json"])["turns"]}
+        self.assertEqual(tokens, {"spec": "unknown", "build": {"input": 11, "output": 22, "cache_read": 14,
+                                                               "cache_write": 2},
+                                  "review": {"input": 5, "output": 6, "cache_read": 2, "cache_write": 0}})
+        self.assertEqual([t["session"] for t in wf.state.turns][1:],
+                         [herdr_sessions["build"], herdr_sessions["review"]])
+
+    def test_a_turn_that_changed_sessions_has_unknown_tokens(self):
+        state = saved_run("build", 1, agents=("spec", "build"), prompted="build-1.md")
+        state.agents["build"]["session"] = "s-old"
+        state.turns = [dict(turn("build", "build-1.md", -100, None, session="s-old", tokens=None))]
+        wf, herdr, host, _ = resume(state, {"build": [build_turn(1)], "review": [review_turn(1, APPROVE)]})
+        herdr.lost_sessions.add("s-old")
+        host.session_logs[("claude", "s-old")] = claude_log((-50, 1, 1))
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual((wf.state.turns[0]["session"], wf.state.turns[0]["tokens"]), (None, "unknown"))
+
+    def test_turn_tokens_needs_a_known_window_and_a_harness_it_reads(self):
+        log = claude_log((10, 1, 1))
+        known = {"agent": "claude", "session": "s", "started_at": at(0), "ended_at": at(20)}
+        self.assertEqual(orchestrator.turn_tokens(known, log),
+                         {"input": 1, "output": 1, "cache_read": 7, "cache_write": 1})
+        self.assertEqual(orchestrator.turn_tokens({**known, "ended_at": at(10)}, log)["input"], 1)
+        self.assertEqual(orchestrator.turn_tokens({**known, "ended_at": at(9)}, log)["input"], 0)
+        for unknown in ({"started_at": None}, {"ended_at": None}, {"session": None}, {"agent": "codex"}):
+            self.assertEqual(orchestrator.turn_tokens({**known, **unknown}, log), "unknown")
+        self.assertEqual(orchestrator.turn_tokens(known, None), "unknown")
+
+    def test_session_log_finds_the_file_under_home(self):
+        with tempfile.TemporaryDirectory() as home, patch.dict("os.environ", {"HOME": home}):
+            os.makedirs(f"{home}/.claude/projects/-proj")
+            with open(f"{home}/.claude/projects/-proj/abc-123.jsonl", "w") as f:
+                f.write("log\n")
+            self.assertEqual(Host().session_log("claude", "abc-123"), "log\n")
+            self.assertIsNone(Host().session_log("claude", "other"))
+            self.assertIsNone(Host().session_log("claude", "*"))
+            self.assertIsNone(Host().session_log("codex", "abc-123"))
+
+    @patch.dict("os.environ", {"HERDR_ENV": "1"})
+    def test_the_metrics_command_prints_a_line_per_run_that_is_done(self):
+        with tempfile.TemporaryDirectory() as proj:
+            for run_id, metrics in (("1-aaaaaa", {"run_id": "1-aaaaaa", "outcome": APPROVE}), ("2-bbbbbb", None),
+                                    ("3-cccccc", {"run_id": "3-cccccc", "outcome": "error"})):
+                os.makedirs(f"{proj}/{orchestrator.RUNS_DIR}/{run_id}")
+                if metrics:
+                    with open(f"{proj}/{orchestrator.RUNS_DIR}/{run_id}/metrics.json", "w") as f:
+                        f.write(json.dumps(metrics, indent=1) if run_id.startswith("3") else json.dumps(metrics))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), patch("sys.stderr"):
+                self.assertEqual(main(["metrics", "--cwd", proj]), orchestrator.EXIT_ERROR)
+            # A file that is not one JSON line is corrupt; the run writes each as one.
+            with open(f"{proj}/{orchestrator.RUNS_DIR}/3-cccccc/metrics.json", "w") as f:
+                f.write(json.dumps({"run_id": "3-cccccc", "outcome": "error"}) + "\n")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(main(["metrics", "--cwd", proj]), 0)
+        self.assertEqual([json.loads(line) for line in out.getvalue().splitlines()],
+                         [{"run_id": "1-aaaaaa", "outcome": APPROVE}, {"run_id": "3-cccccc", "outcome": "error"}])
+        self.assertEqual(len(out.getvalue().splitlines()), 2)
 
 
 class Killed(BaseException):
