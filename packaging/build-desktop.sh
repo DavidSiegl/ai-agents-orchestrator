@@ -77,8 +77,13 @@ publish() {
 out="ui/src-tauri/target/release/bundle"
 if [ "$os" = linux ]; then
     for deb in "$out/deb/Orchestrator_${version}_"*.deb; do
-        dpkg-deb --contents "$deb" | grep -q ' \./usr/bin/orchestrator$' \
-            || { echo "build-desktop.sh: $deb has no usr/bin/orchestrator" >&2; exit 1; }
+        # A .deb's paths start with ./ when dpkg-deb built it, and may not when Tauri did.
+        files=$(dpkg-deb --contents "$deb" | awk '{print $NF}')
+        if ! printf '%s\n' "$files" | grep -Eqx '(\./)?usr/bin/orchestrator'; then
+            echo "build-desktop.sh: $deb has no usr/bin/orchestrator; its usr/bin holds:" >&2
+            printf '%s\n' "$files" | grep -E '^(\./)?usr/bin/' >&2 || true
+            exit 1
+        fi
     done
     publish deb "$out/deb/Orchestrator_${version}_"*.deb
     publish AppImage "$out/appimage/Orchestrator_${version}_"*.AppImage
