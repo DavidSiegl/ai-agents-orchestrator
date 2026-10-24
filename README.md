@@ -266,14 +266,24 @@ uv run python orchestrator.py gate --base main --coverage coverage.xml --out qua
 | `--spec FILE` | `run` only: skip the interview. `FILE`, read on this machine (a relative path is from the current directory, not `--cwd`), is copied into the run as the handoff file of the workflow's first step, `spec.md` in `default`, and the run starts at the step after it. The task is then optional: without one it is the spec's `# ` title, or else `FILE`'s name. Needs a workflow whose first step writes the spec, such as `default` or `tdd`, not `quick`. |
 | `--no-pr` | `run` only: leave the change uncommitted and the workspace open instead of opening a pull request. Works outside git. |
 | `--worktree` | `run` only: work in a git worktree of the run's own, `.orchestrator/worktrees/<key>`, checked out from `origin`'s version of the branch the project is on, instead of in the project's checkout, which then need not be clean and stays yours to use. Needs a branch checked out and an `origin`, also with `--no-pr`. See [Worktree runs](#worktree-runs). |
-| `--quality-gate JOB` | `run` only: after each Builder turn, have this Jenkins job, by its full name with folders, judge the change with `orchestrator.py gate`, and send the findings back to the Builder before the Reviewer. Needs `JENKINS_URL`, `JENKINS_USER` and `JENKINS_TOKEN`, from the environment or `~/.config/ai-agents-orchestrator/ci.env`. |
-| `--max-quality-rounds N` | With the gate: quality builds per review round before the Reviewer gets the change anyway (default 3). |
+| `--quality-gate JOB` | After each Builder turn, have this Jenkins job, by its full name with folders, judge the change with `orchestrator.py gate`, and send the findings back to the Builder before the Reviewer. Needs `JENKINS_URL`, `JENKINS_USER` and `JENKINS_TOKEN`, from the environment or `~/.config/ai-agents-orchestrator/ci.env`. On `resume`, turns the gate on for a run started without it; see below. |
+| `--no-quality-gate` | `resume` only: turn the run's quality gate off for good; see below. |
+| `--max-quality-rounds N` | With the gate: quality builds per review round before the Reviewer gets the change anyway (default 3). Not with `--no-quality-gate`. |
 | `--force` | `resume` only: take over a run that still looks alive. |
 | `--dry-run` | `prune` only: print what would become of each branch, and delete and record nothing. |
 
-A run saves its settings. `resume` takes the same flags as `run` except `--no-pr`, `--worktree`, `--quality-gate`,
+A run saves its settings. `resume` takes the same flags as `run` except `--no-pr`, `--worktree`,
 `--workflow`, `--workflow-file` and `--spec`, and a flag given to `resume` overrides the saved value; one left out keeps it.
 A harness changed by `resume` applies to each role's next agent; one still running keeps its own.
+
+`resume --quality-gate JOB` turns the gate on for a run started without it, after the same preflight as `run`'s
+(past round 0: an `origin`, the credentials and the job). A Builder report the Reviewer has not been prompted for
+yet is judged first; otherwise the gate starts at the Builder's next turn. It is refused once the run is in
+`publish` or `done`, after `--no-quality-gate`, for a run with another job, and for a `--no-pr` run in the checkout
+itself past round 0, whose tree may hold your own changes. `resume --no-quality-gate` turns the gate off for good:
+the run's `orchestrator-ci/` branches are deleted, an analysis under way is dropped, and the Reviewer is told what
+the round's last quality file found, or that the Builder changed the code after it. See
+[quality gate](docs/quality-gate.md#turning-the-gate-on-or-off-on-resume).
 
 ### Harnesses
 
