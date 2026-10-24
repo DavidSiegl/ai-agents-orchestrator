@@ -205,12 +205,12 @@ class Leak:
 
 
 class LeaksFound(OrchestratorError):
-    """A push refused because what it would publish holds a secret, as Host.push_ref and Host.push_branch raise it."""
+    """A push refused because what it would publish holds a secret, as Host.refuse_leaks raises it."""
 
-    def __init__(self, leaks: list[Leak], report: str):
+    def __init__(self, leaks: list[Leak], report_path: str):
         self.leaks = leaks
         super().__init__(f"gitleaks found {len(leaks)} secret{'s' if len(leaks) != 1 else ''} in what the push would "
-                         f"publish, so nothing was pushed (report: {report}):\n"
+                         f"publish, so nothing was pushed (report: {report_path}):\n"
                          + "\n".join(f"- {leak}" for leak in leaks))
 
 
@@ -1480,19 +1480,20 @@ class Host:
                                    0 if removed == "-" else int(removed)))
         return out
 
-    def push_ref(self, cwd: str, commit: str, branch: str, *, base: str, report: str) -> None:
+    def push_ref(self, cwd: str, commit: str, branch: str, *, base: str, report_path: str) -> None:
         """Push commit to origin's branch, replacing what is there, once scan_unpublished finds no secret in what it
-        would publish; base and report are as scan_unpublished takes them. Raises LeaksFound with what it found, or
-        OrchestratorError when the scan cannot judge or the push fails; nothing is pushed then."""
-        self._refuse_leaks(cwd, commit, base, report)
+        would publish; base and report_path are as scan_unpublished takes them. Raises LeaksFound with what it found,
+        or OrchestratorError when the scan cannot judge or the push fails; nothing is pushed then."""
+        self.refuse_leaks(cwd, commit, base=base, report_path=report_path)
         # --force replaces what a failed attempt left under the same name.
         self.git(cwd, "push", "--quiet", "--force", REMOTE, f"{commit}:refs/heads/{branch}", timeout=NETWORK_TIMEOUT)
 
-    def push_branch(self, cwd: str, branch: str, *, base: str, report: str) -> None:
+    def push_branch(self, cwd: str, branch: str, *, base: str, report_path: str) -> None:
         """Push the local branch to origin's branch of that name and track it, once scan_unpublished finds no secret
-        in what its commit would publish; base and report are as scan_unpublished takes them. Raises as push_ref."""
+        in what its commit would publish; base and report_path are as scan_unpublished takes them. Raises as
+        push_ref."""
         commit = self.git(cwd, "rev-parse", "--verify", f"refs/heads/{branch}").strip()
-        self._refuse_leaks(cwd, commit, base, report)
+        self.refuse_leaks(cwd, commit, base=base, report_path=report_path)
         self.git(cwd, "push", "--quiet", "--set-upstream", REMOTE, branch, timeout=NETWORK_TIMEOUT)
 
     def check_gitleaks(self) -> None:
@@ -1508,49 +1509,57 @@ class Host:
             raise OrchestratorError(f"this run pushes, and every push is scanned for secrets first, but `gitleaks git` "
                                     f"does not run: {GITLEAKS_INSTALL}")
 
-    def _refuse_leaks(self, cwd: str, commit: str, base: str, report: str) -> None:
-        """Raise LeaksFound when scan_unpublished finds any."""
-        leaks = self.scan_unpublished(cwd, commit, base, report)
+    def refuse_leaks(self, cwd: str, commit: str, *, base: str, report_path: str) -> None:
+        """Raise LeaksFound when scan_unpublished finds any in what a push of commit would publish."""
+        leaks = self.scan_unpublished(cwd, commit, base, report_path)
         if leaks:
-            raise LeaksFound(leaks, report)
+            raise LeaksFound(leaks, report_path)
 
-    def scan_unpublished(self, cwd: str, commit: str, base: str, report: str) -> list[Leak]:
+    def scan_unpublished(self, cwd: str, commit: str, base: str, report_path: str) -> list[Leak]:
         """The secrets gitleaks finds, and the `gitleaks:allow` comments added, in the commits a push of commit would
         publish: those reachable from it and from no origin ref, as git log's `<commit> --not --remotes=origin`
-        gives them. A stale remote-tracking ref only widens that range.
+        gives them. A merge's own content is what it adds beyond git's automatic merge of its parents (git's
+        remerge diff): a conflict's resolution or an edit made in the merge counts, what a parent already had does
+        not. A remote-tracking ref for a branch origin has since deleted or rewritten narrows the range: what only
+        it reaches was public once, and is not scanned again.
 
         The rules come from base, a commit before the change: its .gitleaks.toml (else gitleaks' defaults) and its
-        .gitleaksignore (else none), so that the change cannot allowlist itself; gitleaks honours a `gitleaks:allow`
-        comment silently, so each one an added line holds is a Leak of its own. gitleaks runs with --redact and
-        writes its JSON report to report, a path in the run's directory, beside the config files this writes.
+        .gitleaksignore (else none), and nothing the working tree holds, so that the change cannot allowlist itself;
+        gitleaks honours a `gitleaks:allow` comment silently, so each one an added line holds is a Leak of its own.
+        gitleaks runs with --redact and writes its JSON report to report_path, a path in the run's directory, beside
+        the config files and the empty directory this makes there.
 
-        Raises OrchestratorError, failing closed, when gitleaks cannot be started, exits other than 0 or 1, writes
-        no report or one that is not a list of findings, or exits 1 with an empty one: gitleaks also exits 1 when it
-        cannot load its config, writing nothing. Runs where cwd is, as every Host command does."""
-        directory = report.rsplit("/", 1)[0]
-        config, ignore = f"{directory}/gitleaks.toml", f"{directory}/gitleaksignore"
-        base_config = self.git_run(cwd, "show", f"{base}:.gitleaks.toml", verbatim=True)
-        self.write(config, base_config.stdout if base_config.returncode == 0 else "[extend]\nuseDefault = true\n")
-        base_ignore = self.git_run(cwd, "show", f"{base}:.gitleaksignore", verbatim=True)
-        self.write(ignore, base_ignore.stdout if base_ignore.returncode == 0 else "")
-        # A report an earlier scan left would be read as this one's.
-        self.check(["rm", "-f", "--", report])
-        log_opts = f"{commit} --not --remotes={REMOTE}"
-        proc = self.run(["gitleaks", "git", f"--log-opts={log_opts}", "--redact", "--no-banner", "--no-color", "--exit-code", "1",
-                         "--report-format", "json", "--report-path", report, "--config", config,
-                         "--gitleaks-ignore-path", ignore, cwd], timeout=GITLEAKS_TIMEOUT)
+        Raises OrchestratorError, failing closed, when git cannot read base or the range, or gitleaks cannot be
+        started, exits other than 0 or 1, writes no report or one that is not a list of findings, or exits 1 with
+        an empty one: gitleaks also exits 1 when it cannot load its config, writing nothing. Runs where cwd is, as
+        every Host command does."""
+        directory = report_path.rsplit("/", 1)[0]
+        config, ignore, source = (f"{directory}/gitleaks{name}" for name in (".toml", "ignore", "-source"))
+        base_config = self.file_at(cwd, base, ".gitleaks.toml")
+        self.write(config, "[extend]\nuseDefault = true\n" if base_config is None else base_config)
+        self.write(ignore, self.file_at(cwd, base, ".gitleaksignore") or "")
+        # gitleaks also reads <source>/.gitleaksignore, which in the working tree the change could write: it scans
+        # from an empty directory, the repository named by GIT_DIR. And a report an earlier scan left would be read
+        # as this one's.
+        self.check(["sh", "-c", 'rm -rf -- "$1" "$2" && mkdir -p -- "$1"', "_", source, report_path])
+        git_dir = self.git(cwd, "rev-parse", "--absolute-git-dir").strip()
+        log_opts = f"--diff-merges=remerge {commit} --not --remotes={REMOTE}"
+        proc = self.run(["env", f"GIT_DIR={git_dir}", "gitleaks", "git", f"--log-opts={log_opts}", "--redact",
+                         "--no-banner", "--no-color", "--exit-code", "1", "--report-format", "json", "--report-path",
+                         report_path, "--config", config, "--gitleaks-ignore-path", ignore, source],
+                        timeout=GITLEAKS_TIMEOUT)
         where = f" on {self.ssh_target}" if self.ssh_target else ""
         failed = f"gitleaks could not scan what the push would publish{where}, so nothing was pushed"
         said = _clip(proc.stderr.strip().rsplit("\n", 1)[-1] or "nothing")
         if proc.returncode not in (0, 1):
             raise OrchestratorError(f"{failed}: it exited with status {proc.returncode}: {said}")
-        text = self.read(report)
+        text = self.read(report_path)
         try:
             findings = json.loads(text) if text is not None else None
             leaks = [Leak(f["RuleID"], f["File"], int(f["StartLine"]), f["Commit"], f["Fingerprint"])
                      for f in findings] if isinstance(findings, list) else None
         except (ValueError, TypeError, KeyError) as e:
-            raise OrchestratorError(f"{failed}: its report {report} cannot be read: {e}") from e
+            raise OrchestratorError(f"{failed}: its report {report_path} cannot be read: {e}") from e
         if leaks is None or (proc.returncode == 1 and not leaks):
             raise OrchestratorError(f"{failed}: it exited with status {proc.returncode} and wrote "
                                     f"{'no report' if text is None else 'no finding'}: {said}")
@@ -1558,22 +1567,16 @@ class Host:
 
     def _allow_comments(self, cwd: str, log_opts: str) -> list[Leak]:
         """A Leak for each line holding `gitleaks:allow` that the commits log_opts selects add, as git log -p shows
-        them: each commit's own diff against its first parent, a merge's included."""
-        out = self.git(cwd, "log", "-p", "-U0", "--diff-merges=first-parent", "--no-color", "--no-ext-diff",
-                       "--format=%x00%H",
-                       *log_opts.split(), timeout=GITLEAKS_TIMEOUT, verbatim=True)
-        leaks, commit, path, line = [], "", "", 0
-        for text in out.split("\n"):
-            if text.startswith("\x00"):
-                commit = text[1:]
-            elif text.startswith("+++ "):
-                path = text[6:] if text.startswith("+++ b/") else text[4:]
-            elif m := re.match(r"@@ -\S+ \+(\d+)", text):
-                line = int(m[1])
-            elif text.startswith("+"):
-                if "gitleaks:allow" in text:
-                    leaks.append(Leak("gitleaks-allow", path, line, commit, f"{commit}:{path}:gitleaks-allow:{line}"))
-                line += 1
+        them with log_opts, read as change_diff's diffs are."""
+        out = self.git(cwd, "-c", "core.quotePath=false", "log", "-p", "-U0", "--no-color", "--no-ext-diff",
+                       "--src-prefix=a/", "--dst-prefix=b/", "--format=%x00%H", *log_opts.split(),
+                       timeout=GITLEAKS_TIMEOUT, verbatim=True)
+        leaks = []
+        # Each commit's patch follows its sha on a line of its own after a NUL; no line of a patch starts with one.
+        for block in out.split("\x00")[1:]:
+            commit, _, patch = block.partition("\n")
+            leaks += [Leak("gitleaks-allow", path, line, commit, f"{commit}:{path}:gitleaks-allow:{line}")
+                      for path, line, text in _added_lines(patch) if "gitleaks:allow" in text]
         return leaks
 
     def delete_remote_branch(self, cwd: str, branch: str) -> None:
@@ -2201,6 +2204,23 @@ def _hunk_positions(diff: str, positions: Callable[[str], Iterable[int]]) -> dic
         elif not in_hunk:
             path = _header_path(out, path, line)
     return out
+
+
+def _added_lines(diff: str) -> Iterator[tuple[str, int, str]]:
+    """Each line a `git diff -U0` adds, as (its file's path in the new tree, its line there, its text without the
+    +), the headers read as changed_lines reads them: inside a hunk only `diff --git` and `@@` lines are structure."""
+    paths: dict[str, set[int]] = {}
+    path, line, in_hunk = None, 0, False
+    for text in diff.split("\n"):
+        if text.startswith("diff --git "):
+            path, in_hunk = _note_path(paths, _diff_git_path(text[len("diff --git "):])), False
+        elif text.startswith("@@"):
+            in_hunk, line = True, _hunk_lines(text).start
+        elif not in_hunk:
+            path = _header_path(paths, path, text)
+        elif text.startswith("+") and path is not None:
+            yield path, line, text[1:]
+            line += 1
 
 
 def _note_path(out: dict[str, set[int]], path: str | None) -> str | None:
@@ -5456,15 +5476,16 @@ class Workflow:
                 # Before a turn of the gated step that may take half an hour, not after it.
                 self.ci.check_credentials()
 
-    def _push_branch(self) -> None:
-        """Push the run's branch to origin, as Host.push_branch does, and fail the run, still in phase publish, when
-        gitleaks finds a secret in it: the commit holding it is already on the local branch, so fixing the working
-        tree is not enough, and the error says how to rewrite it before a resume."""
+    @contextlib.contextmanager
+    def _rewrite_on_leak(self) -> Iterator[tuple[str, str]]:
+        """The run's base and branch, for a scan of the branch at publish. A LeaksFound raised inside becomes the
+        error that ends the run, still in phase publish: the commit holding the secret is already on the local
+        branch, so fixing the working tree is not enough, and the error says how to rewrite it before a resume."""
         s = self.state
         if s.base is None or s.branch is None:
             raise OrchestratorError("a publish before the run has a base and a branch")
         try:
-            self.host.push_branch(s.work_dir, s.branch, base=s.base, report=s.leaks_path("publish"))
+            yield s.base, s.branch
         except LeaksFound as e:
             raise OrchestratorError(
                 f"{e}\nThose commits are on {s.branch} in {s.work_dir} and not on {REMOTE}. Rewrite them without the "
@@ -5860,6 +5881,9 @@ class Workflow:
                 self.host.git(wd, "commit", "--quiet", "-m", title, "-m", commit_note(s))
             elif self.host.git_head(wd) == s.base:
                 raise OrchestratorError(f"the Builder changed no files; there is nothing to commit on {s.branch}")
+            # Scanned before the merge too, so that rewriting the run's commits never has to undo a merge.
+            with self._rewrite_on_leak() as (base, branch):
+                self.host.refuse_leaks(wd, f"refs/heads/{branch}", base=base, report_path=s.leaks_path("publish"))
             # The base moved on while the run built and reviewed. A conflict is left to the human:
             # the branch is pushed without the merge and the pull request says what conflicts.
             s.conflicts = self.host.merge_upstream(wd, s.base_branch)
@@ -5867,7 +5891,8 @@ class Workflow:
             if s.conflicts:
                 log(f"{s.branch} conflicts with {REMOTE}/{s.base_branch} in {', '.join(s.conflicts)}; "
                     f"the pull request will be a draft")
-            self._push_branch()
+            with self._rewrite_on_leak() as (base, branch):
+                self.host.push_branch(wd, branch, base=base, report_path=s.leaks_path("publish"))
             quality = self.host.read(s.quality_path(s.round, s.quality_round)) if s.quality_round else None
             report = self._last_text(p.last_edit, s.round)
             verdict = self._last_text(p.verdict_step, s.round)
@@ -5985,7 +6010,7 @@ class Workflow:
             if s.ci.get("ref"):
                 self._delete_ci_ref(s.ci["ref"])
             sha = commit()
-            self.host.push_ref(s.work_dir, sha, ref, base=base, report=s.leaks_path("snapshot"))
+            self.host.push_ref(s.work_dir, sha, ref, base=base, report_path=s.leaks_path("snapshot"))
             s.ci = {"ref": ref, "sha": sha}
             self._save()
         if "build" not in s.ci:

@@ -5,11 +5,12 @@ was done.
 
 ## Open issues
 
-- **A `gitleaks:allow` in a file whose name git quotes is reported under the quoted name.** `Host._allow_comments`
-  reads the path from `git log -p`'s `+++ b/...` line, which git writes in C quotes for a name with a tab, a newline,
-  a double quote or a byte above 0x7f (unless `core.quotePath` is off). The comment is still found and the push still
-  refused; only the finding's file reads `"b/na\tme"`. Closes with `-c core.quotePath=false` and unquoting, or
-  with `--name-only -z` beside the patch.
+- **A base `.gitleaks.toml` that extends another file reads that file from outside the base.** `scan_unpublished`
+  writes the base's `.gitleaks.toml` into the run directory and passes it with `--config`; an `[extend] path = ...`
+  in it is resolved by gitleaks against its working directory, not against the base, so a file the change can edit
+  may supply rules. Raised by the cross-review of `push-secret-scan` (F6, 2026-10-24): "a base config using
+  `[extend] path = ...` resolves that path outside base (process cwd), which the change may control". Closes by
+  writing each extended file from the base beside the config and rewriting the path, or refusing such a config.
 - **A test file whose name is not UTF-8 is never rerun by `flaky-tests`.** pytest-randomly 5.0.0 hashes each node
   id as strict UTF-8 (`pytest_randomly._crc32`, called from `pytest_runtest_setup` and its neighbours) and stops
   with an internal error, exit status 3. `_pytest` already lets pytest print such an id

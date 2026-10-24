@@ -153,8 +153,11 @@ class FakeHost(Host):
         self.file_reads = []
         self.line_counts = None
 
-    def scan_unpublished(self, cwd, commit, base, report):
-        self.scans.append((commit, base, report))
+    def scan_unpublished(self, cwd, commit, base, report_path):
+        self.scans.append((commit, base, report_path))
+        if self.leaks:
+            # As a gitleaks run without --redact would write it: the report is the one place the secret may be.
+            self.files[report_path] = json.dumps([{"Secret": FAKE_TOKEN, "File": leak.file} for leak in self.leaks])
         return list(self.leaks)
 
     def check_gitleaks(self):
@@ -3279,7 +3282,7 @@ for flag, name in (("--config", "config-seen"), ("--gitleaks-ignore-path", "igno
     with open(args[args.index(flag) + 1]) as src, open(os.path.join(here, name), "w") as dst:
         dst.write(src.read())
 report = args[args.index("--report-path") + 1]
-commit = args[args.index("git") + 1].split("=", 1)[1].split()[0]
+commit = next(w for w in args[args.index("git") + 1].split("=", 1)[1].split() if not w.startswith("--"))
 if mode == "leak":
     with open(report, "w") as f:
         json.dump([{"RuleID": "github-pat", "File": "cfg.py", "StartLine": 1, "Commit": commit,
@@ -3343,7 +3346,8 @@ class TestScanUnpublished(unittest.TestCase):
             return f.read()
 
     def push(self, commit):
-        self.host.push_ref(self.repo, commit, "ci-ref", base=self.base, report=f"{self.run_dir}/leaks-snapshot.json")
+        self.host.push_ref(self.repo, commit, "ci-ref", base=self.base,
+                           report_path=f"{self.run_dir}/leaks-snapshot.json")
 
     def on_origin(self):
         return self.host.git(self.origin, "for-each-ref", "--format=%(refname)").split()
@@ -3353,7 +3357,9 @@ class TestScanUnpublished(unittest.TestCase):
         self.push(commit)
         self.assertIn("refs/heads/ci-ref", self.on_origin())
         argv = json.loads(self.seen("argv"))
-        self.assertIn(f"--log-opts={commit} --not --remotes=origin", argv)
+        self.assertIn(f"--log-opts=--diff-merges=remerge {commit} --not --remotes=origin", argv)
+        # Not the working tree: gitleaks would read its .gitleaksignore.
+        self.assertEqual(argv[-1], f"{self.run_dir}/gitleaks-source")
         self.assertIn("--redact", argv)
 
     def test_a_secret_blocks_the_push_and_stays_out_of_the_error(self):
@@ -3389,6 +3395,38 @@ class TestScanUnpublished(unittest.TestCase):
         # One already on origin publishes nothing new.
         self.git("push", "--quiet", "origin", "HEAD:main")
         self.push(self.commit({"d.txt": "d\n"}, "after"))
+
+    def test_an_added_line_that_looks_like_a_header_is_still_read(self):
+        commit = self.commit({"notes.md": "a\n++ token # gitleaks:allow\n"}, "header-like")
+        with self.assertRaises(orchestrator.LeaksFound) as caught:
+            self.push(commit)
+        self.assertEqual([(leak.file, leak.line) for leak in caught.exception.leaks], [("notes.md", 2)])
+
+    def test_a_merge_counts_what_it_adds_not_what_its_parents_had(self):
+        # Upstream, already on origin, adds a gitleaks:allow; merging it publishes nothing new.
+        self.git("switch", "--quiet", "-c", "upstream")
+        self.commit({"up.py": "x = 1  # gitleaks:allow\n"}, "upstream")
+        self.git("push", "--quiet", "origin", "upstream")
+        self.git("switch", "--quiet", "main")
+        self.commit({"mine.txt": "mine\n"}, "mine")
+        self.git("merge", "--quiet", "--no-edit", "upstream")
+        self.push(self.git("rev-parse", "HEAD").strip())
+        # An edit made in a merge is the merge's own.
+        self.git("switch", "--quiet", "-c", "side", "HEAD~1")
+        self.commit({"side.txt": "side\n"}, "side")
+        self.git("switch", "--quiet", "main")
+        self.git("merge", "--quiet", "--no-commit", "side")
+        merge = self.commit({"evil.py": "y = 2  # gitleaks:allow\n"}, "merge side")
+        with self.assertRaises(orchestrator.LeaksFound) as caught:
+            self.push(merge)
+        self.assertEqual([(leak.file, leak.commit) for leak in caught.exception.leaks], [("evil.py", merge)])
+
+    def test_a_base_git_cannot_read_blocks_the_push(self):
+        commit = self.commit({"b.txt": "b\n"}, "clean")
+        self.base = "0" * 40
+        with self.assertRaises(OrchestratorError):
+            self.push(commit)
+        self.assertNotIn("refs/heads/ci-ref", self.on_origin())
 
     def test_a_gitleaks_that_cannot_judge_blocks_the_push(self):
         commit = self.commit({"b.txt": "b\n"}, "clean")
@@ -3441,13 +3479,20 @@ class TestSecretScanWorkflow(unittest.TestCase):
 
     def test_a_secret_on_the_branch_stops_publish_until_it_is_rewritten(self):
         host = FakeHost()
-        host.leaks = [LEAK]
+        host.leaks, host.upstream = [LEAK], "u3"
         wf, herdr, host, _ = make_workflow(self.script(), host=host)
-        with self.assertRaises(OrchestratorError) as caught:
+        with self.assertRaises(OrchestratorError) as caught, patch("sys.stderr", new_callable=io.StringIO) as err:
             wf.run()
-        self.assertIn("git reset --soft abc123", str(caught.exception))
+        self.assertIn(f"git reset --soft {wf.state.base}", str(caught.exception))
         self.assertIn("`limiter.py:3` github-pat", str(caught.exception))
+        # Scanned before origin's base is merged in, so the rewrite never has to undo a merge.
         self.assertFalse([c for c in host.git_calls if c[0] == "push"])
+        self.assertNotIn(TestUpToDateBase.MERGE, host.git_calls)
+        self.assertEqual([scan[0] for scan in host.scans], [f"refs/heads/{wf.state.branch}"])
+        # The report gitleaks wrote is the only place the secret is.
+        self.assertNotIn(FAKE_TOKEN, err.getvalue() + str(caught.exception))
+        self.assertEqual([path for path, text in host.files.items() if FAKE_TOKEN in text],
+                         [wf.state.leaks_path("publish")])
         self.assertEqual((wf.state.phase, host.prs), ("publish", []))
         self.assertEqual(json.loads(host.files[f"{wf.state.dir}/state.json"])["phase"], "publish")
         # Rewritten, the branch passes the scan, and the resume pushes it.
