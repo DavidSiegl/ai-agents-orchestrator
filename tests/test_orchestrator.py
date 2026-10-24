@@ -1129,6 +1129,57 @@ class TestPullRequestText(unittest.TestCase):
         self.assertIn("truncated", body)
 
 
+class TestProvenance(unittest.TestCase):
+    BRANCH = "orchestrator/add-a-token-bucket-rate-limiter-a1b2c3"
+
+    def test_a_role_run_in_two_harnesses_names_the_one_that_finished(self):
+        state = saved_run("build", 1, agents=("spec", "build"), pull_request=True, base_branch="main",
+                          branch=self.BRANCH, models={"build": "gpt-5"})
+        state.agents["build"]["kind"] = "codex"
+        wf, _, host, _ = resume(state, {"build": [build_turn(1)], "review": [review_turn(1, APPROVE)]},
+                                host=FakeHost(branch=self.BRANCH), agent_kinds={"build": "claude"},
+                                models={"build": "opus"})
+        self.assertEqual(wf.run(), APPROVE)
+        commit = next(c for c in host.git_calls if c[0] == "commit")
+        self.assertEqual(commit[6:], ("--trailer", "Orchestrator-Run: 20260929-120000-a1b2c3",
+                                      "--trailer", "Orchestrator-Workflow: default",
+                                      "--trailer", "Orchestrator-Role: spec=claude/default",
+                                      "--trailer", "Orchestrator-Role: build=claude/opus",
+                                      "--trailer", "Orchestrator-Role: review=claude/default"))
+
+    def test_the_gate_trailer_says_how_the_last_quality_round_ended(self):
+        state = saved_run("publish", 2, agents=("build",), quality_job=JOB, quality_round=1)
+        self.assertEqual(orchestrator.provenance(state, "GATE: OK\n")[-1],
+                         ("Orchestrator-Gate", "OK after 1 quality round"))
+        state.quality_round = 3
+        self.assertEqual(orchestrator.provenance(state, "garbled")[-1],
+                         ("Orchestrator-Gate", "? after 3 quality rounds"))
+        self.assertEqual([k for k, _ in orchestrator.provenance(state, None)],
+                         ["Orchestrator-Run", "Orchestrator-Workflow", "Orchestrator-Role"])
+
+    def test_git_reads_them_as_trailers(self):
+        with tempfile.TemporaryDirectory() as d:
+            host = Host()
+            host.check(["git", "init", "--quiet", d])
+            for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
+                host.git(d, "config", key, value)
+            state = saved_run("publish", 1, agents=("spec", "build", "review"), quality_job=JOB, quality_round=2,
+                              verdict=APPROVE, models={"review": "gpt-5"})
+            state.agents["review"]["kind"] = "codex"
+            trailers = [arg for key, value in orchestrator.provenance(state, "GATE: OK\n")
+                        for arg in ("--trailer", f"{key}: {value}")]
+            host.git(d, "commit", "--quiet", "--allow-empty", "-m", "Add a limiter", "-m",
+                     orchestrator.commit_note(state), *trailers)
+            message = host.git(d, "log", "-1", "--format=%B")
+            self.assertEqual(host.check(["git", "interpret-trailers", "--parse"], stdin=message),
+                             "Orchestrator-Run: 20260929-120000-a1b2c3\nOrchestrator-Workflow: default\n"
+                             "Orchestrator-Role: spec=claude/default\nOrchestrator-Role: build=claude/default\n"
+                             "Orchestrator-Role: review=codex/gpt-5\nOrchestrator-Gate: OK after 2 quality rounds\n")
+            self.assertEqual(host.git(d, "log", "-1", "--format=%(trailers:key=Orchestrator-Role,valueonly)"),
+                             "spec=claude/default\nbuild=claude/default\nreview=codex/gpt-5\n\n")
+            self.assertIn(orchestrator.commit_note(state), message)
+
+
 class TestHerdr(unittest.TestCase):
     def test_call_returns_result_and_forwards_machine(self):
         run = MagicMock(return_value=result({"agent": {"agent_status": "idle"}}))
@@ -3015,7 +3066,8 @@ class TestWorktreeRun(unittest.TestCase):
         self.assertEqual(wf.run(), APPROVE)
         self.assertFalse([a for a in host.git_calls if a[:2] == ("worktree", "add")])
         self.assertIn((WORKTREE, ("commit", "--quiet", "-m", "add a rate limiter", "-m",
-                                  orchestrator.commit_note(wf.state))), host.git_log)
+                                  orchestrator.commit_note(wf.state))),
+                      [(cwd, args[:6]) for cwd, args in host.git_log])
 
     def test_resume_before_the_first_edit_reuses_the_worktree(self):
         host = FakeHost()
@@ -8649,6 +8701,15 @@ GOLDEN = {
 GOLDEN_PR_BODY = (
     'Opened by ai-agents-orchestrator run `20260929-120000-a1b2c3`. Reviewer verdict after 2 rounds: **APPROVE**.\n'
     '\n'
+    '| Commit trailer | Value |\n'
+    '| --- | --- |\n'
+    '| Orchestrator-Run | `20260929-120000-a1b2c3` |\n'
+    '| Orchestrator-Workflow | `default` |\n'
+    '| Orchestrator-Role | `spec=claude/default` |\n'
+    '| Orchestrator-Role | `build=claude/default` |\n'
+    '| Orchestrator-Role | `review=claude/default` |\n'
+    '| Orchestrator-Gate | `ERROR after 2 quality rounds` |\n'
+    '\n'
     '<details open>\n'
     '<summary>Spec</summary>\n'
     '\n'
@@ -9758,11 +9819,17 @@ class TestWorkflowWithoutAVerdict(unittest.TestCase):
         self.assertFalse(pr["draft"])
         self.assertTrue(pr["body"].startswith(
             "Opened by ai-agents-orchestrator run `20260929-120000-a1b2c3`. **FINISHED**: its workflow has no review "
-            "step, so no agent reviewed this change.\n\n<details open>\n<summary>Spec</summary>"))
+            "step, so no agent reviewed this change.\n\n"
+            "| Commit trailer | Value |\n| --- | --- |\n| Orchestrator-Run | `20260929-120000-a1b2c3` |\n"
+            "| Orchestrator-Workflow | `solo` |\n| Orchestrator-Role | `build=claude/default` |\n\n"
+            "<details open>\n<summary>Spec</summary>"))
         self.assertIn("<summary>Builder report (round 1)</summary>\n\nsolo report", pr["body"])
         self.assertNotIn("<summary>Review", pr["body"])
         commit = next(c for c in host.git_calls if c[0] == "commit")
-        self.assertEqual(commit[-1], "Orchestrator run 20260929-120000-a1b2c3: FINISHED, unreviewed.")
+        self.assertEqual(commit[5:], ("Orchestrator run 20260929-120000-a1b2c3: FINISHED, unreviewed.",
+                                      "--trailer", "Orchestrator-Run: 20260929-120000-a1b2c3",
+                                      "--trailer", "Orchestrator-Workflow: solo",
+                                      "--trailer", "Orchestrator-Role: build=claude/default"))
         self.assertIn("Run finished: FINISHED", notes)
         saved = json.loads(host.files[f"{D}/state.json"])
         self.assertEqual((saved["phase"], saved["verdict"]), ("done", "FINISHED"))
@@ -9793,11 +9860,14 @@ class TestWorkflowWithoutAVerdict(unittest.TestCase):
         self.assertTrue(pr["body"].startswith(
             "Opened by ai-agents-orchestrator run `20260929-120000-a1b2c3`. **QUALITY_GATE_FAILED**: its workflow has "
             "no review step, and the quality gate still did not pass after the last quality round, so this "
-            "is a draft.\n\n<details open>"))
+            "is a draft.\n\n"
+            "| Commit trailer | Value |\n| --- | --- |\n| Orchestrator-Run | `20260929-120000-a1b2c3` |\n"
+            "| Orchestrator-Workflow | `gsolo` |\n| Orchestrator-Role | `impl=claude/default` |\n"
+            "| Orchestrator-Gate | `ERROR after 2 quality rounds` |\n\n<details open>"))
         self.assertNotIn("Reviewer", pr["body"])
         self.assertIn("<summary>Quality gate (round 1)</summary>\n\nGATE: ERROR", pr["body"])
         commit = next(c for c in host.git_calls if c[0] == "commit")
-        self.assertEqual(commit[-1], "Orchestrator run 20260929-120000-a1b2c3: QUALITY_GATE_FAILED, unreviewed.")
+        self.assertEqual(commit[5], "Orchestrator run 20260929-120000-a1b2c3: QUALITY_GATE_FAILED, unreviewed.")
         self.assertIn("Run finished: QUALITY_GATE_FAILED", notes)
 
     def test_a_gate_that_passes_is_finished(self):

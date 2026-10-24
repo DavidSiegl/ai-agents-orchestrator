@@ -82,6 +82,28 @@ resume that ends again rewrites it with every turn; a run that is already `done`
 request's body ends with the same table up to publishing, collapsed under "Run timings", and `show` prints a
 line per turn.
 
+## Provenance trailers
+
+The commit a run publishes ends with git trailers that say what made it, after the line that names the run
+(`commit_note`), and the pull request's body repeats them as a table under its first line (`provenance`):
+
+| Trailer | Value |
+| --- | --- |
+| `Orchestrator-Run` | the run id, which names the run directory and the run's `summary.md` |
+| `Orchestrator-Workflow` | the workflow's name |
+| `Orchestrator-Role` | one per role whose agent ran, in the order they first started: `role=harness/model`, the model `default` when no flag or workflow file set one; a role that ran in two harnesses over resumes names the one it ended in |
+| `Orchestrator-Gate` | with `--quality-gate` only: the last quality round's gate and how many quality rounds its review round took, such as `OK after 2 quality rounds` |
+
+So which harness and model built and reviewed a change can be read from history:
+
+```sh
+git log --format='%h %(trailers:key=Orchestrator-Role,valueonly,separator=%x2C )'
+git log --format='%(trailers:key=Orchestrator-Gate,valueonly,separator=%x2C )' | sort | uniq -c
+```
+
+The commit is made once: a resume in `publish` whose commit already exists does not amend it. Signing agents'
+commits is a separate question.
+
 ## Deleting run branches
 
 A run that opens a pull request leaves its branch `orchestrator/<slug>-<key>` locally and on `origin`. `prune`

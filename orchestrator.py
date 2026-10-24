@@ -5689,9 +5689,29 @@ def commit_note(state: "RunState") -> str:
     return f"Orchestrator run {state.run_id}: {state.verdict} after {state.round} review round(s)."
 
 
+def provenance(state: "RunState", quality: str | None) -> list[tuple[str, str]]:
+    """The git trailers of the run's commit, (key, value) in order: Orchestrator-Run, Orchestrator-Workflow, an
+    Orchestrator-Role per role whose agent ran, in the order they first started, as role=harness/model, the model
+    "default" where none was set, and with a quality gate Orchestrator-Gate, how the last quality round ended.
+
+    quality is the round's last quality file, None for a run without one. A role that ran in two harnesses over
+    resumes names the last. docs/design.md says what each trailer means.
+    """
+    s = state
+    trailers = [("Orchestrator-Run", s.run_id), ("Orchestrator-Workflow", s.workflow)]
+    trailers += [("Orchestrator-Role", f"{role}={agent.get('kind', DEFAULT_AGENT)}/{s.models.get(role) or 'default'}")
+                 for role, agent in s.agents.items()]
+    if quality is not None:
+        rounds = f"{s.quality_round} quality round{'s' if s.quality_round != 1 else ''}"
+        trailers.append(("Orchestrator-Gate", f"{parse_gate(quality) or '?'} after {rounds}"))
+    return trailers
+
+
 def pr_body(state: "RunState", spec: str, report: str, review: str, quality: str | None = None) -> str:
     approved = state.verdict in SUCCEEDED
     head = f"Opened by ai-agents-orchestrator run `{state.run_id}`. {verdict_line(state)}"
+    trailers = "\n".join(["| Commit trailer | Value |", "| --- | --- |",
+                          *(f"| {key} | `{value}` |" for key, value in provenance(state, quality))])
     warning = []
     if state.conflicts:
         files = "\n".join(f"> - `{f}`" for f in state.conflicts)
@@ -5700,6 +5720,7 @@ def pr_body(state: "RunState", spec: str, report: str, review: str, quality: str
     return "\n\n".join([
         *warning,
         head,
+        trailers,
         _details("Spec", spec, open_=True),
         _details(f"Builder report (round {state.round})", report),
         *([_details(f"Quality gate (round {state.round})", quality)] if quality else []),
@@ -6466,9 +6487,11 @@ class Workflow:
                 log(f"aborted the merge an earlier orchestrator left in {wd}")
             spec = self._last_text(p.contract, 0)
             title = (spec_title(spec) or s.task.strip().split("\n", 1)[0] or s.run_id)[:72]
+            quality = self.host.read(s.quality_path(s.round, s.quality_round)) if s.quality_round else None
             if self.host.git(wd, "status", "--porcelain").strip():
                 self.host.git(wd, "add", "--all")
-                self.host.git(wd, "commit", "--quiet", "-m", title, "-m", commit_note(s))
+                trailers = [arg for key, value in provenance(s, quality) for arg in ("--trailer", f"{key}: {value}")]
+                self.host.git(wd, "commit", "--quiet", "-m", title, "-m", commit_note(s), *trailers)
             elif self.host.git_head(wd) == s.base:
                 raise OrchestratorError(f"the Builder changed no files; there is nothing to commit on {s.branch}")
             # Scanned before the merge too, so that rewriting the run's commits never has to undo a merge.
@@ -6483,7 +6506,6 @@ class Workflow:
                     f"the pull request will be a draft")
             with self._rewrite_on_leak() as (base, branch):
                 self.host.push_branch(wd, branch, base=base, report_path=s.leaks_path("publish"))
-            quality = self.host.read(s.quality_path(s.round, s.quality_round)) if s.quality_round else None
             report = self._last_text(p.last_edit, s.round)
             verdict = self._last_text(p.verdict_step, s.round)
             body = pr_body(s, spec, report, verdict, quality)

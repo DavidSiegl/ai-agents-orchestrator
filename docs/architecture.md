@@ -99,7 +99,8 @@ The quality-gated step is the one the gate follows: its answer to quality round 
 extension, other steps' prompts name its last report of the round, and `QUALITY_PASSED_NOTE` or
 `QUALITY_UNRESOLVED_NOTE` ends the verdict step's prompt. The contract step, a first step with a fixed file that
 does not edit, titles the branch and the pull request; without one the task does. The pull request body holds the
-contract, the last editing step's last report, the last quality file and the verdict file.
+commit's provenance trailers as a table (`provenance`), the contract, the last editing step's last report, the
+last quality file and the verdict file.
 
 A locking step (`locks`, editing steps only) locks the change as it stands when each of its turns ends: `Host.lock`
 snapshots the tree into the local ref `refs/orchestrator/<key>/locked/<step>`, which nothing pushes and `done`

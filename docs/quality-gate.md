@@ -617,10 +617,10 @@ as it answers the gate's.
 ### What goes to the Builder
 
 `QUALITY_FIX_PROMPT` names the quality file and the Builder's next report, `build-<n>-q<q>.md`, whose findings it
-answers by number. A Builder in a fresh session gets `BUILD_PROMPT`, `REBUILD_NOTE` with every earlier report,
-and `QUALITY_FIX_PROMPT`. The Reviewer's prompt ends with `QUALITY_PASSED_NOTE`, `QUALITY_UNRESOLVED_NOTE` or `QUALITY_STUCK_NOTE`,
-naming the round's last quality file, and points at the Builder's last report of the round. The pull request's
-description includes the last quality file.
+answers by number. A Builder in a fresh session gets `BUILD_PROMPT`, `REBUILD_NOTE` with every earlier report, and
+`QUALITY_FIX_PROMPT`. The Reviewer's prompt ends with `QUALITY_PASSED_NOTE`, `QUALITY_UNRESOLVED_NOTE` or
+`QUALITY_STUCK_NOTE`, naming the round's last quality file, and points at the Builder's last report of the round.
+The pull request's description includes the last quality file.
 
 ### Run state and resume
 
