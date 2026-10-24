@@ -3467,9 +3467,9 @@ def passes_at_base(change: GateChange, *, budget: float) -> list[dict]:
     skip, all its parameter sets included. One that fails or errors there tests the change, which is what the check
     expects, and gives nothing; so does one that pytest does not collect there: a test whose file cannot be imported at
     the base, or whose conftest.py raises ImportError there, whatever the test itself checks, and a test_* method of a
-    class pytest does not take for a test class. The base's code is what the copy's own configuration, such as pytest's pythonpath, imports;
-    a project installed into the gate's interpreter imports the working tree's instead, and every test of it then
-    passes at the base.
+    class pytest does not take for a test class. The base's code is what the copy's own configuration, such as
+    pytest's pythonpath, imports; a project installed into the gate's interpreter imports the working tree's instead,
+    and every test of it then passes at the base.
 
     The collection and the run together may take budget seconds; a stop there is a budget-reached finding saying
     when, and how many test cases the run had run; none of their outcomes is reported. A pytest that cannot start,
