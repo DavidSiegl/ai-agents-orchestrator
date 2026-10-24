@@ -170,11 +170,19 @@ was done.
 - **A file name that holds a line separator breaks its list item in the quality file.** `quality_report` writes
   names as they are, so `\r` or U+2028 in one shows as a line break in some renderers. The finding is still
   matched to the right file. Closes with names escaped when the quality file is written.
+- **A quality round waits for the whole build, not for its quality file.** `Workflow._analyse` polls the build's
+  result until the build ends and only then reads `quality.md`, which the Gate stage archived before any later
+  stage ran. So every stage after Gate counts against `QUALITY_TIMEOUT`; the Package stage was taken out of quality
+  builds for that (2026-10-24), and a stage added after Gate slows the rounds again. Raised by the cross-review of
+  `skip-package-in-quality-builds` (2026-10-24): "`_analyse` waits for the whole build instead of stopping once
+  `quality.md` is archived". Closes with the round reading `quality.md` once the Gate stage has archived it, or
+  with a rule in the Jenkinsfile that nothing after Gate runs in a quality build.
 - **The mutation budget leaves most of a large change's mutants untried.** `MUTATION_BUDGET` is 600 s. Measured on
   Jenkins on 2026-10-24: on PR #50 (surviving-mutants' change) mutmut tried 756 of 3079 mutants and the Gate stage took
   683 s, the build about 850 s; on PR #51, 677 of 801 in a 638 s Gate stage. That fits `QUALITY_TIMEOUT` (1200 s) with
   about 350 s to spare, but not after a wait in Jenkins' queue, which counts against a quality round (PR #52 waited
-  about 860 s behind the others). The user kept 600 s (2026-10-24): a stopped run says `budget-reached`, never "none
+  about 860 s behind the others). Those were pull request builds; a quality build has skipped the Package stage
+  since 2026-10-24, so it has more to spare than that. The user kept 600 s (2026-10-24): a stopped run says `budget-reached`, never "none
   survived". Closes with the shared time budget above, or mutants chosen by the changed lines rather than whole
   functions.
 - **`parse_args` still yields many survivors after `do_not_mutate_patterns = ['\bhelp=']`.** Its `description=` texts
