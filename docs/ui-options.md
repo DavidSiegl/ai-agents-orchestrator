@@ -111,9 +111,11 @@ block, the verdict, the pull request and the workflow. The UI needs them apart:
 - **From:** `Host.run_states` (each `state.json` with its age by the host's clock), `run_health` (running or
   stale, and why), `RunState.blocked`, `verdict`, `error`, `pr_url`, `closed`, `turns`, and `saved_pipeline`
   for the workflow's steps and role labels.
-- **Proposed:** a pure function beside `run_rows` that returns one JSON-ready record per run, which `run_rows`
-  and `print_runs` then format, so the CLI and the UI cannot disagree. `list --json` would expose it to
-  scripts and to a shell that is not Python.
+- **Implemented:** `run_record`, a pure function beside `run_rows` that returns one JSON-ready record per run,
+  which `run_rows`, `print_runs`, `show` and the Tk run list format, so the CLI and the UI cannot disagree; its
+  docstring lists the record's keys. `list --json` prints `{"version": 1, "runs": [...]}` for scripts and for a
+  shell that is not Python, and `list --json --pr-state` fills in each pull request's state through gh. The
+  "waits for you" reason comes from `state.json` alone; herdr's live agent status joins it with the watcher.
 - **Remote:** `Host` already reads every `state.json` of a project in one `ssh -o BatchMode=yes` call
   (`run_states`), so a remote project costs one SSH round trip per poll, as `project_runs` does now.
 
@@ -631,14 +633,21 @@ Each step is one pull request, mergeable on its own, in this order. Bumps follow
 breaks existing flags, exit codes or saved run state; changing or removing `gui`, or what running with no
 arguments does, is `major`.
 
-1. **Runs as data, and the event watcher.**
+1. **Runs as data.**
    - *Scope:* the per-run record beside `run_rows` (which `run_rows` and `print_runs` then format),
-     `list --json`, and the watcher that turns `state.json` and run-directory changes into events, locally and
-     over one SSH connection per remote project, tested on `FakeHost` and real directories. No UI.
+     `list --json`, and `--pr-state` for the pull request's live state, tested on `FakeHost`. No UI. The event
+     watcher, which this step first included, is step 2 now.
    - *Unlocks:* every later step's data, and scripts that read runs without parsing `list`'s text.
    - *Bump:* `minor` (`list --json` is a new flag).
    - *Tk and new UI:* only Tk exists; it is unchanged.
-2. **A read-only live UI.**
+2. **The event watcher.**
+   - *Scope:* the watcher that turns `state.json` and run-directory changes into events, locally and over one
+     SSH connection per remote project, and `list --json --watch`, tested on `FakeHost` and real directories.
+     No UI.
+   - *Unlocks:* live progress for step 3, and for scripts.
+   - *Bump:* `minor` (`--watch` is a new flag).
+   - *Tk and new UI:* only Tk exists; it is unchanged.
+3. **A read-only live UI.**
    - *Scope:* `orchestrator.py web`: the stdlib server on `127.0.0.1` with its token and `Host`/`Origin`
      checks, the JSON and SSE endpoints, the vendored Preact, htm, signals, Markdown and sanitiser modules,
      and the overview and detail views with live progress and rendered handoff files. Shipping the assets:
@@ -648,14 +657,14 @@ arguments does, is `major`.
    - *Unlocks:* capabilities 1 and 2, for every run, including those started from a terminal.
    - *Bump:* `minor` (a new command).
    - *Tk and new UI:* coexist; `gui` and no arguments still open Tk.
-3. **Run control.**
+4. **Run control.**
    - *Scope:* the New run form and Resume in the browser, one `RunProcess` per run with its output sent to a
      file so runs can outlive the server, Stop per run, and the runs' output in the detail view; Stop for a
      run started elsewhere if the human wants it.
    - *Unlocks:* capability 4, and parity with Tk's form, list and output pane.
    - *Bump:* `minor`.
    - *Tk and new UI:* coexist.
-4. **Agent I/O.**
+5. **Agent I/O.**
    - *Scope:* the agent area: the current role's pane through `herdr pane read`, pushed over SSE; the text box
      through `pane send-text` and Enter, the key buttons through `pane send-keys`, and Focus through
      `herdr agent focus`; the overview's Answer button for a run whose agent is `blocked`, whose human-paced
@@ -665,7 +674,7 @@ arguments does, is `major`.
      advice no longer applies to the new UI.
    - *Bump:* `minor`.
    - *Tk and new UI:* coexist; the new UI now does everything Tk does, and more.
-5. **The new UI becomes `gui`, and Tk goes.**
+6. **The new UI becomes `gui`, and Tk goes.**
    - *Scope:* `gui`, and no arguments where `gui_by_default` finds a display, open the web UI; `web` stays as
      an alias or goes (an open question). `RunWindow`, `RunForm`'s Tk parts, the palette constants,
      `LOGO_PNG`, the zoom code and `gui_command`'s tkinter import are deleted, with `TestRunWindow`,
@@ -676,19 +685,19 @@ arguments does, is `major`.
    - *Bump:* `major` (what `gui` and no arguments do changes).
    - *Tk and new UI:* only the new UI.
 
-If a desktop window is wanted after step 5, option B or C is a further pull request on top of it, with its own
+If a desktop window is wanted after step 6, option B or C is a further pull request on top of it, with its own
 bump: `minor` if it is added beside the browser, `major` if it replaces a distribution form.
 
 ## Open questions
 
 1. **The option and the framework.** A with Preact and htm, as proposed, or another option or framework.
-2. **Package or single file.** Split `orchestrator.py` into a package at step 2, so the frontend's files ship
+2. **Package or single file.** Split `orchestrator.py` into a package at step 3, so the frontend's files ship
    beside it, or keep one file with the assets embedded as `LOGO_PNG` is. Splitting ends "copy
    `orchestrator.py` to the remote machine" ([design](design.md#running-the-agents-on-another-machine)); the
    `.pyz` would take that role. Is that a `patch` (no flag, exit code or state changes) or, for users who copy
    the file, a `major`?
 3. **The command's name**, `web` or `ui` or something else, and whether it survives as an alias of `gui` at
-   step 5.
+   step 6.
 4. **No arguments without a display.** Today they print the usage on a Linux without a display. Should they
    start the server and print its URL instead, for use over `ssh -L`?
 5. **Stopping runs the UI did not start**, by sending SIGINT to `RunState.owner`'s pid on the same host. Today
