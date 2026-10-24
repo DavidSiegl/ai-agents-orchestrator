@@ -4525,6 +4525,7 @@ class TestQualityGateOnResume(unittest.TestCase):
         fake = FakeCI()
         with patch.object(Host, "run_states", return_value=[(10**4, saved)]), \
                 patch.object(Host, "git_run", return_value=completed()), \
+                patch.object(Host, "check_gitleaks"), \
                 patch("orchestrator.CI", side_effect=lambda job: CI(job, env=CREDENTIALS, urlopen=fake)) as ci, \
                 patch.object(Workflow, "__init__", return_value=None) as init, patch("builtins.print"):
             main(["resume", "a1b2c3", "--quality-gate", JOB, "--max-quality-rounds", "2"])
