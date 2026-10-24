@@ -65,11 +65,6 @@ was done.
   `mutants/calc.py`, mutmut's mutated copy with its trampolines, has its added lines there linted, and their findings
   can fail the gate. Whether the coverage condition counts such files was not traced. Whether they should be linted,
   left out, or refused is open. Closes with that decision.
-- **Committed mutmut output is linted as the change's own code.** The surviving-mutants check leaves the tree's
-  `mutants/` out of mutmut's copy and mutates no function in it, but the linters read every tracked file their
-  pathspecs match, so a change that commits `mutants/calc.py`, mutmut's mutated copy with its trampolines, has its
-  added lines there linted, and their findings can fail the gate. Whether such files should be linted, left out, or
-  refused is open. Closes with that decision.
 - **The cognitive-complexity check reads and parses changed files in a loop of its own.** `_judged_files` and
   `_working_functions` repeat `_changed_python_units`' reading, decoding and unreadable-file handling, because that
   walker yields only top-level functions and methods of top-level classes, the units mutmut names, while the check
