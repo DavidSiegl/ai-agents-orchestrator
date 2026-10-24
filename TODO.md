@@ -3,19 +3,32 @@
 What is known to be open in `orchestrator.py`, and why. An entry leaves `Open issues` only for `Fixed`, with what
 was done.
 
+## Planned
+
+- **The desktop app as the terminal client too.** Started with arguments, the app's executable becomes the
+  orchestrator binary it bundles (`Orchestrator::locate` in `ui/src-tauri/src/lib.rs`), by `exec` on Unix, so the
+  terminal, the exit status and signals are the CLI's own; started with none, it opens the window as now. Then
+  the AppImage is one file that is both, `./orchestrator-desktop-linux-x86_64.AppImage run "..."`; the `.deb`
+  has `/usr/bin/orchestrator` already; on macOS, where a `.app` is a directory, the CLI is a symlink to
+  `Orchestrator.app/Contents/MacOS/orchestrator` away. The README says how to use each. The plain CLI binaries stay
+  released: 13 MB against the AppImage's 120 MB of WebKit, and they start without FUSE on headless machines and in
+  CI, where an AppImage needs `--appimage-extract-and-run`. Decided against: one file on every platform, by
+  embedding the orchestrator's bytes in the Rust executable and unpacking them at start (PyInstaller's onefile
+  done twice), or by Python hosting the window, which [ui-options.md](docs/ui-options.md) chose against. Agreed
+  2026-10-24.
+
 ## Open issues
 
+- **No test shows the proof reruns come after the quality loop.** `Workflow._rerun_proofs` runs right before the
+  verdict step's turn, which follows the quality loop by construction, but every proof test uses `QUICK`, which has
+  no quality-gated step. Raised by the cross-review of the proof reruns (R1-F5, 2026-10-24): "no test would notice
+  the rerun moving before it". Closes with a proof test on a quality-gated workflow, through the CI fakes.
 - **The macOS builds are first tried on a published release.** `.github/workflows/macos-binary.yml` runs only on
   `release: published` or by hand for an existing tag, so a change that breaks the macOS binary or
   `packaging/build-desktop.sh` on macOS merges green, and the release then lacks those assets until it is fixed and
   the workflow is run again for the tag. Found adding the desktop app to releases (2026-10-24), whose `.dmg` had
   never been built before the first release with it. Closes with a macOS build of pull requests that touch
   `packaging/` or `ui/`, or a decision that a rerun after the release is enough.
-- **The frontend's tests fail on Node 25 and later.** Node's own `localStorage` global, which is undefined without
-  `--localstorage-file`, hides jsdom's, so `ui/src/test/setup.ts`'s `localStorage.clear()` throws and every test
-  fails. Jenkins's Node 20 is unaffected; locally `NODE_OPTIONS=--no-experimental-webstorage npm test` passes.
-  Found on Node 26 (2026-10-24). Closes with tests that pass on both, e.g. jsdom's storage installed in
-  `setup.ts`, or `engines` in `ui/package.json` that rules the newer Node out.
 
 - **A pull request opened over a conflict stays a draft with its warning after the conflict is resolved.** When
   `Host.merge_upstream` finds conflicts with the base branch, `pr_body` opens the body with a `[!WARNING]` naming
@@ -24,11 +37,6 @@ was done.
   it conflicts and stays a draft until a human edits it by hand. Met on PR #61 (2026-10-24): resolved and pushed,
   it still showed the warning and the draft. Closes when the orchestrator, or a command of its, notices that the
   head merges cleanly and drops the warning and the conflict-only draft.
-- **A proof that failed is not run again in the next round.** `Workflow._judge_proofs` runs only the proofs the
-  verdict step wrote in its own round, so a Builder told to make round N's failing proofs pass (`PROOFS_NOTE`) is
-  checked only if the Reviewer writes them again; one that still fails can be approved. Raised by the code review of
-  loop-guards (2026-10-24). Closes with round N's demonstrated proofs run again after the Builder's turn of round
-  N+1 and their outcomes put before the Reviewer.
 - **Proofs run after the last round's review too.** No Builder turn follows to read them; only the draft pull
   request's review shows them, and each may take `PROOF_TIMEOUT`. Kept: a demonstrated defect is what the human
   most needs to see in a draft. Raised by the same review.
@@ -251,3 +259,17 @@ was done.
   a new function under its old name (review round 6, R6-F1). Decided by the user in review round 4 of ticket 06.
   Closes with a way to tell a copy from a rename, such as git's copy detection (`git diff -C`) on the change's
   files.
+
+## Fixed
+
+- **A proof that failed is not run again in the next round.** `Workflow._judge_proofs` ran only the proofs the
+  verdict step wrote in its own round, so a Builder told to make round N's failing proofs pass (`PROOFS_NOTE`) was
+  checked only if the Reviewer wrote them again; one that still failed could be approved. Raised by the code review
+  of loop-guards (2026-10-24). Fixed (2026-10-24): `Workflow._rerun_proofs` runs every proof whose last run failed,
+  or whose rerun errored, again right before each later round's verdict turn, until it passes, recording each rerun in
+  `RunState.proofs` with the round that wrote the proof; `CARRIED_PROOFS_NOTE` tells the verdict step which still
+  fail or now error, and `PROOFS_NOTE` names all of them to the step the review loops back to.
+- **The frontend's tests failed on Node 25 and later.** Node's own `localStorage` global, undefined without
+  `--localstorage-file`, hid jsdom's, since Vitest's jsdom environment copies no global over one Node already has,
+  so `ui/src/test/setup.ts`'s `localStorage.clear()` threw and every test failed. `setup.ts` now puts jsdom's
+  storage on the global itself; the tests pass on Node 20.20 and 26.12 alike (2026-10-24).
