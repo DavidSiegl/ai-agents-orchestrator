@@ -344,9 +344,9 @@ Only lines a change adds count, so what `main` already has does not block.
 ## Jenkins setup
 
 One `Jenkinsfile` serves two jobs. Every build installs, tests with branch coverage of `orchestrator`, checks the
-desktop app's frontend, runs the gate and archives `quality.md`, and builds the Linux binary; a build of `main` that
+desktop app, runs the gate and archives `quality.md`, and builds the Linux binary; a build of `main` that
 gets that far also releases. A build of `main` whose tree a pull request build already judged skips the tests, the
-frontend's checks and the gate (see
+desktop app's checks and the gate (see
 [A build of main judged at its pull request](#a-build-of-main-judged-at-its-pull-request)).
 
 ### What Jenkins needs
@@ -360,8 +360,12 @@ frontend's checks and the gate (see
   the nodes, with the Job Restrictions plugin.
 - **`uv`, `git`, `shellcheck` and `actionlint` on the agent**: the Install stage runs `uv sync --frozen`, and `uv`
   brings the Python of `.python-version`; the gate fails a build that lacks a linter.
-- **Node 20.19 or later and npm on the agent**, for the UI stage's checks of `ui/`'s frontend. Debian 13's
-  `nodejs` and `npm` packages do; `ui/.npmrc` makes their npm 9.2 resolve the tree.
+- **Node 20.19 or later and npm, Rust 1.90 or later, and Tauri 2's system packages on the agent**, for the UI
+  stage's checks of the desktop app. Debian 13's `nodejs` and `npm` packages do for the frontend (`ui/.npmrc` makes
+  their npm 9.2 resolve the tree), but its Rust 1.85 is older than the shell's locked Tauri crates need; the
+  packages are `libwebkit2gtk-4.1-dev`, `build-essential`, `pkg-config`, `libxdo-dev`, `libssl-dev` and `file`
+  ([Tauri's prerequisites](https://v2.tauri.app/start/prerequisites/)). A clean `cargo test` takes about 100 s on
+  2 CPUs; the stage keeps `CARGO_HOME` in the workspace, so nothing is cached between builds.
 - **`gh` on the agent, and a GitHub token** for the Release stage: a Secret text credential with the ID
   `GitHub-Agents`, holding a token with *Contents: read and write* on this repository. It is the agents' own
   `gh` token, so when that is rotated the credential must be too, or every build of `main` fails at Release.

@@ -248,14 +248,15 @@ running `after` callbacks on `tick`), and `TestRunProcess` runs real child proce
   in the `build` group.
 - `ui/package.json`: the desktop app's npm scripts, `dev`, `build`, `test`, `typecheck`, `lint` and `tauri`. Its
   `.npmrc` sets `legacy-peer-deps`, because npm 9.2 as Debian ships it cannot resolve Vitest's optional peers.
-  Jenkins runs the frontend's `typecheck`, `lint` and `test`; nothing builds or tests the Rust shell yet (`TODO.md`).
+  Jenkins runs the frontend's `typecheck`, `lint` and `test`, and the shell's `cargo test`.
 - `packaging/build-binary.sh`: builds `dist/orchestrator-<os>-<arch>` (`linux-x86_64`, `macos-arm64`), a
   PyInstaller one-file binary with Python and tkinter inside, and its `.sha256`, then smoke-tests it: `--help`,
   `workflows` lists `default`, and `gui --smoke-test` where there is a display. On Linux it builds with the
   system `python3` (`python3-tk` installed) in `build/binary-venv`, not uv's Python, whose Tk lacks Xft and so
   draws every font in one fixed bitmap size; it refuses a Tk without libXft.
 - `Jenkinsfile`: `uv sync --frozen`, `uv run pytest` with branch coverage of `orchestrator`, a UI stage that runs
-  `ui/`'s `npm ci`, `typecheck`, `lint` and `test` and fails the build before the gate, a Gate stage that
+  `ui/`'s `npm ci`, `typecheck`, `lint` and `test` and `ui/src-tauri/`'s `cargo test --locked`, failing the build
+  before the gate, a Gate stage that
   runs `orchestrator.py gate` and archives `quality.md` (see [quality gate](quality-gate.md)), and a Package stage
   that runs `packaging/build-binary.sh` on every build. On `main` a Release stage publishes a new
   `pyproject.toml` version as a GitHub release, with `orchestrator.py` attached as the zipapp `orchestrator.pyz`

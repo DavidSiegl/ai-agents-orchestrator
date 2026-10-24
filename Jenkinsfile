@@ -91,11 +91,17 @@ pipeline {
             }
         }
 
-        // The desktop app's frontend: its types, its lint and its Vitest tests. The gate judges only the Python, so
-        // this stage stops the build instead, before Gate: a quality round then reports BUILD_FAILED with the
-        // console's end, where a failure after Gate would hide under quality.md's passing GATE line.
+        // The desktop app: its frontend's types, lint and Vitest tests, and its Tauri shell's cargo tests. The gate
+        // judges only the Python, so this stage stops the build instead, before Gate: a quality round then reports
+        // BUILD_FAILED with the console's end, where a failure after Gate would hide under quality.md's passing GATE
+        // line.
         stage('UI') {
             when { expression { return env.JUDGED_AT_PR != 'true' } }
+            environment {
+                // Crates are fetched into the workspace, which cleanWs empties, so no build compiles sources an
+                // earlier build left behind.
+                CARGO_HOME = "${env.WORKSPACE}/.cargo-home"
+            }
             steps {
                 dir('ui') {
                     sh '''
@@ -104,6 +110,9 @@ pipeline {
                         npm run lint
                         npm test
                     '''
+                }
+                dir('ui/src-tauri') {
+                    sh 'cargo test --locked'
                 }
             }
         }
