@@ -398,8 +398,15 @@ empty `GIT_REF`, before it accepts `buildWithParameters`.
 | Build | `--base` | Gate and rules |
 |---|---|---|
 | Quality build (`GIT_REF` set) | `HEAD^`: the snapshot's only parent is the run's base | `main`'s `orchestrator.py` and `pyproject.toml`, from `origin/main` |
-| Pull request (`CHANGE_TARGET` set) | the merge base with the target branch, fetched first | its own: a human reviews the pull request, `Jenkinsfile` included |
+| Pull request (`CHANGE_TARGET` set) | the merge base with the target branch, fetched first | its own, `Jenkinsfile` included (below) |
 | `main` | the last successful build's commit, else `HEAD^1` | its own; none when judged at its pull request (below) |
+
+A pull request is judged by the gate and rules it brings, and most from a branch of this repository merge once
+Jenkins's App reports `pr-head` green, with no human in between (`.github/workflows/automerge.yml` says which).
+The App's status is honest about the build, but the build ran the pull request's own `Jenkinsfile` and gate. So
+whoever can push a branch here, the agents included, can change the rules that branch's merge is judged by, and
+an agent's pull request from a branch outside `orchestrator/` can reach `main` without a human. A fork's pull
+request still waits for one.
 
 The repository is public, so the stage fetches `main` or the target branch without credentials. `GIT_REF` and
 the base reach the shell as environment variables, never as Groovy-built shell code, and `GIT_REF` is otherwise

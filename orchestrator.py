@@ -94,6 +94,7 @@ GITLEAKS_TIMEOUT = 300
 # What the preflight tells a user whose machine lacks gitleaks with its `git` subcommand (8.19 and later).
 GITLEAKS_INSTALL = ("install gitleaks 8.19 or later where the agents run (https://github.com/gitleaks/gitleaks#installing; "
                     "on Arch, `pacman -S gitleaks`)")
+# .github/workflows/automerge.yml repeats this prefix to leave the orchestrator's pull requests to a human; change both.
 BRANCH_PREFIX = "orchestrator/"
 REMOTE = "origin"
 # prune deletes a run's branch once its pull request is merged, or closed this long: time to reopen it.
