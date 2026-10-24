@@ -28,6 +28,20 @@ was done.
   `quality_path(n, quality_round)` itself, while `_quality_note` and `_publish` use `_last_quality`; they agree only
   because `_gate_passed` returns True whenever the run has no CI. Raised by the same review (finding 11). Closes with
   `_gate_passed` reading `_last_quality`.
+- **`doctor --machine` probes the machine over about twenty SSH connections, one after another.** Each check is
+  its own `Host.run`, so `_tool_version` asks `command -v` before `--version`, which already fails for a missing
+  command, and `gh auth status` may wait up to `NETWORK_TIMEOUT`. Raised by the cross-review of the doctor command
+  (F8, 2026-10-24): "redundant probes, each one SSH connection with `--machine`". Closes with the probes run in one
+  shell over one connection, or SSH connection sharing for `Host`.
+- **herdr 0.9.1 lists no `gemini` integration.** `herdr integration status` on this host lists `antigravity-cli`
+  (whose hook is under `~/.gemini/`) but no `gemini`, so `doctor` warns that it does not list gemini, and the
+  README's `herdr integration install gemini` may name a kind herdr no longer has. Found by the doctor run
+  (2026-10-24); not checked whether `agent start --kind gemini` still works. Closes once `AGENT_KINDS` and the README
+  name the kind herdr installs for Gemini, or herdr is shown to accept `gemini`.
+- **`doctor` checks gitleaks's `git` subcommand, not its version.** README asks for gitleaks 8.19 or later; the
+  check reuses `Host.gitleaks_problem`, the run's pre-push check, which asks `gitleaks git --help` because a
+  distribution's build may print no version number. So `doctor` shows no gitleaks version. Kept by choice
+  (2026-10-24).
 - **No test shows the proof reruns come after the quality loop.** `Workflow._rerun_proofs` runs right before the
   verdict step's turn, which follows the quality loop by construction, but every proof test uses `QUICK`, which has
   no quality-gated step. Raised by the cross-review of the proof reruns (R1-F5, 2026-10-24): "no test would notice
@@ -67,9 +81,11 @@ was done.
 - **An agent's pull request can reach `main` on rules it wrote itself, with no human.** Jenkins's App reports
   `continuous-integration/jenkins/pr-head`, which the agents' token cannot post, but a pull request build runs
   the pull request's own `Jenkinsfile` and gate (`docs/quality-gate.md`, What the Gate stage judges), and since
-  `automerge.yml` a pull request into `main` from a branch outside `orchestrator/` merges once that status is
-  green. Raised by the cross-review of `pr-automerge` (F5, 2026-10-24): "A branch the agents push under any other
-  name, once a pull request is open on it, merges into `main` (and so into a release) without a human". Closes
+  `automerge.yml` a pull request into `main` merges once that status is green. Raised by the cross-review of
+  `pr-automerge` (F5, 2026-10-24): "A branch the agents push under any other name, once a pull request is open on
+  it, merges into `main` (and so into a release) without a human". The orchestrator's own pull requests, under
+  `orchestrator/`, were held for a human until the user decided on 2026-10-24 that every pull request of this
+  repository merges on a green build; so a run's change now reaches `main` and a release unreviewed too. Closes
   with an approving review required on `main` that the agents cannot give (Homelab `.scratch/agent-identity`,
   ticket 03), or a Jenkinsfile and gate a pull request build takes from `main` rather than from the pull request.
 - **A pull request moved off `main` can merge unchecked before `automerge.yml` turns auto-merge off.** No ruleset
@@ -179,11 +195,19 @@ was done.
 - **A file name that holds a line separator breaks its list item in the quality file.** `quality_report` writes
   names as they are, so `\r` or U+2028 in one shows as a line break in some renderers. The finding is still
   matched to the right file. Closes with names escaped when the quality file is written.
+- **A quality round waits for the whole build, not for its quality file.** `Workflow._analyse` polls the build's
+  result until the build ends and only then reads `quality.md`, which the Gate stage archived before any later
+  stage ran. So every stage after Gate counts against `QUALITY_TIMEOUT`; the Package stage was taken out of quality
+  builds for that (2026-10-24), and a stage added after Gate slows the rounds again. Raised by the cross-review of
+  `skip-package-in-quality-builds` (2026-10-24): "`_analyse` waits for the whole build instead of stopping once
+  `quality.md` is archived". Closes with the round reading `quality.md` once the Gate stage has archived it, or
+  with a rule in the Jenkinsfile that nothing after Gate runs in a quality build.
 - **The mutation budget leaves most of a large change's mutants untried.** `MUTATION_BUDGET` is 600 s. Measured on
   Jenkins on 2026-10-24: on PR #50 (surviving-mutants' change) mutmut tried 756 of 3079 mutants and the Gate stage took
   683 s, the build about 850 s; on PR #51, 677 of 801 in a 638 s Gate stage. That fits `QUALITY_TIMEOUT` (1200 s) with
   about 350 s to spare, but not after a wait in Jenkins' queue, which counts against a quality round (PR #52 waited
-  about 860 s behind the others). The user kept 600 s (2026-10-24): a stopped run says `budget-reached`, never "none
+  about 860 s behind the others). Those were pull request builds; a quality build has skipped the Package stage
+  since 2026-10-24, so it has more to spare than that. The user kept 600 s (2026-10-24): a stopped run says `budget-reached`, never "none
   survived". Closes with the shared time budget above, or mutants chosen by the changed lines rather than whole
   functions.
 - **`parse_args` still yields many survivors after `do_not_mutate_patterns = ['\bhelp=']`.** Its `description=` texts

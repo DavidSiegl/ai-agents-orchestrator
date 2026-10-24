@@ -1,10 +1,13 @@
 # Keeps auto-merge on for a pull request into main from a branch of this repository, so GitHub merges it with a
 # merge commit once the ci-cd ruleset's required check, continuous-integration/jenkins/pr-head, passes; when that
-# check has passed already, gh merges at once. Left for a human to merge, with auto-merge turned off if it is on:
-# drafts, pull requests labelled no-automerge, the orchestrator's own pull requests (branches under BRANCH_PREFIX,
-# orchestrator/ in orchestrator.py), and pull requests into any branch but main, which no ruleset requires a check
-# for, so auto-merge would merge them unchecked. Pull requests from forks are not touched at all: their runs get a
-# read-only token.
+# check has passed already, gh merges at once. The orchestrator's own pull requests (branches under orchestrator/)
+# merge the same way, by the owner's decision of 2026-10-24 (TODO.md, "An agent's pull request can reach main").
+# Left for a human to merge, with auto-merge turned off if it is on: drafts; pull requests labelled no-automerge;
+# and pull requests into any branch but main, which no ruleset requires a check for, so auto-merge would merge them
+# unchecked. A run opens its pull request as a draft when the Reviewer still requested changes, when the quality
+# gate never passed, or when the branch conflicts with its base (Workflow._publish), so the draft hold is what
+# keeps those out of main. Taking such a draft out of draft is a human approving it for merge: if Jenkins has
+# passed it, it merges at once. Pull requests from forks are not touched at all: their runs get a read-only token.
 #
 # It acts with AUTOMERGE_TOKEN, a fine-grained personal access token of the repository's owner limited to this
 # repository, with contents and pull requests read and write. Not github.token: GitHub deletes no head branch of a
@@ -39,9 +42,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
         run: |
-          pr=$(gh pr view "$PR" --json state,isDraft,labels,baseRefName,headRefName,autoMergeRequest --jq '[.state,
-            .isDraft or any(.labels[]; .name == "no-automerge") or .baseRefName != "main"
-              or (.headRefName | startswith("orchestrator/")),
+          pr=$(gh pr view "$PR" --json state,isDraft,labels,baseRefName,autoMergeRequest --jq '[.state,
+            .isDraft or any(.labels[]; .name == "no-automerge") or .baseRefName != "main",
             .autoMergeRequest != null] | @tsv')
           read -r state held queued <<<"$pr"
           if [ "$state" != OPEN ]; then
