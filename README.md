@@ -62,7 +62,7 @@ Each harness a run uses needs its CLI and its herdr integration where the agents
 
 ## Requirements
 
-`python orchestrator.py doctor` checks these, where the agents run, and says what to run for each that is missing;
+`python orchestrator.py doctor` checks these, here and where the agents run, and says what to run for each that is missing;
 see [Usage](#usage).
 
 - herdr 0.9+ where the agents run, with the integration of each harness a run uses installed there

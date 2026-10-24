@@ -5,6 +5,11 @@ was done.
 
 ## Open issues
 
+- **`doctor --machine` probes the machine over about twenty SSH connections, one after another.** Each check is
+  its own `Host.run`, so `_tool_version` asks `command -v` before `--version`, which already fails for a missing
+  command, and `gh auth status` may wait up to `NETWORK_TIMEOUT`. Raised by the cross-review of the doctor command
+  (F8, 2026-10-24): "redundant probes, each one SSH connection with `--machine`". Closes with the probes run in one
+  shell over one connection, or SSH connection sharing for `Host`.
 - **herdr 0.9.1 lists no `gemini` integration.** `herdr integration status` on this host lists `antigravity-cli`
   (whose hook is under `~/.gemini/`) but no `gemini`, so `doctor` warns that it does not list gemini, and the
   README's `herdr integration install gemini` may name a kind herdr no longer has. Found by the doctor run
