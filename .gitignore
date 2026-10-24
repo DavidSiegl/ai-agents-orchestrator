@@ -17,3 +17,9 @@ TESTING.md
 .coverage
 coverage.xml
 quality.md
+
+# The desktop app's dependencies and build output, and the schemas `tauri build` generates
+ui/node_modules/
+ui/dist/
+ui/src-tauri/target/
+ui/src-tauri/gen/

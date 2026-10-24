@@ -130,6 +130,59 @@ wheel; the percentage between the buttons sets it back to 100%.
 A Python without tkinter makes `gui` exit with status 1 and the command to install it, such as
 `apt install python3-tk` or `brew install python-tk@3.13`; the binaries include it.
 
+### Desktop app
+
+A desktop app is taking over from the window, one step at a time. So far it is read-only: it shows one
+project's runs and their handoff files live, without Refresh, and it starts no runs. It is a Tauri 2 app in
+[`ui/`](ui), a React and TypeScript frontend in a native window, and it is not released yet: run it from a
+checkout.
+
+- **Overview:** each run's key and task, its progress through the workflow's steps, its round and quality
+  round, the current role, whether it is running or stale with the age of its heartbeat, the question it is
+  blocked on, its verdict and its pull request.
+- **Run detail:** click a run to see its progress and the files in its run directory, and the newest one, or the
+  one you pick, rendered as Markdown. The list gains new files as they are written, and the file shown is shown
+  again when it changes.
+- **Project bar:** a project folder and, for agents on another machine, a saved herdr machine, as in the window.
+  The app opens its own checkout first, then the project you opened last.
+
+It needs Node 20.19 or later with npm, and Rust ([rustup](https://rustup.rs)) with
+[Tauri 2's system packages](https://v2.tauri.app/start/prerequisites/). On Debian or Ubuntu those are:
+
+```bash
+sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev \
+  libayatana-appindicator3-dev librsvg2-dev pkg-config
+```
+
+```bash
+cd ui
+npm ci
+npm run tauri dev     # the window, rebuilt as you edit
+npm run tauri build   # an optimized build, src-tauri/target/release/orchestrator-ui
+npm test              # the frontend's tests; npm run typecheck and npm run lint check it too
+(cd src-tauri && cargo test)   # the shell's, which start and stop a real serve
+```
+
+The app starts `python3 ../orchestrator.py serve` beside it and stops it when its window closes. To serve
+another copy of the orchestrator, set `ORCHESTRATOR_PY` to its path before starting the app. Projects on a
+machine are read over SSH every 5 seconds; local ones are read every second.
+
+`serve` works without the app too. It prints one JSON line, `{"url": "http://127.0.0.1:<port>", "token":
+"..."}`, and serves on that free port of `127.0.0.1` until you press Ctrl-C or send SIGTERM. It exits with status 1
+if it cannot print that line, as when whatever started it has stopped reading. Every request names
+the project by `?cwd=` and, optionally, `?machine=`, and needs the token, as an `Authorization: Bearer` header
+or as `?token=`:
+
+| Endpoint | Gives |
+|---|---|
+| `/runs` | `{"version": 1, "runs": [...]}`, the records `list --json` prints |
+| `/files?run=ID` | the files in the run's directory, oldest first, each `{"name", "mtime"}` |
+| `/file?run=ID&name=NAME` | `{"run", "name", "text"}` for one of them |
+| `/events` | a `text/event-stream`: `record` with `{"run", "record"}` when a run appears, changes or goes (`record` is `null` then), `files` with `{"run", "files"}` when its files change, and `problem` with `{"error"}` while the project cannot be read |
+
+The server only answers a `Host` header that is its own address and an `Origin` that is its own or one given
+with `--origin`, which the app passes for its webview.
+
 ## Usage
 
 ```bash
@@ -173,6 +226,9 @@ python orchestrator.py run --quality-gate AI-Agents-Orchestrator/py-ai-agents-or
 
 # The window to start, list and resume runs in; no arguments open it too where there is a display
 python orchestrator.py gui
+
+# Serve any project's runs read-only on 127.0.0.1 for the desktop app; prints {"url": ..., "token": ...} first
+python orchestrator.py serve
 
 # Judge the change since a commit as the quality gate does, by the rules in pyproject.toml; exit status 0 for
 # GATE: OK, 1 for GATE: ERROR. Needs ruff, mypy and pymarkdown (uv's dev group), shellcheck and actionlint on PATH

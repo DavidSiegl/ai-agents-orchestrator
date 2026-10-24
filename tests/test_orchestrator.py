@@ -2,10 +2,12 @@ import ast
 import base64
 import contextlib
 import copy
+import http.client
 import io
 import itertools
 import json
 import os
+import queue
 import re
 import shlex
 import shutil
@@ -22,6 +24,7 @@ import tomllib
 import unittest
 import urllib.error
 import urllib.parse
+import urllib.request
 from dataclasses import asdict
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -10062,7 +10065,7 @@ class ShowHost(FakeHost):
 
     def run_files(self, run_dir):
         # Written in mtime order, so the order of insertion is the age order.
-        return [p for p in self.files if p.startswith(f"{run_dir}/")]
+        return [orchestrator.RunFile(p, 0) for p in self.files if p.startswith(f"{run_dir}/")]
 
 
 def show_state(**kw):
@@ -10269,7 +10272,8 @@ class TestRunFiles(unittest.TestCase):
                 host.write(f"{run_dir}/{name}", name)
                 os.utime(f"{run_dir}/{name}", (mtime, mtime))
             os.mkdir(f"{run_dir}/sub")
-            self.assertEqual(host.run_files(run_dir), [f"{run_dir}/{n}" for n in ("c.md", "a.md", "b.md", "d.md")])
+            self.assertEqual(host.run_files(run_dir), [(f"{run_dir}/{n}", m) for n, m in
+                                                       (("c.md", 100), ("a.md", 200), ("b.md", 300), ("d.md", 300))])
 
     def test_missing_directory(self):
         with tempfile.TemporaryDirectory() as d:
@@ -10277,7 +10281,7 @@ class TestRunFiles(unittest.TestCase):
 
     def test_one_call_over_ssh(self):
         run = MagicMock(return_value=completed("5 /r/b.md\0" "5 /r/a b.md\0" "3 /r/c.md\0"))
-        self.assertEqual(Host("remote-host", run=run).run_files("/r"), ["/r/c.md", "/r/a b.md", "/r/b.md"])
+        self.assertEqual(Host("remote-host", run=run).run_files("/r"), [("/r/c.md", 3), ("/r/a b.md", 5), ("/r/b.md", 5)])
         run.assert_called_once()
         self.assertEqual(run.call_args.args[0][:4], ["ssh", "-o", "BatchMode=yes", "remote-host"])
         self.assertIn("stat -c %Y", run.call_args.args[0][4])
@@ -10287,6 +10291,12 @@ class TestRunFiles(unittest.TestCase):
         host = Host(run=MagicMock(return_value=completed(stderr="Permission denied", returncode=1)))
         with self.assertRaisesRegex(OrchestratorError, "Permission denied"):
             host.run_files("/r")
+
+    def test_a_time_that_is_not_one(self):
+        host = Host(run=MagicMock(return_value=completed("5 /r/a.md\0" "soon /r/b.md\0")))
+        with self.assertRaises(OrchestratorError) as raised:
+            host.run_files("/r")
+        self.assertEqual(str(raised.exception), "listing /r: stat printed 'soon', not a time")
 
 
 # ---------------------------------------------------------------------------
@@ -12028,6 +12038,626 @@ class TestBlockedListing(unittest.TestCase):
 
     def test_status_tag(self):
         self.assertEqual(orchestrator.status_tag(f"blocked: {QUESTION} (pane w1:p2)"), "warn")
+
+
+# ---------------------------------------------------------------------------
+# serve: a project's runs over HTTP, for the desktop app
+# ---------------------------------------------------------------------------
+
+SERVE_ID = "20261024-120000-5e7e00"
+SERVE_RUN_DIR = f"/proj/.orchestrator/runs/{SERVE_ID}"
+TAURI_ORIGIN = "tauri://localhost"
+OPENER = urllib.request.build_opener()
+
+
+def serve_state(**kw):
+    return {"run_id": SERVE_ID, "task": "add a rate limiter", "phase": "build", "round": 1, **kw}
+
+
+class ServeHost(FakeHost):
+    """A FakeHost whose run_files lists the files under a run directory in `files`, by their `mtimes`, as Host's does,
+    and which records the path of every read in `reads`."""
+
+    def __init__(self, ssh_target=None):
+        super().__init__()
+        self.ssh_target = ssh_target
+        self.reads = []
+
+    def read(self, path):
+        self.reads.append(path)
+        return super().read(path)
+
+    def run_files(self, run_dir):
+        files = [(self.mtimes.get(p, 0), p) for p in self.files
+                 if p.startswith(f"{run_dir}/") and p != f"{run_dir}/state.json"]
+        return [orchestrator.RunFile(p, m) for m, p in sorted(files)]
+
+
+class ServerTest(unittest.TestCase):
+    """A RunServer on a free port, serving the projects connect gives, for as long as the test runs."""
+
+    def start(self, connect, origins=()):
+        server = orchestrator.RunServer(origins, connect=connect)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.stopping.set)
+        self.server = server
+        return server
+
+    def fake_project(self, host=None, origins=()):
+        """Serve a ServeHost as /proj, on any machine; returns the host."""
+        host = host or ServeHost()
+        self.connects = []
+
+        def connect(machine, cwd):
+            self.connects.append((machine, cwd))
+            return host, "/proj"
+
+        self.start(connect, origins)
+        return host
+
+    def request(self, path, method="GET", token=True, **headers):
+        """(HTTP status code, response headers, JSON body or else None) of a request to the server, with its token
+        as a Bearer header unless token is False."""
+        if token:
+            headers.setdefault("Authorization", f"Bearer {self.server.token}")
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=10)
+        self.addCleanup(conn.close)
+        conn.request(method, path, headers=headers)
+        resp = conn.getresponse()
+        body = resp.read()
+        is_json = resp.headers.get_content_type() == "application/json"
+        return resp.status, resp.headers, json.loads(body) if is_json else None
+
+    def query(self, endpoint, **params):
+        return f"{endpoint}?{urllib.parse.urlencode({'cwd': '~/proj', **params})}"
+
+    def events(self, **params):
+        """The server's event stream, read through urllib as an EventSource would, with the token in the URL. It
+        ends when the server stops, at the end of the test."""
+        url = f"{self.server.url}{self.query('/events', token=self.server.token, **params)}"
+        return EventStream(OPENER.open(url, timeout=10))
+
+
+class EventStream:
+    """A text/event-stream response, its events parsed on a thread as they arrive."""
+
+    def __init__(self, response):
+        self.response = response
+        self.headers = response.headers
+        self.queue = queue.Queue()
+        self.ended = threading.Event()  # set once the response has ended
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self):
+        kind, payload = None, None
+        with contextlib.suppress(OSError, ValueError):
+            for raw in self.response:
+                line = raw.decode().rstrip("\n")
+                if line.startswith("event: "):
+                    kind = line.removeprefix("event: ")
+                elif line.startswith("data: "):
+                    payload = json.loads(line.removeprefix("data: "))
+                elif not line and kind:
+                    self.queue.put((kind, payload))
+                    kind, payload = None, None
+        self.response.close()
+        self.ended.set()
+
+    def next(self, timeout=2):
+        """The next event, as (kind, payload); fails the test when none comes within timeout seconds."""
+        try:
+            return self.queue.get(timeout=timeout)
+        except queue.Empty:
+            raise AssertionError(f"no event within {timeout}s") from None
+
+    def take(self, n, timeout=2):
+        return [self.next(timeout) for _ in range(n)]
+
+
+class TestProjectHost(unittest.TestCase):
+    @patch.object(Host, "resolve_dir", return_value="/home/user/proj")
+    @patch.object(Herdr, "ssh_target", autospec=True, return_value="remote-host")
+    def test_a_machine_is_reached_by_its_saved_target(self, target, resolve_dir):
+        host, cwd = orchestrator.project_host("devbox", "~/proj")
+        self.assertEqual((host.ssh_target, cwd), ("remote-host", "/home/user/proj"))
+        self.assertEqual(target.call_args.args[0].machine, "devbox")
+        resolve_dir.assert_called_once_with("~/proj")
+
+    @patch.object(Host, "resolve_dir", return_value="/home/user/proj")
+    @patch.object(Herdr, "ssh_target", side_effect=AssertionError("herdr was asked"))
+    def test_no_machine_is_this_one(self, _target, _resolve_dir):
+        host, cwd = orchestrator.project_host("", "~/proj")
+        self.assertEqual((host.ssh_target, cwd), (None, "/home/user/proj"))
+
+
+class TestServeEndpoints(ServerTest):
+    def test_runs_are_list_json_records_on_a_machine(self):
+        host = self.fake_project(ServeHost("remote-host"))
+        host.files[f"{SERVE_RUN_DIR}/state.json"] = json.dumps(serve_state(owner=ME))
+        host.ages[SERVE_ID] = STALE_SECONDS + 1
+        code, _, doc = self.request(self.query("/runs", machine="remote"))
+        self.assertEqual(code, 200)
+        self.assertEqual(self.connects, [("remote", "~/proj")])
+        with patch.object(Host, "run_states", return_value=host.run_states("/proj")), \
+                patch.object(Host, "resolve_dir", return_value="/proj"), \
+                patch.object(Herdr, "ssh_target", return_value="remote-host"), \
+                patch.object(Herdr, "_exec", side_effect=AssertionError("herdr was called")), \
+                patch("builtins.print") as out:
+            self.assertEqual(main(["list", "--json", "--machine", "remote", "--cwd", "~/proj"]), 0)
+        self.assertEqual(doc, json.loads(out.call_args.args[0]))
+        self.assertEqual(doc["runs"][0]["resume_command"],
+                         "orchestrator.py resume 5e7e00 --machine remote --cwd '~/proj'")
+
+    def test_runs_are_list_json_records_locally(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.start(orchestrator.project_host)
+            Host().write(f"{d}/{orchestrator.RUNS_DIR}/{SERVE_ID}/state.json", json.dumps(serve_state()))
+            Host().write(f"{d}/{orchestrator.RUNS_DIR}/x-beef00/state.json",
+                         json.dumps({**serve_state(phase="done", verdict=APPROVE), "run_id": "x-beef00"}))
+            code, _, doc = self.request(f"/runs?{urllib.parse.urlencode({'cwd': d})}")
+            # list needs a herdr pane, which serve does not.
+            with patch.dict("os.environ", {"HERDR_ENV": "1"}), patch("builtins.print") as out:
+                self.assertEqual(main(["list", "--json", "--cwd", d]), 0)
+        self.assertEqual(code, 200)
+        listed = json.loads(out.call_args.args[0])
+        # A second may pass between the two reads; everything else is the same.
+        for record in doc["runs"] + listed["runs"]:
+            record.pop("heartbeat_age")
+            record.pop("health_reason")
+        self.assertEqual(doc, listed)
+        self.assertEqual(len(doc["runs"]), 2)
+
+    def test_a_project_is_connected_once(self):
+        self.fake_project()
+        self.request(self.query("/runs"))
+        self.request(self.query("/runs"))
+        self.assertEqual(self.connects, [("", "~/proj")])
+
+    def test_files_with_their_mtimes(self):
+        host = self.fake_project()
+        host.files[f"{SERVE_RUN_DIR}/state.json"] = json.dumps(serve_state())
+        host.files[f"{SERVE_RUN_DIR}/spec.md"] = "# Spec\n"
+        host.files[f"{SERVE_RUN_DIR}/build-1.md"] = "built"
+        host.mtimes.update({f"{SERVE_RUN_DIR}/spec.md": 100, f"{SERVE_RUN_DIR}/build-1.md": 200})
+        code, _, doc = self.request(self.query("/files", run=SERVE_ID))
+        self.assertEqual((code, doc), (200, {"run": SERVE_ID, "files": [{"name": "spec.md", "mtime": 100},
+                                                                         {"name": "build-1.md", "mtime": 200}]}))
+
+    def test_file(self):
+        host = self.fake_project()
+        host.files[f"{SERVE_RUN_DIR}/spec.md"] = "# Spec\n"
+        code, _, doc = self.request(self.query("/file", run=SERVE_ID, name="spec.md"))
+        self.assertEqual((code, doc), (200, {"run": SERVE_ID, "name": "spec.md", "text": "# Spec\n"}))
+
+    def test_missing_file(self):
+        self.fake_project()
+        code, _, doc = self.request(self.query("/file", run=SERVE_ID, name="review-1.md"))
+        self.assertEqual(code, 404)
+        self.assertIn("review-1.md", doc["error"])
+
+    def test_paths_outside_the_run_directory_are_refused_unread(self):
+        host = self.fake_project()
+        host.files[f"{SERVE_RUN_DIR}/state.json"] = json.dumps(serve_state())
+        host.files["/proj/secret"] = "secret"
+        for run, name in ((SERVE_ID, "../../../secret"), (SERVE_ID, "/proj/secret"), (SERVE_ID, "state.json"),
+                          (SERVE_ID, ".."), (SERVE_ID, "."), (SERVE_ID, ""), (SERVE_ID, "spec\0.md"),
+                          ("..", "secret"), (".", "secret"), (f"{SERVE_ID}/..", "secret"),
+                          ("/proj", "secret")):
+            with self.subTest(run=run, name=name):
+                code, _, doc = self.request(self.query("/file", run=run, name=name))
+                self.assertEqual(code, 403)
+                self.assertNotIn("text", doc)
+                self.assertEqual(doc["error"], "state.json is not a handoff file" if name == "state.json"
+                                 else f"{name if run == SERVE_ID else run!r} is not a name in the run directory")
+        self.assertEqual(host.reads, [])
+
+    def test_files_of_a_run_outside_the_runs_directory_are_refused(self):
+        self.fake_project()
+        code, _, _ = self.request(self.query("/files", run="../.."))
+        self.assertEqual(code, 403)
+
+    def test_missing_parameter(self):
+        self.fake_project()
+        for path in ("/runs", self.query("/file", run=SERVE_ID), self.query("/files")):
+            with self.subTest(path=path):
+                code, _, doc = self.request(path)
+                self.assertEqual(code, 400)
+                self.assertIn("missing parameter", doc["error"])
+
+    def test_unknown_endpoint(self):
+        self.fake_project()
+        self.assertEqual(self.request(self.query("/state"))[0], 404)
+
+    def test_an_unreadable_project_is_a_bad_gateway(self):
+        def connect(machine, cwd):
+            raise OrchestratorError("no saved herdr machine named nosuch")
+
+        self.start(connect)
+        code, _, doc = self.request(self.query("/runs", machine="nosuch"))
+        self.assertEqual((code, doc), (502, {"error": "no saved herdr machine named nosuch"}))
+
+
+class TestServeSecurity(ServerTest):
+    def test_no_token(self):
+        self.fake_project()
+        code, headers, _ = self.request(self.query("/runs"), token=False)
+        self.assertEqual(code, 401)
+        self.assertEqual(headers["WWW-Authenticate"], "Bearer")
+
+    def test_wrong_token(self):
+        self.fake_project()
+        for headers in ({"Authorization": "Bearer nope"}, {"Authorization": self.server.token}):
+            with self.subTest(headers=headers):
+                self.assertEqual(self.request(self.query("/runs"), token=False, **headers)[0], 401)
+        self.assertEqual(self.request(self.query("/runs", token="nope"), token=False)[0], 401)
+
+    def test_non_ascii_tokens(self):
+        self.fake_project()
+        # http.client sends a header's str as Latin-1, so these are é's UTF-8 bytes on the wire.
+        for header in ("Bearer é".encode().decode("latin-1"), f"Bearer {self.server.token}é".encode().decode("latin-1")):
+            with self.subTest(header=header):
+                self.assertEqual(self.request(self.query("/runs"), token=False, Authorization=header)[0], 401)
+        # é, an encoded lone surrogate, and a byte that is not UTF-8.
+        for token in ("%C3%A9", "%ED%B2%80", "%FF"):
+            with self.subTest(token=token):
+                self.assertEqual(self.request(f"{self.query('/runs')}&token={token}", token=False)[0], 401)
+
+    def test_token_in_the_query(self):
+        self.fake_project()
+        self.assertEqual(self.request(self.query("/runs", token=self.server.token), token=False)[0], 200)
+
+    def test_tokens_differ_per_server(self):
+        self.fake_project()
+        other = orchestrator.RunServer()
+        self.addCleanup(other.server_close)
+        self.assertNotEqual(other.token, self.server.token)
+        self.assertGreaterEqual(len(self.server.token), 32)
+
+    def test_bound_to_loopback_only(self):
+        self.fake_project()
+        self.assertEqual(self.server.server_address[0], "127.0.0.1")
+        self.assertEqual(self.server.url, f"http://127.0.0.1:{self.server.server_address[1]}")
+
+    def test_foreign_host_header(self):
+        self.fake_project()
+        port = self.server.server_address[1]
+        for host in ("evil.example", f"evil.example:{port}", "127.0.0.1", f"127.0.0.1:{port + 1}"):
+            with self.subTest(host=host):
+                code, _, doc = self.request(self.query("/runs"), Host=host)
+                self.assertEqual(code, 403)
+                self.assertNotIn("runs", doc)
+
+    def test_own_host_headers(self):
+        self.fake_project()
+        port = self.server.server_address[1]
+        for host in (f"127.0.0.1:{port}", f"localhost:{port}"):
+            with self.subTest(host=host):
+                self.assertEqual(self.request(self.query("/runs"), Host=host)[0], 200)
+
+    def test_foreign_origin(self):
+        self.fake_project(origins=[TAURI_ORIGIN])
+        for origin in ("http://evil.example", "null", "http://localhost:1420"):
+            with self.subTest(origin=origin):
+                code, headers, _ = self.request(self.query("/runs"), Origin=origin)
+                self.assertEqual(code, 403)
+                self.assertNotIn("Access-Control-Allow-Origin", headers)
+
+    def test_foreign_origin_even_without_a_token(self):
+        self.fake_project()
+        self.assertEqual(self.request(self.query("/runs"), token=False, Origin="http://evil.example")[0], 403)
+
+    def test_the_webview_origin_is_allowed_by_cors(self):
+        self.fake_project(origins=[TAURI_ORIGIN])
+        code, headers, _ = self.request(self.query("/runs"), Origin=TAURI_ORIGIN)
+        self.assertEqual(code, 200)
+        self.assertEqual(headers["Access-Control-Allow-Origin"], TAURI_ORIGIN)
+
+    def test_own_origin_and_none(self):
+        self.fake_project()
+        code, headers, _ = self.request(self.query("/runs"))
+        self.assertEqual(code, 200)
+        self.assertNotIn("Access-Control-Allow-Origin", headers)
+        port = self.server.server_address[1]
+        self.assertEqual(self.request(self.query("/runs"), Origin=f"http://localhost:{port}")[0], 200)
+
+    def test_preflight_of_the_webview(self):
+        self.fake_project(origins=[TAURI_ORIGIN])
+        code, headers, _ = self.request("/runs", method="OPTIONS", token=False, Origin=TAURI_ORIGIN)
+        self.assertEqual(code, 204)
+        self.assertEqual(headers["Access-Control-Allow-Origin"], TAURI_ORIGIN)
+        self.assertEqual(headers["Access-Control-Allow-Headers"], "Authorization")
+        self.assertEqual(headers["Access-Control-Allow-Methods"], "GET")
+
+    def test_preflight_of_a_foreign_origin(self):
+        self.fake_project(origins=[TAURI_ORIGIN])
+        code, headers, _ = self.request("/runs", method="OPTIONS", token=False, Origin="http://evil.example")
+        self.assertEqual(code, 403)
+        self.assertNotIn("Access-Control-Allow-Origin", headers)
+
+    def test_writes_are_not_served(self):
+        self.fake_project()
+        self.assertEqual(self.request(self.query("/runs"), method="POST")[0], 501)
+
+
+class TestServeEvents(ServerTest):
+    """The event stream against real run directories, on a real server, read through urllib."""
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.cwd = d.name
+        self.runs = f"{d.name}/{orchestrator.RUNS_DIR}"
+        self.start(orchestrator.project_host)
+
+    def query(self, endpoint, **params):
+        return f"{endpoint}?{urllib.parse.urlencode({'cwd': self.cwd, **params})}"
+
+    def save(self, run_id, **kw):
+        Host().write(f"{self.runs}/{run_id}/state.json", json.dumps({**serve_state(**kw), "run_id": run_id}))
+
+    def assert_soon(self, stream, expected, started):
+        """The next event is expected, and arrived within 2 s of started."""
+        kind, payload = stream.next(timeout=3)
+        self.assertLessEqual(time.monotonic() - started, 2)
+        self.assertEqual((kind, {k: payload[k] for k in expected[1]}), expected)
+        return payload
+
+    def test_the_stream(self):
+        self.save(SERVE_ID)
+        Host().write(f"{self.runs}/{SERVE_ID}/spec.md", "# Spec\n")
+        stream = self.events()
+        self.assertEqual(stream.headers["Content-Type"], "text/event-stream")
+        self.assertEqual(stream.headers["Cache-Control"], "no-store")
+        (kind, record), (files_kind, files) = stream.take(2)
+        self.assertEqual((kind, record["run"], record["record"]["phase"]), ("record", SERVE_ID, "build"))
+        self.assertEqual((files_kind, [f["name"] for f in files["files"]]), ("files", ["spec.md"]))
+
+        started = time.monotonic()
+        self.save(SERVE_ID, phase="review")
+        payload = self.assert_soon(stream, ("record", {"run": SERVE_ID}), started)
+        self.assertEqual(payload["record"]["phase"], "review")
+
+        started = time.monotonic()
+        Host().write(f"{self.runs}/{SERVE_ID}/build-1.md", "built")
+        payload = self.assert_soon(stream, ("files", {"run": SERVE_ID}), started)
+        self.assertEqual([f["name"] for f in payload["files"]], ["spec.md", "build-1.md"])
+
+        started = time.monotonic()
+        self.save("20261024-130000-a11ce0")
+        self.assert_soon(stream, ("record", {"run": "20261024-130000-a11ce0"}), started)
+        self.assert_soon(stream, ("files", {"run": "20261024-130000-a11ce0", "files": []}), started)
+
+        started = time.monotonic()
+        shutil.rmtree(f"{self.runs}/{SERVE_ID}")
+        self.assert_soon(stream, ("record", {"run": SERVE_ID, "record": None}), started)
+
+    def test_nothing_while_nothing_changes(self):
+        self.save(SERVE_ID)
+        stream = self.events()
+        stream.take(2)
+        with self.assertRaises(AssertionError):
+            stream.next(timeout=2.5)
+
+    def test_an_unreadable_project_is_a_problem_event(self):
+        os.makedirs(f"{self.runs}/{SERVE_ID}")
+        with open(f"{self.runs}/{SERVE_ID}/state.json", "w") as f:
+            f.write("{not json")
+        stream = self.events()
+        kind, payload = stream.next()
+        self.assertEqual(kind, "problem")
+        self.assertIn("corrupt run state", payload["error"])
+        started = time.monotonic()
+        self.save(SERVE_ID)
+        self.assert_soon(stream, ("problem", {"error": None}), started)
+        self.assert_soon(stream, ("record", {"run": SERVE_ID}), started)
+
+    def test_the_stream_ends_when_the_server_stops(self):
+        stream = self.events()
+        self.server.stopping.set()
+        self.assertTrue(stream.ended.wait(timeout=3))
+
+
+class TestServeEventsOnAMachine(ServerTest):
+    """The event stream of a --machine project, on FakeHost."""
+
+    @patch.object(orchestrator, "SERVE_REMOTE_POLL_SECONDS", 0.1)
+    @patch.object(orchestrator, "SERVE_POLL_SECONDS", 60)
+    def test_changes_are_polled(self):
+        host = self.fake_project(ServeHost("remote-host"))
+        host.files[f"{SERVE_RUN_DIR}/state.json"] = json.dumps(serve_state())
+        stream = self.events(machine="remote")
+        self.assertEqual([kind for kind, _ in stream.take(2)], ["record", "files"])
+        host.files[f"{SERVE_RUN_DIR}/review-1.md"] = "VERDICT: APPROVE\n"
+        kind, payload = stream.next()
+        self.assertEqual((kind, payload), ("files", {"run": SERVE_ID, "files": [{"name": "review-1.md", "mtime": 0}]}))
+        del host.files[f"{SERVE_RUN_DIR}/state.json"]
+        self.assertEqual(stream.next(), ("record", {"run": SERVE_ID, "record": None}))
+
+    @patch.object(orchestrator, "SERVE_REMOTE_POLL_SECONDS", 60)
+    @patch.object(orchestrator, "SERVE_POLL_SECONDS", 0.1)
+    def test_a_machine_is_polled_less_often(self):
+        host = self.fake_project(ServeHost("remote-host"))
+        host.files[f"{SERVE_RUN_DIR}/state.json"] = json.dumps(serve_state())
+        stream = self.events(machine="remote")
+        # The first poll, whenever the handler gets to it, sends the run; only a change after it waits for the next.
+        self.assertEqual([kind for kind, _ in stream.take(2)], ["record", "files"])
+        host.files[f"{SERVE_RUN_DIR}/state.json"] = json.dumps(serve_state(phase="review"))
+        with self.assertRaises(AssertionError):
+            stream.next(timeout=1)
+
+
+class TestRunWatch(unittest.TestCase):
+    def setUp(self):
+        self.host = ServeHost()
+        self.watch = orchestrator.RunWatch(orchestrator.ProjectRuns(self.host, "/proj", []))
+
+    def save(self, age=0, **kw):
+        self.host.files[f"{SERVE_RUN_DIR}/state.json"] = json.dumps(serve_state(**kw))
+        self.host.ages[SERVE_ID] = age
+
+    def test_first_poll_sends_everything(self):
+        self.save()
+        self.host.files[f"{SERVE_RUN_DIR}/spec.md"] = "# Spec\n"
+        events = self.watch.poll()
+        self.assertEqual([(kind, payload["run"]) for kind, payload in events], [("record", SERVE_ID), ("files", SERVE_ID)])
+        self.assertEqual(events[0][1]["record"]["phase"], "build")
+        self.assertEqual(events[1][1]["files"], [{"name": "spec.md", "mtime": 0}])
+        self.assertEqual(self.watch.poll(), [])
+
+    def test_an_older_heartbeat_alone_is_no_event(self):
+        self.save(age=10)
+        self.watch.poll()
+        self.save(age=50)
+        self.assertEqual(self.watch.poll(), [])
+
+    def test_a_run_turning_stale_is_an_event(self):
+        self.save(age=10)
+        self.watch.poll()
+        self.save(age=STALE_SECONDS + 1)
+        [(kind, payload)] = self.watch.poll()
+        self.assertEqual((kind, payload["record"]["health"]), ("record", orchestrator.STALE))
+
+    def test_a_finished_runs_files_are_read_again_only_when_it_changes(self):
+        self.save(phase="done", verdict=APPROVE)
+        self.watch.poll()
+        self.host.files[f"{SERVE_RUN_DIR}/summary.md"] = "done"
+        self.assertEqual(self.watch.poll(), [])
+        self.save(phase="done", verdict=APPROVE, closed="2026-10-24T12:00:00Z")
+        self.assertEqual([kind for kind, _ in self.watch.poll()], ["record", "files"])
+
+    def test_a_run_of_this_host_whose_orchestrator_exited_is_stale(self):
+        self.save(age=HEARTBEAT_SECONDS + 1, owner={"host": socket.gethostname(), "pid": 4242, "started_at": "x"})
+        with patch.object(orchestrator, "pid_alive", return_value=False) as alive:
+            [(kind, payload), _] = self.watch.poll()
+        alive.assert_called_once_with(4242)
+        self.assertEqual((payload["record"]["health"], payload["record"]["health_reason"]),
+                         (orchestrator.STALE, "orchestrator pid 4242 exited"))
+
+    def test_a_problem_is_told_once_and_its_end_too(self):
+        with patch.object(self.host, "run_states", side_effect=OrchestratorError("ssh: connection refused")):
+            self.assertEqual(self.watch.poll(), [("problem", {"error": "ssh: connection refused"})])
+            self.assertEqual(self.watch.poll(), [])
+        self.save()
+        self.assertEqual([kind for kind, _ in self.watch.poll()], ["problem", "record", "files"])
+        self.assertEqual(self.watch.poll(), [])
+
+
+class TestServeCommand(unittest.TestCase):
+    """orchestrator.py serve as a process of its own."""
+
+    def serve(self):
+        """The started serve, as a RunProcess, and its first line of output."""
+        proc = orchestrator.RunProcess([sys.executable, orchestrator.__file__, "serve"])
+        self.addCleanup(proc.proc.kill)
+        out = ""
+        deadline = time.monotonic() + 10
+        while "\n" not in out and time.monotonic() < deadline:
+            chunk, returncode = proc.read()
+            self.assertIsNone(returncode, out)
+            out += chunk
+            time.sleep(0.05)
+        line, _, rest = out.partition("\n")
+        self.assertEqual(rest, "")
+        return proc, json.loads(line)
+
+    def test_one_json_line_then_serves_until_a_signal(self):
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signal=sig):
+                proc, line = self.serve()
+                self.assertEqual(set(line), {"url", "token"})
+                self.assertRegex(line["url"], r"^http://127\.0\.0\.1:\d+$")
+                with tempfile.TemporaryDirectory() as d:
+                    url = f"{line['url']}/runs?{urllib.parse.urlencode({'cwd': d, 'token': line['token']})}"
+                    with OPENER.open(url, timeout=10) as resp:
+                        self.assertEqual(json.load(resp), {"version": 1, "runs": []})
+                proc.proc.send_signal(sig)
+                self.assertEqual(proc.proc.wait(timeout=10), 0)
+                # Nothing more on standard output or standard error, which RunProcess reads together.
+                self.assertEqual(self.rest_of_output(proc), "")
+
+    @staticmethod
+    def rest_of_output(proc):
+        out, returncode = proc.read()
+        while returncode is None:
+            time.sleep(0.05)
+            chunk, returncode = proc.read()
+            out += chunk
+        return out
+
+    def test_in_process(self):
+        handlers = {}
+        with patch("signal.signal", side_effect=handlers.setdefault), \
+                patch("builtins.print") as out:
+            thread = threading.Thread(target=lambda: handlers.setdefault("status", orchestrator.serve_command([])))
+            thread.start()
+            deadline = time.monotonic() + 10
+            while not out.called and time.monotonic() < deadline:
+                time.sleep(0.01)
+            line = json.loads(out.call_args.args[0])
+            with tempfile.TemporaryDirectory() as d:
+                url = f"{line['url']}/runs?{urllib.parse.urlencode({'cwd': d, 'token': line['token']})}"
+                with OPENER.open(url, timeout=10) as resp:
+                    self.assertEqual(resp.status, 200)
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+            thread.join(timeout=10)
+        self.assertEqual(handlers["status"], 0)
+        self.assertEqual(out.call_args.kwargs, {"flush": True})
+
+    def test_a_closed_stdout_ends_it(self):
+        # serve's standard output is a pipe whose reader has gone, as when the app quit before reading the line.
+        script = textwrap.dedent(f"""
+            import os, subprocess, sys
+            r, w = os.pipe()
+            os.close(r)
+            proc = subprocess.Popen([sys.executable, {orchestrator.__file__!r}, "serve"], stdout=w,
+                                    stderr=subprocess.PIPE, text=True)
+            os.close(w)
+            try:
+                _, err = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                print("hung")
+            else:
+                print(proc.returncode)
+                print(err, end="")
+        """)
+        out = Host().check([sys.executable, "-c", script], timeout=30)
+        self.assertEqual(out, f"{orchestrator.EXIT_ERROR}\n"
+                              "error: cannot print the server's address: [Errno 32] Broken pipe\n")
+
+    def test_an_unprintable_line_ends_it(self):
+        handlers = {}
+
+        def broken_stdout(text, file=None, flush=False):
+            if file is None:
+                raise BrokenPipeError(32, "Broken pipe")
+            file.write(f"{text}\n")
+
+        with patch("signal.signal", side_effect=handlers.setdefault), patch("builtins.print", side_effect=broken_stdout), \
+                patch("sys.stderr", new_callable=io.StringIO) as err, patch("os.open", return_value=99) as devnull, \
+                patch("os.dup2") as dup2, patch("sys.stdout") as stdout:
+            stdout.fileno.return_value = 1
+            started = time.monotonic()
+            self.assertEqual(orchestrator.serve_command([]), orchestrator.EXIT_ERROR)
+        self.assertLess(time.monotonic() - started, 5)
+        devnull.assert_called_once_with(os.devnull, os.O_WRONLY)
+        dup2.assert_called_once_with(99, 1)
+        self.assertEqual(err.getvalue(), "error: cannot print the server's address: [Errno 32] Broken pipe\n")
+
+    def test_no_port(self):
+        with patch.object(orchestrator, "RunServer", side_effect=OSError("Address already in use")), \
+                patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(orchestrator.serve_command([]), orchestrator.EXIT_ERROR)
+        self.assertEqual(err.getvalue(), "error: cannot serve on 127.0.0.1: Address already in use\n")
+
+    def test_needs_no_herdr_pane(self):
+        with patch.dict("os.environ", {"HERDR_ENV": ""}), \
+                patch.object(orchestrator, "serve_command", return_value=0) as serve, \
+                patch.object(orchestrator, "connect", side_effect=AssertionError("connect was called")):
+            self.assertEqual(main(["serve", "--origin", TAURI_ORIGIN]), 0)
+        serve.assert_called_once_with([TAURI_ORIGIN])
 
 
 if __name__ == "__main__":

@@ -39,6 +39,7 @@ import difflib
 import fnmatch
 import functools
 import http.client
+import http.server
 import io
 import itertools
 import json
@@ -68,6 +69,7 @@ import urllib.request
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
+from http import HTTPStatus
 from types import SimpleNamespace
 from typing import Any, NamedTuple
 from xml.etree import ElementTree
@@ -1205,6 +1207,12 @@ class ChangedFile(NamedTuple):
     removed: int
 
 
+class RunFile(NamedTuple):
+    """A file in a run directory, as Host.run_files lists it."""
+    path: str  # the run directory's path, a slash and the file's name
+    mtime: int  # when it was last modified, in seconds since the epoch by its host's clock
+
+
 class Host:
     """Runs commands on the machine where the agents run: locally, or over SSH."""
 
@@ -1597,8 +1605,8 @@ class Host:
                 raise OrchestratorError(f"corrupt run state under {cwd}/{RUNS_DIR}: {e}") from e
         return runs
 
-    def run_files(self, run_dir: str) -> list[str]:
-        """The paths of the files in a run directory, oldest first, except state.json and write's temp files."""
+    def run_files(self, run_dir: str) -> list[RunFile]:
+        """The files in a run directory, oldest first, except state.json and write's temp files."""
         # Each entry is "<mtime> <path>" ended by a NUL, which no path holds. stat -c is GNU, stat -f is BSD.
         script = ('for f in "$1"/*; do [ -f "$f" ] || continue; '
                   'case "${f##*/}" in state.json|*.tmp.*) continue;; esac; '
@@ -1614,7 +1622,7 @@ class Host:
                 files.append((int(mtime), path))
             except ValueError as e:
                 raise OrchestratorError(f"listing {run_dir}: stat printed {mtime!r}, not a time") from e
-        return [path for _, path in sorted(files)]
+        return [RunFile(path, mtime) for mtime, path in sorted(files)]
 
 
 # ---------------------------------------------------------------------------
@@ -6563,6 +6571,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                     "is a display")
     gui.add_argument("--smoke-test", action="store_true", help="open the window and close it at once")
 
+    serve = sub.add_parser(
+        "serve", help="serve the runs of any project, read-only, over HTTP on 127.0.0.1, for the desktop app",
+        description="Serve the runs of any project, local or on a saved herdr machine, read-only: the run records "
+                    "list --json prints, each run's files and their contents, and a stream of events as they "
+                    "change. Prints one JSON line, {\"url\": ..., \"token\": ...}, then serves on a free port of "
+                    "127.0.0.1 until SIGINT or SIGTERM, and exits 0. Every request needs the token.")
+    serve.add_argument("--origin", action="append", default=[], metavar="ORIGIN",
+                       help="also answer requests from this origin, such as the desktop app's webview, "
+                            "tauri://localhost; repeatable")
+
     args = p.parse_args(argv)
     check_spec_args(args, run, resume)
     if getattr(args, "pr_state", False) and not args.json:
@@ -6746,7 +6764,7 @@ def show_run(host: Host, cwd: str, ref: str, local_host: str, pid_alive, target:
     print_section("agents", [f"{role:<{width}}  {a.get('kind') or DEFAULT_AGENT:<8}  {a.get('pane', '')}"
                              for role, a in agents.items()])
     print_section("turns", turn_lines(s.get("turns") or []))
-    print_section("files", host.run_files(run_dir))
+    print_section("files", [f.path for f in host.run_files(run_dir)])
     review = last_review(host, run_dir, pipeline, s.get("round", 0)) if pipeline else None
     if review:
         path, text = review
@@ -7246,15 +7264,9 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     state = None
     try:
-        # Workflows are on this machine, so listing them needs no herdr.
-        if args.command == "workflows":
-            workflows_command(args.workflow)
-            return 0
-        if args.command == "gui":
-            return gui_command(args.smoke_test)
-        # The gate judges the tree it runs in: no herdr, no agents.
-        if args.command == "gate":
-            return gate_command(args.base, args.config, args.coverage, args.tests, args.out, args.mutation_budget)
+        exit_code = herdrless_command(args)
+        if exit_code is not None:
+            return exit_code
         herdr, host = connect(args.machine)
         cwd = host.resolve_dir(args.cwd or os.getcwd())
         if args.command in RUNS_COMMANDS:
@@ -7281,6 +7293,23 @@ def main(argv: list[str]) -> int:
         print(f"interrupted; the role agents keep running in herdr{hint}", file=sys.stderr)
         return EXIT_INTERRUPTED
     return finish(verdict, state, pipeline)
+
+
+def herdrless_command(args: argparse.Namespace) -> int | None:
+    """Run args's command if it is one that needs no herdr pane, and return its exit status; None for any other
+    command, which main runs after connect. Raises OrchestratorError as the command does."""
+    # Workflows are on this machine, so listing them needs no herdr.
+    if args.command == "workflows":
+        workflows_command(args.workflow)
+        return 0
+    if args.command == "gui":
+        return gui_command(args.smoke_test)
+    if args.command == "serve":
+        return serve_command(args.origin)
+    # The gate judges the tree it runs in: no herdr, no agents.
+    if args.command == "gate":
+        return gate_command(args.base, args.config, args.coverage, args.tests, args.out, args.mutation_budget)
+    return None
 
 
 # The commands about a project's runs, which start none.
@@ -7613,13 +7642,21 @@ def resume_args(run_id: str, form: RunForm) -> list[str]:
 
 
 def project_runs(machine: str, cwd: str) -> list[tuple[int, dict]]:
-    """The runs `list` shows for the project.
+    """The runs `list` shows for the project."""
+    host, cwd = project_host(machine, cwd)
+    return host.run_states(cwd)
 
-    Without connect's check for a herdr pane, which guards the herdr commands a run sends: listing a
-    local project sends none, so a GUI started from a file manager lists it too.
+
+def project_host(machine: str, cwd: str) -> tuple[Host, str]:
+    """The Host that reaches the project, on the saved herdr machine or, with machine empty, here, and the project's
+    absolute directory on it; cwd may start with ~.
+
+    Without connect's check for a herdr pane, which guards the herdr commands a run sends: reading a project sends
+    none, so a window started from a file manager reads it too. Raises OrchestratorError when the machine is not
+    saved or enabled, or the directory cannot be entered.
     """
     host = Host(Herdr(machine).ssh_target()) if machine else Host()
-    return host.run_states(host.resolve_dir(cwd))
+    return host, host.resolve_dir(cwd)
 
 
 class RunProcess:
@@ -8088,6 +8125,332 @@ def gui_command(smoke_test: bool) -> int:
     if smoke_test:
         root.after(SMOKE_TEST_MS, window.close)
     root.mainloop()
+    return 0
+
+
+
+# ---------------------------------------------------------------------------
+# serve: a project's runs, read-only, over HTTP for the desktop app
+# ---------------------------------------------------------------------------
+
+# How often an event stream reads its project's runs again, in seconds. A read of a local project starts a few short
+# processes; on a --machine, each of them is an SSH round trip.
+SERVE_POLL_SECONDS = 1
+SERVE_REMOTE_POLL_SECONDS = 5
+# The keys of a run record that grow with every read of it while nothing happens; a change in them alone is no event.
+# The client ages heartbeat_age itself from when it got the record.
+AGING_RECORD_KEYS = ("heartbeat_age", "health_reason")
+
+
+class RunPathRefused(OrchestratorError):
+    """A run id or file name given to serve that is not one plain name in the run directory, or names state.json."""
+
+
+class ProjectRuns:
+    """One project's runs and their files, as serve's endpoints give them.
+
+    host reaches the project, whose absolute directory on it is cwd. target is the --machine and --cwd flags as the
+    client gave them (target_args), for the records' resume commands.
+    """
+
+    def __init__(self, host: Host, cwd: str, target: list[str]):
+        self.host = host
+        self.cwd = cwd
+        self.target = target
+
+    @property
+    def remote(self) -> bool:
+        """Whether the project is on another machine, read over SSH."""
+        return bool(self.host.ssh_target)
+
+    def records(self) -> list[dict]:
+        """Each run's run_record, as `list --json` prints them. Raises OrchestratorError when the runs cannot be
+        read."""
+        return [run_record(s, age, socket.gethostname(), pid_alive, self.target)
+                for age, s in self.host.run_states(self.cwd)]
+
+    def files(self, run_id: str) -> list[dict]:
+        """The run's files, oldest first, each {"name", "mtime"} with mtime in seconds since the epoch; [] for a run
+        without a directory. Raises RunPathRefused for a run id that is not a plain name, and OrchestratorError when
+        the directory cannot be listed."""
+        return [{"name": posixpath.basename(f.path), "mtime": f.mtime} for f in self.host.run_files(self._dir(run_id))]
+
+    def read(self, run_id: str, name: str) -> str | None:
+        """The text of the run's file name, None when there is no such file. Raises RunPathRefused, having read
+        nothing, for a run id or name that is not a plain name or for state.json, and OrchestratorError when the file
+        cannot be read."""
+        if name == "state.json":
+            raise RunPathRefused("state.json is not a handoff file")
+        return self.host.read(f"{self._dir(run_id)}/{plain_name(name)}")
+
+    def _dir(self, run_id: str) -> str:
+        return f"{self.cwd}/{RUNS_DIR}/{plain_name(run_id)}"
+
+
+def plain_name(name: str) -> str:
+    """name, if it names an entry of a directory itself: not empty, . or .., and without a slash or NUL. Raises
+    RunPathRefused otherwise."""
+    if name in ("", ".", "..") or "/" in name or "\0" in name:
+        raise RunPathRefused(f"{name!r} is not a name in the run directory")
+    return name
+
+
+class RunWatch:
+    """What one event stream has told its client about a project's runs, and the events that bring it up to date."""
+
+    def __init__(self, project: ProjectRuns):
+        self.project = project
+        # By run id, the run's record without AGING_RECORD_KEYS and its files, as last sent.
+        self._sent: dict[str, tuple[dict, list[dict]]] = {}
+        # The error the last event of kind problem reported; None when there was none, or it cleared.
+        self._problem: str | None = None
+
+    def poll(self) -> list[tuple[str, dict]]:
+        """The events since the last poll, each as (kind, payload):
+
+        - ("record", {"run", "record"}): the run's run_record, for a run that appeared or whose record changed other
+          than in AGING_RECORD_KEYS; record is null for a run whose state.json is gone.
+        - ("files", {"run", "files"}): the run's files, as ProjectRuns.files lists them, when they changed.
+        - ("problem", {"error"}): the project could not be read, and why; error is null once it can be again.
+
+        The first poll sends every run's record and files. A finished or failed run's files are read again only
+        when its record changes: nothing drives it.
+        """
+        try:
+            events = self._changes()
+        except OrchestratorError as e:
+            return self._problem_events(str(e))
+        return self._problem_events(None) + events
+
+    def _changes(self) -> list[tuple[str, dict]]:
+        events = []
+        sent = {}
+        for record in self.project.records():
+            run_id = record["id"]
+            key = {k: v for k, v in record.items() if k not in AGING_RECORD_KEYS}
+            old_key, old_files = self._sent.get(run_id, (None, None))
+            if key != old_key:
+                events.append(("record", {"run": run_id, "record": record}))
+            files = old_files if old_files is not None and key == old_key and record["health"] is None \
+                else self.project.files(run_id)
+            if files != old_files:
+                events.append(("files", {"run": run_id, "files": files}))
+            sent[run_id] = (key, files)
+        events += [("record", {"run": run_id, "record": None}) for run_id in sorted(self._sent.keys() - sent.keys())]
+        self._sent = sent
+        return events
+
+    def _problem_events(self, error: str | None) -> list[tuple[str, dict]]:
+        if error == self._problem:
+            return []
+        self._problem = error
+        return [("problem", {"error": error})]
+
+
+def sse_event(kind: str, payload: dict) -> str:
+    """One Server-Sent Event of the kind, its payload as the one line of JSON in its data field."""
+    return f"event: {kind}\ndata: {json.dumps(payload)}\n\n"
+
+
+class RunServer(http.server.ThreadingHTTPServer):
+    """serve's HTTP server, on a free port of 127.0.0.1, with its token; RunRequestHandler answers its requests.
+
+    origins are the Origin headers besides its own that it answers and allows by CORS: the desktop app's webview.
+    connect gives the Host that reaches a project and the project's absolute directory, from the machine (empty for
+    this one) and directory a request names, as project_host does; each pair is connected once. Raises OSError when
+    no port can be bound.
+    """
+
+    daemon_threads = True  # an event stream never ends by itself, so shutting down cannot wait for it
+
+    def __init__(self, origins: Iterable[str] = (),
+                 connect: Callable[[str, str], tuple[Host, str]] = project_host):
+        super().__init__(("127.0.0.1", 0), RunRequestHandler)
+        port = self.server_address[1]
+        self.url = f"http://127.0.0.1:{port}"
+        self.token = secrets.token_urlsafe(32)
+        # The Host headers a request may carry: anything else came through a name that only resolves here, as a DNS
+        # rebinding page's does.
+        self.hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+        self.origins = {f"http://127.0.0.1:{port}", f"http://localhost:{port}", *origins}
+        # Set when the server shuts down, which ends every event stream.
+        self.stopping = threading.Event()
+        self._connect = connect
+        self._projects: dict[tuple[str, str], ProjectRuns] = {}
+        self._projects_lock = threading.Lock()
+
+    def project(self, machine: str, cwd: str) -> ProjectRuns:
+        """The project in directory cwd, which may start with ~, on the saved herdr machine, or here with machine
+        empty. Raises OrchestratorError when it cannot be reached."""
+        with self._projects_lock:
+            project = self._projects.get((machine, cwd))
+        if project is None:
+            host, path = self._connect(machine, cwd)
+            project = ProjectRuns(host, path, target_args(argparse.Namespace(machine=machine, cwd=cwd)))
+            with self._projects_lock:
+                self._projects[machine, cwd] = project
+        return project
+
+
+class RunRequestHandler(http.server.BaseHTTPRequestHandler):
+    """The endpoints of a RunServer, each a GET of JSON naming the project by ?cwd= and an optional ?machine=:
+
+    - /runs: {"version", "runs"}, as `list --json` prints it.
+    - /files?run=ID: {"run", "files"}, the run's files as ProjectRuns.files lists them.
+    - /file?run=ID&name=NAME: {"run", "name", "text"}; 403 for a name outside the run directory or state.json,
+      404 for no such file.
+    - /events: a text/event-stream of RunWatch's events, polled every SERVE_POLL_SECONDS, every
+      SERVE_REMOTE_POLL_SECONDS for a --machine project, until the client goes or the server stops.
+
+    Every request needs the server's token as an `Authorization: Bearer` header or, for an EventSource, which cannot
+    set one, as ?token=; else 401. A Host header other than the server's own address, or an Origin other than its own
+    or one of its origins, gets 403. 400 is a missing parameter, 502 a project that could not be read, with
+    {"error"}.
+    """
+
+    server: RunServer
+
+    def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+        """Log nothing for a request answered: the app polls every second. Errors are still logged, to standard
+        error."""
+
+    def do_OPTIONS(self) -> None:
+        """Answer a CORS preflight that passes the Host and Origin checks with 204, allowing GET with an
+        Authorization header. A browser sends no Authorization header with a preflight, so there is no token to
+        check."""
+        if self._refused():
+            return
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self._allow_origin()
+        self.send_header("Access-Control-Allow-Methods", "GET")
+        self.send_header("Access-Control-Allow-Headers", "Authorization")
+        self.end_headers()
+
+    def do_GET(self) -> None:
+        """Answer a GET of one of the endpoints, as the class docstring lists them."""
+        url = urllib.parse.urlsplit(self.path)
+        query = dict(urllib.parse.parse_qsl(url.query, keep_blank_values=True))
+        if self._refused():
+            return
+        if not self._has_token(query.get("token", "")):
+            self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "the token is missing or wrong"})
+            return
+        # Each endpoint, with the parameters it needs besides cwd.
+        endpoints = {"/runs": (self._runs, ()), "/files": (self._files, ("run",)),
+                     "/file": (self._file, ("run", "name")), "/events": (self._events, ())}
+        if url.path not in endpoints:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": f"no endpoint {url.path}"})
+            return
+        endpoint, params = endpoints[url.path]
+        if missing := [name for name in ("cwd", *params) if name not in query]:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": f"missing parameter {', '.join(missing)}"})
+            return
+        try:
+            endpoint(self.server.project(query.get("machine", ""), query["cwd"]), query)
+        except RunPathRefused as e:
+            self._send_json(HTTPStatus.FORBIDDEN, {"error": str(e)})
+        except OrchestratorError as e:
+            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(e)})
+
+    def _runs(self, project: ProjectRuns, query: dict[str, str]) -> None:
+        self._send_json(HTTPStatus.OK, {"version": RUN_RECORD_VERSION, "runs": project.records()})
+
+    def _files(self, project: ProjectRuns, query: dict[str, str]) -> None:
+        self._send_json(HTTPStatus.OK, {"run": query["run"], "files": project.files(query["run"])})
+
+    def _file(self, project: ProjectRuns, query: dict[str, str]) -> None:
+        text = project.read(query["run"], query["name"])
+        if text is None:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": f"no file {query['name']} in run {query['run']}"})
+        else:
+            self._send_json(HTTPStatus.OK, {"run": query["run"], "name": query["name"], "text": text})
+
+    def _events(self, project: ProjectRuns, query: dict[str, str]) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self._allow_origin()
+        self.end_headers()
+        watch = RunWatch(project)
+        interval = SERVE_REMOTE_POLL_SECONDS if project.remote else SERVE_POLL_SECONDS
+        while not self.server.stopping.is_set():
+            # A comment when nothing changed, so a client that went away fails the write and ends the stream.
+            chunk = "".join(sse_event(kind, payload) for kind, payload in watch.poll()) or ":\n\n"
+            try:
+                self.wfile.write(chunk.encode())
+                self.wfile.flush()
+            except OSError:
+                return
+            self.server.stopping.wait(interval)
+
+    def _refused(self) -> bool:
+        """Whether the request came through another name than the server's address, or from a foreign origin;
+        answered with 403 if so."""
+        origin = self.headers.get("Origin")
+        if self.headers.get("Host") not in self.server.hosts or (origin is not None and origin not in self.server.origins):
+            self._send_json(HTTPStatus.FORBIDDEN, {"error": "the Host or Origin header is not this server's"})
+            return True
+        return False
+
+    def _has_token(self, query_token: str) -> bool:
+        # As bytes: compare_digest refuses a str with a non-ASCII character, which a client can send in either place.
+        # surrogatepass encodes any str, lone surrogates too.
+        def digest(text: str) -> bytes:
+            return text.encode("utf-8", "surrogatepass")
+
+        token = self.server.token
+        header = self.headers.get("Authorization", "")
+        return (secrets.compare_digest(digest(header), digest(f"Bearer {token}"))
+                or secrets.compare_digest(digest(query_token), digest(token)))
+
+    def _allow_origin(self) -> None:
+        # Only after _refused, so an Origin here is one the server answers.
+        if origin := self.headers.get("Origin"):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+
+    def _send_json(self, code: HTTPStatus, body: dict) -> None:
+        payload = json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        if code != HTTPStatus.FORBIDDEN:
+            self._allow_origin()
+        if code == HTTPStatus.UNAUTHORIZED:
+            self.send_header("WWW-Authenticate", "Bearer")
+        self.end_headers()
+        self.wfile.write(payload)
+
+
+def serve_command(origins: list[str]) -> int:
+    """Start a RunServer that also answers origins, print {"url", "token"} as one JSON line, and serve until SIGINT or
+    SIGTERM; returns 0 then. Returns EXIT_ERROR when no port can be bound, or when the line cannot be printed, as when
+    whoever started serve has stopped reading its standard output: nobody could reach the server then."""
+    try:
+        server = RunServer(origins)
+    except OSError as e:
+        print(f"error: cannot serve on 127.0.0.1: {e}", file=sys.stderr)
+        return EXIT_ERROR
+    stop = threading.Event()
+    previous = {sig: signal.signal(sig, lambda *_: stop.set()) for sig in (signal.SIGINT, signal.SIGTERM)}
+    # Serving before the line is printed: shutdown waits for serve_forever to stop, so it must have started.
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        try:
+            print(json.dumps({"url": server.url, "token": server.token}), flush=True)
+        except OSError as e:
+            print(f"error: cannot print the server's address: {e}", file=sys.stderr)
+            # The line stays in stdout's buffer, and the flush at exit would fail again; see
+            # https://docs.python.org/3/library/signal.html#note-on-sigpipe
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+            return EXIT_ERROR
+        stop.wait()
+    finally:
+        server.stopping.set()
+        server.shutdown()
+        server.server_close()
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
     return 0
 
 

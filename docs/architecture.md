@@ -20,8 +20,9 @@ One standard-library module, in these sections:
 | `CI` | Jenkins's quality job over HTTP, from the orchestrator's machine, one method per call, over an injected `urlopen`. The credentials come from the environment or `ci.env` and go only into the `Authorization` header; `mask` replaces the token in text from Jenkins. `CIError` carries the HTTP status, and `transient` says whether a retry may help. |
 | `RunState` and helpers | `RunState` is `state.json`; it saves `permission_mode` as given and each role's harness in `agent_kinds`, and `from_dict` reads a 0.3.0 state's `agent_args` as its permission mode. `worktree` is a `--worktree` run's worktree, set from the start (`None` in place, as for a state saved before it); `work_dir` is that, or else `cwd`, and is where the agents work and every git step of the run runs, while `cwd` stays the project, which holds the run directory (`dir`) and `.orchestrator/.gitignore`. The pure helpers are `parse_verdict`, `parse_gate`, `spec_title`, `branch_name`, `pr_body` (with `verdict_line`; `commit_note` for the commit message), and for the quality file `changed_lines`, `edited_config` and `quality_report`. |
 | `Workflow` | Drives one run through its `pipeline`. Its collaborators (`herdr`, `host`, `ci`, `notify`, and `clocks`, a `Clocks` of `sleep`, `monotonic` and `wall`) are arguments, which is what lets the tests use fakes. |
-| CLI | `parse_args` (which turns no arguments into `gui` when `gui_by_default` finds a display), `offered_workflows`, `role_models` (with `role_model_arg`), `role_agents` (with `role_agent_arg`), `print_workflows`, `workflow_arg`, `run_health`, `print_runs` (with `run_rows`, `run_outcome` and `run_round`, which format the `run_record` of each run that `list --json` prints, and `fill_pr_states`, which adds `--pr-state`'s pull request states to those records), `find_run`, `resumable_state`, `prune_branches` (with `is_prune_candidate`, `prune_run`, `pull_request_pending`, `prune_remote`, `prune_local` and `record_in_state`, returning a `PrunedRun` per run), which `prune` prints with `print_pruned` and `run` calls first through `sweep_branches`, which logs `sweep_summary`, `close_run` (with `close_run_workspace`, `discard_run_worktree`, `discard_run_branch` and `record_in_state`), and `main` with `runs_command` (`list`, `show`, `prune` and `close`), `workflows_command`, `connect`, `new_state`, `resumed_state` and `finish`. |
+| CLI | `parse_args` (which turns no arguments into `gui` when `gui_by_default` finds a display), `offered_workflows`, `role_models` (with `role_model_arg`), `role_agents` (with `role_agent_arg`), `print_workflows`, `workflow_arg`, `run_health`, `print_runs` (with `run_rows`, `run_outcome` and `run_round`, which format the `run_record` of each run that `list --json` prints, and `fill_pr_states`, which adds `--pr-state`'s pull request states to those records), `find_run`, `resumable_state`, `prune_branches` (with `is_prune_candidate`, `prune_run`, `pull_request_pending`, `prune_remote`, `prune_local` and `record_in_state`, returning a `PrunedRun` per run), which `prune` prints with `print_pruned` and `run` calls first through `sweep_branches`, which logs `sweep_summary`, `close_run` (with `close_run_workspace`, `discard_run_worktree`, `discard_run_branch` and `record_in_state`), and `main` with `herdrless_command` (`workflows`, `gui`, `serve` and `gate`, which need no herdr pane), `runs_command` (`list`, `show`, `prune` and `close`), `workflows_command`, `connect`, `new_state`, `resumed_state` and `finish`. |
 | GUI | `gui_command` and `RunWindow`, a tkinter window over the CLI; see [GUI](#gui). |
+| serve | `serve_command`, `RunServer` with `RunRequestHandler`, `ProjectRuns` and `RunWatch`: a project's runs, read-only over HTTP, for the desktop app in `ui/`; see [serve](#serve). |
 
 ## The phase machine
 
@@ -137,6 +138,67 @@ fakes:
   `connect`'s herdr-pane check, since listing sends no herdr command. It is read on a background thread.
 - Tk is used only from its own thread: `_poll`, every `GUI_POLL_MS`, takes up the output and the listings.
 
+## serve
+
+`serve_command` starts a `RunServer`, a stdlib `ThreadingHTTPServer` on a free port of `127.0.0.1`, prints
+`{"url", "token"}` as one line, and serves from a thread until SIGINT or SIGTERM sets its stop event; it then
+sets `RunServer.stopping`, which ends every event stream, shuts the server down and returns 0. The thread starts
+before the line is printed, because `shutdown` waits for `serve_forever` to stop, so it must have started. A line
+that cannot be printed (the reader of stdout is gone) returns `EXIT_ERROR`, with stdout pointed at `/dev/null` so
+the flush at exit cannot fail again. Like `gui` and
+`gate`, `main` runs it through `herdrless_command`, before `connect`, so it needs no herdr pane. Everything it serves is read-only.
+
+- **Projects.** Each request names its project by `cwd` and an optional `machine`, as the window's fields do.
+  `RunServer.project` connects each pair once through `project_host`, which `project_runs` also uses: the
+  `Host` that reaches the machine, and the directory resolved on it. It keeps them as a `ProjectRuns`, with
+  `target_args` of the pair for the records' resume commands.
+- **Endpoints.** `RunRequestHandler`'s docstring lists them: `/runs` is `list --json`'s document (`run_record` of
+  each of `Host.run_states`), `/files` is `Host.run_files` with each file's mtime, `/file` reads one file
+  through `Host.read`, and `/events` is a `text/event-stream`.
+- **Events.** Each `/events` stream has its own `RunWatch`. It polls `run_states` every `SERVE_POLL_SECONDS`,
+  and for a `--machine` project every `SERVE_REMOTE_POLL_SECONDS`, and compares what it reads with what the stream
+  last sent. A run whose record changed, other than in `AGING_RECORD_KEYS`, gets a `record` event, and one whose
+  files changed a `files` event; a run whose `state.json` is gone gets a `record` event with `null`. The first
+  poll sends every run. An unfinished run's files are read on every poll, a finished or failed run's only when
+  its record changes. A project that cannot be read gives one `problem` event, and another with `null` once it
+  can. A stream with nothing to send writes an SSE comment instead, so a client that has gone is noticed at the
+  next poll.
+- **Security.** Any local user can connect to a port on `127.0.0.1`, and any web page can ask the browser to.
+  So `RunRequestHandler` checks every request, in this order. `_refused` answers 403 to a `Host` header that is
+  not `127.0.0.1:<port>` or `localhost:<port>`, which is how a DNS-rebinding page's requests arrive. It also
+  answers 403 to an `Origin` that is not the server's own or one given with `--origin`. The Tauri shell passes
+  its webview's origin: `tauri://localhost`, or Vite's dev server under `tauri dev`. `_has_token` then wants
+  the token from `secrets.token_urlsafe`, compared in constant time as UTF-8 bytes, since `compare_digest`
+  refuses a non-ASCII `str`. It may come as `Authorization: Bearer` or,
+  for an `EventSource`, which cannot set headers, as `?token=`; without it the answer is 401. A CORS preflight
+  (`OPTIONS`) carries no token, so it gets only the `Host` and `Origin` checks, and a 204 that allows `GET`
+  with `Authorization`. `Access-Control-Allow-Origin` echoes only an origin that passed. `ProjectRuns` lets a
+  run id or file name be only a plain name (`plain_name`: no `/`, not `.` or `..`) and refuses `state.json`.
+  It raises `RunPathRefused` before anything is read, which the handler answers with 403.
+
+## The desktop app: `ui/`
+
+A Vite + React + TypeScript frontend in `ui/src/`, in a Tauri 2 shell in `ui/src-tauri/` (`create-tauri-app`'s
+layout), with no Python of its own.
+
+- **Shell.** `src-tauri/src/lib.rs` starts the sidecar in `setup`: `python3 <orchestrator.py> serve --origin
+  <the webview's origin>`, where the script is `$ORCHESTRATOR_PY` or else the checkout the app was built in.
+  It reads the first line and keeps the URL, the token and the checkout's directory, or why it failed, for the
+  `server` command. It kills the sidecar on `RunEvent::Exit`. The webview's CSP allows connections only to itself,
+  Tauri's IPC and `http://127.0.0.1`.
+- **Frontend.** `api.ts` types the protocol: `RunRecord` mirrors `run_record`, and `Api` builds the URLs and
+  reads `/file`. `hooks.ts`'s `useRunStream` opens the `EventSource` and folds its events into a `RunsState`
+  with `runs.ts`'s `applyEvent`. Every opening starts from no runs, since the server sends every run again.
+  `runs.ts` also holds `progress` (the stages of a run's progress bar, with `quality` after the step it judges)
+  and the wording helpers, which follow `format_age` and `run_round`. A `RunEntry` keeps when its record arrived,
+  so `heartbeatAge` ticks with `useNow` between events. The components are `ProjectBar`, `RunsOverview`,
+  `RunDetail`, `StepProgress` and `HandoffFile`, which renders a file with `react-markdown` and `remark-gfm`,
+  raw HTML skipped, and fetches it again whenever its mtime changes.
+- **Tests.** Vitest with React Testing Library in jsdom: `App.test.tsx` replays `test/recorded-stream.json`
+  through `test/fakes.ts`'s `FakeEventSource`, with `fetch` stubbed. The recording is the events a real
+  `serve` sent over a scripted run. `runs.test.ts` covers the pure helpers. `cargo test` in `src-tauri/` starts
+  and stops a real sidecar.
+
 ## Tests
 
 `tests/test_orchestrator.py` runs `Workflow` on in-memory fakes: `FakeHost` (filesystem and git, played one git
@@ -151,12 +213,18 @@ compares the default's prompts with those recorded from commit `d6bb100`, except
 on `FakeHerdr`, which records each agent's kind in `kinds` and finds a resumed session by its harness's syntax; `gated` and `resume_gated` build a run with the gate
 on a `FakeCI`. `TestHostGit` and `TestHostSnapshot` run on real git in a temporary directory. `TestRunWindow`
 and `TestGuiCommand` drive the GUI on fakes of the tkinter modules (`fake_ui`, `fake_tkinter`, with `FakeRoot`
-running `after` callbacks on `tick`), and `TestRunProcess` runs real child processes.
+running `after` callbacks on `tick`), and `TestRunProcess` runs real child processes. `TestServeEndpoints`,
+`TestServeSecurity` and `TestServeEventsOnAMachine` run a real `RunServer` on a free port over `ServeHost`, a
+`FakeHost` with run files. `TestServeEvents` runs one over real temporary directories, read with `urllib`.
+`TestRunWatch` covers the polling on its own, and `TestServeCommand` runs `serve` as a process of its own.
 
 ## Tooling
 
 - `pyproject.toml`: no runtime dependencies, Python 3.13+; pytest and pytest-cov in the `dev` group, PyInstaller
   in the `build` group.
+- `ui/package.json`: the desktop app's npm scripts, `dev`, `build`, `test`, `typecheck`, `lint` and `tauri`. Its
+  `.npmrc` sets `legacy-peer-deps`, because npm 9.2 as Debian ships it cannot resolve Vitest's optional peers.
+  Neither Jenkins nor the macOS Action builds or tests `ui/` yet.
 - `packaging/build-binary.sh`: builds `dist/orchestrator-<os>-<arch>` (`linux-x86_64`, `macos-arm64`), a
   PyInstaller one-file binary with Python and tkinter inside, and its `.sha256`, then smoke-tests it: `--help`,
   `workflows` lists `default`, and `gui --smoke-test` where there is a display. On Linux it builds with the
