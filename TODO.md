@@ -5,6 +5,74 @@ was done.
 
 ## Open issues
 
+- **The secret scan does not look inside a file git takes for binary.** With no attributes, git still calls a file
+  binary when its first 8000 bytes hold a NUL, and `git log -p` prints "Binary files ... differ" for it, to gitleaks
+  and to `Host._allow_comments` alike, so a secret or a `gitleaks:allow` in such a file is pushed unscanned. gitleaks'
+  own `git` mode has the same blind spot. Raised by the cross-review of `push-secret-scan` (F15, 2026-10-24). Closes
+  with a decision in the spec whether binary content is in scope, and, if it is, a `--text` diff or a scan of the
+  blobs themselves (`gitleaks dir` over the pushed files).
+- **A base `.gitleaks.toml` that extends another file reads that file from outside the base.** `scan_unpublished`
+  writes the base's `.gitleaks.toml` into the run directory and passes it with `--config`; an `[extend] path = ...`
+  in it is resolved by gitleaks against its working directory, not against the base, so a file the change can edit
+  may supply rules. Raised by the cross-review of `push-secret-scan` (F6, 2026-10-24): "a base config using
+  `[extend] path = ...` resolves that path outside base (process cwd), which the change may control". Closes by
+  writing each extended file from the base beside the config and rewriting the path, or refusing such a config.
+- **A process a test leaves holding pytest's output keeps a finished run waiting until its timeout.** `_pytest`'s
+  `communicate` reads to the end of pytest's output, so a server a test started that inherits it keeps a run that has
+  finished going until the timeout, reported then as `budget-reached` (passes-at-base) or `not-rerun` (flaky-tests).
+  It was so before `_pytest` ran pytest in its own session. Raised by the cross-review of `passes-at-base` (round 2,
+  2026-10-24). Closes when `_pytest` waits for pytest itself, then kills its group and reads what is buffered.
+- **`_pytest` and `_run_mutmut` copy one stop-and-kill sequence.** Both start their tool in a session of its own,
+  kill its process group on a timeout and in `finally`, and read what is left with `_abandon`; the copies had already
+  drifted in which errors `killpg` may raise. Raised by the same review. Closes with one helper that runs a command in
+  its own session and stops it, which both use, mutmut's SIGINT grace an option of it.
+- **`vague-names` does not split CamelCase.** `vague_names` matches a whole name or its last `_`-separated word,
+  so `user_data` is found but a class `InfoManager` or `UserData` is not. Closes, if the run metrics show such names
+  recur, with the last CamelCase word matched too.
+- **Nine test classes copy the same git-repository fixture.** `TestFlakyTests`, `TestPassesAtBase`, `TestVagueNames`,
+  `TestTooComplexFunctions` and five more each define a `setUp` that makes a repository, configures it and commits a
+  base, most with the same `git` and `put` helpers; eight of the copies bind the vague `value` that `vague-names` now
+  reports on added lines, and `TestVagueNames`' binds `setting`. Raised again by the cross-review of `written-rules`
+  (F8, 2026-10-24). Closes with one mixin or base class those tests share.
+- **`vague-names` reports a name an undecorated override cannot change.** A `def handle(self)` in a
+  `socketserver.BaseRequestHandler` subclass, or a parameter the overridden signature names, has no fix; only a
+  method marked `@override` is skipped (`_bound_names`). Raised by the cross-review of `written-rules` (F6,
+  2026-10-24): "names fixed by a parent class or framework are reported, though they cannot be renamed". Closes, if
+  the run metrics show it is common, with methods whose class has a base from outside the repository left out.
+- **`passes-at-base` reads every changed test as passing in a project installed into the gate's interpreter.**
+  `_base_run_findings` runs pytest in the gate's interpreter, so the base's code is whatever the copy's
+  configuration puts on `sys.path` (`pythonpath = ["."]` here). An editable install, as a `src/` layout under
+  `uv sync` has, resolves the package to the working tree first, so the base run tests the change and every changed
+  test is reported. This repository is not installed (no `[build-system]`), so it is unaffected. Closes when the run
+  at the base puts the copy's own package directories before site-packages, or names such a project as one it cannot
+  judge.
+- **A test file that cannot be imported at the base hides all its changed tests from `passes-at-base`.** A
+  module-level import of something the change adds makes pytest's collection of the whole file fail at the base,
+  which `_collect_at_base` takes as the expected outcome for every changed test in it, including ones that would pass
+  there. Accepted: the check reports only, and splitting the file's tests from its imports would mean rewriting
+  them. Closes, if its run metrics show these files are common, by importing such names inside the tests that use
+  them, or by running each test with the failing import stubbed.
+- **A `conftest.py` that fails at the base other than by `ImportError` makes `passes-at-base` not-run.** One that
+  reaches a name the change adds by attribute (`import calc; calc.TWO`, an `AttributeError`) stops pytest with exit 4
+  as an `ImportError` does, but `_conftest_import_failed` accepts only `ImportError` and `ModuleNotFoundError`, so
+  the whole check is `not-run`, where a test file failing the same way gives nothing. Loud, not wrong. Raised by the
+  cross-review of `passes-at-base` (round 3, 2026-10-24). Closes by telling a conftest.py the change edits from one
+  it does not, and taking any failure of the first as the expected outcome.
+- **The fallback collection runs one pytest per changed test file.** When a `conftest.py` cannot be imported at the
+  base, `_collect_at_base` collects each changed file on its own, each paying pytest's start-up from the shared
+  budget, and a failing root `conftest.py` makes every file repeat the failure. Raised by the same review. Closes by
+  reading the failing conftest's path from pytest's output and leaving out only the files under it, in one more run.
+- **A submodule is empty in `passes-at-base`'s copy of the base.** `git archive` leaves a submodule's directory
+  empty, so a changed test that imports from one fails to import at the base and gives nothing, though it might pass
+  there; the check misses it. Raised by the cross-review of `passes-at-base` (R1-5, 2026-10-24): "`git archive` omits
+  submodule contents, so a test that imports from a submodule fails import at the base and is silently 'nothing'".
+  Closes when `_copy_base_with_tests` checks out each submodule at the commit the base records for it.
+- **Three gate checks repeat the make-a-scratch-directory, run, remove-it skeleton.** `flaky_tests`,
+  `_mutation_test` and `passes_at_base` each call `tempfile.mkdtemp`, word their own finding when it fails, and word
+  another when `shutil.rmtree` fails (`not-removed` twice, `cleanup` once). The cross-review of `passes-at-base`
+  (R1-8, 2026-10-24) raised it as "a third copy of the scratch-directory skeleton ... with reworded messages". Closes
+  with one helper that takes the check's rule and what it was doing, and the three findings worded one way, with the
+  flaky-tests and surviving-mutants tests that quote today's wording.
 - **A test file whose name is not UTF-8 is never rerun by `flaky-tests`.** pytest-randomly 5.0.0 hashes each node
   id as strict UTF-8 (`pytest_randomly._crc32`, called from `pytest_runtest_setup` and its neighbours) and stops
   with an internal error, exit status 3. `_pytest` already lets pytest print such an id

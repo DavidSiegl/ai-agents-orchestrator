@@ -23,3 +23,6 @@ ui/node_modules/
 ui/dist/
 ui/src-tauri/target/
 ui/src-tauri/gen/
+
+# What Hypothesis keeps of the examples it tried
+.hypothesis/

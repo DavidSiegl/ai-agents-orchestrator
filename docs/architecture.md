@@ -220,7 +220,7 @@ running `after` callbacks on `tick`), and `TestRunProcess` runs real child proce
 
 ## Tooling
 
-- `pyproject.toml`: no runtime dependencies, Python 3.13+; pytest and pytest-cov in the `dev` group, PyInstaller
+- `pyproject.toml`: no runtime dependencies, Python 3.13+; pytest, pytest-cov and Hypothesis in the `dev` group, PyInstaller
   in the `build` group.
 - `ui/package.json`: the desktop app's npm scripts, `dev`, `build`, `test`, `typecheck`, `lint` and `tauri`. Its
   `.npmrc` sets `legacy-peer-deps`, because npm 9.2 as Debian ships it cannot resolve Vitest's optional peers.

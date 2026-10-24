@@ -27,6 +27,15 @@ listed and never held against the change, so the gate judges the change rather t
 | shellcheck | `*.sh` | its defaults |
 | actionlint | `.github/workflows/*.yml` | its defaults |
 
+ruff's rules include the coding rules the agents are given as prose that a linter can apply, so that every harness
+gets them, every time: a docstring on every public module, class, method and function (`D100`-`D104`, `D106`,
+presence only, since the repository's docstrings are prose rather than a convention; `tests/**` is exempt). A blind
+`except Exception` (`BLE001`) is in ruff 0.17's default rules, which `extend-select` adds to and a `select` would
+drop; an `except` that does nothing (`S110`, `S112`) and `subprocess.run` without `check` (`PLW1510`) were already
+selected. `D105` and `D107` are not, since they fire on nearly all of `main`: its one magic method, and 8 of its 10
+`__init__`s, each documented by its class's docstring. Which rule to mechanize next is a question for the run
+metrics: the findings that recur.
+
 ruff, mypy and pymarkdownlnt are in uv's `dev` group, so `uv run` puts them on `PATH`; shellcheck and actionlint
 come from the Jenkins agent image. The orchestrator itself stays stdlib-only: the gate runs them as processes.
 
@@ -47,6 +56,8 @@ moved out of it counts as added. The linters and the build configuration listing
 | `cognitive-complexity` | yes | functions the change edits or adds that it takes over a cognitive complexity of 15 |
 | `flaky-tests` | no | tests the change adds or edits that pass in one order and fail in another |
 | `surviving-mutants` | no | changes to the functions the change edits that no test notices |
+| `passes-at-base` | no | tests the change adds or edits that pass without the rest of the change |
+| `vague-names` | no | names the change binds that fit anything, such as `data` or `raw_info` |
 
 **Test integrity** compares each test file the change touches, outside `mutants/` as above, with its base, so a
 change cannot pass by weakening its tests. Each of these is a finding:
@@ -197,13 +208,57 @@ puts the mutated code. Its runs get the configuration flaky-tests' reruns get, w
 `--mutation-budget SECONDS`, 600 by default, bounds mutmut's run. Stopping it takes at most 15 seconds more: SIGINT,
 10 seconds to exit, a kill of its process group, and 5 seconds to read what it printed. Listing its results and showing
 the survivors then take at most 60 seconds, each call's stop included. So the check takes at most the budget and 75
-seconds, and the few it takes to copy the tree. With the flaky-tests check's three minutes and the test run, a quality
-build stays inside the orchestrator's `QUALITY_TIMEOUT` of 1200 seconds.
+seconds, and the few it takes to copy the tree. With the flaky-tests check's three minutes, passes-at-base's two and
+the test run, a quality build stays inside the orchestrator's `QUALITY_TIMEOUT` of 1200 seconds when Jenkins starts
+it without a wait in the queue.
 
 This repository's table keeps mutmut off argparse's help texts, which no test reads word for word:
 `do_not_mutate_patterns = ['\bhelp=']`. mutmut matches each pattern against each source line and skips every expression
 that starts on a matching line, with all it holds, so a help text's later lines are skipped too, and so is a whole
 `add_argument(...)` call that starts on its `help=` line. A change to a help text alone makes no mutant.
+
+**Passes at base** runs the tests the change adds or edits, picked as flaky-tests picks them, against the base's code,
+since a test that passes without the change cannot be what shows the change works: coverage counts the lines it runs,
+surviving-mutants sees only the functions the change edits, and test integrity only tests getting weaker. For a bug
+fix, a test that fails at the base is the proof the bug was reproduced. The check runs only when the change edits
+Python source outside the tests: a `.py` file, or a script whose `#!` names python, that is not a test file (as for
+test integrity), a `conftest.py` or under a `tests` directory. A change to the tests alone, or to the tests and the
+docs, has no "without the change" a test could see. The base is the files git tracked at `--base`, as `git archive`
+writes them, with every one of the change's files that belong with the tests (those three kinds) taken from the
+working tree, or removed where the change removed it, so the changed tests keep their fixtures and data. A submodule is
+an empty directory there. pytest, in the gate's interpreter, with the configuration flaky-tests' reruns get and the
+copy's own `TMPDIR`, first collects the changed test files with `--continue-on-collection-errors`, then runs those of
+the changed tests it collected:
+
+- `passes-at-base`: a test that passed at the base, each of its parameter sets that pytest did not skip included, at
+  its `def`. A test that fails or errors there tests the change and gives nothing; so does one pytest does not collect
+  there: a test whose file cannot be imported at the base, or whose `conftest.py` raises `ImportError` there,
+  typically because it imports what the change adds (such a `conftest.py` hides only the tests under it), and a
+  `test_*` method of a class pytest does not take for a test class. A refactor that keeps behaviour gives these
+  findings rightly: the Builder says it is one, and the Reviewer judges;
+- `budget-reached`: `--base-run-budget SECONDS`, 120 by default, shared by the collection and the run, ran out; the
+  finding says when, and how many of its test cases the run had run. pytest runs in a session of its own, and is
+  killed with every process it started;
+- `not-run`: pytest could not start, stopped before it collected (as for a plugin a `conftest.py` names that cannot be
+  imported), stopped with a usage error other than a `conftest.py`'s `ImportError` (such as one whose `AttributeError`
+  reaches for what the change adds; see `TODO.md`), or wrote no readable report; a changed test file could not be
+  read or parsed; or the copy could not be made;
+- `not-removed`: the copy could not be removed afterwards; the findings stand.
+
+The base's code is what the copy's configuration, such as `[tool.pytest.ini_options] pythonpath`, puts on the path. A
+project installed into the gate's interpreter, as an editable install of a `src/` layout is, imports the working tree's
+code instead, and every changed test then passes at the base (see `TODO.md`).
+
+**Vague names** lists the names a change binds that tell a reader nothing about what they hold: `data`, `info`,
+`value`, `status`, `handle` and `manager` (`VAGUE_NAME_WORDS`), or a name ending in one after an underscore, such as
+`raw_info`, in any case. A name counts where a line the change adds binds it: an assignment to a name or to an
+attribute of `self` or `cls`, a parameter, a `def` or `class`, a `for` or comprehension target, a `with`'s or an
+`except`'s `as`, an import, a `match` pattern's capture, or a type parameter. Each is a `vague-name` finding once per
+file, at its first such line; a binding on a line the change did not add is never reported, though an added line
+binding the same name is. A function marked `@override` (PEP 698) is skipped, name and parameters, since its base
+class fixes them; an override without the mark is reported (see `TODO.md`).
+`result` is not on the list, since the rules allow it for what a function returns. A changed file that cannot be read
+or parsed is a `not-read` finding.
 
 The gate is `GATE: ERROR` when any of these holds, and `GATE: OK` otherwise:
 
@@ -290,6 +345,8 @@ Only lines a change adds count, so what `main` already has does not block.
 
 One `Jenkinsfile` serves two jobs. Every build installs, tests with branch coverage of `orchestrator`, runs the
 gate and archives `quality.md`, and builds the Linux binary; a build of `main` that gets that far also releases.
+A build of `main` whose tree a pull request build already judged skips the tests and the gate (see
+[A build of main judged at its pull request](#a-build-of-main-judged-at-its-pull-request)).
 
 ### What Jenkins needs
 
@@ -305,14 +362,17 @@ gate and archives `quality.md`, and builds the Linux binary; a build of `main` t
 - **`gh` on the agent, and a GitHub token** for the Release stage: a Secret text credential with the ID
   `GitHub-Agents`, holding a token with *Contents: read and write* on this repository. It is the agents' own
   `gh` token, so when that is rotated the credential must be too, or every build of `main` fails at Release.
-  Only builds of `main` use it.
-- **A checkout credential of the same token**: GitHub Branch Source and Git need a Username with password
-  credential, so both jobs check out with `GitHub-Agents-scm` (username and the agents' token as password).
-  Jenkins also reports each pull request's `continuous-integration/jenkins/pr-head` status with it, so the
-  token needs *Commit statuses: read and write* - without it the build passes and the required check waits
-  forever, the log saying `Could not update commit status ... 403`. The agents can therefore post that
-  status themselves too: the required check shows that a status was set, not that Jenkins set it.
-  Keep both credentials in this folder's own store, not the global one: any build can bind any credential it
+  Only builds of `main` use it, for Release and to read pull request statuses.
+- **A GitHub App of Jenkins's own, as the checkout credential**: both jobs check out with `GitHub-Agents-scm`,
+  a GitHub Branch Source *GitHub App* credential, and Jenkins reports each pull request's
+  `continuous-integration/jenkins/pr-head` status with it. The App needs *Contents: read*, *Pull requests:
+  read* and *Commit statuses: read and write* on this repository - without the last the build passes and the
+  required check waits forever, the log saying `Could not update commit status ... 403`. Its login,
+  `<app-slug>[bot]`, is `PR_STATUS_CREATOR` in the `Jenkinsfile`, and the ruleset on `main` requires the
+  `pr-head` check from that App, not from any source. The agents' token cannot post as the App, so a green
+  required check, and the status a build of `main` trusts, show that Jenkins set it. With the agents' token as
+  the checkout credential instead, as before, the agents could post that status themselves.
+  Keep the credentials in this folder's own store, not the global one: any build can bind any credential it
   can see by ID, and a pushed branch's `Jenkinsfile` is a build.
 
 ### The two jobs
@@ -339,11 +399,27 @@ empty `GIT_REF`, before it accepts `buildWithParameters`.
 |---|---|---|
 | Quality build (`GIT_REF` set) | `HEAD^`: the snapshot's only parent is the run's base | `main`'s `orchestrator.py` and `pyproject.toml`, from `origin/main` |
 | Pull request (`CHANGE_TARGET` set) | the merge base with the target branch, fetched first | its own: a human reviews the pull request, `Jenkinsfile` included |
-| `main` | the last successful build's commit, else `HEAD^1` | its own |
+| `main` | the last successful build's commit, else `HEAD^1` | its own; none when judged at its pull request (below) |
 
 The repository is public, so the stage fetches `main` or the target branch without credentials. `GIT_REF` and
 the base reach the shell as environment variables, never as Groovy-built shell code, and `GIT_REF` is otherwise
 interpolated only into the checkout's branch spec.
+
+### A build of main judged at its pull request
+
+A merge whose branch was up to date with `main` leaves `main` with the tree its pull request build judged: the
+same code, tests, `Jenkinsfile`, gate and rules. The "Judged at PR" stage runs `ci/judged-at-pr.sh`, and when it
+finds that build, `main`'s build skips Test and Gate, archives no `quality.md`, and goes on to Package and
+Release. The script's header says what counts as judged; in short, a `pr-head` success that Jenkins's App posted
+on a commit with `HEAD`'s tree that contains `HEAD^1`, with `HEAD^1` built successfully as `main`. A commit
+that was never built as `main`, such as one of several a rebase merge adds, or one after a failed build of
+`main`, is judged in full, so the lines of a failed build are never let through by a later skip. So is every
+merge whose branch was behind `main`: its merged tree was never built.
+
+A status counts only from Jenkins's own GitHub identity because anything a pull request build writes, an archived
+file included, comes from code the agents control: the `Jenkinsfile` and tests of every commit pushed to the
+pull request run unreviewed. Only the status Jenkins itself posts for a commit says that this commit's build,
+with this commit's `Jenkinsfile`, passed.
 
 ### What each kind of build reports
 
@@ -384,9 +460,12 @@ JENKINS_TOKEN=…
 ```
 
 The orchestrator reads the file itself, on `run` and `resume`, so no wrapper is needed. Comments, blank lines,
-quotes and `export ` are allowed, so the same file can also be sourced by a shell. A variable set in the
-environment wins over the file, and the file is read only when one is missing. The orchestrator refuses a file
-that others may read.
+a comment after a value, and an `export` before a name are allowed, so the same file can also be sourced by a
+shell, and it means the same to both. A value is quoted, or unquoted without blanks, quotes or shell syntax; a
+line that sh would read otherwise is refused, and so is a file with Windows line ends, since sh would keep each
+carriage return in its value.
+A variable set in the environment wins over the file, and the file is read only when one is missing. The
+orchestrator refuses a file that others may read.
 
 Never export them from `~/.bashrc` or a direnv `.envrc`: every agent's shell would have them. Values from the
 file stay inside the orchestrator process and are never put into its environment.
