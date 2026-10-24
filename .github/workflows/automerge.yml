@@ -1,0 +1,43 @@
+# Turns on auto-merge for a pull request from a branch of this repository, so GitHub merges it with a merge commit
+# once the ci-cd ruleset's required check, Jenkins' continuous-integration/jenkins/pr-head, passes. It never merges
+# by itself. Left for a human to merge: drafts until they are marked ready, the orchestrator's own pull requests
+# (branches under BRANCH_PREFIX, orchestrator/), pull requests from forks, and any labelled no-automerge; adding
+# that label later turns auto-merge off again.
+name: Auto-merge
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, labeled]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  enable:
+    if: >-
+      github.event.action != 'labeled'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && !github.event.pull_request.draft
+      && !startsWith(github.event.pull_request.head.ref, 'orchestrator/')
+      && !contains(github.event.pull_request.labels.*.name, 'no-automerge')
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: gh pr merge "$PR" --auto --merge
+
+  disable:
+    if: >-
+      github.event.action == 'labeled'
+      && github.event.label.name == 'no-automerge'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: gh pr merge "$PR" --disable-auto
