@@ -6567,6 +6567,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     check_spec_args(args, run, resume)
     if getattr(args, "pr_state", False) and not args.json:
         listing.error("--pr-state needs --json")
+    check_flag_values(args, p)
+    return args
+
+
+def check_flag_values(args: argparse.Namespace, p: argparse.ArgumentParser) -> None:
+    """Exit with a usage error from p, the top-level parser, for flag values that argparse's types cannot rule out:
+    --machine without --cwd, a --max-rounds, --mutation-budget or --max-quality-rounds below 1, a run given
+    --max-quality-rounds without --quality-gate, and a --quality-gate that is not a Jenkins job's full name. args are
+    any command's; a flag its command does not take is not checked."""
     if getattr(args, "machine", None) and not args.cwd:
         p.error("--cwd is required with --machine")
     if getattr(args, "max_rounds", None) is not None and args.max_rounds < 1:
@@ -6580,7 +6589,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             p.error("--max-quality-rounds needs --quality-gate")
     if getattr(args, "quality_gate", None) is not None and not re.fullmatch(r"[^/]+(/[^/]+)*", args.quality_gate):
         p.error("--quality-gate takes a Jenkins job's full name, such as folder/job")
-    return args
 
 
 def check_spec_args(args: argparse.Namespace, run: argparse.ArgumentParser,
