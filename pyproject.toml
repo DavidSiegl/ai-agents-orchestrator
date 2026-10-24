@@ -32,7 +32,10 @@ dev = [
 # The defaults, plus bugbear, simplifications, pyupgrade, bandit's security checks, complexity and pylint's errors
 # and warnings, and W505 for comments and docstrings. No E501: code wraps at 120 by eye, since breaking a long
 # expression can read worse than leaving it; a line of prose never does.
-extend-select = ["B", "SIM", "UP", "S", "C90", "PLE", "PLW", "W505"]
+# Then the coding rules the agents are given that a linter can apply (docs/quality-gate.md): a docstring on every public
+# module, class, method and function, presence only. Not D105 or D107: a magic method says what it does by its name,
+# and the class's docstring documents its __init__, as nearly all of main does.
+extend-select = ["B", "SIM", "UP", "S", "C90", "PLE", "PLW", "W505", "D100", "D101", "D102", "D103", "D104", "D106"]
 
 [tool.ruff.lint.pycodestyle]
 max-doc-length = 120
@@ -42,8 +45,8 @@ max-complexity = 15
 
 [tool.ruff.lint.per-file-ignores]
 # assert is how pytest checks; the tokens and /tmp paths are fakes; unused unpacked fixtures, dict() calls, class-level
-# fake data and the size of the fake servers are how the tests read best.
-"tests/**" = ["S101", "S105", "S106", "S108", "RUF059", "RUF012", "C408", "C901"]
+# fake data and the size of the fake servers are how the tests read best; a test documents itself by its name.
+"tests/**" = ["S101", "S105", "S106", "S108", "RUF059", "RUF012", "C408", "C901", "D1"]
 
 [tool.mypy]
 # The tests are untyped by design; the orchestrator is the typed surface.

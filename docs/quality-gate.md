@@ -27,6 +27,14 @@ listed and never held against the change, so the gate judges the change rather t
 | shellcheck | `*.sh` | its defaults |
 | actionlint | `.github/workflows/*.yml` | its defaults |
 
+ruff's rules include the coding rules the agents are given as prose that a linter can apply, so that every harness
+gets them, every time: a docstring on every public module, class, method and function (`D100`-`D104`, `D106`,
+presence only, since the repository's docstrings are prose rather than a convention; `tests/**` is exempt). A blind
+`except Exception` (`BLE001`) is in ruff 0.17's default rules, to which `extend-select` adds; an `except` that does
+nothing (`S110`, `S112`) and `subprocess.run` without `check` (`PLW1510`) were already selected. `D105` and `D107` are not: a magic method says what it does by its name,
+and a class's docstring documents its `__init__`, as it does for nearly every class on `main`. Which rule to
+mechanize next is a question for the run metrics: the findings that recur.
+
 ruff, mypy and pymarkdownlnt are in uv's `dev` group, so `uv run` puts them on `PATH`; shellcheck and actionlint
 come from the Jenkins agent image. The orchestrator itself stays stdlib-only: the gate runs them as processes.
 
@@ -48,6 +56,7 @@ moved out of it counts as added. The linters and the build configuration listing
 | `flaky-tests` | no | tests the change adds or edits that pass in one order and fail in another |
 | `surviving-mutants` | no | changes to the functions the change edits that no test notices |
 | `passes-at-base` | no | tests the change adds or edits that pass without the rest of the change |
+| `vague-names` | no | names the change binds that fit anything, such as `data` or `user_info` |
 
 **Test integrity** compares each test file the change touches, outside `mutants/` as above, with its base, so a
 change cannot pass by weakening its tests. Each of these is a finding:
@@ -238,6 +247,14 @@ the changed tests it collected:
 The base's code is what the copy's configuration, such as `[tool.pytest.ini_options] pythonpath`, puts on the path. A
 project installed into the gate's interpreter, as an editable install of a `src/` layout is, imports the working tree's
 code instead, and every changed test then passes at the base (see `TODO.md`).
+
+**Vague names** lists the names a change binds that tell a reader nothing about what they hold: `data`, `info`,
+`value`, `status`, `handle` and `manager` (`VAGUE_NAME_WORDS`), or a name ending in one after an underscore, such as
+`raw_info`, in any case. A name counts where a line the change adds binds it: an assignment to a name or to an
+attribute of `self` or `cls`, a parameter, a `def` or `class`, a `for` or comprehension target, or a `with`'s `as`.
+Each is a `vague-name` finding once per file, at its first such line; a name already on an unchanged line is not.
+`result` is not on the list, since the rules allow it for what a function returns. A changed file that cannot be read
+or parsed is a `not-read` finding.
 
 The gate is `GATE: ERROR` when any of these holds, and `GATE: OK` otherwise:
 

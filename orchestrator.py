@@ -4492,17 +4492,22 @@ def _is_python_source(change: GateChange, path: str) -> bool:
 
 
 def _working_functions(change: GateChange, path: str) -> tuple[list[_ScoredFunction] | None, str]:
-    """The scored functions of the working tree's file at path, and ""; or None and why there are none, a clause:
-    it could not be read, or does not parse as Python."""
+    """The scored functions of the working tree's file at path, and ""; or None and why there are none, as
+    _parse_working_file says."""
+    tree, why = _parse_working_file(change, path)
+    return (None, why) if tree is None else (_scored_functions(tree), "")
+
+
+def _parse_working_file(change: GateChange, path: str) -> tuple[ast.Module | None, str]:
+    """The syntax tree of the working tree's file at path, read as Python reads it, by its byte order mark or coding
+    cookie, and ""; or None and why there is none, a clause: it could not be read, or does not parse as Python."""
     try:
         with open(os.path.join(change.root, path), "rb") as source:
             text, _ = _decode_python(source.read())
     except (OSError, SyntaxError) as e:
         return None, f"could not be read ({e})"
     tree = _parse_python(text)
-    if tree is None:
-        return None, "does not parse as Python"
-    return _scored_functions(tree), ""
+    return (None, "does not parse as Python") if tree is None else (tree, "")
 
 
 def _base_functions(change: GateChange, path: str) -> list[_ScoredFunction]:
@@ -4661,6 +4666,53 @@ def _calls_itself(function: ast.FunctionDef | ast.AsyncFunctionDef, cls: str | N
     return False
 
 
+# Vague names: names that fit anything, which tell a reader nothing about what they hold.
+
+# The words the coding rules the agents are given ("Names" in the user's ~/.claude/CLAUDE.md) forbid as names that fit
+# anything; vague_names finds a name that is one, or ends in one after an underscore, in any case. "result" is not
+# here: the rules allow it for what a function returns, and telling that use from the others needs more than ast.
+VAGUE_NAME_WORDS = frozenset({"data", "info", "value", "status", "handle", "manager"})
+
+
+def vague_names(change: GateChange) -> list[dict]:
+    """The vague-names check's find: each name that a line the change added to a Python file binds and that
+    VAGUE_NAME_WORDS forbids, once per name and file, at the first such line. A name is bound by an assignment
+    (augmented, annotated or :=, to a name or to an attribute of self or cls), as a parameter, a def or class, a for or
+    comprehension target, or a with's as. A changed file that cannot be read or parsed is a finding saying so; files
+    under mutmut's state are not changed files, as GateChange.from_tree says."""
+    out = []
+    for path, added in change.changed.items():
+        if not added or not path.endswith(".py") or _is_link_or_special(change, path):
+            continue
+        tree, why = _parse_working_file(change, path)
+        if tree is None:
+            out.append(_finding(path, None, "not-read", f"{why}, so its names were not read."))
+            continue
+        # Each vague name's first binding on an added line, as (line, column).
+        first: dict[str, tuple[int, int]] = {}
+        for name, at in _bound_names(tree):
+            if at[0] in added and name.lower().rpartition("_")[2] in VAGUE_NAME_WORDS:
+                first[name] = min(first.get(name, at), at)
+        out += [_finding(path, line, "vague-name", f"`{name}` could name anything; name it for what it holds.")
+                for name, (line, _) in sorted(first.items(), key=lambda item: item[1])]
+    return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
+
+
+def _bound_names(tree: ast.Module) -> Iterator[tuple[str, tuple[int, int]]]:
+    """Each name tree binds, as vague_names lists the ways, with where: the line, from 1, and the column, from 0, of
+    what binds it, such as its def."""
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            yield node.name, (node.lineno, node.col_offset)
+        elif isinstance(node, ast.arg):
+            yield node.arg, (node.lineno, node.col_offset)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            yield node.id, (node.lineno, node.col_offset)
+        elif (isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store) and isinstance(node.value, ast.Name)
+              and node.value.id in ("self", "cls")):
+            yield node.attr, (node.lineno, node.col_offset)
+
+
 def gate_checks(mutation_budget: float = MUTATION_BUDGET,
                 base_run_budget: float = BASE_RUN_BUDGET) -> tuple[GateCheck, ...]:
     """The checks judge_change runs after the linters, in this order, the surviving-mutants check letting mutmut run
@@ -4671,6 +4723,7 @@ def gate_checks(mutation_budget: float = MUTATION_BUDGET,
         GateCheck("flaky-tests", fails=False, find=flaky_tests),
         GateCheck("surviving-mutants", fails=False, find=functools.partial(surviving_mutants, budget=mutation_budget)),
         GateCheck("passes-at-base", fails=False, find=functools.partial(passes_at_base, budget=base_run_budget)),
+        GateCheck("vague-names", fails=False, find=vague_names),
     )
 
 
