@@ -402,10 +402,10 @@ QUALITY_UNRESOLVED_NOTE = """\
 The quality gate still did not pass after the Builder's last quality round; \
 its unresolved findings are in {quality_path}. Weigh them as you would your own."""
 
-# QUALITY_UNRESOLVED_NOTE for a quality loop that stopped because a round failed on what the one before it had.
+# QUALITY_UNRESOLVED_NOTE for a quality loop that stopped because a round failed on just what the one before it had.
 QUALITY_STUCK_NOTE = """\
-The quality gate still did not pass, and its last quality round failed on nothing that the round before it \
-had not already failed on, so the Builder was not asked again; its unresolved findings are in {quality_path}. \
+The quality gate still did not pass, and its last quality round failed on just what the round before it \
+failed on, so the Builder was not asked again; its unresolved findings are in {quality_path}. \
 Weigh them as you would your own."""
 
 # Appended to the prompt of the step a review loops back to, when tests the Reviewer wrote fail against the change.
@@ -2548,11 +2548,11 @@ class GateFailures(NamedTuple):
     fingerprints: dict[str, list[str]]
 
     def repeats(self, earlier: "GateFailures") -> bool:
-        """Whether these failures are the earlier ones again, or fewer of them: something failed, and nothing that
-        had not failed before. A finding counts as the same wherever it moved (finding_fingerprint), a condition
-        only when its words are."""
+        """Whether these failures are the earlier ones again: something failed, nothing that failed before was
+        fixed, and nothing new failed. A finding counts as the same wherever it moved (finding_fingerprint), a
+        condition only when its words are."""
         now = self._all()
-        return bool(now) and now <= earlier._all()
+        return bool(now) and now == earlier._all()
 
     def _all(self) -> set[str]:
         return {*self.conditions, *(f for fs in self.fingerprints.values() for f in fs)}
@@ -6605,7 +6605,7 @@ class Workflow:
 
     def _judge_quality(self, n: int) -> bool:
         """The current quality round of round n; False when its gate sends the change back to the gated step: when it
-        failed, and on something the quality round before had not failed on (_stuck)."""
+        failed, and not on just what the quality round before failed on (_stuck)."""
         s, gated = self.state, self.pipeline.gated
         if gated is None:
             raise OrchestratorError(f"a quality round in workflow {self.pipeline.name}, which has no quality-gated step")
@@ -6615,7 +6615,7 @@ class Workflow:
         if gate == GATE_OK or q >= s.max_quality_rounds:
             return True
         if self._stuck(n, q):
-            log(f"[quality] round {n}, quality round {q} failed on nothing quality round {q - 1} had not; "
+            log(f"[quality] round {n}, quality round {q} failed on just what quality round {q - 1} failed on; "
                 f"going on rather than back to {gated.id}")
             return True
         s.phase = gated.id
@@ -6623,8 +6623,8 @@ class Workflow:
         return False
 
     def _stuck(self, n: int, q: int) -> bool:
-        """Whether quality round q of round n failed on the failures of quality round q-1 again, or fewer of them
-        (GateFailures.repeats): the gated step's turn between them moved none."""
+        """Whether quality round q of round n failed on the failures of quality round q-1 again (GateFailures.repeats):
+        the gated step's turn between them fixed none of them."""
         if q < 2:
             return False
         before, after = (self.host.read(self.state.quality_path(n, k)) for k in (q - 1, q))

@@ -275,7 +275,7 @@ since, the agent starts a fresh session instead.
    It writes `quality-N-Q.md`, the build's own quality file, which starts with `GATE: OK`, `GATE: ERROR` or
    `GATE: BUILD_FAILED` and lists the findings on the lines the change added and the failing tests. If the gate
    does not pass, the Builder answers it in `build-N-qQ.md` and the change is judged again, up to
-   `--max-quality-rounds` times, or until a quality round fails on nothing the one before it had not; then it
+   `--max-quality-rounds` times, or until a quality round fails on just what the one before it did; then it
    goes to the Reviewer either way, who is told whether the gate passed.
    The throwaway branches are deleted when the run finishes; see
    [quality gate](docs/quality-gate.md).

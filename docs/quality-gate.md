@@ -474,12 +474,12 @@ After `--max-quality-rounds` rounds (default 3) the change goes to the Reviewer 
 last quality file as unresolved findings. Three rounds are at most three builds and two fix turns, and each
 review round has its own budget. Without `--quality-gate`, a run behaves as it did before.
 
-The loop also stops early when it is stuck: when quality round Q fails on nothing that round Q-1 had not failed on
-already, the Builder's turn between them moved none of it, and another turn is unlikely to. `gate_failures` reads
-what failed from the quality file: its failed conditions, by their words; its failing tests; and each numbered
-finding before the findings to weigh, by `finding_fingerprint`, a hash of its path, rule and message with the digits
-taken out, so a finding whose line moved is the same finding. When round Q's failures are not empty and are all
-round Q-1's (`GateFailures.repeats`), the change goes to the Reviewer, whose prompt ends with `QUALITY_STUCK_NOTE`,
+The loop also stops early when it is stuck: when quality round Q fails on just what round Q-1 failed on, the
+Builder's turn between them fixed none of it, and another turn is unlikely to. `gate_failures` reads what failed
+from the quality file: its failed conditions, by their words; its failing tests; and each numbered finding before
+the findings to weigh, by `finding_fingerprint`, a hash of its path, rule and message with the digits taken out, so
+a finding whose line moved is the same finding. When round Q's failures are not empty and are round Q-1's, no more
+and no fewer (`GateFailures.repeats`), the change goes to the Reviewer, whose prompt ends with `QUALITY_STUCK_NOTE`,
 and the log says why. A build that failed with nothing listed has no failures to compare, so it is never stuck by
 this rule; a coverage condition is, while its percentage stays the same.
 

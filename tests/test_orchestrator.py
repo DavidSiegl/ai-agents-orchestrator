@@ -4084,10 +4084,10 @@ class TestStuckQualityLoop(unittest.TestCase):
         self.assertIn(orchestrator.QUALITY_UNRESOLVED_NOTE.format(quality_path=wf.state.quality_path(1, 3)),
                       reviews[0])
 
-    def test_fewer_of_the_same_findings_go_to_review(self):
+    def test_a_fixed_finding_keeps_the_loop_going(self):
         both = dict(gate="ERROR", findings=[*RED["findings"], *RED2["findings"]])
-        wf, herdr, _ = self.loop(outcome(**both), outcome(**RED))
-        self.assertEqual(herdr.calls.count(("prompt", "build-a1b2c3")), 2)
+        _, herdr, _ = self.loop(outcome(**both), outcome(**RED), outcome(**RED))
+        self.assertEqual(herdr.calls.count(("prompt", "build-a1b2c3")), 3)
 
     def test_a_finding_on_a_moved_line_is_the_same(self):
         moved = dict(gate="ERROR", findings=["`limiter.py:12` error ruff F401: `os` imported but unused"])
