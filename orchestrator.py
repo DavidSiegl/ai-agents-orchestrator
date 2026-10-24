@@ -3862,16 +3862,10 @@ def _scored_functions(tree: ast.Module) -> list[_ScoredFunction]:
 
 def too_complex_functions(change: GateChange) -> list[dict]:
     """The cognitive-complexity check's find: each function the change adds a line to, in a Python file outside
-    _COMPLEXITY_EXEMPT, whose cognitive_complexity is over COGNITIVE_COMPLEXITY_LIMIT and higher than at the base, or
-    which the base does not have; at its def line, with both scores. A function over the limit that the change leaves
-    no worse is not a finding: the gate judges the change, not the codebase. The functions judged are those
-    _ScoredFunction describes.
-
-    A function's base is a function of the base, each lending its score to one function at most: first one with its
-    body, as _lend_by_body pairs them; failing that, the highest-scoring base function of its name left in its file's
-    base, under the file's old name for a file the change renamed; failing that, the function is new. A base under
-    _COMPLEXITY_EXEMPT is no base, since the tests were never held to the limit, and nor is one that cannot be read or
-    parsed: their functions are judged as new.
+    _COMPLEXITY_EXEMPT, whose cognitive_complexity is over COGNITIVE_COMPLEXITY_LIMIT and higher than its base's, as
+    _base_scores pairs them, or which has no base; at its def line, with both scores. A function over the limit that
+    the change leaves no worse is not a finding: the gate judges the change, not the codebase. The functions judged
+    are those _ScoredFunction describes.
 
     A changed file that cannot be read or parsed, and changed files git cannot list, are each a finding saying so, as
     GateCheck asks of a check that cannot do its work, and fail the gate as any other does.
@@ -3884,20 +3878,12 @@ def too_complex_functions(change: GateChange) -> list[dict]:
     except OrchestratorError as e:
         return [*out, _finding(None, None, "not-scored", f"the files the change edits could not be listed ({e}), so no "
                                                          f"function was compared with its base.", severity="error")]
-    # A judged file's base whatever its old name, as for bin/tool renamed bin/tool.py; and any other Python file's, as
-    # where a function may have moved from. Each list loses the functions that become another's base.
-    bases = {old: _base_functions(change, old) for old, new in pairs
-             if old and not old.startswith(_COMPLEXITY_EXEMPT) and (new in judged or old.endswith(".py"))}
-    old_paths = {new: old for old, new in pairs if new}
-    # Every changed Python file's functions take their bases, so that one moved unchanged, even into tests/, which is
-    # not judged, is still itself and lends no score to a copy.
-    working = {path: functions for path, (functions, _) in judged.items()}
-    working.update({new: _working_functions(change, new)[0] or [] for _, new in pairs
-                    if new and new not in working and new.endswith(".py")})
-    lent = _lend_by_body(working, bases, old_paths)
+    scores = _base_scores(change, judged, pairs)
     for path, (functions, added) in judged.items():
-        home = old_paths.get(path, path)
-        out += _worse_than_base(path, _over_limit(functions, added), lent, bases.get(home, []) if home else [])
+        for scored in _over_limit(functions, added):
+            was = scores.get((path, scored.line))
+            if was is None or scored.score > was:
+                out.append(_over_limit_finding(path, scored, was))
     return sorted(out, key=lambda finding: (finding["path"] or "", finding["line"] or 0))
 
 
@@ -3906,24 +3892,6 @@ def _over_limit(functions: list[_ScoredFunction], added: set[int]) -> list[_Scor
     included; added is the lines it adds to their file."""
     return [scored for scored in functions if scored.score > COGNITIVE_COMPLEXITY_LIMIT
             and any(scored.first <= line <= scored.last for line in added)]
-
-
-def _worse_than_base(path: str, over: list[_ScoredFunction], lent: dict[tuple[str, int], int],
-                     left: list[_ScoredFunction]) -> list[dict]:
-    """An over-limit finding for each of over, functions over the limit in the working tree's file at path, that is
-    worse than its base: the score lent, by (path, def line), lends it, else the highest-scoring function of its name
-    in left, its file's base functions that lent no score, which is then removed from left; else it is new."""
-    out = []
-    for scored in over:
-        was = lent.get((path, scored.line))
-        namesakes = [g for g in left if g.name == scored.name]
-        if was is None and namesakes:
-            best = max(namesakes, key=lambda g: g.score)
-            left.remove(best)
-            was = best.score
-        if was is None or scored.score > was:
-            out.append(_over_limit_finding(path, scored, was))
-    return out
 
 
 def _over_limit_finding(path: str, scored: _ScoredFunction, was: int | None) -> dict:
@@ -3935,42 +3903,82 @@ def _over_limit_finding(path: str, scored: _ScoredFunction, was: int | None) -> 
         severity="error")
 
 
-def _lend_by_body(working: dict[str, list[_ScoredFunction]], bases: dict[str, list[_ScoredFunction]],
-                  old_paths: dict[str, str | None]) -> dict[tuple[str, int], int]:
-    """The base score of each function of working, the working tree's functions of the change's files by path, that a
-    base function with its body lends one to, by (path, def line). bases holds the base functions by old path, and
-    old_paths each working file's old path, None for a file the change adds; each base function that lends its score
-    is removed from bases, so that it lends it once.
+# The order in which _base_scores pairs a function with a base function of its body, each as (of its name, in its
+# file's base): a function unchanged where it was, moved, renamed in place, renamed and moved.
+_BODY_STEPS = ((True, True), (True, False), (False, True), (False, False))
 
-    An unchanged function is that function, whatever its name, so bodies pair before names: with a base function of
-    its name in its file's base, then of its name elsewhere, as for a function moved; then of any name in its file's
-    base, then elsewhere, as for one renamed. The cost: a copy of a function whose original the change edits takes
-    the original's old score, as if the original were the new function under its name.
+
+def _base_scores(change: GateChange, judged: dict[str, tuple[list[_ScoredFunction], set[int]]],
+                 pairs: list[tuple[str | None, str | None]]) -> dict[tuple[str, int], int]:
+    """The base score of each function of judged, _judged_files' functions by path, that has a base, by (path, def
+    line); pairs is the change's files as Host.changed_files lists them. Every function over the limit that the change
+    adds a line to and that has no key is new. Only the change's own files are read.
+
+    A function's base is a function of the base, each the base of one function at most, so that a copy never takes
+    the score of what it copies. First a base function with its body, since an unchanged function is that function
+    whatever its name: of its name in its file's base, under the file's old name when the change renamed it, then of
+    its name elsewhere, as for a function moved; then of any name in its file's base, then elsewhere, as for one
+    renamed. The functions of every other changed Python file pair by body too, so that one moved unchanged, even
+    into a file the check does not judge, is still itself and lends its base to no copy. Failing a body, a function
+    over the limit takes the highest-scoring base function of its name left in its file's base. A base under
+    _COMPLEXITY_EXEMPT is no base, since the tests were never held to the limit, and nor is one that cannot be read
+    or parsed.
+
+    The cost of bodies first: a copy of a function whose original the change edits takes the original's old score,
+    as if the original were the new function under its name.
     """
-    lent: dict[tuple[str, int], int] = {}
-    for same_name, same_file in ((True, True), (True, False), (False, True), (False, False)):
+    working = {path: functions for path, (functions, _) in judged.items()}
+    working.update({new: _working_functions(change, new)[0] or [] for _, new in pairs
+                    if new and new not in working and new.endswith(".py")})
+    old_paths = {new: old for old, new in pairs if new}
+    homes = {path: old_paths.get(path, path) for path in working}
+    pool = _BasePool({old: _base_functions(change, old) for old, new in pairs
+                      if old and not old.startswith(_COMPLEXITY_EXEMPT) and (new in judged or old.endswith(".py"))})
+    for same_name, same_file in _BODY_STEPS:
         for path, functions in working.items():
-            home = old_paths.get(path, path)
-            sources = [base for old, base in bases.items() if (old == home) == same_file]
-            lent.update(_twins(path, [scored for scored in functions if (path, scored.line) not in lent], sources,
-                               same_name))
-    return lent
+            pool.lend_by_body(path, functions, homes[path], same_name, same_file)
+    for path, (functions, added) in judged.items():
+        for scored in _over_limit(functions, added):
+            pool.lend_by_name(path, scored, homes[path])
+    return pool.lent
 
 
-def _twins(path: str, functions: list[_ScoredFunction], sources: list[list[_ScoredFunction]],
-           same_name: bool) -> dict[tuple[str, int], int]:
-    """The base score, by (path, def line), of each of functions, of the working tree's file at path, that a base
-    function in sources with its body, and with its name when same_name, lends one to; that base function is removed
-    from its list in sources."""
-    out = {}
-    for scored in functions:
-        for base in sources:
-            twin = next((g for g in base if g.body == scored.body and (g.name == scored.name or not same_name)), None)
-            if twin is not None:
-                base.remove(twin)
-                out[(path, scored.line)] = twin.score
-                break
-    return out
+class _BasePool:
+    """The functions of the change's files at the base, each of which lends its score to one function of the working
+    tree at most, for _base_scores."""
+
+    def __init__(self, bases: dict[str, list[_ScoredFunction]]):
+        """bases: the base functions of the change's files, by old path."""
+        self._left = bases  # the base functions that have lent no score yet, by old path
+        self.lent: dict[tuple[str, int], int] = {}  # the score lent to each function, by (path, def line)
+
+    def lend_by_body(self, path: str, functions: list[_ScoredFunction], home: str | None, same_name: bool,
+                     same_file: bool) -> None:
+        """Lend to each of functions, the working tree's in its file at path whose old path is home (None for a file
+        the change adds), that has no score lent yet, the score of a base function left with its body: and its name
+        for same_name, and in home's base for same_file, else in another file's."""
+        for scored in functions:
+            if (path, scored.line) in self.lent:
+                continue
+            for old, left in self._left.items():
+                if (old == home) != same_file:
+                    continue
+                twin = next((g for g in left if g.body == scored.body and (g.name == scored.name or not same_name)),
+                            None)
+                if twin is not None:
+                    self._lend(path, scored, old, twin)
+                    break
+
+    def lend_by_name(self, path: str, scored: _ScoredFunction, home: str | None) -> None:
+        """Lend to scored, a function of the working tree's file at path whose old path is home, unless it has a
+        score lent, the highest of the base functions of its name left in home's base."""
+        namesakes = [g for g in self._left.get(home, []) if g.name == scored.name] if home else []
+        if (path, scored.line) not in self.lent and namesakes:
+            self._lend(path, scored, home, max(namesakes, key=lambda g: g.score))
+
+    def _lend(self, path: str, scored: _ScoredFunction, old: str, base: _ScoredFunction) -> None:
+        self._left[old].remove(base)
+        self.lent[(path, scored.line)] = base.score
 
 
 def _judged_files(change: GateChange) -> tuple[list[dict], dict[str, tuple[list[_ScoredFunction], set[int]]]]:

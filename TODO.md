@@ -81,7 +81,7 @@ was done.
   `C.m`, but not a cycle through other functions, nor a call through an alias. A function that recurses through a
   helper scores a point less than the paper says. Closes with a call graph of the module, scored per cycle.
 - **A copy of a function whose original the change edits keeps the old score and passes.** The cognitive-complexity
-  check pairs identical bodies before names (`_lend_by_body`), so that a function renamed unchanged keeps its score
+  check pairs identical bodies before names (`_base_scores`), so that a function renamed unchanged keeps its score
   and a new function under its old name is new. A change that edits `big` in place and adds `copied`, a copy of
   `big`'s old body, has the same shape: `copied` takes `big`'s score and passes, and the edited `big` is judged as
   new, so nothing is reported when the edit takes `big` below the limit. Decided by the user in review round 4 of
