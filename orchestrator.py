@@ -3137,58 +3137,77 @@ def _rerun_findings(root: str, tmp: str, tests: dict[tuple[str, str], int]) -> l
     except OSError as e:
         return [_finding(None, None, "not-rerun", f"could not write an empty pytest configuration for the "
                                                   f"reruns: {e}; the changed tests were not rerun.")]
-    out = []
     ids, problem = _collect_python_tests(tree, inifile, tests)
-    # Each test's outcome by the seed of a run that reported it as passed or failed.
-    outcomes: dict[str, dict[int, str]] = {i: {} for i in ids}
-    seeds: list[int] = []
-    # The seed whose run went wrong and ended the reruns; None when every run told something.
-    stopped: int | None = None
-    for seed in FLAKY_SEEDS if ids else ():
-        reported, problem = _rerun_python_tests(tree, inifile, ids, seed, os.path.join(tmp, f"seed-{seed}.xml"))
-        if problem:
-            stopped = seed
-            break
-        seeds.append(seed)
-        for i, outcome in reported.items():
-            if outcome != "skipped":
-                outcomes[i][seed] = outcome
-    for i, by_seed in outcomes.items():
-        path, names, params = _node_parts(i)
-        name = ".".join(names) + params
-        # What it did under which seeds, for each outcome it had.
-        did = [f"{_OUTCOME_VERBS[o]} under {_seeds(under)}" for o in _OUTCOME_VERBS
-               if (under := [s for s in seeds if by_seed.get(s) == o])]
-        unjudged = [s for s in seeds if s not in by_seed]
-        if len(did) > 1:
-            message = (f"`{name}` {_series(did)}"
-                       + (f", and was skipped or not run under {_seeds(unjudged)}" if unjudged else "")
-                       + ": it depends on the order the tests run in, or on state or randomness that one run does "
-                         "not share with another.")
-            rule = "mixed-results"
-        elif seeds and len(by_seed) < 2:
-            # Without a run that told something, the finding about the run already says no test was rerun.
-            message = (f"`{name}` " + (f"{did[0]} only" if did else "neither passed nor failed under any seed")
-                       + (f"; the reports of {_seeds(unjudged)} have it skipped or not at all" if unjudged else "")
-                       + (f"; the reruns stopped when the run under seed {stopped} went wrong" if stopped else "")
-                       + ", so too few runs tell whether it is flaky.")
-            rule = "not-rerun"
-        elif len(by_seed) >= 2 and set(by_seed.values()) == {"failed"}:
-            # Not flaky, but the gate cannot tell a test the build fails too from one that needs what the copy lacks.
-            message = (f"`{name}` failed under {_seeds(list(by_seed))}, every rerun"
-                       + (f" that did not skip it or leave it out ({_seeds(unjudged)} did)" if unjudged else "")
-                       + ", which ran in a copy of the tracked files. If the build failed it too, the failing tests "
-                         "list it. If the build passed it, it needs something the copy lacks, such as git's "
-                         "metadata, an untracked or ignored file or a build product, so whether it is flaky could "
-                         "not be judged here.")
-            rule = "failed-every-run"
-        else:
-            continue
-        out.append(_finding(path, tests[(path, ".".join(names))], rule, message))
+    reruns = _Reruns.run(tree, inifile, ids, tmp)
+    problem = problem or reruns.problem
+    out = []
+    for i in reruns.outcomes:
+        path, names, _ = _node_parts(i)
+        if judged := reruns.judge(i):
+            out.append(_finding(path, tests[(path, ".".join(names))], *judged))
     if problem:
         out.append(_finding(None, None, "not-rerun", f"{problem}; " + (
-            f"only the reruns under {_seeds(seeds)} were judged." if seeds else "the changed tests were not rerun.")))
+            f"only the reruns under {_seeds(reruns.seeds)} were judged." if reruns.seeds
+            else "the changed tests were not rerun.")))
     return out
+
+
+@dataclass(frozen=True)
+class _Reruns:
+    """What flaky_tests' reruns of a set of tests, one under each of FLAKY_SEEDS in turn, told of each test."""
+    outcomes: dict[str, dict[int, str]]  # each test's outcome by the seed of a run that reported it passed or failed
+    seeds: list[int]  # the seeds of the runs that told something, in the order they ran
+    stopped: int | None  # the seed whose run went wrong and ended the reruns; None when every run told something
+    problem: str | None  # what went wrong with the run under stopped, a clause; None with it
+
+    @classmethod
+    def run(cls, tree: str, inifile: str, ids: list[str], tmp: str) -> "_Reruns":
+        """Rerun the tests of node ids ids at tree, with the configuration in inifile, once under each of FLAKY_SEEDS,
+        until a run goes wrong, writing the runs' reports in tmp. For no ids, no run."""
+        outcomes: dict[str, dict[int, str]] = {i: {} for i in ids}
+        seeds: list[int] = []
+        for seed in FLAKY_SEEDS if ids else ():
+            reported, problem = _rerun_python_tests(tree, inifile, ids, seed, os.path.join(tmp, f"seed-{seed}.xml"))
+            if problem:
+                return cls(outcomes, seeds, seed, problem)
+            seeds.append(seed)
+            for i, outcome in reported.items():
+                if outcome != "skipped":
+                    outcomes[i][seed] = outcome
+        return cls(outcomes, seeds, None, None)
+
+    def judge(self, test_id: str) -> tuple[str, str] | None:
+        """The rule and message of flaky_tests' finding on the test of node id test_id, one of outcomes', by what the
+        reruns told of it; None when they show nothing to report."""
+        _, names, params = _node_parts(test_id)
+        name = ".".join(names) + params
+        by_seed = self.outcomes[test_id]
+        # What it did under which seeds, for each outcome it had.
+        did = [f"{_OUTCOME_VERBS[o]} under {_seeds(under)}" for o in _OUTCOME_VERBS
+               if (under := [s for s in self.seeds if by_seed.get(s) == o])]
+        unjudged = [s for s in self.seeds if s not in by_seed]
+        if len(did) > 1:
+            return "mixed-results", (
+                f"`{name}` {_series(did)}"
+                + (f", and was skipped or not run under {_seeds(unjudged)}" if unjudged else "")
+                + ": it depends on the order the tests run in, or on state or randomness that one run does not share "
+                  "with another.")
+        if self.seeds and len(by_seed) < 2:
+            # Without a run that told something, the finding about the run already says no test was rerun.
+            return "not-rerun", (
+                f"`{name}` " + (f"{did[0]} only" if did else "neither passed nor failed under any seed")
+                + (f"; the reports of {_seeds(unjudged)} have it skipped or not at all" if unjudged else "")
+                + (f"; the reruns stopped when the run under seed {self.stopped} went wrong" if self.stopped else "")
+                + ", so too few runs tell whether it is flaky.")
+        if len(by_seed) >= 2 and set(by_seed.values()) == {"failed"}:
+            # Not flaky, but the gate cannot tell a test the build fails too from one that needs what the copy lacks.
+            return "failed-every-run", (
+                f"`{name}` failed under {_seeds(list(by_seed))}, every rerun"
+                + (f" that did not skip it or leave it out ({_seeds(unjudged)} did)" if unjudged else "")
+                + ", which ran in a copy of the tracked files. If the build failed it too, the failing tests list it. "
+                  "If the build passed it, it needs something the copy lacks, such as git's metadata, an untracked or "
+                  "ignored file or a build product, so whether it is flaky could not be judged here.")
+        return None
 
 
 def _pytest_inifile(tree: str) -> str | None:
