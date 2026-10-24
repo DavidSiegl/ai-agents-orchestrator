@@ -5,6 +5,11 @@ was done.
 
 ## Open issues
 
+- **A `gitleaks:allow` in a file whose name git quotes is reported under the quoted name.** `Host._allow_comments`
+  reads the path from `git log -p`'s `+++ b/...` line, which git writes in C quotes for a name with a tab, a newline,
+  a double quote or a byte above 0x7f (unless `core.quotePath` is off). The comment is still found and the push still
+  refused; only the finding's file reads `"b/na\tme"`. Closes with `-c core.quotePath=false` and unquoting, or
+  with `--name-only -z` beside the patch.
 - **A test file whose name is not UTF-8 is never rerun by `flaky-tests`.** pytest-randomly 5.0.0 hashes each node
   id as strict UTF-8 (`pytest_randomly._crc32`, called from `pytest_runtest_setup` and its neighbours) and stops
   with an internal error, exit status 3. `_pytest` already lets pytest print such an id
