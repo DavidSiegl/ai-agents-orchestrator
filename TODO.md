@@ -3,6 +3,20 @@
 What is known to be open in `orchestrator.py`, and why. An entry leaves `Open issues` only for `Fixed`, with what
 was done.
 
+## Planned
+
+- **The desktop app as the terminal client too.** Started with arguments, the app's executable becomes the
+  orchestrator binary it bundles (`Orchestrator::locate` in `ui/src-tauri/src/lib.rs`), by `exec` on Unix, so the
+  terminal, the exit status and signals are the CLI's own; started with none, it opens the window as now. Then
+  the AppImage is one file that is both, `./orchestrator-desktop-linux-x86_64.AppImage run "..."`; the `.deb`
+  has `/usr/bin/orchestrator` already; on macOS, where a `.app` is a directory, the CLI is a symlink to
+  `Orchestrator.app/Contents/MacOS/orchestrator` away. The README says how to use each. The plain CLI binaries stay
+  released: 13 MB against the AppImage's 120 MB of WebKit, and they start without FUSE on headless machines and in
+  CI, where an AppImage needs `--appimage-extract-and-run`. Decided against: one file on every platform, by
+  embedding the orchestrator's bytes in the Rust executable and unpacking them at start (PyInstaller's onefile
+  done twice), or by Python hosting the window, which [ui-options.md](docs/ui-options.md) chose against. Agreed
+  2026-10-24.
+
 ## Open issues
 
 - **`doctor --machine` probes the machine over about twenty SSH connections, one after another.** Each check is
@@ -25,11 +39,7 @@ was done.
   the workflow is run again for the tag. Found adding the desktop app to releases (2026-10-24), whose `.dmg` had
   never been built before the first release with it. Closes with a macOS build of pull requests that touch
   `packaging/` or `ui/`, or a decision that a rerun after the release is enough.
-- **The frontend's tests fail on Node 25 and later.** Node's own `localStorage` global, which is undefined without
-  `--localstorage-file`, hides jsdom's, so `ui/src/test/setup.ts`'s `localStorage.clear()` throws and every test
-  fails. Jenkins's Node 20 is unaffected; locally `NODE_OPTIONS=--no-experimental-webstorage npm test` passes.
-  Found on Node 26 (2026-10-24). Closes with tests that pass on both, e.g. jsdom's storage installed in
-  `setup.ts`, or `engines` in `ui/package.json` that rules the newer Node out.
+
 - **A pull request opened over a conflict stays a draft with its warning after the conflict is resolved.** When
   `Host.merge_upstream` finds conflicts with the base branch, `pr_body` opens the body with a `[!WARNING]` naming
   the conflicting files and `create_pr` opens it as a draft; nothing ever edits the body or marks it ready, and
@@ -264,3 +274,10 @@ was done.
   a new function under its old name (review round 6, R6-F1). Decided by the user in review round 4 of ticket 06.
   Closes with a way to tell a copy from a rename, such as git's copy detection (`git diff -C`) on the change's
   files.
+
+## Fixed
+
+- **The frontend's tests failed on Node 25 and later.** Node's own `localStorage` global, undefined without
+  `--localstorage-file`, hid jsdom's, since Vitest's jsdom environment copies no global over one Node already has,
+  so `ui/src/test/setup.ts`'s `localStorage.clear()` threw and every test failed. `setup.ts` now puts jsdom's
+  storage on the global itself; the tests pass on Node 20.20 and 26.12 alike (2026-10-24).
