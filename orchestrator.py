@@ -1526,17 +1526,17 @@ class Host:
         remote-tracking ref for a branch origin has since deleted or rewritten narrows the range: what only it reaches
         was public once, and is not scanned again.
 
-        The rules come from base, a commit before the change: its .gitleaks.toml (else gitleaks' defaults) and its
-        .gitleaksignore (else none), and nothing the working tree holds, so that the change cannot allowlist itself;
+        The rules come from base, a commit before the change: its .gitleaks.toml (else gitleaks' defaults), its
+        .gitleaksignore (else none) and its .gitattributes, which decide how git diffs a file, and nothing the
+        change holds, in the working tree or committed, so that the change cannot allowlist itself;
         gitleaks honours a `gitleaks:allow` comment silently, so each one an added line holds is a Leak of its own.
         gitleaks runs with --redact and writes its JSON report to report_path, a path in the run's directory, beside
         the config files and the empty directory this makes there.
 
         Raises OrchestratorError, failing closed, when git cannot read base or the range, the range holds an octopus
-        merge, or gitleaks cannot be
-        started, exits other than 0 or 1, writes no report or one that is not a list of findings, or exits 1 with
-        an empty one: gitleaks also exits 1 when it cannot load its config, writing nothing. Runs where cwd is, as
-        every Host command does."""
+        merge, or gitleaks cannot be started, exits other than 0 or 1, writes no report or one that is not a list of
+        findings, or exits 1 with an empty one: gitleaks also exits 1 when it cannot load its config, writing
+        nothing. Runs where cwd is, as every Host command does."""
         directory = report_path.rsplit("/", 1)[0]
         config, ignore, source = (f"{directory}/gitleaks{name}" for name in (".toml", "ignore", "-source"))
         base_config = self.file_at(cwd, base, ".gitleaks.toml")
@@ -1549,12 +1549,14 @@ class Host:
         git_dir = self.git(cwd, "rev-parse", "--absolute-git-dir").strip()
         where = f" on {self.ssh_target}" if self.ssh_target else ""
         failed = f"gitleaks could not scan what the push would publish{where}, so nothing was pushed"
-        octopus = self.git(cwd, "rev-list", "--min-parents=3", commit, "--not", f"--remotes={REMOTE}").split()
+        octopus = self.git(cwd, "rev-list", "--min-parents=3", commit, "--not", f"--remotes={REMOTE}",
+                           timeout=GITLEAKS_TIMEOUT).split()
         if octopus:
             raise OrchestratorError(f"{failed}: merge {octopus[0][:12]} has three or more parents, and git shows no "
                                     f"diff of what such a merge adds; merge its branches one at a time")
         log_opts = f"--diff-merges=remerge {commit} --not --remotes={REMOTE}"
-        proc = self.run(["env", f"GIT_DIR={git_dir}", "gitleaks", "git", f"--log-opts={log_opts}", "--redact",
+        git_env = _scan_git_env(git_dir, base)
+        proc = self.run([*git_env, "gitleaks", "git", f"--log-opts={log_opts}", "--redact",
                          "--no-banner", "--no-color", "--exit-code", "1", "--report-format", "json", "--report-path",
                          report_path, "--config", config, "--gitleaks-ignore-path", ignore, source],
                         timeout=GITLEAKS_TIMEOUT)
@@ -1571,16 +1573,15 @@ class Host:
         if leaks is None or (proc.returncode == 1 and not leaks):
             raise OrchestratorError(f"{failed}: it exited with status {proc.returncode} and wrote "
                                     f"{'no report' if text is None else 'no finding'}: {said}")
-        return leaks + self._allow_comments(git_dir, source, log_opts)
+        return leaks + self._allow_comments(git_env, source, log_opts)
 
-    def _allow_comments(self, git_dir: str, source: str, log_opts: str) -> list[Leak]:
+    def _allow_comments(self, git_env: list[str], source: str, log_opts: str) -> list[Leak]:
         """A Leak for each line holding `gitleaks:allow` that the commits log_opts selects add, as git log -p shows
-        them with log_opts, read as change_diff's diffs are. git runs as gitleaks does, in source with git_dir, so
-        no .gitattributes of the working tree changes the patch it reads."""
-        proc = self.run(["env", f"GIT_DIR={git_dir}", "git", "-C", source, "-c", "core.quotePath=false", "log", "-p",
-                         "-U0", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", "--format=%x00%H",
-                         *log_opts.split()], timeout=GITLEAKS_TIMEOUT, verbatim=True)
-        out = self._checked(["git", "log", "-p", *log_opts.split()], proc)
+        them with log_opts, read as change_diff's diffs are. git runs as gitleaks does, in source under git_env, as
+        _scan_git_env gives it, so both read the same patch."""
+        argv = [*git_env, "git", "-C", source, "-c", "core.quotePath=false", "log", "-p", "-U0", "--no-color",
+                "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", "--format=%x00%H", *log_opts.split()]
+        out = self._checked(argv, self.run(argv, timeout=GITLEAKS_TIMEOUT, verbatim=True))
         leaks = []
         # Each commit's patch follows its sha on a line of its own that starts with a NUL; a NUL inside a line of a
         # patch does not start one.
@@ -2215,6 +2216,17 @@ def _hunk_positions(diff: str, positions: Callable[[str], Iterable[int]]) -> dic
         elif not in_hunk:
             path = _header_path(out, path, line)
     return out
+
+
+def _scan_git_env(git_dir: str, base: str) -> list[str]:
+    """The `env` prefix under which the secret scan runs git, and gitleaks, which runs git: the repository at git_dir,
+    with the attributes, which decide how git diffs a file, of base's tree alone. GIT_DIR, from a directory outside
+    the working tree, leaves out the working tree's .gitattributes; attr.tree, given as GIT_CONFIG_COUNT gives
+    config so that it reaches the git gitleaks starts, overrides an attr.tree of the user's (HEAD would read the
+    change's); and GIT_WORK_TREE and GIT_ATTR_SOURCE, which would bring them back, are unset. A git older than 2.42
+    knows no attr.tree, and reads committed attributes in no way."""
+    return ["env", "-u", "GIT_WORK_TREE", "-u", "GIT_ATTR_SOURCE", f"GIT_DIR={git_dir}", "GIT_CONFIG_COUNT=1",
+            "GIT_CONFIG_KEY_0=attr.tree", f"GIT_CONFIG_VALUE_0={base}"]
 
 
 def _added_lines(diff: str) -> Iterator[tuple[str, int, str]]:

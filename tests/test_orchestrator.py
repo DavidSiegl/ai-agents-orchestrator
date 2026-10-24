@@ -3275,6 +3275,8 @@ here = os.path.dirname(os.path.abspath(__file__))
 args = sys.argv[1:]
 with open(os.path.join(here, "argv"), "w") as f:
     json.dump(args, f)
+with open(os.path.join(here, "env"), "w") as f:
+    f.write("\n".join(f"{k}={v}" for k, v in sorted(os.environ.items()) if k.startswith("GIT_")))
 mode = open(os.path.join(here, "mode")).read().strip()
 if args[:2] == ["git", "--help"]:
     sys.exit(1 if mode == "old" else 0)
@@ -3438,6 +3440,16 @@ class TestScanUnpublished(unittest.TestCase):
         with self.assertRaises(orchestrator.LeaksFound) as caught:
             self.push(commit)
         self.assertEqual([(leak.file, leak.line) for leak in caught.exception.leaks], [("notes.md", 1)])
+
+    def test_committed_gitattributes_do_not_hide_an_allow_whatever_git_s_config(self):
+        # attr.tree=HEAD, or GIT_ATTR_SOURCE, makes git read the attributes a commit holds: the change's.
+        self.git("config", "attr.tree", "HEAD")
+        commit = self.commit({".gitattributes": "notes.md -diff\n", "notes.md": "x # gitleaks:allow\n"}, "hidden")
+        with patch.dict(os.environ, {"GIT_ATTR_SOURCE": commit}), self.assertRaises(orchestrator.LeaksFound) as caught:
+            self.push(commit)
+        self.assertEqual([(leak.file, leak.line) for leak in caught.exception.leaks], [("notes.md", 1)])
+        # gitleaks gets the same git environment.
+        self.assertIn(f"GIT_CONFIG_VALUE_0={self.base}", self.seen("env"))
 
     def test_a_nul_inside_a_line_does_not_end_the_commit_s_patch(self):
         # git still diffs as text a file whose first 8000 bytes hold no NUL.
