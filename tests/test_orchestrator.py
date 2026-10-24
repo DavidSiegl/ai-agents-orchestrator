@@ -1,3 +1,4 @@
+import ast
 import base64
 import contextlib
 import copy
@@ -6,14 +7,15 @@ import itertools
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
-import subprocess
-import shlex
 import struct
+import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import tomllib
@@ -26,9 +28,28 @@ from unittest.mock import MagicMock, patch
 
 import orchestrator
 from orchestrator import (
-    APPROVE, CHANGES_REQUESTED, CI, HEARTBEAT_SECONDS, STALE_SECONDS, CIError, Herdr, HerdrError, Host,
-    OrchestratorError, RunState, RunTakenOver, Workflow, branch_name, changed_lines, main, parse_args,
-    parse_gate, parse_verdict, pr_body, quality_report, spec_title,
+    APPROVE,
+    CHANGES_REQUESTED,
+    CI,
+    HEARTBEAT_SECONDS,
+    STALE_SECONDS,
+    CIError,
+    Herdr,
+    HerdrError,
+    Host,
+    OrchestratorError,
+    RunState,
+    RunTakenOver,
+    Workflow,
+    branch_name,
+    changed_lines,
+    main,
+    parse_args,
+    parse_gate,
+    parse_verdict,
+    pr_body,
+    quality_report,
+    spec_title,
 )
 
 
@@ -4216,6 +4237,47 @@ class TestWeakenedTests(unittest.TestCase):
         self.edit("tests/test_calc.py", "def test_large(self):", "def test_big(self):")
         self.assertEqual(self.found()[0], [])
 
+    def test_a_renamed_test_deeper_than_python_s_recursion_limit_is_matched(self):
+        # A sum of 3000 terms parses, but a recursive walk of it, as ast.dump makes, overflows the stack.
+        deep = "def test_deep():\n    assert " + " + ".join(["1"] * 3000) + " == 3000\n"
+        self.put("tests/test_deep.py", deep)
+        self.git("add", "tests/test_deep.py")
+        self.git("commit", "--quiet", "-m", "deep")
+        self.edit("tests/test_deep.py", "def test_deep():", "def test_deeper():")
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_test_deeper_than_python_s_recursion_limit_is_compared_with_its_base(self):
+        # Changing a literal while the code changes too compares the test's assertions by their shape.
+        deep = "def test_deep():\n    x = 1\n    assert x + " + " + ".join(["1"] * 3000) + " == 3001\n"
+        self.put("tests/test_deep.py", deep)
+        self.git("add", "tests/test_deep.py")
+        self.git("commit", "--quiet", "-m", "deep")
+        self.edit("tests/test_deep.py", "    x = 1\n", "    x = 2\n")
+        self.edit("calc.py", "return a + b", "return b + a")
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_deep_assertion_whose_expected_value_changes_is_reported_without_its_text(self):
+        deep = "def test_deep():\n    assert " + " + ".join(["1"] * 3000) + " == 3001\n"
+        self.put("tests/test_deep.py", deep)
+        self.git("add", "tests/test_deep.py")
+        self.git("commit", "--quiet", "-m", "deep")
+        self.edit("tests/test_deep.py", "== 3001", "== 3002")
+        self.edit("calc.py", "return a + b", "return b + a")
+        where, found = self.found()
+        self.assertEqual(where, [("tests/test_deep.py", 2, "expected-value-changed")])
+        self.assertIn("too deep to print", found[0]["message"])
+
+    def test_an_assertion_with_an_int_too_long_to_print_is_reported_without_its_text(self):
+        # ast.unparse writes an int with repr, which refuses one of more than 4300 decimal digits.
+        self.put("tests/test_big.py", "def test_big():\n    assert 1 == 0x" + "f" * 4000 + "\n")
+        self.git("add", "tests/test_big.py")
+        self.git("commit", "--quiet", "-m", "big")
+        self.edit("tests/test_big.py", "assert 1 ==", "assert 2 ==")
+        self.edit("calc.py", "return a + b", "return b + a")
+        where, found = self.found()
+        self.assertEqual(where, [("tests/test_big.py", 2, "expected-value-changed")])
+        self.assertIn("(code at line 2, too long to print)", found[0]["message"])
+
     def test_tests_moved_to_a_renamed_file_are_not_removed(self):
         self.git("mv", "tests/test_other.py", "tests/test_moved.py")
         self.edit("tests/test_moved.py", "def test_b():", "def test_bee():")
@@ -5425,6 +5487,771 @@ class TestSurvivingMutants(unittest.TestCase):
             check.find("change")
         self.assertFalse(check.fails)
         find.assert_called_once_with("change", budget=42)
+
+
+# The seven functions S3776 flagged, as orchestrator.py had them before 84e87e7 split them.
+S3776_FUNCTIONS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "s3776_at_84e87e7.py.txt")
+
+
+def score(source, cls=None):
+    """The cognitive complexity of the first function in source, or of its class cls's first method."""
+    tree = ast.parse(textwrap.dedent(source))
+    if cls is not None:
+        [owner] = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls]
+        tree = owner
+    function = next(n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
+    return orchestrator.cognitive_complexity(function, cls)
+
+
+class TestCognitiveComplexity(unittest.TestCase):
+    """cognitive_complexity, after G. Ann Campbell's paper, in its mapping to Python. Each expected score is
+    added up in the comments, one increment per line."""
+
+    def test_loops_and_ifs_add_one_and_their_nesting(self):
+        # The paper's sumOfPrimes, whose labelled `continue OUT` Python writes as a loop's else.
+        self.assertEqual(score("""
+            def sum_of_primes(top):
+                total = 0
+                for i in range(1, top + 1):  # +1
+                    for j in range(2, i):    # +2
+                        if i % j == 0:       # +3
+                            break
+                    else:                    # +1
+                        total += i
+                return total
+        """), 7)
+
+    def test_elif_and_else_add_one_and_nest_their_bodies(self):
+        self.assertEqual(score("""
+            def f(a):
+                if a == 1:      # +1
+                    return 1
+                elif a == 2:    # +1
+                    if a:       # +2
+                        return 2
+                else:           # +1
+                    if a:       # +2
+                        return 3
+                return 0
+        """), 7)
+
+    def test_a_while_and_its_else(self):
+        self.assertEqual(score("""
+            def f(n):
+                while n:      # +1
+                    n -= 1
+                else:         # +1
+                    n = 0
+                return n
+        """), 2)
+
+    def test_match_adds_one_for_all_its_cases_and_nests_them(self):
+        # The paper's getWords: a switch is one increment, however many cases it has.
+        self.assertEqual(score("""
+            def get_words(n):
+                match n:              # +1
+                    case 1:
+                        return "one"
+                    case 2 if n > 0:  # a guard adds nothing of its own
+                        return "a couple"
+                    case _:
+                        if n:         # +2
+                            return "lots"
+        """), 3)
+
+    def test_except_adds_one_and_its_nesting_while_try_finally_and_with_add_nothing(self):
+        self.assertEqual(score("""
+            def f(path):
+                try:
+                    with open(path) as f:  # neither try nor with nests
+                        if f:              # +1
+                            pass
+                except OSError:            # +1
+                    if path:               # +2
+                        pass
+                except ValueError:         # +1
+                    pass
+                else:                      # +1
+                    pass
+                finally:
+                    if path:               # +1
+                        pass
+        """), 7)
+
+    def test_each_sequence_of_like_boolean_operators_adds_one(self):
+        self.assertEqual(score("""
+            def f(a, b, c, d):
+                if a and b and c:       # +1 if, +1 and
+                    pass
+                if a and b or c and d:  # +1 if, +1 and, +1 or, +1 and
+                    pass
+                x = a or b and c or d   # +1 or, +1 and, +1 or
+                y = a or not (b or c)   # +1 or, +1 or: not starts a sequence of its own
+                z = (1 if a else 0) or b and c  # +1 or, +1 and, +1 ternary
+                return a and (b and c)  # +1: the parentheses do not show in the syntax tree
+        """), 15)
+
+    def test_except_and_match_take_their_nesting_too(self):
+        self.assertEqual(score("""
+            def f(xs):
+                for x in xs:            # +1
+                    try:
+                        pass
+                    except ValueError:  # +2
+                        pass
+                    match x:            # +2
+                        case _:
+                            pass
+        """), 5)
+
+    def test_a_ternary_adds_one_and_its_nesting_and_nests_what_it_holds(self):
+        self.assertEqual(score("""
+            def f(a, b):
+                for x in a:                          # +1
+                    y = 1 if x else (2 if b else 3)  # +2, +3
+                return y
+        """), 6)
+
+    def test_what_a_statement_reads_before_its_body_counts_at_the_statement_s_level(self):
+        self.assertEqual(score("""
+            def f(xs, key=lambda x: 1 if x else 0):  # the judged function's own defaults count for nothing
+                for x in (xs if xs else []):         # +1 for, +1 ternary
+                    while (x if x else 0):           # +2 while, +2 ternary
+                        if (x if x else 0):          # +3 if, +3 ternary
+                            x -= 1
+                        elif x:                      # +1
+                            x += 1
+                match (xs if xs else None):          # +1 match, +1 ternary
+                    case _:
+                        pass
+                try:
+                    pass
+                except (ValueError if xs else TypeError):  # +1 except, +1 ternary
+                    pass
+                def g(y=(1 if xs else 2)):           # +1 ternary
+                    return y
+                h = lambda y=(1 if xs else 2): y     # +1 ternary
+                return g, h
+        """), 19)
+
+    def test_comprehensions_add_nothing_and_lambdas_and_nested_functions_nest(self):
+        self.assertEqual(score("""
+            def f(xs):
+                ys = [x for x in xs if x for y in x if not y]
+                key = lambda x: 1 if x else 2          # +2
+                def inner(x):
+                    if x:                              # +2
+                        return [y for y in x if y and x]  # +1
+                    return inner(x - 1)                # +1, recursion
+                class Box:
+                    def size(self):
+                        return 3 if self else 4        # +2
+                return sorted(ys, key=key), inner, Box
+        """), 8)
+
+    def test_a_function_that_calls_itself_adds_one(self):
+        self.assertEqual(score("""
+            def walk(node):
+                if node is None:                      # +1
+                    return 0
+                return walk(node.left) + walk(node.right)  # +1, once
+        """), 2)
+
+    def test_a_method_calls_itself_through_self_cls_or_its_class(self):
+        source = """
+            class Tree:
+                def depth(self, node):
+                    return max(self.depth(c) for c in node)  # +1
+                def size(self, node):
+                    return Tree.size(self, node)            # +1
+                def leaves(self, node):
+                    return leaves(node)                     # a module-level function, not this method
+                @classmethod
+                def build(cls, n):
+                    return cls.build(n - 1)                 # +1
+        """
+        self.assertEqual(score(source, "Tree"), 1)
+        tree = ast.parse(textwrap.dedent(source)).body[0]
+        self.assertEqual([orchestrator.cognitive_complexity(m, "Tree") for m in tree.body], [1, 1, 0, 1])
+
+    def test_a_method_of_a_class_nested_in_the_function_recurses_as_a_method_does(self):
+        self.assertEqual(score("""
+            def outer():
+                class K:
+                    def m(self):
+                        return m()       # a module-level m, not this method
+                return K
+        """), 0)
+        self.assertEqual(score("""
+            def outer():
+                class K:
+                    def m(self):
+                        if self:
+                            return self.m()  # +1 recursion
+                        return K.m(self)
+                return K
+        """), 3)  # the if, nested in m: +2
+
+    def test_code_deeper_than_python_s_recursion_limit_is_scored(self):
+        self.assertEqual(score(LONG_SUM), 0)
+        self.assertEqual(score(LONG_ELIF), 1001)  # the if, and one for each elif
+
+    def fingerprint(self, source):
+        return orchestrator._body_fingerprint(ast.parse(textwrap.dedent(source)).body[0])
+
+    def test_a_body_fingerprint_keeps_where_each_absent_part_sits(self):
+        # Dict.keys holds None for a ** entry, and kw_defaults None for a keyword-only argument without a default.
+        self.assertNotEqual(self.fingerprint("def f(a, b, c):\n    return {**a, b: c}\n"),
+                            self.fingerprint("def f(a, b, c):\n    return {b: a, **c}\n"))
+        self.assertNotEqual(self.fingerprint("def f():\n    def g(*, a=1, b):\n        pass\n"),
+                            self.fingerprint("def f():\n    def g(*, a, b=1):\n        pass\n"))
+
+    def test_a_body_fingerprint_takes_an_integer_too_long_to_print_in_decimal(self):
+        # 4000 hex digits are about 4800 decimal ones, past the 4300 that int's repr allows.
+        huge = "def f():\n    return 0x" + "f" * 4000 + "\n"
+        self.assertNotEqual(self.fingerprint(huge), self.fingerprint(huge.replace("0xf", "0xe", 1)))
+
+    def test_the_seven_functions_sonarqube_flagged_score_over_the_limit(self):
+        with open(S3776_FUNCTIONS) as f:
+            tree = ast.parse(f.read())
+        scores = {}
+        for node in tree.body:
+            cls = node.name if isinstance(node, ast.ClassDef) else None
+            for function in node.body if cls else [node]:
+                scores[function.name] = orchestrator.cognitive_complexity(function, cls)
+        self.assertEqual(sorted(scores), sorted(["main", "_turn", "_poll", "quality_report", "changed_lines",
+                                                 "_shared_name", "_parse_step"]))
+        for name, n in scores.items():
+            self.assertGreater(n, orchestrator.COGNITIVE_COMPLEXITY_LIMIT, name)
+
+
+# Valid Python whose syntax tree is deeper than the interpreter's recursion limit lets a recursive walk go: a sum of 350
+# terms, and an if with 1000 elifs.
+LONG_SUM = "def long_sum(a):\n    return " + " + ".join(["a"] * 350) + "\n"
+LONG_ELIF = ("def long_elif(x):\n    if x == 0:\n        pass\n"
+             + "".join(f"    elif x == {k}:\n        pass\n" for k in range(1, 1001)))
+
+
+def flat(name, n, indent=""):
+    """A function of n ifs one after the other, so of cognitive complexity n, which returns at its last line."""
+    body = "".join(f"{indent}    if x == '{name} {k}':\n{indent}        x += {k}\n" for k in range(n))
+    return f"{indent}def {name}(x):\n{body}{indent}    return x\n"
+
+
+class TestTooComplexFunctions(unittest.TestCase):
+    """The cognitive-complexity check over a real git repository: a base commit, then the change in its working tree."""
+
+    BASE = flat("grow", 14) + "\n\n" + flat("big", 20) + "\n\n" + flat("small", 3)
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = tmp.name
+        self.host = Host()
+        self.git("init", "--quiet", "-b", "main")
+        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
+            self.git("config", key, value)
+        self.put("calc.py", self.BASE)
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "base")
+
+    def git(self, *args):
+        return self.host.git(self.repo, *args)
+
+    def put(self, name, text):
+        path = os.path.join(self.repo, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    def edit(self, name, old, new):
+        with open(os.path.join(self.repo, name)) as f:
+            text = f.read()
+        self.assertEqual(text.count(old), 1, old)
+        self.put(name, text.replace(old, new))
+
+    def change(self):
+        return orchestrator.GateChange.from_tree(self.repo, self.git("rev-parse", "HEAD").strip())
+
+    def found(self):
+        """(path, line, rule) of each finding on the working tree's change, and the findings themselves."""
+        found = orchestrator.too_complex_functions(self.change())
+        return [(f["path"], f["line"], f["rule"]) for f in found], found
+
+    def def_line(self, name, path="calc.py"):
+        with open(os.path.join(self.repo, path)) as f:
+            return next(n for n, line in enumerate(f, 1) if line.lstrip().startswith(f"def {name}("))
+
+    def nest_under(self, name, k):
+        """Add an if inside the kth if of calc.py's function name: 2 more for it, at nesting 1."""
+        self.edit("calc.py", f"    if x == '{name} {k}':\n        x += {k}\n",
+                  f"    if x == '{name} {k}':\n        x += {k}\n        if x:\n            x -= 1\n")
+
+    def test_an_unchanged_tree_has_no_findings(self):
+        self.assertEqual(self.found()[0], [])
+
+    def test_nesting_added_inside_a_function_is_found_at_its_def_line_which_the_change_does_not_add(self):
+        self.nest_under("grow", 13)  # its last if: 14 becomes 16
+        where, found = self.found()
+        self.assertEqual(where, [("calc.py", 1, "over-limit")])
+        self.assertNotIn(1, self.change().changed["calc.py"])
+        self.assertEqual(found[0]["message"], "`grow`: cognitive complexity 16, 14 at the base; the limit is 15.")
+        self.assertEqual(found[0]["severity"], "error")
+
+    def test_a_function_over_the_limit_whose_score_the_change_leaves_alone_is_not_found(self):
+        self.edit("calc.py", "        x += 19\n", "        x += 190\n")  # big's last if, still 20
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_function_over_the_limit_whose_score_the_change_raises_is_found(self):
+        self.nest_under("big", 19)  # its last if: 20 becomes 22
+        where, found = self.found()
+        self.assertEqual(where, [("calc.py", self.def_line("big"), "over-limit")])
+        self.assertEqual(found[0]["message"], "`big`: cognitive complexity 22, 20 at the base; the limit is 15.")
+
+    def test_a_score_that_rises_to_the_limit_is_not_found(self):
+        self.edit("calc.py", "    if x == 'grow 13':\n", "    if x == 'grow 13' and x:\n")  # grow: 14 becomes 15
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_new_function_over_the_limit_is_found_and_one_at_it_is_not(self):
+        self.put("calc.py", self.BASE + "\n\n" + flat("new_big", 16) + "\n\n" + flat("new_ok", 15))
+        where, found = self.found()
+        self.assertEqual(where, [("calc.py", self.def_line("new_big"), "over-limit")])
+        self.assertEqual(found[0]["message"], "`new_big`: cognitive complexity 16, a new function; the limit is 15.")
+
+    def test_a_method_is_named_and_scored_with_its_class(self):
+        # 15 ifs, and a call of itself through self: 16.
+        self.put("shapes.py", "class Box:\n" + flat("size", 15, indent="    ").replace("return x", "return self.size(x)"))
+        self.git("add", "shapes.py")
+        where, found = self.found()
+        self.assertEqual(where, [("shapes.py", 2, "over-limit")])
+        self.assertTrue(found[0]["message"].startswith("`Box.size`: cognitive complexity 16, a new function"))
+
+    def test_a_method_is_scored_with_its_class_at_the_base_too(self):
+        # 15 ifs, and a call of itself through self: 16 at the base and after an edit that adds no point.
+        self.put("shapes.py", "class Box:\n" + flat("size", 15, indent="    ").replace("return x", "return self.size(x)"))
+        self.git("add", "shapes.py")
+        self.git("commit", "--quiet", "-m", "box")
+        self.edit("shapes.py", "x += 3\n", "x += 30\n")
+        self.assertEqual(self.found()[0], [])
+
+    def test_an_unchanged_function_moved_and_renamed_is_compared_with_its_old_self(self):
+        big = flat("big", 20)
+        self.edit("calc.py", "\n\n" + big, "")
+        self.put("other.py", big.replace("def big(", "def huge("))
+        self.git("add", "other.py")
+        self.assertEqual(self.found()[0], [])
+
+    def test_an_unchanged_function_moved_out_of_a_deleted_file_is_compared_with_its_old_self(self):
+        self.git("rm", "--quiet", "calc.py")
+        # Lines enough of its own that git does not take other.py for calc.py renamed.
+        self.put("other.py", "".join(f"CONSTANT_{k} = {k}\n" for k in range(200)) + "\n\n" + flat("big", 20))
+        self.git("add", "other.py")
+        self.assertIn(("calc.py", None), self.host.changed_files(self.repo, self.git("rev-parse", "HEAD").strip()))
+        self.assertEqual(self.found()[0], [])
+
+    def test_an_unchanged_function_made_a_method_in_its_file_is_compared_with_its_old_self(self):
+        big = flat("big", 20)
+        self.edit("calc.py", big, "class Box:\n" + flat("big", 20, indent="    "))
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_copy_of_a_function_over_the_limit_is_new_wherever_it_goes(self):
+        copy = flat("big", 20).replace("def big(", "def copied(")
+        new = ["`copied`: cognitive complexity 20, a new function; the limit is 15."]
+        with self.subTest("beside the original, in its file"):
+            self.put("calc.py", self.BASE + "\n\n" + copy)
+            self.assertEqual([f["message"] for f in self.found()[1]], new)
+        self.put("calc.py", self.BASE)
+        self.put("other.py", copy)
+        self.git("add", "other.py")
+        with self.subTest("in another file, the original's file untouched"):
+            self.assertEqual([f["message"] for f in self.found()[1]], new)
+        with self.subTest("in another file, the original's file edited elsewhere"):
+            self.edit("calc.py", "'small 2':\n        x += 2\n", "'small 2':\n        x += 20\n")
+            self.assertEqual([f["message"] for f in self.found()[1]], new)
+
+    def test_a_function_moved_and_made_more_complex_is_judged_as_new(self):
+        big = flat("big", 20)
+        self.edit("calc.py", "\n\n" + big, "")
+        self.put("other.py", big.replace("        x += 19\n", "        x += 19\n        if x:\n            x -= 1\n"))
+        self.git("add", "other.py")
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`big`: cognitive complexity 22, a new function; the limit is 15."])
+
+    def test_a_file_renamed_from_any_name_is_compared_with_its_base(self):
+        self.commit_file("bin/tool", flat("helper", 20))
+        self.git("mv", "bin/tool", "bin/tool.py")
+        self.edit("bin/tool.py", "x += 3\n", "x += 30\n")  # still 20
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_function_out_of_tests_is_judged_as_new_as_tests_were_never_held_to_the_limit(self):
+        self.commit_file("tests/helpers.py", flat("helper", 20) + "\n\n" + flat("other_helper", 20))
+        os.makedirs(os.path.join(self.repo, "lib"))
+        self.git("mv", "tests/helpers.py", "lib/helpers.py")  # renamed, with both functions
+        self.edit("lib/helpers.py", "'helper 3':\n        x += 3\n", "'helper 3':\n        x += 30\n")  # still 20
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`helper`: cognitive complexity 20, a new function; the limit is 15."])
+        self.git("commit", "--quiet", "-am", "renamed")
+        self.put("lib/helpers.py", flat("helper", 20))
+        self.put("lib/more.py", flat("other_helper", 20))  # moved out of the old test file's lines
+        self.git("add", "lib/more.py")
+        self.assertEqual(self.found()[0], [])  # lib/helpers.py's base is lib/, now held to the limit
+
+    def test_a_function_moved_unchanged_out_of_tests_is_judged_as_new(self):
+        self.commit_file("tests/helpers.py", "X = 0\n\n\n" + flat("helper", 20))
+        self.put("tests/helpers.py", "X = 0\n")
+        self.put("lib.py", flat("helper", 20))
+        self.git("add", "lib.py")
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`helper`: cognitive complexity 20, a new function; the limit is 15."])
+
+    def test_a_function_moved_unchanged_into_tests_keeps_its_base_from_a_copy_elsewhere(self):
+        big = flat("big", 20)
+        self.put("calc.py", self.BASE.replace("\n\n" + big, ""))
+        self.put("tests/helpers.py", big)  # the original, moved where nothing is judged
+        self.put("lib.py", big.replace("def big(", "def copied("))
+        self.git("add", "tests/helpers.py", "lib.py")
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`copied`: cognitive complexity 20, a new function; the limit is 15."])
+
+    def test_a_function_moved_unchanged_where_nothing_is_judged_keeps_its_base_from_a_copy_of_its_name(self):
+        big = flat("big", 20)
+        self.put("calc.py", self.BASE.replace("\n\n" + big, ""))
+        self.put("tests/helpers.py", big)  # the original, moved where nothing is judged
+        self.put("lib.py", big)  # a copy under the same name
+        self.git("add", "tests/helpers.py", "lib.py")
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`big`: cognitive complexity 20, a new function; the limit is 15."])
+
+    def test_a_function_moved_unchanged_into_a_python_script_keeps_its_base_from_a_copy_elsewhere(self):
+        big = flat("big", 20)
+        self.put("calc.py", self.BASE.replace("\n\n" + big, ""))
+        self.put("bin/tool", "#!/usr/bin/env python3\n" + big)  # the original, in a script with no .py
+        self.put("lib.py", big.replace("def big(", "def copied("))
+        self.git("add", "bin/tool", "lib.py")
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`copied`: cognitive complexity 20, a new function; the limit is 15."])
+
+    def test_a_function_s_text_moved_into_a_file_that_is_not_python_leaves_its_base_to_its_copy(self):
+        big = flat("big", 20)
+        for name, first in [("notes.txt", "# python, kept for reference\n"), ("bin/run", "#!/bin/sh\n")]:
+            with self.subTest(name):
+                self.put("calc.py", self.BASE.replace("\n\n" + big, ""))
+                self.put(name, first + big)
+                self.put("lib.py", big.replace("def big(", "def copied("))  # the only function with big's body
+                self.git("add", name, "lib.py")
+                self.assertEqual(self.found()[0], [])
+                self.git("rm", "--quiet", "--cached", name)
+                os.remove(os.path.join(self.repo, name))
+
+    def test_a_function_in_a_file_the_check_does_not_judge_keeps_its_own_base_from_a_moved_twin(self):
+        big = flat("big", 20)
+        self.commit_file("tests/helpers.py", "X = 0\n\n\n" + big)
+        self.edit("tests/helpers.py", "X = 0\n", "X = 1\n")
+        self.put("calc.py", self.BASE.replace("\n\n" + big, ""))
+        self.put("lib.py", big)  # calc.py's big, moved unchanged
+        self.git("add", "lib.py")
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_changed_symlink_is_not_read_so_one_to_a_fifo_cannot_block_the_check(self):
+        elsewhere = tempfile.TemporaryDirectory()
+        self.addCleanup(elsewhere.cleanup)
+        fifo = os.path.join(elsewhere.name, "pipe")
+        os.mkfifo(fifo)
+        os.symlink(fifo, os.path.join(self.repo, "x.py"))
+        self.git("add", "x.py")
+        self.nest_under("big", 19)
+        where = []
+        worker = threading.Thread(target=lambda: where.extend(self.found()[0]), daemon=True)
+        worker.start()
+        worker.join(10)
+        if worker.is_alive():
+            # Open the FIFO's other end and close it, so that the read blocked on it ends and the suite goes on.
+            with contextlib.suppress(OSError):
+                os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+            worker.join(10)
+            self.fail("the check read the FIFO a changed symlink points to")
+        self.assertEqual(where, [("calc.py", self.def_line("big"), "over-limit")])
+
+    def test_a_module_renamed_with_a_symlink_left_under_its_old_name_keeps_its_functions_bases(self):
+        self.git("mv", "calc.py", "core.py")
+        os.symlink("core.py", os.path.join(self.repo, "calc.py"))
+        self.git("add", "calc.py")
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_changed_file_gone_before_it_is_read_could_not_be_read(self):
+        self.nest_under("big", 19)
+        change = self.change()
+        os.remove(os.path.join(self.repo, "calc.py"))
+        found = orchestrator.too_complex_functions(change)
+        self.assertEqual([(f["path"], f["rule"]) for f in found], [("calc.py", "not-scored")])
+        self.assertTrue(found[0]["message"].startswith("could not be read ("), found[0]["message"])
+
+    def test_an_unchanged_copy_in_a_file_the_check_does_not_judge_takes_no_base_from_its_original(self):
+        big = flat("big", 20)
+        self.commit_file("tests/helpers.py", "X = 0\n\n\n" + big)
+        self.edit("calc.py", "'big 3':\n        x += 3\n", "'big 3':\n        x += 30\n")  # edited in place: still 20
+        self.edit("tests/helpers.py", "X = 0\n", "X = 1\n")  # the copy at the base, in a file edited elsewhere
+        self.assertEqual(self.found()[0], [])
+
+    def test_an_unchanged_copy_in_a_file_the_check_does_not_judge_takes_no_base_from_its_original_renamed(self):
+        self.put("tests/helpers.py", flat("big", 20))
+        self.git("add", "tests/helpers.py")
+        self.edit("calc.py", "def big(", "def legacy_big(")  # renamed in place, its body unchanged
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_copy_of_its_name_takes_no_base_from_an_original_renamed_in_place(self):
+        big = flat("big", 20)
+        self.edit("calc.py", "def big(", "def legacy_big(")  # renamed in place, its body unchanged
+        self.put("lib.py", big)
+        self.git("add", "lib.py")
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`big`: cognitive complexity 20, a new function; the limit is 15."])
+
+    def test_a_function_moved_unchanged_keeps_its_base_from_a_new_function_under_its_old_name(self):
+        new_big = flat("big", 18).replace("'big ", "'new big ")
+        for where in ["lib.py", "tests/helpers.py", "bin/tool"]:
+            with self.subTest(where):
+                self.put("calc.py", self.BASE.replace(flat("big", 20), new_big))
+                self.put(where, ("#!/usr/bin/env python3\n" if where == "bin/tool" else "") + flat("big", 20))
+                self.git("add", where)
+                self.assertEqual([f["message"] for f in self.found()[1]],
+                                 ["`big`: cognitive complexity 18, a new function; the limit is 15."])
+                self.git("rm", "--quiet", "--cached", where)
+                os.remove(os.path.join(self.repo, where))
+
+    def test_a_function_moved_unchanged_out_of_a_file_that_keeps_its_name_keeps_its_base_from_a_copy(self):
+        # Two functions named _, as @singledispatch registrations are: the one scoring 20 moves where nothing is
+        # judged, the other stays, and a copy of the first is added elsewhere.
+        moved, stays = flat("_", 20).replace("'_ ", "'moved "), flat("_", 3).replace("'_ ", "'stays ")
+        self.commit_file("disp.py", moved + "\n\n" + stays)
+        self.put("disp.py", stays)
+        self.put("tests/helpers.py", moved)
+        self.put("lib.py", moved)
+        self.git("add", "tests/helpers.py", "lib.py")
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`_`: cognitive complexity 20, a new function; the limit is 15."])
+        self.assertEqual(self.found()[0][0][0], "lib.py")
+
+    def test_a_function_moved_unchanged_out_of_a_file_that_keeps_its_twin_keeps_its_base(self):
+        big = flat("big", 20)
+        self.put("calc.py", self.BASE + "\n\n" + big.replace("def big(", "def twin("))
+        self.git("commit", "--quiet", "-am", "twin")
+        self.edit("calc.py", "\n\n" + big.replace("def big(", "def twin("), "")
+        self.put("lib.py", big.replace("def big(", "def twin("))  # twin moved unchanged; big stays as it was
+        self.git("add", "lib.py")
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_copy_of_a_function_the_change_edits_takes_its_base_as_bodies_first_decides(self):
+        # The cost TODO.md records ("A copy of a function whose original the change edits keeps the old score and
+        # passes"): the copy is taken for the original moved unchanged, and the edited original for a new function.
+        big = flat("big", 20)
+        self.edit("calc.py", "'big 3':\n        x += 3\n", "'big 3':\n        x += 30\n")  # edited in place: still 20
+        for where in ["lib.py", "tests/helpers.py"]:
+            with self.subTest(where):
+                self.put(where, big)
+                self.git("add", where)
+                self.assertEqual([f["message"] for f in self.found()[1]],
+                                 ["`big`: cognitive complexity 20, a new function; the limit is 15."])
+                self.assertEqual(self.found()[0][0][0], "calc.py")
+                self.git("rm", "--quiet", "--cached", where)
+                os.remove(os.path.join(self.repo, where))
+
+    def test_a_function_whose_decorator_the_change_adds_is_compared_with_its_unchanged_self(self):
+        self.edit("calc.py", "def big(x):\n", "@staticmethod\ndef big(x):\n")  # touched, its body as it was
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_function_renamed_unchanged_keeps_its_base_from_a_new_function_under_its_old_name(self):
+        big = flat("big", 20)
+        self.put("calc.py", self.BASE.replace(big, big.replace("def big(", "def legacy_big(")) + "\n\n"
+                 + flat("big", 16).replace("'big ", "'new big "))
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`big`: cognitive complexity 16, a new function; the limit is 15."])
+
+    def test_one_base_function_is_the_base_of_one_function_only(self):
+        big = flat("big", 20)
+        copy = big.replace("def big(", "def copied(")
+        # The original moved unchanged, and a copy of it elsewhere.
+        self.put("calc.py", self.BASE.replace("\n\n" + big, ""))
+        self.put("other.py", big)
+        self.put("third.py", copy)
+        self.git("add", "other.py", "third.py")
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`copied`: cognitive complexity 20, a new function; the limit is 15."])
+        # The copy in a file read before the original's new one, so that only the name decides.
+        os.rename(os.path.join(self.repo, "third.py"), os.path.join(self.repo, "a_copy.py"))
+        self.git("add", "-A", "third.py", "a_copy.py")
+        self.assertEqual(self.found()[0], [("a_copy.py", 1, "over-limit")])
+
+    def test_a_name_defined_twice_is_compared_with_the_same_definition_at_the_base(self):
+        # A property's getter, scoring 21, then its setter, which scores nothing, under the same name.
+        getter = flat("x", 21, indent="    ").replace("    def x(x):\n", "    @property\n    def x(self):\n")
+        self.put("props.py", "class C:\n" + getter + "\n    @x.setter\n    def x(self, value):\n        pass\n")
+        self.git("add", "props.py")
+        self.git("commit", "--quiet", "-m", "property")
+        self.edit("props.py", "x += 3\n", "x += 30\n")  # the getter's, still 21
+        self.assertEqual(self.found()[0], [])
+        self.edit("props.py", "x += 30\n", "x += 30\n        if x:\n            x -= 1\n")  # 21 becomes 22
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`C.x`: cognitive complexity 22, 21 at the base; the limit is 15."])
+
+    # A function named _ that does nothing, as one @singledispatch registration or @overload stub can be.
+    TRIVIAL = "def _(a):\n    return a\n\n\n"
+
+    def commit_file(self, name, text):
+        self.put(name, text)
+        self.git("add", name)
+        self.git("commit", "--quiet", "-m", name)
+
+    def test_a_namesake_removed_above_a_function_leaves_it_compared_with_its_own_base(self):
+        self.commit_file("disp.py", self.TRIVIAL + flat("_", 20))
+        self.put("disp.py", flat("_", 20).replace("x += 3\n", "x += 30\n"))  # the trivial one gone; still 20
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_namesake_added_above_a_function_leaves_it_compared_with_its_own_base(self):
+        self.commit_file("disp.py", flat("_", 20))
+        self.put("disp.py", self.TRIVIAL + flat("_", 20).replace("x += 3\n", "x += 30\n"))  # still 20
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_rise_of_a_function_whose_name_others_share_is_found(self):
+        self.commit_file("disp.py", flat("_", 20))
+        self.put("disp.py", flat("_", 20).replace("        x += 19\n", "        x += 19\n        if x:\n            x -= 1\n"))
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`_`: cognitive complexity 22, 20 at the base; the limit is 15."])
+
+    def test_only_the_tests_directory_is_exempt_as_from_ruff_s_c901(self):
+        self.put("tests/test_calc.py", flat("test_big", 16))
+        self.put("tests/unit/helpers.py", flat("helper", 16))
+        self.put("test_top.py", flat("test_big", 16))
+        self.put("src/test_utils.py", flat("util", 16))
+        self.git("add", "tests", "test_top.py", "src")
+        self.assertEqual(self.found()[0], [("src/test_utils.py", 1, "over-limit"), ("test_top.py", 1, "over-limit")])
+
+    def test_methods_of_nested_classes_and_functions_under_module_level_statements_are_judged(self):
+        self.put("more.py", (
+            "class Outer:\n"
+            "    class Inner:\n"
+            + flat("method", 16, indent="        ")
+            + "if True:\n"
+            + flat("under_if", 16, indent="    ")
+            + "try:\n"
+            "    import json\n"
+            "except ImportError:\n"
+            + flat("under_except", 16, indent="    ")))
+        self.git("add", "more.py")
+        where, found = self.found()
+        self.assertEqual(where, [("more.py", self.def_line(name, "more.py"), "over-limit")
+                                 for name in ("method", "under_if", "under_except")])
+        self.assertEqual([f["message"].split(":")[0] for f in found],
+                         ["`Outer.Inner.method`", "`under_if`", "`under_except`"])
+
+    def test_a_renamed_file_is_compared_with_its_base_under_its_old_name(self):
+        self.git("mv", "calc.py", "lib.py")
+        self.edit("lib.py", "        x += 19\n", "        x += 190\n")
+        self.assertEqual(self.found()[0], [])
+
+    def test_an_unparsable_file_is_a_finding(self):
+        self.put("calc.py", self.BASE + "def broken(:\n")
+        where, found = self.found()
+        self.assertEqual(where, [("calc.py", None, "not-scored")])
+        self.assertEqual(found[0]["message"], "does not parse as Python, so its functions were not scored.")
+
+    def test_files_that_cannot_be_read_or_parsed_are_findings_and_the_others_are_still_judged(self):
+        self.put("a_unknown.py", "# -*- coding: nonsense -*-\n")  # an encoding Python does not know
+        self.put("b_broken.py", "def broken(:\n")
+        self.put("0_notes.txt", "not Python\n")
+        self.git("add", "a_unknown.py", "b_broken.py", "0_notes.txt")
+        self.nest_under("big", 19)
+        where, found = self.found()
+        self.assertEqual(where, [("a_unknown.py", None, "not-scored"), ("b_broken.py", None, "not-scored"),
+                                 ("calc.py", self.def_line("big"), "over-limit")])
+        self.assertTrue(found[0]["message"].startswith("could not be read ("), found[0]["message"])
+
+    def test_a_base_that_cannot_be_read_leaves_its_functions_judged_as_new(self):
+        self.nest_under("big", 19)
+        git = Host.git
+
+        def no_blob(host, cwd, *args, **kw):
+            if "cat-file" in args:
+                raise OrchestratorError("git cat-file failed")
+            return git(host, cwd, *args, **kw)
+
+        with patch.object(Host, "git", no_blob):
+            where, found = self.found()
+        self.assertEqual(where, [("calc.py", self.def_line("big"), "over-limit")])
+        self.assertEqual(found[0]["message"], "`big`: cognitive complexity 22, a new function; the limit is 15.")
+
+    def test_a_function_in_mutmut_s_state_is_not_judged(self):
+        self.put("mutants/calc.py", flat("x_big__mutmut_1", 20) + "\n")
+        self.git("add", "mutants/calc.py")
+        self.nest_under("big", 19)
+        where, _ = self.found()
+        self.assertEqual(where, [("calc.py", self.def_line("big"), "over-limit")])
+
+    def put_bytes(self, name, data):
+        with open(os.path.join(self.repo, name), "wb") as f:
+            f.write(data)
+
+    def test_a_file_with_a_byte_order_mark_or_a_coding_cookie_is_judged_as_python_reads_it(self):
+        self.put_bytes("bom.py", b"\xef\xbb\xbf" + flat("marked", 16).encode())
+        self.put_bytes("latin.py", b"# -*- coding: latin-1 -*-\nCAFE = 'caf\xe9'\n" + flat("declared", 16).encode())
+        self.git("add", "bom.py", "latin.py")
+        self.assertEqual(self.found()[0], [("bom.py", 1, "over-limit"), ("latin.py", 3, "over-limit")])
+
+    def test_a_file_whose_coding_cookie_names_no_text_encoding_could_not_be_read(self):
+        # rot13 is a codec, but not one that decodes bytes to text; Python refuses such a file.
+        self.put("rot.py", "# coding: rot13\n" + flat("rotated", 16))
+        self.git("add", "rot.py")
+        where, found = self.found()
+        self.assertEqual(where, [("rot.py", None, "not-scored")])
+        self.assertTrue(found[0]["message"].startswith("could not be read ("), found[0]["message"])
+
+    def test_a_base_whose_coding_cookie_names_no_text_encoding_leaves_its_functions_judged_as_new(self):
+        self.put("rot.py", "# coding: rot13\n" + flat("rotated", 20))
+        self.git("add", "rot.py")
+        self.git("commit", "--quiet", "-m", "rot13")
+        self.put("rot.py", flat("rotated", 20).replace("x += 3\n", "x += 30\n"))
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`rotated`: cognitive complexity 20, a new function; the limit is 15."])
+
+    def test_a_base_with_a_byte_order_mark_or_a_coding_cookie_is_compared_as_python_reads_it(self):
+        bom, cookie = b"\xef\xbb\xbf", b"# -*- coding: latin-1 -*-\nCAFE = 'caf\xe9'\n"
+        self.put_bytes("bom.py", bom + flat("marked", 20).encode())
+        self.put_bytes("latin.py", cookie + flat("declared", 20).encode())
+        self.git("add", "bom.py", "latin.py")
+        self.git("commit", "--quiet", "-m", "encodings")
+        # Edits that leave both at 20.
+        self.put_bytes("bom.py", bom + flat("marked", 20).replace("x += 3\n", "x += 30\n").encode())
+        self.put_bytes("latin.py", cookie + flat("declared", 20).replace("x += 3\n", "x += 30\n").encode())
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_base_that_does_not_parse_leaves_its_functions_judged_as_new(self):
+        self.put("broken.py", "def big(:\n")
+        self.git("add", "broken.py")
+        self.git("commit", "--quiet", "-m", "broken")
+        self.put("broken.py", flat("big", 16))
+        where, found = self.found()
+        self.assertEqual(where, [("broken.py", 1, "over-limit")])
+        self.assertEqual(found[0]["message"], "`big`: cognitive complexity 16, a new function; the limit is 15.")
+
+    def test_code_deeper_than_python_s_recursion_limit_is_judged_in_the_change_and_at_the_base(self):
+        self.put("deep.py", LONG_SUM + "\n\n" + LONG_ELIF)
+        self.git("add", "deep.py")
+        self.assertEqual(self.found()[0], [("deep.py", self.def_line("long_elif", "deep.py"), "over-limit")])
+        self.git("commit", "--quiet", "-m", "deep")
+        self.edit("deep.py", "    elif x == 1000:\n        pass\n",
+                  "    elif x == 1000:\n        pass\n    else:\n        pass\n")  # 1001 becomes 1002
+        found = self.found()[1]
+        self.assertEqual([f["message"] for f in found],
+                         ["`long_elif`: cognitive complexity 1002, 1001 at the base; the limit is 15."])
+
+    def test_an_integer_too_long_to_print_in_decimal_is_judged_like_any_code(self):
+        self.put("huge.py", "def h():\n    return 0x" + "f" * 4000 + "\n\n\n" + flat("big_one", 16))
+        self.git("add", "huge.py")
+        self.assertEqual(self.found()[0], [("huge.py", 5, "over-limit")])
+
+    def test_it_fails_the_gate(self):
+        [check] = [c for c in orchestrator.gate_checks(orchestrator.MUTATION_BUDGET) if c.name == "cognitive-complexity"]
+        self.assertEqual((check.fails, check.find), (True, orchestrator.too_complex_functions))
 
 
 class TestToolFindings(unittest.TestCase):

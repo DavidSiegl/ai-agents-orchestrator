@@ -43,6 +43,7 @@ moved out of it counts as added. The linters and the build configuration listing
 | Check | Fails? | Finds |
 |---|---|---|
 | `test-integrity` | yes | tests the change weakened, in test files (`tests/**`, `test_*.py`, `*_test.py`) |
+| `cognitive-complexity` | yes | functions the change edits or adds that it takes over a cognitive complexity of 15 |
 | `flaky-tests` | no | tests the change adds or edits that pass in one order and fail in another |
 | `surviving-mutants` | no | changes to the functions the change edits that no test notices |
 
@@ -64,6 +65,50 @@ change cannot pass by weakening its tests. Each of these is a finding:
 
 It reads Python only; another language is a `WeakenedTestsDetector` beside the Python one in
 `WEAKENED_TESTS_DETECTORS`.
+
+**Cognitive complexity** scores the functions the change edits, so that a change cannot pile branches into the
+function it is editing rather than split it. A function counts when the change adds a line to it, decorators
+included, in a `.py` file outside `tests/`, which is exempt as it is from ruff's `C901`: any function that no other
+function holds, a method of a nested class and a function under a module-level `if` or `try` included. A function
+nested in another is part of that one. Files are read as Python reads them, by their byte order mark or coding
+cookie. Its score is G. Ann Campbell's [cognitive complexity](https://www.sonarsource.com/docs/CognitiveComplexity.pdf),
+which SonarQube's rule S3776 measured: a point for each `if`, `elif`, `else`, ternary, loop, `except`, `match`,
+sequence of like boolean operators and call of a function to itself, and one more for each level of nesting on those
+that nest. The comment above `COGNITIVE_COMPLEXITY_LIMIT` in `orchestrator.py` says how each Python construct maps to
+the paper's rules. Each of these is a finding:
+
+- `over-limit`: a function over 15, at its `def` line, when it is new or the change raised its score, as
+  "`_poll`: cognitive complexity 19, 14 at the base; the limit is 15". A function already over 15 that the change
+  leaves no worse is not a finding, since the gate judges the change. Its base is a function of the base, and each
+  base function is the base of one function at most:
+  - first, one with the same body, since an unchanged function is that function whatever its name: of its name in
+    its file's base, then of its name in the base of another Python file the change touches, then of any name in its
+    file's base, then elsewhere. So a function moved to another module, renamed or made a method, but otherwise
+    unchanged, keeps its score, and a new function given its old name is new. Of a function moved unchanged and a
+    copy of it, the one that kept the name takes it, and a function moved unchanged into a file the check does not
+    judge, such as one under `tests/` or a script with no `.py` whose `#!` line names python, takes its own before
+    any copy can, whatever the copy's name. A function takes the base of a function in another file only when that
+    one's body is gone from it, so an unchanged copy takes nothing from an original still in its place, under its
+    name or another; an original edited in place is gone by its body, which is the cost below;
+  - failing that, the highest-scoring function of its name left in its file's base, under the file's old name,
+    whatever that name, when the change renamed it. So with a name defined more than once, as a property's getter and
+    setter or `@singledispatch` registrations named `_` are, adding or removing one never makes a function the change
+    left no worse a finding; the cost is that a rise below a higher-scoring namesake goes unseen;
+  - failing that, the function is new: a copy whose original is still in place, a function moved and edited, and a
+    function whose base is under `tests/`, which was never held to the limit.
+
+  Bodies pairing first has a cost: a copy of a function whose original the change edits keeps the old score and
+  passes, as if it were the original renamed and the edited one new, even when the edit takes the original below the
+  limit, and wherever the copy is, in a file the check does not judge too. `TODO.md` holds it.
+- `not-scored`: a changed file that could not be read or parsed. Like any finding of the check, it fails the gate: a
+  check that cannot do its work says so rather than pass. A base that cannot be read or parsed is not a finding: its
+  file's functions are judged as new, as `test-integrity` takes a base that does not parse to have no tests.
+
+ruff's `C90` stays beside it. It counts branches without their nesting, so it misses a deeply nested function that
+cognitive complexity catches, but it still catches a flat function of many branches, which cognitive complexity scores
+lower. It reports at the `def` line, and the gate keeps a linter's finding only on a line the change adds: when a change
+grows an existing function, only this check reports it. A function whose `def` line the change adds, such as a new
+one, and that both flag, is two findings at its `def`.
 
 **Flaky tests** reruns the tests the change adds or edits, so a test that passed the build's one run by luck of
 the order is caught. A test counts when the change adds or removes a line of it in a test file outside `mutants/`, as
@@ -235,10 +280,10 @@ and cache of results, is left out of that copy, so mutmut starts afresh and a ch
 a change that adds or edits files there is listed under build configuration.
 
 The rule sets were tuned until `main` gave a short list of real findings: ruff's defaults plus bugbear,
-simplifications, pyupgrade, bandit, complexity (`max-complexity = 15`) and pylint's errors and warnings, with the
-fake tokens, paths and fixtures of `tests/` exempt; mypy at its default strictness on `orchestrator.py`;
-pymarkdown without the line-length and inline-HTML rules. Only lines a change adds count, so what `main` already
-has does not block.
+simplifications, pyupgrade, bandit, cyclomatic complexity (`C90`, `max-complexity = 15`; nesting is the
+`cognitive-complexity` check's) and pylint's errors and warnings, with the fake tokens, paths and fixtures of `tests/`
+exempt; mypy at its default strictness on `orchestrator.py`; pymarkdown without the line-length and inline-HTML rules.
+Only lines a change adds count, so what `main` already has does not block.
 
 ## Jenkins setup
 
