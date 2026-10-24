@@ -97,7 +97,7 @@ GITLEAKS_TIMEOUT = 300
 # What the preflight tells a user whose machine lacks gitleaks with its `git` subcommand (8.19 and later).
 GITLEAKS_INSTALL = ("install gitleaks 8.19 or later where the agents run (https://github.com/gitleaks/gitleaks#installing; "
                     "on Arch, `pacman -S gitleaks`)")
-# Every run's branch starts with it (branch_name), and prune touches no branch without it (is_prune_candidate).
+# The namespace that marks a branch as a run's, locally and on origin; prune touches no branch outside it.
 BRANCH_PREFIX = "orchestrator/"
 REMOTE = "origin"
 # prune deletes a run's branch once its pull request is merged, or closed this long: time to reopen it.

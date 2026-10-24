@@ -277,7 +277,8 @@ that exists. Both build with `packaging/build-binary.sh`, so the binaries cannot
 differently. The macOS binary is built only for Apple Silicon and is unsigned, apart from PyInstaller's ad-hoc
 signature, and nobody tests it by hand: the Action's smoke tests, the window opened and closed included, are its
 check. A second Action merges a pull request into `main` once Jenkins passes it, unless a human is to merge it;
-the orchestrator's own pull requests always wait for one.
+the orchestrator's own pull requests merge the same way, except a draft, which a run opens when it did not succeed
+or conflicts (`.github/workflows/automerge.yml` says which wait).
 
 ## Design decisions
 
