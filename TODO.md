@@ -81,6 +81,11 @@ was done.
   blocks the surviving-mutants and flaky-tests selection, and one to `/dev/zero` reads without end. The
   cognitive-complexity check skips such paths (`_is_link_or_special`, review round 5 of ticket 06, R5-F1). Found by
   reading the code, not reproduced. Closes with `_changed_python_units` skipping what `_is_link_or_special` names.
+- **A function moved out of a Python script the change deletes is judged as new.** The cognitive-complexity check
+  reads the base of a changed file whose old name has no `.py` only when the file is still Python now
+  (`_base_scores`: `new in working`), so the functions of a deleted `bin/tool` lend no score, and one moved unchanged
+  from it into `lib.py` is reported as new. Closes with the base read whenever its first line is a `#!` naming
+  python, as `_is_python_source` asks of the working tree.
 - **Cognitive complexity scores direct recursion only.** Campbell's paper gives a point to each function in a
   recursion cycle; `_calls_itself` sees a function calling itself by name, or a method as `self.m`, `cls.m` or
   `C.m`, but not a cycle through other functions, nor a call through an alias. A function that recurses through a

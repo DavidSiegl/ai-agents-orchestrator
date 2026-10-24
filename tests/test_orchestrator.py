@@ -5896,6 +5896,45 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.assertEqual([f["message"] for f in self.found()[1]],
                          ["`copied`: cognitive complexity 20, a new function; the limit is 15."])
 
+    def test_a_function_moved_unchanged_where_nothing_is_judged_keeps_its_base_from_a_copy_of_its_name(self):
+        big = flat("big", 20)
+        self.put("calc.py", self.BASE.replace("\n\n" + big, ""))
+        self.put("tests/helpers.py", big)  # the original, moved where nothing is judged
+        self.put("lib.py", big)  # a copy under the same name
+        self.git("add", "tests/helpers.py", "lib.py")
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`big`: cognitive complexity 20, a new function; the limit is 15."])
+
+    def test_a_function_moved_unchanged_into_a_python_script_keeps_its_base_from_a_copy_elsewhere(self):
+        big = flat("big", 20)
+        self.put("calc.py", self.BASE.replace("\n\n" + big, ""))
+        self.put("bin/tool", "#!/usr/bin/env python3\n" + big)  # the original, in a script with no .py
+        self.put("lib.py", big.replace("def big(", "def copied("))
+        self.git("add", "bin/tool", "lib.py")
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`copied`: cognitive complexity 20, a new function; the limit is 15."])
+
+    def test_a_function_s_text_moved_into_a_file_that_is_not_python_leaves_its_base_to_its_copy(self):
+        big = flat("big", 20)
+        for name, first in [("notes.txt", "# python, kept for reference\n"), ("bin/run", "#!/bin/sh\n")]:
+            with self.subTest(name):
+                self.put("calc.py", self.BASE.replace("\n\n" + big, ""))
+                self.put(name, first + big)
+                self.put("lib.py", big.replace("def big(", "def copied("))  # the only function with big's body
+                self.git("add", name, "lib.py")
+                self.assertEqual(self.found()[0], [])
+                self.git("rm", "--quiet", "--cached", name)
+                os.remove(os.path.join(self.repo, name))
+
+    def test_a_function_in_a_file_the_check_does_not_judge_keeps_its_own_base_from_a_moved_twin(self):
+        big = flat("big", 20)
+        self.commit_file("tests/helpers.py", "X = 0\n\n\n" + big)
+        self.edit("tests/helpers.py", "X = 0\n", "X = 1\n")
+        self.put("calc.py", self.BASE.replace("\n\n" + big, ""))
+        self.put("lib.py", big)  # calc.py's big, moved unchanged
+        self.git("add", "lib.py")
+        self.assertEqual(self.found()[0], [])
+
     def test_a_changed_symlink_is_not_read_so_one_to_a_fifo_cannot_block_the_check(self):
         elsewhere = tempfile.TemporaryDirectory()
         self.addCleanup(elsewhere.cleanup)

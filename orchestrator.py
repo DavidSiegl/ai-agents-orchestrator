@@ -3923,17 +3923,21 @@ def _base_scores(change: GateChange, judged: dict[str, tuple[list[_ScoredFunctio
     its file's base. A base under _COMPLEXITY_EXEMPT is no base, since the tests were never held to the limit, and
     nor is one that cannot be read or parsed.
 
-    The functions of every other changed Python file, which the check does not judge, pair by body too, so that one
-    moved unchanged into such a file is still itself and lends its base to no copy. Such a function takes a base
-    function of another file only when that one is gone from its file, whose working tree holds no function of its
-    name or body now: one that is still there, edited, is the base of its edited self, and the other a copy.
+    The functions of every other changed Python file, which the check does not judge, such as one under
+    _COMPLEXITY_EXEMPT or a script whose name has no .py (_is_python_source), pair by body too, and in each step
+    before the judged ones, so that one moved unchanged into such a file is still itself and lends its base to no
+    copy, whatever the copy's name. Such a function takes a base function of another file only when that one is gone
+    from its file, whose working tree holds no function of its name or body now: one that is still there, edited, is
+    the base of its edited self, and the other a copy.
 
     The cost of bodies first: a copy of a function whose original the change edits takes the original's old score,
     as if the original were the new function under its name.
     """
-    working = {path: functions for path, (functions, _) in judged.items()}
-    working.update({new: _working_functions(change, new)[0] or [] for _, new in pairs
-                    if new and new not in working and new.endswith(".py") and not _is_link_or_special(change, new)})
+    # The changed Python files the check does not judge come first, so that a function moved unchanged into one takes
+    # its base before a copy in a judged file can.
+    working = {new: _working_functions(change, new)[0] or [] for _, new in pairs
+               if new and new not in judged and _is_python_source(change, new)}
+    working.update((path, functions) for path, (functions, _) in judged.items())
     old_paths = {new: old for old, new in pairs if new}
     homes = {path: old_paths.get(path, path) for path in working}
     pool = _BasePool({old: _base_functions(change, old) for old, new in pairs
@@ -4028,6 +4032,21 @@ def _is_link_or_special(change: GateChange, path: str) -> bool:
         return not stat.S_ISREG(os.lstat(os.path.join(change.root, path)).st_mode)
     except OSError:
         return False
+
+
+def _is_python_source(change: GateChange, path: str) -> bool:
+    """Whether the working tree's path is a regular file of Python source: named *.py, or a script whose first line
+    is a #! naming python. False for anything _is_link_or_special names, and for a file that cannot be read."""
+    if _is_link_or_special(change, path):
+        return False
+    if path.endswith(".py"):
+        return True
+    try:
+        with open(os.path.join(change.root, path), "rb") as source:
+            first = source.readline(256)
+    except OSError:
+        return False
+    return first.startswith(b"#!") and b"python" in first
 
 
 def _working_functions(change: GateChange, path: str) -> tuple[list[_ScoredFunction] | None, str]:
