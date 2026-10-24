@@ -3635,8 +3635,10 @@ class TestQualityReport(unittest.TestCase):
     def test_files_under_mutmut_s_state_are_named_apart_from_build_config(self):
         text = quality_report("OK", "i", mutmut_state=["mutants/calc.py", "mutants/calc.py.meta"])
         self.assertIn("## Build configuration\n\n- The change adds or edits `mutants/calc.py` and "
-                      "`mutants/calc.py.meta` under `mutants/`, where mutmut keeps its state. The surviving-mutants "
-                      "check runs mutmut without them and mutates no function in them.\n", text)
+                      "`mutants/calc.py.meta` under `mutants/`, where mutmut keeps its state. The gate's checks leave "
+                      "them out: none selects a test or a function in them or counts them as a change to the code, "
+                      "and the surviving-mutants check runs mutmut without them. The linters read them as they read "
+                      "any tracked file.\n", text)
         self.assertNotIn("The change edits", text)
 
     def test_tokens_are_masked(self):
