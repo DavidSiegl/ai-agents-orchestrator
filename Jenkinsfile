@@ -91,6 +91,23 @@ pipeline {
             }
         }
 
+        // The desktop app's frontend: its types, its lint and its Vitest tests. The gate judges only the Python, so
+        // this stage stops the build instead, before Gate: a quality round then reports BUILD_FAILED with the
+        // console's end, where a failure after Gate would hide under quality.md's passing GATE line.
+        stage('UI') {
+            when { expression { return env.JUDGED_AT_PR != 'true' } }
+            steps {
+                dir('ui') {
+                    sh '''
+                        npm ci --no-audit --no-fund
+                        npm run typecheck
+                        npm run lint
+                        npm test
+                    '''
+                }
+            }
+        }
+
         // orchestrator.py gate (docs/quality-gate.md): ruff, mypy, pymarkdown, shellcheck and actionlint, the tests and
         // coverage of new code, judged on the lines the change adds. A quality build judges its snapshot by main's
         // gate and main's rules, so a change cannot loosen how it is itself judged, and goes UNSTABLE on a red gate;

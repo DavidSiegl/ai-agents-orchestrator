@@ -21,6 +21,11 @@ was done.
   and unchecked", "In (b) that run still races GitHub's immediate merge. A conflict cleared by a change to the base
   rather than the head raises no pull-request event at all." Closes with a ruleset that requires the check on
   every branch, or one that restricts merges outside `main`.
+- **No build compiles or tests the desktop app's Rust shell.** Jenkins' UI stage checks only `ui/`'s frontend;
+  `cargo test` in `ui/src-tauri/`, which starts and stops a real `serve`, runs only by hand. Debian 13's Rust 1.85
+  cannot build it: the locked Tauri 2.12 crates need rustc 1.90 (tried in the agent's base image, 2026-10-24). The
+  agent would need a newer toolchain, Tauri's system packages (`libwebkit2gtk-4.1-dev` and the rest the README
+  lists) and room for a Tauri build within agentbox0's 2 CPUs and 3 GB. Closes with a Jenkins stage that runs it.
 - **The secret scan does not look inside a file git takes for binary.** With no attributes, git still calls a file
   binary when its first 8000 bytes hold a NUL, and `git log -p` prints "Binary files ... differ" for it, to gitleaks
   and to `Host._allow_comments` alike, so a secret or a `gitleaks:allow` in such a file is pushed unscanned. gitleaks'
