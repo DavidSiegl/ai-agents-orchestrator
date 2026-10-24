@@ -1526,9 +1526,10 @@ class Host:
         remote-tracking ref for a branch origin has since deleted or rewritten narrows the range: what only it reaches
         was public once, and is not scanned again.
 
-        The rules come from base, a commit before the change: its .gitleaks.toml (else gitleaks' defaults), its
-        .gitleaksignore (else none) and its .gitattributes, which decide how git diffs a file, and nothing the
-        change holds, in the working tree or committed, so that the change cannot allowlist itself;
+        The rules come from base, a commit before the change: its .gitleaks.toml (else gitleaks' defaults) and its
+        .gitleaksignore (else none), and nothing the change holds, in the working tree or committed, so that the
+        change cannot allowlist itself. Every file is diffed as text, with no textconv, whatever any .gitattributes
+        says, as _scan_git_env sets git up;
         gitleaks honours a `gitleaks:allow` comment silently, so each one an added line holds is a Leak of its own.
         gitleaks runs with --redact and writes its JSON report to report_path, a path in the run's directory, beside
         the config files and the empty directory this makes there.
@@ -1554,8 +1555,8 @@ class Host:
         if octopus:
             raise OrchestratorError(f"{failed}: merge {octopus[0][:12]} has three or more parents, and git shows no "
                                     f"diff of what such a merge adds; merge its branches one at a time")
-        log_opts = f"--diff-merges=remerge {commit} --not --remotes={REMOTE}"
-        git_env = _scan_git_env(git_dir, base)
+        log_opts = f"--diff-merges=remerge --no-textconv {commit} --not --remotes={REMOTE}"
+        git_env = _scan_git_env(git_dir, self.git(cwd, "hash-object", "-t", "tree", os.devnull).strip())
         proc = self.run([*git_env, "gitleaks", "git", f"--log-opts={log_opts}", "--redact",
                          "--no-banner", "--no-color", "--exit-code", "1", "--report-format", "json", "--report-path",
                          report_path, "--config", config, "--gitleaks-ignore-path", ignore, source],
@@ -2218,15 +2219,18 @@ def _hunk_positions(diff: str, positions: Callable[[str], Iterable[int]]) -> dic
     return out
 
 
-def _scan_git_env(git_dir: str, base: str) -> list[str]:
+def _scan_git_env(git_dir: str, empty_tree: str) -> list[str]:
     """The `env` prefix under which the secret scan runs git, and gitleaks, which runs git: the repository at git_dir,
-    with the attributes, which decide how git diffs a file, of base's tree alone. GIT_DIR, from a directory outside
-    the working tree, leaves out the working tree's .gitattributes; attr.tree, given as GIT_CONFIG_COUNT gives
-    config so that it reaches the git gitleaks starts, overrides an attr.tree of the user's (HEAD would read the
-    change's); and GIT_WORK_TREE and GIT_ATTR_SOURCE, which would bring them back, are unset. A git older than 2.42
-    knows no attr.tree, and reads committed attributes in no way."""
-    return ["env", "-u", "GIT_WORK_TREE", "-u", "GIT_ATTR_SOURCE", f"GIT_DIR={git_dir}", "GIT_CONFIG_COUNT=1",
-            "GIT_CONFIG_KEY_0=attr.tree", f"GIT_CONFIG_VALUE_0={base}"]
+    with no tree's attributes, so that git diffs every file as text, whatever a .gitattributes the change commits or
+    the base holds says. GIT_DIR, from a directory outside the working tree, leaves out the working tree's
+    .gitattributes; attr.tree, set to empty_tree (the repository's empty tree) as GIT_CONFIG_COUNT sets config, so
+    that it reaches the git gitleaks starts, overrides an attr.tree of the user's (HEAD would read the change's);
+    GIT_WORK_TREE and GIT_ATTR_SOURCE, which would bring a tree's back, are unset, and so are GIT_CONFIG_PARAMETERS,
+    which `git -c` exports and git reads after GIT_CONFIG_COUNT, and the environment's own GIT_CONFIG_COUNT entries.
+    $GIT_DIR/info/attributes and core.attributesFile still apply: only someone with the repository's or the user's
+    files could write them, not a change. A git that knows no attr.tree reads no tree's attributes from here."""
+    return ["env", "-u", "GIT_WORK_TREE", "-u", "GIT_ATTR_SOURCE", "-u", "GIT_CONFIG_PARAMETERS",
+            f"GIT_DIR={git_dir}", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=attr.tree", f"GIT_CONFIG_VALUE_0={empty_tree}"]
 
 
 def _added_lines(diff: str) -> Iterator[tuple[str, int, str]]:

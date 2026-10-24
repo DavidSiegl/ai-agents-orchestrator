@@ -3359,7 +3359,7 @@ class TestScanUnpublished(unittest.TestCase):
         self.push(commit)
         self.assertIn("refs/heads/ci-ref", self.on_origin())
         argv = json.loads(self.seen("argv"))
-        self.assertIn(f"--log-opts=--diff-merges=remerge {commit} --not --remotes=origin", argv)
+        self.assertIn(f"--log-opts=--diff-merges=remerge --no-textconv {commit} --not --remotes=origin", argv)
         # Not the working tree: gitleaks would read its .gitleaksignore.
         self.assertEqual(argv[-1], f"{self.run_dir}/gitleaks-source")
         self.assertIn("--redact", argv)
@@ -3448,8 +3448,20 @@ class TestScanUnpublished(unittest.TestCase):
         with patch.dict(os.environ, {"GIT_ATTR_SOURCE": commit}), self.assertRaises(orchestrator.LeaksFound) as caught:
             self.push(commit)
         self.assertEqual([(leak.file, leak.line) for leak in caught.exception.leaks], [("notes.md", 1)])
-        # gitleaks gets the same git environment.
-        self.assertIn(f"GIT_CONFIG_VALUE_0={self.base}", self.seen("env"))
+        # gitleaks gets the same git environment, which brings back no tree's attributes.
+        env = dict(line.split("=", 1) for line in self.seen("env").splitlines())
+        self.assertEqual(env["GIT_CONFIG_VALUE_0"], self.git("hash-object", "-t", "tree", os.devnull).strip())
+        self.assertFalse({"GIT_ATTR_SOURCE", "GIT_WORK_TREE", "GIT_CONFIG_PARAMETERS"} & set(env))
+
+    def test_neither_the_base_s_attributes_nor_git_c_hide_an_allow(self):
+        # A -diff the base has for its own reasons is no allowlist; git -c exports GIT_CONFIG_PARAMETERS.
+        self.base = self.commit({".gitattributes": "package-lock.json -diff\n"}, "base attributes")
+        self.git("push", "--quiet", "origin", "main")
+        commit = self.commit({"package-lock.json": '{"t": "x"} // gitleaks:allow\n'}, "lock")
+        with patch.dict(os.environ, {"GIT_CONFIG_PARAMETERS": "'attr.tree'='HEAD'"}), \
+                self.assertRaises(orchestrator.LeaksFound) as caught:
+            self.push(commit)
+        self.assertEqual([leak.file for leak in caught.exception.leaks], ["package-lock.json"])
 
     def test_a_nul_inside_a_line_does_not_end_the_commit_s_patch(self):
         # git still diffs as text a file whose first 8000 bytes hold no NUL.
