@@ -1,3 +1,4 @@
+import ast
 import base64
 import contextlib
 import copy
@@ -6,12 +7,15 @@ import itertools
 import json
 import os
 import re
-import shutil
-import socket
-import subprocess
 import shlex
+import shutil
+import signal
+import socket
 import struct
+import subprocess
+import sys
 import tempfile
+import textwrap
 import threading
 import time
 import tomllib
@@ -24,9 +28,28 @@ from unittest.mock import MagicMock, patch
 
 import orchestrator
 from orchestrator import (
-    APPROVE, CHANGES_REQUESTED, CI, HEARTBEAT_SECONDS, STALE_SECONDS, CIError, Herdr, HerdrError, Host,
-    OrchestratorError, RunState, RunTakenOver, Workflow, branch_name, changed_lines, main, parse_args,
-    parse_gate, parse_verdict, pr_body, quality_report, spec_title,
+    APPROVE,
+    CHANGES_REQUESTED,
+    CI,
+    HEARTBEAT_SECONDS,
+    STALE_SECONDS,
+    CIError,
+    Herdr,
+    HerdrError,
+    Host,
+    OrchestratorError,
+    RunState,
+    RunTakenOver,
+    Workflow,
+    branch_name,
+    changed_lines,
+    main,
+    parse_args,
+    parse_gate,
+    parse_verdict,
+    pr_body,
+    quality_report,
+    spec_title,
 )
 
 
@@ -3630,6 +3653,15 @@ class TestQualityReport(unittest.TestCase):
         text = quality_report("OK", "i", edited=["pyproject.toml"], rules_from="`main`'s `pyproject.toml`")
         self.assertIn("The gate took its rules from `main`'s `pyproject.toml`, so the edit did not change", text)
 
+    def test_files_under_mutmut_s_state_are_named_apart_from_build_config(self):
+        text = quality_report("OK", "i", mutmut_state=["mutants/calc.py", "mutants/calc.py.meta"])
+        self.assertIn("## Build configuration\n\n- The change adds or edits `mutants/calc.py` and "
+                      "`mutants/calc.py.meta` under `mutants/`, where mutmut keeps its state. The gate's checks leave "
+                      "them out: none selects a test or a function in them or counts them as a change to the code, "
+                      "and the surviving-mutants check runs mutmut without them. The linters read them as they read "
+                      "any tracked file.\n", text)
+        self.assertNotIn("The change edits", text)
+
     def test_tokens_are_masked(self):
         ci = CI(JOB, env=CREDENTIALS)
         self.assertEqual(ci.mask(f"a {JENKINS_TOKEN} b {JENKINS_TOKEN}"), "a **** b ****")
@@ -3698,6 +3730,17 @@ class TestGate(unittest.TestCase):
     def add_lines(self, n, start=4):
         with open(os.path.join(self.repo, "f.py"), "a") as f:
             f.write("".join(f"new{k} = {k}\n" for k in range(start, start + n)))
+
+    def test_ruff_reads_every_file_whatever_syntax_the_environment_gives_git_s_pathspecs(self):
+        self.put("sub/g.py", "g = 1\n")
+        self.git("add", "sub/g.py")
+        self.add_lines(1)
+        for name in ("GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS"):
+            with self.subTest(name), patch.dict("os.environ", {name: "1"}):
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(os.path.join(self.stubs, "ruff.argv"))
+                self.gate()
+                self.assertTrue({"f.py", "sub/g.py"} <= set(self.argv("ruff")), self.argv("ruff"))
 
     def test_a_clean_change_passes(self):
         self.add_lines(1)
@@ -3994,8 +4037,8 @@ class TestGate(unittest.TestCase):
                       "- `run.sh:1` `# shellcheck disable=SC2086`\n", out)
 
     def checks(self, *checks):
-        """Run the gate with checks in place of GATE_CHECKS."""
-        p = patch.object(orchestrator, "GATE_CHECKS", checks)
+        """Run the gate with checks in place of gate_checks's."""
+        p = patch.object(orchestrator, "gate_checks", lambda mutation_budget: checks)
         p.start()
         self.addCleanup(p.stop)
 
@@ -4051,6 +4094,30 @@ class TestGate(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertNotIn("quiet", out)
         self.assertNotIn("Findings to weigh", out)
+
+    def test_mutation_budget_bounds_the_surviving_mutants_check(self):
+        budgets = []
+
+        def find(change, budget):
+            budgets.append(budget)
+            return []
+        self.add_lines(1)
+        with patch.object(orchestrator, "surviving_mutants", find):
+            self.gate()
+            self.gate("--mutation-budget", "45")
+        self.assertEqual(budgets, [orchestrator.MUTATION_BUDGET, 45])
+        with self.assertRaises(SystemExit), patch("sys.stderr"):
+            self.gate("--mutation-budget", "0")
+
+    def test_the_checks_are_told_whose_rules_judge_the_change(self):
+        seen = []
+        self.checks(orchestrator.GateCheck("rules", fails=False, find=lambda change: seen.append(change.rules) or []))
+        main_rules = os.path.join(self.stubs, "main.toml")
+        with open(main_rules, "w") as f:
+            f.write("[tool.ruff]\n")
+        self.gate()
+        self.gate("--config", main_rules)
+        self.assertEqual(seen, [os.path.join(self.repo, "pyproject.toml"), main_rules])
 
     def test_config_replaces_the_tree_s_rules(self):
         self.put("pyproject.toml", "[tool.ruff]\nline-length = 1\n")
@@ -4139,8 +4206,7 @@ class TestWeakenedTests(unittest.TestCase):
     def found(self):
         """(path, line, rule) of each finding on the working tree's change, and the findings themselves."""
         base = self.git("rev-parse", "HEAD").strip()
-        diff = self.host.change_diff(self.repo, base)
-        found = orchestrator.weakened_tests(orchestrator.GateChange(self.repo, base, diff, changed_lines(diff)))
+        found = orchestrator.weakened_tests(orchestrator.GateChange.from_tree(self.repo, base))
         return [(f["path"], f["line"], f["rule"]) for f in found], found
 
     def test_an_unchanged_tree_has_no_findings(self):
@@ -4170,6 +4236,47 @@ class TestWeakenedTests(unittest.TestCase):
     def test_a_renamed_test_with_the_same_body_is_not_removed(self):
         self.edit("tests/test_calc.py", "def test_large(self):", "def test_big(self):")
         self.assertEqual(self.found()[0], [])
+
+    def test_a_renamed_test_deeper_than_python_s_recursion_limit_is_matched(self):
+        # A sum of 3000 terms parses, but a recursive walk of it, as ast.dump makes, overflows the stack.
+        deep = "def test_deep():\n    assert " + " + ".join(["1"] * 3000) + " == 3000\n"
+        self.put("tests/test_deep.py", deep)
+        self.git("add", "tests/test_deep.py")
+        self.git("commit", "--quiet", "-m", "deep")
+        self.edit("tests/test_deep.py", "def test_deep():", "def test_deeper():")
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_test_deeper_than_python_s_recursion_limit_is_compared_with_its_base(self):
+        # Changing a literal while the code changes too compares the test's assertions by their shape.
+        deep = "def test_deep():\n    x = 1\n    assert x + " + " + ".join(["1"] * 3000) + " == 3001\n"
+        self.put("tests/test_deep.py", deep)
+        self.git("add", "tests/test_deep.py")
+        self.git("commit", "--quiet", "-m", "deep")
+        self.edit("tests/test_deep.py", "    x = 1\n", "    x = 2\n")
+        self.edit("calc.py", "return a + b", "return b + a")
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_deep_assertion_whose_expected_value_changes_is_reported_without_its_text(self):
+        deep = "def test_deep():\n    assert " + " + ".join(["1"] * 3000) + " == 3001\n"
+        self.put("tests/test_deep.py", deep)
+        self.git("add", "tests/test_deep.py")
+        self.git("commit", "--quiet", "-m", "deep")
+        self.edit("tests/test_deep.py", "== 3001", "== 3002")
+        self.edit("calc.py", "return a + b", "return b + a")
+        where, found = self.found()
+        self.assertEqual(where, [("tests/test_deep.py", 2, "expected-value-changed")])
+        self.assertIn("too deep to print", found[0]["message"])
+
+    def test_an_assertion_with_an_int_too_long_to_print_is_reported_without_its_text(self):
+        # ast.unparse writes an int with repr, which refuses one of more than 4300 decimal digits.
+        self.put("tests/test_big.py", "def test_big():\n    assert 1 == 0x" + "f" * 4000 + "\n")
+        self.git("add", "tests/test_big.py")
+        self.git("commit", "--quiet", "-m", "big")
+        self.edit("tests/test_big.py", "assert 1 ==", "assert 2 ==")
+        self.edit("calc.py", "return a + b", "return b + a")
+        where, found = self.found()
+        self.assertEqual(where, [("tests/test_big.py", 2, "expected-value-changed")])
+        self.assertIn("(code at line 2, too long to print)", found[0]["message"])
 
     def test_tests_moved_to_a_renamed_file_are_not_removed(self):
         self.git("mv", "tests/test_other.py", "tests/test_moved.py")
@@ -4236,6 +4343,41 @@ class TestWeakenedTests(unittest.TestCase):
     def test_an_expected_value_changed_alone_is_not_found(self):
         self.edit("tests/test_calc.py", "assert add(10, 20) == 30", "assert add(10, 20) == 31")
         self.assertEqual(self.found()[0], [])
+
+    def commit_mutmut_state(self):
+        """Commit what mutmut leaves in mutants/ after a run: its copy of the code and of the tests beside it."""
+        for name, text in self.BASE.items():
+            self.put(f"mutants/{name}", text)
+        self.git("add", "mutants")
+        self.git("commit", "--quiet", "-m", "mutmut's state")
+
+    def test_a_removed_test_is_found_whatever_syntax_the_environment_gives_git_s_pathspecs(self):
+        self.put("Mutants/test_case.py", "def test_a():\n    assert 1\n\n\ndef test_b():\n    assert 2\n")
+        self.git("add", "Mutants")
+        self.git("commit", "--quiet", "-m", "a directory that is not mutmut's")
+        self.edit("Mutants/test_case.py", "def test_b():\n    assert 2\n", "")
+        for name in ("GIT_LITERAL_PATHSPECS", "GIT_ICASE_PATHSPECS"):
+            with self.subTest(name), patch.dict("os.environ", {name: "1"}):
+                self.assertEqual(self.found()[0], [("Mutants/test_case.py", 5, "removed-test")])
+
+    def test_removing_mutmut_s_state_removes_no_test(self):
+        self.commit_mutmut_state()
+        self.git("rm", "-r", "--quiet", "mutants")
+        self.assertEqual(self.found()[0], [])
+
+    def test_an_edit_to_mutmut_s_state_is_no_change_to_the_code(self):
+        self.commit_mutmut_state()
+        self.edit("mutants/calc.py", "return a + b", "return a + b + 1")
+        self.edit("tests/test_calc.py", "assert add(10, 20) == 30", "assert add(10, 20) == 31")
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_test_moved_out_of_mutmut_s_state_is_a_new_test(self):
+        # Seen without mutants/, the move adds the file, so the skip at its base is on an added line.
+        self.put("mutants/tests/test_skipped.py", "import pytest\n\n\n@pytest.mark.skip\ndef test_x():\n    assert 1\n")
+        self.git("add", "mutants")
+        self.git("commit", "--quiet", "-m", "mutmut's state")
+        self.git("mv", "mutants/tests/test_skipped.py", "tests/test_skipped.py")
+        self.assertEqual(self.found()[0], [("tests/test_skipped.py", 4, "skip")])
 
     def test_a_test_file_that_does_not_parse_says_so(self):
         self.edit("tests/test_other.py", "def test_b():", "def test_b(:")
@@ -4328,8 +4470,7 @@ class TestFlakyTests(unittest.TestCase):
 
     def found(self):
         base = self.git("rev-parse", "HEAD").strip()
-        diff = self.host.change_diff(self.repo, base)
-        return orchestrator.flaky_tests(orchestrator.GateChange(self.repo, base, diff, changed_lines(diff)))
+        return orchestrator.flaky_tests(orchestrator.GateChange.from_tree(self.repo, base))
 
     def change_the_tests(self, extra=""):
         """Edit TestRuns.test_alternates to fail on every second run, whatever the order, and add PAIRS writers and
@@ -4652,6 +4793,14 @@ class TestFlakyTests(unittest.TestCase):
             self.assertEqual(self.found(), [])
         run.assert_not_called()
 
+    def test_mutmut_s_copy_of_a_test_is_not_rerun(self):
+        # mutmut copies the tests into mutants/ beside the mutated code; committed, they are its state, not tests.
+        self.put("mutants/tests/test_state.py", self.BASE + "\n\ndef test_new():\n    assert True\n")
+        self.git("add", "mutants/tests/test_state.py")
+        with patch.object(orchestrator.subprocess, "run") as run:
+            self.assertEqual(self.found(), [])
+        run.assert_not_called()
+
     def test_a_rerun_that_cannot_start_is_a_finding(self):
         self.change_the_tests()
         with patch.object(orchestrator.sys, "executable", os.path.join(self.repo, "no-python")):
@@ -4743,8 +4892,1366 @@ class TestFlakyTests(unittest.TestCase):
                          [("tests/test_state.py", None, "not-rerun")])
 
     def test_it_reports_without_failing_the_gate(self):
-        [check] = [c for c in orchestrator.GATE_CHECKS if c.name == "flaky-tests"]
+        [check] = [c for c in orchestrator.gate_checks(orchestrator.MUTATION_BUDGET) if c.name == "flaky-tests"]
         self.assertEqual((check.fails, check.find), (False, orchestrator.flaky_tests))
+
+
+class TestSurvivingMutants(unittest.TestCase):
+    """The surviving-mutants check over a real git repository, with this suite's own mutmut, or a fake one."""
+
+    BASE = (
+        "def checked(a, b):\n"          # 1
+        "    return b + a\n"            # 2
+        "\n"                            # 3
+        "\n"                            # 4
+        "def unchecked(a, b):\n"        # 5
+        "    return b * a\n"            # 6
+        "\n"                            # 7
+        "\n"                            # 8
+        "def untouched(a, b):\n"        # 9
+        "    return a - b\n"            # 10
+        "\n"                            # 11
+        "\n"                            # 12
+        "def orphan():\n"               # 13
+        "    return 1\n"                # 14
+        "\n"                            # 15
+        "\n"                            # 16
+        "class Box:\n"                  # 17
+        "    def size(self):\n"         # 18
+        "        return 3\n"            # 19
+        "\n"                            # 20
+        "    def other(self):\n"        # 21
+        "        return 4\n"            # 22
+        "\n"                            # 23
+        "\n"                            # 24
+        "def describe(parser):\n"       # 25
+        "    parser.add_argument('--count', help='how many'\n"   # 26
+        "                                     ' to make')\n"    # 27
+    )
+    # The repository's own [tool.mutmut] do_not_mutate_patterns, which keep mutmut off argparse's help texts.
+    with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pyproject.toml"), "rb") as f:
+        PATTERNS = tomllib.load(f)["tool"]["mutmut"].get("do_not_mutate_patterns", [])
+    # Each test calls one function; only test_checked looks at what it returns.
+    TESTS = (
+        "import calc\n\n\n"
+        "def test_checked():\n    assert calc.checked(2, 3) == 5\n\n\n"
+        "def test_unchecked():\n    calc.unchecked(2, 3)\n\n\n"
+        "def test_untouched():\n    calc.untouched(2, 3)\n\n\n"
+        "def test_box():\n    calc.Box().size()\n    calc.Box().other()\n"
+    )
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo, self.bin = (os.path.join(tmp.name, d) for d in ("repo", "bin"))
+        os.mkdir(self.repo)
+        os.mkdir(self.bin)
+        self.host = Host()
+        self.git("init", "--quiet", "-b", "main")
+        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
+            self.git("config", key, value)
+        self.put("pyproject.toml", '[tool.mutmut]\nsource_paths = ["calc.py"]\n'
+                                   'pytest_add_cli_args_test_selection = ["tests/"]\n'
+                                   f'do_not_mutate_patterns = {json.dumps(self.PATTERNS)}\n')
+        self.put("calc.py", self.BASE)
+        self.put("tests/test_calc.py", self.TESTS)
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "base")
+
+    def git(self, *args):
+        return self.host.git(self.repo, *args)
+
+    def put(self, name, text):
+        path = os.path.join(self.repo, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    def found(self, budget=60, rules=None):
+        base = self.git("rev-parse", "HEAD").strip()
+        return orchestrator.surviving_mutants(orchestrator.GateChange.from_tree(self.repo, base, rules), budget=budget)
+
+    def rules(self, table):
+        """A rules file outside the tree, as `gate --config` names one, with table as its [tool.mutmut]."""
+        path = os.path.join(self.bin, "rules.toml")
+        with open(path, "w") as f:
+            f.write("[tool.mutmut]\n" + "".join(f"{key} = {json.dumps(value)}\n" for key, value in table.items()))
+        return path
+
+    # How change_the_functions edits each function it edits.
+    EDITS = {"checked": ("b + a", "a + b"), "unchecked": ("b * a", "a * b"), "orphan": ("return 1", "return 2"),
+             "Box.size": ("return 3", "return 5")}
+
+    def change_the_functions(self, *names):
+        """Edit the functions names, by default checked, unchecked, orphan and Box.size, leaving untouched and
+        Box.other as they were."""
+        text = self.BASE
+        for name in names or self.EDITS:
+            text = text.replace(*self.EDITS[name])
+        self.put("calc.py", text)
+
+    def fake_mutmut(self, run, results="", show=None, listing=None):
+        """Make the gate's interpreter a fake that answers `mutmut run` with the shell code run, `results` by
+        printing results, or with the shell code listing, and `show NAME` by printing show[NAME]."""
+        python = os.path.join(self.bin, "python")
+        shows = "".join(f"{shlex.quote(name)}) printf %s {shlex.quote(diff)};;\n"
+                        for name, diff in (show or {}).items())
+        # The gate starts mutmut as `python -c CODE ARGS`, so the command is the third argument.
+        with open(python, "w") as f:
+            f.write(f'#!/bin/sh\ncase "$3" in\nrun) {run};;\n'
+                    f'results) {listing or "printf %s " + shlex.quote(results)};;\n'
+                    f'show) case "$4" in\n{shows}esac;;\nesac\n')
+        os.chmod(python, 0o700)
+        p = patch.object(orchestrator.sys, "executable", python)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_a_mutant_the_tests_do_not_notice_is_reported_and_a_killed_one_is_not(self):
+        self.change_the_functions()
+        made, found = self.found_and_made()
+        # untouched and Box.other are as weakly tested as unchecked, but the change left them alone, so mutmut made
+        # no mutant of them.
+        self.assertEqual({re.sub(r"__mutmut_\d+$", "", m) for m in made},
+                         {"calc.x_checked", "calc.x_unchecked", "calc.x_orphan", "calc.xǁBoxǁsize"})
+        # unchecked's test never looks at what it returns, nor does Box.size's; checked's does.
+        self.assertEqual([(f["path"], f["line"], f["severity"], f["rule"]) for f in found],
+                         [("calc.py", 5, "warning", "survived"), ("calc.py", 13, "warning", "untested"),
+                          ("calc.py", 18, "warning", "survived")])
+        self.assertEqual(found[0]["message"], "1 of 1 mutants of `unchecked` survived its tests: line 6, "
+                                              "`return a * b` became `return a / b`.")
+        self.assertIn("`orphan`", found[1]["message"])
+        self.assertIn("1 of 1 mutants of `Box.size` survived its tests: line 19, `return 5` became ",
+                      found[2]["message"])
+        self.assertEqual(self.git("status", "--porcelain", "--ignored"), " M calc.py\n")
+
+    def test_a_source_file_with_a_byte_order_mark_is_read_as_python_reads_it(self):
+        self.change_the_functions()
+        with open(os.path.join(self.repo, "calc.py"), encoding="utf-8") as f:
+            text = f.read()
+        with open(os.path.join(self.repo, "calc.py"), "w", encoding="utf-8-sig") as f:
+            f.write(text)
+        made, found = self.found_and_made()
+        # untouched and Box.other are marked to be skipped in the copy as in a file without the mark.
+        self.assertEqual({re.sub(r"__mutmut_\d+$", "", m) for m in made},
+                         {"calc.x_checked", "calc.x_unchecked", "calc.x_orphan", "calc.xǁBoxǁsize"})
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                         [("calc.py", 5, "survived"), ("calc.py", 13, "untested"), ("calc.py", 18, "survived")])
+
+    def found_and_made(self, budget=60):
+        """found(budget), and the names of the mutants mutmut made."""
+        made, list_results = [], orchestrator._mutant_statuses
+
+        def results(*args):
+            statuses, problem = list_results(*args)
+            made.extend(statuses)
+            return statuses, problem
+        with patch.object(orchestrator, "_mutant_statuses", results):
+            return made, self.found(budget)
+
+    def test_the_rules_mutmut_table_judges_the_change_not_the_tree_s(self):
+        self.change_the_functions()
+        # The change tells mutmut to leave every line alone; the rules it is judged by do not.
+        with open(os.path.join(self.repo, "pyproject.toml"), "a") as f:
+            f.write("do_not_mutate_patterns = ['.']\n")
+        rules = self.rules({"source_paths": ["calc.py"], "pytest_add_cli_args_test_selection": ["tests/"]})
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in self.found(rules=rules)],
+                         [("calc.py", 5, "survived"), ("calc.py", 13, "untested"), ("calc.py", 18, "survived")])
+
+    def test_a_function_outside_source_paths_is_not_mutated_and_said_so(self):
+        self.put("tools/extra.py", "def extra():\n    return 1\n")
+        self.git("add", "tools/extra.py")
+        self.fake_mutmut(f"touch {self.bin}/ran")
+        found = self.found()
+        self.assertFalse(os.path.exists(os.path.join(self.bin, "ran")))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("tools/extra.py", 1, "not-mutated")])
+        self.assertIn("`extra`", found[0]["message"])
+        self.assertIn("outside [tool.mutmut] source_paths", found[0]["message"])
+
+    def test_a_file_do_not_mutate_names_is_not_mutated_and_said_so(self):
+        self.put("calc.py", self.BASE.replace("return 1", "return 2"))
+        self.fake_mutmut(f"touch {self.bin}/ran")
+        rules = self.rules({"source_paths": ["."], "do_not_mutate": ["calc*"]})
+        found = self.found(rules=rules)
+        self.assertFalse(os.path.exists(os.path.join(self.bin, "ran")))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 13, "not-mutated")])
+        self.assertIn("do_not_mutate", found[0]["message"])
+
+    def test_rules_that_name_no_source_paths_are_a_finding(self):
+        self.change_the_functions()
+        self.fake_mutmut(f"touch {self.bin}/ran")
+        found = self.found(rules=self.rules({"also_copy": ["docs/"]}))
+        self.assertFalse(os.path.exists(os.path.join(self.bin, "ran")))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
+        self.assertIn("source_paths", found[0]["message"])
+
+    def test_a_function_mutmut_does_not_mutate_is_said_so(self):
+        # mutmut 3.8.0 mutates no decorated function but one decorated with @staticmethod or @classmethod alone, and
+        # never __new__, __setattr__ or __getattribute__.
+        text = (self.BASE + "\n\n"
+                "import functools\n\n\n"
+                "@functools.cache\n"
+                "def cached(a):\n    return a + 1\n\n\n"
+                "class Made:\n"
+                "    def __new__(cls):\n        return super().__new__(cls)\n\n"
+                "    @staticmethod\n"
+                "    def make():\n        return 1\n")
+        self.put("calc.py", text)
+        lines = text.split("\n")
+        # mutmut is run for Made.make, the one function it mutates, and lists its mutant.
+        self.fake_mutmut(f"touch {self.bin}/ran", results="    calc.xǁMadeǁmake__mutmut_1: killed\n")
+        found = self.found()
+        self.assertTrue(os.path.exists(os.path.join(self.bin, "ran")))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                         [("calc.py", lines.index("def cached(a):") + 1, "not-mutated"),
+                          ("calc.py", lines.index("    def __new__(cls):") + 1, "not-mutated")])
+        self.assertIn("`cached` was not mutation-tested: mutmut does not mutate a decorated function",
+                      found[0]["message"])
+        self.assertIn("`Made.__new__` was not mutation-tested: mutmut never mutates `__new__`", found[1]["message"])
+
+    def test_a_change_to_a_decorated_function_alone_runs_nothing_and_says_so(self):
+        self.put("calc.py", self.BASE + "\n\n@property\ndef shown(self):\n    return 1\n")
+        self.fake_mutmut(f"touch {self.bin}/ran")
+        self.assertEqual([(f["path"], f["rule"]) for f in self.found()], [("calc.py", "not-mutated")])
+        self.assertFalse(os.path.exists(os.path.join(self.bin, "ran")))
+
+    def test_the_budget_counts_tried_mutants_as_each_function_does(self):
+        self.change_the_functions("checked", "orphan", "unchecked")
+        self.fake_mutmut("exec sleep 30", results="    calc.x_checked__mutmut_1: killed\n"
+                                                  "    calc.x_orphan__mutmut_1: no tests\n"
+                                                  "    calc.x_unchecked__mutmut_1: not checked\n")
+        found = self.found(budget=1)
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                         [(None, None, "budget-reached"), ("calc.py", 13, "untested")])
+        self.assertTrue(found[0]["message"].startswith("budget reached after 1 of 3 mutants"), found[0]["message"])
+
+    def test_a_directory_for_the_copy_that_cannot_be_made_is_a_finding(self):
+        self.change_the_functions()
+        with patch.object(orchestrator.tempfile, "mkdtemp", side_effect=OSError(28, "No space left on device")):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
+        self.assertIn("No space left on device", found[0]["message"])
+
+    def test_a_copy_that_cannot_be_removed_is_a_finding_beside_the_others(self):
+        self.change_the_functions("orphan")
+        self.fake_mutmut("exit 0", results="    calc.x_orphan__mutmut_1: no tests\n")
+        rmtree = shutil.rmtree
+        with patch.object(orchestrator.shutil, "rmtree", side_effect=OSError(16, "Device or resource busy")):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                         [(None, None, "cleanup"), ("calc.py", 13, "untested")])
+        self.assertIn("Device or resource busy", found[0]["message"])
+        left = re.search(r"`([^`]+)`", found[0]["message"]).group(1)
+        self.assertTrue(os.path.isdir(left))
+        rmtree(left)
+
+    def helper_holding_the_output(self):
+        """Shell code that starts a process in a session of its own, which keeps the fake mutmut's output open after
+        mutmut's process group is killed, and that the test kills when it ends."""
+        pid = os.path.join(self.bin, "helper.pid")
+
+        def kill():
+            with contextlib.suppress(FileNotFoundError, ProcessLookupError), open(pid) as f:
+                os.kill(int(f.read()), signal.SIGKILL)
+        self.addCleanup(kill)
+        code = f"import os, time; os.setsid(); open({pid!r}, 'w').write(str(os.getpid())); time.sleep(30)"
+        return f"{shlex.quote(sys.executable)} -c {shlex.quote(code)} &"
+
+    def test_a_run_whose_output_outlives_it_ends_within_the_stated_bound(self):
+        self.change_the_functions()
+        # mutmut ignores SIGINT here, so it is killed after the grace, and a helper keeps its output open after that.
+        self.fake_mutmut(f"trap '' INT; {self.helper_holding_the_output()} exec sleep 30")
+        started = time.monotonic()
+        with patch.multiple(orchestrator, MUTMUT_STOP_GRACE=0.5, MUTMUT_KILL_WAIT=0.5):
+            found = self.found(budget=1)
+        self.assertLess(time.monotonic() - started, 6)
+        self.assertEqual([f["rule"] for f in found], ["budget-reached"])
+
+    def test_the_report_ends_within_its_time_whatever_mutmut_does(self):
+        self.change_the_functions()
+        self.fake_mutmut("exit 0", listing="trap '' INT; exec sleep 30")
+        started = time.monotonic()
+        # Without its stop counted in, the listing would get all 4 seconds, and then the grace on top.
+        with patch.multiple(orchestrator, MUTMUT_REPORT_TIMEOUT=4, MUTMUT_STOP_GRACE=1.5, MUTMUT_KILL_WAIT=0.5):
+            found = self.found()
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual([f["rule"] for f in found], ["not-run"])
+
+    def test_a_pytest_configuration_above_the_copy_is_not_read(self):
+        # The project has no pytest configuration of its own, so pytest under mutmut would look for one in every
+        # directory above the copy, where another account may plant one, and a conftest.py beside it.
+        self.change_the_functions()
+        above, ran = os.path.join(self.bin, "tmp"), os.path.join(self.bin, "planted-ran")
+        os.mkdir(above)
+        with open(os.path.join(above, "pytest.ini"), "w") as f:
+            f.write("[pytest]\n")
+        with open(os.path.join(above, "conftest.py"), "w") as f:
+            f.write(f"open({ran!r}, 'w').close()\n")
+        with patch.object(orchestrator.tempfile, "tempdir", above):
+            found = self.found()
+        self.assertFalse(os.path.exists(ran))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                         [("calc.py", 5, "survived"), ("calc.py", 13, "untested"), ("calc.py", 18, "survived")])
+
+    def test_the_project_s_own_pytest_configuration_still_applies(self):
+        self.change_the_functions()
+        # Its addopts run only test_checked, so no test calls the other changed functions. Its pythonpath, relative to
+        # the configuration's directory, must name mutmut's copy of the code, or checked's mutants go untested too.
+        with open(os.path.join(self.repo, "pyproject.toml"), "a") as f:
+            f.write('\n[tool.pytest.ini_options]\naddopts = "-k test_checked"\npythonpath = ["."]\n')
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in self.found()],
+                         [("calc.py", 5, "untested"), ("calc.py", 13, "untested"), ("calc.py", 18, "untested")])
+
+    def test_a_mutmut_table_of_the_wrong_shape_is_a_finding_and_leaves_nothing_behind(self):
+        self.change_the_functions()
+        tables = [("only_mutate", "only_mutate = 5"), ("only_mutate", 'only_mutate = "calc.py"'),
+                  ("do_not_mutate", "do_not_mutate = [1]"), ("when", "when = 1979-05-27")]
+        for key, line in tables:
+            with self.subTest(line=line):
+                tmp = tempfile.mkdtemp(dir=self.bin)
+                self.fake_mutmut(f"touch {self.bin}/ran")
+                rules = os.path.join(self.bin, "rules.toml")
+                with open(rules, "w") as f:
+                    f.write(f'[tool.mutmut]\nsource_paths = ["calc.py"]\n{line}\n')
+                with patch.object(orchestrator.tempfile, "tempdir", tmp):
+                    found = self.found(rules=rules)
+                self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
+                self.assertIn(f"[tool.mutmut] {key}", found[0]["message"])
+                self.assertFalse(os.path.exists(os.path.join(self.bin, "ran")))
+                self.assertEqual(os.listdir(tmp), [])
+
+    def test_a_failing_test_that_prints_mutmut_s_words_is_not_taken_for_mutmut(self):
+        # The clean run fails, and mutmut prints the test's output before its own "failed to collect stats".
+        self.change_the_functions("unchecked")
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_loud():\n    calc.unchecked(1, 1)\n"
+                                                  "    print('could not find any test case for any mutant')\n"
+                                                  "    assert False\n")
+        found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
+        self.assertIn("failed to collect stats", found[0]["message"])
+
+    def test_a_failed_run_is_named_by_mutmut_s_message_not_its_config_warning(self):
+        # paths_to_mutate makes mutmut warn that it is deprecated, on standard error, before the failing test stops it.
+        self.change_the_functions("unchecked")
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_failing():\n    assert False\n")
+        found = self.found(rules=self.rules({"paths_to_mutate": ["calc.py"],
+                                             "pytest_add_cli_args_test_selection": ["tests/"]}))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
+        self.assertIn("exited with status 1: failed to collect stats. runner returned 1", found[0]["message"])
+
+    def test_a_file_whose_coding_cookie_names_no_text_encoding_is_not_read(self):
+        # Python finds rot13, a codec of str to str, and undefined, which refuses to decode anything, by name, but
+        # decodes no source with either.
+        for codec in ("rot13", "undefined"):
+            with self.subTest(codec=codec, file="changed"):
+                self.put(f"tools/{codec}.py", f"# coding: {codec}\n")
+                self.git("add", f"tools/{codec}.py")
+                self.git("commit", "--quiet", "-m", codec)
+                self.put("calc.py", self.BASE)
+                self.put(f"tools/{codec}.py", f"# coding: {codec}\nqrs s():\n    erghea 1\n")
+                found = self.found()
+                self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                                 [(f"tools/{codec}.py", None, "not-run")])
+                self.assertIn("could not be read", found[0]["message"])
+            with self.subTest(codec=codec, file="copied"):
+                self.put(f"tools/{codec}.py", f"# coding: {codec}\n")
+                self.change_the_functions("checked")
+                self.fake_mutmut("exit 0", results="    calc.x_checked__mutmut_1: killed\n")
+                self.assertEqual(self.found(), [])
+                self.git("checkout", "--quiet", "--", ".")
+
+    def test_a_function_whose_file_the_budget_kept_mutmut_from_is_part_of_the_budget(self):
+        # mutmut makes and saves mutants file by file, so a run stopped while making them lists only some files'.
+        self.put("more.py", "def g(a):\n    return a + 1\n")
+        self.git("add", "more.py")
+        self.git("commit", "--quiet", "-m", "more")
+        self.put("more.py", "def g(a):\n    return a + 2\n")
+        self.change_the_functions("checked")
+        self.fake_mutmut("exec sleep 30", results="    calc.x_checked__mutmut_1: not checked\n")
+        found = self.found(budget=1, rules=self.rules({"source_paths": ["calc.py", "more.py"]}))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "budget-reached")])
+        self.assertIn("mutmut made no mutant of `g` in more.py before the budget ran out", found[0]["message"])
+
+    def test_a_pragma_mutmut_does_not_honour_is_not_given_as_the_cause(self):
+        # A bare `no mutate` on the def keeps only that line out; under mutate_only_covered_lines the function no test
+        # calls gets no mutant for that reason instead.
+        self.put("calc.py", self.BASE.replace("def orphan():", "def orphan():  # pragma: no mutate")
+                 .replace("return 1", "return 2"))
+        found = self.found(rules=self.rules({"source_paths": ["calc.py"], "mutate_only_covered_lines": True,
+                                             "pytest_add_cli_args_test_selection": ["tests/"]}))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 13, "not-mutated")])
+        self.assertNotIn("on its def keeps it out", found[0]["message"])
+        self.assertIn("either it has nothing mutmut mutates", found[0]["message"])
+
+    def test_a_block_pragma_where_a_long_header_ends_is_given_as_the_cause(self):
+        self.put("calc.py", self.BASE.replace("def unchecked(a, b):",
+                                              "def unchecked(\n        a, b):  # pragma: no mutate block"))
+        found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 5, "not-mutated")])
+        self.assertIn("a `# pragma: no mutate block` where its header ends keeps it out", found[0]["message"])
+
+    def test_a_function_in_a_file_mutmut_listed_mutants_of_keeps_its_cause_after_a_budget_stop(self):
+        # The fake saves mutants/calc.py.meta, as mutmut does once it has made calc.py's mutants, which is how the
+        # gate knows calc.py was reached.
+        self.put("calc.py", self.BASE.replace("b + a", "a + b")
+                 .replace("def unchecked(a, b):", "def unchecked(a, b):  # pragma: no mutate block"))
+        self.fake_mutmut("mkdir -p mutants; touch mutants/calc.py.meta; exec sleep 30",
+                         results="    calc.x_checked__mutmut_1: not checked\n")
+        found = self.found(budget=1)
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                         [(None, None, "budget-reached"), ("calc.py", 5, "not-mutated")])
+        self.assertNotIn("before the budget ran out", found[0]["message"])
+        self.assertIn("a `# pragma: no mutate block` where its header ends keeps it out", found[1]["message"])
+
+    def test_a_module_mutmut_saved_without_mutants_was_reached(self):
+        # mutmut saves a module's .meta once it has made its mutants, none or more.
+        self.put("more.py", "def g(a):\n    return a + 1\n")
+        self.git("add", "more.py")
+        self.git("commit", "--quiet", "-m", "more")
+        self.put("more.py", "def g(a):  # pragma: no mutate block\n    return a + 2\n")
+        self.change_the_functions("checked")
+        self.fake_mutmut("mkdir -p mutants; touch mutants/calc.py.meta mutants/more.py.meta; exec sleep 30",
+                         results="    calc.x_checked__mutmut_1: not checked\n")
+        found = self.found(budget=1, rules=self.rules({"source_paths": ["calc.py", "more.py"]}))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                         [(None, None, "budget-reached"), ("more.py", 1, "not-mutated")])
+        self.assertNotIn("before the budget ran out", found[0]["message"])
+        self.assertIn("a `# pragma: no mutate block` where its header ends keeps it out", found[1]["message"])
+
+    def test_mutmut_s_state_in_the_change_is_left_out_and_listed(self):
+        self.change_the_functions("unchecked")
+        # The .meta mutmut writes for this change, kept from a first run, with every mutant marked killed.
+        kept, run = os.path.join(self.bin, "calc.py.meta"), orchestrator._mutmut_findings
+
+        def keep(tree_copy, *args):
+            shutil.copy(os.path.join(tree_copy, "mutants", "calc.py.meta"), kept)
+            return run(tree_copy, *args)
+        with patch.object(orchestrator, "_mutmut_findings", keep):
+            self.assertEqual([f["rule"] for f in self.found()], ["survived"])
+        with open(kept) as f:
+            meta = json.load(f)
+        meta["exit_code_by_key"] = dict.fromkeys(meta["exit_code_by_key"], 1)
+        self.put("mutants/calc.py.meta", json.dumps(meta))
+        self.git("add", "mutants/calc.py.meta")
+        found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 5, "survived")])
+        diff = self.host.change_diff(self.repo, self.git("rev-parse", "HEAD").strip())
+        self.assertEqual(orchestrator.edited_config(diff, changed_lines(diff)), [])
+        self.assertEqual(orchestrator.mutmut_state_files(changed_lines(diff)), ["mutants/calc.py.meta"])
+
+    def test_a_function_under_mutmut_s_state_is_not_selected(self):
+        self.put("mutants/calc.py", "def x_checked__mutmut_1(a, b):\n    return a - b\n")
+        self.git("add", "mutants/calc.py")
+        self.fake_mutmut(f"touch {self.bin}/ran")
+        found = self.found(rules=self.rules({"source_paths": ["."]}))
+        self.assertEqual(found, [])
+        self.assertFalse(os.path.exists(os.path.join(self.bin, "ran")))
+
+    def test_unreached_functions_are_named_with_their_files(self):
+        for name in ("a.py", "b.py"):
+            self.put(name, "def run():\n    return 1\n")
+            self.git("add", name)
+        self.git("commit", "--quiet", "-m", "run twice")
+        for name in ("a.py", "b.py"):
+            self.put(name, "def run():\n    return 2\n")
+        self.fake_mutmut("exec sleep 30")
+        found = self.found(budget=1, rules=self.rules({"source_paths": ["a.py", "b.py"]}))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "budget-reached")])
+        self.assertIn("mutmut made no mutant of `run` in a.py and `run` in b.py before the budget ran out",
+                      found[0]["message"])
+
+    def test_a_series_reads_as_a_list_in_prose(self):
+        series = orchestrator._series
+        self.assertEqual([series([]), series(["a"]), series(["a", "b"]), series(["a", "b", "c"])],
+                         ["", "a", "a and b", "a, b and c"])
+        self.assertEqual(series(["a", "b", "c", "d"], limit=2), "a, b and 2 more")
+        self.assertEqual(series(["a", "b"], limit=2), "a and b")
+
+    def test_a_change_to_a_help_text_alone_makes_no_mutant(self):
+        # The second line of the help text does not say help=, but its string starts on the line that does.
+        self.put("calc.py", self.BASE.replace(" to make", " to build"))
+        made, found = self.found_and_made()
+        self.assertEqual(made, [])
+        # mutmut made no mutant of describe, and the finding says why rather than nothing.
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 25, "not-mutated")])
+        self.assertEqual(found[0]["message"], "`describe` was not mutation-tested: mutmut made no mutant of it; the "
+                                              "rules' do_not_mutate_patterns match each statement in it.")
+
+    def test_a_function_a_mutmut_pragma_opts_out_is_said_so_and_its_pragma_listed(self):
+        text = self.BASE.replace("def unchecked(a, b):", "def unchecked(a, b):  # pragma: no mutate block")
+        self.put("calc.py", text)
+        made, found = self.found_and_made()
+        self.assertEqual(made, [])
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 5, "not-mutated")])
+        self.assertEqual(found[0]["message"], "`unchecked` was not mutation-tested: mutmut made no mutant of it; a "
+                                              "`# pragma: no mutate block` where its header ends keeps it out.")
+        diff = self.host.change_diff(self.repo, self.git("rev-parse", "HEAD").strip())
+        self.assertEqual(orchestrator.added_suppressions(self.repo, changed_lines(diff)),
+                         [("calc.py", 5, "def unchecked(a, b):  # pragma: no mutate block")])
+
+    def test_a_change_to_untested_functions_alone_is_reported_as_untested(self):
+        # mutmut stops early when no test calls any function it mutated.
+        self.put("calc.py", self.BASE.replace("return 1", "return 2"))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in self.found()], [("calc.py", 13, "untested")])
+
+    def test_a_change_to_no_function_runs_nothing(self):
+        self.put("calc.py", self.BASE + "\nLIMIT = 3\n")
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_more():\n    calc.checked(1, 1)\n")
+        self.fake_mutmut(f"touch {self.bin}/ran")
+        self.assertEqual(self.found(), [])
+        self.assertFalse(os.path.exists(os.path.join(self.bin, "ran")))
+
+    def test_a_run_stopped_by_the_budget_says_so_with_what_it_found(self):
+        self.change_the_functions("checked", "unchecked")
+        self.fake_mutmut("exec sleep 30",
+                         results="    calc.x_checked__mutmut_1: killed\n    calc.x_unchecked__mutmut_1: survived\n"
+                                 "    calc.x_unchecked__mutmut_2: not checked\n",
+                         show={"calc.x_unchecked__mutmut_1": self.unchecked_mutant("a / b")})
+        started = time.monotonic()
+        found = self.found(budget=1)
+        self.assertLess(time.monotonic() - started, 15)
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                         [(None, None, "budget-reached"), ("calc.py", 5, "survived")])
+        self.assertTrue(found[0]["message"].startswith("budget reached after 2 of 3 mutants"), found[0]["message"])
+        self.assertTrue(found[1]["message"].startswith("1 of 1 mutants of `unchecked`"), found[1]["message"])
+
+    @staticmethod
+    def unchecked_mutant(new):
+        """What `mutmut show` prints for a mutant of unchecked that returns new."""
+        return (f"# a mutant: survived\n--- calc.py\n+++ calc.py\n@@ -1,2 +1,2 @@\n def unchecked(a, b):\n"
+                f"-    return a * b\n+    return {new}\n")
+
+    def test_a_run_that_fails_is_a_finding(self):
+        self.change_the_functions()
+        self.fake_mutmut("echo 'failed to collect stats. runner returned 1'; exit 1")
+        found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
+        self.assertIn("exited with status 1: failed to collect stats. runner returned 1", found[0]["message"])
+
+    def test_a_project_without_mutmut_gets_a_finding_naming_the_import_error(self):
+        self.change_the_functions()
+        self.fake_mutmut("echo 'Traceback (most recent call last):' >&2; "
+                         "echo \"ModuleNotFoundError: No module named 'mutmut'\" >&2; exit 1")
+        found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
+        self.assertIn("exited with status 1: ModuleNotFoundError: No module named 'mutmut'", found[0]["message"])
+
+    def test_the_survivors_of_a_function_are_one_finding_with_examples(self):
+        self.change_the_functions("unchecked")
+        self.fake_mutmut("exit 0", results="    calc.x_unchecked__mutmut_1: survived\n"
+                                           "    calc.x_unchecked__mutmut_2: killed\n"
+                                           "    calc.x_unchecked__mutmut_3: survived\n",
+                         show={"calc.x_unchecked__mutmut_1": self.unchecked_mutant("a / b"),
+                               "calc.x_unchecked__mutmut_3": self.unchecked_mutant("None")})
+        self.assertEqual(self.found(), [{
+            "path": "calc.py", "line": 5, "severity": "warning", "rule": "survived",
+            "message": "2 of 3 mutants of `unchecked` survived its tests: line 6, `return a * b` became "
+                       "`return a / b`; line 6, `return a * b` became `return None`."}])
+
+    def test_an_example_keeps_a_line_that_holds_a_line_separator_whole(self):
+        # Only "\n" ends a line of mutmut's output, as of git's; U+2028 in a string is part of the line.
+        self.put("calc.py", self.BASE.replace("return b * a", "return 'a\u2028b'"))
+        self.fake_mutmut("exit 0", results="    calc.x_unchecked__mutmut_1: survived\n",
+                         show={"calc.x_unchecked__mutmut_1": self.unchecked_mutant("'XXa\u2028bXX'").replace(
+                             "return a * b", "return 'a\u2028b'")})
+        [finding] = self.found()
+        self.assertEqual(finding["message"], "1 of 1 mutants of `unchecked` survived its tests: line 6, "
+                                             "`return 'a\u2028b'` became `return 'XXa\u2028bXX'`.")
+
+    def test_a_function_s_first_three_survivors_are_its_examples(self):
+        self.change_the_functions("unchecked")
+        names = [f"calc.x_unchecked__mutmut_{n}" for n in range(1, 5)]
+        self.fake_mutmut("exit 0", results="".join(f"    {name}: survived\n" for name in names),
+                         show={name: self.unchecked_mutant(f"{n}") for n, name in enumerate(names)})
+        [finding] = self.found()
+        self.assertTrue(finding["message"].startswith("4 of 4 mutants of `unchecked` survived its tests: "),
+                        finding["message"])
+        self.assertEqual(re.findall(r"became `return (\d)`", finding["message"]), ["0", "1", "2"])
+
+    def test_a_mutmut_that_cannot_start_is_a_finding(self):
+        self.change_the_functions()
+        with patch.object(orchestrator.sys, "executable", os.path.join(self.repo, "no-python")):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
+        self.assertIn("could not start mutmut", found[0]["message"])
+
+    def test_an_unparsable_source_file_is_a_finding(self):
+        self.put("calc.py", self.BASE + "def broken(:\n")
+        self.fake_mutmut(f"touch {self.bin}/ran")
+        found = self.found()
+        self.assertFalse(os.path.exists(os.path.join(self.bin, "ran")))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", None, "not-run")])
+
+    def test_it_reports_without_failing_the_gate_within_its_budget(self):
+        with patch.object(orchestrator, "surviving_mutants", return_value=[]) as find:
+            [check] = [c for c in orchestrator.gate_checks(42) if c.name == "surviving-mutants"]
+            check.find("change")
+        self.assertFalse(check.fails)
+        find.assert_called_once_with("change", budget=42)
+
+
+# The seven functions S3776 flagged, as orchestrator.py had them before 84e87e7 split them.
+S3776_FUNCTIONS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "s3776_at_84e87e7.py.txt")
+
+
+def score(source, cls=None):
+    """The cognitive complexity of the first function in source, or of its class cls's first method."""
+    tree = ast.parse(textwrap.dedent(source))
+    if cls is not None:
+        [owner] = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls]
+        tree = owner
+    function = next(n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
+    return orchestrator.cognitive_complexity(function, cls)
+
+
+class TestCognitiveComplexity(unittest.TestCase):
+    """cognitive_complexity, after G. Ann Campbell's paper, in its mapping to Python. Each expected score is
+    added up in the comments, one increment per line."""
+
+    def test_loops_and_ifs_add_one_and_their_nesting(self):
+        # The paper's sumOfPrimes, whose labelled `continue OUT` Python writes as a loop's else.
+        self.assertEqual(score("""
+            def sum_of_primes(top):
+                total = 0
+                for i in range(1, top + 1):  # +1
+                    for j in range(2, i):    # +2
+                        if i % j == 0:       # +3
+                            break
+                    else:                    # +1
+                        total += i
+                return total
+        """), 7)
+
+    def test_elif_and_else_add_one_and_nest_their_bodies(self):
+        self.assertEqual(score("""
+            def f(a):
+                if a == 1:      # +1
+                    return 1
+                elif a == 2:    # +1
+                    if a:       # +2
+                        return 2
+                else:           # +1
+                    if a:       # +2
+                        return 3
+                return 0
+        """), 7)
+
+    def test_a_while_and_its_else(self):
+        self.assertEqual(score("""
+            def f(n):
+                while n:      # +1
+                    n -= 1
+                else:         # +1
+                    n = 0
+                return n
+        """), 2)
+
+    def test_match_adds_one_for_all_its_cases_and_nests_them(self):
+        # The paper's getWords: a switch is one increment, however many cases it has.
+        self.assertEqual(score("""
+            def get_words(n):
+                match n:              # +1
+                    case 1:
+                        return "one"
+                    case 2 if n > 0:  # a guard adds nothing of its own
+                        return "a couple"
+                    case _:
+                        if n:         # +2
+                            return "lots"
+        """), 3)
+
+    def test_except_adds_one_and_its_nesting_while_try_finally_and_with_add_nothing(self):
+        self.assertEqual(score("""
+            def f(path):
+                try:
+                    with open(path) as f:  # neither try nor with nests
+                        if f:              # +1
+                            pass
+                except OSError:            # +1
+                    if path:               # +2
+                        pass
+                except ValueError:         # +1
+                    pass
+                else:                      # +1
+                    pass
+                finally:
+                    if path:               # +1
+                        pass
+        """), 7)
+
+    def test_each_sequence_of_like_boolean_operators_adds_one(self):
+        self.assertEqual(score("""
+            def f(a, b, c, d):
+                if a and b and c:       # +1 if, +1 and
+                    pass
+                if a and b or c and d:  # +1 if, +1 and, +1 or, +1 and
+                    pass
+                x = a or b and c or d   # +1 or, +1 and, +1 or
+                y = a or not (b or c)   # +1 or, +1 or: not starts a sequence of its own
+                z = (1 if a else 0) or b and c  # +1 or, +1 and, +1 ternary
+                return a and (b and c)  # +1: the parentheses do not show in the syntax tree
+        """), 15)
+
+    def test_except_and_match_take_their_nesting_too(self):
+        self.assertEqual(score("""
+            def f(xs):
+                for x in xs:            # +1
+                    try:
+                        pass
+                    except ValueError:  # +2
+                        pass
+                    match x:            # +2
+                        case _:
+                            pass
+        """), 5)
+
+    def test_a_ternary_adds_one_and_its_nesting_and_nests_what_it_holds(self):
+        self.assertEqual(score("""
+            def f(a, b):
+                for x in a:                          # +1
+                    y = 1 if x else (2 if b else 3)  # +2, +3
+                return y
+        """), 6)
+
+    def test_what_a_statement_reads_before_its_body_counts_at_the_statement_s_level(self):
+        self.assertEqual(score("""
+            def f(xs, key=lambda x: 1 if x else 0):  # the judged function's own defaults count for nothing
+                for x in (xs if xs else []):         # +1 for, +1 ternary
+                    while (x if x else 0):           # +2 while, +2 ternary
+                        if (x if x else 0):          # +3 if, +3 ternary
+                            x -= 1
+                        elif x:                      # +1
+                            x += 1
+                match (xs if xs else None):          # +1 match, +1 ternary
+                    case _:
+                        pass
+                try:
+                    pass
+                except (ValueError if xs else TypeError):  # +1 except, +1 ternary
+                    pass
+                def g(y=(1 if xs else 2)):           # +1 ternary
+                    return y
+                h = lambda y=(1 if xs else 2): y     # +1 ternary
+                return g, h
+        """), 19)
+
+    def test_comprehensions_add_nothing_and_lambdas_and_nested_functions_nest(self):
+        self.assertEqual(score("""
+            def f(xs):
+                ys = [x for x in xs if x for y in x if not y]
+                key = lambda x: 1 if x else 2          # +2
+                def inner(x):
+                    if x:                              # +2
+                        return [y for y in x if y and x]  # +1
+                    return inner(x - 1)                # +1, recursion
+                class Box:
+                    def size(self):
+                        return 3 if self else 4        # +2
+                return sorted(ys, key=key), inner, Box
+        """), 8)
+
+    def test_a_function_that_calls_itself_adds_one(self):
+        self.assertEqual(score("""
+            def walk(node):
+                if node is None:                      # +1
+                    return 0
+                return walk(node.left) + walk(node.right)  # +1, once
+        """), 2)
+
+    def test_a_method_calls_itself_through_self_cls_or_its_class(self):
+        source = """
+            class Tree:
+                def depth(self, node):
+                    return max(self.depth(c) for c in node)  # +1
+                def size(self, node):
+                    return Tree.size(self, node)            # +1
+                def leaves(self, node):
+                    return leaves(node)                     # a module-level function, not this method
+                @classmethod
+                def build(cls, n):
+                    return cls.build(n - 1)                 # +1
+        """
+        self.assertEqual(score(source, "Tree"), 1)
+        tree = ast.parse(textwrap.dedent(source)).body[0]
+        self.assertEqual([orchestrator.cognitive_complexity(m, "Tree") for m in tree.body], [1, 1, 0, 1])
+
+    def test_a_method_of_a_class_nested_in_the_function_recurses_as_a_method_does(self):
+        self.assertEqual(score("""
+            def outer():
+                class K:
+                    def m(self):
+                        return m()       # a module-level m, not this method
+                return K
+        """), 0)
+        self.assertEqual(score("""
+            def outer():
+                class K:
+                    def m(self):
+                        if self:
+                            return self.m()  # +1 recursion
+                        return K.m(self)
+                return K
+        """), 3)  # the if, nested in m: +2
+
+    def test_code_deeper_than_python_s_recursion_limit_is_scored(self):
+        self.assertEqual(score(LONG_SUM), 0)
+        self.assertEqual(score(LONG_ELIF), 1001)  # the if, and one for each elif
+
+    def fingerprint(self, source):
+        return orchestrator._body_fingerprint(ast.parse(textwrap.dedent(source)).body[0])
+
+    def test_a_body_fingerprint_keeps_where_each_absent_part_sits(self):
+        # Dict.keys holds None for a ** entry, and kw_defaults None for a keyword-only argument without a default.
+        self.assertNotEqual(self.fingerprint("def f(a, b, c):\n    return {**a, b: c}\n"),
+                            self.fingerprint("def f(a, b, c):\n    return {b: a, **c}\n"))
+        self.assertNotEqual(self.fingerprint("def f():\n    def g(*, a=1, b):\n        pass\n"),
+                            self.fingerprint("def f():\n    def g(*, a, b=1):\n        pass\n"))
+
+    def test_a_body_fingerprint_takes_an_integer_too_long_to_print_in_decimal(self):
+        # 4000 hex digits are about 4800 decimal ones, past the 4300 that int's repr allows.
+        huge = "def f():\n    return 0x" + "f" * 4000 + "\n"
+        self.assertNotEqual(self.fingerprint(huge), self.fingerprint(huge.replace("0xf", "0xe", 1)))
+
+    def test_the_seven_functions_sonarqube_flagged_score_over_the_limit(self):
+        with open(S3776_FUNCTIONS) as f:
+            tree = ast.parse(f.read())
+        scores = {}
+        for node in tree.body:
+            cls = node.name if isinstance(node, ast.ClassDef) else None
+            for function in node.body if cls else [node]:
+                scores[function.name] = orchestrator.cognitive_complexity(function, cls)
+        self.assertEqual(sorted(scores), sorted(["main", "_turn", "_poll", "quality_report", "changed_lines",
+                                                 "_shared_name", "_parse_step"]))
+        for name, n in scores.items():
+            self.assertGreater(n, orchestrator.COGNITIVE_COMPLEXITY_LIMIT, name)
+
+
+# Valid Python whose syntax tree is deeper than the interpreter's recursion limit lets a recursive walk go: a sum of 350
+# terms, and an if with 1000 elifs.
+LONG_SUM = "def long_sum(a):\n    return " + " + ".join(["a"] * 350) + "\n"
+LONG_ELIF = ("def long_elif(x):\n    if x == 0:\n        pass\n"
+             + "".join(f"    elif x == {k}:\n        pass\n" for k in range(1, 1001)))
+
+
+def flat(name, n, indent=""):
+    """A function of n ifs one after the other, so of cognitive complexity n, which returns at its last line."""
+    body = "".join(f"{indent}    if x == '{name} {k}':\n{indent}        x += {k}\n" for k in range(n))
+    return f"{indent}def {name}(x):\n{body}{indent}    return x\n"
+
+
+class TestTooComplexFunctions(unittest.TestCase):
+    """The cognitive-complexity check over a real git repository: a base commit, then the change in its working tree."""
+
+    BASE = flat("grow", 14) + "\n\n" + flat("big", 20) + "\n\n" + flat("small", 3)
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = tmp.name
+        self.host = Host()
+        self.git("init", "--quiet", "-b", "main")
+        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
+            self.git("config", key, value)
+        self.put("calc.py", self.BASE)
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "base")
+
+    def git(self, *args):
+        return self.host.git(self.repo, *args)
+
+    def put(self, name, text):
+        path = os.path.join(self.repo, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    def edit(self, name, old, new):
+        with open(os.path.join(self.repo, name)) as f:
+            text = f.read()
+        self.assertEqual(text.count(old), 1, old)
+        self.put(name, text.replace(old, new))
+
+    def change(self):
+        return orchestrator.GateChange.from_tree(self.repo, self.git("rev-parse", "HEAD").strip())
+
+    def found(self):
+        """(path, line, rule) of each finding on the working tree's change, and the findings themselves."""
+        found = orchestrator.too_complex_functions(self.change())
+        return [(f["path"], f["line"], f["rule"]) for f in found], found
+
+    def def_line(self, name, path="calc.py"):
+        with open(os.path.join(self.repo, path)) as f:
+            return next(n for n, line in enumerate(f, 1) if line.lstrip().startswith(f"def {name}("))
+
+    def nest_under(self, name, k):
+        """Add an if inside the kth if of calc.py's function name: 2 more for it, at nesting 1."""
+        self.edit("calc.py", f"    if x == '{name} {k}':\n        x += {k}\n",
+                  f"    if x == '{name} {k}':\n        x += {k}\n        if x:\n            x -= 1\n")
+
+    def test_an_unchanged_tree_has_no_findings(self):
+        self.assertEqual(self.found()[0], [])
+
+    def test_nesting_added_inside_a_function_is_found_at_its_def_line_which_the_change_does_not_add(self):
+        self.nest_under("grow", 13)  # its last if: 14 becomes 16
+        where, found = self.found()
+        self.assertEqual(where, [("calc.py", 1, "over-limit")])
+        self.assertNotIn(1, self.change().changed["calc.py"])
+        self.assertEqual(found[0]["message"], "`grow`: cognitive complexity 16, 14 at the base; the limit is 15.")
+        self.assertEqual(found[0]["severity"], "error")
+
+    def test_a_function_over_the_limit_whose_score_the_change_leaves_alone_is_not_found(self):
+        self.edit("calc.py", "        x += 19\n", "        x += 190\n")  # big's last if, still 20
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_function_over_the_limit_whose_score_the_change_raises_is_found(self):
+        self.nest_under("big", 19)  # its last if: 20 becomes 22
+        where, found = self.found()
+        self.assertEqual(where, [("calc.py", self.def_line("big"), "over-limit")])
+        self.assertEqual(found[0]["message"], "`big`: cognitive complexity 22, 20 at the base; the limit is 15.")
+
+    def test_a_score_that_rises_to_the_limit_is_not_found(self):
+        self.edit("calc.py", "    if x == 'grow 13':\n", "    if x == 'grow 13' and x:\n")  # grow: 14 becomes 15
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_new_function_over_the_limit_is_found_and_one_at_it_is_not(self):
+        self.put("calc.py", self.BASE + "\n\n" + flat("new_big", 16) + "\n\n" + flat("new_ok", 15))
+        where, found = self.found()
+        self.assertEqual(where, [("calc.py", self.def_line("new_big"), "over-limit")])
+        self.assertEqual(found[0]["message"], "`new_big`: cognitive complexity 16, a new function; the limit is 15.")
+
+    def test_a_method_is_named_and_scored_with_its_class(self):
+        # 15 ifs, and a call of itself through self: 16.
+        self.put("shapes.py", "class Box:\n" + flat("size", 15, indent="    ").replace("return x", "return self.size(x)"))
+        self.git("add", "shapes.py")
+        where, found = self.found()
+        self.assertEqual(where, [("shapes.py", 2, "over-limit")])
+        self.assertTrue(found[0]["message"].startswith("`Box.size`: cognitive complexity 16, a new function"))
+
+    def test_a_method_is_scored_with_its_class_at_the_base_too(self):
+        # 15 ifs, and a call of itself through self: 16 at the base and after an edit that adds no point.
+        self.put("shapes.py", "class Box:\n" + flat("size", 15, indent="    ").replace("return x", "return self.size(x)"))
+        self.git("add", "shapes.py")
+        self.git("commit", "--quiet", "-m", "box")
+        self.edit("shapes.py", "x += 3\n", "x += 30\n")
+        self.assertEqual(self.found()[0], [])
+
+    def test_an_unchanged_function_moved_and_renamed_is_compared_with_its_old_self(self):
+        big = flat("big", 20)
+        self.edit("calc.py", "\n\n" + big, "")
+        self.put("other.py", big.replace("def big(", "def huge("))
+        self.git("add", "other.py")
+        self.assertEqual(self.found()[0], [])
+
+    def test_an_unchanged_function_moved_out_of_a_deleted_file_is_compared_with_its_old_self(self):
+        self.git("rm", "--quiet", "calc.py")
+        # Lines enough of its own that git does not take other.py for calc.py renamed.
+        self.put("other.py", "".join(f"CONSTANT_{k} = {k}\n" for k in range(200)) + "\n\n" + flat("big", 20))
+        self.git("add", "other.py")
+        self.assertIn(("calc.py", None), self.host.changed_files(self.repo, self.git("rev-parse", "HEAD").strip()))
+        self.assertEqual(self.found()[0], [])
+
+    def test_an_unchanged_function_made_a_method_in_its_file_is_compared_with_its_old_self(self):
+        big = flat("big", 20)
+        self.edit("calc.py", big, "class Box:\n" + flat("big", 20, indent="    "))
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_copy_of_a_function_over_the_limit_is_new_wherever_it_goes(self):
+        copy = flat("big", 20).replace("def big(", "def copied(")
+        new = ["`copied`: cognitive complexity 20, a new function; the limit is 15."]
+        with self.subTest("beside the original, in its file"):
+            self.put("calc.py", self.BASE + "\n\n" + copy)
+            self.assertEqual([f["message"] for f in self.found()[1]], new)
+        self.put("calc.py", self.BASE)
+        self.put("other.py", copy)
+        self.git("add", "other.py")
+        with self.subTest("in another file, the original's file untouched"):
+            self.assertEqual([f["message"] for f in self.found()[1]], new)
+        with self.subTest("in another file, the original's file edited elsewhere"):
+            self.edit("calc.py", "'small 2':\n        x += 2\n", "'small 2':\n        x += 20\n")
+            self.assertEqual([f["message"] for f in self.found()[1]], new)
+
+    def test_a_function_moved_and_made_more_complex_is_judged_as_new(self):
+        big = flat("big", 20)
+        self.edit("calc.py", "\n\n" + big, "")
+        self.put("other.py", big.replace("        x += 19\n", "        x += 19\n        if x:\n            x -= 1\n"))
+        self.git("add", "other.py")
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`big`: cognitive complexity 22, a new function; the limit is 15."])
+
+    def test_a_file_renamed_from_any_name_is_compared_with_its_base(self):
+        self.commit_file("bin/tool", flat("helper", 20))
+        self.git("mv", "bin/tool", "bin/tool.py")
+        self.edit("bin/tool.py", "x += 3\n", "x += 30\n")  # still 20
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_function_out_of_tests_is_judged_as_new_as_tests_were_never_held_to_the_limit(self):
+        self.commit_file("tests/helpers.py", flat("helper", 20) + "\n\n" + flat("other_helper", 20))
+        os.makedirs(os.path.join(self.repo, "lib"))
+        self.git("mv", "tests/helpers.py", "lib/helpers.py")  # renamed, with both functions
+        self.edit("lib/helpers.py", "'helper 3':\n        x += 3\n", "'helper 3':\n        x += 30\n")  # still 20
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`helper`: cognitive complexity 20, a new function; the limit is 15."])
+        self.git("commit", "--quiet", "-am", "renamed")
+        self.put("lib/helpers.py", flat("helper", 20))
+        self.put("lib/more.py", flat("other_helper", 20))  # moved out of the old test file's lines
+        self.git("add", "lib/more.py")
+        self.assertEqual(self.found()[0], [])  # lib/helpers.py's base is lib/, now held to the limit
+
+    def test_a_function_moved_unchanged_out_of_tests_is_judged_as_new(self):
+        self.commit_file("tests/helpers.py", "X = 0\n\n\n" + flat("helper", 20))
+        self.put("tests/helpers.py", "X = 0\n")
+        self.put("lib.py", flat("helper", 20))
+        self.git("add", "lib.py")
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`helper`: cognitive complexity 20, a new function; the limit is 15."])
+
+    def test_a_function_moved_unchanged_into_tests_keeps_its_base_from_a_copy_elsewhere(self):
+        big = flat("big", 20)
+        self.put("calc.py", self.BASE.replace("\n\n" + big, ""))
+        self.put("tests/helpers.py", big)  # the original, moved where nothing is judged
+        self.put("lib.py", big.replace("def big(", "def copied("))
+        self.git("add", "tests/helpers.py", "lib.py")
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`copied`: cognitive complexity 20, a new function; the limit is 15."])
+
+    def test_a_function_moved_unchanged_where_nothing_is_judged_keeps_its_base_from_a_copy_of_its_name(self):
+        big = flat("big", 20)
+        self.put("calc.py", self.BASE.replace("\n\n" + big, ""))
+        self.put("tests/helpers.py", big)  # the original, moved where nothing is judged
+        self.put("lib.py", big)  # a copy under the same name
+        self.git("add", "tests/helpers.py", "lib.py")
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`big`: cognitive complexity 20, a new function; the limit is 15."])
+
+    def test_a_function_moved_unchanged_into_a_python_script_keeps_its_base_from_a_copy_elsewhere(self):
+        big = flat("big", 20)
+        self.put("calc.py", self.BASE.replace("\n\n" + big, ""))
+        self.put("bin/tool", "#!/usr/bin/env python3\n" + big)  # the original, in a script with no .py
+        self.put("lib.py", big.replace("def big(", "def copied("))
+        self.git("add", "bin/tool", "lib.py")
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`copied`: cognitive complexity 20, a new function; the limit is 15."])
+
+    def test_a_function_s_text_moved_into_a_file_that_is_not_python_leaves_its_base_to_its_copy(self):
+        big = flat("big", 20)
+        for name, first in [("notes.txt", "# python, kept for reference\n"), ("bin/run", "#!/bin/sh\n")]:
+            with self.subTest(name):
+                self.put("calc.py", self.BASE.replace("\n\n" + big, ""))
+                self.put(name, first + big)
+                self.put("lib.py", big.replace("def big(", "def copied("))  # the only function with big's body
+                self.git("add", name, "lib.py")
+                self.assertEqual(self.found()[0], [])
+                self.git("rm", "--quiet", "--cached", name)
+                os.remove(os.path.join(self.repo, name))
+
+    def test_a_function_in_a_file_the_check_does_not_judge_keeps_its_own_base_from_a_moved_twin(self):
+        big = flat("big", 20)
+        self.commit_file("tests/helpers.py", "X = 0\n\n\n" + big)
+        self.edit("tests/helpers.py", "X = 0\n", "X = 1\n")
+        self.put("calc.py", self.BASE.replace("\n\n" + big, ""))
+        self.put("lib.py", big)  # calc.py's big, moved unchanged
+        self.git("add", "lib.py")
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_changed_symlink_is_not_read_so_one_to_a_fifo_cannot_block_the_check(self):
+        elsewhere = tempfile.TemporaryDirectory()
+        self.addCleanup(elsewhere.cleanup)
+        fifo = os.path.join(elsewhere.name, "pipe")
+        os.mkfifo(fifo)
+        os.symlink(fifo, os.path.join(self.repo, "x.py"))
+        self.git("add", "x.py")
+        self.nest_under("big", 19)
+        where = []
+        worker = threading.Thread(target=lambda: where.extend(self.found()[0]), daemon=True)
+        worker.start()
+        worker.join(10)
+        if worker.is_alive():
+            # Open the FIFO's other end and close it, so that the read blocked on it ends and the suite goes on.
+            with contextlib.suppress(OSError):
+                os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+            worker.join(10)
+            self.fail("the check read the FIFO a changed symlink points to")
+        self.assertEqual(where, [("calc.py", self.def_line("big"), "over-limit")])
+
+    def test_a_module_renamed_with_a_symlink_left_under_its_old_name_keeps_its_functions_bases(self):
+        self.git("mv", "calc.py", "core.py")
+        os.symlink("core.py", os.path.join(self.repo, "calc.py"))
+        self.git("add", "calc.py")
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_changed_file_gone_before_it_is_read_could_not_be_read(self):
+        self.nest_under("big", 19)
+        change = self.change()
+        os.remove(os.path.join(self.repo, "calc.py"))
+        found = orchestrator.too_complex_functions(change)
+        self.assertEqual([(f["path"], f["rule"]) for f in found], [("calc.py", "not-scored")])
+        self.assertTrue(found[0]["message"].startswith("could not be read ("), found[0]["message"])
+
+    def test_an_unchanged_copy_in_a_file_the_check_does_not_judge_takes_no_base_from_its_original(self):
+        big = flat("big", 20)
+        self.commit_file("tests/helpers.py", "X = 0\n\n\n" + big)
+        self.edit("calc.py", "'big 3':\n        x += 3\n", "'big 3':\n        x += 30\n")  # edited in place: still 20
+        self.edit("tests/helpers.py", "X = 0\n", "X = 1\n")  # the copy at the base, in a file edited elsewhere
+        self.assertEqual(self.found()[0], [])
+
+    def test_an_unchanged_copy_in_a_file_the_check_does_not_judge_takes_no_base_from_its_original_renamed(self):
+        self.put("tests/helpers.py", flat("big", 20))
+        self.git("add", "tests/helpers.py")
+        self.edit("calc.py", "def big(", "def legacy_big(")  # renamed in place, its body unchanged
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_copy_of_its_name_takes_no_base_from_an_original_renamed_in_place(self):
+        big = flat("big", 20)
+        self.edit("calc.py", "def big(", "def legacy_big(")  # renamed in place, its body unchanged
+        self.put("lib.py", big)
+        self.git("add", "lib.py")
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`big`: cognitive complexity 20, a new function; the limit is 15."])
+
+    def test_a_function_moved_unchanged_keeps_its_base_from_a_new_function_under_its_old_name(self):
+        new_big = flat("big", 18).replace("'big ", "'new big ")
+        for where in ["lib.py", "tests/helpers.py", "bin/tool"]:
+            with self.subTest(where):
+                self.put("calc.py", self.BASE.replace(flat("big", 20), new_big))
+                self.put(where, ("#!/usr/bin/env python3\n" if where == "bin/tool" else "") + flat("big", 20))
+                self.git("add", where)
+                self.assertEqual([f["message"] for f in self.found()[1]],
+                                 ["`big`: cognitive complexity 18, a new function; the limit is 15."])
+                self.git("rm", "--quiet", "--cached", where)
+                os.remove(os.path.join(self.repo, where))
+
+    def test_a_function_moved_unchanged_out_of_a_file_that_keeps_its_name_keeps_its_base_from_a_copy(self):
+        # Two functions named _, as @singledispatch registrations are: the one scoring 20 moves where nothing is
+        # judged, the other stays, and a copy of the first is added elsewhere.
+        moved, stays = flat("_", 20).replace("'_ ", "'moved "), flat("_", 3).replace("'_ ", "'stays ")
+        self.commit_file("disp.py", moved + "\n\n" + stays)
+        self.put("disp.py", stays)
+        self.put("tests/helpers.py", moved)
+        self.put("lib.py", moved)
+        self.git("add", "tests/helpers.py", "lib.py")
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`_`: cognitive complexity 20, a new function; the limit is 15."])
+        self.assertEqual(self.found()[0][0][0], "lib.py")
+
+    def test_a_function_moved_unchanged_out_of_a_file_that_keeps_its_twin_keeps_its_base(self):
+        big = flat("big", 20)
+        self.put("calc.py", self.BASE + "\n\n" + big.replace("def big(", "def twin("))
+        self.git("commit", "--quiet", "-am", "twin")
+        self.edit("calc.py", "\n\n" + big.replace("def big(", "def twin("), "")
+        self.put("lib.py", big.replace("def big(", "def twin("))  # twin moved unchanged; big stays as it was
+        self.git("add", "lib.py")
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_copy_of_a_function_the_change_edits_takes_its_base_as_bodies_first_decides(self):
+        # The cost TODO.md records ("A copy of a function whose original the change edits keeps the old score and
+        # passes"): the copy is taken for the original moved unchanged, and the edited original for a new function.
+        big = flat("big", 20)
+        self.edit("calc.py", "'big 3':\n        x += 3\n", "'big 3':\n        x += 30\n")  # edited in place: still 20
+        for where in ["lib.py", "tests/helpers.py"]:
+            with self.subTest(where):
+                self.put(where, big)
+                self.git("add", where)
+                self.assertEqual([f["message"] for f in self.found()[1]],
+                                 ["`big`: cognitive complexity 20, a new function; the limit is 15."])
+                self.assertEqual(self.found()[0][0][0], "calc.py")
+                self.git("rm", "--quiet", "--cached", where)
+                os.remove(os.path.join(self.repo, where))
+
+    def test_a_function_whose_decorator_the_change_adds_is_compared_with_its_unchanged_self(self):
+        self.edit("calc.py", "def big(x):\n", "@staticmethod\ndef big(x):\n")  # touched, its body as it was
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_function_renamed_unchanged_keeps_its_base_from_a_new_function_under_its_old_name(self):
+        big = flat("big", 20)
+        self.put("calc.py", self.BASE.replace(big, big.replace("def big(", "def legacy_big(")) + "\n\n"
+                 + flat("big", 16).replace("'big ", "'new big "))
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`big`: cognitive complexity 16, a new function; the limit is 15."])
+
+    def test_one_base_function_is_the_base_of_one_function_only(self):
+        big = flat("big", 20)
+        copy = big.replace("def big(", "def copied(")
+        # The original moved unchanged, and a copy of it elsewhere.
+        self.put("calc.py", self.BASE.replace("\n\n" + big, ""))
+        self.put("other.py", big)
+        self.put("third.py", copy)
+        self.git("add", "other.py", "third.py")
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`copied`: cognitive complexity 20, a new function; the limit is 15."])
+        # The copy in a file read before the original's new one, so that only the name decides.
+        os.rename(os.path.join(self.repo, "third.py"), os.path.join(self.repo, "a_copy.py"))
+        self.git("add", "-A", "third.py", "a_copy.py")
+        self.assertEqual(self.found()[0], [("a_copy.py", 1, "over-limit")])
+
+    def test_a_name_defined_twice_is_compared_with_the_same_definition_at_the_base(self):
+        # A property's getter, scoring 21, then its setter, which scores nothing, under the same name.
+        getter = flat("x", 21, indent="    ").replace("    def x(x):\n", "    @property\n    def x(self):\n")
+        self.put("props.py", "class C:\n" + getter + "\n    @x.setter\n    def x(self, value):\n        pass\n")
+        self.git("add", "props.py")
+        self.git("commit", "--quiet", "-m", "property")
+        self.edit("props.py", "x += 3\n", "x += 30\n")  # the getter's, still 21
+        self.assertEqual(self.found()[0], [])
+        self.edit("props.py", "x += 30\n", "x += 30\n        if x:\n            x -= 1\n")  # 21 becomes 22
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`C.x`: cognitive complexity 22, 21 at the base; the limit is 15."])
+
+    # A function named _ that does nothing, as one @singledispatch registration or @overload stub can be.
+    TRIVIAL = "def _(a):\n    return a\n\n\n"
+
+    def commit_file(self, name, text):
+        self.put(name, text)
+        self.git("add", name)
+        self.git("commit", "--quiet", "-m", name)
+
+    def test_a_namesake_removed_above_a_function_leaves_it_compared_with_its_own_base(self):
+        self.commit_file("disp.py", self.TRIVIAL + flat("_", 20))
+        self.put("disp.py", flat("_", 20).replace("x += 3\n", "x += 30\n"))  # the trivial one gone; still 20
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_namesake_added_above_a_function_leaves_it_compared_with_its_own_base(self):
+        self.commit_file("disp.py", flat("_", 20))
+        self.put("disp.py", self.TRIVIAL + flat("_", 20).replace("x += 3\n", "x += 30\n"))  # still 20
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_rise_of_a_function_whose_name_others_share_is_found(self):
+        self.commit_file("disp.py", flat("_", 20))
+        self.put("disp.py", flat("_", 20).replace("        x += 19\n", "        x += 19\n        if x:\n            x -= 1\n"))
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`_`: cognitive complexity 22, 20 at the base; the limit is 15."])
+
+    def test_only_the_tests_directory_is_exempt_as_from_ruff_s_c901(self):
+        self.put("tests/test_calc.py", flat("test_big", 16))
+        self.put("tests/unit/helpers.py", flat("helper", 16))
+        self.put("test_top.py", flat("test_big", 16))
+        self.put("src/test_utils.py", flat("util", 16))
+        self.git("add", "tests", "test_top.py", "src")
+        self.assertEqual(self.found()[0], [("src/test_utils.py", 1, "over-limit"), ("test_top.py", 1, "over-limit")])
+
+    def test_methods_of_nested_classes_and_functions_under_module_level_statements_are_judged(self):
+        self.put("more.py", (
+            "class Outer:\n"
+            "    class Inner:\n"
+            + flat("method", 16, indent="        ")
+            + "if True:\n"
+            + flat("under_if", 16, indent="    ")
+            + "try:\n"
+            "    import json\n"
+            "except ImportError:\n"
+            + flat("under_except", 16, indent="    ")))
+        self.git("add", "more.py")
+        where, found = self.found()
+        self.assertEqual(where, [("more.py", self.def_line(name, "more.py"), "over-limit")
+                                 for name in ("method", "under_if", "under_except")])
+        self.assertEqual([f["message"].split(":")[0] for f in found],
+                         ["`Outer.Inner.method`", "`under_if`", "`under_except`"])
+
+    def test_a_renamed_file_is_compared_with_its_base_under_its_old_name(self):
+        self.git("mv", "calc.py", "lib.py")
+        self.edit("lib.py", "        x += 19\n", "        x += 190\n")
+        self.assertEqual(self.found()[0], [])
+
+    def test_an_unparsable_file_is_a_finding(self):
+        self.put("calc.py", self.BASE + "def broken(:\n")
+        where, found = self.found()
+        self.assertEqual(where, [("calc.py", None, "not-scored")])
+        self.assertEqual(found[0]["message"], "does not parse as Python, so its functions were not scored.")
+
+    def test_files_that_cannot_be_read_or_parsed_are_findings_and_the_others_are_still_judged(self):
+        self.put("a_unknown.py", "# -*- coding: nonsense -*-\n")  # an encoding Python does not know
+        self.put("b_broken.py", "def broken(:\n")
+        self.put("0_notes.txt", "not Python\n")
+        self.git("add", "a_unknown.py", "b_broken.py", "0_notes.txt")
+        self.nest_under("big", 19)
+        where, found = self.found()
+        self.assertEqual(where, [("a_unknown.py", None, "not-scored"), ("b_broken.py", None, "not-scored"),
+                                 ("calc.py", self.def_line("big"), "over-limit")])
+        self.assertTrue(found[0]["message"].startswith("could not be read ("), found[0]["message"])
+
+    def test_a_base_that_cannot_be_read_leaves_its_functions_judged_as_new(self):
+        self.nest_under("big", 19)
+        git = Host.git
+
+        def no_blob(host, cwd, *args, **kw):
+            if "cat-file" in args:
+                raise OrchestratorError("git cat-file failed")
+            return git(host, cwd, *args, **kw)
+
+        with patch.object(Host, "git", no_blob):
+            where, found = self.found()
+        self.assertEqual(where, [("calc.py", self.def_line("big"), "over-limit")])
+        self.assertEqual(found[0]["message"], "`big`: cognitive complexity 22, a new function; the limit is 15.")
+
+    def test_a_function_in_mutmut_s_state_is_not_judged(self):
+        self.put("mutants/calc.py", flat("x_big__mutmut_1", 20) + "\n")
+        self.git("add", "mutants/calc.py")
+        self.nest_under("big", 19)
+        where, _ = self.found()
+        self.assertEqual(where, [("calc.py", self.def_line("big"), "over-limit")])
+
+    def put_bytes(self, name, data):
+        with open(os.path.join(self.repo, name), "wb") as f:
+            f.write(data)
+
+    def test_a_file_with_a_byte_order_mark_or_a_coding_cookie_is_judged_as_python_reads_it(self):
+        self.put_bytes("bom.py", b"\xef\xbb\xbf" + flat("marked", 16).encode())
+        self.put_bytes("latin.py", b"# -*- coding: latin-1 -*-\nCAFE = 'caf\xe9'\n" + flat("declared", 16).encode())
+        self.git("add", "bom.py", "latin.py")
+        self.assertEqual(self.found()[0], [("bom.py", 1, "over-limit"), ("latin.py", 3, "over-limit")])
+
+    def test_a_file_whose_coding_cookie_names_no_text_encoding_could_not_be_read(self):
+        # rot13 is a codec, but not one that decodes bytes to text; Python refuses such a file.
+        self.put("rot.py", "# coding: rot13\n" + flat("rotated", 16))
+        self.git("add", "rot.py")
+        where, found = self.found()
+        self.assertEqual(where, [("rot.py", None, "not-scored")])
+        self.assertTrue(found[0]["message"].startswith("could not be read ("), found[0]["message"])
+
+    def test_a_base_whose_coding_cookie_names_no_text_encoding_leaves_its_functions_judged_as_new(self):
+        self.put("rot.py", "# coding: rot13\n" + flat("rotated", 20))
+        self.git("add", "rot.py")
+        self.git("commit", "--quiet", "-m", "rot13")
+        self.put("rot.py", flat("rotated", 20).replace("x += 3\n", "x += 30\n"))
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`rotated`: cognitive complexity 20, a new function; the limit is 15."])
+
+    def test_a_base_with_a_byte_order_mark_or_a_coding_cookie_is_compared_as_python_reads_it(self):
+        bom, cookie = b"\xef\xbb\xbf", b"# -*- coding: latin-1 -*-\nCAFE = 'caf\xe9'\n"
+        self.put_bytes("bom.py", bom + flat("marked", 20).encode())
+        self.put_bytes("latin.py", cookie + flat("declared", 20).encode())
+        self.git("add", "bom.py", "latin.py")
+        self.git("commit", "--quiet", "-m", "encodings")
+        # Edits that leave both at 20.
+        self.put_bytes("bom.py", bom + flat("marked", 20).replace("x += 3\n", "x += 30\n").encode())
+        self.put_bytes("latin.py", cookie + flat("declared", 20).replace("x += 3\n", "x += 30\n").encode())
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_base_that_does_not_parse_leaves_its_functions_judged_as_new(self):
+        self.put("broken.py", "def big(:\n")
+        self.git("add", "broken.py")
+        self.git("commit", "--quiet", "-m", "broken")
+        self.put("broken.py", flat("big", 16))
+        where, found = self.found()
+        self.assertEqual(where, [("broken.py", 1, "over-limit")])
+        self.assertEqual(found[0]["message"], "`big`: cognitive complexity 16, a new function; the limit is 15.")
+
+    def test_code_deeper_than_python_s_recursion_limit_is_judged_in_the_change_and_at_the_base(self):
+        self.put("deep.py", LONG_SUM + "\n\n" + LONG_ELIF)
+        self.git("add", "deep.py")
+        self.assertEqual(self.found()[0], [("deep.py", self.def_line("long_elif", "deep.py"), "over-limit")])
+        self.git("commit", "--quiet", "-m", "deep")
+        self.edit("deep.py", "    elif x == 1000:\n        pass\n",
+                  "    elif x == 1000:\n        pass\n    else:\n        pass\n")  # 1001 becomes 1002
+        found = self.found()[1]
+        self.assertEqual([f["message"] for f in found],
+                         ["`long_elif`: cognitive complexity 1002, 1001 at the base; the limit is 15."])
+
+    def test_an_integer_too_long_to_print_in_decimal_is_judged_like_any_code(self):
+        self.put("huge.py", "def h():\n    return 0x" + "f" * 4000 + "\n\n\n" + flat("big_one", 16))
+        self.git("add", "huge.py")
+        self.assertEqual(self.found()[0], [("huge.py", 5, "over-limit")])
+
+    def test_it_fails_the_gate(self):
+        [check] = [c for c in orchestrator.gate_checks(orchestrator.MUTATION_BUDGET) if c.name == "cognitive-complexity"]
+        self.assertEqual((check.fails, check.find), (True, orchestrator.too_complex_functions))
 
 
 class TestToolFindings(unittest.TestCase):

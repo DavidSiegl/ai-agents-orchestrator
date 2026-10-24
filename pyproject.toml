@@ -3,7 +3,7 @@ pythonpath = ["."]
 
 [project]
 name = "ai-agents-orchestrator"
-version = "0.19.0"
+version = "0.21.0"
 description = "Spec Collector -> Builder -> Reviewer handoff between Claude Code sessions in herdr"
 readme = "README.md"
 # The orchestrator is stdlib-only, so it runs with a system python3 3.13+ without uv.
@@ -15,6 +15,7 @@ build = [
     "pyinstaller>=6.22.3",
 ]
 dev = [
+    "mutmut>=3.8.0",
     "mypy>=2.4.0",
     "pymarkdownlnt>=0.9.41",
     "pytest>=9.0.3",
@@ -47,6 +48,17 @@ max-complexity = 15
 [tool.mypy]
 # The tests are untyped by design; the orchestrator is the typed surface.
 files = ["orchestrator.py"]
+
+[tool.mutmut]
+# What `orchestrator.py gate`'s surviving-mutants check runs mutmut by, on a copy of the tree in which only the functions
+# a change edits can be mutated (docs/quality-gate.md). The tests read examples/ and docs/ beside the code; mutmut runs
+# them in a directory of its own, which holds only what is listed here.
+source_paths = ["orchestrator.py"]
+pytest_add_cli_args_test_selection = ["tests/"]
+also_copy = ["examples/", "docs/"]
+# argparse's help texts, which no test reads word for word. mutmut matches each pattern against each source line and
+# skips every expression that starts on a matching line, with what it holds, the following lines of a help text too.
+do_not_mutate_patterns = ['\bhelp=']
 
 [tool.pymarkdown]
 # The docs wrap at 120, by eye. README.md opens with its logo in HTML, which also keeps a heading off its first line.
