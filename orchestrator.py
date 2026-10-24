@@ -578,8 +578,19 @@ class Pipeline:
         return None
 
     def _lock_problem(self) -> str | None:
-        locker = next((st for st in self.steps if st.locks and not st.edits), None)
-        return f"step {locker.id} locks the files it changes, so it must edit" if locker else None
+        """A locking step that is not the first editing step, or that the verdict loop runs again. Host.lock locks
+        what the change holds when the step's turn ends, which is only the step's own work when no editing turn
+        came before it."""
+        for st in (st for st in self.steps if st.locks):
+            if not st.edits:
+                return f"step {st.id} locks the files it changes, so it must edit"
+            if st is not self.first_edit:
+                return f"step {st.id} locks the files it changes, so it must be the first editing step"
+            verdict = self.verdict_step
+            ids = [x.id for x in self.steps]
+            if verdict and verdict.loop_to in ids and ids.index(verdict.loop_to) <= ids.index(st.id):
+                return f"step {st.id} locks the files it changes, so the verdict loop must not run it again"
+        return None
 
     def _name_problem(self) -> str | None:
         ids, files = [st.id for st in self.steps], [st.file for st in self.steps]
@@ -1511,8 +1522,14 @@ class Host:
     def restore(self, cwd: str, ref: str, paths: list[str]) -> None:
         """Make each of paths in the working tree what it is in ref: written as ref has it, or deleted where ref has
         none. The index stays as it is."""
-        if paths:
-            self.git(cwd, "restore", f"--source={ref}", "--worktree", "--", *_top_literal(paths))
+        held = set(self.git(cwd, "ls-tree", "-r", "--name-only", "-z", "--full-tree", ref, "--", *_top_literal(paths),
+                            verbatim=True).split("\0")) if paths else set()
+        if kept := [p for p in paths if p in held]:
+            self.git(cwd, "restore", f"--source={ref}", "--worktree", "--", *_top_literal(kept))
+        # git restore refuses a path that neither ref nor the index has, so a file ref lacks is removed here.
+        if gone := [p for p in paths if p not in held]:
+            top = self.git(cwd, "rev-parse", "--show-toplevel", verbatim=True).rstrip("\n")
+            self.check(["rm", "-f", "--", *(f"{top}/{p}" for p in gone)])
 
     def delete_refs(self, cwd: str, prefix: str) -> None:
         """Delete every local ref whose name starts with prefix, such as refs/orchestrator/<key>/; none is no error."""

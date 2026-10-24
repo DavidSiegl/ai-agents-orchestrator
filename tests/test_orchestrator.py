@@ -1692,22 +1692,26 @@ class TestHostGit(unittest.TestCase):
 
     def test_locked_files_are_restored_and_the_index_is_left_alone(self):
         self.commit(self.a, "gone.py", "old\n")
+        self.commit(self.a, "removed.py", "old\n")
         base = self.head(self.a)
         ref = "refs/orchestrator/a1b2c3/locked/tests"
         self.put("tests/test_[x].py", "assert f()\n")
         self.put("app.py", "one\ntested\n")
         self.put("gone.py")
-        self.assertEqual(self.host.lock(self.a, base, ref), ["app.py", "gone.py", "tests/test_[x].py"])
+        # Deleted from the index too, so that git restore would know it from neither side.
+        self.sh("git", "-C", self.a, "rm", "--quiet", "removed.py")
+        self.assertEqual(self.host.lock(self.a, base, ref), ["app.py", "gone.py", "removed.py", "tests/test_[x].py"])
         locked = self.host.lock(self.a, base, ref)
 
         # A later step edits one, deletes another, brings back the third and changes a file nobody locked.
         self.put("tests/test_[x].py")
         self.put("app.py", "one\nweakened\n")
         self.put("gone.py", "back\n")
+        self.put("removed.py", "back\n")
         self.put("feature.py", "new\n")
         os.makedirs(f"{self.a}/sub")
         differ, diff = self.host.locked_changes(f"{self.a}/sub", ref, locked)
-        self.assertEqual(differ, ["app.py", "gone.py", "tests/test_[x].py"])
+        self.assertEqual(differ, ["app.py", "gone.py", "removed.py", "tests/test_[x].py"])
         self.assertIn("-tested\n+weakened\n", diff)
         self.assertIn("deleted file mode", diff)
         porcelain = self.sh("git", "-C", self.a, "status", "--porcelain")
@@ -1716,8 +1720,10 @@ class TestHostGit(unittest.TestCase):
         self.assertEqual((self.read("tests/test_[x].py"), self.read("app.py"), self.read("feature.py")),
                          ("assert f()\n", "one\ntested\n", "new\n"))
         self.assertFalse(os.path.exists(f"{self.a}/gone.py"))
+        self.assertFalse(os.path.exists(f"{self.a}/removed.py"))
         self.assertEqual(self.host.locked_changes(self.a, ref, locked), ([], ""))
-        self.assertEqual(self.sh("git", "-C", self.a, "diff", "--cached", "--name-only"), "")
+        # The index holds only the deletion staged above.
+        self.assertEqual(self.sh("git", "-C", self.a, "diff", "--cached", "--name-only"), "removed.py\n")
         self.assertNotEqual(self.sh("git", "-C", self.a, "status", "--porcelain"), porcelain)
 
         other = "refs/orchestrator/d4e5f6/locked/tests"
@@ -9307,6 +9313,17 @@ class TestLockedFiles(unittest.TestCase):
     def test_only_an_editing_step_may_lock(self):
         with self.assertRaisesRegex(ValueError, "step review locks the files it changes, so it must edit"):
             Pipeline("bad", QUICK.roles, (QUICK.steps[0], replace(QUICK.steps[1], locks=True)))
+        # Its lock would hold the earlier step's work too.
+        with self.assertRaisesRegex(ValueError, "step build locks the files it changes, so it must be the first "
+                                                "editing step"):
+            Pipeline("bad", FOUR.roles, tuple(replace(st, locks=st.id == "build") for st in FOUR.steps))
+        # A second turn of it would lock the Builder's work of the round before.
+        with self.assertRaisesRegex(ValueError, "step tests locks the files it changes, so the verdict loop must not "
+                                                "run it again"):
+            Pipeline("bad", FOUR.roles, tuple(replace(st, locks=st.id == "tests", file="tests-{n}.md")
+                                              if st.id == "tests" else
+                                              replace(st, loop_to="tests") if st.id == "review" else st
+                                              for st in FOUR.steps))
         step = 'id = "tests"\nfile = "t.md"\nprompt = "{path}"\nlocks = true\n'
         with self.assertRaisesRegex(ValueError, "step tests locks the files it changes, so it must edit"):
             orchestrator.parse_workflow("bad", tomllib.loads(f"[[steps]]\n{step}"))

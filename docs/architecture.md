@@ -105,14 +105,15 @@ does not edit, titles the branch and the pull request; without one the task does
 commit's provenance trailers as a table (`provenance`), the contract, the last editing step's last report, the
 last quality file and the verdict file.
 
-A locking step (`locks`, editing steps only) locks the change as it stands when each of its turns ends: `Host.lock`
-snapshots the tree into the local ref `refs/orchestrator/<key>/locked/<step>`, which nothing pushes and `done`
-deletes, and `RunState.locked` saves the paths that differ from the base. After every other editing turn,
-`Workflow._hold_locks` writes the turn's changes to those paths to `locked-<turn's file>.diff` in the run directory,
-saves a record of them in `RunState.restored`, and then restores the paths from the ref (`Host.restore`, the working
-tree only, a path the ref lacks deleted); a resume restores a saved record again. That happens before the quality
-round, so the gate judges the locked files, and `LOCKED_NOTE` tells the verdict step which files of its round were
-restored and where the diffs are.
+A locking step (`locks`: the first editing step, which the verdict loop does not run again, so that what it locks is
+its own work) locks the change as it stands when each of its turns ends: `Host.lock` snapshots the tree into the
+local ref `refs/orchestrator/<key>/locked/<step>`, which nothing pushes and `done` deletes, and `RunState.locked`
+saves the paths that differ from the base. After every other editing turn, `Workflow._hold_locks` writes the turn's
+changes to those paths to `locked-<turn's file>.diff` in the run directory, saves a record of them in
+`RunState.restored`, and then restores the paths from the ref (`Host.restore`, the working tree only, a path the ref
+lacks deleted); a resume restores a saved record again. That happens before the quality round, so the gate judges
+the locked files, and `LOCKED_NOTE` tells the verdict step which files of its round were restored and where the
+diffs are.
 
 A workflow with a `proof_command` (`examples/workflows/adversarial.toml`) has its verdict step back findings with
 tests in `{proofs_dir}`, `RunState.proofs_dir(n)` in the run directory, so they never enter the snapshot or the

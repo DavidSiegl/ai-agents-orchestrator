@@ -393,8 +393,8 @@ later round), `loop_to`, which makes it the verdict step that sends `CHANGES_REQ
 workflow without one ends `FINISHED` when its last step is done, and its pull request says no agent reviewed the
 change; with `--quality-gate`, a gate that still failed after the last quality round ends it `QUALITY_GATE_FAILED`
 instead, a draft, as under [Exit status](#exit-status)), and the flags `human_paced`, `edits`, `quality_gated`,
-`fresh_repeats_again` (a fresh session gets `again` too) and `locks`: an editing step that locks the files it
-changes, as `tdd`'s Test Writer does, has every later turn's change to them undone, and the Reviewer told where it
+`fresh_repeats_again` (a fresh session gets `again` too) and `locks`: the first editing step, outside the review loop, can lock the files it
+changes, as `tdd`'s Test Writer does; every later turn's change to them is undone, and the Reviewer told where it
 is. A workflow's `proof_command`, such as `"python -m pytest -q {proofs}"`, runs each test the verdict step wrote in
 `{proofs_dir}` with a review that requests changes, in the working tree, and exits 1 when the test fails: the review
 gains which findings their tests demonstrate, and the next round's prompt tells the step it loops back to to make
