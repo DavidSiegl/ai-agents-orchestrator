@@ -5,14 +5,14 @@ was done.
 
 ## Open issues
 
-- **An agent can merge into `main` without Jenkins.** The agents' token can set
-  `continuous-integration/jenkins/pr-head`, the one status the `ci-cd` ruleset requires (`docs/quality-gate.md`,
-  the checkout credential), and since `automerge.yml` a pull request into `main` from a branch outside
-  `orchestrator/` merges once that status is green. With *Contents: write* the token could already merge such a
-  pull request itself. Raised by the cross-review of `pr-automerge` (F5, 2026-10-24): "A branch the agents push
-  under any other name, once a pull request is open on it, merges into `main` (and so into a release) without a
-  human". Closes when Jenkins reports the status under an identity the agents do not hold, such as a GitHub App,
-  and the ruleset requires that app's check (Homelab `.scratch/agent-identity`, tickets 02 and 03).
+- **An agent's pull request can reach `main` on rules it wrote itself, with no human.** Jenkins's App reports
+  `continuous-integration/jenkins/pr-head`, which the agents' token cannot post, but a pull request build runs
+  the pull request's own `Jenkinsfile` and gate (`docs/quality-gate.md`, What the Gate stage judges), and since
+  `automerge.yml` a pull request into `main` from a branch outside `orchestrator/` merges once that status is
+  green. Raised by the cross-review of `pr-automerge` (F5, 2026-10-24): "A branch the agents push under any other
+  name, once a pull request is open on it, merges into `main` (and so into a release) without a human". Closes
+  with an approving review required on `main` that the agents cannot give (Homelab `.scratch/agent-identity`,
+  ticket 03), or a Jenkinsfile and gate a pull request build takes from `main` rather than from the pull request.
 - **A pull request moved off `main` can merge unchecked before `automerge.yml` turns auto-merge off.** No ruleset
   requires a check outside `main`, so once a pull request with auto-merge on targets another branch and has no
   conflict, GitHub merges it at once, racing the run that would turn auto-merge off; and a conflict cleared from
