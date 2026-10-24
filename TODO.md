@@ -84,13 +84,20 @@ was done.
   (`_base_scores`: `new in working`), so the functions of a deleted `bin/tool` lend no score, and one moved unchanged
   from it into `lib.py` is reported as new. Closes with the base read whenever its first line is a `#!` naming
   python, as `_is_python_source` asks of the working tree.
-- **A deep decorator can crash test-integrity and surviving-mutants.** `_changed_python_units` writes each
-  decorator of a changed function with `ast.unparse(d)`, which recurses as deep as the expression goes, so a function
-  decorated with a deep expression, such as a sum of a few thousand terms, can raise `RecursionError` out of the
-  check, which GateCheck says must not raise; an int of more than 4300 digits in one raises `ValueError` the same
-  way. Raised by review round 5 of ticket 06 (R5-F5), confirmed at the node only, not end to end; the code is
+- **A deep decorator can crash flaky-tests and surviving-mutants.** `_changed_python_units`, which both select
+  through (`_changed_python_tests`, `_changed_python_functions`), writes each decorator of a changed function with
+  `ast.unparse(d)`, which recurses as deep as the expression goes, so a function decorated with a deep expression,
+  such as a sum of a few thousand terms, can raise `RecursionError` out of the check, which GateCheck says must not
+  raise; an int of more than 4300 digits in one raises `ValueError` the same way. Raised by review round 5 of ticket
+  06 (R5-F5), its check named right in round 6 (R6-F3); confirmed at the node only, not end to end; the code is
   surviving-mutants'. `_code` already survives both for findings' messages. Closes with the decorators compared by
   `_body_fingerprint`-like fingerprints rather than their text, or the unparse guarded as `_code` guards it.
+- **A Python script with no `.py` is never judged by the cognitive-complexity check.** `_judged_files` judges only
+  paths ending in `.py`, while the pairing reads a script whose `#!` line names python as Python
+  (`_is_python_source`), so a function moved unchanged into `bin/tool` keeps its base, but one the change grows
+  there, or writes new over the limit, is not a finding. `docs/quality-gate.md` says "a `.py` file". Raised by the
+  spec-conformance pass of review round 6 of ticket 06; ticket 06's "the Python functions the change touches" can be
+  read either way. Closes with `_judged_files` taking `_is_python_source`, or a decision that `.py` is the scope.
 - **Cognitive complexity scores direct recursion only.** Campbell's paper gives a point to each function in a
   recursion cycle; `_calls_itself` sees a function calling itself by name, or a method as `self.m`, `cls.m` or
   `C.m`, but not a cycle through other functions, nor a call through an alias. A function that recurses through a
