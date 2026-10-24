@@ -2903,13 +2903,17 @@ def _literals(node: ast.AST) -> list:
 
 
 def _code(node: ast.AST) -> str:
-    """node as Python source, for a finding's message: its first line, clipped; or a note that it is too deep to
-    print, as ast.unparse recurses as deep as the tree goes and overflows the stack on valid code, such as a sum of a
-    few thousand terms."""
+    """node as Python source, for a finding's message: its first line, clipped; or a note that it is too deep or too
+    long to print. ast.unparse recurses as deep as the tree goes, and so overflows the stack on valid code such as a
+    sum of a few thousand terms; and it writes an int with repr, which refuses one of more than
+    sys.get_int_max_str_digits() decimal digits."""
+    where = f"code at line {getattr(node, 'lineno', '?')}"
     try:
         text = ast.unparse(node)
     except RecursionError:
-        return f"(code at line {getattr(node, 'lineno', '?')}, too deep to print)"
+        return f"({where}, too deep to print)"
+    except ValueError:
+        return f"({where}, too long to print)"
     return _clip(text.splitlines()[0] if text else text)
 
 

@@ -4267,6 +4267,17 @@ class TestWeakenedTests(unittest.TestCase):
         self.assertEqual(where, [("tests/test_deep.py", 2, "expected-value-changed")])
         self.assertIn("too deep to print", found[0]["message"])
 
+    def test_an_assertion_with_an_int_too_long_to_print_is_reported_without_its_text(self):
+        # ast.unparse writes an int with repr, which refuses one of more than 4300 decimal digits.
+        self.put("tests/test_big.py", "def test_big():\n    assert 1 == 0x" + "f" * 4000 + "\n")
+        self.git("add", "tests/test_big.py")
+        self.git("commit", "--quiet", "-m", "big")
+        self.edit("tests/test_big.py", "assert 1 ==", "assert 2 ==")
+        self.edit("calc.py", "return a + b", "return b + a")
+        where, found = self.found()
+        self.assertEqual(where, [("tests/test_big.py", 2, "expected-value-changed")])
+        self.assertIn("(code at line 2, too long to print)", found[0]["message"])
+
     def test_tests_moved_to_a_renamed_file_are_not_removed(self):
         self.git("mv", "tests/test_other.py", "tests/test_moved.py")
         self.edit("tests/test_moved.py", "def test_b():", "def test_bee():")

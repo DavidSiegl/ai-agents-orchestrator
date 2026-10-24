@@ -86,6 +86,13 @@ was done.
   (`_base_scores`: `new in working`), so the functions of a deleted `bin/tool` lend no score, and one moved unchanged
   from it into `lib.py` is reported as new. Closes with the base read whenever its first line is a `#!` naming
   python, as `_is_python_source` asks of the working tree.
+- **A deep decorator can crash test-integrity and surviving-mutants.** `_changed_python_units` writes each
+  decorator of a changed function with `ast.unparse(d)`, which recurses as deep as the expression goes, so a function
+  decorated with a deep expression, such as a sum of a few thousand terms, can raise `RecursionError` out of the
+  check, which GateCheck says must not raise; an int of more than 4300 digits in one raises `ValueError` the same
+  way. Raised by review round 5 of ticket 06 (R5-F5), confirmed at the node only, not end to end; the code is
+  surviving-mutants'. `_code` already survives both for findings' messages. Closes with the decorators compared by
+  `_body_fingerprint`-like fingerprints rather than their text, or the unparse guarded as `_code` guards it.
 - **Cognitive complexity scores direct recursion only.** Campbell's paper gives a point to each function in a
   recursion cycle; `_calls_itself` sees a function calling itself by name, or a method as `self.m`, `cls.m` or
   `C.m`, but not a cycle through other functions, nor a call through an alias. A function that recurses through a
