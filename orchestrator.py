@@ -32,11 +32,15 @@ window over the same CLI: it starts run and resume as child processes.
 import argparse
 import ast
 import base64
+import bisect
 import collections
 import contextlib
-import copy
 import difflib
+import fnmatch
+import functools
 import http.client
+import io
+import itertools
 import json
 import math
 import os
@@ -44,21 +48,27 @@ import queue
 import re
 import secrets
 import shlex
+import shutil
 import signal
 import socket
+import stat
 import string
 import subprocess
 import sys
+import tempfile
+import textwrap
 import threading
 import time
+import tokenize
 import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from typing import Any
 from xml.etree import ElementTree
 
 RUNS_DIR = ".orchestrator/runs"
@@ -106,6 +116,11 @@ QUALITY_TIMEOUT = 1200
 # The orchestrator's own environment variables that hold the credentials; no process it starts inherits them.
 CI_ENV = ("JENKINS_URL", "JENKINS_USER", "JENKINS_TOKEN")
 CI_TOKENS = ("JENKINS_TOKEN",)
+# git's switches for how it reads every pathspec, which no process the orchestrator starts inherits. Its pathspecs are
+# written in git's default syntax, and each switch breaks one of them without an error: under LITERAL the linters'
+# globs and GateChange.from_tree's exclude match nothing, under NOGLOB the globs match nothing, under GLOB "*.py"
+# matches only the top level's files, and under ICASE the exclude leaves out a Mutants/ that is not mutmut's.
+GIT_PATHSPEC_ENV = ("GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS")
 JOB_PARAMETERS = ("GIT_REF",)
 # Snapshots are pushed to orchestrator-ci/<key>-<round>-q<quality round>.
 CI_REF_PREFIX = "orchestrator-ci/"
@@ -123,6 +138,21 @@ GATE_MIN_COVERAGE = 80.0
 GATE_MIN_NEW_LINES = 20
 # Seconds one linter may take before the gate counts it as failed.
 GATE_TOOL_TIMEOUT = 600
+# The flaky-tests check reruns the tests a change adds or edits once under each of these pytest-randomly seeds,
+# each pytest run, the collection before them included, within FLAKY_RUN_TIMEOUT seconds; so it adds at most
+# (1 + len(FLAKY_SEEDS)) * FLAKY_RUN_TIMEOUT seconds to the gate, well inside a build's QUALITY_TIMEOUT.
+FLAKY_SEEDS = (1, 2, 3, 4, 5)
+FLAKY_RUN_TIMEOUT = 30
+# The surviving-mutants check lets mutmut run for `gate --mutation-budget` seconds, MUTATION_BUDGET by default, then
+# stops it: SIGINT, MUTMUT_STOP_GRACE seconds to exit, a kill, and MUTMUT_KILL_WAIT seconds to read what it printed.
+# Listing its results and showing what a few survivors of each function change, about a third of a second each, then
+# get MUTMUT_REPORT_TIMEOUT seconds in all, each call's stop included. So mutmut adds at most the budget and 75 seconds
+# to the gate, and copying the tree a few more: with the flaky-tests check's 180 and the test run, about 870 of a
+# quality round's QUALITY_TIMEOUT, leaving the rest to the queue and the install.
+MUTATION_BUDGET = 600
+MUTMUT_STOP_GRACE = 10
+MUTMUT_KILL_WAIT = 5
+MUTMUT_REPORT_TIMEOUT = 60
 # The gate's exit status when it could not judge the change, and so wrote no quality file.
 EXIT_GATE_UNJUDGED = 2
 
@@ -152,12 +182,16 @@ class HerdrError(OrchestratorError):
 
 
 def child_env() -> dict[str, str]:
-    """The environment for every process the orchestrator starts: its own, without the CI credentials.
+    """The environment for every process the orchestrator starts: its own, without the CI credentials and without
+    GIT_PATHSPEC_ENV.
 
     So the agents, which herdr, git, ssh and gh start or reach, never inherit the tokens. They can
-    still read a file the tokens came from, as the same user.
+    still read a file the tokens came from, as the same user. And the git that the orchestrator, a linter, a test
+    the flaky-tests check reruns or mutmut runs reads each pathspec in its default syntax, whatever switch the user
+    exported. An agent does not inherit the switches either, but its pane's shell reads the user's startup files and
+    takes any they set. Over SSH this is the local ssh process's environment; the remote git reads the remote shell's.
     """
-    return {k: v for k, v in os.environ.items() if k not in CI_ENV}
+    return {k: v for k, v in os.environ.items() if k not in CI_ENV and k not in GIT_PATHSPEC_ENV}
 
 
 def config_dir() -> str:
@@ -950,10 +984,12 @@ class AgentSettings:
 
 
 def permission_args(kind: str, mode: str) -> list[str] | None:
-    """The harness's arguments for a --permission-mode, or None when it has no equivalent."""
+    """The harness's arguments for a --permission-mode, as a new list the caller may extend, or None when it has
+    no equivalent."""
     if kind == "claude":
         return ["--permission-mode", mode]
-    return PERMISSION_ARGS[kind].get(mode)
+    args = PERMISSION_ARGS[kind].get(mode)
+    return None if args is None else list(args)
 
 
 def launch_args(kind: str, permission_mode: str | None, model: str | None, session: str | None,
@@ -1313,22 +1349,26 @@ class Host:
             raise OrchestratorError(f"snapshot of {cwd}: git commit-tree printed {sha!r}, not a commit")
         return sha
 
-    def change_diff(self, cwd: str, base: str, commit: str | None = None) -> str:
+    def change_diff(self, cwd: str, base: str, commit: str | None = None, *, pathspecs: tuple[str, ...] = ()) -> str:
         """`git diff -U0` from base to commit, or to the working tree's tracked files without one, in the one shape
-        changed_lines parses, whatever the user's git config.
+        changed_lines parses, whatever the user's git config. With pathspecs, git's, only the files they match: a
+        rename from a file they leave out is an added file.
 
         It is verbatim, as Host.run says: a line that is not UTF-8, such as Latin-1 text or a binary file that git
         diffs as text, is kept rather than refused, so a change to such a file is judged like any other, and only
         git's "\n" ends a line, so nothing inside an added line can pass for a header.
         """
         return self.git(cwd, "-c", "core.quotePath=false", "diff", "-U0", "-M", "--no-color", "--no-ext-diff",
-                        "--src-prefix=a/", "--dst-prefix=b/", base, *([commit] if commit else []), verbatim=True)
+                        "--src-prefix=a/", "--dst-prefix=b/", base, *([commit] if commit else []), "--", *pathspecs,
+                        verbatim=True)
 
-    def changed_files(self, cwd: str, base: str) -> list[tuple[str | None, str | None]]:
+    def changed_files(self, cwd: str, base: str, *,
+                      pathspecs: tuple[str, ...] = ()) -> list[tuple[str | None, str | None]]:
         """(path at base, path in the working tree) of each tracked file changed since base, a rename paired as
-        change_diff pairs it; None on the side where the file does not exist. The paths are verbatim, as Host.run
-        says, so each opens the file it names."""
-        fields = self.git(cwd, "diff", "--name-status", "-z", "-M", "--no-ext-diff", base, verbatim=True).split("\0")
+        change_diff pairs it; None on the side where the file does not exist. pathspecs are as for change_diff. The
+        paths are verbatim, as Host.run says, so each opens the file it names."""
+        fields = self.git(cwd, "diff", "--name-status", "-z", "-M", "--no-ext-diff", base, "--", *pathspecs,
+                          verbatim=True).split("\0")
         out: list[tuple[str | None, str | None]] = []
         i = 0
         # -z gives each entry as its status, then one path, or two for a rename; the list ends with an empty field.
@@ -1872,6 +1912,19 @@ def changed_lines(diff: str) -> dict[str, set[int]]:
     `@@` lines are read inside a hunk, since an added line can itself start with `+++ `. Only "\n" ends a
     line, as in git's output: an added line can hold a carriage return, a form feed or U+2028.
     """
+    return _hunk_positions(diff, _hunk_lines)
+
+
+def _removal_points(diff: str) -> dict[str, set[int]]:
+    """For each file of a `git diff -U0`, by its path in the new tree, the new tree's lines after which a hunk that
+    only removes lines removed them, 0 for the top of the file. The files are changed_lines'; one without such a
+    hunk maps to an empty set."""
+    return _hunk_positions(diff, _hunk_removal_point)
+
+
+def _hunk_positions(diff: str, positions: Callable[[str], Iterable[int]]) -> dict[str, set[int]]:
+    """The new tree's lines that positions gives for each `@@` line of each file of a `git diff -U0`, by its path in
+    the new tree, the files as changed_lines says."""
     out: dict[str, set[int]] = {}
     path, in_hunk = None, False
     for line in diff.split("\n"):
@@ -1880,7 +1933,7 @@ def changed_lines(diff: str) -> dict[str, set[int]]:
         elif line.startswith("@@"):
             in_hunk = True
             if path is not None:
-                out[path].update(_hunk_lines(line))
+                out[path].update(positions(line))
         elif not in_hunk:
             path = _header_path(out, path, line)
     return out
@@ -1900,6 +1953,13 @@ def _hunk_lines(line: str) -> range:
         return range(0)
     start = int(m.group(1))
     return range(start, start + (1 if m.group(2) is None else int(m.group(2))))
+
+
+def _hunk_removal_point(line: str) -> list[int]:
+    """The new tree's line after which a `@@` line's hunk removes lines when it adds none, which git gives as the
+    hunk's new start with a count of 0; [] for a hunk that adds lines."""
+    m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+),0 @@", line)
+    return [int(m.group(1))] if m else []
 
 
 def _header_path(out: dict[str, set[int]], path: str | None, line: str) -> str | None:
@@ -1945,7 +2005,7 @@ _NO_TESTS_SECTION: list = []
 def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (), issues=(), to_weigh=(),
                    elsewhere: int = 0, tests: list[tuple[str, str]] | None = _NO_TESTS_SECTION,
                    coverage: str | None = None, suppressions: list[tuple[str, int, str]] | tuple = (),
-                   console: str = "", edited=(), rules_from: str | None = None) -> str:
+                   console: str = "", edited=(), rules_from: str | None = None, mutmut_state=()) -> str:
     """The quality file: the gate on its first line, then what the Builder has to answer.
 
     conditions are the failed ones, each a sentence. issues, the findings that fail the gate, and to_weigh,
@@ -1958,7 +2018,8 @@ def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (),
     coverage is the sentence about coverage of new code, None for no such section. suppressions are the
     (path, line, text) of lint suppressions the change added. edited are the BUILD_CONFIG_FILES the change
     edits; rules_from names the file the gate took its rules from when that was not the edited
-    pyproject.toml.
+    pyproject.toml. mutmut_state are the files the change adds or edits under mutmut's state, as mutmut_state_files
+    gives them.
     """
     out = [f"GATE: {gate}", "", intro]
     if conditions:
@@ -1976,8 +2037,8 @@ def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (),
                 *(f"- `{path}:{line}` `{text}`" for path, line, text in suppressions)]
     if console:
         out += ["", f"## The last {CONSOLE_TAIL_LINES} lines of the build's console", "", "````", console, "````"]
-    if edited:
-        out += _config_section(edited, rules_from)
+    if edited or mutmut_state:
+        out += _config_section(edited, rules_from, mutmut_state)
     return "\n".join(out) + "\n"
 
 
@@ -2035,7 +2096,7 @@ def _tests_section(tests: list[tuple[str, str]] | None) -> list[str]:
     return out
 
 
-def _config_section(edited, rules_from: str | None) -> list[str]:
+def _config_section(edited, rules_from: str | None, mutmut_state) -> list[str]:
     out = ["", "## Build configuration", ""]
     if "Jenkinsfile" in edited:
         out.append("- The change edits `Jenkinsfile`. The quality job reads it from `main`, "
@@ -2047,13 +2108,24 @@ def _config_section(edited, rules_from: str | None) -> list[str]:
                    "the edited rules.")
     if "uv.lock" in edited:
         out.append("- The change edits `uv.lock`, which pins the versions of the linters the gate ran.")
+    if mutmut_state:
+        out.append(f"- The change adds or edits {_series([f'`{f}`' for f in mutmut_state], limit=5)} under "
+                   f"`{_MUTMUT_STATE}/`, where mutmut keeps its state. The gate's checks leave them out: none selects "
+                   f"a test or a function in them or counts them as a change to the code, and the surviving-mutants "
+                   f"check runs mutmut without them. The linters read them as they read any tracked file.")
     return out
 
 
 def edited_config(diff: str, changed: dict[str, set[int]]) -> list[str]:
     """The BUILD_CONFIG_FILES the diff changes, deletes or renames away."""
     return [f for f in BUILD_CONFIG_FILES
-            if f in changed or re.search(rf"^(--- a/|rename from ){re.escape(f)}\t?$", diff, re.M)]
+            if f in changed or re.search(rf"^(--- a/|rename from ){re.escape(f)}\t?$", diff, re.MULTILINE)]
+
+
+def mutmut_state_files(changed: dict[str, set[int]]) -> list[str]:
+    """The files a change adds or edits under mutmut's state, _MUTMUT_STATE, by path, of changed as changed_lines
+    gives it: the files GateChange.from_tree leaves out of what the checks see."""
+    return sorted(f for f in changed if f == _MUTMUT_STATE or f.startswith(f"{_MUTMUT_STATE}/"))
 
 
 # ---------------------------------------------------------------------------
@@ -2111,11 +2183,30 @@ GATE_TOOLS = (
 
 @dataclass(frozen=True)
 class GateChange:
-    """The change the gate judges, as each GateCheck is given it."""
+    """The change the gate judges, as each GateCheck is given it; from_tree makes one."""
     root: str  # the repository's top level; its working tree is the change's new side
     base: str  # the commit the change is judged against, a full sha
-    diff: str  # Host.change_diff from base to the working tree
+    diff: str  # Host.change_diff from base to the working tree, of the files the checks see
     changed: dict[str, set[int]]  # changed_lines(diff)
+    files: list[tuple[str | None, str | None]]  # Host.changed_files from base, of the files the checks see
+    # The path of the pyproject.toml whose rules judge the change, as judge_change passes it: `gate --config`'s, else
+    # the tree's own. None, which only a caller other than judge_change passes, also means the tree's own.
+    rules: str | None = None
+
+    @classmethod
+    def from_tree(cls, root: str, base: str, rules: str | None = None) -> "GateChange":
+        """The change from base, a full sha, to the working tree of the repository whose top level is root, judged by
+        rules as the rules field says.
+
+        The checks see the change as if git tracked nothing under mutmut's state, _MUTMUT_STATE, on either side: no
+        check selects a test, a function or a changed line there, or counts an edit there as a change to the code. A
+        file moved out of it is an added file, and one moved into it a deleted one. That is the one place mutmut's
+        state is left out; the linters and the build-configuration listing see it as any other tracked file.
+
+        Raises OrchestratorError when git cannot diff the tree against base."""
+        host, pathspecs = Host(), (f":(top,exclude,literal){_MUTMUT_STATE}",)
+        diff = host.change_diff(root, base, pathspecs=pathspecs)
+        return cls(root, base, diff, changed_lines(diff), host.changed_files(root, base, pathspecs=pathspecs), rules)
 
 
 @dataclass(frozen=True)
@@ -2139,7 +2230,7 @@ class GateCheck:
 _FINDING_AT = re.compile(r"(?P<path>[^:]+):(?:(?P<line>\d+):(?:\d+:)?)? (?P<detail>.+)")
 
 # Comments that silence a linter or exempt lines from coverage, which the quality file lists for the Reviewer.
-_SUPPRESSION = re.compile(r"#.*\b(?:noqa|type:\s*ignore|shellcheck\s+disable|pragma:\s*no\s*(?:cover|branch))\b"
+_SUPPRESSION = re.compile(r"#.*\b(?:noqa|type:\s*ignore|shellcheck\s+disable|pragma:\s*no\s*(?:cover|branch|mutate))\b"
                           r"|<!--\s*pyml\s+disable")
 
 
@@ -2158,22 +2249,21 @@ class NewCoverage:
         return 100.0 * (self.covered_lines + self.covered_conditions) / total if total else 100.0
 
 
-def judge_change(cwd: str, base: str, *, rules: str | None = None, coverage: str | None = None,
-                 tests: str | None = None) -> str:
+def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: str | None = None,
+                 coverage: str | None = None, tests: str | None = None) -> str:
     """The quality file for the change from base to the working tree of the git repository at cwd.
 
-    Runs each GATE_TOOLS linter whose files the repository tracks over those files, with the rules of the
-    pyproject.toml at rules, or the tree's own, and lists the findings on lines the change added and the
-    lineless ones on files it touched. Then runs each of GATE_CHECKS and lists what it finds, as an issue or
-    as a finding to weigh as its fails says. The gate is ERROR when there is such a linter finding or a
-    failing check's finding, when a linter is missing, fails or prints nothing readable, when a file a linter
-    reads and the change adds lines to holds a line end that git does not count, as stray_line_ends finds,
-    when tests, a JUnit report of the tree's tests such as pytest's --junitxml, has a failing test, or when
-    coverage, a Cobertura report of the tree such as pytest-cov's coverage.xml, puts new code below
-    GATE_MIN_COVERAGE percent on GATE_MIN_NEW_LINES or more new lines to cover; else OK. Suppressions the
-    change added are listed, not counted against it. Paths are absolute or relative to the process's working
-    directory. A file name that is not UTF-8 appears in the quality file with each byte it cannot decode as
-    `\\xNN`.
+    Runs each GATE_TOOLS linter whose files the repository tracks over those files, with the rules of the pyproject.toml
+    at rules, or the tree's own, and lists the findings on lines the change added and the lineless ones on files it
+    touched. Then runs each of checks, such as gate_checks gives, on the change as GateChange.from_tree gives it, and
+    lists what it finds, as an issue or as a finding to weigh as its fails says. The gate is ERROR when there is such a
+    linter finding or a failing check's finding, when a linter is missing, fails or prints nothing readable, when a file
+    a linter reads and the change adds lines to holds a line end that git does not count, as stray_line_ends finds, when
+    tests, a JUnit report of the tree's tests such as pytest's --junitxml, has a failing test, or when coverage, a
+    Cobertura report of the tree such as pytest-cov's coverage.xml, puts new code below GATE_MIN_COVERAGE percent on
+    GATE_MIN_NEW_LINES or more new lines to cover; else OK. Suppressions the change added are listed, not counted
+    against it. Paths are absolute or relative to the process's working directory. A file name that is not UTF-8 appears
+    in the quality file with each byte it cannot decode as `\\xNN`.
 
     Raises OrchestratorError when it cannot judge: cwd is not in a git work tree, base names no commit, there
     is no rules file, the test or coverage report cannot be read, or git prints what it cannot decode outside
@@ -2216,8 +2306,8 @@ def judge_change(cwd: str, base: str, *, rules: str | None = None, coverage: str
                    f"write it as an escape in a string."
                    for path, n, end in stray_line_ends(root, changed, reads)]
     to_weigh: list[dict] = []
-    change = GateChange(root, base_sha, diff, changed)
-    for check in GATE_CHECKS:
+    change = GateChange.from_tree(root, base_sha, rules_path)
+    for check in checks:
         found = [{**f, "rule": f"{check.name} {f['rule']}" if f["rule"] else check.name} for f in check.find(change)]
         if not check.fails:
             to_weigh += found
@@ -2246,6 +2336,7 @@ def judge_change(cwd: str, base: str, *, rules: str | None = None, coverage: str
     text = quality_report(GATE_ERROR if conditions else GATE_OK, intro, conditions=conditions, issues=issues,
                           to_weigh=to_weigh, elsewhere=elsewhere, tests=failing, coverage=coverage_sentence,
                           suppressions=added_suppressions(root, changed), edited=edited_config(diff, changed),
+                          mutmut_state=mutmut_state_files(changed),
                           rules_from=f"`{rules}`" if rules else None)
     # Paths and linter output come verbatim, so a name that is not UTF-8 holds lone surrogates, which no file or
     # terminal can take: give their bytes back, then write each byte that is not UTF-8 as \xNN.
@@ -2312,6 +2403,14 @@ def tool_findings(tool: GateTool, output: str, root: str, tracked: set[str]) -> 
 def failing_tests(report: str) -> list[tuple[str, str]]:
     """(test, what failed) for each failing or erroring test case of a JUnit XML report, such as pytest's
     --junitxml. Raises OrchestratorError when the report cannot be read or parsed."""
+    return [(name, detail) for name, outcome, detail in junit_outcomes(report) if outcome == "failed"]
+
+
+def junit_outcomes(report: str) -> list[tuple[str, str, str]]:
+    """(test, outcome, what failed) for each test case of a JUnit XML report, such as pytest's --junitxml, test
+    named classname.name. outcome is "failed" for a failure or an error, with its message; else, with "",
+    "xfailed" for a test that failed as an xfail mark expected (pytest's <skipped type="pytest.xfail">), "skipped"
+    for any other skip, or "passed". Raises OrchestratorError when the report cannot be read or parsed."""
     try:
         # As for new_coverage: the build's own test run wrote it, and expat refuses the S314 attacks.
         tree = ElementTree.parse(report)  # noqa: S314
@@ -2319,10 +2418,14 @@ def failing_tests(report: str) -> list[tuple[str, str]]:
         raise OrchestratorError(f"cannot read the test report {report}: {e}") from e
     out = []
     for case in tree.iter("testcase"):
+        name = f"{case.get('classname', '')}.{case.get('name', '')}".strip(".")
         failed = next((e for e in (case.find("failure"), case.find("error")) if e is not None), None)
         if failed is not None:
-            out.append((f"{case.get('classname', '')}.{case.get('name', '')}".strip("."),
-                        failed.get("message") or failed.text or ""))
+            out.append((name, "failed", failed.get("message") or failed.text or ""))
+        elif (skipped := case.find("skipped")) is not None:
+            out.append((name, "xfailed" if skipped.get("type") == "pytest.xfail" else "skipped", ""))
+        else:
+            out.append((name, "passed", ""))
     return out
 
 
@@ -2460,13 +2563,12 @@ class WeakenedTestsDetector:
 def weakened_tests(change: GateChange) -> list[dict]:
     """The test-integrity check's find: in each WEAKENED_TESTS_DETECTORS language, the tests the change removed,
     skipped, stripped of assertions or wrapped in a swallowed error, and the expected values it changed together
-    with the code under test."""
+    with the code under test. The change leaves out mutmut's state, as GateChange.from_tree says."""
     host = Host()
-    pairs = host.changed_files(change.root, change.base)
     out: list[dict] = []
     for detector in WEAKENED_TESTS_DETECTORS:
         files, unreadable = [], []
-        for old, new in pairs:
+        for old, new in change.files:
             if not any(p is not None and detector.is_test(p) for p in (old, new)):
                 continue
             try:
@@ -2475,9 +2577,10 @@ def weakened_tests(change: GateChange) -> list[dict]:
                     after=_read_text(os.path.join(change.root, new)) if new else "",
                     added=change.changed.get(new, set()) if new else set()))
             except (OrchestratorError, OSError, UnicodeDecodeError) as e:
-                unreadable.append(_integrity_finding(new or old, None, "unreadable",
-                                                     f"could not be read, so its tests were not checked: {e}"))
-        code_changed = any(detector.is_source(p) and not detector.is_test(p) for pair in pairs for p in pair if p)
+                unreadable.append(_finding(new or old, None, "unreadable",
+                                           f"could not be read, so its tests were not checked: {e}", severity="error"))
+        code_changed = any(detector.is_source(p) and not detector.is_test(p)
+                           for pair in change.files for p in pair if p)
         out += unreadable + (detector.find(files, code_changed) if files else [])
     return out
 
@@ -2487,14 +2590,50 @@ def _read_text(path: str) -> str:
         return f.read()
 
 
-def _integrity_finding(path: str | None, line: int | None, rule: str, message: str) -> dict:
-    return {"path": path, "line": line, "severity": "error", "rule": rule, "message": message}
+def _finding(path: str | None, line: int | None, rule: str, message: str, severity: str = "warning") -> dict:
+    """A finding as GateCheck.find returns it: a check that only reports gives warnings, and one that fails errors."""
+    return {"path": path, "line": line, "severity": severity, "rule": rule, "message": message}
 
 
 def _python_test_file(path: str) -> bool:
     """pytest's and unittest's usual places: under a tests directory, test_*.py or *_test.py."""
     *dirs, name = path.split("/")
     return name.endswith(".py") and ("tests" in dirs or name.startswith("test_") or name.endswith("_test.py"))
+
+
+def _body_fingerprint(definition: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> str:
+    """What a function's or class's body does, without its name, where it is, its comments or its layout: the same
+    text for two bodies whose syntax trees are equal, so that a test or a function moved or renamed matches its old
+    self."""
+    return _tree_fingerprint(ast.Module(body=definition.body, type_ignores=[]))
+
+
+def _tree_fingerprint(root: ast.AST, *, blank_literals: bool = False) -> str:
+    """The syntax tree at root as text, without positions: the same text for two equal trees, and different text for
+    two that differ. With blank_literals, each constant's value is left out, so trees that differ only in their literals
+    give the same text."""
+    # Not ast.dump or copy.deepcopy, which recurse as deep as the tree goes and overflow the stack on valid code, such
+    # as a sum of a few thousand terms. ast.walk goes breadth first with a queue; each node's type, and each field with
+    # every item of a list in its place, a node standing as "@" and coming later in the walk, fix the tree's shape.
+    parts = []
+    for node in ast.walk(root):
+        parts.append(type(node).__name__)
+        for field_name, value in ast.iter_fields(node):
+            if blank_literals and isinstance(node, ast.Constant) and field_name == "value":
+                continue
+            items = value if isinstance(value, list) else [value]
+            parts.append(f"{field_name}{'[]' if isinstance(value, list) else ''}="
+                         + ",".join(_fingerprint_value(item) for item in items))
+    return "\0".join(parts)
+
+
+def _fingerprint_value(value: object) -> str:
+    """value, a field of a syntax node or an item of one, as _tree_fingerprint writes it: "@" for a node, else its
+    type and value, in a form that cannot fail. An int is in hex, since repr refuses one past sys.get_int_max_str_digits
+    decimal digits, which a hex literal can hold."""
+    if isinstance(value, ast.AST):
+        return "@"
+    return f"{type(value).__name__}:{hex(value) if isinstance(value, int) else repr(value)}"
 
 
 @dataclass(frozen=True)
@@ -2509,7 +2648,7 @@ class _PythonTest:
 
     def body(self) -> str:
         """What it does, without its name or where it is, so that a test renamed or moved matches its old self."""
-        return ast.dump(ast.Module(body=self.node.body, type_ignores=[]))
+        return _body_fingerprint(self.node)
 
 
 # The last part of a name that skips a test or expects it to fail, in unittest and pytest.
@@ -2527,8 +2666,8 @@ def python_weakened_tests(files: list[ChangedTestFile], code_changed: bool) -> l
     for k, f in enumerate(files):
         new_tree = _parse_python(f.after)
         if new_tree is None:
-            out.append(_integrity_finding(f.new_path, None, "unparsable",
-                                          "does not parse as Python, so its tests were not checked."))
+            out.append(_finding(f.new_path, None, "unparsable",
+                                "does not parse as Python, so its tests were not checked.", severity="error"))
             continue
         # A base that does not parse has no tests to lose.
         before += _python_tests(k, _parse_python(f.before) or ast.Module(body=[], type_ignores=[]))
@@ -2542,12 +2681,12 @@ def python_weakened_tests(files: list[ChangedTestFile], code_changed: bool) -> l
         was, now = _python_assertions(at_base[t.key()].node), _python_assertions(t.node)
         path = files[t.file].new_path
         if len(now) < len(was):
-            out.append(_integrity_finding(path, t.node.lineno, "fewer-assertions",
-                                          f"`{t.name}` has {len(now)} assertions, {len(was)} at the base."))
+            out.append(_finding(path, t.node.lineno, "fewer-assertions",
+                                f"`{t.name}` has {len(now)} assertions, {len(was)} at the base.", severity="error"))
         if code_changed:
-            out += [_integrity_finding(path, b.lineno, "expected-value-changed",
-                                       f"`{t.name}`: `{_clip(ast.unparse(a))}` became `{_clip(ast.unparse(b))}`, "
-                                       f"in a change that also edits the code under test.")
+            out += [_finding(path, b.lineno, "expected-value-changed",
+                             f"`{t.name}`: `{_code(a)}` became `{_code(b)}`, "
+                             f"in a change that also edits the code under test.", severity="error")
                     for a, b in _changed_literals(was, now)]
     return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
 
@@ -2555,8 +2694,91 @@ def python_weakened_tests(files: list[ChangedTestFile], code_changed: bool) -> l
 def _parse_python(text: str) -> ast.Module | None:
     try:
         return ast.parse(text)
-    except (SyntaxError, ValueError):
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        # ValueError: a null byte. RecursionError and MemoryError: the parser's own limits on nesting.
         return None
+
+
+def _decode_python(raw: bytes) -> tuple[str, str]:
+    """raw, the bytes of a Python source file, as text, decoded as Python decodes them: by a byte order mark or a PEP
+    263 coding cookie, else as UTF-8, with the line endings left as they are; and the encoding that took. Raises
+    SyntaxError, and only that, when raw cannot be decoded so: its cookie names an encoding that is unknown, not a text
+    encoding, such as rot13, or one that decodes nothing, such as undefined, or it holds bytes the encoding cannot
+    decode."""
+    try:
+        encoding, _ = tokenize.detect_encoding(io.BytesIO(raw).readline)
+        return raw.decode(encoding), encoding
+    except (LookupError, UnicodeError) as e:
+        raise SyntaxError(f"cannot be decoded as its coding cookie or UTF-8 says: {e}") from e
+
+
+@dataclass(frozen=True)
+class _ChangedFunction:
+    """A top-level function or a method of a top-level class, the unit mutmut mutates and pytest runs as a test, that
+    the change touched, as the predicate _changed_python_units was given says."""
+    path: str
+    name: str  # f, or C.f for a method
+    line: int  # the line of its def
+    first: int  # the line it starts on, its decorators included
+    source: tuple[str, ...]  # its lines, from first on, as the working tree has them
+    decorators: tuple[str, ...] = ()  # each as written, without its @
+    # The last line of the statement before it in its module or class, else its class's first line, else 0.
+    floor: int = 0
+
+    @property
+    def last(self) -> int:
+        """The line it ends on."""
+        return self.first + len(self.source) - 1
+
+
+def _adds_to(f: _ChangedFunction, added: set[int], removed: set[int]) -> bool:
+    """Whether the change added a line to f, decorators included, as _changed_python_units's touched; lines it only
+    removed do not count."""
+    return any(f.first <= n <= f.last for n in added)
+
+
+def _changed_python_units(change: GateChange, in_scope: Callable[[str], bool],
+                          touched: Callable[[_ChangedFunction, set[int], set[int]], bool] = _adds_to,
+                          ) -> tuple[list[_ChangedFunction], list[tuple[str, str]]]:
+    """The top-level functions and methods of top-level classes, in the Python files of the working tree whose paths
+    in_scope accepts, that the change touched: touched(unit, added, removed) says so, added being the lines the change
+    added to its file and removed the lines after which a hunk that only removes lines removed them, 0 for the top, as
+    _removal_points gives them. And (path, why) for each such file that could not be read or parsed, why a clause such
+    as "does not parse as Python"."""
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef)
+    functions, unreadable = [], []
+    removed = _removal_points(change.diff)
+    for path, added in change.changed.items():
+        points = removed.get(path, set())
+        if not (added or points) or not path.endswith(".py") or not in_scope(path):
+            continue
+        try:
+            with open(os.path.join(change.root, path), "rb") as f:
+                text, _ = _decode_python(f.read())
+        except (OSError, SyntaxError) as e:
+            unreadable.append((path, f"could not be read ({e})"))
+            continue
+        tree = _parse_python(text)
+        if tree is None:
+            unreadable.append((path, "does not parse as Python"))
+            continue
+        lines = text.split("\n")
+        # Each unit with the last line of the statement before it in its block, or the line that opens the block.
+        units: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef, int]] = []
+        for block, opener, prefix in [(tree.body, 0, ""),
+                                      *((c.body, c.lineno, f"{c.name}.") for c in tree.body
+                                        if isinstance(c, ast.ClassDef))]:
+            ends = [opener, *(stmt.end_lineno or stmt.lineno for stmt in block)]
+            units += [(prefix + stmt.name, stmt, floor) for stmt, floor in zip(block, ends, strict=False)
+                      if isinstance(stmt, defs)]
+        for name, unit, floor in units:
+            first = min([unit.lineno, *(d.lineno for d in unit.decorator_list)])
+            candidate = _ChangedFunction(path, name, unit.lineno, first,
+                                         tuple(lines[first - 1:unit.end_lineno or unit.lineno]),
+                                         tuple(ast.unparse(d) for d in unit.decorator_list), floor)
+            if touched(candidate, added, points):
+                functions.append(candidate)
+    return functions, unreadable
 
 
 def _python_tests(k: int, tree: ast.Module) -> list[_PythonTest]:
@@ -2595,8 +2817,8 @@ def _python_removed_tests(files: list[ChangedTestFile], before: list[_PythonTest
         mine = [t for t in removed if t.file == k]
         tests = [t for t in mine if not isinstance(t.node, ast.ClassDef)]
         if f.new_path is None and mine:
-            out.append(_integrity_finding(f.old_path, None, "removed-test",
-                                          f"deleted, with its {len(tests)} tests: {_names(tests)}."))
+            out.append(_finding(f.old_path, None, "removed-test",
+                                f"deleted, with its {len(tests)} tests: {_names(tests)}.", severity="error"))
             continue
         # A class whose tests are all removed is one finding; a class that keeps or moved any is not.
         whole = {t.name for t in mine if isinstance(t.node, ast.ClassDef)
@@ -2605,12 +2827,13 @@ def _python_removed_tests(files: list[ChangedTestFile], before: list[_PythonTest
             cls = t.name.split(".")[0]
             if t.name in whole:
                 n = sum(1 for m in tests if m.name.startswith(f"{t.name}."))
-                out.append(_integrity_finding(f.old_path, t.node.lineno, "removed-test",
-                                              f"`{t.name}` and its {n} tests are gone; this was line "
-                                              f"{t.node.lineno} at the base."))
+                out.append(_finding(f.old_path, t.node.lineno, "removed-test",
+                                    f"`{t.name}` and its {n} tests are gone; this was line "
+                                    f"{t.node.lineno} at the base.", severity="error"))
             elif cls not in whole and not isinstance(t.node, ast.ClassDef):
-                out.append(_integrity_finding(f.old_path, t.node.lineno, "removed-test",
-                                              f"`{t.name}` is gone; this was line {t.node.lineno} at the base."))
+                out.append(_finding(f.old_path, t.node.lineno, "removed-test",
+                                    f"`{t.name}` is gone; this was line {t.node.lineno} at the base.",
+                                    severity="error"))
     return out
 
 
@@ -2630,12 +2853,12 @@ def _python_added_weakenings(path: str, tree: ast.Module, added: set[int]) -> li
         name = node.attr if isinstance(node, ast.Attribute) else node.id if isinstance(node, ast.Name) else None
         if name in _SKIP_NAMES and (line, name) not in seen:
             seen.add((line, name))
-            out.append(_integrity_finding(path, line, "skip", f"`{_clip(ast.unparse(node))}` added: it skips a "
-                                                              f"test or expects it to fail."))
+            out.append(_finding(path, line, "skip", f"`{_code(node)}` added: it skips a "
+                                                    f"test or expects it to fail.", severity="error"))
         elif isinstance(node, ast.ExceptHandler) and _swallows(node):
-            out.append(_integrity_finding(path, line, "swallowed-error",
-                                          f"`{_clip(ast.unparse(node).splitlines()[0])}` added in a test: "
-                                          f"it hides the failure it catches."))
+            out.append(_finding(path, line, "swallowed-error",
+                                f"`{_code(node)}` added in a test: "
+                                f"it hides the failure it catches.", severity="error"))
     return out
 
 
@@ -2672,15 +2895,26 @@ def _changed_literals(was: list[ast.Assert | ast.Call],
 
 def _shape(node: ast.AST) -> str:
     """node with every literal blanked, so that two assertions differing only in literals have one shape."""
-    blank = copy.deepcopy(node)
-    for n in ast.walk(blank):
-        if isinstance(n, ast.Constant):
-            n.value = None
-    return ast.dump(blank)
+    return _tree_fingerprint(node, blank_literals=True)
 
 
 def _literals(node: ast.AST) -> list:
     return [n.value for n in ast.walk(node) if isinstance(n, ast.Constant)]
+
+
+def _code(node: ast.AST) -> str:
+    """node as Python source, for a finding's message: its first line, clipped; or a note that it is too deep or too
+    long to print. ast.unparse recurses as deep as the tree goes, and so overflows the stack on valid code such as a
+    sum of a few thousand terms; and it writes an int with repr, which refuses one of more than
+    sys.get_int_max_str_digits() decimal digits."""
+    where = f"code at line {getattr(node, 'lineno', '?')}"
+    try:
+        text = ast.unparse(node)
+    except RecursionError:
+        return f"({where}, too deep to print)"
+    except ValueError:
+        return f"({where}, too long to print)"
+    return _clip(text.splitlines()[0] if text else text)
 
 
 def _clip(text: str, n: int = 160) -> str:
@@ -2692,10 +2926,1312 @@ WEAKENED_TESTS_DETECTORS = (
                           find=python_weakened_tests),
 )
 
-# The checks judge_change runs after the linters, in this order.
-GATE_CHECKS: tuple[GateCheck, ...] = (
-    GateCheck("test-integrity", fails=True, find=weakened_tests),
-)
+
+# Flaky tests: the tests a change adds or edits that pass in one order and fail in another, which the build's one
+# green run does not show.
+
+def flaky_tests(change: GateChange) -> list[dict]:
+    """The flaky-tests check's find: reruns the Python tests the change adds or removes lines of, decorators
+    included, once under each of FLAKY_SEEDS with pytest-randomly, and reports at its def each test whose outcome,
+    failed, xfailed (failed as its xfail mark expects) or passed, differs between seeds, naming the seeds of each. A
+    test that failed under every seed that judged it, at least two, is not flaky, but is a finding of its own: the
+    build may fail it too, which the failing-tests section lists, or it may need what the copy below lacks, so that
+    the reruns could not judge it. One that xfails under every seed is not reported. The change leaves out mutmut's
+    state, as GateChange.from_tree says, so no test there is rerun.
+
+    The tests run in a temporary copy of the files git tracks, so that what the project's addopts write, such as a
+    coverage report, does not replace the build's own; a test that needs an untracked file, such as a build product,
+    cannot find it there. A run that skips a test, or does not report it, as when the project's addopts stop at the
+    first failure, neither passed nor failed it. A test that is not mixed, which fewer than two runs passed or
+    failed, is reported as one that too few runs judged, whether runs skipped it or the reruns stopped early; when
+    no run told anything, the finding about the run that went wrong stands for them all.
+
+    pytest decides which of those defs are tests, so a helper named test_* that it does not collect is not rerun.
+    pytest and pytest-randomly must be importable by the gate's own interpreter, as a `uv run` of the project makes
+    them. A pytest run that cannot start, takes longer than FLAKY_RUN_TIMEOUT, ends in a usage or collection error
+    or writes no readable report ends the reruns with a finding saying so, after what the runs before it showed; so
+    does a changed test file that cannot be read or parsed, and a copy that cannot be made. One that cannot be
+    removed afterwards is a finding of its own, beside the results.
+    """
+    tests, out = _changed_python_tests(change)
+    if tests:
+        try:
+            tmp = tempfile.mkdtemp(prefix="flaky-tests-")
+        except OSError as e:
+            out.append(_finding(None, None, "not-rerun", f"could not make a directory to rerun the changed "
+                                                         f"tests in: {e}; the changed tests were not rerun."))
+        else:
+            out += _rerun_findings(change.root, tmp, tests)
+            try:
+                shutil.rmtree(tmp)
+            except OSError as e:
+                out.append(_finding(None, None, "not-removed", f"could not remove the directory the changed "
+                                                               f"tests were rerun in, {tmp}: {e}"))
+    return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
+
+
+def _rerun_findings(root: str, tmp: str, tests: dict[tuple[str, str], int]) -> list[dict]:
+    """flaky_tests' findings on tests, as _changed_python_tests gives them, rerun in a copy of root's tracked files
+    that it makes in tmp, an empty directory, beside the runs' reports."""
+    tree = os.path.join(tmp, "tree")
+    try:
+        _copy_tracked(root, tree)
+    except (OSError, OrchestratorError) as e:
+        return [_finding(None, None, "not-rerun", f"could not copy the tracked files to rerun the changed "
+                                                  f"tests in: {e}; the changed tests were not rerun.")]
+    try:
+        inifile = _pytest_config(tree, tmp)
+    except OSError as e:
+        return [_finding(None, None, "not-rerun", f"could not write an empty pytest configuration for the "
+                                                  f"reruns: {e}; the changed tests were not rerun.")]
+    out = []
+    ids, problem = _collect_python_tests(tree, inifile, tests)
+    # Each test's outcome by the seed of a run that reported it as passed or failed.
+    outcomes: dict[str, dict[int, str]] = {i: {} for i in ids}
+    seeds: list[int] = []
+    # The seed whose run went wrong and ended the reruns; None when every run told something.
+    stopped: int | None = None
+    for seed in FLAKY_SEEDS if ids else ():
+        reported, problem = _rerun_python_tests(tree, inifile, ids, seed, os.path.join(tmp, f"seed-{seed}.xml"))
+        if problem:
+            stopped = seed
+            break
+        seeds.append(seed)
+        for i, outcome in reported.items():
+            if outcome != "skipped":
+                outcomes[i][seed] = outcome
+    for i, by_seed in outcomes.items():
+        path, names, params = _node_parts(i)
+        name = ".".join(names) + params
+        # What it did under which seeds, for each outcome it had.
+        did = [f"{_OUTCOME_VERBS[o]} under {_seeds(under)}" for o in _OUTCOME_VERBS
+               if (under := [s for s in seeds if by_seed.get(s) == o])]
+        unjudged = [s for s in seeds if s not in by_seed]
+        if len(did) > 1:
+            message = (f"`{name}` {_series(did)}"
+                       + (f", and was skipped or not run under {_seeds(unjudged)}" if unjudged else "")
+                       + ": it depends on the order the tests run in, or on state or randomness that one run does "
+                         "not share with another.")
+            rule = "mixed-results"
+        elif seeds and len(by_seed) < 2:
+            # Without a run that told something, the finding about the run already says no test was rerun.
+            message = (f"`{name}` " + (f"{did[0]} only" if did else "neither passed nor failed under any seed")
+                       + (f"; the reports of {_seeds(unjudged)} have it skipped or not at all" if unjudged else "")
+                       + (f"; the reruns stopped when the run under seed {stopped} went wrong" if stopped else "")
+                       + ", so too few runs tell whether it is flaky.")
+            rule = "not-rerun"
+        elif len(by_seed) >= 2 and set(by_seed.values()) == {"failed"}:
+            # Not flaky, but the gate cannot tell a test the build fails too from one that needs what the copy lacks.
+            message = (f"`{name}` failed under {_seeds(list(by_seed))}, every rerun"
+                       + (f" that did not skip it or leave it out ({_seeds(unjudged)} did)" if unjudged else "")
+                       + ", which ran in a copy of the tracked files. If the build failed it too, the failing tests "
+                         "list it. If the build passed it, it needs something the copy lacks, such as git's "
+                         "metadata, an untracked or ignored file or a build product, so whether it is flaky could "
+                         "not be judged here.")
+            rule = "failed-every-run"
+        else:
+            continue
+        out.append(_finding(path, tests[(path, ".".join(names))], rule, message))
+    if problem:
+        out.append(_finding(None, None, "not-rerun", f"{problem}; " + (
+            f"only the reruns under {_seeds(seeds)} were judged." if seeds else "the changed tests were not rerun.")))
+    return out
+
+
+def _pytest_inifile(tree: str) -> str | None:
+    """The file in the top directory of tree that pytest 9 takes its configuration from when run there: the first of
+    pytest.toml, .pytest.toml, pytest.ini and .pytest.ini, a pyproject.toml with a [tool.pytest] table, a tox.ini
+    with a [pytest] section and a setup.cfg with [tool:pytest], as pytest's locate_config orders them. None when it
+    has none. A candidate that cannot be read or parsed is taken, so that pytest reports what is wrong with it."""
+    for name in ("pytest.toml", ".pytest.toml", "pytest.ini", ".pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg"):
+        path = os.path.join(tree, name)
+        if not os.path.isfile(path):
+            continue
+        if name in ("pytest.toml", ".pytest.toml", "pytest.ini", ".pytest.ini"):
+            return path
+        try:
+            text = _read_text(path)
+            if name == "pyproject.toml":
+                # An empty [tool.pytest] table is not one; an empty [tool.pytest.ini_options] is, and fills it.
+                if tomllib.loads(text).get("tool", {}).get("pytest"):
+                    return path
+            elif {"tox.ini": "pytest", "setup.cfg": "tool:pytest"}[name] in _ini_sections(text):
+                return path
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+            return path
+    return None
+
+
+def _pytest_config(tree: str, tmp: str) -> str:
+    """The pytest configuration to run the tests of tree, a copy of a tree, by: its own, as _pytest_inifile finds
+    it, else an empty pytest.ini that this writes in tmp, the private directory beside tree, so that pytest, given it
+    with -c, does not look for one above the copy, where another account may write. Raises OSError when that file
+    cannot be written."""
+    inifile = _pytest_inifile(tree)
+    if inifile is None:
+        inifile = os.path.join(tmp, "pytest.ini")
+        with open(inifile, "x", encoding="utf-8"):
+            pass
+    return inifile
+
+
+def _ini_sections(text: str) -> list[str]:
+    """The names of an ini file's sections, as its [name] lines give them."""
+    return re.findall(r"^\[\s*([^]\n]*?)\s*]", text, re.MULTILINE)
+
+
+def _copy_tracked(root: str, dest: str) -> None:
+    """Copy the files git tracks in the working tree at root, as they are there, to the same paths under dest, a
+    directory it makes, with its parents. A symbolic link is copied as a link and a submodule as its directory; a
+    tracked file missing from the working tree is left out. Raises OrchestratorError when git cannot list the files,
+    and OSError when dest exists or a file cannot be copied; dest may then hold part of the copy."""
+    names = sorted({n for n in Host().git(root, "ls-files", "-z", verbatim=True).split("\0") if n})
+    os.makedirs(dest)
+    for name in names:
+        src, dst = os.path.join(root, name), os.path.join(dest, name)
+        if not os.path.lexists(src):
+            continue
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        if os.path.isdir(src) and not os.path.islink(src):
+            shutil.copytree(src, dst, symlinks=True)
+        else:
+            shutil.copy2(src, dst, follow_symlinks=False)
+
+
+def _changed_python_tests(change: GateChange) -> tuple[dict[tuple[str, str], int], list[dict]]:
+    """The test functions and methods the change added lines to or removed lines from, decorators included, in the
+    test files it left in the working tree: (path, qualified name as _python_tests gives it) to the line of its def.
+    And a finding for each such file that could not be read or parsed. Which lines count is as _edits_test says."""
+    functions, unreadable = _changed_python_units(change, _python_test_file, _edits_test)
+    tests = {(f.path, f.name): f.line for f in functions if f.name.rpartition(".")[2].startswith("test")}
+    return tests, [_finding(path, None, "not-rerun", f"{why}, so its tests were not rerun.")
+                   for path, why in unreadable]
+
+
+def _edits_test(f: _ChangedFunction, added: set[int], removed: set[int]) -> bool:
+    """Whether the change added lines to f, a test, or removed lines from it, as _changed_python_units's touched.
+    Its lines run from the line after the statement before it, f.floor, to its last: what lies above its def, such
+    as its decorators and comments, may have changed it, and a decorator replaced or removed leaves no line of the
+    def itself changed. Lines removed right after its last line count too, though they may have been the blank lines
+    below it."""
+    return any(f.floor < n <= f.last for n in added) or any(f.floor <= n <= f.last for n in removed)
+
+
+def _node_parts(node_id: str) -> tuple[str, list[str], str]:
+    """The path, the names after it and the parameters of a pytest node id, such as `tests/t.py`, ["TestX", "test_y"]
+    and "[a::b]" for `tests/t.py::TestX::test_y[a::b]`; "" for a node without parameters. As pytest's JUnit report
+    splits it: the parameters start at the first "[", and only the "::" before them separate names. ".".join of the
+    names is the qualified name _python_tests gives the test."""
+    head, bracket, params = node_id.partition("[")
+    path, *names = head.split("::")
+    return path, names, bracket + params
+
+
+def _collect_python_tests(root: str, inifile: str, tests: dict[tuple[str, str], int]) -> tuple[list[str], str | None]:
+    """The pytest node ids of tests, one per parameter set, collected at root with the configuration in inifile,
+    and the problem, a clause, when pytest could not collect them; then the ids are []."""
+    files = sorted({path for path, _ in tests})
+    # Exit status 5: pytest collected no test from the files, as for a file of helpers named test_*.
+    # Without pytest-randomly, which only shuffles the list, and cannot hash a node id that is not UTF-8.
+    proc, problem = _pytest(root, inifile, "collecting the changed tests",
+                            ["-p", "no:randomly", "--collect-only", *files], ok=(0, 5))
+    if proc is None:
+        return [], problem
+    # At verbosity -1 pytest lists one node id a line, unindented, before its summary; a warnings summary repeats
+    # some, indented or not. A collection that found tests but listed none in that form cannot be judged.
+    ids = {line for line in proc.stdout.split("\n") if "::" in line and _node_parts(line)[0] in files}
+    if proc.returncode == 0 and not ids:
+        return [], f"pytest, collecting the changed tests, printed no node id the gate could read: {_said(proc)}"
+    wanted = []
+    for i in sorted(ids):
+        path, names, _ = _node_parts(i)
+        if (path, ".".join(names)) in tests:
+            wanted.append(i)
+    return wanted, None
+
+
+def _rerun_python_tests(root: str, inifile: str, ids: list[str], seed: int,
+                        report: str) -> tuple[dict[str, str], str | None]:
+    """The outcome, as junit_outcomes gives it, of each of ids that pytest reported when it ran them at root, with
+    the configuration in inifile, in the order pytest-randomly's seed gives, writing its JUnit report to report; a
+    test reported more than once takes the first of failed, xfailed and passed that any of its cases has, else
+    skipped. And the problem, a clause, when that run told nothing, then with {}."""
+    doing = f"rerunning them under seed {seed}"
+    proc, problem = _pytest(root, inifile, doing,
+                            ["-p", "randomly", f"--randomly-seed={seed}", f"--junitxml={report}", *ids])
+    if proc is None:
+        return {}, problem
+    if not os.path.isfile(report):
+        return {}, f"pytest, {doing}, wrote no test report: {_said(proc)}"
+    try:
+        cases = junit_outcomes(report)
+    except OrchestratorError as e:
+        return {}, f"pytest, {doing}, wrote a report the gate cannot read: {e}"
+    by_case = {_junit_case(i): i for i in ids}
+    rank = ("skipped", "passed", "xfailed", "failed")
+    out: dict[str, str] = {}
+    for name, outcome, _ in cases:
+        if (i := by_case.get(name)) is not None and rank.index(outcome) >= rank.index(out.get(i, "skipped")):
+            out[i] = outcome
+    return out, None
+
+
+def _junit_case(node_id: str) -> str:
+    """How junit_outcomes names the test of a pytest node id: pytest's JUnit classname, the path dotted without .py
+    and the classes after it, then a dot and the test's name with its parameters, as pytest's mangle_test_address
+    makes them."""
+    path, names, params = _node_parts(node_id)
+    return ".".join([re.sub(r"\.py$", "", path).replace("/", "."), *names]) + params
+
+
+def _pytest(root: str, inifile: str, doing: str, args: list[str],
+            ok: tuple[int, ...] = (0, 1)) -> tuple[subprocess.CompletedProcess | None, str | None]:
+    """pytest run at verbosity -1, for test cases too, in the gate's own interpreter at root, without its cache, with
+    the configuration in inifile and args, taking no configuration or conftest.py from above root; or None and the
+    problem, a clause naming doing, when it could not start, took longer than FLAKY_RUN_TIMEOUT or exited with a
+    status outside ok (by default 0, all passed, and 1, some failed). pytest
+    writes a name that is not UTF-8 as its bytes, and its output is decoded as Host.run's verbatim output is, so the
+    node ids in it hold paths as git's do, and only "\n" ends a line. pytest-randomly 5.0.0 cannot shuffle such a
+    name: under -p randomly pytest stops with an internal error."""
+    # --verbosity sets the level outright, and pytest reads the project's addopts and PYTEST_ADDOPTS before the
+    # command line, so a -v or -q of theirs cannot change what the collection prints. The list of collected tests
+    # follows verbosity_test_cases where the project's configuration sets it, and -o overrides that; in pytest 9.0
+    # no other option changes the list.
+    # Without -c pytest looks for its configuration in every directory above the test files, and the copy is in a
+    # temporary directory another account may write to, along with a conftest.py beside it: -c ends that search,
+    # and --confcutdir keeps conftest.py files above root from being imported.
+    argv = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-c", inifile, "--rootdir", root,
+            "--confcutdir", root, "--verbosity=-1", "-o", "verbosity_test_cases=-1", *args]
+    try:
+        # A fixed command over the node ids pytest itself collected; no shell reads it.
+        raw = subprocess.run(argv, cwd=root, capture_output=True, timeout=FLAKY_RUN_TIMEOUT,  # noqa: S603
+                             env={**child_env(), "PYTHONIOENCODING": "utf-8:surrogateescape"}, check=False)
+    except subprocess.TimeoutExpired:
+        return None, f"pytest, {doing}, did not finish within {FLAKY_RUN_TIMEOUT} seconds"
+    except OSError as e:
+        return None, f"could not start pytest, {doing}: {e}"
+    proc = subprocess.CompletedProcess(raw.args, raw.returncode, os.fsdecode(raw.stdout), os.fsdecode(raw.stderr))
+    if proc.returncode not in ok:
+        return None, f"pytest, {doing}, exited with status {proc.returncode}: {_said(proc)}"
+    return proc, None
+
+
+def _said(proc: subprocess.CompletedProcess) -> str:
+    """What a tool that went wrong, such as pytest or mutmut, said about it, in a line: the exception of a pytest
+    internal error, else the exception that ended it when it printed a traceback, else the first line of its
+    standard error, else the last line of its output. Only "\n" ends a line, as in the verbatim output of Host.run,
+    so a path in it stays whole."""
+    err = [line.strip() for line in proc.stderr.split("\n") if line.strip()]
+    out = [line.strip() for line in proc.stdout.split("\n") if line.strip()]
+    internal = [line.removeprefix("INTERNALERROR>").strip() for line in out if line.startswith("INTERNALERROR>")]
+    return _clip(internal[-1] if internal else err[-1] if err and "Traceback" in proc.stderr else err[0] if err
+                 else out[-1] if out else "nothing")
+
+
+# How a mixed-results finding says what a test did under some seeds, by its outcome as junit_outcomes gives it; a
+# skip judges nothing, so it has none.
+_OUTCOME_VERBS = {"failed": "failed", "xfailed": "failed as its xfail mark expects", "passed": "passed"}
+
+
+def _seeds(seeds: list[int]) -> str:
+    """'seed 3', 'seeds 2 and 4' or 'seeds 1, 3 and 5'."""
+    return f"seed{'s' if len(seeds) > 1 else ''} {_series([str(s) for s in seeds])}"
+
+
+def _series(items: list[str], limit: int | None = None) -> str:
+    """items as a list in prose: "a", "a and b" or "a, b and c"; "" for none. With limit, at most that many items are
+    named, then how many are not, as "a, b and 3 more"."""
+    if limit is not None and len(items) > limit:
+        items = [*items[:limit], f"{len(items) - limit} more"]
+    return " and ".join([", ".join(items[:-1]), items[-1]]) if len(items) > 1 else "".join(items)
+
+
+# Surviving mutants: the code a change adds that its tests run without checking what it does, which coverage counts
+# as tested.
+#
+# mutmut 3 (3.8.0 here) is bounded to the functions the change edits like this. Its own selector, `mutmut run` with
+# mutant names or globs such as `orchestrator.x_flaky_tests__mutmut_*`, only picks which mutants run: it first makes a
+# mutant of every function in its source_paths, which for orchestrator.py takes minutes and makes a 25 MB module the
+# tests then crawl through. So mutmut runs on a copy of the tree, and in the copy every function and class that holds
+# no changed function gets `# pragma: no mutate block` at the end of the line its header ends on. mutmut skips such a
+# function whole: no mutants, and none of the call tracing that slows the tests. Appending a comment keeps every line
+# where it was, and mutmut writes its state, mutants/, into the copy, so the working tree is never written to.
+_MUTMUT_SKIP = "  # pragma: no mutate block"
+
+# The directory in the tree mutmut runs in where it keeps its state: its copy of the code with the mutants, and each
+# module's results in <path>.meta beside it. What a tree tracks there is no part of the change the checks see
+# (GateChange.from_tree).
+_MUTMUT_STATE = "mutants"
+
+# How `mutmut results` words a mutant it did not try against a test: one the budget stopped it before, and one of a
+# function no test calls.
+_MUTMUT_UNTRIED = frozenset({"not checked", "check was interrupted by user", "no tests"})
+
+# The line mutmut 3.8.0 prints, exiting with status 1 before it tries any mutant, when no test calls any function it
+# mutated, or it made no mutant at all; the mutants it made are then left not checked. Only the whole line counts: the
+# output of a failing test, which mutmut prints before its own, may hold its words.
+_MUTMUT_NO_TESTS = re.compile(r"^Stopping early, because we could not find any test case for any mutant\. It seems "
+                              r"that the selected tests do not cover any code that we mutated\.$", re.MULTILINE)
+
+# How many of a function's surviving mutants its finding shows, in the order mutmut made them.
+_SURVIVOR_EXAMPLES = 3
+
+
+def surviving_mutants(change: GateChange, *, budget: float) -> list[dict]:
+    """The surviving-mutants check's find: mutation-tests with mutmut each top-level function and method the change adds
+    a line to in a Python file outside the tests. Reports at its def each such function that has mutants the tests did
+    not notice, with how many of its mutants they were and what the first _SURVIVOR_EXAMPLES change, as a line before
+    and after; and each such function that no test calls. The change leaves out mutmut's state, as
+    GateChange.from_tree says, so no function there is mutated.
+
+    mutmut runs in the gate's own interpreter, as flaky_tests runs pytest, on a copy of the files git tracks. The copy
+    leaves out what the tree tracks under mutmut's state, so mutmut starts without a cache. mutmut runs there by the
+    [tool.mutmut] of change.rules, whatever the copy's says: its source_paths, only_mutate and do_not_mutate decide
+    which files can be mutated, and a changed function outside them is a finding saying so; its test selection says
+    which tests run. Each mutant is tried against the tests that called its function on a clean run. mutmut may run
+    budget seconds; a run stopped there is a finding that says how many of the mutants it tried, beside what those
+    showed. A mutmut that cannot start, fails, or whose results cannot be listed is a finding saying so, and so are
+    rules that name no source_paths and a changed file that cannot be read or parsed.
+    """
+    functions, out = _changed_python_functions(change)
+    if functions:
+        out += _mutation_test(change, functions, budget)
+    return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
+
+
+def _mutation_test(change: GateChange, functions: list[_ChangedFunction], budget: float) -> list[dict]:
+    """surviving_mutants's findings on functions, the change's changed functions: those mutmut does not mutate, then
+    what a run of mutmut, by the rules' [tool.mutmut], of budget seconds found of the others."""
+    rules = change.rules or os.path.join(change.root, "pyproject.toml")
+    table, problem = _mutmut_table(rules)
+    if problem:
+        return [_mutation_not_run(problem)]
+    out, mutated = [], []
+    for f in functions:
+        why = _outside_mutmut(f.path, table) or _unmutatable(f)
+        if why:
+            out.append(_finding(f.path, f.line, "not-mutated", f"`{f.name}` was not mutation-tested: {why}."))
+        else:
+            mutated.append(f)
+    if not mutated:
+        return out
+    try:
+        tmp = tempfile.mkdtemp(prefix="gate-mutmut-")
+    except OSError as e:
+        return [*out, _mutation_not_run(f"could not make a directory to copy the tree into: {e}")]
+    try:
+        out += _mutmut_on_copy(change.root, tmp, mutated, table, budget)
+    finally:
+        try:
+            shutil.rmtree(tmp)
+        except OSError as e:
+            out.append(_finding(None, None, "cleanup", f"the copy of the tree mutmut ran in, `{tmp}`, could not be "
+                                                       f"removed: {e}"))
+    return out
+
+
+def _mutmut_on_copy(root: str, tmp: str, functions: list[_ChangedFunction], table: dict, budget: float) -> list[dict]:
+    """Copies the files git tracks in root's working tree into tmp, an empty private directory, as _copy_tracked
+    does, but for what it tracks under mutmut's state, _MUTMUT_STATE, marked for mutmut to skip all but
+    functions, with table, the rules' [tool.mutmut], in place of its own; runs mutmut there on functions for
+    budget seconds, its pytest runs taking no configuration or conftest.py from above the copy, and returns what
+    it found."""
+    tree_copy = os.path.join(tmp, "tree")
+    added = table.get("pytest_add_cli_args", [])
+    try:
+        _copy_tracked(root, tree_copy)
+        # mutmut takes what it finds under its state for its own cache, results included, so it starts without what
+        # the tree tracks there.
+        state = os.path.join(tree_copy, _MUTMUT_STATE)
+        if os.path.isdir(state) and not os.path.islink(state):
+            shutil.rmtree(state)
+        elif os.path.lexists(state):
+            os.remove(state)
+        _mark_for_mutmut(tree_copy, {(f.path, f.name) for f in functions})
+        # mutmut runs pytest in the copy's mutants/, with --rootdir=. and these after its own arguments. Without -c,
+        # pytest looks for its configuration in each directory above, up to one that another account may write to
+        # when the project has none; --confcutdir keeps it from importing a conftest.py from above mutants/. The
+        # project's own configuration is read from mutmut's copy of it in mutants/, which also_copy makes, since
+        # pytest takes paths in it, such as pythonpath, from where it is: there they name the mutated code.
+        config = _pytest_config(tree_copy, tmp)
+        mutants = os.path.join(tree_copy, _MUTMUT_STATE)
+        also_copy = table.get("also_copy", [])
+        if os.path.dirname(config) == tree_copy:
+            also_copy = [*also_copy, os.path.basename(config)]
+            config = os.path.join(mutants, os.path.basename(config))
+        _use_mutmut_table(tree_copy, {**table, "also_copy": also_copy,
+                                      "pytest_add_cli_args": [*added, "-c", config, "--confcutdir", mutants]})
+        run, stopped = _run_mutmut(tree_copy, ["run"], budget)
+    except (OSError, OrchestratorError) as e:
+        return [_mutation_not_run(f"could not start mutmut: {e}")]
+    except ValueError as e:
+        return [_mutation_not_run(str(e))]
+    return _mutmut_findings(tree_copy, functions, run, stopped, budget, table)
+
+
+def _mutmut_findings(tree_copy: str, functions: list[_ChangedFunction], run: subprocess.CompletedProcess,
+                     stopped: bool, budget: float, table: dict) -> list[dict]:
+    """What the run of mutmut in tree_copy found of functions, as `mutmut results` and `mutmut show` tell it: run is
+    how it ended, stopped whether the budget of budget seconds stopped it, and table the [tool.mutmut] it ran by."""
+    no_tests = run.returncode != 0 and _MUTMUT_NO_TESTS.search(run.stdout) is not None
+    if run.returncode != 0 and not stopped and not no_tests:
+        return [_mutation_not_run(f"mutmut exited with status {run.returncode}: {_said_by_mutmut(run)}")]
+    deadline = time.monotonic() + MUTMUT_REPORT_TIMEOUT
+    statuses, problem = _mutant_statuses(tree_copy, deadline)
+    if problem:
+        return [_mutation_not_run(problem)]
+    if no_tests:
+        statuses = dict.fromkeys(statuses, "no tests")
+    by_prefix = {_mutant_prefix(f): f for f in functions}
+    # Each function's mutants, in the order mutmut lists them, which is the order it made them in, by status.
+    mutants: dict[_ChangedFunction, dict[str, list[str]]] = {}
+    for mutant, status in statuses.items():
+        owner = by_prefix.get(_prefix_of(mutant))
+        if owner is not None:
+            mutants.setdefault(owner, {}).setdefault(status, []).append(mutant)
+    # A function mutmut was given but listed no mutant of. mutmut saves a module's mutants, none or more, in
+    # mutants/<path>.meta once it has made them all, so stopped by the budget it had not reached a module without one.
+    unlisted = [f for f in functions if f not in mutants]
+    unreached = [f for f in unlisted
+                 if stopped and not os.path.exists(os.path.join(tree_copy, _MUTMUT_STATE, f"{f.path}.meta"))]
+    out = [_finding(f.path, f.line, "not-mutated",
+                    f"`{f.name}` was not mutation-tested: mutmut made no mutant of it; {_why_no_mutant(f, table)}.")
+           for f in unlisted if f not in unreached]
+    for f, by_status in mutants.items():
+        tried = sum(len(names) for status, names in by_status.items() if status not in _MUTMUT_UNTRIED)
+        if by_status.get("survived"):
+            out.append(_survivors(tree_copy, f, by_status["survived"], tried, deadline))
+        if by_status.get("no tests"):
+            out.append(_finding(f.path, f.line, "untested", f"no test calls `{f.name}`, so none of its "
+                                                            f"{len(by_status['no tests'])} mutants can make one fail."))
+    if stopped:
+        tried = sum(1 for status in statuses.values() if status not in _MUTMUT_UNTRIED)
+        out.append(_finding(None, None, "budget-reached", (
+            f"budget reached after {tried} of {len(statuses)} mutants" if statuses
+            else "budget reached before mutmut had made its mutants")
+            + f": mutmut was stopped at {budget:g} seconds (`--mutation-budget`), so the mutants it did not try may "
+              f"survive too"
+            + (f"; mutmut made no mutant of {_series([f'`{f.name}` in {f.path}' for f in unreached], limit=5)} "
+               f"before the budget ran out." if unreached else ".")))
+    return out
+
+
+def _why_no_mutant(f: _ChangedFunction, table: dict) -> str:
+    """Why mutmut 3.8.0 made no mutant of f, a function it was given, as a clause: the one cause the gate can tell
+    cheaply, a `# pragma: no mutate block` where its header ends or table's do_not_mutate_patterns matching each
+    statement in it, else every cause there can be."""
+    text = textwrap.dedent("\n".join(f.source))
+    tree = _parse_python(text)
+    unit = tree.body[0] if tree is not None and tree.body else None
+    if not isinstance(unit, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return _EVERY_CAUSE
+    ends, comments = _logical_line_ends(text)
+    # The one form of mutmut's pragmas that the gate recognises and names as the cause: `block` in the comment of
+    # the line its header ends on, with the body on the lines below (pragma_handling.py, _visit_compound_header). A
+    # block pragma on a line of its own above the def or atop its body, one on its class, or a start/end pair around
+    # it keep it out too, and get _EVERY_CAUSE, which names a pragma among the causes.
+    header = ends[bisect.bisect_left(ends, unit.lineno)] if ends and ends[-1] >= unit.lineno else None
+    if header is not None and unit.body[0].lineno > header and _mutmut_pragma(comments.get(header, "")) == "block":
+        return "a `# pragma: no mutate block` where its header ends keeps it out"
+    patterns = table.get("do_not_mutate_patterns", [])
+    if patterns:
+        # mutmut skips every expression that starts on a line a pattern matches; a statement with a block of its own
+        # holds lines of other statements, which this does not look into.
+        body = unit.body[1:] if ast.get_docstring(unit) is not None else unit.body
+        starts = [f.source[stmt.lineno - 1] for stmt in body if not hasattr(stmt, "body")]
+        with contextlib.suppress(re.error):
+            if body and len(starts) == len(body) and all(any(re.search(p, line) for p in patterns) for line in starts):
+                return "the rules' do_not_mutate_patterns match each statement in it"
+    return _EVERY_CAUSE
+
+
+# Why mutmut made no mutant of a function it was given, when the gate cannot tell which cause it was.
+_EVERY_CAUSE = ("either it has nothing mutmut mutates, the rules' do_not_mutate_patterns or mutate_only_covered_lines "
+                "leave its lines out, a `# pragma: no mutate` keeps them out, or the gate could not read mutmut's "
+                "names for its mutants")
+
+
+def _mutmut_pragma(comment: str) -> str | None:
+    """What a comment says to mutmut 3.8.0, as its _parse_pragma_token reads it: "block", "start", "end" or "bare"
+    for a `# pragma: no mutate` comment of each form; None for any other comment."""
+    if "# pragma:" not in comment or "no mutate" not in comment:
+        return None
+    words = comment.partition("no mutate")[2].strip().lstrip(": ").split(",", 1)[0].split()
+    return words[0] if words and words[0] in ("block", "start", "end") else "bare"
+
+
+def _logical_line_ends(text: str) -> tuple[list[int], dict[int, str]]:
+    """The lines of Python source text on which a logical line ends, in order, and each line's comment by its
+    number; ([], {}) when text does not tokenize. A def's or a class's header ends on the first of those lines on or
+    after the line of its def or class, whatever brackets or decorators it spans."""
+    ends, comments = [], {}
+    try:
+        for t in tokenize.generate_tokens(io.StringIO(text).readline):
+            if t.type == tokenize.NEWLINE:
+                ends.append(t.start[0])
+            elif t.type == tokenize.COMMENT:
+                comments[t.start[0]] = t.string
+    except (tokenize.TokenError, SyntaxError):
+        return [], {}
+    return ends, comments
+
+
+def _changed_python_functions(change: GateChange) -> tuple[list[_ChangedFunction], list[dict]]:
+    """The functions mutmut mutates as one that the change added lines to, decorators included, in the Python files
+    outside the tests that it left in the working tree; and a finding for each such file that could not be read or
+    parsed."""
+    functions, unreadable = _changed_python_units(change, lambda path: not _python_test_file(path))
+    return functions, [_finding(path, None, "not-run", f"{why}, so its functions were not mutation-tested.")
+                       for path, why in unreadable]
+
+
+def _mutmut_table(rules: str) -> tuple[dict, str | None]:
+    """The [tool.mutmut] table of the pyproject.toml at rules, {} when it has none; or {} and the problem, a clause,
+    when it cannot be read, names no source_paths, without which what mutmut mutates cannot be told, or holds an
+    only_mutate, do_not_mutate, do_not_mutate_patterns, also_copy or pytest_add_cli_args that is not a list of
+    strings."""
+    try:
+        with open(rules, "rb") as f:
+            table = tomllib.load(f).get("tool", {}).get("mutmut", {})
+    except (OSError, tomllib.TOMLDecodeError, AttributeError) as e:
+        return {}, f"could not read [tool.mutmut] in {rules}: {e}"
+    sources = (table.get("source_paths") or table.get("paths_to_mutate")) if isinstance(table, dict) else None
+    if not isinstance(sources, list) or not sources or not all(isinstance(p, str) for p in sources):
+        return {}, (f"[tool.mutmut] in {rules} names no source_paths as a list of paths, so what mutmut mutates is "
+                    f"unknown")
+    # The other keys the gate reads or adds to.
+    for key in ("only_mutate", "do_not_mutate", "do_not_mutate_patterns", "also_copy", "pytest_add_cli_args"):
+        setting = table.get(key, [])
+        if not isinstance(setting, list) or not all(isinstance(p, str) for p in setting):
+            return {}, f"[tool.mutmut] {key} in {rules} is not a list of strings"
+    return table, None
+
+
+def _outside_mutmut(path: str, table: dict) -> str | None:
+    """Why mutmut, set up by table, a [tool.mutmut] with source_paths, mutates nothing in the file at path, relative to
+    the tree's top; None when it may. As mutmut 3.8.0 decides it, by walking source_paths, then Config.should_mutate's
+    only_mutate and do_not_mutate globs."""
+    sources: list[str] = table.get("source_paths") or table.get("paths_to_mutate") or []
+    roots = [os.path.normpath(p) for p in sources]
+    if not any(r == "." or path == r or path.startswith(f"{r}/") for r in roots):
+        return f"it is outside [tool.mutmut] source_paths ({', '.join(sources)})"
+    only = table.get("only_mutate", [])
+    if only and not any(fnmatch.fnmatch(path, g) for g in only):
+        return f"[tool.mutmut] only_mutate ({', '.join(only)}) leaves it out"
+    excluded = [g for g in table.get("do_not_mutate", []) if fnmatch.fnmatch(path, g)]
+    return f"[tool.mutmut] do_not_mutate excludes it ({', '.join(excluded)})" if excluded else None
+
+
+def _unmutatable(f: _ChangedFunction) -> str | None:
+    """Why mutmut 3.8.0 makes no mutant of f whatever it holds, as its file_mutation.py decides; None when it may."""
+    name = f.name.rpartition(".")[2]
+    if name in ("__new__", "__getattribute__", "__setattr__"):
+        return f"mutmut never mutates `{name}`"
+    if f.decorators and f.decorators not in (("staticmethod",), ("classmethod",)):
+        return "mutmut does not mutate a decorated function, unless @staticmethod or @classmethod is its one decorator"
+    return None
+
+
+def _use_mutmut_table(tree_copy: str, table: dict) -> None:
+    """Puts table in place of the [tool.mutmut] of tree_copy's pyproject.toml, leaving the rest of the file, the
+    tests' own settings among it, as the tree has it. Raises OSError when the file cannot be read or written, and
+    ValueError when the result does not read back as table, as when table holds a setting TOML's flat form cannot take
+    or the file defines the table other than under a [tool.mutmut] header."""
+    path = os.path.join(tree_copy, "pyproject.toml")
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        text = ""
+    kept, inside = [], False
+    for line in text.split("\n"):
+        header = re.fullmatch(r"\s*\[\[?\s*([^\[\],=#]+?)\s*\]\]?\s*(?:#.*)?", line)
+        if header:
+            inside = header.group(1) == "tool.mutmut"
+        if not inside:
+            kept.append(line)
+    # JSON's strings, numbers, booleans and arrays of them are TOML's too, and a quoted key is a key. What JSON
+    # cannot write, such as a TOML date, cannot be put back.
+    options = []
+    for name, setting in table.items():
+        try:
+            options.append(f"{json.dumps(name)} = {json.dumps(setting)}\n")
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"[tool.mutmut] {name} in the rules cannot be written back for mutmut: {e}") from e
+    text = "\n".join(kept).rstrip("\n") + "\n\n[tool.mutmut]\n" + "".join(options)
+    try:
+        replaced = tomllib.loads(text).get("tool", {}).get("mutmut") == table
+    except tomllib.TOMLDecodeError:
+        replaced = False
+    if not replaced:
+        raise ValueError("the rules' [tool.mutmut] could not be put in place of the tree's in its pyproject.toml")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
+def _mark_for_mutmut(tree_copy: str, changed: set[tuple[str, str]]) -> None:
+    """Marks for mutmut to skip each top-level function and class of the Python files in tree_copy, a copy of a tree,
+    that is not, and holds no method, in changed: (path, name as _ChangedFunction gives it). A Python file that cannot
+    be decoded or parsed, and a symbolic link, are left as they are. Raises OSError when a file cannot be read or
+    written."""
+    for top, _, names in os.walk(tree_copy):
+        for name in names:
+            path = os.path.join(top, name)
+            if not name.endswith(".py") or os.path.islink(path):
+                continue
+            with open(path, "rb") as f:
+                raw = f.read()
+            try:
+                text, encoding = _decode_python(raw)
+            except SyntaxError:
+                continue
+            marked = _skip_unchanged(os.path.relpath(path, tree_copy).replace(os.sep, "/"), text, changed)
+            if marked != text:
+                with open(path, "wb") as f:
+                    f.write(marked.encode(encoding))
+
+
+def _skip_unchanged(path: str, text: str, changed: set[tuple[str, str]]) -> str:
+    """text, the Python file at path, with _MUTMUT_SKIP on the line each header ends on of each top-level function and
+    class that is not, and holds no method, in changed, and of each method or nested class beside one that is. text
+    as it is when it does not parse."""
+    tree = _parse_python(text)
+    if tree is None:
+        return text
+    ends, _ = _logical_line_ends(text)
+    if not ends:
+        return text
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    skipped: list[ast.stmt] = []
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            inner = [m for m in node.body if isinstance(m, defs)]
+            kept = [m for m in inner if (path, f"{node.name}.{m.name}") in changed]
+            skipped += [m for m in inner if m not in kept] if kept else [node]
+        elif isinstance(node, defs) and (path, node.name) not in changed:
+            skipped.append(node)
+    lines = text.split("\n")
+    for node in skipped:
+        i = ends[bisect.bisect_left(ends, node.lineno)] - 1
+        line, cr = (lines[i][:-1], "\r") if lines[i].endswith("\r") else (lines[i], "")
+        lines[i] = line + _MUTMUT_SKIP + cr
+    return "\n".join(lines)
+
+
+def _mutant_prefix(f: _ChangedFunction) -> str:
+    """The name mutmut 3 gives f's mutants before their `__mutmut_<n>`: f's module, from its path as mutmut's
+    get_mutant_name makes it, a dot, then x_<function> or xǁ<class>ǁ<method>, which holds no dot. _prefix_of reads it
+    back from a mutant's name."""
+    module = f.path.removesuffix(".py").replace("/", ".").removeprefix("src.")
+    cls, _, name = f.name.rpartition(".")
+    return f"{module}.{f'xǁ{cls}ǁ{name}' if cls else f'x_{name}'}".replace(".__init__.", ".")
+
+
+def _prefix_of(mutant: str) -> str:
+    """The part of a mutant's name, as `mutmut results` lists it, that _mutant_prefix gives its function: all before
+    its last `__mutmut_`, since a function named _mutmut_x has one in its own name, as x__mutmut_x."""
+    return mutant.rpartition("__mutmut_")[0]
+
+
+def _run_mutmut(tree_copy: str, args: list[str], timeout: float) -> tuple[subprocess.CompletedProcess, bool]:
+    """mutmut with args, run in the gate's own interpreter at tree_copy, and whether it was stopped at timeout seconds.
+
+    Stopped, it gets SIGINT, on which mutmut stops trying mutants and keeps the results it has, and
+    MUTMUT_STOP_GRACE seconds to exit before its process group is killed; what it printed is then read for at most
+    MUTMUT_KILL_WAIT seconds more, and lost when a process outside the group holds its output open. So it returns
+    within timeout + MUTMUT_STOP_GRACE + MUTMUT_KILL_WAIT seconds, every process in its group gone. Its temporary
+    files, and those of the tests it runs, go into tree_copy's .tmp, so that what a test it killed left goes with
+    it. Its output is decoded as Host.run's verbatim output is, since its mutant names and diffs hold paths and
+    source lines: only "\n" ends a line. Raises OSError when it cannot be started.
+    """
+    # `mutmut`, its console script, runs this line. `python -m mutmut` would import its __main__ a second time in each
+    # forked worker, which mutmut warns against.
+    argv = [sys.executable, "-c", "from mutmut.__main__ import cli; cli()", *args]
+    tmp = os.path.join(tree_copy, ".tmp")
+    os.makedirs(tmp, exist_ok=True)
+    # A fixed command over mutant names mutmut itself listed; no shell reads it. Its own session puts its workers in
+    # its process group, so that they can be killed with it.
+    proc = subprocess.Popen(argv, cwd=tree_copy, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,  # noqa: S603
+                            stderr=subprocess.PIPE, env={**child_env(), "TMPDIR": tmp}, start_new_session=True)
+    stopped = False
+    try:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            stopped = True
+            proc.send_signal(signal.SIGINT)
+            try:
+                out, err = proc.communicate(timeout=MUTMUT_STOP_GRACE)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                out, err = _abandon(proc)
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+    # A process still unreaped was killed with its group a moment ago.
+    returncode = proc.poll()
+    return subprocess.CompletedProcess(argv, -signal.SIGKILL if returncode is None else returncode, os.fsdecode(out),
+                                       os.fsdecode(err)), stopped
+
+
+def _abandon(proc: subprocess.Popen) -> tuple[bytes, bytes]:
+    """What proc, just killed, printed, read for at most MUTMUT_KILL_WAIT seconds; b"" for both when something else,
+    such as a test's helper in a session of its own, still holds its output open, whose pipes are then closed."""
+    try:
+        return proc.communicate(timeout=MUTMUT_KILL_WAIT)
+    except subprocess.TimeoutExpired:
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is not None:
+                with contextlib.suppress(OSError):
+                    pipe.close()
+        return b"", b""
+
+
+def _time_left(deadline: float) -> float:
+    """The seconds a mutmut run may be given that must end by deadline, a time.monotonic() time, stop included."""
+    return deadline - time.monotonic() - MUTMUT_STOP_GRACE - MUTMUT_KILL_WAIT
+
+
+def _mutant_statuses(tree_copy: str, deadline: float) -> tuple[dict[str, str], str | None]:
+    """Each mutant mutmut made in tree_copy, by name, with its status, mutmut's word for what became of a mutant, as
+    `mutmut results` words it: killed, survived, no tests, not checked and the like. Or {} and the problem, a clause,
+    when they could not be listed by deadline, a time.monotonic() time that mutmut's stop is kept within."""
+    try:
+        proc, stopped = _run_mutmut(tree_copy, ["results", "--all", "true"], max(0.0, _time_left(deadline)))
+    except OSError as e:
+        return {}, f"could not start mutmut to list its results: {e}"
+    if stopped:
+        return {}, f"mutmut did not list its results within {MUTMUT_REPORT_TIMEOUT} seconds"
+    if proc.returncode != 0:
+        return {}, (f"mutmut could not list its results, exiting with status {proc.returncode}: "
+                    f"{_said_by_mutmut(proc)}")
+    return dict(re.findall(r"^\s*(\S+): (.+?)\s*$", proc.stdout, re.MULTILINE)), None
+
+
+def _survivors(tree_copy: str, f: _ChangedFunction, survived: list[str], tried: int, deadline: float) -> dict:
+    """The finding for f's survived mutants, of the tried ones mutmut ran against f's tests: how many, and what the
+    first _SURVIVOR_EXAMPLES of them change, each as `mutmut show` gives it by deadline, a time.monotonic() time."""
+    examples = [e for e in (_example(tree_copy, f, m, deadline) for m in survived[:_SURVIVOR_EXAMPLES]) if e]
+    said = f"{len(survived)} of {tried} mutants of `{f.name}` survived its tests"
+    return _finding(f.path, f.line, "survived", f"{said}: {'; '.join(examples)}." if examples
+                    else f"{said}; mutmut did not show in time what they change.")
+
+
+def _example(tree_copy: str, f: _ChangedFunction, mutant: str, deadline: float) -> str | None:
+    """What mutant, a mutant of f, changes, as `line N, `before` became `after``; None when mutmut does not show it by
+    deadline, a time.monotonic() time that mutmut's stop is kept within."""
+    if _time_left(deadline) <= 0:
+        return None
+    try:
+        proc, stopped = _run_mutmut(tree_copy, ["show", mutant], _time_left(deadline))
+    except OSError:
+        return None
+    shown = None if stopped or proc.returncode != 0 else _mutation(proc.stdout)
+    if shown is None:
+        return None
+    at, old, new = shown
+    # at counts from the first line of the function's code as mutmut prints it, which takes in the comments right
+    # above it, so the line is the nearest one that reads as the mutant's removed one.
+    expected = f.first + at - 1
+    hits = [f.first + k for k, line in enumerate(f.source) if line.strip() == old[0]]
+    line = min(hits, key=lambda n: abs(n - expected), default=expected)
+    return f"line {line}, `{_clip(' '.join(old))}` became `{_clip(' '.join(new))}`"
+
+
+def _mutation(diff: str) -> tuple[int, list[str], list[str]] | None:
+    """What the first hunk of `mutmut show`'s diff of a function and its mutant changes: the line of the function's code
+    where it starts, 1 for the first, and the lines it removes and adds there, stripped; None when it removes none."""
+    lines = diff.split("\n")
+    hunk = next((i for i, line in enumerate(lines) if line.startswith("@@")), len(lines))
+    m = re.match(r"@@ -(\d+)", lines[hunk]) if hunk < len(lines) else None
+    if not m:
+        return None
+    n, at = int(m.group(1)), None
+    old: list[str] = []
+    new: list[str] = []
+    for line in lines[hunk + 1:]:
+        if line.startswith("@@"):
+            break
+        if line.startswith("+"):
+            new.append(line[1:].strip())
+            continue
+        if line.startswith("-"):
+            at = at or n
+            old.append(line[1:].strip())
+        n += 1
+    return (at, old, new) if at else None
+
+
+# A Python warning as the warnings module writes it to standard error: where, its category and message, then the
+# source line it is about, indented.
+_PYTHON_WARNING = re.compile(r"^\S.*:\d+: \w*Warning: .*\n(?:[ \t].*(?:\n|$))?", re.MULTILINE)
+
+
+def _said_by_mutmut(proc: subprocess.CompletedProcess) -> str:
+    """_said of a mutmut that went wrong, leaving out the Python warnings it writes to standard error, such as that a
+    [tool.mutmut] key is deprecated, which come before its own message on standard output."""
+    return _said(subprocess.CompletedProcess(proc.args, proc.returncode, proc.stdout,
+                                             _PYTHON_WARNING.sub("", proc.stderr)))
+
+
+def _mutation_not_run(problem: str) -> dict:
+    return _finding(None, None, "not-run", f"{problem}; the change's functions were not mutation-tested.")
+
+
+# Cognitive complexity: how hard a function is to follow, which a change raises when it piles branches into the
+# function it edits rather than splitting it. ruff's C90 does not see that: it counts branches without their nesting,
+# and reports at a def line, which a change that grows a function does not add.
+#
+# The score is G. Ann Campbell's, "Cognitive Complexity", SonarSource, 2017, version 1.7
+# (https://www.sonarsource.com/docs/CognitiveComplexity.pdf), which SonarQube's rule S3776 implements. Its rules, as
+# they apply in Python:
+#
+# - One point for each break in the linear flow: `if`, `elif`, `else`, a ternary `x if c else y`, `for`, `while`,
+#   `except`, `match`, each sequence of like boolean operators, and a function that calls itself. Python has no
+#   `goto` and no labelled `break` or `continue`, so the paper's points for those never apply; a plain `break` or
+#   `continue` is free, as in the paper.
+# - One more for each level of nesting it sits at, on `if`, a ternary, `for`, `while`, `except` and `match`; not on
+#   `elif` and `else`, whose `if` has paid it.
+# - The level rises by one in the bodies of `if`, `elif`, `else`, `for`, `while`, `except` and `match`'s cases, in
+#   what a ternary holds, its condition included, and in a nested function or lambda. `try`, `finally` and `with`
+#   add neither a point nor a level. A statement's condition, a loop's iterable and a nested function's decorators
+#   and defaults are at the statement's level, outside its body.
+#
+# Where the paper leaves Python open, these are the choices. Sonar's own Python analyzer (sonar-python's
+# CognitiveComplexityVisitor) is named where it chose otherwise:
+#
+# - `match` is the paper's `switch`: one point and its nesting for the whole statement, however many cases, which
+#   nest their bodies. A case's guard adds only its own operators. Sonar's analyzer gives `match` no point.
+# - The `else` of a loop or of a `try` counts as an `if`'s does, as in Sonar's analyzer: it runs on a condition the
+#   reader must keep in mind, that no `break`, or no exception, came first.
+# - A comprehension adds nothing, its `for` and `if` clauses included, as in Sonar's analyzer: it is the kind of
+#   shorthand the paper exempts, a loop written as one expression and read left to right. What it holds, such as a
+#   ternary or an `and`, counts as anywhere.
+# - A nested function or lambda raises the level of its body, as the paper says of nested methods and lambdas, and
+#   its points count toward the function it is in. Sonar's analyzer leaves a lambda's level alone, and a decorator's
+#   wrapper function at its decorator's; this does neither. A class nested in a function raises nothing itself: its
+#   methods are nested functions.
+# - Boolean operators are read as written: `a and b or c` is the sequence `and`, `or`, two points, and an operand that
+#   is itself an `and` or `or` continues its parent's sequence. The syntax tree keeps no parentheses, so
+#   `a and (b and c)` is one sequence, one point, where Sonar's analyzer, which sees them, gives two. `not` starts a
+#   sequence of its own.
+# - Recursion is one point for each function, the judged one or one nested in it, that calls itself, however often:
+#   by its name, or a method `m` of a class `C` as `self.m`, `cls.m` or `C.m`. A cycle through other functions, which
+#   the paper also counts, is not found. Sonar's analyzer counts no recursion.
+
+# The cognitive-complexity check's limit: a function the change edits fails the gate above it, as with SonarQube's
+# default for S3776.
+COGNITIVE_COMPLEXITY_LIMIT = 15
+
+# Where the check judges no function: the tests, as `per-file-ignores` in pyproject.toml exempts them from ruff's C901.
+_COMPLEXITY_EXEMPT = "tests/"
+
+
+@dataclass(frozen=True)
+class _ScoredFunction:
+    """A function the cognitive-complexity check judges as one, and its score: a function no other function holds,
+    whether at the top of its module, in a class at any depth, or under a module-level statement such as an if or a
+    try. A function nested in another is part of that one."""
+    name: str  # its name qualified by its classes: f, C.f or C.D.f; a property's getter and setter share one
+    first: int  # the line it starts on, its decorators included
+    last: int  # the line it ends on
+    line: int  # the line of its def
+    score: int  # its cognitive_complexity
+    body: str  # what its body does, as _body_fingerprint gives it: equal for a function moved or renamed unchanged
+
+
+def _scored_functions(tree: ast.Module) -> list[_ScoredFunction]:
+    """Each function of tree that the cognitive-complexity check judges as one, scored, in the order they are
+    written."""
+    found: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef, str | None]] = []
+    # The nodes whose statements are still to be read, each with the qualified-name prefix there and the class a
+    # function there is a method of. A stack rather than recursion, as cognitive_complexity has.
+    todo: list[tuple[ast.AST, str, str | None]] = [(tree, "", None)]
+    while todo:
+        node, prefix, cls = todo.pop()
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                found.append((prefix + child.name, child, cls))
+            elif isinstance(child, ast.ClassDef):
+                todo.append((child, f"{prefix}{child.name}.", child.name))
+            elif isinstance(child, ast.stmt | ast.excepthandler | ast.match_case):
+                todo.append((child, prefix, cls))
+    out = []
+    for name, node, cls in sorted(found, key=lambda x: x[1].lineno):
+        first = min([node.lineno, *(d.lineno for d in node.decorator_list)])
+        out.append(_ScoredFunction(name, first, node.end_lineno or node.lineno, node.lineno,
+                                   cognitive_complexity(node, cls), _body_fingerprint(node)))
+    return out
+
+
+def too_complex_functions(change: GateChange) -> list[dict]:
+    """The cognitive-complexity check's find: each function the change adds a line to, in a Python file outside
+    _COMPLEXITY_EXEMPT, whose cognitive_complexity is over COGNITIVE_COMPLEXITY_LIMIT and higher than its base's, as
+    _base_scores pairs them, or which has no base; at its def line, with both scores. A function over the limit that
+    the change leaves no worse is not a finding: the gate judges the change, not the codebase. The functions judged
+    are those _ScoredFunction describes.
+
+    A changed file that cannot be read or parsed is a finding saying so, as GateCheck asks of a check that cannot do
+    its work, and fails the gate as any other does. Files under mutmut's state are not changed files, as
+    GateChange.from_tree says.
+    """
+    out, judged = _judged_files(change)
+    if not any(_over_limit(functions, added) for functions, added in judged.values()):
+        return out
+    scores = _base_scores(change, judged)
+    for path, (functions, added) in judged.items():
+        for scored in _over_limit(functions, added):
+            was = scores.get((path, scored.line))
+            if was is None or scored.score > was:
+                out.append(_over_limit_finding(path, scored, was))
+    return sorted(out, key=lambda finding: (finding["path"] or "", finding["line"] or 0))
+
+
+def _over_limit(functions: list[_ScoredFunction], added: set[int]) -> list[_ScoredFunction]:
+    """Those of functions that score over COGNITIVE_COMPLEXITY_LIMIT and that the change adds a line to, decorators
+    included; added is the lines it adds to their file."""
+    return [scored for scored in functions if scored.score > COGNITIVE_COMPLEXITY_LIMIT
+            and any(scored.first <= line <= scored.last for line in added)]
+
+
+def _over_limit_finding(path: str, scored: _ScoredFunction, was: int | None) -> dict:
+    """The finding for scored, a function of the working tree's file at path over the limit, whose base scored was, or
+    which is new for was None."""
+    return _finding(path, scored.line, "over-limit", (
+        f"`{scored.name}`: cognitive complexity {scored.score}, "
+        f"{'a new function' if was is None else f'{was} at the base'}; the limit is {COGNITIVE_COMPLEXITY_LIMIT}."),
+        severity="error")
+
+
+# The order in which _base_scores pairs a function with a base function of its body, each as (of its name, in its
+# file's base): a function unchanged where it was, moved, renamed in place, renamed and moved.
+_BODY_STEPS = ((True, True), (True, False), (False, True), (False, False))
+
+
+def _base_scores(change: GateChange,
+                 judged: dict[str, tuple[list[_ScoredFunction], set[int]]]) -> dict[tuple[str, int], int]:
+    """The base score of each function of judged, _judged_files' functions by path, that has a base, by (path, def
+    line); a function with no key is new. Only the change's own files are read.
+
+    A function's base is a function of the base, each the base of one function at most, so that a copy never takes
+    the score of what it copies. First a base function with its body, since an unchanged function is that function
+    whatever its name: of its name in its file's base, under the file's old name when the change renamed it, then of
+    its name elsewhere, as for a function moved; then of any name in its file's base, then elsewhere, as for one
+    renamed. A base function lends to a function of another file only when its body is gone from its file, which
+    now holds it fewer times than the base did: one still there, under any name, is the base of itself, and the
+    other a copy. Failing a body, a function over the limit takes the highest-scoring base function of its name left
+    in its file's base. A function of judged takes no base under _COMPLEXITY_EXEMPT, since the tests were never held
+    to the limit; and a base that cannot be read or parsed has no functions.
+
+    The functions of every other changed Python file, which the check does not judge, such as one under
+    _COMPLEXITY_EXEMPT or a script whose name has no .py (_is_python_source), pair by body too, from any base, and in
+    each step before the judged ones, so that one moved unchanged into such a file is still itself and lends its base
+    to no copy, whatever the copy's name.
+
+    The cost of bodies first: a copy of a function whose original the change edits takes the original's old score,
+    as if the original were the new function under its name.
+    """
+    unjudged = {new: _working_functions(change, new)[0] or [] for _, new in change.files
+                if new and new not in judged and _is_python_source(change, new)}
+    working = {**unjudged, **{path: functions for path, (functions, _) in judged.items()}}
+    old_paths = {new: old for old, new in change.files if new}
+    homes = {path: old_paths.get(path, path) for path in working}
+    pool = _BasePool({old: _base_functions(change, old) for old, new in change.files
+                      if old and (new in working or old.endswith(".py"))},
+                     {old: working.get(new, []) if new else [] for old, new in change.files if old})
+    for same_name, same_file in _BODY_STEPS:
+        for path in [*unjudged, *judged]:
+            pool.lend_by_body(path, working[path], homes[path], same_name=same_name, same_file=same_file,
+                              judged=path in judged)
+    for path, (functions, added) in judged.items():
+        for scored in _over_limit(functions, added):
+            pool.lend_by_name(path, scored, homes[path])
+    return {(path, line): score for (path, line), score in pool.lent.items() if path in judged}
+
+
+class _BasePool:
+    """The functions of the change's files at the base, each of which lends its score to one function of the working
+    tree at most, for _base_scores."""
+
+    def __init__(self, bases: dict[str, list[_ScoredFunction]], now: dict[str, list[_ScoredFunction]]):
+        """bases: the base functions of the change's files, by old path; now: the working tree's functions of the file
+        each old path became, by old path, every one of bases' included, with none for a file the change deletes or
+        that holds no Python now."""
+        self._left = bases  # the base functions that have lent no score yet, by old path
+        # (old path, body) of each body that the working tree's file holds fewer times than its base did: moved out of
+        # it, edited or deleted, so that its base functions with that body may lend to functions of other files. The
+        # count does not ask where the working tree's copies came from (TODO.md: "A body moved into a file ...").
+        self._gone = {(old, body) for old, functions in bases.items()
+                      for body, n in collections.Counter(g.body for g in functions).items()
+                      if sum(f.body == body for f in now[old]) < n}
+        self.lent: dict[tuple[str, int], int] = {}  # the score lent to each function, by (path, def line)
+
+    def lend_by_body(self, path: str, functions: list[_ScoredFunction], home: str | None, *, same_name: bool,
+                     same_file: bool, judged: bool) -> None:
+        """Lend to each of functions, the working tree's in its file at path whose old path is home (None for a file
+        the change adds), that has no score lent yet, the score of a base function left with its body: and its name
+        for same_name, and in home's base for same_file, else in another file's, whose body is gone from it. judged
+        says whether the check judges the file at path, whose functions then take no base under
+        _COMPLEXITY_EXEMPT."""
+        for scored in functions:
+            if (path, scored.line) not in self.lent:
+                found = self._twin(scored, home, same_name=same_name, same_file=same_file, judged=judged)
+                if found is not None:
+                    self._lend(path, scored, *found)
+
+    def _twin(self, scored: _ScoredFunction, home: str | None, *, same_name: bool, same_file: bool,
+              judged: bool) -> tuple[str, _ScoredFunction] | None:
+        """The old path and the first base function left there that may lend to scored in lend_by_body's step, as its
+        arguments of the same names say; None for no such function."""
+        for old, left in self._left.items():
+            if (old == home) != same_file or (judged and old.startswith(_COMPLEXITY_EXEMPT)):
+                continue
+            for base in left:
+                if (base.body == scored.body and (base.name == scored.name or not same_name)
+                        and (same_file or (old, base.body) in self._gone)):
+                    return old, base
+        return None
+
+    def lend_by_name(self, path: str, scored: _ScoredFunction, home: str | None) -> None:
+        """Lend to scored, a function of a judged file of the working tree at path whose old path is home, unless it
+        has a score lent, the highest of the base functions of its name left in home's base, if that is outside
+        _COMPLEXITY_EXEMPT."""
+        if home is None or home.startswith(_COMPLEXITY_EXEMPT) or (path, scored.line) in self.lent:
+            return
+        namesakes = [g for g in self._left.get(home, []) if g.name == scored.name]
+        if namesakes:
+            self._lend(path, scored, home, max(namesakes, key=lambda g: g.score))
+
+    def _lend(self, path: str, scored: _ScoredFunction, old: str, base: _ScoredFunction) -> None:
+        self._left[old].remove(base)
+        self.lent[(path, scored.line)] = base.score
+
+
+def _judged_files(change: GateChange) -> tuple[list[dict], dict[str, tuple[list[_ScoredFunction], set[int]]]]:
+    """A finding for each Python file outside _COMPLEXITY_EXEMPT that the change adds lines to and that cannot be read
+    or parsed; and, by path, the scored functions of each of the others, with the lines the change adds to it."""
+    out: list[dict] = []
+    judged: dict[str, tuple[list[_ScoredFunction], set[int]]] = {}
+    for path, added in change.changed.items():
+        if not added or not path.endswith(".py") or path.startswith(_COMPLEXITY_EXEMPT):
+            continue
+        if _is_link_or_special(change, path):
+            continue
+        functions, why = _working_functions(change, path)
+        if functions is None:
+            out.append(_finding(path, None, "not-scored", f"{why}, so its functions were not scored.",
+                                severity="error"))
+            continue
+        judged[path] = (functions, added)
+    return out, judged
+
+
+def _is_link_or_special(change: GateChange, path: str) -> bool:
+    """Whether the working tree's path is there as anything but a regular file: a symlink, a submodule's directory,
+    or a FIFO or device a symlink could name. The check reads none of them as code: a symlink's change is the name it
+    points to, and a submodule's its commit; and reading what one points to could block, as on a FIFO, or never end,
+    as on /dev/zero. False for a path that is not there, whose reading then fails as any other."""
+    try:
+        return not stat.S_ISREG(os.lstat(os.path.join(change.root, path)).st_mode)
+    except OSError:
+        return False
+
+
+def _is_python_source(change: GateChange, path: str) -> bool:
+    """Whether the working tree's path is a regular file of Python source: named *.py, or a script whose first line
+    is a #! naming python. False for anything _is_link_or_special names, and for a file that cannot be read."""
+    if _is_link_or_special(change, path):
+        return False
+    if path.endswith(".py"):
+        return True
+    try:
+        with open(os.path.join(change.root, path), "rb") as source:
+            first = source.readline(256)
+    except OSError:
+        return False
+    return first.startswith(b"#!") and b"python" in first
+
+
+def _working_functions(change: GateChange, path: str) -> tuple[list[_ScoredFunction] | None, str]:
+    """The scored functions of the working tree's file at path, and ""; or None and why there are none, a clause:
+    it could not be read, or does not parse as Python."""
+    try:
+        with open(os.path.join(change.root, path), "rb") as source:
+            text, _ = _decode_python(source.read())
+    except (OSError, SyntaxError) as e:
+        return None, f"could not be read ({e})"
+    tree = _parse_python(text)
+    if tree is None:
+        return None, "does not parse as Python"
+    return _scored_functions(tree), ""
+
+
+def _base_functions(change: GateChange, path: str) -> list[_ScoredFunction]:
+    """The functions the check judges as one in the file at path at the change's base, scored; none for a base that
+    cannot be read or parsed, whose functions the change can then only be judged as adding."""
+    try:
+        # Verbatim, so that os.fsencode gives back the bytes git stores, which _decode_python decodes as Python would.
+        tree = _parse_python(_decode_python(os.fsencode(
+            Host().git(change.root, "cat-file", "blob", f"{change.base}:{path}", verbatim=True)))[0])
+    except (OrchestratorError, SyntaxError):
+        return []
+    return _scored_functions(tree) if tree else []
+
+
+# What a node holds, each with the nesting level it is scored at; None stands for a part the node goes without.
+_Held = list[tuple[ast.AST | None, int]]
+# A rule of cognitive_complexity's: the points a node of one type scores by itself at a nesting level, and _Held.
+_CognitiveRule = Callable[[Any, int], tuple[int, _Held]]
+
+
+def cognitive_complexity(function: ast.FunctionDef | ast.AsyncFunctionDef, cls: str | None = None) -> int:
+    """function's cognitive complexity, by the rules above, the functions nested in it included. cls is the name of
+    the class function is a method of, None for one outside a class; it decides which calls are recursive. function's
+    own decorators and defaults are not scored: they run where it is defined, not when it is called."""
+    # A walk with a stack of its own rather than recursion: a syntax tree can be deeper than the interpreter lets a
+    # recursive walk go, as a sum of a few hundred terms or an if with a thousand elifs are. Each node's points do not
+    # depend on what it holds, so the order nodes are taken in does not matter. Each node goes with its nesting level
+    # and the class whose body holds it directly, None outside one, which decides how a nested function recurses.
+    points = int(_calls_itself(function, cls))
+    todo: list[tuple[ast.AST | None, int, str | None]] = [(s, 0, None) for s in function.body]
+    while todo:
+        node, nesting, owner = todo.pop()
+        if node is None:
+            continue
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            # A function nested in the one judged, or a method of a class nested in it: its body one level deeper.
+            points += int(_calls_itself(node, owner))
+            outside = [*node.decorator_list, *node.args.defaults, *node.args.kw_defaults]
+            todo += [*((o, nesting, owner) for o in outside), *((s, nesting + 1, None) for s in node.body)]
+            continue
+        if isinstance(node, ast.ClassDef):
+            # A class nested in the one judged raises no level itself; its methods are nested functions.
+            todo += [*((c, nesting, owner) for c in [*node.decorator_list, *node.bases, *node.keywords]),
+                     *((s, nesting, node.name) for s in node.body)]
+            continue
+        rule = _COGNITIVE_RULES.get(type(node))
+        if rule is None:
+            todo += [(child, nesting, owner) for child in ast.iter_child_nodes(node)]
+            continue
+        own, held = rule(node, nesting)
+        points += own
+        todo += [(child, level, owner) for child, level in held]
+    return points
+
+
+def _cognitive_if(node: ast.If, nesting: int) -> tuple[int, _Held]:
+    """An if, with the elifs and the else that follow it."""
+    points = 1 + nesting
+    held: _Held = []
+    while True:
+        held += [(node.test, nesting), *((s, nesting + 1) for s in node.body)]
+        orelse = node.orelse
+        # ast writes an elif as an else that holds just an if. That if starts in the elif's column; an if written
+        # inside an else is indented further.
+        if not (len(orelse) == 1 and isinstance(orelse[0], ast.If) and orelse[0].col_offset == node.col_offset):
+            break
+        node = orelse[0]
+        points += 1
+    return _with_else(points, held, orelse, nesting)
+
+
+def _with_else(points: int, held: _Held, orelse: list[ast.stmt], nesting: int) -> tuple[int, _Held]:
+    """points and held, with the else of an if, a loop or a try whose body is orelse: one point, and its body one level
+    deeper; nothing for an empty orelse, which is no else."""
+    if not orelse:
+        return points, held
+    return points + 1, held + [(s, nesting + 1) for s in orelse]
+
+
+def _cognitive_loop(node: ast.For | ast.AsyncFor | ast.While, nesting: int) -> tuple[int, _Held]:
+    head = [node.test] if isinstance(node, ast.While) else [node.target, node.iter]
+    held: _Held = [*((h, nesting) for h in head), *((s, nesting + 1) for s in node.body)]
+    return _with_else(1 + nesting, held, node.orelse, nesting)
+
+
+def _cognitive_try(node: ast.Try | ast.TryStar, nesting: int) -> tuple[int, _Held]:
+    held: _Held = [(s, nesting) for s in [*node.body, *node.finalbody]]
+    for h in node.handlers:
+        held += [(h.type, nesting), *((s, nesting + 1) for s in h.body)]
+    return _with_else(len(node.handlers) * (1 + nesting), held, node.orelse, nesting)
+
+
+def _cognitive_match(node: ast.Match, nesting: int) -> tuple[int, _Held]:
+    # A case's pattern holds no operators and no branches; its guard and body are what can.
+    return 1 + nesting, [(node.subject, nesting),
+                         *((part, nesting + 1) for c in node.cases for part in [c.guard, *c.body])]
+
+
+def _cognitive_ternary(node: ast.IfExp, nesting: int) -> tuple[int, _Held]:
+    return 1 + nesting, [(node.test, nesting + 1), (node.body, nesting + 1), (node.orelse, nesting + 1)]
+
+
+def _cognitive_boolean(node: ast.BoolOp, nesting: int) -> tuple[int, _Held]:
+    """A sequence of boolean operators, its operands that are themselves and or or included: one point for its first
+    operator and one for each that differs from the one before it."""
+    ops, operands = _boolean_sequence(node)
+    return 1 + sum(a is not b for a, b in itertools.pairwise(ops)), [(o, nesting) for o in operands]
+
+
+def _boolean_sequence(node: ast.BoolOp) -> tuple[list[type[ast.boolop]], list[ast.expr]]:
+    """The operators of node in the order they are written, those of an operand that is an and or or spliced in, and
+    the operands that are neither."""
+    ops: list[type[ast.boolop]] = []
+    operands: list[ast.expr] = []
+    # A stack of what is still to be read, the next item last: operands, and the operator types between them.
+    todo: list[ast.expr | type[ast.boolop]] = [node]
+    while todo:
+        item = todo.pop()
+        if isinstance(item, ast.BoolOp):
+            written: list[ast.expr | type[ast.boolop]] = []
+            for k, value in enumerate(item.values):
+                written += [type(item.op), value] if k else [value]
+            todo += reversed(written)
+        elif isinstance(item, ast.expr):
+            operands.append(item)
+        else:
+            ops.append(item)
+    return ops, operands
+
+
+def _cognitive_lambda(node: ast.Lambda, nesting: int) -> tuple[int, _Held]:
+    return 0, [*((d, nesting) for d in [*node.args.defaults, *node.args.kw_defaults]), (node.body, nesting + 1)]
+
+
+# The node types that cognitive_complexity scores by a rule of their own, beside the functions and classes nested in the
+# judged one, which its walk takes itself; any other scores nothing itself, and what it holds is scored at its level.
+_COGNITIVE_RULES: dict[type[ast.AST], _CognitiveRule] = {
+    ast.If: _cognitive_if, ast.For: _cognitive_loop, ast.AsyncFor: _cognitive_loop, ast.While: _cognitive_loop,
+    ast.Try: _cognitive_try, ast.TryStar: _cognitive_try, ast.Match: _cognitive_match, ast.IfExp: _cognitive_ternary,
+    ast.BoolOp: _cognitive_boolean, ast.Lambda: _cognitive_lambda,
+}
+
+
+def _calls_itself(function: ast.FunctionDef | ast.AsyncFunctionDef, cls: str | None) -> bool:
+    """Whether function's body calls function: by its name, or as self.m, cls.m or C.m when it is the method m of the
+    class C, cls."""
+    for node in (node for statement in function.body for node in ast.walk(statement)):
+        if not isinstance(node, ast.Call):
+            continue
+        callee = node.func
+        if cls is None and isinstance(callee, ast.Name) and callee.id == function.name:
+            return True
+        if (cls is not None and isinstance(callee, ast.Attribute) and callee.attr == function.name
+                and isinstance(callee.value, ast.Name) and callee.value.id in ("self", "cls", cls)):
+            return True
+    return False
+
+
+def gate_checks(mutation_budget: float) -> tuple[GateCheck, ...]:
+    """The checks judge_change runs after the linters, in this order, the surviving-mutants check letting mutmut run
+    for mutation_budget seconds."""
+    return (
+        GateCheck("test-integrity", fails=True, find=weakened_tests),
+        GateCheck("cognitive-complexity", fails=True, find=too_complex_functions),
+        GateCheck("flaky-tests", fails=False, find=flaky_tests),
+        GateCheck("surviving-mutants", fails=False, find=functools.partial(surviving_mutants, budget=mutation_budget)),
+    )
 
 
 def spec_title(spec: str) -> str | None:
@@ -3644,7 +5180,7 @@ class Workflow:
         intro = (f"Jenkins build #{build} of snapshot `{sha}` ({where}) ended {result} before the quality gate "
                  f"ran, so nothing judged the change. Make it build first.")
         return quality_report(GATE_BUILD_FAILED, intro, tests=tests, console=console,
-                              edited=edited_config(diff, changed))
+                              edited=edited_config(diff, changed), mutmut_state=mutmut_state_files(changed))
 
     def _poll(self, step: str, deadline: float, poll):
         """Call poll() every CI_POLL_SECONDS until it returns something other than None, and return that.
@@ -4254,6 +5790,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                       help="a JUnit report of the tree's tests, such as pytest's --junitxml; without it, tests are "
                            "not judged")
     gate.add_argument("--out", metavar="FILE", help="write the quality file here instead of to standard output")
+    gate.add_argument("--mutation-budget", type=int, default=MUTATION_BUDGET, metavar="SECONDS",
+                      help=f"stop mutmut, which mutation-tests the functions the change edits, after this long, "
+                           f"and report how many of its mutants it tried; default {MUTATION_BUDGET}")
 
     gui = sub.add_parser(
         "gui", help="open a window to start, list and resume runs; the default with no arguments where there "
@@ -4266,6 +5805,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         p.error("--cwd is required with --machine")
     if getattr(args, "max_rounds", None) is not None and args.max_rounds < 1:
         p.error("--max-rounds must be at least 1")
+    if getattr(args, "mutation_budget", 1) < 1:
+        p.error("--mutation-budget must be at least 1")
     if getattr(args, "max_quality_rounds", None) is not None:
         if args.max_quality_rounds < 1:
             p.error("--max-quality-rounds must be at least 1")
@@ -4871,7 +6412,7 @@ def main(argv: list[str]) -> int:
             return gui_command(args.smoke_test)
         # The gate judges the tree it runs in: no herdr, no agents.
         if args.command == "gate":
-            return gate_command(args.base, args.config, args.coverage, args.tests, args.out)
+            return gate_command(args.base, args.config, args.coverage, args.tests, args.out, args.mutation_budget)
         herdr, host = connect(args.machine)
         cwd = host.resolve_dir(args.cwd or os.getcwd())
         if args.command in RUNS_COMMANDS:
@@ -4916,14 +6457,17 @@ def runs_command(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str) -
         print_pruned(prune_branches(host, cwd, time.time, local_host, pid_alive, dry_run=args.dry_run, revisit=True))
 
 
-def gate_command(base: str, rules: str | None, coverage: str | None, tests: str | None, out: str | None) -> int:
-    """Write the quality file judge_change gives for the current directory, to out or standard output.
+def gate_command(base: str, rules: str | None, coverage: str | None, tests: str | None, out: str | None,
+                 mutation_budget: float) -> int:
+    """Write the quality file judge_change gives for the current directory, with gate_checks's checks, to out or
+    standard output.
 
     Returns 0 for GATE: OK and 1 for GATE: ERROR; EXIT_GATE_UNJUDGED, having written nothing, when the change
     could not be judged or out could not be written.
     """
     try:
-        text = judge_change(os.getcwd(), base, rules=rules, coverage=coverage, tests=tests)
+        text = judge_change(os.getcwd(), base, gate_checks(mutation_budget), rules=rules, coverage=coverage,
+                            tests=tests)
         if out:
             # Written aside and renamed into place, so a failed write leaves no half a quality file.
             tmp = f"{out}.tmp.{os.getpid()}"

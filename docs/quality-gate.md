@@ -29,19 +29,26 @@ listed and never held against the change, so the gate judges the change rather t
 ruff, mypy and pymarkdownlnt are in uv's `dev` group, so `uv run` puts them on `PATH`; shellcheck and actionlint
 come from the Jenkins agent image. The orchestrator itself stays stdlib-only: the gate runs them as processes.
 
-After the linters come the checks in `GATE_CHECKS`, which judge what the change did rather than how the tree
+After the linters come the checks `gate_checks` gives, which judge what the change did rather than how the tree
 reads. Each is a `GateCheck` that either fails the gate or only reports: a failing check's findings are issues,
 like the linters', and a reporting check's are findings to weigh, which the Builder answers and the Reviewer
 judges without the gate failing. Either kind is listed wherever it is, not only on added lines, and names the
 check that raised it. A check that cannot run says so as one of its findings, so a failing check that cannot
 run fails the gate.
 
+Every check sees the change without what the tree tracks under `mutants/`, mutmut's state (`GateChange.from_tree`):
+none selects a test, a function or a changed line there, or counts an edit there as a change to the code, and a file
+moved out of it counts as added. The linters and the build configuration listing see those files as any other.
+
 | Check | Fails? | Finds |
 |---|---|---|
 | `test-integrity` | yes | tests the change weakened, in test files (`tests/**`, `test_*.py`, `*_test.py`) |
+| `cognitive-complexity` | yes | functions the change edits or adds that it takes over a cognitive complexity of 15 |
+| `flaky-tests` | no | tests the change adds or edits that pass in one order and fail in another |
+| `surviving-mutants` | no | changes to the functions the change edits that no test notices |
 
-**Test integrity** compares each test file the change touches with its base, so a change cannot pass by
-weakening its tests. Each of these is a finding:
+**Test integrity** compares each test file the change touches, outside `mutants/` as above, with its base, so a
+change cannot pass by weakening its tests. Each of these is a finding:
 
 - `removed-test`: a test function, method or class is gone, at its line at the base. A class whose tests all
   went is one finding, and so is a deleted file. A test that reappears with the same body under another name or
@@ -58,6 +65,144 @@ weakening its tests. Each of these is a finding:
 
 It reads Python only; another language is a `WeakenedTestsDetector` beside the Python one in
 `WEAKENED_TESTS_DETECTORS`.
+
+**Cognitive complexity** scores the functions the change edits, so that a change cannot pile branches into the
+function it is editing rather than split it. A function counts when the change adds a line to it, decorators
+included, in a `.py` file outside `tests/`, which is exempt as it is from ruff's `C901`: any function that no other
+function holds, a method of a nested class and a function under a module-level `if` or `try` included. A function
+nested in another is part of that one. Files are read as Python reads them, by their byte order mark or coding
+cookie. Its score is G. Ann Campbell's [cognitive complexity](https://www.sonarsource.com/docs/CognitiveComplexity.pdf),
+which SonarQube's rule S3776 measured: a point for each `if`, `elif`, `else`, ternary, loop, `except`, `match`,
+sequence of like boolean operators and call of a function to itself, and one more for each level of nesting on those
+that nest. The comment above `COGNITIVE_COMPLEXITY_LIMIT` in `orchestrator.py` says how each Python construct maps to
+the paper's rules. Each of these is a finding:
+
+- `over-limit`: a function over 15, at its `def` line, when it is new or the change raised its score, as
+  "`_poll`: cognitive complexity 19, 14 at the base; the limit is 15". A function already over 15 that the change
+  leaves no worse is not a finding, since the gate judges the change. Its base is a function of the base, and each
+  base function is the base of one function at most:
+  - first, one with the same body, since an unchanged function is that function whatever its name: of its name in
+    its file's base, then of its name in the base of another Python file the change touches, then of any name in its
+    file's base, then elsewhere. So a function moved to another module, renamed or made a method, but otherwise
+    unchanged, keeps its score, and a new function given its old name is new. Of a function moved unchanged and a
+    copy of it, the one that kept the name takes it, and a function moved unchanged into a file the check does not
+    judge, such as one under `tests/` or a script with no `.py` whose `#!` line names python, takes its own before
+    any copy can, whatever the copy's name. A function takes the base of a function in another file only when that
+    one's body is gone from it, so an unchanged copy takes nothing from an original still in its place, under its
+    name or another; an original edited in place is gone by its body, which is the cost below;
+  - failing that, the highest-scoring function of its name left in its file's base, under the file's old name,
+    whatever that name, when the change renamed it. So with a name defined more than once, as a property's getter and
+    setter or `@singledispatch` registrations named `_` are, adding or removing one never makes a function the change
+    left no worse a finding; the cost is that a rise below a higher-scoring namesake goes unseen;
+  - failing that, the function is new: a copy whose original is still in place, a function moved and edited, and a
+    function whose base is under `tests/`, which was never held to the limit.
+
+  Bodies pairing first has a cost: a copy of a function whose original the change edits keeps the old score and
+  passes, as if it were the original renamed and the edited one new, even when the edit takes the original below the
+  limit, and wherever the copy is, in a file the check does not judge too. `TODO.md` holds it.
+- `not-scored`: a changed file that could not be read or parsed. Like any finding of the check, it fails the gate: a
+  check that cannot do its work says so rather than pass. A base that cannot be read or parsed is not a finding: its
+  file's functions are judged as new, as `test-integrity` takes a base that does not parse to have no tests.
+
+ruff's `C90` stays beside it. It counts branches without their nesting, so it misses a deeply nested function that
+cognitive complexity catches, but it still catches a flat function of many branches, which cognitive complexity scores
+lower. It reports at the `def` line, and the gate keeps a linter's finding only on a line the change adds: when a change
+grows an existing function, only this check reports it. A function whose `def` line the change adds, such as a new
+one, and that both flag, is two findings at its `def`.
+
+**Flaky tests** reruns the tests the change adds or edits, so a test that passed the build's one run by luck of
+the order is caught. A test counts when the change adds or removes a line of it in a test file outside `mutants/`, as
+above, from the line after the statement before it to its last: its decorators and the comments above its `def`
+count, since a decorator replaced or removed changes the test, and so do lines removed right below it. pytest
+decides which of those are tests. It runs them five times, alone, under pytest-randomly with seeds 1 to 5
+(`-p randomly -p no:cacheprovider --randomly-seed=N`), each run in the gate's own interpreter (`python -m pytest`,
+so the project's environment that `uv run` gives, whatever `pytest` is on `PATH`) and within 30 seconds. They run in
+a temporary copy of the files git tracks, so a report the project's `addopts` write, such as `coverage.xml`, lands in
+the copy and the build's own stays as the gate reads it; a test that needs an untracked file, such as a build
+product, does not find it there. pytest takes its configuration only from the copy's top directory, in pytest's
+order (`pytest.toml`, `.pytest.toml`, `pytest.ini`, `.pytest.ini`, then `pyproject.toml`, `tox.ini` and `setup.cfg`
+with a pytest table or section), given with `-c`, or an empty one when it has none; `--confcutdir` is the copy. So
+no `pytest.ini` or `conftest.py` that another account put above the temporary directory is read. The top directory
+is where a build that runs pytest there takes its configuration. A configuration in a subdirectory, such as
+`pkg/pyproject.toml` or `tests/pytest.ini`, is not used: the reruns get the top directory's, or the empty one when
+the top has none, and a project that needs the subdirectory's usually gets `not-rerun` (see `TODO.md`):
+
+- `mixed-results`: a test that failed under some seeds and passed under the others, at its `def`, naming the seeds
+  of each. It depends on the order of the tests, on state another test leaves, or on randomness pytest-randomly
+  seeds. An xfail counts as an outcome of its own, so a test that xfails under every seed is consistent, and one
+  that xfails under some seeds and passes or xpasses under others is mixed. A run that skips a test, or leaves it
+  out of its report (an `addopts` with `--maxfail`, say), neither passed nor failed it;
+- `failed-every-run`: a test that failed under every seed that judged it, at least two, in the copy. It is not
+  flaky. If the build failed it too, the failing tests list it; if the build passed it, it needs something the copy
+  lacks, such as git's metadata, an untracked or ignored file or a build product, and the reruns could not judge it.
+  The gate does not compare the two, so the finding says both;
+- `not-rerun`: the reruns could not judge the tests: pytest could not start, took longer than 30 seconds, ended in a
+  usage or collection error, or collected tests without listing their ids; a changed test file could not be read or
+  parsed; or the temporary copy could not be made. After a run that went wrong, the finding says which earlier runs
+  were judged, and the reruns stop there. A test that is not mixed and that fewer than two runs passed or failed is
+  one of these too, at its `def`, once any run has told something. pytest runs at `--verbosity=-1`, which a `-v`
+  or `-q` in the project's `addopts` or `PYTEST_ADDOPTS` does not change, nor its `verbosity_test_cases`;
+- `not-removed`: the copy could not be removed afterwards; the reruns' results stand.
+
+A change to a helper or fixture outside the tests' `def`s reruns nothing. The check adds at most six pytest runs of
+30 seconds to the gate, the collection included, and only when the change touches a test. pytest-randomly is in the
+`dev` group, so every `uv run pytest` shuffles the tests too, printing the seed it used; `-p no:randomly` turns it
+off, and `--randomly-seed=N` repeats an order.
+
+**Surviving mutants** mutation-tests the functions the change edits, so that code its tests run without checking what
+it does is found; coverage counts such code as tested. A function counts when the change adds a line to it, decorators
+included: a top-level function, or a method of a top-level class, in a Python file outside the test files and, as
+above, `mutants/`. mutmut, in the `dev` group, makes small changes to each, one at a time - an operator
+swapped, a number or a string altered, an argument dropped - and runs each of these mutants against the tests that
+call the function:
+
+- `survived`: a function with mutants no test failed on, at its `def`: how many of its mutants survived out of how many
+  were tried, and what the first three change, each as a line before and after. No test checks what those lines do;
+- `untested`: a changed function that no test calls, at its `def`, with how many mutants it has;
+- `budget-reached`: mutmut ran out of time, as "budget reached after N of M mutants", N counting the mutants it tried
+  against a test, as the `survived` counts do. What the N showed is listed; the others may survive too. It also names,
+  with their files, the changed functions in modules mutmut had not reached when it was stopped: it saves a module's
+  mutants, none or more, in `mutants/<path>.meta` once it has made them all, and theirs had none;
+- `not-mutated`: a changed function mutmut does not mutate, at its `def`, with the reason: its file is outside
+  `[tool.mutmut]`'s `source_paths`, or left out by `only_mutate` or `do_not_mutate`; it is decorated, other than with
+  `@staticmethod` or `@classmethod` alone; or it is `__new__`, `__getattribute__` or `__setattr__`. And a function
+  mutmut was given but made no mutant of, with the cause where the gate can tell it, a `# pragma: no mutate block` on
+  the line its header ends on, the one form of mutmut's pragmas the gate recognises and names as the cause, or
+  `do_not_mutate_patterns` matching each statement in it, else every cause there can be: it has nothing mutmut
+  mutates, `do_not_mutate_patterns` or `mutate_only_covered_lines` leave its lines out, a `# pragma: no mutate` keeps
+  them out, or the gate could not read mutmut's names for its mutants. A block pragma on a line of its own above the
+  `def` or atop its body, one on its class, and a `start`/`end` pair around it keep a function out too, and get that
+  list;
+- `not-run`: mutmut could not start, failed, as it does when a test fails, or left results the gate could not read; the
+  rules name no `source_paths`, or give a key the gate reads or writes a value of another shape; the directory to copy
+  the tree into could not be made; or a changed file could not be read or parsed;
+- `cleanup`: the copy mutmut ran in could not be removed afterwards, named so that it can be.
+
+mutmut runs in the gate's own interpreter, on a copy of the files git tracks, so the working tree stays as it was; its
+state, `mutants/`, goes into the copy too. Its own selector, mutant names such as
+`orchestrator.x_judge_change__mutmut_*`, picks which mutants run only after mutmut has made a mutant of every function,
+which takes minutes for `orchestrator.py`. So in the copy, each function and class the change does not touch gets
+mutmut's `# pragma: no mutate block` at the end of its header, and mutmut skips it. The rules' `[tool.mutmut]` says
+what can be mutated (`source_paths`, `only_mutate`, `do_not_mutate`), which tests run
+(`pytest_add_cli_args_test_selection`), what the tests read beside the code (`also_copy`), and which lines are left
+alone (`do_not_mutate_patterns`); see [whose rules judge a change](#whose-rules-judge-a-change). Python files are read
+as Python reads them, by a byte order mark or a coding cookie. mutmut runs pytest in the copy's `mutants/`, where it
+puts the mutated code. Its runs get the configuration flaky-tests' reruns get, with `-c`: the project's own, which
+`also_copy` puts in `mutants/` so that paths in it, such as `pythonpath`, name the mutated code, or an empty one; and
+`--confcutdir` is `mutants/`. Both are added to the table's `pytest_add_cli_args`, so these runs too read no
+`pytest.ini` or `conftest.py` from above the copy. In a repository without mutmut, a change to a function gets a
+`not-run` finding.
+
+`--mutation-budget SECONDS`, 600 by default, bounds mutmut's run. Stopping it takes at most 15 seconds more: SIGINT,
+10 seconds to exit, a kill of its process group, and 5 seconds to read what it printed. Listing its results and showing
+the survivors then take at most 60 seconds, each call's stop included. So the check takes at most the budget and 75
+seconds, and the few it takes to copy the tree. With the flaky-tests check's three minutes and the test run, a quality
+build stays inside the orchestrator's `QUALITY_TIMEOUT` of 1200 seconds.
+
+This repository's table keeps mutmut off argparse's help texts, which no test reads word for word:
+`do_not_mutate_patterns = ['\bhelp=']`. mutmut matches each pattern against each source line and skips every expression
+that starts on a matching line, with all it holds, so a help text's later lines are skipped too, and so is a whole
+`add_argument(...)` call that starts on its `help=` line. A change to a help text alone makes no mutant.
 
 The gate is `GATE: ERROR` when any of these holds, and `GATE: OK` otherwise:
 
@@ -97,6 +242,8 @@ A file whose name is not UTF-8 is read the same way, and the quality file writes
   a `.md` file. Either is a failed condition quoting the tool's first line, which need not name the file; mypy's
   comes back on every change until the file has a UTF-8 name.
 - coverage.py collects no data for such a file, so its added lines count as not coverable.
+- `flaky-tests` collects the tests of such a test file, but pytest-randomly stops with an internal error,
+  `UnicodeEncodeError`, when it shuffles them, so a change to one of them is a `not-rerun` finding quoting it.
 
 Any other git output the gate cannot decode, such as a work tree whose own path is not UTF-8, leaves the change
 unjudged (exit 2).
@@ -107,10 +254,13 @@ the change adds, and the build configuration it edits. Issues and findings to we
 first, at most 50 in all, then a count:
 
 - **Suppressions added** (`# noqa`, `# type: ignore`, `# shellcheck disable`, `<!-- pyml disable`,
-  `# pragma: no cover`) are listed, not failed, so the Reviewer weighs each one. A `# pragma: no cover` is listed
-  because it takes lines out of the coverage condition.
+  `# pragma: no cover`, `# pragma: no mutate`) are listed, not failed, so the Reviewer weighs each one. A
+  `# pragma: no cover` is listed because it takes lines out of the coverage condition, and a `# pragma: no mutate`
+  because it takes them out of the surviving-mutants check.
 - **Build configuration**: an edit to `Jenkinsfile`, `pyproject.toml` or `uv.lock` is noted, since each can
-  change how the change was judged.
+  change how the change was judged, and so is each file the change adds or edits under `mutants/`, where mutmut keeps
+  its state: the checks leave them out, as [the gate](#the-gate) says, and the surviving-mutants check runs mutmut
+  without them, though the linters read them as they read any tracked file.
 
 ### Whose rules judge a change
 
@@ -122,11 +272,18 @@ snapshot still controls is visible in its quality file: tool versions through `u
 configuration), and inline suppressions (listed). shellcheck and actionlint versions live in the agent image,
 outside this repository.
 
+The surviving-mutants check takes `[tool.mutmut]` from the same file, so a change cannot tell mutmut to leave its code
+alone. In the copy mutmut runs on, that table replaces the tree's own, and only that table: the rest of the tree's
+`pyproject.toml`, such as `[tool.pytest.ini_options]`, is how its tests run, which a change may need to alter. Without
+`--config`, the tree's table judges it, as the linters' do. What the tree holds under `mutants/`, mutmut's own state
+and cache of results, is left out of that copy, so mutmut starts afresh and a change cannot mark its mutants killed;
+a change that adds or edits files there is listed under build configuration.
+
 The rule sets were tuned until `main` gave a short list of real findings: ruff's defaults plus bugbear,
-simplifications, pyupgrade, bandit, complexity (`max-complexity = 15`) and pylint's errors and warnings, with the
-fake tokens, paths and fixtures of `tests/` exempt; mypy at its default strictness on `orchestrator.py`;
-pymarkdown without the line-length and inline-HTML rules. Only lines a change adds count, so what `main` already
-has does not block.
+simplifications, pyupgrade, bandit, cyclomatic complexity (`C90`, `max-complexity = 15`; nesting is the
+`cognitive-complexity` check's) and pylint's errors and warnings, with the fake tokens, paths and fixtures of `tests/`
+exempt; mypy at its default strictness on `orchestrator.py`; pymarkdown without the line-length and inline-HTML rules.
+Only lines a change adds count, so what `main` already has does not block.
 
 ## Jenkins setup
 
