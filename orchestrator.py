@@ -1510,7 +1510,9 @@ class Host:
                                     f"does not run: {GITLEAKS_INSTALL}")
 
     def refuse_leaks(self, cwd: str, commit: str, *, base: str, report_path: str) -> None:
-        """Raise LeaksFound when scan_unpublished finds any in what a push of commit would publish."""
+        """Raise LeaksFound when scan_unpublished finds any in what a push of commit would publish, and
+        OrchestratorError when it cannot judge, as scan_unpublished says, which also says what it writes beside
+        report_path."""
         leaks = self.scan_unpublished(cwd, commit, base, report_path)
         if leaks:
             raise LeaksFound(leaks, report_path)
@@ -1520,8 +1522,9 @@ class Host:
         publish: those reachable from it and from no origin ref, as git log's `<commit> --not --remotes=origin`
         gives them. A merge's own content is what it adds beyond git's automatic merge of its parents (git's
         remerge diff): a conflict's resolution or an edit made in the merge counts, what a parent already had does
-        not. A remote-tracking ref for a branch origin has since deleted or rewritten narrows the range: what only
-        it reaches was public once, and is not scanned again.
+        not. git gives no remerge diff for a merge of three or more parents, so a range holding one is refused. A
+        remote-tracking ref for a branch origin has since deleted or rewritten narrows the range: what only it reaches
+        was public once, and is not scanned again.
 
         The rules come from base, a commit before the change: its .gitleaks.toml (else gitleaks' defaults) and its
         .gitleaksignore (else none), and nothing the working tree holds, so that the change cannot allowlist itself;
@@ -1529,7 +1532,8 @@ class Host:
         gitleaks runs with --redact and writes its JSON report to report_path, a path in the run's directory, beside
         the config files and the empty directory this makes there.
 
-        Raises OrchestratorError, failing closed, when git cannot read base or the range, or gitleaks cannot be
+        Raises OrchestratorError, failing closed, when git cannot read base or the range, the range holds an octopus
+        merge, or gitleaks cannot be
         started, exits other than 0 or 1, writes no report or one that is not a list of findings, or exits 1 with
         an empty one: gitleaks also exits 1 when it cannot load its config, writing nothing. Runs where cwd is, as
         every Host command does."""
@@ -1543,13 +1547,17 @@ class Host:
         # as this one's.
         self.check(["sh", "-c", 'rm -rf -- "$1" "$2" && mkdir -p -- "$1"', "_", source, report_path])
         git_dir = self.git(cwd, "rev-parse", "--absolute-git-dir").strip()
+        where = f" on {self.ssh_target}" if self.ssh_target else ""
+        failed = f"gitleaks could not scan what the push would publish{where}, so nothing was pushed"
+        octopus = self.git(cwd, "rev-list", "--min-parents=3", commit, "--not", f"--remotes={REMOTE}").split()
+        if octopus:
+            raise OrchestratorError(f"{failed}: merge {octopus[0][:12]} has three or more parents, and git shows no "
+                                    f"diff of what such a merge adds; merge its branches one at a time")
         log_opts = f"--diff-merges=remerge {commit} --not --remotes={REMOTE}"
         proc = self.run(["env", f"GIT_DIR={git_dir}", "gitleaks", "git", f"--log-opts={log_opts}", "--redact",
                          "--no-banner", "--no-color", "--exit-code", "1", "--report-format", "json", "--report-path",
                          report_path, "--config", config, "--gitleaks-ignore-path", ignore, source],
                         timeout=GITLEAKS_TIMEOUT)
-        where = f" on {self.ssh_target}" if self.ssh_target else ""
-        failed = f"gitleaks could not scan what the push would publish{where}, so nothing was pushed"
         said = _clip(proc.stderr.strip().rsplit("\n", 1)[-1] or "nothing")
         if proc.returncode not in (0, 1):
             raise OrchestratorError(f"{failed}: it exited with status {proc.returncode}: {said}")
@@ -1563,17 +1571,20 @@ class Host:
         if leaks is None or (proc.returncode == 1 and not leaks):
             raise OrchestratorError(f"{failed}: it exited with status {proc.returncode} and wrote "
                                     f"{'no report' if text is None else 'no finding'}: {said}")
-        return leaks + self._allow_comments(cwd, log_opts)
+        return leaks + self._allow_comments(git_dir, source, log_opts)
 
-    def _allow_comments(self, cwd: str, log_opts: str) -> list[Leak]:
+    def _allow_comments(self, git_dir: str, source: str, log_opts: str) -> list[Leak]:
         """A Leak for each line holding `gitleaks:allow` that the commits log_opts selects add, as git log -p shows
-        them with log_opts, read as change_diff's diffs are."""
-        out = self.git(cwd, "-c", "core.quotePath=false", "log", "-p", "-U0", "--no-color", "--no-ext-diff",
-                       "--src-prefix=a/", "--dst-prefix=b/", "--format=%x00%H", *log_opts.split(),
-                       timeout=GITLEAKS_TIMEOUT, verbatim=True)
+        them with log_opts, read as change_diff's diffs are. git runs as gitleaks does, in source with git_dir, so
+        no .gitattributes of the working tree changes the patch it reads."""
+        proc = self.run(["env", f"GIT_DIR={git_dir}", "git", "-C", source, "-c", "core.quotePath=false", "log", "-p",
+                         "-U0", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", "--format=%x00%H",
+                         *log_opts.split()], timeout=GITLEAKS_TIMEOUT, verbatim=True)
+        out = self._checked(["git", "log", "-p", *log_opts.split()], proc)
         leaks = []
-        # Each commit's patch follows its sha on a line of its own after a NUL; no line of a patch starts with one.
-        for block in out.split("\x00")[1:]:
+        # Each commit's patch follows its sha on a line of its own that starts with a NUL; a NUL inside a line of a
+        # patch does not start one.
+        for block in ("\n" + out).split("\n\x00")[1:]:
             commit, _, patch = block.partition("\n")
             leaks += [Leak("gitleaks-allow", path, line, commit, f"{commit}:{path}:gitleaks-allow:{line}")
                       for path, line, text in _added_lines(patch) if "gitleaks:allow" in text]

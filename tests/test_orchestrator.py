@@ -3421,6 +3421,31 @@ class TestScanUnpublished(unittest.TestCase):
             self.push(merge)
         self.assertEqual([(leak.file, leak.commit) for leak in caught.exception.leaks], [("evil.py", merge)])
 
+    def test_an_octopus_merge_is_refused(self):
+        # git gives no remerge diff for three parents, so what such a merge adds cannot be scanned.
+        for name in ("s1", "s2"):
+            self.git("switch", "--quiet", "-c", name, self.base)
+            self.commit({f"{name}.txt": name}, name)
+        self.git("switch", "--quiet", "main")
+        self.commit({"mine.txt": "mine\n"}, "mine")
+        self.git("merge", "--quiet", "--no-edit", "s1", "s2")
+        with self.assertRaisesRegex(OrchestratorError, "three or more parents"):
+            self.push(self.git("rev-parse", "HEAD").strip())
+        self.assertNotIn("refs/heads/ci-ref", self.on_origin())
+
+    def test_the_change_s_gitattributes_do_not_hide_an_allow(self):
+        commit = self.commit({".gitattributes": "notes.md -diff\n", "notes.md": "x # gitleaks:allow\n"}, "hidden")
+        with self.assertRaises(orchestrator.LeaksFound) as caught:
+            self.push(commit)
+        self.assertEqual([(leak.file, leak.line) for leak in caught.exception.leaks], [("notes.md", 1)])
+
+    def test_a_nul_inside_a_line_does_not_end_the_commit_s_patch(self):
+        # git still diffs as text a file whose first 8000 bytes hold no NUL.
+        commit = self.commit({"n.txt": "x" * 9000 + "\na\0b\ny = 2  # gitleaks:allow\n"}, "nul")
+        with self.assertRaises(orchestrator.LeaksFound) as caught:
+            self.push(commit)
+        self.assertEqual([(leak.file, leak.line) for leak in caught.exception.leaks], [("n.txt", 3)])
+
     def test_a_base_git_cannot_read_blocks_the_push(self):
         commit = self.commit({"b.txt": "b\n"}, "clean")
         self.base = "0" * 40
