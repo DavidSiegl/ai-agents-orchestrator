@@ -184,9 +184,10 @@ def child_env() -> dict[str, str]:
     GIT_PATHSPEC_ENV.
 
     So the agents, which herdr, git, ssh and gh start or reach, never inherit the tokens. They can
-    still read a file the tokens came from, as the same user. And git, run by the orchestrator, an agent, a linter,
-    a test the flaky-tests check reruns or mutmut, reads each pathspec in its default syntax, whatever switch the
-    user exported. Over SSH this is the local ssh process's environment; the remote git reads the remote shell's.
+    still read a file the tokens came from, as the same user. And the git that the orchestrator, a linter, a test
+    the flaky-tests check reruns or mutmut runs reads each pathspec in its default syntax, whatever switch the user
+    exported. An agent does not inherit the switches either, but its pane's shell reads the user's startup files and
+    takes any they set. Over SSH this is the local ssh process's environment; the remote git reads the remote shell's.
     """
     return {k: v for k, v in os.environ.items() if k not in CI_ENV and k not in GIT_PATHSPEC_ENV}
 
