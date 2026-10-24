@@ -6135,28 +6135,38 @@ class TestWrittenRules(unittest.TestCase):
     PYPROJECT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pyproject.toml")
 
     def ruff(self, name, text):
-        """The rule codes the real ruff reports on text, saved as name, by this repository's pyproject.toml."""
+        """(line, rule code) of each finding the real ruff reports on text, saved as name in a copy of this
+        repository's pyproject.toml's directory, run there with a relative path as the gate runs it: ruff resolves
+        per-file-ignores against its working directory."""
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        path = os.path.join(tmp.name, name)
-        with open(path, "w") as f:
+        shutil.copy(self.PYPROJECT, tmp.name)
+        os.makedirs(os.path.join(tmp.name, os.path.dirname(name)), exist_ok=True)
+        with open(os.path.join(tmp.name, name), "w") as f:
             f.write(text)
         # A fixed command over a file this test wrote; no shell reads it.
-        proc = subprocess.run([sys.executable, "-m", "ruff", "check", "--config", self.PYPROJECT,  # noqa: S603
-                               "--no-cache", "--output-format", "concise", path],
-                              capture_output=True, text=True, check=False)
+        proc = subprocess.run([sys.executable, "-m", "ruff", "check", "--config", "pyproject.toml",  # noqa: S603
+                               "--no-cache", "--output-format", "concise", name],
+                              cwd=tmp.name, capture_output=True, text=True, check=False)
+        self.assertNotIn("No module named", proc.stderr)
         self.assertIn(proc.returncode, (0, 1), proc.stderr)
-        return sorted(re.findall(r":\d+:\d+: ([A-Z]+\d+)", proc.stdout))
+        return sorted((int(line), code) for line, code in re.findall(r":(\d+):\d+: ([A-Z]+\d+)", proc.stdout))
 
-    def test_an_undocumented_public_function_class_or_method_is_found(self):
-        text = ('"""A module."""\n\n\ndef load():\n    return 1\n\n\nclass Store:\n    def get(self):\n        return 1\n'
-                '\n    def __init__(self):\n        self.n = 1\n\n    def __len__(self):\n        return 1\n'
-                '\n\ndef _private():\n    return 1\n')
-        self.assertEqual(self.ruff("store.py", text), ["D101", "D102", "D103"])
-        # The tests document themselves by their names. ruff resolves this glob against pyproject.toml's directory.
-        with open(self.PYPROJECT, "rb") as f:
-            ignored = tomllib.load(f)["tool"]["ruff"]["lint"]["per-file-ignores"]["tests/**"]
-        self.assertIn("D1", ignored)
+    STORE = ('"""A module."""\n\n\ndef load():\n    return 1\n\n\nclass Store:\n    def get(self):\n        return 1\n'
+             '\n    def __init__(self):\n        self.n = 1\n\n    def __len__(self):\n        return 1\n'
+             '\n\ndef _private():\n    return 1\n')
+
+    def test_an_undocumented_public_function_class_or_method_is_found_at_its_def(self):
+        self.assertEqual(self.ruff("store.py", self.STORE), [(4, "D103"), (8, "D101"), (9, "D102")])
+
+    def test_the_tests_need_no_docstrings(self):
+        self.assertEqual(self.ruff("tests/test_store.py", self.STORE.replace('"""A module."""\n', "")), [])
+
+    def test_a_blind_except_that_goes_on_is_found(self):
+        # BLE001 comes from ruff's defaults, which extend-select keeps: this fails if the rules move to select.
+        text = ('"""A module."""\n\n\ndef load():\n    """Load."""\n    try:\n        return 1\n'
+                '    except Exception:\n        return None\n')
+        self.assertEqual(self.ruff("store.py", text), [(8, "BLE001")])
 
 
 class TestVagueNames(unittest.TestCase):
@@ -6224,6 +6234,43 @@ class TestVagueNames(unittest.TestCase):
         self.put("calc.py", self.BASE + "\n\nclass C:\n    @classmethod\n    def make(cls):\n        cls.manager = 1\n")
         self.assertEqual([(path, message.split("`")[1]) for path, _, _, message in self.found()],
                          [("calc.py", "manager")])
+
+    def test_imports_excepts_matches_and_type_parameters_bind_names(self):
+        self.put("calc.py", self.BASE + textwrap.dedent("""\
+
+
+            import json as raw_data
+            from os import path as status
+
+
+            def parse[T_value](text: str) -> None:
+                try:
+                    match json.loads(text):
+                        case {"k": handle, **rest_info}:
+                            pass
+                        case [*all_status]:
+                            pass
+                except ValueError as info:
+                    raise
+            """))
+        self.assertEqual([message.split("`")[1] for _, _, _, message in self.found()],
+                         # A mapping pattern's **rest is placed at the pattern's start, before the captures in it.
+                         ["raw_data", "status", "T_value", "rest_info", "handle", "all_status", "info"])
+
+    def test_an_override_s_name_and_parameters_are_its_base_s(self):
+        self.put("calc.py", self.BASE + textwrap.dedent("""\
+
+
+            from typing import override
+
+
+            class Handler(Base):
+                @override
+                def handle(self, raw_data):
+                    status = raw_data
+                    return status
+            """))
+        self.assertEqual([message.split("`")[1] for _, _, _, message in self.found()], ["status"])
 
     def test_a_name_on_a_line_the_change_left_alone_is_not_found(self):
         self.put("calc.py", self.BASE.replace("return value", "return value + 1"))

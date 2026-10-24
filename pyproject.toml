@@ -33,8 +33,9 @@ dev = [
 # and warnings, and W505 for comments and docstrings. No E501: code wraps at 120 by eye, since breaking a long
 # expression can read worse than leaving it; a line of prose never does.
 # Then the coding rules the agents are given that a linter can apply (docs/quality-gate.md): a docstring on every public
-# module, class, method and function, presence only. Not D105 or D107: a magic method says what it does by its name,
-# and the class's docstring documents its __init__, as nearly all of main does.
+# module, class, method and function, presence only. Not D105 or D107, which fire on nearly all of main: 1 of 1 magic
+# method, 8 of 10 __init__, whose class's docstring documents it. No blind except Exception (BLE001) is in ruff's
+# defaults, which extend-select keeps; a select would drop it.
 extend-select = ["B", "SIM", "UP", "S", "C90", "PLE", "PLW", "W505", "D100", "D101", "D102", "D103", "D104", "D106"]
 
 [tool.ruff.lint.pycodestyle]

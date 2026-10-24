@@ -4451,18 +4451,24 @@ def _judged_files(change: GateChange) -> tuple[list[dict], dict[str, tuple[list[
     or parsed; and, by path, the scored functions of each of the others, with the lines the change adds to it."""
     out: list[dict] = []
     judged: dict[str, tuple[list[_ScoredFunction], set[int]]] = {}
-    for path, added in change.changed.items():
-        if not added or not path.endswith(".py") or path.startswith(_COMPLEXITY_EXEMPT):
-            continue
-        if _is_link_or_special(change, path):
-            continue
-        functions, why = _working_functions(change, path)
-        if functions is None:
+    for path, added, tree, why in _parsed_changed_files(change, skip=lambda path: path.startswith(_COMPLEXITY_EXEMPT)):
+        if tree is None:
             out.append(_finding(path, None, "not-scored", f"{why}, so its functions were not scored.",
                                 severity="error"))
-            continue
-        judged[path] = (functions, added)
+        else:
+            judged[path] = (_scored_functions(tree), added)
     return out, judged
+
+
+def _parsed_changed_files(change: GateChange, skip: Callable[[str], bool] = lambda path: False,
+                          ) -> Iterator[tuple[str, set[int], ast.Module | None, str]]:
+    """Each .py file the change adds lines to, as a regular file of the working tree (_is_link_or_special) whose path
+    skip does not accept: its path, the lines the change adds to it, and its syntax tree and "", or None and why there
+    is none, as _parse_working_file gives them. Files under mutmut's state are not changed files, as
+    GateChange.from_tree says."""
+    for path, added in change.changed.items():
+        if added and path.endswith(".py") and not skip(path) and not _is_link_or_special(change, path):
+            yield path, added, *_parse_working_file(change, path)
 
 
 def _is_link_or_special(change: GateChange, path: str) -> bool:
@@ -4676,15 +4682,11 @@ VAGUE_NAME_WORDS = frozenset({"data", "info", "value", "status", "handle", "mana
 
 def vague_names(change: GateChange) -> list[dict]:
     """The vague-names check's find: each name that a line the change added to a Python file binds and that
-    VAGUE_NAME_WORDS forbids, once per name and file, at the first such line. A name is bound by an assignment
-    (augmented, annotated or :=, to a name or to an attribute of self or cls), as a parameter, a def or class, a for or
-    comprehension target, or a with's as. A changed file that cannot be read or parsed is a finding saying so; files
-    under mutmut's state are not changed files, as GateChange.from_tree says."""
+    VAGUE_NAME_WORDS forbids, once per name and file, at the first such line; a binding on a line the change did not
+    add is never reported. A name is bound as _bound_names says. A changed file that cannot be read or parsed is a
+    finding saying so; the files are those _parsed_changed_files gives."""
     out = []
-    for path, added in change.changed.items():
-        if not added or not path.endswith(".py") or _is_link_or_special(change, path):
-            continue
-        tree, why = _parse_working_file(change, path)
+    for path, added, tree, why in _parsed_changed_files(change):
         if tree is None:
             out.append(_finding(path, None, "not-read", f"{why}, so its names were not read."))
             continue
@@ -4699,13 +4701,33 @@ def vague_names(change: GateChange) -> list[dict]:
 
 
 def _bound_names(tree: ast.Module) -> Iterator[tuple[str, tuple[int, int]]]:
-    """Each name tree binds, as vague_names lists the ways, with where: the line, from 1, and the column, from 0, of
-    what binds it, such as its def."""
+    """Each name tree binds, with where: the line, from 1, and the column, from 0, of what binds it, such as its def.
+    A name is bound by an assignment (augmented, annotated or :=, to a name or to an attribute of self or cls), as a
+    parameter, a def or class, a for or comprehension target, a with's or an except's as, an import, a match pattern's
+    capture, or a type parameter. global and nonlocal bind nothing new. A function marked @override, as PEP 698
+    marks one whose name and signature its base class fixes, binds neither its name nor its parameters here."""
+    fixed: set[int] = set()  # the id()s of the defs and parameters an @override fixes
     for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+                (d.id if isinstance(d, ast.Name) else d.attr if isinstance(d, ast.Attribute) else "") == "override"
+                for d in node.decorator_list):
+            a = node.args
+            fixed |= {id(node), *map(id, [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg])}
+    for node in ast.walk(tree):
+        if id(node) in fixed:
+            continue
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             yield node.name, (node.lineno, node.col_offset)
         elif isinstance(node, ast.arg):
             yield node.arg, (node.lineno, node.col_offset)
+        elif isinstance(node, ast.alias) and node.name != "*":
+            # `import a.b` binds a.
+            yield node.asname or node.name.partition(".")[0], (node.lineno, node.col_offset)
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar, ast.TypeVar, ast.ParamSpec,
+                               ast.TypeVarTuple)) and node.name:
+            yield node.name, (node.lineno, node.col_offset)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            yield node.rest, (node.lineno, node.col_offset)
         elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
             yield node.id, (node.lineno, node.col_offset)
         elif (isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store) and isinstance(node.value, ast.Name)
