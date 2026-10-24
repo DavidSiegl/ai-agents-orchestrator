@@ -3960,7 +3960,8 @@ class _BasePool:
         that holds no Python now."""
         self._left = bases  # the base functions that have lent no score yet, by old path
         # (old path, body) of each body that the working tree's file holds fewer times than its base did: moved out of
-        # it, edited or deleted, so that one of its base functions may lend to a function of another file.
+        # it, edited or deleted, so that its base functions with that body may lend to functions of other files. The
+        # count does not ask where the working tree's copies came from (TODO.md: "A body moved into a file ...").
         self._gone = {(old, body) for old, functions in bases.items()
                       for body, n in collections.Counter(g.body for g in functions).items()
                       if sum(f.body == body for f in now[old]) < n}

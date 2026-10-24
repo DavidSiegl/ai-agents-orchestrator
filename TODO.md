@@ -103,6 +103,14 @@ was done.
   recursion cycle; `_calls_itself` sees a function calling itself by name, or a method as `self.m`, `cls.m` or
   `C.m`, but not a cycle through other functions, nor a call through an alias. A function that recurses through a
   helper scores a point less than the paper says. Closes with a call graph of the module, scored per cycle.
+- **A body moved into a file hides a function with that body moved out of it, which is then judged as new.** The
+  cognitive-complexity check takes a base function as gone from its file when the file now holds its body fewer times
+  than the base did (`_BasePool._gone`), without asking where the working tree's copies came from. So when `calc.py`'s
+  `big` moves unchanged to `lib.py` and `other.py`'s `dup`, with the same body, moves unchanged into `calc.py`, `dup`
+  takes `big`'s base in `calc.py` and `big` is "a new function": two unchanged moves fail the gate (review 01 round 7,
+  R7-F1, a regression from the round-6 rule; deferred by the user, 2026-10-24, as rare: it needs two over-limit
+  functions with one body in two of the change's files). Closes with a count that pairs each working copy with the
+  base it came from, so an arrival does not make up for a departure.
 - **A copy of a function whose original the change edits keeps the old score and passes.** The cognitive-complexity
   check pairs identical bodies before names (`_base_scores`), so that a function renamed unchanged keeps its score
   and a new function under its old name is new. A change that edits `big` in place and adds `copied`, a copy of
