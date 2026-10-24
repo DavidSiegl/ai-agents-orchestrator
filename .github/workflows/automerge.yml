@@ -1,0 +1,51 @@
+# Keeps auto-merge on for a pull request into main from a branch of this repository, so GitHub merges it with a
+# merge commit once the ci-cd ruleset's required check, continuous-integration/jenkins/pr-head, passes; when that
+# check has passed already, gh merges at once. Left for a human to merge, with auto-merge turned off if it is on:
+# drafts, pull requests labelled no-automerge, the orchestrator's own pull requests (branches under BRANCH_PREFIX,
+# orchestrator/ in orchestrator.py), and pull requests into any branch but main, which no ruleset requires a check
+# for, so auto-merge would merge them unchecked. Pull requests from forks are not touched at all: their runs get a
+# read-only token.
+name: Auto-merge
+
+on:
+  pull_request:
+    # edited: a changed base branch. synchronize: a push, the first event a pull request with a merge conflict
+    # gets once it is resolved, since GitHub runs no pull_request workflow during a conflict. auto_merge_enabled:
+    # auto-merge turned on by hand, which a held pull request gets turned off again; the workflow's own turning it
+    # on starts no run, as nothing done with github.token does.
+    types: [opened, reopened, edited, synchronize, ready_for_review, converted_to_draft, labeled, unlabeled,
+            auto_merge_enabled]
+
+permissions: {}
+
+jobs:
+  auto-merge:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    # One run per pull request at a time: gh pr create adds labels after opening, so the opened and labeled
+    # events arrive together, and each run must see what the one before it did.
+    concurrency:
+      group: auto-merge-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    steps:
+      # Decided from the pull request as it is now, not from the event, which can predate a label or a draft.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          pr=$(gh pr view "$PR" --json state,isDraft,labels,baseRefName,headRefName,autoMergeRequest --jq '[.state,
+            .isDraft or any(.labels[]; .name == "no-automerge") or .baseRefName != "main"
+              or (.headRefName | startswith("orchestrator/")),
+            .autoMergeRequest != null] | @tsv')
+          read -r state held queued <<<"$pr"
+          if [ "$state" != OPEN ]; then
+            echo "#$PR is $state"
+          elif [ "$held" = true ]; then
+            if [ "$queued" = true ]; then gh pr merge "$PR" --disable-auto; fi
+          elif [ "$queued" = false ]; then
+            gh pr merge "$PR" --auto --merge
+          fi

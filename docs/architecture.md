@@ -179,7 +179,7 @@ running `after` callbacks on `tick`), and `TestRunProcess` runs real child proce
 
 ## Tooling
 
-- `pyproject.toml`: no runtime dependencies, Python 3.13+; pytest and pytest-cov in the `dev` group, PyInstaller
+- `pyproject.toml`: no runtime dependencies, Python 3.13+; pytest, pytest-cov and Hypothesis in the `dev` group, PyInstaller
   in the `build` group.
 - `packaging/build-binary.sh`: builds `dist/orchestrator-<os>-<arch>` (`linux-x86_64`, `macos-arm64`), a
   PyInstaller one-file binary with Python and tkinter inside, and its `.sha256`, then smoke-tests it: `--help`,
@@ -192,7 +192,10 @@ running `after` callbacks on `tick`), and `TestRunProcess` runs real child proce
   `pyproject.toml` version as a GitHub release, with `orchestrator.py` attached as the zipapp `orchestrator.pyz`
   and the Linux binary, each with its `.sha256`, in one `gh release create`. Its parameter `GIT_REF` builds
   another branch; such a build never releases.
-- `.github/workflows/macos-binary.yml`, the only GitHub Action: Jenkins has no Mac, so when a release is
+- `.github/workflows/automerge.yml`: keeps auto-merge on for a pull request into `main` from a branch of this
+  repository, so it merges with a merge commit once Jenkins' required check passes; its header lists the pull
+  requests it leaves to a human.
+- `.github/workflows/macos-binary.yml`: Jenkins has no Mac, so when a release is
   published, or by hand for an existing tag, it runs `packaging/build-binary.sh` on `macos-latest` and uploads
   `orchestrator-macos-arm64` and its `.sha256` to that release with `gh release upload --clobber`. With only
   `contents: write`, it never creates a release or a tag; everything else stays in Jenkins.

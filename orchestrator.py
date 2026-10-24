@@ -95,6 +95,7 @@ GITLEAKS_TIMEOUT = 300
 # What the preflight tells a user whose machine lacks gitleaks with its `git` subcommand (8.19 and later).
 GITLEAKS_INSTALL = ("install gitleaks 8.19 or later where the agents run (https://github.com/gitleaks/gitleaks#installing; "
                     "on Arch, `pacman -S gitleaks`)")
+# .github/workflows/automerge.yml repeats this prefix to leave the orchestrator's pull requests to a human; change both.
 BRANCH_PREFIX = "orchestrator/"
 REMOTE = "origin"
 # prune deletes a run's branch once its pull request is merged, or closed this long: time to reopen it.
@@ -263,7 +264,8 @@ def ci_credentials(environ, path: str) -> dict[str, str]:
     if len(found) == len(CI_ENV):
         return found
     try:
-        with open(path, encoding="utf-8") as f:
+        # newline="": parse_env_file must see a carriage return to refuse it.
+        with open(path, encoding="utf-8", newline="") as f:
             if os.fstat(f.fileno()).st_mode & 0o077:
                 raise OrchestratorError(f"{path} holds tokens but others may read it; run: chmod 600 {path}")
             text = f.read()
@@ -274,20 +276,35 @@ def ci_credentials(environ, path: str) -> dict[str, str]:
     return {**parse_env_file(text, path), **found}
 
 
+# An assignment line of an env file, blanks at its ends removed, in the forms sh reads literally: `export ` or
+# not, NAME=, then a value that is single-quoted, double-quoted without what expands inside double quotes, or
+# unquoted without blanks, quotes, a ~ (expanded at the start and after a ":"), a { (brace-expanded in an
+# argument of export) or what sh treats as syntax there; then nothing, or blanks and a comment. No value holds a
+# NUL, which sh drops. Group 1 is the name, 2 to 4 the value in its form.
+_ENV_ASSIGNMENT = re.compile(r"""(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)="""
+                             r"""(?:'([^'\x00]*)'|"([^"\\$`\x00]*)"|([^ \t'"\\$`;&|<>()~{\x00]*))"""
+                             r"""(?:[ \t]+(?:#.*)?)?""", re.DOTALL)
+
+
 def parse_env_file(text: str, path: str) -> dict[str, str]:
-    """The NAME=value lines of text, with the quotes and `export ` that a file also sourced by a shell has."""
+    """The NAME=value lines of text, with the quotes, `export ` and comments that a file also sourced by a shell has.
+
+    Whatever it accepts means the same to sh: a line ends at "\n" alone, only spaces and tabs are blanks, and a
+    value is quoted, or unquoted without blanks, quotes or shell syntax. Raises OrchestratorError, naming path and
+    line but never its content, for a line in any other form, which sh would read otherwise or not at all, and
+    for a carriage return outside a comment, which a file with Windows line ends puts at the end of every value.
+    """
     values = {}
-    for i, line in enumerate(text.splitlines(), 1):
-        line = line.strip()
+    for i, raw in enumerate(text.split("\n"), 1):
+        line = raw.strip(" \t")
         if not line or line.startswith("#"):
             continue
-        name, sep, value = line.removeprefix("export ").partition("=")
-        name, value = name.strip(), value.strip()
-        if not sep or not re.fullmatch(r"[A-Za-z_]\w*", name, re.ASCII):
+        if "\r" in line:
+            raise OrchestratorError(f"{path}:{i}: a carriage return; save the file with Unix line ends")
+        m = _ENV_ASSIGNMENT.fullmatch(line)
+        if not m:
             raise OrchestratorError(f"{path}:{i}: expected NAME=value")
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-            value = value[1:-1]
-        values[name] = value
+        values[m.group(1)] = next(v for v in m.group(2, 3, 4) if v is not None)
     return values
 
 
@@ -2333,13 +2350,30 @@ def new_run_id() -> str:
     return f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}"
 
 
+def _labelled_word(label: str, words: tuple[str, ...]) -> str:
+    """A regex for `label:`, blanks, then one of words: group 1 is `label:` with the blanks, group 2 the word.
+
+    Every reader and rewriter of a verdict or gate line matches through this, so they agree on which lines hold a
+    word. The word must end there: a word character after it continues it into another word, unless it is one of
+    the underscores that close emphasis, as in `_VERDICT: APPROVE_`.
+    """
+    return rf"({label}:\s*)({'|'.join(map(re.escape, words))})(?=_*(?!\w))"
+
+
+def _first_line_word(text: str, label: str, words: tuple[str, ...]) -> str | None:
+    """The one of words that follows `label:` on text's first non-blank line, Markdown emphasis around them
+    tolerated; None when that line has none of them, or when text is blank."""
+    pattern = _labelled_word(label, words)
+    for line in text.splitlines():
+        if line.strip():
+            m = re.search(pattern, line)
+            return m.group(2) if m else None
+    return None
+
+
 def parse_verdict(review: str) -> str | None:
     """The verdict on the review's first non-blank line, tolerating Markdown emphasis around it."""
-    for line in review.splitlines():
-        if line.strip():
-            m = re.search(rf"VERDICT:\s*({APPROVE}|{CHANGES_REQUESTED})\b", line)
-            return m.group(1) if m else None
-    return None
+    return _first_line_word(review, "VERDICT", (APPROVE, CHANGES_REQUESTED))
 
 
 def parse_blocked(report: str) -> str | None:
@@ -2354,11 +2388,7 @@ def parse_blocked(report: str) -> str | None:
 
 def parse_gate(quality: str) -> str | None:
     """The gate on the quality file's first non-blank line, tolerating Markdown emphasis around it."""
-    for line in quality.splitlines():
-        if line.strip():
-            m = re.search(rf"GATE:\s*({GATE_OK}|{GATE_ERROR}|{GATE_BUILD_FAILED})\b", line)
-            return m.group(1) if m else None
-    return None
+    return _first_line_word(quality, "GATE", (GATE_OK, GATE_ERROR, GATE_BUILD_FAILED))
 
 
 def _under_gate_line(quality: str, line: str) -> str:
@@ -2485,13 +2515,22 @@ def _diff_git_path(names: str) -> str | None:
 
 
 def _unquote(name: str) -> str:
-    """A path as git quotes it when it holds a quote, a backslash or a control character."""
+    """A path as git quotes it when it holds a quote, a backslash or a control character, or, with core.quotePath
+    on, a byte above 0x7f; any other name as it is. The path comes back as os.fsdecode makes it."""
     if len(name) < 2 or not (name.startswith('"') and name.endswith('"')):
         return name
     escapes = {"a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v", '"': '"', "\\": "\\"}
-    return re.sub(r'\\([0-7]{3}|.)',
-                  lambda m: chr(int(m.group(1), 8)) if len(m.group(1)) == 3 else escapes.get(m.group(1), m.group(1)),
-                  name[1:-1])
+    # An octal escape is one byte of the name, so a character above 0x7f is a run of them: gather the bytes and
+    # decode them together.
+    raw = bytearray()
+    for m in re.finditer(r'\\([0-3][0-7]{2}|.)|[^\\]+|\\', name[1:-1], re.DOTALL):
+        if m.group(1) is None:
+            raw += os.fsencode(m.group(0))
+        elif len(m.group(1)) == 3:
+            raw.append(int(m.group(1), 8))
+        else:
+            raw += os.fsencode(escapes.get(m.group(1), m.group(1)))
+    return os.fsdecode(bytes(raw))
 
 
 # quality_report's default for tests: the file has no tests section, as when the gate wrote it, which runs no tests.
@@ -5263,10 +5302,11 @@ def _check_condition(name: str, n: int) -> str:
 
 def _failed_by(quality: str, conditions: list[str]) -> str:
     """quality with GATE: ERROR, and conditions last among its failed conditions, a section it gains, before its
-    first other one, when it has none."""
+    first other one below the gate line, when it has none. The gate line stays the first non-blank one, even when
+    it is itself a `## ` heading, so parse_gate reads ERROR from the result."""
     lines = quality.split("\n")
     at = next((i for i, x in enumerate(lines) if x.strip()), 0)
-    lines[at] = re.sub(rf"(GATE:\s*){GATE_OK}\b", rf"\g<1>{GATE_ERROR}", lines[at], count=1)
+    lines[at] = re.sub(_labelled_word("GATE", (GATE_OK,)), rf"\g<1>{GATE_ERROR}", lines[at], count=1)
     bullets = [f"- {c}" for c in conditions]
     if FAILED_CONDITIONS in lines:
         end = lines.index(FAILED_CONDITIONS) + 2
@@ -5274,7 +5314,7 @@ def _failed_by(quality: str, conditions: list[str]) -> str:
             end += 1
         lines[end:end] = bullets
     else:
-        first = next((i for i, x in enumerate(lines) if x.startswith("## ")), len(lines))
+        first = next((i for i in range(at + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
         lines[first:first] = [FAILED_CONDITIONS, "", *bullets, ""]
     return "\n".join(lines)
 

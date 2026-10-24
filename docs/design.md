@@ -276,7 +276,8 @@ builds the macOS binary when that release is published and uploads it there. It 
 that exists. Both build with `packaging/build-binary.sh`, so the binaries cannot be built or smoke-tested
 differently. The macOS binary is built only for Apple Silicon and is unsigned, apart from PyInstaller's ad-hoc
 signature, and nobody tests it by hand: the Action's smoke tests, the window opened and closed included, are its
-check.
+check. A second Action merges a pull request into `main` once Jenkins passes it, unless a human is to merge it;
+the orchestrator's own pull requests always wait for one.
 
 ## Design decisions
 

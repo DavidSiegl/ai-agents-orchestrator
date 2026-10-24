@@ -28,6 +28,22 @@ was done.
   `refs/orchestrator/<key>/locked/` (`RunState.lock_ref`) until the run ends `done` (`Workflow._clean_up_locks`);
   `close` and `prune` do not delete them, so a failed run's locked snapshots are never collected by `git gc`. Closes
   with `close` and `prune` deleting `RunState.refs_prefix` as they delete the run's branch.
+- **An agent's pull request can reach `main` on rules it wrote itself, with no human.** Jenkins's App reports
+  `continuous-integration/jenkins/pr-head`, which the agents' token cannot post, but a pull request build runs
+  the pull request's own `Jenkinsfile` and gate (`docs/quality-gate.md`, What the Gate stage judges), and since
+  `automerge.yml` a pull request into `main` from a branch outside `orchestrator/` merges once that status is
+  green. Raised by the cross-review of `pr-automerge` (F5, 2026-10-24): "A branch the agents push under any other
+  name, once a pull request is open on it, merges into `main` (and so into a release) without a human". Closes
+  with an approving review required on `main` that the agents cannot give (Homelab `.scratch/agent-identity`,
+  ticket 03), or a Jenkinsfile and gate a pull request build takes from `main` rather than from the pull request.
+- **A pull request moved off `main` can merge unchecked before `automerge.yml` turns auto-merge off.** No ruleset
+  requires a check outside `main`, so once a pull request with auto-merge on targets another branch and has no
+  conflict, GitHub merges it at once, racing the run that would turn auto-merge off; and a conflict cleared from
+  the base side starts no run. Raised by the cross-review of `pr-automerge` (R3-1(b), 2026-10-24): "After the push
+  that resolves the conflict, the PR is CLEAN against a base with no required check, so GitHub merges it at once
+  and unchecked", "In (b) that run still races GitHub's immediate merge. A conflict cleared by a change to the base
+  rather than the head raises no pull-request event at all." Closes with a ruleset that requires the check on
+  every branch, or one that restricts merges outside `main`.
 - **The secret scan does not look inside a file git takes for binary.** With no attributes, git still calls a file
   binary when its first 8000 bytes hold a NUL, and `git log -p` prints "Binary files ... differ" for it, to gitleaks
   and to `Host._allow_comments` alike, so a secret or a `gitleaks:allow` in such a file is pushed unscanned. gitleaks'
