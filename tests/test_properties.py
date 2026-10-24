@@ -302,7 +302,7 @@ class TestEnvFile(unittest.TestCase):
 GATES = (GATE_OK, GATE_ERROR, GATE_BUILD_FAILED)
 VERDICTS = (APPROVE, CHANGES_REQUESTED)
 blank_lines = st.lists(padding).map(lambda ls: "".join(line + "\n" for line in ls))
-emphasis = st.sampled_from([("", ""), ("**", "**"), ("_", "_"), ("`", "`"), ("# ", ""), ("> ", "")])
+emphasis = st.sampled_from([("", ""), ("**", "**"), ("_", "_"), ("`", "`"), ("# ", ""), ("## ", ""), ("> ", "")])
 # What may follow the word on its line: nothing, or text after a space.
 after_word = st.one_of(st.just(""), text_without(LINE_BREAKS).map(lambda t: " " + t))
 non_blank_line = text_without(LINE_BREAKS, min_size=1).filter(str.strip)
@@ -345,6 +345,7 @@ class TestFirstLineParsers(unittest.TestCase):
 
     @given(blank_lines, emphasis, after_word, st.text())
     @example("", ("_", "_"), "", "")  # _failed_by matched the word with its own \b, which fails before "_"
+    @example("", ("## ", ""), "", "")  # _failed_by put its new section above the gate line, the first `## ` one
     def test_a_gate_read_as_ok_reads_as_error_once_a_check_fails_it(self, blanks, marks, after, rest):
         before, behind = marks
         quality = f"{blanks}{before}GATE: {GATE_OK}{behind}{after}\n{rest}"

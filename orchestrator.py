@@ -5066,7 +5066,8 @@ def _check_condition(name: str, n: int) -> str:
 
 def _failed_by(quality: str, conditions: list[str]) -> str:
     """quality with GATE: ERROR, and conditions last among its failed conditions, a section it gains, before its
-    first other one, when it has none."""
+    first other one below the gate line, when it has none. The gate line stays the first non-blank one, even when
+    it is itself a `## ` heading, so parse_gate reads ERROR from the result."""
     lines = quality.split("\n")
     at = next((i for i, x in enumerate(lines) if x.strip()), 0)
     lines[at] = re.sub(_labelled_word("GATE", (GATE_OK,)), rf"\g<1>{GATE_ERROR}", lines[at], count=1)
@@ -5077,7 +5078,7 @@ def _failed_by(quality: str, conditions: list[str]) -> str:
             end += 1
         lines[end:end] = bullets
     else:
-        first = next((i for i, x in enumerate(lines) if x.startswith("## ")), len(lines))
+        first = next((i for i in range(at + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
         lines[first:first] = ["## Failed conditions", "", *bullets, ""]
     return "\n".join(lines)
 
