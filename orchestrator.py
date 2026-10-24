@@ -2099,8 +2099,8 @@ def _config_section(edited, rules_from: str | None, mutmut_state) -> list[str]:
         out.append("- The change edits `uv.lock`, which pins the versions of the linters the gate ran.")
     if mutmut_state:
         out.append(f"- The change adds or edits {_series([f'`{f}`' for f in mutmut_state], limit=5)} under "
-                   f"`{_MUTMUT_STATE}/`, where mutmut keeps its state. The gate's checks leave them out: none selects a "
-                   f"test or a function in them or counts them as a change to the code, and the surviving-mutants "
+                   f"`{_MUTMUT_STATE}/`, where mutmut keeps its state. The gate's checks leave them out: none selects "
+                   f"a test or a function in them or counts them as a change to the code, and the surviving-mutants "
                    f"check runs mutmut without them. The linters read them as they read any tracked file.")
     return out
 
@@ -2242,17 +2242,17 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
                  coverage: str | None = None, tests: str | None = None) -> str:
     """The quality file for the change from base to the working tree of the git repository at cwd.
 
-    Runs each GATE_TOOLS linter whose files the repository tracks over those files, with the rules of the
-    pyproject.toml at rules, or the tree's own, and lists the findings on lines the change added and the lineless
-    ones on files it touched. Then runs each of checks, such as gate_checks gives, on the change as
-    GateChange.from_tree gives it, and lists what it finds, as an issue or as a finding to weigh as its fails says. The gate is ERROR when there is such a linter finding or a
-    failing check's finding, when a linter is missing, fails or prints nothing readable, when a file a linter reads
-    and the change adds lines to holds a line end that git does not count, as stray_line_ends finds, when tests, a
-    JUnit report of the tree's tests such as pytest's --junitxml, has a failing test, or when coverage, a Cobertura
-    report of the tree such as pytest-cov's coverage.xml, puts new code below GATE_MIN_COVERAGE percent on
+    Runs each GATE_TOOLS linter whose files the repository tracks over those files, with the rules of the pyproject.toml
+    at rules, or the tree's own, and lists the findings on lines the change added and the lineless ones on files it
+    touched. Then runs each of checks, such as gate_checks gives, on the change as GateChange.from_tree gives it, and
+    lists what it finds, as an issue or as a finding to weigh as its fails says. The gate is ERROR when there is such a
+    linter finding or a failing check's finding, when a linter is missing, fails or prints nothing readable, when a file
+    a linter reads and the change adds lines to holds a line end that git does not count, as stray_line_ends finds, when
+    tests, a JUnit report of the tree's tests such as pytest's --junitxml, has a failing test, or when coverage, a
+    Cobertura report of the tree such as pytest-cov's coverage.xml, puts new code below GATE_MIN_COVERAGE percent on
     GATE_MIN_NEW_LINES or more new lines to cover; else OK. Suppressions the change added are listed, not counted
-    against it. Paths are absolute or relative to the process's working directory. A file name that is not UTF-8
-    appears in the quality file with each byte it cannot decode as `\\xNN`.
+    against it. Paths are absolute or relative to the process's working directory. A file name that is not UTF-8 appears
+    in the quality file with each byte it cannot decode as `\\xNN`.
 
     Raises OrchestratorError when it cannot judge: cwd is not in a git work tree, base names no commit, there
     is no rules file, the test or coverage report cannot be read, or git prints what it cannot decode outside
@@ -2568,7 +2568,8 @@ def weakened_tests(change: GateChange) -> list[dict]:
             except (OrchestratorError, OSError, UnicodeDecodeError) as e:
                 unreadable.append(_finding(new or old, None, "unreadable",
                                            f"could not be read, so its tests were not checked: {e}", severity="error"))
-        code_changed = any(detector.is_source(p) and not detector.is_test(p) for pair in change.files for p in pair if p)
+        code_changed = any(detector.is_source(p) and not detector.is_test(p)
+                           for pair in change.files for p in pair if p)
         out += unreadable + (detector.find(files, code_changed) if files else [])
     return out
 
