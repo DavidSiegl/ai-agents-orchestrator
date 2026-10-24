@@ -38,6 +38,7 @@ import contextlib
 import difflib
 import fnmatch
 import functools
+import hashlib
 import http.client
 import io
 import itertools
@@ -400,6 +401,12 @@ The quality gate passed on this change; its report is in {quality_path}."""
 QUALITY_UNRESOLVED_NOTE = """\
 The quality gate still did not pass after the Builder's last quality round; \
 its unresolved findings are in {quality_path}. Weigh them as you would your own."""
+
+# QUALITY_UNRESOLVED_NOTE for a quality loop that stopped because a round failed on what the one before it had.
+QUALITY_STUCK_NOTE = """\
+The quality gate still did not pass, and its last quality round failed on nothing that the round before it \
+had not already failed on, so the Builder was not asked again; its unresolved findings are in {quality_path}. \
+Weigh them as you would your own."""
 
 # Appended to the verdict step's prompt when a turn of the round changed files that an earlier step locked.
 LOCKED_NOTE = """\
@@ -2397,6 +2404,9 @@ def _unquote(name: str) -> str:
 
 # quality_report's default for tests: the file has no tests section, as when the gate wrote it, which runs no tests.
 _NO_TESTS_SECTION: list = []
+# The headings of the quality file's sections that gate_failures reads, besides its numbered findings.
+FAILED_CONDITIONS = "## Failed conditions"
+FAILING_TESTS = "## Failing tests"
 
 
 def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (), issues=(), to_weigh=(),
@@ -2420,7 +2430,7 @@ def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (),
     """
     out = [f"GATE: {gate}", "", intro]
     if conditions:
-        out += ["", "## Failed conditions", "", *(f"- {c}" for c in conditions)]
+        out += ["", FAILED_CONDITIONS, "", *(f"- {c}" for c in conditions)]
     if gate != GATE_BUILD_FAILED:
         out += _issues_section(issues, elsewhere)
         if to_weigh:
@@ -2437,6 +2447,58 @@ def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (),
     if edited or mutmut_state:
         out += _config_section(edited, rules_from, mutmut_state)
     return "\n".join(out) + "\n"
+
+
+class GateFailures(NamedTuple):
+    """What a quality file says failed the gate, in a form two quality rounds can be compared by."""
+    conditions: list[str]  # the failed conditions, as the file words them
+    # By check, the first word of a finding's rule, or "tests" for a failing test: finding_fingerprint of each
+    # finding that fails the gate, and of each failing test, in the file's order. Findings to weigh are left out.
+    fingerprints: dict[str, list[str]]
+
+    def repeats(self, earlier: "GateFailures") -> bool:
+        """Whether these failures are the earlier ones again, or fewer of them: something failed, and nothing that
+        had not failed before. A finding counts as the same wherever it moved (finding_fingerprint), a condition
+        only when its words are."""
+        now = self._all()
+        return bool(now) and now <= earlier._all()
+
+    def _all(self) -> set[str]:
+        return {*self.conditions, *(f for fs in self.fingerprints.values() for f in fs)}
+
+
+def finding_fingerprint(path: str | None, rule: str, message: str) -> str:
+    """A short hash that names a finding however its line moves: its path, its rule and its message without
+    digits, since a line number in it moves too. A finding about the whole change has no path."""
+    key = "\0".join([path or "", rule, re.sub(r"\d", "", message)])
+    return hashlib.sha256(key.encode("utf-8", "surrogateescape")).hexdigest()[:16]
+
+
+# A numbered finding as _numbered writes it: where, then severity, rule and message.
+_NUMBERED_FINDING = re.compile(r"\d+\. (?:`(?P<path>.+?)(?::\d+| \(the whole file\))`|The change as a whole:) "
+                               r"\S+ (?P<rule>.+?): (?P<message>.*)")
+_FAILING_TEST = re.compile(r"- `(?P<name>.+)`: .*")
+
+
+def gate_failures(quality: str) -> GateFailures:
+    """What the quality file, as quality_report and judge_run write it, says failed the gate: its failed conditions,
+    the numbered findings before a TO_WEIGH_NOTE in each section, and its failing tests."""
+    conditions: list[str] = []
+    fingerprints: dict[str, list[str]] = {}
+    section, weighing = "", False
+    for line in quality.split("\n"):
+        if line.startswith("## "):
+            section, weighing = line, False
+        elif line == TO_WEIGH_NOTE:
+            weighing = True
+        elif section == FAILED_CONDITIONS and line.startswith("- "):
+            conditions.append(line[2:])
+        elif section == FAILING_TESTS and (test := _FAILING_TEST.fullmatch(line)):
+            fingerprints.setdefault("tests", []).append(finding_fingerprint(test["name"], "tests", ""))
+        elif not weighing and (finding := _NUMBERED_FINDING.fullmatch(line)):
+            fingerprints.setdefault(finding["rule"].split(" ", 1)[0], []).append(
+                finding_fingerprint(finding["path"], finding["rule"], finding["message"]))
+    return GateFailures(conditions, fingerprints)
 
 
 # The sections of quality_report after its first, each as lines that start with a blank one.
@@ -2487,7 +2549,7 @@ def _numbered(k: int, finding: dict) -> str:
 
 
 def _tests_section(tests: list[tuple[str, str]] | None) -> list[str]:
-    out = ["", "## Failing tests", ""]
+    out = ["", FAILING_TESTS, ""]
     if tests is None:
         return out + ["Jenkins has no test report for this build."]
     out += [f"- `{name}`: {detail.strip().splitlines()[0] if detail.strip() else 'failed'}"
@@ -5114,14 +5176,14 @@ def _failed_by(quality: str, conditions: list[str]) -> str:
     at = next((i for i, x in enumerate(lines) if x.strip()), 0)
     lines[at] = re.sub(rf"(GATE:\s*){GATE_OK}\b", rf"\g<1>{GATE_ERROR}", lines[at], count=1)
     bullets = [f"- {c}" for c in conditions]
-    if "## Failed conditions" in lines:
-        end = lines.index("## Failed conditions") + 2
+    if FAILED_CONDITIONS in lines:
+        end = lines.index(FAILED_CONDITIONS) + 2
         while end < len(lines) and lines[end].startswith("- "):
             end += 1
         lines[end:end] = bullets
     else:
         first = next((i for i, x in enumerate(lines) if x.startswith("## ")), len(lines))
-        lines[first:first] = ["## Failed conditions", "", *bullets, ""]
+        lines[first:first] = [FAILED_CONDITIONS, "", *bullets, ""]
     return "\n".join(lines)
 
 
@@ -6240,15 +6302,31 @@ class Workflow:
             log(f"could not delete the refs under {s.refs_prefix}: {e}")
 
     def _judge_quality(self, n: int) -> bool:
-        """The current quality round of round n; False when its gate sends the change back to the gated step."""
-        s = self.state
-        gate = self._quality(n, s.quality_round)
+        """The current quality round of round n; False when its gate sends the change back to the gated step: when it
+        failed, and on something the quality round before had not failed on (_stuck)."""
+        s, gated = self.state, self.pipeline.gated
+        if gated is None:
+            raise OrchestratorError(f"a quality round in workflow {self.pipeline.name}, which has no quality-gated step")
+        q = s.quality_round
+        gate = self._quality(n, q)
         # As for review rounds: a saved round beyond a lowered limit ends here too.
-        if gate != GATE_OK and s.quality_round < s.max_quality_rounds:
-            s.phase = self.pipeline.gated.id
-            self._save()
+        if gate == GATE_OK or q >= s.max_quality_rounds:
+            return True
+        if self._stuck(n, q):
+            log(f"[quality] round {n}, quality round {q} failed on nothing quality round {q - 1} had not; "
+                f"going on rather than back to {gated.id}")
+            return True
+        s.phase = gated.id
+        self._save()
+        return False
+
+    def _stuck(self, n: int, q: int) -> bool:
+        """Whether quality round q of round n failed on the failures of quality round q-1 again, or fewer of them
+        (GateFailures.repeats): the gated step's turn between them moved none."""
+        if q < 2:
             return False
-        return True
+        before, after = (self.host.read(self.state.quality_path(n, k)) for k in (q - 1, q))
+        return before is not None and after is not None and gate_failures(after).repeats(gate_failures(before))
 
     def _goto(self, step: Step, n: int) -> None:
         """Make step the current one, in round n, and save that; the first editing step starts round 1."""
@@ -6454,7 +6532,10 @@ class Workflow:
         s = self.state
         if not self.ci or not s.quality_round:
             return ""
-        note = QUALITY_PASSED_NOTE if self._gate_passed(n) else QUALITY_UNRESOLVED_NOTE
+        if self._gate_passed(n):
+            note = QUALITY_PASSED_NOTE
+        else:
+            note = QUALITY_STUCK_NOTE if self._stuck(n, s.quality_round) else QUALITY_UNRESOLVED_NOTE
         return "\n\n" + note.format(quality_path=s.quality_path(n, s.quality_round))
 
     def _gate_passed(self, n: int) -> bool:

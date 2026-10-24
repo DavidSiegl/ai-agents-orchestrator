@@ -3209,6 +3209,8 @@ def outcome(gate="OK", *, archived=True, result=None, findings=(), tests=(), tes
 
 
 RED = dict(gate="ERROR", findings=["`limiter.py:3` error ruff F401: `os` imported but unused"])
+# A gate that fails on something else than RED.
+RED2 = dict(gate="ERROR", findings=["`limiter.py:9` error mypy arg-type: Argument 1 has incompatible type"])
 
 
 class FakeCI:
@@ -3740,7 +3742,7 @@ class TestQualityGate(unittest.TestCase):
 
     def test_rounds_run_out(self):
         fake = FakeCI()
-        fake.outcomes = [outcome(**RED), outcome(**RED)]
+        fake.outcomes = [outcome(**RED), outcome(**RED2)]
         reviews = []
         wf, herdr, host, fake, _ = gated({
             "spec": [spec_turn], "build": [build_turn(1), fix_turn(1, 1)],
@@ -3990,6 +3992,94 @@ class TestQualityGate(unittest.TestCase):
         with patch("sys.stderr") as err:
             self.assertEqual(wf.run(), APPROVE)
         self.assertIn("could not list the orchestrator-ci/ branches", "".join(c.args[0] for c in err.write.call_args_list))
+
+
+class TestStuckQualityLoop(unittest.TestCase):
+    def loop(self, *outcomes, builds=3):
+        fake = FakeCI()
+        fake.outcomes = list(outcomes)
+        reviews = []
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "build": [build_turn(1), *(fix_turn(1, q) for q in range(1, builds))],
+            "review": [recording(review_turn(1, APPROVE), reviews)]}, fake=fake)
+        self.assertEqual(wf.run(), APPROVE)
+        return wf, herdr, reviews
+
+    def test_the_same_findings_again_go_to_review(self):
+        wf, herdr, reviews = self.loop(outcome(**RED), outcome(**RED))
+        self.assertEqual(herdr.calls.count(("prompt", "build-a1b2c3")), 2)
+        self.assertEqual(wf.state.quality_round, 2)
+        self.assertIn(orchestrator.QUALITY_STUCK_NOTE.format(quality_path=wf.state.quality_path(1, 2)), reviews[0])
+        self.assertNotIn(orchestrator.QUALITY_UNRESOLVED_NOTE[:40], reviews[0])
+
+    def test_a_fixed_finding_and_a_new_one_keep_the_loop_going(self):
+        both = dict(gate="ERROR", findings=[*RED["findings"], *RED2["findings"]])
+        new = dict(gate="ERROR", findings=[RED2["findings"][0], "`limiter.py:1` error ruff E501: Line too long"])
+        wf, herdr, reviews = self.loop(outcome(**both), outcome(**new), outcome(**RED))
+        self.assertEqual(herdr.calls.count(("prompt", "build-a1b2c3")), 3)
+        self.assertIn(orchestrator.QUALITY_UNRESOLVED_NOTE.format(quality_path=wf.state.quality_path(1, 3)),
+                      reviews[0])
+
+    def test_fewer_of_the_same_findings_go_to_review(self):
+        both = dict(gate="ERROR", findings=[*RED["findings"], *RED2["findings"]])
+        wf, herdr, _ = self.loop(outcome(**both), outcome(**RED))
+        self.assertEqual(herdr.calls.count(("prompt", "build-a1b2c3")), 2)
+
+    def test_a_finding_on_a_moved_line_is_the_same(self):
+        moved = dict(gate="ERROR", findings=["`limiter.py:12` error ruff F401: `os` imported but unused"])
+        _, herdr, _ = self.loop(outcome(**RED), outcome(**moved))
+        self.assertEqual(herdr.calls.count(("prompt", "build-a1b2c3")), 2)
+
+    def test_a_build_that_failed_with_nothing_listed_is_not_stuck(self):
+        failed = outcome("ERROR", archived=False, test_report=False, console="error: cannot install")
+        _, herdr, reviews = self.loop(failed, failed, failed)
+        self.assertEqual(herdr.calls.count(("prompt", "build-a1b2c3")), 3)
+
+
+class TestGateFailures(unittest.TestCase):
+    def test_a_coverage_condition_repeated_is_stuck_until_its_words_change(self):
+        def report(percent):
+            return quality_report("ERROR", "judged.", conditions=[f"Coverage of new code is {percent}%."])
+        fifty, sixty = (orchestrator.gate_failures(report(p)) for p in ("50.0", "60.0"))
+        self.assertTrue(fifty.repeats(orchestrator.gate_failures(report("50.0"))))
+        self.assertFalse(sixty.repeats(fifty))
+        self.assertEqual(fifty.fingerprints, {})
+
+    def test_reads_failing_findings_and_tests_and_leaves_findings_to_weigh_out(self):
+        issue = {"path": "a.py", "line": 3, "severity": "error", "rule": "ruff F401", "message": "`os` unused"}
+        whole = {"path": "b.py", "line": None, "severity": "error", "rule": "mypy", "message": "bad: 2 errors"}
+        weigh = {"path": "a.py", "line": 4, "severity": "warning", "rule": "flaky-tests failed", "message": "x"}
+        quality = quality_report("ERROR", "judged.", conditions=["1 tests fail; each is listed below."],
+                                 issues=[issue, whole], to_weigh=[weigh],
+                                 tests=[("tests.test_a.T.test_x", "AssertionError: 1 != 2")])
+        checked = {"path": None, "line": None, "severity": "error", "rule": "", "message": "too big: 900 lines"}
+        change = SimpleNamespace()
+        quality = orchestrator.judge_run(quality, (
+            orchestrator.OrchestratorCheck("diff-budget", lambda c: orchestrator.CheckFindings([checked], [weigh])),
+        ), change)
+
+        failures = orchestrator.gate_failures(quality)
+
+        fp = orchestrator.finding_fingerprint
+        self.assertEqual(failures.conditions, ["1 tests fail; each is listed below.",
+                                               "1 findings of the `diff-budget` check; each is listed below."])
+        self.assertEqual(failures.fingerprints, {
+            "ruff": [fp("a.py", "ruff F401", "`os` unused")], "mypy": [fp("b.py", "mypy", "bad: 2 errors")],
+            "diff-budget": [fp(None, "diff-budget", "too big: 900 lines")],
+            "tests": [fp("tests.test_a.T.test_x", "tests", "")]})
+
+    def test_a_fingerprint_ignores_digits_and_keeps_paths_and_rules_apart(self):
+        fp = orchestrator.finding_fingerprint
+        self.assertEqual(fp("a.py", "ruff C901", "too complex (16 > 15)"),
+                         fp("a.py", "ruff C901", "too complex (17 > 15)"))
+        self.assertNotEqual(fp("a.py", "ruff C901", "m"), fp("b.py", "ruff C901", "m"))
+        self.assertNotEqual(fp("a.py", "ruff C901", "m"), fp("a.py", "ruff E501", "m"))
+        self.assertEqual(len(fp(None, "x", "y")), 16)
+
+    def test_nothing_failed_repeats_nothing(self):
+        ok = orchestrator.gate_failures(quality_report("OK", "judged."))
+        self.assertEqual(ok, orchestrator.GateFailures([], {}))
+        self.assertFalse(ok.repeats(ok))
 
 
 class TestQualityResume(unittest.TestCase):
@@ -8587,7 +8677,7 @@ GOLDEN_PR_BODY = (
     '\n'
     '## Issues on changed lines\n'
     '\n'
-    '1. `limiter.py:3` error ruff F401: `os` imported but unused\n'
+    '1. `limiter.py:9` error mypy arg-type: Argument 1 has incompatible type\n'
     '\n'
     '</details>\n'
     '\n'
@@ -8643,7 +8733,7 @@ class TestDefaultWorkflowPrompts(unittest.TestCase):
     def test_gate_passes_after_a_fix_then_runs_out(self):
         red = outcome(**RED)
         seen, phases, herdr, host = self.two_gated_rounds(
-            [red, outcome(), red, red], [build_turn(1), fix_turn(1, 1), build_turn(2), fix_turn(2, 1)],
+            [red, outcome(), red, outcome(**RED2)], [build_turn(1), fix_turn(1, 1), build_turn(2), fix_turn(2, 1)],
             [review_turn(1, CHANGES_REQUESTED), review_turn(2, APPROVE)])
 
         self.assertEqual(seen, [GOLDEN[k] for k in ("spec", "build_1", "quality_fix_1_1", "review_1_passed", "fix_2",
@@ -8664,7 +8754,7 @@ class TestDefaultWorkflowPrompts(unittest.TestCase):
     def test_gate_runs_out_then_passes(self):
         red = outcome(**RED)
         seen, *_ = self.two_gated_rounds(
-            [red, red, outcome()], [build_turn(1), fix_turn(1, 1), build_turn(2)],
+            [red, outcome(**RED2), outcome()], [build_turn(1), fix_turn(1, 1), build_turn(2)],
             [review_turn(1, CHANGES_REQUESTED), review_turn(2, APPROVE)])
 
         self.assertEqual(seen, [GOLDEN[k] for k in ("spec", "build_1", "quality_fix_1_1", "review_1_unresolved",
