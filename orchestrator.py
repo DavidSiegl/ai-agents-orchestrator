@@ -1355,6 +1355,10 @@ class Host:
         self.ssh_target = ssh_target
         self._run = run
 
+    def over_ssh(self, ssh_target: str) -> "Host":
+        """A Host that runs its commands on ssh_target over SSH, starting them as this one does."""
+        return Host(ssh_target, self._run)
+
     def run(self, argv: list[str], stdin: str | None = None, timeout: float = 60, *,
             verbatim: bool = False) -> subprocess.CompletedProcess:
         """argv's exit status, standard output and standard error, as text, run here or over SSH on ssh_target.
@@ -1658,18 +1662,21 @@ class Host:
         self.refuse_leaks(cwd, commit, base=base, report_path=report_path)
         self.git(cwd, "push", "--quiet", "--set-upstream", REMOTE, branch, timeout=NETWORK_TIMEOUT)
 
-    def check_gitleaks(self) -> None:
-        """Raise OrchestratorError, saying how to install it, unless gitleaks with its `git` subcommand (8.19 and
-        later), which scan_unpublished runs, is here. Its help, not its version, is asked: a distribution's build may
-        print no version number."""
+    def gitleaks_problem(self) -> str | None:
+        """Why gitleaks with its `git` subcommand (8.19 and later), which scan_unpublished runs, cannot run here, or
+        None when it can. Its help, not its version, is asked: a distribution's build may print no version number."""
         try:
             proc = self.run(["gitleaks", "git", "--help"])
         except OrchestratorError as e:
-            raise OrchestratorError(f"this run pushes, and every push is scanned for secrets first: {GITLEAKS_INSTALL} "
-                                    f"({e})") from e
-        if proc.returncode != 0:
-            raise OrchestratorError(f"this run pushes, and every push is scanned for secrets first, but `gitleaks git` "
-                                    f"does not run: {GITLEAKS_INSTALL}")
+            return f"gitleaks cannot be started ({e})"
+        return None if proc.returncode == 0 else "`gitleaks git` does not run"
+
+    def check_gitleaks(self) -> None:
+        """Raise OrchestratorError, saying how to install it, when gitleaks_problem finds a problem."""
+        problem = self.gitleaks_problem()
+        if problem:
+            raise OrchestratorError(f"this run pushes, and every push is scanned for secrets first, but {problem}: "
+                                    f"{GITLEAKS_INSTALL}")
 
     def refuse_leaks(self, cwd: str, commit: str, *, base: str, report_path: str) -> None:
         """Raise LeaksFound when scan_unpublished finds any in what a push of commit would publish, and
@@ -7809,6 +7816,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                       help=f"stop the run of the changed tests against the base's code, which finds tests that pass "
                            f"without the change, after this long; default {BASE_RUN_BUDGET}")
 
+    sub.add_parser(
+        "doctor", parents=[target], help="check what a run needs, and say what to run for each that is missing",
+        description=f"Check what a run needs where the agents run, on this machine or with --machine on that one: "
+                    f"herdr {dotted(HERDR_MIN_VERSION)} or later and a way to reach it, each harness's "
+                    f"CLI and herdr integration, git {dotted(GIT_MIN_VERSION)} or later, gh logged in, "
+                    f"gitleaks, with --cwd a git checkout with an {REMOTE}, and tkinter for the GUI. Prints a line "
+                    f"each, ok, missing, or warn for one only some runs need, with a fix under each that is not ok. "
+                    f"Installs and changes nothing. Exit status 0 when nothing is missing, {EXIT_ERROR} otherwise.")
+
     gui = sub.add_parser(
         "gui", help="open a window to start, list and resume runs; the default with no arguments where there "
                     "is a display")
@@ -8558,6 +8574,9 @@ def herdrless_command(args: argparse.Namespace) -> int | None:
         return gui_command(args.smoke_test)
     if args.command == "serve":
         return serve_command(args.origin)
+    # Not being in a herdr pane is one of the things doctor reports.
+    if args.command == "doctor":
+        return doctor_command(args.machine, args.cwd)
     # The gate judges the tree it runs in: no herdr, no agents.
     if args.command == "gate":
         return gate_command(args.base, args.config, args.coverage, args.tests, args.out, args.mutation_budget,
@@ -8629,16 +8648,274 @@ def workflows_command(ref: str | None) -> None:
         print_workflows()
 
 
+def in_herdr_pane() -> bool:
+    """Whether this process runs in a pane herdr manages, which a run without a machine needs: without a machine,
+    herdr commands target whichever session is focused, and only such a pane knows it is talking to its own."""
+    return os.environ.get("HERDR_ENV") == "1"
+
+
 def connect(machine: str | None) -> tuple[Herdr, Host]:
     """The herdr the agents run in, and the host the project is on."""
     herdr = Herdr(machine)
     if machine:
         return herdr, Host(herdr.ssh_target())
-    if os.environ.get("HERDR_ENV") != "1":
-        # Without a machine, herdr commands target whichever session is focused;
-        # only a pane herdr manages knows it is talking to its own session.
+    if not in_herdr_pane():
         raise OrchestratorError("not inside a herdr pane; run from herdr, or pass --machine")
     return herdr, Host()
+
+
+# ---------------------------------------------------------------------------
+# doctor: what a run needs, checked before the first run fails on it
+# ---------------------------------------------------------------------------
+
+# How much a failed Check matters, as README's Requirements lists them: no run starts without a REQUIRED one, no run
+# opens its pull request without a NEEDED_FOR_PR one, and an OPTIONAL one only some runs need.
+REQUIRED = "required"
+NEEDED_FOR_PR = "needed-for-pr"
+OPTIONAL = "optional"
+# The oldest herdr and git a run works with, by the numbers their --version prints.
+HERDR_MIN_VERSION = (0, 9)
+GIT_MIN_VERSION = (2, 36)
+
+
+def dotted(version: tuple[int, ...]) -> str:
+    """A version as it is written, such as 0.9 for (0, 9)."""
+    return ".".join(map(str, version))
+
+
+@dataclass(frozen=True)
+class Check:
+    """One thing a run needs, as check_setup found it."""
+    name: str  # what was checked, such as "herdr" or "codex integration"
+    level: str  # REQUIRED, NEEDED_FOR_PR or OPTIONAL
+    ok: bool
+    # What was found, such as a version or a path; when not ok, why, or for a skipped check the check it needs.
+    detail: str
+    fix: str = ""  # a command to run or one sentence; empty when ok; for a skipped check, a pointer to its cause
+
+
+def doctor_command(machine: str | None, cwd: str | None) -> int:
+    """Print check_setup's checks where the agents run, this machine or the saved herdr machine, and of the project
+    at cwd when given, as report_checks does, and return its exit status."""
+    return report_checks(check_setup(Host(), Herdr(machine), cwd))
+
+
+def report_checks(checks: list[Check]) -> int:
+    """Print a line for each check, `ok`, `missing`, or `warn` for an OPTIONAL one that failed, then its name and
+    detail, with its fix on an indented line under it when it has one. Returns 0 when every REQUIRED and
+    NEEDED_FOR_PR check is ok, EXIT_ERROR otherwise."""
+    for c in checks:
+        word = "ok" if c.ok else "warn" if c.level == OPTIONAL else "missing"
+        print(f"{word:<8}{c.name}: {c.detail}")
+        if c.fix:
+            print(f"{'':<8}fix: {c.fix}")
+    return 0 if all(c.ok for c in checks if c.level != OPTIONAL) else EXIT_ERROR
+
+
+class _Unmet(OrchestratorError):
+    """A requirement a check found unmet: the message is what it found; fix, when given, replaces the check's own."""
+
+    def __init__(self, detail: str, fix: str | None = None):
+        super().__init__(detail)
+        self.fix = fix
+
+
+def check_setup(host: Host, herdr: Herdr, cwd: str | None = None) -> list[Check]:
+    """A Check of each thing a run needs, in this order: herdr, reaching herdr, with herdr.machine herdr on that
+    machine, each harness's CLI and herdr integration, git, gh, gitleaks, with cwd the project's git checkout and its
+    origin, and tkinter.
+
+    host runs commands on this machine, where the orchestrator runs and whose herdr a run drives. Without
+    herdr.machine the agents run here too, and herdr is reached from a herdr pane. With it, this herdr must find the
+    machine saved and enabled, and every later check but tkinter's runs on its SSH target, through a Host that starts
+    commands as host does. cwd is the project's directory where the agents run, a leading ~ meaning the home directory
+    there, as for a run; without it the project is not checked. Only reads: it installs, logs in and
+    writes nothing. A check that fails, or cannot run or times out, has ok False and the error as its detail. A check
+    that needs an earlier one that failed is skipped: ok False, with a detail naming that one. So one failure does not
+    stop the rest, and check_setup raises nothing.
+    """
+    checks: list[Check] = []
+
+    def add(*args, **kwargs) -> Check:
+        checks.append(check := _check_unless_skipped(*args, **kwargs))
+        return check
+
+    install_herdr = f"install herdr {dotted(HERDR_MIN_VERSION)} or later, or update it with `herdr update`"
+    found = add("herdr", REQUIRED, install_herdr, lambda: _tool_version(host, "herdr", HERDR_MIN_VERSION))
+    reach_host, reach = _reach_herdr(host, herdr, found)
+    checks.append(reach)
+    # On a machine every check but tkinter's needs reaching it; reach_host is only used once it is.
+    on_machine = reach if herdr.machine else None
+    agents = reach_host or host
+    if herdr.machine:
+        found = add(f"herdr on {herdr.machine}", REQUIRED, install_herdr,
+                    lambda: _tool_version(agents, "herdr", HERDR_MIN_VERSION), on_machine)
+    integrations = _IntegrationStatus(agents)
+    for kind in AGENT_KINDS:
+        level = REQUIRED if kind == DEFAULT_AGENT else OPTIONAL
+        note = f"needed only for a role that runs in {kind}" if level == OPTIONAL else ""
+        add(f"{kind} CLI", level, f"install the {kind} CLI where the agents run",
+            functools.partial(_on_path, agents, kind), on_machine, note)
+        add(f"{kind} integration", level, f"herdr integration install {kind}",
+            functools.partial(integrations.current, kind), found, note)
+    git = add("git", REQUIRED, f"install git {dotted(GIT_MIN_VERSION)} or later",
+              lambda: _tool_version(agents, "git", GIT_MIN_VERSION), on_machine)
+    add("gh", NEEDED_FOR_PR, "install gh (https://cli.github.com)", lambda: _gh_logged_in(agents), on_machine)
+    add("gitleaks", NEEDED_FOR_PR, GITLEAKS_INSTALL, lambda: _gitleaks_runs(agents), on_machine)
+    if cwd is not None:
+        checkout = add("git checkout", NEEDED_FOR_PR,
+                       "pass --cwd a git checkout, or make one with git clone or git init",
+                       lambda: _checkout(agents, cwd), git)
+        add("origin", NEEDED_FOR_PR, f"git remote add {REMOTE} <url>",
+            lambda: agents.git(checkout.detail, "remote", "get-url", REMOTE).strip(), checkout)
+    checks.append(_tkinter_check())
+    return checks
+
+
+def _check_unless_skipped(name: str, level: str, fix: str, probe: Callable[[], str], needs: Check | None = None,
+                          note: str = "") -> Check:
+    """_run_check's Check of probe, or, when needs is given and not ok, a skipped Check naming it without running
+    probe; note is added to the detail of a Check that is not ok."""
+    check = _skipped(name, level, needs) if needs is not None and not needs.ok else _run_check(name, level, fix, probe)
+    if not check.ok and note:
+        check = Check(name, level, False, f"{check.detail}; {note}", check.fix)
+    return check
+
+
+def _skipped(name: str, level: str, needs: Check) -> Check:
+    """The Check of name, skipped because needs is not ok: not ok itself, its fix pointing at needs."""
+    return Check(name, level, False, f"skipped: needs {needs.name}", f"fix {needs.name} first")
+
+
+def _run_check(name: str, level: str, fix: str, probe: Callable[[], str]) -> Check:
+    """The Check of probe, which returns the detail when the requirement is met and raises OrchestratorError, such as
+    _Unmet, when it is not or cannot be checked; fix is the Check's when the error brings none."""
+    try:
+        return Check(name, level, True, probe())
+    except OrchestratorError as e:
+        return Check(name, level, False, str(e), getattr(e, "fix", None) or fix)
+
+
+def _reach_herdr(host: Host, herdr: Herdr, local_herdr: Check) -> tuple[Host | None, Check]:
+    """The Host the agents run on, None when it cannot be reached, and the Check of reaching herdr: as connect
+    needs it, from a herdr pane without herdr.machine; with it, the machine saved and enabled, and its SSH target
+    answering non-interactive SSH, which is skipped when local_herdr, the Check of herdr here, is not ok."""
+    name = "reaching herdr"
+    if herdr.machine and not local_herdr.ok:
+        return None, _skipped(name, REQUIRED, local_herdr)
+    if not herdr.machine:
+        if in_herdr_pane():
+            return host, Check(name, REQUIRED, True, "inside a herdr pane")
+        return host, Check(name, REQUIRED, False, "not inside a herdr pane", "run from a herdr pane, or pass --machine")
+    try:
+        target = herdr.ssh_target()
+        remote = host.over_ssh(target)
+        remote.check(["true"])
+    except OrchestratorError as e:
+        return None, Check(name, REQUIRED, False, str(e), f"save herdr machine {herdr.machine} and enable it, with "
+                                                          f"non-interactive SSH to its target")
+    return remote, Check(name, REQUIRED, True, f"herdr machine {herdr.machine}, over SSH to {target}")
+
+
+def _on_path(host: Host, command: str) -> str:
+    """Where command is on host's PATH; raises _Unmet when it is not there."""
+    proc = host.run(["sh", "-c", 'command -v -- "$1"', "_", command])
+    if proc.returncode != 0 or not proc.stdout.strip():
+        raise _Unmet(f"{command} is not on PATH")
+    return proc.stdout.strip()
+
+
+def _tool_version(host: Host, command: str, minimum: tuple[int, ...]) -> str:
+    """What `command --version` prints, once it is on host's PATH and the first version number it prints is minimum
+    or later; raises _Unmet when it is missing, prints no version or an older one."""
+    _on_path(host, command)
+    said = host.check([command, "--version"]).strip()
+    number = re.search(r"\d+(?:\.\d+)+", said)
+    if number is None:
+        raise _Unmet(f"{command} --version prints no version number: {said!r}")
+    if tuple(int(n) for n in number.group().split(".")) < minimum:
+        raise _Unmet(f"{command} {number.group()} is older than {dotted(minimum)}")
+    return said
+
+
+class _IntegrationStatus:
+    """The states `herdr integration status` gives the harnesses on a host, asked once, when first needed."""
+
+    def __init__(self, host: Host):
+        self._host = host
+        self._states: dict[str, str] | _Unmet | None = None  # by harness kind; or why herdr could not be asked
+
+    def current(self, kind: str) -> str:
+        """The state of kind's integration when it is current, such as "current (v10)"; raises _Unmet when it is in
+        any other, or not listed, and _Unmet with herdr's fix when herdr cannot be asked."""
+        if self._states is None:
+            try:
+                self._states = integration_states(self._host.check(["herdr", "integration", "status"]))
+            except OrchestratorError as e:
+                self._states = _Unmet(str(e), "update herdr with `herdr update`, then check that "
+                                              "`herdr integration status` runs")
+        if isinstance(self._states, OrchestratorError):
+            raise self._states
+        state = self._states.get(kind)
+        if state is None:
+            raise _Unmet(f"herdr integration status does not list {kind}")
+        if not state.startswith("current"):
+            raise _Unmet(state)
+        return state
+
+
+def integration_states(listing: str) -> dict[str, str]:
+    """Each harness's integration state, by its kind, from `herdr integration status`, whose lines read
+    `<kind>: current (vN) (<path>)`, `<kind>: not installed (<path>)` or the like for another state, and a kind may
+    carry a note, as `letta (experimental): ...`. The state is what follows the colon, the path left out."""
+    states = {}
+    for line in listing.splitlines():
+        if m := re.fullmatch(r"(\S+)[^:]*: (.*?)(?: \([^()]*\))?", line.strip()):
+            states[m.group(1)] = m.group(2)
+    return states
+
+
+def _gh_logged_in(host: Host) -> str:
+    """That gh is on host's PATH and logged in; raises _Unmet with the fix for what is not."""
+    _on_path(host, "gh")
+    proc = host.run(["gh", "auth", "status"], timeout=NETWORK_TIMEOUT)
+    if proc.returncode != 0:
+        said = " ".join(line.strip() for line in (proc.stderr.strip() or proc.stdout.strip()).splitlines()[:4])
+        raise _Unmet(f"gh auth status fails{': ' + said if said else ''}", "gh auth login")
+    return "logged in"
+
+
+def _gitleaks_runs(host: Host) -> str:
+    """That `gitleaks git` runs on host, as the pre-push check asks it; raises _Unmet with why it does not."""
+    problem = host.gitleaks_problem()
+    if problem:
+        raise _Unmet(problem)
+    return "`gitleaks git` runs"
+
+
+def _checkout(host: Host, cwd: str) -> str:
+    """The top level of the git checkout cwd is in on host, a leading ~ in cwd being host's home as Host.resolve_dir
+    reads it; raises _Unmet when cwd is no directory there, or in no checkout."""
+    try:
+        path = host.resolve_dir(cwd)
+    except OrchestratorError as e:
+        raise _Unmet(f"{cwd} is not a directory: {e}") from e
+    proc = host.git_run(path, "rev-parse", "--show-toplevel")
+    if proc.returncode != 0:
+        said = proc.stderr.strip().splitlines()
+        raise _Unmet(f"{cwd} is not in a git checkout{': ' + said[0] if said else ''}")
+    return proc.stdout.strip()
+
+
+def _tkinter_check() -> Check:
+    """Whether this Python, where the orchestrator runs, has tkinter, which only the GUI needs."""
+    # Imported here, as gui_command does, so the CLI and the tests run on a Python without tkinter.
+    try:
+        import tkinter
+    except ImportError:
+        return Check("tkinter", OPTIONAL, False, "this Python lacks it; needed only for the GUI",
+                     tk_install_hint(sys.platform, sys.version_info))
+    return Check("tkinter", OPTIONAL, True, f"Tk {tkinter.TkVersion}")
 
 
 def new_state(args: argparse.Namespace, cwd: str, spec: SpecFile | None = None) -> tuple[RunState, Pipeline]:

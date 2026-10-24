@@ -19,6 +19,20 @@ was done.
 
 ## Open issues
 
+- **`doctor --machine` probes the machine over about twenty SSH connections, one after another.** Each check is
+  its own `Host.run`, so `_tool_version` asks `command -v` before `--version`, which already fails for a missing
+  command, and `gh auth status` may wait up to `NETWORK_TIMEOUT`. Raised by the cross-review of the doctor command
+  (F8, 2026-10-24): "redundant probes, each one SSH connection with `--machine`". Closes with the probes run in one
+  shell over one connection, or SSH connection sharing for `Host`.
+- **herdr 0.9.1 lists no `gemini` integration.** `herdr integration status` on this host lists `antigravity-cli`
+  (whose hook is under `~/.gemini/`) but no `gemini`, so `doctor` warns that it does not list gemini, and the
+  README's `herdr integration install gemini` may name a kind herdr no longer has. Found by the doctor run
+  (2026-10-24); not checked whether `agent start --kind gemini` still works. Closes once `AGENT_KINDS` and the README
+  name the kind herdr installs for Gemini, or herdr is shown to accept `gemini`.
+- **`doctor` checks gitleaks's `git` subcommand, not its version.** README asks for gitleaks 8.19 or later; the
+  check reuses `Host.gitleaks_problem`, the run's pre-push check, which asks `gitleaks git --help` because a
+  distribution's build may print no version number. So `doctor` shows no gitleaks version. Kept by choice
+  (2026-10-24).
 - **No test shows the proof reruns come after the quality loop.** `Workflow._rerun_proofs` runs right before the
   verdict step's turn, which follows the quality loop by construction, but every proof test uses `QUICK`, which has
   no quality-gated step. Raised by the cross-review of the proof reruns (R1-F5, 2026-10-24): "no test would notice

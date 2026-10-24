@@ -14241,5 +14241,398 @@ class TestServeCommand(unittest.TestCase):
         serve.assert_called_once_with([TAURI_ORIGIN])
 
 
+# ---------------------------------------------------------------------------
+# doctor
+# ---------------------------------------------------------------------------
+
+INTEGRATIONS_CURRENT = "".join(f"{kind}: current (v3) (/home/u/.{kind}/herdr-agent-state.sh)\n"
+                               for kind in orchestrator.AGENT_KINDS) + "letta (experimental): not installed (/l)\n"
+
+
+class FakeTools:
+    """A machine's commands, as Host.run and Herdr's run start them, with every tool doctor checks present; a test
+    changes paths or answers to take one away. Over SSH it answers for targets, and records each command's
+    target in calls."""
+
+    def __init__(self, targets=("me@box",)):
+        self.paths = {name: f"/usr/bin/{name}" for name in (*orchestrator.AGENT_KINDS, "herdr", "git", "gh")}
+        self.answers = {
+            ("herdr", "--version"): completed("herdr 0.9.1\n"),
+            ("herdr", "integration", "status"): completed(INTEGRATIONS_CURRENT),
+            ("git", "--version"): completed("git version 2.47.3\n"),
+            ("gh", "auth", "status"): completed("github.com\n  ✓ Logged in to github.com\n"),
+            ("gitleaks", "git", "--help"): completed("Usage: gitleaks git [flags]\n"),
+            ("git", "-C", "/proj", "rev-parse", "--show-toplevel"): completed("/proj\n"),
+            ("git", "-C", "/proj", "remote", "get-url", "origin"): completed("git@github.com:me/proj.git\n"),
+            ("git", "-C", "/home/u/proj", "rev-parse", "--show-toplevel"): completed("/home/u/proj\n"),
+            ("git", "-C", "/home/u/proj", "remote", "get-url", "origin"): completed("git@github.com:me/p.git\n"),
+            ("herdr", "machine", "list", "--json"): completed(json.dumps(
+                [{"label": "box", "id": "m1", "enabled": True, "target": "me@box"},
+                 {"label": "off", "id": "m2", "enabled": False, "target": "me@off"}])),
+        }
+        self.targets = targets
+        self.dirs = {"/proj", "/home/u/proj"}  # the directories Host.resolve_dir finds
+        self.calls = []  # (SSH target or None, argv)
+
+    def __call__(self, argv, **kwargs):
+        target = None
+        if argv[0] == "ssh":
+            target, argv = argv[3], shlex.split(argv[4])
+            if target not in self.targets:
+                return completed(stderr=f"ssh: connect to host {target}: Connection refused", returncode=255)
+        self.calls.append((target, argv))
+        if argv == ["true"]:
+            return completed()
+        if argv[:2] == ["sh", "-c"] and "command -v" in argv[2]:
+            path = self.paths.get(argv[-1])
+            return completed(f"{path}\n") if path else completed(returncode=1)
+        if argv[:2] == ["sh", "-c"] and argv[2].endswith("&& pwd"):  # Host.resolve_dir, home being /home/u
+            path = ("/home/u" if "$HOME" in argv[2] else "") + argv[-1]
+            return completed(f"{path}\n") if path in self.dirs else completed(stderr="cd: no such dir", returncode=2)
+        if argv[0] not in self.paths and argv[0] != "gitleaks":
+            raise FileNotFoundError(2, "No such file or directory", argv[0])
+        answer = self.answers[tuple(argv)]
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+
+def with_tkinter():
+    tk = ModuleType("tkinter")
+    tk.TkVersion = 8.6
+    return patch.dict("sys.modules", {"tkinter": tk})
+
+
+@patch.dict("os.environ", {"HERDR_ENV": "1"})
+class TestCheckSetup(unittest.TestCase):
+    def check(self, tools, machine=None, cwd=None):
+        with with_tkinter():
+            checks = orchestrator.check_setup(Host(run=tools), Herdr(machine, run=tools), cwd)
+        return {c.name: c for c in checks}
+
+    def report(self, checks):
+        with patch("sys.stdout", new_callable=io.StringIO) as out:
+            doctor_exit = orchestrator.report_checks(list(checks.values()))
+        return out.getvalue(), doctor_exit
+
+    def test_all_present(self):
+        checks = self.check(FakeTools(), cwd="/proj")
+        kinds = orchestrator.AGENT_KINDS
+        self.assertEqual(list(checks), [
+            "herdr", "reaching herdr",
+            *(f"{kind} {what}" for kind in kinds for what in ("CLI", "integration")),
+            "git", "gh", "gitleaks", "git checkout", "origin", "tkinter"])
+        self.assertEqual([c.name for c in checks.values() if not c.ok], [])
+        self.assertEqual(checks["herdr"].detail, "herdr 0.9.1")
+        self.assertEqual(checks["claude integration"].detail, "current (v3)")
+        self.assertEqual(checks["origin"].detail, "git@github.com:me/proj.git")
+        out, doctor_exit = self.report(checks)
+        self.assertEqual(doctor_exit, 0)
+        self.assertTrue(all(line.startswith("ok      ") for line in out.splitlines()), out)
+        self.assertIn("ok      herdr: herdr 0.9.1\n", out)
+
+    def test_levels(self):
+        checks = self.check(FakeTools(), cwd="/proj")
+        self.assertEqual({name: c.level for name, c in checks.items() if c.level != orchestrator.OPTIONAL}, {
+            "herdr": "required", "reaching herdr": "required", "claude CLI": "required",
+            "claude integration": "required", "git": "required", "gh": "needed-for-pr", "gitleaks": "needed-for-pr",
+            "git checkout": "needed-for-pr", "origin": "needed-for-pr"})
+
+    def test_without_herdr(self):
+        tools = FakeTools()
+        del tools.paths["herdr"]
+        checks = self.check(tools)
+        self.assertEqual(checks["herdr"], orchestrator.Check(
+            "herdr", "required", False, "herdr is not on PATH",
+            "install herdr 0.9 or later, or update it with `herdr update`"))
+        self.assertEqual(checks["claude integration"].detail, "skipped: needs herdr")
+        self.assertEqual(checks["codex integration"].detail,
+                         "skipped: needs herdr; needed only for a role that runs in codex")
+        self.assertTrue(checks["git"].ok and checks["gh"].ok and checks["claude CLI"].ok)
+        self.assertNotIn((None, ["herdr", "integration", "status"]), tools.calls)
+        out, doctor_exit = self.report(checks)
+        self.assertEqual(doctor_exit, orchestrator.EXIT_ERROR)
+        self.assertIn("missing herdr: herdr is not on PATH\n"
+                      "        fix: install herdr 0.9 or later, or update it with `herdr update`\n", out)
+        self.assertIn("missing claude integration: skipped: needs herdr\n        fix: fix herdr first\nok      codex CLI",
+                      out)
+
+    def test_old_herdr(self):
+        tools = FakeTools()
+        tools.answers["herdr", "--version"] = completed("herdr 0.8.4\n")
+        herdr = self.check(tools)["herdr"]
+        self.assertEqual((herdr.ok, herdr.detail), (False, "herdr 0.8.4 is older than 0.9"))
+        for said, ok in (("herdr 0.9\n", True), ("herdr 0.10.0\n", True), ("herdr 1.0.0\n", True),
+                         ("herdr dev\n", False)):
+            with self.subTest(said=said):
+                tools.answers["herdr", "--version"] = completed(said)
+                self.assertEqual(self.check(tools)["herdr"].ok, ok)
+
+    def test_integrations_not_installed(self):
+        tools = FakeTools()
+        tools.answers["herdr", "integration", "status"] = completed(
+            INTEGRATIONS_CURRENT.replace("claude: current (v3)", "claude: not installed")
+            .replace("codex: current (v3)", "codex: not installed")
+            .replace("gemini: current (v3)", "gemini: outdated (v1)"))
+        checks = self.check(tools, cwd="/proj")
+        self.assertEqual(checks["claude integration"], orchestrator.Check(
+            "claude integration", "required", False, "not installed", "herdr integration install claude"))
+        self.assertEqual(checks["codex integration"], orchestrator.Check(
+            "codex integration", "optional", False, "not installed; needed only for a role that runs in codex",
+            "herdr integration install codex"))
+        self.assertEqual(checks["gemini integration"].detail,
+                         "outdated (v1); needed only for a role that runs in gemini")
+        self.assertEqual([c.name for c in checks.values() if not c.ok],
+                         ["claude integration", "codex integration", "gemini integration"])
+        self.assertEqual(tools.calls.count((None, ["herdr", "integration", "status"])), 1)
+        out, doctor_exit = self.report(checks)
+        self.assertEqual(doctor_exit, orchestrator.EXIT_ERROR)
+        self.assertIn("missing claude integration: not installed\n        fix: herdr integration install claude\n", out)
+        self.assertIn("warn    codex integration: not installed;", out)
+
+    def test_optional_failures_alone_pass(self):
+        tools = FakeTools()
+        del tools.paths["codex"]
+        tools.answers["herdr", "integration", "status"] = completed(
+            INTEGRATIONS_CURRENT.replace("pi: current", "pi: x"))
+        checks = self.check(tools)
+        self.assertEqual(checks["codex CLI"].fix, "install the codex CLI where the agents run")
+        self.assertEqual(self.report(checks)[1], 0)
+
+    def test_integration_unlisted_or_unasked(self):
+        tools = FakeTools()
+        tools.answers["herdr", "integration", "status"] = completed("claude: current (v3) (/c)\n")
+        self.assertEqual(self.check(tools)["pi integration"].detail,
+                         "herdr integration status does not list pi; needed only for a role that runs in pi")
+        tools.answers["herdr", "integration", "status"] = completed(stderr="unknown command", returncode=2)
+        checks = self.check(tools)
+        self.assertIn("herdr integration status failed: unknown command", checks["claude integration"].detail)
+        for kind in orchestrator.AGENT_KINDS:
+            self.assertEqual(checks[f"{kind} integration"].fix,
+                             "update herdr with `herdr update`, then check that `herdr integration status` runs")
+
+    def test_integration_states(self):
+        self.assertEqual(orchestrator.integration_states(
+            "pi: current (v9) (/home/u/.pi/a.ts)\n"
+            "codex: not installed (/home/u/.codex/a.sh)\n"
+            "letta (experimental): not installed (/home/u/.letta/a.sh)\n"
+            "gemini: outdated (v2, current is v3) (/g)\n"
+            "\n"
+            "noise\n"), {"pi": "current (v9)", "codex": "not installed", "letta": "not installed",
+                         "gemini": "outdated (v2, current is v3)"})
+
+    def test_git(self):
+        tools = FakeTools()
+        for said, ok in (("git version 2.36.0\n", True), ("git version 2.39.3 (Apple Git-145)\n", True),
+                         ("git version 2.35.9\n", False)):
+            with self.subTest(said=said):
+                tools.answers["git", "--version"] = completed(said)
+                self.assertEqual(self.check(tools)["git"].ok, ok)
+        git = self.check(tools)["git"]
+        self.assertEqual((git.detail, git.fix), ("git 2.35.9 is older than 2.36", "install git 2.36 or later"))
+        del tools.paths["git"]
+        checks = self.check(tools, cwd="/proj")
+        self.assertEqual(checks["git"].detail, "git is not on PATH")
+        self.assertEqual(checks["git checkout"].detail, "skipped: needs git")
+        self.assertEqual(checks["origin"].detail, "skipped: needs git checkout")
+
+    def test_gh_logged_out(self):
+        tools = FakeTools()
+        tools.answers["gh", "auth", "status"] = completed(
+            stderr="You are not logged into any GitHub hosts. To log in, run: gh auth login\n", returncode=1)
+        checks = self.check(tools)
+        self.assertEqual(checks["gh"], orchestrator.Check(
+            "gh", "needed-for-pr", False,
+            "gh auth status fails: You are not logged into any GitHub hosts. To log in, run: gh auth login",
+            "gh auth login"))
+        self.assertTrue(checks["gitleaks"].ok and checks["tkinter"].ok)
+        self.assertEqual(self.report(checks)[1], orchestrator.EXIT_ERROR)
+        tools.answers["gh", "auth", "status"] = completed(
+            "github.com\n  X Failed to log in to github.com using token (GH_TOKEN)\n"
+            "  - The token in GH_TOKEN is invalid.\n", returncode=1)
+        self.assertEqual(self.check(tools)["gh"].detail,
+                         "gh auth status fails: github.com X Failed to log in to github.com using token (GH_TOKEN) "
+                         "- The token in GH_TOKEN is invalid.")
+        del tools.paths["gh"]
+        gh = self.check(tools)["gh"]
+        self.assertEqual((gh.detail, gh.fix), ("gh is not on PATH", "install gh (https://cli.github.com)"))
+
+    def test_gh_times_out(self):
+        tools = FakeTools()
+        tools.answers["gh", "auth", "status"] = subprocess.TimeoutExpired(["gh"], orchestrator.NETWORK_TIMEOUT)
+        checks = self.check(tools)
+        self.assertFalse(checks["gh"].ok)
+        self.assertIn("timed out", checks["gh"].detail)
+        self.assertTrue(checks["gitleaks"].ok)
+
+    def test_gitleaks(self):
+        tools = FakeTools()
+        tools.answers["gitleaks", "git", "--help"] = completed(stderr="unknown command \"git\"", returncode=1)
+        checks = self.check(tools)
+        self.assertEqual(checks["gitleaks"], orchestrator.Check(
+            "gitleaks", "needed-for-pr", False, "`gitleaks git` does not run", orchestrator.GITLEAKS_INSTALL))
+        self.assertIn("https://github.com/gitleaks/gitleaks#installing", checks["gitleaks"].fix)
+        self.assertEqual(self.report(checks)[1], orchestrator.EXIT_ERROR)
+        tools.answers["gitleaks", "git", "--help"] = FileNotFoundError(2, "No such file or directory", "gitleaks")
+        self.assertTrue(self.check(tools)["gitleaks"].detail.startswith("gitleaks cannot be started ("))
+
+    def test_not_a_checkout(self):
+        tools = FakeTools()
+        tools.answers["git", "-C", "/proj", "rev-parse", "--show-toplevel"] = completed(
+            stderr="fatal: not a git repository (or any of the parent directories): .git\nmore\n", returncode=128)
+        checks = self.check(tools, cwd="/proj")
+        self.assertEqual(checks["git checkout"].detail,
+                         "/proj is not in a git checkout: fatal: not a git repository (or any of the parent "
+                         "directories): .git")
+        self.assertEqual(checks["origin"], orchestrator.Check("origin", "needed-for-pr", False,
+                                                              "skipped: needs git checkout", "fix git checkout first"))
+        self.assertNotIn((None, ["git", "-C", "/proj", "remote", "get-url", "origin"]), tools.calls)
+
+    def test_no_origin(self):
+        tools = FakeTools()
+        tools.answers["git", "-C", "/proj", "remote", "get-url", "origin"] = completed(
+            stderr="error: No such remote 'origin'", returncode=2)
+        origin = self.check(tools, cwd="/proj")["origin"]
+        self.assertFalse(origin.ok)
+        self.assertEqual(origin.fix, "git remote add origin <url>")
+
+    def test_cwd_resolved_as_a_run_resolves_it(self):
+        tools = FakeTools()
+        checks = self.check(tools, machine="box", cwd="~/proj")
+        self.assertEqual((checks["git checkout"].detail, checks["origin"].detail),
+                         ("/home/u/proj", "git@github.com:me/p.git"))
+        self.assertIn(("me@box", ["sh", "-c", 'cd -- "$HOME$1" && pwd', "_", "/proj"]), tools.calls)
+        checkout = self.check(tools, cwd="/gone")["git checkout"]
+        self.assertEqual((checkout.ok, checkout.detail.split(":")[0]), (False, "/gone is not a directory"))
+
+    def test_without_cwd_the_project_is_not_checked(self):
+        self.assertNotIn("git checkout", self.check(FakeTools()))
+
+    @patch.dict("os.environ", {"HERDR_ENV": ""})
+    def test_outside_a_herdr_pane(self):
+        checks = self.check(FakeTools())
+        self.assertEqual(checks["reaching herdr"], orchestrator.Check(
+            "reaching herdr", "required", False, "not inside a herdr pane", "run from a herdr pane, or pass --machine"))
+        self.assertEqual([c.name for c in checks.values() if not c.ok], ["reaching herdr"])
+        out, doctor_exit = self.report(checks)
+        self.assertEqual(doctor_exit, orchestrator.EXIT_ERROR)
+        self.assertIn("missing reaching herdr: not inside a herdr pane\n"
+                      "        fix: run from a herdr pane, or pass --machine\n", out)
+
+    @patch.dict("os.environ", {"HERDR_ENV": ""})
+    def test_on_a_machine(self):
+        tools = FakeTools()
+        checks = self.check(tools, machine="box", cwd="/proj")
+        self.assertEqual([c.name for c in checks.values() if not c.ok], [])
+        self.assertEqual(checks["reaching herdr"].detail, "herdr machine box, over SSH to me@box")
+        self.assertEqual((checks["herdr"].detail, checks["herdr on box"].detail), ("herdr 0.9.1", "herdr 0.9.1"))
+        # Only the herdr a run drives is checked here; everything else goes over SSH to the machine.
+        local = [argv for target, argv in tools.calls if target is None]
+        self.assertEqual(local, [["sh", "-c", 'command -v -- "$1"', "_", "herdr"], ["herdr", "--version"],
+                                 ["herdr", "machine", "list", "--json"]])
+        remote = {tuple(argv) for target, argv in tools.calls if target == "me@box"}
+        for argv in (("herdr", "--version"), ("herdr", "integration", "status"), ("git", "--version"),
+                     ("gh", "auth", "status"), ("gitleaks", "git", "--help"),
+                     ("git", "-C", "/proj", "rev-parse", "--show-toplevel"),
+                     ("sh", "-c", 'command -v -- "$1"', "_", "codex")):
+            self.assertIn(argv, remote)
+
+    def test_machine_not_saved_disabled_or_unreachable(self):
+        tools = FakeTools(targets=())
+        for machine, detail in (("nowhere", "no saved herdr machine named nowhere"),
+                                ("off", "herdr machine off is disabled"),
+                                ("box", "true failed on me@box: ssh: connect to host me@box: Connection refused")):
+            with self.subTest(machine=machine):
+                checks = self.check(tools, machine=machine, cwd="/proj")
+                reach = checks["reaching herdr"]
+                self.assertEqual((reach.ok, reach.detail), (False, detail))
+                self.assertIn(machine, reach.fix)
+                self.assertTrue(checks["herdr"].ok)
+                self.assertEqual(checks["herdr on " + machine].detail, "skipped: needs reaching herdr")
+                self.assertEqual(checks["gh"].detail, "skipped: needs reaching herdr")
+                self.assertEqual(checks["origin"].detail, "skipped: needs git checkout")
+                self.assertTrue(checks["tkinter"].ok)
+                out, doctor_exit = self.report(checks)
+                self.assertEqual(doctor_exit, orchestrator.EXIT_ERROR)
+                self.assertIn(f"missing reaching herdr: {detail}\n", out)
+
+    def test_machine_without_local_herdr(self):
+        tools = FakeTools()
+        del tools.paths["herdr"]
+        checks = self.check(tools, machine="box")
+        self.assertEqual((checks["herdr"].detail, checks["herdr"].fix),
+                         ("herdr is not on PATH", "install herdr 0.9 or later, or update it with `herdr update`"))
+        self.assertEqual((checks["reaching herdr"].detail, checks["reaching herdr"].fix),
+                         ("skipped: needs herdr", "fix herdr first"))
+        self.assertNotIn((None, ["herdr", "machine", "list", "--json"]), tools.calls)
+
+    def test_machine_herdr_versions_checked_apart(self):
+        # The herdr here drives the run and the one on the machine hosts its agents; each must be recent enough.
+        for local, remote, old in (("0.8.4", "0.9.1", "herdr"), ("0.9.1", "0.8.4", "herdr on box")):
+            with self.subTest(local=local, remote=remote):
+                tools = FakeTools()
+                versions = {None: f"herdr {local}\n", "me@box": f"herdr {remote}\n"}
+
+                def answer(argv, run=tools.__call__, versions=versions, **kwargs):
+                    if argv == ["herdr", "--version"] or argv[-1:] == ["herdr --version"]:
+                        return completed(versions[None if argv[0] == "herdr" else argv[3]])
+                    return run(argv, **kwargs)
+
+                with with_tkinter():
+                    checks = {c.name: c for c in orchestrator.check_setup(Host(run=answer), Herdr("box", run=answer))}
+                self.assertEqual(checks[old].detail, "herdr 0.8.4 is older than 0.9")
+                self.assertEqual([checks[n].ok for n in ("herdr", "reaching herdr", "herdr on box")],
+                                 [False, False, False] if old == "herdr" else [True, True, False])
+
+    def test_without_tkinter(self):
+        for platform, hint in (("linux", "apt install python3-tk"), ("darwin", "brew install python-tk@")):
+            with self.subTest(platform=platform), patch.dict("sys.modules", {"tkinter": None}), \
+                    patch.object(sys, "platform", platform):
+                checks = orchestrator.check_setup(Host(run=FakeTools()), Herdr(run=FakeTools()))
+                tk = checks[-1]
+                self.assertEqual((tk.name, tk.level, tk.ok), ("tkinter", "optional", False))
+                self.assertIn(hint, tk.fix)
+                with patch("sys.stdout", new_callable=io.StringIO) as out:
+                    self.assertEqual(orchestrator.report_checks(checks), 0)
+                self.assertIn("warn    tkinter: this Python lacks it; needed only for the GUI\n", out.getvalue())
+
+    def test_commands_get_the_child_env(self):
+        tools = MagicMock(wraps=FakeTools())
+        with patch.dict("os.environ", {"JENKINS_TOKEN": "secret"}), with_tkinter():
+            orchestrator.check_setup(Host(run=tools), Herdr("box", run=tools), "/proj")
+        self.assertTrue(tools.call_args_list)
+        for call in tools.call_args_list:
+            self.assertNotIn("JENKINS_TOKEN", call.kwargs["env"])
+
+
+class TestDoctorCommand(unittest.TestCase):
+    def test_needs_no_herdr_pane(self):
+        checks = [orchestrator.Check("herdr", "required", True, "herdr 0.9.1")]
+        with patch.dict("os.environ", {"HERDR_ENV": ""}), \
+                patch.object(orchestrator, "check_setup", return_value=checks) as check, \
+                patch.object(orchestrator, "connect", side_effect=AssertionError("connect was called")), \
+                patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(main(["doctor", "--machine", "box", "--cwd", "~/proj"]), 0)
+        host, herdr, cwd = check.call_args.args
+        self.assertEqual((host.ssh_target, herdr.machine, cwd), (None, "box", "~/proj"))
+        self.assertEqual(out.getvalue(), "ok      herdr: herdr 0.9.1\n")
+
+    def test_machine_needs_cwd(self):
+        with self.assertRaises(SystemExit), patch("sys.stderr"):
+            parse_args(["doctor", "--machine", "box"])
+        self.assertIsNone(parse_args(["doctor"]).cwd)
+
+    def test_report(self):
+        checks = [orchestrator.Check("a", "required", True, "fine"),
+                  orchestrator.Check("b", "optional", False, "gone", "get b"),
+                  orchestrator.Check("c", "needed-for-pr", False, "skipped: needs a", "fix a first")]
+        with patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(orchestrator.report_checks(checks), orchestrator.EXIT_ERROR)
+        self.assertEqual(out.getvalue(), "ok      a: fine\nwarn    b: gone\n        fix: get b\n"
+                                         "missing c: skipped: needs a\n        fix: fix a first\n")
+        with patch("sys.stdout", new_callable=io.StringIO):
+            self.assertEqual(orchestrator.report_checks(checks[:2]), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
