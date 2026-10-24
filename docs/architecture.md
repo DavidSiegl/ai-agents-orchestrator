@@ -120,8 +120,10 @@ tests in `{proofs_dir}`, `RunState.proofs_dir(n)` in the run directory, so they 
 commit. After a review that requests changes, `Workflow._judge_proofs` runs each proof file with the command in the
 working tree (`_run_proof`: exit status 1 is a failing proof, which demonstrates the finding its name's first number
 names; 0 passes and anything else errors, neither demonstrating), saves the outcomes in `RunState.proofs`, and
-appends `proofs_section` under `PROOFS_HEADING` to the review, which a resume finds and does not judge again.
-`PROOFS_NOTE` ends the next round's prompt of the step the review loops back to, naming the failing proofs.
+appends `proofs_section` under `PROOFS_HEADING` to the review; a resume runs no proof of a round that has records,
+and appends the section only where the review lacks it. A proof runs under GNU `timeout` where there is one, which
+stops its whole process group. `PROOFS_NOTE` ends the next round's prompt of the step the review loops back to,
+naming the failing proofs.
 
 `WORKFLOWS` holds only `DEFAULT_WORKFLOW`. Other workflows are TOML files: `run --workflow NAME` finds
 `NAME.toml` in `workflows_dir` (`~/.config/ai-agents-orchestrator/workflows/`), and `run --workflow-file` takes
