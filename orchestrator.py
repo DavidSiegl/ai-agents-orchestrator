@@ -3872,18 +3872,14 @@ def too_complex_functions(change: GateChange) -> list[dict]:
     the change leaves no worse is not a finding: the gate judges the change, not the codebase. The functions judged
     are those _ScoredFunction describes.
 
-    A changed file that cannot be read or parsed, and changed files git cannot list, are each a finding saying so, as
-    GateCheck asks of a check that cannot do its work, and fail the gate as any other does.
+    A changed file that cannot be read or parsed is a finding saying so, as GateCheck asks of a check that cannot do
+    its work, and fails the gate as any other does. Files under mutmut's state are not changed files, as
+    GateChange.from_tree says.
     """
     out, judged = _judged_files(change)
     if not any(_over_limit(functions, added) for functions, added in judged.values()):
         return out
-    try:
-        pairs = Host().changed_files(change.root, change.base)
-    except OrchestratorError as e:
-        return [*out, _finding(None, None, "not-scored", f"the files the change edits could not be listed ({e}), so no "
-                                                         f"function was compared with its base.", severity="error")]
-    scores = _base_scores(change, judged, pairs)
+    scores = _base_scores(change, judged)
     for path, (functions, added) in judged.items():
         for scored in _over_limit(functions, added):
             was = scores.get((path, scored.line))
@@ -3913,10 +3909,10 @@ def _over_limit_finding(path: str, scored: _ScoredFunction, was: int | None) -> 
 _BODY_STEPS = ((True, True), (True, False), (False, True), (False, False))
 
 
-def _base_scores(change: GateChange, judged: dict[str, tuple[list[_ScoredFunction], set[int]]],
-                 pairs: list[tuple[str | None, str | None]]) -> dict[tuple[str, int], int]:
+def _base_scores(change: GateChange,
+                 judged: dict[str, tuple[list[_ScoredFunction], set[int]]]) -> dict[tuple[str, int], int]:
     """The base score of each function of judged, _judged_files' functions by path, that has a base, by (path, def
-    line); pairs is the change's files as Host.changed_files lists them. Every function over the limit that the change
+    line). Every function over the limit that the change
     adds a line to and that has no key is new. Only the change's own files are read.
 
     A function's base is a function of the base, each the base of one function at most, so that a copy never takes
@@ -3939,14 +3935,14 @@ def _base_scores(change: GateChange, judged: dict[str, tuple[list[_ScoredFunctio
     """
     # The changed Python files the check does not judge come first, so that a function moved unchanged into one takes
     # its base before a copy in a judged file can.
-    working = {new: _working_functions(change, new)[0] or [] for _, new in pairs
+    working = {new: _working_functions(change, new)[0] or [] for _, new in change.files
                if new and new not in judged and _is_python_source(change, new)}
     working.update((path, functions) for path, (functions, _) in judged.items())
-    old_paths = {new: old for old, new in pairs if new}
+    old_paths = {new: old for old, new in change.files if new}
     homes = {path: old_paths.get(path, path) for path in working}
-    pool = _BasePool({old: _base_functions(change, old) for old, new in pairs
+    pool = _BasePool({old: _base_functions(change, old) for old, new in change.files
                       if old and (new in working or old.endswith(".py"))},
-                     {old: working.get(new, []) if new else [] for old, new in pairs if old})
+                     {old: working.get(new, []) if new else [] for old, new in change.files if old})
     for same_name, same_file in _BODY_STEPS:
         for path, functions in working.items():
             pool.lend_by_body(path, functions, homes[path], same_name, same_file, path in judged)

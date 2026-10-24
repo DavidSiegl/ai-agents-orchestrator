@@ -100,10 +100,9 @@ the paper's rules. Each of these is a finding:
   Bodies pairing first has a cost: a copy of a function whose original the change edits keeps the old score and
   passes, as if it were the original renamed and the edited one new, even when the edit takes the original below the
   limit. `TODO.md` holds it.
-- `not-scored`: a changed file that could not be read or parsed, or changed files git could not list. Like any finding
-  of the check, it fails the gate: a check that cannot do its work says so rather than pass. A base that cannot be read
-  or parsed is not a finding: its file's functions are judged as new, as `test-integrity` takes a base that does not
-  parse to have no tests.
+- `not-scored`: a changed file that could not be read or parsed. Like any finding of the check, it fails the gate: a
+  check that cannot do its work says so rather than pass. A base that cannot be read or parsed is not a finding: its
+  file's functions are judged as new, as `test-integrity` takes a base that does not parse to have no tests.
 
 ruff's `C90` stays beside it. It counts branches without their nesting, so it misses a deeply nested function that
 cognitive complexity catches, but it still catches a flat function of many branches, which cognitive complexity scores

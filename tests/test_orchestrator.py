@@ -5771,9 +5771,7 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.put(name, text.replace(old, new))
 
     def change(self):
-        base = self.git("rev-parse", "HEAD").strip()
-        diff = self.host.change_diff(self.repo, base)
-        return orchestrator.GateChange(self.repo, base, diff, changed_lines(diff))
+        return orchestrator.GateChange.from_tree(self.repo, self.git("rev-parse", "HEAD").strip())
 
     def found(self):
         """(path, line, rule) of each finding on the working tree's change, and the findings themselves."""
@@ -6118,12 +6116,12 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.assertEqual(where, [("calc.py", self.def_line("big"), "over-limit")])
         self.assertEqual(found[0]["message"], "`big`: cognitive complexity 22, a new function; the limit is 15.")
 
-    def test_a_change_whose_files_git_cannot_list_is_a_finding(self):
+    def test_a_function_in_mutmut_s_state_is_not_judged(self):
+        self.put("mutants/calc.py", flat("x_big__mutmut_1", 20) + "\n")
+        self.git("add", "mutants/calc.py")
         self.nest_under("big", 19)
-        with patch.object(Host, "changed_files", side_effect=OrchestratorError("git diff failed")):
-            where, found = self.found()
-        self.assertEqual(where, [(None, None, "not-scored")])
-        self.assertIn("could not be listed (git diff failed)", found[0]["message"])
+        where, _ = self.found()
+        self.assertEqual(where, [("calc.py", self.def_line("big"), "over-limit")])
 
     def put_bytes(self, name, data):
         with open(os.path.join(self.repo, name), "wb") as f:

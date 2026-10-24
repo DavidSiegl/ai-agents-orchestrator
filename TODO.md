@@ -58,13 +58,16 @@ was done.
   then exits with a `JSONDecodeError`, and `_mutmut_findings` reports `not-run`, "mutmut could not list its results",
   without the `budget-reached` finding or anything the run had shown. Seen once in another branch's gate run. Closes
   with the stop waiting for a save to end, or with the gate reading what remains and saying the budget stopped it.
-- **Committed mutmut output is read as the change's own code by the linters.** Neither check selects anything under
-  `mutants/` (`_changed_python_units`): the surviving-mutants check leaves it out of mutmut's copy and mutates no
-  function in it, and the flaky-tests check reruns no test there, such as the `mutants/tests/` mutmut copies beside
-  its mutated code. But the linters read every tracked file their pathspecs match, so a change that commits
-  `mutants/calc.py`, mutmut's mutated copy with its trampolines, has its added lines there linted, and their findings
-  can fail the gate. Whether the coverage condition counts such files was not traced. Whether they should be linted,
-  left out, or refused is open. Closes with that decision.
+- **Committed mutmut output is read as the change's own code by the linters.** The checks leave `mutants/` out, by the
+  user's decision of 2026-10-24 (review round 9, F33): `GateChange.from_tree` diffs the tree without it, so no check
+  (test-integrity, flaky-tests, surviving-mutants, cognitive-complexity) selects a test, a function or a changed line
+  there or counts an edit there as a change to the code, and the build configuration listing still names such files.
+  That filter does not reach the linters: `judge_change` runs them over every tracked file their pathspecs match and
+  keeps their findings on its own, unfiltered `changed_lines`, so a change that commits `mutants/calc.py`, mutmut's
+  mutated copy with its trampolines, has its added lines there linted, and their findings can fail the gate. The same
+  unfiltered lines feed the suppressions list, the stray-line-end refusal and the coverage condition; whether coverage
+  counts such files was not traced. Whether the linters should read them, leave them out, or the gate refuse them is
+  open. Closes with that decision.
 - **The cognitive-complexity check reads and parses changed files in a loop of its own.** `_judged_files` and
   `_working_functions` repeat `_changed_python_units`' reading, decoding and unreadable-file handling, because that
   walker yields only top-level functions and methods of top-level classes, the units mutmut names, while the check
