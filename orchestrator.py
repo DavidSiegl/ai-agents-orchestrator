@@ -3912,8 +3912,7 @@ _BODY_STEPS = ((True, True), (True, False), (False, True), (False, False))
 def _base_scores(change: GateChange,
                  judged: dict[str, tuple[list[_ScoredFunction], set[int]]]) -> dict[tuple[str, int], int]:
     """The base score of each function of judged, _judged_files' functions by path, that has a base, by (path, def
-    line). Every function over the limit that the change
-    adds a line to and that has no key is new. Only the change's own files are read.
+    line); a function with no key is new. Only the change's own files are read.
 
     A function's base is a function of the base, each the base of one function at most, so that a copy never takes
     the score of what it copies. First a base function with its body, since an unchanged function is that function
@@ -3933,23 +3932,22 @@ def _base_scores(change: GateChange,
     The cost of bodies first: a copy of a function whose original the change edits takes the original's old score,
     as if the original were the new function under its name.
     """
-    # The changed Python files the check does not judge come first, so that a function moved unchanged into one takes
-    # its base before a copy in a judged file can.
-    working = {new: _working_functions(change, new)[0] or [] for _, new in change.files
-               if new and new not in judged and _is_python_source(change, new)}
-    working.update((path, functions) for path, (functions, _) in judged.items())
+    unjudged = {new: _working_functions(change, new)[0] or [] for _, new in change.files
+                if new and new not in judged and _is_python_source(change, new)}
+    working = {**unjudged, **{path: functions for path, (functions, _) in judged.items()}}
     old_paths = {new: old for old, new in change.files if new}
     homes = {path: old_paths.get(path, path) for path in working}
     pool = _BasePool({old: _base_functions(change, old) for old, new in change.files
                       if old and (new in working or old.endswith(".py"))},
                      {old: working.get(new, []) if new else [] for old, new in change.files if old})
     for same_name, same_file in _BODY_STEPS:
-        for path, functions in working.items():
-            pool.lend_by_body(path, functions, homes[path], same_name, same_file, path in judged)
+        for path in [*unjudged, *judged]:
+            pool.lend_by_body(path, working[path], homes[path], same_name=same_name, same_file=same_file,
+                              judged=path in judged)
     for path, (functions, added) in judged.items():
         for scored in _over_limit(functions, added):
             pool.lend_by_name(path, scored, homes[path])
-    return pool.lent
+    return {(path, line): score for (path, line), score in pool.lent.items() if path in judged}
 
 
 class _BasePool:
@@ -3967,7 +3965,7 @@ class _BasePool:
                       if sum(f.body == body for f in now.get(old, [])) < n}
         self.lent: dict[tuple[str, int], int] = {}  # the score lent to each function, by (path, def line)
 
-    def lend_by_body(self, path: str, functions: list[_ScoredFunction], home: str | None, same_name: bool,
+    def lend_by_body(self, path: str, functions: list[_ScoredFunction], home: str | None, *, same_name: bool,
                      same_file: bool, judged: bool) -> None:
         """Lend to each of functions, the working tree's in its file at path whose old path is home (None for a file
         the change adds), that has no score lent yet, the score of a base function left with its body: and its name
