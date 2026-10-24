@@ -19,6 +19,15 @@ was done.
 
 ## Open issues
 
+- **A pull request whose gate was turned off shows the last analysis as the change's.** After `resume
+  --no-quality-gate`, `Workflow._publish` passes `_last_quality`'s file to `pr_body` and `provenance`, so the quality
+  section and the `Orchestrator-Gate` trailer judge code the Builder has since changed; only the Reviewer is told
+  (`QUALITY_OFF_NOTE`). Raised by the cross-review of resume-quality-gate (finding 8, 2026-10-24): "nothing in the PR
+  says the final change went unjudged". Closes with the PR body and trailer saying the gate was turned off after it.
+- **Two functions decide which quality file is a round's last.** `Workflow._gate_passed` reads
+  `quality_path(n, quality_round)` itself, while `_quality_note` and `_publish` use `_last_quality`; they agree only
+  because `_gate_passed` returns True whenever the run has no CI. Raised by the same review (finding 11). Closes with
+  `_gate_passed` reading `_last_quality`.
 - **`doctor --machine` probes the machine over about twenty SSH connections, one after another.** Each check is
   its own `Host.run`, so `_tool_version` asks `command -v` before `--version`, which already fails for a missing
   command, and `gh auth status` may wait up to `NETWORK_TIMEOUT`. Raised by the cross-review of the doctor command
