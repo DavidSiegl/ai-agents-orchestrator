@@ -100,11 +100,12 @@ A change to a helper or fixture outside the tests' `def`s reruns nothing. The ch
 `dev` group, so every `uv run pytest` shuffles the tests too, printing the seed it used; `-p no:randomly` turns it
 off, and `--randomly-seed=N` repeats an order.
 
-**Surviving mutants** mutation-tests the functions the change edits, so that code its tests run without checking
-what it does is found; coverage counts such code as tested. A function counts when the change adds a line to it,
-decorators included: a top-level function, or a method of a top-level class, in a Python file outside the test files.
-mutmut, in the `dev` group, makes small changes to each, one at a time - an operator swapped, a number or a string
-altered, an argument dropped - and runs each of these mutants against the tests that call the function:
+**Surviving mutants** mutation-tests the functions the change edits, so that code its tests run without checking what
+it does is found; coverage counts such code as tested. A function counts when the change adds a line to it, decorators
+included: a top-level function, or a method of a top-level class, in a Python file outside the test files and
+`mutants/`, mutmut's state. mutmut, in the `dev` group, makes small changes to each, one at a time - an operator
+swapped, a number or a string altered, an argument dropped - and runs each of these mutants against the tests that
+call the function:
 
 - `survived`: a function with mutants no test failed on, at its `def`: how many of its mutants survived out of how many
   were tried, and what the first three change, each as a line before and after. No test checks what those lines do;
@@ -209,8 +210,8 @@ first, at most 50 in all, then a count:
   because it takes them out of the surviving-mutants check.
 - **Build configuration**: an edit to `Jenkinsfile`, `pyproject.toml` or `uv.lock` is noted, since each can
   change how the change was judged, and so is each file the change adds or edits under `mutants/`, where mutmut keeps
-  its state: the surviving-mutants check runs mutmut without them and mutates no function in them, though the linters
-  read them as they read any tracked file.
+  its state: the surviving-mutants check runs mutmut without them and mutates no function in them, and the
+  flaky-tests check reruns no test in them, though the linters read them as they read any tracked file.
 
 ### Whose rules judge a change
 

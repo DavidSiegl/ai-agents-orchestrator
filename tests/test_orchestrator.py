@@ -4685,6 +4685,14 @@ class TestFlakyTests(unittest.TestCase):
             self.assertEqual(self.found(), [])
         run.assert_not_called()
 
+    def test_mutmut_s_copy_of_a_test_is_not_rerun(self):
+        # mutmut copies the tests into mutants/ beside the mutated code; committed, they are its state, not tests.
+        self.put("mutants/tests/test_state.py", self.BASE + "\n\ndef test_new():\n    assert True\n")
+        self.git("add", "mutants/tests/test_state.py")
+        with patch.object(orchestrator.subprocess, "run") as run:
+            self.assertEqual(self.found(), [])
+        run.assert_not_called()
+
     def test_a_rerun_that_cannot_start_is_a_finding(self):
         self.change_the_tests()
         with patch.object(orchestrator.sys, "executable", os.path.join(self.repo, "no-python")):

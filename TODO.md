@@ -57,8 +57,10 @@ was done.
   then exits with a `JSONDecodeError`, and `_mutmut_findings` reports `not-run`, "mutmut could not list its results",
   without the `budget-reached` finding or anything the run had shown. Seen once in another branch's gate run. Closes
   with the stop waiting for a save to end, or with the gate reading what remains and saying the budget stopped it.
-- **Committed mutmut output is linted as the change's own code.** The surviving-mutants check leaves the tree's
-  `mutants/` out of mutmut's copy and mutates no function in it, but the linters read every tracked file their
-  pathspecs match, so a change that commits `mutants/calc.py`, mutmut's mutated copy with its trampolines, has its
-  added lines there linted, and their findings can fail the gate. Whether such files should be linted, left out, or
-  refused is open. Closes with that decision.
+- **Committed mutmut output is read as the change's own code by the linters.** Neither check selects anything under
+  `mutants/` (`_changed_python_units`): the surviving-mutants check leaves it out of mutmut's copy and mutates no
+  function in it, and the flaky-tests check reruns no test there, such as the `mutants/tests/` mutmut copies beside
+  its mutated code. But the linters read every tracked file their pathspecs match, so a change that commits
+  `mutants/calc.py`, mutmut's mutated copy with its trampolines, has its added lines there linted, and their findings
+  can fail the gate. Whether the coverage condition counts such files was not traced. Whether they should be linted,
+  left out, or refused is open. Closes with that decision.

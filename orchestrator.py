@@ -2103,7 +2103,7 @@ def _config_section(edited, rules_from: str | None, mutmut_state) -> list[str]:
 def edited_config(diff: str, changed: dict[str, set[int]]) -> list[str]:
     """The BUILD_CONFIG_FILES the diff changes, deletes or renames away."""
     return [f for f in BUILD_CONFIG_FILES
-            if f in changed or re.search(rf"^(--- a/|rename from ){re.escape(f)}\t?$", diff, re.M)]
+            if f in changed or re.search(rf"^(--- a/|rename from ){re.escape(f)}\t?$", diff, re.MULTILINE)]
 
 
 def mutmut_state_files(changed: dict[str, set[int]]) -> list[str]:
@@ -2113,7 +2113,7 @@ def mutmut_state_files(changed: dict[str, set[int]]) -> list[str]:
 
 def _is_mutmut_state(path: str) -> bool:
     """Whether path, relative to the tree's top, is under _MUTMUT_STATE: mutmut's, which the surviving-mutants
-    check neither copies for mutmut nor selects functions from."""
+    check does not copy for mutmut, and neither check selects functions or tests from (_changed_python_units)."""
     return path == _MUTMUT_STATE or path.startswith(f"{_MUTMUT_STATE}/")
 
 
@@ -2677,17 +2677,17 @@ def _adds_to(f: _ChangedFunction, added: set[int], removed: set[int]) -> bool:
 def _changed_python_units(change: GateChange, in_scope: Callable[[str], bool],
                           touched: Callable[[_ChangedFunction, set[int], set[int]], bool] = _adds_to,
                           ) -> tuple[list[_ChangedFunction], list[tuple[str, str]]]:
-    """The top-level functions and methods of top-level classes, in the Python files of the working tree whose paths
-    in_scope accepts, that the change touched: touched(unit, added, removed) says so, added being the lines the
-    change added to its file and removed the lines after which a hunk that only removes lines removed them, 0 for the
-    top, as _removal_points gives them. And (path, why) for each such file that could not be read or parsed, why a
-    clause such as "does not parse as Python"."""
+    """The top-level functions and methods of top-level classes, in the Python files of the working tree outside
+    mutmut's state (_is_mutmut_state) whose paths in_scope accepts, that the change touched: touched(unit, added,
+    removed) says so, added being the lines the change added to its file and removed the lines after which a hunk
+    that only removes lines removed them, 0 for the top, as _removal_points gives them. And (path, why) for each such
+    file that could not be read or parsed, why a clause such as "does not parse as Python"."""
     defs = (ast.FunctionDef, ast.AsyncFunctionDef)
     functions, unreadable = [], []
     removed = _removal_points(change.diff)
     for path, added in change.changed.items():
         points = removed.get(path, set())
-        if not (added or points) or not path.endswith(".py") or not in_scope(path):
+        if not (added or points) or not path.endswith(".py") or _is_mutmut_state(path) or not in_scope(path):
             continue
         try:
             with open(os.path.join(change.root, path), "rb") as f:
@@ -3202,19 +3202,19 @@ _SURVIVOR_EXAMPLES = 3
 
 
 def surviving_mutants(change: GateChange, *, budget: float) -> list[dict]:
-    """The surviving-mutants check's find: mutation-tests with mutmut each top-level function and method the change
-    adds a line to in a Python file outside the tests. Reports at its def each such function that has mutants the
-    tests did not notice, with how many of its mutants they were and what the first _SURVIVOR_EXAMPLES change, as a
-    line before and after; and each such function that no test calls.
+    """The surviving-mutants check's find: mutation-tests with mutmut each top-level function and method the change adds
+    a line to in a Python file outside the tests and mutmut's state. Reports at its def each such function that has
+    mutants the tests did not notice, with how many of its mutants they were and what the first _SURVIVOR_EXAMPLES
+    change, as a line before and after; and each such function that no test calls.
 
-    mutmut runs in the gate's own interpreter, as flaky_tests runs pytest, on a copy of the files git tracks, but
-    for those under mutmut's state, which it selects no function from either, by the [tool.mutmut] of change.rules,
-    whatever the copy's says: its source_paths, only_mutate and do_not_mutate decide which files can be mutated, and
-    a changed function outside them is a finding saying so; its test selection says which tests run. Each mutant is
-    tried against the tests that called its function on a clean run. mutmut may run budget seconds; a run stopped
-    there is a finding that says how many of the mutants it tried, beside what those showed. A mutmut that cannot
-    start, fails, or whose results cannot be listed is a finding saying so, and so are rules that name no
-    source_paths and a changed file that cannot be read or parsed.
+    mutmut runs in the gate's own interpreter, as flaky_tests runs pytest, on a copy of the files git tracks. The copy
+    leaves out what the tree tracks under mutmut's state, so mutmut starts without a cache. mutmut runs there by the
+    [tool.mutmut] of change.rules, whatever the copy's says: its source_paths, only_mutate and do_not_mutate decide
+    which files can be mutated, and a changed function outside them is a finding saying so; its test selection says
+    which tests run. Each mutant is tried against the tests that called its function on a clean run. mutmut may run
+    budget seconds; a run stopped there is a finding that says how many of the mutants it tried, beside what those
+    showed. A mutmut that cannot start, fails, or whose results cannot be listed is a finding saying so, and so are
+    rules that name no source_paths and a changed file that cannot be read or parsed.
     """
     functions, out = _changed_python_functions(change)
     if functions:
@@ -3403,8 +3403,7 @@ def _changed_python_functions(change: GateChange) -> tuple[list[_ChangedFunction
     """The functions mutmut mutates as one that the change added lines to, decorators included, in the Python files
     outside the tests and mutmut's state (_is_mutmut_state) that it left in the working tree; and a finding for each
     such file that could not be read or parsed."""
-    functions, unreadable = _changed_python_units(
-        change, lambda path: not _python_test_file(path) and not _is_mutmut_state(path))
+    functions, unreadable = _changed_python_units(change, lambda path: not _python_test_file(path))
     return functions, [_finding(path, None, "not-run", f"{why}, so its functions were not mutation-tested.")
                        for path, why in unreadable]
 
