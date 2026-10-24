@@ -62,6 +62,9 @@ Each harness a run uses needs its CLI and its herdr integration where the agents
 
 ## Requirements
 
+`python orchestrator.py doctor` checks these, where the agents run, and says what to run for each that is missing;
+see [Usage](#usage).
+
 - herdr 0.9+ where the agents run, with the integration of each harness a run uses installed there
   (`herdr integration install <kind>`, e.g. `herdr integration install claude`)
 - The CLI of each harness a run uses on `PATH` where the agents run: `claude` by default, and `codex`, `gemini`,
@@ -190,6 +193,10 @@ with `--origin`, which the app passes for its webview.
 ## Usage
 
 ```bash
+# What a run needs, checked before one fails on it: herdr, each harness's CLI and integration, git, gh, gitleaks,
+# tkinter, and with --cwd the project's checkout and origin. A fix under each that is missing; exit status 1 if any is
+python orchestrator.py doctor --machine <machine> --cwd ~/GitHub/myproject
+
 # From a herdr pane, on the project in the current directory
 python orchestrator.py run "add a token-bucket rate limiter to the API client"
 
@@ -245,7 +252,7 @@ uv run python orchestrator.py gate --base main --coverage coverage.xml --out qua
 | Flag | Description |
 |---|---|
 | `--machine NAME` | Saved herdr machine to run the agents on. Requires `--cwd`. |
-| `--cwd PATH` | Project directory, on the machine if `--machine` is given. Default: current directory. |
+| `--cwd PATH` | Project directory, on the machine if `--machine` is given. Default: current directory; `doctor` checks a project only when given one. |
 | `--max-rounds N` | Review rounds before giving up (default 3). |
 | `--timeout SECONDS` | How long one Builder or Reviewer turn may take (default 1800). The interview has no limit. |
 | `--agent KIND` | The [harness](#harnesses) every role runs in: `claude`, `codex`, `gemini`, `opencode` or `pi`. Overrides the `agent` of a role in the workflow file. Default: that, else `claude`. |

@@ -5,6 +5,15 @@ was done.
 
 ## Open issues
 
+- **herdr 0.9.1 lists no `gemini` integration.** `herdr integration status` on this host lists `antigravity-cli`
+  (whose hook is under `~/.gemini/`) but no `gemini`, so `doctor` warns that it does not list gemini, and the
+  README's `herdr integration install gemini` may name a kind herdr no longer has. Found by the doctor run
+  (2026-10-24); not checked whether `agent start --kind gemini` still works. Closes once `AGENT_KINDS` and the README
+  name the kind herdr installs for Gemini, or herdr is shown to accept `gemini`.
+- **`doctor` checks gitleaks's `git` subcommand, not its version.** README asks for gitleaks 8.19 or later; the
+  check reuses `Host.gitleaks_problem`, the run's pre-push check, which asks `gitleaks git --help` because a
+  distribution's build may print no version number. So `doctor` shows no gitleaks version. Kept by choice
+  (2026-10-24).
 - **A pull request opened over a conflict stays a draft with its warning after the conflict is resolved.** When
   `Host.merge_upstream` finds conflicts with the base branch, `pr_body` opens the body with a `[!WARNING]` naming
   the conflicting files and `create_pr` opens it as a draft; nothing ever edits the body or marks it ready, and
