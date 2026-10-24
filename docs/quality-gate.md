@@ -673,7 +673,8 @@ goes to `build`, round n + 1, q = 0. `list` shows the phase `quality` and, in `b
 round.
 
 A resume in `quality` takes the furthest step the state allows: an existing quality file (one without a valid
-`GATE:` line is refused, as an empty handoff file is); `ci.build`; `ci.queue_url` (when Jenkins has forgotten the
+`GATE:` line is refused, as an empty handoff file is); `ci.build` (when the job has discarded that build, the run
+fails, cut back to `ci.ref`, so the next resume builds it again); `ci.queue_url` (when Jenkins has forgotten the
 queue item, the build with that `GIT_REF` among the job's last 20); `ci.ref` alone, where a build with that
 `GIT_REF` is adopted before a new one is triggered; otherwise snapshot, push and trigger. A state saved while
 quality rounds went through SonarQube loads too: its project and baseline are dropped, its `ci.ce_task` is

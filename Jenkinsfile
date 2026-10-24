@@ -11,8 +11,8 @@ pipeline {
     options {
         skipDefaultCheckout()
         // Per job, and per branch or pull request in the multibranch one; a discarded build takes its archived
-        // quality.md with it. Jenkins never discards the last successful build, which GIT_PREVIOUS_SUCCESSFUL_COMMIT
-        // names for the Gate stage.
+        // quality.md with it, and a resumed run that still names it builds its ref again. Jenkins never discards the
+        // last successful build, which GIT_PREVIOUS_SUCCESSFUL_COMMIT names for the Gate stage.
         buildDiscarder(logRotator(numToKeepStr: '30'))
     }
 

@@ -4224,6 +4224,20 @@ class TestQualityResume(unittest.TestCase):
             wf.run()
         self.assertEqual(wf.state.ci, {"ref": REF_1_1, "sha": "snap9"})
 
+    def test_discarded_build_is_cut_back_so_a_resume_builds_again(self):
+        fake = FakeCI()
+        state = quality_state(ci={"ref": REF_1_1, "sha": "snap9", "queue_url": f"{JENKINS}/queue/item/1/",
+                                  "build": 41})
+        wf, herdr, host, _ = resume_gated(state, {}, fake)
+
+        with self.assertRaisesRegex(OrchestratorError, f"Jenkins build #41 of {REF_1_1} is gone"):
+            wf.run()
+        self.assertEqual(wf.state.ci, {"ref": REF_1_1, "sha": "snap9"})
+
+        wf, herdr, host, _ = resume_gated(wf.state, {"review": [review_turn(1, APPROVE)]}, fake, host=host)
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(fake.triggered(), [REF_1_1])
+
     def test_a_leftover_ref_of_another_round_is_dropped(self):
         fake = FakeCI()
         state = quality_state(q=2, ci={"ref": REF_1_1, "sha": "snap9", "queue_url": f"{JENKINS}/queue/item/1/"})
