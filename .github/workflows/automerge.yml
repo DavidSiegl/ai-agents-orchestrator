@@ -1,43 +1,46 @@
-# Turns on auto-merge for a pull request from a branch of this repository, so GitHub merges it with a merge commit
-# once the ci-cd ruleset's required check, Jenkins' continuous-integration/jenkins/pr-head, passes. It never merges
-# by itself. Left for a human to merge: drafts until they are marked ready, the orchestrator's own pull requests
-# (branches under BRANCH_PREFIX, orchestrator/), pull requests from forks, and any labelled no-automerge; adding
-# that label later turns auto-merge off again.
+# Keeps auto-merge on for a pull request into main from a branch of this repository, so GitHub merges it with a
+# merge commit once the ci-cd ruleset's required check, continuous-integration/jenkins/pr-head, passes; when that
+# check has passed already, gh merges at once. Left for a human to merge, with auto-merge turned off again if it
+# was on: drafts, pull requests labelled no-automerge, the orchestrator's own pull requests (branches under
+# BRANCH_PREFIX, orchestrator/ in orchestrator.py) and pull requests from forks. Pull requests into another branch
+# are left alone: no ruleset requires a check there, so auto-merge would merge them unchecked.
 name: Auto-merge
 
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review, labeled]
+    branches: [main]
+    types: [opened, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]
 
-permissions:
-  contents: write
-  pull-requests: write
+permissions: {}
 
 jobs:
-  enable:
+  auto-merge:
     if: >-
-      github.event.action != 'labeled'
-      && github.event.pull_request.head.repo.full_name == github.repository
-      && !github.event.pull_request.draft
+      github.event.pull_request.head.repo.full_name == github.repository
       && !startsWith(github.event.pull_request.head.ref, 'orchestrator/')
-      && !contains(github.event.pull_request.labels.*.name, 'no-automerge')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    # One run per pull request at a time: gh pr create adds labels after opening, so the opened and labeled
+    # events arrive together, and each run must see what the one before it did.
+    concurrency:
+      group: auto-merge-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
     steps:
+      # Decided from the pull request as it is now, not from the event, which can predate a label or a draft.
       - env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
-        run: gh pr merge "$PR" --auto --merge
-
-  disable:
-    if: >-
-      github.event.action == 'labeled'
-      && github.event.label.name == 'no-automerge'
-      && github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
-    steps:
-      - env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-        run: gh pr merge "$PR" --disable-auto
+        run: |
+          pr=$(gh pr view "$PR" --json state,isDraft,labels,autoMergeRequest \
+            --jq '[.state, .isDraft, any(.labels[]; .name == "no-automerge"), .autoMergeRequest != null] | @tsv')
+          read -r state draft held queued <<<"$pr"
+          if [ "$state" != OPEN ]; then
+            echo "#$PR is $state"
+          elif [ "$draft" = true ] || [ "$held" = true ]; then
+            if [ "$queued" = true ]; then gh pr merge "$PR" --disable-auto; fi
+          elif [ "$queued" = false ]; then
+            gh pr merge "$PR" --auto --merge
+          fi
