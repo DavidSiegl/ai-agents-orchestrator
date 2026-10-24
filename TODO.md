@@ -33,6 +33,10 @@ was done.
   check reuses `Host.gitleaks_problem`, the run's pre-push check, which asks `gitleaks git --help` because a
   distribution's build may print no version number. So `doctor` shows no gitleaks version. Kept by choice
   (2026-10-24).
+- **No test shows the proof reruns come after the quality loop.** `Workflow._rerun_proofs` runs right before the
+  verdict step's turn, which follows the quality loop by construction, but every proof test uses `QUICK`, which has
+  no quality-gated step. Raised by the cross-review of the proof reruns (R1-F5, 2026-10-24): "no test would notice
+  the rerun moving before it". Closes with a proof test on a quality-gated workflow, through the CI fakes.
 - **The macOS builds are first tried on a published release.** `.github/workflows/macos-binary.yml` runs only on
   `release: published` or by hand for an existing tag, so a change that breaks the macOS binary or
   `packaging/build-desktop.sh` on macOS merges green, and the release then lacks those assets until it is fixed and
@@ -47,11 +51,6 @@ was done.
   it conflicts and stays a draft until a human edits it by hand. Met on PR #61 (2026-10-24): resolved and pushed,
   it still showed the warning and the draft. Closes when the orchestrator, or a command of its, notices that the
   head merges cleanly and drops the warning and the conflict-only draft.
-- **A proof that failed is not run again in the next round.** `Workflow._judge_proofs` runs only the proofs the
-  verdict step wrote in its own round, so a Builder told to make round N's failing proofs pass (`PROOFS_NOTE`) is
-  checked only if the Reviewer writes them again; one that still fails can be approved. Raised by the code review of
-  loop-guards (2026-10-24). Closes with round N's demonstrated proofs run again after the Builder's turn of round
-  N+1 and their outcomes put before the Reviewer.
 - **Proofs run after the last round's review too.** No Builder turn follows to read them; only the draft pull
   request's review shows them, and each may take `PROOF_TIMEOUT`. Kept: a demonstrated defect is what the human
   most needs to see in a draft. Raised by the same review.
@@ -277,6 +276,13 @@ was done.
 
 ## Fixed
 
+- **A proof that failed is not run again in the next round.** `Workflow._judge_proofs` ran only the proofs the
+  verdict step wrote in its own round, so a Builder told to make round N's failing proofs pass (`PROOFS_NOTE`) was
+  checked only if the Reviewer wrote them again; one that still failed could be approved. Raised by the code review
+  of loop-guards (2026-10-24). Fixed (2026-10-24): `Workflow._rerun_proofs` runs every proof whose last run failed,
+  or whose rerun errored, again right before each later round's verdict turn, until it passes, recording each rerun in
+  `RunState.proofs` with the round that wrote the proof; `CARRIED_PROOFS_NOTE` tells the verdict step which still
+  fail or now error, and `PROOFS_NOTE` names all of them to the step the review loops back to.
 - **The frontend's tests failed on Node 25 and later.** Node's own `localStorage` global, undefined without
   `--localstorage-file`, hid jsdom's, since Vitest's jsdom environment copies no global over one Node already has,
   so `ui/src/test/setup.ts`'s `localStorage.clear()` threw and every test failed. `setup.ts` now puts jsdom's
