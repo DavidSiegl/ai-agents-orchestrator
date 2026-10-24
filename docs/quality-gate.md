@@ -414,7 +414,7 @@ A pull request is judged by the gate and rules it brings, and most from a branch
 Jenkins's App reports `pr-head` green, with no human in between (`.github/workflows/automerge.yml` says which).
 The App's status is honest about the build, but the build ran the pull request's own `Jenkinsfile` and gate. So
 whoever can push a branch here, the agents included, can change the rules that branch's merge is judged by, and
-an agent's pull request from a branch outside `orchestrator/` can reach `main` without a human. A fork's pull
+an agent's pull request, the orchestrator's own included, can reach `main` without a human. A fork's pull
 request still waits for one.
 
 The repository is public, so the stage fetches `main` or the target branch without credentials. `GIT_REF` and

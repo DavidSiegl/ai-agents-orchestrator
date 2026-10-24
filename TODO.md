@@ -58,9 +58,11 @@ was done.
 - **An agent's pull request can reach `main` on rules it wrote itself, with no human.** Jenkins's App reports
   `continuous-integration/jenkins/pr-head`, which the agents' token cannot post, but a pull request build runs
   the pull request's own `Jenkinsfile` and gate (`docs/quality-gate.md`, What the Gate stage judges), and since
-  `automerge.yml` a pull request into `main` from a branch outside `orchestrator/` merges once that status is
-  green. Raised by the cross-review of `pr-automerge` (F5, 2026-10-24): "A branch the agents push under any other
-  name, once a pull request is open on it, merges into `main` (and so into a release) without a human". Closes
+  `automerge.yml` a pull request into `main` merges once that status is green. Raised by the cross-review of
+  `pr-automerge` (F5, 2026-10-24): "A branch the agents push under any other name, once a pull request is open on
+  it, merges into `main` (and so into a release) without a human". The orchestrator's own pull requests, under
+  `orchestrator/`, were held for a human until the user decided on 2026-10-24 that every pull request of this
+  repository merges on a green build; so a run's change now reaches `main` and a release unreviewed too. Closes
   with an approving review required on `main` that the agents cannot give (Homelab `.scratch/agent-identity`,
   ticket 03), or a Jenkinsfile and gate a pull request build takes from `main` rather than from the pull request.
 - **A pull request moved off `main` can merge unchecked before `automerge.yml` turns auto-merge off.** No ruleset
