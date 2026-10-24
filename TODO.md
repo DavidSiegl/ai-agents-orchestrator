@@ -17,10 +17,17 @@ was done.
   there. Accepted: the check reports only, and splitting the file's tests from its imports would mean rewriting
   them. Closes, if its run metrics show these files are common, by importing such names inside the tests that use
   them, or by running each test with the failing import stubbed.
+- **A submodule is empty in `passes-at-base`'s copy of the base.** `git archive` leaves a submodule's directory
+  empty, so a changed test that imports from one fails to import at the base and gives nothing, though it might pass
+  there; the check misses it. Raised by the cross-review of `passes-at-base` (R1-5, 2026-10-24): "`git archive` omits
+  submodule contents, so a test that imports from a submodule fails import at the base and is silently 'nothing'".
+  Closes when `_copy_base_with_tests` checks out each submodule at the commit the base records for it.
 - **Three gate checks repeat the make-a-scratch-directory, run, remove-it skeleton.** `flaky_tests`,
   `_mutation_test` and `passes_at_base` each call `tempfile.mkdtemp`, word their own finding when it fails, and word
-  another when `shutil.rmtree` fails (`not-removed` twice, `cleanup` once). Closes with one helper that takes the
-  check's rule and what it was doing, and the three findings worded one way.
+  another when `shutil.rmtree` fails (`not-removed` twice, `cleanup` once). The cross-review of `passes-at-base`
+  (R1-8, 2026-10-24) raised it as "a third copy of the scratch-directory skeleton ... with reworded messages". Closes
+  with one helper that takes the check's rule and what it was doing, and the three findings worded one way, with the
+  flaky-tests and surviving-mutants tests that quote today's wording.
 - **A test file whose name is not UTF-8 is never rerun by `flaky-tests`.** pytest-randomly 5.0.0 hashes each node
   id as strict UTF-8 (`pytest_randomly._crc32`, called from `pytest_runtest_setup` and its neighbours) and stops
   with an internal error, exit status 3. `_pytest` already lets pytest print such an id

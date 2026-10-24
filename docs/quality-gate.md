@@ -210,23 +210,26 @@ that starts on a matching line, with all it holds, so a help text's later lines 
 **Passes at base** runs the tests the change adds or edits, picked as flaky-tests picks them, against the base's code,
 since a test that passes without the change cannot be what shows the change works: coverage counts the lines it runs,
 surviving-mutants sees only the functions the change edits, and test integrity only tests getting weaker. For a bug
-fix, a test that fails at the base is the proof the bug was reproduced. The check runs only when the change edits a
-file outside the tests: a test file (as for test integrity), a `conftest.py`, or any file under a `tests` directory.
-The base is the files git tracked at `--base`, as `git archive` writes them, with every one of those test files the
-change touches taken from the working tree, or removed where the change removed it, so the changed tests keep their
-fixtures and data. Each changed test file gets a pytest run of its own, in the gate's interpreter, with the
-configuration flaky-tests' reruns get and the copy's own `TMPDIR`; one test file that cannot be imported at the base
-does not stop the others:
+fix, a test that fails at the base is the proof the bug was reproduced. The check runs only when the change edits
+Python source outside the tests: a `.py` file, or a script whose `#!` names python, that is not a test file (as for
+test integrity), a `conftest.py` or under a `tests` directory. A change to the tests alone, or to the tests and the
+docs, has no "without the change" a test could see. The base is the files git tracked at `--base`, as `git archive`
+writes them, with every one of the change's files that belong with the tests (those three kinds) taken from the
+working tree, or removed where the change removed it, so the changed tests keep their fixtures and data. A submodule is
+an empty directory there. pytest, in the gate's interpreter, with the configuration flaky-tests' reruns get and the
+copy's own `TMPDIR`, first collects the changed test files with `--continue-on-collection-errors`, then runs those of
+the changed tests it collected:
 
 - `passes-at-base`: a test that passed at the base, each of its parameter sets that pytest did not skip included, at
-  its `def`. A test that fails or errors there, or whose file cannot be imported there because it imports what the
-  change adds, tests the change and gives nothing. A refactor that keeps behaviour gives these findings rightly: the
-  Builder says it is one, and the Reviewer judges;
-- `budget-reached`: `--base-run-budget SECONDS`, 120 by default, shared by the runs, ran out; the finding says how
-  many test cases the stopped run had run and which test files were not judged;
-- `not-run`: pytest could not start, stopped with a usage error that is not a test file failing to import (such as a
-  `conftest.py` that imports what the change adds), or wrote no readable report; a changed test file could not be
-  read or parsed; or the copy could not be made;
+  its `def`. A test that fails or errors there tests the change and gives nothing; so does one pytest does not collect
+  there: a test whose file or `conftest.py` cannot be imported at the base, typically because it imports what the
+  change adds, and a `test_*` method of a class pytest does not take for a test class. A refactor that keeps behaviour
+  gives these findings rightly: the Builder says it is one, and the Reviewer judges;
+- `budget-reached`: `--base-run-budget SECONDS`, 120 by default, shared by the collection and the run, ran out; the
+  finding says when, and how many of its test cases the run had run. pytest runs in a session of its own, and is
+  killed with every process it started;
+- `not-run`: pytest could not start, stopped with a usage error other than a `conftest.py` that cannot be imported,
+  or wrote no readable report; a changed test file could not be read or parsed; or the copy could not be made;
 - `not-removed`: the copy could not be removed afterwards; the findings stand.
 
 The base's code is what the copy's configuration, such as `[tool.pytest.ini_options] pythonpath`, puts on the path. A

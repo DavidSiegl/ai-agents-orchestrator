@@ -5535,12 +5535,20 @@ class TestFlakyTests(unittest.TestCase):
                 self.assertIn("`TestRuns.test_alternates` failed under seed 2 and passed under seed 1: ",
                               "\n".join(f["message"] for f in self.found()))
 
+    def fake_python(self, script):
+        """Make the gate's interpreter a shell script that runs script, whatever it is asked."""
+        fake = os.path.join(self.repo, "fake-python")
+        with open(fake, "w") as f:
+            f.write(f"#!/bin/sh\n{script}\n")
+        os.chmod(fake, 0o700)
+        p = patch.object(orchestrator.sys, "executable", fake)
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_a_collection_the_gate_cannot_read_is_a_finding(self):
         self.change_the_tests()
-        printed = subprocess.CompletedProcess([], 0, stdout="tests/test_state.py: 20\n\n20 tests collected\n",
-                                              stderr="")
-        with patch.object(orchestrator.subprocess, "run", return_value=printed):
-            found = self.found()
+        self.fake_python("printf 'tests/test_state.py: 20\\n\\n20 tests collected\\n'")
+        found = self.found()
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-rerun")])
         self.assertIn("printed no node id the gate could read: 20 tests collected", found[0]["message"])
 
@@ -5792,17 +5800,17 @@ class TestFlakyTests(unittest.TestCase):
     def test_a_change_to_no_test_reruns_nothing(self):
         self.put("calc.py", "def add(a, b):\n    return b + a\n")
         self.put("tests/test_state.py", self.BASE.replace("import unittest\n", "import unittest  # edited\n"))
-        with patch.object(orchestrator.subprocess, "run") as run:
+        with patch.object(orchestrator, "_pytest") as pytest_run:
             self.assertEqual(self.found(), [])
-        run.assert_not_called()
+        pytest_run.assert_not_called()
 
     def test_mutmut_s_copy_of_a_test_is_not_rerun(self):
         # mutmut copies the tests into mutants/ beside the mutated code; committed, they are its state, not tests.
         self.put("mutants/tests/test_state.py", self.BASE + "\n\ndef test_new():\n    assert True\n")
         self.git("add", "mutants/tests/test_state.py")
-        with patch.object(orchestrator.subprocess, "run") as run:
+        with patch.object(orchestrator, "_pytest") as pytest_run:
             self.assertEqual(self.found(), [])
-        run.assert_not_called()
+        pytest_run.assert_not_called()
 
     def test_a_rerun_that_cannot_start_is_a_finding(self):
         self.change_the_tests()
@@ -5813,11 +5821,11 @@ class TestFlakyTests(unittest.TestCase):
 
     def test_a_rerun_that_times_out_is_a_finding(self):
         self.change_the_tests()
-        timeout = subprocess.TimeoutExpired(["pytest"], orchestrator.FLAKY_RUN_TIMEOUT)
-        with patch.object(orchestrator.subprocess, "run", side_effect=timeout):
+        self.fake_python("exec sleep 30")
+        with patch.object(orchestrator, "FLAKY_RUN_TIMEOUT", 1):
             found = self.found()
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-rerun")])
-        self.assertIn(f"did not finish within {orchestrator.FLAKY_RUN_TIMEOUT} seconds", found[0]["message"])
+        self.assertIn("did not finish within 1 seconds", found[0]["message"])
 
     def test_no_room_for_the_reruns_is_a_finding(self):
         self.change_the_tests()
@@ -5968,28 +5976,73 @@ class TestPassesAtBase(unittest.TestCase):
 
     def test_a_change_to_the_tests_alone_is_not_run(self):
         self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_zero():\n    assert mul(0, 5) == 0\n")
-        with patch.object(orchestrator.subprocess, "run") as run:
+        with patch.object(orchestrator, "_pytest") as pytest_run:
             self.assertEqual(self.found(), [])
-        run.assert_not_called()
+        pytest_run.assert_not_called()
 
-    def test_a_run_past_the_budget_says_how_many_tests_ran(self):
-        self.fix_add()
+    def fake_pytest(self, collect, run):
+        """Make the gate's interpreter a shell script that runs collect for a --collect-only and run otherwise."""
         fake = os.path.join(self.repo, "fake-python")
         with open(fake, "w") as f:
-            f.write("#!/bin/sh\nprintf '..'\nexec sleep 30\n")
+            f.write(f'#!/bin/sh\ncase "$*" in *--collect-only*) {collect};; *) {run};; esac\n')
         os.chmod(fake, 0o700)
-        with patch.object(orchestrator.sys, "executable", fake):
-            found = self.found(budget=1)
+        p = patch.object(orchestrator.sys, "executable", fake)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_a_run_past_the_budget_says_how_many_test_cases_ran(self):
+        self.fix_add("\n\ndef test_more():\n    assert add(1, 1) == 2\n")
+        # The sleep in the background holds pytest's output open too: only killing its process group ends the run.
+        self.fake_pytest("printf 'tests/test_calc.py::test_add\\ntests/test_calc.py::test_more\\n'",
+                         "printf '.'; sleep 30 & exec sleep 30")
+        start = time.monotonic()
+        found = self.found(budget=1)
+        self.assertLess(time.monotonic() - start, orchestrator.MUTMUT_KILL_WAIT)
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "budget-reached")])
-        self.assertEqual(found[0]["message"], "pytest was stopped at 1 seconds (`--base-run-budget`) after 2 test "
-                                              "cases of `tests/test_calc.py`, before it reported them; the changed "
-                                              "tests in `tests/test_calc.py` were not judged.")
+        self.assertEqual(found[0]["message"], "pytest was stopped at 1 seconds (`--base-run-budget`) after 1 of the 2 "
+                                              "test cases it was given, before it reported them, so none of them was "
+                                              "judged.")
+
+    def test_a_collection_past_the_budget_is_a_finding(self):
+        self.fix_add()
+        self.fake_pytest("exec sleep 30", "exit 0")
+        self.assertEqual([f["message"] for f in self.found(budget=1)], [
+            "pytest was stopped at 1 seconds (`--base-run-budget`) while it collected the changed tests, so none of "
+            "them was judged."])
+
+    def test_a_test_pytest_does_not_collect_leaves_the_others_judged(self):
+        # pytest does not collect a test_* method of a class not named Test*; asked for it by id, it exits 4.
+        self.fix_add("\n\nclass CalcMixin:\n    def test_x(self):\n        assert True\n"
+                     "\n\ndef test_mul_one():\n    assert mul(1, 1) == 1\n")
+        self.assertEqual([(f["rule"], f["message"].split("`")[1]) for f in self.found()],
+                         [("passes-at-base", "test_mul_one")])
+
+    def test_a_conftest_that_cannot_be_imported_at_the_base_gives_nothing(self):
+        self.put("calc.py", self.CALC.replace("a - b", "a + b") + "\n\nTWO = 2\n")
+        self.put("tests/conftest.py", "import pytest\n\nfrom calc import TWO\n\n\n@pytest.fixture\n"
+                                      "def two():\n    return TWO\n")
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_two(two):\n    assert mul(two, 1) == 2\n")
+        self.assertEqual(self.found(), [])
+
+    def test_a_change_to_docs_and_tests_is_not_run(self):
+        self.put("TODO.md", "- nothing\n")
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_zero():\n    assert mul(0, 5) == 0\n")
+        with patch.object(orchestrator, "_pytest") as pytest_run:
+            self.assertEqual(self.found(), [])
+        pytest_run.assert_not_called()
+
+    def test_a_tracked_link_out_of_the_tree_does_not_stop_the_copy(self):
+        os.symlink("/etc/hostname", os.path.join(self.repo, "host"))
+        self.git("add", "host")
+        self.git("commit", "--quiet", "-m", "link")
+        self.fix_add("\n\ndef test_mul_one():\n    assert mul(1, 1) == 1\n")
+        self.assertEqual([f["rule"] for f in self.found()], ["passes-at-base"])
 
     def test_a_run_that_cannot_start_is_a_finding(self):
         self.fix_add()
         with patch.object(orchestrator.sys, "executable", os.path.join(self.repo, "no-python")):
             found = self.found()
-        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("tests/test_calc.py", None, "not-run")])
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
         self.assertIn("could not start pytest", found[0]["message"])
 
     def test_an_unparsable_test_file_is_a_finding(self):
@@ -6003,9 +6056,9 @@ class TestPassesAtBase(unittest.TestCase):
         self.put("conftest.py", "")
         self.put("tests/data/input.txt", "2 3\n")
         self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_zero():\n    assert mul(0, 5) == 0\n")
-        with patch.object(orchestrator.subprocess, "run") as run:
+        with patch.object(orchestrator, "_pytest") as pytest_run:
             self.assertEqual(self.found(), [])
-        run.assert_not_called()
+        pytest_run.assert_not_called()
 
     def test_its_budget_is_a_whole_number_of_seconds_from_1(self):
         self.assertEqual(parse_args(["gate", "--base", "main", "--base-run-budget", "7"]).base_run_budget, 7)

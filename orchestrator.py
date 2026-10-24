@@ -3312,17 +3312,21 @@ def _collect_python_tests(root: str, inifile: str, tests: dict[tuple[str, str], 
                             ["-p", "no:randomly", "--collect-only", *files], ok=(0, 5), timeout=FLAKY_RUN_TIMEOUT)
     if problem or proc is None:
         return [], problem
+    return _listed_tests(proc, "collecting the changed tests", tests)
+
+
+def _listed_tests(proc: subprocess.CompletedProcess, doing: str,
+                  tests: dict[tuple[str, str], int]) -> tuple[list[str], str | None]:
+    """The node ids, one per parameter set and sorted, of those of tests, keyed as _changed_python_tests keys them,
+    that proc, a `pytest --collect-only` run by _pytest, listed. And the problem, a clause naming doing, when it exited
+    with status 0 but listed no node id in a form the gate can read; then the ids are []."""
+    files = {path for path, _ in tests}
     # At verbosity -1 pytest lists one node id a line, unindented, before its summary; a warnings summary repeats
     # some, indented or not. A collection that found tests but listed none in that form cannot be judged.
     ids = {line for line in proc.stdout.split("\n") if "::" in line and _node_parts(line)[0] in files}
     if proc.returncode == 0 and not ids:
-        return [], f"pytest, collecting the changed tests, printed no node id the gate could read: {_said(proc)}"
-    wanted = []
-    for i in sorted(ids):
-        path, names, _ = _node_parts(i)
-        if (path, ".".join(names)) in tests:
-            wanted.append(i)
-    return wanted, None
+        return [], f"pytest, {doing}, printed no node id the gate could read: {_said(proc)}"
+    return [i for i in sorted(ids) if (_node_parts(i)[0], ".".join(_node_parts(i)[1])) in tests], None
 
 
 def _rerun_python_tests(root: str, inifile: str, ids: list[str], seed: int,
@@ -3371,7 +3375,9 @@ def _pytest(root: str, inifile: str, doing: str, args: list[str], *, timeout: fl
     variables beside child_env's; its output unbuffered, so that what it printed before a kill is whole. And the
     problem, a clause naming doing, when it could not start, took longer than timeout seconds or exited with a
     status outside ok (by default 0, all passed, and 1, some failed); then the run is None when pytest did not start,
-    a _PytestStopped when timeout stopped it, and else the run that exited so. pytest
+    a _PytestStopped when timeout stopped it, and else the run that exited so. pytest runs in a session of its own,
+    and when it returns every process in that session, such as a server a test started, is gone; one stopped at
+    timeout is killed with them, and what it printed is read for at most MUTMUT_KILL_WAIT seconds more. pytest
     writes a name that is not UTF-8 as its bytes, and its output is decoded as Host.run's verbatim output is, so the
     node ids in it hold paths as git's do, and only "\n" ends a line. pytest-randomly 5.0.0 cannot shuffle such a
     name: under -p randomly pytest stops with an internal error."""
@@ -3386,16 +3392,24 @@ def _pytest(root: str, inifile: str, doing: str, args: list[str], *, timeout: fl
             "--confcutdir", root, "--verbosity=-1", "-o", "verbosity_test_cases=-1", *args]
     try:
         # A fixed command over the node ids pytest itself collected; no shell reads it.
-        raw = subprocess.run(argv, cwd=root, capture_output=True, timeout=timeout,  # noqa: S603
-                             env={**child_env(), **(env or {}), "PYTHONIOENCODING": "utf-8:surrogateescape",
-                                  "PYTHONUNBUFFERED": "1"}, check=False)
-    except subprocess.TimeoutExpired as e:
-        # subprocess.run has killed pytest and read what it printed until then.
-        stopped = _PytestStopped(argv, -signal.SIGKILL, os.fsdecode(e.stdout or b""), os.fsdecode(e.stderr or b""))
-        return stopped, f"pytest, {doing}, did not finish within {timeout:g} seconds"
+        raw = subprocess.Popen(argv, cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,  # noqa: S603
+                               stderr=subprocess.PIPE, start_new_session=True,
+                               env={**child_env(), **(env or {}), "PYTHONIOENCODING": "utf-8:surrogateescape",
+                                    "PYTHONUNBUFFERED": "1"})
     except OSError as e:
         return None, f"could not start pytest, {doing}: {e}"
-    proc = subprocess.CompletedProcess(raw.args, raw.returncode, os.fsdecode(raw.stdout), os.fsdecode(raw.stderr))
+    try:
+        out, err = raw.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(raw.pid, signal.SIGKILL)
+        out, err = _abandon(raw)
+        return (_PytestStopped(argv, -signal.SIGKILL, os.fsdecode(out), os.fsdecode(err)),
+                f"pytest, {doing}, did not finish within {timeout:g} seconds")
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(raw.pid, signal.SIGKILL)
+    proc = subprocess.CompletedProcess(argv, raw.returncode, os.fsdecode(out), os.fsdecode(err))
     if proc.returncode not in ok:
         return proc, f"pytest, {doing}, exited with status {proc.returncode}: {_said(proc)}"
     return proc, None
@@ -3436,28 +3450,33 @@ def _series(items: list[str], limit: int | None = None) -> str:
 
 def passes_at_base(change: GateChange, *, budget: float) -> list[dict]:
     """The passes-at-base check's find: runs the Python tests the change adds or edits, as flaky_tests picks them,
-    against the base's code, and reports at its def each one that passed there. Runs only when the change edits a
-    file outside the tests, as _beside_tests says; a change to tests alone has no "without the change" to run them in.
+    against the base's code, and reports at its def each one that passed there. Runs only when the change edits Python
+    source outside the tests, as _edits_python_source says: a change to tests alone has no "without the change" to run
+    them in, and one to docs alone none that a test could see.
 
     The tests run with pytest, in the gate's own interpreter, in the files git tracked at the base, as `git archive`
-    writes them (so a path the base's .gitattributes marks export-ignore is missing there), with every file of the
-    tests the change touches, conftest.py and data included, taken from the working tree instead, or removed where the
-    change removed it. A test passes there when pytest passed each of its cases that it did not skip, all its
-    parameter sets included. One that fails, errors or cannot be imported there tests the change, which is what the
-    check expects, and gives nothing; so does a test whose file has a module-level import that the base cannot satisfy,
-    whatever the test itself checks. The base's code is what the copy's own configuration, such as pytest's
-    pythonpath, imports; a project installed into the gate's interpreter imports the working tree's instead, and every
-    test of it then passes at the base.
+    writes them (so a path the base's .gitattributes marks export-ignore is missing there, and a submodule is empty),
+    with every file of the tests the change touches, conftest.py and data included, taken from the working tree
+    instead, or removed where the change removed it. pytest first collects the changed test files there, then runs
+    those of the changed tests it collected. A test passes there when pytest passed each of its cases that it did not
+    skip, all its parameter sets included. One that fails or errors there tests the change, which is what the check
+    expects, and gives nothing; so does one that pytest does not collect there: a test whose file, or a conftest.py,
+    cannot be imported at the base, whatever the test itself checks, and a test_* method of a class pytest does not
+    take for a test class. The base's code is what the copy's own configuration, such as pytest's pythonpath, imports;
+    a project installed into the gate's interpreter imports the working tree's instead, and every test of it then
+    passes at the base.
 
-    pytest may run for budget seconds; a run stopped there is a budget-reached finding naming how many test cases it
-    had run, none of whose outcomes it reported. A pytest that cannot start, cannot load the tests or the base's
-    configuration, or writes no readable report, a changed test file that cannot be read or parsed, and a copy that
-    cannot be made are not-run findings saying so; a copy that cannot be removed afterwards is a finding of its own.
+    The collection and the run together may take budget seconds; a stop there is a budget-reached finding saying
+    when, and how many test cases the run had run; none of their outcomes is reported. A pytest that cannot start,
+    stops with a usage error other than a conftest.py that cannot be imported, or writes no readable report, a changed
+    test file that cannot be read or parsed, and a copy that cannot be made are not-run findings saying so; a copy
+    that cannot be removed afterwards is a finding of its own.
     """
-    if not any(not _beside_tests(path) for pair in change.files for path in pair if path is not None):
+    if not _edits_python_source(change):
         return []
     tests, unreadable = _changed_python_tests(change)
-    out = [_finding(path, None, "not-run", f"{why}, so its tests were not run at the base.") for path, why in unreadable]
+    out = [_finding(path, None, "not-run", f"{why}, so its tests were not run at the base.")
+           for path, why in unreadable]
     if tests:
         try:
             tmp = tempfile.mkdtemp(prefix="passes-at-base-")
@@ -3474,6 +3493,14 @@ def passes_at_base(change: GateChange, *, budget: float) -> list[dict]:
     return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
 
 
+def _edits_python_source(change: GateChange) -> bool:
+    """Whether the change edits Python source outside the tests, as _beside_tests tells them: a file it leaves in the
+    working tree that _is_python_source accepts, or a .py file it deletes."""
+    return any((new is not None and not _beside_tests(new) and _is_python_source(change, new))
+               or (new is None and old is not None and old.endswith(".py") and not _beside_tests(old))
+               for old, new in change.files)
+
+
 def _beside_tests(path: str) -> bool:
     """Whether a repository path belongs with the tests rather than with the code they test, as passes_at_base reads
     it: a Python test file (_python_test_file), a conftest.py, or any file under a tests directory, such as a fixture's
@@ -3483,8 +3510,9 @@ def _beside_tests(path: str) -> bool:
 
 
 def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str], int], budget: float) -> list[dict]:
-    """passes_at_base's findings on tests, as _changed_python_tests gives them, run for at most budget seconds in a
-    copy of the base that it makes in tmp, an empty directory, beside the runs' reports and their TMPDIR."""
+    """passes_at_base's findings on tests, as _changed_python_tests gives them, collected and then run, within budget
+    seconds for both, in a copy of the base that it makes in tmp, an empty directory, beside the runs' reports and
+    their TMPDIR."""
     tree, scratch = os.path.join(tmp, "tree"), os.path.join(tmp, "tmp")
     try:
         _copy_base_with_tests(change, tree, os.path.join(tmp, "base.tar"))
@@ -3497,75 +3525,89 @@ def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str]
     except OSError as e:
         return [_finding(None, None, "not-run", f"could not write an empty pytest configuration for the run at the "
                                                 f"base: {e}; the changed tests were not run there.")]
-    out = []
     deadline = time.monotonic() + budget
-    files = sorted({path for path, _ in tests})
-    for k, path in enumerate(files):
-        names = [name for p, name in tests if p == path]
-        passed, ran, problem = _run_at_base(tree, inifile, path, names, os.path.join(tmp, f"base-{k}.xml"),
-                                            deadline - time.monotonic(), scratch)
-        out += [_finding(path, tests[(path, name)], "passes-at-base",
-                         f"`{name}` passes without the change, so it does not test it.") for name in passed]
-        if ran is not None:
-            out.append(_finding(None, None, "budget-reached", (
-                f"pytest was stopped at {budget:g} seconds (`--base-run-budget`) after {ran} test "
-                f"case{'' if ran == 1 else 's'} of `{path}`, before it reported them; the changed tests in "
-                f"{_series([f'`{f}`' for f in files[k:]])} were not judged.")))
-            break
-        if problem:
-            out.append(_finding(path, None, "not-run", f"{problem}; its changed tests were not judged."))
-    return out
-
-
-def _run_at_base(tree: str, inifile: str, path: str, names: list[str], report: str, timeout: float,
-                 scratch: str) -> tuple[list[str], int | None, str | None]:
-    """Run the tests names, qualified as _python_tests gives them, of the test file path in tree, the copy of the base,
-    with pytest by the configuration in inifile, its JUnit report going to report and its TMPDIR to scratch, for at
-    most timeout seconds. Returns the names of those that passed, as passes_at_base says; the number of test cases
-    pytest had run when timeout stopped it, else None; and the problem, a clause, when pytest went wrong otherwise.
-    A file that cannot be imported at the base is no problem: its tests did not pass."""
-    if timeout <= 0:
-        return [], 0, None
-    # A node id without parameters selects every parameter set of its test.
-    ids = {"::".join([path, *name.split(".")]): name for name in names}
-    # Exit status 2 or 4, with a collection failure in the report: the file could not be imported at the base. 5:
-    # pytest collected none of the ids, as for a helper named test_* that is no test.
+    env = {"TMPDIR": scratch}
+    ids, stopped, problem = _collect_at_base(tree, inifile, tests, deadline - time.monotonic(), env)
+    if stopped:
+        return [_base_run_budget_reached(budget, "while it collected the changed tests")]
+    if problem:
+        return [_finding(None, None, "not-run", f"{problem}; the changed tests were not run there.")]
+    if not ids:
+        return []
+    left = deadline - time.monotonic()
+    if left <= 0:
+        return [_base_run_budget_reached(budget, "once it had collected the changed tests, before it ran them")]
+    report = os.path.join(tmp, "base.xml")
     proc, problem = _pytest(tree, inifile, "running the changed tests at the base",
-                            ["-p", "no:randomly", f"--junitxml={report}", *sorted(ids)],
-                            timeout=timeout, ok=(0, 1, 2, 4, 5), env={"TMPDIR": scratch})
+                            ["-p", "no:randomly", f"--junitxml={report}", *ids], timeout=left, env=env)
     if isinstance(proc, _PytestStopped):
-        return [], sum(len(m[1]) for m in re.finditer(r"^([.FEsxX]+) *(?:\[ *\d+%\])?$", proc.stdout, re.MULTILINE)), None
+        ran = sum(len(m[1]) for m in re.finditer(r"^([.FEsxX]+) *(?:\[ *\d+%\])?$", proc.stdout, re.MULTILINE))
+        return [_base_run_budget_reached(budget, f"after {ran} of the {len(ids)} test cases it was given, before it "
+                                                 f"reported them")]
     if problem or proc is None:
-        return [], None, problem
-    if proc.returncode == 5:
-        return [], None, None
+        return [_finding(None, None, "not-run", f"{problem}; the changed tests were not judged.")]
     try:
         cases = junit_outcomes(report)
     except OrchestratorError as e:
-        return [], None, f"pytest, running the changed tests at the base, wrote no report the gate can read ({e}): {_said(proc)}"
-    if proc.returncode in (2, 4):
-        if any(outcome == "failed" and message == "collection failure" for _, outcome, message in cases):
-            return [], None, None
-        return [], None, f"pytest, running the changed tests at the base, exited with status {proc.returncode}: {_said(proc)}"
+        return [_finding(None, None, "not-run", f"pytest, running the changed tests at the base, wrote no report the "
+                                                f"gate can read ({e}): {_said(proc)}")]
     # Each test's outcomes at the base, its skips left out.
-    outcomes: dict[str, set[str]] = {}
-    by_case = {_junit_case(i): name for i, name in ids.items()}
+    outcomes: dict[tuple[str, str], set[str]] = {}
+    by_case = {_junit_case(i): i for i in ids}
     for case, outcome, _ in cases:
-        if (name := by_case.get(case.partition("[")[0])) is not None and outcome != "skipped":
-            outcomes.setdefault(name, set()).add(outcome)
-    return [name for name, seen in outcomes.items() if seen == {"passed"}], None, None
+        if (i := by_case.get(case)) is not None and outcome != "skipped":
+            path, names, _ = _node_parts(i)
+            outcomes.setdefault((path, ".".join(names)), set()).add(outcome)
+    return [_finding(path, tests[(path, name)], "passes-at-base",
+                     f"`{name}` passes without the change, so it does not test it.")
+            for (path, name), seen in sorted(outcomes.items()) if seen == {"passed"}]
+
+
+def _collect_at_base(tree: str, inifile: str, tests: dict[tuple[str, str], int], timeout: float,
+                     env: dict[str, str]) -> tuple[list[str], bool, str | None]:
+    """The node ids, one per parameter set, of those of tests that pytest collects in tree, the copy of the base, by
+    the configuration in inifile and with env, within timeout seconds; whether timeout stopped it; and the problem, a
+    clause, when it went wrong otherwise. A test file, or a conftest.py, that cannot be imported at the base gives no
+    ids and no problem: that is the expected outcome for a test of what the change adds. So does a test pytest does
+    not collect, such as a test_* method of a class not named Test*."""
+    # Exit status 1: some file could not be collected, which --continue-on-collection-errors lets the others outlive;
+    # 4, a usage error, which a conftest.py that cannot be imported gives; 5: no test was collected.
+    proc, problem = _pytest(tree, inifile, "collecting the changed tests at the base",
+                            ["-p", "no:randomly", "--collect-only", "--continue-on-collection-errors",
+                             *sorted({path for path, _ in tests})], timeout=timeout, ok=(0, 1, 4, 5), env=env)
+    if isinstance(proc, _PytestStopped):
+        return [], True, None
+    if problem or proc is None:
+        return [], False, problem
+    if proc.returncode == 4:
+        # pytest's ConftestImportFailure, as pytest 9 words it.
+        if "ImportError while loading conftest" in proc.stdout + proc.stderr:
+            return [], False, None
+        return [], False, f"pytest, collecting the changed tests at the base, exited with status 4: {_said(proc)}"
+    ids, problem = _listed_tests(proc, "collecting the changed tests at the base", tests)
+    return ids, False, problem
+
+
+def _base_run_budget_reached(budget: float, when: str) -> dict:
+    """passes_at_base's finding that its budget of budget seconds ran out when, a clause such as "while it collected
+    the changed tests"."""
+    return _finding(None, None, "budget-reached", f"pytest was stopped at {budget:g} seconds (`--base-run-budget`) "
+                                                  f"{when}, so none of them was judged.")
 
 
 def _copy_base_with_tests(change: GateChange, dest: str, archive: str) -> None:
     """Write the files git tracked at change.base to dest, a directory it makes, through a tar file at archive, then
     replace each file of the change's that _beside_tests accepts with the working tree's: removed at its path at the
-    base, and copied, a symbolic link as a link, to its path in the working tree. Raises OrchestratorError when git
-    cannot write the archive, tarfile.TarError when it cannot be unpacked or holds a link out of dest, and OSError
-    when dest exists or a file cannot be written."""
+    base, and copied, a symbolic link as a link, to its path in the working tree. A symbolic link is written as it is,
+    wherever it points; no file is written through one. A submodule is an empty directory, as git archive leaves it.
+    Raises OrchestratorError when git cannot write the archive, tarfile.TarError when it cannot be unpacked, and
+    OSError when dest exists or a file cannot be written."""
     Host().git(change.root, "archive", "--format=tar", f"--output={archive}", change.base, timeout=GATE_TOOL_TIMEOUT)
     os.makedirs(dest)
     with tarfile.open(archive) as tar:
-        tar.extractall(dest, filter="data")
+        # "tar", not "data": a tracked link out of the tree is the repository's own; both refuse a member whose path
+        # leads out of dest, through a link or otherwise.
+        tar.extractall(dest, filter="tar")
     for old, _ in change.files:
         if old is not None and _beside_tests(old) and os.path.lexists(path := os.path.join(dest, old)):
             os.remove(path)
@@ -7485,8 +7527,8 @@ def gate_command(base: str, rules: str | None, coverage: str | None, tests: str 
     could not be judged or out could not be written.
     """
     try:
-        text = judge_change(os.getcwd(), base, gate_checks(mutation_budget, base_run_budget), rules=rules, coverage=coverage,
-                            tests=tests)
+        text = judge_change(os.getcwd(), base, gate_checks(mutation_budget, base_run_budget), rules=rules,
+                            coverage=coverage, tests=tests)
         if out:
             # Written aside and renamed into place, so a failed write leaves no half a quality file.
             tmp = f"{out}.tmp.{os.getpid()}"
