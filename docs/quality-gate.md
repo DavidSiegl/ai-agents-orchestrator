@@ -36,14 +36,18 @@ judges without the gate failing. Either kind is listed wherever it is, not only 
 check that raised it. A check that cannot run says so as one of its findings, so a failing check that cannot
 run fails the gate.
 
+Every check sees the change without what the tree tracks under `mutants/`, mutmut's state (`GateChange.from_tree`):
+none selects a test, a function or a changed line there, or counts an edit there as a change to the code, and a file
+moved out of it counts as added. The linters and the build configuration listing see those files as any other.
+
 | Check | Fails? | Finds |
 |---|---|---|
 | `test-integrity` | yes | tests the change weakened, in test files (`tests/**`, `test_*.py`, `*_test.py`) |
 | `flaky-tests` | no | tests the change adds or edits that pass in one order and fail in another |
 | `surviving-mutants` | no | changes to the functions the change edits that no test notices |
 
-**Test integrity** compares each test file the change touches with its base, so a change cannot pass by
-weakening its tests. Each of these is a finding:
+**Test integrity** compares each test file the change touches, outside `mutants/` as above, with its base, so a
+change cannot pass by weakening its tests. Each of these is a finding:
 
 - `removed-test`: a test function, method or class is gone, at its line at the base. A class whose tests all
   went is one finding, and so is a deleted file. A test that reappears with the same body under another name or
@@ -62,10 +66,10 @@ It reads Python only; another language is a `WeakenedTestsDetector` beside the P
 `WEAKENED_TESTS_DETECTORS`.
 
 **Flaky tests** reruns the tests the change adds or edits, so a test that passed the build's one run by luck of
-the order is caught. A test counts when the change adds or removes a line of it in a test file, from the line after
-the statement before it to its last: its decorators and the comments above its `def` count, since a decorator
-replaced or removed changes the test, and so do lines removed right below it. pytest decides which of those are
-tests. It runs them five times, alone, under pytest-randomly with seeds 1 to 5
+the order is caught. A test counts when the change adds or removes a line of it in a test file outside `mutants/`, as
+above, from the line after the statement before it to its last: its decorators and the comments above its `def`
+count, since a decorator replaced or removed changes the test, and so do lines removed right below it. pytest
+decides which of those are tests. It runs them five times, alone, under pytest-randomly with seeds 1 to 5
 (`-p randomly -p no:cacheprovider --randomly-seed=N`), each run in the gate's own interpreter (`python -m pytest`,
 so the project's environment that `uv run` gives, whatever `pytest` is on `PATH`) and within 30 seconds. They run in
 a temporary copy of the files git tracks, so a report the project's `addopts` write, such as `coverage.xml`, lands in
@@ -102,8 +106,8 @@ off, and `--randomly-seed=N` repeats an order.
 
 **Surviving mutants** mutation-tests the functions the change edits, so that code its tests run without checking what
 it does is found; coverage counts such code as tested. A function counts when the change adds a line to it, decorators
-included: a top-level function, or a method of a top-level class, in a Python file outside the test files and
-`mutants/`, mutmut's state. mutmut, in the `dev` group, makes small changes to each, one at a time - an operator
+included: a top-level function, or a method of a top-level class, in a Python file outside the test files and, as
+above, `mutants/`. mutmut, in the `dev` group, makes small changes to each, one at a time - an operator
 swapped, a number or a string altered, an argument dropped - and runs each of these mutants against the tests that
 call the function:
 
@@ -210,8 +214,8 @@ first, at most 50 in all, then a count:
   because it takes them out of the surviving-mutants check.
 - **Build configuration**: an edit to `Jenkinsfile`, `pyproject.toml` or `uv.lock` is noted, since each can
   change how the change was judged, and so is each file the change adds or edits under `mutants/`, where mutmut keeps
-  its state: the surviving-mutants check runs mutmut without them and mutates no function in them, and the
-  flaky-tests check reruns no test in them, though the linters read them as they read any tracked file.
+  its state: the checks leave them out, as [the gate](#the-gate) says, and the surviving-mutants check runs mutmut
+  without them, though the linters read them as they read any tracked file.
 
 ### Whose rules judge a change
 
@@ -227,8 +231,8 @@ The surviving-mutants check takes `[tool.mutmut]` from the same file, so a chang
 alone. In the copy mutmut runs on, that table replaces the tree's own, and only that table: the rest of the tree's
 `pyproject.toml`, such as `[tool.pytest.ini_options]`, is how its tests run, which a change may need to alter. Without
 `--config`, the tree's table judges it, as the linters' do. What the tree holds under `mutants/`, mutmut's own state
-and cache of results, is left out of that copy, so mutmut starts afresh and a change cannot mark its mutants killed,
-and the check mutates no function in it; a change that adds or edits files there is listed under build configuration.
+and cache of results, is left out of that copy, so mutmut starts afresh and a change cannot mark its mutants killed;
+a change that adds or edits files there is listed under build configuration.
 
 The rule sets were tuned until `main` gave a short list of real findings: ruff's defaults plus bugbear,
 simplifications, pyupgrade, bandit, complexity (`max-complexity = 15`) and pylint's errors and warnings, with the

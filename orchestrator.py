@@ -1338,22 +1338,26 @@ class Host:
             raise OrchestratorError(f"snapshot of {cwd}: git commit-tree printed {sha!r}, not a commit")
         return sha
 
-    def change_diff(self, cwd: str, base: str, commit: str | None = None) -> str:
+    def change_diff(self, cwd: str, base: str, commit: str | None = None, *, pathspecs: tuple[str, ...] = ()) -> str:
         """`git diff -U0` from base to commit, or to the working tree's tracked files without one, in the one shape
-        changed_lines parses, whatever the user's git config.
+        changed_lines parses, whatever the user's git config. With pathspecs, git's, only the files they match: a
+        rename from a file they leave out is an added file.
 
         It is verbatim, as Host.run says: a line that is not UTF-8, such as Latin-1 text or a binary file that git
         diffs as text, is kept rather than refused, so a change to such a file is judged like any other, and only
         git's "\n" ends a line, so nothing inside an added line can pass for a header.
         """
         return self.git(cwd, "-c", "core.quotePath=false", "diff", "-U0", "-M", "--no-color", "--no-ext-diff",
-                        "--src-prefix=a/", "--dst-prefix=b/", base, *([commit] if commit else []), verbatim=True)
+                        "--src-prefix=a/", "--dst-prefix=b/", base, *([commit] if commit else []), "--", *pathspecs,
+                        verbatim=True)
 
-    def changed_files(self, cwd: str, base: str) -> list[tuple[str | None, str | None]]:
+    def changed_files(self, cwd: str, base: str, *,
+                      pathspecs: tuple[str, ...] = ()) -> list[tuple[str | None, str | None]]:
         """(path at base, path in the working tree) of each tracked file changed since base, a rename paired as
-        change_diff pairs it; None on the side where the file does not exist. The paths are verbatim, as Host.run
-        says, so each opens the file it names."""
-        fields = self.git(cwd, "diff", "--name-status", "-z", "-M", "--no-ext-diff", base, verbatim=True).split("\0")
+        change_diff pairs it; None on the side where the file does not exist. pathspecs are as for change_diff. The
+        paths are verbatim, as Host.run says, so each opens the file it names."""
+        fields = self.git(cwd, "diff", "--name-status", "-z", "-M", "--no-ext-diff", base, "--", *pathspecs,
+                          verbatim=True).split("\0")
         out: list[tuple[str | None, str | None]] = []
         i = 0
         # -z gives each entry as its status, then one path, or two for a rename; the list ends with an empty field.
@@ -2107,14 +2111,9 @@ def edited_config(diff: str, changed: dict[str, set[int]]) -> list[str]:
 
 
 def mutmut_state_files(changed: dict[str, set[int]]) -> list[str]:
-    """The files a change adds or edits under mutmut's state, by path, of changed as changed_lines gives it."""
-    return sorted(f for f in changed if _is_mutmut_state(f))
-
-
-def _is_mutmut_state(path: str) -> bool:
-    """Whether path, relative to the tree's top, is under _MUTMUT_STATE: mutmut's, which the surviving-mutants
-    check does not copy for mutmut, and neither check selects functions or tests from (_changed_python_units)."""
-    return path == _MUTMUT_STATE or path.startswith(f"{_MUTMUT_STATE}/")
+    """The files a change adds or edits under mutmut's state, _MUTMUT_STATE, by path, of changed as changed_lines
+    gives it: the files GateChange.from_tree leaves out of what the checks see."""
+    return sorted(f for f in changed if f == _MUTMUT_STATE or f.startswith(f"{_MUTMUT_STATE}/"))
 
 
 # ---------------------------------------------------------------------------
@@ -2172,14 +2171,30 @@ GATE_TOOLS = (
 
 @dataclass(frozen=True)
 class GateChange:
-    """The change the gate judges, as each GateCheck is given it."""
+    """The change the gate judges, as each GateCheck is given it; from_tree makes one."""
     root: str  # the repository's top level; its working tree is the change's new side
     base: str  # the commit the change is judged against, a full sha
-    diff: str  # Host.change_diff from base to the working tree
+    diff: str  # Host.change_diff from base to the working tree, of the files the checks see
     changed: dict[str, set[int]]  # changed_lines(diff)
+    files: list[tuple[str | None, str | None]]  # Host.changed_files from base, of the files the checks see
     # The path of the pyproject.toml whose rules judge the change, as judge_change passes it: `gate --config`'s, else
     # the tree's own. None, which only a caller other than judge_change passes, also means the tree's own.
     rules: str | None = None
+
+    @classmethod
+    def from_tree(cls, root: str, base: str, rules: str | None = None) -> "GateChange":
+        """The change from base, a full sha, to the working tree of the repository whose top level is root, judged by
+        rules as the rules field says.
+
+        The checks see the change as if git tracked nothing under mutmut's state, _MUTMUT_STATE, on either side: no
+        check selects a test, a function or a changed line there, or counts an edit there as a change to the code. A
+        file moved out of it is an added file, and one moved into it a deleted one. That is the one place mutmut's
+        state is left out; the linters and the build-configuration listing see it as any other tracked file.
+
+        Raises OrchestratorError when git cannot diff the tree against base."""
+        host, pathspecs = Host(), (f":(top,exclude,literal){_MUTMUT_STATE}",)
+        diff = host.change_diff(root, base, pathspecs=pathspecs)
+        return cls(root, base, diff, changed_lines(diff), host.changed_files(root, base, pathspecs=pathspecs), rules)
 
 
 @dataclass(frozen=True)
@@ -2228,8 +2243,8 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
 
     Runs each GATE_TOOLS linter whose files the repository tracks over those files, with the rules of the
     pyproject.toml at rules, or the tree's own, and lists the findings on lines the change added and the lineless
-    ones on files it touched. Then runs each of checks, such as gate_checks gives, and lists what it finds, as an
-    issue or as a finding to weigh as its fails says. The gate is ERROR when there is such a linter finding or a
+    ones on files it touched. Then runs each of checks, such as gate_checks gives, on the change as
+    GateChange.from_tree gives it, and lists what it finds, as an issue or as a finding to weigh as its fails says. The gate is ERROR when there is such a linter finding or a
     failing check's finding, when a linter is missing, fails or prints nothing readable, when a file a linter reads
     and the change adds lines to holds a line end that git does not count, as stray_line_ends finds, when tests, a
     JUnit report of the tree's tests such as pytest's --junitxml, has a failing test, or when coverage, a Cobertura
@@ -2279,7 +2294,7 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
                    f"write it as an escape in a string."
                    for path, n, end in stray_line_ends(root, changed, reads)]
     to_weigh: list[dict] = []
-    change = GateChange(root, base_sha, diff, changed, rules_path)
+    change = GateChange.from_tree(root, base_sha, rules_path)
     for check in checks:
         found = [{**f, "rule": f"{check.name} {f['rule']}" if f["rule"] else check.name} for f in check.find(change)]
         if not check.fails:
@@ -2536,13 +2551,12 @@ class WeakenedTestsDetector:
 def weakened_tests(change: GateChange) -> list[dict]:
     """The test-integrity check's find: in each WEAKENED_TESTS_DETECTORS language, the tests the change removed,
     skipped, stripped of assertions or wrapped in a swallowed error, and the expected values it changed together
-    with the code under test."""
+    with the code under test. The change leaves out mutmut's state, as GateChange.from_tree says."""
     host = Host()
-    pairs = host.changed_files(change.root, change.base)
     out: list[dict] = []
     for detector in WEAKENED_TESTS_DETECTORS:
         files, unreadable = [], []
-        for old, new in pairs:
+        for old, new in change.files:
             if not any(p is not None and detector.is_test(p) for p in (old, new)):
                 continue
             try:
@@ -2553,7 +2567,7 @@ def weakened_tests(change: GateChange) -> list[dict]:
             except (OrchestratorError, OSError, UnicodeDecodeError) as e:
                 unreadable.append(_finding(new or old, None, "unreadable",
                                            f"could not be read, so its tests were not checked: {e}", severity="error"))
-        code_changed = any(detector.is_source(p) and not detector.is_test(p) for pair in pairs for p in pair if p)
+        code_changed = any(detector.is_source(p) and not detector.is_test(p) for pair in change.files for p in pair if p)
         out += unreadable + (detector.find(files, code_changed) if files else [])
     return out
 
@@ -2677,17 +2691,17 @@ def _adds_to(f: _ChangedFunction, added: set[int], removed: set[int]) -> bool:
 def _changed_python_units(change: GateChange, in_scope: Callable[[str], bool],
                           touched: Callable[[_ChangedFunction, set[int], set[int]], bool] = _adds_to,
                           ) -> tuple[list[_ChangedFunction], list[tuple[str, str]]]:
-    """The top-level functions and methods of top-level classes, in the Python files of the working tree outside
-    mutmut's state (_is_mutmut_state) whose paths in_scope accepts, that the change touched: touched(unit, added,
-    removed) says so, added being the lines the change added to its file and removed the lines after which a hunk
-    that only removes lines removed them, 0 for the top, as _removal_points gives them. And (path, why) for each such
-    file that could not be read or parsed, why a clause such as "does not parse as Python"."""
+    """The top-level functions and methods of top-level classes, in the Python files of the working tree whose paths
+    in_scope accepts, that the change touched: touched(unit, added, removed) says so, added being the lines the change
+    added to its file and removed the lines after which a hunk that only removes lines removed them, 0 for the top, as
+    _removal_points gives them. And (path, why) for each such file that could not be read or parsed, why a clause such
+    as "does not parse as Python"."""
     defs = (ast.FunctionDef, ast.AsyncFunctionDef)
     functions, unreadable = [], []
     removed = _removal_points(change.diff)
     for path, added in change.changed.items():
         points = removed.get(path, set())
-        if not (added or points) or not path.endswith(".py") or _is_mutmut_state(path) or not in_scope(path):
+        if not (added or points) or not path.endswith(".py") or not in_scope(path):
             continue
         try:
             with open(os.path.join(change.root, path), "rb") as f:
@@ -2862,7 +2876,8 @@ def flaky_tests(change: GateChange) -> list[dict]:
     failed, xfailed (failed as its xfail mark expects) or passed, differs between seeds, naming the seeds of each. A
     test that failed under every seed that judged it, at least two, is not flaky, but is a finding of its own: the
     build may fail it too, which the failing-tests section lists, or it may need what the copy below lacks, so that
-    the reruns could not judge it. One that xfails under every seed is not reported.
+    the reruns could not judge it. One that xfails under every seed is not reported. The change leaves out mutmut's
+    state, as GateChange.from_tree says, so no test there is rerun.
 
     The tests run in a temporary copy of the files git tracks, so that what the project's addopts write, such as a
     coverage report, does not replace the build's own; a test that needs an untracked file, such as a build product,
@@ -3184,7 +3199,8 @@ def _series(items: list[str], limit: int | None = None) -> str:
 _MUTMUT_SKIP = "  # pragma: no mutate block"
 
 # The directory in the tree mutmut runs in where it keeps its state: its copy of the code with the mutants, and each
-# module's results in <path>.meta beside it.
+# module's results in <path>.meta beside it. What a tree tracks there is no part of the change the checks see
+# (GateChange.from_tree).
 _MUTMUT_STATE = "mutants"
 
 # How `mutmut results` words a mutant it did not try against a test: one the budget stopped it before, and one of a
@@ -3203,9 +3219,10 @@ _SURVIVOR_EXAMPLES = 3
 
 def surviving_mutants(change: GateChange, *, budget: float) -> list[dict]:
     """The surviving-mutants check's find: mutation-tests with mutmut each top-level function and method the change adds
-    a line to in a Python file outside the tests and mutmut's state. Reports at its def each such function that has
-    mutants the tests did not notice, with how many of its mutants they were and what the first _SURVIVOR_EXAMPLES
-    change, as a line before and after; and each such function that no test calls.
+    a line to in a Python file outside the tests. Reports at its def each such function that has mutants the tests did
+    not notice, with how many of its mutants they were and what the first _SURVIVOR_EXAMPLES change, as a line before
+    and after; and each such function that no test calls. The change leaves out mutmut's state, as
+    GateChange.from_tree says, so no function there is mutated.
 
     mutmut runs in the gate's own interpreter, as flaky_tests runs pytest, on a copy of the files git tracks. The copy
     leaves out what the tree tracks under mutmut's state, so mutmut starts without a cache. mutmut runs there by the
@@ -3401,8 +3418,8 @@ def _logical_line_ends(text: str) -> tuple[list[int], dict[int, str]]:
 
 def _changed_python_functions(change: GateChange) -> tuple[list[_ChangedFunction], list[dict]]:
     """The functions mutmut mutates as one that the change added lines to, decorators included, in the Python files
-    outside the tests and mutmut's state (_is_mutmut_state) that it left in the working tree; and a finding for each
-    such file that could not be read or parsed."""
+    outside the tests that it left in the working tree; and a finding for each such file that could not be read or
+    parsed."""
     functions, unreadable = _changed_python_units(change, lambda path: not _python_test_file(path))
     return functions, [_finding(path, None, "not-run", f"{why}, so its functions were not mutation-tested.")
                        for path, why in unreadable]

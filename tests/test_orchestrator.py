@@ -4172,8 +4172,7 @@ class TestWeakenedTests(unittest.TestCase):
     def found(self):
         """(path, line, rule) of each finding on the working tree's change, and the findings themselves."""
         base = self.git("rev-parse", "HEAD").strip()
-        diff = self.host.change_diff(self.repo, base)
-        found = orchestrator.weakened_tests(orchestrator.GateChange(self.repo, base, diff, changed_lines(diff)))
+        found = orchestrator.weakened_tests(orchestrator.GateChange.from_tree(self.repo, base))
         return [(f["path"], f["line"], f["rule"]) for f in found], found
 
     def test_an_unchanged_tree_has_no_findings(self):
@@ -4270,6 +4269,32 @@ class TestWeakenedTests(unittest.TestCase):
         self.edit("tests/test_calc.py", "assert add(10, 20) == 30", "assert add(10, 20) == 31")
         self.assertEqual(self.found()[0], [])
 
+    def commit_mutmut_state(self):
+        """Commit what mutmut leaves in mutants/ after a run: its copy of the code and of the tests beside it."""
+        for name, text in self.BASE.items():
+            self.put(f"mutants/{name}", text)
+        self.git("add", "mutants")
+        self.git("commit", "--quiet", "-m", "mutmut's state")
+
+    def test_removing_mutmut_s_state_removes_no_test(self):
+        self.commit_mutmut_state()
+        self.git("rm", "-r", "--quiet", "mutants")
+        self.assertEqual(self.found()[0], [])
+
+    def test_an_edit_to_mutmut_s_state_is_no_change_to_the_code(self):
+        self.commit_mutmut_state()
+        self.edit("mutants/calc.py", "return a + b", "return a + b + 1")
+        self.edit("tests/test_calc.py", "assert add(10, 20) == 30", "assert add(10, 20) == 31")
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_test_moved_out_of_mutmut_s_state_is_a_new_test(self):
+        # Seen without mutants/, the move adds the file, so the skip at its base is on an added line.
+        self.put("mutants/tests/test_skipped.py", "import pytest\n\n\n@pytest.mark.skip\ndef test_x():\n    assert 1\n")
+        self.git("add", "mutants")
+        self.git("commit", "--quiet", "-m", "mutmut's state")
+        self.git("mv", "mutants/tests/test_skipped.py", "tests/test_skipped.py")
+        self.assertEqual(self.found()[0], [("tests/test_skipped.py", 4, "skip")])
+
     def test_a_test_file_that_does_not_parse_says_so(self):
         self.edit("tests/test_other.py", "def test_b():", "def test_b(:")
         where, _ = self.found()
@@ -4361,8 +4386,7 @@ class TestFlakyTests(unittest.TestCase):
 
     def found(self):
         base = self.git("rev-parse", "HEAD").strip()
-        diff = self.host.change_diff(self.repo, base)
-        return orchestrator.flaky_tests(orchestrator.GateChange(self.repo, base, diff, changed_lines(diff)))
+        return orchestrator.flaky_tests(orchestrator.GateChange.from_tree(self.repo, base))
 
     def change_the_tests(self, extra=""):
         """Edit TestRuns.test_alternates to fail on every second run, whatever the order, and add PAIRS writers and
@@ -4861,9 +4885,7 @@ class TestSurvivingMutants(unittest.TestCase):
 
     def found(self, budget=60, rules=None):
         base = self.git("rev-parse", "HEAD").strip()
-        diff = self.host.change_diff(self.repo, base)
-        return orchestrator.surviving_mutants(
-            orchestrator.GateChange(self.repo, base, diff, changed_lines(diff), rules), budget=budget)
+        return orchestrator.surviving_mutants(orchestrator.GateChange.from_tree(self.repo, base, rules), budget=budget)
 
     def rules(self, table):
         """A rules file outside the tree, as `gate --config` names one, with table as its [tool.mutmut]."""
