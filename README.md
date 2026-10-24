@@ -150,6 +150,9 @@ python orchestrator.py list --machine <machine> --cwd ~/GitHub/myproject
 # request's state (OPEN, CLOSED or MERGED) from gh
 python orchestrator.py list --json --pr-state
 
+# Every finished run's metrics.json, one JSON line each: outcome, roles, turns with times and tokens, quality rounds
+python orchestrator.py metrics --machine <machine> --cwd ~/GitHub/myproject | jq -s 'map(.rounds) | add / length'
+
 # One run in full: its state, branch and pull request, agents, handoff files and last review
 python orchestrator.py show e292fb --machine <machine> --cwd ~/GitHub/myproject
 
@@ -272,7 +275,8 @@ since, the agent starts a fresh session instead.
    It writes `quality-N-Q.md`, the build's own quality file, which starts with `GATE: OK`, `GATE: ERROR` or
    `GATE: BUILD_FAILED` and lists the findings on the lines the change added and the failing tests. If the gate
    does not pass, the Builder answers it in `build-N-qQ.md` and the change is judged again, up to
-   `--max-quality-rounds` times; then it goes to the Reviewer either way, who is told whether the gate passed.
+   `--max-quality-rounds` times, or until a quality round fails on just what the one before it did; then it
+   goes to the Reviewer either way, who is told whether the gate passed.
    The throwaway branches are deleted when the run finishes; see
    [quality gate](docs/quality-gate.md).
 5. **Reviewer.** A fresh session checks the change against the spec and writes `review-N.md`, which starts with
@@ -289,26 +293,29 @@ since, the agent starts a fresh session instead.
    agents run on. Whenever the run ends, done, failed or interrupted, the orchestrator writes `summary.md`: the
    task, the outcome or the error, the pull request and branch, each role's harness and model, the total wall
    time, a table of the turns with their start and duration, and each round's quality gates and verdict. A
-   resume that ends again rewrites it. The pull request gets the same table, collapsed under "Run timings".
+   resume that ends again rewrites it. The pull request gets the same table, collapsed under "Run timings". A
+   run that is done also writes `metrics.json`, the same as one JSON object with each turn's tokens where its
+   harness records them, and each quality round's gate, failed conditions and finding fingerprints; `metrics`
+   prints every run's.
 
 One run at a time per checkout: runs in one project directory share its working tree, so a run, `--no-pr`
 or not, refuses to start or resume while another run there is `running` (see `list`). A stale, finished or
 failed run does not count. A `--worktree` run has a working tree of its own, so it neither refuses nor is
 refused by any other run. To run in parallel, use `--worktree`, or give each run its own clone.
 
-Everything a run writes stays in `<project>/.orchestrator/runs/<run-id>/`: the handoff files, `state.json`,
-which records the phase, round, panes, branch, pull request, verdict, any error, and in `turns` each handoff
-file's turn (step, role, round, harness, model, start, end and seconds), and `summary.md` once the run has
-ended ([Turn timings and the summary](docs/design.md#turn-timings-and-the-summary)). A turn whose file was
-written before turns were recorded has no start, and the tables show `?` for it; a spec given with `--spec` has
-no turn. A workflow's step cannot name its file `summary.md`. `.orchestrator/` ignores itself, so it never
-shows up in the diff or the commit. A failed run keeps its workspace open and stays on its
-branch, and a `--no-pr` run keeps its workspace open too. `close` closes it when you are done, and records that
-in `state.json`; `resume` then refuses the run. A failed or stale `--worktree` run also loses its worktree,
-uncommitted changes included, which `close` lists first, and its branch, unless the branch has commits beyond the
-run's base. A finished run keeps its worktree, and an in-place run its checkout and branch. `close` refuses a run
-that is `running`. `list` ends a closed run's line with what `close` did, in place of `stale` and its `resume`
-command ([Closing a run](docs/design.md#closing-a-run)).
+Everything a run writes stays in `<project>/.orchestrator/runs/<run-id>/`: the handoff files, `state.json`, which
+records the phase, round, panes, branch, pull request, verdict, any error, and in `turns` each handoff file's turn
+(step, role, round, harness, model, session, start, end, seconds and tokens), and `summary.md` once the run has
+ended, and `metrics.json` once it is done ([Turn timings and the summary](docs/design.md#turn-timings-and-the-
+summary)). A turn whose file was written before turns were recorded has no start, and the tables show `?` for it; a
+spec given with `--spec` has no turn. A workflow's step cannot name its file `summary.md` or `metrics.json`.
+`.orchestrator/` ignores itself, so it never shows up in the diff or the commit. A failed run keeps its workspace
+open and stays on its branch, and a `--no-pr` run keeps its workspace open too. `close` closes it when you are done,
+and records that in `state.json`; `resume` then refuses the run. A failed or stale `--worktree` run also loses its
+worktree, uncommitted changes included, which `close` lists first, and its branch, unless the branch has commits
+beyond the run's base. A finished run keeps its worktree, and an in-place run its checkout and branch. `close`
+refuses a run that is `running`. `list` ends a closed run's line with what `close` did, in place of `stale` and its
+`resume` command ([Closing a run](docs/design.md#closing-a-run)).
 
 `resume` continues a run whose orchestrator stopped where `state.json` says, reusing or relaunching its agents
 ([Resuming a run](docs/design.md#resuming-a-run)). It refuses while another branch than the run's is checked
@@ -349,9 +356,10 @@ The roles, their prompts and their order are a workflow. Besides the built-in `d
 without touching the code: a TOML file in `~/.config/ai-agents-orchestrator/workflows/`, named after the
 workflow, or a file anywhere passed with `--workflow-file`. `python orchestrator.py workflows` lists them and
 shows why one does not load; `python orchestrator.py workflows default > ~/.config/ai-agents-orchestrator/workflows/mine.toml`
-gives you the default's full definition to edit. [`examples/workflows/`](examples/workflows) has three more:
+gives you the default's full definition to edit. [`examples/workflows/`](examples/workflows) has four more:
 `spec-build-review` (the built-in `default` as a file, to copy and edit), `quick` (Builder ⇄ Reviewer, the task
-as the contract) and `tdd` (a Test Writer before the Builder).
+as the contract), `tdd` (a Test Writer before the Builder) and `adversarial` (a Reviewer who backs each finding with
+a failing test).
 
 ```toml
 description = "Spec Collector -> Test Writer -> Builder <-> Reviewer"
@@ -381,21 +389,26 @@ use = "review"
 
 A step takes `id`, `role`, `file` (a plain file name in the run directory, which no other step's file can match in
 any round), `prompt`, and optionally `again` (its prompt in a later round), `fresh_note` (for a fresh session in a
-later round), `loop_to`, which makes it the verdict step that sends `CHANGES_REQUESTED` back to the step it names
-(a workflow without one ends `FINISHED` when its last step is done, and its pull request says no agent reviewed the
+later round), `loop_to`, which makes it the verdict step that sends `CHANGES_REQUESTED` back to the step it names (a
+workflow without one ends `FINISHED` when its last step is done, and its pull request says no agent reviewed the
 change; with `--quality-gate`, a gate that still failed after the last quality round ends it `QUALITY_GATE_FAILED`
-instead, a draft, as under [Exit status](#exit-status)), and the flags `human_paced`, `edits`, `quality_gated` and
-`fresh_repeats_again` (a fresh session gets `again` too). `use = "spec"`, `"build"` or `"review"` starts from that
-default step and overrides only the keys you give. Prompts fill in `{task}`, `{cwd}`, `{n}`, `{change}`, `{path}`
-(the step's own file), and for every step `X`: `{X_path}`, `{prev_X_path}` and `{earlier_X_paths}`; write a literal
-brace as `{{` or `}}`. A role you do not list in `[roles]`, or list without a label, keeps the default workflow's
-label for that key (`build` is "Builder"), and is otherwise labelled after its key (`test_writer` is "Test
-Writer"). The panes follow the steps: the first role to take a turn gets the root pane, the next one a split to its
-right, and each further one a split below. A role's `model` is its default, and any model flag overrides it;
-likewise its `agent`, the [harness](#harnesses) it runs in, one of `claude`, `codex`, `gemini`, `opencode` and
-`pi`, which `--agent` and `--role-agent` override. The file is checked when it loads, and an error names the step
-and key. A run saves its workflow's definition, so editing or deleting the file does not change a run already
-started. See [Workflows](docs/architecture.md#workflows) for the rules.
+instead, a draft, as under [Exit status](#exit-status)), and the flags `human_paced`, `edits`, `quality_gated`,
+`fresh_repeats_again` (a fresh session gets `again` too) and `locks`: the first editing step, outside the review loop, can lock the files it
+changes, as `tdd`'s Test Writer does; every later turn's change to them is undone, and the Reviewer told where it
+is. A workflow's `proof_command`, such as `"python -m pytest -q {proofs}"`, runs each test the verdict step wrote in
+`{proofs_dir}` with a review that requests changes, in the working tree, and exits 1 when the test fails: the review
+gains which findings their tests demonstrate, and the next round's prompt tells the step it loops back to to make
+those tests pass. `use = "spec"`, `"build"` or `"review"` starts from that default step and overrides only the keys
+you give. Prompts fill in `{task}`, `{cwd}`, `{n}`, `{change}`, `{path}` (the step's own file), `{proofs_dir}` (the
+round's directory for proofs), and for every step `X`: `{X_path}`, `{prev_X_path}` and `{earlier_X_paths}`; write a
+literal brace as `{{` or `}}`. A role you do not list in `[roles]`, or list without a label, keeps the default
+workflow's label for that key (`build` is "Builder"), and is otherwise labelled after its key (`test_writer` is
+"Test Writer"). The panes follow the steps: the first role to take a turn gets the root pane, the next one a split
+to its right, and each further one a split below. A role's `model` is its default, and any model flag overrides it;
+likewise its `agent`, the [harness](#harnesses) it runs in, one of `claude`, `codex`, `gemini`, `opencode` and `pi`,
+which `--agent` and `--role-agent` override. The file is checked when it loads, and an error names the step and key.
+A run saves its workflow's definition, so editing or deleting the file does not change a run already started. See
+[Workflows](docs/architecture.md#workflows) for the rules.
 
 ## Running tests
 

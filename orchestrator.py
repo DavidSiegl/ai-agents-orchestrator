@@ -38,6 +38,7 @@ import contextlib
 import difflib
 import fnmatch
 import functools
+import hashlib
 import http.client
 import io
 import itertools
@@ -140,6 +141,8 @@ GIT_PATHSPEC_ENV = ("GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_P
 JOB_PARAMETERS = ("GIT_REF",)
 # Snapshots are pushed to orchestrator-ci/<key>-<round>-q<quality round>.
 CI_REF_PREFIX = "orchestrator-ci/"
+# A run's local refs are under refs/orchestrator/<key>/ (RunState.refs_prefix).
+LOCAL_REFS_PREFIX = "refs/orchestrator/"
 # Files a change may edit that alter how Jenkins and the gate judge it.
 BUILD_CONFIG_FILES = ("Jenkinsfile", "pyproject.toml", "uv.lock")
 QUALITY_ISSUE_LIMIT = 50
@@ -416,6 +419,24 @@ QUALITY_UNRESOLVED_NOTE = """\
 The quality gate still did not pass after the Builder's last quality round; \
 its unresolved findings are in {quality_path}. Weigh them as you would your own."""
 
+# QUALITY_UNRESOLVED_NOTE for a quality loop that stopped because a round failed on just what the one before it had.
+QUALITY_STUCK_NOTE = """\
+The quality gate still did not pass, and its last quality round failed on just what the round before it \
+failed on, so the Builder was not asked again; its unresolved findings are in {quality_path}. \
+Weigh them as you would your own."""
+
+# Appended to the prompt of the step a review loops back to, when tests the Reviewer wrote fail against the change.
+PROOFS_NOTE = """\
+The Reviewer backed findings with tests, and these fail against your change: {proofs}. \
+Make each of them pass, without changing it; you may move one into the project as a regression test. \
+If one is wrong, say so in your report instead."""
+
+# Appended to the verdict step's prompt when a turn of the round changed files that an earlier step locked.
+LOCKED_NOTE = """\
+This round changed files that step {steps} locked: {paths}. The orchestrator restored them, \
+so the change you review does not hold those edits; they are in {diff_paths}. \
+If a report says a locked file is wrong, weigh that claim against the diff."""
+
 
 # ---------------------------------------------------------------------------
 # Workflow definitions
@@ -427,7 +448,7 @@ PUBLISH = "publish"
 DONE = "done"
 
 # The placeholders a step's prompts may use besides the per-step paths (see Step).
-PROMPT_FIELDS = {"task", "cwd", "n", "change", "approve", "changes", "path"}
+PROMPT_FIELDS = {"task", "cwd", "n", "change", "approve", "changes", "path", "proofs_dir"}
 # The per-step paths: (prefix, suffix) around a step's id.
 PATH_FIELDS = (("", "_path"), ("prev_", "_path"), ("earlier_", "_paths"))
 
@@ -436,8 +457,9 @@ PATH_FIELDS = (("", "_path"), ("prev_", "_path"), ("earlier_", "_paths"))
 class Step:
     """One role's turn in a workflow, which ends when the role writes its handoff file.
 
-    A prompt is formatted with PROMPT_FIELDS, where n is the round and path the turn's own
-    file, and with three paths for every step X of the workflow: X_path in round n,
+    A prompt is formatted with PROMPT_FIELDS, where n is the round, path the turn's own file and
+    proofs_dir the round's directory for the verdict step's proofs (Pipeline.proof_command), and
+    with three paths for every step X of the workflow: X_path in round n,
     prev_X_path in round n-1, and earlier_X_paths, rounds 1 to n-1 joined with commas.
 
     A quality-gated step writes more than one file a round: the answer to quality round q
@@ -465,6 +487,10 @@ class Step:
     # With --quality-gate, each turn is followed by the quality loop, which sends a gate that does
     # not pass back to this step with QUALITY_FIX_PROMPT, and the verdict step hears how it ended.
     quality_gated: bool = False
+    # Locks the change as it stands when each of this editing step's turns ends: every file it then changes from the
+    # base. A later turn of another editing step that changes one has it restored, and the verdict step hears of it
+    # (Workflow._hold_locks).
+    locks: bool = False
 
     @property
     def per_round(self) -> bool:
@@ -531,6 +557,10 @@ class Pipeline:
     # run's base to the snapshot, so it holds every editing step's work, not only the gated step's.
     max_files: int = DEFAULT_MAX_FILES
     max_lines: int = DEFAULT_MAX_LINES
+    # A shell command, with {proofs} for one proof file's path, that runs a proof in the working tree and exits 1 when
+    # the proof fails, as pytest does. With it, each proof the verdict step writes in proofs_dir with a review that
+    # requests changes is run, and the review gains the outcomes (Workflow._judge_proofs). None runs none.
+    proof_command: str | None = None
 
     def __post_init__(self):
         if problem := self._problem():
@@ -541,13 +571,42 @@ class Pipeline:
         if not self.steps:
             return "has no steps"
         checks = (self._name_problem, self._role_problem, self._uniqueness_problem, self._step_problem,
-                  self._collision_problem, self._loop_problem, self._budget_problem)
+                  self._collision_problem, self._loop_problem, self._budget_problem, self._lock_problem,
+                  self._proof_problem)
         return next((problem for check in checks if (problem := check())), None)
 
     def _budget_problem(self) -> str | None:
         for key in BUDGET_KEYS:
             if getattr(self, key) < 1:
                 return f"{key} must be at least 1"
+        return None
+
+    def _proof_problem(self) -> str | None:
+        if self.proof_command is None:
+            return None
+        if self.verdict_step is None:
+            return "proof_command runs the verdict step's proofs, and the workflow has no verdict step"
+        try:
+            names = _fields_of(self.proof_command)
+        except ValueError as e:
+            return f"proof_command: {e}; write a literal brace as {{{{ or }}}}"
+        if names != ["proofs"]:
+            return "proof_command must name the proof file once, as {proofs}, and no other placeholder"
+        return None
+
+    def _lock_problem(self) -> str | None:
+        """A locking step that is not the first editing step, or that the verdict loop runs again. Host.lock locks
+        what the change holds when the step's turn ends, which is only the step's own work when no editing turn
+        came before it."""
+        for st in (st for st in self.steps if st.locks):
+            if not st.edits:
+                return f"step {st.id} locks the files it changes, so it must edit"
+            if st is not self.first_edit:
+                return f"step {st.id} locks the files it changes, so it must be the first editing step"
+            verdict = self.verdict_step
+            ids = [x.id for x in self.steps]
+            if verdict and verdict.loop_to in ids and ids.index(verdict.loop_to) <= ids.index(st.id):
+                return f"step {st.id} locks the files it changes, so the verdict loop must not run it again"
         return None
 
     def _name_problem(self) -> str | None:
@@ -675,8 +734,10 @@ class Pipeline:
 
 # Written into the run directory whenever the run ends: what it did, and where its time went.
 SUMMARY_FILE = "summary.md"
+# Written into the run directory when the run is done: run_metrics, for the metrics command.
+METRICS_FILE = "metrics.json"
 # Files the run writes into its directory itself, beside the steps' handoff files.
-RUN_FILE = re.compile(r"state\.json|summary\.md|quality-.*")
+RUN_FILE = re.compile(r"state\.json|summary\.md|metrics\.json|quality-.*|locked-.*|proofs-.*")
 
 
 def _fill_problem(step: Step, known: set[str]) -> str | None:
@@ -687,8 +748,8 @@ def _fill_problem(step: Step, known: set[str]) -> str | None:
         return f"handoff file {step.file} may use {{n}} only as it is, with no format spec or conversion"
     name = step.file.format(n=1)
     if "/" in name or name in ("", ".", "..") or RUN_FILE.fullmatch(name):
-        return f"handoff file {step.file} must be a plain file name, and not state.json, {SUMMARY_FILE} " \
-               f"or quality-*, which the run writes itself"
+        return f"handoff file {step.file} must be a plain file name, and not state.json, {SUMMARY_FILE}, " \
+               f"{METRICS_FILE}, quality-*, locked-* or proofs-*, which the run writes itself"
     # Every value a prompt is filled in with is a string.
     values = dict.fromkeys(known, "")
     for field_name in ("prompt", "again", "fresh_note"):
@@ -797,6 +858,7 @@ def find_workflow(name: str) -> Pipeline:
 #   description = "..."                      # optional, shown by `workflows`
 #   max_files = 15                           # optional: the change's budget (Pipeline), 15 files and 600 lines
 #   max_lines = 600                          # when left out
+#   proof_command = "python -m pytest {proofs}"   # optional: runs the Reviewer's proofs (Pipeline)
 #   [roles]                                  # optional
 #   build = "Builder"                        # a role's pane label,
 #   tests = { label = "Test Writer", model = "sonnet", agent = "codex" }   # or its label, default model
@@ -810,7 +872,7 @@ def find_workflow(name: str) -> Pipeline:
 # first use the roles. workflow_definition writes the canonical form, which
 # such a file may also be: every role with its label, and every step with its fields.
 
-WORKFLOW_KEYS = {"description", "roles", "steps", *BUDGET_KEYS}
+WORKFLOW_KEYS = {"description", "roles", "steps", "proof_command", *BUDGET_KEYS}
 ROLE_KEYS = {"label", "model", "agent"}
 STEP_KEYS = {f.name for f in fields(Step)}
 STEP_FLAGS = {f.name for f in fields(Step) if f.default is False}
@@ -886,13 +948,16 @@ def parse_workflow(name: str, data: dict) -> Pipeline:
     description = data.get("description", "")
     if not isinstance(description, str):
         raise ValueError("description must be a string")
+    proof_command = data.get("proof_command")
+    if proof_command is not None and not isinstance(proof_command, str):
+        raise ValueError("proof_command must be a string")
     budget = {key: data[key] for key in BUDGET_KEYS if key in data}
     for key, value in budget.items():
         # type(), not isinstance: true is an int to isinstance, but no number of lines.
         if type(value) is not int:
             raise ValueError(f"{key} must be a whole number")
     return Pipeline(name, labels, tuple(Step(**st) for st in steps), models=models, description=description,
-                    agents=agents, **budget)
+                    agents=agents, proof_command=proof_command, **budget)
 
 
 def _parse_role(role: str, raw) -> dict[str, str]:
@@ -978,6 +1043,7 @@ def workflow_definition(p: Pipeline) -> dict:
     budget = {f.name: getattr(p, f.name) for f in fields(Pipeline)
               if f.name in BUDGET_KEYS and getattr(p, f.name) != f.default}
     return {**({"description": p.description} if p.description else {}), **budget,
+            **({"proof_command": p.proof_command} if p.proof_command else {}),
             "roles": roles, "steps": [step_fields(st) for st in p.steps]}
 
 
@@ -986,6 +1052,7 @@ def workflow_toml(p: Pipeline) -> str:
     d = workflow_definition(p)
     lines = [f"description = {_toml_string(d['description'])}"] if "description" in d else []
     lines += [f"{key} = {d[key]}" for key in BUDGET_KEYS if key in d]
+    lines += [f"proof_command = {_toml_string(d['proof_command'])}"] if "proof_command" in d else []
     for role, table in d["roles"].items():
         lines += ["", f"[roles.{role}]", *(f"{k} = {_toml_string(v)}" for k, v in table.items())]
     for st in d["steps"]:
@@ -1243,6 +1310,12 @@ GH_UNUSABLE_STATUS = (4, 127)
 IN_DIR = 'cd -- "$1" && shift && exec "$@"'
 
 
+def _top_literal(paths: list[str]) -> list[str]:
+    """git pathspecs that each match exactly one of paths, relative to the repository's top level, whatever directory
+    git runs in, and with no glob in them."""
+    return [f":(top,literal){p}" for p in paths]
+
+
 class GhUnusable(OrchestratorError):
     """gh is missing or logged out where the project is, so no gh call can succeed."""
 
@@ -1436,6 +1509,55 @@ class Host:
         if not re.fullmatch(r"[0-9a-f]{40,64}", sha):
             raise OrchestratorError(f"snapshot of {cwd}: git commit-tree printed {sha!r}, not a commit")
         return sha
+
+    # Locked files (Step.locks). Their paths are relative to the repository's top level, verbatim as Host.run says,
+    # whatever directory of the repository cwd is.
+
+    def lock(self, cwd: str, base: str, ref: str) -> list[str]:
+        """Snapshot the working tree on top of base, store the commit under ref, replacing what ref held, and return
+        the paths whose files the snapshot changes from base: added, edited or deleted, a rename as its two paths.
+
+        ref is a local ref, which keeps the commit from git gc; nothing pushes it.
+        """
+        sha = self.snapshot(cwd, base, f"locked files, {ref}")
+        self.git(cwd, "update-ref", ref, sha)
+        return self._paths_between(cwd, base, sha)
+
+    def locked_changes(self, cwd: str, ref: str, paths: list[str]) -> tuple[list[str], str]:
+        """Of paths, the ones whose file in the working tree, untracked files included, differs from ref's, a file
+        missing on one side counting as different; and the diff from ref to the working tree over them, as text
+        for a reader. ([], "") when none differs. Reads only: ref, the tree and the index stay as they are."""
+        if not paths:
+            return [], ""
+        sha = self.snapshot(cwd, ref, f"the working tree against {ref}")
+        differ = self._paths_between(cwd, ref, sha, paths)
+        if not differ:
+            return [], ""
+        return differ, self.git(cwd, "diff", "--no-color", "--no-ext-diff", "--no-renames", ref, sha, "--",
+                                *_top_literal(differ), verbatim=True)
+
+    def restore(self, cwd: str, ref: str, paths: list[str]) -> None:
+        """Make each of paths in the working tree what it is in ref: written as ref has it, or deleted where ref has
+        none. The index stays as it is."""
+        held = set(self.git(cwd, "ls-tree", "-r", "--name-only", "-z", "--full-tree", ref, "--", *_top_literal(paths),
+                            verbatim=True).split("\0")) if paths else set()
+        if kept := [p for p in paths if p in held]:
+            self.git(cwd, "restore", f"--source={ref}", "--worktree", "--", *_top_literal(kept))
+        # git restore refuses a path that neither ref nor the index has, so a file ref lacks is removed here.
+        if gone := [p for p in paths if p not in held]:
+            top = self.git(cwd, "rev-parse", "--show-toplevel", verbatim=True).rstrip("\n")
+            self.check(["rm", "-f", "--", *(f"{top}/{p}" for p in gone)])
+
+    def delete_refs(self, cwd: str, prefix: str) -> None:
+        """Delete every local ref whose name starts with prefix, such as refs/orchestrator/<key>/; none is no error."""
+        for ref in self.git(cwd, "for-each-ref", "--format=%(refname)", prefix).split():
+            self.git(cwd, "update-ref", "-d", ref)
+
+    def _paths_between(self, cwd: str, a: str, b: str, paths: list[str] | None = None) -> list[str]:
+        """The paths whose files differ between commits a and b, a rename as its two paths; with paths, only those."""
+        names = self.git(cwd, "diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", a, b, "--",
+                         *_top_literal(paths or []), verbatim=True)
+        return [p for p in names.split("\0") if p]
 
     def change_diff(self, cwd: str, base: str, commit: str | None = None, *, pathspecs: tuple[str, ...] = ()) -> str:
         """`git diff -U0` from base to commit, or to the working tree's tracked files without one, in the one shape
@@ -1755,6 +1877,35 @@ class Host:
             except ValueError as e:  # JSONDecodeError is a ValueError
                 raise OrchestratorError(f"corrupt run state under {cwd}/{RUNS_DIR}: {e}") from e
         return runs
+
+    def session_log(self, kind: str, session: str) -> str | None:
+        """The log in which the harness kind keeps a session's token usage (SESSION_LOGS), found in the home directory
+        here; None for a harness without one, a session id that is not a plain name, or no such file. Verbatim, as
+        Host.run says."""
+        pattern = SESSION_LOGS.get(kind)
+        if pattern is None or not re.fullmatch(r"[A-Za-z0-9_-]+", session):
+            return None
+        script = (f'cd -- "$HOME" || exit 1; for f in $1; do [ -f "$f" ] && exec cat -- "$f"; done; '
+                  f'exit {MISSING_FILE_STATUS}')
+        proc = self.run(["sh", "-c", script, "_", pattern.format(session=session)], verbatim=True)
+        if proc.returncode == MISSING_FILE_STATUS:
+            return None
+        return self._checked(["sh", "-c", script], proc)
+
+    def run_metrics(self, cwd: str) -> list[dict]:
+        """The metrics.json of each run of the project at cwd that has one, oldest run first."""
+        # Each file is one line; echo ends one that lacks its line end.
+        script = (f'for f in "$1"/{RUNS_DIR}/*/{METRICS_FILE}; do [ -f "$f" ] || continue; cat -- "$f" && echo; done; '
+                  'true')
+        records = []
+        for line in self.check(["sh", "-c", script, "_", cwd]).splitlines():
+            if not line.strip():
+                continue
+            try:
+                records.append(json.loads(line))
+            except ValueError as e:
+                raise OrchestratorError(f"corrupt {METRICS_FILE} under {cwd}/{RUNS_DIR}: {e}") from e
+        return records
 
     def run_files(self, run_dir: str) -> list[str]:
         """The paths of the files in a run directory, oldest first, except state.json and write's temp files."""
@@ -2090,9 +2241,25 @@ class RunState:
     # when its prompt is delivered, or a quality analysis starts, and closes when its file is found. Absent from a
     # run saved before them.
     turns: list[dict] = field(default_factory=list)
+    # One record per quality round judged, in order: {"round", "quality_round", "gate", "conditions",
+    # "fingerprints_by_check"}, the last two as gate_failures reads them from its quality file. Fingerprints, never
+    # the findings' text, so that state.json stays small.
+    quality_rounds: list[dict] = field(default_factory=list)
     # The BLOCKED report the current turn waits on the human for, {"file", "question", "k"}: file is the handoff
     # file's basename, and the report was moved to its k-th blocked name (Workflow._blocked_path). None otherwise.
     blocked: dict | None = None
+    # Per locking step (Step.locks), by id: the paths its last turn locked, as Host.lock gives them. Their locked
+    # versions are in the commit at lock_ref(step id).
+    locked: dict[str, list[str]] = field(default_factory=dict)
+    # One record per editing turn that changed locked files, {"round", "file", "paths"}, in the order of the turns:
+    # file is the basename of the diff of what the turn changed in them, in the run directory, and paths are the
+    # files, by the id of the step that locked them. The files were restored once the record was saved.
+    restored: list[dict] = field(default_factory=list)
+    # One record per proof the verdict step wrote with a review that requested changes, {"round", "file", "finding",
+    # "demonstrated", "said"}, in the order they ran (Workflow._judge_proofs): file is the proof's basename in the
+    # round's proofs directory, finding the first number in that name, demonstrated whether it failed against the
+    # change, and said how it exited and the last PROOF_TAIL_LINES lines it printed.
+    proofs: list[dict] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, saved: dict) -> "RunState":
@@ -2123,6 +2290,19 @@ class RunState:
     def work_dir(self) -> str:
         """Where the agents work and the run's git steps run: its worktree, or else the project's checkout."""
         return self.worktree or self.cwd
+
+    @property
+    def refs_prefix(self) -> str:
+        """Where the run keeps its local refs, which nothing pushes and done deletes."""
+        return f"{LOCAL_REFS_PREFIX}{self.key}/"
+
+    def proofs_dir(self, n: int) -> str:
+        """Where the verdict step of round n writes its proofs (Pipeline.proof_command)."""
+        return f"{self.dir}/proofs-{n}"
+
+    def lock_ref(self, step_id: str) -> str:
+        """The local ref of the commit that holds the files the step locked."""
+        return f"{self.refs_prefix}locked/{step_id}"
 
     # The default workflow's handoff files; the quality files are every workflow's.
     @property
@@ -2355,6 +2535,9 @@ def _unquote(name: str) -> str:
 
 # quality_report's default for tests: the file has no tests section, as when the gate wrote it, which runs no tests.
 _NO_TESTS_SECTION: list = []
+# The headings of the quality file's sections that gate_failures reads, besides its numbered findings.
+FAILED_CONDITIONS = "## Failed conditions"
+FAILING_TESTS = "## Failing tests"
 
 
 def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (), issues=(), to_weigh=(),
@@ -2378,7 +2561,7 @@ def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (),
     """
     out = [f"GATE: {gate}", "", intro]
     if conditions:
-        out += ["", "## Failed conditions", "", *(f"- {c}" for c in conditions)]
+        out += ["", FAILED_CONDITIONS, "", *(f"- {c}" for c in conditions)]
     if gate != GATE_BUILD_FAILED:
         out += _issues_section(issues, elsewhere)
         if to_weigh:
@@ -2395,6 +2578,58 @@ def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (),
     if edited or mutmut_state:
         out += _config_section(edited, rules_from, mutmut_state)
     return "\n".join(out) + "\n"
+
+
+class GateFailures(NamedTuple):
+    """What a quality file says failed the gate, in a form two quality rounds can be compared by."""
+    conditions: list[str]  # the failed conditions, as the file words them
+    # By check, the first word of a finding's rule, or "tests" for a failing test: finding_fingerprint of each
+    # finding that fails the gate, and of each failing test, in the file's order. Findings to weigh are left out.
+    fingerprints: dict[str, list[str]]
+
+    def repeats(self, earlier: "GateFailures") -> bool:
+        """Whether these failures are the earlier ones again: something failed, nothing that failed before was
+        fixed, and nothing new failed. A finding counts as the same wherever it moved (finding_fingerprint), a
+        condition only when its words are."""
+        now = self._all()
+        return bool(now) and now == earlier._all()
+
+    def _all(self) -> set[str]:
+        return {*self.conditions, *(f for fs in self.fingerprints.values() for f in fs)}
+
+
+def finding_fingerprint(path: str | None, rule: str, message: str) -> str:
+    """A short hash that names a finding however its line moves: its path, its rule and its message without
+    digits, since a line number in it moves too. A finding about the whole change has no path."""
+    key = "\0".join([path or "", rule, re.sub(r"\d", "", message)])
+    return hashlib.sha256(key.encode("utf-8", "surrogateescape")).hexdigest()[:16]
+
+
+# A numbered finding as _numbered writes it: where, then severity, rule and message.
+_NUMBERED_FINDING = re.compile(r"\d+\. (?:`(?P<path>.+?)(?::\d+| \(the whole file\))`|The change as a whole:) "
+                               r"\S+ (?P<rule>.+?): (?P<message>.*)")
+_FAILING_TEST = re.compile(r"- `(?P<name>.+)`: .*")
+
+
+def gate_failures(quality: str) -> GateFailures:
+    """What the quality file, as quality_report and judge_run write it, says failed the gate: its failed conditions,
+    the numbered findings before a TO_WEIGH_NOTE in each section, and its failing tests."""
+    conditions: list[str] = []
+    fingerprints: dict[str, list[str]] = {}
+    section, weighing = "", False
+    for line in quality.split("\n"):
+        if line.startswith("## "):
+            section, weighing = line, False
+        elif line == TO_WEIGH_NOTE:
+            weighing = True
+        elif section == FAILED_CONDITIONS and line.startswith("- "):
+            conditions.append(line[2:])
+        elif section == FAILING_TESTS and (test := _FAILING_TEST.fullmatch(line)):
+            fingerprints.setdefault("tests", []).append(finding_fingerprint(test["name"], "tests", ""))
+        elif not weighing and (finding := _NUMBERED_FINDING.fullmatch(line)):
+            fingerprints.setdefault(finding["rule"].split(" ", 1)[0], []).append(
+                finding_fingerprint(finding["path"], finding["rule"], finding["message"]))
+    return GateFailures(conditions, fingerprints)
 
 
 # The sections of quality_report after its first, each as lines that start with a blank one.
@@ -2445,7 +2680,7 @@ def _numbered(k: int, finding: dict) -> str:
 
 
 def _tests_section(tests: list[tuple[str, str]] | None) -> list[str]:
-    out = ["", "## Failing tests", ""]
+    out = ["", FAILING_TESTS, ""]
     if tests is None:
         return out + ["Jenkins has no test report for this build."]
     out += [f"- `{name}`: {detail.strip().splitlines()[0] if detail.strip() else 'failed'}"
@@ -5073,14 +5308,14 @@ def _failed_by(quality: str, conditions: list[str]) -> str:
     at = next((i for i, x in enumerate(lines) if x.strip()), 0)
     lines[at] = re.sub(_labelled_word("GATE", (GATE_OK,)), rf"\g<1>{GATE_ERROR}", lines[at], count=1)
     bullets = [f"- {c}" for c in conditions]
-    if "## Failed conditions" in lines:
-        end = lines.index("## Failed conditions") + 2
+    if FAILED_CONDITIONS in lines:
+        end = lines.index(FAILED_CONDITIONS) + 2
         while end < len(lines) and lines[end].startswith("- "):
             end += 1
         lines[end:end] = bullets
     else:
         first = next((i for i in range(at + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
-        lines[first:first] = ["## Failed conditions", "", *bullets, ""]
+        lines[first:first] = [FAILED_CONDITIONS, "", *bullets, ""]
     return "\n".join(lines)
 
 
@@ -5586,9 +5821,29 @@ def commit_note(state: "RunState") -> str:
     return f"Orchestrator run {state.run_id}: {state.verdict} after {state.round} review round(s)."
 
 
+def provenance(state: "RunState", quality: str | None) -> list[tuple[str, str]]:
+    """The git trailers of the run's commit, (key, value) in order: Orchestrator-Run, Orchestrator-Workflow, an
+    Orchestrator-Role per role whose agent ran, in the order they first started, as role=harness/model, the model
+    "default" where none was set, and with a quality gate Orchestrator-Gate, how the last quality round ended.
+
+    quality is the round's last quality file, None for a run without one. A role that ran in two harnesses over
+    resumes names the last. docs/design.md says what each trailer means.
+    """
+    s = state
+    trailers = [("Orchestrator-Run", s.run_id), ("Orchestrator-Workflow", s.workflow)]
+    trailers += [("Orchestrator-Role", f"{role}={agent.get('kind', DEFAULT_AGENT)}/{s.models.get(role) or 'default'}")
+                 for role, agent in s.agents.items()]
+    if quality is not None:
+        rounds = f"{s.quality_round} quality round{'s' if s.quality_round != 1 else ''}"
+        trailers.append(("Orchestrator-Gate", f"{parse_gate(quality) or '?'} after {rounds}"))
+    return trailers
+
+
 def pr_body(state: "RunState", spec: str, report: str, review: str, quality: str | None = None) -> str:
     approved = state.verdict in SUCCEEDED
     head = f"Opened by ai-agents-orchestrator run `{state.run_id}`. {verdict_line(state)}"
+    trailers = "\n".join(["| Commit trailer | Value |", "| --- | --- |",
+                          *(f"| {key} | `{said}` |" for key, said in provenance(state, quality))])
     warning = []
     if state.conflicts:
         files = "\n".join(f"> - `{f}`" for f in state.conflicts)
@@ -5597,6 +5852,7 @@ def pr_body(state: "RunState", spec: str, report: str, review: str, quality: str
     return "\n\n".join([
         *warning,
         head,
+        trailers,
         _details("Spec", spec, open_=True),
         _details(f"Builder report (round {state.round})", report),
         *([_details(f"Quality gate (round {state.round})", quality)] if quality else []),
@@ -5700,6 +5956,128 @@ def run_summary(state: "RunState", pipeline: Pipeline, rounds: list[str], now: i
     if rounds:
         lines += ["", "## Rounds", "", *(f"- {line}" for line in rounds)]
     return "\n".join(lines) + "\n"
+
+
+# -- Run metrics: metrics.json, which the metrics command prints ---------------------------------------------
+
+# The version of run_metrics' shape, raised when a key changes its meaning or goes.
+METRICS_VERSION = 1
+
+# Where each harness that records the tokens of a session on disk keeps that record, as a glob relative to the home
+# directory of the machine the agents run on, {session} standing for the session id herdr reports. A harness that is
+# not here records none the orchestrator reads, and its turns' tokens are "unknown" (docs/design.md, Token usage).
+SESSION_LOGS = {"claude": ".claude/projects/*/{session}.jsonl", "pi": ".pi/agent/sessions/*/*_{session}.jsonl"}
+
+
+def session_usage(kind: str, session_log: str) -> list[tuple[float, dict[str, int]]]:
+    """The token usage a harness's session log, as SESSION_LOGS finds it, records: (when, in seconds since the epoch;
+    {"input", "output", "cache_read", "cache_write"}) for each answer of the model, oldest first. A line that is not a
+    record of one is skipped. Claude Code writes one line per content block of an answer, each with the answer's
+    usage, so each answer counts once, at its first line."""
+    out, seen = [], set()
+    for line in session_log.split("\n"):
+        try:
+            entry = json.loads(line)
+            message = entry["message"]
+            usage = message["usage"]
+            when = datetime.fromisoformat(entry["timestamp"]).timestamp()
+            if kind == "claude":
+                if entry.get("type") != "assistant" or message.get("id") in seen:
+                    continue
+                seen.add(message.get("id"))
+                tokens = {"input": usage["input_tokens"], "output": usage["output_tokens"],
+                          "cache_read": usage.get("cache_read_input_tokens", 0),
+                          "cache_write": usage.get("cache_creation_input_tokens", 0)}
+            else:
+                if message.get("role") != "assistant":
+                    continue
+                tokens = {"input": usage["input"], "output": usage["output"], "cache_read": usage.get("cacheRead", 0),
+                          "cache_write": usage.get("cacheWrite", 0)}
+        except (ValueError, KeyError, TypeError, AttributeError):
+            continue
+        if all(type(v) is int for v in tokens.values()):
+            out.append((when, tokens))
+    return out
+
+
+def turn_tokens(turn: dict, usage: list[tuple[float, dict[str, int]]] | None) -> dict[str, int] | str:
+    """The tokens of the answers the turn's agent gave from the turn's start to the second its handoff file was
+    written, summed, from usage, session_usage of the session it ran in throughout; "unknown" when there is no such
+    usage, or the turn's session or either end is not known, or not a time."""
+    if usage is None or not turn.get("session") or not turn.get("started_at") or not turn.get("ended_at"):
+        return "unknown"
+    try:
+        start, end = epoch_seconds(turn["started_at"]), epoch_seconds(turn["ended_at"]) + 1
+    except (ValueError, TypeError):
+        return "unknown"
+    total = dict.fromkeys(("input", "output", "cache_read", "cache_write"), 0)
+    for when, tokens in usage:
+        if start <= when < end:
+            for k, v in tokens.items():
+                total[k] += v
+    return total
+
+
+def run_metrics(state: "RunState", now: int) -> dict:
+    """metrics.json of a run that is done, at now: one object of the run's outcome, its roles, its turns with their
+    times and tokens, and its quality rounds with their fingerprints, never their findings' text. docs/design.md
+    gives every key."""
+    s = state
+    starts = [epoch_seconds(t["started_at"]) for t in s.turns if t.get("started_at")]
+    turns = [{"step": t["step"], "role": t["role"], "harness": t.get("agent"), "model": t.get("model"),
+              "round": t["round"], "quality_round": t.get("quality_round", 0),
+              "human_paced": bool(t.get("human_paced")), "started_at": t.get("started_at"),
+              "ended_at": t.get("ended_at"), "seconds": t.get("seconds"),
+              "tokens": (t.get("tokens") or "unknown") if t.get("agent") else None}
+             for t in s.turns]
+    return {
+        "version": METRICS_VERSION, "run_id": s.run_id, "workflow": s.workflow,
+        "outcome": s.verdict or ("error" if s.error else "unfinished"), "rounds": s.round,
+        "max_rounds": s.max_rounds, "quality_gate": s.quality_job is not None,
+        "max_quality_rounds": s.max_quality_rounds if s.quality_job else None, "pull_request": s.pr_url,
+        "started_at": iso_utc(min(starts)) if starts else None, "ended_at": iso_utc(now),
+        "seconds": now - min(starts) if starts else None,
+        "roles": {role: {"harness": a.get("kind", DEFAULT_AGENT), "model": s.models.get(role)}
+                  for role, a in s.agents.items()},
+        "turns": turns, "quality_rounds": s.quality_rounds,
+        "restored_locked_files": sum(len(ps) for r in s.restored for ps in r["paths"].values()),
+    }
+
+
+# -- Proofs: the verdict step's failing tests (Pipeline.proof_command) --------------------------------------
+
+# The heading of the section _judge_proofs appends to a review, which a Reviewer's own section is unlikely to take.
+PROOFS_HEADING = "## Proofs the orchestrator ran"
+# Seconds one proof may run, and how many lines of its output the review quotes.
+PROOF_TIMEOUT = 300
+PROOF_TAIL_LINES = 10
+
+
+def _proof_finding(file: str) -> int | None:
+    """The number of the finding a proof file is for: the first number in its name, as in test_3_rate.py."""
+    m = re.search(r"\d+", file)
+    return int(m.group()) if m else None
+
+
+def proofs_section(command: str, cwd: str, review: str, proofs: list[dict]) -> str:
+    """The section _judge_proofs appends to a review: for each of proofs, the round's records in RunState.proofs,
+    whether it demonstrates its finding, and the review's numbered findings left without one, which stand as
+    unproven."""
+    out = [PROOFS_HEADING, "", (f"The orchestrator ran each proof with `{command}` in {cwd}. A proof that fails "
+                                "demonstrates its finding; one that passes or errors does not.")]
+    for p in proofs:
+        file, failed, said = p["file"], p["demonstrated"], p["said"]
+        number = p["finding"]
+        finding = f"finding {number}" if number is not None else "no finding"
+        how = said.split("\n", 1)[0].rstrip(":")
+        out += ["", f"- `{file}` ({finding}): {'demonstrated' if failed else 'not demonstrated'}, {how}."]
+        if "\n" in said:
+            out += ["", "  ````", *(f"  {line}" for line in said.split("\n")[1:]), "  ````"]
+    proven = {p["finding"] for p in proofs}
+    unproven = [int(k) for k in re.findall(r"^(\d+)\. ", review, re.MULTILINE) if int(k) not in proven]
+    if unproven:
+        out += ["", f"Findings without a proof, unproven: {', '.join(map(str, unproven))}."]
+    return "\n".join(out) + "\n"
 
 
 def log(msg: str) -> None:
@@ -5837,6 +6215,7 @@ class Workflow:
             if s.pull_request:
                 self._publish()
             self._clean_up_quality()
+            self._clean_up_locks()
         except RunTakenOver:
             raise
         except OrchestratorError as e:
@@ -5847,9 +6226,13 @@ class Workflow:
             raise
 
         s.phase = DONE
+        # Saved first: the run is done whatever counting the tokens meets.
+        self._save()
+        self._count_tokens()
         s.owner = None
         self._save()
         self._write_summary()
+        self._write_metrics()
         if s.worktree and not s.pull_request:
             log(f"the change is in worktree {s.worktree}")
         self.notify(f"Run finished: {s.verdict}", s.pr_url or s.task)
@@ -5976,6 +6359,31 @@ class Workflow:
                             run_summary(s, self.pipeline, self._round_results(), self.host.now()))
         except OrchestratorError as e:
             log(f"could not write {SUMMARY_FILE}: {e}")
+
+    def _write_metrics(self) -> None:
+        """Write metrics.json for a run that is done; as for the summary, a failure is only logged."""
+        s = self.state
+        try:
+            self.host.write(f"{s.dir}/{METRICS_FILE}", json.dumps(run_metrics(s, self.host.now())) + "\n")
+        except OrchestratorError as e:
+            log(f"could not write {METRICS_FILE}: {e}")
+
+    def _count_tokens(self) -> None:
+        """Give each agent turn the tokens its harness recorded for it (turn_tokens), "unknown" where it recorded
+        none the orchestrator can read. A session log that cannot be read costs only its turns' counts."""
+        usage: dict[tuple[str, str], list[tuple[float, dict[str, int]]] | None] = {}
+        for t in self.state.turns:
+            if not t.get("agent"):
+                continue
+            key = (t["agent"], t.get("session") or "")
+            if key not in usage:
+                usage[key] = None
+                try:
+                    if key[1] and (session_log := self.host.session_log(*key)) is not None:
+                        usage[key] = session_usage(key[0], session_log)
+                except OrchestratorError as e:
+                    log(f"could not read the {key[0]} session log of {key[1]}: {e}")
+            t["tokens"] = turn_tokens(t, usage[key])
 
     def _round_results(self) -> list[str]:
         """Per round, its quality gates and its verdict, as its handoff files say."""
@@ -6118,6 +6526,9 @@ class Workflow:
         """The step's turn in round n; False when the run goes on elsewhere than the next step."""
         s = self.state
         out = self._step_turn(step, n)
+        if step.edits:
+            # Before the quality round, so the gate judges the locked files.
+            self._hold_locks(step, n)
         if step.quality_gated and self.ci:
             s.phase, s.quality_round = QUALITY, s.quality_round + 1
             self._save()
@@ -6126,22 +6537,153 @@ class Workflow:
             return True
         s.verdict = parse_verdict(out)  # _turn accepts no verdict file without one
         log(f"[{step.role}] round {n}: {s.verdict}")
+        if s.verdict == CHANGES_REQUESTED and self.pipeline.proof_command:
+            self._judge_proofs(step, n, out)
         if s.verdict != APPROVE and n < s.max_rounds:
             s.quality_round = 0
             self._goto(self.pipeline.step(step.loop_to), n + 1)
             return False
         return True
 
-    def _judge_quality(self, n: int) -> bool:
-        """The current quality round of round n; False when its gate sends the change back to the gated step."""
+    def _hold_locks(self, step: Step, n: int) -> None:
+        """After the editing step's turn in round n: restore the files other steps locked that the turn changed, then
+        lock the step's own files if it locks them. A resume before the run moves on does it again, harmlessly."""
         s = self.state
-        gate = self._quality(n, s.quality_round)
-        # As for review rounds: a saved round beyond a lowered limit ends here too.
-        if gate != GATE_OK and s.quality_round < s.max_quality_rounds:
-            s.phase = self.pipeline.gated.id
+        file = f"locked-{os.path.splitext(os.path.basename(self._own_path(step, n)))[0]}.diff"
+        record = next((r for r in s.restored if r["file"] == file), None)
+        if record is None:
+            record = self._locked_changes(step, n, file)
+        # A saved record is restored again: an orchestrator may have stopped before or while restoring it.
+        for locker, paths in (record or {}).get("paths", {}).items():
+            self.host.restore(s.work_dir, s.lock_ref(locker), paths)
+            log(f"[{step.role}] restored {', '.join(paths)}, which step {locker} locked; the changes are in {file}")
+        if step.locks:
+            if s.base is None:
+                raise OrchestratorError("a lock before the run has a base")
+            s.locked[step.id] = self.host.lock(s.work_dir, s.base, s.lock_ref(step.id))
             self._save()
+            log(f"[{step.role}] locked {len(s.locked[step.id])} files for the steps after it")
+
+    def _locked_changes(self, step: Step, n: int, file: str) -> dict | None:
+        """The record of what the step's turn in round n changed in other steps' locked files, saved with its diff
+        written to file; None when it changed none of them."""
+        s = self.state
+        paths: dict[str, list[str]] = {}
+        diffs = []
+        for locker, locked in s.locked.items():
+            if locker == step.id:
+                continue
+            differ, diff = self.host.locked_changes(s.work_dir, s.lock_ref(locker), locked)
+            if differ:
+                paths[locker] = differ
+                diffs.append(diff)
+        if not paths:
+            return None
+        self.host.write(f"{s.dir}/{file}", "".join(diffs))
+        record = {"round": n, "file": file, "paths": paths}
+        s.restored.append(record)
+        self._save()
+        return record
+
+    def _locks_note(self, n: int) -> str:
+        """What the verdict step hears of the locked files restored in round n; "" when none was."""
+        s = self.state
+        records = [r for r in s.restored if r["round"] == n]
+        if not records:
+            return ""
+        paths = sorted({p for r in records for ps in r["paths"].values() for p in ps})
+        lockers = sorted({locker for r in records for locker in r["paths"]})
+        return "\n\n" + LOCKED_NOTE.format(
+            paths=", ".join(f"`{p}`" for p in paths), steps=", ".join(lockers),
+            diff_paths=", ".join(f"{s.dir}/{r['file']}" for r in records))
+
+    def _clean_up_locks(self) -> None:
+        """At the end of a run, delete its local refs; a failure is only logged."""
+        s = self.state
+        if not s.locked:
+            return
+        try:
+            self.host.delete_refs(s.cwd, s.refs_prefix)
+        except OrchestratorError as e:
+            log(f"could not delete the refs under {s.refs_prefix}: {e}")
+
+    def _judge_proofs(self, step: Step, n: int, review: str) -> None:
+        """Run each proof the verdict step wrote in round n with the workflow's proof_command, record which fail, and
+        append their outcomes to its review. A resume runs none that were recorded, and appends them once."""
+        s, command = self.state, self.pipeline.proof_command
+        if command is None:
+            return
+        records = [p for p in s.proofs if p["round"] == n]
+        if not records:
+            for f in sorted(os.path.basename(f) for f in self.host.run_files(s.proofs_dir(n))):
+                failed, said = self._run_proof(command, s.proofs_dir(n), f)
+                records.append({"round": n, "file": f, "finding": _proof_finding(f), "demonstrated": failed,
+                                "said": said})
+            if not records:
+                return
+            s.proofs += records
+            self._save()
+            log(f"[{step.role}] {sum(p['demonstrated'] for p in records)} of {len(records)} proofs fail against the "
+                f"change")
+        if PROOFS_HEADING not in review.split("\n"):
+            self.host.write(step.path(s.dir, n),
+                            review.rstrip("\n") + "\n\n" + proofs_section(command, s.work_dir, review, records))
+
+    def _run_proof(self, command: str, proofs_dir: str, file: str) -> tuple[bool, str]:
+        """Whether the proof fails against the working tree, as proof_command's exit status 1 says, and what it
+        printed last: its output's end, how else it exited, or why it could not run."""
+        cmd = command.format(proofs=shlex.quote(f"{proofs_dir}/{file}"))
+        # GNU timeout runs the proof in a process group of its own and kills all of it, so nothing a proof started
+        # goes on writing to the tree; where there is none, Host.run's limit stops only the shell.
+        script = ('cd -- "$1" || exit 125; command -v timeout >/dev/null 2>&1 && exec timeout -k 10 "$3" sh -c "$2"; '
+                  'eval "$2"')
+        try:
+            proc = self.host.run(["sh", "-c", script, "_", self.state.work_dir, cmd, str(PROOF_TIMEOUT)],
+                                 timeout=PROOF_TIMEOUT + 30, verbatim=True)
+        except OrchestratorError as e:
+            return False, f"it did not run: {e}"
+        tail = "\n".join((proc.stdout + proc.stderr).rstrip().split("\n")[-PROOF_TAIL_LINES:])
+        how = {0: "it passes", 1: "it fails", 124: f"it errors, running out of its {PROOF_TIMEOUT} s"}.get(
+            proc.returncode, f"it errors, with exit status {proc.returncode}")
+        return proc.returncode == 1, f"{how}:\n{tail}" if tail else how
+
+    def _proofs_note(self, step: Step, n: int) -> str:
+        """What the step hears in round n of the proofs the verdict step's review of round n-1 demonstrated; "" when
+        it is not the step that review loops back to, or none failed."""
+        s, verdict = self.state, self.pipeline.verdict_step
+        if verdict is None or verdict.loop_to != step.id:
+            return ""
+        failing = [f"{s.proofs_dir(n - 1)}/{p['file']}" for p in s.proofs if p["round"] == n - 1 and p["demonstrated"]]
+        if not failing:
+            return ""
+        return "\n\n" + PROOFS_NOTE.format(proofs=", ".join(failing))
+
+    def _judge_quality(self, n: int) -> bool:
+        """The current quality round of round n; False when its gate sends the change back to the gated step: when it
+        failed, and not on just what the quality round before failed on (_stuck)."""
+        s, gated = self.state, self.pipeline.gated
+        if gated is None:
+            raise OrchestratorError(f"a quality round in workflow {self.pipeline.name}, which has no quality-gated step")
+        q = s.quality_round
+        gate = self._quality(n, q)
+        # As for review rounds: a saved round beyond a lowered limit ends here too.
+        if gate == GATE_OK or q >= s.max_quality_rounds:
+            return True
+        if self._stuck(n, q):
+            log(f"[quality] round {n}, quality round {q} failed on just what quality round {q - 1} failed on; "
+                f"going on rather than back to {gated.id}")
+            return True
+        s.phase = gated.id
+        self._save()
+        return False
+
+    def _stuck(self, n: int, q: int) -> bool:
+        """Whether quality round q of round n failed on the failures of quality round q-1 again (GateFailures.repeats):
+        the gated step's turn between them fixed none of them."""
+        if q < 2:
             return False
-        return True
+        before, after = (self.host.read(self.state.quality_path(n, k)) for k in (q - 1, q))
+        return before is not None and after is not None and gate_failures(after).repeats(gate_failures(before))
 
     def _goto(self, step: Step, n: int) -> None:
         """Make step the current one, in round n, and save that; the first editing step starts round 1."""
@@ -6196,7 +6738,7 @@ class Workflow:
         s = self.state
         q = s.quality_round if step.quality_gated else 0
         fill = {name: self._placeholder(name, step, n) for name in step.placeholders()}
-        quality = self._quality_note(n) if step.loop_to is not None else ""
+        quality = self._quality_note(n) + self._locks_note(n) if step.loop_to is not None else ""
         first = step.prompt.format(**fill) + quality
         if q:
             follow = QUALITY_FIX_PROMPT.format(quality_path=s.quality_path(n, q), report_path=self._own_path(step, n))
@@ -6210,12 +6752,15 @@ class Workflow:
         # A quality fix always asks for work that the first prompt does not.
         if q or step.fresh_repeats_again:
             fresh.append(follow)
-        return follow, "\n\n".join(fresh)
+        # Last, so a fresh session hears it too, whatever its prompt repeats.
+        proofs = "" if q else self._proofs_note(step, n)
+        return follow + proofs, "\n\n".join(fresh) + proofs
 
     def _placeholder(self, name: str, step: Step, n: int) -> str:
         """The value of a prompt placeholder (see Step) in the step's turn in round n."""
         s = self.state
-        fixed = {"task": s.task, "cwd": s.work_dir, "n": str(n), "approve": APPROVE, "changes": CHANGES_REQUESTED}
+        fixed = {"task": s.task, "cwd": s.work_dir, "n": str(n), "approve": APPROVE, "changes": CHANGES_REQUESTED,
+                 "proofs_dir": s.proofs_dir(n)}
         if name in fixed:
             return fixed[name]
         if name == "change":
@@ -6281,9 +6826,11 @@ class Workflow:
                 log(f"aborted the merge an earlier orchestrator left in {wd}")
             spec = self._last_text(p.contract, 0)
             title = (spec_title(spec) or s.task.strip().split("\n", 1)[0] or s.run_id)[:72]
+            quality = self.host.read(s.quality_path(s.round, s.quality_round)) if s.quality_round else None
             if self.host.git(wd, "status", "--porcelain").strip():
                 self.host.git(wd, "add", "--all")
-                self.host.git(wd, "commit", "--quiet", "-m", title, "-m", commit_note(s))
+                trailers = [arg for key, said in provenance(s, quality) for arg in ("--trailer", f"{key}: {said}")]
+                self.host.git(wd, "commit", "--quiet", "-m", title, "-m", commit_note(s), *trailers)
             elif self.host.git_head(wd) == s.base:
                 raise OrchestratorError(f"the Builder changed no files; there is nothing to commit on {s.branch}")
             # Scanned before the merge too, so that rewriting the run's commits never has to undo a merge.
@@ -6298,7 +6845,6 @@ class Workflow:
                     f"the pull request will be a draft")
             with self._rewrite_on_leak() as (base, branch):
                 self.host.push_branch(wd, branch, base=base, report_path=s.leaks_path("publish"))
-            quality = self.host.read(s.quality_path(s.round, s.quality_round)) if s.quality_round else None
             report = self._last_text(p.last_edit, s.round)
             verdict = self._last_text(p.verdict_step, s.round)
             body = pr_body(s, spec, report, verdict, quality)
@@ -6347,7 +6893,10 @@ class Workflow:
         s = self.state
         if not self.ci or not s.quality_round:
             return ""
-        note = QUALITY_PASSED_NOTE if self._gate_passed(n) else QUALITY_UNRESOLVED_NOTE
+        if self._gate_passed(n):
+            note = QUALITY_PASSED_NOTE
+        else:
+            note = QUALITY_STUCK_NOTE if self._stuck(n, s.quality_round) else QUALITY_UNRESOLVED_NOTE
         return "\n\n" + note.format(quality_path=s.quality_path(n, s.quality_round))
 
     def _gate_passed(self, n: int) -> bool:
@@ -6396,6 +6945,10 @@ class Workflow:
         gate = parse_gate(text)
         if gate is None:
             self._reject(path, "does not start with a GATE line")
+        if not any(r["round"] == n and r["quality_round"] == q for r in s.quality_rounds):
+            failures = gate_failures(text)
+            s.quality_rounds.append({"round": n, "quality_round": q, "gate": gate, "conditions": failures.conditions,
+                                     "fingerprints_by_check": failures.fingerprints})
         log(f"[quality] round {n}, quality round {q}: {gate}")
         self._finish_analysis(ref)
         return gate
@@ -6800,13 +7353,18 @@ class Workflow:
         a quality analysis, which runs no agent. started is None when the turn's start is not known."""
         s = self.state
         step = self.pipeline.step(s.phase)
-        agent = model = None
+        agent = model = session = None
         if step:
             agent = (s.agents.get(role) or {}).get("kind") or s.agent_kinds.get(role, DEFAULT_AGENT)
             model = s.models.get(role)
+            session = (s.agents.get(role) or {}).get("session")
         return {"step": s.phase, "role": role, "round": s.round,
                 "quality_round": s.quality_round if step is None or step.quality_gated else 0,
-                "file": file, "agent": agent, "model": model,
+                # The agent's session for the whole turn, None when that is not known: _end_turn clears it for a
+                # turn that ended in another session than it started in.
+                # The tokens of the turn, turn_tokens counts them once the run is done; None until then, and always
+                # for a quality analysis.
+                "file": file, "agent": agent, "model": model, "session": session, "tokens": None,
                 # A blocked turn's wait for the human's answer, and the rewrite after it, is paced by the human too.
                 "human_paced": bool(step and step.human_paced) or bool(s.blocked and s.blocked["file"] == file),
                 "started_at": None if started is None else iso_utc(started), "ended_at": None, "seconds": None}
@@ -6822,6 +7380,8 @@ class Workflow:
                 return  # closed already, by an orchestrator that stopped before the run moved on
             record = self._turn_record(role, file, None)
             s.turns.append(record)
+        if record.get("session") != (s.agents.get(role) or {}).get("session"):
+            record["session"] = None
         ended = self.host.mtime(path)
         record["ended_at"] = iso_utc(ended)
         if record["started_at"] is not None:
@@ -7082,6 +7642,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                               "with a record of each run's state")
     listing.add_argument("--pr-state", action="store_true",
                          help="with --json, ask gh for the state of each run's pull request, one call per run")
+
+    sub.add_parser(
+        "metrics", parents=[target], help="print the metrics of every run that is done, a JSON line each",
+        description=f"Print the {METRICS_FILE} of every run in the project directory that is done, one JSON object "
+                    f"per line, oldest run first, for jq or a spreadsheet: its outcome, roles, turns with their times "
+                    f"and tokens, and quality rounds. A run that is not done has none and is left out.")
 
     show = sub.add_parser(
         "show", parents=[target], help="print one run in full: its state, files and last review",
@@ -7877,7 +8443,7 @@ def main(argv: list[str]) -> int:
 
 
 # The commands about a project's runs, which start none.
-RUNS_COMMANDS = ("list", "show", "prune", "close")
+RUNS_COMMANDS = ("list", "show", "prune", "close", "metrics")
 
 
 def runs_command(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str) -> None:
@@ -7893,6 +8459,9 @@ def runs_command(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str) -
         show_run(host, cwd, args.run_ref, local_host, pid_alive, target_args(args))
     elif args.command == "close":
         close_run(herdr, host, cwd, args.run_ref, local_host, pid_alive)
+    elif args.command == "metrics":
+        for record in host.run_metrics(cwd):
+            print(json.dumps(record))
     else:
         print_pruned(prune_branches(host, cwd, time.time, local_host, pid_alive, dry_run=args.dry_run, revisit=True))
 

@@ -22,7 +22,7 @@ import tomllib
 import unittest
 import urllib.error
 import urllib.parse
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -107,6 +107,11 @@ class FakeHost(Host):
     - `pull_requests`: what `gh pr view` prints, by URL: a dict, or a completed process for a failure.
     - `remove_error`: the stderr of a failing `git worktree remove`.
 
+    Each snapshot keeps the changed files' text in `trees`, which lock, locked_changes and restore play the locked
+    files on; `refs` holds the refs lock made, and `restores` records each restore.
+
+    `session_logs` holds each agent session's log, by (harness, session id), for the turns' tokens.
+
     For the secret scan before each push:
 
     - `leaks`: what scan_unpublished finds, as Leaks; every scan finds them all. `scans` records (commit, base,
@@ -152,6 +157,10 @@ class FakeHost(Host):
         self.committed = {}
         self.file_reads = []
         self.line_counts = None
+        self.trees = {}  # by snapshot: the text of each changed file then, None for a deleted one
+        self.refs = {}  # the local refs lock made, with their snapshot
+        self.restores = []  # (ref, paths) of each restore
+        self.session_logs = {}  # by (harness, session): what session_log reads
 
     def scan_unpublished(self, cwd, commit, base, report_path):
         self.scans.append((commit, base, report_path))
@@ -173,7 +182,40 @@ class FakeHost(Host):
 
     def snapshot(self, cwd, parent, message):
         self.snapshots.append((parent, message))
-        return f"snap{len(self.snapshots)}"
+        sha = f"snap{len(self.snapshots)}"
+        self.trees[sha] = {p: self.files.get(p) for p in self._changed_in(cwd)}
+        return sha
+
+    def delete(self, path):
+        """Delete a file of the working tree, as an agent may."""
+        self.files.pop(path, None)
+        self.changed.add(path)
+
+    def lock(self, cwd, base, ref):
+        sha = self.snapshot(cwd, base, f"locked files, {ref}")
+        self.refs[ref] = sha
+        return sorted(p.removeprefix(f"{cwd}/") for p in self.trees[sha])
+
+    def locked_changes(self, cwd, ref, paths):
+        tree = self.trees[self.refs[ref]]
+        differ = [p for p in paths if self.files.get(f"{cwd}/{p}") != tree[f"{cwd}/{p}"]]
+        return differ, "".join(f"--- {p}: {tree[f'{cwd}/{p}']}\n+++ {p}: {self.files.get(f'{cwd}/{p}')}\n"
+                               for p in differ)
+
+    def restore(self, cwd, ref, paths):
+        self.restores.append((ref, list(paths)))
+        tree = self.trees[self.refs[ref]]
+        for p in paths:
+            if tree[f"{cwd}/{p}"] is None:
+                self.files.pop(f"{cwd}/{p}", None)
+            else:
+                self.files[f"{cwd}/{p}"] = tree[f"{cwd}/{p}"]
+
+    def session_log(self, kind, session):
+        return self.session_logs.get((kind, session))
+
+    def delete_refs(self, cwd, prefix):
+        self.refs = {ref: sha for ref, sha in self.refs.items() if not ref.startswith(prefix)}
 
     def read(self, path):
         return self.files.get(path)
@@ -1093,6 +1135,57 @@ class TestPullRequestText(unittest.TestCase):
         self.assertIn("truncated", body)
 
 
+class TestProvenance(unittest.TestCase):
+    BRANCH = "orchestrator/add-a-token-bucket-rate-limiter-a1b2c3"
+
+    def test_a_role_run_in_two_harnesses_names_the_one_that_finished(self):
+        state = saved_run("build", 1, agents=("spec", "build"), pull_request=True, base_branch="main",
+                          branch=self.BRANCH, models={"build": "gpt-5"})
+        state.agents["build"]["kind"] = "codex"
+        wf, _, host, _ = resume(state, {"build": [build_turn(1)], "review": [review_turn(1, APPROVE)]},
+                                host=FakeHost(branch=self.BRANCH), agent_kinds={"build": "claude"},
+                                models={"build": "opus"})
+        self.assertEqual(wf.run(), APPROVE)
+        commit = next(c for c in host.git_calls if c[0] == "commit")
+        self.assertEqual(commit[6:], ("--trailer", "Orchestrator-Run: 20260929-120000-a1b2c3",
+                                      "--trailer", "Orchestrator-Workflow: default",
+                                      "--trailer", "Orchestrator-Role: spec=claude/default",
+                                      "--trailer", "Orchestrator-Role: build=claude/opus",
+                                      "--trailer", "Orchestrator-Role: review=claude/default"))
+
+    def test_the_gate_trailer_says_how_the_last_quality_round_ended(self):
+        state = saved_run("publish", 2, agents=("build",), quality_job=JOB, quality_round=1)
+        self.assertEqual(orchestrator.provenance(state, "GATE: OK\n")[-1],
+                         ("Orchestrator-Gate", "OK after 1 quality round"))
+        state.quality_round = 3
+        self.assertEqual(orchestrator.provenance(state, "garbled")[-1],
+                         ("Orchestrator-Gate", "? after 3 quality rounds"))
+        self.assertEqual([k for k, _ in orchestrator.provenance(state, None)],
+                         ["Orchestrator-Run", "Orchestrator-Workflow", "Orchestrator-Role"])
+
+    def test_git_reads_them_as_trailers(self):
+        with tempfile.TemporaryDirectory() as d:
+            host = Host()
+            host.check(["git", "init", "--quiet", d])
+            for key, setting in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
+                host.git(d, "config", key, setting)
+            state = saved_run("publish", 1, agents=("spec", "build", "review"), quality_job=JOB, quality_round=2,
+                              verdict=APPROVE, models={"review": "gpt-5"})
+            state.agents["review"]["kind"] = "codex"
+            trailers = [arg for key, said in orchestrator.provenance(state, "GATE: OK\n")
+                        for arg in ("--trailer", f"{key}: {said}")]
+            host.git(d, "commit", "--quiet", "--allow-empty", "-m", "Add a limiter", "-m",
+                     orchestrator.commit_note(state), *trailers)
+            message = host.git(d, "log", "-1", "--format=%B")
+            self.assertEqual(host.check(["git", "interpret-trailers", "--parse"], stdin=message),
+                             "Orchestrator-Run: 20260929-120000-a1b2c3\nOrchestrator-Workflow: default\n"
+                             "Orchestrator-Role: spec=claude/default\nOrchestrator-Role: build=claude/default\n"
+                             "Orchestrator-Role: review=codex/gpt-5\nOrchestrator-Gate: OK after 2 quality rounds\n")
+            self.assertEqual(host.git(d, "log", "-1", "--format=%(trailers:key=Orchestrator-Role,valueonly)"),
+                             "spec=claude/default\nbuild=claude/default\nreview=codex/gpt-5\n\n")
+            self.assertIn(orchestrator.commit_note(state), message)
+
+
 class TestHerdr(unittest.TestCase):
     def test_call_returns_result_and_forwards_machine(self):
         run = MagicMock(return_value=result({"agent": {"agent_status": "idle"}}))
@@ -1582,6 +1675,63 @@ class TestHostGit(unittest.TestCase):
         self.assertEqual(self.sh("git", "-C", wt, "diff", "--name-only", base, sha), "feature.py\n")
         self.assertEqual(changed_lines(self.host.change_diff(wt, base, sha)), {"feature.py": {1}})
         self.assertEqual(self.sh("git", "-C", self.a, "status", "--porcelain"), " M app.py\n?? mine.py\n")
+
+    def put(self, name, text=None):
+        """Write a file of checkout A, or delete it with no text."""
+        path = f"{self.a}/{name}"
+        if text is None:
+            os.remove(path)
+            return
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    def read(self, name):
+        with open(f"{self.a}/{name}") as f:
+            return f.read()
+
+    def test_locked_files_are_restored_and_the_index_is_left_alone(self):
+        self.commit(self.a, "gone.py", "old\n")
+        self.commit(self.a, "removed.py", "old\n")
+        base = self.head(self.a)
+        ref = "refs/orchestrator/a1b2c3/locked/tests"
+        self.put("tests/test_[x].py", "assert f()\n")
+        self.put("app.py", "one\ntested\n")
+        self.put("gone.py")
+        # Deleted from the index too, so that git restore would know it from neither side.
+        self.sh("git", "-C", self.a, "rm", "--quiet", "removed.py")
+        self.assertEqual(self.host.lock(self.a, base, ref), ["app.py", "gone.py", "removed.py", "tests/test_[x].py"])
+        locked = self.host.lock(self.a, base, ref)
+
+        # A later step edits one, deletes another, brings back the third and changes a file nobody locked.
+        self.put("tests/test_[x].py")
+        self.put("app.py", "one\nweakened\n")
+        self.put("gone.py", "back\n")
+        self.put("removed.py", "back\n")
+        self.put("feature.py", "new\n")
+        os.makedirs(f"{self.a}/sub")
+        differ, diff = self.host.locked_changes(f"{self.a}/sub", ref, locked)
+        self.assertEqual(differ, ["app.py", "gone.py", "removed.py", "tests/test_[x].py"])
+        self.assertIn("-tested\n+weakened\n", diff)
+        self.assertIn("deleted file mode", diff)
+        porcelain = self.sh("git", "-C", self.a, "status", "--porcelain")
+
+        self.host.restore(f"{self.a}/sub", ref, differ)
+        self.assertEqual((self.read("tests/test_[x].py"), self.read("app.py"), self.read("feature.py")),
+                         ("assert f()\n", "one\ntested\n", "new\n"))
+        self.assertFalse(os.path.exists(f"{self.a}/gone.py"))
+        self.assertFalse(os.path.exists(f"{self.a}/removed.py"))
+        self.assertEqual(self.host.locked_changes(self.a, ref, locked), ([], ""))
+        # The index holds only the deletion staged above.
+        self.assertEqual(self.sh("git", "-C", self.a, "diff", "--cached", "--name-only"), "removed.py\n")
+        self.assertNotEqual(self.sh("git", "-C", self.a, "status", "--porcelain"), porcelain)
+
+        other = "refs/orchestrator/d4e5f6/locked/tests"
+        self.sh("git", "-C", self.a, "update-ref", other, base)
+        self.host.delete_refs(self.a, "refs/orchestrator/a1b2c3/")
+        self.assertEqual(self.sh("git", "-C", self.a, "for-each-ref", "--format=%(refname)", "refs/orchestrator/"),
+                         f"{other}\n")
+        self.host.delete_refs(self.a, "refs/orchestrator/a1b2c3/")
 
 
 class TestCLI(unittest.TestCase):
@@ -2928,7 +3078,8 @@ class TestWorktreeRun(unittest.TestCase):
         self.assertEqual(wf.run(), APPROVE)
         self.assertFalse([a for a in host.git_calls if a[:2] == ("worktree", "add")])
         self.assertIn((WORKTREE, ("commit", "--quiet", "-m", "add a rate limiter", "-m",
-                                  orchestrator.commit_note(wf.state))), host.git_log)
+                                  orchestrator.commit_note(wf.state))),
+                      [(cwd, args[:6]) for cwd, args in host.git_log])
 
     def test_resume_before_the_first_edit_reuses_the_worktree(self):
         host = FakeHost()
@@ -3122,6 +3273,8 @@ def outcome(gate="OK", *, archived=True, result=None, findings=(), tests=(), tes
 
 
 RED = dict(gate="ERROR", findings=["`limiter.py:3` error ruff F401: `os` imported but unused"])
+# A gate that fails on something else than RED.
+RED2 = dict(gate="ERROR", findings=["`limiter.py:9` error mypy arg-type: Argument 1 has incompatible type"])
 
 
 class FakeCI:
@@ -3653,7 +3806,7 @@ class TestQualityGate(unittest.TestCase):
 
     def test_rounds_run_out(self):
         fake = FakeCI()
-        fake.outcomes = [outcome(**RED), outcome(**RED)]
+        fake.outcomes = [outcome(**RED), outcome(**RED2)]
         reviews = []
         wf, herdr, host, fake, _ = gated({
             "spec": [spec_turn], "build": [build_turn(1), fix_turn(1, 1)],
@@ -3903,6 +4056,94 @@ class TestQualityGate(unittest.TestCase):
         with patch("sys.stderr") as err:
             self.assertEqual(wf.run(), APPROVE)
         self.assertIn("could not list the orchestrator-ci/ branches", "".join(c.args[0] for c in err.write.call_args_list))
+
+
+class TestStuckQualityLoop(unittest.TestCase):
+    def loop(self, *outcomes, builds=3):
+        fake = FakeCI()
+        fake.outcomes = list(outcomes)
+        reviews = []
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "build": [build_turn(1), *(fix_turn(1, q) for q in range(1, builds))],
+            "review": [recording(review_turn(1, APPROVE), reviews)]}, fake=fake)
+        self.assertEqual(wf.run(), APPROVE)
+        return wf, herdr, reviews
+
+    def test_the_same_findings_again_go_to_review(self):
+        wf, herdr, reviews = self.loop(outcome(**RED), outcome(**RED))
+        self.assertEqual(herdr.calls.count(("prompt", "build-a1b2c3")), 2)
+        self.assertEqual(wf.state.quality_round, 2)
+        self.assertIn(orchestrator.QUALITY_STUCK_NOTE.format(quality_path=wf.state.quality_path(1, 2)), reviews[0])
+        self.assertNotIn(orchestrator.QUALITY_UNRESOLVED_NOTE[:40], reviews[0])
+
+    def test_a_fixed_finding_and_a_new_one_keep_the_loop_going(self):
+        both = dict(gate="ERROR", findings=[*RED["findings"], *RED2["findings"]])
+        new = dict(gate="ERROR", findings=[RED2["findings"][0], "`limiter.py:1` error ruff E501: Line too long"])
+        wf, herdr, reviews = self.loop(outcome(**both), outcome(**new), outcome(**RED))
+        self.assertEqual(herdr.calls.count(("prompt", "build-a1b2c3")), 3)
+        self.assertIn(orchestrator.QUALITY_UNRESOLVED_NOTE.format(quality_path=wf.state.quality_path(1, 3)),
+                      reviews[0])
+
+    def test_a_fixed_finding_keeps_the_loop_going(self):
+        both = dict(gate="ERROR", findings=[*RED["findings"], *RED2["findings"]])
+        _, herdr, _ = self.loop(outcome(**both), outcome(**RED), outcome(**RED))
+        self.assertEqual(herdr.calls.count(("prompt", "build-a1b2c3")), 3)
+
+    def test_a_finding_on_a_moved_line_is_the_same(self):
+        moved = dict(gate="ERROR", findings=["`limiter.py:12` error ruff F401: `os` imported but unused"])
+        _, herdr, _ = self.loop(outcome(**RED), outcome(**moved))
+        self.assertEqual(herdr.calls.count(("prompt", "build-a1b2c3")), 2)
+
+    def test_a_build_that_failed_with_nothing_listed_is_not_stuck(self):
+        failed = outcome("ERROR", archived=False, test_report=False, console="error: cannot install")
+        _, herdr, reviews = self.loop(failed, failed, failed)
+        self.assertEqual(herdr.calls.count(("prompt", "build-a1b2c3")), 3)
+
+
+class TestGateFailures(unittest.TestCase):
+    def test_a_coverage_condition_repeated_is_stuck_until_its_words_change(self):
+        def report(percent):
+            return quality_report("ERROR", "judged.", conditions=[f"Coverage of new code is {percent}%."])
+        fifty, sixty = (orchestrator.gate_failures(report(p)) for p in ("50.0", "60.0"))
+        self.assertTrue(fifty.repeats(orchestrator.gate_failures(report("50.0"))))
+        self.assertFalse(sixty.repeats(fifty))
+        self.assertEqual(fifty.fingerprints, {})
+
+    def test_reads_failing_findings_and_tests_and_leaves_findings_to_weigh_out(self):
+        issue = {"path": "a.py", "line": 3, "severity": "error", "rule": "ruff F401", "message": "`os` unused"}
+        whole = {"path": "b.py", "line": None, "severity": "error", "rule": "mypy", "message": "bad: 2 errors"}
+        weigh = {"path": "a.py", "line": 4, "severity": "warning", "rule": "flaky-tests failed", "message": "x"}
+        quality = quality_report("ERROR", "judged.", conditions=["1 tests fail; each is listed below."],
+                                 issues=[issue, whole], to_weigh=[weigh],
+                                 tests=[("tests.test_a.T.test_x", "AssertionError: 1 != 2")])
+        checked = {"path": None, "line": None, "severity": "error", "rule": "", "message": "too big: 900 lines"}
+        change = SimpleNamespace()
+        quality = orchestrator.judge_run(quality, (
+            orchestrator.OrchestratorCheck("diff-budget", lambda c: orchestrator.CheckFindings([checked], [weigh])),
+        ), change)
+
+        failures = orchestrator.gate_failures(quality)
+
+        fp = orchestrator.finding_fingerprint
+        self.assertEqual(failures.conditions, ["1 tests fail; each is listed below.",
+                                               "1 findings of the `diff-budget` check; each is listed below."])
+        self.assertEqual(failures.fingerprints, {
+            "ruff": [fp("a.py", "ruff F401", "`os` unused")], "mypy": [fp("b.py", "mypy", "bad: 2 errors")],
+            "diff-budget": [fp(None, "diff-budget", "too big: 900 lines")],
+            "tests": [fp("tests.test_a.T.test_x", "tests", "")]})
+
+    def test_a_fingerprint_ignores_digits_and_keeps_paths_and_rules_apart(self):
+        fp = orchestrator.finding_fingerprint
+        self.assertEqual(fp("a.py", "ruff C901", "too complex (16 > 15)"),
+                         fp("a.py", "ruff C901", "too complex (17 > 15)"))
+        self.assertNotEqual(fp("a.py", "ruff C901", "m"), fp("b.py", "ruff C901", "m"))
+        self.assertNotEqual(fp("a.py", "ruff C901", "m"), fp("a.py", "ruff E501", "m"))
+        self.assertEqual(len(fp(None, "x", "y")), 16)
+
+    def test_nothing_failed_repeats_nothing(self):
+        ok = orchestrator.gate_failures(quality_report("OK", "judged."))
+        self.assertEqual(ok, orchestrator.GateFailures([], {}))
+        self.assertFalse(ok.repeats(ok))
 
 
 class TestQualityResume(unittest.TestCase):
@@ -8472,6 +8713,15 @@ GOLDEN = {
 GOLDEN_PR_BODY = (
     'Opened by ai-agents-orchestrator run `20260929-120000-a1b2c3`. Reviewer verdict after 2 rounds: **APPROVE**.\n'
     '\n'
+    '| Commit trailer | Value |\n'
+    '| --- | --- |\n'
+    '| Orchestrator-Run | `20260929-120000-a1b2c3` |\n'
+    '| Orchestrator-Workflow | `default` |\n'
+    '| Orchestrator-Role | `spec=claude/default` |\n'
+    '| Orchestrator-Role | `build=claude/default` |\n'
+    '| Orchestrator-Role | `review=claude/default` |\n'
+    '| Orchestrator-Gate | `ERROR after 2 quality rounds` |\n'
+    '\n'
     '<details open>\n'
     '<summary>Spec</summary>\n'
     '\n'
@@ -8500,7 +8750,7 @@ GOLDEN_PR_BODY = (
     '\n'
     '## Issues on changed lines\n'
     '\n'
-    '1. `limiter.py:3` error ruff F401: `os` imported but unused\n'
+    '1. `limiter.py:9` error mypy arg-type: Argument 1 has incompatible type\n'
     '\n'
     '</details>\n'
     '\n'
@@ -8556,7 +8806,7 @@ class TestDefaultWorkflowPrompts(unittest.TestCase):
     def test_gate_passes_after_a_fix_then_runs_out(self):
         red = outcome(**RED)
         seen, phases, herdr, host = self.two_gated_rounds(
-            [red, outcome(), red, red], [build_turn(1), fix_turn(1, 1), build_turn(2), fix_turn(2, 1)],
+            [red, outcome(), red, outcome(**RED2)], [build_turn(1), fix_turn(1, 1), build_turn(2), fix_turn(2, 1)],
             [review_turn(1, CHANGES_REQUESTED), review_turn(2, APPROVE)])
 
         self.assertEqual(seen, [GOLDEN[k] for k in ("spec", "build_1", "quality_fix_1_1", "review_1_passed", "fix_2",
@@ -8568,7 +8818,7 @@ class TestDefaultWorkflowPrompts(unittest.TestCase):
         written = [p.rsplit("/", 1)[-1] for p in host.writes if p.startswith(D) and not p.endswith("state.json")]
         self.assertEqual(written, ["spec.md", "build-1.md", "quality-1-1.md", "build-1-q1.md", "quality-1-2.md",
                                    "review-1.md", "build-2.md", "quality-2-1.md", "build-2-q1.md", "quality-2-2.md",
-                                   "review-2.md", "summary.md"])
+                                   "review-2.md", "summary.md", "metrics.json"])
         self.assertEqual([c for c in herdr.calls if c[0] in ("rename", "split")], [
             ("rename", "w1:p1", "Spec Collector"), ("split", "w1:p1", "right"), ("rename", "w1:p2", "Builder"),
             ("split", "w1:p2", "down"), ("rename", "w1:p3", "Reviewer")])
@@ -8577,7 +8827,7 @@ class TestDefaultWorkflowPrompts(unittest.TestCase):
     def test_gate_runs_out_then_passes(self):
         red = outcome(**RED)
         seen, *_ = self.two_gated_rounds(
-            [red, red, outcome()], [build_turn(1), fix_turn(1, 1), build_turn(2)],
+            [red, outcome(**RED2), outcome()], [build_turn(1), fix_turn(1, 1), build_turn(2)],
             [review_turn(1, CHANGES_REQUESTED), review_turn(2, APPROVE)])
 
         self.assertEqual(seen, [GOLDEN[k] for k in ("spec", "build_1", "quality_fix_1_1", "review_1_unresolved",
@@ -8878,7 +9128,7 @@ class TestOtherWorkflows(unittest.TestCase):
                                    orchestrator.QUALITY_PASSED_NOTE.format(quality_path=f"{D}/quality-1-2.md")])
         written = [p.rsplit("/", 1)[-1] for p in host.writes if p.startswith(D) and not p.endswith("state.json")]
         self.assertEqual(written, ["impl-1.md", "quality-1-1.md", "impl-1-q1.md", "quality-1-2.md", "review-1.md",
-                                   "summary.md"])
+                                   "summary.md", "metrics.json"])
         self.assertTrue(host.files[f"{D}/quality-1-1.md"].startswith("GATE: ERROR\n"))
         self.assertTrue(host.files[f"{D}/quality-1-2.md"].startswith("GATE: OK\n"))
         self.assertEqual(fake.triggered(), [REF_1_1, "orchestrator-ci/a1b2c3-1-q2"])
@@ -8928,6 +9178,313 @@ class TestOtherWorkflows(unittest.TestCase):
         wf, *_ = make_workflow({}, state=new_run(FOUR), pipeline=QUICK)
         with self.assertRaisesRegex(OrchestratorError, "phase spec, which workflow quick has no step for"):
             wf.run()
+
+
+LOCKING = Pipeline("locking", FOUR.roles, tuple(replace(st, locks=True) if st.id == "tests" else st
+                                                for st in FOUR.steps))
+TEST_FILE = "/proj/test_limiter.py"
+
+
+def locked_tests_turn(prompt, state, host):
+    host.write(TEST_FILE, "assert limit() == 3")
+    return write_tests(prompt, state, host)
+
+
+def build_touching_tests(n, test=""):
+    """The Builder's turn in round n, which also rewrites the locked test, or deletes it for None."""
+    def turn(prompt, state, host):
+        if test is None:
+            host.delete(TEST_FILE)
+        else:
+            host.write(TEST_FILE, test)
+        return build_turn(n)(prompt, state, host)
+    return turn
+
+
+class TestLockedFiles(unittest.TestCase):
+    def run_locking(self, *builds, reviews=None, **kw):
+        seen = []
+        reviews = reviews or [review_turn(1, APPROVE)]
+        wf, herdr, host, notes = make_workflow({
+            "spec": [spec_turn], "tests": [locked_tests_turn], "build": list(builds),
+            "review": [recording(r, seen) for r in reviews],
+        }, state=new_run(LOCKING), pipeline=LOCKING, **kw)
+        return wf, host, seen
+
+    def test_an_edited_locked_test_is_restored_and_the_reviewer_told(self):
+        wf, host, seen = self.run_locking(build_touching_tests(1, "assert True"))
+
+        self.assertEqual(wf.run(), APPROVE)
+
+        ref = "refs/orchestrator/a1b2c3/locked/tests"
+        self.assertEqual(host.restores, [(ref, ["test_limiter.py"])])
+        self.assertEqual(host.files[TEST_FILE], "assert limit() == 3")
+        # A file nobody locked keeps the Builder's change.
+        self.assertEqual(host.files["/proj/limiter.py"], "version 1")
+        self.assertEqual(host.files[f"{D}/locked-build-1.diff"],
+                         "--- test_limiter.py: assert limit() == 3\n+++ test_limiter.py: assert True\n")
+        self.assertEqual(wf.state.locked, {"tests": ["test_limiter.py"]})
+        self.assertEqual(wf.state.restored,
+                         [{"round": 1, "file": "locked-build-1.diff", "paths": {"tests": ["test_limiter.py"]}}])
+        self.assertIn("\n\n" + orchestrator.LOCKED_NOTE.format(steps="tests", paths="`test_limiter.py`",
+                                                               diff_paths=f"{D}/locked-build-1.diff"), seen[0])
+        # done: the run's local refs are gone.
+        self.assertEqual(host.refs, {})
+
+    def test_a_deleted_locked_test_comes_back(self):
+        wf, host, _ = self.run_locking(build_touching_tests(1, None))
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(host.files[TEST_FILE], "assert limit() == 3")
+        self.assertIn("+++ test_limiter.py: None", host.files[f"{D}/locked-build-1.diff"])
+
+    def test_untouched_locked_files_need_no_restore(self):
+        wf, host, seen = self.run_locking(build_turn(1), build_touching_tests(2, "assert True"),
+                                          reviews=[review_turn(1, CHANGES_REQUESTED), review_turn(2, APPROVE)])
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(host.restores, [("refs/orchestrator/a1b2c3/locked/tests", ["test_limiter.py"])])
+        self.assertNotIn(f"{D}/locked-build-1.diff", host.files)
+        self.assertNotIn("locked", seen[0])
+        self.assertIn(f"{D}/locked-build-2.diff", seen[1])
+
+    def test_a_workflow_without_locks_restores_nothing(self):
+        wf, _, host, _ = make_workflow({
+            "spec": [spec_turn], "tests": [locked_tests_turn], "build": [build_touching_tests(1, "assert True")],
+            "review": [review_turn(1, APPROVE)],
+        }, state=new_run(FOUR), pipeline=FOUR)
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual((host.files[TEST_FILE], host.restores, host.refs), ("assert True", [], {}))
+        self.assertEqual((wf.state.locked, wf.state.restored), ({}, []))
+
+    def test_a_resume_between_the_turn_and_the_restore_still_restores(self):
+        def build_then_interrupt(prompt, state, host):
+            build_touching_tests(1, "assert True")(prompt, state, host)
+            raise KeyboardInterrupt
+        wf, host, _ = self.run_locking(build_then_interrupt)
+        with self.assertRaises(KeyboardInterrupt):
+            wf.run()
+        self.assertEqual(host.files[TEST_FILE], "assert True")
+        saved = json.loads(host.files[f"{D}/state.json"])
+        self.assertEqual((saved["phase"], saved["locked"], saved["restored"]),
+                         ("build", {"tests": ["test_limiter.py"]}, []))
+
+        wf2, *_ = resume(RunState.from_dict(saved), {"review": [review_turn(1, APPROVE)]}, host=host,
+                         pipeline=LOCKING)
+        self.assertEqual(wf2.run(), APPROVE)
+        self.assertEqual(host.files[TEST_FILE], "assert limit() == 3")
+        self.assertEqual([r["file"] for r in wf2.state.restored], ["locked-build-1.diff"])
+
+    def test_a_record_saved_before_the_restore_is_restored_on_resume(self):
+        state = saved_run("build", 1, agents=("spec", "build"), workflow="locking",
+                          workflow_definition=orchestrator.workflow_definition(LOCKING),
+                          locked={"tests": ["test_limiter.py"]},
+                          restored=[{"round": 1, "file": "locked-build-1.diff", "paths": {"tests": ["test_limiter.py"]}}])
+        host = FakeHost()
+        host.refs["refs/orchestrator/a1b2c3/locked/tests"] = "snap0"
+        host.trees["snap0"] = {TEST_FILE: "assert limit() == 3"}
+        host.files[TEST_FILE] = "assert True"
+        wf, *_ = resume(state, {"review": [review_turn(1, APPROVE)]}, host=host, pipeline=LOCKING,
+                        files={lambda s: s.build_path(1): "report 1", lambda s: f"{s.dir}/tests.md": "tests"})
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(host.files[TEST_FILE], "assert limit() == 3")
+        self.assertEqual(len(wf.state.restored), 1)
+        self.assertNotIn(f"{D}/locked-build-1.diff", host.writes)
+
+    def test_the_gate_judges_the_restored_tests(self):
+        fake = FakeCI()
+        fake.outcomes = [outcome(**RED), outcome()]
+        gated_build = replace(LOCKING.step("build"), quality_gated=True)
+        pipeline = Pipeline("locking", LOCKING.roles, tuple(gated_build if st.id == "build" else st
+                                                            for st in LOCKING.steps))
+
+        def fix(prompt, state, host):
+            host.write(TEST_FILE, "assert 1")
+            return fix_turn(1, 1)(prompt, state, host)
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "tests": [locked_tests_turn], "build": [build_touching_tests(1, "assert True"), fix],
+            "review": [review_turn(1, APPROVE)]}, fake=fake, state=new_run(pipeline), pipeline=pipeline)
+
+        self.assertEqual(wf.run(), APPROVE)
+        quality_snapshots = [sha for (_, message), sha in zip(host.snapshots, host.trees, strict=True)
+                             if "quality round" in message]
+        self.assertEqual([host.trees[sha][TEST_FILE] for sha in quality_snapshots],
+                         ["assert limit() == 3", "assert limit() == 3"])
+        self.assertEqual([r["file"] for r in wf.state.restored], ["locked-build-1.diff", "locked-build-1-q1.diff"])
+
+    def test_only_an_editing_step_may_lock(self):
+        with self.assertRaisesRegex(ValueError, "step review locks the files it changes, so it must edit"):
+            Pipeline("bad", QUICK.roles, (QUICK.steps[0], replace(QUICK.steps[1], locks=True)))
+        # Its lock would hold the earlier step's work too.
+        with self.assertRaisesRegex(ValueError, "step build locks the files it changes, so it must be the first "
+                                                "editing step"):
+            Pipeline("bad", FOUR.roles, tuple(replace(st, locks=st.id == "build") for st in FOUR.steps))
+        # A second turn of it would lock the Builder's work of the round before.
+        with self.assertRaisesRegex(ValueError, "step tests locks the files it changes, so the verdict loop must not "
+                                                "run it again"):
+            Pipeline("bad", FOUR.roles, tuple(replace(st, locks=st.id == "tests", file="tests-{n}.md")
+                                              if st.id == "tests" else
+                                              replace(st, loop_to="tests") if st.id == "review" else st
+                                              for st in FOUR.steps))
+        step = 'id = "tests"\nfile = "t.md"\nprompt = "{path}"\nlocks = true\n'
+        with self.assertRaisesRegex(ValueError, "step tests locks the files it changes, so it must edit"):
+            orchestrator.parse_workflow("bad", tomllib.loads(f"[[steps]]\n{step}"))
+        with self.assertRaisesRegex(ValueError, "locks must be true or false"):
+            orchestrator.parse_workflow("bad", tomllib.loads(f'[[steps]]\n{step}'.replace("true", '"yes"')))
+
+    def test_locks_round_trip_through_a_workflow_file(self):
+        text = orchestrator.workflow_toml(LOCKING)
+        self.assertIn("locks = true", text)
+        self.assertEqual(orchestrator.parse_workflow("locking", tomllib.loads(text)), LOCKING)
+
+
+class TestProofs(unittest.TestCase):
+    """The verdict step's proofs, run for real by sh in a scratch directory that stands in for the project."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.proj = tmp.name
+        self.pipeline = replace(QUICK, proof_command="sh {proofs}")
+
+    def run_proofs(self, *reviews, builds=2, pipeline=None, state=None, host=None):
+        """A quick run in the scratch project whose Reviewer writes, per round, a review and {proof file: its exit
+        status}; returns the workflow, the host and the Builder's prompts."""
+        seen = []
+
+        def review(n, verdict, proofs):
+            def turn(prompt, state, host):
+                for name, exit_status in proofs.items():
+                    os.makedirs(state.proofs_dir(n), exist_ok=True)
+                    with open(f"{state.proofs_dir(n)}/{name}", "w") as f:
+                        f.write(f"echo checking {name}\nexit {exit_status}\n")
+                return writes(lambda s: s.review_path(n), f"VERDICT: {verdict}\n1. a bug\n2. another\n3. more\n")(
+                    prompt, state, host)
+            return turn
+        pipeline = pipeline or self.pipeline
+        state = state or RunState("20260929-120000-a1b2c3", "add a rate limiter", self.proj, None, phase="build",
+                                  workflow=pipeline.name)
+        host = host or FakeHost()
+        host._run = subprocess.run
+        wf, herdr, host, _ = make_workflow({
+            "build": [recording(build_turn(n), seen) for n in range(1, builds + 1)],
+            "review": [review(n, *r) for n, r in enumerate(reviews, 1)]},
+            host=host, state=state, pipeline=pipeline, pull_request=False)
+        return wf, host, seen
+
+    def test_a_failing_proof_demonstrates_its_finding_and_the_builder_must_make_it_pass(self):
+        wf, host, seen = self.run_proofs((CHANGES_REQUESTED, {"test_1_bug.sh": 1, "test_2.sh": 0, "test_3.sh": 4}),
+                                         (APPROVE, {}))
+        self.assertEqual(wf.run(), APPROVE)
+
+        state = wf.state
+        review = host.files[state.review_path(1)]
+        self.assertTrue(review.startswith("VERDICT: CHANGES_REQUESTED\n1. a bug\n"))
+        self.assertIn(f"## Proofs the orchestrator ran\n\nThe orchestrator ran each proof with `sh {{proofs}}` in {self.proj}.", review)
+        self.assertIn("- `test_1_bug.sh` (finding 1): demonstrated, it fails.\n\n  ````\n  checking test_1_bug.sh\n"
+                      "  ````", review)
+        self.assertIn("- `test_2.sh` (finding 2): not demonstrated, it passes.", review)
+        self.assertIn("- `test_3.sh` (finding 3): not demonstrated, it errors, with exit status 4.", review)
+        self.assertEqual([(p["file"], p["finding"], p["demonstrated"]) for p in state.proofs],
+                         [("test_1_bug.sh", 1, True), ("test_2.sh", 2, False), ("test_3.sh", 3, False)])
+        self.assertEqual(state.proofs[0]["said"], "it fails:\nchecking test_1_bug.sh")
+        self.assertIn("\n\n" + orchestrator.PROOFS_NOTE.format(proofs=f"{state.proofs_dir(1)}/test_1_bug.sh"), seen[1])
+        self.assertNotIn("Reviewer backed", seen[0])
+
+    def test_findings_without_a_proof_stand_as_unproven(self):
+        wf, host, _ = self.run_proofs((CHANGES_REQUESTED, {"test_2.sh": 1}), (APPROVE, {}))
+        wf.run()
+        self.assertIn("Findings without a proof, unproven: 1, 3.", host.files[wf.state.review_path(1)])
+
+    def test_no_proofs_directory_leaves_the_review_as_it_is(self):
+        wf, host, seen = self.run_proofs((CHANGES_REQUESTED, {}), (APPROVE, {}))
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(host.files[wf.state.review_path(1)],
+                         "VERDICT: CHANGES_REQUESTED\n1. a bug\n2. another\n3. more\n")
+        self.assertEqual(wf.state.proofs, [])
+        self.assertNotIn("Reviewer backed", seen[1])
+
+    def test_an_approval_runs_no_proof(self):
+        wf, host, _ = self.run_proofs((APPROVE, {"test_1.sh": 1}), builds=1)
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertNotIn(orchestrator.PROOFS_HEADING, host.files[wf.state.review_path(1)])
+        self.assertEqual(wf.state.proofs, [])
+
+    def test_a_workflow_without_proof_command_runs_none(self):
+        wf, host, _ = self.run_proofs((CHANGES_REQUESTED, {"test_1.sh": 1}), (APPROVE, {}), pipeline=QUICK)
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertNotIn(orchestrator.PROOFS_HEADING, host.files[wf.state.review_path(1)])
+
+    def resumed_in_review(self, review, proofs):
+        state = RunState("20260929-120000-a1b2c3", "add a rate limiter", self.proj, None, phase="review", round=1,
+                         workflow="quick", base="abc123", proofs=proofs)
+        host = FakeHost()
+        host.files[state.review_path(1)] = review
+        host.files[state.build_path(1)] = "report 1"
+        seen = []
+        wf, *_ = make_workflow({"build": [recording(build_turn(2), seen)], "review": [review_turn(2, APPROVE)]},
+                               host=host, state=state, pipeline=self.pipeline, pull_request=False)
+        self.assertEqual(wf.run(), APPROVE)
+        return wf, host, seen
+
+    def test_a_review_judged_before_a_resume_is_not_judged_again(self):
+        judged = f"VERDICT: CHANGES_REQUESTED\n1. a bug\n\n{orchestrator.PROOFS_HEADING}\n\nalready judged\n"
+        proof = {"round": 1, "file": "test_1.sh", "finding": 1, "demonstrated": True, "said": "it fails"}
+        wf, host, seen = self.resumed_in_review(judged, [proof])
+        self.assertEqual(host.files[wf.state.review_path(1)], judged)
+        self.assertEqual(wf.state.proofs, [proof])
+        self.assertIn(orchestrator.PROOFS_NOTE.format(proofs=f"{wf.state.proofs_dir(1)}/test_1.sh"), seen[0])
+
+    def test_proofs_recorded_before_a_resume_are_appended_without_running_again(self):
+        # No proof file is on disk: running one again would fail to find it.
+        proof = {"round": 1, "file": "test_1.sh", "finding": 1, "demonstrated": True, "said": "it fails"}
+        wf, host, _ = self.resumed_in_review("VERDICT: CHANGES_REQUESTED\n1. a bug\n", [proof])
+        self.assertIn("- `test_1.sh` (finding 1): demonstrated, it fails.", host.files[wf.state.review_path(1)])
+
+    def test_the_reviewers_own_proofs_heading_does_not_stop_the_run(self):
+        wf, host, _ = self.run_proofs((CHANGES_REQUESTED, {"test_1.sh": 1}), (APPROVE, {}))
+        real_read = host.read
+
+        def read(path):
+            text = real_read(path)
+            if path == wf.state.review_path(1) and text and orchestrator.PROOFS_HEADING not in text:
+                return text + "\n## Proofs\n\n1. test_1.sh\n"
+            return text
+        host.read = read
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual([p["demonstrated"] for p in wf.state.proofs], [True])
+
+    def test_a_proof_that_runs_too_long_is_stopped_with_what_it_started(self):
+        with patch.object(orchestrator, "PROOF_TIMEOUT", 1):
+            wf, host, _ = self.run_proofs((CHANGES_REQUESTED, {}), (APPROVE, {}))
+            os.makedirs(wf.state.proofs_dir(1))
+            with open(f"{wf.state.proofs_dir(1)}/test_1.sh", "w") as f:
+                f.write(f"(sleep 3; echo leaked > {self.proj}/leaked) &\nsleep 30\n")
+            failed, said = wf._run_proof("sh {proofs}", wf.state.proofs_dir(1), "test_1.sh")
+        self.assertEqual((failed, said), (False, "it errors, running out of its 1 s"))
+        time.sleep(4)
+        self.assertFalse(os.path.exists(f"{self.proj}/leaked"))
+
+    def test_proof_command_needs_a_verdict_step_and_names_the_proof_once(self):
+        with self.assertRaisesRegex(ValueError, "proof_command runs the verdict step's proofs, and the workflow has no "
+                                                "verdict step"):
+            replace(SOLO, proof_command="sh {proofs}")
+        for command in ("sh", "sh {proofs} {proofs}", "sh {proofs} {task}", "sh {proofs"):
+            with self.subTest(command=command), self.assertRaisesRegex(ValueError, "proof_command"):
+                replace(QUICK, proof_command=command)
+        with self.assertRaisesRegex(ValueError, "proof_command must be a string"):
+            orchestrator.parse_workflow("bad", {**orchestrator.workflow_definition(QUICK), "proof_command": 1})
+
+    def test_proof_command_round_trips_through_a_workflow_file(self):
+        text = orchestrator.workflow_toml(self.pipeline)
+        self.assertIn('proof_command = "sh {proofs}"', text)
+        self.assertEqual(orchestrator.parse_workflow("quick", tomllib.loads(text)), self.pipeline)
+        self.assertNotIn("proof_command", orchestrator.workflow_toml(QUICK))
+
+    def test_the_adversarial_example_loads(self):
+        adversarial = orchestrator.load_workflow_file(f"{EXAMPLES}/adversarial.toml")
+        self.assertEqual(orchestrator.workflow_shape(adversarial), "spec -> build -> review (back to build)")
+        self.assertIn("{proofs}", adversarial.proof_command)
+        self.assertIn("{proofs_dir}", adversarial.step("review").prompt)
+        self.assertIn("{proofs_dir}", adversarial.step("review").again)
 
 
 class TestSavedBeforeWorkflows(unittest.TestCase):
@@ -9088,7 +9645,7 @@ class TestWorkflowFiles(unittest.TestCase):
         self.assertNotEqual(build.prompt, default.step("build").prompt)
         self.assertEqual(Step(**{**orchestrator.step_fields(build), "prompt": default.step("build").prompt}),
                          default.step("build"))
-        self.assertEqual((tests.role, tests.file, tests.edits), ("tests", "tests.md", True))
+        self.assertEqual((tests.role, tests.file, tests.edits, tests.locks), ("tests", "tests.md", True, True))
 
     def test_default_round_trips_through_its_file(self):
         default = orchestrator.DEFAULT_WORKFLOW
@@ -9192,9 +9749,10 @@ class TestWorkflowFiles(unittest.TestCase):
         for name in ("b-{n!s}.md", "b-{n:d}.md", "b-{n:{x}}.md"):
             cases.append((f"step build: handoff file {name} may use {{n}} only as it is, with no format spec or "
                           f"conversion", "[[steps]]\n" + step.replace("b-{n}.md", name)))
-        for name in ("state.json", "summary.md", "quality-{n}-1.md", "../b-{n}.md", "/tmp/b-{n}.md", ".."):
+        for name in ("state.json", "summary.md", "metrics.json", "quality-{n}-1.md", "proofs-{n}", "../b-{n}.md",
+                     "/tmp/b-{n}.md", ".."):
             cases.append((f"step build: handoff file {name} must be a plain file name, and not state.json, "
-                          f"summary.md or quality-*, which the run writes itself",
+                          f"summary.md, metrics.json, quality-*, locked-* or proofs-*, which the run writes itself",
                           "[[steps]]\n" + step.replace("b-{n}.md", name)))
         for message, text in cases:
             with self.subTest(message=message):
@@ -9434,13 +9992,21 @@ class TestWorkflowWithoutAVerdict(unittest.TestCase):
         self.assertEqual(wf.run(), orchestrator.FINISHED)
         pr = host.prs[0]
         self.assertFalse(pr["draft"])
-        self.assertTrue(pr["body"].startswith(
-            "Opened by ai-agents-orchestrator run `20260929-120000-a1b2c3`. **FINISHED**: its workflow has no review "
-            "step, so no agent reviewed this change.\n\n<details open>\n<summary>Spec</summary>"))
+        # The head line, then the commit's trailers, then the spec.
+        head, trailers, rest = pr["body"].split("\n\n", 2)
+        self.assertEqual(head, "Opened by ai-agents-orchestrator run `20260929-120000-a1b2c3`. **FINISHED**: its "
+                               "workflow has no review step, so no agent reviewed this change.")
+        self.assertEqual(trailers, "| Commit trailer | Value |\n| --- | --- |\n"
+                                   "| Orchestrator-Run | `20260929-120000-a1b2c3` |\n"
+                                   "| Orchestrator-Workflow | `solo` |\n| Orchestrator-Role | `build=claude/default` |")
+        self.assertTrue(rest.startswith("<details open>\n<summary>Spec</summary>"))
         self.assertIn("<summary>Builder report (round 1)</summary>\n\nsolo report", pr["body"])
         self.assertNotIn("<summary>Review", pr["body"])
         commit = next(c for c in host.git_calls if c[0] == "commit")
-        self.assertEqual(commit[-1], "Orchestrator run 20260929-120000-a1b2c3: FINISHED, unreviewed.")
+        self.assertEqual(commit[5:], ("Orchestrator run 20260929-120000-a1b2c3: FINISHED, unreviewed.",
+                                      "--trailer", "Orchestrator-Run: 20260929-120000-a1b2c3",
+                                      "--trailer", "Orchestrator-Workflow: solo",
+                                      "--trailer", "Orchestrator-Role: build=claude/default"))
         self.assertIn("Run finished: FINISHED", notes)
         saved = json.loads(host.files[f"{D}/state.json"])
         self.assertEqual((saved["phase"], saved["verdict"]), ("done", "FINISHED"))
@@ -9468,14 +10034,16 @@ class TestWorkflowWithoutAVerdict(unittest.TestCase):
         self.assertEqual(verdict, orchestrator.QUALITY_GATE_FAILED)
         pr = host.prs[0]
         self.assertTrue(pr["draft"])
-        self.assertTrue(pr["body"].startswith(
-            "Opened by ai-agents-orchestrator run `20260929-120000-a1b2c3`. **QUALITY_GATE_FAILED**: its workflow has "
-            "no review step, and the quality gate still did not pass after the last quality round, so this "
-            "is a draft.\n\n<details open>"))
+        head, trailers, rest = pr["body"].split("\n\n", 2)
+        self.assertEqual(head, "Opened by ai-agents-orchestrator run `20260929-120000-a1b2c3`. "
+                               "**QUALITY_GATE_FAILED**: its workflow has no review step, and the quality gate still "
+                               "did not pass after the last quality round, so this is a draft.")
+        self.assertIn("| Orchestrator-Gate | `ERROR after 2 quality rounds` |", trailers.split("\n"))
+        self.assertTrue(rest.startswith("<details open>"))
         self.assertNotIn("Reviewer", pr["body"])
         self.assertIn("<summary>Quality gate (round 1)</summary>\n\nGATE: ERROR", pr["body"])
         commit = next(c for c in host.git_calls if c[0] == "commit")
-        self.assertEqual(commit[-1], "Orchestrator run 20260929-120000-a1b2c3: QUALITY_GATE_FAILED, unreviewed.")
+        self.assertEqual(commit[5], "Orchestrator run 20260929-120000-a1b2c3: QUALITY_GATE_FAILED, unreviewed.")
         self.assertIn("Run finished: QUALITY_GATE_FAILED", notes)
 
     def test_a_gate_that_passes_is_finished(self):
@@ -12001,12 +12569,25 @@ def at(seconds):
     return orchestrator.iso_utc(HOST_EPOCH + seconds)
 
 
-def turn(step, file, start, end, *, role=None, rnd=1, q=0, agent="claude", model=None, human_paced=False):
-    """A turn record that started and ended at these host clock readings; None for one not known."""
-    return {"step": step, "role": role or step, "round": rnd, "quality_round": q, "file": file, "agent": agent,
-            "model": model, "human_paced": human_paced,
-            "started_at": None if start is None else at(start), "ended_at": None if end is None else at(end),
-            "seconds": None if start is None or end is None else end - start}
+class Partly(dict):
+    """A dict equal to any dict that holds all of its items, whatever else that holds."""
+
+    def __eq__(self, other):
+        return isinstance(other, dict) and all(k in other and other[k] == v for k, v in self.items())
+
+    def __ne__(self, other):
+        return not self == other
+
+    __hash__ = None
+
+
+def turn(step, file, start, end, *, role=None, rnd=1, q=0, agent="claude", model=None, human_paced=False, **more):
+    """A turn record that started and ended at these host clock readings; None for one not known. It equals a record
+    with any session and tokens, unless more gives them."""
+    return Partly({"step": step, "role": role or step, "round": rnd, "quality_round": q, "file": file, "agent": agent,
+                   "model": model, "human_paced": human_paced,
+                   "started_at": None if start is None else at(start), "ended_at": None if end is None else at(end),
+                   "seconds": None if start is None or end is None else end - start, **more})
 
 
 GOLDEN_SUMMARY = """\
@@ -12103,7 +12684,7 @@ class TestTurnTimings(unittest.TestCase):
 
     def test_a_restarted_agent_keeps_its_turns_record(self):
         state = saved_run("build", 2, agents=("spec", "build", "review"), prompted="build-2.md",
-                          turns=[turn("build", "build-2.md", -1000, None, rnd=2)])
+                          turns=[dict(turn("build", "build-2.md", -1000, None, rnd=2))])
         wf, herdr, host, _ = resume(state, {"build": [taking(50, build_turn(2))], "review": [review_turn(2, APPROVE)]},
                                     alive=["review"])
 
@@ -12149,7 +12730,7 @@ class TestTurnTimings(unittest.TestCase):
         n = fake.add_build(REF_1_1, outcome())
         state = quality_state(ci={"ref": REF_1_1, "sha": "snap9", "queue_url": f"{JENKINS}/queue/item/1/",
                                   "build": n},
-                              turns=[turn("quality", "quality-1-1.md", -500, None, q=1, agent=None)])
+                              turns=[dict(turn("quality", "quality-1-1.md", -500, None, q=1, agent=None))])
         wf, *_ = resume_gated(state, {"review": [review_turn(1, APPROVE)]}, fake)
 
         self.assertEqual(wf.run(), APPROVE)
@@ -12350,6 +12931,157 @@ def bounded(wf, limit=100 * orchestrator.STALL_SECONDS):
             raise AssertionError(f"the run is still waiting after {limit}s")
     wf.clock.hooks.append(give_up)
     return wf
+
+
+def claude_log(*answers):
+    """A Claude Code session log: for each (host clock reading, input, output) an answer of the model, written as Claude
+    Code writes it, one line per content block, each with the whole answer's usage."""
+    lines = [json.dumps({"type": "user", "timestamp": at(0).replace("+00:00", "Z"), "message": {"role": "user"}})]
+    for k, (seconds, tokens_in, tokens_out) in enumerate(answers):
+        usage = {"input_tokens": tokens_in, "output_tokens": tokens_out, "cache_read_input_tokens": 7,
+                 "cache_creation_input_tokens": 1}
+        for _ in range(2):
+            lines.append(json.dumps({"type": "assistant", "timestamp": at(seconds).replace("+00:00", ".250Z"),
+                                     "message": {"id": f"msg_{k}", "usage": usage}}))
+    return "\n".join(lines) + "\n"
+
+
+class TestRunMetrics(unittest.TestCase):
+    def test_a_gated_run_of_two_rounds_records_its_turns_and_quality_rounds(self):
+        fake = FakeCI()
+        fake.outcomes = [outcome(**RED), outcome(), outcome(**RED), outcome(**RED)]
+        wf, herdr, host, fake, _ = gated({
+            "spec": [taking(600, spec_turn)], "build": [taking(100, build_turn(1)), taking(50, fix_turn(1, 1)),
+                                                        taking(100, build_turn(2)), taking(50, fix_turn(2, 1))],
+            "review": [taking(30, review_turn(1, CHANGES_REQUESTED)), taking(30, review_turn(2, APPROVE))]}, fake=fake)
+
+        self.assertEqual(wf.run(), APPROVE)
+
+        metrics = json.loads(host.files[f"{D}/metrics.json"])
+        self.assertEqual(host.files[f"{D}/metrics.json"].count("\n"), 1)
+        self.assertEqual([(t["step"], t["round"], t["quality_round"], t["harness"]) for t in metrics["turns"]], [
+            ("spec", 0, 0, "claude"), ("build", 1, 0, "claude"), ("quality", 1, 1, None), ("build", 1, 1, "claude"),
+            ("quality", 1, 2, None), ("review", 1, 0, "claude"), ("build", 2, 0, "claude"), ("quality", 2, 1, None),
+            ("build", 2, 1, "claude"), ("quality", 2, 2, None), ("review", 2, 0, "claude")])
+        self.assertEqual(metrics["turns"][0]["seconds"], 600)
+        self.assertEqual(metrics["turns"][3], {"step": "build", "role": "build", "harness": "claude", "model": None,
+                                               "round": 1, "quality_round": 1, "human_paced": False,
+                                               "started_at": at(730), "ended_at": at(780), "seconds": 50,
+                                               "tokens": "unknown"})
+        self.assertEqual(metrics["turns"][2]["tokens"], None)
+        self.assertEqual([t["tokens"] for t in metrics["turns"]][:3], ["unknown", "unknown", None])
+        ruff = [orchestrator.finding_fingerprint("limiter.py", "ruff F401", "`os` imported but unused")]
+        red, green = {"gate": "ERROR", "conditions": [], "fingerprints_by_check": {"ruff": ruff}}, \
+            {"gate": "OK", "conditions": [], "fingerprints_by_check": {}}
+        self.assertEqual(metrics["quality_rounds"], [
+            {"round": 1, "quality_round": 1, **red}, {"round": 1, "quality_round": 2, **green},
+            {"round": 2, "quality_round": 1, **red}, {"round": 2, "quality_round": 2, **red}])
+        self.assertEqual({k: metrics[k] for k in ("version", "run_id", "workflow", "outcome", "rounds", "quality_gate",
+                                                  "max_quality_rounds", "pull_request", "restored_locked_files")},
+                         {"version": 1, "run_id": "20260929-120000-a1b2c3", "workflow": "default", "outcome": APPROVE,
+                          "rounds": 2, "quality_gate": True, "max_quality_rounds": 3,
+                          "pull_request": "https://github.com/o/r/pull/7", "restored_locked_files": 0})
+        claude = {"harness": "claude", "model": None}
+        self.assertEqual(metrics["roles"], {"spec": claude, "build": claude, "review": claude})
+        self.assertEqual(metrics["started_at"], at(0))
+        self.assertEqual(metrics["seconds"], orchestrator.epoch_seconds(metrics["ended_at"]) - HOST_EPOCH)
+        self.assertEqual(json.loads(host.files[f"{D}/state.json"])["quality_rounds"], metrics["quality_rounds"])
+
+    def test_a_resumed_quality_round_is_recorded_once(self):
+        state = quality_state(quality_rounds=[{"round": 1, "quality_round": 1, "gate": "OK", "conditions": [],
+                                               "fingerprints_by_check": {}}])
+        wf, *_ = resume_gated(state, {"review": [review_turn(1, APPROVE)]}, FakeCI(),
+                              files={lambda s: s.quality_path(1, 1): "GATE: OK\n"})
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(len(wf.state.quality_rounds), 1)
+
+    def test_a_failed_run_writes_no_metrics(self):
+        wf, herdr, host, _ = make_workflow({"spec": [spec_turn], "build": [lambda *a: "done"]}, turn_timeout=5)
+        with patch("sys.stderr"), self.assertRaises(OrchestratorError):
+            wf.run()
+        self.assertIn(f"{D}/summary.md", host.files)
+        self.assertNotIn(f"{D}/metrics.json", host.files)
+
+    def test_tokens_come_from_the_session_the_turn_ran_in(self):
+        host = FakeHost()
+        wf, herdr, host, _ = make_workflow({
+            "spec": [spec_turn], "build": [taking(100, build_turn(1))],
+            "review": [taking(60, review_turn(1, APPROVE))]}, host=host, agent_kinds={"review": "pi"})
+        # Sessions are named after herdr's call count when each agent starts: spec, then build, then review.
+        herdr_sessions = {}
+
+        def logs():
+            herdr_sessions.update({role: herdr.sessions[f"{role}-a1b2c3"] for role in ("build", "review")})
+            host.session_logs[("claude", herdr_sessions["build"])] = claude_log((50, 10, 20), (90, 1, 2), (500, 9, 9))
+            host.session_logs[("pi", herdr_sessions["review"])] = "\n".join([
+                json.dumps({"type": "message", "timestamp": at(130).replace("+00:00", "Z"),
+                            "message": {"role": "assistant", "usage": {"input": 5, "output": 6, "cacheRead": 2}}}),
+                json.dumps({"type": "message", "timestamp": at(140).replace("+00:00", "Z"),
+                            "message": {"role": "user", "usage": {"input": 100, "output": 100}}}),
+                "not json"])
+        real_publish = wf._publish
+        wf._publish = lambda: (logs(), real_publish())
+
+        self.assertEqual(wf.run(), APPROVE)
+        tokens = {t["role"]: t["tokens"] for t in json.loads(host.files[f"{D}/metrics.json"])["turns"]}
+        self.assertEqual(tokens, {"spec": "unknown", "build": {"input": 11, "output": 22, "cache_read": 14,
+                                                               "cache_write": 2},
+                                  "review": {"input": 5, "output": 6, "cache_read": 2, "cache_write": 0}})
+        self.assertEqual([t["session"] for t in wf.state.turns][1:],
+                         [herdr_sessions["build"], herdr_sessions["review"]])
+
+    def test_a_turn_that_changed_sessions_has_unknown_tokens(self):
+        state = saved_run("build", 1, agents=("spec", "build"), prompted="build-1.md")
+        state.agents["build"]["session"] = "s-old"
+        state.turns = [dict(turn("build", "build-1.md", -100, None, session="s-old", tokens=None))]
+        wf, herdr, host, _ = resume(state, {"build": [build_turn(1)], "review": [review_turn(1, APPROVE)]})
+        herdr.lost_sessions.add("s-old")
+        host.session_logs[("claude", "s-old")] = claude_log((-50, 1, 1))
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual((wf.state.turns[0]["session"], wf.state.turns[0]["tokens"]), (None, "unknown"))
+
+    def test_turn_tokens_needs_a_known_window_and_a_harness_it_reads(self):
+        log = orchestrator.session_usage("claude", claude_log((10, 1, 1)))
+        known = {"agent": "claude", "session": "s", "started_at": at(0), "ended_at": at(20)}
+        self.assertEqual(orchestrator.turn_tokens(known, log),
+                         {"input": 1, "output": 1, "cache_read": 7, "cache_write": 1})
+        self.assertEqual(orchestrator.turn_tokens({**known, "ended_at": at(10)}, log)["input"], 1)
+        self.assertEqual(orchestrator.turn_tokens({**known, "ended_at": at(9)}, log)["input"], 0)
+        for unknown in ({"started_at": None}, {"ended_at": None}, {"session": None}, {"started_at": "garbled"}):
+            self.assertEqual(orchestrator.turn_tokens({**known, **unknown}, log), "unknown")
+        self.assertEqual(orchestrator.turn_tokens(known, None), "unknown")
+
+    def test_session_log_finds_the_file_under_home(self):
+        with tempfile.TemporaryDirectory() as home, patch.dict("os.environ", {"HOME": home}):
+            os.makedirs(f"{home}/.claude/projects/-proj")
+            with open(f"{home}/.claude/projects/-proj/abc-123.jsonl", "w") as f:
+                f.write("log\n")
+            self.assertEqual(Host().session_log("claude", "abc-123"), "log\n")
+            self.assertIsNone(Host().session_log("claude", "other"))
+            self.assertIsNone(Host().session_log("claude", "*"))
+            self.assertIsNone(Host().session_log("codex", "abc-123"))
+
+    @patch.dict("os.environ", {"HERDR_ENV": "1"})
+    def test_the_metrics_command_prints_a_line_per_run_that_is_done(self):
+        with tempfile.TemporaryDirectory() as proj:
+            for run_id, metrics in (("1-aaaaaa", {"run_id": "1-aaaaaa", "outcome": APPROVE}), ("2-bbbbbb", None),
+                                    ("3-cccccc", {"run_id": "3-cccccc", "outcome": "error"})):
+                os.makedirs(f"{proj}/{orchestrator.RUNS_DIR}/{run_id}")
+                if metrics:
+                    with open(f"{proj}/{orchestrator.RUNS_DIR}/{run_id}/metrics.json", "w") as f:
+                        f.write(json.dumps(metrics, indent=1) if run_id.startswith("3") else json.dumps(metrics))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), patch("sys.stderr"):
+                self.assertEqual(main(["metrics", "--cwd", proj]), orchestrator.EXIT_ERROR)
+            # A file that is not one JSON line is corrupt; the run writes each as one.
+            with open(f"{proj}/{orchestrator.RUNS_DIR}/3-cccccc/metrics.json", "w") as f:
+                f.write(json.dumps({"run_id": "3-cccccc", "outcome": "error"}) + "\n")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(main(["metrics", "--cwd", proj]), 0)
+        self.assertEqual([json.loads(line) for line in out.getvalue().splitlines()],
+                         [{"run_id": "1-aaaaaa", "outcome": APPROVE}, {"run_id": "3-cccccc", "outcome": "error"}])
+        self.assertEqual(len(out.getvalue().splitlines()), 2)
 
 
 class Killed(BaseException):
