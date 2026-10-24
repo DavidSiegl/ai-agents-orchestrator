@@ -23,6 +23,7 @@ from orchestrator import (
     GATE_OK,
     Host,
     OrchestratorError,
+    _failed_by,
     _unquote,
     changed_lines,
     ci_credentials,
@@ -341,3 +342,10 @@ class TestFirstLineParsers(unittest.TestCase):
     @given(st.sampled_from(GATES), st.text())
     def test_read_back_the_gate_quality_report_writes(self, gate, intro):
         self.assertEqual(parse_gate(quality_report(gate, intro)), gate)
+
+    @given(blank_lines, emphasis, after_word, st.text())
+    @example("", ("_", "_"), "", "")  # _failed_by matched the word with its own \b, which fails before "_"
+    def test_a_gate_read_as_ok_reads_as_error_once_a_check_fails_it(self, blanks, marks, after, rest):
+        before, behind = marks
+        quality = f"{blanks}{before}GATE: {GATE_OK}{behind}{after}\n{rest}"
+        self.assertEqual(parse_gate(_failed_by(quality, ["a check failed"])), GATE_ERROR)

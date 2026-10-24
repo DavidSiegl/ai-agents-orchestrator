@@ -2169,16 +2169,24 @@ def new_run_id() -> str:
     return f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}"
 
 
+def _labelled_word(label: str, words: tuple[str, ...]) -> str:
+    """A regex for `label:`, blanks, then one of words: group 1 is `label:` with the blanks, group 2 the word.
+
+    Every reader and rewriter of a verdict or gate line matches through this, so they agree on which lines hold a
+    word. The word must end there: a word character after it continues it into another word, unless it is one of
+    the underscores that close emphasis, as in `_VERDICT: APPROVE_`.
+    """
+    return rf"({label}:\s*)({'|'.join(map(re.escape, words))})(?=_*(?!\w))"
+
+
 def _first_line_word(text: str, label: str, words: tuple[str, ...]) -> str | None:
     """The one of words that follows `label:` on text's first non-blank line, Markdown emphasis around them
     tolerated; None when that line has none of them, or when text is blank."""
-    # The word must end there: a word character after it continues it into another word, unless it is one of
-    # the underscores that close emphasis, as in `_VERDICT: APPROVE_`.
-    pattern = rf"{label}:\s*({'|'.join(map(re.escape, words))})(?=_*(?!\w))"
+    pattern = _labelled_word(label, words)
     for line in text.splitlines():
         if line.strip():
             m = re.search(pattern, line)
-            return m.group(1) if m else None
+            return m.group(2) if m else None
     return None
 
 
@@ -5061,7 +5069,7 @@ def _failed_by(quality: str, conditions: list[str]) -> str:
     first other one, when it has none."""
     lines = quality.split("\n")
     at = next((i for i, x in enumerate(lines) if x.strip()), 0)
-    lines[at] = re.sub(rf"(GATE:\s*){GATE_OK}\b", rf"\g<1>{GATE_ERROR}", lines[at], count=1)
+    lines[at] = re.sub(_labelled_word("GATE", (GATE_OK,)), rf"\g<1>{GATE_ERROR}", lines[at], count=1)
     bullets = [f"- {c}" for c in conditions]
     if "## Failed conditions" in lines:
         end = lines.index("## Failed conditions") + 2
