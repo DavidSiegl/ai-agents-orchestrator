@@ -5930,6 +5930,24 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.assertEqual([(f["path"], f["rule"]) for f in found], [("calc.py", "not-scored")])
         self.assertTrue(found[0]["message"].startswith("could not be read ("), found[0]["message"])
 
+    def test_an_unchanged_copy_in_a_file_the_check_does_not_judge_takes_no_base_from_its_original(self):
+        big = flat("big", 20)
+        self.commit_file("tests/helpers.py", "X = 0\n\n\n" + big)
+        self.edit("calc.py", "'big 3':\n        x += 3\n", "'big 3':\n        x += 30\n")  # edited in place: still 20
+        with self.subTest("a copy at the base too, in a file the change edits elsewhere"):
+            self.edit("tests/helpers.py", "X = 0\n", "X = 1\n")
+            self.assertEqual(self.found()[0], [])
+        with self.subTest("a copy the change adds"):
+            self.put("tests/more_helpers.py", big)
+            self.git("add", "tests/more_helpers.py")
+            self.assertEqual(self.found()[0], [])
+
+    def test_an_unchanged_copy_in_a_file_the_check_does_not_judge_takes_no_base_from_its_original_renamed(self):
+        self.put("tests/helpers.py", flat("big", 20))
+        self.git("add", "tests/helpers.py")
+        self.edit("calc.py", "def big(", "def legacy_big(")  # renamed in place, its body unchanged
+        self.assertEqual(self.found()[0], [])
+
     def test_a_function_whose_decorator_the_change_adds_is_compared_with_its_unchanged_self(self):
         self.edit("calc.py", "def big(x):\n", "@staticmethod\ndef big(x):\n")  # touched, its body as it was
         self.assertEqual(self.found()[0], [])

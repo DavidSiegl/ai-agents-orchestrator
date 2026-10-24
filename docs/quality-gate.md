@@ -86,7 +86,9 @@ the paper's rules. Each of these is a finding:
     file's base, then elsewhere. So a function moved to another module, renamed or made a method, but otherwise
     unchanged, keeps its score, and a new function given its old name is new. Of a function moved unchanged and a
     copy of it, the one that kept the name takes it, and a function moved unchanged into a file the check does not
-    judge, such as one under `tests/`, still takes its own;
+    judge, such as one under `tests/`, still takes its own. A function in such a file takes the base of a function
+    in another file only when that one is gone from it, by name and by body, so an unchanged copy there takes
+    nothing from an original still in its place, edited or renamed;
   - failing that, the highest-scoring function of its name left in its file's base, under the file's old name,
     whatever that name, when the change renamed it. So with a name defined more than once, as a property's getter and
     setter or `@singledispatch` registrations named `_` are, adding or removing one never makes a function the change
