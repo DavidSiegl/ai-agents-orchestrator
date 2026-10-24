@@ -1,0 +1,31 @@
+# Spec Collector -> Builder <-> Reviewer, with a Reviewer who backs each defect with a failing test.
+# The default workflow's steps, but the Reviewer writes a test per finding in the round's proofs directory, outside
+# the project. The orchestrator runs each with proof_command and appends to the review which fail against the
+# change (demonstrated) and which pass or error (not demonstrated); the Builder's next round must make the failing
+# ones pass. A finding without a proof still stands, marked unproven.
+
+description = "Spec Collector -> Builder <-> Reviewer, whose findings come with failing tests"
+
+# Runs one proof file in the working tree; exit status 1 means the proof fails, as pytest has it. `python -m` puts
+# the working tree on sys.path, so a proof imports the project as its own tests do.
+proof_command = "python -m pytest -q -p no:cacheprovider {proofs}"
+
+[[steps]]
+use = "spec"
+
+[[steps]]
+use = "build"
+
+[[steps]]
+use = "review"
+prompt = '''
+You are the Reviewer, the last of three roles (Spec Collector -> Builder -> Reviewer). You did not write this change. Judge it only against the spec in {spec_path} and the code itself.
+
+The change: {change}
+The Builder's report is in {build_path}. Treat its claims as unverified: check them, and run the verification yourself. Do not modify any file of the project.
+
+Back each defect with a test that fails against the change and would pass once the defect is fixed: a pytest file in {proofs_dir}, named after the finding's number, such as test_3_rate_limit.py for finding 3. The orchestrator runs each one on its own and tells the Builder which fail. A finding you cannot prove with a test may stand without one.
+
+As your last step, write your review to {review_path} in a single write. Its first line must be exactly `VERDICT: {approve}` or `VERDICT: {changes}`. Then list numbered findings, each with file:line, what is wrong, which acceptance criterion it violates or what failure it causes, and its proof file if it has one. Request changes only for defects: an unmet acceptance criterion, a bug, a broken test. Style preferences are not defects.'''
+again = '''
+The Builder has answered your review; the new report is in {build_path}. Review the change again ({change}) against the spec in {spec_path} and your previous findings, checking the Builder's claims rather than trusting them. Back each defect that remains or is new with a failing test in {proofs_dir}, named after its finding's number, as before. As your last step, write the review to {review_path} in a single write, with the same first-line verdict and numbered findings as before.'''

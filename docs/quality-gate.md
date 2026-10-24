@@ -498,7 +498,7 @@ With `--quality-gate JOB`, every Builder turn is followed by a quality round, in
 ```text
 build ──▶ quality ──▶ review
   ▲          │
-  └── not OK, quality round < --max-quality-rounds
+  └── not OK, quality round < --max-quality-rounds, and not stuck
 ```
 
 A quality round snapshots the working tree, pushes the snapshot to a throwaway branch on `origin`, has the
@@ -507,6 +507,15 @@ the Builder gets the quality file and answers it in `build-<n>-q<q>.md`, and the
 After `--max-quality-rounds` rounds (default 3) the change goes to the Reviewer anyway, whose prompt names the
 last quality file as unresolved findings. Three rounds are at most three builds and two fix turns, and each
 review round has its own budget. Without `--quality-gate`, a run behaves as it did before.
+
+The loop also stops early when it is stuck: when quality round Q fails on just what round Q-1 failed on, the
+Builder's turn between them fixed none of it, and another turn is unlikely to. `gate_failures` reads what failed
+from the quality file: its failed conditions, by their words; its failing tests; and each numbered finding before
+the findings to weigh, by `finding_fingerprint`, a hash of its path, rule and message with the digits taken out, so
+a finding whose line moved is the same finding. When round Q's failures are not empty and are round Q-1's, no more
+and no fewer (`GateFailures.repeats`), the change goes to the Reviewer, whose prompt ends with `QUALITY_STUCK_NOTE`,
+and the log says why. A build that failed with nothing listed has no failures to compare, so it is never stuck by
+this rule; a coverage condition is, while its percentage stays the same.
 
 ### Snapshotting the uncommitted tree
 
@@ -642,10 +651,10 @@ as it answers the gate's.
 ### What goes to the Builder
 
 `QUALITY_FIX_PROMPT` names the quality file and the Builder's next report, `build-<n>-q<q>.md`, whose findings it
-answers by number. A Builder in a fresh session gets `BUILD_PROMPT`, `REBUILD_NOTE` with every earlier report,
-and `QUALITY_FIX_PROMPT`. The Reviewer's prompt ends with `QUALITY_PASSED_NOTE` or `QUALITY_UNRESOLVED_NOTE`,
-naming the round's last quality file, and points at the Builder's last report of the round. The pull request's
-description includes the last quality file.
+answers by number. A Builder in a fresh session gets `BUILD_PROMPT`, `REBUILD_NOTE` with every earlier report, and
+`QUALITY_FIX_PROMPT`. The Reviewer's prompt ends with `QUALITY_PASSED_NOTE`, `QUALITY_UNRESOLVED_NOTE` or
+`QUALITY_STUCK_NOTE`, naming the round's last quality file, and points at the Builder's last report of the round.
+The pull request's description includes the last quality file.
 
 ### Run state and resume
 

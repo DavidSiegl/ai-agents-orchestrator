@@ -11,7 +11,7 @@ One standard-library module, in these sections:
 | Section | What it holds |
 |---|---|
 | Constants | Defaults (`DEFAULT_MAX_ROUNDS`, `DEFAULT_TURN_TIMEOUT`, `DEFAULT_MAX_QUALITY_ROUNDS`), intervals (`POLL_SECONDS`, `STALL_SECONDS`, `HEARTBEAT_SECONDS`, `STALE_SECONDS`, and for the quality gate `HTTP_TIMEOUT`, `CI_POLL_SECONDS`, `QUALITY_TIMEOUT`), `BRANCH_PREFIX` with `CLOSED_BRANCH_GRACE` (how long `prune` waits after a pull request is closed), `CI_REF_PREFIX`, `CI_ENV` (the credential variables), `GIT_PATHSPEC_ENV` (git's pathspec-syntax switches), `ROLE_LABELS` (the default workflow's roles, and so the `--<role>-model` flags), `AGENT_KINDS` (the harnesses a role can run in, herdr's `--kind`) with `DEFAULT_AGENT` and the exit codes. `OrchestratorError` ends a run with a message; `HerdrError` carries herdr's error code. `child_env` is the environment of every process the orchestrator starts: its own without `CI_ENV` and `GIT_PATHSPEC_ENV`, which the agents' shells do not inherit, though they read the user's startup files. `ci_credentials` fills what the environment lacks of `CI_ENV` from the file at `ci_env_path` in `config_dir`, parsed by `parse_env_file`, without putting it into the environment. |
-| Role prompts | `SPEC_PROMPT`, `BUILD_PROMPT` and `REVIEW_PROMPT` start each role; `FIX_PROMPT` and `RECHECK_PROMPT` follow up in later rounds; `QUALITY_FIX_PROMPT` sends a quality file to the Builder; `CONTINUE_PROMPT` goes to a relaunched session; `REBUILD_NOTE` and `REREVIEW_NOTE` brief a fresh session on earlier turns; `QUALITY_PASSED_NOTE` and `QUALITY_UNRESOLVED_NOTE` end the Reviewer's prompt in a run with the gate. |
+| Role prompts | `SPEC_PROMPT`, `BUILD_PROMPT` and `REVIEW_PROMPT` start each role; `FIX_PROMPT` and `RECHECK_PROMPT` follow up in later rounds; `QUALITY_FIX_PROMPT` sends a quality file to the Builder; `CONTINUE_PROMPT` goes to a relaunched session; `REBUILD_NOTE` and `REREVIEW_NOTE` brief a fresh session on earlier turns; `QUALITY_PASSED_NOTE`, `QUALITY_UNRESOLVED_NOTE` and `QUALITY_STUCK_NOTE` end the Reviewer's prompt in a run with the gate, and `LOCKED_NOTE` when locked files were restored. |
 | Workflow definitions | `Step` and `Pipeline`, the reserved phases `QUALITY`, `PUBLISH` and `DONE`, `DEFAULT_WORKFLOW` built from the role prompts, the `WORKFLOWS` registry and `find_workflow`; see [Workflows](#workflows). |
 | Workflow files | `parse_workflow` turns a definition (TOML, or one saved in `state.json`) into a `Pipeline`, resolving `use` and filling in labels; `load_workflow_file` reads one, `workflow_files` and `named_workflow` find them in `workflows_dir`, and `workflow_definition` and `workflow_toml` write one back. `run_pipeline` is a run's workflow: its saved definition, else the built-in one of its name. |
 | Agent harnesses | `AgentSettings` is how each role's agent starts: the permission mode, and per role its model and harness; `Workflow` takes one and saves it in `state.json`. `launch_args` builds the arguments an agent starts with in its harness: `permission_args` translates `--permission-mode` through `PERMISSION_ARGS` (claude takes every mode as it is; `None` means the harness has no equivalent), `RESUME_ARGS` names each harness's way into a saved session (codex's `resume` is a subcommand, so it goes first), the model goes after it as `--model`, and `ADD_DIR_ARGS` grants a worktree run's agents its run directory last (claude and codex `--add-dir`, gemini `--include-directories`; opencode and pi have no such flag). |
@@ -66,41 +66,65 @@ order, in `work_dir`:
 - `done`: `_clean_up_quality` deletes the run's throwaway branches, `owner` is cleared,
   and with a pull request `_close_workspace` closes the workspace.
 
-A failure goes through `_release`, which records `error`. Each role's turn is `_turn`: it takes a handoff file
-that already exists, and otherwise gets the agent ready through `_agent` (`NEW`, `ALIVE`, `RESUMED` or
-`RESTARTED`; an exited agent is resumed into its saved session only if its record's `kind` is the role's
-harness now, and otherwise starts fresh), prompts it with what `_prompt_for` picks, and polls for the file in `_await_handoff`, where
-`_tell_human` notifies the human of a blocked or stalled agent once. A verdict step's file without a `VERDICT`
-first line goes to `_retry` (in `_verdict_turn`), which moves it aside and, once per file (`retried`), prompts the role again with
-`RETRY_VERDICT_PROMPT`; `retrying` names the file while that turn is under way, so a resume sends the retry prompt,
-not the step's own. A file of a step that can block (`Step.can_block`: neither human-paced nor the verdict step)
-whose first line is `BLOCKED:` (`parse_blocked`) goes to `_block`, which saves `blocked` and then moves it aside to
-`.blocked-K`; `_unblocked` then has `_block_answer` notify the human and wait for the file again, as often as it
-comes back `BLOCKED:`, with `BLOCKED_PROMPT`, no
-timeout and no stall notice, and a resume with `blocked` set finishes an undone move (`_finish_block`) and goes
-back into that wait. `_prompts` appends `BLOCKED_NOTE` to every prompt of such a step. `_save` checks the owner before every write and raises
-`RunTakenOver` after a takeover; `_heartbeat` keeps `state.json` fresh while a turn runs. `_written` and
-`_quality` open a turn's record in `turns` (`_turn_record`, started by `Host.now`) and `_end_turn` closes it at
-the handoff file's `Host.mtime`; both read the project host's clock. The end of `run` and `_release` write
-`summary.md` (`run_summary`, with `turns_table`), except after a takeover; `pr_body` adds the same table and
-`show` prints `turn_lines`.
+A failure goes through `_release`, which records `error`. Each role's turn is `_turn`: it takes a handoff file that
+already exists, and otherwise gets the agent ready through `_agent` (`NEW`, `ALIVE`, `RESUMED` or `RESTARTED`; an
+exited agent is resumed into its saved session only if its record's `kind` is the role's harness now, and otherwise
+starts fresh), prompts it with what `_prompt_for` picks, and polls for the file in `_await_handoff`, where
+`_tell_human` notifies the human of a blocked or stalled agent once. A verdict step's file without a `VERDICT` first
+line goes to `_retry` (in `_verdict_turn`), which moves it aside and, once per file (`retried`), prompts the role
+again with `RETRY_VERDICT_PROMPT`; `retrying` names the file while that turn is under way, so a resume sends the
+retry prompt, not the step's own. A file of a step that can block (`Step.can_block`: neither human-paced nor the
+verdict step) whose first line is `BLOCKED:` (`parse_blocked`) goes to `_block`, which saves `blocked` and then
+moves it aside to `.blocked-K`; `_unblocked` then has `_block_answer` notify the human and wait for the file again,
+as often as it comes back `BLOCKED:`, with `BLOCKED_PROMPT`, no timeout and no stall notice, and a resume with
+`blocked` set finishes an undone move (`_finish_block`) and goes back into that wait. `_prompts` appends
+`BLOCKED_NOTE` to every prompt of such a step. `_save` checks the owner before every write and raises `RunTakenOver`
+after a takeover; `_heartbeat` keeps `state.json` fresh while a turn runs. `_written` and `_quality` open a turn's
+record in `turns` (`_turn_record`, started by `Host.now`) and `_end_turn` closes it at the handoff file's
+`Host.mtime`; both read the project host's clock. The end of `run` and `_release` write `summary.md` (`run_summary`,
+with `turns_table`), except after a takeover; `pr_body` adds the same table and `show` prints `turn_lines`. A run
+that is done first counts each agent turn's tokens (`_count_tokens`: `Host.session_log` reads the session's log
+where `SESSION_LOGS` says its harness keeps one, and `turn_tokens` sums the answers within the turn), then writes
+`metrics.json` (`run_metrics`), with the quality rounds `_quality` records in `quality_rounds` by `gate_failures`;
+the `metrics` command prints every run's (`Host.run_metrics`).
 
 ## Workflows
 
 A workflow is data: a `Pipeline` with a name, its roles in pane order (role key to pane label) and a tuple of
-`Step`s. A step names its id (also its phase), its role, its handoff file (fixed like `spec.md`, or one per
-round like `build-{n}.md`), a first prompt, a later-round prompt (`again`) and a note for a fresh session in a
-later round (`fresh_note`), and the flags `human_paced`, `edits`, `loop_to` (which makes it the verdict step)
-and `quality_gated`. Prompts take `{task}`, `{cwd}`, `{n}`, `{change}`, `{path}` and, for every step `X`,
-`{X_path}`, `{prev_X_path}` and `{earlier_X_paths}`. `Pipeline` validates itself when constructed and raises
-`ValueError` naming the problem, such as a duplicate id, a loop target that does not come earlier, two verdict
-loops, two gated steps or an unknown placeholder.
+`Step`s, and optionally a `proof_command`. A step names its id (also its phase), its role, its handoff file (fixed
+like `spec.md`, or one per round like `build-{n}.md`), a first prompt, a later-round prompt (`again`) and a note for
+a fresh session in a later round (`fresh_note`), and the flags `human_paced`, `edits`, `loop_to` (which makes it the
+verdict step), `quality_gated` and `locks`. Prompts take `{task}`, `{cwd}`, `{n}`, `{change}`, `{path}`,
+`{proofs_dir}` and, for every step `X`, `{X_path}`, `{prev_X_path}` and `{earlier_X_paths}`. `Pipeline` validates
+itself when constructed and raises `ValueError` naming the problem, such as a duplicate id, a loop target that does
+not come earlier, two verdict loops, two gated steps or an unknown placeholder.
 
-The quality-gated step is the one the gate follows: its answer to quality round Q inserts `-qQ` before its
-file's extension, other steps' prompts name its last report of the round, and `QUALITY_PASSED_NOTE` or
-`QUALITY_UNRESOLVED_NOTE` ends the verdict step's prompt. The contract step, a first step with a fixed file
-that does not edit, titles the branch and the pull request; without one the task does. The pull request body
-holds the contract, the last editing step's last report, the last quality file and the verdict file.
+The quality-gated step is the one the gate follows: its answer to quality round Q inserts `-qQ` before its file's
+extension, other steps' prompts name its last report of the round, and `QUALITY_PASSED_NOTE` or
+`QUALITY_UNRESOLVED_NOTE` ends the verdict step's prompt. The contract step, a first step with a fixed file that
+does not edit, titles the branch and the pull request; without one the task does. The pull request body holds the
+commit's provenance trailers as a table (`provenance`), the contract, the last editing step's last report, the
+last quality file and the verdict file.
+
+A locking step (`locks`: the first editing step, which the verdict loop does not run again, so that what it locks is
+its own work) locks the change as it stands when each of its turns ends: `Host.lock` snapshots the tree into the
+local ref `refs/orchestrator/<key>/locked/<step>`, which nothing pushes and `done` deletes, and `RunState.locked`
+saves the paths that differ from the base. After every other editing turn, `Workflow._hold_locks` writes the turn's
+changes to those paths to `locked-<turn's file>.diff` in the run directory, saves a record of them in
+`RunState.restored`, and then restores the paths from the ref (`Host.restore`, the working tree only, a path the ref
+lacks deleted); a resume restores a saved record again. That happens before the quality round, so the gate judges
+the locked files, and `LOCKED_NOTE` tells the verdict step which files of its round were restored and where the
+diffs are.
+
+A workflow with a `proof_command` (`examples/workflows/adversarial.toml`) has its verdict step back findings with
+tests in `{proofs_dir}`, `RunState.proofs_dir(n)` in the run directory, so they never enter the snapshot or the
+commit. After a review that requests changes, `Workflow._judge_proofs` runs each proof file with the command in the
+working tree (`_run_proof`: exit status 1 is a failing proof, which demonstrates the finding its name's first number
+names; 0 passes and anything else errors, neither demonstrating), saves the outcomes in `RunState.proofs`, and
+appends `proofs_section` under `PROOFS_HEADING` to the review; a resume runs no proof of a round that has records,
+and appends the section only where the review lacks it. A proof runs under GNU `timeout` where there is one, which
+stops its whole process group. `PROOFS_NOTE` ends the next round's prompt of the step the review loops back to,
+naming the failing proofs.
 
 `WORKFLOWS` holds only `DEFAULT_WORKFLOW`. Other workflows are TOML files: `run --workflow NAME` finds
 `NAME.toml` in `workflows_dir` (`~/.config/ai-agents-orchestrator/workflows/`), and `run --workflow-file` takes
@@ -110,7 +134,7 @@ workflow's label for its key, or else is named after the key; a role's `model` s
 and its `agent` (`Pipeline.agents`, one of `AGENT_KINDS`) under `--agent` and `--role-agent`. A
 file cannot take a built-in workflow's name. `Pipeline` also rejects a prompt or file that could not be filled
 in at run time (`_fill_problem`), and a handoff file outside the run directory or named like the run's own
-`state.json`, `summary.md` and `quality-*` files, and two steps whose files can share a name in some round (`Step.name_forms`,
+`state.json`, `summary.md`, `metrics.json`, `quality-*` and `locked-*` files, and two steps whose files can share a name in some round (`Step.name_forms`,
 `_shared_name` and `_collision_problem`, an exact check). `state.json` saves
 the workflow's name and, for one that is not built in, its canonical definition (`workflow_definition`), which
 a resume rebuilds the `Pipeline` from, so editing or deleting the file does not change a started run. One saved

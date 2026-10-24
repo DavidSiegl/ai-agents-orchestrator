@@ -82,6 +82,73 @@ resume that ends again rewrites it with every turn; a run that is already `done`
 request's body ends with the same table up to publishing, collapsed under "Run timings", and `show` prints a
 line per turn.
 
+## Run metrics
+
+A run that is done writes `metrics.json` in its run directory, one JSON object on one line, and `orchestrator.py
+metrics` prints every run's of a project, a line each, oldest first; a run that failed or was interrupted has none
+until a resume finishes it. Its keys:
+
+- `version` (1), `run_id`, `workflow`, `outcome` (the verdict, `error` or `unfinished`), `rounds` and
+  `max_rounds`, `quality_gate` and `max_quality_rounds`, `pull_request`, `started_at`, `ended_at` and `seconds`
+  of the whole run, and `restored_locked_files`, how many locked files later turns had changed.
+- `roles`: per role whose agent ran, its `harness` and `model` (`null` for the harness's default).
+- `turns`: `turns` of `state.json` in order, each with `step`, `role`, `harness` and `model` (`null` for a quality
+  analysis), `round`, `quality_round`, `human_paced`, `started_at`, `ended_at`, `seconds` and `tokens`.
+- `quality_rounds`: per quality round, `round`, `quality_round`, `gate`, the failed `conditions` and
+  `fingerprints_by_check`: for each check or linter, the first word of a finding's rule, and `tests` for failing
+  tests, the fingerprints of the findings that failed the gate (`finding_fingerprint`, the one stuck-loop
+  detection compares). Fingerprints, never the findings' text, so `state.json`, which keeps the same records and
+  is rewritten on every heartbeat, stays small. The quality file of each round is still in the run directory.
+
+So `jq` answers "which check fails most" and "how many rounds does a run take":
+
+```sh
+orchestrator.py metrics | jq -c -s '[.[].quality_rounds[].fingerprints_by_check | keys[]]
+                                    | group_by(.) | map({check: .[0], rounds: length})'
+orchestrator.py metrics | jq -s 'map(.rounds) | add / length'
+```
+
+### Token usage
+
+`tokens` is `{"input", "output", "cache_read", "cache_write"}`, the sums over the model's answers in the turn's
+agent session from the turn's start to the second its handoff file was written, as the harness itself recorded
+them; `"unknown"` where that record cannot be read; `null` for a quality analysis. It is never estimated. What each
+harness records, as of October 2026:
+
+| Harness | Token record the orchestrator reads | |
+| --- | --- | --- |
+| `claude` | `~/.claude/projects/<project>/<session>.jsonl`: each answer's `message.usage`, on every line of the answer, counted once by `message.id` | read |
+| `pi` | `~/.pi/agent/sessions/<project>/<time>_<session>.jsonl`: `message.usage` of each assistant message | read |
+| `gemini` | `~/.gemini/tmp/<project hash>/chats/session-*.json`: `tokens` of each `gemini` message, but the file is named by time, not by the session herdr reports | `unknown` |
+| `codex` | `~/.codex/sessions/`, `token_count` events in each rollout file; not installed where this was checked | `unknown` |
+| `opencode` | its SQLite database, `message.data`; not installed where this was checked | `unknown` |
+
+A turn's session is the agent's when its prompt went out; a turn whose agent ended in another session, after a
+restart, has `"unknown"` tokens, since part of its work is in a log that is not its session's. The answer that an
+agent gives after writing its handoff file, if any, counts for no turn.
+
+## Provenance trailers
+
+The commit a run publishes ends with git trailers that say what made it, after the line that names the run
+(`commit_note`), and the pull request's body repeats them as a table under its first line (`provenance`):
+
+| Trailer | Value |
+| --- | --- |
+| `Orchestrator-Run` | the run id, which names the run directory and the run's `summary.md` |
+| `Orchestrator-Workflow` | the workflow's name |
+| `Orchestrator-Role` | one per role whose agent ran, in the order they first started: `role=harness/model`, the model `default` when no flag or workflow file set one; a role that ran in two harnesses over resumes names the one it ended in |
+| `Orchestrator-Gate` | with `--quality-gate` only: the last quality round's gate and how many quality rounds its review round took, such as `OK after 2 quality rounds` |
+
+So which harness and model built and reviewed a change can be read from history:
+
+```sh
+git log --format='%h %(trailers:key=Orchestrator-Role,valueonly,separator=%x2C )'
+git log --format='%(trailers:key=Orchestrator-Gate,valueonly,separator=%x2C )' | sort | uniq -c
+```
+
+The commit is made once: a resume in `publish` whose commit already exists does not amend it. Signing agents'
+commits is a separate question.
+
 ## Deleting run branches
 
 A run that opens a pull request leaves its branch `orchestrator/<slug>-<key>` locally and on `origin`. `prune`

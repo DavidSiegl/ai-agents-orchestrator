@@ -5,6 +5,29 @@ was done.
 
 ## Open issues
 
+- **A proof that failed is not run again in the next round.** `Workflow._judge_proofs` runs only the proofs the
+  verdict step wrote in its own round, so a Builder told to make round N's failing proofs pass (`PROOFS_NOTE`) is
+  checked only if the Reviewer writes them again; one that still fails can be approved. Raised by the code review of
+  loop-guards (2026-10-24). Closes with round N's demonstrated proofs run again after the Builder's turn of round
+  N+1 and their outcomes put before the Reviewer.
+- **Proofs run after the last round's review too.** No Builder turn follows to read them; only the draft pull
+  request's review shows them, and each may take `PROOF_TIMEOUT`. Kept: a demonstrated defect is what the human
+  most needs to see in a draft. Raised by the same review.
+- **A proof in a worktree run finds the checkout's pytest configuration.** The run directory, and with it
+  `RunState.proofs_dir`, is under the project checkout, not the run's worktree, so `adversarial.toml`'s
+  `python -m pytest {proofs}` takes its rootdir and `conftest.py` from the checkout while importing the code from the
+  worktree it runs in. Found while writing loop-guards ticket 05; not reproduced. Closes with `_run_proof` passing
+  the working tree as pytest's rootdir and conftest root, or the proofs copied into a scratch directory of the
+  worktree for their run.
+- **`test-integrity` does not see an expected value held outside the assertion.** `expected-value-changed` compares
+  each assertion's literals (`_changed_literals`), so editing a golden constant the assertion names, such as the
+  tests' `GOLDEN_PR_BODY` or `GOLDEN_SUMMARY`, changes what is expected without a finding, while the same edit inside
+  the assertion is one. Found while adding the provenance trailers to the pull request body (loop-guards ticket 03).
+  Closes with the assertions' names resolved to module-level constants the change edits.
+- **A run that never reaches `done` keeps its local refs.** A locking step's commit stays under
+  `refs/orchestrator/<key>/locked/` (`RunState.lock_ref`) until the run ends `done` (`Workflow._clean_up_locks`);
+  `close` and `prune` do not delete them, so a failed run's locked snapshots are never collected by `git gc`. Closes
+  with `close` and `prune` deleting `RunState.refs_prefix` as they delete the run's branch.
 - **An agent's pull request can reach `main` on rules it wrote itself, with no human.** Jenkins's App reports
   `continuous-integration/jenkins/pr-head`, which the agents' token cannot post, but a pull request build runs
   the pull request's own `Jenkinsfile` and gate (`docs/quality-gate.md`, What the Gate stage judges), and since
