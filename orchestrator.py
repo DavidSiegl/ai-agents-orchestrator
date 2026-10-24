@@ -4706,33 +4706,40 @@ def _bound_names(tree: ast.Module) -> Iterator[tuple[str, tuple[int, int]]]:
     parameter, a def or class, a for or comprehension target, a with's or an except's as, an import, a match pattern's
     capture, or a type parameter. global and nonlocal bind nothing new. A function marked @override, as PEP 698
     marks one whose name and signature its base class fixes, binds neither its name nor its parameters here."""
-    fixed: set[int] = set()  # the id()s of the defs and parameters an @override fixes
+    fixed = _fixed_by_override(tree)
+    for node in ast.walk(tree):
+        name = _BINDING_NAME.get(type(node), lambda node: None)(node)
+        # Every node _BINDING_NAME names is one of these, which carry where they are.
+        if name and id(node) not in fixed and isinstance(node, (ast.stmt, ast.expr, ast.arg, ast.alias,
+                                                                ast.excepthandler, ast.pattern, ast.type_param)):
+            yield name, (node.lineno, node.col_offset)
+
+
+# The name each kind of node that binds one binds, or None where that node binds none, as for a Name it only reads.
+_BINDING_NAME: dict[type, Callable[[Any], str | None]] = {
+    **dict.fromkeys((ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler, ast.MatchAs,
+                     ast.MatchStar, ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple), lambda node: node.name),
+    ast.arg: lambda node: node.arg,
+    # `import a.b` binds a; `from m import *` binds names the module chooses.
+    ast.alias: lambda node: None if node.name == "*" else node.asname or node.name.partition(".")[0],
+    ast.Name: lambda node: node.id if isinstance(node.ctx, ast.Store) else None,
+    ast.Attribute: lambda node: node.attr if isinstance(node.ctx, ast.Store) and isinstance(node.value, ast.Name)
+    and node.value.id in ("self", "cls") else None,
+    ast.MatchMapping: lambda node: node.rest,
+}
+
+
+def _fixed_by_override(tree: ast.Module) -> set[int]:
+    """The id()s of the defs in tree marked @override (typing's, or any decorator named override) and of their
+    parameters: the names their base class fixes."""
+    fixed: set[int] = set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
                 (d.id if isinstance(d, ast.Name) else d.attr if isinstance(d, ast.Attribute) else "") == "override"
                 for d in node.decorator_list):
             a = node.args
             fixed |= {id(node), *map(id, [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg])}
-    for node in ast.walk(tree):
-        if id(node) in fixed:
-            continue
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            yield node.name, (node.lineno, node.col_offset)
-        elif isinstance(node, ast.arg):
-            yield node.arg, (node.lineno, node.col_offset)
-        elif isinstance(node, ast.alias) and node.name != "*":
-            # `import a.b` binds a.
-            yield node.asname or node.name.partition(".")[0], (node.lineno, node.col_offset)
-        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar, ast.TypeVar, ast.ParamSpec,
-                               ast.TypeVarTuple)) and node.name:
-            yield node.name, (node.lineno, node.col_offset)
-        elif isinstance(node, ast.MatchMapping) and node.rest:
-            yield node.rest, (node.lineno, node.col_offset)
-        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-            yield node.id, (node.lineno, node.col_offset)
-        elif (isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store) and isinstance(node.value, ast.Name)
-              and node.value.id in ("self", "cls")):
-            yield node.attr, (node.lineno, node.col_offset)
+    return fixed
 
 
 def gate_checks(mutation_budget: float = MUTATION_BUDGET,

@@ -6156,10 +6156,9 @@ class TestWrittenRules(unittest.TestCase):
              '\n    def __init__(self):\n        self.n = 1\n\n    def __len__(self):\n        return 1\n'
              '\n\ndef _private():\n    return 1\n')
 
-    def test_an_undocumented_public_function_class_or_method_is_found_at_its_def(self):
+    def test_an_undocumented_public_function_class_or_method_is_found_at_its_def_outside_the_tests(self):
         self.assertEqual(self.ruff("store.py", self.STORE), [(4, "D103"), (8, "D101"), (9, "D102")])
-
-    def test_the_tests_need_no_docstrings(self):
+        # The tests document themselves by their names.
         self.assertEqual(self.ruff("tests/test_store.py", self.STORE.replace('"""A module."""\n', "")), [])
 
     def test_a_blind_except_that_goes_on_is_found(self):
