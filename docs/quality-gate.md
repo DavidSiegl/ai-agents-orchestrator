@@ -692,15 +692,16 @@ q ≥ 1, where the Builder is answering quality round q. `resume` also takes `--
 `state.json` as it was.
 
 `resume --quality-gate JOB` saves `JOB` as `quality_job`, after the preflight: in round 0, `_check_gate`, as for
-`run --quality-gate`; later, an `origin`, the credentials and `CI.preflight`, before any turn. Where the gate
+`run --quality-gate`; later, an `origin`, gitleaks, the credentials and `CI.preflight`, before any turn. Where the gate
 starts depends on where the run is:
 
 - in round 0, or in `build`: that Builder turn is followed by quality round 1;
-- in `review`, with `review-<n>.md` neither written nor prompted for: phase `quality`, q = 1, so the Builder's
-  report is judged before the Reviewer sees it, and a failure goes back to the Builder as usual;
+- in `review`, with `review-<n>.md` neither written, prompted for, asked again for its verdict nor waiting on a
+  BLOCKED answer: phase `quality`, q = 1, so the Builder's report is judged before the Reviewer sees it, and a
+  failure goes back to the Builder as usual;
 - otherwise, a Reviewer already prompted included: at the Builder's next turn.
 
-It is refused in `publish` or `done`, after `--no-quality-gate` (the gate cannot come back), for a run that has
+It is refused in `publish` or `done`, even with the run's own job, after `--no-quality-gate` (the gate cannot come back), for a run that has
 another job (the same job is a no-op), in a workflow without a quality-gated step, and for a `--no-pr` run in the
 checkout itself past round 0: its tree was never required to be clean, and a snapshot takes the whole tree.
 

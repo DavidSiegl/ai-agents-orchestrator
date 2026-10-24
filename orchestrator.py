@@ -2248,7 +2248,8 @@ class RunState:
     # files written until then stay the run's (turn_quality_gate_off).
     quality_gate_disabled: bool = False
     max_quality_rounds: int = DEFAULT_MAX_QUALITY_ROUNDS
-    # The quality round the round is in: 0 until the Builder's first report, then q from quality round q on.
+    # The quality round the round is in: 0 until the Builder's first report, then q from quality round q on. After
+    # resume --no-quality-gate in a quality-fix turn it is one past the last quality round, which never runs.
     quality_round: int = 0
     # The quality build in flight, {ref, sha, queue_url, build}, each saved as soon as it is known.
     # rejected lists builds of ref that ended without a verdict, so a resume does not adopt them again.
@@ -6073,8 +6074,8 @@ def run_metrics(state: "RunState", now: int) -> dict:
     return {
         "version": METRICS_VERSION, "run_id": s.run_id, "workflow": s.workflow,
         "outcome": s.verdict or ("error" if s.error else "unfinished"), "rounds": s.round,
-        "max_rounds": s.max_rounds, "quality_gate": s.quality_job is not None,
-        "max_quality_rounds": s.max_quality_rounds if s.quality_job else None, "pull_request": s.pr_url,
+        "max_rounds": s.max_rounds, "quality_gate": s.had_quality_gate,
+        "max_quality_rounds": s.max_quality_rounds if s.had_quality_gate else None, "pull_request": s.pr_url,
         "started_at": iso_utc(min(starts)) if starts else None, "ended_at": iso_utc(now),
         "seconds": now - min(starts) if starts else None,
         "roles": {role: {"harness": a.get("kind", DEFAULT_AGENT), "model": s.models.get(role)}
@@ -6535,8 +6536,7 @@ class Workflow:
         if not s.pull_request:
             # A snapshot takes every change in the tree, so the tree must start with none.
             self._require_clean()
-            if self.host.git_run(s.cwd, "remote", "get-url", REMOTE).returncode != 0:
-                raise OrchestratorError(f"the quality gate pushes snapshots to {REMOTE}, and {s.cwd} has no {REMOTE}")
+            require_origin(self.host, s.cwd)
         self.ci.preflight()
 
     def _require_clean(self) -> None:
@@ -7108,7 +7108,7 @@ class Workflow:
         fresh = s.ci.get("ref") != ref
         if fresh:
             if s.ci.get("ref"):
-                self._delete_ci_ref(s.ci["ref"])
+                delete_ci_ref(self.host, s.cwd, s.ci["ref"])
             sha = commit()
             self.host.push_ref(s.work_dir, sha, ref, base=base, report_path=s.leaks_path("snapshot"))
             s.ci = {"ref": ref, "sha": sha}
@@ -7254,17 +7254,15 @@ class Workflow:
     def _finish_analysis(self, ref: str) -> None:
         s = self.state
         if s.ci.get("ref") == ref:
-            self._delete_ci_ref(ref)
+            # Jenkins has checked the ref out by now; a leftover is only clutter, which the run's end tries again.
+            delete_ci_ref(self.host, s.cwd, ref)
             s.ci = {}
         self._save()
 
-    def _delete_ci_ref(self, ref: str) -> None:
-        # Jenkins has checked the ref out by now; a leftover is only clutter, which `done` tries again.
-        delete_ci_ref(self.host, self.state.cwd, ref)
-
     def _clean_up_quality(self) -> None:
-        """At the end of a run, delete its refs on origin; a failure is only logged."""
-        if self.ci:
+        """At the end of a run that has or had the quality gate, delete its refs on origin, again for one whose gate
+        resume turned off, in case deleting them then failed; a failure is only logged."""
+        if self.state.had_quality_gate:
             delete_ci_refs(self.host, self.state)
 
     def _turn(self, role: str, text: str, path: str, timeout: int | None, *, fresh_text: str | None = None,
@@ -8278,43 +8276,55 @@ def resume_quality_limit(state: RunState, pipeline: Pipeline, args: argparse.Nam
                                 f"--max-quality-rounds {state.max_quality_rounds} is too low")
 
 
+def require_origin(host: Host, cwd: str) -> None:
+    """Raise OrchestratorError unless the checkout at cwd has an origin, which the quality gate pushes snapshots to."""
+    if host.git_run(cwd, "remote", "get-url", REMOTE).returncode != 0:
+        raise OrchestratorError(f"the quality gate pushes snapshots to {REMOTE}, and {cwd} has no {REMOTE}")
+
+
 def turn_quality_gate_on(state: RunState, pipeline: Pipeline, host: Host, ci: CI) -> None:
     """Turn the quality gate of the run in state, of workflow pipeline, on with ci's job, as resume --quality-gate
     does; state is changed in memory only, for the Workflow to save. The run's own job again is a no-op.
 
-    From round 1 on, the checkout must have an origin and the job must pass CI.preflight; round 0 is left to the
-    Workflow's own preflight, as for run --quality-gate. A run in the step after the gated one, whose turn has not
-    started, goes to quality round 1 first; any other starts the gate at the gated step's next turn.
+    From round 1 on, the checkout must have an origin, gitleaks must run, and the job must pass CI.preflight; round 0
+    is left to the Workflow's own preflight, as for run --quality-gate. A run in the step after the gated one, whose
+    turn has not started, goes to quality round 1 first; any other starts the gate at the gated step's next turn.
 
-    Raises OrchestratorError, with state unchanged, in phase done or publish, after turn_quality_gate_off, for a run
-    with another job, in a workflow without a quality-gated step, for an in-place --no-pr run past round 0, whose
-    working tree may hold the human's own changes that a snapshot would take, and for a failed preflight.
+    Raises OrchestratorError, with state unchanged, in phase done or publish (even with the run's own job), after
+    turn_quality_gate_off, for a run with another job, in a workflow without a quality-gated step, for an in-place
+    --no-pr run past round 0, whose working tree may hold the human's own changes that a snapshot would take, and for
+    a failed preflight.
     """
     s = state
-    if s.quality_job == ci.job:
+    gated = _gate_can_start(s, pipeline, ci.job)
+    if gated is None:
         log(f"run {s.run_id} already has quality gate job {ci.job}")
         return
-    gated = _gate_can_start(s, pipeline, ci.job)
     if s.round:
-        if host.git_run(s.cwd, "remote", "get-url", REMOTE).returncode != 0:
-            raise OrchestratorError(f"the quality gate pushes snapshots to {REMOTE}, and {s.cwd} has no {REMOTE}")
+        require_origin(host, s.cwd)
+        # Every quality snapshot is scanned before it is pushed (Host.push_ref); round 0's preflight checks it.
+        host.check_gitleaks()
         ci.preflight()
     s.quality_job = ci.job
     following = pipeline.after(gated)
     if following and s.phase == following.id:
-        path = following.path(s.dir, s.round)
-        if host.read(path) is None and s.prompted != os.path.basename(path):
-            # The gated step's last turn has not been judged, and the next step has not seen it yet.
+        file = os.path.basename(following.path(s.dir, s.round))
+        # A turn that was prompted, asked again for its verdict, or is waiting on its BLOCKED answer has seen the
+        # change; only one with none of these has not.
+        started = {s.prompted, s.retrying, (s.blocked or {}).get("file")}
+        if host.read(f"{s.dir}/{file}") is None and file not in started:
             s.phase, s.quality_round = QUALITY, 1
     log(f"turned the quality gate of run {s.run_id} on, with job {ci.job}")
 
 
-def _gate_can_start(state: RunState, pipeline: Pipeline, job: str) -> Step:
-    """The quality-gated step of pipeline, if the run in state, which lacks job, may turn the gate on with it;
-    OrchestratorError saying why not otherwise (turn_quality_gate_on)."""
+def _gate_can_start(state: RunState, pipeline: Pipeline, job: str) -> Step | None:
+    """The quality-gated step of pipeline, if the run in state may turn the gate on with job; None when it already
+    has job, which needs nothing done; OrchestratorError saying why not otherwise (turn_quality_gate_on)."""
     s, gated = state, pipeline.gated
     if s.phase in (DONE, PUBLISH):
         why = f"is in phase {s.phase}, past its last turn"
+    elif s.quality_job == job:
+        return None
     elif s.quality_gate_disabled:
         why = "had its quality gate turned off with --no-quality-gate, which cannot be undone"
     elif s.quality_job:
@@ -8823,6 +8833,10 @@ def seeded_start(p: Pipeline) -> Step:
 
 
 def resumed_state(args: argparse.Namespace, host: Host, cwd: str) -> tuple[RunState, Pipeline]:
+    """The state of the run args.run_ref names among cwd's runs, as resumable_state finds it, and its workflow, with
+    the quality gate turned on or off as args.quality_gate or args.no_quality_gate asks (turn_quality_gate_on and
+    _off: a CI preflight, and deleting the run's refs on origin). Changes nothing on disk; raises OrchestratorError
+    when the run cannot be resumed or its gate cannot be switched."""
     state = resumable_state(host.run_states(cwd), args, cwd, socket.gethostname(), pid_alive)
     pipeline = run_pipeline(state.workflow, state.workflow_definition)
     if args.quality_gate:

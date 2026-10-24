@@ -277,7 +277,7 @@ A run saves its settings. `resume` takes the same flags as `run` except `--no-pr
 A harness changed by `resume` applies to each role's next agent; one still running keeps its own.
 
 `resume --quality-gate JOB` turns the gate on for a run started without it, after the same preflight as `run`'s
-(past round 0: an `origin`, the credentials and the job). A Builder report the Reviewer has not been prompted for
+(past round 0: an `origin`, gitleaks, the credentials and the job). A Builder report the Reviewer has not been prompted for
 yet is judged first; otherwise the gate starts at the Builder's next turn. It is refused once the run is in
 `publish` or `done`, after `--no-quality-gate`, for a run with another job, and for a `--no-pr` run in the checkout
 itself past round 0, whose tree may hold your own changes. `resume --no-quality-gate` turns the gate off for good:

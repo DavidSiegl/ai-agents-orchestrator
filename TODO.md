@@ -19,6 +19,15 @@ was done.
 
 ## Open issues
 
+- **A pull request whose gate was turned off shows the last analysis as the change's.** After `resume
+  --no-quality-gate`, `Workflow._publish` passes `_last_quality`'s file to `pr_body` and `provenance`, so the quality
+  section and the `Orchestrator-Gate` trailer judge code the Builder has since changed; only the Reviewer is told
+  (`QUALITY_OFF_NOTE`). Raised by the cross-review of resume-quality-gate (finding 8, 2026-10-24): "nothing in the PR
+  says the final change went unjudged". Closes with the PR body and trailer saying the gate was turned off after it.
+- **Two functions decide which quality file is a round's last.** `Workflow._gate_passed` reads
+  `quality_path(n, quality_round)` itself, while `_quality_note` and `_publish` use `_last_quality`; they agree only
+  because `_gate_passed` returns True whenever the run has no CI. Raised by the same review (finding 11). Closes with
+  `_gate_passed` reading `_last_quality`.
 - **No test shows the proof reruns come after the quality loop.** `Workflow._rerun_proofs` runs right before the
   verdict step's turn, which follows the quality loop by construction, but every proof test uses `QUICK`, which has
   no quality-gated step. Raised by the cross-review of the proof reruns (R1-F5, 2026-10-24): "no test would notice

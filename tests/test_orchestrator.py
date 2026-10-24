@@ -4400,6 +4400,15 @@ class TestQualityGateOnResume(unittest.TestCase):
         self.assertEqual(fake.triggered(), ["orchestrator-ci/a1b2c3-2-q1"])
         self.assertNotIn(state.quality_path(1, 1), host.files)
 
+    def test_on_with_the_reviewer_retried_or_blocked_gates_the_next_builder_turn(self):
+        # Both have seen the change: one is asked again for the verdict it wrote, the other waits on its answer.
+        for name, kw in (("retried", {"retrying": "review-1.md"}),
+                         ("blocked", {"blocked": {"file": "review-1.md", "question": "which?", "k": 1}})):
+            with self.subTest(name):
+                state = pr_run("review", 1, **kw)
+                switch(state, ci_for(FakeCI()))
+                self.assertEqual((state.phase, state.quality_round, state.quality_job), ("review", 0, JOB))
+
     def test_on_in_round_0_is_run_quality_gate(self):
         fake = FakeCI()
         state = saved_run("spec", 0, agents=(), pull_request=True)
@@ -4437,6 +4446,8 @@ class TestQualityGateOnResume(unittest.TestCase):
         cases = [
             ("done", pr_run("done", 1, verdict=APPROVE), "is in phase done, past its last turn"),
             ("publish", pr_run("publish", 1), "is in phase publish, past its last turn"),
+            ("done, the same job", pr_run("done", 1, verdict=APPROVE, quality_job=JOB),
+             "is in phase done, past its last turn"),
             ("turned off", pr_run("build", 1, quality_gate_disabled=True),
              "turned off with --no-quality-gate, which cannot be undone"),
             ("another job", pr_run("build", 1, quality_job="other/job"),
@@ -4471,12 +4482,15 @@ class TestQualityGateOnResume(unittest.TestCase):
     def test_a_failed_preflight_refuses_before_any_turn(self):
         no_origin = pr_host()
         no_origin.has_origin = False
+        no_gitleaks = pr_host()
+        no_gitleaks.gitleaks_missing = True
         unknown = FakeCI()
         unknown.job_gone = True
         cases = [
             ("no credentials", FakeCI(), {}, None, "needs JENKINS_URL, JENKINS_USER, JENKINS_TOKEN"),
             ("no such job", unknown, None, None, f"there is no Jenkins job {JOB}"),
             ("no origin", FakeCI(), None, no_origin, "pushes snapshots to origin, and /proj has no origin"),
+            ("no gitleaks", FakeCI(), None, no_gitleaks, "every push is scanned for secrets first"),
         ]
         for name, fake, env, host, why in cases:
             with self.subTest(name):
@@ -4613,6 +4627,27 @@ class TestQualityGateOffOnResume(unittest.TestCase):
             switch(state, None, host=host)
         self.assertIn(f"could not delete {REF_1_1} on origin", "".join(c.args[0] for c in err.write.call_args_list))
         self.assertTrue(state.quality_gate_disabled)
+
+    def test_refs_left_by_a_failed_deletion_are_deleted_at_the_end(self):
+        state = pr_run("review", 1, quality_job=JOB, quality_round=1)
+        host = pr_host()
+        host.remote = {REF_1_1: "snap1"}
+        failing = host.delete_remote_branch
+        host.delete_remote_branch = MagicMock(side_effect=OrchestratorError("ssh: connection reset"))
+        with patch("sys.stderr"):
+            switch(state, None, host=host)
+        host.delete_remote_branch = failing
+        wf, herdr, host, _ = resume(state, {"review": [review_turn(1, APPROVE)]}, host=host,
+                                    files={lambda s: s.build_path(1): "report 1"})
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(host.remote, {})
+
+    def test_metrics_count_a_gate_turned_off_as_a_gate(self):
+        state = pr_run("review", 1, quality_job=JOB, quality_round=1)
+        switch(state, None)
+        metrics = orchestrator.run_metrics(state, 10**9)
+        self.assertEqual((metrics["quality_gate"], metrics["max_quality_rounds"]),
+                         (True, orchestrator.DEFAULT_MAX_QUALITY_ROUNDS))
 
     def test_refused_without_a_gate_or_once_done(self):
         for name, state in [("no gate", pr_run("build", 1)), ("done", pr_run("done", 1, quality_job=JOB))]:
