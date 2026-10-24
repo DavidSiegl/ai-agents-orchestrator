@@ -3,6 +3,20 @@
 What is known to be open in `orchestrator.py`, and why. An entry leaves `Open issues` only for `Fixed`, with what
 was done.
 
+## Planned
+
+- **The desktop app as the terminal client too.** Started with arguments, the app's executable becomes the
+  orchestrator binary it bundles (`Orchestrator::locate` in `ui/src-tauri/src/lib.rs`), by `exec` on Unix, so the
+  terminal, the exit status and signals are the CLI's own; started with none, it opens the window as now. Then
+  the AppImage is one file that is both, `./orchestrator-desktop-linux-x86_64.AppImage run "..."`; the `.deb`
+  has `/usr/bin/orchestrator` already; on macOS, where a `.app` is a directory, the CLI is a symlink to
+  `Orchestrator.app/Contents/MacOS/orchestrator` away. The README says how to use each. The plain CLI binaries stay
+  released: 13 MB against the AppImage's 120 MB of WebKit, and they start without FUSE on headless machines and in
+  CI, where an AppImage needs `--appimage-extract-and-run`. Decided against: one file on every platform, by
+  embedding the orchestrator's bytes in the Rust executable and unpacking them at start (PyInstaller's onefile
+  done twice), or by Python hosting the window, which [ui-options.md](docs/ui-options.md) chose against. Agreed
+  2026-10-24.
+
 ## Open issues
 
 - **The macOS builds are first tried on a published release.** `.github/workflows/macos-binary.yml` runs only on
