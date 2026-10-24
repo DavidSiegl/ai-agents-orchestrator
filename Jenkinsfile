@@ -15,6 +15,9 @@ pipeline {
     environment {
         UV_NO_PROGRESS = '1'
         COVERAGE_FILE  = '.coverage'
+        // The GitHub login Jenkins posts pull request statuses as, its GitHub App's "<slug>[bot]", which the agents
+        // cannot post as. Empty: no build of main trusts a pull request build, and each judges itself.
+        PR_STATUS_CREATOR = 'davidsiegl-jenkins[bot]'
     }
 
     stages {
@@ -35,6 +38,24 @@ pipeline {
             }
         }
 
+        // A build of main skips Test and Gate when a pull request build already judged its tree
+        // (ci/judged-at-pr.sh). Whatever stops the script from saying so, the build judges the tree itself.
+        stage('Judged at PR') {
+            when {
+                branch 'main'
+                expression { return !params.GIT_REF }
+            }
+            steps {
+                withCredentials([string(credentialsId: 'GitHub-Agents', variable: 'GH_TOKEN')]) {
+                    script {
+                        if (sh(returnStatus: true, script: 'ci/judged-at-pr.sh') == 0) {
+                            env.JUDGED_AT_PR = 'true'
+                        }
+                    }
+                }
+            }
+        }
+
         stage('Install') {
             steps {
                 sh 'uv sync --frozen'
@@ -48,6 +69,7 @@ pipeline {
         }
 
         stage('Test') {
+            when { expression { return env.JUDGED_AT_PR != 'true' } }
             environment {
                 // tests/conftest.py's larger profile: a build tries ten times the examples a local run does.
                 HYPOTHESIS_PROFILE = 'ci'
@@ -74,6 +96,7 @@ pipeline {
         // gate and main's rules, so a change cannot loosen how it is itself judged, and goes UNSTABLE on a red gate;
         // a pull request or main fails. A gate that could not judge fails any build.
         stage('Gate') {
+            when { expression { return env.JUDGED_AT_PR != 'true' } }
             steps {
                 script {
                     def gate = 'orchestrator.py'
