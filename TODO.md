@@ -5,6 +5,22 @@ was done.
 
 ## Open issues
 
+- **`passes-at-base` reads every changed test as passing in a project installed into the gate's interpreter.**
+  `_run_at_base` runs pytest in the gate's interpreter, so the base's code is whatever the copy's configuration puts
+  on `sys.path` (`pythonpath = ["."]` here). An editable install, as a `src/` layout under `uv sync` has, resolves
+  the package to the working tree first, so the base run tests the change and every changed test is reported. This
+  repository is not installed (no `[build-system]`), so it is unaffected. Closes when the run at the base puts the
+  copy's own package directories before site-packages, or names such a project as one it cannot judge.
+- **A test file that cannot be imported at the base hides all its changed tests from `passes-at-base`.** A
+  module-level import of something the change adds makes pytest's collection of the whole file fail at the base,
+  which `_run_at_base` takes as the expected outcome for every changed test in it, including ones that would pass
+  there. Accepted: the check reports only, and splitting the file's tests from its imports would mean rewriting
+  them. Closes, if its run metrics show these files are common, by importing such names inside the tests that use
+  them, or by running each test with the failing import stubbed.
+- **Three gate checks repeat the make-a-scratch-directory, run, remove-it skeleton.** `flaky_tests`,
+  `_mutation_test` and `passes_at_base` each call `tempfile.mkdtemp`, word their own finding when it fails, and word
+  another when `shutil.rmtree` fails (`not-removed` twice, `cleanup` once). Closes with one helper that takes the
+  check's rule and what it was doing, and the three findings worded one way.
 - **A test file whose name is not UTF-8 is never rerun by `flaky-tests`.** pytest-randomly 5.0.0 hashes each node
   id as strict UTF-8 (`pytest_randomly._crc32`, called from `pytest_runtest_setup` and its neighbours) and stops
   with an internal error, exit status 3. `_pytest` already lets pytest print such an id

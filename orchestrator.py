@@ -56,6 +56,7 @@ import stat
 import string
 import subprocess
 import sys
+import tarfile
 import tempfile
 import textwrap
 import threading
@@ -156,12 +157,14 @@ FLAKY_RUN_TIMEOUT = 30
 # stops it: SIGINT, MUTMUT_STOP_GRACE seconds to exit, a kill, and MUTMUT_KILL_WAIT seconds to read what it printed.
 # Listing its results and showing what a few survivors of each function change, about a third of a second each, then
 # get MUTMUT_REPORT_TIMEOUT seconds in all, each call's stop included. So mutmut adds at most the budget and 75 seconds
-# to the gate, and copying the tree a few more: with the flaky-tests check's 180 and the test run, about 870 of a
-# quality round's QUALITY_TIMEOUT, leaving the rest to the queue and the install.
+# to the gate, and copying the tree a few more: with the flaky-tests check's 180, passes-at-base's BASE_RUN_BUDGET and
+# the test run, about 990 of a quality round's QUALITY_TIMEOUT, leaving the rest to the queue and the install.
 MUTATION_BUDGET = 600
 MUTMUT_STOP_GRACE = 10
 MUTMUT_KILL_WAIT = 5
 MUTMUT_REPORT_TIMEOUT = 60
+# The passes-at-base check runs the changed tests at the base for `gate --base-run-budget` seconds, this by default.
+BASE_RUN_BUDGET = 120
 # The gate's exit status when it could not judge the change, and so wrote no quality file.
 EXIT_GATE_UNJUDGED = 2
 
@@ -3106,7 +3109,8 @@ def flaky_tests(change: GateChange) -> list[dict]:
     does a changed test file that cannot be read or parsed, and a copy that cannot be made. One that cannot be
     removed afterwards is a finding of its own, beside the results.
     """
-    tests, out = _changed_python_tests(change)
+    tests, unreadable = _changed_python_tests(change)
+    out = [_finding(path, None, "not-rerun", f"{why}, so its tests were not rerun.") for path, why in unreadable]
     if tests:
         try:
             tmp = tempfile.mkdtemp(prefix="flaky-tests-")
@@ -3270,14 +3274,13 @@ def _copy_tracked(root: str, dest: str) -> None:
             shutil.copy2(src, dst, follow_symlinks=False)
 
 
-def _changed_python_tests(change: GateChange) -> tuple[dict[tuple[str, str], int], list[dict]]:
+def _changed_python_tests(change: GateChange) -> tuple[dict[tuple[str, str], int], list[tuple[str, str]]]:
     """The test functions and methods the change added lines to or removed lines from, decorators included, in the
     test files it left in the working tree: (path, qualified name as _python_tests gives it) to the line of its def.
-    And a finding for each such file that could not be read or parsed. Which lines count is as _edits_test says."""
+    And (path, why) for each such file that could not be read or parsed, as _changed_python_units gives them. Which
+    lines count is as _edits_test says."""
     functions, unreadable = _changed_python_units(change, _python_test_file, _edits_test)
-    tests = {(f.path, f.name): f.line for f in functions if f.name.rpartition(".")[2].startswith("test")}
-    return tests, [_finding(path, None, "not-rerun", f"{why}, so its tests were not rerun.")
-                   for path, why in unreadable]
+    return {(f.path, f.name): f.line for f in functions if f.name.rpartition(".")[2].startswith("test")}, unreadable
 
 
 def _edits_test(f: _ChangedFunction, added: set[int], removed: set[int]) -> bool:
@@ -3306,8 +3309,8 @@ def _collect_python_tests(root: str, inifile: str, tests: dict[tuple[str, str], 
     # Exit status 5: pytest collected no test from the files, as for a file of helpers named test_*.
     # Without pytest-randomly, which only shuffles the list, and cannot hash a node id that is not UTF-8.
     proc, problem = _pytest(root, inifile, "collecting the changed tests",
-                            ["-p", "no:randomly", "--collect-only", *files], ok=(0, 5))
-    if proc is None:
+                            ["-p", "no:randomly", "--collect-only", *files], ok=(0, 5), timeout=FLAKY_RUN_TIMEOUT)
+    if problem or proc is None:
         return [], problem
     # At verbosity -1 pytest lists one node id a line, unindented, before its summary; a warnings summary repeats
     # some, indented or not. A collection that found tests but listed none in that form cannot be judged.
@@ -3330,8 +3333,9 @@ def _rerun_python_tests(root: str, inifile: str, ids: list[str], seed: int,
     skipped. And the problem, a clause, when that run told nothing, then with {}."""
     doing = f"rerunning them under seed {seed}"
     proc, problem = _pytest(root, inifile, doing,
-                            ["-p", "randomly", f"--randomly-seed={seed}", f"--junitxml={report}", *ids])
-    if proc is None:
+                            ["-p", "randomly", f"--randomly-seed={seed}", f"--junitxml={report}", *ids],
+                            timeout=FLAKY_RUN_TIMEOUT)
+    if problem or proc is None:
         return {}, problem
     if not os.path.isfile(report):
         return {}, f"pytest, {doing}, wrote no test report: {_said(proc)}"
@@ -3356,12 +3360,18 @@ def _junit_case(node_id: str) -> str:
     return ".".join([re.sub(r"\.py$", "", path).replace("/", "."), *names]) + params
 
 
-def _pytest(root: str, inifile: str, doing: str, args: list[str],
-            ok: tuple[int, ...] = (0, 1)) -> tuple[subprocess.CompletedProcess | None, str | None]:
+class _PytestStopped(subprocess.CompletedProcess):
+    """What a pytest run that _pytest stopped at its timeout printed until then; its returncode is the kill's."""
+
+
+def _pytest(root: str, inifile: str, doing: str, args: list[str], *, timeout: float, ok: tuple[int, ...] = (0, 1),
+            env: dict[str, str] | None = None) -> tuple[subprocess.CompletedProcess | None, str | None]:
     """pytest run at verbosity -1, for test cases too, in the gate's own interpreter at root, without its cache, with
-    the configuration in inifile and args, taking no configuration or conftest.py from above root; or None and the
-    problem, a clause naming doing, when it could not start, took longer than FLAKY_RUN_TIMEOUT or exited with a
-    status outside ok (by default 0, all passed, and 1, some failed). pytest
+    the configuration in inifile and args, taking no configuration or conftest.py from above root, and env's
+    variables beside child_env's; its output unbuffered, so that what it printed before a kill is whole. And the
+    problem, a clause naming doing, when it could not start, took longer than timeout seconds or exited with a
+    status outside ok (by default 0, all passed, and 1, some failed); then the run is None when pytest did not start,
+    a _PytestStopped when timeout stopped it, and else the run that exited so. pytest
     writes a name that is not UTF-8 as its bytes, and its output is decoded as Host.run's verbatim output is, so the
     node ids in it hold paths as git's do, and only "\n" ends a line. pytest-randomly 5.0.0 cannot shuffle such a
     name: under -p randomly pytest stops with an internal error."""
@@ -3376,15 +3386,18 @@ def _pytest(root: str, inifile: str, doing: str, args: list[str],
             "--confcutdir", root, "--verbosity=-1", "-o", "verbosity_test_cases=-1", *args]
     try:
         # A fixed command over the node ids pytest itself collected; no shell reads it.
-        raw = subprocess.run(argv, cwd=root, capture_output=True, timeout=FLAKY_RUN_TIMEOUT,  # noqa: S603
-                             env={**child_env(), "PYTHONIOENCODING": "utf-8:surrogateescape"}, check=False)
-    except subprocess.TimeoutExpired:
-        return None, f"pytest, {doing}, did not finish within {FLAKY_RUN_TIMEOUT} seconds"
+        raw = subprocess.run(argv, cwd=root, capture_output=True, timeout=timeout,  # noqa: S603
+                             env={**child_env(), **(env or {}), "PYTHONIOENCODING": "utf-8:surrogateescape",
+                                  "PYTHONUNBUFFERED": "1"}, check=False)
+    except subprocess.TimeoutExpired as e:
+        # subprocess.run has killed pytest and read what it printed until then.
+        stopped = _PytestStopped(argv, -signal.SIGKILL, os.fsdecode(e.stdout or b""), os.fsdecode(e.stderr or b""))
+        return stopped, f"pytest, {doing}, did not finish within {timeout:g} seconds"
     except OSError as e:
         return None, f"could not start pytest, {doing}: {e}"
     proc = subprocess.CompletedProcess(raw.args, raw.returncode, os.fsdecode(raw.stdout), os.fsdecode(raw.stderr))
     if proc.returncode not in ok:
-        return None, f"pytest, {doing}, exited with status {proc.returncode}: {_said(proc)}"
+        return proc, f"pytest, {doing}, exited with status {proc.returncode}: {_said(proc)}"
     return proc, None
 
 
@@ -3416,6 +3429,150 @@ def _series(items: list[str], limit: int | None = None) -> str:
     if limit is not None and len(items) > limit:
         items = [*items[:limit], f"{len(items) - limit} more"]
     return " and ".join([", ".join(items[:-1]), items[-1]]) if len(items) > 1 else "".join(items)
+
+
+# Tests that pass at the base: a test the change adds or edits that passes without the rest of the change, so that
+# it cannot be what shows the change works, though coverage counts the lines it runs.
+
+def passes_at_base(change: GateChange, *, budget: float) -> list[dict]:
+    """The passes-at-base check's find: runs the Python tests the change adds or edits, as flaky_tests picks them,
+    against the base's code, and reports at its def each one that passed there. Runs only when the change edits a
+    file outside the tests, as _beside_tests says; a change to tests alone has no "without the change" to run them in.
+
+    The tests run with pytest, in the gate's own interpreter, in the files git tracked at the base, as `git archive`
+    writes them (so a path the base's .gitattributes marks export-ignore is missing there), with every file of the
+    tests the change touches, conftest.py and data included, taken from the working tree instead, or removed where the
+    change removed it. A test passes there when pytest passed each of its cases that it did not skip, all its
+    parameter sets included. One that fails, errors or cannot be imported there tests the change, which is what the
+    check expects, and gives nothing; so does a test whose file has a module-level import that the base cannot satisfy,
+    whatever the test itself checks. The base's code is what the copy's own configuration, such as pytest's
+    pythonpath, imports; a project installed into the gate's interpreter imports the working tree's instead, and every
+    test of it then passes at the base.
+
+    pytest may run for budget seconds; a run stopped there is a budget-reached finding naming how many test cases it
+    had run, none of whose outcomes it reported. A pytest that cannot start, cannot load the tests or the base's
+    configuration, or writes no readable report, a changed test file that cannot be read or parsed, and a copy that
+    cannot be made are not-run findings saying so; a copy that cannot be removed afterwards is a finding of its own.
+    """
+    if not any(not _beside_tests(path) for pair in change.files for path in pair if path is not None):
+        return []
+    tests, unreadable = _changed_python_tests(change)
+    out = [_finding(path, None, "not-run", f"{why}, so its tests were not run at the base.") for path, why in unreadable]
+    if tests:
+        try:
+            tmp = tempfile.mkdtemp(prefix="passes-at-base-")
+        except OSError as e:
+            out.append(_finding(None, None, "not-run", f"could not make a directory to run the changed tests at the "
+                                                       f"base in: {e}; the changed tests were not run there."))
+        else:
+            out += _base_run_findings(change, tmp, tests, budget)
+            try:
+                shutil.rmtree(tmp)
+            except OSError as e:
+                out.append(_finding(None, None, "not-removed", f"could not remove the directory the changed tests "
+                                                               f"were run at the base in, {tmp}: {e}"))
+    return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
+
+
+def _beside_tests(path: str) -> bool:
+    """Whether a repository path belongs with the tests rather than with the code they test, as passes_at_base reads
+    it: a Python test file (_python_test_file), a conftest.py, or any file under a tests directory, such as a fixture's
+    data."""
+    *dirs, name = path.split("/")
+    return _python_test_file(path) or name == "conftest.py" or "tests" in dirs
+
+
+def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str], int], budget: float) -> list[dict]:
+    """passes_at_base's findings on tests, as _changed_python_tests gives them, run for at most budget seconds in a
+    copy of the base that it makes in tmp, an empty directory, beside the runs' reports and their TMPDIR."""
+    tree, scratch = os.path.join(tmp, "tree"), os.path.join(tmp, "tmp")
+    try:
+        _copy_base_with_tests(change, tree, os.path.join(tmp, "base.tar"))
+        os.mkdir(scratch)
+    except (OSError, tarfile.TarError, OrchestratorError) as e:
+        return [_finding(None, None, "not-run", f"could not copy the base to run the changed tests in: {e}; the "
+                                                f"changed tests were not run there.")]
+    try:
+        inifile = _pytest_config(tree, tmp)
+    except OSError as e:
+        return [_finding(None, None, "not-run", f"could not write an empty pytest configuration for the run at the "
+                                                f"base: {e}; the changed tests were not run there.")]
+    out = []
+    deadline = time.monotonic() + budget
+    files = sorted({path for path, _ in tests})
+    for k, path in enumerate(files):
+        names = [name for p, name in tests if p == path]
+        passed, ran, problem = _run_at_base(tree, inifile, path, names, os.path.join(tmp, f"base-{k}.xml"),
+                                            deadline - time.monotonic(), scratch)
+        out += [_finding(path, tests[(path, name)], "passes-at-base",
+                         f"`{name}` passes without the change, so it does not test it.") for name in passed]
+        if ran is not None:
+            out.append(_finding(None, None, "budget-reached", (
+                f"pytest was stopped at {budget:g} seconds (`--base-run-budget`) after {ran} test "
+                f"case{'' if ran == 1 else 's'} of `{path}`, before it reported them; the changed tests in "
+                f"{_series([f'`{f}`' for f in files[k:]])} were not judged.")))
+            break
+        if problem:
+            out.append(_finding(path, None, "not-run", f"{problem}; its changed tests were not judged."))
+    return out
+
+
+def _run_at_base(tree: str, inifile: str, path: str, names: list[str], report: str, timeout: float,
+                 scratch: str) -> tuple[list[str], int | None, str | None]:
+    """Run the tests names, qualified as _python_tests gives them, of the test file path in tree, the copy of the base,
+    with pytest by the configuration in inifile, its JUnit report going to report and its TMPDIR to scratch, for at
+    most timeout seconds. Returns the names of those that passed, as passes_at_base says; the number of test cases
+    pytest had run when timeout stopped it, else None; and the problem, a clause, when pytest went wrong otherwise.
+    A file that cannot be imported at the base is no problem: its tests did not pass."""
+    if timeout <= 0:
+        return [], 0, None
+    # A node id without parameters selects every parameter set of its test.
+    ids = {"::".join([path, *name.split(".")]): name for name in names}
+    # Exit status 2 or 4, with a collection failure in the report: the file could not be imported at the base. 5:
+    # pytest collected none of the ids, as for a helper named test_* that is no test.
+    proc, problem = _pytest(tree, inifile, "running the changed tests at the base",
+                            ["-p", "no:randomly", f"--junitxml={report}", *sorted(ids)],
+                            timeout=timeout, ok=(0, 1, 2, 4, 5), env={"TMPDIR": scratch})
+    if isinstance(proc, _PytestStopped):
+        return [], sum(len(m[1]) for m in re.finditer(r"^([.FEsxX]+) *(?:\[ *\d+%\])?$", proc.stdout, re.MULTILINE)), None
+    if problem or proc is None:
+        return [], None, problem
+    if proc.returncode == 5:
+        return [], None, None
+    try:
+        cases = junit_outcomes(report)
+    except OrchestratorError as e:
+        return [], None, f"pytest, running the changed tests at the base, wrote no report the gate can read ({e}): {_said(proc)}"
+    if proc.returncode in (2, 4):
+        if any(outcome == "failed" and message == "collection failure" for _, outcome, message in cases):
+            return [], None, None
+        return [], None, f"pytest, running the changed tests at the base, exited with status {proc.returncode}: {_said(proc)}"
+    # Each test's outcomes at the base, its skips left out.
+    outcomes: dict[str, set[str]] = {}
+    by_case = {_junit_case(i): name for i, name in ids.items()}
+    for case, outcome, _ in cases:
+        if (name := by_case.get(case.partition("[")[0])) is not None and outcome != "skipped":
+            outcomes.setdefault(name, set()).add(outcome)
+    return [name for name, seen in outcomes.items() if seen == {"passed"}], None, None
+
+
+def _copy_base_with_tests(change: GateChange, dest: str, archive: str) -> None:
+    """Write the files git tracked at change.base to dest, a directory it makes, through a tar file at archive, then
+    replace each file of the change's that _beside_tests accepts with the working tree's: removed at its path at the
+    base, and copied, a symbolic link as a link, to its path in the working tree. Raises OrchestratorError when git
+    cannot write the archive, tarfile.TarError when it cannot be unpacked or holds a link out of dest, and OSError
+    when dest exists or a file cannot be written."""
+    Host().git(change.root, "archive", "--format=tar", f"--output={archive}", change.base, timeout=GATE_TOOL_TIMEOUT)
+    os.makedirs(dest)
+    with tarfile.open(archive) as tar:
+        tar.extractall(dest, filter="data")
+    for old, _ in change.files:
+        if old is not None and _beside_tests(old) and os.path.lexists(path := os.path.join(dest, old)):
+            os.remove(path)
+    for _, new in change.files:
+        if new is not None and _beside_tests(new) and os.path.lexists(src := os.path.join(change.root, new)):
+            os.makedirs(os.path.dirname(dst := os.path.join(dest, new)), exist_ok=True)
+            shutil.copy2(src, dst, follow_symlinks=False)
 
 
 # Surviving mutants: the code a change adds that its tests run without checking what it does, which coverage counts
@@ -4409,14 +4566,16 @@ def _calls_itself(function: ast.FunctionDef | ast.AsyncFunctionDef, cls: str | N
     return False
 
 
-def gate_checks(mutation_budget: float) -> tuple[GateCheck, ...]:
+def gate_checks(mutation_budget: float = MUTATION_BUDGET,
+                base_run_budget: float = BASE_RUN_BUDGET) -> tuple[GateCheck, ...]:
     """The checks judge_change runs after the linters, in this order, the surviving-mutants check letting mutmut run
-    for mutation_budget seconds."""
+    for mutation_budget seconds and the passes-at-base check letting pytest run for base_run_budget."""
     return (
         GateCheck("test-integrity", fails=True, find=weakened_tests),
         GateCheck("cognitive-complexity", fails=True, find=too_complex_functions),
         GateCheck("flaky-tests", fails=False, find=flaky_tests),
         GateCheck("surviving-mutants", fails=False, find=functools.partial(surviving_mutants, budget=mutation_budget)),
+        GateCheck("passes-at-base", fails=False, find=functools.partial(passes_at_base, budget=base_run_budget)),
     )
 
 
@@ -6554,9 +6713,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                       help="a JUnit report of the tree's tests, such as pytest's --junitxml; without it, tests are "
                            "not judged")
     gate.add_argument("--out", metavar="FILE", help="write the quality file here instead of to standard output")
-    gate.add_argument("--mutation-budget", type=int, default=MUTATION_BUDGET, metavar="SECONDS",
+    gate.add_argument("--mutation-budget", type=seconds_arg, default=MUTATION_BUDGET, metavar="SECONDS",
                       help=f"stop mutmut, which mutation-tests the functions the change edits, after this long, "
                            f"and report how many of its mutants it tried; default {MUTATION_BUDGET}")
+    gate.add_argument("--base-run-budget", type=seconds_arg, default=BASE_RUN_BUDGET, metavar="SECONDS",
+                      help=f"stop the run of the changed tests against the base's code, which finds tests that pass "
+                           f"without the change, after this long; default {BASE_RUN_BUDGET}")
 
     gui = sub.add_parser(
         "gui", help="open a window to start, list and resume runs; the default with no arguments where there "
@@ -6573,15 +6735,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def check_flag_values(args: argparse.Namespace, p: argparse.ArgumentParser) -> None:
     """Exit with a usage error from p, the top-level parser, for flag values that argparse's types cannot rule out:
-    --machine without --cwd, a --max-rounds, --mutation-budget or --max-quality-rounds below 1, a run given
+    --machine without --cwd, a --max-rounds or --max-quality-rounds below 1, a run given
     --max-quality-rounds without --quality-gate, and a --quality-gate that is not a Jenkins job's full name. args are
     any command's; a flag its command does not take is not checked."""
     if getattr(args, "machine", None) and not args.cwd:
         p.error("--cwd is required with --machine")
     if getattr(args, "max_rounds", None) is not None and args.max_rounds < 1:
         p.error("--max-rounds must be at least 1")
-    if getattr(args, "mutation_budget", 1) < 1:
-        p.error("--mutation-budget must be at least 1")
     if getattr(args, "max_quality_rounds", None) is not None:
         if args.max_quality_rounds < 1:
             p.error("--max-quality-rounds must be at least 1")
@@ -6606,6 +6766,17 @@ def offered_workflows() -> list[str]:
         return workflow_names()
     except OrchestratorError:
         return sorted(WORKFLOWS)  # the workflows command shows why the directory cannot be listed
+
+
+def seconds_arg(text: str) -> int:
+    """A time budget given on the command line, in whole seconds, at least 1."""
+    try:
+        seconds = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a whole number of seconds, not {text!r}") from None
+    if seconds < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, not {seconds}")
+    return seconds
 
 
 def role_model_arg(text: str) -> tuple[str, str]:
@@ -7254,7 +7425,8 @@ def main(argv: list[str]) -> int:
             return gui_command(args.smoke_test)
         # The gate judges the tree it runs in: no herdr, no agents.
         if args.command == "gate":
-            return gate_command(args.base, args.config, args.coverage, args.tests, args.out, args.mutation_budget)
+            return gate_command(args.base, args.config, args.coverage, args.tests, args.out, args.mutation_budget,
+                                args.base_run_budget)
         herdr, host = connect(args.machine)
         cwd = host.resolve_dir(args.cwd or os.getcwd())
         if args.command in RUNS_COMMANDS:
@@ -7305,7 +7477,7 @@ def runs_command(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str) -
 
 
 def gate_command(base: str, rules: str | None, coverage: str | None, tests: str | None, out: str | None,
-                 mutation_budget: float) -> int:
+                 mutation_budget: float, base_run_budget: float) -> int:
     """Write the quality file judge_change gives for the current directory, with gate_checks's checks, to out or
     standard output.
 
@@ -7313,7 +7485,7 @@ def gate_command(base: str, rules: str | None, coverage: str | None, tests: str 
     could not be judged or out could not be written.
     """
     try:
-        text = judge_change(os.getcwd(), base, gate_checks(mutation_budget), rules=rules, coverage=coverage,
+        text = judge_change(os.getcwd(), base, gate_checks(mutation_budget, base_run_budget), rules=rules, coverage=coverage,
                             tests=tests)
         if out:
             # Written aside and renamed into place, so a failed write leaves no half a quality file.

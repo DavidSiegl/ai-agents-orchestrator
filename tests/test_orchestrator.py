@@ -5041,7 +5041,7 @@ class TestGate(unittest.TestCase):
 
     def checks(self, *checks):
         """Run the gate with checks in place of gate_checks's."""
-        p = patch.object(orchestrator, "gate_checks", lambda mutation_budget: checks)
+        p = patch.object(orchestrator, "gate_checks", lambda mutation_budget, base_run_budget: checks)
         p.start()
         self.addCleanup(p.stop)
 
@@ -5897,6 +5897,132 @@ class TestFlakyTests(unittest.TestCase):
     def test_it_reports_without_failing_the_gate(self):
         [check] = [c for c in orchestrator.gate_checks(orchestrator.MUTATION_BUDGET) if c.name == "flaky-tests"]
         self.assertEqual((check.fails, check.find), (False, orchestrator.flaky_tests))
+
+
+class TestPassesAtBase(unittest.TestCase):
+    """The passes-at-base check over a real git repository, running its tests with this suite's own pytest."""
+
+    # add is wrong at the base; mul is right, and stays so.
+    CALC = "def add(a, b):\n    return a - b\n\n\ndef mul(a, b):\n    return a * b\n"
+    TESTS = "from calc import mul\n\n\ndef test_mul():\n    assert mul(2, 3) == 6\n"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = tmp.name
+        self.host = Host()
+        self.git("init", "--quiet", "-b", "main")
+        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
+            self.git("config", key, value)
+        self.put("calc.py", self.CALC)
+        self.put("tests/test_calc.py", self.TESTS)
+        self.put("pytest.ini", "[pytest]\npythonpath = .\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "base")
+
+    def git(self, *args):
+        return self.host.git(self.repo, *args)
+
+    def put(self, name, text):
+        path = os.path.join(self.repo, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    def found(self, budget=orchestrator.BASE_RUN_BUDGET):
+        """The check's findings on the working tree, every file in it tracked."""
+        base = self.git("rev-parse", "HEAD").strip()
+        self.git("add", "-A")
+        return orchestrator.passes_at_base(orchestrator.GateChange.from_tree(self.repo, base), budget=budget)
+
+    def fix_add(self, tests=""):
+        """Fix add, and add test_add, which fails on the old add, then tests."""
+        self.put("calc.py", self.CALC.replace("a - b", "a + b"))
+        self.put("tests/test_calc.py", self.TESTS.replace("import mul", "import add, mul")
+                 + "\n\ndef test_add():\n    assert add(2, 2) == 4\n" + tests)
+
+    def test_a_test_that_fails_without_the_fix_gives_nothing(self):
+        self.fix_add()
+        self.assertEqual(self.found(), [])
+
+    def test_a_test_of_code_the_change_left_alone_passes_at_the_base(self):
+        # The fixture comes from a conftest.py the change adds, so the test runs at the base only with it overlaid.
+        self.put("tests/conftest.py", "import pytest\n\n\n@pytest.fixture\ndef three():\n    return 3\n")
+        self.fix_add("\n\nimport pytest\n\n\n@pytest.mark.parametrize('n', [1, 2])\n"
+                     "def test_mul_again(n, three):\n    assert mul(n, three) == 3 * n\n")
+        self.git("add", "-A")
+        status = self.git("status", "--porcelain")
+        found = self.found()
+        with open(os.path.join(self.repo, "tests/test_calc.py")) as f:
+            line = f.read().splitlines().index("def test_mul_again(n, three):") + 1
+        self.assertEqual(found, [{"path": "tests/test_calc.py", "line": line, "severity": "warning",
+                                  "rule": "passes-at-base",
+                                  "message": "`test_mul_again` passes without the change, so it does not test it."}])
+        self.assertEqual(self.git("status", "--porcelain"), status)
+
+    def test_a_test_of_a_function_the_change_adds_gives_nothing(self):
+        # At the base, the test file cannot import sub, so pytest collects nothing from it.
+        self.put("calc.py", self.CALC + "\n\ndef sub(a, b):\n    return a - b\n")
+        self.put("tests/test_sub.py", "from calc import sub\n\n\ndef test_sub():\n    assert sub(3, 1) == 2\n")
+        self.assertEqual(self.found(), [])
+
+    def test_a_change_to_the_tests_alone_is_not_run(self):
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_zero():\n    assert mul(0, 5) == 0\n")
+        with patch.object(orchestrator.subprocess, "run") as run:
+            self.assertEqual(self.found(), [])
+        run.assert_not_called()
+
+    def test_a_run_past_the_budget_says_how_many_tests_ran(self):
+        self.fix_add()
+        fake = os.path.join(self.repo, "fake-python")
+        with open(fake, "w") as f:
+            f.write("#!/bin/sh\nprintf '..'\nexec sleep 30\n")
+        os.chmod(fake, 0o700)
+        with patch.object(orchestrator.sys, "executable", fake):
+            found = self.found(budget=1)
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "budget-reached")])
+        self.assertEqual(found[0]["message"], "pytest was stopped at 1 seconds (`--base-run-budget`) after 2 test "
+                                              "cases of `tests/test_calc.py`, before it reported them; the changed "
+                                              "tests in `tests/test_calc.py` were not judged.")
+
+    def test_a_run_that_cannot_start_is_a_finding(self):
+        self.fix_add()
+        with patch.object(orchestrator.sys, "executable", os.path.join(self.repo, "no-python")):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("tests/test_calc.py", None, "not-run")])
+        self.assertIn("could not start pytest", found[0]["message"])
+
+    def test_an_unparsable_test_file_is_a_finding(self):
+        self.put("calc.py", self.CALC.replace("a - b", "a + b"))
+        self.put("tests/test_calc.py", self.TESTS + "def test_new(:\n")
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in self.found()],
+                         [("tests/test_calc.py", None, "not-run")])
+
+    def test_a_change_beside_the_tests_alone_is_not_run(self):
+        # A conftest.py anywhere and any file under tests/ go with the tests, not with the code they test.
+        self.put("conftest.py", "")
+        self.put("tests/data/input.txt", "2 3\n")
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_zero():\n    assert mul(0, 5) == 0\n")
+        with patch.object(orchestrator.subprocess, "run") as run:
+            self.assertEqual(self.found(), [])
+        run.assert_not_called()
+
+    def test_its_budget_is_a_whole_number_of_seconds_from_1(self):
+        self.assertEqual(parse_args(["gate", "--base", "main", "--base-run-budget", "7"]).base_run_budget, 7)
+        self.assertEqual(parse_args(["gate", "--base", "main"]).base_run_budget, orchestrator.BASE_RUN_BUDGET)
+        for flag in ("--base-run-budget", "--mutation-budget"):
+            for value, error in (("0", "must be at least 1, not 0"), ("1.5", "expected a whole number of seconds")):
+                with self.subTest(flag=flag, value=value), patch("sys.stderr", new_callable=io.StringIO) as err:
+                    with self.assertRaises(SystemExit):
+                        parse_args(["gate", "--base", "main", flag, value])
+                    self.assertIn(f"argument {flag}: {error}", err.getvalue())
+
+    def test_it_reports_without_failing_the_gate_within_its_budget(self):
+        with patch.object(orchestrator, "passes_at_base", return_value=[]) as find:
+            [check] = [c for c in orchestrator.gate_checks(base_run_budget=42) if c.name == "passes-at-base"]
+            check.find("change")
+        self.assertFalse(check.fails)
+        find.assert_called_once_with("change", budget=42)
 
 
 class TestSurvivingMutants(unittest.TestCase):

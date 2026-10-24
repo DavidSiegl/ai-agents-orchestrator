@@ -47,6 +47,7 @@ moved out of it counts as added. The linters and the build configuration listing
 | `cognitive-complexity` | yes | functions the change edits or adds that it takes over a cognitive complexity of 15 |
 | `flaky-tests` | no | tests the change adds or edits that pass in one order and fail in another |
 | `surviving-mutants` | no | changes to the functions the change edits that no test notices |
+| `passes-at-base` | no | tests the change adds or edits that pass without the rest of the change |
 
 **Test integrity** compares each test file the change touches, outside `mutants/` as above, with its base, so a
 change cannot pass by weakening its tests. Each of these is a finding:
@@ -197,13 +198,40 @@ puts the mutated code. Its runs get the configuration flaky-tests' reruns get, w
 `--mutation-budget SECONDS`, 600 by default, bounds mutmut's run. Stopping it takes at most 15 seconds more: SIGINT,
 10 seconds to exit, a kill of its process group, and 5 seconds to read what it printed. Listing its results and showing
 the survivors then take at most 60 seconds, each call's stop included. So the check takes at most the budget and 75
-seconds, and the few it takes to copy the tree. With the flaky-tests check's three minutes and the test run, a quality
-build stays inside the orchestrator's `QUALITY_TIMEOUT` of 1200 seconds.
+seconds, and the few it takes to copy the tree. With the flaky-tests check's three minutes, passes-at-base's two and
+the test run, a quality build stays inside the orchestrator's `QUALITY_TIMEOUT` of 1200 seconds when Jenkins starts
+it without a wait in the queue.
 
 This repository's table keeps mutmut off argparse's help texts, which no test reads word for word:
 `do_not_mutate_patterns = ['\bhelp=']`. mutmut matches each pattern against each source line and skips every expression
 that starts on a matching line, with all it holds, so a help text's later lines are skipped too, and so is a whole
 `add_argument(...)` call that starts on its `help=` line. A change to a help text alone makes no mutant.
+
+**Passes at base** runs the tests the change adds or edits, picked as flaky-tests picks them, against the base's code,
+since a test that passes without the change cannot be what shows the change works: coverage counts the lines it runs,
+surviving-mutants sees only the functions the change edits, and test integrity only tests getting weaker. For a bug
+fix, a test that fails at the base is the proof the bug was reproduced. The check runs only when the change edits a
+file outside the tests: a test file (as for test integrity), a `conftest.py`, or any file under a `tests` directory.
+The base is the files git tracked at `--base`, as `git archive` writes them, with every one of those test files the
+change touches taken from the working tree, or removed where the change removed it, so the changed tests keep their
+fixtures and data. Each changed test file gets a pytest run of its own, in the gate's interpreter, with the
+configuration flaky-tests' reruns get and the copy's own `TMPDIR`; one test file that cannot be imported at the base
+does not stop the others:
+
+- `passes-at-base`: a test that passed at the base, each of its parameter sets that pytest did not skip included, at
+  its `def`. A test that fails or errors there, or whose file cannot be imported there because it imports what the
+  change adds, tests the change and gives nothing. A refactor that keeps behaviour gives these findings rightly: the
+  Builder says it is one, and the Reviewer judges;
+- `budget-reached`: `--base-run-budget SECONDS`, 120 by default, shared by the runs, ran out; the finding says how
+  many test cases the stopped run had run and which test files were not judged;
+- `not-run`: pytest could not start, stopped with a usage error that is not a test file failing to import (such as a
+  `conftest.py` that imports what the change adds), or wrote no readable report; a changed test file could not be
+  read or parsed; or the copy could not be made;
+- `not-removed`: the copy could not be removed afterwards; the findings stand.
+
+The base's code is what the copy's configuration, such as `[tool.pytest.ini_options] pythonpath`, puts on the path. A
+project installed into the gate's interpreter, as an editable install of a `src/` layout is, imports the working tree's
+code instead, and every changed test then passes at the base (see `TODO.md`).
 
 The gate is `GATE: ERROR` when any of these holds, and `GATE: OK` otherwise:
 
