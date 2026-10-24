@@ -33,7 +33,10 @@ between the engine and the candidates below:
   request.
 - **H. Runs without an editing step** have no base commit or branch, so they need `--no-pr`.
 - **I. Orchestrator checks**: a step without an agent that runs a command and judges it, such as "the new tests
-  fail at the base".
+  fail at the base". A first, fixed form ships: each quality round runs `orchestrator_checks` after the build's gate,
+  each an `OrchestratorCheck` that judges the run's change with its spec and workflow ([The orchestrator's
+  checks](quality-gate.md#the-orchestrators-checks)). To come: checks a workflow chooses, and outside the quality
+  round.
 - **J. More than one quality-gated step.**
 - **K. Workflow choice**: mid-run, by the Spec Collector or the human, or with `resume --workflow`; a default
   workflow other than `default` without passing `--workflow` each time; workflow files that extend another

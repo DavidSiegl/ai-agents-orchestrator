@@ -85,6 +85,10 @@ class FakeHost(Host):
     - `merge_head`: a merge is in progress, as one that conflicted and was never aborted leaves it.
     - `remote`: origin's branches that `push --force` created, by name; `ls-remote` lists them.
     - `diff`: what `git diff -U0` from the base to a snapshot prints.
+    - `committed`: the text of each file in a commit, by (commit, path); file_at reads it, and records each read in
+      `file_reads`.
+    - `line_counts`: what changed_line_counts gives; None gives each file changed_lines finds in `diff`, under its
+      own path, with the lines it adds and none removed.
     - `has_origin`: whether the checkout has an origin at all.
     - `ages`: the seconds since each run's state.json was written, by run id; 0 for one not listed.
     - `clock`: a FakeClock, which make_workflow sets to the workflow's. The host's own time is HOST_EPOCH later:
@@ -136,6 +140,9 @@ class FakeHost(Host):
         self.mtime_kept = []  # every path written with keep_mtime
         self.clock = None
         self.mtimes = {}
+        self.committed = {}
+        self.file_reads = []
+        self.line_counts = None
 
     def now(self):
         return HOST_EPOCH + int(self.clock() if self.clock else 0)
@@ -167,6 +174,15 @@ class FakeHost(Host):
 
     def git_head(self, cwd):
         return self.head
+
+    def file_at(self, cwd, commit, path):
+        self.file_reads.append((commit, path))
+        return self.committed.get((commit, path))
+
+    def changed_line_counts(self, cwd, base, commit):
+        if self.line_counts is not None:
+            return self.line_counts
+        return touched(self.diff)
 
     def run_states(self, cwd):
         # A test that patches Host.run_states, for main to find the run to resume, decides it here too.
@@ -1282,6 +1298,39 @@ class TestHostGit(unittest.TestCase):
         upstream = self.commit(self.b, name, text)
         self.sh("git", "-C", self.b, "push", "--quiet", "origin", "main")
         return upstream
+
+    def test_file_at_reads_a_file_as_a_commit_has_it(self):
+        first = self.head(self.a)
+        os.makedirs(f"{self.a}/sub")
+        second = self.commit(self.a, "sub/lib.py", "two\n")
+        self.assertEqual(self.host.file_at(self.a, second, "sub/lib.py"), "two\n")
+        self.assertEqual(self.host.file_at(f"{self.a}/sub", second, "sub/lib.py"), "two\n")
+        self.assertIsNone(self.host.file_at(self.a, first, "sub/lib.py"))
+        self.assertIsNone(self.host.file_at(self.a, second, "sub"))
+        self.assertEqual(self.host.file_at(self.a, first, "app.py"), "one\n")
+        with self.assertRaises(OrchestratorError):
+            self.host.file_at(self.a, "0" * 40, "app.py")
+
+    def test_changed_line_counts_pair_renames_and_count_binary_files_as_none(self):
+        self.commit(self.a, "gone.py", "x\ny\n")
+        base = self.commit(self.a, "lib.py", "".join(f"line {i}\n" for i in range(20)))
+        self.sh("git", "-C", self.a, "rm", "--quiet", "gone.py")
+        os.makedirs(f"{self.a}/sub dir")
+        self.sh("git", "-C", self.a, "mv", "lib.py", "sub dir/lib.py")
+        with open(f"{self.a}/sub dir/lib.py", "a") as f:
+            f.write("added\n")
+        with open(f"{self.a}/app.py", "w") as f:
+            f.write("two\n")
+        with open(f"{self.a}/logo.png", "wb") as f:
+            f.write(b"\x00\x01\x02")
+        self.sh("git", "-C", self.a, "add", "-A")
+        self.sh("git", "-C", self.a, "commit", "--quiet", "-m", "change")
+        counts = self.host.changed_line_counts(self.a, base, self.head(self.a))
+        self.assertEqual(sorted(counts), [
+            orchestrator.ChangedFile("app.py", "app.py", 1, 1),
+            orchestrator.ChangedFile("gone.py", "gone.py", 0, 2),
+            orchestrator.ChangedFile("lib.py", "sub dir/lib.py", 1, 0),
+            orchestrator.ChangedFile("logo.png", "logo.png", 0, 0)])
 
     def test_fast_forward_moves_the_base_to_origins(self):
         upstream = self.push_from_b("lib.py", "new\n")
@@ -3489,6 +3538,745 @@ class TestQualityResume(unittest.TestCase):
         with self.assertRaisesRegex(OrchestratorError, "needs JENKINS_TOKEN"):
             wf.run()
         self.assertNotIn(("prompt", "build-a1b2c3"), herdr.calls)
+
+
+PYPI_JSON = "https://pypi.org/pypi/{}/json"
+# 2026-10-23, the day the young-package tests run on.
+TODAY = 1_792_713_600
+
+
+def pypi_project(first="2015-01-03", latest="2024-06-22", version="3.13.0", license="MIT", expression=None,
+                 classifiers=()):
+    """PyPI's JSON for a project with one early release and its latest, as https://docs.pypi.org/api/json/ has it."""
+    def files(day):
+        return [{"upload_time_iso_8601": f"{day}T10:00:00.123456Z"}, {"upload_time_iso_8601": f"{day}T11:00:00Z"}]
+    return {"info": {"version": version, "license": license, "license_expression": expression,
+                     "classifiers": list(classifiers)},
+            "releases": {"0.1": files(first), "0.2": [], version: files(latest)}, "urls": files(latest)}
+
+
+class FakePyPI:
+    """PyPI behind urlopen: each project in `projects` answers its JSON, any other 404; `down` makes every request
+    time out. `asked` lists the project names requested, in order. With `clock`, a FakeClock, each request takes
+    `seconds` of its time, and is logged as ("ask", name) in `events`."""
+
+    def __init__(self, **projects):
+        self.projects = projects
+        self.down = False
+        self.asked = []
+        self.clock, self.seconds, self.events = None, 0, []
+
+    def __call__(self, req, timeout=None):
+        assert timeout == orchestrator.PYPI_TIMEOUT
+        url = req.full_url
+        m = re.fullmatch(r"https://pypi\.org/pypi/([^/]+)/json", url)
+        assert m, url
+        self.asked.append(m.group(1))
+        self.events.append(("ask", m.group(1)))
+        if self.clock:
+            self.clock.now += self.seconds
+        if self.down:
+            raise TimeoutError("timed out")
+        if m.group(1) not in self.projects:
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b"{}"))
+        return FakeResponse(json.dumps(self.projects[m.group(1)]))
+
+
+def pyproject_with(*requirements):
+    """A pyproject.toml depending on httpx, then on requirements, from line 5 on."""
+    deps = "".join(f'    "{r}",\n' for r in ("httpx>=0.27", *requirements))
+    return f'[project]\nname = "limiter"\ndependencies = [\n{deps}]\n'
+
+
+def pyproject_diff(*requirements):
+    """`git diff -U0` of pyproject_with() becoming pyproject_with(*requirements)."""
+    added = "".join(f'+    "{r}",\n' for r in requirements)
+    return ("diff --git a/pyproject.toml b/pyproject.toml\nindex 1111111..2222222 100644\n--- a/pyproject.toml\n"
+            f"+++ b/pyproject.toml\n@@ -4,0 +5,{len(requirements)} @@ dependencies = [\n{added}")
+
+
+def pyproject_files(*requirements, base="abc123", commit="snap1"):
+    return {(base, "pyproject.toml"): pyproject_with(), (commit, "pyproject.toml"): pyproject_with(*requirements)}
+
+
+SPEC_NAMING_LIMITS = ("# Add a token-bucket rate limiter\n\n## Goal\nThrottle the client with the `Limits` package, "
+                      "declared in pyproject.toml.\n")
+
+
+def touched(diff):
+    """The ChangedFiles of the files changed_lines finds in diff, each under its own path, with the lines it adds and
+    none removed."""
+    return [orchestrator.ChangedFile(path, path, len(lines), 0) for path, lines in changed_lines(diff).items()]
+
+
+def run_change(diff, files=None, spec=SPEC_NAMING_LIMITS, now=TODAY, counts=None, in_time=lambda: True):
+    """The RunChange of a quality round from base to new; files holds each file's text by (commit, path), and counts
+    the ChangedFiles, touched(diff) by default."""
+    files = files or {}
+    return orchestrator.RunChange(spec=spec, base="base", commit="new", changed=changed_lines(diff),
+                                  files=touched(diff) if counts is None else counts,
+                                  file_at=lambda commit, path: files.get((commit, path)), now=now, in_time=in_time)
+
+
+def new_file_diff(path, lines):
+    return (f"diff --git a/{path} b/{path}\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n"
+            f"+++ b/{path}\n@@ -0,0 +1,{lines} @@\n" + "".join(f"+line {i}\n" for i in range(lines)))
+
+
+class TestOrchestratorChecks(unittest.TestCase):
+    """The checks the quality round runs itself after the build, with the run's spec: driven through a run."""
+
+    def quality(self, diff, files=None, *, pypi=None, spec=SPEC_NAMING_LIMITS, build=None):
+        """The quality file of a gated run's first quality round, whose snapshot has diff and files, and the PyPI it
+        asked. build is the Jenkins build's outcome. The round runs on TODAY."""
+        fake = FakeCI()
+        fake.outcomes = [build or outcome()]
+        pypi = pypi or FakePyPI(limits=pypi_project())
+        host = FakeHost()
+        host.diff = diff
+        host.committed = files or {}
+        wf, herdr, host, fake, _ = gated({
+            "spec": [writes(lambda s: s.spec_path, spec)], "build": [build_turn(1)],
+            "review": [review_turn(1, APPROVE)]}, fake=fake, host=host, max_quality_rounds=1,
+            pypi=orchestrator.PyPI(urlopen=pypi))
+        wf.wallclock = lambda: TODAY
+        self.assertEqual(wf.run(), APPROVE)
+        return host.files[wf.state.quality_path(1, 1)], pypi
+
+    def test_a_dependency_the_spec_names_passes_with_its_metadata(self):
+        quality, pypi = self.quality(pyproject_diff("limits>=3"), pyproject_files("limits>=3"))
+
+        self.assertTrue(quality.startswith("GATE: OK\n"), quality)
+        self.assertNotIn("## Failed conditions", quality)
+        self.assertIn("\n## The orchestrator's checks\n", quality)
+        self.assertIn("These do not fail the gate.", quality)
+        self.assertIn("\n1. `pyproject.toml:5` warning new-dependencies added: `limits`, which the spec names: on PyPI "
+                      "since 2015-01-03, latest 3.13.0 of 2024-06-22, license MIT.\n", quality)
+        self.assertEqual(pypi.asked, ["limits"])
+
+    def test_a_dependency_the_spec_does_not_name_fails(self):
+        pypi = FakePyPI(requests=pypi_project(first="2011-02-14", version="2.32.3", license="Apache-2.0"))
+        quality, _ = self.quality(pyproject_diff("requests>=2"), pyproject_files("requests>=2"), pypi=pypi)
+
+        self.assertTrue(quality.startswith("GATE: ERROR\n"), quality)
+        self.assertIn("## Failed conditions\n\n- 1 findings of the `new-dependencies` check; each is listed below.\n"
+                      "\n## Issues on changed lines\n", quality)
+        self.assertIn("\n1. `pyproject.toml:5` error new-dependencies not-in-spec: `requests` is a new dependency that "
+                      "the spec does not name; on PyPI since 2011-02-14, latest 2.32.3 of 2024-06-22, license "
+                      "Apache-2.0.\n", quality)
+        self.assertEqual(parse_gate(quality), "ERROR")
+
+    def test_a_failing_finding_is_numbered_after_the_builds_own(self):
+        quality, _ = self.quality(pyproject_diff("requests>=2"), pyproject_files("requests>=2"), build=outcome(**RED))
+
+        self.assertTrue(quality.startswith("GATE: ERROR\n"))
+        self.assertIn("1. `limiter.py:3` error ruff F401", quality)
+        self.assertIn("\n2. `pyproject.toml:5` error new-dependencies not-in-spec: `requests` is a new dependency "
+                      "that the spec does not name; PyPI does not know it either.\n", quality)
+
+    def test_a_dependency_pypi_does_not_know_fails(self):
+        spec = "# Add a rate limiter\n\nUse the `limitz` package.\n"
+        quality, pypi = self.quality(pyproject_diff("limitz"), pyproject_files("limitz"), spec=spec)
+
+        self.assertTrue(quality.startswith("GATE: ERROR\n"))
+        self.assertIn("1. `pyproject.toml:5` error new-dependencies not-on-pypi: PyPI does not know `limitz`: the name "
+                      "may be mistyped, or name a package that does not exist yet, which anyone could register "
+                      "(slopsquatting).\n", quality)
+        self.assertEqual(pypi.asked, ["limitz"])
+
+    def test_a_pypi_timeout_is_unchecked_never_passed(self):
+        pypi = FakePyPI(limits=pypi_project())
+        pypi.down = True
+        quality, _ = self.quality(pyproject_diff("limits>=3"), pyproject_files("limits>=3"), pypi=pypi)
+
+        self.assertTrue(quality.startswith("GATE: ERROR\n"))
+        self.assertIn("1. The change as a whole: error new-dependencies unchecked: PyPI could not be asked about "
+                      f"`limits`: GET {PYPI_JSON.format('limits')}: timed out; whether they exist is not known.\n",
+                      quality)
+        self.assertNotIn("which the spec names", quality)
+
+    def test_a_dependency_younger_than_fourteen_days_is_flagged_not_failed(self):
+        pypi = FakePyPI(limits=pypi_project(first="2026-10-20", latest="2026-10-21", version="0.2"))
+        quality, _ = self.quality(pyproject_diff("limits"), pyproject_files("limits"), pypi=pypi)
+
+        self.assertTrue(quality.startswith("GATE: OK\n"))
+        self.assertIn("1. `pyproject.toml:5` warning new-dependencies young: `limits`, which the spec names: on PyPI "
+                      "since 2026-10-20, latest 0.2 of 2026-10-21, license MIT; it is younger than 14 days, so few "
+                      "have used it yet.\n", quality)
+
+    def test_the_budget_and_unexpected_paths_are_reported_and_never_change_the_gate(self):
+        diff = "".join(new_file_diff(f"src/m{i}.py", 40) for i in range(16))
+        for build, gate in ((outcome(), "OK"), (outcome(**RED), "ERROR")):
+            with self.subTest(gate=gate):
+                quality, pypi = self.quality(diff, build=build)
+
+                self.assertTrue(quality.startswith(f"GATE: {gate}\n"))
+                self.assertNotIn("## Failed conditions", quality)
+                first = 2 if gate == "ERROR" else 1
+                self.assertIn(f"\n{first}. The change as a whole: warning diff-budget: The change touches 16 files, "
+                              "over the workflow's max_files of 15, and 640 lines (640 added, 0 removed), over its "
+                              "max_lines of 600. Say in your report why it cannot be smaller.\n", quality)
+                self.assertIn(f"\n{first + 1}. `src/m0.py (the whole file)` warning unexpected-paths: the spec "
+                              "mentions neither this path nor its file name.\n", quality)
+                self.assertIn(f"\n{first + 16}. `src/m9.py (the whole file)`", quality)
+                self.assertEqual(pypi.asked, [])
+
+    def test_a_change_the_checks_find_nothing_in_keeps_the_builds_file(self):
+        quality, pypi = self.quality("")
+        self.assertEqual(quality, (
+            "GATE: OK\n\nJenkins build #41 judged snapshot `snap1` (round 1, quality round 1 of 1) and ended SUCCESS.\n"
+            "\n`orchestrator.py gate` judged the working tree.\n\n## Issues on changed lines\n\nNone.\n"))
+
+    def test_a_build_that_failed_before_the_gate_is_not_checked(self):
+        quality, pypi = self.quality(pyproject_diff("requests"), pyproject_files("requests"),
+                                     build=outcome(archived=False, console="boom"))
+        self.assertTrue(quality.startswith("GATE: BUILD_FAILED\n"))
+        self.assertNotIn("orchestrator's checks", quality)
+        self.assertEqual(pypi.asked, [])
+
+    def test_slow_pypi_keeps_the_run_alive_and_stops_at_the_rounds_deadline(self):
+        pypi = FakePyPI(limits=pypi_project(), rich=pypi_project(), attrs=pypi_project())
+        host = FakeHost()
+        host.diff = pyproject_diff("limits", "rich", "attrs")
+        host.committed = pyproject_files("limits", "rich", "attrs")
+        spec = "# Throttle\n\nUse limits, rich and attrs, in pyproject.toml.\n"
+        wf, herdr, host, fake, _ = gated({
+            "spec": [writes(lambda s: s.spec_path, spec)], "build": [build_turn(1), fix_turn(1, 1)],
+            "review": [review_turn(1, APPROVE)]}, host=host, max_quality_rounds=1,
+            pypi=orchestrator.PyPI(urlopen=pypi))
+        wf.wallclock = lambda: TODAY
+        # Each request takes half the round's time.
+        pypi.clock, pypi.seconds = wf.clock, orchestrator.QUALITY_TIMEOUT / 2
+        beat = wf._heartbeat
+
+        def heartbeat():
+            pypi.events.append("beat")
+            beat()
+        wf._heartbeat = heartbeat
+
+        self.assertEqual(wf.run(), APPROVE)
+
+        quality = host.files[wf.state.quality_path(1, 1)]
+        self.assertEqual(pypi.asked, ["limits", "rich"])
+        self.assertIn("unchecked: PyPI could not be asked about `attrs`: the quality round had too little time left to "
+                      "ask;", quality)
+        self.assertTrue(quality.startswith("GATE: ERROR\n"))
+        asks = [i for i, e in enumerate(pypi.events) if e != "beat"]
+        self.assertIn("beat", pypi.events[asks[0]:asks[1]])
+
+    def test_without_the_quality_gate_none_of_this_runs(self):
+        pypi = FakePyPI(limits=pypi_project())
+        host = FakeHost()
+        host.diff = pyproject_diff("requests")
+        host.committed = pyproject_files("requests")
+        wf, herdr, host, _ = make_workflow({
+            "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, host=host,
+            pypi=orchestrator.PyPI(urlopen=pypi))
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual((pypi.asked, host.file_reads), ([], []))
+        self.assertFalse([p for p in host.files if "quality-" in p])
+
+    def test_the_spec_is_the_runs_task_without_a_contract_step(self):
+        pypi = FakePyPI(limits=pypi_project())
+        host = FakeHost()
+        host.diff = pyproject_diff("limits")
+        host.committed = pyproject_files("limits")
+        state = RunState("20260929-120000-a1b2c3", "limit requests with limits in pyproject.toml", "/proj", None,
+                         phase="impl", workflow="impl")
+        wf, herdr, host, fake, _ = gated({"impl": [impl_turn(1)], "review": [review_turn(1, APPROVE)]},
+                                         host=host, state=state, pipeline=IMPL, pypi=orchestrator.PyPI(urlopen=pypi))
+        wf.wallclock = lambda: TODAY
+
+        self.assertEqual(wf.run(), APPROVE)
+        quality = host.files[wf.state.quality_path(1, 1)]
+        self.assertTrue(quality.startswith("GATE: OK\n"), quality)
+        self.assertIn("new-dependencies added: `limits`, which the spec names", quality)
+
+
+class TestNewDependencies(unittest.TestCase):
+    """new_dependencies on a RunChange of its own, with PyPI faked."""
+
+    def find(self, change, pypi):
+        return orchestrator.new_dependencies(change, pypi=orchestrator.PyPI(urlopen=pypi))
+
+    def test_the_spec_names_a_package_as_a_word_in_any_spelling(self):
+        names = orchestrator.spec_names("Use `Requests`. Add pytest_randomly, and ruff>=0.5 to the dev group.")
+        self.assertTrue({"requests", "pytest-randomly", "ruff"} <= names)
+        self.assertNotIn("pytest", names)
+        self.assertNotIn("request", names)
+
+    def test_a_package_the_lock_alone_adds_is_pulled_in(self):
+        lock_base = 'version = 1\n\n[[package]]\nname = "limiter"\nversion = "0.1"\nsource = { virtual = "." }\n'
+        lock = lock_base + "".join(
+            f'\n[[package]]\nname = "{n}"\nversion = "1.0"\nsource = {{ registry = "https://pypi.org/simple" }}\n'
+            for n in ("limits", "Deprecated", "packaging"))
+        lock += '\n[[package]]\nname = "vendored"\nversion = "1.0"\nsource = { path = "vendor/x" }\n'
+        diff = pyproject_diff("limits") + (
+            "diff --git a/uv.lock b/uv.lock\n--- a/uv.lock\n+++ b/uv.lock\n@@ -6,0 +7,20 @@\n")
+        files = {**pyproject_files("limits", base="base", commit="new"), ("base", "uv.lock"): lock_base,
+                 ("new", "uv.lock"): lock}
+        mit = "License :: OSI Approved :: MIT License"
+        pypi = FakePyPI(limits=pypi_project(), deprecated=pypi_project(first="2016-11-01", latest="2026-10-20",
+                                                                        version="1.2.18", license=None,
+                                                                        classifiers=[mit]),
+                        packaging=pypi_project(license="", expression="Apache-2.0 OR BSD-2-Clause"))
+
+        issues, to_weigh = self.find(run_change(diff, files), pypi)
+
+        self.assertEqual(issues, [])
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in to_weigh],
+                         [("pyproject.toml", 5, "added"), ("uv.lock", None, "pulled-in")])
+        self.assertEqual(to_weigh[1]["message"], (
+            "3 new packages that the change's dependencies pull in: `deprecated` (on PyPI since 2016-11-01, latest "
+            "1.2.18 of 2026-10-20, license MIT License), `packaging` (on PyPI since 2015-01-03, latest 3.13.0 of "
+            "2024-06-22, license Apache-2.0 OR BSD-2-Clause), `vendored` (from the path vendor/x, not from PyPI)."))
+        self.assertEqual(pypi.asked, ["limits", "deprecated", "packaging"])
+
+    def test_pypi_is_asked_no_more_once_it_failed(self):
+        pypi = FakePyPI()
+        pypi.down = True
+        diff = pyproject_diff("limits", "requests")
+        issues, to_weigh = self.find(run_change(diff, pyproject_files("limits", "requests", base="base",
+                                                                      commit="new")), pypi)
+
+        self.assertEqual(pypi.asked, ["limits"])
+        self.assertEqual([(f["path"], f["rule"]) for f in issues],
+                         [("pyproject.toml", "not-in-spec"), (None, "unchecked")])
+        self.assertEqual(issues[0]["message"], "`requests` is a new dependency that the spec does not name.")
+        self.assertIn("about `limits`, `requests`: GET", issues[1]["message"])
+        self.assertEqual(to_weigh, [])
+
+    def test_pypi_is_asked_only_while_the_round_has_time(self):
+        pypi = FakePyPI(limits=pypi_project(), rich=pypi_project())
+        answers = iter([True, False])
+        change = run_change(pyproject_diff("limits", "rich", "attrs"),
+                            pyproject_files("limits", "rich", "attrs", base="base", commit="new"),
+                            spec="limits, rich and attrs", in_time=lambda: next(answers))
+
+        issues, to_weigh = self.find(change, pypi)
+
+        self.assertEqual(pypi.asked, ["limits"])
+        self.assertEqual([f["rule"] for f in to_weigh], ["added"])
+        self.assertEqual([(f["rule"], f["message"]) for f in issues], [
+            ("unchecked", ("PyPI could not be asked about `rich`, `attrs`: the quality round had too little time "
+                           "left to ask; whether they exist is not known."))])
+
+    def test_a_dependency_is_found_on_the_line_that_names_it_whole(self):
+        pypi = FakePyPI(**{"zope-interface": pypi_project(), "zope": pypi_project()})
+        reqs = ("zope.interface>=5", "zope")
+        _, to_weigh = self.find(run_change(pyproject_diff(*reqs), pyproject_files(*reqs, base="base", commit="new"),
+                                           spec="zope and zope.interface"), pypi)
+        self.assertEqual([(f["line"], f["message"][:16]) for f in to_weigh],
+                         [(5, "`zope-interface`"), (6, "`zope`, which th")])
+
+    def test_a_dependency_from_a_url_is_not_looked_up(self):
+        url = "git+https://example.com/limits.git@v3"
+        pypi = FakePyPI()
+        issues, to_weigh = self.find(run_change(pyproject_diff(f"limits @ {url}"),
+                                                pyproject_files(f"limits @ {url}", base="base", commit="new")), pypi)
+        self.assertEqual((issues, pypi.asked), ([], []))
+        self.assertEqual(to_weigh[0]["message"], f"`limits`, which the spec names: from {url}, not from PyPI.")
+
+    def test_dependency_lists_of_every_kind_are_read_without_the_project_itself(self):
+        text = textwrap.dedent("""\
+            [project]
+            name = "My_Proj"
+            dependencies = ["Foo.Bar[extra] >=1; python_version>'3'", "baz @ https://example.com/baz.whl"]
+            [project.optional-dependencies]
+            docs = ["sphinx"]
+            all = ["my-proj[docs]"]
+            [dependency-groups]
+            dev = ["pytest", {include-group = "lint"}, "my.proj[docs]"]
+            lint = ["ruff==0.5"]
+            [tool.uv]
+            dev-dependencies = ["ignored"]
+        """)
+        self.assertEqual(orchestrator.python_dependencies({"pyproject.toml": text}.get).direct, {
+            "foo-bar": None, "baz": orchestrator.PackageSource("url", "https://example.com/baz.whl"), "sphinx": None,
+            "pytest": None, "ruff": None})
+
+    def test_the_project_itself_in_an_extra_is_no_new_dependency(self):
+        new = pyproject_with() + '[project.optional-dependencies]\nall = ["limiter[a,b]"]\n'
+        pypi = FakePyPI()
+        found = self.find(run_change("", {("base", "pyproject.toml"): pyproject_with(), ("new", "pyproject.toml"): new},
+                                     counts=[orchestrator.ChangedFile("pyproject.toml", "pyproject.toml", 2, 0)]), pypi)
+        self.assertEqual((found, pypi.asked), (([], []), []))
+
+    def changed_manifests(self, base, new, lock_base=None, lock=None):
+        """A RunChange whose pyproject.toml, and uv.lock when given, go from base to new."""
+        files = {("base", "pyproject.toml"): base, ("new", "pyproject.toml"): new,
+                 ("base", "uv.lock"): lock_base, ("new", "uv.lock"): lock}
+        counts = [orchestrator.ChangedFile(p, p, 1, 0) for p in ("pyproject.toml", "uv.lock")]
+        return run_change("", files, spec="Use `forked`, `wheel-pkg`, `corp-utils`, `corp-auth` and `rich`.",
+                          counts=counts)
+
+    def test_a_package_with_a_uv_source_is_not_looked_up_on_pypi(self):
+        new = textwrap.dedent("""\
+            [project]
+            name = "limiter"
+            dependencies = ["httpx>=0.27", "member", "local", "forked", "wheel-pkg"]
+            [tool.uv.sources]
+            member = { workspace = true }
+            local = { path = "../local", editable = true }
+            forked = [{ git = "https://github.com/x/forked", rev = "v1" }]
+            wheel-pkg = { url = "https://example.com/wheel_pkg-1.0-py3-none-any.whl" }
+        """)
+        # Each name squatted on PyPI: none of their metadata may show.
+        pypi = FakePyPI(**{n: pypi_project() for n in ("member", "local", "forked", "wheel-pkg")})
+
+        issues, to_weigh = self.find(self.changed_manifests(pyproject_with(), new), pypi)
+
+        self.assertEqual(pypi.asked, [])
+        self.assertEqual([(f["rule"], f["message"]) for f in issues], [
+            ("not-in-spec", ("`local` is a new dependency that the spec does not name; from the path ../local, not "
+                             "from PyPI."))])
+        self.assertEqual([(f["rule"], f["message"]) for f in to_weigh], [
+            ("added", "`member`: a member of the project's workspace, not from PyPI."),
+            ("added", ("`forked`, which the spec names: from the repository https://github.com/x/forked, not from "
+                       "PyPI.")),
+            ("added", ("`wheel-pkg`, which the spec names: from https://example.com/wheel_pkg-1.0-py3-none-any.whl, "
+                       "not from PyPI."))])
+
+    def test_a_package_from_another_index_is_never_checked_against_pypi(self):
+        corp = "https://pypi.internal.example/simple"
+        new = textwrap.dedent(f"""\
+            [project]
+            name = "limiter"
+            dependencies = ["httpx>=0.27", "corp-utils", "corp-auth", "corp-secret"]
+            [[tool.uv.index]]
+            name = "corp"
+            url = "{corp}"
+            explicit = true
+            [tool.uv.sources]
+            corp-utils = {{ index = "corp" }}
+            corp-secret = {{ index = "corp" }}
+        """)
+
+        def lock(*packages):
+            return 'version = 1\n' + "".join(
+                f'\n[[package]]\nname = "{n}"\nversion = "1.0"\nsource = {{ registry = "{url}" }}\n'
+                for n, url in packages)
+        lock_base = lock(("httpx", "https://pypi.org/simple"))
+        lock_new = lock(("httpx", "https://pypi.org/simple"), ("corp-utils", corp), ("corp-auth", corp),
+                        ("corp-secret", corp), ("corp-lib", corp))
+        squatted = FakePyPI(**{n: pypi_project() for n in ("corp-utils", "corp-auth", "corp-secret", "corp-lib")})
+
+        issues, to_weigh = self.find(self.changed_manifests(pyproject_with(), new, lock_base, lock_new), squatted)
+
+        self.assertEqual(squatted.asked, [])
+        whence = f"from the index {corp}, not checked against PyPI"
+        self.assertEqual([(f["rule"], f["message"]) for f in issues], [
+            ("not-in-spec", f"`corp-secret` is a new dependency that the spec does not name; {whence}.")])
+        self.assertEqual([(f["path"], f["rule"], f["message"]) for f in to_weigh], [
+            ("pyproject.toml", "other-index", f"`corp-utils`, which the spec names: {whence}."),
+            ("pyproject.toml", "other-index", f"`corp-auth`, which the spec names: {whence}."),
+            ("uv.lock", "pulled-in", f"1 new packages that the change's dependencies pull in: `corp-lib` ({whence}).")])
+        self.assertNotIn("on PyPI since", json.dumps(issues + to_weigh))
+
+    def test_a_dependency_moved_to_another_source_is_reported(self):
+        evil = "https://evil.example/simple"
+        new = pyproject_with("requests") + textwrap.dedent(f"""\
+            [[tool.uv.index]]
+            name = "evil"
+            url = "{evil}"
+            [tool.uv.sources]
+            requests = {{ index = "evil" }}
+        """)
+
+        def lock(registry):
+            return 'version = 1\n' + "".join(
+                f'\n[[package]]\nname = "{n}"\nversion = "1.0"\nsource = {{ registry = "{url}" }}\n'
+                for n, url in (("requests", registry), ("idna", registry), ("httpx", "https://pypi.org/simple")))
+        files = {("base", "pyproject.toml"): pyproject_with("requests"), ("new", "pyproject.toml"): new,
+                 ("base", "uv.lock"): lock("https://pypi.org/simple"), ("new", "uv.lock"): lock(evil)}
+        diff = ("diff --git a/pyproject.toml b/pyproject.toml\n--- a/pyproject.toml\n+++ b/pyproject.toml\n"
+                "@@ -6,0 +7,5 @@\n")
+        pypi = FakePyPI()
+
+        issues, to_weigh = self.find(run_change(diff, files), pypi)
+
+        self.assertEqual((issues, pypi.asked), ([], []))
+        whence = f"from the index {evil}, not checked against PyPI"
+        self.assertEqual([(f["path"], f["line"], f["severity"], f["rule"], f["message"]) for f in to_weigh], [
+            ("pyproject.toml", 11, "warning", "source-changed",
+             f"`requests`: at the base, from PyPI; in the change, {whence}."),
+            ("uv.lock", None, "warning", "source-changed", f"`idna`: at the base, from PyPI; in the change, {whence}.")])
+
+    def test_a_uv_source_of_a_shape_this_check_does_not_know_is_reported(self):
+        new = pyproject_with("forked", "local") + textwrap.dedent("""\
+            [tool.uv.sources]
+            forked = { mirror = "https://example.com/forked", tag = "v1" }
+            local = { mirror = "../local" }
+        """)
+        pypi = FakePyPI(forked=pypi_project(), local=pypi_project())
+        issues, to_weigh = self.find(self.changed_manifests(pyproject_with(), new), pypi)
+        self.assertEqual(pypi.asked, [])
+        self.assertEqual([(f["rule"], f["message"]) for f in to_weigh], [
+            ("unknown-source", ('`forked`, which the spec names: from the uv source { mirror = '
+                                '"https://example.com/forked", tag = "v1" }, which this check does not know, so where '
+                                'it comes from is not checked.'))])
+        self.assertEqual([(f["rule"], f["message"]) for f in issues], [
+            ("not-in-spec", ('`local` is a new dependency that the spec does not name; from the uv source { mirror = '
+                             '"../local" }, which this check does not know, so where it comes from is not checked.'))])
+
+    def test_a_default_index_replaces_pypi(self):
+        new = pyproject_with("rich") + '[[tool.uv.index]]\nname = "mirror"\nurl = "https://mirror.example/simple"\n' \
+                                       "default = true\n"
+        pypi = FakePyPI(rich=pypi_project())
+        issues, to_weigh = self.find(self.changed_manifests(pyproject_with(), new), pypi)
+        self.assertEqual((issues, pypi.asked), ([], []))
+        whence = "from the index https://mirror.example/simple, not checked against PyPI"
+        # The default index takes every dependency, httpx too.
+        self.assertEqual([(f["rule"], f["message"]) for f in to_weigh], [
+            ("source-changed", f"`httpx`: at the base, from PyPI; in the change, {whence}."),
+            ("other-index", f"`rich`, which the spec names: {whence}.")])
+
+    def test_only_the_manifests_at_the_top_level_count(self):
+        files = {("base", "tests/fixtures/x/pyproject.toml"): pyproject_with(),
+                 ("new", "tests/fixtures/x/pyproject.toml"): pyproject_with("made-up-package"),
+                 ("new", "tests/fixtures/bad/uv.lock"): "[[package\n"}
+        counts = [orchestrator.ChangedFile(p, p, 1, 0) for p in ("tests/fixtures/x/pyproject.toml",
+                                                               "tests/fixtures/bad/uv.lock")]
+        pypi = FakePyPI()
+        self.assertEqual(self.find(run_change("", files, counts=counts), pypi), ([], []))
+        self.assertEqual(pypi.asked, [])
+
+    def test_a_manifest_broken_at_the_base_and_left_alone_is_weighed_not_failed(self):
+        broken = "[[package\n"
+        files = {("base", "pyproject.toml"): pyproject_with(), ("new", "pyproject.toml"): pyproject_with("rich"),
+                 ("base", "uv.lock"): broken, ("new", "uv.lock"): broken}
+        pypi = FakePyPI()
+        issues, to_weigh = self.find(run_change(pyproject_diff("rich"), files), pypi)
+        self.assertEqual((issues, pypi.asked), ([], []))
+        self.assertEqual([(f["path"], f["severity"], f["rule"]) for f in to_weigh],
+                         [("uv.lock", "warning", "unreadable")])
+        self.assertTrue(to_weigh[0]["message"].startswith("`uv.lock` cannot be read at the base: it is not TOML: "))
+
+    def test_each_manifest_is_judged_by_its_own_base(self):
+        broken = "[[package\n"
+        files = {("base", "pyproject.toml"): pyproject_with(), ("new", "pyproject.toml"): "[project\n",
+                 ("base", "uv.lock"): broken, ("new", "uv.lock"): broken}
+        pypi = FakePyPI()
+        issues, to_weigh = self.find(run_change(pyproject_diff("rich"), files), pypi)
+        self.assertEqual([(f["path"], f["severity"], f["rule"]) for f in issues],
+                         [("pyproject.toml", "error", "unreadable")])
+        self.assertIn("cannot be read in the change", issues[0]["message"])
+        self.assertEqual([(f["path"], f["severity"], f["rule"]) for f in to_weigh],
+                         [("uv.lock", "warning", "unreadable")])
+        self.assertEqual(pypi.asked, [])
+
+    def test_a_manifest_the_change_breaks_fails_whatever_the_base(self):
+        files = {("base", "pyproject.toml"): "[project\n", ("new", "pyproject.toml"): "[project\n",
+                 ("base", "uv.lock"): None, ("new", "uv.lock"): "[[package\n"}
+        issues, to_weigh = self.find(run_change(pyproject_diff("rich"), files), FakePyPI())
+        self.assertEqual(([(f["path"], f["rule"]) for f in issues], [(f["path"], f["rule"]) for f in to_weigh]),
+                         ([("uv.lock", "unreadable")], [("pyproject.toml", "unreadable")]))
+        self.assertIn("cannot be read in the change", issues[0]["message"])
+
+    def test_a_manifest_unreadable_at_the_base_is_weighed_not_failed(self):
+        files = {("base", "pyproject.toml"): "[project\n", ("new", "pyproject.toml"): pyproject_with("rich")}
+        pypi = FakePyPI()
+        issues, to_weigh = self.find(run_change(pyproject_diff("rich"), files), pypi)
+        self.assertEqual((issues, pypi.asked), ([], []))
+        self.assertEqual([(f["path"], f["line"], f["severity"], f["rule"]) for f in to_weigh],
+                         [("pyproject.toml", None, "warning", "unreadable")])
+        self.assertTrue(to_weigh[0]["message"].startswith("`pyproject.toml` cannot be read at the base: it is not "
+                                                          "TOML: "), to_weigh[0]["message"])
+        self.assertTrue(to_weigh[0]["message"].endswith("; the change's new dependencies were not checked."))
+
+    def test_a_manifest_that_cannot_be_read_fails_unchecked(self):
+        files = {("base", "pyproject.toml"): pyproject_with(), ("new", "pyproject.toml"): "[project\n"}
+        for text, why in (("[project\n", "it is not TOML"), ('[project]\ndependencies = "x"\n', "not a list"),
+                          ('[project]\ndependencies = ["=x"]\n', "is not a requirement"),
+                          # As Host.file_at gives a file that is not UTF-8: TOML must be.
+                          (os.fsdecode(b'[project]\ndependencies = ["\xff"]\n'), "codec can't decode byte 0xff")):
+            with self.subTest(why=why):
+                files[("new", "pyproject.toml")] = text
+                issues, to_weigh = self.find(run_change(pyproject_diff("x"), files), FakePyPI())
+                self.assertEqual([(f["path"], f["line"], f["rule"]) for f in issues],
+                                 [("pyproject.toml", None, "unreadable")])
+                self.assertIn(why, issues[0]["message"])
+                self.assertTrue(issues[0]["message"].startswith("`pyproject.toml` cannot be read in the change: "))
+                self.assertTrue(issues[0]["message"].endswith("; the change's new dependencies were not checked."))
+
+    def test_a_deleted_or_untouched_manifest_adds_nothing(self):
+        diff = ("diff --git a/pyproject.toml b/pyproject.toml\ndeleted file mode 100644\n--- a/pyproject.toml\n"
+                "+++ /dev/null\n@@ -1,5 +0,0 @@\n")
+        pypi = FakePyPI()
+        deleted = [orchestrator.ChangedFile("pyproject.toml", "pyproject.toml", 0, 5)]
+        self.assertEqual(self.find(run_change(diff, {("base", "pyproject.toml"): pyproject_with("x")},
+                                              counts=deleted), pypi), ([], []))
+        self.assertEqual(self.find(run_change(new_file_diff("app.py", 3)), pypi), ([], []))
+        self.assertEqual(pypi.asked, [])
+
+    def test_a_manifest_moved_out_of_the_top_level_adds_nothing(self):
+        moved = pyproject_with("requests", "rich")
+        files = {("base", "pyproject.toml"): moved, ("new", "backend/pyproject.toml"): moved}
+        pypi = FakePyPI()
+        found = self.find(run_change("", files, counts=[
+            orchestrator.ChangedFile("pyproject.toml", "backend/pyproject.toml", 0, 0)]), pypi)
+        self.assertEqual((found, pypi.asked), (([], []), []))
+
+    def test_a_manifest_moved_to_the_top_level_brings_no_base_of_its_own(self):
+        fixture = pyproject_with("evilpkg")
+        files = {("base", "tests/fixtures/pyproject.toml"): fixture, ("new", "pyproject.toml"): fixture}
+        issues, _ = self.find(run_change("", files, counts=[
+            orchestrator.ChangedFile("tests/fixtures/pyproject.toml", "pyproject.toml", 0, 0)]), FakePyPI())
+        self.assertEqual([(f["path"], f["rule"], f["message"][:9]) for f in issues],
+                         [("pyproject.toml", "not-in-spec", "`httpx` i"), ("pyproject.toml", "not-in-spec", "`evilpkg`")])
+
+    def test_a_new_manifest_adds_all_it_names(self):
+        files = {("new", "pyproject.toml"): pyproject_with()}
+        issues, _ = self.find(run_change(new_file_diff("pyproject.toml", 6), files), FakePyPI(
+            httpx=pypi_project()))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in issues], [("pyproject.toml", 4, "not-in-spec")])
+
+
+class TestPyPI(unittest.TestCase):
+    def project(self, *answers):
+        urlopen = MagicMock(side_effect=list(answers))
+        return orchestrator.PyPI(urlopen=urlopen).project("limits"), urlopen
+
+    def test_reads_dates_version_and_license(self):
+        project, urlopen = self.project(FakeResponse(json.dumps(pypi_project())))
+        self.assertEqual(project.first_release.isoformat(), "2015-01-03T10:00:00.123456+00:00")
+        self.assertEqual(project.latest_release.isoformat(), "2024-06-22T10:00:00.123456+00:00")
+        self.assertEqual((project.version, project.license), ("3.13.0", "MIT"))
+        (req,) = [c.args[0] for c in urlopen.call_args_list]
+        self.assertEqual(req.full_url, PYPI_JSON.format("limits"))
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], orchestrator.PYPI_TIMEOUT)
+
+    def test_a_license_is_the_expression_then_the_field_then_the_classifier(self):
+        cases = [(dict(license="MIT", expression="Apache-2.0"), "Apache-2.0"),
+                 (dict(license="BSD\n\nlong text of the licence"), "BSD"),
+                 (dict(license="", classifiers=["Topic :: X", "License :: OSI Approved :: MIT License"]),
+                  "MIT License"),
+                 (dict(license=None), None)]
+        for kw, license in cases:
+            with self.subTest(license=license):
+                project, _ = self.project(FakeResponse(json.dumps(pypi_project(**kw))))
+                self.assertEqual(project.license, license)
+
+    def test_a_project_without_files_has_no_release_dates(self):
+        body = {"info": {"version": "0.0.1"}, "releases": {"0.0.1": []}, "urls": []}
+        project, _ = self.project(FakeResponse(json.dumps(body)))
+        self.assertEqual((project.first_release, project.latest_release), (None, None))
+
+    def test_an_unknown_project_is_none(self):
+        project, _ = self.project(urllib.error.HTTPError("u", 404, "Not Found", {}, io.BytesIO(b"")))
+        self.assertIsNone(project)
+
+    def test_any_other_failure_raises(self):
+        url = PYPI_JSON.format("limits")
+        for answer, message in [
+                (urllib.error.HTTPError("u", 503, "Unavailable", {}, io.BytesIO(b"")), f"GET {url}: HTTP 503"),
+                (urllib.error.URLError("[Errno -3] name resolution"), f"GET {url}: [Errno -3] name resolution"),
+                (TimeoutError("timed out"), f"GET {url}: timed out"),
+                (FakeResponse(b"<html>"), f"GET {url}: the answer is not PyPI's JSON"),
+                (FakeResponse(b"[]"), f"GET {url}: the answer is not PyPI's JSON"),
+                (FakeResponse(b'{"info": {}}'), f"GET {url}: the answer is not PyPI's JSON")]:
+            with self.subTest(message=message):
+                with self.assertRaises(orchestrator.PyPIError) as cm:
+                    self.project(answer)
+                self.assertTrue(str(cm.exception).startswith(message), str(cm.exception))
+
+
+class TestDiffBudget(unittest.TestCase):
+    def test_the_budget_counts_files_and_lines_against_the_workflows(self):
+        counts = [orchestrator.ChangedFile("a.py", "a.py", 10, 0), orchestrator.ChangedFile("b.py", "b.py", 10, 0),
+                  orchestrator.ChangedFile("old.py", "c.py", 1, 5)]
+        budget = orchestrator.diff_budget
+        self.assertEqual(budget(run_change("", counts=counts), max_files=3, max_lines=26), ([], []))
+        (finding,) = budget(run_change("", counts=counts), max_files=2, max_lines=26).to_weigh
+        self.assertEqual(finding["message"], "The change touches 3 files, over the workflow's max_files of 2. Say in "
+                                             "your report why it cannot be smaller.")
+        (finding,) = budget(run_change("", counts=counts), max_files=3, max_lines=25).to_weigh
+        self.assertEqual(finding["message"], "The change touches 26 lines (21 added, 5 removed), over the workflow's "
+                                             "max_lines of 25. Say in your report why it cannot be smaller.")
+
+    def test_a_path_the_spec_mentions_by_path_or_name_is_expected(self):
+        diff = new_file_diff("src/limiter.py", 1) + new_file_diff("tests/test_limiter.py", 1) + new_file_diff(
+            "README.md", 1)
+        spec = "Add src/limiter.py, tested in test_limiter.py."
+        issues, to_weigh = orchestrator.unexpected_paths(run_change(diff, spec=spec))
+        self.assertEqual(issues, [])
+        self.assertEqual([f["path"] for f in to_weigh], ["README.md"])
+
+
+class TestJudgeRun(unittest.TestCase):
+    """judge_run adds the orchestrator checks' findings to a quality file the gate wrote."""
+
+    def finding(self, rule, path="pyproject.toml"):
+        return {"path": path, "line": 5, "severity": "error", "rule": rule, "message": "m"}
+
+    def check(self, name, issues=(), to_weigh=()):
+        return orchestrator.OrchestratorCheck(name, lambda change: orchestrator.CheckFindings(list(issues),
+                                                                                            list(to_weigh)))
+
+    def test_findings_follow_the_files_own_and_fail_it_as_a_condition(self):
+        built = quality_report(
+            "ERROR", "intro", conditions=["Coverage of new code is 50%."],
+            issues=[self.finding("ruff F401", "a.py")], to_weigh=[self.finding("flaky-tests mixed-results", "t.py")],
+            tests=[])
+        checks = (self.check("new-dependencies", issues=[self.finding("not-in-spec")]),
+                  self.check("diff-budget", to_weigh=[self.finding("", None)]))
+
+        text = orchestrator.judge_run(built, checks, run_change(""))
+
+        self.assertTrue(text.startswith("GATE: ERROR\n\nintro\n\n## Failed conditions\n\n- Coverage of new code is "
+                                        "50%.\n- 1 findings of the `new-dependencies` check; each is listed below.\n"
+                                        "\n## Issues on changed lines\n"), text)
+        self.assertTrue(text.endswith(
+            "## Failing tests\n\nNone.\n\n## The orchestrator's checks\n\n"
+            "The orchestrator ran these itself after the build, with what the build does not see: the run's spec and "
+            "its workflow.\n\n"
+            "3. `pyproject.toml:5` error new-dependencies not-in-spec: m\n\n"
+            "These do not fail the gate. Fix each, or say in your report why it should stand.\n\n"
+            "4. The change as a whole: error diff-budget: m\n"), text)
+        self.assertEqual(parse_gate(text), "ERROR")
+
+    def test_a_failing_finding_turns_ok_into_error(self):
+        built = quality_report("OK", "intro", tests=[])
+        checks = (self.check("c", issues=[self.finding("r")]), self.check("d", issues=[self.finding("s")] * 2))
+        text = orchestrator.judge_run(built, checks, run_change(""))
+        self.assertTrue(text.startswith("GATE: ERROR\n\nintro\n\n## Failed conditions\n\n- 1 findings of the `c` "
+                                        "check; each is listed below.\n- 2 findings of the `d` check; each is listed "
+                                        "below.\n\n## Issues on changed lines\n\nNone.\n"), text)
+        self.assertTrue(text.endswith("\n1. `pyproject.toml:5` error c r: m\n2. `pyproject.toml:5` error d s: m\n"
+                                      "3. `pyproject.toml:5` error d s: m\n"), text)
+
+    def test_nothing_found_leaves_the_file_as_it_is(self):
+        built = quality_report("OK", "intro", tests=[])
+        self.assertEqual(orchestrator.judge_run(built, (self.check("c"),), run_change("")), built)
+
+    def test_at_most_fifty_are_listed(self):
+        built = quality_report("OK", "intro")
+        many = [self.finding("r")] * 60
+        text = orchestrator.judge_run(built, (self.check("c", to_weigh=many),), run_change(""))
+        self.assertIn("\n50. `pyproject.toml:5` error c r: m\n", text)
+        self.assertNotIn("\n51. ", text)
+        self.assertTrue(text.endswith("\n10 more findings of the orchestrator's checks are not listed.\n"))
+
+    def test_the_limit_of_fifty_is_the_whole_files(self):
+        checks = (self.check("c", issues=[self.finding("r")] * 2, to_weigh=[self.finding("w")] * 3),)
+        # The build's file lists its first 50 of 60 issues, or all of its 48.
+        for issues, shown in ((60, 0), (48, 2)):
+            with self.subTest(issues=issues):
+                built = quality_report("ERROR", "intro", issues=[self.finding("ruff F401", "a.py")] * issues)
+                text = orchestrator.judge_run(built, checks, run_change(""))
+                section = text[text.index("## The orchestrator's checks"):]
+                self.assertEqual(re.findall(r"^(\d+)\. ", section, re.MULTILINE), [str(n) for n in range(49, 51)][:shown])
+                self.assertTrue(section.endswith(f"\n{5 - shown} more findings of the orchestrator's checks are not "
+                                                 "listed.\n"), section)
+                self.assertIn("- 2 findings of the `c` check; each is listed below.", text)
+
+    def test_checks_come_from_the_workflow(self):
+        p = Pipeline("budget", QUICK.roles, QUICK.steps, max_files=3, max_lines=40)
+        checks = orchestrator.orchestrator_checks(p, orchestrator.PyPI(urlopen=FakePyPI()))
+        self.assertEqual([c.name for c in checks], ["new-dependencies", "diff-budget", "unexpected-paths"])
+        (finding,) = checks[1].find(run_change(new_file_diff("README.md", 41))).to_weigh
+        self.assertIn("over the workflow's max_lines of 40", finding["message"])
 
 
 class TestChangedLines(unittest.TestCase):
@@ -7372,6 +8160,22 @@ class TestWorkflowFiles(unittest.TestCase):
         default = orchestrator.DEFAULT_WORKFLOW
         text = orchestrator.workflow_toml(default)
         self.assertEqual(orchestrator.parse_workflow("default", tomllib.loads(text)), default)
+
+    def test_the_change_budget_is_the_workflows(self):
+        step = 'id = "build"\nfile = "b-{n}.md"\nprompt = "{path}"\nedits = true\n'
+        p = orchestrator.load_workflow_file(self.file("small", f"max_files = 1\nmax_lines = 100\n[[steps]]\n{step}"))
+        self.assertEqual((p.max_files, p.max_lines), (1, 100))
+        self.assertEqual(orchestrator.parse_workflow("small", tomllib.loads(orchestrator.workflow_toml(p))), p)
+        self.assertEqual(orchestrator.workflow_definition(p)["max_lines"], 100)
+        default = orchestrator.DEFAULT_WORKFLOW
+        self.assertEqual((default.max_files, default.max_lines), (15, 600))
+        self.assertNotIn("max_files", orchestrator.workflow_definition(default))
+        for value, message in (("0", "workflow bad: max_lines must be at least 1"),
+                               ("-1", "workflow bad: max_lines must be at least 1"),
+                               ('"3"', "max_lines must be a whole number"), ("true", "max_lines must be a whole number"),
+                               ("1.5", "max_lines must be a whole number")):
+            with self.subTest(value=value), self.assertRaisesRegex(OrchestratorError, message):
+                orchestrator.load_workflow_file(self.file("bad", f"max_lines = {value}\n[[steps]]\n{step}"))
 
     def test_any_text_round_trips(self):
         odd = ["ends in a quote '", "has ''' inside\nand a newline", "tab\there", "del\x7f", "ünïcode 🦀\n",

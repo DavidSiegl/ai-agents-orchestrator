@@ -2,8 +2,9 @@
 
 How Jenkins judges this repository with `orchestrator.py gate`, and how `orchestrator.py run --quality-gate` uses
 it: the [gate](#the-gate) itself, the [Jenkins setup](#jenkins-setup), the
-[credentials and permissions](#credentials-and-permissions) the orchestrator needs, and the
-[orchestrator loop](#orchestrator-loop).
+[credentials and permissions](#credentials-and-permissions) the orchestrator needs, the
+[orchestrator loop](#orchestrator-loop), and the [orchestrator's own checks](#the-orchestrators-checks), which
+need the run's spec.
 
 ## The gate
 
@@ -447,8 +448,9 @@ becomes `/job/` in its URL, so `AI-Agents-Orchestrator/py-ai-agents-orchestrator
   without one: (5) `<job>/<number>/testReport/api/json`, and (6) the last 60 lines of
   `<job>/<number>/consoleText` when no test failed.
 
-**Once a build ends**, live or resumed: with `quality.md`, whatever the result, that file is the round's, with a
-line under its `GATE:` line naming the build, the snapshot and the round. Without it and ABORTED, or cancelled in
+**Once a build ends**, live or resumed: with `quality.md`, whatever the result, that file is the round's, with
+[the orchestrator's checks](#the-orchestrators-checks) added and a line under its `GATE:` line naming the build,
+the snapshot and the round. Without it and ABORTED, or cancelled in
 the queue, nothing judged the change: the run fails with `ci` cut back to `ref` and `sha`, and the Builder gets no
 fix turn. Without it otherwise: `GATE: BUILD_FAILED`, with the failing tests or the console's end, and a fix turn.
 A build cut back that way is recorded in `ci.rejected`, so a resume builds the snapshot again instead of adopting
@@ -459,6 +461,94 @@ that build.
 the step and keeping `ci`, and a resume gets a fresh timeout. Any other answer, such as 401, 403 or 404, fails the
 run at once, naming the step, method, URL and status. A 404 on the trigger means the job was deleted. The poll
 loops call `_heartbeat`, so a long build does not make the run look stale.
+
+### The orchestrator's checks
+
+Some checks need the run's spec, which lives in the run directory (`.orchestrator/`, ignored, so never in a
+snapshot) and so never reaches Jenkins. The orchestrator runs these itself, in each quality round, after it reads
+the build's `quality.md` and before it writes `quality-<n>-<q>.md`; a build that ended before its Gate stage gets
+none of them. They run only with `--quality-gate`. The spec is the contract step's file, `spec.md` in the default
+workflow, or the run's task for a workflow without one. Each check is an `OrchestratorCheck` in
+`orchestrator_checks`, and judges the change from the run's base to the round's snapshot:
+
+| Check | Fails? | Finds |
+|---|---|---|
+| `new-dependencies` | yes | packages the change adds that the spec does not name or PyPI does not know |
+| `diff-budget` | no | a change over the workflow's `max_files` or `max_lines` |
+| `unexpected-paths` | no | changed paths the spec never mentions |
+
+**New dependencies** reads the project's manifests at the repository's top level only, `pyproject.toml` and the
+`uv.lock` beside it, when the change touches either: a manifest anywhere else, such as a test fixture, is not the
+project's. It reads them in the snapshot and at the base, both at the top level: a file the change moves there, such
+as a fixture's `pyproject.toml`, was not the project's at the base, so what it lists is new. The direct
+dependencies are `pyproject.toml`'s `[project] dependencies` and `optional-dependencies` and its
+`[dependency-groups]`, the project itself left out, so `all = ["myproj[a,b]"]` adds nothing; the locked packages are
+`uv.lock`'s, the project and its workspace members left out. A package is new when the snapshot's files name it and
+the base's do not. Names compare as PyPI compares them (PEP 503), and the spec names a package when it holds the name as
+a word, in any case, so `pytest_randomly` names `pytest-randomly` and `pytest-randomly` does not name `pytest`. The
+spec was agreed with the human, so naming a package there is the approval.
+
+Where a package comes from decides whether PyPI is asked about it. A direct dependency's source is its
+`[tool.uv.sources]` entry (`workspace`, `path`, `git`, `url` or `index`), else its PEP 508 URL (`name @ url`), else
+the `[[tool.uv.index]]` marked `default = true`, else the registry `uv.lock` has it from; a locked package's is its
+`source` in `uv.lock`. Only a package from PyPI's own index (`https://pypi.org/simple`) is looked up, at
+`https://pypi.org/pypi/<name>/json`, with a timeout of 15 seconds (`PYPI_TIMEOUT`). A package from another index is
+never looked up on pypi.org, so a name someone squatted there cannot lend it pypi.org's metadata: that is the
+dependency-confusion case, and the finding names the index instead. Such a package is therefore never `not-on-pypi`;
+only the spec rule can fail it.
+
+- `not-in-spec` (fails): a new direct dependency the spec does not name, with where it comes from, unless it is a
+  member of the project's workspace (`{ workspace = true }`): the project's own code, not a package from outside;
+- `not-on-pypi` (fails): a package from PyPI that PyPI answers 404 for. That is the slopsquatting case: a name an
+  agent made up, which anyone could register;
+- `unchecked` (fails): the packages from PyPI that PyPI was not asked about, because a request got no usable answer
+  (no answer, a timeout, an HTTP error other than 404, an answer that is not PyPI's JSON), or because the quality
+  round had too little time left. PyPI is asked no more after the first such request, and none is started with less
+  than 60 seconds (`SLOW_STEP_MARGIN`) of the round's `QUALITY_TIMEOUT` left. The run's heartbeat is kept between
+  requests, so a long list of new packages cannot make a live run look stale. A package that could not be checked is
+  never reported as passed, so the next quality round asks again;
+- `unreadable` (fails): a manifest in the change that is not UTF-8 TOML, or not in the shape above. One that cannot
+  be read at the base is a finding to weigh instead, since the Builder did not write it, and so is one that cannot be
+  read in the change because it could not at the base either. Each manifest is judged by its own two sides, so a
+  `pyproject.toml` the change breaks fails even beside a `uv.lock` broken all along. Either way that ecosystem's new
+  dependencies are not checked;
+- `added` (reports): a new direct dependency the spec names, or a workspace member, with its first release date, its
+  latest version and its date, and its license, or the path, repository or URL it comes from. `young` instead when its
+  first release is less than 14 days old (`YOUNG_PACKAGE_DAYS`), or it has no release files: few have used it yet.
+  `other-index` instead for one from an index other than PyPI's, naming the index, and `unknown-source` for one whose
+  `[tool.uv.sources]` entry has a shape this check does not know (none of `workspace`, `path`, `git`, `url` or
+  `index`), quoting the entry: where it comes from is not checked, so it is reported rather than passed in silence;
+- `pulled-in` (reports): one finding per `uv.lock`, listing with the same facts the packages it alone adds, those the
+  new dependencies pull in. The spec cannot be expected to name them;
+- `source-changed` (reports): a dependency the project already had, direct or locked, that the change takes from
+  another source, naming both: `requests` moved from PyPI to `{ index = "evil" }` is the dependency-confusion move
+  without a new name. A new default index moves every dependency without a source of its own.
+
+**Diff budget** counts the files the change touches and the lines it adds and removes, from `git diff --numstat -M`
+(`Host.changed_line_counts`); a rename counts as one file, with the lines it changes, and a binary file as a file of
+no lines. Over either limit it is one finding about the change as a whole, naming each count over its limit; within
+both it reports nothing, so the counts of a change of usual size do not take a number the Builder must answer. The
+limits are workflow keys, a whole number of at least 1 each, in a workflow file next to `description`:
+
+```toml
+max_files = 15   # the defaults
+max_lines = 600
+```
+
+They belong to the workflow rather than to the quality-gated step, because the change a quality round judges runs
+from the run's base, so it holds every editing step's work, a Test Writer's as well as the Builder's.
+
+**Unexpected paths** is a finding for each path the change touches, or deletes, that the spec mentions neither as a
+whole nor by its file name. A rename is judged at its new path only. A path or name counts as mentioned only where it
+appears whole in the spec, as a plain substring: naming `docs/` does not cover `docs/x.md`.
+
+The findings go into the quality file as the gate's do, with `{path, line, severity, rule, message}` and the rule
+prefixed by the check's name, in one last section, `## The orchestrator's checks`, which holds both the failing ones
+and those to weigh. They are numbered on from the build's last number, failing ones first, then the findings to weigh
+under the same lead sentence as the gate's. The limit of 50 is the whole file's: they are listed only while the file
+holds fewer, and the rest are counted. A check with failing findings is a failed condition, added to the build's, and
+turns `GATE: OK` into `GATE: ERROR`. Findings to weigh never change the gate. The Builder answers them all by number,
+as it answers the gate's.
 
 ### What goes to the Builder
 
