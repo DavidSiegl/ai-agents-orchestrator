@@ -2519,11 +2519,7 @@ def tool_findings(tool: GateTool, output: str, root: str, tracked: set[str]) -> 
     UTF-8 as os.fsdecode does; the tool may print it so, or with U+FFFD for each byte that is not, as ruff does,
     which names the one tracked file it can stand for.
     """
-    # Each such tracked name by how a lossy tool prints it; None where two names print alike.
-    lossy: dict[str, str | None] = {}
-    for name in tracked:
-        if (shown := os.fsencode(name).decode("utf-8", "replace")) != name:
-            lossy[shown] = None if shown in lossy else name
+    lossy = _lossy_names(tracked)
     out = []
     for text in output.split("\n"):
         # Spaces, tabs and the \r of a \r\n only: other whitespace, such as U+2028, can be part of a name.
@@ -2539,6 +2535,16 @@ def tool_findings(tool: GateTool, output: str, root: str, tracked: set[str]) -> 
                     "severity": detail.groupdict().get("severity") or "error",
                     "rule": f"{tool.name} {detail['rule']}" if detail["rule"] else tool.name,
                     "message": detail["message"].strip()})
+    return out
+
+
+def _lossy_names(tracked: set[str]) -> dict[str, str | None]:
+    """Each name of tracked that is not UTF-8, as os.fsdecode holds it, by how a tool that prints U+FFFD for each
+    byte that is not shows it; None for a name so shown that two tracked names share, which then stands for neither."""
+    out: dict[str, str | None] = {}
+    for name in tracked:
+        if (shown := os.fsencode(name).decode("utf-8", "replace")) != name:
+            out[shown] = None if shown in out else name
     return out
 
 
