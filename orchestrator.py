@@ -3554,13 +3554,7 @@ def _mutmut_findings(tree_copy: str, functions: list[_ChangedFunction], run: sub
         return [_mutation_not_run(problem)]
     if no_tests:
         statuses = dict.fromkeys(statuses, "no tests")
-    by_prefix = {_mutant_prefix(f): f for f in functions}
-    # Each function's mutants, in the order mutmut lists them, which is the order it made them in, by status.
-    mutants: dict[_ChangedFunction, dict[str, list[str]]] = {}
-    for mutant, status in statuses.items():
-        owner = by_prefix.get(_prefix_of(mutant))
-        if owner is not None:
-            mutants.setdefault(owner, {}).setdefault(status, []).append(mutant)
+    mutants = _mutants_by_function(statuses, functions)
     # A function mutmut was given but listed no mutant of. mutmut saves a module's mutants, none or more, in
     # mutants/<path>.meta once it has made them all, so stopped by the budget it had not reached a module without one.
     unlisted = [f for f in functions if f not in mutants]
@@ -3577,15 +3571,35 @@ def _mutmut_findings(tree_copy: str, functions: list[_ChangedFunction], run: sub
             out.append(_finding(f.path, f.line, "untested", f"no test calls `{f.name}`, so none of its "
                                                             f"{len(by_status['no tests'])} mutants can make one fail."))
     if stopped:
-        tried = sum(1 for status in statuses.values() if status not in _MUTMUT_UNTRIED)
-        out.append(_finding(None, None, "budget-reached", (
-            f"budget reached after {tried} of {len(statuses)} mutants" if statuses
-            else "budget reached before mutmut had made its mutants")
-            + f": mutmut was stopped at {budget:g} seconds (`--mutation-budget`), so the mutants it did not try may "
-              f"survive too"
-            + (f"; mutmut made no mutant of {_series([f'`{f.name}` in {f.path}' for f in unreached], limit=5)} "
-               f"before the budget ran out." if unreached else ".")))
+        out.append(_budget_reached(statuses, budget, unreached))
     return out
+
+
+def _mutants_by_function(statuses: dict[str, str], functions: list[_ChangedFunction],
+                         ) -> dict[_ChangedFunction, dict[str, list[str]]]:
+    """The mutants of statuses, mutmut's status of each mutant by its name, that belong to each of functions, by
+    status, in the order statuses lists them, which for `mutmut results` is the order mutmut made them in; a function
+    without one has no key, and a mutant of no such function is left out."""
+    by_prefix = {_mutant_prefix(f): f for f in functions}
+    out: dict[_ChangedFunction, dict[str, list[str]]] = {}
+    for mutant, status in statuses.items():
+        owner = by_prefix.get(_prefix_of(mutant))
+        if owner is not None:
+            out.setdefault(owner, {}).setdefault(status, []).append(mutant)
+    return out
+
+
+def _budget_reached(statuses: dict[str, str], budget: float, unreached: list[_ChangedFunction]) -> dict:
+    """The finding that the budget of budget seconds stopped mutmut, having made the mutants of statuses, mutmut's
+    status of each by its name, and none yet of unreached, the functions it was given in modules it had not reached."""
+    tried = sum(1 for status in statuses.values() if status not in _MUTMUT_UNTRIED)
+    return _finding(None, None, "budget-reached", (
+        f"budget reached after {tried} of {len(statuses)} mutants" if statuses
+        else "budget reached before mutmut had made its mutants")
+        + f": mutmut was stopped at {budget:g} seconds (`--mutation-budget`), so the mutants it did not try may "
+          f"survive too"
+        + (f"; mutmut made no mutant of {_series([f'`{f.name}` in {f.path}' for f in unreached], limit=5)} "
+           f"before the budget ran out." if unreached else "."))
 
 
 def _why_no_mutant(f: _ChangedFunction, table: dict) -> str:
