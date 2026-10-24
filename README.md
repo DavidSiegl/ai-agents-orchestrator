@@ -276,13 +276,13 @@ A run saves its settings. `resume` takes the same flags as `run` except `--no-pr
 `--workflow`, `--workflow-file` and `--spec`, and a flag given to `resume` overrides the saved value; one left out keeps it.
 A harness changed by `resume` applies to each role's next agent; one still running keeps its own.
 
-`resume --quality-gate JOB` turns the gate on for a run started without it, after the same preflight as `run`'s
-(past round 0: an `origin`, gitleaks, the credentials and the job). A Builder report the Reviewer has not been prompted for
-yet is judged first; otherwise the gate starts at the Builder's next turn. It is refused once the run is in
-`publish` or `done`, after `--no-quality-gate`, for a run with another job, and for a `--no-pr` run in the checkout
-itself past round 0, whose tree may hold your own changes. `resume --no-quality-gate` turns the gate off for good:
-the run's `orchestrator-ci/` branches are deleted, an analysis under way is dropped, and the Reviewer is told what
-the round's last quality file found, or that the Builder changed the code after it. See
+`resume --quality-gate JOB` turns the gate on for a run started without it, after the same preflight as `run`'s (past
+round 0: an `origin`, gitleaks, the credentials and the job). A Builder report the Reviewer has not been prompted for
+yet is judged first; otherwise the gate starts at the Builder's next turn. It is refused once the run is in `publish`
+or `done`, after `--no-quality-gate`, for a run with another job, and for a `--no-pr` run in the checkout itself past
+round 0, whose tree may hold your own changes. `resume --no-quality-gate` turns the gate off for good: the run's
+`orchestrator-ci/` branches are deleted, an analysis under way is dropped, and the Reviewer is told what the round's
+last quality file found, or that the Builder changed the code after it. See
 [quality gate](docs/quality-gate.md#turning-the-gate-on-or-off-on-resume).
 
 ### Harnesses

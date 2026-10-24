@@ -2248,8 +2248,9 @@ class RunState:
     # files written until then stay the run's (turn_quality_gate_off).
     quality_gate_disabled: bool = False
     max_quality_rounds: int = DEFAULT_MAX_QUALITY_ROUNDS
-    # The quality round the round is in: 0 until the Builder's first report, then q from quality round q on. After
-    # resume --no-quality-gate in a quality-fix turn it is one past the last quality round, which never runs.
+    # The quality round the round is in: 0 until the Builder's first report, then q from quality round q on. A
+    # quality-fix turn that ends after resume --no-quality-gate leaves it one past the last quality round, which never
+    # runs.
     quality_round: int = 0
     # The quality build in flight, {ref, sha, queue_url, build}, each saved as soon as it is known.
     # rejected lists builds of ref that ended without a verdict, so a resume does not adopt them again.

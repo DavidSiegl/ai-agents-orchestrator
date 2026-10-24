@@ -701,9 +701,10 @@ starts depends on where the run is:
   failure goes back to the Builder as usual;
 - otherwise, a Reviewer already prompted included: at the Builder's next turn.
 
-It is refused in `publish` or `done`, even with the run's own job, after `--no-quality-gate` (the gate cannot come back), for a run that has
-another job (the same job is a no-op), in a workflow without a quality-gated step, and for a `--no-pr` run in the
-checkout itself past round 0: its tree was never required to be clean, and a snapshot takes the whole tree.
+It is refused in `publish` or `done`, even with the run's own job, after `--no-quality-gate` (the gate cannot come
+back), for a run that has another job (the same job is a no-op), in a workflow without a quality-gated step, and for
+a `--no-pr` run in the checkout itself past round 0: its tree was never required to be clean, and a snapshot takes
+the whole tree.
 
 `resume --no-quality-gate` deletes the run's `orchestrator-ci/<key>-*` branches on `origin`, a failure only
 logged, without cancelling a Jenkins build in progress, and saves `quality_job` null, `quality_gate_disabled` true
