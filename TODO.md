@@ -65,9 +65,10 @@ was done.
   That filter does not reach the linters: `judge_change` runs them over every tracked file their pathspecs match and
   keeps their findings on its own, unfiltered `changed_lines`, so a change that commits `mutants/calc.py`, mutmut's
   mutated copy with its trampolines, has its added lines there linted, and their findings can fail the gate. The same
-  unfiltered lines feed the suppressions list, the stray-line-end refusal and the coverage condition; whether coverage
-  counts such files was not traced. Whether the linters should read them, leave them out, or the gate refuse them is
-  open. Closes with that decision.
+  unfiltered lines feed the suppressions list, the stray-line-end refusal and the coverage condition; coverage counts
+  such files only when the project's coverage measures them, since `new_coverage` reads only the files the Cobertura
+  report lists. Whether the linters should read them, leave them out, or the gate refuse them is open. Closes with that
+  decision.
 - **The cognitive-complexity check reads and parses changed files in a loop of its own.** `_judged_files` and
   `_working_functions` repeat `_changed_python_units`' reading, decoding and unreadable-file handling, because that
   walker yields only top-level functions and methods of top-level classes, the units mutmut names, while the check
