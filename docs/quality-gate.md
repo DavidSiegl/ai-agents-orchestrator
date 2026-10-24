@@ -345,6 +345,8 @@ Only lines a change adds count, so what `main` already has does not block.
 
 One `Jenkinsfile` serves two jobs. Every build installs, tests with branch coverage of `orchestrator`, runs the
 gate and archives `quality.md`, and builds the Linux binary; a build of `main` that gets that far also releases.
+A build of `main` whose tree a pull request build already judged skips the tests and the gate (see
+[A build of main judged at its pull request](#a-build-of-main-judged-at-its-pull-request)).
 
 ### What Jenkins needs
 
@@ -360,14 +362,17 @@ gate and archives `quality.md`, and builds the Linux binary; a build of `main` t
 - **`gh` on the agent, and a GitHub token** for the Release stage: a Secret text credential with the ID
   `GitHub-Agents`, holding a token with *Contents: read and write* on this repository. It is the agents' own
   `gh` token, so when that is rotated the credential must be too, or every build of `main` fails at Release.
-  Only builds of `main` use it.
-- **A checkout credential of the same token**: GitHub Branch Source and Git need a Username with password
-  credential, so both jobs check out with `GitHub-Agents-scm` (username and the agents' token as password).
-  Jenkins also reports each pull request's `continuous-integration/jenkins/pr-head` status with it, so the
-  token needs *Commit statuses: read and write* - without it the build passes and the required check waits
-  forever, the log saying `Could not update commit status ... 403`. The agents can therefore post that
-  status themselves too: the required check shows that a status was set, not that Jenkins set it.
-  Keep both credentials in this folder's own store, not the global one: any build can bind any credential it
+  Only builds of `main` use it, for Release and to read pull request statuses.
+- **A GitHub App of Jenkins's own, as the checkout credential**: both jobs check out with `GitHub-Agents-scm`,
+  a GitHub Branch Source *GitHub App* credential, and Jenkins reports each pull request's
+  `continuous-integration/jenkins/pr-head` status with it. The App needs *Contents: read*, *Pull requests:
+  read* and *Commit statuses: read and write* on this repository - without the last the build passes and the
+  required check waits forever, the log saying `Could not update commit status ... 403`. Its login,
+  `<app-slug>[bot]`, is `PR_STATUS_CREATOR` in the `Jenkinsfile`, and the ruleset on `main` requires the
+  `pr-head` check from that App, not from any source. The agents' token cannot post as the App, so a green
+  required check, and the status a build of `main` trusts, show that Jenkins set it. With the agents' token as
+  the checkout credential instead, as before, the agents could post that status themselves.
+  Keep the credentials in this folder's own store, not the global one: any build can bind any credential it
   can see by ID, and a pushed branch's `Jenkinsfile` is a build.
 
 ### The two jobs
@@ -394,11 +399,27 @@ empty `GIT_REF`, before it accepts `buildWithParameters`.
 |---|---|---|
 | Quality build (`GIT_REF` set) | `HEAD^`: the snapshot's only parent is the run's base | `main`'s `orchestrator.py` and `pyproject.toml`, from `origin/main` |
 | Pull request (`CHANGE_TARGET` set) | the merge base with the target branch, fetched first | its own: a human reviews the pull request, `Jenkinsfile` included |
-| `main` | the last successful build's commit, else `HEAD^1` | its own |
+| `main` | the last successful build's commit, else `HEAD^1` | its own; none when judged at its pull request (below) |
 
 The repository is public, so the stage fetches `main` or the target branch without credentials. `GIT_REF` and
 the base reach the shell as environment variables, never as Groovy-built shell code, and `GIT_REF` is otherwise
 interpolated only into the checkout's branch spec.
+
+### A build of main judged at its pull request
+
+A merge whose branch was up to date with `main` leaves `main` with the tree its pull request build judged: the
+same code, tests, `Jenkinsfile`, gate and rules. The "Judged at PR" stage runs `ci/judged-at-pr.sh`, and when it
+finds that build, `main`'s build skips Test and Gate, archives no `quality.md`, and goes on to Package and
+Release. The script's header says what counts as judged; in short, a `pr-head` success that Jenkins's App posted
+on a commit with `HEAD`'s tree that contains `HEAD^1`, with `HEAD^1` built successfully as `main`. A commit
+that was never built as `main`, such as one of several a rebase merge adds, or one after a failed build of
+`main`, is judged in full, so the lines of a failed build are never let through by a later skip. So is every
+merge whose branch was behind `main`: its merged tree was never built.
+
+A status counts only from Jenkins's own GitHub identity because anything a pull request build writes, an archived
+file included, comes from code the agents control: the `Jenkinsfile` and tests of every commit pushed to the
+pull request run unreviewed. Only the status Jenkins itself posts for a commit says that this commit's build,
+with this commit's `Jenkinsfile`, passed.
 
 ### What each kind of build reports
 
