@@ -3946,7 +3946,7 @@ def _base_scores(change: GateChange, judged: dict[str, tuple[list[_ScoredFunctio
     homes = {path: old_paths.get(path, path) for path in working}
     pool = _BasePool({old: _base_functions(change, old) for old, new in pairs
                       if old and (new in working or old.endswith(".py"))},
-                     {old: working.get(new) or [] for old, new in pairs if old})
+                     {old: working.get(new, []) if new else [] for old, new in pairs if old})
     for same_name, same_file in _BODY_STEPS:
         for path, functions in working.items():
             pool.lend_by_body(path, functions, homes[path], same_name, same_file, path in judged)
@@ -3991,9 +3991,11 @@ class _BasePool:
     def lend_by_name(self, path: str, scored: _ScoredFunction, home: str | None) -> None:
         """Lend to scored, a function of a judged file of the working tree at path whose old path is home, unless it
         has a score lent, the highest of the base functions of its name left in home's base."""
+        if home is None or (path, scored.line) in self.lent:
+            return
         namesakes = [g for g in self._left.get(home, []) if g.name == scored.name
-                     and self._may_lend(home, g, True, True)] if home else []
-        if (path, scored.line) not in self.lent and namesakes:
+                     and self._may_lend(home, g, True, True)]
+        if namesakes:
             self._lend(path, scored, home, max(namesakes, key=lambda g: g.score))
 
     def _may_lend(self, old: str, base: _ScoredFunction, same_file: bool, judged: bool) -> bool:
