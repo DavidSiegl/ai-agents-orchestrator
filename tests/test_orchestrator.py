@@ -2311,6 +2311,221 @@ class TestRunHealth(unittest.TestCase):
         ])
 
 
+RUN_RECORD_KEYS = {"id", "key", "task", "workflow", "steps", "phase", "round", "quality_round", "role", "pane",
+                   "health", "health_reason", "heartbeat_age", "waiting", "verdict", "error", "closed", "branch",
+                   "worktree", "pr", "turns", "resume_command"}
+PR_URL = "https://github.com/o/r/pull/7"
+
+
+def open_turn(step, role):
+    return {"step": step, "role": role, "round": 1, "quality_round": 0, "file": f"{step}.md", "agent": "claude",
+            "model": None, "human_paced": True, "started_at": "2026-09-30T07:00:00Z", "ended_at": None,
+            "seconds": None}
+
+
+class TestRunRecord(unittest.TestCase):
+    """The record `list --json` prints, and the plain list and show lines formatted from it."""
+
+    def record(self, state, age=40, alive=True, target=()):
+        return orchestrator.run_record(state, age, "here", lambda pid: alive, list(target))
+
+    def test_every_key_is_present(self):
+        record = self.record({**run_record(owner=ME), "branch": "orchestrator/x", "pr_url": PR_URL})
+        self.assertEqual(set(record), RUN_RECORD_KEYS)
+        self.assertEqual(record["id"], "20260930-070000-c0ffee")
+        self.assertEqual(record["key"], "c0ffee")
+        self.assertEqual(record["workflow"], orchestrator.DEFAULT_WORKFLOW.name)
+        self.assertEqual(record["steps"], [{"id": "spec", "role": "spec"}, {"id": "build", "role": "build"},
+                                           {"id": "review", "role": "review"}])
+        self.assertEqual((record["phase"], record["round"], record["role"]), ("build", 1, "build"))
+        self.assertEqual((record["health"], record["health_reason"], record["heartbeat_age"]),
+                         ("running", "pid 4242 on here, beat 40s ago", 40))
+        self.assertEqual(record["pr"], {"url": PR_URL, "state": None, "error": None})
+        self.assertEqual(record["branch"], "orchestrator/x")
+        self.assertEqual(record["turns"], [])
+        self.assertIsNone(record["waiting"])
+        self.assertIsNone(record["resume_command"])
+        json.dumps(record)
+
+    def test_the_task_is_whole(self):
+        task = "x" * 300
+        self.assertEqual(self.record({**run_record(), "task": task})["task"], task)
+
+    def test_a_state_from_before_the_newer_fields(self):
+        record = self.record({"run_id": "20260930-070000-c0ffee", "task": "t", "phase": "review", "round": 2},
+                             age=STALE_SECONDS + 1)
+        self.assertEqual(set(record), RUN_RECORD_KEYS)
+        self.assertEqual((record["turns"], record["quality_round"], record["closed"], record["worktree"]),
+                         ([], None, None, None))
+        self.assertEqual(record["waiting"], {"reason": "stale", "detail": "orchestrator.py resume c0ffee"})
+
+    def test_a_workflow_this_orchestrator_cannot_load(self):
+        record = self.record({**run_record(), "workflow": "gone", "quality_round": 2})
+        self.assertEqual(set(record), RUN_RECORD_KEYS)
+        self.assertEqual((record["workflow"], record["steps"], record["role"], record["pane"]),
+                         ("gone", None, None, None))
+        self.assertIsNone(record["quality_round"])
+        self.assertEqual(self.record({**run_record(orchestrator.QUALITY), "workflow": "gone",
+                                      "quality_round": 2})["quality_round"], 2)
+
+    def test_no_role_outside_the_steps(self):
+        for phase in (orchestrator.QUALITY, orchestrator.PUBLISH, orchestrator.DONE):
+            with self.subTest(phase=phase):
+                self.assertIsNone(self.record(run_record(phase))["role"])
+
+    def test_quality_round_only_in_the_quality_loop_or_gated_step(self):
+        for phase, expected in (("build", 2), (orchestrator.QUALITY, 2), ("review", None)):
+            with self.subTest(phase=phase):
+                self.assertEqual(self.record({**run_record(phase), "quality_round": 2})["quality_round"], expected)
+
+    def test_blocked_waits_for_the_answer(self):
+        state = {**run_record(owner=ME), "blocked": {"file": "build-1.md", "question": "which db?", "k": 1},
+                 "agents": {"build": {"name": "build-c0ffee", "pane": "w1:p2"}},
+                 "turns": [open_turn("spec", "spec")]}
+        record = self.record(state)
+        self.assertEqual(record["waiting"], {"reason": "blocked", "detail": "which db?"})
+        self.assertEqual(record["pane"], "w1:p2")
+
+    def test_an_interview_waits_while_the_human_paced_turn_is_open(self):
+        state = {**run_record("spec", owner=ME), "turns": [open_turn("spec", "spec")]}
+        self.assertEqual(self.record(state)["waiting"], {"reason": "interview", "detail": "spec"})
+        ended = {**open_turn("spec", "spec"), "ended_at": "2026-09-30T07:05:00Z"}
+        self.assertIsNone(self.record({**state, "turns": [ended]})["waiting"])
+        self.assertIsNone(self.record({**run_record("spec", owner=ME)})["waiting"])
+        # A Builder turn is not human-paced, open or not.
+        self.assertIsNone(self.record({**run_record(owner=ME), "turns": [open_turn("build", "build")]})["waiting"])
+
+    def test_a_stale_run_waits_to_be_resumed_unless_closed(self):
+        stale = run_record(owner=ME)
+        record = self.record(stale, age=STALE_SECONDS + 1, target=["--machine", "m", "--cwd", "~/p"])
+        command = "orchestrator.py resume c0ffee --machine m --cwd '~/p'"
+        self.assertEqual(record["waiting"], {"reason": "stale", "detail": command})
+        self.assertEqual(record["resume_command"], command)
+        closed = self.record({**stale, "closed": "workspace closed"}, age=STALE_SECONDS + 1)
+        self.assertEqual(closed["health"], "stale")
+        self.assertIsNone(closed["waiting"])
+        self.assertIsNone(closed["resume_command"])
+
+    def test_a_blocked_stale_run_waits_to_be_resumed(self):
+        state = {**run_record(owner=ME), "blocked": {"file": "build-1.md", "question": "q", "k": 1}}
+        self.assertEqual(self.record(state, age=STALE_SECONDS + 1)["waiting"]["reason"], "stale")
+
+    def test_finished_and_failed_runs_wait_for_nothing(self):
+        for state in (run_record("done", verdict=APPROVE), run_record(error="interrupted")):
+            with self.subTest(state=state):
+                record = self.record(state, age=10**6)
+                self.assertEqual((record["health"], record["waiting"], record["resume_command"]), (None, None, None))
+
+    def test_plain_lines_in_each_state(self):
+        blocked = {**run_record(owner=ME), "blocked": {"file": "build-1.md", "question": "which db?", "k": 1},
+                   "agents": {"build": {"name": "build-c0ffee", "pane": "w1:p2"}}}
+        runs = [
+            (40, run_record(owner=ME)),
+            (STALE_SECONDS + 1, run_record(owner=ME)),
+            (40, blocked),
+            (STALE_SECONDS + 1, {**run_record(), "closed": "workspace closed"}),
+            (10**6, run_record(error="interrupted")),
+            (10**6, {**run_record("done", verdict=APPROVE), "pr_url": PR_URL}),
+            (10**6, {**run_record("done", verdict=APPROVE), "workflow": "gone"}),
+            (40, {**run_record(orchestrator.QUALITY, owner=ME), "quality_round": 2}),
+        ]
+        rows = orchestrator.run_rows(runs, "here", lambda pid: True, [])
+        self.assertEqual([orchestrator.run_line(*row[:4]) for row in rows], [
+            "20260930-070000-c0ffee  build    round 1  running: pid 4242 on here, beat 40s ago",
+            "20260930-070000-c0ffee  build    round 1  stale: no heartbeat for 5m; resume: orchestrator.py resume c0ffee",
+            "20260930-070000-c0ffee  build    round 1  blocked: which db? (pane w1:p2)",
+            "20260930-070000-c0ffee  build    round 1  closed: workspace closed",
+            "20260930-070000-c0ffee  build    round 1  error: interrupted",
+            f"20260930-070000-c0ffee  done     round 1  {APPROVE}  {PR_URL}",
+            f"20260930-070000-c0ffee  done     round 1  {APPROVE}  [gone workflow]",
+            "20260930-070000-c0ffee  quality  round 1 q2  running: pid 4242 on here, beat 40s ago",
+        ])
+
+    def test_show_starts_with_the_list_line(self):
+        host = FakeHost()
+        state = {**run_record("done", verdict=APPROVE), "cwd": "/proj", "pr_url": PR_URL}
+        host.files[f"/proj/{orchestrator.RUNS_DIR}/{state['run_id']}/state.json"] = json.dumps(state)
+        with patch.object(host, "run_files", return_value=[]), patch("builtins.print") as out:
+            orchestrator.show_run(host, "/proj", "c0ffee", "here", lambda pid: True, [])
+        self.assertEqual(out.call_args_list[0].args[0],
+                         f"20260930-070000-c0ffee  done     round 1  {APPROVE}  {PR_URL}")
+
+    def test_pr_states_are_filled_per_run(self):
+        host = FakeHost()
+        unusable = f"{PR_URL}/unusable"
+        broken = f"{PR_URL}/broken"
+        host.pull_requests = {
+            PR_URL: {"state": "MERGED", "headRefOid": "a" * 40, "closedAt": "2026-09-30T08:00:00Z"},
+            unusable: completed(stderr="gh: not logged in", returncode=4),
+            broken: completed(stdout="nonsense"),
+        }
+        records = [self.record({**run_record("done"), "pr_url": url}) for url in (PR_URL, unusable, broken)]
+        records.append(self.record(run_record("done")))
+        orchestrator.fill_pr_states(host, "/proj", records)
+        self.assertEqual(records[0]["pr"], {"url": PR_URL, "state": "MERGED", "error": None})
+        self.assertIsNone(records[1]["pr"]["state"])
+        self.assertIn("not logged in", records[1]["pr"]["error"])
+        self.assertIsNone(records[2]["pr"]["state"])
+        self.assertIn("nonsense", records[2]["pr"]["error"])
+        self.assertIsNone(records[3]["pr"])
+        self.assertEqual(len(host.gh_calls), 3)
+
+
+@patch.object(Host, "resolve_dir", return_value="/proj")
+@patch.dict("os.environ", {"HERDR_ENV": "1"})
+class TestListJSON(unittest.TestCase):
+    def list_json(self, *flags, runs=()):
+        with patch.object(Host, "run_states", return_value=list(runs)), \
+                patch.object(Herdr, "_exec", side_effect=AssertionError("herdr was called")), \
+                patch("builtins.print") as out:
+            self.assertEqual(main(["list", "--json", *flags]), 0)
+        self.assertEqual(out.call_count, 1)
+        return json.loads(out.call_args.args[0])
+
+    def test_no_runs(self, _resolve):
+        self.assertEqual(self.list_json(), {"version": 1, "runs": []})
+
+    def test_one_record_per_run_in_order(self, _resolve):
+        runs = [(40, run_record(owner=ME)), (10**6, {**run_record("done", verdict=APPROVE), "run_id": "x-beef00"})]
+        doc = self.list_json(runs=runs)
+        self.assertEqual([r["key"] for r in doc["runs"]], ["c0ffee", "beef00"])
+        self.assertEqual(doc["runs"][0], orchestrator.run_record(runs[0][1], 40, socket.gethostname(),
+                                                                 orchestrator.pid_alive, []))
+
+    def test_no_gh_without_pr_state(self, _resolve):
+        with patch.object(Host, "pull_request", side_effect=AssertionError("gh was called")):
+            doc = self.list_json(runs=[(10**6, {**run_record("done"), "pr_url": PR_URL})])
+        self.assertEqual(doc["runs"][0]["pr"], {"url": PR_URL, "state": None, "error": None})
+
+    def test_pr_state(self, _resolve):
+        with patch.object(Host, "pull_request", return_value={"state": "OPEN"}) as pr:
+            doc = self.list_json("--pr-state", runs=[(10**6, {**run_record("done"), "pr_url": PR_URL}),
+                                                     (10**6, run_record("done"))])
+        pr.assert_called_once_with("/proj", PR_URL)
+        self.assertEqual(doc["runs"][0]["pr"]["state"], "OPEN")
+
+    def test_unusable_gh_still_lists(self, _resolve):
+        with patch.object(Host, "pull_request", side_effect=orchestrator.GhUnusable("gh is not installed")):
+            doc = self.list_json("--pr-state", runs=[(10**6, {**run_record("done"), "pr_url": PR_URL})])
+        self.assertEqual(doc["runs"][0]["pr"], {"url": PR_URL, "state": None, "error": "gh is not installed"})
+
+    def test_pr_state_needs_json(self, _resolve):
+        with self.assertRaises(SystemExit) as raised, patch("sys.stderr"):
+            parse_args(["list", "--pr-state"])
+        self.assertEqual(raised.exception.code, 2)
+
+    @patch.object(Herdr, "ssh_target", return_value="remote-host")
+    def test_on_a_machine(self, _target, _resolve):
+        runs = [(STALE_SECONDS + 1, run_record(owner=ME))]
+        with patch.object(Host, "run_states", return_value=runs) as states, \
+                patch.object(Herdr, "_exec", side_effect=AssertionError("herdr was called")), \
+                patch("builtins.print") as out:
+            self.assertEqual(main(["list", "--json", "--machine", "remote", "--cwd", "~/proj"]), 0)
+        self.assertEqual(states.call_args.args, ("/proj",))
+        record = json.loads(out.call_args.args[0])["runs"][0]
+        self.assertEqual(record["resume_command"], "orchestrator.py resume c0ffee --machine remote --cwd '~/proj'")
+
+
 class TestPidAlive(unittest.TestCase):
     def test_own_process_is_alive(self):
         self.assertTrue(orchestrator.pid_alive(os.getpid()))

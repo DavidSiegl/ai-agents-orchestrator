@@ -6450,7 +6450,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     # Hidden and refused below: argparse would otherwise take --spec for an abbreviation of --spec-model.
     resume.add_argument("--spec", nargs="?", const="", help=argparse.SUPPRESS)
 
-    sub.add_parser("list", parents=[target], help="list the runs in the project directory")
+    listing = sub.add_parser(
+        "list", parents=[target], help="list the runs in the project directory",
+        description="List the runs in the project directory: each run's id, phase, round and outcome, and its task.")
+    listing.add_argument("--json", action="store_true",
+                         help=f"print one JSON document instead, {{\"version\": {RUN_RECORD_VERSION}, \"runs\": [...]}}, "
+                              "with a record of each run's state")
+    listing.add_argument("--pr-state", action="store_true",
+                         help="with --json, ask gh for the state of each run's pull request, one call per run")
 
     show = sub.add_parser(
         "show", parents=[target], help="print one run in full: its state, files and last review",
@@ -6514,6 +6521,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
     args = p.parse_args(argv)
     check_spec_args(args, run, resume)
+    if getattr(args, "pr_state", False) and not args.json:
+        listing.error("--pr-state needs --json")
     if getattr(args, "machine", None) and not args.cwd:
         p.error("--cwd is required with --machine")
     if getattr(args, "max_rounds", None) is not None and args.max_rounds < 1:
@@ -6621,7 +6630,7 @@ def format_age(seconds: int) -> str:
 
 RUNNING = "running"
 STALE = "stale"
-# The outcome of a running run whose turn waits on a BLOCKED report (blocked_outcome).
+# The waiting reason, and outcome, of a running run whose turn waits on a BLOCKED report (run_record).
 BLOCKED_STATUS = "blocked"
 
 
@@ -6719,55 +6728,123 @@ def last_review(host: Host, run_dir: str, pipeline: Pipeline, rnd: int) -> tuple
     return None
 
 
+# The version of the run records `list --json` prints, raised when a key is removed or changes its meaning.
+RUN_RECORD_VERSION = 1
+
+
+def run_record(s: dict, age: int, local_host: str, pid_alive, target: list[str]) -> dict:
+    """A run's saved state as `list --json` prints it, and as the run list and `show` word it (run_rows).
+
+    s is the state as Host.run_states loaded it, age the seconds since its state.json was written, and
+    local_host, pid_alive and target are run_health's and resume_command's. Reads nothing beyond s; a state
+    saved by an older version, or one whose workflow this orchestrator cannot load, still makes a record.
+
+    The record is JSON-ready, and has every key below; null means the key does not apply to the run:
+    - id, key, task (the whole task), workflow: the run's id, its key (as resume takes it), task and workflow.
+    - steps: the workflow's steps, each {"id", "role"}, in order; null when the workflow cannot be loaded.
+    - phase, round: as saved. quality_round: the quality round while the run is in the quality loop or its
+      gated step, once it has one; null otherwise.
+    - role, pane: the current step's role and that role's pane; null in quality, publish or done, or when the
+      workflow cannot be loaded, and pane also before the role's agent is started.
+    - health, health_reason: RUNNING or STALE and why, as run_health has them; null for a finished or failed run.
+      heartbeat_age is age.
+    - waiting: what the run waits on the human for, {"reason", "detail"}, else null. Reasons, first match wins:
+      "blocked" (detail: the question) while a running run's turn waits on a BLOCKED report; "interview"
+      (detail: the role) while a running run's current step is human-paced and its last turn has not ended;
+      "stale" (detail: the resume command) for a stale run that is not closed.
+    - verdict, error, closed, branch, worktree: as saved.
+    - pr: null without a pull request, else {"url", "state", "error"}; state and error are null here, and
+      fill_pr_states sets one of them.
+    - turns: the turn records as saved (Workflow._turn_record), [] for a run saved before them.
+    - resume_command: the command that resumes a stale run that is not closed; null otherwise.
+    """
+    pipeline = saved_pipeline(s)
+    step = pipeline.step(s["phase"]) if pipeline else None
+    role = step.role if step else None
+    health = run_health(s, age, local_host, pid_alive)
+    resume = resume_command(s["run_id"], target) if health and health[0] == STALE and not s.get("closed") else None
+    # A workflow this orchestrator lacks has no gated step known, so only phase quality has a quality round then.
+    gated = pipeline.gated.id if pipeline and pipeline.gated else QUALITY
+    turns = s.get("turns") or []
+    last_turn = next((t for t in reversed(turns) if t.get("step") == s["phase"]), None)
+    waiting = None
+    if health and health[0] == RUNNING and s.get("blocked"):
+        waiting = {"reason": BLOCKED_STATUS, "detail": s["blocked"]["question"]}
+    elif (health and health[0] == RUNNING and step and step.human_paced and last_turn
+          and last_turn.get("ended_at") is None):
+        waiting = {"reason": "interview", "detail": role}
+    elif resume:
+        waiting = {"reason": STALE, "detail": resume}
+    return {
+        "id": s["run_id"], "key": s["run_id"].rsplit("-", 1)[-1], "task": s["task"],
+        "workflow": s.get("workflow") or DEFAULT_WORKFLOW.name,
+        "steps": [{"id": st.id, "role": st.role} for st in pipeline.steps] if pipeline else None,
+        "phase": s["phase"], "round": s["round"],
+        "quality_round": s.get("quality_round") if s.get("quality_round") and s["phase"] in (QUALITY, gated) else None,
+        "role": role, "pane": (s.get("agents") or {}).get(role, {}).get("pane") if role else None,
+        "health": health[0] if health else None, "health_reason": health[1] if health else None,
+        "heartbeat_age": age, "waiting": waiting,
+        "verdict": s.get("verdict"), "error": s.get("error"), "closed": s.get("closed"),
+        "branch": s.get("branch"), "worktree": s.get("worktree"),
+        "pr": {"url": s["pr_url"], "state": None, "error": None} if s.get("pr_url") else None,
+        "turns": turns, "resume_command": resume,
+    }
+
+
+def fill_pr_states(host: Host, cwd: str, records: list[dict]) -> None:
+    """Set pr.state of each run record with a pull request to gh's OPEN, CLOSED or MERGED, one gh pr view each,
+    run in the project directory cwd. A run whose lookup fails gets the failure's message in pr.error instead."""
+    for record in records:
+        if pr := record["pr"]:
+            try:
+                pr["state"] = host.pull_request(cwd, pr["url"])["state"]
+            except OrchestratorError as e:  # GhUnusable too: each run says why its state is missing
+                pr["error"] = str(e)
+
+
 def run_rows(runs: list[tuple[int, dict]], local_host: str, pid_alive,
              target: list[str]) -> list[tuple[str, str, str, str, str]]:
     """Each run as `list` shows it, in the GUI too: its id, phase, round, outcome and task."""
-    return [(s["run_id"], s["phase"], run_round(s), run_outcome(s, age, local_host, pid_alive, target),
-             s["task"][:100]) for age, s in runs]
+    rows = []
+    for age, s in runs:
+        record = run_record(s, age, local_host, pid_alive, target)
+        rows.append((record["id"], record["phase"], run_round(record), run_outcome(record), record["task"][:100]))
+    return rows
 
 
-def run_outcome(s: dict, age: int, local_host: str, pid_alive, target: list[str]) -> str:
-    health = run_health(s, age, local_host, pid_alive)
-    if s.get("error"):
-        outcome = f"error: {s['error']}"
-    elif health is None:
-        outcome = s.get("verdict") or ""
-    elif s.get("closed"):
+def run_outcome(record: dict) -> str:
+    """A run record's outcome as `list` words it: its error, verdict, waiting reason or health, then what it has
+    besides, its closing, pull request and a workflow other than the default."""
+    waiting = record["waiting"] or {}
+    if record["error"]:
+        outcome = f"error: {record['error']}"
+    elif record["health"] is None:
+        outcome = record["verdict"] or ""
+    elif record["closed"]:
         # Stale by its heartbeat, but resume refuses it, so neither its staleness nor the command is worth showing.
         outcome = ""
-    elif health[0] == RUNNING and s.get("blocked"):
-        outcome = blocked_outcome(s)
+    elif waiting.get("reason") == BLOCKED_STATUS:
+        outcome = f"{BLOCKED_STATUS}: {waiting['detail']}"
+        if record["pane"]:
+            outcome += f" (pane {record['pane']})"
     else:
-        outcome = f"{health[0]}: {health[1]}"
-        if health[0] == STALE:
-            outcome += f"; resume: {resume_command(s['run_id'], target)}"
-    if s.get("closed"):
-        outcome = "; ".join(part for part in (outcome, f"closed: {s['closed']}") if part)
-    if s.get("pr_url"):
-        outcome += f"  {s['pr_url']}"
-    if (workflow := s.get("workflow", DEFAULT_WORKFLOW.name)) != DEFAULT_WORKFLOW.name:
-        outcome += f"  [{workflow} workflow]"
+        outcome = f"{record['health']}: {record['health_reason']}"
+        if record["resume_command"]:
+            outcome += f"; resume: {record['resume_command']}"
+    if record["closed"]:
+        outcome = "; ".join(part for part in (outcome, f"closed: {record['closed']}") if part)
+    if record["pr"]:
+        outcome += f"  {record['pr']['url']}"
+    if record["workflow"] != DEFAULT_WORKFLOW.name:
+        outcome += f"  [{record['workflow']} workflow]"
     return outcome
 
 
-def blocked_outcome(s: dict) -> str:
-    """A running run's outcome while its current step waits for the human's answer, and the pane to answer in."""
-    outcome = f"{BLOCKED_STATUS}: {s['blocked']['question']}"
-    pipeline = saved_pipeline(s)
-    step = pipeline.step(s["phase"]) if pipeline else None
-    if step and (pane := (s.get("agents") or {}).get(step.role, {}).get("pane")):
-        outcome += f" (pane {pane})"
-    return outcome
-
-
-def run_round(s: dict) -> str:
-    """The run's round, and its quality round while it is in the quality loop or the gated step."""
-    rnd = f"round {s['round']}"
-    # A workflow this orchestrator lacks has no gated step known, so only phase quality shows the quality round.
-    pipeline = saved_pipeline(s)
-    gated = pipeline.gated.id if pipeline and pipeline.gated else QUALITY
-    if s.get("quality_round") and s["phase"] in (QUALITY, gated):
-        rnd += f" q{s['quality_round']}"
+def run_round(record: dict) -> str:
+    """A run record's round, and its quality round when it has one."""
+    rnd = f"round {record['round']}"
+    if record["quality_round"]:
+        rnd += f" q{record['quality_round']}"
     return rnd
 
 
@@ -7160,7 +7237,12 @@ RUNS_COMMANDS = ("list", "show", "prune", "close")
 
 def runs_command(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str) -> None:
     local_host = socket.gethostname()
-    if args.command == "list":
+    if args.command == "list" and args.json:
+        records = [run_record(s, age, local_host, pid_alive, target_args(args)) for age, s in host.run_states(cwd)]
+        if args.pr_state:
+            fill_pr_states(host, cwd, records)
+        print(json.dumps({"version": RUN_RECORD_VERSION, "runs": records}, indent=2))
+    elif args.command == "list":
         print_runs(host.run_states(cwd), local_host, pid_alive, target_args(args))
     elif args.command == "show":
         show_run(host, cwd, args.run_ref, local_host, pid_alive, target_args(args))
