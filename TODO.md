@@ -16,11 +16,14 @@ was done.
   `new_coverage` finds none of its added lines in `coverage.xml` and counts them as not coverable: the coverage
   condition can pass a change whose new code there is untested. `docs/quality-gate.md` states it. Closes with a
   coverage.py that records such files, or with the gate naming them as unmeasured.
-- **The reruns' time limit is thin for the check's own tests.** `FLAKY_RUN_TIMEOUT` is 30 s a run. On
-  `flaky-tests`' own change each run took about 9 s on an idle laptop and about twice that under load, since many of
-  `TestFlakyTests`' tests start nested pytest runs. A run over the limit makes `flaky_tests` report `not-rerun`,
-  not a wrong verdict. Not measured on the Jenkins agent. Closes with a measured limit, or a lighter
-  `TestFlakyTests`.
+- **The reruns' time limit is too short for slow tests on the Jenkins agent.** `FLAKY_RUN_TIMEOUT` is 30 s a run. On
+  `flaky-tests`' own change each run took about 9 s on an idle laptop and about twice that under load. Measured on
+  Jenkins on 2026-10-24 (PR #50, surviving-mutants' change): the first rerun did not finish within 30 s, so the check
+  reported `not-rerun` and judged no test; the tests that change edits start mutmut, and rerunning their four test
+  classes once takes about 50 s on the laptop. A limit that covers them (about 90 s, five seeds) would push the quality
+  build past `QUALITY_TIMEOUT` beside the mutation budget, so the user kept 30 s (2026-10-24). `not-rerun` is a finding
+  to weigh, never a wrong verdict. Closes with one time budget the reruns and mutmut share, or lighter tests for the
+  gate's own checks.
 - **A pytest configuration below the copy's top directory is not used, so its tests are never rerun.**
   `_pytest_inifile` looks only in the top directory of `flaky_tests`' copy, and `_pytest` passes what it finds with
   `-c`, or an empty `pytest.ini`. A project whose pytest configuration is in a subdirectory (`pkg/pyproject.toml`,
@@ -33,11 +36,13 @@ was done.
 - **A file name that holds a line separator breaks its list item in the quality file.** `quality_report` writes
   names as they are, so `\r` or U+2028 in one shows as a line break in some renderers. The finding is still
   matched to the right file. Closes with names escaped when the quality file is written.
-- **The mutation budget's default is not measured on the Jenkins agent.** `MUTATION_BUDGET` is 600 s, which fits
-  `QUALITY_TIMEOUT` by the arithmetic beside it (budget + 75 s, flaky-tests' 180 s, the test run). mutmut runs one
-  worker per CPU: on this branch's own change it made 1702 mutants in 221 s on 24 cores, so an agent with fewer cores
-  ends at the budget, reported as `budget-reached`. Closes with a real quality build's timings, and the default
-  lowered if the build does not fit.
+- **The mutation budget leaves most of a large change's mutants untried.** `MUTATION_BUDGET` is 600 s. Measured on
+  Jenkins on 2026-10-24: on PR #50 (surviving-mutants' change) mutmut tried 756 of 3079 mutants and the Gate stage took
+  683 s, the build about 850 s; on PR #51, 677 of 801 in a 638 s Gate stage. That fits `QUALITY_TIMEOUT` (1200 s) with
+  about 350 s to spare, but not after a wait in Jenkins' queue, which counts against a quality round (PR #52 waited
+  about 860 s behind the others). The user kept 600 s (2026-10-24): a stopped run says `budget-reached`, never "none
+  survived". Closes with the shared time budget above, or mutants chosen by the changed lines rather than whole
+  functions.
 - **`parse_args` still yields many survivors after `do_not_mutate_patterns = ['\bhelp=']`.** Its `description=` texts
   and flag names are mutated, and few tests check them word for word: 105 of 305 mutants survived on this branch's
   change. Reported per function, so it is one finding. Closes with a decision to add `'\bdescription='` to the
