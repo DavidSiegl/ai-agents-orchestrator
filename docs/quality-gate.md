@@ -344,8 +344,9 @@ Only lines a change adds count, so what `main` already has does not block.
 ## Jenkins setup
 
 One `Jenkinsfile` serves two jobs. Every build installs, tests with branch coverage of `orchestrator`, checks the
-desktop app, runs the gate and archives `quality.md`, and builds the Linux binary and desktop app; a build of
-`main` that gets that far also releases. A build of `main` whose tree a pull request build already judged skips the
+desktop app, runs the gate and archives `quality.md`; a pull request or `main` build then builds the Linux binary
+and desktop app, which a quality build skips (the `Jenkinsfile`'s Package stage says why), and a build of `main`
+that gets that far also releases. A build of `main` whose tree a pull request build already judged skips the
 tests, the desktop app's checks and the gate (see
 [A build of main judged at its pull request](#a-build-of-main-judged-at-its-pull-request)).
 

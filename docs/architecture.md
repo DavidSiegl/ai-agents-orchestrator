@@ -273,7 +273,8 @@ running `after` callbacks on `tick`), and `TestRunProcess` runs real child proce
   `ui/`'s `npm ci`, `typecheck`, `lint` and `test` and `ui/src-tauri/`'s `cargo test --locked`, failing the build
   before the gate, a Gate stage that
   runs `orchestrator.py gate` and archives `quality.md` (see [quality gate](quality-gate.md)), and a Package stage
-  that runs `packaging/build-binary.sh` and `packaging/build-desktop.sh` on every build. On `main` a Release stage
+  that runs `packaging/build-binary.sh` and `packaging/build-desktop.sh` on every build but a quality build
+  (`GIT_REF` set). On `main` a Release stage
   publishes a new `pyproject.toml` version as a GitHub release, with `orchestrator.py` attached as the zipapp
   `orchestrator.pyz`, the Linux binary and the Linux desktop app, each with its `.sha256`, in one
   `gh release create`. Its parameter `GIT_REF` builds
