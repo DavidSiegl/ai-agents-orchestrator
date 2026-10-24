@@ -5368,7 +5368,7 @@ class TestGate(unittest.TestCase):
 
     def checks(self, *checks):
         """Run the gate with checks in place of gate_checks's."""
-        p = patch.object(orchestrator, "gate_checks", lambda mutation_budget: checks)
+        p = patch.object(orchestrator, "gate_checks", lambda mutation_budget, base_run_budget: checks)
         p.start()
         self.addCleanup(p.stop)
 
@@ -5862,12 +5862,20 @@ class TestFlakyTests(unittest.TestCase):
                 self.assertIn("`TestRuns.test_alternates` failed under seed 2 and passed under seed 1: ",
                               "\n".join(f["message"] for f in self.found()))
 
+    def fake_python(self, script):
+        """Make the gate's interpreter a shell script that runs script, whatever it is asked."""
+        fake = os.path.join(self.repo, "fake-python")
+        with open(fake, "w") as f:
+            f.write(f"#!/bin/sh\n{script}\n")
+        os.chmod(fake, 0o700)
+        p = patch.object(orchestrator.sys, "executable", fake)
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_a_collection_the_gate_cannot_read_is_a_finding(self):
         self.change_the_tests()
-        printed = subprocess.CompletedProcess([], 0, stdout="tests/test_state.py: 20\n\n20 tests collected\n",
-                                              stderr="")
-        with patch.object(orchestrator.subprocess, "run", return_value=printed):
-            found = self.found()
+        self.fake_python("printf 'tests/test_state.py: 20\\n\\n20 tests collected\\n'")
+        found = self.found()
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-rerun")])
         self.assertIn("printed no node id the gate could read: 20 tests collected", found[0]["message"])
 
@@ -6119,17 +6127,17 @@ class TestFlakyTests(unittest.TestCase):
     def test_a_change_to_no_test_reruns_nothing(self):
         self.put("calc.py", "def add(a, b):\n    return b + a\n")
         self.put("tests/test_state.py", self.BASE.replace("import unittest\n", "import unittest  # edited\n"))
-        with patch.object(orchestrator.subprocess, "run") as run:
+        with patch.object(orchestrator, "_pytest") as pytest_run:
             self.assertEqual(self.found(), [])
-        run.assert_not_called()
+        pytest_run.assert_not_called()
 
     def test_mutmut_s_copy_of_a_test_is_not_rerun(self):
         # mutmut copies the tests into mutants/ beside the mutated code; committed, they are its state, not tests.
         self.put("mutants/tests/test_state.py", self.BASE + "\n\ndef test_new():\n    assert True\n")
         self.git("add", "mutants/tests/test_state.py")
-        with patch.object(orchestrator.subprocess, "run") as run:
+        with patch.object(orchestrator, "_pytest") as pytest_run:
             self.assertEqual(self.found(), [])
-        run.assert_not_called()
+        pytest_run.assert_not_called()
 
     def test_a_rerun_that_cannot_start_is_a_finding(self):
         self.change_the_tests()
@@ -6140,11 +6148,11 @@ class TestFlakyTests(unittest.TestCase):
 
     def test_a_rerun_that_times_out_is_a_finding(self):
         self.change_the_tests()
-        timeout = subprocess.TimeoutExpired(["pytest"], orchestrator.FLAKY_RUN_TIMEOUT)
-        with patch.object(orchestrator.subprocess, "run", side_effect=timeout):
+        self.fake_python("exec sleep 30")
+        with patch.object(orchestrator, "FLAKY_RUN_TIMEOUT", 1):
             found = self.found()
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-rerun")])
-        self.assertIn(f"did not finish within {orchestrator.FLAKY_RUN_TIMEOUT} seconds", found[0]["message"])
+        self.assertIn("did not finish within 1 seconds", found[0]["message"])
 
     def test_no_room_for_the_reruns_is_a_finding(self):
         self.change_the_tests()
@@ -6224,6 +6232,390 @@ class TestFlakyTests(unittest.TestCase):
     def test_it_reports_without_failing_the_gate(self):
         [check] = [c for c in orchestrator.gate_checks(orchestrator.MUTATION_BUDGET) if c.name == "flaky-tests"]
         self.assertEqual((check.fails, check.find), (False, orchestrator.flaky_tests))
+
+
+class TestPassesAtBase(unittest.TestCase):
+    """The passes-at-base check over a real git repository, running its tests with this suite's own pytest."""
+
+    # add is wrong at the base; mul is right, and stays so.
+    CALC = "def add(a, b):\n    return a - b\n\n\ndef mul(a, b):\n    return a * b\n"
+    TESTS = "from calc import mul\n\n\ndef test_mul():\n    assert mul(2, 3) == 6\n"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = tmp.name
+        self.host = Host()
+        self.git("init", "--quiet", "-b", "main")
+        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
+            self.git("config", key, value)
+        self.put("calc.py", self.CALC)
+        self.put("tests/test_calc.py", self.TESTS)
+        self.put("pytest.ini", "[pytest]\npythonpath = .\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "base")
+
+    def git(self, *args):
+        return self.host.git(self.repo, *args)
+
+    def put(self, name, text):
+        path = os.path.join(self.repo, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    def found(self, budget=orchestrator.BASE_RUN_BUDGET):
+        """The check's findings on the working tree, every file in it tracked."""
+        base = self.git("rev-parse", "HEAD").strip()
+        self.git("add", "-A")
+        return orchestrator.passes_at_base(orchestrator.GateChange.from_tree(self.repo, base), budget=budget)
+
+    def fix_add(self, tests=""):
+        """Fix add, and add test_add, which fails on the old add, then tests."""
+        self.put("calc.py", self.CALC.replace("a - b", "a + b"))
+        self.put("tests/test_calc.py", self.TESTS.replace("import mul", "import add, mul")
+                 + "\n\ndef test_add():\n    assert add(2, 2) == 4\n" + tests)
+
+    def test_a_test_that_fails_without_the_fix_gives_nothing(self):
+        self.fix_add()
+        self.assertEqual(self.found(), [])
+
+    def test_a_test_of_code_the_change_left_alone_passes_at_the_base(self):
+        # The fixture comes from a conftest.py the change adds, so the test runs at the base only with it overlaid.
+        self.put("tests/conftest.py", "import pytest\n\n\n@pytest.fixture\ndef three():\n    return 3\n")
+        self.fix_add("\n\nimport pytest\n\n\n@pytest.mark.parametrize('n', [1, 2])\n"
+                     "def test_mul_again(n, three):\n    assert mul(n, three) == 3 * n\n")
+        self.git("add", "-A")
+        status = self.git("status", "--porcelain")
+        found = self.found()
+        with open(os.path.join(self.repo, "tests/test_calc.py")) as f:
+            line = f.read().splitlines().index("def test_mul_again(n, three):") + 1
+        self.assertEqual(found, [{"path": "tests/test_calc.py", "line": line, "severity": "warning",
+                                  "rule": "passes-at-base",
+                                  "message": "`test_mul_again` passes without the change, so it does not test it."}])
+        self.assertEqual(self.git("status", "--porcelain"), status)
+
+    def test_a_test_of_a_function_the_change_adds_gives_nothing(self):
+        # At the base, the test file cannot import sub, so pytest collects nothing from it.
+        self.put("calc.py", self.CALC + "\n\ndef sub(a, b):\n    return a - b\n")
+        self.put("tests/test_sub.py", "from calc import sub\n\n\ndef test_sub():\n    assert sub(3, 1) == 2\n")
+        self.assertEqual(self.found(), [])
+
+    def test_a_change_to_the_tests_alone_is_not_run(self):
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_zero():\n    assert mul(0, 5) == 0\n")
+        with patch.object(orchestrator, "_pytest") as pytest_run:
+            self.assertEqual(self.found(), [])
+        pytest_run.assert_not_called()
+
+    def fake_pytest(self, collect, run):
+        """Make the gate's interpreter a shell script that runs collect for a --collect-only and run otherwise."""
+        fake = os.path.join(self.repo, "fake-python")
+        with open(fake, "w") as f:
+            f.write(f'#!/bin/sh\ncase "$*" in *--collect-only*) {collect};; *) {run};; esac\n')
+        os.chmod(fake, 0o700)
+        p = patch.object(orchestrator.sys, "executable", fake)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_a_run_past_the_budget_says_how_many_test_cases_ran(self):
+        self.fix_add("\n\ndef test_more():\n    assert add(1, 1) == 2\n")
+        # The sleep in the background holds pytest's output open too: only killing its process group ends the run.
+        self.fake_pytest("printf 'tests/test_calc.py::test_add\\ntests/test_calc.py::test_more\\n'",
+                         "printf '.'; sleep 30 & exec sleep 30")
+        start = time.monotonic()
+        found = self.found(budget=1)
+        self.assertLess(time.monotonic() - start, orchestrator.MUTMUT_KILL_WAIT)
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "budget-reached")])
+        self.assertEqual(found[0]["message"], "pytest was stopped at 1 seconds (`--base-run-budget`) after 1 of the 2 "
+                                              "test cases it was given, before it reported them, so none of them was "
+                                              "judged.")
+
+    def test_a_collection_past_the_budget_is_a_finding(self):
+        self.fix_add()
+        self.fake_pytest("exec sleep 30", "exit 0")
+        self.assertEqual([f["message"] for f in self.found(budget=1)], [(
+            "pytest was stopped at 1 seconds (`--base-run-budget`) while it collected the changed tests, so none of "
+            "them was judged.")])
+
+    def test_a_test_pytest_does_not_collect_leaves_the_others_judged(self):
+        # pytest does not collect a test_* method of a class not named Test*; asked for it by id, it exits 4.
+        self.fix_add("\n\nclass CalcMixin:\n    def test_x(self):\n        assert True\n"
+                     "\n\ndef test_mul_one():\n    assert mul(1, 1) == 1\n")
+        self.assertEqual([(f["rule"], f["message"].split("`")[1]) for f in self.found()],
+                         [("passes-at-base", "test_mul_one")])
+
+    def test_a_conftest_that_cannot_be_imported_at_the_base_gives_nothing(self):
+        self.put("calc.py", self.CALC.replace("a - b", "a + b") + "\n\nTWO = 2\n")
+        self.put("tests/conftest.py", "import pytest\n\nfrom calc import TWO\n\n\n@pytest.fixture\n"
+                                      "def two():\n    return TWO\n")
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_two(two):\n    assert mul(two, 1) == 2\n")
+        self.assertEqual(self.found(), [])
+
+    def test_a_conftest_that_cannot_be_imported_hides_only_the_tests_under_it(self):
+        self.put("calc.py", self.CALC.replace("a - b", "a + b") + "\n\nTWO = 2\n")
+        self.put("tests/b/conftest.py", "from calc import TWO\n")
+        self.put("tests/b/test_two.py", "from calc import mul\n\n\ndef test_two():\n    assert mul(2, 1) == 2\n")
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_one():\n    assert mul(1, 1) == 1\n")
+        self.assertEqual([(f["path"], f["message"].split("`")[1]) for f in self.found()],
+                         [("tests/test_calc.py", "test_mul_one")])
+
+    def test_a_conftest_broken_otherwise_is_a_finding(self):
+        self.put("calc.py", self.CALC.replace("a - b", "a + b"))
+        self.put("tests/conftest.py", "raise RuntimeError('broken')\n")
+        self.git("add", "tests/conftest.py")
+        self.git("commit", "--quiet", "-m", "broken conftest")
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_one():\n    assert mul(1, 1) == 1\n")
+        self.assertEqual([(f["rule"], "exited with status 4" in f["message"]) for f in self.found()],
+                         [("not-run", True)])
+
+    def test_nothing_is_written_through_a_link_the_change_replaces(self):
+        outside = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, outside)
+        self.git("rm", "--quiet", "-r", "tests")
+        os.symlink(outside, os.path.join(self.repo, "tests"))
+        self.git("add", "tests")
+        self.git("commit", "--quiet", "-m", "tests elsewhere")
+        os.remove(os.path.join(self.repo, "tests"))
+        self.fix_add("\n\ndef test_mul_one():\n    assert mul(1, 1) == 1\n")
+        # The whole test file is new to the change, so test_mul is changed too.
+        self.assertEqual([f["message"].split("`")[1] for f in self.found()], ["test_mul", "test_mul_one"])
+        self.assertEqual(os.listdir(outside), [])
+
+    def test_a_pytest_that_stops_before_it_collects_is_a_finding(self):
+        # pytest exits 1 for a plugin it cannot import, as for collection errors, but collects nothing.
+        self.put("calc.py", self.CALC.replace("a - b", "a + b"))
+        self.put("conftest.py", "pytest_plugins = ['calc_plugin']\n")
+        self.put("calc_plugin.py", "")
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_one():\n    assert mul(1, 1) == 1\n")
+        found = self.found()
+        self.assertEqual([(f["path"], f["rule"]) for f in found], [(None, "not-run")])
+        self.assertIn("pytest stopped before it collected the changed tests at the base: ", found[0]["message"])
+        self.assertIn("calc_plugin", found[0]["message"])
+
+    def test_a_directory_the_change_makes_a_link_is_replaced(self):
+        self.put("tests/data/x.json", "{}\n")
+        self.git("add", "tests/data")
+        self.git("commit", "--quiet", "-m", "data")
+        self.git("rm", "--quiet", "-r", "tests/data")
+        self.put("fixtures/x.json", "{}\n")
+        os.symlink("../fixtures", os.path.join(self.repo, "tests/data"))
+        self.fix_add("\n\ndef test_mul_one():\n    assert mul(1, 1) == 1\n")
+        self.assertEqual([f["message"].split("`")[1] for f in self.found()], ["test_mul_one"])
+
+    def test_a_change_to_docs_and_tests_is_not_run(self):
+        self.put("TODO.md", "- nothing\n")
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_zero():\n    assert mul(0, 5) == 0\n")
+        with patch.object(orchestrator, "_pytest") as pytest_run:
+            self.assertEqual(self.found(), [])
+        pytest_run.assert_not_called()
+
+    def test_a_tracked_link_out_of_the_tree_does_not_stop_the_copy(self):
+        os.symlink("/etc/hostname", os.path.join(self.repo, "host"))
+        self.git("add", "host")
+        self.git("commit", "--quiet", "-m", "link")
+        self.fix_add("\n\ndef test_mul_one():\n    assert mul(1, 1) == 1\n")
+        self.assertEqual([f["rule"] for f in self.found()], ["passes-at-base"])
+
+    def test_a_run_that_cannot_start_is_a_finding(self):
+        self.fix_add()
+        with patch.object(orchestrator.sys, "executable", os.path.join(self.repo, "no-python")):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
+        self.assertIn("could not start pytest", found[0]["message"])
+
+    def test_an_unparsable_test_file_is_a_finding(self):
+        self.put("calc.py", self.CALC.replace("a - b", "a + b"))
+        self.put("tests/test_calc.py", self.TESTS + "def test_new(:\n")
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in self.found()],
+                         [("tests/test_calc.py", None, "not-run")])
+
+    def test_a_change_beside_the_tests_alone_is_not_run(self):
+        # A conftest.py anywhere and any file under tests/ go with the tests, not with the code they test.
+        self.put("conftest.py", "")
+        self.put("tests/data/input.txt", "2 3\n")
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_zero():\n    assert mul(0, 5) == 0\n")
+        with patch.object(orchestrator, "_pytest") as pytest_run:
+            self.assertEqual(self.found(), [])
+        pytest_run.assert_not_called()
+
+    def test_its_budget_is_a_whole_number_of_seconds_from_1(self):
+        self.assertEqual(parse_args(["gate", "--base", "main", "--base-run-budget", "7"]).base_run_budget, 7)
+        self.assertEqual(parse_args(["gate", "--base", "main"]).base_run_budget, orchestrator.BASE_RUN_BUDGET)
+        for flag in ("--base-run-budget", "--mutation-budget"):
+            for value, error in (("0", "must be at least 1, not 0"), ("1.5", "expected a whole number of seconds")):
+                with self.subTest(flag=flag, value=value), patch("sys.stderr", new_callable=io.StringIO) as err:
+                    with self.assertRaises(SystemExit):
+                        parse_args(["gate", "--base", "main", flag, value])
+                    self.assertIn(f"argument {flag}: {error}", err.getvalue())
+
+    def test_it_reports_without_failing_the_gate_within_its_budget(self):
+        with patch.object(orchestrator, "passes_at_base", return_value=[]) as find:
+            [check] = [c for c in orchestrator.gate_checks(base_run_budget=42) if c.name == "passes-at-base"]
+            check.find("change")
+        self.assertFalse(check.fails)
+        find.assert_called_once_with("change", budget=42)
+
+
+class TestWrittenRules(unittest.TestCase):
+    """The coding rules the agents are given as prose, as this repository's ruff rules state them."""
+
+    PYPROJECT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pyproject.toml")
+
+    def ruff(self, name, text):
+        """(line, rule code) of each finding the real ruff reports on text, saved as name in a copy of this
+        repository's pyproject.toml's directory, run there with a relative path as the gate runs it: ruff resolves
+        per-file-ignores against its working directory."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        shutil.copy(self.PYPROJECT, tmp.name)
+        os.makedirs(os.path.join(tmp.name, os.path.dirname(name)), exist_ok=True)
+        with open(os.path.join(tmp.name, name), "w") as f:
+            f.write(text)
+        # A fixed command over a file this test wrote; no shell reads it.
+        proc = subprocess.run([sys.executable, "-m", "ruff", "check", "--config", "pyproject.toml",  # noqa: S603
+                               "--no-cache", "--output-format", "concise", name],
+                              cwd=tmp.name, capture_output=True, text=True, check=False)
+        self.assertNotIn("No module named", proc.stderr)
+        self.assertIn(proc.returncode, (0, 1), proc.stderr)
+        return sorted((int(line), code) for line, code in re.findall(r":(\d+):\d+: ([A-Z]+\d+)", proc.stdout))
+
+    STORE = ('"""A module."""\n\n\ndef load():\n    return 1\n\n\nclass Store:\n    def get(self):\n        return 1\n'
+             '\n    def __init__(self):\n        self.n = 1\n\n    def __len__(self):\n        return 1\n'
+             '\n\ndef _private():\n    return 1\n')
+
+    def test_an_undocumented_public_function_class_or_method_is_found_at_its_def_outside_the_tests(self):
+        self.assertEqual(self.ruff("store.py", self.STORE), [(4, "D103"), (8, "D101"), (9, "D102")])
+        # The tests document themselves by their names.
+        self.assertEqual(self.ruff("tests/test_store.py", self.STORE.replace('"""A module."""\n', "")), [])
+
+    def test_a_blind_except_that_goes_on_is_found(self):
+        # BLE001 comes from ruff's defaults, which extend-select keeps: this fails if the rules move to select.
+        text = ('"""A module."""\n\n\ndef load():\n    """Load."""\n    try:\n        return 1\n'
+                '    except Exception:\n        return None\n')
+        self.assertEqual(self.ruff("store.py", text), [(8, "BLE001")])
+
+
+class TestVagueNames(unittest.TestCase):
+    """The vague-names check over a real git repository: a base commit, then the change in its working tree."""
+
+    BASE = "data = 1\n\n\ndef old(value):\n    return value\n"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = tmp.name
+        self.host = Host()
+        self.git("init", "--quiet", "-b", "main")
+        for key, setting in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
+            self.git("config", key, setting)
+        self.put("calc.py", self.BASE)
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "base")
+
+    def git(self, *args):
+        return self.host.git(self.repo, *args)
+
+    def put(self, name, text):
+        path = os.path.join(self.repo, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    def found(self):
+        """(path, line, rule, message) of each finding on the working tree's change, every file in it tracked."""
+        self.git("add", "-A")
+        change = orchestrator.GateChange.from_tree(self.repo, self.git("rev-parse", "HEAD").strip())
+        return [(f["path"], f["line"], f["rule"], f["message"]) for f in orchestrator.vague_names(change)]
+
+    def test_each_vague_name_an_added_line_binds_is_found_once_at_its_first_binding(self):
+        added = textwrap.dedent("""\
+
+
+            class InfoManager:
+                def __init__(self, raw_info, *, metadata=None, **user_data):
+                    self.handle = raw_info
+                    self.result = metadata
+
+
+            def load(path):
+                result = []
+                for line_value in open(path):
+                    with line_value as status:
+                        data = status
+                        data = data
+                        result.append(data)
+                return result
+            """)
+        self.put("calc.py", self.BASE + added)
+        base = len(self.BASE.splitlines())
+        found = [(path, line - base, rule, message) for path, line, rule, message in self.found()]
+        self.assertEqual([(line, message.split("`")[1]) for _, line, _, message in found], [
+            (4, "raw_info"), (4, "user_data"), (5, "handle"), (11, "line_value"), (12, "status"), (13, "data")])
+        self.assertEqual({(path, rule) for path, _, rule, _ in found}, {("calc.py", "vague-name")})
+        self.assertEqual(found[0][3], "`raw_info` could name anything; name it for what it holds.")
+
+    def test_every_python_file_is_read_and_no_other(self):
+        # notes.txt sorts before calc.py in the diff, so a check that stopped at it would not read calc.py.
+        self.put("a_notes.txt", "data = 1\n")
+        self.put("calc.py", self.BASE + "\n\nclass C:\n    @classmethod\n    def make(cls):\n        cls.manager = 1\n")
+        self.assertEqual([(path, message.split("`")[1]) for path, _, _, message in self.found()],
+                         [("calc.py", "manager")])
+
+    def test_imports_excepts_matches_and_type_parameters_bind_names(self):
+        self.put("calc.py", self.BASE + textwrap.dedent("""\
+
+
+            import json as raw_data
+            from os import path as status
+
+
+            def parse[T_value](text: str) -> None:
+                try:
+                    match json.loads(text):
+                        case {"k": handle, **rest_info}:
+                            pass
+                        case [*all_status]:
+                            pass
+                except ValueError as info:
+                    raise
+            """))
+        self.assertEqual([message.split("`")[1] for _, _, _, message in self.found()],
+                         # A mapping pattern's **rest is placed at the pattern's start, before the captures in it.
+                         ["raw_data", "status", "T_value", "rest_info", "handle", "all_status", "info"])
+
+    def test_an_override_s_name_and_parameters_are_its_base_s(self):
+        self.put("calc.py", self.BASE + textwrap.dedent("""\
+
+
+            from typing import override
+
+
+            class Handler(Base):
+                @override
+                def handle(self, raw_data):
+                    status = raw_data
+                    return status
+            """))
+        self.assertEqual([message.split("`")[1] for _, _, _, message in self.found()], ["status"])
+
+    def test_a_name_on_a_line_the_change_left_alone_is_not_found(self):
+        self.put("calc.py", self.BASE.replace("return value", "return value + 1"))
+        self.assertEqual(self.found(), [])
+
+    def test_a_class_or_function_named_by_a_vague_word_is_found(self):
+        self.put("tests/test_calc.py", "class Manager:\n    pass\n\n\ndef handle():\n    pass\n")
+        self.assertEqual([(path, line) for path, line, _, _ in self.found()],
+                         [("tests/test_calc.py", 1), ("tests/test_calc.py", 5)])
+
+    def test_an_unparsable_file_is_a_finding(self):
+        self.put("calc.py", self.BASE + "def broken(:\n")
+        [(path, line, rule, message)] = self.found()
+        self.assertEqual((path, line, rule), ("calc.py", None, "not-read"))
+        self.assertEqual(message, "does not parse as Python, so its names were not read.")
+
+    def test_it_reports_without_failing_the_gate(self):
+        [check] = [c for c in orchestrator.gate_checks() if c.name == "vague-names"]
+        self.assertEqual((check.fails, check.find), (False, orchestrator.vague_names))
 
 
 class TestSurvivingMutants(unittest.TestCase):
