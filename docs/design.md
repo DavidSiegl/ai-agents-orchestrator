@@ -269,9 +269,9 @@ Its likely successor, a live UI that also lets you answer the agents, is compare
 
 ## Builds and releases
 
-Jenkins does the building and releasing: the tests, the Linux binary (on every build, so a change that breaks
-it fails before it is merged) and, on a merge into `main` that raises the
-version, the release with `orchestrator.pyz` and the Linux binary. Jenkins has no Mac, so one GitHub Action
+Jenkins does the building and releasing: the tests, the Linux binary (on every pull request and `main` build, so
+a change that breaks it fails before it is merged; not in a quality build) and, on a merge into `main` that raises
+the version, the release with `orchestrator.pyz` and the Linux binary. Jenkins has no Mac, so one GitHub Action
 builds the macOS binary when that release is published and uploads it there. It can only add files to a release
 that exists. Both build with `packaging/build-binary.sh`, so the binaries cannot be built or smoke-tested
 differently. The macOS binary is built only for Apple Silicon and is unsigned, apart from PyInstaller's ad-hoc

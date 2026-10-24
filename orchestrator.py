@@ -7084,7 +7084,7 @@ class Workflow:
             self._start_build(ref, deadline, adopt=not fresh)
         number = s.ci["build"]
         result = self._poll(f"waiting for Jenkins build #{number} of {ref}", deadline,
-                            lambda: self._jenkins.build_result(number))
+                            lambda: self._build_result(ref, number))
         quality = self._once(f"reading quality.md of Jenkins build #{number}", deadline,
                              lambda: self._jenkins.quality_file(number))
         if quality is None and result == "ABORTED":
@@ -7133,6 +7133,20 @@ class Workflow:
             raise OrchestratorError(f"the build of {ref} was cancelled in Jenkins's queue, so nothing judged the "
                                     f"change; resume to trigger a new one")
         return (item.get("executable") or {}).get("number")
+
+    def _build_result(self, ref: str, number: int) -> str | None:
+        """build_result of number, which ci records as the build of ref; a build Jenkins no longer has fails the run,
+        cut back so that a resume builds ref again."""
+        try:
+            return self._jenkins.build_result(number)
+        except CIError as e:
+            if e.status != 404:
+                raise
+            # The Jenkinsfile's buildDiscarder drops the job's oldest builds, which a run stopped mid-round and resumed
+            # much later can still name.
+            self._cut_back()
+            raise OrchestratorError(f"Jenkins build #{number} of {ref} is gone, discarded by the job; resume to "
+                                    f"build it again") from e
 
     def _cut_back(self, rejected: int | None = None) -> None:
         """Keep only the pushed commit in ci, so a resume builds it anew, never adopting the rejected build."""

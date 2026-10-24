@@ -10,6 +10,10 @@ pipeline {
 
     options {
         skipDefaultCheckout()
+        // Per job, and per branch or pull request in the multibranch one; a discarded build takes its archived
+        // quality.md with it, and a resumed run that still names it builds its ref again. Jenkins never discards the
+        // last successful build, which GIT_PREVIOUS_SUCCESSFUL_COMMIT names for the Gate stage.
+        buildDiscarder(logRotator(numToKeepStr: '30'))
     }
 
     environment {
@@ -167,10 +171,14 @@ pipeline {
             }
         }
 
-        // The Linux binary and the desktop app around it, built on every build, so a change that breaks either
-        // fails before it is merged; Release attaches them. The macOS ones come from
-        // .github/workflows/macos-binary.yml, with the same scripts, since Jenkins has no macOS machine.
+        // The Linux binary and the desktop app around it, built on every pull request and main build, so a change
+        // that breaks either fails before it is merged; Release attaches them. Not in a quality build (GIT_REF set):
+        // the orchestrator run that triggered it waits for the whole build, within QUALITY_TIMEOUT, for a quality
+        // file the Gate stage has already archived, and the change is packaged by its pull request's build before it
+        // merges. The macOS ones come from .github/workflows/macos-binary.yml, with the same scripts, since Jenkins
+        // has no macOS machine.
         stage('Package') {
+            when { expression { return !params.GIT_REF } }
             steps {
                 sh 'packaging/build-binary.sh'
                 sh 'packaging/build-desktop.sh'
