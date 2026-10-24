@@ -6676,8 +6676,8 @@ class Workflow:
                             review.rstrip("\n") + "\n\n" + proofs_section(command, s.work_dir, review, records))
 
     def _rerun_proofs(self, step: Step, n: int) -> None:
-        """Before the verdict step's turn of round n, run each proof that failed when last run, in an earlier round
-        (_carried_proofs), again against the change, and record the outcomes in RunState.proofs. A resume runs none
+        """Before the verdict step's turn of round n, run each proof carried into it from an earlier round
+        (_carried_proofs) again against the change, and record the outcomes in RunState.proofs. A resume runs none
         once round n's reruns are recorded."""
         s, command = self.state, self.pipeline.proof_command
         if command is None or self._reruns(n):
