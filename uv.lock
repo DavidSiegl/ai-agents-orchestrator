@@ -9,7 +9,7 @@ resolution-markers = [
 
 [[package]]
 name = "ai-agents-orchestrator"
-version = "0.25.1"
+version = "0.27.0"
 source = { virtual = "." }
 
 [package.dev-dependencies]
