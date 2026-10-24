@@ -9339,6 +9339,10 @@ class TestLockedFiles(unittest.TestCase):
         self.assertEqual(orchestrator.parse_workflow("locking", tomllib.loads(text)), LOCKING)
 
 
+# A proof run_proofs writes that fails until a Builder turn fixes it.
+FIXABLE = object()
+
+
 class TestProofs(unittest.TestCase):
     """The verdict step's proofs, run for real by sh in a scratch directory that stands in for the project."""
 
@@ -9348,29 +9352,38 @@ class TestProofs(unittest.TestCase):
         self.proj = tmp.name
         self.pipeline = replace(QUICK, proof_command="sh {proofs}")
 
-    def run_proofs(self, *reviews, builds=2, pipeline=None, state=None, host=None):
+    def run_proofs(self, *reviews, builds=2, fixes=(), max_rounds=3, pipeline=None, state=None, host=None):
         """A quick run in the scratch project whose Reviewer writes, per round, a review and {proof file: its exit
-        status}; returns the workflow, the host and the Builder's prompts."""
-        seen = []
+        status, or FIXABLE}; returns the workflow, the host and the Builder's prompts, and keeps the Reviewer's in
+        self.reviewed. fixes lists, per Builder turn from round 2 on, the FIXABLE proofs it makes pass."""
+        seen, self.reviewed = [], []
 
         def review(n, verdict, proofs):
             def turn(prompt, state, host):
                 for name, exit_status in proofs.items():
                     os.makedirs(state.proofs_dir(n), exist_ok=True)
                     with open(f"{state.proofs_dir(n)}/{name}", "w") as f:
-                        f.write(f"echo checking {name}\nexit {exit_status}\n")
+                        f.write(f"echo checking {name}\n" + (f"test -e fixed-{name} || exit 1\n" if exit_status is FIXABLE
+                                                            else f"exit {exit_status}\n"))
                 return writes(lambda s: s.review_path(n), f"VERDICT: {verdict}\n1. a bug\n2. another\n3. more\n")(
                     prompt, state, host)
-            return turn
+            return recording(turn, self.reviewed)
+
+        def build(n):
+            def turn(prompt, state, host):
+                for name in (fixes[n - 2] if 2 <= n < len(fixes) + 2 else ()):
+                    open(f"{self.proj}/fixed-{name}", "w").close()
+                return build_turn(n)(prompt, state, host)
+            return recording(turn, seen)
         pipeline = pipeline or self.pipeline
         state = state or RunState("20260929-120000-a1b2c3", "add a rate limiter", self.proj, None, phase="build",
                                   workflow=pipeline.name)
         host = host or FakeHost()
         host._run = subprocess.run
         wf, herdr, host, _ = make_workflow({
-            "build": [recording(build_turn(n), seen) for n in range(1, builds + 1)],
+            "build": [build(n) for n in range(1, builds + 1)],
             "review": [review(n, *r) for n, r in enumerate(reviews, 1)]},
-            host=host, state=state, pipeline=pipeline, pull_request=False)
+            host=host, max_rounds=max_rounds, state=state, pipeline=pipeline, pull_request=False)
         return wf, host, seen
 
     def test_a_failing_proof_demonstrates_its_finding_and_the_builder_must_make_it_pass(self):
@@ -9386,7 +9399,7 @@ class TestProofs(unittest.TestCase):
                       "  ````", review)
         self.assertIn("- `test_2.sh` (finding 2): not demonstrated, it passes.", review)
         self.assertIn("- `test_3.sh` (finding 3): not demonstrated, it errors, with exit status 4.", review)
-        self.assertEqual([(p["file"], p["finding"], p["demonstrated"]) for p in state.proofs],
+        self.assertEqual([(p["file"], p["finding"], p["demonstrated"]) for p in state.proofs if p["round"] == 1],
                          [("test_1_bug.sh", 1, True), ("test_2.sh", 2, False), ("test_3.sh", 3, False)])
         self.assertEqual(state.proofs[0]["said"], "it fails:\nchecking test_1_bug.sh")
         self.assertIn("\n\n" + orchestrator.PROOFS_NOTE.format(proofs=f"{state.proofs_dir(1)}/test_1_bug.sh"), seen[1])
@@ -9420,6 +9433,8 @@ class TestProofs(unittest.TestCase):
         state = RunState("20260929-120000-a1b2c3", "add a rate limiter", self.proj, None, phase="review", round=1,
                          workflow="quick", base="abc123", proofs=proofs)
         host = FakeHost()
+        # Round 2's review runs the demonstrated proofs again, and finds no file.
+        host._run = subprocess.run
         host.files[state.review_path(1)] = review
         host.files[state.build_path(1)] = "report 1"
         seen = []
@@ -9433,7 +9448,7 @@ class TestProofs(unittest.TestCase):
         proof = {"round": 1, "file": "test_1.sh", "finding": 1, "demonstrated": True, "said": "it fails"}
         wf, host, seen = self.resumed_in_review(judged, [proof])
         self.assertEqual(host.files[wf.state.review_path(1)], judged)
-        self.assertEqual(wf.state.proofs, [proof])
+        self.assertEqual([p for p in wf.state.proofs if p["round"] == 1], [proof])
         self.assertIn(orchestrator.PROOFS_NOTE.format(proofs=f"{wf.state.proofs_dir(1)}/test_1.sh"), seen[0])
 
     def test_proofs_recorded_before_a_resume_are_appended_without_running_again(self):
@@ -9441,6 +9456,96 @@ class TestProofs(unittest.TestCase):
         proof = {"round": 1, "file": "test_1.sh", "finding": 1, "demonstrated": True, "said": "it fails"}
         wf, host, _ = self.resumed_in_review("VERDICT: CHANGES_REQUESTED\n1. a bug\n", [proof])
         self.assertIn("- `test_1.sh` (finding 1): demonstrated, it fails.", host.files[wf.state.review_path(1)])
+
+    def carried_note(self, *items):
+        """The note the Reviewer hears of proofs from earlier rounds run again, items being its list's items."""
+        return "\n\n" + orchestrator.CARRIED_PROOFS_NOTE.format(command="sh {proofs}", cwd=self.proj,
+                                                                 proofs="\n\n".join(items))
+
+    def test_a_demonstrated_proof_runs_again_every_round_until_it_passes(self):
+        wf, host, seen = self.run_proofs(
+            (CHANGES_REQUESTED, {"test_1_bug.sh": FIXABLE, "test_2.sh": FIXABLE, "test_3.sh": 0}),
+            (CHANGES_REQUESTED, {"test_4.sh": 1}), (CHANGES_REQUESTED, {}), (APPROVE, {}),
+            builds=4, fixes=[["test_2.sh"], [], ["test_1_bug.sh"]], max_rounds=4)
+        self.assertEqual(wf.run(), APPROVE)
+        state = wf.state
+        one, two = state.proofs_dir(1), state.proofs_dir(2)
+
+        self.assertNotIn("run again", self.reviewed[0])
+        self.assertTrue(self.reviewed[1].endswith(self.carried_note(
+            f"- `{one}/test_1_bug.sh`: still fails, it fails.\n\n  ````\n  checking test_1_bug.sh\n  ````",
+            f"- `{one}/test_2.sh`: no longer fails, it passes.")), self.reviewed[1])
+        self.assertTrue(self.reviewed[2].endswith(self.carried_note(
+            f"- `{one}/test_1_bug.sh`: still fails, it fails.\n\n  ````\n  checking test_1_bug.sh\n  ````",
+            f"- `{two}/test_4.sh`: still fails, it fails.\n\n  ````\n  checking test_4.sh\n  ````")))
+        self.assertIn(self.carried_note(f"- `{one}/test_1_bug.sh`: no longer fails, it passes.",
+                                        f"- `{two}/test_4.sh`: still fails, it fails.\n\n  ````\n  checking test_4.sh\n  ````"), self.reviewed[3])
+        self.assertEqual([(p["round"], p["written"], p["file"], p["demonstrated"]) for p in state.proofs], [
+            (1, 1, "test_1_bug.sh", True), (1, 1, "test_2.sh", True), (1, 1, "test_3.sh", False),
+            (2, 1, "test_1_bug.sh", True), (2, 1, "test_2.sh", False), (2, 2, "test_4.sh", True),
+            (3, 1, "test_1_bug.sh", True), (3, 2, "test_4.sh", True),
+            (4, 1, "test_1_bug.sh", False), (4, 2, "test_4.sh", True)])
+
+        # The step the review loops back to hears every proof that still fails, from whichever round wrote it.
+        self.assertIn(orchestrator.PROOFS_NOTE.format(proofs=f"{one}/test_1_bug.sh, {one}/test_2.sh"), seen[1])
+        self.assertIn(orchestrator.PROOFS_NOTE.format(proofs=f"{one}/test_1_bug.sh, {two}/test_4.sh"), seen[2])
+        self.assertIn(orchestrator.PROOFS_NOTE.format(proofs=f"{one}/test_1_bug.sh, {two}/test_4.sh"), seen[3])
+
+        # Round 1's review is the only one with proofs of its own written into it; reruns leave the reviews alone.
+        self.assertNotIn(orchestrator.PROOFS_HEADING, host.files[state.review_path(3)])
+        self.assertNotIn("test_1_bug", host.files[state.review_path(2)])
+
+    def test_a_round_with_no_proof_to_carry_prompts_the_reviewer_as_before(self):
+        # Proofs that pass or error are not carried, so round 2's review is prompted as in a run without proofs.
+        wf, _, _ = self.run_proofs((CHANGES_REQUESTED, {"test_1.sh": 0, "test_2.sh": 4}), (APPROVE, {}))
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual([p["round"] for p in wf.state.proofs], [1, 1])
+        carried = self.reviewed
+        wf, _, _ = self.run_proofs((CHANGES_REQUESTED, {}), (APPROVE, {}))
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(carried, self.reviewed)
+
+    def test_reruns_recorded_before_a_resume_are_not_run_again_and_still_heard(self):
+        # No proof file is on disk: running one again would record that it errors.
+        first = {"round": 1, "file": "test_1.sh", "finding": 1, "demonstrated": True, "said": "it fails"}
+        rerun = {"round": 2, "written": 1, "file": "test_1.sh", "finding": 1, "demonstrated": True,
+                 "said": "it fails:\nstill broken"}
+        state = RunState("20260929-120000-a1b2c3", "add a rate limiter", self.proj, None, phase="review", round=2,
+                         workflow="quick", base="abc123", proofs=[first, rerun])
+        host = FakeHost()
+        for n in (1, 2):
+            host.files[state.build_path(n)] = f"report {n}"
+        host.files[state.review_path(1)] = f"VERDICT: CHANGES_REQUESTED\n1. a bug\n\n{orchestrator.PROOFS_HEADING}\n"
+        reviewed = []
+        wf, *_ = make_workflow({"review": [recording(review_turn(2, APPROVE), reviewed)]},
+                               host=host, state=state, pipeline=self.pipeline, pull_request=False)
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(wf.state.proofs, [first, rerun])
+        self.assertIn(self.carried_note(f"- `{state.proofs_dir(1)}/test_1.sh`: still fails, it fails.\n\n"
+                                        "  ````\n  still broken\n  ````"), reviewed[0])
+
+    def test_a_proof_recorded_before_reruns_existed_runs_again(self):
+        saved = {"run_id": "20260929-120000-a1b2c3", "task": "add a rate limiter", "cwd": self.proj,
+                 "phase": "build", "round": 2, "workflow": "quick", "base": "abc123",
+                 "proofs": [{"round": 1, "file": "test_1.sh", "finding": 1, "demonstrated": True, "said": "it fails"}]}
+        state = RunState.from_dict(saved)
+        os.makedirs(state.proofs_dir(1))
+        with open(f"{state.proofs_dir(1)}/test_1.sh", "w") as f:
+            f.write("exit 0\n")
+        host = FakeHost()
+        host._run = subprocess.run
+        host.files[state.build_path(1)] = "report 1"
+        host.files[state.review_path(1)] = f"VERDICT: CHANGES_REQUESTED\n1. a bug\n\n{orchestrator.PROOFS_HEADING}\n"
+        seen, reviewed = [], []
+        wf, *_ = make_workflow({"build": [recording(build_turn(2), seen)],
+                                "review": [recording(review_turn(2, APPROVE), reviewed)]},
+                               host=host, state=state, pipeline=self.pipeline, pull_request=False)
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertIn(orchestrator.PROOFS_NOTE.format(proofs=f"{state.proofs_dir(1)}/test_1.sh"), seen[0])
+        self.assertEqual(wf.state.proofs[1], {"round": 2, "written": 1, "file": "test_1.sh", "finding": 1,
+                                              "demonstrated": False, "said": "it passes"})
+        self.assertIn(self.carried_note(f"- `{state.proofs_dir(1)}/test_1.sh`: no longer fails, it passes."),
+                      reviewed[0])
 
     def test_the_reviewers_own_proofs_heading_does_not_stop_the_run(self):
         wf, host, _ = self.run_proofs((CHANGES_REQUESTED, {"test_1.sh": 1}), (APPROVE, {}))
@@ -9453,7 +9558,7 @@ class TestProofs(unittest.TestCase):
             return text
         host.read = read
         self.assertEqual(wf.run(), APPROVE)
-        self.assertEqual([p["demonstrated"] for p in wf.state.proofs], [True])
+        self.assertEqual([p["demonstrated"] for p in wf.state.proofs if p["round"] == 1], [True])
 
     def test_a_proof_that_runs_too_long_is_stopped_with_what_it_started(self):
         with patch.object(orchestrator, "PROOF_TIMEOUT", 1):

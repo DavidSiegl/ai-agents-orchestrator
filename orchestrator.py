@@ -433,6 +433,17 @@ The Reviewer backed findings with tests, and these fail against your change: {pr
 Make each of them pass, without changing it; you may move one into the project as a regression test. \
 If one is wrong, say so in your report instead."""
 
+# Appended to the verdict step's prompt, after the quality and locks notes, when proofs that failed when last run in
+# an earlier round were run again against the round's change (Workflow._rerun_proofs); proofs is a list item per
+# proof, as proofs_section writes them.
+CARRIED_PROOFS_NOTE = """\
+Proofs that failed against the change in an earlier round were run again against this round's change, with \
+`{command}` in {cwd}:
+
+{proofs}
+
+Weigh a proof that still fails as a finding that stands, whatever the reports say of it."""
+
 # Appended to the verdict step's prompt when a turn of the round changed files that an earlier step locked.
 LOCKED_NOTE = """\
 This round changed files that step {steps} locked: {paths}. The orchestrator restored them, \
@@ -2263,10 +2274,13 @@ class RunState:
     # file is the basename of the diff of what the turn changed in them, in the run directory, and paths are the
     # files, by the id of the step that locked them. The files were restored once the record was saved.
     restored: list[dict] = field(default_factory=list)
-    # One record per proof the verdict step wrote with a review that requested changes, {"round", "file", "finding",
-    # "demonstrated", "said"}, in the order they ran (Workflow._judge_proofs): file is the proof's basename in the
-    # round's proofs directory, finding the first number in that name, demonstrated whether it failed against the
-    # change, and said how it exited and the last PROOF_TAIL_LINES lines it printed.
+    # One record per run of a proof the verdict step wrote with a review that requested changes, {"round", "written",
+    # "file", "finding", "demonstrated", "said"}, in the order they ran: round is the round it ran in, written the
+    # round whose verdict step wrote it, file its basename in proofs_dir(written), finding the first number in that
+    # name, demonstrated whether it failed against the change, and said how it exited and the last PROOF_TAIL_LINES
+    # lines it printed. A proof first runs in the round that wrote it (Workflow._judge_proofs), then again in every
+    # later round until it does not fail (Workflow._rerun_proofs). A record saved before written existed is a first
+    # run: proof_written reads it.
     proofs: list[dict] = field(default_factory=list)
 
     @classmethod
@@ -6067,6 +6081,24 @@ def _proof_finding(file: str) -> int | None:
     return int(m.group()) if m else None
 
 
+def proof_written(proof: dict) -> int:
+    """The round whose verdict step wrote the proof a RunState.proofs record is a run of."""
+    return proof.get("written", proof["round"])
+
+
+def _proof_outcome(said: str) -> str:
+    """How a proof exited, from a record's said: "it fails", "it passes" or how it errored."""
+    return said.split("\n", 1)[0].rstrip(":")
+
+
+def _proof_output(said: str) -> list[str]:
+    """The lines a proof printed last, from a record's said, fenced and indented under its list item; none when it
+    printed nothing."""
+    if "\n" not in said:
+        return []
+    return ["", "  ````", *(f"  {line}" for line in said.split("\n")[1:]), "  ````"]
+
+
 def proofs_section(command: str, cwd: str, review: str, proofs: list[dict]) -> str:
     """The section _judge_proofs appends to a review: for each of proofs, the round's records in RunState.proofs,
     whether it demonstrates its finding, and the review's numbered findings left without one, which stand as
@@ -6077,10 +6109,8 @@ def proofs_section(command: str, cwd: str, review: str, proofs: list[dict]) -> s
         file, failed, said = p["file"], p["demonstrated"], p["said"]
         number = p["finding"]
         finding = f"finding {number}" if number is not None else "no finding"
-        how = said.split("\n", 1)[0].rstrip(":")
-        out += ["", f"- `{file}` ({finding}): {'demonstrated' if failed else 'not demonstrated'}, {how}."]
-        if "\n" in said:
-            out += ["", "  ````", *(f"  {line}" for line in said.split("\n")[1:]), "  ````"]
+        demonstrated = "demonstrated" if failed else "not demonstrated"
+        out += ["", f"- `{file}` ({finding}): {demonstrated}, {_proof_outcome(said)}.", *_proof_output(said)]
     proven = {p["finding"] for p in proofs}
     unproven = [int(k) for k in re.findall(r"^(\d+)\. ", review, re.MULTILINE) if int(k) not in proven]
     if unproven:
@@ -6533,6 +6563,8 @@ class Workflow:
     def _take_turn(self, step: Step, n: int) -> bool:
         """The step's turn in round n; False when the run goes on elsewhere than the next step."""
         s = self.state
+        if step.loop_to is not None:
+            self._rerun_proofs(step, n)
         out = self._step_turn(step, n)
         if step.edits:
             # Before the quality round, so the gate judges the locked files.
@@ -6621,12 +6653,12 @@ class Workflow:
         s, command = self.state, self.pipeline.proof_command
         if command is None:
             return
-        records = [p for p in s.proofs if p["round"] == n]
+        records = [p for p in s.proofs if p["round"] == n and proof_written(p) == n]
         if not records:
             for f in sorted(os.path.basename(f.path) for f in self.host.run_files(s.proofs_dir(n))):
                 failed, said = self._run_proof(command, s.proofs_dir(n), f)
-                records.append({"round": n, "file": f, "finding": _proof_finding(f), "demonstrated": failed,
-                                "said": said})
+                records.append({"round": n, "written": n, "file": f, "finding": _proof_finding(f),
+                                "demonstrated": failed, "said": said})
             if not records:
                 return
             s.proofs += records
@@ -6636,6 +6668,50 @@ class Workflow:
         if PROOFS_HEADING not in review.split("\n"):
             self.host.write(step.path(s.dir, n),
                             review.rstrip("\n") + "\n\n" + proofs_section(command, s.work_dir, review, records))
+
+    def _rerun_proofs(self, step: Step, n: int) -> None:
+        """Before the verdict step's turn of round n, run each proof that failed when last run, in an earlier round
+        (_carried_proofs), again against the change, and record the outcomes in RunState.proofs. A resume runs none
+        once round n's reruns are recorded."""
+        s, command = self.state, self.pipeline.proof_command
+        if command is None or any(p["round"] == n and proof_written(p) < n for p in s.proofs):
+            return
+        records = []
+        for p in self._carried_proofs(n):
+            written = proof_written(p)
+            failed, said = self._run_proof(command, s.proofs_dir(written), p["file"])
+            records.append({"round": n, "written": written, "file": p["file"], "finding": p["finding"],
+                            "demonstrated": failed, "said": said})
+        if not records:
+            return
+        s.proofs += records
+        self._save()
+        log(f"[{step.role}] {sum(p['demonstrated'] for p in records)} of {len(records)} proofs from earlier rounds "
+            f"still fail against the change")
+
+    def _carried_proofs(self, n: int) -> list[dict]:
+        """The latest record of each proof whose last run before round n failed against the change, in the order the
+        proofs first ran."""
+        latest: dict[tuple[int, str], dict] = {}
+        for p in self.state.proofs:
+            if p["round"] < n:
+                latest[proof_written(p), p["file"]] = p
+        return [p for p in latest.values() if p["demonstrated"]]
+
+    def _carried_proofs_note(self, n: int) -> str:
+        """What the verdict step hears in round n of the proofs from earlier rounds run again before its turn; ""
+        when none was."""
+        s, command = self.state, self.pipeline.proof_command
+        records = [p for p in s.proofs if p["round"] == n and proof_written(p) < n]
+        if command is None or not records:
+            return ""
+        items = []
+        for p in records:
+            how = "still fails" if p["demonstrated"] else "no longer fails"
+            path = f"{s.proofs_dir(proof_written(p))}/{p['file']}"
+            output = _proof_output(p["said"]) if p["demonstrated"] else []
+            items.append("\n".join([f"- `{path}`: {how}, {_proof_outcome(p['said'])}.", *output]))
+        return "\n\n" + CARRIED_PROOFS_NOTE.format(command=command, cwd=s.work_dir, proofs="\n\n".join(items))
 
     def _run_proof(self, command: str, proofs_dir: str, file: str) -> tuple[bool, str]:
         """Whether the proof fails against the working tree, as proof_command's exit status 1 says, and what it
@@ -6656,12 +6732,12 @@ class Workflow:
         return proc.returncode == 1, f"{how}:\n{tail}" if tail else how
 
     def _proofs_note(self, step: Step, n: int) -> str:
-        """What the step hears in round n of the proofs the verdict step's review of round n-1 demonstrated; "" when
-        it is not the step that review loops back to, or none failed."""
+        """What the step hears in round n of the proofs that failed when last run, by round n-1's review or before it;
+        "" when it is not the step that review loops back to, or none failed."""
         s, verdict = self.state, self.pipeline.verdict_step
         if verdict is None or verdict.loop_to != step.id:
             return ""
-        failing = [f"{s.proofs_dir(n - 1)}/{p['file']}" for p in s.proofs if p["round"] == n - 1 and p["demonstrated"]]
+        failing = [f"{s.proofs_dir(proof_written(p))}/{p['file']}" for p in self._carried_proofs(n)]
         if not failing:
             return ""
         return "\n\n" + PROOFS_NOTE.format(proofs=", ".join(failing))
@@ -6746,7 +6822,8 @@ class Workflow:
         s = self.state
         q = s.quality_round if step.quality_gated else 0
         fill = {name: self._placeholder(name, step, n) for name in step.placeholders()}
-        quality = self._quality_note(n) + self._locks_note(n) if step.loop_to is not None else ""
+        quality = (self._quality_note(n) + self._locks_note(n) + self._carried_proofs_note(n)
+                   if step.loop_to is not None else "")
         first = step.prompt.format(**fill) + quality
         if q:
             follow = QUALITY_FIX_PROMPT.format(quality_path=s.quality_path(n, q), report_path=self._own_path(step, n))
