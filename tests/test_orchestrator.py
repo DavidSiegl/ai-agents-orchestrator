@@ -11957,6 +11957,469 @@ class TestSpecBuildReviewExample(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# drain
+# ---------------------------------------------------------------------------
+
+PR_A = "https://github.com/o/r/pull/1"
+PR_B = "https://github.com/o/r/pull/2"
+
+
+def drain_spec_text(title, status="ready-for-agent", *header, nl="\n"):
+    """A spec as drain reads it: a title, a Status: line unless status is None, the further header lines, a body."""
+    lines = [f"# {title}", ""]
+    if status is not None:
+        lines.append(f"Status: {status}")
+    lines += [*header, "", "## Goal", "Status: in the body, which drain never reads", ""]
+    return nl.join(lines)
+
+
+def approved(pr=PR_A, conflicts=()):
+    """A Workflow.run that opened the pull request pr and approved, as run_workflow's workflow."""
+    def run(wf):
+        wf.state.pr_url, wf.state.conflicts, wf.state.phase = pr, list(conflicts), orchestrator.DONE
+        return APPROVE
+    return run
+
+
+def ended(verdict, pr=PR_A):
+    def run(wf):
+        wf.state.pr_url, wf.state.phase = pr, orchestrator.DONE
+        return verdict
+    return run
+
+
+def raising(error):
+    def run(wf):
+        raise error
+    return run
+
+
+@patch.dict("os.environ", {"HERDR_ENV": "1"})
+class TestDrain(unittest.TestCase):
+    """drain through main, each run's Workflow.run played by a script; FakeHost is the project's host."""
+
+    def setUp(self):
+        without_workflow_files(self)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+        self.host = FakeHost()
+        self.runs = []  # each run's state as Workflow.run got it, and the spec it was given
+        for p in (patch.object(orchestrator, "connect", return_value=(None, self.host)),
+                  patch.object(Host, "resolve_dir", return_value="/proj")):
+            p.start()
+            self.addCleanup(p.stop)
+        self.sweep = patch.object(orchestrator, "sweep_branches").start()
+        self.addCleanup(patch.stopall)
+
+    def spec(self, slug, text):
+        os.makedirs(os.path.join(self.dir, slug), exist_ok=True)
+        with open(self.path(slug), "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+
+    def path(self, slug):
+        return os.path.join(self.dir, slug, "spec.md")
+
+    def text(self, slug):
+        with open(self.path(slug), encoding="utf-8", newline="") as f:
+            return f.read()
+
+    def header(self, slug):
+        """The spec's Status:, Run: and PR: values, None for each it lacks."""
+        text = self.text(slug)
+        return tuple(orchestrator.header_field(text, k) for k in ("Status", "Run", "PR"))
+
+    def drain(self, *outcomes, argv=()):
+        """main's exit status for drain with argv, each run ending by the next of outcomes; and what it printed."""
+        script = list(outcomes)
+
+        def run(wf):
+            self.runs.append((copy.deepcopy(wf.state), wf.spec))
+            return script.pop(0)(wf)
+        with patch.object(Workflow, "run", autospec=True, side_effect=run), \
+                patch("sys.stdout", new_callable=io.StringIO) as out, \
+                patch("sys.stderr", new_callable=io.StringIO) as err:
+            status = main(["drain", self.dir, *argv])
+        self.assertEqual(script, [], "every scripted run ran")
+        return status, out.getvalue(), err.getvalue()
+
+    def saved_run(self, slug, run_id, age=0, **fields):
+        """A run of the spec's, as an interrupted drain leaves it in the project's runs."""
+        state = RunState(run_id, f"spec {slug}", "/proj", None, **fields)
+        self.host.files[f"{state.dir}/state.json"] = json.dumps(asdict(state))
+        self.host.ages[run_id] = age
+
+    def test_independent_specs_run_in_slug_order(self):
+        self.spec("b-second", drain_spec_text("Second"))
+        self.spec("a-first", drain_spec_text("First"))
+
+        status, out, _ = self.drain(approved(PR_A), approved(PR_B))
+
+        self.assertEqual(status, 0)
+        self.assertEqual([state.task for state, _ in self.runs], ["First", "Second"])
+        a, b = (state for state, _ in self.runs)
+        self.assertEqual(self.header("a-first"), ("in-review", a.run_id, PR_A))
+        self.assertEqual(self.header("b-second"), ("in-review", b.run_id, PR_B))
+        self.assertTrue(out.endswith(f"a-first: ready-for-agent -> in-review  {PR_A}\n"
+                                     f"b-second: ready-for-agent -> in-review  {PR_B}\n"
+                                     "all specs cleared\n"), out)
+        self.sweep.assert_called_once_with(self.host, "/proj")
+
+    def test_each_run_is_a_run_spec_run_of_its_spec(self):
+        self.spec("a", drain_spec_text("First"))
+        self.drain(approved())
+
+        state, given = self.runs[0]
+        self.assertEqual(given, orchestrator.SpecFile(self.path("a"), drain_spec_text("First")))
+        self.assertEqual((state.phase, state.pull_request, state.cwd), ("build", True, "/proj"))
+
+    def test_the_run_line_is_written_before_the_run(self):
+        self.spec("a", drain_spec_text("First"))
+        seen = []
+
+        def run(wf):
+            seen.append(self.header("a"))
+            return approved()(wf)
+        self.drain(run)
+
+        self.assertEqual(seen, [("ready-for-agent", self.runs[0][0].run_id, None)])
+
+    def test_a_blocked_spec_waits_for_its_blockers_pull_request(self):
+        self.spec("a", drain_spec_text("First"))
+        self.spec("b", drain_spec_text("Second", "ready-for-agent", "Blocked by: a"))
+
+        status, out, _ = self.drain(approved(PR_A))
+
+        self.assertEqual(status, orchestrator.EXIT_WAITING)
+        self.assertEqual(len(self.runs), 1)
+        self.assertEqual(self.header("a")[::2], ("in-review", PR_A))
+        self.assertEqual(self.header("b"), ("ready-for-agent", None, None))
+        self.assertTrue(out.endswith(f"b waits on:\n    a: in-review  {PR_A}\n"), out)
+
+    def test_the_next_drain_follows_the_blockers_pull_request(self):
+        cases = [
+            ("MERGED", [approved(PR_B)], 0, "done", "in-review"),
+            ("OPEN", [], orchestrator.EXIT_WAITING, "in-review", "ready-for-agent"),
+            ("CLOSED", [], orchestrator.EXIT_WAITING, "ready-for-human", "ready-for-agent"),
+        ]
+        for pr_state, outcomes, exit_code, a_after, b_after in cases:
+            with self.subTest(pr_state=pr_state):
+                self.runs.clear()
+                self.spec("a", drain_spec_text("First", "in-review", "Run: 20261024-100000-aaaaaa", f"PR: {PR_A}"))
+                self.spec("b", drain_spec_text("Second", "ready-for-agent", "Blocked by: a/spec.md"))
+                self.host.pull_requests[PR_A] = {"state": pr_state, "headRefOid": "a" * 40, "closedAt": None}
+
+                status, out, _ = self.drain(*outcomes)
+
+                self.assertEqual(status, exit_code)
+                self.assertEqual((self.header("a")[0], self.header("b")[0]), (a_after, b_after))
+                self.assertEqual(len(self.runs), len(outcomes))
+                if pr_state == "OPEN":
+                    self.assertNotIn("->", out)
+                else:
+                    self.assertIn(f"a: in-review -> {a_after}  {PR_A}\n", out)
+
+    def test_a_run_that_does_not_succeed_stops_the_drain(self):
+        cases = [
+            (ended(CHANGES_REQUESTED), orchestrator.EXIT_CHANGES_REQUESTED),
+            (ended(orchestrator.QUALITY_GATE_FAILED), orchestrator.EXIT_CHANGES_REQUESTED),
+            (approved(conflicts=["x.py"]), orchestrator.EXIT_CONFLICT),
+        ]
+        for outcome, exit_code in cases:
+            with self.subTest(exit_code=exit_code):
+                self.runs.clear()
+                self.spec("a", drain_spec_text("First"))
+                self.spec("b", drain_spec_text("Second"))
+
+                status, out, _ = self.drain(outcome)
+
+                self.assertEqual(status, exit_code)
+                self.assertEqual(self.header("a"), ("ready-for-human", self.runs[0][0].run_id, PR_A))
+                self.assertEqual(self.header("b"), ("ready-for-agent", None, None))
+                self.assertIn(f"a: ready-for-agent -> ready-for-human  {PR_A}\n", out)
+                self.assertNotIn("all specs cleared", out)
+
+    def test_a_failed_run_stops_the_drain_with_its_resume_command(self):
+        self.spec("a", drain_spec_text("First"))
+        self.spec("b", drain_spec_text("Second"))
+
+        status, out, err = self.drain(raising(OrchestratorError("the Builder's pane is gone")))
+
+        run_id = self.runs[0][0].run_id
+        self.assertEqual(status, orchestrator.EXIT_ERROR)
+        self.assertEqual(self.header("a"), ("ready-for-human", run_id, None))
+        self.assertEqual(self.header("b"), ("ready-for-agent", None, None))
+        self.assertIn("error: the Builder's pane is gone\n", err)
+        self.assertIn(f"orchestrator.py resume {run_id.rsplit('-', 1)[-1]}", err)
+        self.assertEqual(out, "a: ready-for-agent -> ready-for-human\n")
+
+    def test_an_interrupted_run_keeps_its_spec_ready_with_its_run(self):
+        self.spec("a", drain_spec_text("First"))
+
+        status, out, err = self.drain(raising(KeyboardInterrupt()), argv=["--machine", "m", "--cwd", "~/p"])
+
+        run_id = self.runs[0][0].run_id
+        self.assertEqual(status, orchestrator.EXIT_INTERRUPTED)
+        self.assertEqual(self.header("a"), ("ready-for-agent", run_id, None))
+        self.assertIn(f"resume with: orchestrator.py resume {run_id.rsplit('-', 1)[-1]} --machine m --cwd '~/p'",
+                      err)
+
+    def test_a_finished_run_on_the_run_line_is_taken_up_without_a_new_run(self):
+        cases = [
+            ({"verdict": APPROVE, "pr_url": PR_A}, ("in-review", PR_A)),
+            ({"verdict": orchestrator.FINISHED, "pr_url": PR_A}, ("in-review", PR_A)),
+            ({"verdict": APPROVE, "pr_url": PR_A, "conflicts": ["x.py"]}, ("ready-for-human", PR_A)),
+            ({"verdict": CHANGES_REQUESTED, "pr_url": PR_A}, ("ready-for-human", PR_A)),
+            ({"verdict": CHANGES_REQUESTED}, ("ready-for-human", None)),
+        ]
+        for fields, (spec_after, pr) in cases:
+            with self.subTest(fields=fields):
+                self.spec("a", drain_spec_text("First", "ready-for-agent", "Run: 20261024-100000-aaaaaa"))
+                self.saved_run("a", "20261024-100000-aaaaaa", 10**4, phase="done", **fields)
+
+                status, out, _ = self.drain()
+
+                self.assertEqual(self.header("a"), (spec_after, "20261024-100000-aaaaaa", pr))
+                self.assertEqual(status, 0)
+                self.assertIn(f"a: ready-for-agent -> {spec_after}", out)
+
+    def test_an_unfinished_run_on_the_run_line_stops_the_drain_before_any_run(self):
+        run_id = "20261024-100000-aaaaaa"
+        stale = HEARTBEAT_SECONDS + STALE_SECONDS
+        cases = [
+            ({"owner": {"host": "elsewhere", "pid": 1}}, 0, "is running (pid 1 on elsewhere, beat 0s ago)",
+             "wait for it to finish, or remove the Run: line"),
+            ({}, stale, "is stale (no heartbeat for", "resume it with `orchestrator.py resume aaaaaa`"),
+            ({"error": "interrupted"}, stale, "failed: interrupted", "resume it with `orchestrator.py resume aaaaaa`"),
+            ({"closed": "workspace closed"}, stale, "was closed (workspace closed)", "; remove the Run: line from"),
+            (None, 0, "is not under /proj/.orchestrator/runs", "; remove the Run: line from"),
+        ]
+        for fields, age, why, remedy in cases:
+            with self.subTest(why=why):
+                self.host.files.clear()
+                self.spec("a", drain_spec_text("First", "ready-for-agent", f"Run: {run_id}"))
+                self.spec("b", drain_spec_text("Second"))
+                if fields is not None:
+                    self.saved_run("a", run_id, age, phase="build", **fields)
+                before = self.text("a")
+
+                status, out, err = self.drain()
+
+                self.assertEqual(status, orchestrator.EXIT_ERROR)
+                self.assertTrue(err.startswith(f"error: spec a: run {run_id}, on its Run: line, {why}"), err)
+                self.assertIn(remedy, err)
+                self.assertIn(f"{self.path('a')} to start the spec over", err)
+                self.assertEqual((self.text("a"), self.header("b")), (before, ("ready-for-agent", None, None)))
+                self.assertEqual(out, "")
+                self.sweep.assert_not_called()
+
+    def test_a_refresh_that_fails_changes_no_spec(self):
+        self.spec("a", drain_spec_text("First", "in-review", f"PR: {PR_A}"))
+        self.spec("b", drain_spec_text("Second", "ready-for-agent", "Run: 20261024-100000-bbbbbb"))
+        self.host.pull_requests[PR_A] = {"state": "MERGED", "headRefOid": "a" * 40, "closedAt": None}
+        before = self.text("a")
+
+        status, _, err = self.drain()
+
+        self.assertEqual(status, orchestrator.EXIT_ERROR)
+        self.assertIn("error: spec b: run 20261024-100000-bbbbbb", err)
+        self.assertEqual(self.text("a"), before)
+
+    def test_bad_blockers_stop_the_drain_before_any_run(self):
+        cases = [
+            ({"a": "Blocked by: nosuch"}, "error: spec a is blocked by nosuch, which has no spec.md in"),
+            ({"a": "Blocked by: b", "b": "Blocked by: c", "c": "Blocked by: b"},
+             "error: the specs' blockers form a cycle: b -> c -> b\n"),
+            ({"a": "Blocked by: a"}, "error: the specs' blockers form a cycle: a -> a\n"),
+        ]
+        for blockers, message in cases:
+            with self.subTest(blockers=blockers):
+                shutil.rmtree(self.dir)
+                os.mkdir(self.dir)
+                for slug in "abc":
+                    header = [blockers[slug]] if slug in blockers else []
+                    self.spec(slug, drain_spec_text(slug.upper(), "ready-for-agent", *header))
+
+                status, out, err = self.drain()
+
+                self.assertEqual(status, orchestrator.EXIT_ERROR)
+                self.assertTrue(err.startswith(message), err)
+                self.assertEqual(out, "")
+                self.sweep.assert_not_called()
+
+    def test_specs_with_any_other_status_are_left_alone(self):
+        texts = {
+            "a": drain_spec_text("A", None),
+            "b": drain_spec_text("B", "needs-triage"),
+            "c": drain_spec_text("C", "ready-for-human", f"PR: {PR_A}"),
+            "d": drain_spec_text("D", "wontfix", "Run: 20261024-100000-dddddd"),
+            "e": drain_spec_text("E", "in-review"),
+            "f": drain_spec_text("F", "done"),
+        }
+        for slug, text in texts.items():
+            self.spec(slug, text)
+        os.makedirs(os.path.join(self.dir, "no-spec", "issues"))
+
+        status, out, _ = self.drain()
+
+        self.assertEqual((status, out), (0, "all specs cleared\n"))
+        self.assertEqual({slug: self.text(slug) for slug in texts}, texts)
+        self.assertEqual(self.host.gh_calls, [])
+
+    def test_only_the_header_lines_drain_owns_change(self):
+        for nl in ("\n", "\r\n"):
+            with self.subTest(nl=nl):
+                self.runs.clear()
+                header = ["Owner: me", "Status:   ready-for-agent  ", "Blocked by:", "Run: stale"]
+                text = drain_spec_text("First", None, *header, "## Notes", "PR: not in the header", nl=nl)
+                self.spec("a", text)
+                self.saved_run("a", "stale", phase="done", verdict=APPROVE, pr_url=PR_A)
+
+                self.assertEqual(self.drain()[0], 0)
+
+                want = drain_spec_text("First", None, "Owner: me", "Status: in-review", f"PR: {PR_A}", "Blocked by:",
+                                       "Run: stale", "## Notes", "PR: not in the header", nl=nl)
+                self.assertEqual(self.text("a"), want)
+
+    def test_added_lines_go_directly_below_the_status_line(self):
+        self.spec("a", "# First\r\nOwner: me\r\nStatus: ready-for-agent\r\nNote: x\r\n")
+        self.drain(approved())
+
+        run_id = self.runs[0][0].run_id
+        self.assertEqual(self.text("a"),
+                         f"# First\r\nOwner: me\r\nStatus: in-review\r\nPR: {PR_A}\r\nRun: {run_id}\r\nNote: x\r\n")
+
+    def test_a_after_line_that_ends_the_file(self):
+        self.assertEqual(orchestrator.with_header_field("# T\nStatus: done", "PR", PR_A),
+                         f"# T\nStatus: done\nPR: {PR_A}")
+        with self.assertRaisesRegex(OrchestratorError, "the spec has no Status: line to add PR: below"):
+            orchestrator.with_header_field("# T\n## Status: done\n", "PR", PR_A)
+
+    def test_a_spec_that_cannot_be_written_stops_the_drain_and_keeps_the_old_file(self):
+        self.spec("a", drain_spec_text("First"))
+        before = self.text("a")
+
+        # Fails as a full disk would at the rename, once the new text is written aside; root ignores a chmod.
+        with patch("os.replace", side_effect=OSError(28, "No space left on device")):
+            status, _, err = self.drain()
+
+        self.assertEqual(status, orchestrator.EXIT_ERROR)
+        self.assertIn(f"error: cannot write {self.path('a')}: [Errno 28] No space left on device", err)
+        self.assertEqual((self.text("a"), os.listdir(os.path.join(self.dir, "a"))), (before, ["spec.md"]))
+        self.assertEqual(self.runs, [])
+
+    def test_dry_run_changes_nothing_and_says_what_it_would_do(self):
+        self.spec("a", drain_spec_text("A", "in-review", f"PR: {PR_A}"))
+        self.spec("b", drain_spec_text("B", "ready-for-agent", "Blocked by: a"))
+        self.spec("c", drain_spec_text("C", "ready-for-agent", "Run: 20261024-100000-cccccc"))
+        self.spec("d", drain_spec_text("D"))
+        self.spec("e", drain_spec_text("E", "ready-for-agent", "Blocked by: d"))
+        self.host.pull_requests[PR_A] = {"state": "MERGED", "headRefOid": "a" * 40, "closedAt": None}
+        self.saved_run("c", "20261024-100000-cccccc", phase="done", verdict=APPROVE, pr_url=PR_B)
+        before = {slug: self.text(slug) for slug in "abcde"}
+
+        status, out, _ = self.drain(argv=["--dry-run"])
+
+        self.assertEqual(status, 0)
+        self.assertEqual({slug: self.text(slug) for slug in "abcde"}, before)
+        self.assertEqual(sorted(os.listdir(os.path.join(self.dir, "a"))), ["spec.md"])
+        self.assertEqual(out, f"a: in-review -> done  {PR_A}\nc: ready-for-agent -> in-review  {PR_B}\n"
+                              "would run, in order: b, d\n")
+        self.sweep.assert_not_called()
+
+    def test_drain_takes_no_task_spec_or_no_pr(self):
+        for argv in (["--no-pr"], ["task", "--spec", "spec.md"], ["--spec", "spec.md"], ["a", "b"]):
+            with self.subTest(argv=argv):
+                with self.assertRaises(SystemExit) as exit_, patch("sys.stderr", new_callable=io.StringIO):
+                    parse_args(["drain", *argv])
+                self.assertEqual(exit_.exception.code, 2)
+        self.assertEqual(parse_args(["drain", "--spec-model", "opus"]).spec_model, "opus")
+        self.assertEqual(parse_args(["drain"]).dir, ".scratch")
+
+    @patch.dict("os.environ", {"XDG_CONFIG_HOME": "/nonexistent"})
+    def test_the_flags_reach_every_run(self):
+        example = f"{EXAMPLES}/spec-build-review.toml"
+        self.spec("a", drain_spec_text("A"))
+        self.spec("b", drain_spec_text("B"))
+        argv = ["--workflow-file", example, "--worktree", "--quality-gate", JOB, "--max-quality-rounds", "2",
+                "--max-rounds", "5", "--timeout", "60", "--permission-mode", "auto", "--model", "m",
+                "--review-model", "r", "--agent", "codex"]
+
+        self.assertEqual(self.drain(approved(), approved(), argv=argv)[0], 0)
+
+        for state, _ in self.runs:
+            self.assertEqual((state.workflow, state.quality_job, state.max_quality_rounds, state.max_rounds,
+                              state.turn_timeout, state.permission_mode),
+                             ("spec-build-review", JOB, 2, 5, 60, "auto"))
+            self.assertEqual(state.worktree, f"/proj/{orchestrator.WORKTREES_DIR}/{state.key}")
+            self.assertEqual(state.models, {"spec": "m", "build": "m", "review": "r"})
+            self.assertEqual(set(state.agent_kinds.values()), {"codex"})
+        self.assertEqual(len(self.runs), 2)
+
+    def test_a_workflow_that_cannot_take_a_spec_fails_before_any_run(self):
+        self.spec("a", drain_spec_text("A"))
+
+        status, _, err = self.drain(argv=["--workflow-file", f"{EXAMPLES}/quick.toml"])
+
+        self.assertEqual(status, orchestrator.EXIT_ERROR)
+        self.assertIn("--spec needs a first step that writes the spec", err)
+        self.sweep.assert_not_called()
+        self.assertEqual(self.header("a"), ("ready-for-agent", None, None))
+
+    def test_a_relative_dir_is_the_shells(self):
+        self.spec("a", drain_spec_text("A"))
+        here = os.getcwd()
+        os.chdir(self.dir)
+        self.addCleanup(os.chdir, here)
+        with patch.object(Workflow, "run", autospec=True, side_effect=approved()), patch("sys.stdout"):
+            self.assertEqual(main(["drain", ".", "--cwd", "/elsewhere"]), 0)
+        self.assertEqual(self.header("a")[0], "in-review")
+
+    def test_a_missing_dir_is_an_error(self):
+        with patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(main(["drain", os.path.join(self.dir, "nosuch")]), orchestrator.EXIT_ERROR)
+        self.assertIn("error: cannot list the specs in", err.getvalue())
+
+
+@patch.dict("os.environ", {"HERDR_ENV": "1"})
+class TestDrainWorkflows(unittest.TestCase):
+    """drain driving real Workflows through FakeHerdr and FakeHost, from spec to pull request."""
+
+    def test_two_specs_end_as_two_pull_requests(self):
+        without_workflow_files(self)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for slug in ("a", "b"):
+            os.mkdir(os.path.join(tmp.name, slug))
+            with open(os.path.join(tmp.name, slug, "spec.md"), "w") as f:
+                f.write(drain_spec_text(f"Spec {slug}"))
+        host = FakeHost()
+        herdr = FakeHerdr(host, None, {"build": [build_turn(1), build_turn(1)],
+                                       "review": [review_turn(1, APPROVE), review_turn(1, APPROVE)]})
+        clock = FakeClock()
+        host.clock = clock
+        init = Workflow.__init__
+
+        def on_fakes(wf, herdr, host, state, **kw):
+            herdr.state = state  # the run FakeHerdr's turns play
+            init(wf, herdr, host, state, clocks=orchestrator.Clocks(clock.sleep, clock, clock), **kw)
+        with patch.object(orchestrator, "connect", return_value=(herdr, host)), \
+                patch.object(Host, "resolve_dir", return_value="/proj"), \
+                patch.object(Workflow, "__init__", autospec=True, side_effect=on_fakes), \
+                patch.object(orchestrator, "notify_locally"), \
+                patch("sys.stdout", new_callable=io.StringIO) as out, patch("sys.stderr"):
+            self.assertEqual(main(["drain", tmp.name]), 0)
+
+        self.assertEqual([pr["title"] for pr in host.prs], ["Spec a", "Spec b"])
+        self.assertTrue(out.getvalue().endswith("all specs cleared\n"))
+        for slug in ("a", "b"):
+            with open(os.path.join(tmp.name, slug, "spec.md")) as f:
+                text = f.read()
+            self.assertEqual(orchestrator.header_field(text, "Status"), "in-review")
+            self.assertEqual(orchestrator.header_field(text, "PR"), "https://github.com/o/r/pull/7")
+
+
+# ---------------------------------------------------------------------------
 # Pruning run branches
 # ---------------------------------------------------------------------------
 
