@@ -5,14 +5,19 @@
 # orchestrator/ in orchestrator.py), and pull requests into any branch but main, which no ruleset requires a check
 # for, so auto-merge would merge them unchecked. Pull requests from forks are not touched at all: their runs get a
 # read-only token.
+#
+# It acts with AUTOMERGE_TOKEN, a fine-grained personal access token of the repository's owner limited to this
+# repository, with contents and pull requests read and write. Not github.token: GitHub deletes no head branch of a
+# pull request merged as github-actions[bot], and starts no workflow for the push to main that merge makes. When the
+# token expires, every run fails at its first gh call and pull requests wait for a human until it is replaced.
 name: Auto-merge
 
 on:
   pull_request:
     # edited: a changed base branch. synchronize: a push, the first event a pull request with a merge conflict
     # gets once it is resolved, since GitHub runs no pull_request workflow during a conflict. auto_merge_enabled:
-    # auto-merge turned on by hand, which a held pull request gets turned off again; the workflow's own turning it
-    # on starts no run, as nothing done with github.token does.
+    # auto-merge turned on by hand, which a held pull request gets turned off again. The workflow's own turning it
+    # on starts a run too, which finds it on and does nothing.
     types: [opened, reopened, edited, synchronize, ready_for_review, converted_to_draft, labeled, unlabeled,
             auto_merge_enabled]
 
@@ -22,9 +27,6 @@ jobs:
   auto-merge:
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
     # One run per pull request at a time: gh pr create adds labels after opening, so the opened and labeled
     # events arrive together, and each run must see what the one before it did.
     concurrency:
@@ -33,7 +35,7 @@ jobs:
     steps:
       # Decided from the pull request as it is now, not from the event, which can predate a label or a draft.
       - env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN }}
           GH_REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
         run: |
