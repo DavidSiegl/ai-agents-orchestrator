@@ -99,6 +99,8 @@ was done.
   check pairs identical bodies before names (`_base_scores`), so that a function renamed unchanged keeps its score
   and a new function under its old name is new. A change that edits `big` in place and adds `copied`, a copy of
   `big`'s old body, has the same shape: `copied` takes `big`'s score and passes, and the edited `big` is judged as
-  new, so nothing is reported when the edit takes `big` below the limit. Decided by the user in review round 4 of
-  ticket 06. Closes with a way to tell a copy from a rename, such as git's copy detection (`git diff -C`) on the
-  change's files.
+  new, so nothing is reported when the edit takes `big` below the limit. The same holds for a copy in a file the
+  check does not judge, such as one under `tests/`, since a function moved unchanged there must keep its base from
+  a new function under its old name (review round 6, R6-F1). Decided by the user in review round 4 of ticket 06.
+  Closes with a way to tell a copy from a rename, such as git's copy detection (`git diff -C`) on the change's
+  files.

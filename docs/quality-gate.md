@@ -87,9 +87,9 @@ the paper's rules. Each of these is a finding:
     unchanged, keeps its score, and a new function given its old name is new. Of a function moved unchanged and a
     copy of it, the one that kept the name takes it, and a function moved unchanged into a file the check does not
     judge, such as one under `tests/` or a script with no `.py` whose `#!` line names python, takes its own before
-    any copy can, whatever the copy's name. A function in such a file takes the base of a function in another file
-    only when that one is gone from it, by name and by body, so an unchanged copy there takes nothing from an
-    original still in its place, edited or renamed;
+    any copy can, whatever the copy's name. A function takes the base of a function in another file only when that
+    one's body is gone from it, so an unchanged copy takes nothing from an original still in its place, under its
+    name or another; an original edited in place is gone by its body, which is the cost below;
   - failing that, the highest-scoring function of its name left in its file's base, under the file's old name,
     whatever that name, when the change renamed it. So with a name defined more than once, as a property's getter and
     setter or `@singledispatch` registrations named `_` are, adding or removing one never makes a function the change
@@ -99,7 +99,7 @@ the paper's rules. Each of these is a finding:
 
   Bodies pairing first has a cost: a copy of a function whose original the change edits keeps the old score and
   passes, as if it were the original renamed and the edited one new, even when the edit takes the original below the
-  limit. `TODO.md` holds it.
+  limit, and wherever the copy is, in a file the check does not judge too. `TODO.md` holds it.
 - `not-scored`: a changed file that could not be read or parsed. Like any finding of the check, it fails the gate: a
   check that cannot do its work says so rather than pass. A base that cannot be read or parsed is not a finding: its
   file's functions are judged as new, as `test-integrity` takes a base that does not parse to have no tests.

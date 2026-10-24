@@ -3919,16 +3919,16 @@ def _base_scores(change: GateChange,
     the score of what it copies. First a base function with its body, since an unchanged function is that function
     whatever its name: of its name in its file's base, under the file's old name when the change renamed it, then of
     its name elsewhere, as for a function moved; then of any name in its file's base, then elsewhere, as for one
-    renamed. Failing a body, a function over the limit takes the highest-scoring base function of its name left in
-    its file's base. A base under _COMPLEXITY_EXEMPT is no base, since the tests were never held to the limit, and
-    nor is one that cannot be read or parsed.
+    renamed. A base function lends to a function of another file only when its body is gone from its file, which
+    now holds it fewer times than the base did: one still there, under any name, is the base of itself, and the
+    other a copy. Failing a body, a function over the limit takes the highest-scoring base function of its name left
+    in its file's base. A function of judged takes no base under _COMPLEXITY_EXEMPT, since the tests were never held
+    to the limit; and a base that cannot be read or parsed has no functions.
 
     The functions of every other changed Python file, which the check does not judge, such as one under
-    _COMPLEXITY_EXEMPT or a script whose name has no .py (_is_python_source), pair by body too, and in each step
-    before the judged ones, so that one moved unchanged into such a file is still itself and lends its base to no
-    copy, whatever the copy's name. Such a function takes a base function of another file only when that one is gone
-    from its file, whose working tree holds no function of its name or body now: one that is still there, edited, is
-    the base of its edited self, and the other a copy.
+    _COMPLEXITY_EXEMPT or a script whose name has no .py (_is_python_source), pair by body too, from any base, and in
+    each step before the judged ones, so that one moved unchanged into such a file is still itself and lends its base
+    to no copy, whatever the copy's name.
 
     The cost of bodies first: a copy of a function whose original the change edits takes the original's old score,
     as if the original were the new function under its name.
@@ -3960,46 +3960,41 @@ class _BasePool:
         """bases: the base functions of the change's files, by old path; now: the working tree's functions of the file
         each old path became, by old path, with none for a file the change deletes or that holds no Python now."""
         self._left = bases  # the base functions that have lent no score yet, by old path
-        # The base functions whose file holds no function of their name or body now, by (old path, def line): moved
-        # out of it, renamed and edited, or deleted.
-        self._gone = {(old, g.line) for old, functions in bases.items() for g in functions
-                      if not any(f.name == g.name or f.body == g.body for f in now.get(old, []))}
+        # (old path, body) of each body that the working tree's file holds fewer times than its base did: moved out of
+        # it, edited or deleted, so that one of its base functions may lend to a function of another file.
+        self._gone = {(old, body) for old, functions in bases.items()
+                      for body, n in collections.Counter(g.body for g in functions).items()
+                      if sum(f.body == body for f in now.get(old, [])) < n}
         self.lent: dict[tuple[str, int], int] = {}  # the score lent to each function, by (path, def line)
 
     def lend_by_body(self, path: str, functions: list[_ScoredFunction], home: str | None, same_name: bool,
                      same_file: bool, judged: bool) -> None:
         """Lend to each of functions, the working tree's in its file at path whose old path is home (None for a file
         the change adds), that has no score lent yet, the score of a base function left with its body: and its name
-        for same_name, and in home's base for same_file, else in another file's. judged says whether the check judges
-        the file at path; if not, a base function of another file lends only once gone from its file."""
+        for same_name, and in home's base for same_file, else in another file's, whose body is gone from it. judged
+        says whether the check judges the file at path, whose functions then take no base under
+        _COMPLEXITY_EXEMPT."""
         for scored in functions:
             if (path, scored.line) in self.lent:
                 continue
             for old, left in self._left.items():
-                if (old == home) != same_file:
+                if (old == home) != same_file or (judged and old.startswith(_COMPLEXITY_EXEMPT)):
                     continue
                 twin = next((g for g in left if g.body == scored.body and (g.name == scored.name or not same_name)
-                             and self._may_lend(old, g, same_file, judged)), None)
+                             and (same_file or (old, g.body) in self._gone)), None)
                 if twin is not None:
                     self._lend(path, scored, old, twin)
                     break
 
     def lend_by_name(self, path: str, scored: _ScoredFunction, home: str | None) -> None:
         """Lend to scored, a function of a judged file of the working tree at path whose old path is home, unless it
-        has a score lent, the highest of the base functions of its name left in home's base."""
-        if home is None or (path, scored.line) in self.lent:
+        has a score lent, the highest of the base functions of its name left in home's base, if that is outside
+        _COMPLEXITY_EXEMPT."""
+        if home is None or home.startswith(_COMPLEXITY_EXEMPT) or (path, scored.line) in self.lent:
             return
-        namesakes = [g for g in self._left.get(home, []) if g.name == scored.name
-                     and self._may_lend(home, g, True, True)]
+        namesakes = [g for g in self._left.get(home, []) if g.name == scored.name]
         if namesakes:
             self._lend(path, scored, home, max(namesakes, key=lambda g: g.score))
-
-    def _may_lend(self, old: str, base: _ScoredFunction, same_file: bool, judged: bool) -> bool:
-        """Whether base, a base function of the file at old, may lend its score to a function of the same file or of
-        another one, as same_file says, which is a file the check judges or not."""
-        if judged:
-            return not old.startswith(_COMPLEXITY_EXEMPT)
-        return same_file or (old, base.line) in self._gone
 
     def _lend(self, path: str, scored: _ScoredFunction, old: str, base: _ScoredFunction) -> None:
         self._left[old].remove(base)

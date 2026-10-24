@@ -5982,19 +5982,71 @@ class TestTooComplexFunctions(unittest.TestCase):
         big = flat("big", 20)
         self.commit_file("tests/helpers.py", "X = 0\n\n\n" + big)
         self.edit("calc.py", "'big 3':\n        x += 3\n", "'big 3':\n        x += 30\n")  # edited in place: still 20
-        with self.subTest("a copy at the base too, in a file the change edits elsewhere"):
-            self.edit("tests/helpers.py", "X = 0\n", "X = 1\n")
-            self.assertEqual(self.found()[0], [])
-        with self.subTest("a copy the change adds"):
-            self.put("tests/more_helpers.py", big)
-            self.git("add", "tests/more_helpers.py")
-            self.assertEqual(self.found()[0], [])
+        self.edit("tests/helpers.py", "X = 0\n", "X = 1\n")  # the copy at the base, in a file edited elsewhere
+        self.assertEqual(self.found()[0], [])
 
     def test_an_unchanged_copy_in_a_file_the_check_does_not_judge_takes_no_base_from_its_original_renamed(self):
         self.put("tests/helpers.py", flat("big", 20))
         self.git("add", "tests/helpers.py")
         self.edit("calc.py", "def big(", "def legacy_big(")  # renamed in place, its body unchanged
         self.assertEqual(self.found()[0], [])
+
+    def test_a_copy_of_its_name_takes_no_base_from_an_original_renamed_in_place(self):
+        big = flat("big", 20)
+        self.edit("calc.py", "def big(", "def legacy_big(")  # renamed in place, its body unchanged
+        self.put("lib.py", big)
+        self.git("add", "lib.py")
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`big`: cognitive complexity 20, a new function; the limit is 15."])
+
+    def test_a_function_moved_unchanged_keeps_its_base_from_a_new_function_under_its_old_name(self):
+        new_big = flat("big", 18).replace("'big ", "'new big ")
+        for where in ["lib.py", "tests/helpers.py", "bin/tool"]:
+            with self.subTest(where):
+                self.put("calc.py", self.BASE.replace(flat("big", 20), new_big))
+                self.put(where, ("#!/usr/bin/env python3\n" if where == "bin/tool" else "") + flat("big", 20))
+                self.git("add", where)
+                self.assertEqual([f["message"] for f in self.found()[1]],
+                                 ["`big`: cognitive complexity 18, a new function; the limit is 15."])
+                self.git("rm", "--quiet", "--cached", where)
+                os.remove(os.path.join(self.repo, where))
+
+    def test_a_function_moved_unchanged_out_of_a_file_that_keeps_its_name_keeps_its_base_from_a_copy(self):
+        # Two functions named _, as @singledispatch registrations are: the one scoring 20 moves where nothing is
+        # judged, the other stays, and a copy of the first is added elsewhere.
+        moved, stays = flat("_", 20).replace("'_ ", "'moved "), flat("_", 3).replace("'_ ", "'stays ")
+        self.commit_file("disp.py", moved + "\n\n" + stays)
+        self.put("disp.py", stays)
+        self.put("tests/helpers.py", moved)
+        self.put("lib.py", moved)
+        self.git("add", "tests/helpers.py", "lib.py")
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`_`: cognitive complexity 20, a new function; the limit is 15."])
+        self.assertEqual(self.found()[0][0][0], "lib.py")
+
+    def test_a_function_moved_unchanged_out_of_a_file_that_keeps_its_twin_keeps_its_base(self):
+        big = flat("big", 20)
+        self.put("calc.py", self.BASE + "\n\n" + big.replace("def big(", "def twin("))
+        self.git("commit", "--quiet", "-am", "twin")
+        self.edit("calc.py", "\n\n" + big.replace("def big(", "def twin("), "")
+        self.put("lib.py", big.replace("def big(", "def twin("))  # twin moved unchanged; big stays as it was
+        self.git("add", "lib.py")
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_copy_of_a_function_the_change_edits_takes_its_base_as_bodies_first_decides(self):
+        # The cost TODO.md records ("A copy of a function whose original the change edits keeps the old score and
+        # passes"): the copy is taken for the original moved unchanged, and the edited original for a new function.
+        big = flat("big", 20)
+        self.edit("calc.py", "'big 3':\n        x += 3\n", "'big 3':\n        x += 30\n")  # edited in place: still 20
+        for where in ["lib.py", "tests/helpers.py"]:
+            with self.subTest(where):
+                self.put(where, big)
+                self.git("add", where)
+                self.assertEqual([f["message"] for f in self.found()[1]],
+                                 ["`big`: cognitive complexity 20, a new function; the limit is 15."])
+                self.assertEqual(self.found()[0][0][0], "calc.py")
+                self.git("rm", "--quiet", "--cached", where)
+                os.remove(os.path.join(self.repo, where))
 
     def test_a_function_whose_decorator_the_change_adds_is_compared_with_its_unchanged_self(self):
         self.edit("calc.py", "def big(x):\n", "@staticmethod\ndef big(x):\n")  # touched, its body as it was
