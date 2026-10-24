@@ -5,6 +5,11 @@ was done.
 
 ## Open issues
 
+- **`test-integrity` does not see an expected value held outside the assertion.** `expected-value-changed` compares
+  each assertion's literals (`_changed_literals`), so editing a golden constant the assertion names, such as the
+  tests' `GOLDEN_PR_BODY` or `GOLDEN_SUMMARY`, changes what is expected without a finding, while the same edit inside
+  the assertion is one. Found while adding the provenance trailers to the pull request body (loop-guards ticket 03).
+  Closes with the assertions' names resolved to module-level constants the change edits.
 - **A run that never reaches `done` keeps its local refs.** A locking step's commit stays under
   `refs/orchestrator/<key>/locked/` (`RunState.lock_ref`) until the run ends `done` (`Workflow._clean_up_locks`);
   `close` and `prune` do not delete them, so a failed run's locked snapshots are never collected by `git gc`. Closes

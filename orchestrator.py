@@ -5711,7 +5711,7 @@ def pr_body(state: "RunState", spec: str, report: str, review: str, quality: str
     approved = state.verdict in SUCCEEDED
     head = f"Opened by ai-agents-orchestrator run `{state.run_id}`. {verdict_line(state)}"
     trailers = "\n".join(["| Commit trailer | Value |", "| --- | --- |",
-                          *(f"| {key} | `{value}` |" for key, value in provenance(state, quality))])
+                          *(f"| {key} | `{said}` |" for key, said in provenance(state, quality))])
     warning = []
     if state.conflicts:
         files = "\n".join(f"> - `{f}`" for f in state.conflicts)
@@ -6490,7 +6490,7 @@ class Workflow:
             quality = self.host.read(s.quality_path(s.round, s.quality_round)) if s.quality_round else None
             if self.host.git(wd, "status", "--porcelain").strip():
                 self.host.git(wd, "add", "--all")
-                trailers = [arg for key, value in provenance(s, quality) for arg in ("--trailer", f"{key}: {value}")]
+                trailers = [arg for key, said in provenance(s, quality) for arg in ("--trailer", f"{key}: {said}")]
                 self.host.git(wd, "commit", "--quiet", "-m", title, "-m", commit_note(s), *trailers)
             elif self.host.git_head(wd) == s.base:
                 raise OrchestratorError(f"the Builder changed no files; there is nothing to commit on {s.branch}")
