@@ -9474,11 +9474,11 @@ class TestProofs(unittest.TestCase):
         self.assertNotIn("run again", self.reviewed[0])
         self.assertTrue(self.reviewed[1].endswith(self.carried_note(
             f"- `{one}/test_1_bug.sh`: still fails, it fails.\n\n  ````\n  checking test_1_bug.sh\n  ````",
-            f"- `{one}/test_2.sh`: no longer fails, it passes.")), self.reviewed[1])
+            f"- `{one}/test_2.sh`: now passes.")), self.reviewed[1])
         self.assertTrue(self.reviewed[2].endswith(self.carried_note(
             f"- `{one}/test_1_bug.sh`: still fails, it fails.\n\n  ````\n  checking test_1_bug.sh\n  ````",
             f"- `{two}/test_4.sh`: still fails, it fails.\n\n  ````\n  checking test_4.sh\n  ````")))
-        self.assertIn(self.carried_note(f"- `{one}/test_1_bug.sh`: no longer fails, it passes.",
+        self.assertIn(self.carried_note(f"- `{one}/test_1_bug.sh`: now passes.",
                                         f"- `{two}/test_4.sh`: still fails, it fails.\n\n  ````\n  checking test_4.sh\n  ````"), self.reviewed[3])
         self.assertEqual([(p["round"], p["written"], p["file"], p["demonstrated"]) for p in state.proofs], [
             (1, 1, "test_1_bug.sh", True), (1, 1, "test_2.sh", True), (1, 1, "test_3.sh", False),
@@ -9544,8 +9544,33 @@ class TestProofs(unittest.TestCase):
         self.assertIn(orchestrator.PROOFS_NOTE.format(proofs=f"{state.proofs_dir(1)}/test_1.sh"), seen[0])
         self.assertEqual(wf.state.proofs[1], {"round": 2, "written": 1, "file": "test_1.sh", "finding": 1,
                                               "demonstrated": False, "said": "it passes"})
-        self.assertIn(self.carried_note(f"- `{state.proofs_dir(1)}/test_1.sh`: no longer fails, it passes."),
+        self.assertIn(self.carried_note(f"- `{state.proofs_dir(1)}/test_1.sh`: now passes."),
                       reviewed[0])
+
+    def test_a_proof_that_errors_when_run_again_stays_carried(self):
+        # A change that makes a demonstrated proof crash has not made it pass.
+        first = {"round": 1, "written": 1, "file": "test_1.sh", "finding": 1, "demonstrated": True, "said": "it fails"}
+        state = RunState("20260929-120000-a1b2c3", "add a rate limiter", self.proj, None, phase="build", round=2,
+                         workflow="quick", base="abc123", proofs=[first])
+        os.makedirs(state.proofs_dir(1))
+        with open(f"{state.proofs_dir(1)}/test_1.sh", "w") as f:
+            f.write("echo crashed\nexit 2\n")
+        host = FakeHost()
+        host._run = subprocess.run
+        host.files[state.build_path(1)] = "report 1"
+        host.files[state.review_path(1)] = f"VERDICT: CHANGES_REQUESTED\n1. a bug\n\n{orchestrator.PROOFS_HEADING}\n"
+        seen, reviewed = [], []
+        wf, *_ = make_workflow({"build": [recording(build_turn(n), seen) for n in (2, 3)],
+                                "review": [recording(review_turn(2, CHANGES_REQUESTED), reviewed),
+                                           recording(review_turn(3, APPROVE), reviewed)]},
+                               host=host, state=state, pipeline=self.pipeline, pull_request=False)
+        self.assertEqual(wf.run(), APPROVE)
+        path = f"{state.proofs_dir(1)}/test_1.sh"
+        for prompt in reviewed:
+            self.assertIn(self.carried_note(f"- `{path}`: no longer fails but errors, it errors, with exit status 2."
+                                            "\n\n  ````\n  crashed\n  ````"), prompt)
+        self.assertIn(orchestrator.PROOFS_NOTE.format(proofs=path), seen[1])
+        self.assertEqual([(p["round"], p["demonstrated"]) for p in wf.state.proofs], [(1, True), (2, False), (3, False)])
 
     def test_the_reviewers_own_proofs_heading_does_not_stop_the_run(self):
         wf, host, _ = self.run_proofs((CHANGES_REQUESTED, {"test_1.sh": 1}), (APPROVE, {}))
@@ -9566,7 +9591,7 @@ class TestProofs(unittest.TestCase):
             os.makedirs(wf.state.proofs_dir(1))
             with open(f"{wf.state.proofs_dir(1)}/test_1.sh", "w") as f:
                 f.write(f"(sleep 3; echo leaked > {self.proj}/leaked) &\nsleep 30\n")
-            failed, said = wf._run_proof("sh {proofs}", wf.state.proofs_dir(1), "test_1.sh")
+            failed, said = wf._run_proof("sh {proofs}", f"{wf.state.proofs_dir(1)}/test_1.sh")
         self.assertEqual((failed, said), (False, "it errors, running out of its 1 s"))
         time.sleep(4)
         self.assertFalse(os.path.exists(f"{self.proj}/leaked"))

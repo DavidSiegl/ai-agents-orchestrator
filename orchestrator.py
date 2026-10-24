@@ -429,20 +429,21 @@ Weigh them as you would your own."""
 
 # Appended to the prompt of the step a review loops back to, when tests the Reviewer wrote fail against the change.
 PROOFS_NOTE = """\
-The Reviewer backed findings with tests, and these fail against your change: {proofs}. \
+The Reviewer backed findings with tests, and these do not pass against your change: {proofs}. \
 Make each of them pass, without changing it; you may move one into the project as a regression test. \
 If one is wrong, say so in your report instead."""
 
-# Appended to the verdict step's prompt, after the quality and locks notes, when proofs that failed when last run in
-# an earlier round were run again against the round's change (Workflow._rerun_proofs); proofs is a list item per
-# proof, as proofs_section writes them.
+# Appended to the verdict step's prompt, after the quality and locks notes, when proofs carried from an earlier round
+# (Workflow._carried_proofs) were run again against the round's change (Workflow._rerun_proofs); proofs is a list item
+# per proof, as proofs_section writes them.
 CARRIED_PROOFS_NOTE = """\
 Proofs that failed against the change in an earlier round were run again against this round's change, with \
 `{command}` in {cwd}:
 
 {proofs}
 
-Weigh a proof that still fails as a finding that stands, whatever the reports say of it."""
+Weigh a proof that still fails, or now errors, as a finding that stands, unless a report shows the proof \
+itself is wrong."""
 
 # Appended to the verdict step's prompt when a turn of the round changed files that an earlier step locked.
 LOCKED_NOTE = """\
@@ -6086,6 +6087,11 @@ def proof_written(proof: dict) -> int:
     return proof.get("written", proof["round"])
 
 
+def _proof_passed(proof: dict) -> bool:
+    """Whether the run a RunState.proofs record holds passed: exited 0, neither failing nor erroring."""
+    return _proof_outcome(proof["said"]) == "it passes"
+
+
 def _proof_outcome(said: str) -> str:
     """How a proof exited, from a record's said: "it fails", "it passes" or how it errored."""
     return said.split("\n", 1)[0].rstrip(":")
@@ -6656,7 +6662,7 @@ class Workflow:
         records = [p for p in s.proofs if p["round"] == n and proof_written(p) == n]
         if not records:
             for f in sorted(os.path.basename(f.path) for f in self.host.run_files(s.proofs_dir(n))):
-                failed, said = self._run_proof(command, s.proofs_dir(n), f)
+                failed, said = self._run_proof(command, f"{s.proofs_dir(n)}/{f}")
                 records.append({"round": n, "written": n, "file": f, "finding": _proof_finding(f),
                                 "demonstrated": failed, "said": said})
             if not records:
@@ -6674,13 +6680,12 @@ class Workflow:
         (_carried_proofs), again against the change, and record the outcomes in RunState.proofs. A resume runs none
         once round n's reruns are recorded."""
         s, command = self.state, self.pipeline.proof_command
-        if command is None or any(p["round"] == n and proof_written(p) < n for p in s.proofs):
+        if command is None or self._reruns(n):
             return
         records = []
         for p in self._carried_proofs(n):
-            written = proof_written(p)
-            failed, said = self._run_proof(command, s.proofs_dir(written), p["file"])
-            records.append({"round": n, "written": written, "file": p["file"], "finding": p["finding"],
+            failed, said = self._run_proof(command, self._proof_path(p))
+            records.append({"round": n, "written": proof_written(p), "file": p["file"], "finding": p["finding"],
                             "demonstrated": failed, "said": said})
         if not records:
             return
@@ -6690,33 +6695,45 @@ class Workflow:
             f"still fail against the change")
 
     def _carried_proofs(self, n: int) -> list[dict]:
-        """The latest record of each proof whose last run before round n failed against the change, in the order the
-        proofs first ran."""
+        """The latest record before round n of each proof carried into it, in the order the proofs first ran: one
+        that failed when last run, or that a rerun found erroring rather than passing. A proof whose first run, in the
+        round that wrote it, errored is not carried: it never demonstrated its finding."""
         latest: dict[tuple[int, str], dict] = {}
         for p in self.state.proofs:
             if p["round"] < n:
                 latest[proof_written(p), p["file"]] = p
-        return [p for p in latest.values() if p["demonstrated"]]
+        return [p for p in latest.values()
+                if p["demonstrated"] or (proof_written(p) < p["round"] and not _proof_passed(p))]
+
+    def _reruns(self, n: int) -> list[dict]:
+        """The records of the proofs carried into round n and run again before its verdict step's turn."""
+        return [p for p in self.state.proofs if p["round"] == n and proof_written(p) < n]
+
+    def _proof_path(self, proof: dict) -> str:
+        """Where the proof a RunState.proofs record is a run of lies: in the proofs directory of the round that wrote
+        it."""
+        return f"{self.state.proofs_dir(proof_written(proof))}/{proof['file']}"
 
     def _carried_proofs_note(self, n: int) -> str:
         """What the verdict step hears in round n of the proofs from earlier rounds run again before its turn; ""
         when none was."""
         s, command = self.state, self.pipeline.proof_command
-        records = [p for p in s.proofs if p["round"] == n and proof_written(p) < n]
+        records = self._reruns(n)
         if command is None or not records:
             return ""
         items = []
         for p in records:
-            how = "still fails" if p["demonstrated"] else "no longer fails"
-            path = f"{s.proofs_dir(proof_written(p))}/{p['file']}"
-            output = _proof_output(p["said"]) if p["demonstrated"] else []
-            items.append("\n".join([f"- `{path}`: {how}, {_proof_outcome(p['said'])}.", *output]))
+            passed = _proof_passed(p)
+            how = "still fails" if p["demonstrated"] else "now passes" if passed else "no longer fails but errors"
+            output = [] if passed else _proof_output(p["said"])
+            said = "" if passed else f", {_proof_outcome(p['said'])}"
+            items.append("\n".join([f"- `{self._proof_path(p)}`: {how}{said}.", *output]))
         return "\n\n" + CARRIED_PROOFS_NOTE.format(command=command, cwd=s.work_dir, proofs="\n\n".join(items))
 
-    def _run_proof(self, command: str, proofs_dir: str, file: str) -> tuple[bool, str]:
-        """Whether the proof fails against the working tree, as proof_command's exit status 1 says, and what it
+    def _run_proof(self, command: str, path: str) -> tuple[bool, str]:
+        """Whether the proof at path fails against the working tree, as proof_command's exit status 1 says, and what it
         printed last: its output's end, how else it exited, or why it could not run."""
-        cmd = command.format(proofs=shlex.quote(f"{proofs_dir}/{file}"))
+        cmd = command.format(proofs=shlex.quote(path))
         # GNU timeout runs the proof in a process group of its own and kills all of it, so nothing a proof started
         # goes on writing to the tree; where there is none, Host.run's limit stops only the shell.
         script = ('cd -- "$1" || exit 125; command -v timeout >/dev/null 2>&1 && exec timeout -k 10 "$3" sh -c "$2"; '
@@ -6732,12 +6749,12 @@ class Workflow:
         return proc.returncode == 1, f"{how}:\n{tail}" if tail else how
 
     def _proofs_note(self, step: Step, n: int) -> str:
-        """What the step hears in round n of the proofs that failed when last run, by round n-1's review or before it;
-        "" when it is not the step that review loops back to, or none failed."""
-        s, verdict = self.state, self.pipeline.verdict_step
+        """What the step hears in round n of the proofs carried into it (_carried_proofs); "" when it is not the step
+        the verdict step loops back to, or none is carried."""
+        verdict = self.pipeline.verdict_step
         if verdict is None or verdict.loop_to != step.id:
             return ""
-        failing = [f"{s.proofs_dir(proof_written(p))}/{p['file']}" for p in self._carried_proofs(n)]
+        failing = [self._proof_path(p) for p in self._carried_proofs(n)]
         if not failing:
             return ""
         return "\n\n" + PROOFS_NOTE.format(proofs=", ".join(failing))

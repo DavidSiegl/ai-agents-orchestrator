@@ -5,6 +5,10 @@ was done.
 
 ## Open issues
 
+- **No test shows the proof reruns come after the quality loop.** `Workflow._rerun_proofs` runs right before the
+  verdict step's turn, which follows the quality loop by construction, but every proof test uses `QUICK`, which has
+  no quality-gated step. Raised by the cross-review of the proof reruns (R1-F5, 2026-10-24): "no test would notice
+  the rerun moving before it". Closes with a proof test on a quality-gated workflow, through the CI fakes.
 - **The macOS builds are first tried on a published release.** `.github/workflows/macos-binary.yml` runs only on
   `release: published` or by hand for an existing tag, so a change that breaks the macOS binary or
   `packaging/build-desktop.sh` on macOS merges green, and the release then lacks those assets until it is fixed and
@@ -252,7 +256,7 @@ was done.
 - **A proof that failed is not run again in the next round.** `Workflow._judge_proofs` ran only the proofs the
   verdict step wrote in its own round, so a Builder told to make round N's failing proofs pass (`PROOFS_NOTE`) was
   checked only if the Reviewer wrote them again; one that still failed could be approved. Raised by the code review
-  of loop-guards (2026-10-24). Fixed (2026-10-24): `Workflow._rerun_proofs` runs every proof whose last run failed
-  again right before each later round's verdict turn, until it no longer fails, recording each rerun in
+  of loop-guards (2026-10-24). Fixed (2026-10-24): `Workflow._rerun_proofs` runs every proof whose last run failed,
+  or whose rerun errored, again right before each later round's verdict turn, until it passes, recording each rerun in
   `RunState.proofs` with the round that wrote the proof; `CARRIED_PROOFS_NOTE` tells the verdict step which still
-  fail, and `PROOFS_NOTE` names all of them to the step the review loops back to.
+  fail or now error, and `PROOFS_NOTE` names all of them to the step the review loops back to.
