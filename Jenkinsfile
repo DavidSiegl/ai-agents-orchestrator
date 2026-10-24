@@ -70,6 +70,10 @@ pipeline {
 
         stage('Test') {
             when { expression { return env.JUDGED_AT_PR != 'true' } }
+            environment {
+                // tests/conftest.py's larger profile: a build tries ten times the examples a local run does.
+                HYPOTHESIS_PROFILE = 'ci'
+            }
             steps {
                 // A failing test does not stop the build here: the Gate stage judges it with everything else, so a
                 // quality build's report lists failing tests and findings together. Any other exit status means

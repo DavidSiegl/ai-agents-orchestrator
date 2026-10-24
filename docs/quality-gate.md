@@ -460,9 +460,12 @@ JENKINS_TOKEN=…
 ```
 
 The orchestrator reads the file itself, on `run` and `resume`, so no wrapper is needed. Comments, blank lines,
-quotes and `export ` are allowed, so the same file can also be sourced by a shell. A variable set in the
-environment wins over the file, and the file is read only when one is missing. The orchestrator refuses a file
-that others may read.
+a comment after a value, and an `export` before a name are allowed, so the same file can also be sourced by a
+shell, and it means the same to both. A value is quoted, or unquoted without blanks, quotes or shell syntax; a
+line that sh would read otherwise is refused, and so is a file with Windows line ends, since sh would keep each
+carriage return in its value.
+A variable set in the environment wins over the file, and the file is read only when one is missing. The
+orchestrator refuses a file that others may read.
 
 Never export them from `~/.bashrc` or a direnv `.envrc`: every agent's shell would have them. Values from the
 file stay inside the orchestrator process and are never put into its environment.
