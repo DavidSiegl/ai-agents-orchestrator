@@ -384,8 +384,10 @@ any round), `prompt`, and optionally `again` (its prompt in a later round), `fre
 later round), `loop_to`, which makes it the verdict step that sends `CHANGES_REQUESTED` back to the step it names
 (a workflow without one ends `FINISHED` when its last step is done, and its pull request says no agent reviewed the
 change; with `--quality-gate`, a gate that still failed after the last quality round ends it `QUALITY_GATE_FAILED`
-instead, a draft, as under [Exit status](#exit-status)), and the flags `human_paced`, `edits`, `quality_gated` and
-`fresh_repeats_again` (a fresh session gets `again` too). `use = "spec"`, `"build"` or `"review"` starts from that
+instead, a draft, as under [Exit status](#exit-status)), and the flags `human_paced`, `edits`, `quality_gated`,
+`fresh_repeats_again` (a fresh session gets `again` too) and `locks`: an editing step that locks the files it
+changes, as `tdd`'s Test Writer does, has every later turn's change to them undone, and the Reviewer told where it
+is. `use = "spec"`, `"build"` or `"review"` starts from that
 default step and overrides only the keys you give. Prompts fill in `{task}`, `{cwd}`, `{n}`, `{change}`, `{path}`
 (the step's own file), and for every step `X`: `{X_path}`, `{prev_X_path}` and `{earlier_X_paths}`; write a literal
 brace as `{{` or `}}`. A role you do not list in `[roles]`, or list without a label, keeps the default workflow's

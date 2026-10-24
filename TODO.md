@@ -5,6 +5,10 @@ was done.
 
 ## Open issues
 
+- **A run that never reaches `done` keeps its local refs.** A locking step's commit stays under
+  `refs/orchestrator/<key>/locked/` (`RunState.lock_ref`) until the run ends `done` (`Workflow._clean_up_locks`);
+  `close` and `prune` do not delete them, so a failed run's locked snapshots are never collected by `git gc`. Closes
+  with `close` and `prune` deleting `RunState.refs_prefix` as they delete the run's branch.
 - **The secret scan does not look inside a file git takes for binary.** With no attributes, git still calls a file
   binary when its first 8000 bytes hold a NUL, and `git log -p` prints "Binary files ... differ" for it, to gitleaks
   and to `Host._allow_comments` alike, so a secret or a `gitleaks:allow` in such a file is pushed unscanned. gitleaks'

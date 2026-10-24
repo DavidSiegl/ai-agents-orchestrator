@@ -22,7 +22,7 @@ import tomllib
 import unittest
 import urllib.error
 import urllib.parse
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -107,6 +107,9 @@ class FakeHost(Host):
     - `pull_requests`: what `gh pr view` prints, by URL: a dict, or a completed process for a failure.
     - `remove_error`: the stderr of a failing `git worktree remove`.
 
+    Each snapshot keeps the changed files' text in `trees`, which lock, locked_changes and restore play the locked
+    files on; `refs` holds the refs lock made, and `restores` records each restore.
+
     For the secret scan before each push:
 
     - `leaks`: what scan_unpublished finds, as Leaks; every scan finds them all. `scans` records (commit, base,
@@ -152,6 +155,9 @@ class FakeHost(Host):
         self.committed = {}
         self.file_reads = []
         self.line_counts = None
+        self.trees = {}  # by snapshot: the text of each changed file then, None for a deleted one
+        self.refs = {}  # the local refs lock made, with their snapshot
+        self.restores = []  # (ref, paths) of each restore
 
     def scan_unpublished(self, cwd, commit, base, report_path):
         self.scans.append((commit, base, report_path))
@@ -173,7 +179,37 @@ class FakeHost(Host):
 
     def snapshot(self, cwd, parent, message):
         self.snapshots.append((parent, message))
-        return f"snap{len(self.snapshots)}"
+        sha = f"snap{len(self.snapshots)}"
+        self.trees[sha] = {p: self.files.get(p) for p in self._changed_in(cwd)}
+        return sha
+
+    def delete(self, path):
+        """Delete a file of the working tree, as an agent may."""
+        self.files.pop(path, None)
+        self.changed.add(path)
+
+    def lock(self, cwd, base, ref):
+        sha = self.snapshot(cwd, base, f"locked files, {ref}")
+        self.refs[ref] = sha
+        return sorted(p.removeprefix(f"{cwd}/") for p in self.trees[sha])
+
+    def locked_changes(self, cwd, ref, paths):
+        tree = self.trees[self.refs[ref]]
+        differ = [p for p in paths if self.files.get(f"{cwd}/{p}") != tree[f"{cwd}/{p}"]]
+        return differ, "".join(f"--- {p}: {tree[f'{cwd}/{p}']}\n+++ {p}: {self.files.get(f'{cwd}/{p}')}\n"
+                               for p in differ)
+
+    def restore(self, cwd, ref, paths):
+        self.restores.append((ref, list(paths)))
+        tree = self.trees[self.refs[ref]]
+        for p in paths:
+            if tree[f"{cwd}/{p}"] is None:
+                self.files.pop(f"{cwd}/{p}", None)
+            else:
+                self.files[f"{cwd}/{p}"] = tree[f"{cwd}/{p}"]
+
+    def delete_refs(self, cwd, prefix):
+        self.refs = {ref: sha for ref, sha in self.refs.items() if not ref.startswith(prefix)}
 
     def read(self, path):
         return self.files.get(path)
@@ -1582,6 +1618,57 @@ class TestHostGit(unittest.TestCase):
         self.assertEqual(self.sh("git", "-C", wt, "diff", "--name-only", base, sha), "feature.py\n")
         self.assertEqual(changed_lines(self.host.change_diff(wt, base, sha)), {"feature.py": {1}})
         self.assertEqual(self.sh("git", "-C", self.a, "status", "--porcelain"), " M app.py\n?? mine.py\n")
+
+    def put(self, name, text=None):
+        """Write a file of checkout A, or delete it with no text."""
+        path = f"{self.a}/{name}"
+        if text is None:
+            os.remove(path)
+            return
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    def read(self, name):
+        with open(f"{self.a}/{name}") as f:
+            return f.read()
+
+    def test_locked_files_are_restored_and_the_index_is_left_alone(self):
+        self.commit(self.a, "gone.py", "old\n")
+        base = self.head(self.a)
+        ref = "refs/orchestrator/a1b2c3/locked/tests"
+        self.put("tests/test_[x].py", "assert f()\n")
+        self.put("app.py", "one\ntested\n")
+        self.put("gone.py")
+        self.assertEqual(self.host.lock(self.a, base, ref), ["app.py", "gone.py", "tests/test_[x].py"])
+        locked = self.host.lock(self.a, base, ref)
+
+        # A later step edits one, deletes another, brings back the third and changes a file nobody locked.
+        self.put("tests/test_[x].py")
+        self.put("app.py", "one\nweakened\n")
+        self.put("gone.py", "back\n")
+        self.put("feature.py", "new\n")
+        os.makedirs(f"{self.a}/sub")
+        differ, diff = self.host.locked_changes(f"{self.a}/sub", ref, locked)
+        self.assertEqual(differ, ["app.py", "gone.py", "tests/test_[x].py"])
+        self.assertIn("-tested\n+weakened\n", diff)
+        self.assertIn("deleted file mode", diff)
+        porcelain = self.sh("git", "-C", self.a, "status", "--porcelain")
+
+        self.host.restore(f"{self.a}/sub", ref, differ)
+        self.assertEqual((self.read("tests/test_[x].py"), self.read("app.py"), self.read("feature.py")),
+                         ("assert f()\n", "one\ntested\n", "new\n"))
+        self.assertFalse(os.path.exists(f"{self.a}/gone.py"))
+        self.assertEqual(self.host.locked_changes(self.a, ref, locked), ([], ""))
+        self.assertEqual(self.sh("git", "-C", self.a, "diff", "--cached", "--name-only"), "")
+        self.assertNotEqual(self.sh("git", "-C", self.a, "status", "--porcelain"), porcelain)
+
+        other = "refs/orchestrator/d4e5f6/locked/tests"
+        self.sh("git", "-C", self.a, "update-ref", other, base)
+        self.host.delete_refs(self.a, "refs/orchestrator/a1b2c3/")
+        self.assertEqual(self.sh("git", "-C", self.a, "for-each-ref", "--format=%(refname)", "refs/orchestrator/"),
+                         f"{other}\n")
+        self.host.delete_refs(self.a, "refs/orchestrator/a1b2c3/")
 
 
 class TestCLI(unittest.TestCase):
@@ -8930,6 +9017,151 @@ class TestOtherWorkflows(unittest.TestCase):
             wf.run()
 
 
+LOCKING = Pipeline("locking", FOUR.roles, tuple(replace(st, locks=True) if st.id == "tests" else st
+                                                for st in FOUR.steps))
+TEST_FILE = "/proj/test_limiter.py"
+
+
+def locked_tests_turn(prompt, state, host):
+    host.write(TEST_FILE, "assert limit() == 3")
+    return write_tests(prompt, state, host)
+
+
+def build_touching_tests(n, test=""):
+    """The Builder's turn in round n, which also rewrites the locked test, or deletes it for None."""
+    def turn(prompt, state, host):
+        if test is None:
+            host.delete(TEST_FILE)
+        else:
+            host.write(TEST_FILE, test)
+        return build_turn(n)(prompt, state, host)
+    return turn
+
+
+class TestLockedFiles(unittest.TestCase):
+    def run_locking(self, *builds, reviews=None, **kw):
+        seen = []
+        reviews = reviews or [review_turn(1, APPROVE)]
+        wf, herdr, host, notes = make_workflow({
+            "spec": [spec_turn], "tests": [locked_tests_turn], "build": list(builds),
+            "review": [recording(r, seen) for r in reviews],
+        }, state=new_run(LOCKING), pipeline=LOCKING, **kw)
+        return wf, host, seen
+
+    def test_an_edited_locked_test_is_restored_and_the_reviewer_told(self):
+        wf, host, seen = self.run_locking(build_touching_tests(1, "assert True"))
+
+        self.assertEqual(wf.run(), APPROVE)
+
+        ref = "refs/orchestrator/a1b2c3/locked/tests"
+        self.assertEqual(host.restores, [(ref, ["test_limiter.py"])])
+        self.assertEqual(host.files[TEST_FILE], "assert limit() == 3")
+        # A file nobody locked keeps the Builder's change.
+        self.assertEqual(host.files["/proj/limiter.py"], "version 1")
+        self.assertEqual(host.files[f"{D}/locked-build-1.diff"],
+                         "--- test_limiter.py: assert limit() == 3\n+++ test_limiter.py: assert True\n")
+        self.assertEqual(wf.state.locked, {"tests": ["test_limiter.py"]})
+        self.assertEqual(wf.state.restored,
+                         [{"round": 1, "file": "locked-build-1.diff", "paths": {"tests": ["test_limiter.py"]}}])
+        self.assertIn("\n\n" + orchestrator.LOCKED_NOTE.format(steps="tests", paths="`test_limiter.py`",
+                                                               diff_paths=f"{D}/locked-build-1.diff"), seen[0])
+        # done: the run's local refs are gone.
+        self.assertEqual(host.refs, {})
+
+    def test_a_deleted_locked_test_comes_back(self):
+        wf, host, _ = self.run_locking(build_touching_tests(1, None))
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(host.files[TEST_FILE], "assert limit() == 3")
+        self.assertIn("+++ test_limiter.py: None", host.files[f"{D}/locked-build-1.diff"])
+
+    def test_untouched_locked_files_need_no_restore(self):
+        wf, host, seen = self.run_locking(build_turn(1), build_touching_tests(2, "assert True"),
+                                          reviews=[review_turn(1, CHANGES_REQUESTED), review_turn(2, APPROVE)])
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(host.restores, [("refs/orchestrator/a1b2c3/locked/tests", ["test_limiter.py"])])
+        self.assertNotIn(f"{D}/locked-build-1.diff", host.files)
+        self.assertNotIn("locked", seen[0])
+        self.assertIn(f"{D}/locked-build-2.diff", seen[1])
+
+    def test_a_workflow_without_locks_restores_nothing(self):
+        wf, _, host, _ = make_workflow({
+            "spec": [spec_turn], "tests": [locked_tests_turn], "build": [build_touching_tests(1, "assert True")],
+            "review": [review_turn(1, APPROVE)],
+        }, state=new_run(FOUR), pipeline=FOUR)
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual((host.files[TEST_FILE], host.restores, host.refs), ("assert True", [], {}))
+        self.assertEqual((wf.state.locked, wf.state.restored), ({}, []))
+
+    def test_a_resume_between_the_turn_and_the_restore_still_restores(self):
+        def build_then_interrupt(prompt, state, host):
+            build_touching_tests(1, "assert True")(prompt, state, host)
+            raise KeyboardInterrupt
+        wf, host, _ = self.run_locking(build_then_interrupt)
+        with self.assertRaises(KeyboardInterrupt):
+            wf.run()
+        self.assertEqual(host.files[TEST_FILE], "assert True")
+        saved = json.loads(host.files[f"{D}/state.json"])
+        self.assertEqual((saved["phase"], saved["locked"], saved["restored"]),
+                         ("build", {"tests": ["test_limiter.py"]}, []))
+
+        wf2, *_ = resume(RunState.from_dict(saved), {"review": [review_turn(1, APPROVE)]}, host=host,
+                         pipeline=LOCKING)
+        self.assertEqual(wf2.run(), APPROVE)
+        self.assertEqual(host.files[TEST_FILE], "assert limit() == 3")
+        self.assertEqual([r["file"] for r in wf2.state.restored], ["locked-build-1.diff"])
+
+    def test_a_record_saved_before_the_restore_is_restored_on_resume(self):
+        state = saved_run("build", 1, agents=("spec", "build"), workflow="locking",
+                          workflow_definition=orchestrator.workflow_definition(LOCKING),
+                          locked={"tests": ["test_limiter.py"]},
+                          restored=[{"round": 1, "file": "locked-build-1.diff", "paths": {"tests": ["test_limiter.py"]}}])
+        host = FakeHost()
+        host.refs["refs/orchestrator/a1b2c3/locked/tests"] = "snap0"
+        host.trees["snap0"] = {TEST_FILE: "assert limit() == 3"}
+        host.files[TEST_FILE] = "assert True"
+        wf, *_ = resume(state, {"review": [review_turn(1, APPROVE)]}, host=host, pipeline=LOCKING,
+                        files={lambda s: s.build_path(1): "report 1", lambda s: f"{s.dir}/tests.md": "tests"})
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(host.files[TEST_FILE], "assert limit() == 3")
+        self.assertEqual(len(wf.state.restored), 1)
+        self.assertNotIn(f"{D}/locked-build-1.diff", host.writes)
+
+    def test_the_gate_judges_the_restored_tests(self):
+        fake = FakeCI()
+        fake.outcomes = [outcome(**RED), outcome()]
+        gated_build = replace(LOCKING.step("build"), quality_gated=True)
+        pipeline = Pipeline("locking", LOCKING.roles, tuple(gated_build if st.id == "build" else st
+                                                            for st in LOCKING.steps))
+
+        def fix(prompt, state, host):
+            host.write(TEST_FILE, "assert 1")
+            return fix_turn(1, 1)(prompt, state, host)
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "tests": [locked_tests_turn], "build": [build_touching_tests(1, "assert True"), fix],
+            "review": [review_turn(1, APPROVE)]}, fake=fake, state=new_run(pipeline), pipeline=pipeline)
+
+        self.assertEqual(wf.run(), APPROVE)
+        quality_snapshots = [sha for (_, message), sha in zip(host.snapshots, host.trees, strict=True)
+                             if "quality round" in message]
+        self.assertEqual([host.trees[sha][TEST_FILE] for sha in quality_snapshots],
+                         ["assert limit() == 3", "assert limit() == 3"])
+        self.assertEqual([r["file"] for r in wf.state.restored], ["locked-build-1.diff", "locked-build-1-q1.diff"])
+
+    def test_only_an_editing_step_may_lock(self):
+        with self.assertRaisesRegex(ValueError, "step review locks the files it changes, so it must edit"):
+            Pipeline("bad", QUICK.roles, (QUICK.steps[0], replace(QUICK.steps[1], locks=True)))
+        step = 'id = "tests"\nfile = "t.md"\nprompt = "{path}"\nlocks = true\n'
+        with self.assertRaisesRegex(ValueError, "step tests locks the files it changes, so it must edit"):
+            orchestrator.parse_workflow("bad", tomllib.loads(f"[[steps]]\n{step}"))
+        with self.assertRaisesRegex(ValueError, "locks must be true or false"):
+            orchestrator.parse_workflow("bad", tomllib.loads(f'[[steps]]\n{step}'.replace("true", '"yes"')))
+
+    def test_locks_round_trip_through_a_workflow_file(self):
+        text = orchestrator.workflow_toml(LOCKING)
+        self.assertIn("locks = true", text)
+        self.assertEqual(orchestrator.parse_workflow("locking", tomllib.loads(text)), LOCKING)
+
+
 class TestSavedBeforeWorkflows(unittest.TestCase):
     """state.json as commit d6bb100 wrote it, without a workflow field."""
 
@@ -9088,7 +9320,7 @@ class TestWorkflowFiles(unittest.TestCase):
         self.assertNotEqual(build.prompt, default.step("build").prompt)
         self.assertEqual(Step(**{**orchestrator.step_fields(build), "prompt": default.step("build").prompt}),
                          default.step("build"))
-        self.assertEqual((tests.role, tests.file, tests.edits), ("tests", "tests.md", True))
+        self.assertEqual((tests.role, tests.file, tests.edits, tests.locks), ("tests", "tests.md", True, True))
 
     def test_default_round_trips_through_its_file(self):
         default = orchestrator.DEFAULT_WORKFLOW
@@ -9194,7 +9426,7 @@ class TestWorkflowFiles(unittest.TestCase):
                           f"conversion", "[[steps]]\n" + step.replace("b-{n}.md", name)))
         for name in ("state.json", "summary.md", "quality-{n}-1.md", "../b-{n}.md", "/tmp/b-{n}.md", ".."):
             cases.append((f"step build: handoff file {name} must be a plain file name, and not state.json, "
-                          f"summary.md or quality-*, which the run writes itself",
+                          f"summary.md, quality-* or locked-*, which the run writes itself",
                           "[[steps]]\n" + step.replace("b-{n}.md", name)))
         for message, text in cases:
             with self.subTest(message=message):

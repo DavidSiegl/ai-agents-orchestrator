@@ -89,17 +89,26 @@ the handoff file's `Host.mtime`; both read the project host's clock. The end of 
 A workflow is data: a `Pipeline` with a name, its roles in pane order (role key to pane label) and a tuple of
 `Step`s. A step names its id (also its phase), its role, its handoff file (fixed like `spec.md`, or one per
 round like `build-{n}.md`), a first prompt, a later-round prompt (`again`) and a note for a fresh session in a
-later round (`fresh_note`), and the flags `human_paced`, `edits`, `loop_to` (which makes it the verdict step)
-and `quality_gated`. Prompts take `{task}`, `{cwd}`, `{n}`, `{change}`, `{path}` and, for every step `X`,
+later round (`fresh_note`), and the flags `human_paced`, `edits`, `loop_to` (which makes it the verdict step),
+`quality_gated` and `locks`. Prompts take `{task}`, `{cwd}`, `{n}`, `{change}`, `{path}` and, for every step `X`,
 `{X_path}`, `{prev_X_path}` and `{earlier_X_paths}`. `Pipeline` validates itself when constructed and raises
 `ValueError` naming the problem, such as a duplicate id, a loop target that does not come earlier, two verdict
 loops, two gated steps or an unknown placeholder.
 
-The quality-gated step is the one the gate follows: its answer to quality round Q inserts `-qQ` before its
-file's extension, other steps' prompts name its last report of the round, and `QUALITY_PASSED_NOTE` or
-`QUALITY_UNRESOLVED_NOTE` ends the verdict step's prompt. The contract step, a first step with a fixed file
-that does not edit, titles the branch and the pull request; without one the task does. The pull request body
-holds the contract, the last editing step's last report, the last quality file and the verdict file.
+The quality-gated step is the one the gate follows: its answer to quality round Q inserts `-qQ` before its file's
+extension, other steps' prompts name its last report of the round, and `QUALITY_PASSED_NOTE` or
+`QUALITY_UNRESOLVED_NOTE` ends the verdict step's prompt. The contract step, a first step with a fixed file that
+does not edit, titles the branch and the pull request; without one the task does. The pull request body holds the
+contract, the last editing step's last report, the last quality file and the verdict file.
+
+A locking step (`locks`, editing steps only) locks the change as it stands when each of its turns ends: `Host.lock`
+snapshots the tree into the local ref `refs/orchestrator/<key>/locked/<step>`, which nothing pushes and `done`
+deletes, and `RunState.locked` saves the paths that differ from the base. After every other editing turn,
+`Workflow._hold_locks` writes the turn's changes to those paths to `locked-<turn's file>.diff` in the run directory,
+saves a record of them in `RunState.restored`, and then restores the paths from the ref (`Host.restore`, the working
+tree only, a path the ref lacks deleted); a resume restores a saved record again. That happens before the quality
+round, so the gate judges the locked files, and `LOCKED_NOTE` tells the verdict step which files of its round were
+restored and where the diffs are.
 
 `WORKFLOWS` holds only `DEFAULT_WORKFLOW`. Other workflows are TOML files: `run --workflow NAME` finds
 `NAME.toml` in `workflows_dir` (`~/.config/ai-agents-orchestrator/workflows/`), and `run --workflow-file` takes
@@ -109,7 +118,7 @@ workflow's label for its key, or else is named after the key; a role's `model` s
 and its `agent` (`Pipeline.agents`, one of `AGENT_KINDS`) under `--agent` and `--role-agent`. A
 file cannot take a built-in workflow's name. `Pipeline` also rejects a prompt or file that could not be filled
 in at run time (`_fill_problem`), and a handoff file outside the run directory or named like the run's own
-`state.json`, `summary.md` and `quality-*` files, and two steps whose files can share a name in some round (`Step.name_forms`,
+`state.json`, `summary.md`, `quality-*` and `locked-*` files, and two steps whose files can share a name in some round (`Step.name_forms`,
 `_shared_name` and `_collision_problem`, an exact check). `state.json` saves
 the workflow's name and, for one that is not built in, its canonical definition (`workflow_definition`), which
 a resume rebuilds the `Pipeline` from, so editing or deleting the file does not change a started run. One saved

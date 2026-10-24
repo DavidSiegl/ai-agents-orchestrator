@@ -139,6 +139,8 @@ GIT_PATHSPEC_ENV = ("GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_P
 JOB_PARAMETERS = ("GIT_REF",)
 # Snapshots are pushed to orchestrator-ci/<key>-<round>-q<quality round>.
 CI_REF_PREFIX = "orchestrator-ci/"
+# A run's local refs are under refs/orchestrator/<key>/ (RunState.refs_prefix).
+LOCAL_REFS_PREFIX = "refs/orchestrator/"
 # Files a change may edit that alter how Jenkins and the gate judge it.
 BUILD_CONFIG_FILES = ("Jenkinsfile", "pyproject.toml", "uv.lock")
 QUALITY_ISSUE_LIMIT = 50
@@ -399,6 +401,12 @@ QUALITY_UNRESOLVED_NOTE = """\
 The quality gate still did not pass after the Builder's last quality round; \
 its unresolved findings are in {quality_path}. Weigh them as you would your own."""
 
+# Appended to the verdict step's prompt when a turn of the round changed files that an earlier step locked.
+LOCKED_NOTE = """\
+This round changed files that step {steps} locked: {paths}. The orchestrator restored them, \
+so the change you review does not hold those edits; they are in {diff_paths}. \
+If a report says a locked file is wrong, weigh that claim against the diff."""
+
 
 # ---------------------------------------------------------------------------
 # Workflow definitions
@@ -448,6 +456,10 @@ class Step:
     # With --quality-gate, each turn is followed by the quality loop, which sends a gate that does
     # not pass back to this step with QUALITY_FIX_PROMPT, and the verdict step hears how it ended.
     quality_gated: bool = False
+    # Locks the change as it stands when each of this editing step's turns ends: every file it then changes from the
+    # base. A later turn of another editing step that changes one has it restored, and the verdict step hears of it
+    # (Workflow._hold_locks).
+    locks: bool = False
 
     @property
     def per_round(self) -> bool:
@@ -524,7 +536,7 @@ class Pipeline:
         if not self.steps:
             return "has no steps"
         checks = (self._name_problem, self._role_problem, self._uniqueness_problem, self._step_problem,
-                  self._collision_problem, self._loop_problem, self._budget_problem)
+                  self._collision_problem, self._loop_problem, self._budget_problem, self._lock_problem)
         return next((problem for check in checks if (problem := check())), None)
 
     def _budget_problem(self) -> str | None:
@@ -532,6 +544,10 @@ class Pipeline:
             if getattr(self, key) < 1:
                 return f"{key} must be at least 1"
         return None
+
+    def _lock_problem(self) -> str | None:
+        locker = next((st for st in self.steps if st.locks and not st.edits), None)
+        return f"step {locker.id} locks the files it changes, so it must edit" if locker else None
 
     def _name_problem(self) -> str | None:
         ids, files = [st.id for st in self.steps], [st.file for st in self.steps]
@@ -659,7 +675,7 @@ class Pipeline:
 # Written into the run directory whenever the run ends: what it did, and where its time went.
 SUMMARY_FILE = "summary.md"
 # Files the run writes into its directory itself, beside the steps' handoff files.
-RUN_FILE = re.compile(r"state\.json|summary\.md|quality-.*")
+RUN_FILE = re.compile(r"state\.json|summary\.md|quality-.*|locked-.*")
 
 
 def _fill_problem(step: Step, known: set[str]) -> str | None:
@@ -670,8 +686,8 @@ def _fill_problem(step: Step, known: set[str]) -> str | None:
         return f"handoff file {step.file} may use {{n}} only as it is, with no format spec or conversion"
     name = step.file.format(n=1)
     if "/" in name or name in ("", ".", "..") or RUN_FILE.fullmatch(name):
-        return f"handoff file {step.file} must be a plain file name, and not state.json, {SUMMARY_FILE} " \
-               f"or quality-*, which the run writes itself"
+        return f"handoff file {step.file} must be a plain file name, and not state.json, {SUMMARY_FILE}, " \
+               f"quality-* or locked-*, which the run writes itself"
     # Every value a prompt is filled in with is a string.
     values = dict.fromkeys(known, "")
     for field_name in ("prompt", "again", "fresh_note"):
@@ -1226,6 +1242,12 @@ GH_UNUSABLE_STATUS = (4, 127)
 IN_DIR = 'cd -- "$1" && shift && exec "$@"'
 
 
+def _top_literal(paths: list[str]) -> list[str]:
+    """git pathspecs that each match exactly one of paths, relative to the repository's top level, whatever directory
+    git runs in, and with no glob in them."""
+    return [f":(top,literal){p}" for p in paths]
+
+
 class GhUnusable(OrchestratorError):
     """gh is missing or logged out where the project is, so no gh call can succeed."""
 
@@ -1419,6 +1441,49 @@ class Host:
         if not re.fullmatch(r"[0-9a-f]{40,64}", sha):
             raise OrchestratorError(f"snapshot of {cwd}: git commit-tree printed {sha!r}, not a commit")
         return sha
+
+    # Locked files (Step.locks). Their paths are relative to the repository's top level, verbatim as Host.run says,
+    # whatever directory of the repository cwd is.
+
+    def lock(self, cwd: str, base: str, ref: str) -> list[str]:
+        """Snapshot the working tree on top of base, store the commit under ref, replacing what ref held, and return
+        the paths whose files the snapshot changes from base: added, edited or deleted, a rename as its two paths.
+
+        ref is a local ref, which keeps the commit from git gc; nothing pushes it.
+        """
+        sha = self.snapshot(cwd, base, f"locked files, {ref}")
+        self.git(cwd, "update-ref", ref, sha)
+        return self._paths_between(cwd, base, sha)
+
+    def locked_changes(self, cwd: str, ref: str, paths: list[str]) -> tuple[list[str], str]:
+        """Of paths, the ones whose file in the working tree, untracked files included, differs from ref's, a file
+        missing on one side counting as different; and the diff from ref to the working tree over them, as text
+        for a reader. ([], "") when none differs. Reads only: ref, the tree and the index stay as they are."""
+        if not paths:
+            return [], ""
+        sha = self.snapshot(cwd, ref, f"the working tree against {ref}")
+        differ = self._paths_between(cwd, ref, sha, paths)
+        if not differ:
+            return [], ""
+        return differ, self.git(cwd, "diff", "--no-color", "--no-ext-diff", "--no-renames", ref, sha, "--",
+                                *_top_literal(differ), verbatim=True)
+
+    def restore(self, cwd: str, ref: str, paths: list[str]) -> None:
+        """Make each of paths in the working tree what it is in ref: written as ref has it, or deleted where ref has
+        none. The index stays as it is."""
+        if paths:
+            self.git(cwd, "restore", f"--source={ref}", "--worktree", "--", *_top_literal(paths))
+
+    def delete_refs(self, cwd: str, prefix: str) -> None:
+        """Delete every local ref whose name starts with prefix, such as refs/orchestrator/<key>/; none is no error."""
+        for ref in self.git(cwd, "for-each-ref", "--format=%(refname)", prefix).split():
+            self.git(cwd, "update-ref", "-d", ref)
+
+    def _paths_between(self, cwd: str, a: str, b: str, paths: list[str] | None = None) -> list[str]:
+        """The paths whose files differ between commits a and b, a rename as its two paths; with paths, only those."""
+        names = self.git(cwd, "diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", a, b, "--",
+                         *_top_literal(paths or []), verbatim=True)
+        return [p for p in names.split("\0") if p]
 
     def change_diff(self, cwd: str, base: str, commit: str | None = None, *, pathspecs: tuple[str, ...] = ()) -> str:
         """`git diff -U0` from base to commit, or to the working tree's tracked files without one, in the one shape
@@ -2076,6 +2141,13 @@ class RunState:
     # The BLOCKED report the current turn waits on the human for, {"file", "question", "k"}: file is the handoff
     # file's basename, and the report was moved to its k-th blocked name (Workflow._blocked_path). None otherwise.
     blocked: dict | None = None
+    # Per locking step (Step.locks), by id: the paths its last turn locked, as Host.lock gives them. Their locked
+    # versions are in the commit at lock_ref(step id).
+    locked: dict[str, list[str]] = field(default_factory=dict)
+    # One record per editing turn that changed locked files, {"round", "file", "paths"}, in the order of the turns:
+    # file is the basename of the diff of what the turn changed in them, in the run directory, and paths are the
+    # files, by the id of the step that locked them. The files were restored once the record was saved.
+    restored: list[dict] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, saved: dict) -> "RunState":
@@ -2106,6 +2178,15 @@ class RunState:
     def work_dir(self) -> str:
         """Where the agents work and the run's git steps run: its worktree, or else the project's checkout."""
         return self.worktree or self.cwd
+
+    @property
+    def refs_prefix(self) -> str:
+        """Where the run keeps its local refs, which nothing pushes and done deletes."""
+        return f"{LOCAL_REFS_PREFIX}{self.key}/"
+
+    def lock_ref(self, step_id: str) -> str:
+        """The local ref of the commit that holds the files the step locked."""
+        return f"{self.refs_prefix}locked/{step_id}"
 
     # The default workflow's handoff files; the quality files are every workflow's.
     @property
@@ -5797,6 +5878,7 @@ class Workflow:
             if s.pull_request:
                 self._publish()
             self._clean_up_quality()
+            self._clean_up_locks()
         except RunTakenOver:
             raise
         except OrchestratorError as e:
@@ -6078,6 +6160,9 @@ class Workflow:
         """The step's turn in round n; False when the run goes on elsewhere than the next step."""
         s = self.state
         out = self._step_turn(step, n)
+        if step.edits:
+            # Before the quality round, so the gate judges the locked files.
+            self._hold_locks(step, n)
         if step.quality_gated and self.ci:
             s.phase, s.quality_round = QUALITY, s.quality_round + 1
             self._save()
@@ -6091,6 +6176,68 @@ class Workflow:
             self._goto(self.pipeline.step(step.loop_to), n + 1)
             return False
         return True
+
+    def _hold_locks(self, step: Step, n: int) -> None:
+        """After the editing step's turn in round n: restore the files other steps locked that the turn changed, then
+        lock the step's own files if it locks them. A resume before the run moves on does it again, harmlessly."""
+        s = self.state
+        file = f"locked-{os.path.splitext(os.path.basename(self._own_path(step, n)))[0]}.diff"
+        record = next((r for r in s.restored if r["file"] == file), None)
+        if record is None:
+            record = self._locked_changes(step, n, file)
+        # A saved record is restored again: an orchestrator may have stopped before or while restoring it.
+        for locker, paths in (record or {}).get("paths", {}).items():
+            self.host.restore(s.work_dir, s.lock_ref(locker), paths)
+            log(f"[{step.role}] restored {', '.join(paths)}, which step {locker} locked; the changes are in {file}")
+        if step.locks:
+            if s.base is None:
+                raise OrchestratorError("a lock before the run has a base")
+            s.locked[step.id] = self.host.lock(s.work_dir, s.base, s.lock_ref(step.id))
+            self._save()
+            log(f"[{step.role}] locked {len(s.locked[step.id])} files for the steps after it")
+
+    def _locked_changes(self, step: Step, n: int, file: str) -> dict | None:
+        """The record of what the step's turn in round n changed in other steps' locked files, saved with its diff
+        written to file; None when it changed none of them."""
+        s = self.state
+        paths: dict[str, list[str]] = {}
+        diffs = []
+        for locker, locked in s.locked.items():
+            if locker == step.id:
+                continue
+            differ, diff = self.host.locked_changes(s.work_dir, s.lock_ref(locker), locked)
+            if differ:
+                paths[locker] = differ
+                diffs.append(diff)
+        if not paths:
+            return None
+        self.host.write(f"{s.dir}/{file}", "".join(diffs))
+        record = {"round": n, "file": file, "paths": paths}
+        s.restored.append(record)
+        self._save()
+        return record
+
+    def _locks_note(self, n: int) -> str:
+        """What the verdict step hears of the locked files restored in round n; "" when none was."""
+        s = self.state
+        records = [r for r in s.restored if r["round"] == n]
+        if not records:
+            return ""
+        paths = sorted({p for r in records for ps in r["paths"].values() for p in ps})
+        lockers = sorted({locker for r in records for locker in r["paths"]})
+        return "\n\n" + LOCKED_NOTE.format(
+            paths=", ".join(f"`{p}`" for p in paths), steps=", ".join(lockers),
+            diff_paths=", ".join(f"{s.dir}/{r['file']}" for r in records))
+
+    def _clean_up_locks(self) -> None:
+        """At the end of a run, delete its local refs; a failure is only logged."""
+        s = self.state
+        if not s.locked:
+            return
+        try:
+            self.host.delete_refs(s.cwd, s.refs_prefix)
+        except OrchestratorError as e:
+            log(f"could not delete the refs under {s.refs_prefix}: {e}")
 
     def _judge_quality(self, n: int) -> bool:
         """The current quality round of round n; False when its gate sends the change back to the gated step."""
@@ -6156,7 +6303,7 @@ class Workflow:
         s = self.state
         q = s.quality_round if step.quality_gated else 0
         fill = {name: self._placeholder(name, step, n) for name in step.placeholders()}
-        quality = self._quality_note(n) if step.loop_to is not None else ""
+        quality = self._quality_note(n) + self._locks_note(n) if step.loop_to is not None else ""
         first = step.prompt.format(**fill) + quality
         if q:
             follow = QUALITY_FIX_PROMPT.format(quality_path=s.quality_path(n, q), report_path=self._own_path(step, n))
