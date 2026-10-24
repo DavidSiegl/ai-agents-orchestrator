@@ -344,8 +344,9 @@ Only lines a change adds count, so what `main` already has does not block.
 ## Jenkins setup
 
 One `Jenkinsfile` serves two jobs. Every build installs, tests with branch coverage of `orchestrator`, checks the
-desktop app, runs the gate and archives `quality.md`, and builds the Linux binary and desktop app; a build of
-`main` that gets that far also releases. A build of `main` whose tree a pull request build already judged skips the
+desktop app, runs the gate and archives `quality.md`; a pull request or `main` build then builds the Linux binary
+and desktop app, which a quality build skips (the `Jenkinsfile`'s Package stage says why), and a build of `main`
+that gets that far also releases. A build of `main` whose tree a pull request build already judged skips the
 tests, the desktop app's checks and the gate (see
 [A build of main judged at its pull request](#a-build-of-main-judged-at-its-pull-request)).
 
@@ -414,7 +415,7 @@ A pull request is judged by the gate and rules it brings, and most from a branch
 Jenkins's App reports `pr-head` green, with no human in between (`.github/workflows/automerge.yml` says which).
 The App's status is honest about the build, but the build ran the pull request's own `Jenkinsfile` and gate. So
 whoever can push a branch here, the agents included, can change the rules that branch's merge is judged by, and
-an agent's pull request from a branch outside `orchestrator/` can reach `main` without a human. A fork's pull
+an agent's pull request, the orchestrator's own included, can reach `main` without a human. A fork's pull
 request still waits for one.
 
 The repository is public, so the stage fetches `main` or the target branch without credentials. `GIT_REF` and
@@ -672,7 +673,8 @@ goes to `build`, round n + 1, q = 0. `list` shows the phase `quality` and, in `b
 round.
 
 A resume in `quality` takes the furthest step the state allows: an existing quality file (one without a valid
-`GATE:` line is refused, as an empty handoff file is); `ci.build`; `ci.queue_url` (when Jenkins has forgotten the
+`GATE:` line is refused, as an empty handoff file is); `ci.build` (when the job has discarded that build, the run
+fails, cut back to `ci.ref`, so the next resume builds it again); `ci.queue_url` (when Jenkins has forgotten the
 queue item, the build with that `GIT_REF` among the job's last 20); `ci.ref` alone, where a build with that
 `GIT_REF` is adopted before a new one is triggered; otherwise snapshot, push and trigger. A state saved while
 quality rounds went through SonarQube loads too: its project and baseline are dropped, its `ci.ce_task` is
