@@ -6129,6 +6129,168 @@ class TestPassesAtBase(unittest.TestCase):
         find.assert_called_once_with("change", budget=42)
 
 
+class TestWrittenRules(unittest.TestCase):
+    """The coding rules the agents are given as prose, as this repository's ruff rules state them."""
+
+    PYPROJECT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pyproject.toml")
+
+    def ruff(self, name, text):
+        """(line, rule code) of each finding the real ruff reports on text, saved as name in a copy of this
+        repository's pyproject.toml's directory, run there with a relative path as the gate runs it: ruff resolves
+        per-file-ignores against its working directory."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        shutil.copy(self.PYPROJECT, tmp.name)
+        os.makedirs(os.path.join(tmp.name, os.path.dirname(name)), exist_ok=True)
+        with open(os.path.join(tmp.name, name), "w") as f:
+            f.write(text)
+        # A fixed command over a file this test wrote; no shell reads it.
+        proc = subprocess.run([sys.executable, "-m", "ruff", "check", "--config", "pyproject.toml",  # noqa: S603
+                               "--no-cache", "--output-format", "concise", name],
+                              cwd=tmp.name, capture_output=True, text=True, check=False)
+        self.assertNotIn("No module named", proc.stderr)
+        self.assertIn(proc.returncode, (0, 1), proc.stderr)
+        return sorted((int(line), code) for line, code in re.findall(r":(\d+):\d+: ([A-Z]+\d+)", proc.stdout))
+
+    STORE = ('"""A module."""\n\n\ndef load():\n    return 1\n\n\nclass Store:\n    def get(self):\n        return 1\n'
+             '\n    def __init__(self):\n        self.n = 1\n\n    def __len__(self):\n        return 1\n'
+             '\n\ndef _private():\n    return 1\n')
+
+    def test_an_undocumented_public_function_class_or_method_is_found_at_its_def_outside_the_tests(self):
+        self.assertEqual(self.ruff("store.py", self.STORE), [(4, "D103"), (8, "D101"), (9, "D102")])
+        # The tests document themselves by their names.
+        self.assertEqual(self.ruff("tests/test_store.py", self.STORE.replace('"""A module."""\n', "")), [])
+
+    def test_a_blind_except_that_goes_on_is_found(self):
+        # BLE001 comes from ruff's defaults, which extend-select keeps: this fails if the rules move to select.
+        text = ('"""A module."""\n\n\ndef load():\n    """Load."""\n    try:\n        return 1\n'
+                '    except Exception:\n        return None\n')
+        self.assertEqual(self.ruff("store.py", text), [(8, "BLE001")])
+
+
+class TestVagueNames(unittest.TestCase):
+    """The vague-names check over a real git repository: a base commit, then the change in its working tree."""
+
+    BASE = "data = 1\n\n\ndef old(value):\n    return value\n"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = tmp.name
+        self.host = Host()
+        self.git("init", "--quiet", "-b", "main")
+        for key, setting in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
+            self.git("config", key, setting)
+        self.put("calc.py", self.BASE)
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "base")
+
+    def git(self, *args):
+        return self.host.git(self.repo, *args)
+
+    def put(self, name, text):
+        path = os.path.join(self.repo, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    def found(self):
+        """(path, line, rule, message) of each finding on the working tree's change, every file in it tracked."""
+        self.git("add", "-A")
+        change = orchestrator.GateChange.from_tree(self.repo, self.git("rev-parse", "HEAD").strip())
+        return [(f["path"], f["line"], f["rule"], f["message"]) for f in orchestrator.vague_names(change)]
+
+    def test_each_vague_name_an_added_line_binds_is_found_once_at_its_first_binding(self):
+        added = textwrap.dedent("""\
+
+
+            class InfoManager:
+                def __init__(self, raw_info, *, metadata=None, **user_data):
+                    self.handle = raw_info
+                    self.result = metadata
+
+
+            def load(path):
+                result = []
+                for line_value in open(path):
+                    with line_value as status:
+                        data = status
+                        data = data
+                        result.append(data)
+                return result
+            """)
+        self.put("calc.py", self.BASE + added)
+        base = len(self.BASE.splitlines())
+        found = [(path, line - base, rule, message) for path, line, rule, message in self.found()]
+        self.assertEqual([(line, message.split("`")[1]) for _, line, _, message in found], [
+            (4, "raw_info"), (4, "user_data"), (5, "handle"), (11, "line_value"), (12, "status"), (13, "data")])
+        self.assertEqual({(path, rule) for path, _, rule, _ in found}, {("calc.py", "vague-name")})
+        self.assertEqual(found[0][3], "`raw_info` could name anything; name it for what it holds.")
+
+    def test_every_python_file_is_read_and_no_other(self):
+        # notes.txt sorts before calc.py in the diff, so a check that stopped at it would not read calc.py.
+        self.put("a_notes.txt", "data = 1\n")
+        self.put("calc.py", self.BASE + "\n\nclass C:\n    @classmethod\n    def make(cls):\n        cls.manager = 1\n")
+        self.assertEqual([(path, message.split("`")[1]) for path, _, _, message in self.found()],
+                         [("calc.py", "manager")])
+
+    def test_imports_excepts_matches_and_type_parameters_bind_names(self):
+        self.put("calc.py", self.BASE + textwrap.dedent("""\
+
+
+            import json as raw_data
+            from os import path as status
+
+
+            def parse[T_value](text: str) -> None:
+                try:
+                    match json.loads(text):
+                        case {"k": handle, **rest_info}:
+                            pass
+                        case [*all_status]:
+                            pass
+                except ValueError as info:
+                    raise
+            """))
+        self.assertEqual([message.split("`")[1] for _, _, _, message in self.found()],
+                         # A mapping pattern's **rest is placed at the pattern's start, before the captures in it.
+                         ["raw_data", "status", "T_value", "rest_info", "handle", "all_status", "info"])
+
+    def test_an_override_s_name_and_parameters_are_its_base_s(self):
+        self.put("calc.py", self.BASE + textwrap.dedent("""\
+
+
+            from typing import override
+
+
+            class Handler(Base):
+                @override
+                def handle(self, raw_data):
+                    status = raw_data
+                    return status
+            """))
+        self.assertEqual([message.split("`")[1] for _, _, _, message in self.found()], ["status"])
+
+    def test_a_name_on_a_line_the_change_left_alone_is_not_found(self):
+        self.put("calc.py", self.BASE.replace("return value", "return value + 1"))
+        self.assertEqual(self.found(), [])
+
+    def test_a_class_or_function_named_by_a_vague_word_is_found(self):
+        self.put("tests/test_calc.py", "class Manager:\n    pass\n\n\ndef handle():\n    pass\n")
+        self.assertEqual([(path, line) for path, line, _, _ in self.found()],
+                         [("tests/test_calc.py", 1), ("tests/test_calc.py", 5)])
+
+    def test_an_unparsable_file_is_a_finding(self):
+        self.put("calc.py", self.BASE + "def broken(:\n")
+        [(path, line, rule, message)] = self.found()
+        self.assertEqual((path, line, rule), ("calc.py", None, "not-read"))
+        self.assertEqual(message, "does not parse as Python, so its names were not read.")
+
+    def test_it_reports_without_failing_the_gate(self):
+        [check] = [c for c in orchestrator.gate_checks() if c.name == "vague-names"]
+        self.assertEqual((check.fails, check.find), (False, orchestrator.vague_names))
+
+
 class TestSurvivingMutants(unittest.TestCase):
     """The surviving-mutants check over a real git repository, with this suite's own mutmut, or a fake one."""
 

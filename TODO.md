@@ -14,6 +14,19 @@ was done.
   kill its process group on a timeout and in `finally`, and read what is left with `_abandon`; the copies had already
   drifted in which errors `killpg` may raise. Raised by the same review. Closes with one helper that runs a command in
   its own session and stops it, which both use, mutmut's SIGINT grace an option of it.
+- **`vague-names` does not split CamelCase.** `vague_names` matches a whole name or its last `_`-separated word,
+  so `user_data` is found but a class `InfoManager` or `UserData` is not. Closes, if the run metrics show such names
+  recur, with the last CamelCase word matched too.
+- **Nine test classes copy the same git-repository fixture.** `TestFlakyTests`, `TestPassesAtBase`, `TestVagueNames`,
+  `TestTooComplexFunctions` and five more each define a `setUp` that makes a repository, configures it and commits a
+  base, most with the same `git` and `put` helpers; eight of the copies bind the vague `value` that `vague-names` now
+  reports on added lines, and `TestVagueNames`' binds `setting`. Raised again by the cross-review of `written-rules`
+  (F8, 2026-10-24). Closes with one mixin or base class those tests share.
+- **`vague-names` reports a name an undecorated override cannot change.** A `def handle(self)` in a
+  `socketserver.BaseRequestHandler` subclass, or a parameter the overridden signature names, has no fix; only a
+  method marked `@override` is skipped (`_bound_names`). Raised by the cross-review of `written-rules` (F6,
+  2026-10-24): "names fixed by a parent class or framework are reported, though they cannot be renamed". Closes, if
+  the run metrics show it is common, with methods whose class has a base from outside the repository left out.
 - **`passes-at-base` reads every changed test as passing in a project installed into the gate's interpreter.**
   `_base_run_findings` runs pytest in the gate's interpreter, so the base's code is whatever the copy's
   configuration puts on `sys.path` (`pythonpath = ["."]` here). An editable install, as a `src/` layout under
