@@ -9,16 +9,17 @@ import { runsNewestFirst } from "./runs";
 // The project last opened, kept per viewer across starts.
 const PROJECT_KEY = "orchestrator.project";
 
-function savedProject(fallback: string): Project {
+/** The project last opened, else fallback's; a project with an empty cwd when there is neither. */
+function savedProject(fallback: string | null): Project {
   try {
     const saved = JSON.parse(localStorage.getItem(PROJECT_KEY) ?? "null") as Project | null;
     if (saved && typeof saved.cwd === "string" && typeof saved.machine === "string") {
       return saved;
     }
   } catch {
-    // Storage may be unavailable or hold something else; the checkout's own project will do.
+    // Storage may be unavailable or hold something else; the fallback will do.
   }
-  return { cwd: fallback, machine: "" };
+  return { cwd: fallback ?? "", machine: "" };
 }
 
 function saveProject(project: Project): void {
@@ -46,24 +47,37 @@ export function App({ connect }: { connect: () => Promise<Connection> }) {
 function Connected({ connection }: { connection: Connection }) {
   const api = useMemo(() => new Api(connection), [connection]);
   const [project, setProject] = useState(() => savedProject(connection.project));
-  const [selected, setSelected] = useState<string | null>(null);
-  const state = useRunStream(api, project);
-  const now = useNow();
   const open = (next: Project) => {
     saveProject(next);
-    setSelected(null);
     setProject(next);
   };
-  const entry = selected ? state.runs[selected] : undefined;
   return (
     <main>
       <ProjectBar project={project} onOpen={open} />
+      {project.cwd ? (
+        // Keyed by the project, so opening another one starts from its overview.
+        <ProjectRuns key={`${project.machine}:${project.cwd}`} api={api} project={project} />
+      ) : (
+        <p className="empty">Open a project folder to see its runs.</p>
+      )}
+    </main>
+  );
+}
+
+/** One project's runs, live: the overview, or the run picked from it in detail. */
+function ProjectRuns({ api, project }: { api: Api; project: Project }) {
+  const [selected, setSelected] = useState<string | null>(null);
+  const state = useRunStream(api, project);
+  const now = useNow();
+  const entry = selected ? state.runs[selected] : undefined;
+  return (
+    <>
       {state.problem && <p className="problem">{state.problem}</p>}
       {entry ? (
         <RunDetail key={entry.record.id} api={api} project={project} entry={entry} now={now} onClose={() => setSelected(null)} />
       ) : (
         <RunsOverview runs={runsNewestFirst(state)} now={now} selected={selected} onSelect={setSelected} />
       )}
-    </main>
+    </>
   );
 }
