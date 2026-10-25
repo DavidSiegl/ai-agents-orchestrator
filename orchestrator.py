@@ -85,6 +85,9 @@ AGENT_START_TIMEOUT_MS = 60_000
 POLL_SECONDS = 3
 # How long a Builder or Reviewer may sit idle without its handoff file before the human is told.
 STALL_SECONDS = 180
+# How long one attempt waits for an agent to take a prompt: herdr reports it working or blocked, or its handoff
+# file appears. An agent reported idle before its input takes text, as behind a startup dialog, drops the prompt.
+PROMPT_DELIVERY_SECONDS = 30
 # A live orchestrator rewrites state.json at least this often, so `list` can tell a live run from a dead one.
 HEARTBEAT_SECONDS = 60
 # A run whose state.json is older than this is stale: five missed beats, which rides out a slow SSH hop
@@ -7956,8 +7959,8 @@ class Workflow:
             # A resumed or restarted turn keeps its record and start. Read before the prompt goes out, so that
             # no agent can write its file before its turn started.
             started = None if self._open_turn(file) else self.host.now()
-            self.herdr.prompt(agent["name"], message)
-            # Recorded only once the prompt is delivered. Dying in between costs one duplicate
+            self._deliver(role, path, message)
+            # Recorded only once the prompt is taken. Dying between sending and confirming costs one duplicate
             # prompt, which the role answers by writing the same file again.
             s.prompted = file
             if started is not None:
@@ -7967,6 +7970,47 @@ class Workflow:
         log(f"[{role}] wrote {file}")
         self._end_turn(role, path)
         return out
+
+    def _deliver(self, role: str, path: str, message: str) -> None:
+        """Prompt the role's agent with message until it takes it (_taken), sending it at most twice.
+
+        Raises OrchestratorError when the agent takes neither prompt, naming what a resume does about it, or exits
+        meanwhile; HerdrError as Herdr does.
+        """
+        name = self.state.agents[role]["name"]
+        self.herdr.prompt(name, message)
+        if self._taken(role, path):
+            return
+        log(f"[{role}] did not take its prompt within {PROMPT_DELIVERY_SECONDS}s; sending it again")
+        self.herdr.prompt(name, message)
+        if not self._taken(role, path):
+            label, pane = self.pipeline.roles[role], self.state.agents[role]["pane"]
+            raise OrchestratorError(f"the {label} did not take its prompt to write {path}, sent twice; see pane "
+                                    f"{pane}, and resume to send it again")
+
+    def _taken(self, role: str, path: str) -> bool:
+        """Whether the role's agent took the prompt just sent, within PROMPT_DELIVERY_SECONDS: herdr reports it
+        working or blocked, or path, its handoff file, exists. idle and done do not count, since an agent shows
+        them before taking a prompt too.
+
+        Raises OrchestratorError when the agent exits without writing path; HerdrError as Herdr.wait does.
+        """
+        name = self.state.agents[role]["name"]
+        # First, for a turn so quick that the agent is done before the wait begins.
+        if self.host.read(path) is not None:
+            return True
+        try:
+            self.herdr.wait(name, PROMPT_DELIVERY_SECONDS * 1000, until=("working", "blocked"))
+            return True
+        except HerdrError as e:
+            # herdr's wait on an agent that has exited fails with agent_not_found, which is told apart below.
+            if e.code not in ("timeout", "agent_not_found"):
+                raise
+        if self.host.read(path) is not None:
+            return True
+        if self.herdr.agent(name) is None:
+            raise OrchestratorError(f"the {self.pipeline.roles[role]} exited without writing {path}")
+        return False
 
     def _retry(self, role: str, path: str, out: str) -> None:
         """Move a malformed verdict file aside so its role writes it again; end the run if its retry is used."""
@@ -9611,8 +9655,11 @@ def refreshed_headers(specs: list[QueuedSpec], host: Host, cwd: str, target: lis
     behind: an SPEC_IN_REVIEW spec's pull request, now merged or closed; a SPEC_FOR_HUMAN spec's run, whose conflict
     this refreshes (refresh_conflict) and which, open with the conflict cleared and succeeded, makes it
     SPEC_IN_REVIEW; and the run on a SPEC_READY spec's Run: line, which an interrupted drain leaves
-    (finished_run_header). It refreshes an SPEC_IN_REVIEW spec's run too, and logs what refresh_conflict did; with
-    dry_run, it does nothing of that, and gives the header lines as though it had.
+    (finished_run_header), whose pull request, once finished_run_header makes the spec SPEC_IN_REVIEW, it asks about
+    in the same pass, merging pull_request_header's lines into the one pair, so that a pull request already merged
+    or closed settles the spec, and frees its dependants, in this drain. It refreshes an SPEC_IN_REVIEW spec's run
+    too, and logs what refresh_conflict did; with dry_run, it does nothing of that, and gives the header lines as
+    though it had.
 
     cwd is the project, where gh asks about pull requests and the runs are; target is the --machine and --cwd flags
     as given, for a resume command. Raises OrchestratorError as Host.pull_request, refresh_conflict and
@@ -9629,7 +9676,10 @@ def refreshed_headers(specs: list[QueuedSpec], host: Host, cwd: str, target: lis
         if spec.status == SPEC_IN_REVIEW and spec.pr and (entries := pull_request_header(spec.pr, host, cwd)):
             out.append((spec, entries))
         elif spec.status == SPEC_READY and (run_id := spec.run):
-            out.append((spec, finished_run_header(spec, run_id, runs, cwd, target, local_host, pid_alive)))
+            entries = finished_run_header(spec, run_id, runs, cwd, target, local_host, pid_alive)
+            if entries[STATUS_KEY] == SPEC_IN_REVIEW and (merged := pull_request_header(entries[PR_KEY], host, cwd)):
+                entries |= merged
+            out.append((spec, entries))
     return out
 
 
