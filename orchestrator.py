@@ -4212,7 +4212,7 @@ def _pytest(root: str, inifile: str, doing: str, args: list[str], *, timeout: fl
             env: dict[str, str] | None = None) -> tuple[subprocess.CompletedProcess | None, str | None]:
     """pytest run at verbosity -1, for test cases too, in the gate's own interpreter at root, without its cache, with
     the configuration in inifile and args, taking no configuration or conftest.py from above root, and env's
-    variables beside child_env's; its output unbuffered, so that what it printed before a kill is whole. And the
+    variables beside tool_env's; its output unbuffered, so that what it printed before a kill is whole. And the
     problem, a clause naming doing, when it could not start, took longer than timeout seconds or exited with a
     status outside ok (by default 0, all passed, and 1, some failed); then the run is None when pytest did not start,
     a _PytestStopped when timeout stopped it, and else the run that exited so. pytest runs in a session of its own,
