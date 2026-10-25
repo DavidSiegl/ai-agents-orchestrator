@@ -16,6 +16,21 @@ was done.
   embedding the orchestrator's bytes in the Rust executable and unpacking them at start (PyInstaller's onefile
   done twice), or by Python hosting the window, which [ui-options.md](docs/ui-options.md) chose against. Agreed
   2026-10-24.
+- **The quality gate in a `gate.py` of its own.** The gate is reusable for other Python projects, but lives inside
+  `orchestrator.py`; and it can only run inside the judged project's environment anyway, since it starts pytest
+  and mutmut with `sys.executable`, which in the binary is the binary. Decided 2026-10-24: the quality file is the
+  one interface: the engine reads and amends it (`parse_gate`, `gate_failures`, `judge_run`) and imports nothing
+  from the gate; each side keeps its own copy of the pieces of the format it needs, the gate's the home, and
+  `TestQualityFileContract` checks they agree. The engine writes a BUILD_FAILED file itself, minimally
+  (`build_failed_report`: status line, intro, failing tests or the console's end, no build-configuration or
+  mutmut-state listing). `gate.py` is one stdlib-only file beside `orchestrator.py`, so a quality build can still
+  take main's with `git show origin/main:gate.py`; it is the whole program, `python gate.py --base REV ...`, with
+  no subcommand, and the orchestrator loses `gate`. During the cutover, while main has no `gate.py`, the
+  Jenkinsfile falls back to main's `orchestrator.py gate`. The gate moves to its own repository only once a second
+  project uses it. The seam is drawn: the gate's block in `orchestrator.py` (from "Everything from here to the line
+  that ends the gate's block" to that line) uses nothing outside it, and nothing outside uses it but the `gate`
+  subcommand (`add_gate_arguments`, `gate_command`). Left: the cut itself, with its tests, CI and docs, then the
+  fallback's removal, then making the test-file patterns a setting for other projects.
 
 ## Open issues
 

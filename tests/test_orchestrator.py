@@ -5575,6 +5575,84 @@ class TestJudgeRun(unittest.TestCase):
         self.assertIn("over the workflow's max_lines of 40", finding["message"])
 
 
+class TestQualityFileContract(unittest.TestCase):
+    """The quality file is the one interface between the gate and the engine: what the gate's quality_report writes,
+    over every section it can write, the engine's parse_gate and gate_failures read back, and judge_run's
+    amendments leave a file they still read. Each side keeps its own copy of the format, which this checks agree."""
+
+    def finding(self, path, line, rule, message="m", severity="error"):
+        return {"path": path, "line": line, "severity": severity, "rule": rule, "message": message}
+
+    def full_report(self, gate, n_issues=3):
+        """A quality file with every section quality_report can write, and the inputs it was written from."""
+        conditions = ["`ruff` is not installed: it is not on PATH.", "2 tests fail; each is listed below."]
+        kinds = [("a.py", 3), ("b.py", None), (None, None)]
+        issues = [self.finding(*kinds[k % 3], f"ruff F{k}", f"m{k} at 1{k}") for k in range(n_issues)]
+        to_weigh = [self.finding("t.py", 9, "flaky-tests mixed-results", severity="warning"),
+                    self.finding(None, None, "surviving-mutants budget-reached", severity="warning")]
+        tests = [("t.T.test_a", "AssertionError: 1 != 2\ntraceback"), ("t.T.test_b", "")]
+        text = quality_report(gate, "intro", conditions=conditions, issues=issues, to_weigh=to_weigh, elsewhere=4,
+                              tests=tests, coverage="62.5% of 40 new lines to cover.",
+                              suppressions=[("a.py", 3, "x = 1  # noqa: F401")],
+                              edited=list(orchestrator.BUILD_CONFIG_FILES), rules_from="`main.toml`",
+                              mutmut_state=["mutants/a.py.meta"])
+        return text, conditions, issues, tests
+
+    def expected_fingerprints(self, issues, tests):
+        out: dict[str, list[str]] = {}
+        for i in issues[:orchestrator.QUALITY_ISSUE_LIMIT]:
+            out.setdefault(i["rule"].split(" ", 1)[0], []).append(
+                orchestrator.finding_fingerprint(i["path"], i["rule"], i["message"]))
+        out["tests"] = [orchestrator.finding_fingerprint(name, "tests", "") for name, _ in tests]
+        return out
+
+    def test_the_engine_reads_every_section_the_gate_writes(self):
+        for gate, n_issues in ((orchestrator.GATE_OK, 0), (orchestrator.GATE_ERROR, 3),
+                               (orchestrator.GATE_ERROR, orchestrator.QUALITY_ISSUE_LIMIT + 2)):
+            with self.subTest(gate=gate, n_issues=n_issues):
+                text, conditions, issues, tests = self.full_report(gate, n_issues)
+                for heading in ("## Failed conditions", "## Issues on changed lines", "## Findings to weigh",
+                                "## Failing tests", "## Coverage on new code", "## Suppressions added",
+                                "## Build configuration"):
+                    self.assertIn(f"\n{heading}\n", text)
+                self.assertEqual(parse_gate(text), gate)
+                failures = orchestrator.gate_failures(text)
+                self.assertEqual(failures.conditions, conditions)
+                self.assertEqual(failures.fingerprints, self.expected_fingerprints(issues, tests))
+
+    def test_judge_run_s_amendments_leave_a_file_the_engine_reads(self):
+        text, conditions, issues, tests = self.full_report(orchestrator.GATE_OK, 0)
+        found = self.finding("pyproject.toml", 5, "not-in-spec", "names a package at 7")
+        weigh = self.finding(None, None, "over-budget", severity="warning")
+        check = orchestrator.OrchestratorCheck(
+            "new-dependencies", lambda change: orchestrator.CheckFindings([found], [weigh]))
+        amended = orchestrator.judge_run(text, (check,), run_change(""))
+        self.assertEqual(parse_gate(amended), orchestrator.QUALITY_ERROR)
+        failures = orchestrator.gate_failures(amended)
+        self.assertEqual(failures.conditions,
+                         [*conditions, "1 findings of the `new-dependencies` check; each is listed below."])
+        expected = self.expected_fingerprints(issues, tests)
+        expected["new-dependencies"] = [orchestrator.finding_fingerprint(
+            "pyproject.toml", "new-dependencies not-in-spec", "names a package at 7")]
+        self.assertEqual(failures.fingerprints, expected)
+
+    def test_the_engine_s_copies_match_the_gate_s(self):
+        self.assertEqual((orchestrator.QUALITY_OK, orchestrator.QUALITY_ERROR),
+                         (orchestrator.GATE_OK, orchestrator.GATE_ERROR))
+        self.assertEqual(orchestrator.QUALITY_FAILED_CONDITIONS, orchestrator.FAILED_CONDITIONS)
+        self.assertEqual(orchestrator.QUALITY_FAILING_TESTS, orchestrator.FAILING_TESTS)
+        self.assertEqual(orchestrator.QUALITY_TO_WEIGH_NOTE, orchestrator.TO_WEIGH_NOTE)
+        self.assertEqual(orchestrator.QUALITY_FINDINGS_LIMIT, orchestrator.QUALITY_ISSUE_LIMIT)
+        self.assertEqual(orchestrator._orchestrator_condition("c", 2), orchestrator._check_condition("c", 2))
+        for path, line in (("a.py", 3), ("a.py", None), (None, None)):
+            f = orchestrator._check_finding(path, line, "r", "m", severity="error")
+            self.assertEqual(f, orchestrator._finding(path, line, "r", "m", severity="error"))
+            self.assertEqual(orchestrator._numbered_finding(7, f), orchestrator._numbered(7, f))
+        text = "x" * 200
+        self.assertEqual(orchestrator._shortened(text), orchestrator._clip(text))
+        self.assertEqual(orchestrator._shortened(text, 80), orchestrator._clip(text, 80))
+
+
 class TestChangedLines(unittest.TestCase):
     def test_added_modified_and_deleted_files(self):
         diff = ("diff --git a/new.py b/new.py\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n"
@@ -5623,12 +5701,59 @@ class TestChangedLines(unittest.TestCase):
                         f"+x = 1{sep}diff --git a/g.py b/g.py{sep}@@ -5,0 +6,2 @@\n+y\n+z\n")
                 self.assertEqual(changed_lines(diff), {"f.py": {4, 5, 6}})
 
+    def test_added_lines_the_engine_s_reads_each_diff_as_changed_lines_does(self):
+        diffs = [
+            "diff --git a/f.py b/f.py\n--- a/f.py\n+++ b/f.py\n@@ -5,2 +4,0 @@\n-a\n-b\n",
+            ("diff --git a/my file.py b/my file.py\nnew file mode 100644\nindex 0000000..e69de29\n"
+             "diff --git a/x y.py b/x y.py\n--- a/x y.py\t\n+++ b/x y.py\t\n@@ -1 +1 @@\n-a\n+b\n"),
+            ('diff --git "a/tab\\there.py" "b/tab\\there.py"\n--- "a/tab\\there.py"\n+++ "b/tab\\there.py"\n'
+             "@@ -0,0 +1 @@\n+x\n"),
+            "diff --git a/f.md b/f.md\n--- a/f.md\n+++ b/f.md\n@@ -1,0 +2,3 @@\n+++ b/evil.md\n+--- a/x\n+rename to y\n",
+            ("diff --git a/old.py b/new.py\nsimilarity index 90%\nrename from old.py\nrename to new.py\n"
+             "--- a/old.py\n+++ b/new.py\n@@ -2,0 +3 @@\n+z = 1\r\n"
+             "diff --git a/uv.lock b/uv.lock\ndeleted file mode 100644\n--- a/uv.lock\n+++ /dev/null\n@@ -1 +0,0 @@\n"
+             "-x\n"),
+        ]
+        for diff in diffs:
+            with self.subTest(diff=diff):
+                added = orchestrator.added_lines(diff)
+                self.assertEqual({path: set(lines) for path, lines in added.items()}, changed_lines(diff))
+        self.assertEqual(orchestrator.added_lines(diffs[3]),
+                         {"f.md": {2: "++ b/evil.md", 3: "--- a/x", 4: "rename to y"}})
+        self.assertEqual(orchestrator.added_lines(diffs[4]), {"new.py": {3: "z = 1\r"}})
+
     def test_build_config_edits(self):
         diff = ("diff --git a/Jenkinsfile b/Jenkinsfile\n--- a/Jenkinsfile\n+++ b/Jenkinsfile\n@@ -1 +1 @@\n-a\n+b\n"
                 "diff --git a/uv.lock b/uv.lock\ndeleted file mode 100644\n"
                 "--- a/uv.lock\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n")
         self.assertEqual(orchestrator.edited_config(diff, changed_lines(diff)), ["Jenkinsfile", "uv.lock"])
         self.assertEqual(orchestrator.edited_config("", {}), [])
+
+
+class TestBuildFailedReport(unittest.TestCase):
+    """build_failed_report, the engine's quality file for a build that ended before its Gate stage."""
+
+    def test_no_test_report_and_the_console(self):
+        text = orchestrator.build_failed_report("intro", None, "last\nlines")
+        self.assertTrue(text.startswith("GATE: BUILD_FAILED\n\nintro\n"))
+        self.assertIn("## Failing tests\n\nJenkins has no test report for this build.\n", text)
+        self.assertIn(f"## The last {orchestrator.CONSOLE_TAIL_LINES} lines of the build's console\n\n"
+                      "````\nlast\nlines\n````\n", text)
+        self.assertNotIn("Issues on changed lines", text)
+        self.assertNotIn("Findings to weigh", text)
+
+    def test_failing_tests_without_a_console(self):
+        text = orchestrator.build_failed_report("intro", [("t.T.test_x", "AssertionError\ntraceback")], "")
+        self.assertIn("## Failing tests\n\n- `t.T.test_x`: AssertionError\n", text)
+        self.assertNotIn("console", text)
+        self.assertIn("## Failing tests\n\nNone.\n", orchestrator.build_failed_report("intro", [], ""))
+
+    def test_failing_tests_beyond_the_limit_are_counted(self):
+        tests = [(f"t.T.test_{k}", "") for k in range(orchestrator.QUALITY_FINDINGS_LIMIT + 3)]
+        text = orchestrator.build_failed_report("intro", tests, "")
+        self.assertIn("- `t.T.test_0`: failed\n", text)
+        self.assertIn("- and 3 more.\n", text)
+        self.assertNotIn(f"test_{orchestrator.QUALITY_FINDINGS_LIMIT}`", text)
 
 
 class TestQualityReport(unittest.TestCase):
@@ -5687,18 +5812,19 @@ class TestQualityReport(unittest.TestCase):
 
     def test_no_findings_to_weigh_no_section(self):
         self.assertNotIn("Findings to weigh", quality_report("OK", "intro"))
-        self.assertNotIn("Findings to weigh", quality_report("BUILD_FAILED", "intro", to_weigh=[self.finding("t", 1)]))
+        self.assertNotIn("Findings to weigh", quality_report("ERROR", "intro", issues=self.issues(1)))
 
-    def test_tests_coverage_and_console(self):
-        text = quality_report("BUILD_FAILED", "intro", tests=None, console="last\nlines")
-        self.assertIn("Jenkins has no test report for this build.", text)
-        self.assertIn("````\nlast\nlines\n````", text)
-        self.assertNotIn("Issues on changed lines", text)
+    def test_tests_and_coverage(self):
+        # The console's end is the engine's to write (TestBuildFailedReport): the gate's file never has one.
         text = quality_report("OK", "intro", tests=[("t.T.test_x", "AssertionError\ntraceback")],
                               coverage="62.5% of 40 new lines to cover.")
         self.assertIn("- `t.T.test_x`: AssertionError\n", text)
         self.assertIn("## Coverage on new code\n\n62.5% of 40 new lines to cover.\n", text)
         self.assertIn("None.", text)
+        self.assertNotIn("console", text)
+        self.assertNotIn("Jenkins has no test report", text)
+        self.assertNotIn("## Failing tests", quality_report("OK", "intro", tests=None))
+        self.assertIn("## Failing tests\n\nNone.\n", quality_report("OK", "intro", tests=[]))
 
     def test_sections_left_out_by_default(self):
         text = quality_report("OK", "intro")
@@ -5908,7 +6034,7 @@ class TestGate(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("- `f.py:5` holds `\\r`, which a linter that reads the file ends a line at", out)
         self.assertNotIn("`f.py:4`", out)
-        with self.assertRaisesRegex(OrchestratorError, "cannot read gone.py, which the change edits"):
+        with self.assertRaisesRegex(orchestrator.GateError, "cannot read gone.py, which the change edits"):
             orchestrator.stray_line_ends(self.repo, {"gone.py": {1}}, [(orchestrator.GATE_TOOLS[0], ["gone.py"])])
 
     def test_a_carriage_return_in_a_file_no_linter_reads_passes(self):
@@ -6497,7 +6623,7 @@ class TestWeakenedTests(unittest.TestCase):
         self.put("new.py", "x = 1\n")
         self.git("add", "new.py")
         self.edit("tests/test_calc.py", "import unittest\n", "import unittest  # edited\n")
-        self.assertEqual(sorted(self.host.changed_files(self.repo, "HEAD"), key=str),
+        self.assertEqual(sorted(orchestrator._changed_files(self.repo, "HEAD"), key=str),
                          sorted([("calc.py", None), (None, "new.py"), ("tests/test_calc.py", "tests/test_calc.py"),
                                  ("tests/test_other.py", "tests/test_renamed.py")], key=str))
 
@@ -8322,7 +8448,7 @@ class TestTooComplexFunctions(unittest.TestCase):
         # Lines enough of its own that git does not take other.py for calc.py renamed.
         self.put("other.py", "".join(f"CONSTANT_{k} = {k}\n" for k in range(200)) + "\n\n" + flat("big", 20))
         self.git("add", "other.py")
-        self.assertIn(("calc.py", None), self.host.changed_files(self.repo, self.git("rev-parse", "HEAD").strip()))
+        self.assertIn(("calc.py", None), orchestrator._changed_files(self.repo, self.git("rev-parse", "HEAD").strip()))
         self.assertEqual(self.found()[0], [])
 
     def test_an_unchanged_function_made_a_method_in_its_file_is_compared_with_its_old_self(self):
@@ -8644,14 +8770,14 @@ class TestTooComplexFunctions(unittest.TestCase):
 
     def test_a_base_that_cannot_be_read_leaves_its_functions_judged_as_new(self):
         self.nest_under("big", 19)
-        git = Host.git
+        git = orchestrator._git
 
-        def no_blob(host, cwd, *args, **kw):
+        def no_blob(cwd, *args, **kw):
             if "cat-file" in args:
-                raise OrchestratorError("git cat-file failed")
-            return git(host, cwd, *args, **kw)
+                raise orchestrator.GateError("git cat-file failed")
+            return git(cwd, *args, **kw)
 
-        with patch.object(Host, "git", no_blob):
+        with patch.object(orchestrator, "_git", no_blob):
             where, found = self.found()
         self.assertEqual(where, [("calc.py", self.def_line("big"), "over-limit")])
         self.assertEqual(found[0]["message"], "`big`: cognitive complexity 22, a new function; the limit is 15.")
@@ -9023,6 +9149,14 @@ class TestChildEnvironment(unittest.TestCase):
         self.assertIn("KEEP_ME=1", out)
         self.assertFalse([k for k in orchestrator.CI_ENV if f"{k}=" in out])
         self.assertFalse(leaks(out))
+
+    @patch.dict("os.environ", {**ENV, **{k: "1" for k in orchestrator.GIT_PATHSPEC_ENV}})
+    def test_the_gate_s_processes_get_no_credentials_and_no_pathspec_switches(self):
+        # tool_env is the gate's own copy of child_env, which the gate cannot use; both leave out the same names.
+        env = orchestrator.tool_env()
+        self.assert_scrubbed(env)
+        self.assertFalse(set(orchestrator.GIT_PATHSPEC_ENV) & set(env))
+        self.assertEqual(env, orchestrator.child_env())
 
 
 class TestQualityCLI(unittest.TestCase):
@@ -10840,7 +10974,7 @@ class TestPromptFiles(unittest.TestCase):
         names = {f.name for f in orchestrator.fields(orchestrator.Prompts)}
         constants = {k for k in vars(orchestrator) if re.fullmatch(r"[A-Z_]+_(PROMPT|NOTE)", k)}
         # Not sent to an agent: the quality file's and the window's.
-        self.assertEqual(constants - names, {"TO_WEIGH_NOTE", "HERDR_NOTE"})
+        self.assertEqual(constants - names, {"TO_WEIGH_NOTE", "QUALITY_TO_WEIGH_NOTE", "HERDR_NOTE"})
         for name in names:
             self.assertEqual(getattr(BUILT_IN_PROMPTS, name), getattr(orchestrator, name))
             self.assertIsNone(orchestrator.prompt_problem(name, getattr(orchestrator, name)))
