@@ -385,7 +385,8 @@ since, the agent starts a fresh session instead.
 4. **Quality gate**, with `--quality-gate`. The orchestrator snapshots the working tree, pushes it to a
    throwaway branch `orchestrator-ci/<id>-N-qQ`, and has the Jenkins job judge it with `orchestrator.py gate`.
    It writes `quality-N-Q.md`, the build's own quality file, which starts with `GATE: OK`, `GATE: ERROR` or
-   `GATE: BUILD_FAILED` and lists the findings on the lines the change added and the failing tests. If the gate
+   `GATE: BUILD_FAILED` and lists the findings on the lines the change added and the failing tests. A snapshot
+   holding a secret is not pushed; its quality file is `GATE: LEAK`, listing where each secret is. If the gate
    does not pass, the Builder answers it in `build-N-qQ.md` and the change is judged again, up to
    `--max-quality-rounds` times, or until a quality round fails on just what the one before it did; then it
    goes to the Reviewer either way, who is told whether the gate passed.

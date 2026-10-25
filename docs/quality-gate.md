@@ -41,10 +41,11 @@ come from the Jenkins agent image. The orchestrator itself stays stdlib-only: th
 
 After the linters come the checks `gate_checks` gives, which judge what the change did rather than how the tree
 reads. Each is a `GateCheck` that either fails the gate or only reports: a failing check's findings are issues,
-like the linters', and a reporting check's are findings to weigh, which the Builder answers and the Reviewer
-judges without the gate failing. Either kind is listed wherever it is, not only on added lines, and names the
-check that raised it. A check that cannot run says so as one of its findings, so a failing check that cannot
-run fails the gate.
+like the linters', listed as `error`, and a reporting check's are findings to weigh, listed as `warning`, which the
+Builder answers and the Reviewer judges without the gate failing. A failing check may name rules it weighs instead
+(`GateCheck.weighed`), as `test-integrity` does for what a spec can ask for. Either kind is listed wherever it is,
+not only on added lines, and names the check that raised it. A check that cannot run says so as one of its
+findings, so a failing check that cannot run fails the gate.
 
 Every check sees the change without what the tree tracks under `mutants/`, mutmut's state (`GateChange.from_tree`):
 none selects a test, a function or a changed line there, or counts an edit there as a change to the code, and a file
@@ -52,7 +53,7 @@ moved out of it counts as added. The linters and the build configuration listing
 
 | Check | Fails? | Finds |
 |---|---|---|
-| `test-integrity` | yes | tests the change weakened, in test files (`tests/**`, `test_*.py`, `*_test.py`) |
+| `test-integrity` | yes, but for removed tests, fewer assertions and changed expected values | tests the change weakened, in test files (`tests/**`, `test_*.py`, `*_test.py`) |
 | `cognitive-complexity` | yes | functions the change edits or adds that it takes over a cognitive complexity of 15 |
 | `flaky-tests` | no | tests the change adds or edits that pass in one order and fail in another |
 | `surviving-mutants` | no | changes to the functions the change edits that no test notices |
@@ -60,20 +61,21 @@ moved out of it counts as added. The linters and the build configuration listing
 | `vague-names` | no | names the change binds that fit anything, such as `data` or `raw_info` |
 
 **Test integrity** compares each test file the change touches, outside `mutants/` as above, with its base, so a
-change cannot pass by weakening its tests. Each of these is a finding:
+change cannot weaken its tests unseen. Each of these is a finding:
 
 - `removed-test`: a test function, method or class is gone, at its line at the base. A class whose tests all
   went is one finding, and so is a deleted file. A test that reappears with the same body under another name or
   in another file was renamed or moved, not removed. A test removed together with the code it tested is still a
-  finding: the gate cannot see the spec, so the Builder says why in its report and the Reviewer judges;
+  finding. It is one to weigh: the gate cannot see the spec, so the Builder says why in its report and the
+  Reviewer judges;
 - `skip`: a `skip`, `skipIf`, `skipUnless`, `skipTest`, `SkipTest`, `xfail` or `expectedFailure` on an added
   line;
 - `fewer-assertions`: a test with fewer `assert` statements, `self.assert*` calls and `pytest.raises` calls than at
-  the base;
+  the base. It is one to weigh, like `removed-test`: a test the spec reshapes may need fewer;
 - `swallowed-error`: a bare `except:`, or an `except Exception:` that does nothing, on an added line;
 - `expected-value-changed`: an assertion whose literals changed while the rest of it stayed, in a change that also
   edits code outside the tests: the "update the expected value to match the output" move. The finding names the
-  assertion before and after.
+  assertion before and after. It is one to weigh, like `removed-test`, since the spec may ask for the new value.
 
 It reads Python only; another language is a `WeakenedTestsDetector` beside the Python one in
 `WEAKENED_TESTS_DETECTORS`.
@@ -262,7 +264,7 @@ or parsed is a `not-read` finding.
 
 The gate is `GATE: ERROR` when any of these holds, and `GATE: OK` otherwise:
 
-- a finding on a line the change adds, or a finding of a failing check;
+- a finding on a line the change adds, or a finding of a failing check that it does not weigh;
 - a linter that is missing, fails, or exits "found something" with nothing the gate can read. A gate that cannot
   run a check never reports it as passed;
 - a file a linter reads, by the pathspecs in the table above, with a character that linter ends a line at and git does
@@ -305,7 +307,7 @@ Any other git output the gate cannot decode, such as a work tree whose own path 
 unjudged (exit 2).
 
 The quality file starts with the `GATE:` line, then has the failed conditions, the issues (the findings on added
-lines, then the failing checks'), the findings to weigh, the failing tests, coverage of new code, the suppressions
+lines, then the failing checks' that they do not weigh), the findings to weigh, the failing tests, coverage of new code, the suppressions
 the change adds, and the build configuration it edits. Issues and findings to weigh are numbered as one list, issues
 first, at most 50 in all, then a count:
 
@@ -662,6 +664,17 @@ answers by number. A Builder in a fresh session gets `BUILD_PROMPT`, `REBUILD_NO
 `QUALITY_FIX_PROMPT`. The Reviewer's prompt ends with `QUALITY_PASSED_NOTE`, `QUALITY_UNRESOLVED_NOTE` or
 `QUALITY_STUCK_NOTE`, naming the round's last quality file, and points at the Builder's last report of the round.
 The pull request's description includes the last quality file.
+
+A snapshot in which gitleaks, by the base's rules, finds a secret or an added comment telling it to allow a line is not
+pushed, and no build is triggered. Its quality file is `GATE: LEAK`, saying why, with the findings numbered under
+`## Secrets found`: each one's `file:line`, rule, commit and fingerprint, never the secret, which only gitleaks'
+redacted report `leaks-snapshot.json` in the run's directory describes. The Builder gets `QUALITY_FIX_PROMPT` as for
+any other gate, and the round counts toward `--max-quality-rounds`; a round that finds the same secrets as the one
+before it, as many of each rule in each file, stops the loop early as any repeated failure does. A finding that is not a secret
+passes only once the human lists it as `file:rule:line` (the fingerprint without its commit, which is the round's
+snapshot) in `.gitleaksignore` on the base branch, and only in a run started after that: a run keeps the rules of
+its base. A secret in a commit the snapshot does not add, the run's base or a commit below it that origin lacks,
+fails the run instead: those are the human's commits. So does one in the branch at publish.
 
 ### Run state and resume
 
