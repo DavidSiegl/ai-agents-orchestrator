@@ -5,10 +5,20 @@ was done.
 
 ## Planned
 
+- **The rename to Octoflow AI, the rest of it.** The product is Octoflow AI (README, window titles, pull request
+  text) and the binaries, release assets, `.deb` path, Tauri bundle and crates are `octoflow`; the bundle name has
+  no space because Tauri names the `.deb`, `.app` and `.dmg` after it verbatim. Still under the old name, each a
+  decision of its own: the GitHub repository, so every URL in the README and the badges stays until it is renamed
+  (GitHub redirects the old URL afterwards, never the new one before); `~/.config/ai-agents-orchestrator/`, the
+  `.orchestrator/` project directory and the `orchestrator-ci/` branches, which are on users' disks and remotes and
+  need a fallback that reads the old location; `orchestrator.py` and the `Orchestrator-*` commit trailers; the
+  Jenkins folder `AI-Agents-Orchestrator`. The macOS app could show "Octoflow AI" in Finder while staying
+  `Octoflow.app`, with `CFBundleDisplayName` in a `src-tauri/Info.plist`, unchecked on a Mac. Agreed 2026-10-25.
+
 - **The desktop app as the terminal client too: the macOS check.** Started with arguments, the app execs the
   orchestrator it bundles (`cli` in `ui/src-tauri/src/lib.rs`), so the AppImage is the CLI too and the README says
   how to get the CLI from each download; on macOS, where a `.app` is a directory, the CLI is a symlink to
-  `Orchestrator.app/Contents/MacOS/orchestrator`. Left: smoke-testing that on macOS, in
+  `Octoflow.app/Contents/MacOS/octoflow`. Left: smoke-testing that on macOS, in
   `.github/workflows/macos-binary.yml` (`.scratch/desktop-cli/issues/02-macos-cli-symlink.md`), which runs only on
   a published release or a dispatch for an existing tag, and checking the README's quarantine advice for the
   `.dmg` against a downloaded copy. The plain CLI binaries stay released: 13 MB against the AppImage's 120 MB of

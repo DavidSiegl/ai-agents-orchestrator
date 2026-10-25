@@ -6425,7 +6425,7 @@ def without_conflict_warning(body: str, base_branch: str | None, conflicts: list
 def pr_body(state: "RunState", spec: str, report: str, review: str, quality: GateEvidence) -> str:
     """The pull request's body; quality is what the gate said of the change, as provenance takes it."""
     approved = state.verdict in SUCCEEDED
-    head = f"Opened by ai-agents-orchestrator run `{state.run_id}`. {verdict_line(state)}"
+    head = f"Opened by Octoflow AI run `{state.run_id}`. {verdict_line(state)}"
     trailers = "\n".join(["| Commit trailer | Value |", "| --- | --- |",
                           *(f"| {key} | `{said}` |" for key, said in provenance(state, quality))])
     warning = [conflict_warning(state.base_branch, state.conflicts)] if state.conflicts else []
@@ -10581,7 +10581,7 @@ class RunWindow:
         self._closed = False
         self._listed = None  # the form whose project the run list shows
         self._listings = queue.Queue()
-        root.title("ai-agents-orchestrator")
+        root.title("Octoflow AI")
         root.protocol("WM_DELETE_WINDOW", self.close)
         # The header and the form keep their size; at the window's least, the run list and the output still
         # show a few lines each.
@@ -10707,7 +10707,7 @@ class RunWindow:
         h.grid(row=0, column=0, sticky="ew", padx=16, pady=(12, 12))
         h.columnconfigure(1, weight=1)
         ttk.Label(h, image=self.logo, style="Header.TLabel").grid(row=0, column=0, rowspan=2, padx=(0, 12))
-        ttk.Label(h, text="ai-agents-orchestrator", style="Title.TLabel").grid(row=0, column=1, sticky="sw")
+        ttk.Label(h, text="Octoflow AI", style="Title.TLabel").grid(row=0, column=1, sticky="sw")
         # Wrapped, so that a long error, such as a workflow file's path, does not widen the window.
         self.pipeline_label = ttk.Label(h, textvariable=self.vars["pipeline"], style=PIPELINE_LABEL,
                                         wraplength=640)
