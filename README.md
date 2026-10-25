@@ -144,9 +144,8 @@ project's runs and their handoff files live, without Refresh, and it starts no r
 [`ui/`](ui), a React and TypeScript frontend in a native window. Each release has it for Linux x86_64, as
 `orchestrator-desktop-linux-x86_64.deb` and `.AppImage`, and for Apple Silicon macOS, as
 `orchestrator-desktop-macos-arm64.dmg`, each with its `.sha256` and the orchestrator binary inside, so it needs
-neither Python nor a checkout. The `.deb` installs that binary as `/usr/bin/orchestrator` too. The macOS app is
-signed ad hoc only, not notarized: macOS refuses to open it the first time, as it does the binary (see
-[Install](#install)).
+neither Python nor a checkout. The macOS app is signed ad hoc only, not notarized: macOS refuses to open it the
+first time, as it does the binary (see [Install](#install)).
 
 - **Overview:** each run's key and task, its progress through the workflow's steps, its round and quality
   round, the current role, whether it is running or stale with the age of its heartbeat, the question it is
@@ -157,7 +156,31 @@ signed ad hoc only, not notarized: macOS refuses to open it the first time, as i
 - **Project bar:** a project folder and, for agents on another machine, a saved herdr machine, as in the window.
   The app opens the project you opened last; until then, run from a checkout, it opens that checkout.
 
-To run it from a checkout instead, it needs Node 20.19 or later with npm, and Rust ([rustup](https://rustup.rs))
+Each download is the CLI too, with the same commands and flags; started without arguments, the app opens its
+window:
+
+- **AppImage:** the file itself. Started with arguments it runs the orchestrator inside it, in the directory and
+  environment of your shell:
+
+  ```bash
+  chmod +x orchestrator-desktop-linux-x86_64.AppImage
+  ./orchestrator-desktop-linux-x86_64.AppImage run "add a token-bucket rate limiter to the API client"
+  ```
+
+- **`.deb`:** it installs the orchestrator as `/usr/bin/orchestrator`, so `orchestrator run "..."`.
+- **macOS:** a `.app` is a folder, so link the orchestrator inside it onto your `PATH`:
+
+  ```bash
+  ln -s /Applications/Orchestrator.app/Contents/MacOS/orchestrator /usr/local/bin/orchestrator
+  ```
+
+  If macOS refuses to run it, the app was downloaded with a browser and is quarantined: open the app once with
+  right-click and Open, or run `xattr -dr com.apple.quarantine /Applications/Orchestrator.app`. Not yet checked on
+  a real Mac.
+- **Headless machines and CI:** the plain binaries in [Install](#install). They need neither WebKit nor, as an
+  AppImage does, FUSE, and are a seventh of its size.
+
+To run the app from a checkout instead, it needs Node 20.19 or later with npm, and Rust ([rustup](https://rustup.rs))
 with [Tauri 2's system packages](https://v2.tauri.app/start/prerequisites/). On Debian or Ubuntu those are:
 
 ```bash
@@ -362,7 +385,8 @@ since, the agent starts a fresh session instead.
 4. **Quality gate**, with `--quality-gate`. The orchestrator snapshots the working tree, pushes it to a
    throwaway branch `orchestrator-ci/<id>-N-qQ`, and has the Jenkins job judge it with `orchestrator.py gate`.
    It writes `quality-N-Q.md`, the build's own quality file, which starts with `GATE: OK`, `GATE: ERROR` or
-   `GATE: BUILD_FAILED` and lists the findings on the lines the change added and the failing tests. If the gate
+   `GATE: BUILD_FAILED` and lists the findings on the lines the change added and the failing tests. A snapshot
+   holding a secret is not pushed; its quality file is `GATE: LEAK`, listing where each secret is. If the gate
    does not pass, the Builder answers it in `build-N-qQ.md` and the change is judged again, up to
    `--max-quality-rounds` times, or until a quality round fails on just what the one before it did; then it
    goes to the Reviewer either way, who is told whether the gate passed.
