@@ -221,6 +221,21 @@ layout), with no Python of its own.
   the bundled binary, or why it failed, for the `server` command. With no checkout and no project opened before,
   the frontend asks for a project folder. It kills the sidecar on `RunEvent::Exit`. The webview's CSP allows
   connections only to itself, Tauri's IPC and `http://127.0.0.1`.
+- **CLI.** Started with arguments, `main.rs` runs none of that: before GTK or WebKit start, `lib.rs`'s `cli` builds
+  the same orchestrator's command with the arguments appended, and `Cli::exec` replaces the app's process with it,
+  so the terminal, the exit status and the signals sent to the app are the CLI's; a user's directory that is gone,
+  or an exec that fails, prints why and exits 1. So the AppImage is the CLI too, but for signals when it runs
+  without FUSE: then the process its caller started is the AppImage's runtime, which passes on none (TODO.md). On
+  macOS, a lone `-psn_` argument, which a Finder launch may pass, opens the window. Windows, which builds no app and
+  no console, has no CLI.
+- **The user's shell.** `Orchestrator::command`, which the sidecar and the CLI are both built from, starts the
+  orchestrator in `UserShell`'s environment and directory, not the app's. Only an AppImage makes them differ: its
+  `AppRun` points path lists, `PYTHONHOME` and GTK's variables into the bundle and starts the app in
+  `$APPDIR/usr`, and so does an extracted one's `squashfs-root/AppRun`. `UserShell` drops the bundle's entries and
+  variables (its constants list them), naming the bundle by `$APPDIR` and by what that resolves to, and changes to
+  the directory the AppImage was started from, `OWD`, or `PWD` where an extracted AppImage sets no `OWD`, so the
+  orchestrator, and every process it starts through `child_env`, sees the user's. The app's own process keeps the
+  bundle's, which its GTK needs.
 - **Frontend.** `api.ts` types the protocol: `RunRecord` mirrors `run_record`, and `Api` builds the URLs and
   reads `/file`. `hooks.ts`'s `useRunStream` opens the `EventSource` and folds its events into a `RunsState`
   with `runs.ts`'s `applyEvent`. Every opening starts from no runs, since the server sends every run again.
@@ -264,7 +279,9 @@ running `after` callbacks on `tick`), and `TestRunProcess` runs real child proce
   copied in as its `externalBin` sidecar and `pyproject.toml`'s version, through a release config the script
   writes and merges over `tauri.conf.json`, which bundles nothing. It writes
   `dist/orchestrator-desktop-<os>-<arch>` `.deb` and `.AppImage` on Linux, `.dmg` on macOS (signed ad hoc),
-  each with its `.sha256`, and refuses a bundle without the sidecar.
+  each with its `.sha256`, and refuses a bundle without the sidecar. On Linux it then runs the AppImage as the
+  CLI from a temporary directory: `--help` and `workflows` exit 0, and the orchestrator `serve` execs starts in
+  that directory with no `$APPDIR` entry in `LD_LIBRARY_PATH` and no `PYTHONHOME`, read from its `/proc` entry.
 - `packaging/build-binary.sh`: builds `dist/orchestrator-<os>-<arch>` (`linux-x86_64`, `macos-arm64`), a
   PyInstaller one-file binary with Python and tkinter inside, and its `.sha256`, then smoke-tests it: `--help`,
   `workflows` lists `default`, and `gui --smoke-test` where there is a display. On Linux it builds with the

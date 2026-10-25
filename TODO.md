@@ -5,20 +5,37 @@ was done.
 
 ## Planned
 
-- **The desktop app as the terminal client too.** Started with arguments, the app's executable becomes the
-  orchestrator binary it bundles (`Orchestrator::locate` in `ui/src-tauri/src/lib.rs`), by `exec` on Unix, so the
-  terminal, the exit status and signals are the CLI's own; started with none, it opens the window as now. Then
-  the AppImage is one file that is both, `./orchestrator-desktop-linux-x86_64.AppImage run "..."`; the `.deb`
-  has `/usr/bin/orchestrator` already; on macOS, where a `.app` is a directory, the CLI is a symlink to
-  `Orchestrator.app/Contents/MacOS/orchestrator` away. The README says how to use each. The plain CLI binaries stay
-  released: 13 MB against the AppImage's 120 MB of WebKit, and they start without FUSE on headless machines and in
-  CI, where an AppImage needs `--appimage-extract-and-run`. Decided against: one file on every platform, by
-  embedding the orchestrator's bytes in the Rust executable and unpacking them at start (PyInstaller's onefile
-  done twice), or by Python hosting the window, which [ui-options.md](docs/ui-options.md) chose against. Agreed
-  2026-10-24.
+- **The desktop app as the terminal client too: the macOS check.** Started with arguments, the app execs the
+  orchestrator it bundles (`cli` in `ui/src-tauri/src/lib.rs`), so the AppImage is the CLI too and the README says
+  how to get the CLI from each download; on macOS, where a `.app` is a directory, the CLI is a symlink to
+  `Orchestrator.app/Contents/MacOS/orchestrator`. Left: smoke-testing that on macOS, in
+  `.github/workflows/macos-binary.yml` (`.scratch/desktop-cli/issues/02-macos-cli-symlink.md`), which runs only on
+  a published release or a dispatch for an existing tag, and checking the README's quarantine advice for the
+  `.dmg` against a downloaded copy. The plain CLI binaries stay released: 13 MB against the AppImage's 120 MB of
+  WebKit, and they start without FUSE on headless machines and in CI. Decided against: one file on every
+  platform, by embedding the orchestrator's bytes in the Rust executable and unpacking them at start
+  (PyInstaller's onefile done twice), or by Python hosting the window, which [ui-options.md](docs/ui-options.md)
+  chose against. Agreed 2026-10-24.
 
 ## Open issues
 
+- **An AppImage run without FUSE passes no signal on to the orchestrator.** Under `APPIMAGE_EXTRACT_AND_RUN` the
+  AppImage's runtime forks, runs `AppRun` in the child and waits, so the process a caller started is the runtime,
+  and `Cli::exec` (`ui/src-tauri/src/lib.rs`) only replaces the child. Raised by the cross-review of desktop-cli
+  (F3, 2026-10-25), reproduced with `dist/orchestrator-desktop-linux-x86_64.AppImage serve`: "`kill -TERM <runtime
+  pid>` → both orchestrator processes still running 2 s later, orphaned", so `timeout`, a systemd stop or `kill %1`
+  on an AppImage `run` on a machine without FUSE leaves the orchestrator and its agents running unsupervised.
+  Ctrl-C reaches the whole process group and is not affected; the mounted AppImage was not checked. Closes with
+  `Cli::exec` asking the kernel for a signal when its parent, the runtime, dies (`PR_SET_PDEATHSIG`) when the app
+  runs extracted, checked on a built AppImage, or with a runtime that forwards signals.
+- **An AppImage run without FUSE leaves its extraction in `/tmp`.** Under `APPIMAGE_EXTRACT_AND_RUN` the
+  AppImage runtime that linuxdeploy-plugin-appimage bundles extracts into `$TMPDIR/appimage_extracted_<hash>` and
+  never removes it. `packaging/build-desktop.sh` sets the variable for the whole Tauri build, so linuxdeploy and
+  appimagetool leave two such directories on the build machine at every build (Jenkins's agent among them). Users
+  who run the desktop AppImage as the CLI without FUSE are left with one 336 MB directory per version. Its smoke
+  test already points `TMPDIR` into its own directory. Found in the second build round of run 20261025-081413-327fc2
+  (2026-10-25). Closes with a `TMPDIR` the build removes around `tauri build`, and with a README note, or a newer
+  runtime that cleans up, for users.
 - **A prompt sent right after a startup dialog can be lost.** When an agent starts behind a dialog, such as Claude
   Code's folder-trust question, `Workflow._start` waits in `_wait_for_startup` for herdr to report it `idle` and
   returns; `Workflow._written` then sends the turn's prompt and records it in `RunState.prompted`. On 2026-10-25
@@ -95,16 +112,6 @@ was done.
   tests' `GOLDEN_PR_BODY` or `GOLDEN_SUMMARY`, changes what is expected without a finding, while the same edit inside
   the assertion is one. Found while adding the provenance trailers to the pull request body (loop-guards ticket 03).
   Closes with the assertions' names resolved to module-level constants the change edits.
-- **`test-integrity` has no way to accept an expected value the spec changes.** `expected-value-changed` fails the
-  gate whenever an assertion's literals change beside code, also when the spec asks for the new output, and unlike
-  `removed-test` there is no report the Reviewer judges instead. PR #76 changed what the pull request says for a
-  gate turned off after its analysis; its edited assertions failed the PR build, and the fix was to drop them where
-  other tests already pinned the new text. One check went with them: the cross-review of that fix found that "this
-  path no longer checks the analysis text in the body", i.e. that
-  `test_off_in_quality_drops_the_analysis_and_goes_to_the_reviewer` no longer pins that the details block shows
-  quality-1-1.md's text; an `assertIn` of that text there pairs with the dropped one and is the same finding.
-  Closes with a way for the Builder to name the changed expectations in its report, judged by the Reviewer, or
-  with such a finding demoted to one to weigh; then that assertion goes back.
 - **A run that never reaches `done` keeps its local refs.** A locking step's commit stays under
   `refs/orchestrator/<key>/locked/` (`RunState.lock_ref`) until the run ends `done` (`Workflow._clean_up_locks`);
   `close` and `prune` do not delete them, so a failed run's locked snapshots are never collected by `git gc`. Closes
@@ -326,6 +333,30 @@ was done.
 
 ## Fixed
 
+- **`test-integrity` has no way to accept an expected value the spec changes.** `expected-value-changed` fails the
+  gate whenever an assertion's literals change beside code, also when the spec asks for the new output, and unlike
+  `removed-test` there is no report the Reviewer judges instead. PR #76 changed what the pull request says for a
+  gate turned off after its analysis; its edited assertions failed the PR build, and the fix was to drop them where
+  other tests already pinned the new text. One check went with them: the cross-review of that fix found that "this
+  path no longer checks the analysis text in the body", i.e. that
+  `test_off_in_quality_drops_the_analysis_and_goes_to_the_reviewer` no longer pins that the details block shows
+  quality-1-1.md's text; an `assertIn` of that text there pairs with the dropped one and is the same finding.
+  Closes with a way for the Builder to name the changed expectations in its report, judged by the Reviewer, or
+  with such a finding demoted to one to weigh; then that assertion goes back.
+  Fixed (2026-10-25): a failing `GateCheck` names the rules it weighs instead (`GateCheck.weighed`), and the gate
+  sets each finding's severity to what it does with it (`GateCheck.judged`). `test-integrity` weighs
+  `removed-test`, `fewer-assertions` and `expected-value-changed`, what a spec can ask for and the gate cannot read
+  the spec to tell; skips and swallowed errors, which only hide a failure, still fail. The details-block assertion
+  is back. PR #82 and PR #83 failed their builds on such findings, a test the spec retired and one it reshaped.
+- **The orchestrator the AppImage started ran in the bundle's environment and directory.** The AppImage's start-up
+  (linuxdeploy's `AppRun`, its GTK hook, AppImageKit's `AppRun.wrapped`) prefixes `LD_LIBRARY_PATH`, `PATH`,
+  `PYTHONPATH` and other path lists with `$APPDIR` entries, sets `PYTHONHOME` and GTK's variables into the bundle,
+  and starts the app in `$APPDIR/usr`; the window's `serve` sidecar inherited all of it, and passes its environment
+  to every process it starts (`child_env`), so git, gh and ssh could load the bundle's libraries. Found while
+  grounding `.scratch/desktop-cli/` (2026-10-24), not seen failing. Fixed (2026-10-25): `UserShell` in
+  `ui/src-tauri/src/lib.rs` recovers the user's shell's environment and directory (`OWD`) for the orchestrator's
+  process, the sidecar and the CLI alike, and keeps the app's own for GTK; `packaging/build-desktop.sh`
+  smoke-tests it on the built AppImage.
 - **A pull request opened over a conflict stays a draft with its warning after the conflict is resolved.** When
   `Host.merge_upstream` finds conflicts with the base branch, `pr_body` opens the body with a `[!WARNING]` naming
   the conflicting files and `create_pr` opens it as a draft; nothing ever edits the body or marks it ready, and

@@ -3052,15 +3052,28 @@ class GateCheck:
 
     find returns its findings as {path, line, severity, rule, message}, like tool_findings's, but with rule
     the check's own, which the gate prefixes with name ("" for none), and path None for one about the change
-    as a whole. They are listed wherever they are, unlike linter findings, which count only on added lines.
-    A check that cannot do its work returns a finding saying so, never an empty list, so that it is not read
-    as having found nothing. It must not raise: an exception ends the gate with a traceback and no quality file.
+    as a whole; the gate replaces its severity with what it does with the finding (judged). They are listed
+    wherever they are, unlike linter findings, which count only on added lines. A check that cannot do its work
+    returns a finding saying so, never an empty list, so that it is not read as having found nothing, and never
+    under a weighed rule. It must not raise: an exception ends the gate with a traceback and no quality file.
     """
     name: str
-    # True: each finding fails the gate, numbered with the linters' issues. False: each is a finding to weigh,
-    # numbered after them, which the Builder answers and the Reviewer judges but which leaves the gate as it is.
+    # True: each finding fails the gate, numbered with the linters' issues, but for those of weighed rules. False:
+    # each is a finding to weigh, numbered after them, which the Builder answers and the Reviewer judges but which
+    # leaves the gate as it is.
     fails: bool
     find: Callable[[GateChange], list[dict]]
+    # The rules of a failing check whose findings are weighed instead, as the rule find gives them, without the
+    # check's name: what a spec can ask for and the gate cannot read the spec to tell.
+    weighed: frozenset[str] = frozenset()
+
+    def judged(self, finding: dict) -> dict:
+        """finding with its rule prefixed with name, and its severity what the gate does with it: "error" when it
+        fails the gate, "warning" when it is weighed."""
+        fails = self.fails and finding["rule"] not in self.weighed
+        rule = f"{self.name} {finding['rule']}" if finding["rule"] else self.name
+        return {**finding, "rule": rule, "severity": "error" if fails else "warning"}
+
 
 # A finding's location, before the tool's own part; lineless when the tool names only the file.
 _FINDING_AT = re.compile(r"(?P<path>[^:]+):(?:(?P<line>\d+):(?:\d+:)?)? (?P<detail>.+)")
@@ -3092,9 +3105,10 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
     Runs each GATE_TOOLS linter whose files the repository tracks over those files, with the rules of the pyproject.toml
     at rules, or the tree's own, and lists the findings on lines the change added and the lineless ones on files it
     touched. Then runs each of checks, such as gate_checks gives, on the change as GateChange.from_tree gives it, and
-    lists what it finds, as an issue or as a finding to weigh as its fails says. The gate is ERROR when there is such a
-    linter finding or a failing check's finding, when a linter is missing, fails or prints nothing readable, when a file
-    a linter reads and the change adds lines to holds a line end that git does not count, as stray_line_ends finds, when
+    lists what it finds, as an issue or as a finding to weigh as GateCheck.judged says. The gate is ERROR when there is
+    such a linter finding or a check's finding judged an error, when a linter is missing, fails or prints nothing
+    readable, when a file a linter reads and the change adds lines to holds a line end that git does not count, as
+    stray_line_ends finds, when
     tests, a JUnit report of the tree's tests such as pytest's --junitxml, has a failing test, or when coverage, a
     Cobertura report of the tree such as pytest-cov's coverage.xml, puts new code below GATE_MIN_COVERAGE percent on
     GATE_MIN_NEW_LINES or more new lines to cover; else OK. Suppressions the change added are listed, not counted
@@ -3144,12 +3158,12 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
     to_weigh: list[dict] = []
     change = GateChange.from_tree(root, base_sha, rules_path)
     for check in checks:
-        found = [{**f, "rule": f"{check.name} {f['rule']}" if f["rule"] else check.name} for f in check.find(change)]
-        if not check.fails:
-            to_weigh += found
-        elif found:
-            issues += found
-            conditions.append(_check_condition(check.name, len(found)))
+        found = [check.judged(f) for f in check.find(change)]
+        errors = [f for f in found if f["severity"] == "error"]
+        to_weigh += [f for f in found if f["severity"] == "warning"]
+        if errors:
+            issues += errors
+            conditions.append(_check_condition(check.name, len(errors)))
 
     failing = _NO_TESTS_SECTION
     if tests:
@@ -3433,7 +3447,8 @@ def _read_text(path: str) -> str:
 
 
 def _finding(path: str | None, line: int | None, rule: str, message: str, severity: str = "warning") -> dict:
-    """A finding as GateCheck.find returns it: a check that only reports gives warnings, and one that fails errors."""
+    """A finding as GateCheck.find returns it, its severity as the check grades it; GateCheck.judged sets the one the
+    gate lists."""
     return {"path": path, "line": line, "severity": severity, "rule": rule, "message": message}
 
 
@@ -5438,7 +5453,10 @@ def gate_checks(mutation_budget: float = MUTATION_BUDGET,
     """The checks judge_change runs after the linters, in this order, the surviving-mutants check letting mutmut run
     for mutation_budget seconds and the passes-at-base check letting pytest run for base_run_budget."""
     return (
-        GateCheck("test-integrity", fails=True, find=weakened_tests),
+        # Removing, reshaping or re-expecting a test is what a spec can ask for; skipping one or swallowing its error
+        # only hides a failure.
+        GateCheck("test-integrity", fails=True, find=weakened_tests,
+                  weighed=frozenset({"removed-test", "fewer-assertions", "expected-value-changed"})),
         GateCheck("cognitive-complexity", fails=True, find=too_complex_functions),
         GateCheck("flaky-tests", fails=False, find=flaky_tests),
         GateCheck("surviving-mutants", fails=False, find=functools.partial(surviving_mutants, budget=mutation_budget)),
@@ -5538,7 +5556,7 @@ def _named_findings(name: str, findings: list[dict]) -> list[dict]:
 
 
 def _check_condition(name: str, n: int) -> str:
-    """The failed condition of a check that fails the gate with n findings."""
+    """The failed condition of a check with n findings that fail the gate."""
     return f"{n} findings of the `{name}` check; each is listed below."
 
 
@@ -8177,9 +8195,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "gate", help="judge the change since a commit as the quality job does, and write the quality file",
         description=f"Run ruff, mypy, pymarkdown, shellcheck and actionlint over the files the repository tracks and "
                     f"write the quality file: GATE: OK or GATE: ERROR on its first line, then the failed "
-                    f"conditions, the findings on lines added since --base and of the failing checks, the findings "
+                    f"conditions, the findings on lines added since --base and the checks' errors, the findings "
                     f"to weigh, failing tests, coverage of new code, suppressions added and edited build "
-                    f"configuration. Any finding on an added line or of a failing check fails the gate, and so do "
+                    f"configuration. Any finding on an added line or a check's error fails the gate, and so do "
                     f"a linter that is missing or fails, a failing test, and coverage below "
                     f"{GATE_MIN_COVERAGE:g}% on "
                     f"{GATE_MIN_NEW_LINES} or more new lines to cover. Exit status 0 for OK, 1 for ERROR, "
