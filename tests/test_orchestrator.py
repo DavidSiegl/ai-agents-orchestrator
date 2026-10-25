@@ -10127,6 +10127,17 @@ class TestProofs(unittest.TestCase):
         self.assertEqual(orchestrator.parse_workflow("quick", tomllib.loads(text), BUILT_IN_PROMPTS), self.pipeline)
         self.assertNotIn("proof_command", orchestrator.workflow_toml(QUICK))
 
+    def test_the_product_team_example_loads(self):
+        team = orchestrator.load_workflow_file(f"{EXAMPLES}/product-team.toml", BUILT_IN_PROMPTS)
+        self.assertEqual(orchestrator.workflow_shape(team), "spec -> design -> tests -> build -> review (back to build)")
+        self.assertEqual(team.roles, {"spec": "Product Manager", "design": "Architect", "tests": "QA Engineer",
+                                      "build": "Engineer", "review": "Tech Lead"})
+        spec, design, tests, build, review = team.steps
+        # The default steps' flags stay: the interview is human-paced, the Engineer quality-gated.
+        self.assertEqual((spec.human_paced, design.edits, tests.locks, build.quality_gated), (True, False, True, True))
+        for step in (tests, build, review):
+            self.assertIn("{design_path}", step.prompt)
+
     def test_the_adversarial_example_loads(self):
         adversarial = orchestrator.load_workflow_file(f"{EXAMPLES}/adversarial.toml", BUILT_IN_PROMPTS)
         self.assertEqual(orchestrator.workflow_shape(adversarial), "spec -> build -> review (back to build)")

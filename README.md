@@ -526,10 +526,11 @@ The roles, their prompts and their order are a workflow. Besides the built-in `d
 without touching the code: a TOML file in `~/.config/ai-agents-orchestrator/workflows/`, named after the
 workflow, or a file anywhere passed with `--workflow-file`. `python orchestrator.py workflows` lists them and
 shows why one does not load; `python orchestrator.py workflows default > ~/.config/ai-agents-orchestrator/workflows/mine.toml`
-gives you the default's full definition to edit. [`examples/workflows/`](examples/workflows) has four more:
+gives you the default's full definition to edit. [`examples/workflows/`](examples/workflows) has five more:
 `spec-build-review` (the built-in `default` as a file, to copy and edit), `quick` (Builder ⇄ Reviewer, the task
-as the contract), `tdd` (a Test Writer before the Builder) and `adversarial` (a Reviewer who backs each finding with
-a failing test).
+as the contract), `tdd` (a Test Writer before the Builder), `adversarial` (a Reviewer who backs each finding with
+a failing test) and `product-team` (Product Manager → Architect → QA Engineer → Engineer ⇄ Tech Lead: requirements
+in business terms, a design against the code, and acceptance tests written and locked before the code).
 
 ```toml
 description = "Spec Collector -> Test Writer -> Builder <-> Reviewer"
