@@ -106,9 +106,10 @@ pipeline {
             when { expression { return env.JUDGED_AT_PR != 'true' } }
             environment {
                 // cargo test's test profile inherits dev. Debug info for the GTK and Tauri crates took enough memory
-                // that rustc was OOM-killed with two builds on agentbox0, which ci/cargo-lock.sh now keeps apart;
-                // without it one build's peak is lower still. A failing test still prints its panic's file:line,
-                // which comes from core::panic::Location, not from debug info.
+                // that rustc was OOM-killed with two builds on agentbox0. ci/cargo-lock.sh now keeps two builds'
+                // cargo steps apart, except a quality build's, which never waits for the lock; building without debug
+                // info keeps each build's own peak lower. A failing test still prints its panic's file:line, which
+                // comes from core::panic::Location, not from debug info.
                 CARGO_PROFILE_DEV_DEBUG = '0'
             }
             steps {
@@ -121,7 +122,9 @@ pipeline {
                     '''
                 }
                 dir('ui/src-tauri') {
-                    sh '"$WORKSPACE/ci/cargo-lock.sh" cargo test --locked'
+                    // A quality build (GIT_REF set) runs within the orchestrator's QUALITY_TIMEOUT, which a wait
+                    // behind another build's Package stage would exceed, so it takes the lock only when it is free.
+                    sh '"$WORKSPACE/ci/cargo-lock.sh" ${GIT_REF:+--no-wait} cargo test --locked'
                 }
             }
         }

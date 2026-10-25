@@ -55,8 +55,10 @@ was done.
   the spec `in-review`, its dependants blocked, until the next drain. Met on 2026-10-25 after resuming a run
   outside drain. Closes with the pull request checked in the same pass once `finished_run_header` gives one.
 - **Is 3 GB the right memory limit for the agentbox0 Jenkins agent?** All builds on the node share its
-  container's `mem_limit: 3g` (Homelab `jenkins/agentbox0.yaml`), which this repo cannot change; since
-  `ci/cargo-lock.sh` its builds compile Rust one at a time, so the limit now caps one build's peak, not two. Open in
+  container's `mem_limit: 3g` (Homelab `jenkins/agentbox0.yaml`), which this repo cannot change. Since
+  `ci/cargo-lock.sh`, two of this repository's builds compile Rust at once only when a quality build starts its
+  `cargo test` beside another build's cargo step, but everything else they run (pytest, mutmut, PyInstaller, npm)
+  still shares the 3 GB beside a locked rustc, as do other jobs' builds on the node. Open in
   `.scratch/ci-cargo-memory/issues/02-agent-container-memory.md`; closes with the Homelab keeping or raising it.
 - **mutmut's clean test run fails on a hypothesis health check, so the gate mutation-tests nothing.** Under the
   gate's mutmut 3.8.0, `TestChangedLines.test_names_each_changed_file_and_exactly_its_added_lines` in
@@ -339,9 +341,13 @@ was done.
   rustc SIGKILLed on `gtk`). Building the UI stage without debug info lowered one build's peak only. Raised by the
   cross-review of ci-no-debuginfo (2026-10-25): "the OOM cause is narrowed and left unrecorded".
   Fixed (2026-10-25): the UI stage's `cargo test` and the Package stage's `build-desktop.sh` run under
-  `ci/cargo-lock.sh`, a `flock` on a file outside every workspace that all builds on the node share, and say so
-  when they wait. Chosen over serialising whole builds: Jenkins has neither Lockable Resources nor Throttle
-  Concurrent Builds, and one executor would queue the Python-only stages too, against `QUALITY_TIMEOUT`.
+  `ci/cargo-lock.sh`, a `flock` on a file outside every workspace that every build of this repository on the node
+  takes, and say so when they wait. A quality build never waits: its rounds already take up to 1174 s of
+  `QUALITY_TIMEOUT`'s 1200 s, and a Package stage holds the lock for about 300 s, so it takes the lock only when it
+  is free and otherwise compiles beside the other build, saying so. Chosen over serialising whole builds: Jenkins
+  has neither Lockable Resources nor Throttle Concurrent Builds, and one executor would queue the Python-only
+  stages too, against `QUALITY_TIMEOUT`. What else shares the 3 GB stays open under "Is 3 GB the right memory
+  limit".
 
 - **`test-integrity` has no way to accept an expected value the spec changes.** `expected-value-changed` fails the
   gate whenever an assertion's literals change beside code, also when the spec asks for the new output, and unlike
