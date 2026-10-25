@@ -12116,6 +12116,21 @@ class TestDrain(unittest.TestCase):
         self.assertEqual(self.header("a")[::2], ("in-review", PR_A))
         self.assertEqual(self.text("b"), drain_spec_text("Second", "needs-info"))
 
+    def test_a_spec_deleted_while_another_runs_is_skipped(self):
+        self.spec("a", drain_spec_text("First"))
+        self.spec("b", drain_spec_text("Second"))
+        self.spec("c", drain_spec_text("Third"))
+
+        def run(wf):
+            os.remove(self.path("b"))
+            return approved(PR_A)(wf)
+        status, _, err = self.drain(run, approved(PR_B))
+
+        self.assertEqual(status, 0)
+        self.assertEqual([state.task for state, _ in self.runs], ["First", "Third"])
+        self.assertIn("b: ", err)
+        self.assertIn("not running it", err)
+
     def test_a_blocked_by_line_naming_no_blocker(self):
         for line in ("Blocked by: -", "Blocked by: none", "Blocked by: None"):
             with self.subTest(line=line):

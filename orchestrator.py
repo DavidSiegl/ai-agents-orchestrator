@@ -7722,15 +7722,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     which = starts.add_mutually_exclusive_group()
     which.add_argument("--workflow", choices=offered_workflows(), default=DEFAULT_WORKFLOW.name,
                        help=f"the roles and handoffs the run goes through: a built-in workflow or one in "
-                            f"{workflows_dir()} (default {DEFAULT_WORKFLOW.name}); see the workflows command")
+                            f"{workflows_dir()} (default {DEFAULT_WORKFLOW.name}); see the workflows command. "
+                            f"With --spec, and for drain, its first step must write the spec")
     which.add_argument("--workflow-file", metavar="FILE",
                        help="like --workflow, for the workflow file at FILE, on this machine")
     starts.add_argument("--worktree", action="store_true",
                         help=f"build in a git worktree of the run's own, {WORKTREES_DIR}/<key>, from {REMOTE}'s "
                              f"version of the checked-out branch, instead of in the checkout itself, which then "
                              f"need not be clean and stays free to use. Needs a branch checked out and an {REMOTE}. "
-                             f"The worktree is removed once the pull request is open; with --no-pr, or when the "
-                             f"run fails, it stays")
+                             f"The worktree is removed once the pull request is open; when the run fails, or "
+                             f"for run --no-pr, it stays")
     starts.add_argument("--quality-gate", metavar="JOB",
                         help="after each Builder turn, have this Jenkins job (its full name, folders included) "
                              "judge the change with `orchestrator.py gate`, and send the findings back to the "
@@ -8654,17 +8655,20 @@ def replace_local_file(path: str, text: str) -> None:
 class QueuedSpec:
     """A spec that drain found, DIR/<slug>/spec.md, with what drain has done to it."""
     slug: str
-    # Its path as drain found it, and its text with drain's changes to its header, line endings as in the file.
+    # Its path as drain found it, and its text as drain last read it, with drain's changes to its header since, line
+    # endings as in the file.
     file: SpecFile
     blockers: list[str]  # the slugs on its Blocked by: line, each one of a spec drain found
     was: str | None  # its status as drain first read it
     # True once drain has changed its header, or would have but for --dry-run.
     changed: bool = False
+    # Why it could not be read again, deleted or emptied while drain ran; None while it can be.
+    unreadable: str | None = None
 
     @property
     def status(self) -> str | None:
-        """Its Status: line's value now; None without one."""
-        return header_field(self.file.text, STATUS_KEY)
+        """Its Status: line's value now; None without one, or once it is unreadable, so it is neither run nor done."""
+        return None if self.unreadable else header_field(self.file.text, STATUS_KEY)
 
     @property
     def run(self) -> str | None:
@@ -8847,9 +8851,16 @@ def drain_command(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str) 
 
 def next_startable(specs: list[QueuedSpec], by_slug: dict[str, QueuedSpec]) -> QueuedSpec | None:
     """The first of specs drain runs next (startable), each read again from disk first, so a status the human
-    changed while an earlier spec ran counts; None when there is none. Raises OrchestratorError as reread does."""
+    changed while an earlier spec ran counts; None when there is none. A spec that cannot be read again, deleted or
+    emptied meanwhile, becomes unreadable, and drain says so."""
     for spec in specs:
-        spec.reread()
+        try:
+            spec.reread()
+            spec.unreadable = None
+        except OrchestratorError as e:
+            if not spec.unreadable:
+                log(f"{spec.slug}: {e}; not running it")
+            spec.unreadable = str(e)
     return next((s for s in specs if startable(s, by_slug)), None)
 
 
@@ -8871,10 +8882,11 @@ def drain_spec(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str, spe
         print(f"{spec.slug} stays {SPEC_READY}; run drain again once that run has ended", file=sys.stderr)
         return EXIT_ERROR
     except OrchestratorError as e:
-        spec.update({STATUS_KEY: SPEC_FOR_HUMAN})
+        # Printed first, so the run's error and its resume command survive a header write that fails too.
         print(f"error: {e}", file=sys.stderr)
-        print(f"{spec.slug} is {SPEC_FOR_HUMAN}; resume its run with: "
-              f"{resume_command(state.run_id, target_args(args))}", file=sys.stderr)
+        print(f"resume its run with: {resume_command(state.run_id, target_args(args))}", file=sys.stderr)
+        spec.update({STATUS_KEY: SPEC_FOR_HUMAN})
+        print(f"{spec.slug} is {SPEC_FOR_HUMAN}", file=sys.stderr)
         return EXIT_ERROR
     except KeyboardInterrupt:
         print(interrupted_note(state, target_args(args)), file=sys.stderr)

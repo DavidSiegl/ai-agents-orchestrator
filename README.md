@@ -455,11 +455,12 @@ PR: https://github.com/o/r/pull/7
 A drain first asks `gh` about each `in-review` spec's pull request: merged makes it `done`, closed
 `ready-for-human`. A `ready-for-agent` spec with a `Run:` line is one an interrupted drain left; its run, if
 finished, sets the spec's status, and if not, drain stops and says what to do: wait for it, `resume` it, or delete
-the `Run:` line to start the spec over. Then drain sweeps the branches of earlier runs once, and runs each spec
-whose blockers are all `done`. It reads each spec again before choosing the next and before each header edit, so
-your edits while it runs are kept, and a spec you set to another status meanwhile is not started; `Blocked by:` is
-read once, at the start. A run another orchestrator takes over with `resume --force` leaves its spec
-`ready-for-agent` for the next drain to pick up.
+the `Run:` line to start the spec over. Then drain sweeps the branches of earlier runs once, and runs each spec whose
+blockers are all `done`. It reads each spec again before choosing the next and before each header edit, so your edits
+to a spec while it runs are kept, but for the `Status:`, `Run:` and `PR:` lines of the spec it is running, which are
+drain's; a spec you set to another status meanwhile is not started; `Blocked by:` is read once, at the start. A run
+another orchestrator takes over with `resume --force` leaves its spec `ready-for-agent` for the next drain to pick
+up.
 
 **It stops, it does not poll.** A spec whose blocker's pull request is still open stays blocked for this drain.
 Once nothing more can start, drain prints the specs left with their blockers and pull requests, and exits `5`; the
