@@ -9642,7 +9642,7 @@ GOLDEN = {
         f'Your session was restarted in the middle of this turn. Continue where you left off; the turn still ends when you write {D}/build-2.md in a single write.'),
 }
 GOLDEN_PR_BODY = (
-    'Opened by ai-agents-orchestrator run `20260929-120000-a1b2c3`. Reviewer verdict after 2 rounds: **APPROVE**.\n'
+    'Opened by Octoflow AI run `20260929-120000-a1b2c3`. Reviewer verdict after 2 rounds: **APPROVE**.\n'
     '\n'
     '| Commit trailer | Value |\n'
     '| --- | --- |\n'
@@ -11278,7 +11278,7 @@ class TestWorkflowWithoutAVerdict(unittest.TestCase):
         self.assertFalse(pr["draft"])
         # The head line, then the commit's trailers, then the spec.
         head, trailers, rest = pr["body"].split("\n\n", 2)
-        self.assertEqual(head, "Opened by ai-agents-orchestrator run `20260929-120000-a1b2c3`. **FINISHED**: its "
+        self.assertEqual(head, "Opened by Octoflow AI run `20260929-120000-a1b2c3`. **FINISHED**: its "
                                "workflow has no review step, so no agent reviewed this change.")
         self.assertEqual(trailers, "| Commit trailer | Value |\n| --- | --- |\n"
                                    "| Orchestrator-Run | `20260929-120000-a1b2c3` |\n"
@@ -11319,7 +11319,7 @@ class TestWorkflowWithoutAVerdict(unittest.TestCase):
         pr = host.prs[0]
         self.assertTrue(pr["draft"])
         head, trailers, rest = pr["body"].split("\n\n", 2)
-        self.assertEqual(head, "Opened by ai-agents-orchestrator run `20260929-120000-a1b2c3`. "
+        self.assertEqual(head, "Opened by Octoflow AI run `20260929-120000-a1b2c3`. "
                                "**QUALITY_GATE_FAILED**: its workflow has no review step, and the quality gate still "
                                "did not pass after the last quality round, so this is a draft.")
         self.assertIn("| Orchestrator-Gate | `ERROR after 2 quality rounds` |", trailers.split("\n"))
@@ -11805,7 +11805,7 @@ class TestSelfCommand(unittest.TestCase):
 
     def test_zipapp(self):
         with tempfile.TemporaryDirectory() as d:
-            pyz = os.path.join(d, "orchestrator.pyz")
+            pyz = os.path.join(d, "octoflow.pyz")
             with open(pyz, "wb") as f:
                 f.write(b"PK")
             with patch.object(orchestrator, "__file__", os.path.join(pyz, "orchestrator.py")):
@@ -11813,8 +11813,8 @@ class TestSelfCommand(unittest.TestCase):
 
     def test_pyinstaller_binary(self):
         with patch.object(orchestrator.sys, "frozen", True, create=True), \
-                patch.object(orchestrator.sys, "executable", "/opt/orchestrator-linux-x86_64"):
-            self.assertEqual(orchestrator.self_command(), ["/opt/orchestrator-linux-x86_64"])
+                patch.object(orchestrator.sys, "executable", "/opt/octoflow-linux-x86_64"):
+            self.assertEqual(orchestrator.self_command(), ["/opt/octoflow-linux-x86_64"])
 
 
 class TestRunProcess(unittest.TestCase):
@@ -12388,7 +12388,7 @@ class TestRunWindowLook(unittest.TestCase):
 
     def test_the_header_names_the_selected_workflows_roles(self):
         texts = [w.options.get("text") for w, _ in self.ttk_widgets()]
-        self.assertIn("ai-agents-orchestrator", texts)
+        self.assertIn("Octoflow AI", texts)
         self.assertEqual(self.header(), ("Spec Collector → Builder → Reviewer", "Pipeline.TLabel"))
         with open(f"{EXAMPLES}/quick.toml") as src, open(f"{self.workflows}/quick.toml", "w") as dst:
             dst.write(src.read())

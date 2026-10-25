@@ -49,5 +49,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release upload "$TAG" dist/orchestrator-macos-arm64 dist/orchestrator-macos-arm64.sha256 \
-            dist/orchestrator-desktop-macos-arm64.dmg dist/orchestrator-desktop-macos-arm64.dmg.sha256 --clobber
+          gh release upload "$TAG" dist/octoflow-macos-arm64 dist/octoflow-macos-arm64.sha256 \
+            dist/octoflow-desktop-macos-arm64.dmg dist/octoflow-desktop-macos-arm64.dmg.sha256 --clobber
