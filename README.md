@@ -555,7 +555,37 @@ to its right, and each further one a split below. A role's `model` is its defaul
 likewise its `agent`, the [harness](#harnesses) it runs in, one of `claude`, `codex`, `gemini`, `opencode` and `pi`,
 which `--agent` and `--role-agent` override. The file is checked when it loads, and an error names the step and key.
 A run saves its workflow's definition, so editing or deleting the file does not change a run already started. See
-[Workflows](docs/architecture.md#workflows) for the rules.
+[Workflows](docs/architecture.md#workflows) for the rules. To change only some of the texts the agents get, the
+default workflow's prompts or the follow-ups and notes every workflow sends, a [prompt file](#prompt-files) needs
+no workflow file.
+
+## Prompt files
+
+Every prompt and note the orchestrator writes to an agent can be replaced without copying a workflow: put
+`NAME.md` in `~/.config/ai-agents-orchestrator/prompts/` (beside `workflows/`), where `NAME` is the text's name in
+`orchestrator.py`, and the file's content, less its trailing newline, is sent in its place.
+
+| File | Sent |
+|---|---|
+| `SPEC_PROMPT.md`, `BUILD_PROMPT.md`, `REVIEW_PROMPT.md` | the default workflow's first prompt to each role |
+| `FIX_PROMPT.md`, `RECHECK_PROMPT.md` | the Builder's and the Reviewer's prompt in a later round |
+| `REBUILD_NOTE.md`, `REREVIEW_NOTE.md` | to a fresh Builder or Reviewer session in a later round |
+| `QUALITY_FIX_PROMPT.md` | to the quality-gated step when the gate did not pass |
+| `QUALITY_PASSED_NOTE.md`, `QUALITY_UNRESOLVED_NOTE.md`, `QUALITY_STUCK_NOTE.md`, `QUALITY_OFF_NOTE.md` | at the end of the verdict step's prompt, on how the quality gate ended |
+| `LOCKED_NOTE.md`, `PROOFS_NOTE.md`, `CARRIED_PROOFS_NOTE.md` | on restored locked files, and on the Reviewer's failing proofs |
+| `BLOCKED_NOTE.md`, `BLOCKED_PROMPT.md` | at the end of every prompt of a step that can block, and once its report asked the human |
+| `CONTINUE_PROMPT.md`, `RETRY_VERDICT_PROMPT.md` | to a session restarted mid-turn, and after a review without a verdict line |
+
+The first seven names are the default workflow's steps, and a workflow file's step that `use`s one of them takes
+the file's text too; a step's own `prompt`, `again` or `fresh_note` in a workflow file stays as written. The others
+reach every workflow. A file uses exactly the placeholders of the text it replaces, `{build_path}` and so on, as
+`str.format` fills them; write a literal brace as `{{` or `}}`. `orchestrator.py workflows` lists the prompt files
+in effect, and `workflows default` prints the default workflow as they word it.
+
+The files are checked when `run` or `drain` starts, before any agent does: a `.md` file named after no text, one
+that is not UTF-8 or cannot be read, and one with a placeholder the built-in text lacks, or without one it has, is
+an error that names the file and the placeholder. Files not ending in `.md` are ignored. A run saves the texts it
+started with, so editing or deleting a file does not change a run already started, and `resume` never reads them.
 
 ## Running tests
 

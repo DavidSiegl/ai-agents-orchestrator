@@ -5,8 +5,6 @@ Ideas for what comes next, in no particular order. The designs behind what has s
 
 - **Per-role permission mode**: give each role its own permission mode. Today one `--permission-mode` applies to
   every role.
-- **Overridable prompts**: load the role prompts from `.orchestrator/prompts/*.md` when those files exist, with
-  the same placeholders.
 - **A reactive UI**: a successor to the Tk window that shows every run's progress and handoff files live, lets
   you answer the agents in it, and starts and watches several runs from one window. The options and the
   decision, a Tauri app, are in [ui-options.md](ui-options.md); its first, read-only step is in [`ui/`](../ui).
