@@ -4633,6 +4633,8 @@ class TestQualityGateOffOnResume(unittest.TestCase):
         self.assertFalse(host.snapshots)
         body = host.prs[0]["body"]
         self.assertIn(f"{OFF_AFTER_ANALYSIS}\n\nOpened by", body)
+        self.assertIn("<summary>Quality gate (round 1, before the last change)</summary>\n\nGATE: ERROR\n\n1. x\n",
+                      body)
         commit = next(c for c in host.git_calls if c[0] == "commit")
         self.assertEqual(commit[-2:], ("--trailer", "Orchestrator-Gate: ERROR after 1 quality round, then turned off"))
 
@@ -6160,15 +6162,34 @@ class TestGate(unittest.TestCase):
         self.assertIn("1. `f.py:4` error ruff F401: `os` imported but unused\n", out)
         self.assertIn("2. `f.py:4` warning flaky seeds 3 5: test_b\n", out)
 
-    def test_a_removed_test_fails_the_gate(self):
+    def test_a_removed_test_is_weighed_and_a_skip_fails_the_gate(self):
         self.put("tests/test_f.py", "def test_one():\n    assert 1\n\n\ndef test_two():\n    assert 2\n")
         self.git("add", "-A")
         self.git("commit", "--quiet", "-m", "tests")
         self.put("tests/test_f.py", "def test_one():\n    assert 1\n")
         status, out, _ = self.gate()
+        self.assertEqual(status, 0)
+        self.assertIn("## Findings to weigh\n\n", out)
+        self.assertIn("1. `tests/test_f.py:5` warning test-integrity removed-test: ", out)
+        self.put("tests/test_f.py", "import pytest\n\n\n@pytest.mark.skip\ndef test_one():\n    assert 1\n")
+        status, out, _ = self.gate()
         self.assertEqual(status, 1)
         self.assertIn("- 1 findings of the `test-integrity` check; each is listed below.\n", out)
-        self.assertIn("1. `tests/test_f.py:5` error test-integrity removed-test: ", out)
+        self.assertIn("1. `tests/test_f.py:4` error test-integrity skip: ", out)
+        self.assertIn("2. `tests/test_f.py:5` warning test-integrity removed-test: ", out)
+
+    def test_a_failing_check_weighs_its_weighed_rules(self):
+        weighed = frozenset({"removed-test"})
+        self.checks(orchestrator.GateCheck("integrity", fails=True, weighed=weighed, find=lambda _: [
+            {"path": "f.py", "line": 2, "severity": "error", "rule": "removed-test", "message": "test_a"},
+            {"path": "f.py", "line": 3, "severity": "warning", "rule": "skip", "message": "test_b"}]))
+        self.add_lines(1)
+        status, out, _ = self.gate()
+        self.assertEqual(status, 1)
+        # The gate, not find, says what each finding does: a failing rule fails whatever severity find gave.
+        self.assertIn("- 1 findings of the `integrity` check; each is listed below.\n", out)
+        self.assertIn("1. `f.py:3` error integrity skip: test_b\n", out)
+        self.assertIn("2. `f.py:2` warning integrity removed-test: test_a\n", out)
 
     def test_a_check_with_nothing_to_say_adds_nothing(self):
         self.checks(orchestrator.GateCheck("quiet", fails=True, find=lambda change: []),
@@ -6222,6 +6243,13 @@ class TestGate(unittest.TestCase):
         status, _, err = self.gate("--config", "missing.toml")
         self.assertEqual(status, orchestrator.EXIT_GATE_UNJUDGED)
         self.assertIn("is not a file", err)
+
+
+class TestTestIntegrityCheck(unittest.TestCase):
+    def test_it_fails_the_gate_but_weighs_what_a_spec_can_ask_for(self):
+        [check] = [c for c in orchestrator.gate_checks() if c.name == "test-integrity"]
+        self.assertEqual((check.fails, check.find), (True, orchestrator.weakened_tests))
+        self.assertEqual(check.weighed, {"removed-test", "fewer-assertions", "expected-value-changed"})
 
 
 class TestWeakenedTests(unittest.TestCase):

@@ -112,16 +112,6 @@ was done.
   tests' `GOLDEN_PR_BODY` or `GOLDEN_SUMMARY`, changes what is expected without a finding, while the same edit inside
   the assertion is one. Found while adding the provenance trailers to the pull request body (loop-guards ticket 03).
   Closes with the assertions' names resolved to module-level constants the change edits.
-- **`test-integrity` has no way to accept an expected value the spec changes.** `expected-value-changed` fails the
-  gate whenever an assertion's literals change beside code, also when the spec asks for the new output, and unlike
-  `removed-test` there is no report the Reviewer judges instead. PR #76 changed what the pull request says for a
-  gate turned off after its analysis; its edited assertions failed the PR build, and the fix was to drop them where
-  other tests already pinned the new text. One check went with them: the cross-review of that fix found that "this
-  path no longer checks the analysis text in the body", i.e. that
-  `test_off_in_quality_drops_the_analysis_and_goes_to_the_reviewer` no longer pins that the details block shows
-  quality-1-1.md's text; an `assertIn` of that text there pairs with the dropped one and is the same finding.
-  Closes with a way for the Builder to name the changed expectations in its report, judged by the Reviewer, or
-  with such a finding demoted to one to weigh; then that assertion goes back.
 - **A run that never reaches `done` keeps its local refs.** A locking step's commit stays under
   `refs/orchestrator/<key>/locked/` (`RunState.lock_ref`) until the run ends `done` (`Workflow._clean_up_locks`);
   `close` and `prune` do not delete them, so a failed run's locked snapshots are never collected by `git gc`. Closes
@@ -343,6 +333,21 @@ was done.
 
 ## Fixed
 
+- **`test-integrity` has no way to accept an expected value the spec changes.** `expected-value-changed` fails the
+  gate whenever an assertion's literals change beside code, also when the spec asks for the new output, and unlike
+  `removed-test` there is no report the Reviewer judges instead. PR #76 changed what the pull request says for a
+  gate turned off after its analysis; its edited assertions failed the PR build, and the fix was to drop them where
+  other tests already pinned the new text. One check went with them: the cross-review of that fix found that "this
+  path no longer checks the analysis text in the body", i.e. that
+  `test_off_in_quality_drops_the_analysis_and_goes_to_the_reviewer` no longer pins that the details block shows
+  quality-1-1.md's text; an `assertIn` of that text there pairs with the dropped one and is the same finding.
+  Closes with a way for the Builder to name the changed expectations in its report, judged by the Reviewer, or
+  with such a finding demoted to one to weigh; then that assertion goes back.
+  Fixed (2026-10-25): a failing `GateCheck` names the rules it weighs instead (`GateCheck.weighed`), and the gate
+  sets each finding's severity to what it does with it (`GateCheck.judged`). `test-integrity` weighs
+  `removed-test`, `fewer-assertions` and `expected-value-changed`, what a spec can ask for and the gate cannot read
+  the spec to tell; skips and swallowed errors, which only hide a failure, still fail. The details-block assertion
+  is back. PR #82 and PR #83 failed their builds on such findings, a test the spec retired and one it reshaped.
 - **The orchestrator the AppImage started ran in the bundle's environment and directory.** The AppImage's start-up
   (linuxdeploy's `AppRun`, its GTK hook, AppImageKit's `AppRun.wrapped`) prefixes `LD_LIBRARY_PATH`, `PATH`,
   `PYTHONPATH` and other path lists with `$APPDIR` entries, sets `PYTHONHOME` and GTK's variables into the bundle,
