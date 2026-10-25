@@ -104,6 +104,12 @@ pipeline {
         // line.
         stage('UI') {
             when { expression { return env.JUDGED_AT_PR != 'true' } }
+            environment {
+                // cargo test's test profile inherits dev. Debug info for the GTK and Tauri crates took enough memory
+                // that rustc was OOM-killed with two builds on the 8 GiB agent. A failing test still prints its
+                // panic's file:line, which comes from core::panic::Location, not from debug info.
+                CARGO_PROFILE_DEV_DEBUG = '0'
+            }
             steps {
                 dir('ui') {
                     sh '''
