@@ -5132,11 +5132,13 @@ def _mutation_not_run(problem: str) -> dict:
 #   is itself an `and` or `or` continues its parent's sequence. The syntax tree keeps no parentheses, so
 #   `a and (b and c)` is one sequence, one point, where Sonar's analyzer, which sees them, gives two. `not` starts a
 #   sequence of its own.
-# - Recursion is one point for each function, the judged one or one nested in it, that calls itself, however often:
-#   by its name, or a method `m` of a class `C` as `self.m`, `cls.m` or `C.m`. A judged function on a cycle of such
-#   calls through other judged functions of its module scores that point too, once, as the paper counts each function
-#   in a recursion cycle (_call_cycles). A call through an alias or into another module is not followed, nor a cycle
-#   through a function nested in another. Sonar's analyzer counts no recursion.
+# - Recursion is one point for each function that recurses, however often: the judged one when it calls itself or
+#   lies on a cycle of calls through other judged functions of its module, as the paper counts each function in a
+#   recursion cycle (_recursive_functions); and one nested in it that calls itself. Calls resolve by name, as Python's
+#   scopes do (_callees): f() is the module's f unless the caller binds f itself, as a parameter, a local or a nested
+#   function; C.m() is the method m of the module's class C; self.m() and cls.m() are the method m of the caller's
+#   own class. A call through an alias or into another module is not followed, nor a cycle through a function
+#   nested in another. Sonar's analyzer counts no recursion.
 
 # The cognitive-complexity check's limit: a function the change edits fails the gate above it, as with SonarQube's
 # default for S3776.
@@ -5155,7 +5157,7 @@ class _ScoredFunction:
     first: int  # the line it starts on, its decorators included
     last: int  # the line it ends on
     line: int  # the line of its def
-    score: int  # its cognitive_complexity, with the recursion point for a function on a cycle (_call_cycles)
+    score: int  # its cognitive_complexity, recursive as _recursive_functions tells it
     body: str  # what its body does, as _body_fingerprint gives it: equal for a function moved or renamed unchanged
 
 
@@ -5163,8 +5165,8 @@ def _scored_functions(tree: ast.Module) -> list[_ScoredFunction]:
     """Each function of tree that the cognitive-complexity check judges as one, scored, in the order they are
     written."""
     found: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef, str | None]] = []
-    # The nodes whose statements are still to be read, each with the qualified-name prefix there and the class a
-    # function there is a method of. A stack rather than recursion, as cognitive_complexity has.
+    # The nodes whose statements are still to be read, each with the qualified-name prefix there and the qualified
+    # name of the class a function there is a method of. A stack rather than recursion, as cognitive_complexity has.
     todo: list[tuple[ast.AST, str, str | None]] = [(tree, "", None)]
     while todo:
         node, prefix, cls = todo.pop()
@@ -5172,31 +5174,30 @@ def _scored_functions(tree: ast.Module) -> list[_ScoredFunction]:
             if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
                 found.append((prefix + child.name, child, cls))
             elif isinstance(child, ast.ClassDef):
-                todo.append((child, f"{prefix}{child.name}.", child.name))
+                todo.append((child, f"{prefix}{child.name}.", prefix + child.name))
             elif isinstance(child, ast.stmt | ast.excepthandler | ast.match_case):
                 todo.append((child, prefix, cls))
     found.sort(key=lambda x: x[1].lineno)
-    cycles = _call_cycles([(node, cls) for _, node, cls in found])
+    recursive = _recursive_functions([(node, cls) for _, node, cls in found])
     out = []
-    for i, (name, node, cls) in enumerate(found):
+    for i, (name, node, _) in enumerate(found):
         first = min([node.lineno, *(d.lineno for d in node.decorator_list)])
-        # One recursion point, which cognitive_complexity has already given a function that calls itself.
-        score = cognitive_complexity(node, cls) + int(i in cycles and not _calls_itself(node, cls))
-        out.append(_ScoredFunction(name, first, node.end_lineno or node.lineno, node.lineno, score,
-                                   _body_fingerprint(node)))
+        out.append(_ScoredFunction(name, first, node.end_lineno or node.lineno, node.lineno,
+                                   cognitive_complexity(node, recursive=i in recursive), _body_fingerprint(node)))
     return out
 
 
-def _call_cycles(functions: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str | None]]) -> set[int]:
-    """The indexes of those of functions, each with the class it is a method of or None, that lie on a cycle of calls
-    through at least one other of them: a strongly connected component of more than one function in the graph of
-    their calls to each other, as _callees resolves them. functions are one module's, as _scored_functions finds
-    them; a call to anything else, a function nested in one of them included, is not followed."""
+def _recursive_functions(functions: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str | None]]) -> set[int]:
+    """The indexes of those of functions that recurse: that call themselves, or lie on a cycle of calls through
+    others of them, a strongly connected component of more than one in the graph of their calls to each other.
+    functions are one module's, as _scored_functions finds them, each with the qualified name of the class it is a
+    method of, or None; calls resolve as _callees resolves them, and a call to anything else, a function nested in
+    one of them included, is not followed."""
     by_key: dict[tuple[str | None, str], list[int]] = collections.defaultdict(list)
     for i, (node, cls) in enumerate(functions):
         by_key[(cls, node.name)].append(i)
     edges = [[j for key in _callees(node, cls) for j in by_key.get(key, [])] for node, cls in functions]
-    return {i for component in _strong_components(edges) if len(component) > 1 for i in component}
+    return {i for component in _strong_components(edges) for i in component if len(component) > 1 or i in edges[i]}
 
 
 def _strong_components(edges: list[list[int]]) -> list[list[int]]:
@@ -5432,28 +5433,48 @@ def _is_python_source(change: GateChange, path: str) -> bool:
     anything _is_link_or_special names, and for a file that cannot be read unless it is named *.py."""
     if _is_link_or_special(change, path):
         return False
-    try:
-        with open(os.path.join(change.root, path), "rb") as source:
-            first = source.readline(256)
-    except OSError:
-        first = b""
-    return _holds_python(path, first)
+
+    def first_line() -> bytes:
+        try:
+            with open(os.path.join(change.root, path), "rb") as source:
+                return source.readline(_FIRST_LINE_BYTES)
+        except OSError:
+            return b""
+
+    return _holds_python(path, first_line)
 
 
 def _was_python_source(change: GateChange, path: str) -> bool:
     """Whether the change's base holds Python source at path, as _holds_python tells it; False for a path the base
     holds no file at, or that git cannot read there."""
-    try:
-        blob = _git(change.root, "cat-file", "blob", f"{change.base}:{path}", verbatim=True)
-    except GateError:
-        return False
-    return _holds_python(path, os.fsencode(blob)[:256].split(b"\n", 1)[0])
+
+    def first_line() -> bytes:
+        # Only the blob's head is read, so a large file costs no more than a small one: git is stopped after it.
+        argv = ["git", "-C", change.root, "cat-file", "blob", f"{change.base}:{path}"]
+        try:
+            with subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,  # noqa: S603
+                                  env=tool_env()) as proc:
+                head = proc.stdout.read(_FIRST_LINE_BYTES) if proc.stdout else b""
+                proc.kill()
+        except OSError:
+            return b""
+        return head.split(b"\n", 1)[0]
+
+    return _holds_python(path, first_line)
 
 
-def _holds_python(path: str, first: bytes) -> bool:
-    """Whether a file at path whose first line, or its first 256 bytes, is first holds Python source: the path ends
-    in .py, or first is a #! naming python."""
-    return path.endswith(".py") or (first.startswith(b"#!") and b"python" in first)
+# How much of a file's first line _holds_python reads, in bytes: enough for any #! line.
+_FIRST_LINE_BYTES = 256
+
+
+def _holds_python(path: str, first_line: Callable[[], bytes]) -> bool:
+    """Whether a file at path holds Python source: the path ends in .py, or the file's first line is a #! naming
+    python. first_line gives that line, or its first _FIRST_LINE_BYTES bytes, and b"" for a file that cannot be read;
+    it is called only when the name does not decide."""
+    if path.endswith(".py"):
+        return True
+    first = first_line()
+    return first.startswith(b"#!") and b"python" in first
 
 
 def _working_functions(change: GateChange, path: str) -> tuple[list[_ScoredFunction] | None, str]:
@@ -5493,15 +5514,16 @@ _Held = list[tuple[ast.AST | None, int]]
 _CognitiveRule = Callable[[Any, int], tuple[int, _Held]]
 
 
-def cognitive_complexity(function: ast.FunctionDef | ast.AsyncFunctionDef, cls: str | None = None) -> int:
-    """function's cognitive complexity, by the rules above, the functions nested in it included. cls is the name of
-    the class function is a method of, None for one outside a class; it decides which calls are recursive. function's
-    own decorators and defaults are not scored: they run where it is defined, not when it is called."""
+def cognitive_complexity(function: ast.FunctionDef | ast.AsyncFunctionDef, *, recursive: bool = False) -> int:
+    """function's cognitive complexity, by the rules above, the functions nested in it included. recursive says
+    whether function itself recurses, which takes its module to tell (_recursive_functions); a function nested in it
+    recurses when it calls itself. function's own decorators and defaults are not scored: they run where it is
+    defined, not when it is called."""
     # A walk with a stack of its own rather than recursion: a syntax tree can be deeper than the interpreter lets a
     # recursive walk go, as a sum of a few hundred terms or an if with a thousand elifs are. Each node's points do not
     # depend on what it holds, so the order nodes are taken in does not matter. Each node goes with its nesting level
     # and the class whose body holds it directly, None outside one, which decides how a nested function recurses.
-    points = int(_calls_itself(function, cls))
+    points = int(recursive)
     todo: list[tuple[ast.AST | None, int, str | None]] = [(s, 0, None) for s in function.body]
     while todo:
         node, nesting, owner = todo.pop()
@@ -5623,22 +5645,62 @@ def _calls_itself(function: ast.FunctionDef | ast.AsyncFunctionDef, cls: str | N
 
 
 def _callees(function: ast.FunctionDef | ast.AsyncFunctionDef, cls: str | None) -> set[tuple[str | None, str]]:
-    """The functions function's body calls, the bodies of functions nested in it included, each as (the name of the
-    class it is a method of, None outside a class; its name). cls is the class function is a method of, or None.
-    Calls resolve by name alone: f() calls the function f outside a class, C.m() the method m of a class named C, and
-    self.m() or cls.m() the method m of cls. A call of anything else, such as an alias or an imported module's
-    function, resolves to no function here."""
+    """The functions of its module that function's body calls, the bodies of functions nested in it included, each as
+    (the name of the class it is a method of, None outside a class; its name). cls is the name of the class function
+    is a method of, or None, as the class names in the result are: qualified, as _scored_functions gives them.
+
+    Calls resolve by name, as Python's scopes do: f() calls the module's f unless function binds f itself
+    (_local_names); C.m() the method m of the module's class C, unless function binds C; and self.m() or cls.m() the
+    method m of cls, or in a class nested in function, of that class, which is no class of the module. A call of
+    anything else, such as an alias or an imported module's function, resolves to no function here."""
+    local = _local_names(function)
     out: set[tuple[str | None, str]] = set()
-    for node in (node for statement in function.body for node in ast.walk(statement)):
+    # Each node still to be read, with the class that self and cls name there.
+    todo: list[tuple[ast.AST, str | None]] = [(s, cls) for s in function.body]
+    while todo:
+        node, owner = todo.pop()
+        if isinstance(node, ast.ClassDef):
+            todo += [(c, f"<{node.name} in {function.name}>") for c in node.body]
+            todo += [(c, owner) for c in [*node.decorator_list, *node.bases, *node.keywords]]
+            continue
+        todo += [(c, owner) for c in ast.iter_child_nodes(node)]
         if not isinstance(node, ast.Call):
             continue
         callee = node.func
-        if isinstance(callee, ast.Name):
+        if isinstance(callee, ast.Name) and callee.id not in local:
             out.add((None, callee.id))
         elif isinstance(callee, ast.Attribute) and isinstance(callee.value, ast.Name):
-            owner = callee.value.id
-            out.add((cls if cls is not None and owner in ("self", "cls") else owner, callee.attr))
+            name = callee.value.id
+            if owner is not None and name in ("self", "cls"):
+                out.add((owner, callee.attr))
+            elif name not in local:
+                out.add((name, callee.attr))
     return out
+
+
+def _local_names(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    """The names function binds, which a call by that name in its body then means rather than the module's: its
+    parameters, and each name its body binds, in the functions, lambdas and classes nested in it too, less those it
+    declares global or nonlocal. Counting a nested scope's names as function's own can only miss a call to the module,
+    never invent one."""
+    names = {a.arg for a in ast.walk(function.args) if isinstance(a, ast.arg)}
+    declared: set[str] = set()
+    for node in (node for statement in function.body for node in ast.walk(statement)):
+        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            names.add(node.id)
+        elif isinstance(node, ast.arg):
+            names.add(node.arg)
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            names.add(node.name)
+        elif isinstance(node, ast.alias):
+            names.add((node.asname or node.name).partition(".")[0])
+        elif isinstance(node, ast.ExceptHandler | ast.MatchAs | ast.MatchStar) and node.name:
+            names.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            names.add(node.rest)
+        elif isinstance(node, ast.Global | ast.Nonlocal):
+            declared.update(node.names)
+    return names - declared
 
 
 # Vague names: names that fit anything, which tell a reader nothing about what they hold.

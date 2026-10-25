@@ -8242,13 +8242,13 @@ S3776_FUNCTIONS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data
 
 
 def score(source, cls=None):
-    """The cognitive complexity of the first function in source, or of its class cls's first method."""
+    """The cognitive complexity of the first function in source, or of its class cls's first method, as the check
+    scores it in its module."""
     tree = ast.parse(textwrap.dedent(source))
-    if cls is not None:
-        [owner] = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls]
-        tree = owner
-    function = next(n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
-    return orchestrator.cognitive_complexity(function, cls)
+    owner = tree if cls is None else next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls)
+    function = next(n for n in owner.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
+    name = function.name if cls is None else f"{cls}.{function.name}"
+    return next(f.score for f in orchestrator._scored_functions(tree) if f.name == name)
 
 
 class TestCognitiveComplexity(unittest.TestCase):
@@ -8419,8 +8419,7 @@ class TestCognitiveComplexity(unittest.TestCase):
                     return cls.build(n - 1)                 # +1
         """
         self.assertEqual(score(source, "Tree"), 1)
-        tree = ast.parse(textwrap.dedent(source)).body[0]
-        self.assertEqual([orchestrator.cognitive_complexity(m, "Tree") for m in tree.body], [1, 1, 0, 1])
+        self.assertEqual(self.module_scores(source), {"Tree.depth": 1, "Tree.size": 1, "Tree.leaves": 0, "Tree.build": 1})
 
     def module_scores(self, source):
         """The score of each function of source that the check judges as one, by its qualified name."""
@@ -8467,6 +8466,49 @@ class TestCognitiveComplexity(unittest.TestCase):
             def b(x):
                 return a(x)
         """), {"a": 0, "b": 0})
+
+    def test_a_call_to_a_name_the_function_binds_is_not_a_call_to_the_module_s_function(self):
+        self.assertEqual(self.module_scores("""
+            def a(b):
+                return b()            # the parameter
+            def b():
+                return a(len)
+            def c():
+                def d():
+                    return 1
+                return d()            # the nested function
+            def d():
+                return c()
+            def e(items):
+                f = sorted
+                return f(items)       # the local
+            def f(items):
+                return e(items)
+        """), {"a": 0, "b": 0, "c": 0, "d": 0, "e": 0, "f": 0})
+
+    def test_self_in_a_class_nested_in_a_method_is_that_class_s(self):
+        self.assertEqual(self.module_scores("""
+            class C:
+                def x(self):
+                    class D:
+                        def z(self):
+                            return self.y()
+                    return D
+                def y(self):
+                    return self.x()
+        """), {"C.x": 0, "C.y": 0})
+
+    def test_methods_of_two_nested_classes_of_one_name_are_told_apart(self):
+        self.assertEqual(self.module_scores("""
+            class A:
+                class Meta:
+                    def x(self):
+                        return self.y()
+            class B:
+                class Meta:
+                    def y(self):
+                        return self.x()
+        """), {"A.Meta.x": 0, "B.Meta.y": 0})
 
     def test_a_function_that_calls_itself_and_lies_on_a_cycle_scores_the_point_once(self):
         self.assertEqual(self.module_scores("""
@@ -8518,11 +8560,7 @@ class TestCognitiveComplexity(unittest.TestCase):
     def test_the_seven_functions_sonarqube_flagged_score_over_the_limit(self):
         with open(S3776_FUNCTIONS) as f:
             tree = ast.parse(f.read())
-        scores = {}
-        for node in tree.body:
-            cls = node.name if isinstance(node, ast.ClassDef) else None
-            for function in node.body if cls else [node]:
-                scores[function.name] = orchestrator.cognitive_complexity(function, cls)
+        scores = {f.name.rpartition(".")[2]: f.score for f in orchestrator._scored_functions(tree)}
         self.assertEqual(sorted(scores), sorted(["main", "_turn", "_poll", "quality_report", "changed_lines",
                                                  "_shared_name", "_parse_step"]))
         for name, n in scores.items():
@@ -8691,6 +8729,11 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.commit_file("bin/tool", "#!/usr/bin/env python3\n" + flat("helper", 20))
         self.git("rm", "--quiet", "bin/tool")
         self.put("calc.py", self.BASE + "\n\n" + flat("helper", 20))  # an edit, so git sees no rename
+        self.assertEqual(self.found()[0], [])
+        # Into a new file, which git may pair with the deleted script as its rename.
+        self.put("calc.py", self.BASE)
+        self.put("lib.py", flat("helper", 20))
+        self.git("add", "lib.py")
         self.assertEqual(self.found()[0], [])
 
     def test_a_deleted_script_that_is_not_python_lends_no_base(self):

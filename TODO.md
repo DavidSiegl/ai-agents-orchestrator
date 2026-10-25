@@ -364,11 +364,14 @@ was done.
   recursion cycle; `_calls_itself` sees a function calling itself by name, or a method as `self.m`, `cls.m` or
   `C.m`, but not a cycle through other functions, nor a call through an alias. A function that recurses through a
   helper scores a point less than the paper says. Closes with a call graph of the module, scored per cycle.
-  Fixed (2026-10-25): `_scored_functions` builds each module's call graph from `_callees`, the name resolution
-  `_calls_itself` now asks too, and `_call_cycles` finds its strongly connected components by Kosaraju's algorithm;
-  each function on one scores the point once. A call through an alias or into another module, and a cycle through
-  a nested function, stay unfollowed, as the comment above `COGNITIVE_COMPLEXITY_LIMIT` says. No function of
-  `orchestrator.py` changed its score.
+  Fixed (2026-10-25): `_recursive_functions` builds each module's call graph from `_callees`, the name resolution
+  `_calls_itself` now asks too, which resolves a call as Python's scopes do (a parameter, local or nested function
+  of the caller's name is not the module's), and finds its strongly connected components by Kosaraju's algorithm;
+  each function on one, or calling itself, scores the point once, which `cognitive_complexity` is told as
+  `recursive`. A call through an alias or into another module, and a cycle through a nested function, stay
+  unfollowed, as the comment above `COGNITIVE_COMPLEXITY_LIMIT` says; a move that brings two functions calling
+  each other into one module raises both by the point (`docs/quality-gate.md`). No function of `orchestrator.py`
+  changed its score.
 
 - **A function moved out of a Python script the change deletes is judged as new.** The cognitive-complexity check
   reads the base of a changed file whose old name has no `.py` only when the file is still Python now
