@@ -5133,8 +5133,10 @@ def _mutation_not_run(problem: str) -> dict:
 #   `a and (b and c)` is one sequence, one point, where Sonar's analyzer, which sees them, gives two. `not` starts a
 #   sequence of its own.
 # - Recursion is one point for each function, the judged one or one nested in it, that calls itself, however often:
-#   by its name, or a method `m` of a class `C` as `self.m`, `cls.m` or `C.m`. A cycle through other functions, which
-#   the paper also counts, is not found. Sonar's analyzer counts no recursion.
+#   by its name, or a method `m` of a class `C` as `self.m`, `cls.m` or `C.m`. A judged function on a cycle of such
+#   calls through other judged functions of its module scores that point too, once, as the paper counts each function
+#   in a recursion cycle (_call_cycles). A call through an alias or into another module is not followed, nor a cycle
+#   through a function nested in another. Sonar's analyzer counts no recursion.
 
 # The cognitive-complexity check's limit: a function the change edits fails the gate above it, as with SonarQube's
 # default for S3776.
@@ -5153,7 +5155,7 @@ class _ScoredFunction:
     first: int  # the line it starts on, its decorators included
     last: int  # the line it ends on
     line: int  # the line of its def
-    score: int  # its cognitive_complexity
+    score: int  # its cognitive_complexity, with the recursion point for a function on a cycle (_call_cycles)
     body: str  # what its body does, as _body_fingerprint gives it: equal for a function moved or renamed unchanged
 
 
@@ -5173,11 +5175,76 @@ def _scored_functions(tree: ast.Module) -> list[_ScoredFunction]:
                 todo.append((child, f"{prefix}{child.name}.", child.name))
             elif isinstance(child, ast.stmt | ast.excepthandler | ast.match_case):
                 todo.append((child, prefix, cls))
+    found.sort(key=lambda x: x[1].lineno)
+    cycles = _call_cycles([(node, cls) for _, node, cls in found])
     out = []
-    for name, node, cls in sorted(found, key=lambda x: x[1].lineno):
+    for i, (name, node, cls) in enumerate(found):
         first = min([node.lineno, *(d.lineno for d in node.decorator_list)])
-        out.append(_ScoredFunction(name, first, node.end_lineno or node.lineno, node.lineno,
-                                   cognitive_complexity(node, cls), _body_fingerprint(node)))
+        # One recursion point, which cognitive_complexity has already given a function that calls itself.
+        score = cognitive_complexity(node, cls) + int(i in cycles and not _calls_itself(node, cls))
+        out.append(_ScoredFunction(name, first, node.end_lineno or node.lineno, node.lineno, score,
+                                   _body_fingerprint(node)))
+    return out
+
+
+def _call_cycles(functions: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str | None]]) -> set[int]:
+    """The indexes of those of functions, each with the class it is a method of or None, that lie on a cycle of calls
+    through at least one other of them: a strongly connected component of more than one function in the graph of
+    their calls to each other, as _callees resolves them. functions are one module's, as _scored_functions finds
+    them; a call to anything else, a function nested in one of them included, is not followed."""
+    by_key: dict[tuple[str | None, str], list[int]] = collections.defaultdict(list)
+    for i, (node, cls) in enumerate(functions):
+        by_key[(cls, node.name)].append(i)
+    edges = [[j for key in _callees(node, cls) for j in by_key.get(key, [])] for node, cls in functions]
+    return {i for component in _strong_components(edges) if len(component) > 1 for i in component}
+
+
+def _strong_components(edges: list[list[int]]) -> list[list[int]]:
+    """The strongly connected components of the graph whose vertices are edges' indexes, with an edge from v to each
+    of edges[v]: each vertex in exactly one component, by Kosaraju's algorithm. Iterative, as cognitive_complexity's
+    walk is, so that no graph is too deep for it."""
+    reverse: list[list[int]] = [[] for _ in edges]
+    for v, targets in enumerate(edges):
+        for w in targets:
+            reverse[w].append(v)
+    seen: set[int] = set()
+    return [_reach(reverse, v, seen) for v in reversed(_finish_order(edges)) if v not in seen]
+
+
+def _finish_order(edges: list[list[int]]) -> list[int]:
+    """Each vertex of the graph edges gives, as _strong_components says, once, in the order a depth-first search from
+    each unvisited vertex in turn finishes it."""
+    order: list[int] = []
+    seen: set[int] = set()
+    for root in range(len(edges)):
+        if root in seen:
+            continue
+        seen.add(root)
+        walk = [(root, iter(edges[root]))]
+        while walk:
+            v, rest = walk[-1]
+            w = next((w for w in rest if w not in seen), None)
+            if w is None:
+                walk.pop()
+                order.append(v)
+            else:
+                seen.add(w)
+                walk.append((w, iter(edges[w])))
+    return order
+
+
+def _reach(edges: list[list[int]], v: int, seen: set[int]) -> list[int]:
+    """v, which is not in seen, and each vertex the graph edges leads to from v through vertices not in seen; each is
+    added to seen."""
+    seen.add(v)
+    out = [v]
+    todo = [v]
+    while todo:
+        for w in edges[todo.pop()]:
+            if w not in seen:
+                seen.add(w)
+                out.append(w)
+                todo.append(w)
     return out
 
 
@@ -5550,18 +5617,28 @@ _COGNITIVE_RULES: dict[type[ast.AST], _CognitiveRule] = {
 
 
 def _calls_itself(function: ast.FunctionDef | ast.AsyncFunctionDef, cls: str | None) -> bool:
-    """Whether function's body calls function: by its name, or as self.m, cls.m or C.m when it is the method m of the
-    class C, cls."""
+    """Whether function's body calls function, as _callees resolves calls; cls is the name of the class function is a
+    method of, None for one outside a class."""
+    return (cls, function.name) in _callees(function, cls)
+
+
+def _callees(function: ast.FunctionDef | ast.AsyncFunctionDef, cls: str | None) -> set[tuple[str | None, str]]:
+    """The functions function's body calls, the bodies of functions nested in it included, each as (the name of the
+    class it is a method of, None outside a class; its name). cls is the class function is a method of, or None.
+    Calls resolve by name alone: f() calls the function f outside a class, C.m() the method m of a class named C, and
+    self.m() or cls.m() the method m of cls. A call of anything else, such as an alias or an imported module's
+    function, resolves to no function here."""
+    out: set[tuple[str | None, str]] = set()
     for node in (node for statement in function.body for node in ast.walk(statement)):
         if not isinstance(node, ast.Call):
             continue
         callee = node.func
-        if cls is None and isinstance(callee, ast.Name) and callee.id == function.name:
-            return True
-        if (cls is not None and isinstance(callee, ast.Attribute) and callee.attr == function.name
-                and isinstance(callee.value, ast.Name) and callee.value.id in ("self", "cls", cls)):
-            return True
-    return False
+        if isinstance(callee, ast.Name):
+            out.add((None, callee.id))
+        elif isinstance(callee, ast.Attribute) and isinstance(callee.value, ast.Name):
+            owner = callee.value.id
+            out.add((cls if cls is not None and owner in ("self", "cls") else owner, callee.attr))
+    return out
 
 
 # Vague names: names that fit anything, which tell a reader nothing about what they hold.

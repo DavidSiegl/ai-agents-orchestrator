@@ -8422,6 +8422,62 @@ class TestCognitiveComplexity(unittest.TestCase):
         tree = ast.parse(textwrap.dedent(source)).body[0]
         self.assertEqual([orchestrator.cognitive_complexity(m, "Tree") for m in tree.body], [1, 1, 0, 1])
 
+    def module_scores(self, source):
+        """The score of each function of source that the check judges as one, by its qualified name."""
+        return {f.name: f.score for f in orchestrator._scored_functions(ast.parse(textwrap.dedent(source)))}
+
+    def test_each_function_in_a_cycle_of_two_scores_the_recursion_point(self):
+        self.assertEqual(self.module_scores("""
+            def even(n):
+                return n == 0 or odd(n - 1)   # +1 or, +1 cycle
+            def odd(n):
+                return n != 0 and even(n - 1)  # +1 and, +1 cycle
+            def unrelated(n):
+                return even(n)
+        """), {"even": 2, "odd": 2, "unrelated": 0})
+
+    def test_each_function_in_a_cycle_of_three_scores_the_recursion_point_and_one_leading_into_it_none(self):
+        self.assertEqual(self.module_scores("""
+            def a(x):
+                return b(x)
+            def b(x):
+                return c(x)
+            def c(x):
+                return a(x)
+            def enter(x):
+                return a(x)
+        """), {"a": 1, "b": 1, "c": 1, "enter": 0})
+
+    def test_methods_in_a_cycle_through_self_score_the_recursion_point(self):
+        self.assertEqual(self.module_scores("""
+            class Parser:
+                def x(self, s):
+                    return self.y(s)
+                def y(self, s):
+                    return Parser.x(self, s)
+                def z(self, s):
+                    return self.x(s)
+        """), {"Parser.x": 1, "Parser.y": 1, "Parser.z": 0})
+
+    def test_a_cycle_through_an_alias_is_not_found(self):
+        self.assertEqual(self.module_scores("""
+            def a(x):
+                f = b
+                return f(x)
+            def b(x):
+                return a(x)
+        """), {"a": 0, "b": 0})
+
+    def test_a_function_that_calls_itself_and_lies_on_a_cycle_scores_the_point_once(self):
+        self.assertEqual(self.module_scores("""
+            def walk(node):
+                return walk(node.left) + visit(node)
+            def visit(node):
+                return walk(node.right)
+            def alone(n):
+                return alone(n - 1)
+        """), {"walk": 1, "visit": 1, "alone": 1})
+
     def test_a_method_of_a_class_nested_in_the_function_recurses_as_a_method_does(self):
         self.assertEqual(score("""
             def outer():

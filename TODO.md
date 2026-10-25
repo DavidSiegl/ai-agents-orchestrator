@@ -333,10 +333,6 @@ was done.
   there, or writes new over the limit, is not a finding. `docs/quality-gate.md` says "a `.py` file". Raised by the
   spec-conformance pass of review round 6 of ticket 06; ticket 06's "the Python functions the change touches" can be
   read either way. Closes with `_judged_files` taking `_is_python_source`, or a decision that `.py` is the scope.
-- **Cognitive complexity scores direct recursion only.** Campbell's paper gives a point to each function in a
-  recursion cycle; `_calls_itself` sees a function calling itself by name, or a method as `self.m`, `cls.m` or
-  `C.m`, but not a cycle through other functions, nor a call through an alias. A function that recurses through a
-  helper scores a point less than the paper says. Closes with a call graph of the module, scored per cycle.
 - **A body moved into a file hides a function with that body moved out of it, which is then judged as new.** The
   cognitive-complexity check takes a base function as gone from its file when the file now holds its body fewer times
   than the base did (`_BasePool._gone`), without asking where the working tree's copies came from. So when `calc.py`'s
@@ -356,6 +352,16 @@ was done.
   files.
 
 ## Fixed
+
+- **Cognitive complexity scores direct recursion only.** Campbell's paper gives a point to each function in a
+  recursion cycle; `_calls_itself` sees a function calling itself by name, or a method as `self.m`, `cls.m` or
+  `C.m`, but not a cycle through other functions, nor a call through an alias. A function that recurses through a
+  helper scores a point less than the paper says. Closes with a call graph of the module, scored per cycle.
+  Fixed (2026-10-25): `_scored_functions` builds each module's call graph from `_callees`, the name resolution
+  `_calls_itself` now asks too, and `_call_cycles` finds its strongly connected components by Kosaraju's algorithm;
+  each function on one scores the point once. A call through an alias or into another module, and a cycle through
+  a nested function, stay unfollowed, as the comment above `COGNITIVE_COMPLEXITY_LIMIT` says. No function of
+  `orchestrator.py` changed its score.
 
 - **A function moved out of a Python script the change deletes is judged as new.** The cognitive-complexity check
   reads the base of a changed file whose old name has no `.py` only when the file is still Python now

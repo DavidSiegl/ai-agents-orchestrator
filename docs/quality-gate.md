@@ -87,8 +87,9 @@ function holds, a method of a nested class and a function under a module-level `
 nested in another is part of that one. Files are read as Python reads them, by their byte order mark or coding
 cookie. Its score is G. Ann Campbell's [cognitive complexity](https://www.sonarsource.com/docs/CognitiveComplexity.pdf),
 which SonarQube's rule S3776 measured: a point for each `if`, `elif`, `else`, ternary, loop, `except`, `match`,
-sequence of like boolean operators and call of a function to itself, and one more for each level of nesting on those
-that nest. The comment above `COGNITIVE_COMPLEXITY_LIMIT` in `orchestrator.py` says how each Python construct maps to
+sequence of like boolean operators and recursion, and one more for each level of nesting on those that nest.
+Recursion is a function that calls itself, or one on a cycle of calls through other functions of its module, each of
+which then scores the point; calls are followed by name only, not through an alias or into another module. The comment above `COGNITIVE_COMPLEXITY_LIMIT` in `orchestrator.py` says how each Python construct maps to
 the paper's rules. Each of these is a finding:
 
 - `over-limit`: a function over 15, at its `def` line, when it is new or the change raised its score, as
