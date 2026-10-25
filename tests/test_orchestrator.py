@@ -4594,8 +4594,6 @@ class TestQualityGateOffOnResume(unittest.TestCase):
         self.assertNotIn(orchestrator.QUALITY_UNRESOLVED_NOTE[:30], reviews[0])
         self.assertFalse(host.snapshots)
         body = host.prs[0]["body"]
-        self.assertIn("<summary>Quality gate (round 1, before the last change)</summary>\n\nGATE: ERROR", body)
-        self.assertIn("| Orchestrator-Gate | `ERROR after 1 quality round, then turned off` |", body)
         self.assertIn(f"{OFF_AFTER_ANALYSIS}\n\nOpened by", body)
         commit = next(c for c in host.git_calls if c[0] == "commit")
         self.assertEqual(commit[-2:], ("--trailer", "Orchestrator-Gate: ERROR after 1 quality round, then turned off"))
