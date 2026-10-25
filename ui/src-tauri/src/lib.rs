@@ -106,7 +106,9 @@ struct UserShell {
 }
 
 /// Path lists the AppImage's start-up prefixes with entries in the bundle, followed by the user's value, or by an
-/// empty entry when the user had none.
+/// empty entry when the user had none. The GTK hook first sets GSETTINGS_SCHEMA_DIR, GI_TYPELIB_PATH,
+/// GIO_MODULE_DIR and GTK_PATH to the bundle's alone, so the user's value of those four is already lost and they
+/// end up unset.
 const APPIMAGE_PATH_LISTS: &[&str] = &[
     "LD_LIBRARY_PATH",
     "PATH",
@@ -144,7 +146,8 @@ impl UserShell {
     }
 
     /// The user's shell, recovered from the app's environment vars, given the app's executable exe, None when it is
-    /// unknown. Under an AppImage (`APPDIR` set, with `APPIMAGE` set or exe in the bundle): each path list in
+    /// unknown. Under an AppImage (`APPDIR` an absolute path below `/`, with `APPIMAGE` set, or with exe in the
+    /// bundle and the bundle's `AppRun` there, as when the user runs an extracted one): each path list in
     /// APPIMAGE_PATH_LISTS keeps only the user's value (`users_path_list`) and is unset when that is empty; each of
     /// APPIMAGE_PATHS is unset when it is in the bundle; each of APPIMAGE_ONLY is unset; and the directory is `OWD`,
     /// else `PWD`, else the app's own. The bundle is `$APPDIR` and what it resolves to, and everything under
@@ -152,12 +155,15 @@ impl UserShell {
     fn from_vars(vars: impl IntoIterator<Item = (OsString, OsString)>, exe: Option<&Path>) -> UserShell {
         let vars: Vec<(OsString, OsString)> = vars.into_iter().collect();
         let get = |name: &str| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
-        let Some(appdir) = get("APPDIR").map(PathBuf::from) else {
+        // An empty APPDIR, or `/`, would put every path in the bundle.
+        let Some(appdir) = get("APPDIR").map(PathBuf::from).filter(|dir| dir.is_absolute() && dir.parent().is_some())
+        else {
             return UserShell { vars, dir: None };
         };
         let bundle = [canonical(appdir.clone()), appdir];
         let in_bundle = |path: &Path| bundle.iter().any(|root| path.starts_with(root));
-        if get("APPIMAGE").is_none() && !exe.is_some_and(in_bundle) {
+        let extracted = exe.is_some_and(in_bundle) && appdir_marker(&bundle[0]);
+        if get("APPIMAGE").is_none() && !extracted {
             return UserShell { vars, dir: None };
         }
         let dir = get("OWD").or_else(|| get("PWD")).map(PathBuf::from);
@@ -191,10 +197,16 @@ impl UserShell {
     }
 }
 
+/// Whether appdir holds the `AppRun` every AppImage's bundle starts with.
+fn appdir_marker(appdir: &Path) -> bool {
+    appdir.join("AppRun").is_file()
+}
+
 /// The user's own value of the path list name, from value as the AppImage's start-up left it: without the prefix
 /// the start-up added (its leading entries in_bundle, and the entry APPIMAGE_PREFIX_ENTRIES names for name after
-/// them) and without any other entry in_bundle. Empty when the user had none, which the start-up marks with a lone
-/// empty entry after its prefix; the user's own empty entries are kept.
+/// them) and without any other entry in_bundle. Empty when nothing of the user's is left: when they had none, which
+/// the start-up marks with a lone empty entry after its prefix, or when the start-up overwrote it
+/// (APPIMAGE_PATH_LISTS). The user's own empty entries are kept.
 fn users_path_list(name: &str, value: &OsStr, in_bundle: impl Fn(&Path) -> bool) -> OsString {
     let mut start_up_entry =
         APPIMAGE_PREFIX_ENTRIES.iter().find(|(list, _)| *list == name).map(|(_, entry)| Path::new(entry));
@@ -256,13 +268,19 @@ impl Cli {
     #[cfg(unix)]
     pub fn exec(mut self) -> ! {
         use std::os::unix::process::CommandExt;
-        if let Some(dir) = self.dir.as_ref().filter(|dir| !dir.is_dir()) {
-            eprintln!("orchestrator-ui: cannot start in {}: it is not a directory", dir.display());
+        if let Some(why) = self.why_not_started() {
+            eprintln!("orchestrator-ui: {why}");
             std::process::exit(1)
         }
         let e = self.command.exec();
         eprintln!("orchestrator-ui: cannot run {}: {e}", self.orchestrator);
         std::process::exit(1)
+    }
+
+    /// Why the CLI cannot start where it must, the user's directory being gone; None when it can.
+    fn why_not_started(&self) -> Option<String> {
+        let dir = self.dir.as_ref().filter(|dir| !dir.is_dir())?;
+        Some(format!("cannot start in {}: it is not a directory", dir.display()))
     }
 }
 
@@ -520,9 +538,25 @@ mod tests {
     #[test]
     fn an_extracted_appimage_started_by_its_apprun_is_one_too() {
         // squashfs-root/AppRun sets APPDIR and the bundle's variables, but no APPIMAGE.
-        let env = vars(&[("APPDIR", "/x/squashfs-root"), ("PYTHONHOME", "/x/squashfs-root/usr/"), ("PWD", "/u/p")]);
-        let shell = UserShell::from_vars(env, Some(Path::new("/x/squashfs-root/usr/bin/orchestrator-ui")));
+        let root = scratch_dir("squashfs-root").canonicalize().expect("a scratch directory");
+        std::fs::write(root.join("AppRun"), "").expect("a stand-in AppRun");
+        let python_home = format!("{}/usr/", root.display());
+        let env = vars(&[("APPDIR", root.to_str().unwrap()), ("PYTHONHOME", &python_home), ("PWD", "/u/p")]);
+        let exe = root.join("usr/bin/orchestrator-ui");
+        let shell = UserShell::from_vars(env.clone(), Some(&exe));
         assert_eq!(shell, UserShell { vars: vars(&[("PWD", "/u/p")]), dir: Some("/u/p".into()) });
+        // Without AppRun, an APPDIR that holds the executable is a user's, not a bundle.
+        std::fs::remove_file(root.join("AppRun")).expect("AppRun removed");
+        assert_eq!(UserShell::from_vars(env.clone(), Some(&exe)), UserShell { vars: env, dir: None });
+    }
+
+    #[test]
+    fn an_empty_relative_or_root_appdir_is_no_appimage() {
+        for appdir in ["", "/", "squashfs-root"] {
+            let env = vars(&[("APPDIR", appdir), ("APPIMAGE", "/a.AppImage"), ("PATH", "/usr/bin:/bin")]);
+            let shell = UserShell::from_vars(env.clone(), Some(Path::new("/usr/bin/orchestrator-ui")));
+            assert_eq!(shell, UserShell { vars: env, dir: None }, "APPDIR={appdir:?}");
+        }
     }
 
     #[test]
@@ -530,6 +564,7 @@ mod tests {
     fn the_bundle_is_appdir_and_what_it_resolves_to() {
         let dir = scratch_dir("linked-appdir");
         std::fs::create_dir_all(dir.join("real/app/usr/lib")).expect("an AppDir");
+        std::fs::write(dir.join("real/app/AppRun"), "").expect("a stand-in AppRun");
         std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).expect("a link");
         let (real, link) = (dir.join("real/app"), dir.join("link/app"));
         let real = real.canonicalize().expect("the AppDir resolves");
@@ -649,6 +684,17 @@ mod tests {
         shell.apply(&mut command);
         let out = command.output().expect("sh runs");
         assert_eq!(String::from_utf8_lossy(&out.stdout), "/\nkept unset\n");
+    }
+
+    #[test]
+    fn the_cli_refuses_a_directory_since_removed() {
+        let Cli { orchestrator, command, .. } = cli(["list".into()]).expect("the CLI");
+        let gone = Cli { orchestrator, command, dir: Some("/nonexistent/proj".into()) };
+        assert_eq!(gone.why_not_started().as_deref(), Some("cannot start in /nonexistent/proj: it is not a directory"));
+        let Cli { orchestrator, command, .. } = cli(["list".into()]).expect("the CLI");
+        assert_eq!(Cli { orchestrator, command, dir: Some("/".into()) }.why_not_started(), None);
+        let Cli { orchestrator, command, .. } = cli(["list".into()]).expect("the CLI");
+        assert_eq!(Cli { orchestrator, command, dir: None }.why_not_started(), None);
     }
 
     #[test]
