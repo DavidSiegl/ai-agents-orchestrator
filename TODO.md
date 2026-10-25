@@ -19,6 +19,14 @@ was done.
 
 ## Open issues
 
+- **Two builds on agentbox0 can still run rustc out of memory.** The agent has 8 GiB, no swap and 2 executors,
+  and a push to a new branch starts a branch build before its pull request exists, so two builds of one commit
+  compile the Tauri crates at once (PR-74's first build: rustc SIGKILLed on `gtk`). The UI stage now builds
+  without debug info (`Jenkinsfile`, stage UI), which lowers its peak only. Nothing keeps two builds' cargo
+  steps from running side by side, among them the Package stage's release build, or a quality build during
+  `drain` beside a pull request build. Raised by the
+  cross-review of ci-no-debuginfo (2026-10-25): "the OOM cause is narrowed and left unrecorded". Closes with
+  more memory or swap on the VM, or a lock around the cargo steps that keeps them from running side by side.
 - **drain models a spec deleted while it runs only in its status.** A spec that cannot be read again is
   `QueuedSpec.unreadable`, which makes `status` None, but `run`, `pr`, `change_line` and the header writes do not
   know it: the running spec deleted mid-run stops the drain at its post-run `update`; a deleted `ready-for-agent`
