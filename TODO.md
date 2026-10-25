@@ -82,6 +82,12 @@ was done.
   tests' `GOLDEN_PR_BODY` or `GOLDEN_SUMMARY`, changes what is expected without a finding, while the same edit inside
   the assertion is one. Found while adding the provenance trailers to the pull request body (loop-guards ticket 03).
   Closes with the assertions' names resolved to module-level constants the change edits.
+- **`test-integrity` has no way to accept an expected value the spec changes.** `expected-value-changed` fails the
+  gate whenever an assertion's literals change beside code, also when the spec asks for the new output, and unlike
+  `removed-test` there is no report the Reviewer judges instead. PR #76 changed what the pull request says for a
+  gate turned off after its analysis; its edited assertions failed the PR build, and the fix was to drop them where
+  other tests already pinned the new text. Closes with a way for the Builder to name the changed expectations in
+  its report, judged by the Reviewer, or with such a finding demoted to one to weigh.
 - **A run that never reaches `done` keeps its local refs.** A locking step's commit stays under
   `refs/orchestrator/<key>/locked/` (`RunState.lock_ref`) until the run ends `done` (`Workflow._clean_up_locks`);
   `close` and `prune` do not delete them, so a failed run's locked snapshots are never collected by `git gc`. Closes
