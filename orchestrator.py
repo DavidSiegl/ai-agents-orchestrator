@@ -5445,20 +5445,15 @@ def _is_python_source(change: GateChange, path: str) -> bool:
 
 
 def _was_python_source(change: GateChange, path: str) -> bool:
-    """Whether the change's base holds Python source at path, as _holds_python tells it; False for a path the base
-    holds no file at, or that git cannot read there."""
+    """Whether the change's base holds Python source at path, as _holds_python tells it: True for any path named
+    *.py, without asking git; for another, False when the base holds no file there or git cannot read it."""
 
     def first_line() -> bytes:
-        # Only the blob's head is read, so a large file costs no more than a small one: git is stopped after it.
-        argv = ["git", "-C", change.root, "cat-file", "blob", f"{change.base}:{path}"]
         try:
-            with subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,  # noqa: S603
-                                  env=tool_env()) as proc:
-                head = proc.stdout.read(_FIRST_LINE_BYTES) if proc.stdout else b""
-                proc.kill()
-        except OSError:
+            blob = _git(change.root, "cat-file", "blob", f"{change.base}:{path}", verbatim=True)
+        except GateError:
             return b""
-        return head.split(b"\n", 1)[0]
+        return os.fsencode(blob)[:_FIRST_LINE_BYTES].split(b"\n", 1)[0]
 
     return _holds_python(path, first_line)
 
@@ -5679,12 +5674,12 @@ def _callees(function: ast.FunctionDef | ast.AsyncFunctionDef, cls: str | None) 
 
 
 def _local_names(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
-    """The names function binds, which a call by that name in its body then means rather than the module's: its
-    parameters, and each name its body binds, in the functions, lambdas and classes nested in it too, less those it
-    declares global or nonlocal. Counting a nested scope's names as function's own can only miss a call to the module,
-    never invent one."""
+    """The names function binds, which a call by that name in its body may then mean rather than the module's: its
+    parameters, and each name its body binds, in the functions, lambdas and classes nested in it too. Every scope's
+    names count, and a global or nonlocal declaration takes none away, so a call taken here for the module's is one
+    no scope in function can mean otherwise: a call can be missed, as one to a name declared global and bound, but
+    never invented."""
     names = {a.arg for a in ast.walk(function.args) if isinstance(a, ast.arg)}
-    declared: set[str] = set()
     for node in (node for statement in function.body for node in ast.walk(statement)):
         if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
             names.add(node.id)
@@ -5698,9 +5693,7 @@ def _local_names(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
             names.add(node.name)
         elif isinstance(node, ast.MatchMapping) and node.rest:
             names.add(node.rest)
-        elif isinstance(node, ast.Global | ast.Nonlocal):
-            declared.update(node.names)
-    return names - declared
+    return names
 
 
 # Vague names: names that fit anything, which tell a reader nothing about what they hold.

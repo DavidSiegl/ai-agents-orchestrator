@@ -8486,7 +8486,7 @@ class TestCognitiveComplexity(unittest.TestCase):
                 return e(items)
         """), {"a": 0, "b": 0, "c": 0, "d": 0, "e": 0, "f": 0})
 
-    def test_every_way_of_binding_a_name_shadows_the_module_s_function_but_global(self):
+    def test_every_way_of_binding_a_name_shadows_the_module_s_function(self):
         self.assertEqual(self.module_scores("""
             def a(x):
                 import b
@@ -8510,11 +8510,30 @@ class TestCognitiveComplexity(unittest.TestCase):
             def h(): return a(0)
             def i(): return a(0)
             def j():
-                global k
+                global k              # bound, so taken as local: a missed call, never an invented one
                 k = None
                 return k()
             def k(): return j()
-        """), {"a": 2, "b": 0, "e": 0, "f": 0, "g": 0, "h": 0, "i": 0, "j": 1, "k": 1})  # a: except, match
+        """), {"a": 2, "b": 0, "e": 0, "f": 0, "g": 0, "h": 0, "i": 0, "j": 0, "k": 0})  # a: except, match
+
+    def test_a_global_or_nonlocal_in_a_nested_scope_leaves_the_outer_binding_alone(self):
+        self.assertEqual(self.module_scores("""
+            def f():
+                g = make()
+                def reset():
+                    nonlocal g
+                    g = make()
+                return g()
+            def g():
+                return f()
+            def k():
+                return m()
+            def m():
+                global k
+                def inner(k):
+                    return k()
+                return inner
+        """), {"f": 0, "g": 0, "k": 0, "m": 0})
 
     def test_self_in_a_class_nested_in_a_method_is_that_class_s(self):
         self.assertEqual(self.module_scores("""
