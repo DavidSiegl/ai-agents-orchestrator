@@ -19,6 +19,15 @@ was done.
 
 ## Open issues
 
+- **drain models a spec deleted while it runs only in its status.** A spec that cannot be read again is
+  `QueuedSpec.unreadable`, which makes `status` None, but `run`, `pr`, `change_line` and the header writes do not
+  know it: the running spec deleted mid-run stops the drain at its post-run `update`; a deleted `ready-for-agent`
+  spec drops out of `drain_end`'s `left`, so the drain can end "all specs cleared"; a deleted blocker shows as `no
+  status` with its old PR, its reason never printed; `change_line` prints `-> None`; and `not running it` is logged
+  for `done` specs too. No test makes the failed-run branch's header write fail. The spec does not cover specs
+  deleted during a drain. Raised by the cross-review of drain (round 3, 2026-10-25): "'gone' is modelled only in
+  `status`". Closes with a gone state that drain_end's summary and exit status, the change lines and the writes all
+  honour, or with drain refusing to go on once a spec it read has gone.
 - **A pull request whose gate was turned off shows the last analysis as the change's.** After `resume
   --no-quality-gate`, `Workflow._publish` passes `_last_quality`'s file to `pr_body` and `provenance`, so the quality
   section and the `Orchestrator-Gate` trailer judge code the Builder has since changed; only the Reviewer is told
