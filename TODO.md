@@ -19,6 +19,13 @@ was done.
 
 ## Open issues
 
+- **unexpected-paths reads only the contract step's file.** `unexpected_paths` judges each path the change touches
+  against `RunChange.spec`, the contract step's file, so a workflow whose contract is in business terms, such as
+  `examples/workflows/product-team.toml`, whose requirements name no file and whose `design.md` lists the
+  components, gets a finding to weigh for every path on every quality round. Raised by review 20 of
+  product-team-workflow (F4, 2026-10-25): "the gate reads file names from the spec and this spec is in business
+  terms by design". The example's header says so. Closes with the check reading every non-editing step's file that
+  precedes the first editing step, or with a workflow key naming the file that holds the paths.
 - **An AppImage run without FUSE passes no signal on to the orchestrator.** Under `APPIMAGE_EXTRACT_AND_RUN` the
   AppImage's runtime forks, runs `AppRun` in the child and waits, so the process a caller started is the runtime,
   and `Cli::exec` (`ui/src-tauri/src/lib.rs`) only replaces the child. Raised by the cross-review of desktop-cli

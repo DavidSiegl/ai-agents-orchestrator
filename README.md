@@ -532,26 +532,28 @@ as the contract) and `product-team` (Product Manager → Architect → QA Engine
 in business terms, a design against the code, and acceptance tests written and locked before the code).
 
 ```toml
-description = "Spec Collector -> Test Writer -> Builder <-> Reviewer"
+# An abridged product-team.toml: the Architect's design before the default Builder and Reviewer.
+description = "Product Manager -> Architect -> Engineer <-> Tech Lead"
 
 [roles]                    # optional: labels, default models and harnesses
-tests = { label = "Test Writer", model = "sonnet" }
-review = { agent = "codex" }
+spec = "Product Manager"
+design = { label = "Architect", model = "sonnet" }
+review = { label = "Tech Lead", agent = "codex" }
 
 [[steps]]
 use = "spec"               # a step of the default workflow, as it is
 
 [[steps]]
-id = "tests"               # also the role, unless role = "..." says otherwise
-file = "tests.md"          # the handoff file that ends the turn; {n} in it makes one per round
-edits = true               # the run's branch is created before the first editing step
+id = "design"              # also the role, unless role = "..." says otherwise
+file = "design.md"         # the handoff file that ends the turn; {n} in it makes one per round
 prompt = """
-You are the Test Writer. Write failing tests for the spec in {spec_path} in {cwd}.
-As your last step, write a report to {tests_path} in a single write."""
+You are the Architect. Design how to meet the requirements in {spec_path} in the code in {cwd}; change no file.
+As your last step, write the design to {design_path} in a single write."""
 
 [[steps]]
 use = "build"              # the default Builder step, with only its first prompt replaced
-prompt = "... the tests in {tests_path} ... write a report to {build_path} in a single write."
+edits = true               # as it already is: the run's branch is created before the first editing step
+prompt = "... the design in {design_path} ... write a report to {build_path} in a single write."
 
 [[steps]]
 use = "review"

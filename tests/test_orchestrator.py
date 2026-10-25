@@ -10121,6 +10121,26 @@ class TestProofs(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "proof_command must be a string"):
             orchestrator.parse_workflow("bad", {**orchestrator.workflow_definition(QUICK), "proof_command": 1}, BUILT_IN_PROMPTS)
 
+    def test_a_workflow_file_takes_proof_command_and_proofs_dir(self):
+        text = """
+proof_command = "python -m pytest -q {proofs}"
+
+[[steps]]
+use = "spec"
+
+[[steps]]
+use = "build"
+
+[[steps]]
+use = "review"
+prompt = "Back each finding with a test in {proofs_dir}; write {review_path}."
+again = "Again, with tests in {proofs_dir}; write {review_path}."
+"""
+        p = orchestrator.parse_workflow("proving", tomllib.loads(text), BUILT_IN_PROMPTS)
+        self.assertEqual(p.proof_command, "python -m pytest -q {proofs}")
+        self.assertIn("{proofs_dir}", p.step("review").prompt)
+        self.assertIn("{proofs_dir}", p.step("review").again)
+
     def test_proof_command_round_trips_through_a_workflow_file(self):
         text = orchestrator.workflow_toml(self.pipeline)
         self.assertIn('proof_command = "sh {proofs}"', text)
@@ -10282,15 +10302,24 @@ class TestWorkflowFiles(unittest.TestCase):
                                       "build": "Engineer", "review": "Tech Lead"})
         self.assertEqual(team.models, {"tests": "sonnet"})
         spec, design, tests, build, review = team.steps
-        # use keeps every field the file does not set: the interview stays human-paced, the Engineer quality-gated.
-        for step in (spec, build, review):
-            self.assertNotEqual(step.prompt, default.step(step.id).prompt)
-            self.assertEqual(Step(**{**orchestrator.step_fields(step), "prompt": default.step(step.id).prompt}),
-                             default.step(step.id))
+        # use keeps every field the file does not set: the interview stays human-paced, the Engineer quality-gated, the
+        # Tech Lead the verdict step looping back to the Engineer.
+        self.assertEqual(Step(**{**orchestrator.step_fields(spec), "prompt": default.step("spec").prompt}),
+                         default.step("spec"))
+        self.assertIn("first line is a `# ` heading", spec.prompt)
+        for step in (build, review):
+            fields = {"prompt", "again", "fresh_note"}
+            self.assertEqual({k: v for k, v in orchestrator.step_fields(step).items() if k not in fields},
+                             {k: v for k, v in orchestrator.step_fields(default.step(step.id)).items() if k not in fields})
         self.assertEqual((design.file, design.edits), ("design.md", False))
         self.assertEqual((tests.role, tests.file, tests.edits, tests.locks), ("tests", "tests.md", True, True))
-        for step in (tests, build, review):
-            self.assertIn("{design_path}", step.prompt)
+        # Every round of the Engineer and the Tech Lead, and a fresh session of either, hears of the design and the
+        # locked acceptance tests, not only the first.
+        for step in (build, review):
+            for text in (step.prompt, step.again, step.fresh_note):
+                self.assertIn("{design_path}", text)
+                self.assertIn("{tests_path}", text)
+        self.assertIn("{design_path}", tests.prompt)
 
     def test_default_round_trips_through_its_file(self):
         default = orchestrator.DEFAULT_WORKFLOW

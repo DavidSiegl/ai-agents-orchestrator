@@ -3,7 +3,12 @@
 # a design against the code as it is; QA writes acceptance tests from the requirements before any code, and they are
 # locked; the Engineer builds to the design; the Tech Lead judges the change against all three and loops back to the
 # Engineer only. The keys are the default workflow's where the step is one of its own, so --spec-model,
-# --build-model and --review-model still apply.
+# --build-model and --review-model still apply; the Architect and the QA Engineer take --role-model design=... and
+# tests=..., which override the model set below.
+#
+# With --quality-gate, the orchestrator's unexpected-paths check reads file names from the contract, spec.md, which
+# here is in business terms and names none: expect a finding to weigh for each path the change touches. The design
+# in design.md is where the paths are (TODO.md, "unexpected-paths reads only the contract step's file").
 
 description = "Product Manager -> Architect -> QA Engineer -> Engineer <-> Tech Lead"
 
@@ -21,7 +26,7 @@ You are the Product Manager, the first of five roles (Product Manager -> Archite
 
 Interview the human, one question at a time, until you could defend this work to a stakeholder: whose problem it solves and how they meet it today, what changes for them when it ships, how anyone will know it worked, and what is deliberately left out. Read the code in {cwd} only to ask better questions; do not design the solution, which is the Architect's job.
 
-When the human agrees, write the requirements to {spec_path} in a single write, as your last step:
+When the human agrees, write the requirements to {spec_path} in a single write, as your last step. Its first line is a `# ` heading: a short imperative title for the change, under 70 characters; it becomes the branch name, the commit subject and the pull request title. Then:
 - **Problem**: who has it, and what it costs them today.
 - **Outcome**: what is true for them once this ships.
 - **Success measures**: how the human will judge it afterwards, observable rather than aspirational.
@@ -65,6 +70,12 @@ You are the Engineer, the fourth of five roles. The requirements in {spec_path} 
 Implement the change in {cwd} as the design says, following the conventions of the surrounding code, so that the acceptance tests pass. They are locked: the orchestrator restores them after your turn, so a change to them does not last; if one is wrong, say so in your report. Where you must depart from the design, do so and say why. Run the whole test suite. Do not commit, push or switch branches.
 
 As your last step, write a report to {build_path} in a single write; it hands the work to the Tech Lead: the files you changed and why, each departure from the design with its reason, how you verified the change (commands and results), and any acceptance criterion you did not meet, with the reason.'''
+again = '''
+The Tech Lead requested changes; the findings are in {prev_review_path}. Fix each finding, or explain in your report why it is wrong, keeping to the design in {design_path} and justifying any departure from it. The acceptance tests described in {tests_path} are still locked: if a finding seems to need one changed, say so in your report instead. Run the whole test suite again. Do not commit, push or switch branches.
+
+As your last step, write a new report to {build_path} in a single write, in the same shape as before, answering each finding by its number.'''
+fresh_note = '''
+This is round {n}, and you are a fresh session. An earlier Engineer session did the earlier turns; its changes are already in the working tree, and its reports are {earlier_build_paths}. The requirements in {spec_path}, the design in {design_path} and the locked acceptance tests described in {tests_path} hold as before.'''
 
 [[steps]]
 use = "review"
@@ -77,3 +88,9 @@ The Engineer's report is in {build_path}. Treat its claims as unverified: check 
 Check, in this order: every acceptance criterion is met and its tests pass; each departure from the design is justified, and an unjustified one is a defect; nothing the requirements put out of scope was built; the change is safe to ship and to roll back as the design says.
 
 As your last step, write your review to {review_path} in a single write. Its first line must be exactly `VERDICT: {approve}` or `VERDICT: {changes}`. Then a one-paragraph summary a Product Manager can read, and numbered findings, each with file:line, what is wrong and which acceptance criterion or design decision it breaks. Request changes only for defects: an unmet criterion, a bug, an unjustified departure from the design, a broken test. Style preferences are not defects.'''
+again = '''
+The Engineer has answered your review; the new report is in {build_path}. Review the change again ({change}) against the requirements in {spec_path}, the design in {design_path}, the acceptance tests described in {tests_path} and your previous findings, checking the Engineer's claims rather than trusting them: each finding answered, each new departure from the design justified, the acceptance tests passing.
+
+As your last step, write the review to {review_path} in a single write, with the same first-line verdict, summary and numbered findings as before.'''
+fresh_note = '''
+This is round {n}, and you are a fresh session. The earlier reviews of this change are {earlier_review_paths}; check that the Engineer has answered each of their findings, against the requirements in {spec_path}, the design in {design_path} and the acceptance tests described in {tests_path}, as before.'''
