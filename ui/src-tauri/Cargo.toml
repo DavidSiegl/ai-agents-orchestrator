@@ -1,12 +1,12 @@
 [package]
-name = "orchestrator-ui"
+name = "octoflow-ui"
 version = "0.1.0"
 description = "A read-only window over the orchestrator's runs, with orchestrator.py serve as its sidecar"
 edition = "2021"
 
 [lib]
 # The _lib suffix keeps the library's name apart from the binary's, which Cargo needs on Windows.
-name = "orchestrator_ui_lib"
+name = "octoflow_ui_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

@@ -8,10 +8,10 @@
   <a href="https://ko-fi.com/davidsiegl"><img src="https://img.shields.io/badge/Ko--fi-support%20me-FF5E5B?logo=kofi&logoColor=white" alt="Support me on Ko-fi"></a>
 </p>
 
-# ai-agents-orchestrator
+# Octoflow AI
 
-A role-based handoff workflow for coding agents running in [herdr](https://herdr.dev), each role in the agent
-of your choice: [Claude Code, Codex, Gemini CLI, opencode or pi](#five-coding-agents-in-any-mix). The default
+Coding agents in relay, no role judging its own work: a handoff workflow running in [herdr](https://herdr.dev),
+each role in the agent of your choice: [Claude Code, Codex, Gemini CLI, opencode or pi](#five-coding-agents-in-any-mix). The default
 workflow:
 
 ```
@@ -90,25 +90,25 @@ Each [release](https://github.com/DavidSiegl/ai-agents-orchestrator/releases) ha
 Linux x86_64 and for Apple Silicon macOS, which needs no Python, and each with its `.sha256`:
 
 ```bash
-# Linux x86_64; on an Apple Silicon Mac, orchestrator-macos-arm64 and `shasum -a 256 -c`
-curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/orchestrator-linux-x86_64
-curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/orchestrator-linux-x86_64.sha256
-sha256sum -c orchestrator-linux-x86_64.sha256 && chmod +x orchestrator-linux-x86_64
-./orchestrator-linux-x86_64 run "add a token-bucket rate limiter to the API client"
+# Linux x86_64; on an Apple Silicon Mac, octoflow-macos-arm64 and `shasum -a 256 -c`
+curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/octoflow-linux-x86_64
+curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/octoflow-linux-x86_64.sha256
+sha256sum -c octoflow-linux-x86_64.sha256 && chmod +x octoflow-linux-x86_64
+./octoflow-linux-x86_64 run "add a token-bucket rate limiter to the API client"
 ```
 
 The macOS binary is not signed or notarized. Downloaded with a browser, macOS refuses to open it the first time:
-right-click it and choose Open once, or run `xattr -d com.apple.quarantine orchestrator-macos-arm64`. A file
+right-click it and choose Open once, or run `xattr -d com.apple.quarantine octoflow-macos-arm64`. A file
 `curl` downloads is not quarantined, so it opens straight away.
 
-Everywhere else, use `orchestrator.pyz`, an executable of `orchestrator.py` that needs Python 3.13+, and tkinter
+Everywhere else, use `octoflow.pyz`, an executable of `orchestrator.py` that needs Python 3.13+, and tkinter
 for the GUI:
 
 ```bash
-curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/orchestrator.pyz
-curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/orchestrator.pyz.sha256
-sha256sum -c orchestrator.pyz.sha256 && chmod +x orchestrator.pyz
-./orchestrator.pyz run "add a token-bucket rate limiter to the API client"
+curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/octoflow.pyz
+curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/octoflow.pyz.sha256
+sha256sum -c octoflow.pyz.sha256 && chmod +x octoflow.pyz
+./octoflow.pyz run "add a token-bucket rate limiter to the API client"
 ```
 
 Both take the same commands and flags as `python orchestrator.py` in a checkout, which the examples below use.
@@ -142,8 +142,8 @@ A Python without tkinter makes `gui` exit with status 1 and the command to insta
 A desktop app is taking over from the window, one step at a time. So far it is read-only: it shows one
 project's runs and their handoff files live, without Refresh, and it starts no runs. It is a Tauri 2 app in
 [`ui/`](ui), a React and TypeScript frontend in a native window. Each release has it for Linux x86_64, as
-`orchestrator-desktop-linux-x86_64.deb` and `.AppImage`, and for Apple Silicon macOS, as
-`orchestrator-desktop-macos-arm64.dmg`, each with its `.sha256` and the orchestrator binary inside, so it needs
+`octoflow-desktop-linux-x86_64.deb` and `.AppImage`, and for Apple Silicon macOS, as
+`octoflow-desktop-macos-arm64.dmg`, each with its `.sha256` and the orchestrator binary inside, so it needs
 neither Python nor a checkout. The macOS app is signed ad hoc only, not notarized: macOS refuses to open it the
 first time, as it does the binary (see [Install](#install)).
 
@@ -163,19 +163,19 @@ window:
   environment of your shell:
 
   ```bash
-  chmod +x orchestrator-desktop-linux-x86_64.AppImage
-  ./orchestrator-desktop-linux-x86_64.AppImage run "add a token-bucket rate limiter to the API client"
+  chmod +x octoflow-desktop-linux-x86_64.AppImage
+  ./octoflow-desktop-linux-x86_64.AppImage run "add a token-bucket rate limiter to the API client"
   ```
 
-- **`.deb`:** it installs the orchestrator as `/usr/bin/orchestrator`, so `orchestrator run "..."`.
+- **`.deb`:** it installs the orchestrator as `/usr/bin/octoflow`, so `octoflow run "..."`.
 - **macOS:** a `.app` is a folder, so link the orchestrator inside it onto your `PATH`:
 
   ```bash
-  ln -s /Applications/Orchestrator.app/Contents/MacOS/orchestrator /usr/local/bin/orchestrator
+  ln -s /Applications/Octoflow.app/Contents/MacOS/octoflow /usr/local/bin/octoflow
   ```
 
   If macOS refuses to run it, the app was downloaded with a browser and is quarantined: open the app once with
-  right-click and Open, or run `xattr -dr com.apple.quarantine /Applications/Orchestrator.app`. Not yet checked on
+  right-click and Open, or run `xattr -dr com.apple.quarantine /Applications/Octoflow.app`. Not yet checked on
   a real Mac.
 - **Headless machines and CI:** the plain binaries in [Install](#install). They need neither WebKit nor, as an
   AppImage does, FUSE, and are a seventh of its size.
@@ -192,7 +192,7 @@ sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev
 cd ui
 npm ci
 npm run tauri dev     # the window, rebuilt as you edit
-npm run tauri build   # an optimized build, src-tauri/target/release/orchestrator-ui
+npm run tauri build   # an optimized build, src-tauri/target/release/octoflow-ui
 npm test              # the frontend's tests; npm run typecheck and npm run lint check it too
 (cd src-tauri && cargo test)   # the shell's, which start and stop a real serve
 ```
