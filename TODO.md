@@ -28,15 +28,6 @@ was done.
   deleted during a drain. Raised by the cross-review of drain (round 3, 2026-10-25): "'gone' is modelled only in
   `status`". Closes with a gone state that drain_end's summary and exit status, the change lines and the writes all
   honour, or with drain refusing to go on once a spec it read has gone.
-- **A pull request whose gate was turned off shows the last analysis as the change's.** After `resume
-  --no-quality-gate`, `Workflow._publish` passes `_last_quality`'s file to `pr_body` and `provenance`, so the quality
-  section and the `Orchestrator-Gate` trailer judge code the Builder has since changed; only the Reviewer is told
-  (`QUALITY_OFF_NOTE`). Raised by the cross-review of resume-quality-gate (finding 8, 2026-10-24): "nothing in the PR
-  says the final change went unjudged". Closes with the PR body and trailer saying the gate was turned off after it.
-- **Two functions decide which quality file is a round's last.** `Workflow._gate_passed` reads
-  `quality_path(n, quality_round)` itself, while `_quality_note` and `_publish` use `_last_quality`; they agree only
-  because `_gate_passed` returns True whenever the run has no CI. Raised by the same review (finding 11). Closes with
-  `_gate_passed` reading `_last_quality`.
 - **`doctor --machine` probes the machine over about twenty SSH connections, one after another.** Each check is
   its own `Host.run`, so `_tool_version` asks `command -v` before `--version`, which already fails for a missing
   command, and `gh auth status` may wait up to `NETWORK_TIMEOUT`. Raised by the cross-review of the doctor command
@@ -303,6 +294,21 @@ was done.
   files.
 
 ## Fixed
+
+- **A pull request whose gate was turned off shows the last analysis as the change's.** After `resume
+  --no-quality-gate`, `Workflow._publish` passed `_last_quality`'s file to `pr_body` and `provenance`, so the quality
+  section and the `Orchestrator-Gate` trailer judged code the Builder had since changed; only the Reviewer was told
+  (`QUALITY_OFF_NOTE`). Raised by the cross-review of resume-quality-gate (finding 8, 2026-10-24): "nothing in the PR
+  says the final change went unjudged". Fixed (2026-10-25): `Workflow._unjudged` decides, for `_quality_note` and
+  `_publish` alike, when no quality file judges the published code; `Workflow._gate_evidence` then cites the run's
+  last quality file from any round, the trailer reads `..., then turned off`, the section `Quality gate (round R,
+  before the last change)`, and the body opens with a `[!NOTE]` saying nothing judged the final change, or that the
+  gate was turned off before any analysis finished.
+- **Two functions decide which quality file is a round's last.** `Workflow._gate_passed` read
+  `quality_path(n, quality_round)` itself, while `_quality_note` and `_publish` used `_last_quality`; they agreed only
+  because `_gate_passed` returns True whenever the run has no CI. Raised by the same review (finding 11). Fixed
+  (2026-10-25): `_gate_passed` reads `_last_quality`, and fails a quality file older than the current quality round
+  as it failed a missing one.
 
 - **A proof that failed is not run again in the next round.** `Workflow._judge_proofs` ran only the proofs the
   verdict step wrote in its own round, so a Builder told to make round N's failing proofs pass (`PROOFS_NOTE`) was

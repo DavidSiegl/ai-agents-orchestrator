@@ -429,8 +429,9 @@ The quality gate still did not pass, and its last quality round failed on just w
 failed on, so the Builder was not asked again; its unresolved findings are in {quality_path}. \
 Weigh them as you would your own."""
 
-# In place of the notes above when resume --no-quality-gate turned the gate off after the round's last quality file,
-# and the Builder changed the code since.
+# In place of the notes above when the round's change went unjudged (Workflow._unjudged) and the round has a quality
+# file: resume --no-quality-gate turned the gate off after it, and the Builder changed the code since. The pull
+# request says so too (pr_body).
 QUALITY_OFF_NOTE = """\
 The quality gate was turned off before the Builder's latest change was analysed, so nothing judged that change; \
 the round's earlier quality files are {quality_paths}, and the Builder's reports since answer them."""
@@ -5870,27 +5871,46 @@ def commit_note(state: "RunState") -> str:
     return f"Orchestrator run {state.run_id}: {state.verdict} after {state.round} review round(s)."
 
 
-def provenance(state: "RunState", quality: tuple[int, str] | None) -> list[tuple[str, str]]:
+class QualityFile(NamedTuple):
+    """A quality file of a run, as its commit and pull request cite it."""
+    round: int  # the review round it belongs to
+    quality_round: int
+    text: str
+
+
+class GateEvidence(NamedTuple):
+    """What the quality gate said of the change a run publishes, for its commit trailers and pull request
+    (provenance, pr_body); Workflow._gate_evidence decides it."""
+    # The quality file they cite: the final round's last one, or for an unjudged change the run's last one from any
+    # round; None when there is none to cite.
+    last: QualityFile | None = None
+    # True when resume --no-quality-gate turned the gate off and no quality file judges the published code
+    # (Workflow._unjudged): last, if any, judged code the Builder has changed since.
+    unjudged: bool = False
+
+
+def provenance(state: "RunState", quality: GateEvidence) -> list[tuple[str, str]]:
     """The git trailers of the run's commit, (key, value) in order: Orchestrator-Run, Orchestrator-Workflow, an
     Orchestrator-Role per role whose agent ran, in the order they first started, as role=harness/model, the model
-    "default" where none was set, and with a quality gate Orchestrator-Gate, how the last quality round ended.
+    "default" where none was set, and with a quality file to cite Orchestrator-Gate, how its quality round ended,
+    with ", then turned off" for an unjudged change.
 
-    quality is the round's last quality file, as (its quality round, its text), None for a round without one. A role
-    that ran in two harnesses over resumes names the last. docs/design.md says what each trailer means.
+    A role that ran in two harnesses over resumes names the last. docs/design.md says what each trailer means.
     """
     s = state
     trailers = [("Orchestrator-Run", s.run_id), ("Orchestrator-Workflow", s.workflow)]
     trailers += [("Orchestrator-Role", f"{role}={agent.get('kind', DEFAULT_AGENT)}/{s.models.get(role) or 'default'}")
                  for role, agent in s.agents.items()]
-    if quality is not None:
-        q, text = quality
+    if (last := quality.last) is not None:
+        q = last.quality_round
         rounds = f"{q} quality round{'s' if q != 1 else ''}"
-        trailers.append(("Orchestrator-Gate", f"{parse_gate(text) or '?'} after {rounds}"))
+        off = ", then turned off" if quality.unjudged else ""
+        trailers.append(("Orchestrator-Gate", f"{parse_gate(last.text) or '?'} after {rounds}{off}"))
     return trailers
 
 
-def pr_body(state: "RunState", spec: str, report: str, review: str, quality: tuple[int, str] | None = None) -> str:
-    """The pull request's body; quality is the final round's last quality file, as provenance takes it."""
+def pr_body(state: "RunState", spec: str, report: str, review: str, quality: GateEvidence) -> str:
+    """The pull request's body; quality is what the gate said of the change, as provenance takes it."""
     approved = state.verdict in SUCCEEDED
     head = f"Opened by ai-agents-orchestrator run `{state.run_id}`. {verdict_line(state)}"
     trailers = "\n".join(["| Commit trailer | Value |", "| --- | --- |",
@@ -5900,13 +5920,22 @@ def pr_body(state: "RunState", spec: str, report: str, review: str, quality: tup
         files = "\n".join(f"> - `{f}`" for f in state.conflicts)
         warning = [f"> [!WARNING]\n> This branch conflicts with `{state.base_branch}`, so this is a draft. "
                    f"Merge `{state.base_branch}` into it and resolve the conflicts in:\n{files}"]
+    note, section = [], []
+    if quality.unjudged:
+        when = ("after its last analysis, and the Builder changed the code since, so nothing judged the final change"
+                if quality.last else "before any analysis finished, so nothing judged the change")
+        note = [f"> [!NOTE]\n> The quality gate was turned off (`resume --no-quality-gate`) {when}."]
+    if (last := quality.last) is not None:
+        label = f"round {last.round}, before the last change" if quality.unjudged else f"round {last.round}"
+        section = [_details(f"Quality gate ({label})", last.text)]
     return "\n\n".join([
         *warning,
+        *note,
         head,
         trailers,
         _details("Spec", spec, open_=True),
         _details(f"Builder report (round {state.round})", report),
-        *([_details(f"Quality gate (round {state.round})", quality[1])] if quality else []),
+        *section,
         *([] if state.verdict in (FINISHED, QUALITY_GATE_FAILED) else
           [_details(f"Review (round {state.round})", review, open_=not approved)]),
         *([_details("Run timings", turns_table(state.turns))] if state.turns else []),
@@ -6960,7 +6989,7 @@ class Workflow:
                 log(f"aborted the merge an earlier orchestrator left in {wd}")
             spec = self._last_text(p.contract, 0)
             title = (spec_title(spec) or s.task.strip().split("\n", 1)[0] or s.run_id)[:72]
-            quality = self._last_quality(s.round)
+            quality = self._gate_evidence(s.round)
             if self.host.git(wd, "status", "--porcelain").strip():
                 self.host.git(wd, "add", "--all")
                 trailers = [arg for key, said in provenance(s, quality) for arg in ("--trailer", f"{key}: {said}")]
@@ -7023,14 +7052,14 @@ class Workflow:
             log(f"could not close herdr workspace {self.state.workspace_id}: {e}")
 
     def _quality_note(self, n: int) -> str:
-        """What the verdict step hears of round n's last quality file: passed, or the findings left, or with the gate
-        turned off since the Builder changed the code, QUALITY_OFF_NOTE; "" without one."""
+        """What the verdict step hears of round n's last quality file: passed, or the findings left, or for an unjudged
+        change (_unjudged), QUALITY_OFF_NOTE; "" without one."""
         s = self.state
         last = self._last_quality(n)
         if last is None:
             return ""
         q, text = last
-        if q < s.quality_round:
+        if self._unjudged(last):
             return "\n\n" + QUALITY_OFF_NOTE.format(
                 quality_paths=", ".join(s.quality_path(n, k) for k in range(1, q + 1)))
         if parse_gate(text) == GATE_OK:
@@ -7051,13 +7080,40 @@ class Workflow:
                 return q, text
         return None
 
+    def _unjudged(self, last: tuple[int, str] | None) -> bool:
+        """Whether the current round's change went unjudged: resume --no-quality-gate turned the gate off, and last,
+        the round's last quality file as _last_quality gives it, is older than the Builder's latest report in the
+        round, or is None: the gate was turned off before the round's first analysis finished, or in an earlier
+        round."""
+        s = self.state
+        return s.quality_gate_disabled and (last is None or last[0] < s.quality_round)
+
+    def _gate_evidence(self, n: int) -> GateEvidence:
+        """What the quality gate said of round n's change, the run's final one: round n's last quality file, or for
+        an unjudged change (_unjudged) the run's last one from any round."""
+        s = self.state
+        last = self._last_quality(n)
+        unjudged = self._unjudged(last)
+        if last is not None or not unjudged:
+            return GateEvidence(None if last is None else QualityFile(n, *last), unjudged)
+        # Round n has none, and quality_round no longer says how far an earlier round got: its quality files are
+        # numbered from 1 without gaps, so its last is the one before the first missing.
+        for m in range(n - 1, 0, -1):
+            found, q = None, 1
+            while (text := self.host.read(s.quality_path(m, q))) is not None:
+                found, q = QualityFile(m, q, text), q + 1
+            if found is not None:
+                return GateEvidence(found, unjudged=True)
+        return GateEvidence(unjudged=True)
+
     def _gate_passed(self, n: int) -> bool:
         """Whether round n's last quality round passed the gate; True for a run without one."""
         s = self.state
         if not self.ci or not s.quality_round:
             return True
-        text = self.host.read(s.quality_path(n, s.quality_round))
-        return text is not None and parse_gate(text) == GATE_OK
+        # With the gate on, the quality loop has written the current quality round's file by now; one missing fails.
+        last = self._last_quality(n)
+        return last is not None and last[0] == s.quality_round and parse_gate(last[1]) == GATE_OK
 
     # -- The quality gate --------------------------------------------------
 
