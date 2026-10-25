@@ -12098,6 +12098,54 @@ class TestDrain(unittest.TestCase):
 
         self.assertEqual(seen, [("ready-for-agent", self.runs[0][0].run_id, None)])
 
+    def test_an_edit_made_while_a_spec_runs_is_kept(self):
+        self.spec("a", drain_spec_text("First"))
+        self.spec("b", drain_spec_text("Second"))
+
+        def run(wf):
+            # The human adds to a's body, and holds b back, while a runs.
+            with open(self.path("a"), "a", encoding="utf-8") as f:
+                f.write("A note added during the run.\n")
+            self.spec("b", drain_spec_text("Second", "needs-info"))
+            return approved(PR_A)(wf)
+        status, _, _ = self.drain(run)
+
+        self.assertEqual(status, 0)
+        self.assertEqual(len(self.runs), 1)
+        self.assertTrue(self.text("a").endswith("A note added during the run.\n"))
+        self.assertEqual(self.header("a")[::2], ("in-review", PR_A))
+        self.assertEqual(self.text("b"), drain_spec_text("Second", "needs-info"))
+
+    def test_a_blocked_by_line_naming_no_blocker(self):
+        for line in ("Blocked by: -", "Blocked by: none", "Blocked by: None"):
+            with self.subTest(line=line):
+                self.runs.clear()
+                self.spec("a", drain_spec_text("First", "ready-for-agent", line))
+                status, _, _ = self.drain(approved())
+                self.assertEqual((status, len(self.runs)), (0, 1))
+
+    def test_a_run_taken_over_leaves_its_spec_for_the_next_drain(self):
+        self.spec("a", drain_spec_text("First"))
+        status, _, err = self.drain(raising(orchestrator.RunTakenOver("run x was taken over by host 1")))
+        self.assertEqual(status, orchestrator.EXIT_ERROR)
+        self.assertEqual(self.header("a")[:2], ("ready-for-agent", self.runs[0][0].run_id))
+        self.assertIn("a stays ready-for-agent; run drain again once that run has ended", err)
+        self.assertNotIn("resume its run", err)
+
+    def test_a_symlinked_spec_stays_a_link_and_keeps_its_mode(self):
+        target = os.path.join(self.dir, "elsewhere.md")
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(drain_spec_text("First"))
+        os.chmod(target, 0o600)
+        os.makedirs(os.path.join(self.dir, "a"))
+        os.symlink(target, self.path("a"))
+
+        self.drain(approved(PR_A))
+
+        self.assertTrue(os.path.islink(self.path("a")))
+        self.assertEqual(self.header("a")[::2], ("in-review", PR_A))
+        self.assertEqual(os.stat(target).st_mode & 0o777, 0o600)
+
     def test_a_blocked_spec_waits_for_its_blockers_pull_request(self):
         self.spec("a", drain_spec_text("First"))
         self.spec("b", drain_spec_text("Second", "ready-for-agent", "Blocked by: a"))
