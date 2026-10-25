@@ -3809,8 +3809,25 @@ class TestSecretScanWorkflow(unittest.TestCase):
         self.assertEqual((s.quality_round, herdr.calls.count(("prompt", "build-a1b2c3"))), (2, 2))
         self.assertIn(orchestrator.QUALITY_STUCK_NOTE.format(quality_path=s.quality_path(1, 2)), reviews[0])
         self.assertEqual([r["fingerprints_by_check"]["gitleaks"] for r in s.quality_rounds],
-                         [[orchestrator.finding_fingerprint("limiter.py", "gitleaks github-pat", "")]] * 2)
+                         [[orchestrator.finding_fingerprint("limiter.py", "gitleaks github-pat", "") + "-1"]] * 2)
         self.assertEqual(fake.triggered(), [])
+
+    def test_removing_one_of_two_secrets_of_a_kind_keeps_the_loop_going(self):
+        host = FakeHost()
+        host.leaks = [SNAPSHOT_LEAK, replace(SNAPSHOT_LEAK, line=9)]
+
+        def fix(remaining):
+            def turn(prompt, state, host):
+                host.leaks = host.leaks[:remaining]
+                return fix_turn(1, state.quality_round)(prompt, state, host)
+            return turn
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "build": [build_turn(1), fix(1), fix(0)],
+            "review": [review_turn(1, APPROVE)]}, host=host)
+        self.assertEqual(wf.run(), APPROVE)
+        s = wf.state
+        self.assertEqual([r["gate"] for r in s.quality_rounds], [orchestrator.GATE_LEAK, orchestrator.GATE_LEAK, "OK"])
+        self.assertEqual(herdr.calls.count(("prompt", "build-a1b2c3")), 3)
 
     def test_a_secret_in_the_base_fails_the_run(self):
         host = FakeHost()
@@ -4253,10 +4270,14 @@ class TestGateFailures(unittest.TestCase):
             return orchestrator.leak_report(list(leaks), "found.")
         first = orchestrator.gate_failures(report(replace(LEAK, commit="snap1")))
         moved = replace(LEAK, line=9, commit="snap2", fingerprint="snap2:limiter.py:github-pat:9")
-        self.assertEqual(first.fingerprints,
-                         {"gitleaks": [orchestrator.finding_fingerprint("limiter.py", "gitleaks github-pat", "")]})
+        pat = orchestrator.finding_fingerprint("limiter.py", "gitleaks github-pat", "")
+        self.assertEqual(first.fingerprints, {"gitleaks": [f"{pat}-1"]})
         self.assertTrue(orchestrator.gate_failures(report(moved)).repeats(first))
         self.assertFalse(orchestrator.gate_failures(report(replace(moved, rule="aws-access-token"))).repeats(first))
+        # Of a file's two keys of a kind, one removed is progress, not the same again.
+        two = orchestrator.gate_failures(report(replace(LEAK, commit="snap1"), moved))
+        self.assertFalse(orchestrator.gate_failures(report(moved)).repeats(two))
+        self.assertTrue(orchestrator.gate_failures(report(moved, replace(LEAK, commit="snap3"))).repeats(two))
 
     def test_a_coverage_condition_repeated_is_stuck_until_its_words_change(self):
         def report(percent):

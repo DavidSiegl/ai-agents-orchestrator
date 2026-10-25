@@ -2848,10 +2848,12 @@ _SECRET_FOUND = re.compile(r"\d+\. `(?P<path>.+):\d+` (?P<rule>\S+) in \S+ \(fin
 
 def gate_failures(quality: str) -> GateFailures:
     """What the quality file, as quality_report, judge_run and leak_report write it, says failed the gate: its failed
-    conditions, the numbered findings before a TO_WEIGH_NOTE in each section, its failing tests, and its secrets, by
-    file and rule under the check "gitleaks", wherever their line moved and whichever snapshot held them."""
+    conditions, the numbered findings before a TO_WEIGH_NOTE in each section, its failing tests, and its secrets
+    under the check "gitleaks", each as the k-th secret of its rule in its file, wherever its line moved and whichever
+    snapshot held it, so that a round which removes one of a file's two keys of a kind is not the same again."""
     conditions: list[str] = []
     fingerprints: dict[str, list[str]] = {}
+    secrets: collections.Counter[tuple[str, str]] = collections.Counter()
     section, weighing = "", False
     for line in quality.split("\n"):
         if line.startswith("## "):
@@ -2863,8 +2865,9 @@ def gate_failures(quality: str) -> GateFailures:
         elif section == FAILING_TESTS and (test := _FAILING_TEST.fullmatch(line)):
             fingerprints.setdefault("tests", []).append(finding_fingerprint(test["name"], "tests", ""))
         elif section == SECRETS_FOUND and (secret := _SECRET_FOUND.fullmatch(line)):
-            fingerprints.setdefault("gitleaks", []).append(
-                finding_fingerprint(secret["path"], f"gitleaks {secret['rule']}", ""))
+            key = (secret["path"], f"gitleaks {secret['rule']}")
+            secrets[key] += 1
+            fingerprints.setdefault("gitleaks", []).append(f"{finding_fingerprint(*key, '')}-{secrets[key]}")
         elif not weighing and (finding := _NUMBERED_FINDING.fullmatch(line)):
             fingerprints.setdefault(finding["rule"].split(" ", 1)[0], []).append(
                 finding_fingerprint(finding["path"], finding["rule"], finding["message"]))
