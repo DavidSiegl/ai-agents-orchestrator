@@ -6245,6 +6245,13 @@ class TestGate(unittest.TestCase):
         self.assertIn("is not a file", err)
 
 
+class TestTestIntegrityCheck(unittest.TestCase):
+    def test_it_fails_the_gate_but_weighs_what_a_spec_can_ask_for(self):
+        [check] = [c for c in orchestrator.gate_checks() if c.name == "test-integrity"]
+        self.assertEqual((check.fails, check.find), (True, orchestrator.weakened_tests))
+        self.assertEqual(check.weighed, {"removed-test", "fewer-assertions", "expected-value-changed"})
+
+
 class TestWeakenedTests(unittest.TestCase):
     """The test-integrity check over a real git repository: a base commit, then the change in its working tree."""
 

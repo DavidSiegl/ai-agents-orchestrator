@@ -3423,7 +3423,8 @@ def _read_text(path: str) -> str:
 
 
 def _finding(path: str | None, line: int | None, rule: str, message: str, severity: str = "warning") -> dict:
-    """A finding as GateCheck.find returns it: a check that only reports gives warnings, and one that fails errors."""
+    """A finding as GateCheck.find returns it, its severity as the check grades it; GateCheck.judged sets the one the
+    gate lists."""
     return {"path": path, "line": line, "severity": severity, "rule": rule, "message": message}
 
 

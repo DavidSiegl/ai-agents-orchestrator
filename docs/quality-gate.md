@@ -61,7 +61,7 @@ moved out of it counts as added. The linters and the build configuration listing
 | `vague-names` | no | names the change binds that fit anything, such as `data` or `raw_info` |
 
 **Test integrity** compares each test file the change touches, outside `mutants/` as above, with its base, so a
-change cannot pass by weakening its tests. Each of these is a finding:
+change cannot weaken its tests unseen. Each of these is a finding:
 
 - `removed-test`: a test function, method or class is gone, at its line at the base. A class whose tests all
   went is one finding, and so is a deleted file. A test that reappears with the same body under another name or
@@ -307,7 +307,7 @@ Any other git output the gate cannot decode, such as a work tree whose own path 
 unjudged (exit 2).
 
 The quality file starts with the `GATE:` line, then has the failed conditions, the issues (the findings on added
-lines, then the failing checks'), the findings to weigh, the failing tests, coverage of new code, the suppressions
+lines, then the failing checks' that they do not weigh), the findings to weigh, the failing tests, coverage of new code, the suppressions
 the change adds, and the build configuration it edits. Issues and findings to weigh are numbered as one list, issues
 first, at most 50 in all, then a count:
 
