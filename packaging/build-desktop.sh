@@ -73,6 +73,73 @@ publish() {
     echo "built dist/$name and dist/$name.sha256"
 }
 
+# smoke_appimage APPIMAGE: run the AppImage, an absolute path, as the CLI from a new directory, as a user would from
+# a project: --help and workflows exit 0, and the orchestrator that serve execs starts in that directory without
+# the bundle's LD_LIBRARY_PATH entries or PYTHONHOME (UserShell in ui/src-tauri/src/lib.rs). serve is the one
+# command that needs no herdr and stays up long enough to read its /proc entry. Exits 1, naming the check, when
+# one fails.
+smoke_appimage() {
+    smoke=$(mktemp -d)
+    smoke=$(cd "$smoke" && pwd -P)
+    # APPIMAGE_EXTRACT_AND_RUN extracts the AppImage under $TMPDIR and never removes it, 336 MB a build: under
+    # $smoke it goes with the rest. Nothing after this function, the script's last step, makes temporary files.
+    export TMPDIR="$smoke"
+    serve_pid='' orchestrator=''
+    smoke_fail() {
+        echo "build-desktop.sh: the AppImage as the CLI: $*" >&2
+        # The orchestrator first: the AppImage's runtime does not pass a signal on to it.
+        for pid in $orchestrator $serve_pid; do kill "$pid" 2>/dev/null || true; done
+        rm -rf "$smoke"
+        exit 1
+    }
+    (cd "$smoke" && "$1" --help >/dev/null) || smoke_fail "--help did not exit 0"
+    (cd "$smoke" && "$1" workflows >/dev/null) || smoke_fail "workflows did not exit 0"
+
+    (cd "$smoke" && exec "$1" serve >serve.out) &
+    serve_pid=$!
+    tries=0
+    until [ -s "$smoke/serve.out" ]; do
+        tries=$((tries + 1))
+        [ "$tries" -le 30 ] || smoke_fail "serve printed no address in 30 s"
+        kill -0 "$serve_pid" 2>/dev/null || smoke_fail "serve exited before printing its address"
+        sleep 1
+    done
+
+    # The AppImage's runtime extracts the bundle and starts AppRun, which execs the app, which execs the
+    # orchestrator: the nearest descendant running $APPDIR/usr/bin/orchestrator is the process the app became (the
+    # one below it is PyInstaller's).
+    pids=$serve_pid
+    while [ -z "$orchestrator" ] && [ -n "$pids" ]; do
+        next=
+        for pid in $pids; do
+            case "$(readlink "/proc/$pid/exe" 2>/dev/null)" in
+                */usr/bin/orchestrator) orchestrator=$pid; break ;;
+            esac
+            # ps exits 1 for a process with no children, which is only a leaf of the walk.
+            next="$next $(ps -o pid= --ppid "$pid" || true)"
+        done
+        pids=$next
+    done
+    [ -n "$orchestrator" ] || smoke_fail "no process of serve's runs the bundled orchestrator"
+    appdir=$(readlink "/proc/$orchestrator/exe") || smoke_fail "the orchestrator exited before its check"
+    appdir=${appdir%/usr/bin/orchestrator}
+    env=$(tr '\0' '\n' <"/proc/$orchestrator/environ") || smoke_fail "cannot read the orchestrator's environment"
+
+    cwd=$(readlink "/proc/$orchestrator/cwd") || smoke_fail "cannot read the orchestrator's directory"
+    [ "$cwd" = "$smoke" ] || smoke_fail "serve runs in $cwd, not the caller's $smoke"
+    if printf '%s\n' "$env" | sed -n 's/^LD_LIBRARY_PATH=//p' | tr ':' '\n' | grep -q "^$appdir\(/\|\$\)"; then
+        smoke_fail "serve's LD_LIBRARY_PATH has the bundle's $appdir in it"
+    fi
+    if printf '%s\n' "$env" | grep -q '^PYTHONHOME='; then
+        smoke_fail "serve has PYTHONHOME set: $(printf '%s\n' "$env" | grep '^PYTHONHOME=')"
+    fi
+
+    kill "$orchestrator"
+    wait "$serve_pid" || smoke_fail "serve did not exit 0 on SIGTERM"
+    rm -rf "$smoke"
+    echo "smoke-tested dist/$(basename "$1") as the CLI"
+}
+
 # A bundle without the sidecar still builds and opens, then says only that it cannot start the orchestrator.
 out="ui/src-tauri/target/release/bundle"
 if [ "$os" = linux ]; then
@@ -87,6 +154,7 @@ if [ "$os" = linux ]; then
     done
     publish deb "$out/deb/Orchestrator_${version}_"*.deb
     publish AppImage "$out/appimage/Orchestrator_${version}_"*.AppImage
+    smoke_appimage "$PWD/dist/orchestrator-desktop-$os-$arch.AppImage"
 else
     [ -x "$out/macos/Orchestrator.app/Contents/MacOS/orchestrator" ] \
         || { echo "build-desktop.sh: Orchestrator.app has no Contents/MacOS/orchestrator" >&2; exit 1; }

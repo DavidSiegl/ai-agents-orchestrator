@@ -1,6 +1,7 @@
 //! The desktop shell: a window over `orchestrator serve`, which it starts as its sidecar when it launches and
 //! kills when it exits. The webview talks to the sidecar's server over HTTP; the shell only hands it the server's
-//! address and token, through the `server` command.
+//! address and token, through the `server` command. Started with arguments, the app is the orchestrator's CLI
+//! instead: see `cli`.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -49,16 +50,19 @@ impl Orchestrator {
         Orchestrator::Script(canonical(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../orchestrator.py")))
     }
 
-    /// A command that runs it with no arguments yet.
+    /// A command that runs it with no arguments yet, in the environment and directory of the shell that started
+    /// the app (`UserShell`).
     fn command(&self) -> Command {
-        match self {
+        let mut command = match self {
             Orchestrator::Script(script) => {
                 let mut command = Command::new("python3");
                 command.arg(script);
                 command
             }
             Orchestrator::Bundled(binary) => Command::new(binary),
-        }
+        };
+        UserShell::from_vars(std::env::vars_os()).apply(&mut command);
+        command
     }
 
     /// The directory of the checkout it belongs to; None for the bundled binary, which belongs to none.
@@ -77,6 +81,129 @@ impl fmt::Display for Orchestrator {
             Orchestrator::Script(script) => write!(f, "python3 {}", script.display()),
             Orchestrator::Bundled(binary) => write!(f, "{}", binary.display()),
         }
+    }
+}
+
+/// The environment and working directory the shell that started the app had, as far as they can be recovered: what
+/// the orchestrator's process gets, so that it, and every process it starts, sees the user's libraries, Python and
+/// project rather than the bundle's. The app's own process keeps its environment, which GTK and WebKit need.
+///
+/// Only an AppImage changes them. Its start-up (linuxdeploy's `AppRun`, its GTK hook and AppImageKit's
+/// `AppRun.wrapped`, as measured from v0.25.0's) points path lists and Python and GTK settings into the bundle,
+/// sets a few variables of its own, and starts the app in `$APPDIR/usr`. The user's directory survives in `OWD`,
+/// which the runtime sets when it mounts the AppImage but not when it extracts it (`APPIMAGE_EXTRACT_AND_RUN`, as
+/// on a machine without FUSE), and in `PWD`, which `AppRun`, a bash script, checks against its directory at start,
+/// before `AppRun.wrapped` changes it. Elsewhere, macOS and the .deb included, the environment and directory are
+/// the app's own.
+#[derive(Debug, PartialEq)]
+struct UserShell {
+    /// The whole environment, in the order it came.
+    vars: Vec<(OsString, OsString)>,
+    /// The working directory to start in; None to keep the app's own.
+    dir: Option<PathBuf>,
+}
+
+/// Path lists the AppImage's start-up prefixes with entries in the bundle.
+const APPIMAGE_PATH_LISTS: &[&str] = &[
+    "LD_LIBRARY_PATH",
+    "PATH",
+    "PYTHONPATH",
+    "PERLLIB",
+    "QT_PLUGIN_PATH",
+    "XDG_DATA_DIRS",
+    "GSETTINGS_SCHEMA_DIR",
+    "GI_TYPELIB_PATH",
+    "GIO_MODULE_DIR",
+    "GTK_PATH",
+];
+
+/// Variables the AppImage's start-up sets to a path in the bundle, overwriting the user's; a value outside the
+/// bundle is the user's own.
+const APPIMAGE_PATHS: &[&str] =
+    &["PYTHONHOME", "GTK_DATA_PREFIX", "GTK_EXE_PREFIX", "GTK_IM_MODULE_FILE", "GDK_PIXBUF_MODULE_FILE"];
+
+/// Variables the AppImage's start-up sets whatever the user had, to values that do not name the bundle, so the
+/// user's own value, if any, is already lost: unset whatever they hold. GTK_THEME is the GTK hook's
+/// `Adwaita:light` or `Adwaita:dark`, set over any GTK_THEME of the user's (who sets APPIMAGE_GTK_THEME to choose
+/// it); PYTHONDONTWRITEBYTECODE is AppImageKit's `1`.
+const APPIMAGE_ONLY: &[&str] = &["GTK_THEME", "PYTHONDONTWRITEBYTECODE", "APPDIR", "APPIMAGE", "ARGV0", "OWD"];
+
+impl UserShell {
+    /// The user's shell, recovered from the app's environment vars. Under an AppImage (`APPIMAGE` and `APPDIR`
+    /// both set): each path list in APPIMAGE_PATH_LISTS loses its entries that are `$APPDIR` or under it and its
+    /// empty ones, keeping the rest in order, and is unset when none are left; each of APPIMAGE_PATHS is unset when
+    /// it is `$APPDIR` or under it; each of APPIMAGE_ONLY is unset; and the directory is `OWD`, else `PWD`, else
+    /// the app's own. Otherwise vars and the app's directory as they are.
+    fn from_vars(vars: impl IntoIterator<Item = (OsString, OsString)>) -> UserShell {
+        let vars: Vec<(OsString, OsString)> = vars.into_iter().collect();
+        let get = |name: &str| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+        let (Some(appdir), Some(_)) = (get("APPDIR"), get("APPIMAGE")) else {
+            return UserShell { vars, dir: None };
+        };
+        let appdir = PathBuf::from(appdir);
+        let in_bundle = |path: &Path| path.starts_with(&appdir);
+        let dir = get("OWD").or_else(|| get("PWD")).map(PathBuf::from);
+        let vars = vars
+            .into_iter()
+            .filter_map(|(name, value)| {
+                let Some(name_str) = name.to_str() else { return Some((name, value)) };
+                if APPIMAGE_ONLY.contains(&name_str) {
+                    return None;
+                }
+                if APPIMAGE_PATHS.contains(&name_str) {
+                    return (!in_bundle(Path::new(&value))).then_some((name, value));
+                }
+                if APPIMAGE_PATH_LISTS.contains(&name_str) {
+                    let kept: Vec<PathBuf> = std::env::split_paths(&value)
+                        .filter(|entry| !entry.as_os_str().is_empty() && !in_bundle(entry))
+                        .collect();
+                    // Rejoining entries split at the separator cannot meet one that holds it.
+                    let joined = std::env::join_paths(kept).expect("entries without a separator");
+                    return (!joined.is_empty()).then_some((name, joined));
+                }
+                Some((name, value))
+            })
+            .collect();
+        UserShell { vars, dir }
+    }
+
+    /// Make command start with this environment, and in this directory when there is one.
+    fn apply(&self, command: &mut Command) {
+        command.env_clear().envs(self.vars.iter().map(|(k, v)| (k, v)));
+        if let Some(dir) = &self.dir {
+            command.current_dir(dir);
+        }
+    }
+}
+
+/// The orchestrator's CLI, ready to replace the app's process.
+pub struct Cli {
+    orchestrator: Orchestrator,
+    command: Command,
+}
+
+/// What the app's arguments, without its own name, ask for: with any, the CLI of the orchestrator
+/// `Orchestrator::locate` picks, given exactly those arguments, in the user's shell's environment and directory
+/// (`UserShell`); with none, None, for the window.
+pub fn cli(args: impl IntoIterator<Item = OsString>) -> Option<Cli> {
+    let mut args = args.into_iter().peekable();
+    args.peek()?;
+    let orchestrator = Orchestrator::locate();
+    let mut command = orchestrator.command();
+    command.args(args);
+    Some(Cli { orchestrator, command })
+}
+
+impl Cli {
+    /// Replace this process with the CLI, so that the terminal, the exit status and the signals are the CLI's own.
+    /// Returns never: when the exec fails, prints why on standard error and exits 1. Call it before anything else
+    /// starts a thread or opens a window, which an exec would discard.
+    #[cfg(unix)]
+    pub fn exec(mut self) -> ! {
+        use std::os::unix::process::CommandExt;
+        let e = self.command.exec();
+        eprintln!("orchestrator-ui: cannot run {}: {e}", self.orchestrator);
+        std::process::exit(1)
     }
 }
 
@@ -201,6 +328,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
 
     /// Whether a process with this pid still exists, zombies included, by its /proc entry.
     fn exists(pid: u32) -> bool {
@@ -278,5 +406,120 @@ mod tests {
         let reason = sidecar.connection.err().expect("an error");
         assert!(reason.contains("/nonexistent/orchestrator.py"), "{reason}");
         assert!(sidecar.child.lock().unwrap().is_none());
+    }
+
+    /// An environment of name=value pairs, in order.
+    fn vars(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+        pairs.iter().map(|(k, v)| (OsString::from(k), OsString::from(v))).collect()
+    }
+
+    /// An AppImage's start-up: APPDIR /tmp/.mount_x, the AppImage, and the user's directory /home/u/proj, before
+    /// rest.
+    fn appimage(rest: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+        let mut env =
+            vars(&[("APPDIR", "/tmp/.mount_x"), ("APPIMAGE", "/home/u/app.AppImage"), ("OWD", "/home/u/proj")]);
+        env.extend(vars(rest));
+        env
+    }
+
+    #[test]
+    fn the_arguments_ask_for_the_cli_and_none_for_the_window() {
+        assert!(cli(Vec::<OsString>::new()).is_none());
+        let Cli { orchestrator, command } = cli(["run".into(), "add a limiter".into()]).expect("the CLI");
+        assert_eq!(orchestrator, Orchestrator::locate());
+        let args: Vec<&OsStr> = command.get_args().collect();
+        let Orchestrator::Script(script) = &orchestrator else { panic!("{orchestrator:?}") };
+        assert_eq!(command.get_program(), "python3");
+        assert_eq!(args, [script.as_os_str(), OsStr::new("run"), OsStr::new("add a limiter")]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_cli_gets_the_arguments_as_they_came() {
+        use std::os::unix::ffi::OsStringExt;
+        let odd = OsString::from_vec(b"not \xff utf-8".to_vec());
+        let Cli { command, .. } = cli([odd.clone(), "--help".into()]).expect("the CLI");
+        let args: Vec<&OsStr> = command.get_args().skip(1).collect();
+        assert_eq!(args, [odd.as_os_str(), OsStr::new("--help")]);
+    }
+
+    #[test]
+    fn outside_an_appimage_nothing_changes() {
+        // APPDIR alone, as a user might export it, is not an AppImage.
+        let env =
+            vars(&[("APPDIR", "/opt/x"), ("LD_LIBRARY_PATH", "/opt/x/lib"), ("PYTHONHOME", "/opt/x"), ("OWD", "/")]);
+        assert_eq!(UserShell::from_vars(env.clone()), UserShell { vars: env, dir: None });
+    }
+
+    #[test]
+    fn under_an_appimage_the_directory_is_the_users() {
+        let shell = UserShell::from_vars(appimage(&[("PWD", "/home/u")]));
+        assert_eq!(shell, UserShell { vars: vars(&[("PWD", "/home/u")]), dir: Some("/home/u/proj".into()) });
+    }
+
+    #[test]
+    fn under_an_extracted_appimage_the_directory_is_pwd() {
+        let env =
+            vars(&[("APPDIR", "/tmp/appimage_extracted_x"), ("APPIMAGE", "/a.AppImage"), ("PWD", "/home/u/proj")]);
+        let shell = UserShell::from_vars(env);
+        assert_eq!(shell, UserShell { vars: vars(&[("PWD", "/home/u/proj")]), dir: Some("/home/u/proj".into()) });
+    }
+
+    #[test]
+    fn under_an_appimage_without_owd_or_pwd_the_directory_stays() {
+        let env = vars(&[("APPDIR", "/tmp/.mount_x"), ("APPIMAGE", "/a.AppImage"), ("HOME", "/home/u")]);
+        assert_eq!(UserShell::from_vars(env), UserShell { vars: vars(&[("HOME", "/home/u")]), dir: None });
+    }
+
+    #[test]
+    fn each_path_list_loses_the_bundles_entries_and_keeps_the_users_in_order() {
+        for name in APPIMAGE_PATH_LISTS {
+            let mixed = "/tmp/.mount_x/usr/lib:/usr/local/lib:/tmp/.mount_x:/usr/lib::/tmp/.mount_xy/lib";
+            let shell = UserShell::from_vars(appimage(&[(name, mixed), ("HOME", "/home/u")]));
+            let expected = vars(&[(name, "/usr/local/lib:/usr/lib:/tmp/.mount_xy/lib"), ("HOME", "/home/u")]);
+            assert_eq!(shell.vars, expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_path_list_of_only_the_bundles_entries_is_unset() {
+        for name in APPIMAGE_PATH_LISTS {
+            // AppRun's prefixing of an unset variable leaves an empty entry at the end.
+            let shell = UserShell::from_vars(appimage(&[(name, "/tmp/.mount_x/usr/lib:/tmp/.mount_x/usr/lib64:")]));
+            assert_eq!(shell.vars, vec![], "{name}");
+        }
+    }
+
+    #[test]
+    fn a_setting_in_the_bundle_is_unset_and_the_users_own_kept() {
+        for name in APPIMAGE_PATHS {
+            // The GTK hook writes `$APPDIR//usr/...`.
+            for bundled in ["/tmp/.mount_x/usr", "/tmp/.mount_x//usr/lib", "/tmp/.mount_x"] {
+                let shell = UserShell::from_vars(appimage(&[(name, bundled)]));
+                assert_eq!(shell.vars, vec![], "{name}={bundled}");
+            }
+            let shell = UserShell::from_vars(appimage(&[(name, "/opt/python")]));
+            assert_eq!(shell.vars, vars(&[(name, "/opt/python")]), "{name}");
+        }
+    }
+
+    #[test]
+    fn what_only_the_appimage_sets_is_unset() {
+        for name in APPIMAGE_ONLY {
+            let shell = UserShell::from_vars(appimage(&[(name, "Adwaita:dark"), ("HOME", "/home/u")]));
+            assert_eq!(shell.vars, vars(&[("HOME", "/home/u")]), "{name}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_command_starts_in_the_users_shell() {
+        let mut command = Command::new("sh");
+        // HOME is the test's own, which the shell's environment leaves out.
+        command.args(["-c", "pwd; echo \"$KEPT${HOME-unset}\""]);
+        let shell = UserShell { vars: vars(&[("KEPT", "kept ")]), dir: Some("/".into()) };
+        shell.apply(&mut command);
+        let out = command.output().expect("sh runs");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "/\nkept unset\n");
     }
 }
