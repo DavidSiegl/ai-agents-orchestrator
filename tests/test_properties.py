@@ -22,6 +22,7 @@ from orchestrator import (
     GATE_OK,
     QUALITY_BUILD_FAILED,
     QUALITY_ERROR,
+    QUALITY_LEAK,
     QUALITY_OK,
     Host,
     OrchestratorError,
@@ -312,7 +313,7 @@ class TestEnvFile(unittest.TestCase):
 # The first line of a handoff file: parse_gate and parse_verdict
 # ---------------------------------------------------------------------------
 
-GATES = (QUALITY_OK, QUALITY_ERROR, QUALITY_BUILD_FAILED)
+GATES = (QUALITY_OK, QUALITY_ERROR, QUALITY_BUILD_FAILED, QUALITY_LEAK)
 VERDICTS = (APPROVE, CHANGES_REQUESTED)
 blank_lines = st.lists(padding).map(lambda ls: "".join(line + "\n" for line in ls))
 emphasis = st.sampled_from([("", ""), ("**", "**"), ("_", "_"), ("`", "`"), ("# ", ""), ("## ", ""), ("> ", "")])

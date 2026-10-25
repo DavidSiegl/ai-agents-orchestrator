@@ -75,6 +75,10 @@ HOST_RUN_STATES = Host.run_states
 HOST_EPOCH = 1_791_000_000
 
 
+# FakeHost.leaks' stand-in for the commit a scan is of.
+SCANNED = "scanned"
+
+
 class FakeHost(Host):
     """An in-memory filesystem and git checkout standing in for the machine the agents run on.
 
@@ -120,8 +124,8 @@ class FakeHost(Host):
 
     For the secret scan before each push:
 
-    - `leaks`: what scan_unpublished finds, as Leaks; every scan finds them all. `scans` records (commit, base,
-      report) of each scan.
+    - `leaks`: what scan_unpublished finds, as Leaks; every scan finds them all, a Leak whose commit is SCANNED in
+      the commit scanned. `scans` records (commit, base, report) of each scan.
     - `gitleaks_missing`: check_gitleaks fails as on a machine without gitleaks.
     """
 
@@ -174,7 +178,7 @@ class FakeHost(Host):
         if self.leaks:
             # As a gitleaks run without --redact would write it: the report is the one place the secret may be.
             self.files[report_path] = json.dumps([{"Secret": FAKE_TOKEN, "File": leak.file} for leak in self.leaks])
-        return list(self.leaks)
+        return [replace(leak, commit=commit) if leak.commit == SCANNED else leak for leak in self.leaks]
 
     def check_gitleaks(self):
         if self.gitleaks_missing:
@@ -3721,6 +3725,8 @@ class TestScanUnpublished(unittest.TestCase):
 
 
 LEAK = orchestrator.Leak("github-pat", "limiter.py", 3, "c0ffee" * 6 + "c0ff", "c0ffee:limiter.py:github-pat:3")
+# LEAK in the snapshot a quality round scans.
+SNAPSHOT_LEAK = replace(LEAK, commit=SCANNED)
 
 
 class TestSecretScanWorkflow(unittest.TestCase):
@@ -3729,15 +3735,113 @@ class TestSecretScanWorkflow(unittest.TestCase):
     def script(self):
         return {"spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}
 
-    def test_a_secret_in_a_snapshot_ends_the_run_before_jenkins(self):
+    def test_a_secret_in_a_snapshot_goes_back_to_the_builder(self):
         host = FakeHost()
-        host.leaks = [LEAK]
-        wf, herdr, host, fake, _ = gated(self.script(), host=host)
-        with self.assertRaisesRegex(orchestrator.LeaksFound, r"`limiter.py:3` github-pat"):
+        host.leaks = [SNAPSHOT_LEAK]
+        builds = []
+
+        def fix(prompt, state, host):
+            # The Builder takes the secret out of the working tree.
+            host.leaks = []
+            return fix_turn(1, 1)(prompt, state, host)
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "build": [build_turn(1), recording(fix, builds)],
+            "review": [review_turn(1, APPROVE)]}, host=host)
+        with patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(wf.run(), APPROVE)
+        state = wf.state
+        quality = host.files[state.quality_path(1, 1)]
+        self.assertEqual(orchestrator.parse_gate(quality), orchestrator.QUALITY_LEAK)
+        self.assertIn("so it was not pushed and Jenkins did not judge the change", quality)
+        self.assertIn(f"## Secrets found\n\n1. {replace(LEAK, commit='snap1')}\n", quality)
+        self.assertEqual(state.quality_rounds[0]["gate"], orchestrator.QUALITY_LEAK)
+        self.assertEqual(builds, [orchestrator.QUALITY_FIX_PROMPT.format(
+            quality_path=state.quality_path(1, 1), report_path=state.quality_build_path(1, 1)) + NOTE])
+        # Only the clean second snapshot was pushed and built.
+        self.assertEqual([c for c in host.git_calls if c[:3] == ("push", "--quiet", "--force")],
+                         [("push", "--quiet", "--force", "origin", "snap2:refs/heads/orchestrator-ci/a1b2c3-1-q2")])
+        self.assertEqual(fake.triggered(), ["orchestrator-ci/a1b2c3-1-q2"])
+        self.assertTrue(host.files[state.quality_path(1, 2)].startswith("GATE: OK"))
+        self.assertEqual([scan[0] for scan in host.scans[:2]], ["snap1", "snap2"])
+        # The report gitleaks wrote is the only place the secret is.
+        self.assertNotIn(FAKE_TOKEN, err.getvalue())
+        self.assertEqual([path for path, text in host.files.items() if FAKE_TOKEN in text],
+                         [state.leaks_path("snapshot")])
+        self.assertNotIn(FAKE_TOKEN, host.prs[0]["body"])
+
+    def test_a_resume_finds_the_leak_quality_file(self):
+        host = FakeHost()
+        host.leaks = [SNAPSHOT_LEAK]
+        def interrupted(prompt, state, host):
+            raise KeyboardInterrupt
+        wf, herdr, host, fake, _ = gated({"spec": [spec_turn], "build": [build_turn(1), interrupted]}, host=host)
+        with self.assertRaises(KeyboardInterrupt):
             wf.run()
-        self.assertNotIn("trigger", fake.names)
-        self.assertEqual(host.remote, {})
-        self.assertEqual(host.scans, [("snap1", "abc123", f"{wf.state.dir}/leaks-snapshot.json")])
+        self.assertEqual((wf.state.phase, wf.state.quality_round, wf.state.ci), ("build", 1, {}))
+        # As if the orchestrator had stopped after writing the quality file, before it moved on.
+        wf.state.phase = "quality"
+        scans, snapshots = len(host.scans), len(host.snapshots)
+        before_fix = []
+
+        def fix(prompt, state, host):
+            before_fix.append((len(host.scans), len(host.snapshots)))
+            host.leaks = []
+            return fix_turn(1, 1)(prompt, state, host)
+        wf, herdr, host, fake, _ = gated({"build": [fix], "review": [review_turn(1, APPROVE)]},
+                                         host=host, state=wf.state)
+        self.assertEqual(wf.run(), APPROVE)
+        # The LEAK file was taken as written: no new snapshot or scan before the fix turn.
+        self.assertEqual(before_fix, [(scans, snapshots)])
+        self.assertEqual(orchestrator.parse_gate(host.files[wf.state.quality_path(1, 1)]), orchestrator.QUALITY_LEAK)
+        self.assertEqual(fake.triggered(), ["orchestrator-ci/a1b2c3-1-q2"])
+
+    def test_a_secret_the_builder_leaves_in_stops_the_loop_early(self):
+        host = FakeHost()
+        host.leaks = [SNAPSHOT_LEAK]
+        reviews = []
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "build": [build_turn(1), fix_turn(1, 1)],
+            "review": [recording(review_turn(1, APPROVE), reviews)]}, host=host)
+        # The secret is still in the branch at publish, which ends the run.
+        with self.assertRaisesRegex(OrchestratorError, "git reset --soft"), patch("sys.stderr"):
+            wf.run()
+        s = wf.state
+        self.assertEqual((s.quality_round, herdr.calls.count(("prompt", "build-a1b2c3"))), (2, 2))
+        self.assertIn(orchestrator.QUALITY_STUCK_NOTE.format(quality_path=s.quality_path(1, 2)), reviews[0])
+        self.assertEqual([r["fingerprints_by_check"]["gitleaks"] for r in s.quality_rounds],
+                         [[orchestrator.finding_fingerprint("limiter.py", "gitleaks github-pat", "") + "-1"]] * 2)
+        self.assertEqual(fake.triggered(), [])
+
+    def test_removing_one_of_two_secrets_of_a_kind_keeps_the_loop_going(self):
+        host = FakeHost()
+        host.leaks = [SNAPSHOT_LEAK, replace(SNAPSHOT_LEAK, line=9)]
+
+        def fix(remaining):
+            def turn(prompt, state, host):
+                host.leaks = host.leaks[:remaining]
+                return fix_turn(1, state.quality_round)(prompt, state, host)
+            return turn
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "build": [build_turn(1), fix(1), fix(0)],
+            "review": [review_turn(1, APPROVE)]}, host=host)
+        self.assertEqual(wf.run(), APPROVE)
+        s = wf.state
+        self.assertEqual([r["gate"] for r in s.quality_rounds], [orchestrator.QUALITY_LEAK, orchestrator.QUALITY_LEAK, "OK"])
+        self.assertEqual(herdr.calls.count(("prompt", "build-a1b2c3")), 3)
+
+    def test_a_secret_in_the_base_fails_the_run(self):
+        host = FakeHost()
+        # In base or below it, not in the snapshot: the human's commit.
+        host.leaks = [SNAPSHOT_LEAK, LEAK]
+        wf, herdr, host, fake, _ = gated(self.script(), host=host)
+        with self.assertRaisesRegex(OrchestratorError, "the human's commits, not the Builder's to fix") as caught, \
+                patch("sys.stderr"):
+            wf.run()
+        self.assertIn("`limiter.py:3` github-pat in c0ffeec0ffee", str(caught.exception))
+        self.assertIn(f"in the run's base {wf.state.base[:12]}", str(caught.exception))
+        self.assertIsNone(host.read(wf.state.quality_path(1, 1)))
+        self.assertEqual((fake.triggered(), wf.state.ci), ([], {}))
+        self.assertFalse([c for c in host.git_calls if c[0] == "push"])
 
     def test_a_secret_on_the_branch_stops_publish_until_it_is_rewritten(self):
         host = FakeHost()
@@ -4161,6 +4265,20 @@ class TestStuckQualityLoop(unittest.TestCase):
 
 
 class TestGateFailures(unittest.TestCase):
+    def test_reads_the_secrets_of_a_leak_file_whichever_snapshot_and_line(self):
+        def report(*leaks):
+            return orchestrator.leak_report(list(leaks), "found.")
+        first = orchestrator.gate_failures(report(replace(LEAK, commit="snap1")))
+        moved = replace(LEAK, line=9, commit="snap2", fingerprint="snap2:limiter.py:github-pat:9")
+        pat = orchestrator.finding_fingerprint("limiter.py", "gitleaks github-pat", "")
+        self.assertEqual(first.fingerprints, {"gitleaks": [f"{pat}-1"]})
+        self.assertTrue(orchestrator.gate_failures(report(moved)).repeats(first))
+        self.assertFalse(orchestrator.gate_failures(report(replace(moved, rule="aws-access-token"))).repeats(first))
+        # Of a file's two keys of a kind, one removed is progress, not the same again.
+        two = orchestrator.gate_failures(report(replace(LEAK, commit="snap1"), moved))
+        self.assertFalse(orchestrator.gate_failures(report(moved)).repeats(two))
+        self.assertTrue(orchestrator.gate_failures(report(moved, replace(LEAK, commit="snap3"))).repeats(two))
+
     def test_a_coverage_condition_repeated_is_stuck_until_its_words_change(self):
         def report(percent):
             return quality_report("ERROR", "judged.", conditions=[f"Coverage of new code is {percent}%."])
@@ -4633,6 +4751,8 @@ class TestQualityGateOffOnResume(unittest.TestCase):
         self.assertFalse(host.snapshots)
         body = host.prs[0]["body"]
         self.assertIn(f"{OFF_AFTER_ANALYSIS}\n\nOpened by", body)
+        self.assertIn("<summary>Quality gate (round 1, before the last change)</summary>\n\nGATE: ERROR\n\n1. x\n",
+                      body)
         commit = next(c for c in host.git_calls if c[0] == "commit")
         self.assertEqual(commit[-2:], ("--trailer", "Orchestrator-Gate: ERROR after 1 quality round, then turned off"))
 
@@ -6286,15 +6406,34 @@ class TestGate(unittest.TestCase):
         self.assertIn("1. `f.py:4` error ruff F401: `os` imported but unused\n", out)
         self.assertIn("2. `f.py:4` warning flaky seeds 3 5: test_b\n", out)
 
-    def test_a_removed_test_fails_the_gate(self):
+    def test_a_removed_test_is_weighed_and_a_skip_fails_the_gate(self):
         self.put("tests/test_f.py", "def test_one():\n    assert 1\n\n\ndef test_two():\n    assert 2\n")
         self.git("add", "-A")
         self.git("commit", "--quiet", "-m", "tests")
         self.put("tests/test_f.py", "def test_one():\n    assert 1\n")
         status, out, _ = self.gate()
+        self.assertEqual(status, 0)
+        self.assertIn("## Findings to weigh\n\n", out)
+        self.assertIn("1. `tests/test_f.py:5` warning test-integrity removed-test: ", out)
+        self.put("tests/test_f.py", "import pytest\n\n\n@pytest.mark.skip\ndef test_one():\n    assert 1\n")
+        status, out, _ = self.gate()
         self.assertEqual(status, 1)
         self.assertIn("- 1 findings of the `test-integrity` check; each is listed below.\n", out)
-        self.assertIn("1. `tests/test_f.py:5` error test-integrity removed-test: ", out)
+        self.assertIn("1. `tests/test_f.py:4` error test-integrity skip: ", out)
+        self.assertIn("2. `tests/test_f.py:5` warning test-integrity removed-test: ", out)
+
+    def test_a_failing_check_weighs_its_weighed_rules(self):
+        weighed = frozenset({"removed-test"})
+        self.checks(orchestrator.GateCheck("integrity", fails=True, weighed=weighed, find=lambda _: [
+            {"path": "f.py", "line": 2, "severity": "error", "rule": "removed-test", "message": "test_a"},
+            {"path": "f.py", "line": 3, "severity": "warning", "rule": "skip", "message": "test_b"}]))
+        self.add_lines(1)
+        status, out, _ = self.gate()
+        self.assertEqual(status, 1)
+        # The gate, not find, says what each finding does: a failing rule fails whatever severity find gave.
+        self.assertIn("- 1 findings of the `integrity` check; each is listed below.\n", out)
+        self.assertIn("1. `f.py:3` error integrity skip: test_b\n", out)
+        self.assertIn("2. `f.py:2` warning integrity removed-test: test_a\n", out)
 
     def test_a_check_with_nothing_to_say_adds_nothing(self):
         self.checks(orchestrator.GateCheck("quiet", fails=True, find=lambda change: []),
@@ -6348,6 +6487,13 @@ class TestGate(unittest.TestCase):
         status, _, err = self.gate("--config", "missing.toml")
         self.assertEqual(status, orchestrator.EXIT_GATE_UNJUDGED)
         self.assertIn("is not a file", err)
+
+
+class TestTestIntegrityCheck(unittest.TestCase):
+    def test_it_fails_the_gate_but_weighs_what_a_spec_can_ask_for(self):
+        [check] = [c for c in orchestrator.gate_checks() if c.name == "test-integrity"]
+        self.assertEqual((check.fails, check.find), (True, orchestrator.weakened_tests))
+        self.assertEqual(check.weighed, {"removed-test", "fewer-assertions", "expected-value-changed"})
 
 
 class TestWeakenedTests(unittest.TestCase):
