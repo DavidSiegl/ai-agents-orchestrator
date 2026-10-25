@@ -8486,6 +8486,36 @@ class TestCognitiveComplexity(unittest.TestCase):
                 return e(items)
         """), {"a": 0, "b": 0, "c": 0, "d": 0, "e": 0, "f": 0})
 
+    def test_every_way_of_binding_a_name_shadows_the_module_s_function_but_global(self):
+        self.assertEqual(self.module_scores("""
+            def a(x):
+                import b
+                from c import d as e
+                try:
+                    pass
+                except ValueError as f:
+                    pass
+                match x:
+                    case [*g]:
+                        pass
+                    case {**h}:
+                        pass
+                    case i:
+                        pass
+                return b() + e() + f() + g() + h() + i()
+            def b(): return a(0)
+            def e(): return a(0)
+            def f(): return a(0)
+            def g(): return a(0)
+            def h(): return a(0)
+            def i(): return a(0)
+            def j():
+                global k
+                k = None
+                return k()
+            def k(): return j()
+        """), {"a": 2, "b": 0, "e": 0, "f": 0, "g": 0, "h": 0, "i": 0, "j": 1, "k": 1})  # a: except, match
+
     def test_self_in_a_class_nested_in_a_method_is_that_class_s(self):
         self.assertEqual(self.module_scores("""
             class C:
