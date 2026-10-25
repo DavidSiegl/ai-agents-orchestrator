@@ -685,8 +685,38 @@ ignored, and its build, which archived no `quality.md`, counts as one that ended
 `run` takes `--quality-gate JOB` and `--max-quality-rounds N`; `resume` takes `--max-quality-rounds N`.
 `--max-quality-rounds` below 1 is refused, and so is it on `run` without `--quality-gate` or on `resume` of a run
 without the gate. `resume` refuses a limit below `quality_round` in phase `quality`, or up to it in `build` with
-q ≥ 1, where the Builder is answering quality round q. Turning the gate on or off in the middle of a run is
-not supported; see the [roadmap](roadmap.md).
+q ≥ 1, where the Builder is answering quality round q. `resume` also takes `--quality-gate JOB` or
+`--no-quality-gate`, below; `--max-quality-rounds` goes with the first and is a usage error with the second.
+
+### Turning the gate on or off on resume
+
+`turn_quality_gate_on` or `turn_quality_gate_off` applies the flag to the saved state before the run goes on; a refusal exits 1 and leaves
+`state.json` as it was.
+
+`resume --quality-gate JOB` saves `JOB` as `quality_job`, after the preflight: in round 0, `_check_gate`, as for
+`run --quality-gate`; later, an `origin`, gitleaks, the credentials and `CI.preflight`, before any turn. Where the gate
+starts depends on where the run is:
+
+- in round 0, or in `build`: that Builder turn is followed by quality round 1;
+- in `review`, with `review-<n>.md` neither written, prompted for, asked again for its verdict nor waiting on a
+  BLOCKED answer: phase `quality`, q = 1, so the Builder's report is judged before the Reviewer sees it, and a
+  failure goes back to the Builder as usual;
+- otherwise, a Reviewer already prompted included: at the Builder's next turn.
+
+It is refused in `publish` or `done`, even with the run's own job, after `--no-quality-gate` (the gate cannot come
+back), for a run that has another job (the same job is a no-op), in a workflow without a quality-gated step, and for
+a `--no-pr` run in the checkout itself past round 0: its tree was never required to be clean, and a snapshot takes
+the whole tree.
+
+`resume --no-quality-gate` deletes the run's `orchestrator-ci/<key>-*` branches on `origin`, a failure only
+logged, without cancelling a Jenkins build in progress, and saves `quality_job` null, `quality_gate_disabled` true
+and `ci` empty. A run in `quality` goes on at `review`, dropping an analysis that has not finished; a Builder in
+its fix turn writes `build-<n>-q<q>.md` and goes straight to `review`, with `quality_round` past the quality round
+no build ever judges. The Reviewer reads the Builder's latest report of the round. Its prompt ends with
+`QUALITY_PASSED_NOTE`, `QUALITY_UNRESOLVED_NOTE` or `QUALITY_STUCK_NOTE` for the round's last quality file that is
+written; with `QUALITY_OFF_NOTE`, naming the round's quality files, when the Builder changed the code after it; and
+with nothing when the round has none. The pull request carries that file, and a workflow without a verdict step
+ends `FINISHED`. `show` prints the job on a `quality` line, or `off (turned off by resume)`.
 
 ### Edge cases
 

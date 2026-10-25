@@ -1158,10 +1158,9 @@ class TestProvenance(unittest.TestCase):
 
     def test_the_gate_trailer_says_how_the_last_quality_round_ended(self):
         state = saved_run("publish", 2, agents=("build",), quality_job=JOB, quality_round=1)
-        self.assertEqual(orchestrator.provenance(state, "GATE: OK\n")[-1],
+        self.assertEqual(orchestrator.provenance(state, (1, "GATE: OK\n"))[-1],
                          ("Orchestrator-Gate", "OK after 1 quality round"))
-        state.quality_round = 3
-        self.assertEqual(orchestrator.provenance(state, "garbled")[-1],
+        self.assertEqual(orchestrator.provenance(state, (3, "garbled"))[-1],
                          ("Orchestrator-Gate", "? after 3 quality rounds"))
         self.assertEqual([k for k, _ in orchestrator.provenance(state, None)],
                          ["Orchestrator-Run", "Orchestrator-Workflow", "Orchestrator-Role"])
@@ -1175,7 +1174,7 @@ class TestProvenance(unittest.TestCase):
             state = saved_run("publish", 1, agents=("spec", "build", "review"), quality_job=JOB, quality_round=2,
                               verdict=APPROVE, models={"review": "gpt-5"})
             state.agents["review"]["kind"] = "codex"
-            trailers = [arg for key, said in orchestrator.provenance(state, "GATE: OK\n")
+            trailers = [arg for key, said in orchestrator.provenance(state, (2, "GATE: OK\n"))
                         for arg in ("--trailer", f"{key}: {said}")]
             host.git(d, "commit", "--quiet", "--allow-empty", "-m", "Add a limiter", "-m",
                      orchestrator.commit_note(state), *trailers)
@@ -4339,6 +4338,389 @@ class TestQualityResume(unittest.TestCase):
             wf.run()
         self.assertNotIn(("prompt", "build-a1b2c3"), herdr.calls)
 
+
+SWITCH_BRANCH = "orchestrator/add-a-token-bucket-rate-limiter-a1b2c3"
+
+
+def pr_run(phase, rnd, **kw):
+    """saved_run for a run that ends in a pull request, on its own branch."""
+    kw.setdefault("agents", ("spec", "build", "review"))
+    return saved_run(phase, rnd, pull_request=True, base_branch="main", branch=SWITCH_BRANCH, **kw)
+
+
+def pr_host():
+    """A FakeHost on pr_run's branch, which already holds a commit of the Builder's."""
+    return FakeHost(head="def456", branch=SWITCH_BRANCH)
+
+
+def switch(state, ci, host=None, pipeline=None):
+    """turn_quality_gate_on with ci, or turn_quality_gate_off with None, on the default workflow unless pipeline is
+    given; returns the host, pr_host() by default."""
+    host = host or pr_host()
+    pipeline = pipeline or orchestrator.DEFAULT_WORKFLOW
+    if ci is None:
+        orchestrator.turn_quality_gate_off(state, pipeline, host)
+    else:
+        orchestrator.turn_quality_gate_on(state, pipeline, host, ci)
+    return host
+
+
+class TestQualityGateOnResume(unittest.TestCase):
+    def test_on_in_the_builders_step_gates_its_turn(self):
+        fake = FakeCI()
+        fake.outcomes = [outcome(**RED)]
+        reviews = []
+        state = pr_run("build", 1)
+        host = switch(state, ci_for(fake))
+        self.assertEqual(fake.names, ["parameters"])
+        self.assertEqual((state.phase, state.quality_job, state.quality_round), ("build", JOB, 0))
+
+        wf, herdr, host, _ = resume(state, {"build": [build_turn(1), fix_turn(1, 1)],
+                                            "review": [recording(review_turn(1, APPROVE), reviews)]},
+                                    ci=ci_for(fake), host=host)
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(fake.triggered(), [REF_1_1, "orchestrator-ci/a1b2c3-1-q2"])
+        self.assertIn(f"The Builder's report is in {state.quality_build_path(1, 1)}", reviews[0])
+        self.assertIn(orchestrator.QUALITY_PASSED_NOTE.format(quality_path=state.quality_path(1, 2)), reviews[0])
+        self.assertEqual(json.loads(host.files[f"{state.dir}/state.json"])["quality_job"], JOB)
+
+    def test_on_in_the_reviewers_step_judges_the_builders_report_before_the_review(self):
+        fake = FakeCI()
+        state = pr_run("review", 1)
+        host = switch(state, ci_for(fake))
+        self.assertEqual((state.phase, state.quality_round), (orchestrator.QUALITY, 1))
+
+        reviews = []
+        wf, herdr, host, _ = resume(state, {"review": [recording(review_turn(1, APPROVE), reviews)]},
+                                    ci=ci_for(fake), host=host, files={lambda s: s.build_path(1): "report 1"})
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(fake.triggered(), [REF_1_1])
+        self.assertEqual(host.snapshots[0][0], "abc123")
+        self.assertEqual(len(reviews), 1)
+        self.assertIn(f"The Builder's report is in {state.build_path(1)}", reviews[0])
+        self.assertIn(orchestrator.QUALITY_PASSED_NOTE.format(quality_path=state.quality_path(1, 1)), reviews[0])
+
+    def test_on_with_the_reviewer_prompted_gates_the_next_builder_turn(self):
+        fake = FakeCI()
+        state = pr_run("review", 1, prompted="review-1.md")
+        host = switch(state, ci_for(fake))
+        self.assertEqual((state.phase, state.quality_round), ("review", 0))
+
+        wf, herdr, host, _ = resume(state, {"build": [build_turn(2)], "review": [review_turn(2, APPROVE)]},
+                                    ci=ci_for(fake), host=host, alive=["review"],
+                                    files={lambda s: s.build_path(1): "report 1",
+                                           lambda s: s.review_path(1): f"VERDICT: {CHANGES_REQUESTED}\n1. x"})
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(fake.triggered(), ["orchestrator-ci/a1b2c3-2-q1"])
+        self.assertNotIn(state.quality_path(1, 1), host.files)
+
+    def test_on_with_the_reviewer_retried_or_blocked_gates_the_next_builder_turn(self):
+        # Both have seen the change: one is asked again for the verdict it wrote, the other waits on its answer.
+        for name, kw in (("retried", {"retrying": "review-1.md"}),
+                         ("blocked", {"blocked": {"file": "review-1.md", "question": "which?", "k": 1}})):
+            with self.subTest(name):
+                state = pr_run("review", 1, **kw)
+                switch(state, ci_for(FakeCI()))
+                self.assertEqual((state.phase, state.quality_round, state.quality_job), ("review", 0, JOB))
+
+    def test_on_in_round_0_is_run_quality_gate(self):
+        fake = FakeCI()
+        state = saved_run("spec", 0, agents=(), pull_request=True)
+        switch(state, ci_for(fake), host=FakeHost())
+        self.assertEqual((fake.requests, state.quality_job), ([], JOB))
+
+        wf, herdr, host, fake, _ = gated({"spec": [spec_turn], "build": [build_turn(1)],
+                                          "review": [review_turn(1, APPROVE)]}, fake=fake, state=state)
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(collapsed(fake.names), ["parameters", "trigger", "queue", "build", "quality"])
+
+        # And its preflight, before the interview.
+        fake = FakeCI()
+        fake.parameters = []
+        state = saved_run("spec", 0, agents=(), pull_request=True)
+        switch(state, ci_for(fake), host=FakeHost())
+        wf, herdr, *_ = gated({"spec": [spec_turn]}, fake=fake, state=state)
+        with self.assertRaisesRegex(OrchestratorError, "lacks the parameters"):
+            wf.run()
+        self.assertNotIn(("prompt", "spec-a1b2c3"), herdr.calls)
+
+    def test_an_in_place_no_pr_run_can_turn_it_on_in_round_0_only(self):
+        fake = FakeCI()
+        state = saved_run("spec", 0, agents=())
+        switch(state, ci_for(fake))
+        self.assertEqual(state.quality_job, JOB)
+        # Round 0 checks the tree is clean before the interview, as run --quality-gate does.
+        host = FakeHost()
+        host.write("/proj/mine.py", "my own change")
+        wf, *_ = gated({"spec": [spec_turn]}, fake=fake, state=state, host=host, pull_request=False)
+        with self.assertRaisesRegex(OrchestratorError, "uncommitted changes"):
+            wf.run()
+
+    def test_refusals_leave_the_state_as_it_was(self):
+        cases = [
+            ("done", pr_run("done", 1, verdict=APPROVE), "is in phase done, past its last turn"),
+            ("publish", pr_run("publish", 1), "is in phase publish, past its last turn"),
+            ("done, the same job", pr_run("done", 1, verdict=APPROVE, quality_job=JOB),
+             "is in phase done, past its last turn"),
+            ("turned off", pr_run("build", 1, quality_gate_disabled=True),
+             "turned off with --no-quality-gate, which cannot be undone"),
+            ("another job", pr_run("build", 1, quality_job="other/job"),
+             f"has quality gate job other/job, and cannot switch to {JOB}"),
+            ("in place", saved_run("build", 1, agents=("spec", "build")), "is a --no-pr run in /proj itself"),
+        ]
+        for name, state, why in cases:
+            with self.subTest(name):
+                fake = FakeCI()
+                before = asdict(state)
+                with self.assertRaisesRegex(OrchestratorError, why):
+                    switch(state, ci_for(fake))
+                self.assertEqual(asdict(state), before)
+                self.assertEqual(fake.requests, [])
+
+        state = saved_run("build", 1, agents=("build",), pull_request=True, workflow="solo")
+        before = asdict(state)
+        with self.assertRaisesRegex(OrchestratorError, "is of workflow solo, which has no quality-gated step, so its "
+                                                       "quality gate cannot be turned on"):
+            switch(state, ci_for(FakeCI()), pipeline=SOLO)
+        self.assertEqual(asdict(state), before)
+
+    def test_the_same_job_again_changes_nothing(self):
+        fake = FakeCI()
+        state = pr_run("review", 1, quality_job=JOB, quality_round=1)
+        before = asdict(state)
+        with patch("sys.stderr") as err:
+            switch(state, ci_for(fake))
+        self.assertEqual((asdict(state), fake.requests), (before, []))
+        self.assertIn(f"already has quality gate job {JOB}", "".join(c.args[0] for c in err.write.call_args_list))
+
+    def test_a_failed_preflight_refuses_before_any_turn(self):
+        no_origin = pr_host()
+        no_origin.has_origin = False
+        no_gitleaks = pr_host()
+        no_gitleaks.gitleaks_missing = True
+        unknown = FakeCI()
+        unknown.job_gone = True
+        cases = [
+            ("no credentials", FakeCI(), {}, None, "needs JENKINS_URL, JENKINS_USER, JENKINS_TOKEN"),
+            ("no such job", unknown, None, None, f"there is no Jenkins job {JOB}"),
+            ("no origin", FakeCI(), None, no_origin, "pushes snapshots to origin, and /proj has no origin"),
+            ("no gitleaks", FakeCI(), None, no_gitleaks, "every push is scanned for secrets first"),
+        ]
+        for name, fake, env, host, why in cases:
+            with self.subTest(name):
+                state = pr_run("build", 1)
+                before = asdict(state)
+                with self.assertRaisesRegex(OrchestratorError, why):
+                    switch(state, ci_for(fake, env), host=host)
+                self.assertEqual(asdict(state), before)
+
+    def test_the_cli_refuses_with_exit_1_and_leaves_state_json_alone(self):
+        saved = asdict(saved_run("build", 1, agents=("spec", "build")))
+        cases = [
+            (["--quality-gate", JOB], "is a --no-pr run in /proj itself"),
+            (["--no-quality-gate"], "has no quality gate, so --no-quality-gate does not apply"),
+        ]
+        for flags, why in cases:
+            with self.subTest(flags[0]), patch.object(Host, "resolve_dir", return_value="/proj"), \
+                    patch.dict("os.environ", {"HERDR_ENV": "1"}), \
+                    patch.object(Host, "run_states", return_value=[(10**4, saved)]), \
+                    patch.object(Host, "write") as write, patch.object(Workflow, "run") as run, \
+                    patch("sys.stderr") as err:
+                self.assertEqual(main(["resume", "a1b2c3", *flags]), orchestrator.EXIT_ERROR)
+                run.assert_not_called()
+                write.assert_not_called()
+                self.assertIn(why, "".join(c.args[0] for c in err.write.call_args_list))
+
+    @patch.object(Workflow, "run", return_value=APPROVE)
+    @patch.object(Host, "resolve_dir", return_value="/proj")
+    @patch.dict("os.environ", {"HERDR_ENV": "1"})
+    def test_the_cli_runs_the_workflow_with_the_new_job(self, _resolve, run):
+        saved = asdict(pr_run("build", 1))
+        fake = FakeCI()
+        with patch.object(Host, "run_states", return_value=[(10**4, saved)]), \
+                patch.object(Host, "git_run", return_value=completed()), \
+                patch.object(Host, "check_gitleaks"), \
+                patch("orchestrator.CI", side_effect=lambda job: CI(job, env=CREDENTIALS, urlopen=fake)) as ci, \
+                patch.object(Workflow, "__init__", return_value=None) as init, patch("builtins.print"):
+            main(["resume", "a1b2c3", "--quality-gate", JOB, "--max-quality-rounds", "2"])
+        self.assertEqual(fake.names, ["parameters"])
+        self.assertEqual([c.args for c in ci.call_args_list], [(JOB,), (JOB,)])
+        state = init.call_args.args[2]
+        self.assertEqual((state.quality_job, state.max_quality_rounds), (JOB, 2))
+
+
+class TestQualityGateOffOnResume(unittest.TestCase):
+    def test_off_in_quality_drops_the_analysis_and_goes_to_the_reviewer(self):
+        ref_2 = "orchestrator-ci/a1b2c3-1-q2"
+        state = pr_run("quality", 1, quality_job=JOB, quality_round=2, ci={"ref": ref_2, "sha": "snap9"},
+                       turns=[{"step": orchestrator.QUALITY, "role": orchestrator.QUALITY, "round": 1,
+                               "quality_round": 2, "file": "quality-1-2.md", "ended_at": None}])
+        host = pr_host()
+        host.remote = {REF_1_1: "snap1", ref_2: "snap9", "orchestrator-ci/ffffff-1-q1": "another-run"}
+        switch(state, None, host=host)
+
+        self.assertEqual(host.remote, {"orchestrator-ci/ffffff-1-q1": "another-run"})
+        self.assertEqual((state.quality_job, state.quality_gate_disabled, state.ci, state.phase, state.turns),
+                         (None, True, {}, "review", []))
+        reviews = []
+        wf, herdr, host, _ = resume(state, {"review": [recording(review_turn(1, APPROVE), reviews)]}, host=host,
+                                    files={lambda s: s.build_path(1): "report 1",
+                                           lambda s: s.quality_path(1, 1): "GATE: ERROR\n\n1. x\n",
+                                           lambda s: s.quality_build_path(1, 1): "report 1 q1"})
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertIn(f"The Builder's report is in {state.quality_build_path(1, 1)}", reviews[0])
+        self.assertIn(orchestrator.QUALITY_OFF_NOTE.format(quality_paths=state.quality_path(1, 1)), reviews[0])
+        self.assertNotIn(orchestrator.QUALITY_UNRESOLVED_NOTE[:30], reviews[0])
+        self.assertFalse(host.snapshots)
+        body = host.prs[0]["body"]
+        self.assertIn("<summary>Quality gate (round 1)</summary>\n\nGATE: ERROR", body)
+        self.assertIn("| Orchestrator-Gate | `ERROR after 1 quality round` |", body)
+
+    def test_off_in_quality_tells_the_reviewer_what_the_round_last_found(self):
+        cases = [
+            ("first analysis unfinished", 1, {}, None, None),
+            ("analysis finished, passed", 1, {lambda s: s.quality_path(1, 1): "GATE: OK\n"},
+             orchestrator.QUALITY_PASSED_NOTE, 1),
+            ("analysis finished, failed", 1, {lambda s: s.quality_path(1, 1): "GATE: ERROR\n\n1. x\n"},
+             orchestrator.QUALITY_UNRESOLVED_NOTE, 1),
+            ("stuck", 2, {lambda s: s.quality_path(1, 1): outcome(**RED)["quality"],
+                          lambda s: s.quality_build_path(1, 1): "report 1 q1",
+                          lambda s: s.quality_path(1, 2): outcome(**RED)["quality"]},
+             orchestrator.QUALITY_STUCK_NOTE, 2),
+        ]
+        for name, q, files, note, noted in cases:
+            with self.subTest(name):
+                state = pr_run("quality", 1, quality_job=JOB, quality_round=q)
+                host = switch(state, None)
+                reviews = []
+                wf, herdr, host, _ = resume(state, {"review": [recording(review_turn(1, APPROVE), reviews)]},
+                                            host=host, files={lambda s: s.build_path(1): "report 1", **files})
+                self.assertEqual(wf.run(), APPROVE)
+                self.assertIn(f"The Builder's report is in {state.last_report_path(1)}", reviews[0])
+                body = host.prs[0]["body"]
+                if note is None:
+                    self.assertNotIn("quality gate", reviews[0].lower())
+                    self.assertNotIn("Quality gate", body)
+                else:
+                    self.assertIn(note.format(quality_path=state.quality_path(1, noted)), reviews[0])
+                    self.assertIn("<summary>Quality gate (round 1)</summary>", body)
+
+    def test_off_in_the_builders_quality_fix_goes_straight_to_the_reviewer(self):
+        state = pr_run("build", 1, quality_job=JOB, quality_round=1, prompted="build-1-q1.md")
+        host = switch(state, None)
+        self.assertEqual((state.phase, state.quality_round), ("build", 1))
+
+        reviews = []
+        with patch("urllib.request.urlopen") as urlopen:
+            wf, herdr, host, _ = resume(state, {"review": [recording(review_turn(1, APPROVE), reviews)]},
+                                        host=host, alive=["build"],
+                                        files={lambda s: s.build_path(1): "report 1",
+                                               lambda s: s.quality_path(1, 1): "GATE: ERROR\n\n1. x\n",
+                                               lambda s: s.quality_build_path(1, 1): "report 1 q1"})
+            self.assertEqual(wf.run(), APPROVE)
+        urlopen.assert_not_called()
+        self.assertFalse(host.snapshots)
+        self.assertIn(f"The Builder's report is in {state.quality_build_path(1, 1)}", reviews[0])
+        self.assertIn(orchestrator.QUALITY_OFF_NOTE.format(quality_paths=state.quality_path(1, 1)), reviews[0])
+        self.assertEqual(wf.state.quality_round, 2)
+
+    def test_a_failed_cleanup_is_only_logged(self):
+        state = pr_run("quality", 1, quality_job=JOB, quality_round=1)
+        host = pr_host()
+        host.remote_branches = MagicMock(side_effect=OrchestratorError("ssh: connection reset"))
+        with patch("sys.stderr") as err:
+            switch(state, None, host=host)
+        self.assertIn("could not list the orchestrator-ci/ branches", "".join(c.args[0] for c in err.write.call_args_list))
+        self.assertEqual((state.quality_job, state.quality_gate_disabled, state.phase), (None, True, "review"))
+
+    def test_a_failed_ref_deletion_is_only_logged(self):
+        state = pr_run("review", 1, quality_job=JOB, quality_round=1)
+        host = pr_host()
+        host.remote = {REF_1_1: "snap1"}
+        host.delete_remote_branch = MagicMock(side_effect=OrchestratorError("ssh: connection reset"))
+        with patch("sys.stderr") as err:
+            switch(state, None, host=host)
+        self.assertIn(f"could not delete {REF_1_1} on origin", "".join(c.args[0] for c in err.write.call_args_list))
+        self.assertTrue(state.quality_gate_disabled)
+
+    def test_refs_left_by_a_failed_deletion_are_deleted_at_the_end(self):
+        state = pr_run("review", 1, quality_job=JOB, quality_round=1)
+        host = pr_host()
+        host.remote = {REF_1_1: "snap1"}
+        failing = host.delete_remote_branch
+        host.delete_remote_branch = MagicMock(side_effect=OrchestratorError("ssh: connection reset"))
+        with patch("sys.stderr"):
+            switch(state, None, host=host)
+        host.delete_remote_branch = failing
+        wf, herdr, host, _ = resume(state, {"review": [review_turn(1, APPROVE)]}, host=host,
+                                    files={lambda s: s.build_path(1): "report 1"})
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(host.remote, {})
+
+    def test_metrics_count_a_gate_turned_off_as_a_gate(self):
+        state = pr_run("review", 1, quality_job=JOB, quality_round=1)
+        switch(state, None)
+        metrics = orchestrator.run_metrics(state, 10**9)
+        self.assertEqual((metrics["quality_gate"], metrics["max_quality_rounds"]),
+                         (True, orchestrator.DEFAULT_MAX_QUALITY_ROUNDS))
+
+    def test_refused_without_a_gate_or_once_done(self):
+        for name, state in [("no gate", pr_run("build", 1)), ("done", pr_run("done", 1, quality_job=JOB))]:
+            with self.subTest(name):
+                before = asdict(state)
+                with self.assertRaisesRegex(OrchestratorError, "so --no-quality-gate does not apply"):
+                    switch(state, None)
+                self.assertEqual(asdict(state), before)
+
+    def test_turned_off_after_a_failed_round_a_workflow_without_a_verdict_finishes(self):
+        solo = Pipeline("gsolo", {"impl": "Implementer"}, (
+            Step("impl", "impl", "impl-{n}.md", "Implement {task}; report to {path}.", edits=True, quality_gated=True),))
+        state = saved_run("quality", 1, agents=(), pull_request=True, base_branch="main", branch=SWITCH_BRANCH,
+                          workflow="gsolo", quality_job=JOB, quality_round=1)
+        host = switch(state, None, host=pr_host(), pipeline=solo)
+        self.assertEqual(state.phase, orchestrator.PUBLISH)
+
+        wf, herdr, host, _ = resume(state, {}, host=host, pipeline=solo,
+                                    files={lambda s: f"{s.dir}/impl-1.md": "impl 1",
+                                           lambda s: s.quality_path(1, 1): "GATE: ERROR\n\n1. x\n"})
+        self.assertEqual(wf.run(), orchestrator.FINISHED)
+        self.assertFalse(host.prs[0]["draft"])
+        with patch("builtins.print"):
+            self.assertEqual(orchestrator.finish(orchestrator.FINISHED, wf.state, solo), 0)
+
+    def test_round_results_keep_the_quality_files(self):
+        state = pr_run("review", 1, quality_job=JOB, quality_round=1)
+        host = switch(state, None)
+        wf, herdr, host, _ = resume(state, {"review": [review_turn(1, APPROVE)]}, host=host,
+                                    files={lambda s: s.build_path(1): "report 1",
+                                           lambda s: s.quality_path(1, 1): "GATE: OK\n"})
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertIn("Round 1: quality gate OK; review APPROVE", host.files[f"{state.dir}/summary.md"])
+
+    def test_show_names_the_gate(self):
+        cases = [("on", {"quality_job": JOB}, f"quality    {JOB}"),
+                 ("off", {"quality_gate_disabled": True}, "quality    off (turned off by resume)"),
+                 ("never", {}, None)]
+        for name, fields_, line in cases:
+            with self.subTest(name):
+                host = FakeHost()
+                state = {**run_record("build"), "cwd": "/proj", **fields_}
+                host.files[f"/proj/{orchestrator.RUNS_DIR}/{state['run_id']}/state.json"] = json.dumps(state)
+                with patch.object(host, "run_files", return_value=[]), patch("builtins.print") as out:
+                    orchestrator.show_run(host, "/proj", "c0ffee", "here", lambda pid: True, [])
+                printed = [c.args[0] for c in out.call_args_list if c.args]
+                quality = [p for p in printed if p.startswith("quality ")]
+                self.assertEqual(quality, [line] if line else [])
+
+    def test_a_state_saved_before_the_switch_loads_with_the_gate_not_turned_off(self):
+        saved = asdict(pr_run("build", 1, quality_job=JOB))
+        del saved["quality_gate_disabled"]
+        state = RunState.from_dict(saved)
+        self.assertFalse(state.quality_gate_disabled)
+        wf, herdr, host, fake, _ = gated({"build": [build_turn(1)], "review": [review_turn(1, APPROVE)]},
+                                         state=state, host=pr_host())
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(fake.triggered(), [REF_1_1])
 
 PYPI_JSON = "https://pypi.org/pypi/{}/json"
 # 2026-10-23, the day the young-package tests run on.
@@ -8538,7 +8920,9 @@ class TestQualityCLI(unittest.TestCase):
         self.refused(["run", "t", "--quality-gate", JOB, "--max-quality-rounds", "0"])
         self.refused(["run", "t", "--max-quality-rounds", "2"])
         self.refused(["run", "t", "--quality-gate", "/folder/"])
-        self.refused(["resume", "a1b2c3", "--quality-gate", JOB])
+        self.refused(["resume", "a1b2c3", "--quality-gate", "/folder/"])
+        self.refused(["resume", "a1b2c3", "--quality-gate", JOB, "--no-quality-gate"])
+        self.refused(["resume", "a1b2c3", "--no-quality-gate", "--max-quality-rounds", "2"])
         self.refused(["resume", "a1b2c3", "--max-quality-rounds", "0"])
         args = parse_args(["run", "t", "--quality-gate", JOB, "--max-quality-rounds", "2"])
         self.assertEqual((args.quality_gate, args.max_quality_rounds), (JOB, 2))
@@ -8565,6 +8949,9 @@ class TestQualityCLI(unittest.TestCase):
         saved = asdict(saved_run("build", 1))
         with self.assertRaisesRegex(OrchestratorError, "has no quality gate"):
             self.resumable(["--max-quality-rounds", "2"], saved)
+        # The gate this resume turns on is enough.
+        self.assertEqual(self.resumable(["--quality-gate", JOB, "--max-quality-rounds", "2"], saved)
+                         .max_quality_rounds, 2)
 
     def test_state_saved_before_the_gate_has_none(self):
         saved = asdict(saved_run("review", 1))
