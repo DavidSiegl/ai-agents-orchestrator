@@ -191,6 +191,8 @@ EXIT_ERROR = 1
 EXIT_CHANGES_REQUESTED = 3
 # Approved, but the pull request conflicts with its base, so it was opened as a draft.
 EXIT_CONFLICT = 4
+# drain ran every spec it could, and specs remain whose blockers are not done, such as a pull request still open.
+EXIT_WAITING = 5
 EXIT_INTERRUPTED = 130
 
 
@@ -7741,7 +7743,29 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                           help=f"with --quality-gate: quality builds per review round before the Reviewer "
                                f"gets the change anyway (default {DEFAULT_MAX_QUALITY_ROUNDS})")
 
-    run = sub.add_parser("run", parents=[target, settings], help="run the handoff workflow for a task")
+    # What a run is started with, for run and for each of drain's runs. Not resume's: a resumed run keeps its
+    # workflow and where it works (its worktree or the checkout), and switches its quality gate with flags of its own.
+    starts = argparse.ArgumentParser(add_help=False)
+    which = starts.add_mutually_exclusive_group()
+    which.add_argument("--workflow", choices=offered_workflows(), default=DEFAULT_WORKFLOW.name,
+                       help=f"the roles and handoffs the run goes through: a built-in workflow or one in "
+                            f"{workflows_dir()} (default {DEFAULT_WORKFLOW.name}); see the workflows command. "
+                            f"With --spec, and for drain, its first step must write the spec")
+    which.add_argument("--workflow-file", metavar="FILE",
+                       help="like --workflow, for the workflow file at FILE, on this machine")
+    starts.add_argument("--worktree", action="store_true",
+                        help=f"build in a git worktree of the run's own, {WORKTREES_DIR}/<key>, from {REMOTE}'s "
+                             f"version of the checked-out branch, instead of in the checkout itself, which then "
+                             f"need not be clean and stays free to use. Needs a branch checked out and an {REMOTE}. "
+                             f"The worktree is removed once the pull request is open; when the run fails, or "
+                             f"for run --no-pr, it stays")
+    starts.add_argument("--quality-gate", metavar="JOB",
+                        help="after each Builder turn, have this Jenkins job (its full name, folders included) "
+                             "judge the change with `orchestrator.py gate`, and send the findings back to the "
+                             "Builder; needs JENKINS_URL, JENKINS_USER and JENKINS_TOKEN, "
+                             "from the environment or ~/.config/ai-agents-orchestrator/ci.env")
+
+    run = sub.add_parser("run", parents=[target, settings, starts], help="run the handoff workflow for a task")
     run.add_argument("task", nargs="?",
                      help="what to build, as you would tell the Spec Collector; optional with --spec, "
                           "which then takes the spec's title")
@@ -7750,29 +7774,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                      help="skip the interview: copy the spec at FILE, on this machine, into the run as the "
                           "first step's file, and start at the step after it. Needs a workflow whose first "
                           "step writes the spec, as default's does")
-    # Run only: a resumed run keeps the workflow it was started with.
-    which = run.add_mutually_exclusive_group()
-    which.add_argument("--workflow", choices=offered_workflows(), default=DEFAULT_WORKFLOW.name,
-                       help=f"the roles and handoffs the run goes through: a built-in workflow or one in "
-                            f"{workflows_dir()} (default {DEFAULT_WORKFLOW.name}); see the workflows command")
-    which.add_argument("--workflow-file", metavar="FILE",
-                       help="like --workflow, for the workflow file at FILE, on this machine")
     # Run only: a resumed run may already be on its own branch, so whether it ends in a pull request is fixed.
     run.add_argument("--no-pr", action="store_true",
                      help="leave the change uncommitted in the working tree and the workspace open, "
                           "instead of opening a pull request")
-    # Run only: a run keeps where it works, its worktree or the checkout.
-    run.add_argument("--worktree", action="store_true",
-                     help=f"build in a git worktree of the run's own, {WORKTREES_DIR}/<key>, from {REMOTE}'s "
-                          f"version of the checked-out branch, instead of in the checkout itself, which then "
-                          f"need not be clean and stays free to use. Needs a branch checked out and an {REMOTE}. "
-                          f"The worktree is removed once the pull request is open; with --no-pr, or when the "
-                          f"run fails, it stays")
-    run.add_argument("--quality-gate", metavar="JOB",
-                     help="after each Builder turn, have this Jenkins job (its full name, folders included) "
-                          "judge the change with `orchestrator.py gate`, and send the findings back to the "
-                          "Builder; needs JENKINS_URL, JENKINS_USER and JENKINS_TOKEN, "
-                          "from the environment or ~/.config/ai-agents-orchestrator/ci.env")
 
     resume = sub.add_parser(
         "resume", parents=[target, settings], help="continue a run whose orchestrator has stopped",
@@ -7819,6 +7824,23 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                     f"A branch with commits its pull request lacks, or one checked out, is kept. Every run "
                     f"that opens a pull request does this first, except for branches kept before.")
     prune.add_argument("--dry-run", action="store_true", help="print what would be deleted, and delete nothing")
+
+    drain = sub.add_parser(
+        "drain", parents=[target, settings, starts], help="run every ready spec in a directory, one pull request each",
+        description=f"Run each DIR/<slug>/spec.md whose header says {SPEC_READY} and whose blockers are "
+                    f"{SPEC_DONE}, one after another, as run --spec runs it, and record each in the spec's header: "
+                    f"{SPEC_IN_REVIEW} with its pull request, or {SPEC_FOR_HUMAN}, which stops the drain. First "
+                    f"it marks {SPEC_DONE} each spec whose pull request has merged. Exits 0 once no spec is "
+                    f"{SPEC_READY}, and {EXIT_WAITING} when the ones left have blockers that are not {SPEC_DONE}.")
+    drain.add_argument("dir", nargs="?", default=DRAIN_DIR, metavar="DIR",
+                       help=f"the directory of specs, on this machine; default {DRAIN_DIR}")
+    drain.add_argument("--dry-run", action="store_true",
+                       help="print the changes to the specs' status and the specs it would run, in order, and "
+                            "write, run and delete nothing")
+    # Hidden and refused below, as for resume: argparse would otherwise take --spec for --spec-model.
+    drain.add_argument("--spec", nargs="?", const="", help=argparse.SUPPRESS)
+    # Each run drain starts is a run --spec run that opens a pull request: new_state reads these.
+    drain.set_defaults(task=None, no_pr=False)
 
     close = sub.add_parser(
         "close", parents=[target], help="clean up after a finished or failed run: its workspace, worktree and branch",
@@ -7889,7 +7911,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                             "tauri://localhost; repeatable")
 
     args = p.parse_args(argv)
-    check_spec_args(args, run, resume)
+    check_spec_args(args, run, resume, drain)
     if getattr(args, "pr_state", False) and not args.json:
         listing.error("--pr-state needs --json")
     check_flag_values(args, p)
@@ -7908,7 +7930,7 @@ def check_flag_values(args: argparse.Namespace, p: argparse.ArgumentParser) -> N
     if getattr(args, "max_quality_rounds", None) is not None:
         if args.max_quality_rounds < 1:
             p.error("--max-quality-rounds must be at least 1")
-        if args.command == "run" and not args.quality_gate:
+        if args.command in ("run", "drain") and not args.quality_gate:
             p.error("--max-quality-rounds needs --quality-gate")
         if getattr(args, "no_quality_gate", False):
             p.error("--max-quality-rounds does not apply with --no-quality-gate")
@@ -7917,12 +7939,14 @@ def check_flag_values(args: argparse.Namespace, p: argparse.ArgumentParser) -> N
 
 
 def check_spec_args(args: argparse.Namespace, run: argparse.ArgumentParser,
-                    resume: argparse.ArgumentParser) -> None:
-    """Exit with a usage error for a run with neither a task nor --spec, or a resume given --spec."""
+                    resume: argparse.ArgumentParser, drain: argparse.ArgumentParser) -> None:
+    """Exit with a usage error for a run with neither a task nor --spec, or a resume or drain given --spec."""
     if args.command == "run" and args.task is None and args.spec is None:
         run.error("a task or --spec FILE is needed")
     if args.command == "resume" and args.spec is not None:
         resume.error("unrecognized arguments: --spec; a resumed run keeps the spec it has")
+    if args.command == "drain" and args.spec is not None:
+        drain.error("unrecognized arguments: --spec; drain runs the specs in DIR")
 
 
 def offered_workflows() -> list[str]:
@@ -7998,6 +8022,13 @@ def target_args(args: argparse.Namespace) -> list[str]:
 
 def resume_command(run_id: str, target: list[str]) -> str:
     return shlex.join(["orchestrator.py", "resume", run_id.rsplit("-", 1)[-1], *target])
+
+
+def interrupted_note(state: RunState | None, target: list[str]) -> str:
+    """What to tell the human whose Ctrl-C stopped the orchestrator, with the command that resumes the run that
+    state describes; state is None for an interrupt before the run's state existed, and the note names no command."""
+    hint = f"; resume with: {resume_command(state.run_id, target)}" if state else ""
+    return f"interrupted; the role agents keep running in herdr{hint}"
 
 
 def notify_locally(title: str, body: str) -> None:
@@ -8676,6 +8707,379 @@ def discard_run_branch(host: Host, cwd: str, state: RunState) -> str:
     return f"branch kept: {why}"
 
 
+# ---------------------------------------------------------------------------
+# Draining specs
+# ---------------------------------------------------------------------------
+
+# Where drain looks for specs when given no DIR, relative to the current directory.
+DRAIN_DIR = ".scratch"
+# The values of a spec's Status: line that drain acts on. A spec moves from SPEC_READY to SPEC_IN_REVIEW, its pull
+# request open, to SPEC_DONE, merged; or to SPEC_FOR_HUMAN, which drain never leaves. Drain leaves a spec with any
+# other value, or none, alone.
+SPEC_READY = "ready-for-agent"
+SPEC_IN_REVIEW = "in-review"
+SPEC_DONE = "done"
+SPEC_FOR_HUMAN = "ready-for-human"
+# The keys of the spec header's lines that drain reads: the lines before the first `## ` heading, each
+# `<key>: <entry>`. It writes all but BLOCKED_BY_KEY. Blocked by: is a comma-separated list of the specs that must be
+# SPEC_DONE first, each by its slug or a path ending in <slug>/spec.md; Run: names the run drain started for the
+# spec, and PR: that run's pull request.
+STATUS_KEY = "Status"
+BLOCKED_BY_KEY = "Blocked by"
+RUN_KEY = "Run"
+PR_KEY = "PR"
+
+
+def _lines(text: str) -> list[str]:
+    """text split after each \\n, every line keeping its ending; "".join of them is text."""
+    return re.findall(r"[^\n]*\n|[^\n]+\Z", text)
+
+
+def _header_end(lines: list[str]) -> int:
+    return next((i for i, line in enumerate(lines) if line.startswith("## ")), len(lines))
+
+
+def _keyed_text(line: str, key: str) -> str | None:
+    m = re.match(rf"{re.escape(key)}:\s*(.*)$", line.rstrip("\r\n"))
+    return m.group(1).strip() if m else None
+
+
+def header_field(text: str, key: str) -> str | None:
+    """The entry on the spec header's first key line, blanks at its ends removed; None when the header has none."""
+    lines = _lines(text)
+    found = (_keyed_text(line, key) for line in lines[:_header_end(lines)])
+    return next((t for t in found if t is not None), None)
+
+
+def with_header_field(text: str, key: str, entry: str) -> str:
+    """text with the header's first key line made `<key>: <entry>`, or with that line added directly below its
+    Status: line when it has none. Every other line, and every line's ending, stays as it was; an added line ends as
+    the Status: line does, and below a Status: line that ends the file unterminated, ends the file so instead.
+    Raises OrchestratorError for a header with neither line."""
+    lines = _lines(text)
+    status_at = None
+    for i, line in enumerate(lines[:_header_end(lines)]):
+        ending = line[len(line.rstrip("\r\n")):]
+        if _keyed_text(line, key) is not None:
+            lines[i] = f"{key}: {entry}{ending}"
+            return "".join(lines)
+        if status_at is None and _keyed_text(line, STATUS_KEY) is not None:
+            status_at = i
+    if status_at is None:
+        raise OrchestratorError(f"the spec has no {STATUS_KEY}: line to add {key}: below")
+    status_line = lines[status_at]
+    ending = status_line[len(status_line.rstrip("\r\n")):]
+    if ending:
+        lines.insert(status_at + 1, f"{key}: {entry}{ending}")
+    else:
+        # The Status: line ends the file without a line ending: the new line takes its place as the last.
+        lines[status_at] += "\r\n" if "\r\n" in text else "\n"
+        lines.append(f"{key}: {entry}")
+    return "".join(lines)
+
+
+# A Blocked by: value that names no blocker, as the specs and tickets here write it.
+NO_BLOCKERS = {"-", "none"}
+
+
+def blocker_slugs(line: str | None) -> list[str]:
+    """The slugs a Blocked by: line's value names, in order; none for a spec without the line, or whose value is
+    one of NO_BLOCKERS."""
+    if (line or "").strip().lower() in NO_BLOCKERS:
+        return []
+    entries = [e.strip() for e in (line or "").split(",")]
+    return [os.path.basename(os.path.dirname(e)) if e.endswith("/spec.md") else e for e in entries if e]
+
+
+def replace_local_file(path: str, text: str) -> None:
+    """Make text, line endings as they are, the contents of the file at path on this machine.
+
+    Written aside and renamed into place, so a failed write leaves the old file, not half a new one. A symlink at
+    path is followed, so the link stays and its target changes, and an existing file keeps its permissions. Raises
+    OrchestratorError when it cannot be written.
+    """
+    real = os.path.realpath(path)
+    tmp = f"{real}.tmp.{os.getpid()}"
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+        with contextlib.suppress(FileNotFoundError):
+            shutil.copymode(real, tmp)
+        os.replace(tmp, real)
+    except OSError as e:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+        raise OrchestratorError(f"cannot write {path}: {e}") from e
+
+
+@dataclass
+class QueuedSpec:
+    """A spec that drain found, DIR/<slug>/spec.md, with what drain has done to it."""
+    slug: str
+    # Its path as drain found it, and its text as drain last read it, with drain's changes to its header since, line
+    # endings as in the file.
+    file: SpecFile
+    blockers: list[str]  # the slugs on its Blocked by: line, each one of a spec drain found
+    was: str | None  # its status as drain first read it
+    # True once drain has changed its header, or would have but for --dry-run.
+    changed: bool = False
+    # Why it could not be read again, deleted or emptied while drain ran; None while it can be.
+    unreadable: str | None = None
+
+    @property
+    def status(self) -> str | None:
+        """Its Status: line's value now; None without one, or once it is unreadable, so it is neither run nor done."""
+        return None if self.unreadable else header_field(self.file.text, STATUS_KEY)
+
+    @property
+    def run(self) -> str | None:
+        """The run id on its Run: line; None without one."""
+        return header_field(self.file.text, RUN_KEY)
+
+    @property
+    def pr(self) -> str | None:
+        """The pull request's URL on its PR: line; None without one."""
+        return header_field(self.file.text, PR_KEY)
+
+    def reread(self) -> None:
+        """Take the file as it is on disk now, so an edit made while drain runs is kept, not overwritten. Its
+        blockers stay as drain first read them. Raises OrchestratorError as read_spec_file does."""
+        self.file = read_spec_file(self.file.path)
+
+    def update(self, entries: dict[str, str], write: bool = True) -> None:
+        """Set each of the header's lines that entries names, by key (with_header_field), and, with write, save the
+        file as it is on disk now with those lines changed. Raises OrchestratorError as with_header_field,
+        read_spec_file and replace_local_file do."""
+        if write:
+            self.reread()
+        text = self.file.text
+        for key, entry in entries.items():
+            text = with_header_field(text, key, entry)
+        if write:
+            replace_local_file(self.file.path, text)
+        self.file = SpecFile(self.file.path, text)
+        self.changed = True
+
+    def change_line(self) -> str:
+        """The line drain prints for a spec it changed: its slug, old and new status, and pull request."""
+        line = f"{self.slug}: {self.was} -> {self.status}"
+        return f"{line}  {self.pr}" if self.pr else line
+
+
+def read_queue(spec_dir: str) -> list[QueuedSpec]:
+    """Every spec_dir/<slug>/spec.md on this machine, ordered by slug.
+
+    Raises OrchestratorError when spec_dir cannot be listed, a spec cannot be read (read_spec_file), a Blocked by:
+    line names a slug that has no spec.md, or the blockers form a cycle; the message names the specs.
+    """
+    try:
+        names = sorted(os.listdir(spec_dir))
+    except OSError as e:
+        raise OrchestratorError(f"cannot list the specs in {spec_dir}: {e.strerror}") from e
+    specs = {}
+    for name in names:
+        path = os.path.join(spec_dir, name, "spec.md")
+        if os.path.isfile(path):
+            file = read_spec_file(path)
+            specs[name] = QueuedSpec(name, file, blocker_slugs(header_field(file.text, BLOCKED_BY_KEY)),
+                                     header_field(file.text, STATUS_KEY))
+    for spec in specs.values():
+        if missing := [b for b in spec.blockers if b not in specs]:
+            raise OrchestratorError(f"spec {spec.slug} is blocked by {', '.join(missing)}, which has no spec.md "
+                                    f"in {spec_dir}")
+    if cycle := blocker_cycle({slug: spec.blockers for slug, spec in specs.items()}):
+        raise OrchestratorError(f"the specs' blockers form a cycle: {' -> '.join(cycle)}")
+    return list(specs.values())
+
+
+def blocker_cycle(blockers: dict[str, list[str]]) -> list[str] | None:
+    """A cycle among the specs, each by its slug with the slugs that block it, as the slugs along it with the first
+    again at the end; None when there is none. Every blocker must be a key of blockers."""
+    acyclic = set()
+
+    def cycle_from(slug: str, path: list[str]) -> list[str] | None:
+        if slug in path:
+            return path[path.index(slug):] + [slug]
+        if slug in acyclic:
+            return None
+        for b in blockers[slug]:
+            if found := cycle_from(b, [*path, slug]):
+                return found
+        acyclic.add(slug)
+        return None
+
+    return next((c for slug in blockers if (c := cycle_from(slug, []))), None)
+
+
+def refreshed_headers(specs: list[QueuedSpec], host: Host, cwd: str, target: list[str],
+                      local_host: str, pid_alive) -> list[tuple[QueuedSpec, dict[str, str]]]:
+    """The header lines to set, by spec, for what has become of the pull requests and runs that earlier drains left
+    behind: an SPEC_IN_REVIEW spec's pull request, now merged or closed, and the run on a SPEC_READY spec's Run:
+    line, which an interrupted drain leaves (finished_run_header).
+
+    cwd is the project, where gh asks about pull requests and the runs are; target is the --machine and --cwd flags
+    as given, for a resume command. Raises OrchestratorError as Host.pull_request and finished_run_header do.
+    """
+    runs = None
+    out = []
+    for spec in specs:
+        if spec.status == SPEC_IN_REVIEW and spec.pr:
+            pr_state = host.pull_request(cwd, spec.pr)["state"]
+            if pr_state == "MERGED":
+                out.append((spec, {STATUS_KEY: SPEC_DONE}))
+            elif pr_state == "CLOSED":
+                out.append((spec, {STATUS_KEY: SPEC_FOR_HUMAN}))
+        elif spec.status == SPEC_READY and (run_id := spec.run):
+            if runs is None:
+                runs = host.run_states(cwd)
+            out.append((spec, finished_run_header(spec, run_id, runs, cwd, target, local_host, pid_alive)))
+    return out
+
+
+def finished_run_header(spec: QueuedSpec, run_id: str, runs: list[tuple[int, dict]], cwd: str, target: list[str],
+                        local_host: str, pid_alive) -> dict[str, str]:
+    """The header lines to set for the finished run run_id, on the spec's Run: line: SPEC_IN_REVIEW and its pull
+    request for one that succeeded without conflicts, SPEC_FOR_HUMAN otherwise, with its pull request if it has one.
+
+    runs are Host.run_states's. Raises OrchestratorError for a run that is not finished: running, stale, failed,
+    closed or not among runs; the message names the spec, the run and what to do about it.
+    """
+    saved = next(((age, s) for age, s in runs if s.get("run_id") == run_id), None)
+    if saved is None or saved[1].get("phase") != DONE:
+        why, remedy = unfinished_run(spec, run_id, saved, cwd, target, local_host, pid_alive)
+        raise OrchestratorError(f"spec {spec.slug}: run {run_id}, on its {RUN_KEY}: line, {why}; {remedy}")
+    s = saved[1]
+    pr = s.get("pr_url")
+    if s.get("verdict") in SUCCEEDED and not s.get("conflicts") and pr:
+        return {STATUS_KEY: SPEC_IN_REVIEW, PR_KEY: pr}
+    return {STATUS_KEY: SPEC_FOR_HUMAN, **({PR_KEY: pr} if pr else {})}
+
+
+def unfinished_run(spec: QueuedSpec, run_id: str, saved: tuple[int, dict] | None, cwd: str, target: list[str],
+                   local_host: str, pid_alive) -> tuple[str, str]:
+    """Why the run run_id on the spec's Run: line is not finished, and what the human can do about it, as two
+    clauses for finished_run_header's error. saved is the run's age and state as Host.run_states gives them, None
+    when there is no such run; a saved run must not be done."""
+    start_over = f"remove the {RUN_KEY}: line from {spec.file.path} to start the spec over"
+    if saved is None:
+        return f"is not under {cwd}/{RUNS_DIR}", start_over
+    age, s = saved
+    if s.get("closed"):
+        return f"was closed ({s['closed']})", start_over
+    # None for a run that is not done: it failed.
+    health = run_health(s, age, local_host, pid_alive)
+    if health is None:
+        why = f"failed: {s['error']}"
+    elif health[0] == RUNNING:
+        return f"is {health[0]} ({health[1]})", f"wait for it to finish, or {start_over}"
+    else:
+        why = f"is {health[0]} ({health[1]})"
+    return why, f"resume it with `{resume_command(run_id, target)}`, or {start_over}"
+
+
+def startable(spec: QueuedSpec, by_slug: dict[str, QueuedSpec]) -> bool:
+    """Whether drain runs the spec: it is SPEC_READY and each of its blockers, by_slug, is SPEC_DONE."""
+    return spec.status == SPEC_READY and all(by_slug[b].status == SPEC_DONE for b in spec.blockers)
+
+
+def drain_command(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str) -> int:
+    """Run the specs in args.dir that are ready, one after another, recording each in its header, and return the
+    exit status: 0 once no spec is SPEC_READY, EXIT_WAITING when those left are blocked, or the status of the run
+    that stopped the drain. With args.dry_run, print what it would change and run, and change nothing.
+
+    cwd is the project the runs are in. Raises OrchestratorError, before any run starts, for a workflow that cannot
+    take a spec (seeded_start), and as read_queue and refreshed_headers do.
+    """
+    seeded_start(load_workflow_file(args.workflow_file) if args.workflow_file else named_workflow(args.workflow))
+    specs = read_queue(args.dir)
+    for spec, entries in refreshed_headers(specs, host, cwd, target_args(args), socket.gethostname(), pid_alive):
+        spec.update(entries, write=not args.dry_run)
+    by_slug = {spec.slug: spec for spec in specs}
+    if args.dry_run:
+        print_spec_changes(specs)
+        order = [spec.slug for spec in specs if startable(spec, by_slug)]
+        print(f"would run, in order: {', '.join(order)}" if order else "would run no spec")
+        return 0
+    sweep_branches(host, cwd)
+    exit_code = None
+    try:
+        while exit_code is None and (ready := next_startable(specs, by_slug)):
+            exit_code = drain_spec(args, herdr, host, cwd, ready)
+    finally:
+        print_spec_changes(specs)
+    return exit_code if exit_code is not None else drain_end(specs, by_slug)
+
+
+def next_startable(specs: list[QueuedSpec], by_slug: dict[str, QueuedSpec]) -> QueuedSpec | None:
+    """The first of specs drain runs next (startable), each read again from disk first, so a status the human
+    changed while an earlier spec ran counts; None when there is none. A spec that cannot be read again, deleted or
+    emptied meanwhile, becomes unreadable, and drain says so."""
+    for spec in specs:
+        try:
+            spec.reread()
+            spec.unreadable = None
+        except OrchestratorError as e:
+            if not spec.unreadable:
+                log(f"{spec.slug}: {e}; not running it")
+            spec.unreadable = str(e)
+    return next((s for s in specs if startable(s, by_slug)), None)
+
+
+def drain_spec(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str, spec: QueuedSpec) -> int | None:
+    """Run the spec as run --spec would with args's flags, and record the run and how it ended in its header.
+
+    Returns None when the run succeeded without conflicts, and the spec is SPEC_IN_REVIEW; otherwise the exit status
+    that stops the drain, having printed why. Raises OrchestratorError when the run's state cannot be made
+    (new_state) or the spec cannot be written.
+    """
+    given = spec.file
+    state, pipeline = new_state(args, cwd, given)
+    spec.update({RUN_KEY: state.run_id})
+    try:
+        verdict = run_workflow(herdr, host, state, pipeline, given)
+    except RunTakenOver as e:
+        # Another orchestrator drives the run now; the next drain finds it by the Run: line and records its end.
+        print(f"error: {e}", file=sys.stderr)
+        print(f"{spec.slug} stays {SPEC_READY}; run drain again once that run has ended", file=sys.stderr)
+        return EXIT_ERROR
+    except OrchestratorError as e:
+        # Printed first, so the run's error and its resume command survive a header write that fails too.
+        print(f"error: {e}", file=sys.stderr)
+        print(f"resume its run with: {resume_command(state.run_id, target_args(args))}", file=sys.stderr)
+        spec.update({STATUS_KEY: SPEC_FOR_HUMAN})
+        print(f"{spec.slug} is {SPEC_FOR_HUMAN}", file=sys.stderr)
+        return EXIT_ERROR
+    except KeyboardInterrupt:
+        print(interrupted_note(state, target_args(args)), file=sys.stderr)
+        return EXIT_INTERRUPTED
+    exit_code = finish(verdict, state, pipeline)
+    spec.update({STATUS_KEY: SPEC_IN_REVIEW if exit_code == 0 else SPEC_FOR_HUMAN,
+                 **({PR_KEY: state.pr_url} if state.pr_url else {})})
+    return None if exit_code == 0 else exit_code
+
+
+def print_spec_changes(specs: list[QueuedSpec]) -> None:
+    """Print the change_line of each spec drain changed, in their order."""
+    for spec in specs:
+        if spec.changed:
+            print(spec.change_line())
+
+
+def drain_end(specs: list[QueuedSpec], by_slug: dict[str, QueuedSpec]) -> int:
+    """Print what is left once drain can start no spec, and return its exit status: 0 when no spec is SPEC_READY,
+    else EXIT_WAITING."""
+    left = [spec for spec in specs if spec.status == SPEC_READY]
+    if not left:
+        print("all specs cleared")
+        return 0
+    for spec in left:
+        print(f"{spec.slug} waits on:")
+        for b in spec.blockers:
+            blocker = by_slug[b]
+            print(f"    {b}: {blocker.status or 'no status'}" + (f"  {blocker.pr}" if blocker.pr else ""))
+    return EXIT_WAITING
+
+
 def print_workflows() -> None:
     for name in sorted(WORKFLOWS):
         print_workflow(name, "built in", WORKFLOWS[name])
@@ -8714,27 +9118,37 @@ def main(argv: list[str]) -> int:
         if args.command in RUNS_COMMANDS:
             runs_command(args, herdr, host, cwd)
             return 0
+        if args.command == "drain":
+            return drain_command(args, herdr, host, cwd)
         spec = read_spec_file(args.spec) if args.command == "run" and args.spec is not None else None
         # Only a run that opens a pull request: a --no-pr run's project may have no gh.
         if args.command == "run" and not args.no_pr:
             sweep_branches(host, cwd)
         state, pipeline = new_state(args, cwd, spec) if args.command == "run" else resumed_state(args, host, cwd)
-        workflow = Workflow(
-            herdr, host, state, notify=notify_locally,
-            max_rounds=state.max_rounds, turn_timeout=state.turn_timeout,
-            agents=AgentSettings(state.permission_mode, state.models, state.agent_kinds),
-            pull_request=state.pull_request,
-            ci=CI(state.quality_job) if state.quality_job else None,
-            max_quality_rounds=state.max_quality_rounds, pipeline=pipeline, spec=spec)
-        verdict = workflow.run()
+        verdict = run_workflow(herdr, host, state, pipeline, spec)
     except OrchestratorError as e:
         print(f"error: {e}", file=sys.stderr)
         return EXIT_ERROR
     except KeyboardInterrupt:
-        hint = f"; resume with: {resume_command(state.run_id, target_args(args))}" if state else ""
-        print(f"interrupted; the role agents keep running in herdr{hint}", file=sys.stderr)
+        print(interrupted_note(state, target_args(args)), file=sys.stderr)
         return EXIT_INTERRUPTED
     return finish(verdict, state, pipeline)
+
+
+def run_workflow(herdr: Herdr, host: Host, state: RunState, pipeline: Pipeline, spec: SpecFile | None) -> str:
+    """Drive the run state describes through pipeline, by the settings saved in state, and return its verdict.
+
+    spec is the file a new run --spec run starts from; None for any other run. Raises OrchestratorError and
+    KeyboardInterrupt as Workflow.run does, once it has released the run.
+    """
+    workflow = Workflow(
+        herdr, host, state, notify=notify_locally,
+        max_rounds=state.max_rounds, turn_timeout=state.turn_timeout,
+        agents=AgentSettings(state.permission_mode, state.models, state.agent_kinds),
+        pull_request=state.pull_request,
+        ci=CI(state.quality_job) if state.quality_job else None,
+        max_quality_rounds=state.max_quality_rounds, pipeline=pipeline, spec=spec)
+    return workflow.run()
 
 
 def herdrless_command(args: argparse.Namespace) -> int | None:
@@ -8794,16 +9208,7 @@ def gate_command(base: str, rules: str | None, coverage: str | None, tests: str 
         text = judge_change(os.getcwd(), base, gate_checks(mutation_budget, base_run_budget), rules=rules,
                             coverage=coverage, tests=tests)
         if out:
-            # Written aside and renamed into place, so a failed write leaves no half a quality file.
-            tmp = f"{out}.tmp.{os.getpid()}"
-            try:
-                with open(tmp, "w", encoding="utf-8") as f:
-                    f.write(text)
-                os.replace(tmp, out)
-            except OSError as e:
-                with contextlib.suppress(OSError):
-                    os.remove(tmp)
-                raise OrchestratorError(f"cannot write {out}: {e}") from e
+            replace_local_file(out, text)
     except OrchestratorError as e:
         print(f"error: {e}", file=sys.stderr)
         return EXIT_GATE_UNJUDGED

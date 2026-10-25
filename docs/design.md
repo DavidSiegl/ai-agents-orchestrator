@@ -193,6 +193,22 @@ not changed since `close` read it. `list` and `show` print it, a second `close` 
 `resume` refuses a closed run, `--force` or not, since its worktree and branch may be gone. A closed run that was
 stale is no longer marked `stale` in `list`, and its line offers no `resume` command, which would be refused.
 
+## Draining specs
+
+`drain` is a command of its own, not a workflow. A workflow is the steps of one run, with one verdict loop, and a
+run ends in one pull request; looping over specs is a level above that. Each spec drain starts is an ordinary
+`run --spec` run, built by the same `new_state` and driven by the same `run_workflow`, so it can be listed, shown,
+resumed and closed like any other.
+
+A spec is tied to its run by the `Run:` line in its header, written before the run starts, and not by a field in
+`RunState`. The spec is where the human looks, and the saved state format stays as it is. The line is what lets a
+drain that was interrupted be picked up: the next drain finds the run, takes its ending if it is done, and
+otherwise stops before running anything, since a second run of the same spec would race the first.
+
+Drain stops rather than polls. A spec whose blocker's pull request is open waits for a later drain: merging is
+the human's, and every run starts from `origin`'s base branch, so a dependent spec cannot run until its blocker has
+merged.
+
 ## When the orchestrator needs you
 
 A role's turn ends when it writes its handoff file, not when herdr reports it `idle` or `done`: an agent can

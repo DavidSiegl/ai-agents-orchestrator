@@ -240,6 +240,9 @@ python orchestrator.py run --worktree "add a token-bucket rate limiter"
 # Skip the interview: a spec you already have is the contract, and the Builder starts on it
 python orchestrator.py run --spec docs/specs/rate-limiter.md
 
+# Run every ready spec under .scratch/<slug>/spec.md, one pull request each; see Draining specs
+python orchestrator.py drain --worktree
+
 # With the quality gate after each Builder turn; credentials from ~/.config/ai-agents-orchestrator/ci.env
 python orchestrator.py run --quality-gate AI-Agents-Orchestrator/py-ai-agents-orchestrator-quality "add a token-bucket rate limiter"
 
@@ -268,16 +271,16 @@ uv run python orchestrator.py gate --base main --coverage coverage.xml --out qua
 | `--build-model MODEL` | Model for the Builder. Overrides `--model`. |
 | `--review-model MODEL` | Model for the Reviewer. Overrides `--model`. |
 | `--role-model ROLE=MODEL` | Model for one role of the workflow, by its key, e.g. `tests=sonnet`. Overrides `--model`; repeatable. |
-| `--workflow NAME` | `run` only: the workflow the run goes through: `default`, the run described below, or one of [your own](#your-own-workflows) in `~/.config/ai-agents-orchestrator/workflows/`. `--help` lists the choices; a resumed run keeps its workflow. |
-| `--workflow-file FILE` | `run` only: like `--workflow`, for the workflow file at `FILE`, such as one kept in the project. |
+| `--workflow NAME` | `run` and `drain`: the workflow the run goes through: `default`, the run described below, or one of [your own](#your-own-workflows) in `~/.config/ai-agents-orchestrator/workflows/`. `--help` lists the choices; a resumed run keeps its workflow. |
+| `--workflow-file FILE` | `run` and `drain`: like `--workflow`, for the workflow file at `FILE`, such as one kept in the project. |
 | `--spec FILE` | `run` only: skip the interview. `FILE`, read on this machine (a relative path is from the current directory, not `--cwd`), is copied into the run as the handoff file of the workflow's first step, `spec.md` in `default`, and the run starts at the step after it. The task is then optional: without one it is the spec's `# ` title, or else `FILE`'s name. Needs a workflow whose first step writes the spec, such as `default` or `tdd`, not `quick`. |
 | `--no-pr` | `run` only: leave the change uncommitted and the workspace open instead of opening a pull request. Works outside git. |
-| `--worktree` | `run` only: work in a git worktree of the run's own, `.orchestrator/worktrees/<key>`, checked out from `origin`'s version of the branch the project is on, instead of in the project's checkout, which then need not be clean and stays yours to use. Needs a branch checked out and an `origin`, also with `--no-pr`. See [Worktree runs](#worktree-runs). |
-| `--quality-gate JOB` | After each Builder turn, have this Jenkins job, by its full name with folders, judge the change with `orchestrator.py gate`, and send the findings back to the Builder before the Reviewer. Needs `JENKINS_URL`, `JENKINS_USER` and `JENKINS_TOKEN`, from the environment or `~/.config/ai-agents-orchestrator/ci.env`. On `resume`, turns the gate on for a run started without it; see below. |
+| `--worktree` | `run` and `drain`: work in a git worktree of the run's own, `.orchestrator/worktrees/<key>`, checked out from `origin`'s version of the branch the project is on, instead of in the project's checkout, which then need not be clean and stays yours to use. Needs a branch checked out and an `origin`, also with `--no-pr`. See [Worktree runs](#worktree-runs). |
+| `--quality-gate JOB` | `run` and `drain`: after each Builder turn, have this Jenkins job, by its full name with folders, judge the change with `orchestrator.py gate`, and send the findings back to the Builder before the Reviewer. Needs `JENKINS_URL`, `JENKINS_USER` and `JENKINS_TOKEN`, from the environment or `~/.config/ai-agents-orchestrator/ci.env`. On `resume`, turns the gate on for a run started without it; see below. |
 | `--no-quality-gate` | `resume` only: turn the run's quality gate off for good; see below. |
 | `--max-quality-rounds N` | With the gate: quality builds per review round before the Reviewer gets the change anyway (default 3). Not with `--no-quality-gate`. |
 | `--force` | `resume` only: take over a run that still looks alive. |
-| `--dry-run` | `prune` only: print what would become of each branch, and delete and record nothing. |
+| `--dry-run` | `prune`: print what would become of each branch, and delete and record nothing. `drain`: print the status changes and the specs it would run, in order, and write, run and sweep nothing. |
 
 A run saves its settings. `resume` takes the same flags as `run` except `--no-pr`, `--worktree`,
 `--workflow`, `--workflow-file` and `--spec`, and a flag given to `resume` overrides the saved value; one left out keeps it.
@@ -321,8 +324,11 @@ since, the agent starts a fresh session instead.
 | `0` | Approved, or `FINISHED` for a workflow without a verdict step. |
 | `3` | Changes still requested after the last round, or, for a workflow without a verdict step, `QUALITY_GATE_FAILED`: the quality gate still failed after the last quality round. Either way the pull request is a draft. |
 | `4` | Approved or finished, but the pull request conflicts with its base branch, so it is a draft. |
+| `5` | `drain` only: it ran every spec it could, and the specs left wait on blockers that are not `done`, such as a pull request still open. |
 | `1` | Error. |
 | `130` | Interrupted. |
+
+`drain` exits with the status of the run that stopped it, `0` once no spec is `ready-for-agent`, or `5`.
 
 ## How a run works
 
@@ -427,6 +433,53 @@ branch. A `--worktree` run whose worktree is gone cannot be resumed, unless its 
 `close` removes a failed run's worktree, discarding its changes. A finished `--no-pr` run's worktree holds the
 change, so `close` keeps it and prints its path; remove it by `git worktree remove .orchestrator/worktrees/<key>`
 in the project once you have taken the change.
+
+## Draining specs
+
+`drain [DIR]` works through a directory of specs, `.scratch/` by default, read on this machine like `run --spec`'s
+file. Each `DIR/<slug>/spec.md` is a candidate, and drain runs the ones that are ready, one after another, in slug
+order, each as `run --spec` would, with the flags drain was given. Each run ends in its own pull request. You
+merge the pull requests and run `drain` again, until every spec is cleared.
+
+Drain reads and writes a few lines of the spec's header, the lines before its first `##` heading, and nothing
+else in the file:
+
+```markdown
+# Add a token-bucket rate limiter
+
+Status: ready-for-agent
+Blocked by: retry-policy, http-client/spec.md
+Run: 20261024-231412-d64cd0
+PR: https://github.com/o/r/pull/7
+```
+
+- `Status:` moves from `ready-for-agent` to `in-review` while the run's pull request is open, and to `done` once it
+  has merged. A run that does not approve, conflicts with its base or fails leaves its spec `ready-for-human`,
+  which drain never touches again. A spec with any other status, or none, is left alone.
+- `Blocked by:` lists the specs that must be `done` first, each by its slug or a path ending in `<slug>/spec.md`;
+  `-` or `none` names none. A blocker with no `spec.md`, or blockers in a cycle, stop drain before it runs
+  anything.
+- `Run:` and `PR:` are written by drain: the run it started for the spec, before the run starts, and its pull
+  request.
+
+A drain first asks `gh` about each `in-review` spec's pull request: merged makes it `done`, closed
+`ready-for-human`. A `ready-for-agent` spec with a `Run:` line is one an interrupted drain left; its run, if
+finished, sets the spec's status, and if not, drain stops and says what to do: wait for it, `resume` it, or delete
+the `Run:` line to start the spec over. Then drain sweeps the branches of earlier runs once, and runs each spec whose
+blockers are all `done`. It reads each spec again before choosing the next and before each header edit, so your edits
+to a spec while it runs are kept, but for the `Status:`, `Run:` and `PR:` lines of the spec it is running, which are
+drain's; a spec you set to another status meanwhile is not started; `Blocked by:` is read once, at the start. A run
+another orchestrator takes over with `resume --force` leaves its spec `ready-for-agent` for the next drain to pick
+up.
+
+**It stops, it does not poll.** A spec whose blocker's pull request is still open stays blocked for this drain.
+Once nothing more can start, drain prints the specs left with their blockers and pull requests, and exits `5`; the
+first run that does not end in an approved pull request without conflicts stops it at once. Either way it prints
+what it changed in each spec first. `--dry-run` prints the changes and the run order and leaves everything as it
+is.
+
+Drain does not check that `DIR` is ignored by git. If it is inside the project's checkout and not ignored, the
+header edits dirty the tree, and an in-place run refuses to start on it: ignore `DIR`, or use `--worktree`.
 
 ## Your own workflows
 
