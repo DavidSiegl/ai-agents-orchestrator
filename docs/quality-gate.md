@@ -667,9 +667,12 @@ A snapshot in which gitleaks, by the base's rules, finds a secret or an added co
 pushed, and no build is triggered. Its quality file is `GATE: LEAK`, saying why, with the findings numbered under
 `## Secrets found`: each one's `file:line`, rule, commit and fingerprint, never the secret, which only gitleaks'
 redacted report `leaks-snapshot.json` in the run's directory describes. The Builder gets `QUALITY_FIX_PROMPT` as for
-any other gate, and the round counts toward `--max-quality-rounds`. A finding that is not a secret passes only
-once the human lists it in `.gitleaksignore` on the base branch. The base and publish pushes still fail the run
-on a secret.
+any other gate, and the round counts toward `--max-quality-rounds`; a round that finds the same secrets as the one
+before it, by file and rule, stops the loop early as any repeated failure does. A finding that is not a secret
+passes only once the human lists it as `file:rule:line` (the fingerprint without its commit, which is the round's
+snapshot) in `.gitleaksignore` on the base branch, and only in a run started after that: a run keeps the rules of
+its base. A secret in a commit the snapshot does not add, the run's base or a commit below it that origin lacks,
+fails the run instead: those are the human's commits. So does one in the branch at publish.
 
 ### Run state and resume
 
