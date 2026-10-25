@@ -19,6 +19,10 @@ was done.
 
 ## Open issues
 
+- **`TestGate.test_a_missing_tool_fails_naming_it` fails where shellcheck lives beside git.** `TestGate.setUp`
+  (`tests/test_orchestrator.py`) puts git's own directory on `PATH` after the stubs, so on a machine with
+  `/usr/bin/shellcheck` (agentbox, Debian's package) removing the stub still finds the real one and the gate passes.
+  Seen 2026-10-25 on `main` at `9448612`. Closes with `PATH` holding a directory with only a link to `git`.
 - **An AppImage run without FUSE passes no signal on to the orchestrator.** Under `APPIMAGE_EXTRACT_AND_RUN` the
   AppImage's runtime forks, runs `AppRun` in the child and waits, so the process a caller started is the runtime,
   and `Cli::exec` (`ui/src-tauri/src/lib.rs`) only replaces the child. Raised by the cross-review of desktop-cli
