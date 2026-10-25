@@ -96,8 +96,9 @@ the paper's rules. Each of these is a finding:
   leaves no worse is not a finding, since the gate judges the change. Its base is a function of the base, and each
   base function is the base of one function at most:
   - first, one with the same body, since an unchanged function is that function whatever its name: of its name in
-    its file's base, then of its name in the base of another Python file the change touches, then of any name in its
-    file's base, then elsewhere. So a function moved to another module, renamed or made a method, but otherwise
+    its file's base, then of its name in the base of another Python file the change touches, a file it deletes
+    included, which counts as Python by its `.py` or its `#!` line at the base, then of any name in its file's base,
+    then elsewhere. So a function moved to another module, renamed or made a method, but otherwise
     unchanged, keeps its score, and a new function given its old name is new. Of a function moved unchanged and a
     copy of it, the one that kept the name takes it, and a function moved unchanged into a file the check does not
     judge, such as one under `tests/` or a script with no `.py` whose `#!` line names python, takes its own before

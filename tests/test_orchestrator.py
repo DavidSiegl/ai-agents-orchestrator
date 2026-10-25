@@ -8631,6 +8631,19 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.edit("bin/tool.py", "x += 3\n", "x += 30\n")  # still 20
         self.assertEqual(self.found()[0], [])
 
+    def test_a_function_moved_unchanged_out_of_a_deleted_python_script_keeps_its_base(self):
+        self.commit_file("bin/tool", "#!/usr/bin/env python3\n" + flat("helper", 20))
+        self.git("rm", "--quiet", "bin/tool")
+        self.put("calc.py", self.BASE + "\n\n" + flat("helper", 20))  # an edit, so git sees no rename
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_deleted_script_that_is_not_python_lends_no_base(self):
+        self.commit_file("bin/tool", "#!/bin/sh\n" + flat("helper", 20))
+        self.git("rm", "--quiet", "bin/tool")
+        self.put("calc.py", self.BASE + "\n\n" + flat("helper", 20))  # an edit, so git sees no rename
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`helper`: cognitive complexity 20, a new function; the limit is 15."])
+
     def test_a_function_out_of_tests_is_judged_as_new_as_tests_were_never_held_to_the_limit(self):
         self.commit_file("tests/helpers.py", flat("helper", 20) + "\n\n" + flat("other_helper", 20))
         os.makedirs(os.path.join(self.repo, "lib"))

@@ -315,11 +315,10 @@ was done.
   blocks the surviving-mutants and flaky-tests selection, and one to `/dev/zero` reads without end. The
   cognitive-complexity check skips such paths (`_is_link_or_special`, review round 5 of ticket 06, R5-F1). Found by
   reading the code, not reproduced. Closes with `_changed_python_units` skipping what `_is_link_or_special` names.
-- **A function moved out of a Python script the change deletes is judged as new.** The cognitive-complexity check
-  reads the base of a changed file whose old name has no `.py` only when the file is still Python now
-  (`_base_scores`: `new in working`), so the functions of a deleted `bin/tool` lend no score, and one moved unchanged
-  from it into `lib.py` is reported as new. Closes with the base read whenever its first line is a `#!` naming
-  python, as `_is_python_source` asks of the working tree.
+- **passes-at-base misses a deleted Python script with no `.py`.** `_edits_python_source` (`orchestrator.py`)
+  counts a deleted file as Python source only by its `.py`, so a change that only deletes a `#!` python script
+  outside the tests edits no Python source for it. Found while fixing the cognitive-complexity check's same gap
+  (2026-10-25). Closes with that branch asking `_was_python_source`, which the complexity check now uses.
 - **A deep decorator can crash flaky-tests and surviving-mutants.** `_changed_python_units`, which both select
   through (`_changed_python_tests`, `_changed_python_functions`), writes each decorator of a changed function with
   `ast.unparse(d)`, which recurses as deep as the expression goes, so a function decorated with a deep expression,
@@ -357,6 +356,15 @@ was done.
   files.
 
 ## Fixed
+
+- **A function moved out of a Python script the change deletes is judged as new.** The cognitive-complexity check
+  reads the base of a changed file whose old name has no `.py` only when the file is still Python now
+  (`_base_scores`: `new in working`), so the functions of a deleted `bin/tool` lend no score, and one moved unchanged
+  from it into `lib.py` is reported as new. Closes with the base read whenever its first line is a `#!` naming
+  python, as `_is_python_source` asks of the working tree.
+  Fixed (2026-10-25): `_base_scores` reads an old path's base when `_was_python_source` says the base's blob is
+  Python, by `_holds_python`, the one test of a path and its first line that `_is_python_source` uses for the
+  working tree too.
 
 - **`test-integrity` has no way to accept an expected value the spec changes.** `expected-value-changed` fails the
   gate whenever an assertion's literals change beside code, also when the spec asks for the new output, and unlike

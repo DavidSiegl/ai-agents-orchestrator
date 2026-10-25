@@ -5254,7 +5254,7 @@ def _base_scores(change: GateChange,
     old_paths = {new: old for old, new in change.files if new}
     homes = {path: old_paths.get(path, path) for path in working}
     pool = _BasePool({old: _base_functions(change, old) for old, new in change.files
-                      if old and (new in working or old.endswith(".py"))},
+                      if old and (new in working or _was_python_source(change, old))},
                      {old: working.get(new, []) if new else [] for old, new in change.files if old})
     for same_name, same_file in _BODY_STEPS:
         for path in [*unjudged, *judged]:
@@ -5361,18 +5361,32 @@ def _is_link_or_special(change: GateChange, path: str) -> bool:
 
 
 def _is_python_source(change: GateChange, path: str) -> bool:
-    """Whether the working tree's path is a regular file of Python source: named *.py, or a script whose first line
-    is a #! naming python. False for anything _is_link_or_special names, and for a file that cannot be read."""
+    """Whether the working tree's path is a regular file of Python source, as _holds_python tells it. False for
+    anything _is_link_or_special names, and for a file that cannot be read unless it is named *.py."""
     if _is_link_or_special(change, path):
         return False
-    if path.endswith(".py"):
-        return True
     try:
         with open(os.path.join(change.root, path), "rb") as source:
             first = source.readline(256)
     except OSError:
+        first = b""
+    return _holds_python(path, first)
+
+
+def _was_python_source(change: GateChange, path: str) -> bool:
+    """Whether the change's base holds Python source at path, as _holds_python tells it; False for a path the base
+    holds no file at, or that git cannot read there."""
+    try:
+        blob = _git(change.root, "cat-file", "blob", f"{change.base}:{path}", verbatim=True)
+    except GateError:
         return False
-    return first.startswith(b"#!") and b"python" in first
+    return _holds_python(path, os.fsencode(blob)[:256].split(b"\n", 1)[0])
+
+
+def _holds_python(path: str, first: bytes) -> bool:
+    """Whether a file at path whose first line, or its first 256 bytes, is first holds Python source: the path ends
+    in .py, or first is a #! naming python."""
+    return path.endswith(".py") or (first.startswith(b"#!") and b"python" in first)
 
 
 def _working_functions(change: GateChange, path: str) -> tuple[list[_ScoredFunction] | None, str]:
