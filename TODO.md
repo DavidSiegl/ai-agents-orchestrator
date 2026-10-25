@@ -19,6 +19,15 @@ was done.
 
 ## Open issues
 
+- **An AppImage run without FUSE passes no signal on to the orchestrator.** Under `APPIMAGE_EXTRACT_AND_RUN` the
+  AppImage's runtime forks, runs `AppRun` in the child and waits, so the process a caller started is the runtime,
+  and `Cli::exec` (`ui/src-tauri/src/lib.rs`) only replaces the child. Raised by the cross-review of desktop-cli
+  (F3, 2026-10-25), reproduced with `dist/orchestrator-desktop-linux-x86_64.AppImage serve`: "`kill -TERM <runtime
+  pid>` → both orchestrator processes still running 2 s later, orphaned", so `timeout`, a systemd stop or `kill %1`
+  on an AppImage `run` on a machine without FUSE leaves the orchestrator and its agents running unsupervised.
+  Ctrl-C reaches the whole process group and is not affected; the mounted AppImage was not checked. Closes with
+  `Cli::exec` asking the kernel for a signal when its parent, the runtime, dies (`PR_SET_PDEATHSIG`) when the app
+  runs extracted, checked on a built AppImage, or with a runtime that forwards signals.
 - **An AppImage run without FUSE leaves its extraction in `/tmp`.** Under `APPIMAGE_EXTRACT_AND_RUN` the
   AppImage runtime that linuxdeploy-plugin-appimage bundles extracts into `$TMPDIR/appimage_extracted_<hash>` and
   never removes it. `packaging/build-desktop.sh` sets the variable for the whole Tauri build, so linuxdeploy and

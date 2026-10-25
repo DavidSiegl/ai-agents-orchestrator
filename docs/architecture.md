@@ -223,14 +223,19 @@ layout), with no Python of its own.
   connections only to itself, Tauri's IPC and `http://127.0.0.1`.
 - **CLI.** Started with arguments, `main.rs` runs none of that: before GTK or WebKit start, `lib.rs`'s `cli` builds
   the same orchestrator's command with the arguments appended, and `Cli::exec` replaces the app's process with it,
-  so the terminal, the exit status and the signals are the CLI's; an exec that fails prints why and exits 1. So
-  the AppImage is the CLI too. Windows, which builds no app and no console, has no CLI.
+  so the terminal, the exit status and the signals sent to the app are the CLI's; a user's directory that is gone,
+  or an exec that fails, prints why and exits 1. So the AppImage is the CLI too, but for signals when it runs
+  without FUSE: then the process its caller started is the AppImage's runtime, which passes on none (TODO.md). On
+  macOS, a lone `-psn_` argument, which a Finder launch may pass, opens the window. Windows, which builds no app and
+  no console, has no CLI.
 - **The user's shell.** `Orchestrator::command`, which the sidecar and the CLI are both built from, starts the
   orchestrator in `UserShell`'s environment and directory, not the app's. Only an AppImage makes them differ: its
   `AppRun` points path lists, `PYTHONHOME` and GTK's variables into the bundle and starts the app in
-  `$APPDIR/usr`. `UserShell` drops the bundle's entries and variables (its constants list them) and changes to
-  the directory the AppImage was started from, `OWD`, or `PWD` where an extracted AppImage sets no `OWD`, so the orchestrator, and every process it starts through
-  `child_env`, sees the user's. The app's own process keeps the bundle's, which its GTK needs.
+  `$APPDIR/usr`, and so does an extracted one's `squashfs-root/AppRun`. `UserShell` drops the bundle's entries and
+  variables (its constants list them), naming the bundle by `$APPDIR` and by what that resolves to, and changes to
+  the directory the AppImage was started from, `OWD`, or `PWD` where an extracted AppImage sets no `OWD`, so the
+  orchestrator, and every process it starts through `child_env`, sees the user's. The app's own process keeps the
+  bundle's, which its GTK needs.
 - **Frontend.** `api.ts` types the protocol: `RunRecord` mirrors `run_record`, and `Api` builds the URLs and
   reads `/file`. `hooks.ts`'s `useRunStream` opens the `EventSource` and folds its events into a `RunsState`
   with `runs.ts`'s `applyEvent`. Every opening starts from no runs, since the server sends every run again.
