@@ -50,14 +50,10 @@ was done.
   the pull request only for a spec that was `in-review` when the pass began, so a pull request merged since leaves
   the spec `in-review`, its dependants blocked, until the next drain. Met on 2026-10-25 after resuming a run
   outside drain. Closes with the pull request checked in the same pass once `finished_run_header` gives one.
-- **Two builds on agentbox0 can still run rustc out of memory.** The agent has 8 GiB, no swap and 2 executors,
-  and a push to a new branch starts a branch build before its pull request exists, so two builds of one commit
-  compile the Tauri crates at once (PR-74's first build: rustc SIGKILLed on `gtk`). The UI stage now builds
-  without debug info (`Jenkinsfile`, stage UI), which lowers its peak only. Nothing keeps two builds' cargo
-  steps from running side by side, among them the Package stage's release build, or a quality build during
-  `drain` beside a pull request build. Raised by the
-  cross-review of ci-no-debuginfo (2026-10-25): "the OOM cause is narrowed and left unrecorded". Closes with
-  more memory or swap on the VM, or a lock around the cargo steps that keeps them from running side by side.
+- **Is 3 GB the right memory limit for the agentbox0 Jenkins agent?** All builds on the node share its
+  container's `mem_limit: 3g` (Homelab `jenkins/agentbox0.yaml`), which this repo cannot change; since
+  `ci/cargo-lock.sh` its builds compile Rust one at a time, so the limit now caps one build's peak, not two. Open in
+  `.scratch/ci-cargo-memory/issues/02-agent-container-memory.md`; closes with the Homelab keeping or raising it.
 - **mutmut's clean test run fails on a hypothesis health check, so the gate mutation-tests nothing.** Under the
   gate's mutmut 3.8.0, `TestChangedLines.test_names_each_changed_file_and_exactly_its_added_lines` in
   `tests/test_properties.py` fails with `hypothesis.errors.FailedHealthCheck: ... was called from multiple
@@ -332,6 +328,16 @@ was done.
   files.
 
 ## Fixed
+
+- **Two builds on agentbox0 can still run rustc out of memory.** All builds on the node share its Jenkins agent
+  container's 3 GB (`mem_limit: 3g`, not the VM's 8 GiB), and a push to a new branch starts a branch build before
+  its pull request exists, so two builds of one commit compiled the Tauri crates at once (PR-74's first build:
+  rustc SIGKILLed on `gtk`). Building the UI stage without debug info lowered one build's peak only. Raised by the
+  cross-review of ci-no-debuginfo (2026-10-25): "the OOM cause is narrowed and left unrecorded".
+  Fixed (2026-10-25): the UI stage's `cargo test` and the Package stage's `build-desktop.sh` run under
+  `ci/cargo-lock.sh`, a `flock` on a file outside every workspace that all builds on the node share, and say so
+  when they wait. Chosen over serialising whole builds: Jenkins has neither Lockable Resources nor Throttle
+  Concurrent Builds, and one executor would queue the Python-only stages too, against `QUALITY_TIMEOUT`.
 
 - **`test-integrity` has no way to accept an expected value the spec changes.** `expected-value-changed` fails the
   gate whenever an assertion's literals change beside code, also when the spec asks for the new output, and unlike

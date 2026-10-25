@@ -106,8 +106,9 @@ pipeline {
             when { expression { return env.JUDGED_AT_PR != 'true' } }
             environment {
                 // cargo test's test profile inherits dev. Debug info for the GTK and Tauri crates took enough memory
-                // that rustc was OOM-killed with two builds on the 8 GiB agent. A failing test still prints its
-                // panic's file:line, which comes from core::panic::Location, not from debug info.
+                // that rustc was OOM-killed with two builds on agentbox0, which ci/cargo-lock.sh now keeps apart;
+                // without it one build's peak is lower still. A failing test still prints its panic's file:line,
+                // which comes from core::panic::Location, not from debug info.
                 CARGO_PROFILE_DEV_DEBUG = '0'
             }
             steps {
@@ -120,7 +121,7 @@ pipeline {
                     '''
                 }
                 dir('ui/src-tauri') {
-                    sh 'cargo test --locked'
+                    sh '"$WORKSPACE/ci/cargo-lock.sh" cargo test --locked'
                 }
             }
         }
@@ -187,7 +188,7 @@ pipeline {
             when { expression { return !params.GIT_REF } }
             steps {
                 sh 'packaging/build-binary.sh'
-                sh 'packaging/build-desktop.sh'
+                sh 'ci/cargo-lock.sh packaging/build-desktop.sh'
             }
         }
 
