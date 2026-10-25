@@ -1864,7 +1864,22 @@ class Host:
 
     def pull_request(self, cwd: str, url: str) -> dict:
         """The pull request's state (OPEN, CLOSED or MERGED), headRefOid and closedAt, as gh reports them."""
-        args = ["pr", "view", url, "--json", "state,headRefOid,closedAt"]
+        return self._pr_view(cwd, url, "state,headRefOid,closedAt", lambda pr: (
+            isinstance(pr["state"], str) and re.fullmatch(r"[0-9a-f]{40,64}", pr["headRefOid"])
+            and (pr["closedAt"] is None or isinstance(pr["closedAt"], str))))
+
+    def pull_request_merge(self, cwd: str, url: str) -> dict:
+        """The pull request's state (OPEN, CLOSED or MERGED), isDraft, mergeable (MERGEABLE, CONFLICTING, or UNKNOWN
+        while GitHub has not computed it) and body, as gh reports them. Raises as pull_request does."""
+        return self._pr_view(cwd, url, "state,isDraft,mergeable,body", lambda pr: (
+            isinstance(pr["state"], str) and isinstance(pr["isDraft"], bool)
+            and pr["mergeable"] in ("MERGEABLE", "CONFLICTING", "UNKNOWN") and isinstance(pr["body"], str)))
+
+    def _pr_view(self, cwd: str, url: str, json_fields: str, valid: Callable[[dict], object]) -> dict:
+        """gh pr view's JSON object of json_fields, comma-separated, for the pull request at url, once valid finds it
+        truthy. Raises GhUnusable when gh is missing or logged out, and OrchestratorError when it fails otherwise or
+        prints what valid rejects, or raises KeyError or TypeError for."""
+        args = ["pr", "view", url, "--json", json_fields]
         proc = self.gh_run(cwd, *args)
         if proc.returncode in GH_UNUSABLE_STATUS:
             raise GhUnusable(f"gh {shlex.join(args)} failed with status {proc.returncode}: "
@@ -1872,13 +1887,21 @@ class Host:
         out = self._checked(["gh", *args], proc)
         try:
             pr = json.loads(out)
-            fields_ok = (isinstance(pr["state"], str) and re.fullmatch(r"[0-9a-f]{40,64}", pr["headRefOid"])
-                         and (pr["closedAt"] is None or isinstance(pr["closedAt"], str)))
+            fields_ok = valid(pr)
         except (ValueError, KeyError, TypeError) as e:
             raise OrchestratorError(f"gh pr view {url} printed {out.strip()!r}: {e}") from e
         if not fields_ok:
             raise OrchestratorError(f"gh pr view {url} printed {out.strip()!r}, not a pull request's state")
         return pr
+
+    def edit_pr_body(self, cwd: str, url: str, body: str) -> None:
+        """Make body the description of the pull request at url, with gh."""
+        argv = ["gh", "pr", "edit", url, "--body-file", "-"]
+        self.check(["sh", "-c", IN_DIR, "_", cwd, *argv], stdin=body, timeout=NETWORK_TIMEOUT)
+
+    def mark_pr_ready(self, cwd: str, url: str) -> None:
+        """Take the pull request at url out of draft, with gh."""
+        self.check(["sh", "-c", IN_DIR, "_", cwd, "gh", "pr", "ready", url], timeout=NETWORK_TIMEOUT)
 
     def create_pr(self, cwd: str, base: str, head: str, title: str, body: str, draft: bool) -> str:
         """Open a pull request with gh and return its URL."""
@@ -2228,7 +2251,8 @@ class RunState:
     branch: str | None = None
     pr_url: str | None = None
     verdict: str | None = None
-    # The files that conflicted with the base branch when the pull request was opened, as a draft.
+    # The files that conflicted with the base branch when the pull request was opened, as a draft; empty again once
+    # refresh found the pull request merging cleanly, merged or closed (refresh_conflict).
     conflicts: list[str] = field(default_factory=list)
     error: str | None = None
     # Per role: the agent's name, its pane, the harness it runs in (kind) and, once herdr reports it,
@@ -5909,17 +5933,31 @@ def provenance(state: "RunState", quality: GateEvidence) -> list[tuple[str, str]
     return trailers
 
 
+def conflict_warning(base_branch: str | None, conflicts: list[str]) -> str:
+    """The paragraph that opens the body of a pull request opened over conflicts with base_branch in the files
+    conflicts, which must not be empty; without_conflict_warning takes it out again."""
+    files = "\n".join(f"> - `{f}`" for f in conflicts)
+    return (f"> [!WARNING]\n> This branch conflicts with `{base_branch}`, so this is a draft. "
+            f"Merge `{base_branch}` into it and resolve the conflicts in:\n{files}")
+
+
+def without_conflict_warning(body: str, base_branch: str | None, conflicts: list[str]) -> str:
+    """body with its first conflict_warning paragraph for base_branch and conflicts removed, and the blank line after
+    it, or before it when it ends the body; body unchanged when it has no such paragraph. Its lines may end in \r\n,
+    as GitHub's editor leaves them, and the paragraph's own lines must be as conflict_warning wrote them."""
+    block = r"\r?\n".join(re.escape(line) for line in conflict_warning(base_branch, conflicts).split("\n"))
+    paragraph = (rf"(?:\A|(?<=\n\n)|(?<=\n\r\n)){block}(?:\r?\n\r?\n|\r?\n?\Z)"
+                 rf"|\r?\n\r?\n{block}(?=\r?\n?\Z)")
+    return re.sub(paragraph, "", body, count=1)
+
+
 def pr_body(state: "RunState", spec: str, report: str, review: str, quality: GateEvidence) -> str:
     """The pull request's body; quality is what the gate said of the change, as provenance takes it."""
     approved = state.verdict in SUCCEEDED
     head = f"Opened by ai-agents-orchestrator run `{state.run_id}`. {verdict_line(state)}"
     trailers = "\n".join(["| Commit trailer | Value |", "| --- | --- |",
                           *(f"| {key} | `{said}` |" for key, said in provenance(state, quality))])
-    warning = []
-    if state.conflicts:
-        files = "\n".join(f"> - `{f}`" for f in state.conflicts)
-        warning = [f"> [!WARNING]\n> This branch conflicts with `{state.base_branch}`, so this is a draft. "
-                   f"Merge `{state.base_branch}` into it and resolve the conflicts in:\n{files}"]
+    warning = [conflict_warning(state.base_branch, state.conflicts)] if state.conflicts else []
     note, section = [], []
     if quality.unjudged:
         when = ("after its last analysis, and the Builder changed the code since, so nothing judged the final change"
@@ -7886,8 +7924,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         description=f"Run each DIR/<slug>/spec.md whose header says {SPEC_READY} and whose blockers are "
                     f"{SPEC_DONE}, one after another, as run --spec runs it, and record each in the spec's header: "
                     f"{SPEC_IN_REVIEW} with its pull request, or {SPEC_FOR_HUMAN}, which stops the drain. First "
-                    f"it marks {SPEC_DONE} each spec whose pull request has merged. Exits 0 once no spec is "
-                    f"{SPEC_READY}, and {EXIT_WAITING} when the ones left have blockers that are not {SPEC_DONE}.")
+                    f"it marks {SPEC_DONE} each spec whose pull request has merged, and refreshes the runs of "
+                    f"{SPEC_IN_REVIEW} and {SPEC_FOR_HUMAN} specs as the refresh command does, moving a "
+                    f"{SPEC_FOR_HUMAN} spec whose approved pull request no longer conflicts to {SPEC_IN_REVIEW}. "
+                    f"Exits 0 once no spec is {SPEC_READY}, and {EXIT_WAITING} when the ones left have blockers that are not {SPEC_DONE}.")
     drain.add_argument("dir", nargs="?", default=DRAIN_DIR, metavar="DIR",
                        help=f"the directory of specs, on this machine; default {DRAIN_DIR}")
     drain.add_argument("--dry-run", action="store_true",
@@ -7906,6 +7946,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                     "branch, unless that has commits beyond the run's base. A finished run keeps its worktree; "
                     "an in-place run keeps its checkout and branch. A running run is refused.")
     close.add_argument("run_ref", metavar="RUN", help=RUN_REF_HELP)
+
+    refresh = sub.add_parser(
+        "refresh", parents=[target], help="clear a resolved conflict from a run's pull request",
+        description=f"For a finished run whose pull request was opened as a draft over conflicts with its base, ask "
+                    f"gh whether it merges cleanly now. If it does, remove the conflict warning from its "
+                    f"description, keeping every other edit, mark it ready for review if the run approved or "
+                    f"finished, and forget the conflicts in the run's state; a pull request merged or closed only "
+                    f"has its run's conflicts forgotten. Without RUN, every finished run with a pull request and "
+                    f"conflicts. Prints a line per run. Exit status 0 when each conflict is cleared or forgotten, "
+                    f"{EXIT_WAITING} when a pull request still conflicts or GitHub has not computed whether it does.")
+    refresh.add_argument("run_ref", nargs="?", metavar="RUN", help=f"{RUN_REF_HELP}; default: every such run")
 
     workflows = sub.add_parser(
         "workflows", help="list the workflows, or print one as a workflow file",
@@ -8643,10 +8694,10 @@ def deletion(dry_run: bool) -> str:
     return "would be deleted" if dry_run else BRANCH_DELETED
 
 
-def record_in_state(host: Host, path: str, saved: dict, key: str, value: str, meanwhile: str) -> None:
-    """Add key to the run's state.json, unless the run has saved since it was read as saved.
+def record_in_state(host: Host, path: str, saved: dict, key: str, recorded: object, meanwhile: str) -> None:
+    """Set key to recorded, as JSON, in the run's state.json, unless the run has saved since it was read as saved.
 
-    For what prune and close write about a run they do not drive. The file keeps its modification time,
+    For what prune, close and refresh write about a run they do not drive. The file keeps its modification time,
     which is the run's heartbeat: a stale run must not look live.
     """
     text = host.read(path)
@@ -8656,7 +8707,7 @@ def record_in_state(host: Host, path: str, saved: dict, key: str, value: str, me
         raise OrchestratorError(f"corrupt {path}: {e}") from e
     if not unchanged:
         raise OrchestratorError(f"{path} changed while {meanwhile}; {key} is not recorded")
-    host.write(path, json.dumps({**saved, key: value}) + "\n", keep_mtime=True)
+    host.write(path, json.dumps({**saved, key: recorded}) + "\n", keep_mtime=True)
 
 
 def print_pruned(pruned: list[PrunedRun]) -> None:
@@ -8764,14 +8815,111 @@ def discard_run_branch(host: Host, cwd: str, state: RunState) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Refreshing a pull request opened over conflicts
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ConflictCheck:
+    """What gh says now of the pull request a run opened over conflicts with its base (has_conflict), and so what
+    refresh_conflict does about it."""
+    run_id: str
+    url: str
+    pr_state: str  # OPEN, CLOSED or MERGED
+    # MERGEABLE, CONFLICTING, or UNKNOWN while GitHub has not computed it; it decides nothing for a pull request
+    # that is not OPEN.
+    mergeable: str
+    # The pull request's body with the run's conflict_warning removed; None when it is not OPEN and MERGEABLE, or
+    # has no such warning left to remove.
+    body: str | None
+    # True when clearing the conflict takes the pull request out of draft: it is OPEN, MERGEABLE and a draft, and the
+    # run's verdict is one of SUCCEEDED.
+    ready: bool
+
+    @property
+    def clears(self) -> bool:
+        """Whether the run's conflicts are forgotten: its pull request merges cleanly, or is merged or closed."""
+        return self.pr_state != "OPEN" or self.mergeable == "MERGEABLE"
+
+    @property
+    def line(self) -> str:
+        """What refresh prints for the run."""
+        if self.pr_state != "OPEN":
+            return f"{self.run_id}: {self.pr_state.lower()}, conflict forgotten"
+        if self.mergeable == "MERGEABLE":
+            return f"{self.run_id}: conflict cleared{', ready for review' if self.ready else ''}  {self.url}"
+        if self.mergeable == "CONFLICTING":
+            return f"{self.run_id}: still conflicts  {self.url}"
+        return f"{self.run_id}: mergeability not known yet, try again  {self.url}"
+
+
+def has_conflict(saved: dict) -> bool:
+    """Whether the run saved as saved is done, with a pull request it opened over conflicts it still records."""
+    return saved.get("phase") == DONE and bool(saved.get("pr_url")) and bool(saved.get("conflicts"))
+
+
+def refresh_conflict(host: Host, cwd: str, saved: dict, dry_run: bool = False) -> ConflictCheck:
+    """Ask gh about the pull request of the run saved as saved, which has_conflict, and, unless dry_run, act on what
+    it says: for one that merges cleanly now, remove the conflict warning from its body, every other edit to the
+    body kept, take it out of draft if the run succeeded, and record no conflicts in the run's state; for one merged
+    or closed, only that record. One that still conflicts, or whose mergeability GitHub has not computed yet, is left
+    as it is. Returns what gh said, and so what was done.
+
+    cwd is the project, where gh runs and the run's state is. Raises OrchestratorError, naming the run, when gh
+    fails or the state changed since it was read as saved (record_in_state).
+    """
+    run_id, url = saved["run_id"], saved["pr_url"]
+    try:
+        pr = host.pull_request_merge(cwd, url)
+        clean = pr["state"] == "OPEN" and pr["mergeable"] == "MERGEABLE"
+        body = without_conflict_warning(pr["body"], saved.get("base_branch"), saved["conflicts"]) if clean else None
+        check = ConflictCheck(run_id, url, pr["state"], pr["mergeable"], body if body != pr["body"] else None,
+                              clean and pr["isDraft"] and saved.get("verdict") in SUCCEEDED)
+        if dry_run or not check.clears:
+            return check
+        if check.body is not None:
+            host.edit_pr_body(cwd, url, check.body)
+        if check.ready:
+            host.mark_pr_ready(cwd, url)
+        record_in_state(host, f"{cwd}/{RUNS_DIR}/{run_id}/state.json", saved, "conflicts", [],
+                        "its pull request was refreshed")
+    except OrchestratorError as e:
+        raise OrchestratorError(f"run {run_id}: {e}") from e
+    return check
+
+
+def refresh_command(host: Host, cwd: str, ref: str | None) -> int:
+    """Refresh the run ref names (find_run), or with ref None every run in cwd that has_conflict, in run id order,
+    printing a line each (ConflictCheck.line). Returns 0 when each conflict was forgotten, or there was none to
+    refresh, and EXIT_WAITING when any pull request still conflicts or is not known to merge yet. Raises
+    OrchestratorError for a ref that names no run, or one that is not done, and as refresh_conflict does."""
+    states = host.run_states(cwd)
+    runs = [saved for _, saved in states]
+    if ref is not None:
+        _, saved = find_run(states, ref, cwd)
+        if saved.get("phase") != DONE:
+            raise OrchestratorError(f"run {saved['run_id']} is not done; refresh only looks at a finished run's "
+                                    f"pull request")
+        if not has_conflict(saved):
+            print(f"{saved['run_id']}: no conflict to clear")
+            return 0
+        runs = [saved]
+    waiting = False
+    for saved in sorted((s for s in runs if has_conflict(s)), key=lambda s: s["run_id"]):
+        check = refresh_conflict(host, cwd, saved)
+        print(check.line)
+        waiting = waiting or not check.clears
+    return EXIT_WAITING if waiting else 0
+
+
+# ---------------------------------------------------------------------------
 # Draining specs
 # ---------------------------------------------------------------------------
 
 # Where drain looks for specs when given no DIR, relative to the current directory.
 DRAIN_DIR = ".scratch"
 # The values of a spec's Status: line that drain acts on. A spec moves from SPEC_READY to SPEC_IN_REVIEW, its pull
-# request open, to SPEC_DONE, merged; or to SPEC_FOR_HUMAN, which drain never leaves. Drain leaves a spec with any
-# other value, or none, alone.
+# request open, to SPEC_DONE, merged; or to SPEC_FOR_HUMAN, which drain leaves only for SPEC_IN_REVIEW, once a
+# succeeded run's conflict is cleared (refreshed_headers). Drain leaves a spec with any other value, or none, alone.
 SPEC_READY = "ready-for-agent"
 SPEC_IN_REVIEW = "in-review"
 SPEC_DONE = "done"
@@ -8985,28 +9133,59 @@ def blocker_cycle(blockers: dict[str, list[str]]) -> list[str] | None:
 
 
 def refreshed_headers(specs: list[QueuedSpec], host: Host, cwd: str, target: list[str],
-                      local_host: str, pid_alive) -> list[tuple[QueuedSpec, dict[str, str]]]:
+                      local_host: str, pid_alive, dry_run: bool = False) -> list[tuple[QueuedSpec, dict[str, str]]]:
     """The header lines to set, by spec, for what has become of the pull requests and runs that earlier drains left
-    behind: an SPEC_IN_REVIEW spec's pull request, now merged or closed, and the run on a SPEC_READY spec's Run:
-    line, which an interrupted drain leaves (finished_run_header).
+    behind: an SPEC_IN_REVIEW spec's pull request, now merged or closed; a SPEC_FOR_HUMAN spec's run, whose conflict
+    this refreshes (refresh_conflict) and which, open with the conflict cleared and succeeded, makes it
+    SPEC_IN_REVIEW; and the run on a SPEC_READY spec's Run: line, which an interrupted drain leaves
+    (finished_run_header). It refreshes an SPEC_IN_REVIEW spec's run too, and logs what refresh_conflict did; with
+    dry_run, it does nothing of that, and gives the header lines as though it had.
 
     cwd is the project, where gh asks about pull requests and the runs are; target is the --machine and --cwd flags
-    as given, for a resume command. Raises OrchestratorError as Host.pull_request and finished_run_header do.
+    as given, for a resume command. Raises OrchestratorError as Host.pull_request, refresh_conflict and
+    finished_run_header do.
     """
-    runs = None
+    # Read once, and only when a spec's run is to be looked at.
+    statuses = (SPEC_READY, SPEC_IN_REVIEW, SPEC_FOR_HUMAN)
+    runs = host.run_states(cwd) if any(spec.run and spec.status in statuses for spec in specs) else []
     out = []
     for spec in specs:
-        if spec.status == SPEC_IN_REVIEW and spec.pr:
-            pr_state = host.pull_request(cwd, spec.pr)["state"]
-            if pr_state == "MERGED":
-                out.append((spec, {STATUS_KEY: SPEC_DONE}))
-            elif pr_state == "CLOSED":
-                out.append((spec, {STATUS_KEY: SPEC_FOR_HUMAN}))
+        if spec.status in (SPEC_IN_REVIEW, SPEC_FOR_HUMAN) and (entries := conflict_header(spec, runs, host, cwd,
+                                                                                           dry_run)):
+            out.append((spec, entries))
+        if spec.status == SPEC_IN_REVIEW and spec.pr and (entries := pull_request_header(spec.pr, host, cwd)):
+            out.append((spec, entries))
         elif spec.status == SPEC_READY and (run_id := spec.run):
-            if runs is None:
-                runs = host.run_states(cwd)
             out.append((spec, finished_run_header(spec, run_id, runs, cwd, target, local_host, pid_alive)))
     return out
+
+
+def conflict_header(spec: QueuedSpec, runs: list[tuple[int, dict]], host: Host, cwd: str,
+                    dry_run: bool) -> dict[str, str] | None:
+    """Refresh the run on the spec's Run: line, if it has_conflict, as refreshed_headers says, and return the header
+    lines that sets: SPEC_IN_REVIEW and the pull request for a SPEC_FOR_HUMAN spec whose succeeded run's pull request
+    is open and no longer conflicts; None otherwise, and for a run not among runs, Host.run_states's."""
+    saved = next((s for _, s in runs if s.get("run_id") == spec.run), None)
+    if saved is None or not has_conflict(saved):
+        return None
+    check = refresh_conflict(host, cwd, saved, dry_run)
+    if not dry_run:
+        log(check.line)
+    cleared_open = check.pr_state == "OPEN" and check.clears
+    if spec.status == SPEC_FOR_HUMAN and cleared_open and saved.get("verdict") in SUCCEEDED:
+        return {STATUS_KEY: SPEC_IN_REVIEW, PR_KEY: check.url}
+    return None
+
+
+def pull_request_header(url: str, host: Host, cwd: str) -> dict[str, str] | None:
+    """The header lines to set for an SPEC_IN_REVIEW spec whose pull request is at url: SPEC_DONE once it is merged,
+    SPEC_FOR_HUMAN once it is closed; None while it is open. Raises OrchestratorError as Host.pull_request does."""
+    pr_state = host.pull_request(cwd, url)["state"]
+    if pr_state == "MERGED":
+        return {STATUS_KEY: SPEC_DONE}
+    if pr_state == "CLOSED":
+        return {STATUS_KEY: SPEC_FOR_HUMAN}
+    return None
 
 
 def finished_run_header(spec: QueuedSpec, run_id: str, runs: list[tuple[int, dict]], cwd: str, target: list[str],
@@ -9065,7 +9244,8 @@ def drain_command(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str) 
     """
     seeded_start(load_workflow_file(args.workflow_file) if args.workflow_file else named_workflow(args.workflow))
     specs = read_queue(args.dir)
-    for spec, entries in refreshed_headers(specs, host, cwd, target_args(args), socket.gethostname(), pid_alive):
+    for spec, entries in refreshed_headers(specs, host, cwd, target_args(args), socket.gethostname(), pid_alive,
+                                           args.dry_run):
         spec.update(entries, write=not args.dry_run)
     by_slug = {spec.slug: spec for spec in specs}
     if args.dry_run:
@@ -9196,6 +9376,8 @@ def main(argv: list[str]) -> int:
             return 0
         if args.command == "drain":
             return drain_command(args, herdr, host, cwd)
+        if args.command == "refresh":
+            return refresh_command(host, cwd, args.run_ref)
         spec = read_spec_file(args.spec) if args.command == "run" and args.spec is not None else None
         # Only a run that opens a pull request: a --no-pr run's project may have no gh.
         if args.command == "run" and not args.no_pr:

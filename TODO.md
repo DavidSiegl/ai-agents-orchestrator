@@ -60,13 +60,13 @@ was done.
   never been built before the first release with it. Closes with a macOS build of pull requests that touch
   `packaging/` or `ui/`, or a decision that a rerun after the release is enough.
 
-- **A pull request opened over a conflict stays a draft with its warning after the conflict is resolved.** When
-  `Host.merge_upstream` finds conflicts with the base branch, `pr_body` opens the body with a `[!WARNING]` naming
-  the conflicting files and `create_pr` opens it as a draft; nothing ever edits the body or marks it ready, and
-  `RunState.conflicts` keeps the files. So once someone merges the base in and pushes, the pull request still says
-  it conflicts and stays a draft until a human edits it by hand. Met on PR #61 (2026-10-24): resolved and pushed,
-  it still showed the warning and the draft. Closes when the orchestrator, or a command of its, notices that the
-  head merges cleanly and drops the warning and the conflict-only draft.
+- **A spec left `ready-for-human` by a conflict stays there when `refresh` clears the conflict before a drain does.**
+  drain moves such a spec to `in-review` only when its own refresh clears the run's conflict (`refreshed_headers`);
+  a run cleared by `orchestrator.py refresh` beforehand has no conflicts left, so drain cannot tell the spec held
+  back only by its conflict from one the human set `ready-for-human`, and leaves it, with an open pull request
+  ready for review that no drain marks `done` once merged. Kept so that drain never overrides a status the human
+  set. Raised while building the refresh command (2026-10-25). Closes with the run recording that a refresh cleared
+  its conflict, which drain then reads, or with refresh moving the spec itself.
 - **Proofs run after the last round's review too.** No Builder turn follows to read them; only the draft pull
   request's review shows them, and each may take `PROOF_TIMEOUT`. Kept: a demonstrated defect is what the human
   most needs to see in a draft. Raised by the same review.
@@ -312,6 +312,21 @@ was done.
 
 ## Fixed
 
+- **A pull request opened over a conflict stays a draft with its warning after the conflict is resolved.** When
+  `Host.merge_upstream` finds conflicts with the base branch, `pr_body` opens the body with a `[!WARNING]` naming
+  the conflicting files and `create_pr` opens it as a draft; nothing ever edits the body or marks it ready, and
+  `RunState.conflicts` keeps the files. So once someone merges the base in and pushes, the pull request still says
+  it conflicts and stays a draft until a human edits it by hand. Met on PR #61 (2026-10-24): resolved and pushed,
+  it still showed the warning and the draft. Closes when the orchestrator, or a command of its, notices that the
+  head merges cleanly and drops the warning and the conflict-only draft.
+  Fixed (2026-10-25): `orchestrator.py refresh [RUN]` asks gh (`Host.pull_request_merge`) about each done run's pull
+  request with conflicts, or the one named. One that is open and `MERGEABLE` loses the `conflict_warning` paragraph
+  `pr_body` wrote (`without_conflict_warning`; the rest of the body, human edits included, stays, and a body
+  without it is not edited), is marked ready (`gh pr ready`) if it is a draft and the verdict is in `SUCCEEDED`, and
+  its run's `RunState.conflicts` is emptied; one merged or closed only has the conflicts emptied; one `CONFLICTING`
+  or `UNKNOWN` is left, and refresh exits `EXIT_WAITING`. drain refreshes the runs of `in-review` and
+  `ready-for-human` specs in `refreshed_headers`, and moves a `ready-for-human` spec whose succeeded run it cleared
+  to `in-review`. `show` and `finish` read `RunState.conflicts`, so a cleared run is no longer called a draft.
 - **drain models a spec deleted while it runs only in its status.** A spec that cannot be read again is
   `QueuedSpec.unreadable`, which makes `status` None, but `run`, `pr`, `change_line` and the header writes do not
   know it: the running spec deleted mid-run stops the drain at its post-run `update`; a deleted `ready-for-agent`
