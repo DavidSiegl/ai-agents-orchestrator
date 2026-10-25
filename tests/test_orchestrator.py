@@ -107,7 +107,9 @@ class FakeHost(Host):
     - `ancestors`: (commit, of) pairs where commit is an ancestor of of.
     - `ahead`: by branch, the commits it has beyond the commit rev-list --count compares it to.
     - `missing_commits`: commits this clone lacks.
-    - `pull_requests`: what `gh pr view` prints, by URL: a dict, or a completed process for a failure.
+    - `pull_requests`: what `gh pr view` prints, by URL: a dict, or a completed process for a failure. Both of
+      Host's views print the whole dict.
+    - `pr_edits`: each pull request edit refresh made, ("body", url, body) or ("ready", url), in order.
     - `remove_error`: the stderr of a failing `git worktree remove`.
 
     Each snapshot keeps the changed files' text in `trees`, which lock, locked_changes and restore play the locked
@@ -149,6 +151,7 @@ class FakeHost(Host):
         self.ahead = {}
         self.missing_commits = set()
         self.pull_requests = {}
+        self.pr_edits = []
         self.remove_error = None
         self.gh_calls = []
         self.mtime_kept = []  # every path written with keep_mtime
@@ -375,7 +378,7 @@ class FakeHost(Host):
     def gh_run(self, cwd, *args):
         self.gh_calls.append(args)
         match args:
-            case ("pr", "view", url, "--json", "state,headRefOid,closedAt"):
+            case ("pr", "view", url, "--json", "state,headRefOid,closedAt" | "state,isDraft,mergeable,body"):
                 pr = self.pull_requests[url]
                 return pr if isinstance(pr, subprocess.CompletedProcess) else completed(json.dumps(pr))
         raise AssertionError(f"FakeHost got an unscripted gh command: {args}")
@@ -383,6 +386,12 @@ class FakeHost(Host):
     def create_pr(self, cwd, base, head, title, body, draft):
         self.prs.append({"base": base, "head": head, "title": title, "body": body, "draft": draft})
         return "https://github.com/o/r/pull/7"
+
+    def edit_pr_body(self, cwd, url, body):
+        self.pr_edits.append(("body", url, body))
+
+    def mark_pr_ready(self, cwd, url):
+        self.pr_edits.append(("ready", url))
 
 
 class FakeHerdr:
@@ -1126,6 +1135,34 @@ class TestPullRequestText(unittest.TestCase):
         self.assertEqual(body.split("\n\n", 1)[0],
                          "> [!WARNING]\n> This branch conflicts with `main`, so this is a draft. "
                          "Merge `main` into it and resolve the conflicts in:\n> - `a.py`\n> - `docs/b.md`")
+
+    def test_the_conflict_warning_is_removed_and_nothing_else(self):
+        warning = orchestrator.conflict_warning("main", ["a.py", "docs/b.md"])
+        cases = [
+            (f"{warning}\n\nOpened by run r.\n", "Opened by run r.\n"),
+            (f"A note.\n\n{warning}\n\nOpened by run r.\n", "A note.\n\nOpened by run r.\n"),
+            (f"Opened by run r.\n\n{warning}\n", "Opened by run r.\n"),
+            (f"{warning}\n\nOpened by run r.\n".replace("\n", "\r\n"), "Opened by run r.\r\n"),
+            (warning, ""),
+            ("Opened by run r.\n", "Opened by run r.\n"),
+            # Not the run's own warning: another base, other files, or edited.
+            (f"{orchestrator.conflict_warning('dev', ['a.py', 'docs/b.md'])}\n\nx", None),
+            (f"{orchestrator.conflict_warning('main', ['a.py'])}\n\nx", None),
+            (f"{warning} Fixed it.\n\nx", None),
+            (f"Text{warning}\n\nx", None),
+        ]
+        for body, without in cases:
+            with self.subTest(body=body):
+                self.assertEqual(orchestrator.without_conflict_warning(body, "main", ["a.py", "docs/b.md"]),
+                                 body if without is None else without)
+
+    def test_the_pull_request_body_without_its_warning_is_the_body_without_conflicts(self):
+        fields = {"verdict": APPROVE, "round": 1, "base_branch": "main"}
+        conflicted = RunState("r", "t", "/proj", conflicts=["a.py"], **fields)
+        clean = RunState("r", "t", "/proj", **fields)
+        body = pr_body(conflicted, "spec", "r", "VERDICT: APPROVE", orchestrator.GateEvidence())
+        self.assertEqual(orchestrator.without_conflict_warning(body, "main", ["a.py"]),
+                         pr_body(clean, "spec", "r", "VERDICT: APPROVE", orchestrator.GateEvidence()))
 
     def test_no_conflicts_no_warning(self):
         state = RunState("r", "t", "/proj", verdict=APPROVE, round=1, base_branch="main")
@@ -12856,6 +12893,60 @@ class TestDrain(unittest.TestCase):
                 self.assertEqual(status, 0)
                 self.assertIn(f"a: ready-for-agent -> {spec_after}", out)
 
+    def conflicted_spec(self, status="ready-for-human", verdict=APPROVE, **pr):
+        """Spec a, of status, whose run with verdict opened PR_A over a conflict in x.py, and what gh says of PR_A:
+        OPEN, a draft and MERGEABLE unless pr says otherwise, its body the warning and a line."""
+        run_id = "20261024-100000-aaaaaa"
+        self.spec("a", drain_spec_text("First", status, f"Run: {run_id}", f"PR: {PR_A}"))
+        self.saved_run("a", run_id, 10**4, phase="done", verdict=verdict, pr_url=PR_A, base_branch="main",
+                       conflicts=["x.py"])
+        body = f"{orchestrator.conflict_warning('main', ['x.py'])}\n\nOpened by run {run_id}.\n"
+        self.host.pull_requests[PR_A] = {"state": "OPEN", "isDraft": True, "mergeable": "MERGEABLE", "body": body,
+                                         "headRefOid": "a" * 40, "closedAt": None, **pr}
+        return run_id
+
+    def run_conflicts(self, run_id):
+        return json.loads(self.host.files[f"/proj/.orchestrator/runs/{run_id}/state.json"])["conflicts"]
+
+    def test_a_spec_for_the_human_only_for_its_conflict_goes_to_review_once_refresh_clears_it(self):
+        run_id = self.conflicted_spec()
+        status, out, err = self.drain()
+        self.assertEqual(status, 0)
+        self.assertEqual(self.header("a"), ("in-review", run_id, PR_A))
+        self.assertIn(f"a: ready-for-human -> in-review  {PR_A}\n", out)
+        self.assertIn(f"{run_id}: conflict cleared, ready for review  {PR_A}\n", err)
+        self.assertEqual(self.host.pr_edits, [("body", PR_A, f"Opened by run {run_id}.\n"), ("ready", PR_A)])
+        self.assertEqual(self.run_conflicts(run_id), [])
+
+    def test_a_spec_for_the_human_stays_when_its_run_did_not_succeed_or_still_conflicts(self):
+        for verdict, pr, edits in ((CHANGES_REQUESTED, {}, ["body"]), (APPROVE, {"mergeable": "CONFLICTING"}, []),
+                                   (APPROVE, {"state": "CLOSED"}, [])):
+            with self.subTest(verdict=verdict, pr=pr):
+                self.setUp()
+                run_id = self.conflicted_spec(verdict=verdict, **pr)
+                status, out, _ = self.drain()
+                self.assertEqual(status, 0)
+                self.assertEqual(self.header("a"), ("ready-for-human", run_id, PR_A))
+                self.assertNotIn("a: ", out)
+                self.assertEqual([e[0] for e in self.host.pr_edits], edits)
+
+    def test_an_in_review_specs_run_is_refreshed_too(self):
+        run_id = self.conflicted_spec("in-review")
+        status, out, _ = self.drain()
+        self.assertEqual(status, 0)
+        self.assertEqual(self.header("a"), ("in-review", run_id, PR_A))
+        self.assertEqual(self.run_conflicts(run_id), [])
+        self.assertEqual(out, "all specs cleared\n")
+
+    def test_a_dry_run_shows_the_move_and_refreshes_nothing(self):
+        run_id = self.conflicted_spec()
+        before = self.text("a")
+        status, out, err = self.drain(argv=["--dry-run"])
+        self.assertEqual(status, 0)
+        self.assertIn(f"a: ready-for-human -> in-review  {PR_A}\n", out)
+        self.assertNotIn("conflict cleared", err)
+        self.assertEqual((self.text("a"), self.host.pr_edits, self.run_conflicts(run_id)), (before, [], ["x.py"]))
+
     def test_an_unfinished_run_on_the_run_line_stops_the_drain_before_any_run(self):
         run_id = "20261024-100000-aaaaaa"
         stale = HEARTBEAT_SECONDS + STALE_SECONDS
@@ -13419,6 +13510,40 @@ class TestHostPullRequest(unittest.TestCase):
         with self.assertRaisesRegex(OrchestratorError, "PR #7 is closed at 'yesterday', which is not a time"):
             orchestrator.pull_request_pending(pr, "7", NOW)
 
+    def merge_view(self, proc):
+        run = MagicMock(return_value=proc)
+        pr = Host(run=run).pull_request_merge("/my proj", self.URL)
+        self.assertEqual(run.call_args.args[0], ["sh", "-c", orchestrator.IN_DIR, "_", "/my proj", "gh", "pr", "view",
+                                                 self.URL, "--json", "state,isDraft,mergeable,body"])
+        return pr
+
+    def test_merge_view(self):
+        pr = {"state": "OPEN", "isDraft": True, "mergeable": "MERGEABLE", "body": "text"}
+        self.assertEqual(self.merge_view(completed(json.dumps(pr))), pr)
+        for bad in ({**pr, "mergeable": "BLOCKED"}, {**pr, "isDraft": "yes"}, {**pr, "body": None},
+                    {"state": "OPEN"}):
+            with self.subTest(bad), self.assertRaisesRegex(OrchestratorError, f"gh pr view {self.URL} printed"):
+                self.merge_view(completed(json.dumps(bad)))
+        with self.assertRaises(orchestrator.GhUnusable):
+            self.merge_view(completed(stderr="gh auth login\n", returncode=4))
+
+    def test_edit_body_and_ready_run_gh_in_the_project(self):
+        run = MagicMock(return_value=completed())
+        host = Host("remote-host", run=run)
+        host.edit_pr_body("/proj", self.URL, "new body")
+        edit = run.call_args
+        host.mark_pr_ready("/proj", self.URL)
+        ready = run.call_args
+        self.assertTrue(edit.args[0][4].endswith(f"_ /proj gh pr edit {self.URL} --body-file -"), edit.args[0])
+        self.assertEqual(edit.kwargs["input"], "new body")
+        self.assertTrue(ready.args[0][4].endswith(f"_ /proj gh pr ready {self.URL}"), ready.args[0])
+        self.assertEqual({edit.kwargs["timeout"], ready.kwargs["timeout"]}, {orchestrator.NETWORK_TIMEOUT})
+
+    def test_a_failed_edit_raises(self):
+        run = MagicMock(return_value=completed(stderr="HTTP 422", returncode=1))
+        with self.assertRaisesRegex(OrchestratorError, "gh pr ready .* failed: HTTP 422"):
+            Host(run=run).mark_pr_ready("/proj", self.URL)
+
 
 class TestSweepSummary(PruneTest):
     def sweep(self):
@@ -13762,6 +13887,181 @@ class TestClose(unittest.TestCase):
 
 
 NEW_RUN = "20261009-120000-c0ffee"
+
+
+REFRESH_ID = "20261001-120000-a1b2c3"
+REFRESH_URL = "https://github.com/o/r/pull/7"
+
+
+class TestRefresh(unittest.TestCase):
+    """refresh through main, on a FakeHost whose gh is scripted by pull_requests."""
+
+    def setUp(self):
+        self.host = FakeHost()
+        for p in (patch.object(orchestrator, "connect", return_value=(None, self.host)),
+                  patch.object(Host, "resolve_dir", return_value="/proj")):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def add_run(self, run_id=REFRESH_ID, url=REFRESH_URL, conflicts=("a.py",), body=None, **fields):
+        """A done run whose pull request at url was opened over conflicts, and what gh says of that pull request:
+        OPEN, a draft, MERGEABLE and with body, by default the one pr_body wrote, unless fields say otherwise.
+        Returns the run's saved state."""
+        state = RunState(run_id, "a task", "/proj", None, phase="done", round=1, base_branch="main",
+                         branch="orchestrator/x", pr_url=url, verdict=fields.pop("verdict", APPROVE),
+                         conflicts=list(conflicts))
+        saved = asdict(state)
+        self.host.files[f"{state.dir}/state.json"] = json.dumps(saved) + "\n"
+        if body is None:
+            body = pr_body(state, "spec", "report", "VERDICT: APPROVE", orchestrator.GateEvidence())
+        self.host.pull_requests[url] = {"state": "OPEN", "isDraft": True, "mergeable": "MERGEABLE", "body": body,
+                                        **fields}
+        return saved
+
+    def saved(self, run_id=REFRESH_ID):
+        return json.loads(self.host.files[f"/proj/.orchestrator/runs/{run_id}/state.json"])
+
+    def refresh(self, *argv):
+        with patch("sys.stdout", new_callable=io.StringIO) as out, \
+                patch("sys.stderr", new_callable=io.StringIO) as err:
+            code = main(["refresh", *argv])
+        self.err = err.getvalue()
+        return code, out.getvalue()
+
+    def clean_body(self, verdict=APPROVE):
+        state = RunState(REFRESH_ID, "a task", "/proj", None, round=1, base_branch="main", verdict=verdict)
+        return pr_body(state, "spec", "report", "VERDICT: APPROVE", orchestrator.GateEvidence())
+
+    def test_a_cleanly_merging_approved_draft_loses_its_warning_and_is_marked_ready(self):
+        self.add_run()
+        code, out = self.refresh("a1b2c3")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, f"{REFRESH_ID}: conflict cleared, ready for review  {REFRESH_URL}\n")
+        self.assertEqual(self.host.pr_edits, [("body", REFRESH_URL, self.clean_body()), ("ready", REFRESH_URL)])
+        self.assertEqual(self.saved()["conflicts"], [])
+        self.assertEqual(self.host.mtime_kept, [f"/proj/.orchestrator/runs/{REFRESH_ID}/state.json"])
+
+    def test_a_run_that_did_not_succeed_keeps_its_draft(self):
+        self.add_run(verdict=CHANGES_REQUESTED)
+        code, out = self.refresh(REFRESH_ID)
+        self.assertEqual(code, 0)
+        self.assertEqual(out, f"{REFRESH_ID}: conflict cleared  {REFRESH_URL}\n")
+        self.assertEqual(self.host.pr_edits, [("body", REFRESH_URL, self.clean_body(CHANGES_REQUESTED))])
+        self.assertEqual(self.saved()["conflicts"], [])
+
+    def test_a_pull_request_already_out_of_draft_is_not_marked_again(self):
+        self.add_run(isDraft=False)
+        code, out = self.refresh(REFRESH_ID)
+        self.assertEqual((code, out), (0, f"{REFRESH_ID}: conflict cleared  {REFRESH_URL}\n"))
+        self.assertEqual([edit[0] for edit in self.host.pr_edits], ["body"])
+
+    def test_a_pull_request_that_still_conflicts_or_is_not_known_is_left(self):
+        for mergeable, line in (("CONFLICTING", "still conflicts"),
+                                ("UNKNOWN", "mergeability not known yet, try again")):
+            with self.subTest(mergeable):
+                self.setUp()
+                saved = self.add_run(mergeable=mergeable)
+                code, out = self.refresh(REFRESH_ID)
+                self.assertEqual(code, orchestrator.EXIT_WAITING)
+                self.assertEqual(out, f"{REFRESH_ID}: {line}  {REFRESH_URL}\n")
+                self.assertEqual((self.host.pr_edits, self.host.writes), ([], []))
+                self.assertEqual(self.saved(), saved)
+
+    def test_a_merged_or_closed_pull_request_only_forgets_the_conflict(self):
+        for state in ("MERGED", "CLOSED"):
+            with self.subTest(state):
+                self.setUp()
+                self.add_run(state=state)
+                code, out = self.refresh(REFRESH_ID)
+                self.assertEqual((code, out), (0, f"{REFRESH_ID}: {state.lower()}, conflict forgotten\n"))
+                self.assertEqual(self.host.pr_edits, [])
+                self.assertEqual(self.saved()["conflicts"], [])
+
+    def test_human_edits_to_the_body_are_kept(self):
+        warning = orchestrator.conflict_warning("main", ["a.py"])
+        self.add_run(body=f"{warning}\n\nA human's note.\n\nOpened by run x.\n")
+        self.refresh(REFRESH_ID)
+        self.assertEqual(self.host.pr_edits[0], ("body", REFRESH_URL, "A human's note.\n\nOpened by run x.\n"))
+
+    def test_a_body_whose_warning_is_gone_is_not_edited(self):
+        for verdict, edits in ((APPROVE, [("ready", REFRESH_URL)]), (CHANGES_REQUESTED, [])):
+            with self.subTest(verdict):
+                self.setUp()
+                self.add_run(body="Edited by hand.\n", verdict=verdict)
+                code, _ = self.refresh(REFRESH_ID)
+                self.assertEqual(code, 0)
+                self.assertEqual(self.host.pr_edits, edits)
+                self.assertEqual(self.saved()["conflicts"], [])
+
+    def test_without_a_run_every_done_run_with_a_pull_request_and_conflicts_in_run_order(self):
+        urls = {k: f"https://github.com/o/r/pull/{n}" for n, k in enumerate("abcdef", 1)}
+        ids = {k: f"20261001-12000{n}-{k * 6}" for n, k in enumerate("abcdef", 1)}
+        # Added out of order; d has no conflicts, e no pull request, f is not done.
+        self.add_run(ids["c"], urls["c"], mergeable="CONFLICTING")
+        self.add_run(ids["a"], urls["a"])
+        self.add_run(ids["b"], urls["b"], state="MERGED")
+        self.add_run(ids["d"], urls["d"], conflicts=())
+        saved = self.add_run(ids["e"], urls["e"])
+        self.host.files[f"/proj/.orchestrator/runs/{ids['e']}/state.json"] = json.dumps({**saved, "pr_url": None})
+        saved = self.add_run(ids["f"], urls["f"])
+        self.host.files[f"/proj/.orchestrator/runs/{ids['f']}/state.json"] = json.dumps({**saved, "phase": "review"})
+        code, out = self.refresh()
+        self.assertEqual(code, orchestrator.EXIT_WAITING)
+        self.assertEqual(out, f"{ids['a']}: conflict cleared, ready for review  {urls['a']}\n"
+                              f"{ids['b']}: merged, conflict forgotten\n"
+                              f"{ids['c']}: still conflicts  {urls['c']}\n")
+        self.assertEqual([call[2] for call in self.host.gh_calls], [urls["a"], urls["b"], urls["c"]])
+
+    def test_without_a_run_and_nothing_to_refresh(self):
+        self.add_run(conflicts=())
+        self.assertEqual(self.refresh(), (0, ""))
+        self.assertEqual(self.host.gh_calls, [])
+
+    def test_a_named_run_without_conflicts_or_not_done(self):
+        saved = self.add_run(conflicts=())
+        self.assertEqual(self.refresh(REFRESH_ID), (0, f"{REFRESH_ID}: no conflict to clear\n"))
+        self.host.files[f"/proj/.orchestrator/runs/{REFRESH_ID}/state.json"] = json.dumps({**saved, "phase": "build"})
+        self.assertEqual(self.refresh(REFRESH_ID), (orchestrator.EXIT_ERROR, ""))
+        self.assertIn(f"run {REFRESH_ID} is not done", self.err)
+        self.assertEqual(self.refresh("ffffff"), (orchestrator.EXIT_ERROR, ""))
+        self.assertEqual(self.host.gh_calls, [])
+
+    def test_a_gh_failure_names_the_run(self):
+        self.add_run()
+        self.host.pull_requests[REFRESH_URL] = completed(stderr="HTTP 502", returncode=1)
+        self.assertEqual(self.refresh(REFRESH_ID), (orchestrator.EXIT_ERROR, ""))
+        self.assertRegex(self.err, rf"^error: run {REFRESH_ID}: gh pr view .* failed: HTTP 502\n$")
+
+    def test_a_state_saved_meanwhile_is_not_overwritten(self):
+        self.add_run()
+        path = f"/proj/.orchestrator/runs/{REFRESH_ID}/state.json"
+        mark_ready = self.host.mark_pr_ready
+
+        def resumed_meanwhile(cwd, url):
+            self.host.files[path] = json.dumps({**self.saved(), "round": 2})
+            mark_ready(cwd, url)
+        self.host.mark_pr_ready = resumed_meanwhile
+        self.assertEqual(self.refresh(REFRESH_ID), (orchestrator.EXIT_ERROR, ""))
+        self.assertIn(f"run {REFRESH_ID}: {path} changed while its pull request was refreshed", self.err)
+        self.assertEqual(self.saved()["conflicts"], ["a.py"])
+
+    def test_show_no_longer_lists_the_conflicts(self):
+        self.add_run()
+        with patch.object(orchestrator, "pid_alive", return_value=False), \
+                patch.object(self.host, "run_files", return_value=[]), \
+                patch("sys.stdout", new_callable=io.StringIO) as out:
+            main(["show", REFRESH_ID])
+            self.assertIn("conflicts  a.py\n", out.getvalue())
+            self.refresh(REFRESH_ID)
+            out.seek(0)
+            out.truncate()
+            main(["show", REFRESH_ID])
+        self.assertNotIn("conflicts", out.getvalue())
+
+    def test_args(self):
+        args = parse_args(["refresh", "a1b2c3", "--machine", "m", "--cwd", "~/proj"])
+        self.assertEqual((args.command, args.run_ref, args.machine, args.cwd), ("refresh", "a1b2c3", "m", "~/proj"))
+        self.assertIsNone(parse_args(["refresh"]).run_ref)
 
 
 @patch.dict("os.environ", {"HERDR_ENV": "1"})
