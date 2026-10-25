@@ -22,10 +22,6 @@ pipeline {
         // For the UI and Package stages: crates are fetched into the workspace, which cleanWs empties, so no build
         // compiles sources an earlier build left behind.
         CARGO_HOME     = "${env.WORKSPACE}/.cargo-home"
-        // The UI stage's cargo test builds the dev profile, which the test profile inherits. Its debug info for the
-        // GTK and Tauri crates took enough memory that rustc was OOM-killed with two builds on the 8 GiB agent; no
-        // build here runs a debugger. The Package stage builds release and is unaffected.
-        CARGO_PROFILE_DEV_DEBUG = '0'
         // The GitHub login Jenkins posts pull request statuses as, its GitHub App's "<slug>[bot]", which the agents
         // cannot post as. Empty: no build of main trusts a pull request build, and each judges itself.
         PR_STATUS_CREATOR = 'davidsiegl-jenkins[bot]'
@@ -108,6 +104,12 @@ pipeline {
         // line.
         stage('UI') {
             when { expression { return env.JUDGED_AT_PR != 'true' } }
+            environment {
+                // cargo test's test profile inherits dev. Full debug info for the GTK and Tauri crates took enough
+                // memory that rustc was OOM-killed with two builds on the 8 GiB agent; line tables keep file:line in
+                // a panicking test's backtrace.
+                CARGO_PROFILE_DEV_DEBUG = 'line-tables-only'
+            }
             steps {
                 dir('ui') {
                     sh '''
