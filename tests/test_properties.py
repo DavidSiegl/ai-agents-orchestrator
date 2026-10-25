@@ -20,6 +20,7 @@ from orchestrator import (
     CHANGES_REQUESTED,
     GATE_BUILD_FAILED,
     GATE_ERROR,
+    GATE_LEAK,
     GATE_OK,
     Host,
     OrchestratorError,
@@ -299,7 +300,7 @@ class TestEnvFile(unittest.TestCase):
 # The first line of a handoff file: parse_gate and parse_verdict
 # ---------------------------------------------------------------------------
 
-GATES = (GATE_OK, GATE_ERROR, GATE_BUILD_FAILED)
+GATES = (GATE_OK, GATE_ERROR, GATE_BUILD_FAILED, GATE_LEAK)
 VERDICTS = (APPROVE, CHANGES_REQUESTED)
 blank_lines = st.lists(padding).map(lambda ls: "".join(line + "\n" for line in ls))
 emphasis = st.sampled_from([("", ""), ("**", "**"), ("_", "_"), ("`", "`"), ("# ", ""), ("## ", ""), ("> ", "")])

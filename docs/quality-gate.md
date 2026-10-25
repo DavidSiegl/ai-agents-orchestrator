@@ -665,6 +665,17 @@ answers by number. A Builder in a fresh session gets `BUILD_PROMPT`, `REBUILD_NO
 `QUALITY_STUCK_NOTE`, naming the round's last quality file, and points at the Builder's last report of the round.
 The pull request's description includes the last quality file.
 
+A snapshot in which gitleaks, by the base's rules, finds a secret or an added comment telling it to allow a line is not
+pushed, and no build is triggered. Its quality file is `GATE: LEAK`, saying why, with the findings numbered under
+`## Secrets found`: each one's `file:line`, rule, commit and fingerprint, never the secret, which only gitleaks'
+redacted report `leaks-snapshot.json` in the run's directory describes. The Builder gets `QUALITY_FIX_PROMPT` as for
+any other gate, and the round counts toward `--max-quality-rounds`; a round that finds the same secrets as the one
+before it, as many of each rule in each file, stops the loop early as any repeated failure does. A finding that is not a secret
+passes only once the human lists it as `file:rule:line` (the fingerprint without its commit, which is the round's
+snapshot) in `.gitleaksignore` on the base branch, and only in a run started after that: a run keeps the rules of
+its base. A secret in a commit the snapshot does not add, the run's base or a commit below it that origin lacks,
+fails the run instead: those are the human's commits. So does one in the branch at publish.
+
 ### Run state and resume
 
 `state.json` holds `quality_job` (None for a run without the gate, as for one saved before it),
