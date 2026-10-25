@@ -44,6 +44,13 @@ was done.
 
 ## Open issues
 
+- **unexpected-paths reads only the contract step's file.** `unexpected_paths` judges each path the change touches
+  against `RunChange.spec`, the contract step's file, so a workflow whose contract is in business terms, such as
+  `examples/workflows/product-team.toml`, whose requirements name no file and whose `design.md` lists the
+  components, gets a finding to weigh for every path on every quality round. Raised by review 20 of
+  product-team-workflow (F4, 2026-10-25): "the gate reads file names from the spec and this spec is in business
+  terms by design". The example's header says so. Closes with the check reading every non-editing step's file that
+  precedes the first editing step, or with a workflow key naming the file that holds the paths.
 - **An AppImage run without FUSE passes no signal on to the orchestrator.** Under `APPIMAGE_EXTRACT_AND_RUN` the
   AppImage's runtime forks, runs `AppRun` in the child and waits, so the process a caller started is the runtime,
   and `Cli::exec` (`ui/src-tauri/src/lib.rs`) only replaces the child. Raised by the cross-review of desktop-cli
@@ -127,7 +134,7 @@ was done.
   request's review shows them, and each may take `PROOF_TIMEOUT`. Kept: a demonstrated defect is what the human
   most needs to see in a draft. Raised by the same review.
 - **A proof in a worktree run finds the checkout's pytest configuration.** The run directory, and with it
-  `RunState.proofs_dir`, is under the project checkout, not the run's worktree, so `adversarial.toml`'s
+  `RunState.proofs_dir`, is under the project checkout, not the run's worktree, so a `proof_command` of
   `python -m pytest {proofs}` takes its rootdir and `conftest.py` from the checkout while importing the code from the
   worktree it runs in. Found while writing loop-guards ticket 05; not reproduced. Closes with `_run_proof` passing
   the working tree as pytest's rootdir and conftest root, or the proofs copied into a scratch directory of the
