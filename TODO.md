@@ -54,6 +54,11 @@ was done.
   the pull request only for a spec that was `in-review` when the pass began, so a pull request merged since leaves
   the spec `in-review`, its dependants blocked, until the next drain. Met on 2026-10-25 after resuming a run
   outside drain. Closes with the pull request checked in the same pass once `finished_run_header` gives one.
+- **`ci/cargo-lock.sh` has not yet run on the Jenkins agent.** Checked only on the development host, so whether
+  the agent image has `flock` and whether `${JENKINS_AGENT_WORKDIR:-$HOME}` is writable there is unchecked; if
+  either fails, every UI and Package stage fails. Raised by cross-review 25 (F3): "the ticket's Verify step has no
+  evidence". Closes with a pull request build and a branch build of one commit run at once on agentbox0, one
+  saying that it waits for the lock and both passing.
 - **Is 3 GB the right memory limit for the agentbox0 Jenkins agent?** All builds on the node share its
   container's `mem_limit: 3g` (Homelab `jenkins/agentbox0.yaml`), which this repo cannot change. Since
   `ci/cargo-lock.sh`, two of this repository's builds compile Rust at once only when a quality build starts its
