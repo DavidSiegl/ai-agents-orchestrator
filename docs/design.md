@@ -137,7 +137,7 @@ The commit a run publishes ends with git trailers that say what made it, after t
 | `Orchestrator-Run` | the run id, which names the run directory and the run's `summary.md` |
 | `Orchestrator-Workflow` | the workflow's name |
 | `Orchestrator-Role` | one per role whose agent ran, in the order they first started: `role=harness/model`, the model `default` when no flag or workflow file set one; a role that ran in two harnesses over resumes names the one it ended in |
-| `Orchestrator-Gate` | with `--quality-gate` only: the last quality round's gate and how many quality rounds its review round took, such as `OK after 2 quality rounds` |
+| `Orchestrator-Gate` | with `--quality-gate` only: the last quality round's gate and how many quality rounds its review round took, such as `OK after 2 quality rounds`; `, then turned off` appended, as in `ERROR after 1 quality round, then turned off`, when `resume --no-quality-gate` turned the gate off after that quality round and the Builder changed the code since, so nothing judged the final change; no trailer when the gate was turned off before any analysis finished |
 
 So which harness and model built and reviewed a change can be read from history:
 

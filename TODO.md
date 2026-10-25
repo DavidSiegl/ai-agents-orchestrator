@@ -36,15 +36,6 @@ was done.
   deleted during a drain. Raised by the cross-review of drain (round 3, 2026-10-25): "'gone' is modelled only in
   `status`". Closes with a gone state that drain_end's summary and exit status, the change lines and the writes all
   honour, or with drain refusing to go on once a spec it read has gone.
-- **A pull request whose gate was turned off shows the last analysis as the change's.** After `resume
-  --no-quality-gate`, `Workflow._publish` passes `_last_quality`'s file to `pr_body` and `provenance`, so the quality
-  section and the `Orchestrator-Gate` trailer judge code the Builder has since changed; only the Reviewer is told
-  (`QUALITY_OFF_NOTE`). Raised by the cross-review of resume-quality-gate (finding 8, 2026-10-24): "nothing in the PR
-  says the final change went unjudged". Closes with the PR body and trailer saying the gate was turned off after it.
-- **Two functions decide which quality file is a round's last.** `Workflow._gate_passed` reads
-  `quality_path(n, quality_round)` itself, while `_quality_note` and `_publish` use `_last_quality`; they agree only
-  because `_gate_passed` returns True whenever the run has no CI. Raised by the same review (finding 11). Closes with
-  `_gate_passed` reading `_last_quality`.
 - **`doctor --machine` probes the machine over about twenty SSH connections, one after another.** Each check is
   its own `Host.run`, so `_tool_version` asks `command -v` before `--version`, which already fails for a missing
   command, and `gh auth status` may wait up to `NETWORK_TIMEOUT`. Raised by the cross-review of the doctor command
@@ -91,6 +82,16 @@ was done.
   tests' `GOLDEN_PR_BODY` or `GOLDEN_SUMMARY`, changes what is expected without a finding, while the same edit inside
   the assertion is one. Found while adding the provenance trailers to the pull request body (loop-guards ticket 03).
   Closes with the assertions' names resolved to module-level constants the change edits.
+- **`test-integrity` has no way to accept an expected value the spec changes.** `expected-value-changed` fails the
+  gate whenever an assertion's literals change beside code, also when the spec asks for the new output, and unlike
+  `removed-test` there is no report the Reviewer judges instead. PR #76 changed what the pull request says for a
+  gate turned off after its analysis; its edited assertions failed the PR build, and the fix was to drop them where
+  other tests already pinned the new text. One check went with them: the cross-review of that fix found that "this
+  path no longer checks the analysis text in the body", i.e. that
+  `test_off_in_quality_drops_the_analysis_and_goes_to_the_reviewer` no longer pins that the details block shows
+  quality-1-1.md's text; an `assertIn` of that text there pairs with the dropped one and is the same finding.
+  Closes with a way for the Builder to name the changed expectations in its report, judged by the Reviewer, or
+  with such a finding demoted to one to weigh; then that assertion goes back.
 - **A run that never reaches `done` keeps its local refs.** A locking step's commit stays under
   `refs/orchestrator/<key>/locked/` (`RunState.lock_ref`) until the run ends `done` (`Workflow._clean_up_locks`);
   `close` and `prune` do not delete them, so a failed run's locked snapshots are never collected by `git gc`. Closes
@@ -311,6 +312,21 @@ was done.
   files.
 
 ## Fixed
+
+- **A pull request whose gate was turned off shows the last analysis as the change's.** After `resume
+  --no-quality-gate`, `Workflow._publish` passed `_last_quality`'s file to `pr_body` and `provenance`, so the quality
+  section and the `Orchestrator-Gate` trailer judged code the Builder had since changed; only the Reviewer was told
+  (`QUALITY_OFF_NOTE`). Raised by the cross-review of resume-quality-gate (finding 8, 2026-10-24): "nothing in the PR
+  says the final change went unjudged". Fixed (2026-10-25): `Workflow._unjudged` decides, for `_quality_note` and
+  `_publish` alike, when no quality file judges the published code; `Workflow._gate_evidence` then cites the run's
+  last quality file from any round, the trailer reads `..., then turned off`, the section `Quality gate (round R,
+  before the last change)`, and the body opens with a `[!NOTE]` saying nothing judged the final change, or that the
+  gate was turned off before any analysis finished.
+- **Two functions decide which quality file is a round's last.** `Workflow._gate_passed` read
+  `quality_path(n, quality_round)` itself, while `_quality_note` and `_publish` used `_last_quality`; they agreed only
+  because `_gate_passed` returns True whenever the run has no CI. Raised by the same review (finding 11). Fixed
+  (2026-10-25): `_gate_passed` reads `_last_quality`, and fails a quality file older than the current quality round
+  as it failed a missing one.
 
 - **A proof that failed is not run again in the next round.** `Workflow._judge_proofs` ran only the proofs the
   verdict step wrote in its own round, so a Builder told to make round N's failing proofs pass (`PROOFS_NOTE`) was

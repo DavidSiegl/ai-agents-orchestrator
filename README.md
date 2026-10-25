@@ -292,7 +292,8 @@ yet is judged first; otherwise the gate starts at the Builder's next turn. It is
 or `done`, after `--no-quality-gate`, for a run with another job, and for a `--no-pr` run in the checkout itself past
 round 0, whose tree may hold your own changes. `resume --no-quality-gate` turns the gate off for good: the run's
 `orchestrator-ci/` branches are deleted, an analysis under way is dropped, and the Reviewer is told what the round's
-last quality file found, or that the Builder changed the code after it. See
+last quality file found, or that the Builder changed the code after it; the pull request then says nothing judged
+the final change. See
 [quality gate](docs/quality-gate.md#turning-the-gate-on-or-off-on-resume).
 
 ### Harnesses

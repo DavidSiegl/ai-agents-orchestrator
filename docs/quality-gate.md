@@ -715,8 +715,11 @@ its fix turn writes `build-<n>-q<q>.md` and goes straight to `review`, with `qua
 no build ever judges. The Reviewer reads the Builder's latest report of the round. Its prompt ends with
 `QUALITY_PASSED_NOTE`, `QUALITY_UNRESOLVED_NOTE` or `QUALITY_STUCK_NOTE` for the round's last quality file that is
 written; with `QUALITY_OFF_NOTE`, naming the round's quality files, when the Builder changed the code after it; and
-with nothing when the round has none. The pull request carries that file, and a workflow without a verdict step
-ends `FINISHED`. `show` prints the job on a `quality` line, or `off (turned off by resume)`.
+with nothing when the round has none. The pull request carries that file. When no quality file judges the code it
+publishes, because the Builder changed the code after the last one or the gate was turned off before any analysis
+finished, it says so in a note and cites the run's last quality file from any round, if there is one, as `Quality
+gate (round R, before the last change)`, its `Orchestrator-Gate` trailer ending `, then turned off`. A workflow
+without a verdict step ends `FINISHED`. `show` prints the job on a `quality` line, or `off (turned off by resume)`.
 
 ### Edge cases
 

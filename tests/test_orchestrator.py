@@ -1122,18 +1122,20 @@ class TestPullRequestText(unittest.TestCase):
     def test_conflict_warning_comes_first(self):
         state = RunState("r", "t", "/proj", verdict=APPROVE, round=1, base_branch="main",
                          conflicts=["a.py", "docs/b.md"])
-        body = pr_body(state, "spec", "r", "VERDICT: APPROVE")
+        body = pr_body(state, "spec", "r", "VERDICT: APPROVE", orchestrator.GateEvidence())
         self.assertEqual(body.split("\n\n", 1)[0],
                          "> [!WARNING]\n> This branch conflicts with `main`, so this is a draft. "
                          "Merge `main` into it and resolve the conflicts in:\n> - `a.py`\n> - `docs/b.md`")
 
     def test_no_conflicts_no_warning(self):
         state = RunState("r", "t", "/proj", verdict=APPROVE, round=1, base_branch="main")
-        self.assertTrue(pr_body(state, "spec", "r", "VERDICT: APPROVE").startswith("Opened by"))
+        body = pr_body(state, "spec", "r", "VERDICT: APPROVE", orchestrator.GateEvidence())
+        self.assertTrue(body.startswith("Opened by"))
 
     def test_long_sections_are_truncated(self):
         state = RunState("r", "t", "/proj", verdict=APPROVE, round=1)
-        body = pr_body(state, "x" * (orchestrator.PR_SECTION_LIMIT * 2), "r", "VERDICT: APPROVE")
+        body = pr_body(state, "x" * (orchestrator.PR_SECTION_LIMIT * 2), "r", "VERDICT: APPROVE",
+                       orchestrator.GateEvidence())
         self.assertLess(len(body), 65536)
         self.assertIn("truncated", body)
 
@@ -1158,11 +1160,18 @@ class TestProvenance(unittest.TestCase):
 
     def test_the_gate_trailer_says_how_the_last_quality_round_ended(self):
         state = saved_run("publish", 2, agents=("build",), quality_job=JOB, quality_round=1)
-        self.assertEqual(orchestrator.provenance(state, (1, "GATE: OK\n"))[-1],
+        self.assertEqual(orchestrator.provenance(state, gate_evidence(2, 1, "GATE: OK\n"))[-1],
                          ("Orchestrator-Gate", "OK after 1 quality round"))
-        self.assertEqual(orchestrator.provenance(state, (3, "garbled"))[-1],
+        self.assertEqual(orchestrator.provenance(state, gate_evidence(2, 3, "garbled"))[-1],
                          ("Orchestrator-Gate", "? after 3 quality rounds"))
-        self.assertEqual([k for k, _ in orchestrator.provenance(state, None)],
+        self.assertEqual([k for k, _ in orchestrator.provenance(state, orchestrator.GateEvidence())],
+                         ["Orchestrator-Run", "Orchestrator-Workflow", "Orchestrator-Role"])
+
+    def test_the_gate_trailer_says_when_the_gate_was_turned_off_after_it(self):
+        state = saved_run("publish", 2, agents=("build",), quality_round=0, quality_gate_disabled=True)
+        self.assertEqual(orchestrator.provenance(state, gate_evidence(1, 1, "GATE: ERROR\n", unjudged=True))[-1],
+                         ("Orchestrator-Gate", "ERROR after 1 quality round, then turned off"))
+        self.assertEqual([k for k, _ in orchestrator.provenance(state, orchestrator.GateEvidence(unjudged=True))],
                          ["Orchestrator-Run", "Orchestrator-Workflow", "Orchestrator-Role"])
 
     def test_git_reads_them_as_trailers(self):
@@ -1174,7 +1183,7 @@ class TestProvenance(unittest.TestCase):
             state = saved_run("publish", 1, agents=("spec", "build", "review"), quality_job=JOB, quality_round=2,
                               verdict=APPROVE, models={"review": "gpt-5"})
             state.agents["review"]["kind"] = "codex"
-            trailers = [arg for key, said in orchestrator.provenance(state, (2, "GATE: OK\n"))
+            trailers = [arg for key, said in orchestrator.provenance(state, gate_evidence(1, 2, "GATE: OK\n"))
                         for arg in ("--trailer", f"{key}: {said}")]
             host.git(d, "commit", "--quiet", "--allow-empty", "-m", "Add a limiter", "-m",
                      orchestrator.commit_note(state), *trailers)
@@ -3239,6 +3248,17 @@ JOB = "AI-Agents-Orchestrator/py-ai-agents-orchestrator-quality"
 JOB_PATH = "/job/AI-Agents-Orchestrator/job/py-ai-agents-orchestrator-quality/"
 REF_1_1 = "orchestrator-ci/a1b2c3-1-q1"
 
+# The pull request's notes for a final change that resume --no-quality-gate left unjudged (pr_body).
+OFF_AFTER_ANALYSIS = ("> [!NOTE]\n> The quality gate was turned off (`resume --no-quality-gate`) after its last "
+                      "analysis, and the Builder changed the code since, so nothing judged the final change.")
+OFF_BEFORE_ANALYSIS = ("> [!NOTE]\n> The quality gate was turned off (`resume --no-quality-gate`) before any "
+                       "analysis finished, so nothing judged the change.")
+
+
+def gate_evidence(n, q, text, unjudged=False):
+    """GateEvidence citing quality-<n>-<q>.md, of the given text."""
+    return orchestrator.GateEvidence(orchestrator.QualityFile(n, q, text), unjudged)
+
 
 class FakeResponse:
     def __init__(self, body=b"", headers=None):
@@ -4567,14 +4587,16 @@ class TestQualityGateOffOnResume(unittest.TestCase):
                                     files={lambda s: s.build_path(1): "report 1",
                                            lambda s: s.quality_path(1, 1): "GATE: ERROR\n\n1. x\n",
                                            lambda s: s.quality_build_path(1, 1): "report 1 q1"})
+        host.changed.add("/proj/limiter.py")
         self.assertEqual(wf.run(), APPROVE)
         self.assertIn(f"The Builder's report is in {state.quality_build_path(1, 1)}", reviews[0])
         self.assertIn(orchestrator.QUALITY_OFF_NOTE.format(quality_paths=state.quality_path(1, 1)), reviews[0])
         self.assertNotIn(orchestrator.QUALITY_UNRESOLVED_NOTE[:30], reviews[0])
         self.assertFalse(host.snapshots)
         body = host.prs[0]["body"]
-        self.assertIn("<summary>Quality gate (round 1)</summary>\n\nGATE: ERROR", body)
-        self.assertIn("| Orchestrator-Gate | `ERROR after 1 quality round` |", body)
+        self.assertIn(f"{OFF_AFTER_ANALYSIS}\n\nOpened by", body)
+        commit = next(c for c in host.git_calls if c[0] == "commit")
+        self.assertEqual(commit[-2:], ("--trailer", "Orchestrator-Gate: ERROR after 1 quality round, then turned off"))
 
     def test_off_in_quality_tells_the_reviewer_what_the_round_last_found(self):
         cases = [
@@ -4595,15 +4617,52 @@ class TestQualityGateOffOnResume(unittest.TestCase):
                 reviews = []
                 wf, herdr, host, _ = resume(state, {"review": [recording(review_turn(1, APPROVE), reviews)]},
                                             host=host, files={lambda s: s.build_path(1): "report 1", **files})
+                host.changed.add("/proj/limiter.py")
                 self.assertEqual(wf.run(), APPROVE)
                 self.assertIn(f"The Builder's report is in {state.last_report_path(1)}", reviews[0])
                 body = host.prs[0]["body"]
+                commit = next(c for c in host.git_calls if c[0] == "commit")
                 if note is None:
                     self.assertNotIn("quality gate", reviews[0].lower())
                     self.assertNotIn("Quality gate", body)
+                    self.assertIn(f"{OFF_BEFORE_ANALYSIS}\n\nOpened by", body)
+                    self.assertNotIn("Orchestrator-Gate", " ".join(commit) + body)
                 else:
                     self.assertIn(note.format(quality_path=state.quality_path(1, noted)), reviews[0])
                     self.assertIn("<summary>Quality gate (round 1)</summary>", body)
+                    self.assertNotIn("[!NOTE]", body)
+                    self.assertNotIn("then turned off", " ".join(commit) + body)
+                    self.assertRegex(body, rf"\| Orchestrator-Gate \| `\w+ after {noted} quality rounds?` \|")
+
+    def test_off_in_round_1_and_published_in_round_2_cites_round_1(self):
+        state = pr_run("review", 1, quality_job=JOB, quality_round=2)
+        host = switch(state, None)
+        wf, herdr, host, _ = resume(state, {"review": [review_turn(1, CHANGES_REQUESTED), review_turn(2, APPROVE)],
+                                            "build": [build_turn(2)]}, host=host,
+                                    files={lambda s: s.build_path(1): "report 1",
+                                           lambda s: s.quality_path(1, 1): "GATE: ERROR\n\n1. x\n",
+                                           lambda s: s.quality_build_path(1, 1): "report 1 q1",
+                                           lambda s: s.quality_path(1, 2): "GATE: OK\n"})
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual((wf.state.round, wf.state.quality_round), (2, 0))
+        body = host.prs[0]["body"]
+        self.assertIn(f"{OFF_AFTER_ANALYSIS}\n\nOpened by", body)
+        self.assertIn("| Orchestrator-Gate | `OK after 2 quality rounds, then turned off` |", body)
+        self.assertIn("<summary>Quality gate (round 1, before the last change)</summary>\n\nGATE: OK", body)
+        commit = next(c for c in host.git_calls if c[0] == "commit")
+        self.assertEqual(commit[-1], "Orchestrator-Gate: OK after 2 quality rounds, then turned off")
+
+    def test_the_note_follows_a_conflict_warning(self):
+        state = pr_run("quality", 1, quality_job=JOB, quality_round=1)
+        host = switch(state, None)
+        host.merge_upstream = MagicMock(return_value=["limiter.py"])
+        wf, herdr, host, _ = resume(state, {"review": [review_turn(1, APPROVE)]}, host=host,
+                                    files={lambda s: s.build_path(1): "report 1"})
+        self.assertEqual(wf.run(), APPROVE)
+        warning, note, head = host.prs[0]["body"].split("\n\n", 3)[:3]
+        self.assertTrue(warning.startswith("> [!WARNING]"))
+        self.assertEqual(note, OFF_BEFORE_ANALYSIS)
+        self.assertTrue(head.startswith("Opened by"))
 
     def test_off_in_the_builders_quality_fix_goes_straight_to_the_reviewer(self):
         state = pr_run("build", 1, quality_job=JOB, quality_round=1, prompted="build-1-q1.md")
@@ -4685,8 +4744,25 @@ class TestQualityGateOffOnResume(unittest.TestCase):
                                            lambda s: s.quality_path(1, 1): "GATE: ERROR\n\n1. x\n"})
         self.assertEqual(wf.run(), orchestrator.FINISHED)
         self.assertFalse(host.prs[0]["draft"])
+        self.assertNotIn("[!NOTE]", host.prs[0]["body"])
         with patch("builtins.print"):
             self.assertEqual(orchestrator.finish(orchestrator.FINISHED, wf.state, solo), 0)
+
+    def test_turned_off_in_its_quality_fix_a_workflow_without_a_verdict_finishes_unjudged(self):
+        solo = Pipeline("gsolo", {"impl": "Implementer"}, (
+            Step("impl", "impl", "impl-{n}.md", "Implement {task}; report to {path}.", edits=True, quality_gated=True),))
+        state = saved_run("impl", 1, agents=(), pull_request=True, base_branch="main", branch=SWITCH_BRANCH,
+                          workflow="gsolo", quality_job=JOB, quality_round=1)
+        host = switch(state, None, host=pr_host(), pipeline=solo)
+        wf, herdr, host, _ = resume(state, {"impl": [impl_turn(1, 1)]}, host=host, pipeline=solo,
+                                    files={lambda s: f"{s.dir}/impl-1.md": "impl 1",
+                                           lambda s: s.quality_path(1, 1): "GATE: ERROR\n\n1. x\n"})
+        self.assertEqual(wf.run(), orchestrator.FINISHED)
+        self.assertEqual(wf.state.quality_round, 2)
+        body = host.prs[0]["body"]
+        self.assertFalse(host.prs[0]["draft"])
+        self.assertIn(f"{OFF_AFTER_ANALYSIS}\n\nOpened by", body)
+        self.assertIn("| Orchestrator-Gate | `ERROR after 1 quality round, then turned off` |", body)
 
     def test_round_results_keep_the_quality_files(self):
         state = pr_run("review", 1, quality_job=JOB, quality_round=1)
@@ -10579,6 +10655,15 @@ class TestWorkflowWithoutAVerdict(unittest.TestCase):
         commit = next(c for c in host.git_calls if c[0] == "commit")
         self.assertEqual(commit[5], "Orchestrator run 20260929-120000-a1b2c3: QUALITY_GATE_FAILED, unreviewed.")
         self.assertIn("Run finished: QUALITY_GATE_FAILED", notes)
+
+    def test_a_missing_last_quality_file_fails_the_gate(self):
+        # The quality round before passed, but the current one's file is not written: as before _gate_passed read
+        # _last_quality, which falls back to the round before.
+        state = quality_state(q=2)
+        wf, _, host, _ = resume(state, {}, ci=ci_for(FakeCI()), files={lambda s: s.quality_path(1, 1): "GATE: OK\n"})
+        self.assertFalse(wf._gate_passed(1))
+        host.files[state.quality_path(1, 2)] = "GATE: OK\n"
+        self.assertTrue(wf._gate_passed(1))
 
     def test_a_gate_that_passes_is_finished(self):
         verdict, host, _ = self.gated_solo(outcome(**RED), outcome())
