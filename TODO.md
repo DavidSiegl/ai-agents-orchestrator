@@ -326,11 +326,11 @@ was done.
   quality-1-1.md's text; an `assertIn` of that text there pairs with the dropped one and is the same finding.
   Closes with a way for the Builder to name the changed expectations in its report, judged by the Reviewer, or
   with such a finding demoted to one to weigh; then that assertion goes back.
-  Fixed (2026-10-25): a gate check's finding fails the gate by its severity, `error`, and is weighed otherwise
-  (`GateCheck`, whose `fails` flag went), and `weakened_tests` gives `removed-test` and `expected-value-changed`
-  as warnings, to weigh, `removed-test` having failed the gate too; skips, swallowed errors and fewer assertions
-  still fail. The details-block assertion is
-  back. PR #82 and PR #83 failed their builds on such findings, a test the spec retired and one it reshaped.
+  Fixed (2026-10-25): a failing `GateCheck` names the rules it weighs instead (`GateCheck.weighed`), and the gate
+  sets each finding's severity to what it does with it (`GateCheck.judged`). `test-integrity` weighs
+  `removed-test`, `fewer-assertions` and `expected-value-changed`, what a spec can ask for and the gate cannot read
+  the spec to tell; skips and swallowed errors, which only hide a failure, still fail. The details-block assertion
+  is back. PR #82 and PR #83 failed their builds on such findings, a test the spec retired and one it reshaped.
 - **A pull request opened over a conflict stays a draft with its warning after the conflict is resolved.** When
   `Host.merge_upstream` finds conflicts with the base branch, `pr_body` opens the body with a `[!WARNING]` naming
   the conflicting files and `create_pr` opens it as a draft; nothing ever edits the body or marks it ready, and

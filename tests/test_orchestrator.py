@@ -4633,7 +4633,8 @@ class TestQualityGateOffOnResume(unittest.TestCase):
         self.assertFalse(host.snapshots)
         body = host.prs[0]["body"]
         self.assertIn(f"{OFF_AFTER_ANALYSIS}\n\nOpened by", body)
-        self.assertIn("<summary>Quality gate (round 1, before the last change)</summary>\n\nGATE: ERROR\n\n1. x\n", body)
+        self.assertIn("<summary>Quality gate (round 1, before the last change)</summary>\n\nGATE: ERROR\n\n1. x\n",
+                      body)
         commit = next(c for c in host.git_calls if c[0] == "commit")
         self.assertEqual(commit[-2:], ("--trailer", "Orchestrator-Gate: ERROR after 1 quality round, then turned off"))
 
@@ -6135,7 +6136,7 @@ class TestGate(unittest.TestCase):
             # Line 2 is not one the change added; a check's findings are listed anyway.
             return [{"path": "f.py", "line": 2, "severity": "error", "rule": "removed-test", "message": "test_a"},
                     {"path": None, "line": None, "severity": "error", "rule": "", "message": "could not run"}]
-        self.checks(orchestrator.GateCheck("integrity", find=find))
+        self.checks(orchestrator.GateCheck("integrity", fails=True, find=find))
         self.add_lines(1)
         status, out, _ = self.gate()
         self.assertEqual(status, 1)
@@ -6148,7 +6149,7 @@ class TestGate(unittest.TestCase):
         self.assertIn("+new4 = 4", change.diff)
 
     def test_a_reporting_check_is_weighed_after_the_issues_and_passes(self):
-        self.checks(orchestrator.GateCheck("flaky", find=lambda change: [
+        self.checks(orchestrator.GateCheck("flaky", fails=False, find=lambda change: [
             {"path": "f.py", "line": 4, "severity": "warning", "rule": "seeds 3 5", "message": "test_b"}]))
         self.add_lines(1)
         status, out, _ = self.gate()
@@ -6170,7 +6171,6 @@ class TestGate(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertIn("## Findings to weigh\n\n", out)
         self.assertIn("1. `tests/test_f.py:5` warning test-integrity removed-test: ", out)
-        # One check, both kinds: only its errors count towards its failed condition.
         self.put("tests/test_f.py", "import pytest\n\n\n@pytest.mark.skip\ndef test_one():\n    assert 1\n")
         status, out, _ = self.gate()
         self.assertEqual(status, 1)
@@ -6178,9 +6178,22 @@ class TestGate(unittest.TestCase):
         self.assertIn("1. `tests/test_f.py:4` error test-integrity skip: ", out)
         self.assertIn("2. `tests/test_f.py:5` warning test-integrity removed-test: ", out)
 
+    def test_a_failing_check_weighs_its_weighed_rules(self):
+        weighed = frozenset({"removed-test"})
+        self.checks(orchestrator.GateCheck("integrity", fails=True, weighed=weighed, find=lambda _: [
+            {"path": "f.py", "line": 2, "severity": "error", "rule": "removed-test", "message": "test_a"},
+            {"path": "f.py", "line": 3, "severity": "warning", "rule": "skip", "message": "test_b"}]))
+        self.add_lines(1)
+        status, out, _ = self.gate()
+        self.assertEqual(status, 1)
+        # The gate, not find, says what each finding does: a failing rule fails whatever severity find gave.
+        self.assertIn("- 1 findings of the `integrity` check; each is listed below.\n", out)
+        self.assertIn("1. `f.py:3` error integrity skip: test_b\n", out)
+        self.assertIn("2. `f.py:2` warning integrity removed-test: test_a\n", out)
+
     def test_a_check_with_nothing_to_say_adds_nothing(self):
-        self.checks(orchestrator.GateCheck("quiet", find=lambda change: []),
-                    orchestrator.GateCheck("hush", find=lambda change: []))
+        self.checks(orchestrator.GateCheck("quiet", fails=True, find=lambda change: []),
+                    orchestrator.GateCheck("hush", fails=False, find=lambda change: []))
         self.add_lines(1)
         status, out, _ = self.gate()
         self.assertEqual(status, 0)
@@ -6203,7 +6216,7 @@ class TestGate(unittest.TestCase):
 
     def test_the_checks_are_told_whose_rules_judge_the_change(self):
         seen = []
-        self.checks(orchestrator.GateCheck("rules", find=lambda change: seen.append(change.rules) or []))
+        self.checks(orchestrator.GateCheck("rules", fails=False, find=lambda change: seen.append(change.rules) or []))
         main_rules = os.path.join(self.stubs, "main.toml")
         with open(main_rules, "w") as f:
             f.write("[tool.ruff]\n")
@@ -6431,8 +6444,6 @@ class TestWeakenedTests(unittest.TestCase):
         where, found = self.found()
         self.assertEqual(where, [("tests/test_calc.py", 12, "expected-value-changed")])
         self.assertIn("`assert add(10, 20) == 30` became `assert add(10, 20) == 31`", found[0]["message"])
-        # The spec may ask for the new value, which the gate cannot read: the Reviewer judges it.
-        self.assertEqual(found[0]["severity"], "warning")
 
     def test_an_expected_value_changed_alone_is_not_found(self):
         self.edit("tests/test_calc.py", "assert add(10, 20) == 30", "assert add(10, 20) == 31")
@@ -6995,7 +7006,7 @@ class TestFlakyTests(unittest.TestCase):
 
     def test_it_reports_without_failing_the_gate(self):
         [check] = [c for c in orchestrator.gate_checks(orchestrator.MUTATION_BUDGET) if c.name == "flaky-tests"]
-        self.assertIs(check.find, orchestrator.flaky_tests)
+        self.assertEqual((check.fails, check.find), (False, orchestrator.flaky_tests))
 
 
 class TestPassesAtBase(unittest.TestCase):
@@ -7215,8 +7226,8 @@ class TestPassesAtBase(unittest.TestCase):
     def test_it_reports_without_failing_the_gate_within_its_budget(self):
         with patch.object(orchestrator, "passes_at_base", return_value=[]) as find:
             [check] = [c for c in orchestrator.gate_checks(base_run_budget=42) if c.name == "passes-at-base"]
-            found = check.find("change")
-        self.assertIs(found, find.return_value)
+            check.find("change")
+        self.assertFalse(check.fails)
         find.assert_called_once_with("change", budget=42)
 
 
@@ -7379,7 +7390,7 @@ class TestVagueNames(unittest.TestCase):
 
     def test_it_reports_without_failing_the_gate(self):
         [check] = [c for c in orchestrator.gate_checks() if c.name == "vague-names"]
-        self.assertIs(check.find, orchestrator.vague_names)
+        self.assertEqual((check.fails, check.find), (False, orchestrator.vague_names))
 
 
 class TestSurvivingMutants(unittest.TestCase):
@@ -7970,8 +7981,8 @@ class TestSurvivingMutants(unittest.TestCase):
     def test_it_reports_without_failing_the_gate_within_its_budget(self):
         with patch.object(orchestrator, "surviving_mutants", return_value=[]) as find:
             [check] = [c for c in orchestrator.gate_checks(42) if c.name == "surviving-mutants"]
-            found = check.find("change")
-        self.assertIs(found, find.return_value)
+            check.find("change")
+        self.assertFalse(check.fails)
         find.assert_called_once_with("change", budget=42)
 
 
@@ -8737,7 +8748,7 @@ class TestTooComplexFunctions(unittest.TestCase):
 
     def test_it_fails_the_gate(self):
         [check] = [c for c in orchestrator.gate_checks(orchestrator.MUTATION_BUDGET) if c.name == "cognitive-complexity"]
-        self.assertIs(check.find, orchestrator.too_complex_functions)
+        self.assertEqual((check.fails, check.find), (True, orchestrator.too_complex_functions))
 
 
 class TestToolFindings(unittest.TestCase):
