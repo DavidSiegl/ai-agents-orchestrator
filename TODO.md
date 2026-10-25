@@ -18,13 +18,14 @@ was done.
 - **The desktop app as the terminal client too: the macOS check.** Started with arguments, the app execs the
   orchestrator it bundles (`cli` in `ui/src-tauri/src/lib.rs`), so the AppImage is the CLI too and the README says
   how to get the CLI from each download; on macOS, where a `.app` is a directory, the CLI is a symlink to
-  `Octoflow.app/Contents/MacOS/octoflow`. Left: smoke-testing that on macOS, in
-  `.github/workflows/macos-binary.yml` (`.scratch/desktop-cli/issues/02-macos-cli-symlink.md`), and checking the
-  README's quarantine advice for the `.dmg` against a downloaded copy. The plain CLI binaries stay released: 13 MB
-  against the AppImage's 120 MB of WebKit, and they start without FUSE on headless machines and in CI. Decided against: one file on every
-  platform, by embedding the orchestrator's bytes in the Rust executable and unpacking them at start
-  (PyInstaller's onefile done twice), or by Python hosting the window, which [ui-options.md](docs/ui-options.md)
-  chose against. Agreed 2026-10-24.
+  `Octoflow.app/Contents/MacOS/octoflow`. `build-desktop.sh`'s `smoke_dmg` mounts the `.dmg` and runs the CLI
+  through such a symlink and as the app's own executable, in `.github/workflows/macos-binary.yml`'s build of each
+  release and of each pull request that touches the packaging. Left: checking the README's quarantine advice for
+  the `.dmg` against a downloaded copy (`.scratch/desktop-cli/issues/02-macos-cli-symlink.md`). The plain CLI
+  binaries stay released: 13 MB against the AppImage's 120 MB of WebKit, and they start without FUSE on headless
+  machines and in CI. Decided against: one file on every platform, by embedding the orchestrator's bytes in the
+  Rust executable and unpacking them at start (PyInstaller's onefile done twice), or by Python hosting the window,
+  which [ui-options.md](docs/ui-options.md) chose against. Agreed 2026-10-24.
 - **The quality gate in a `gate.py` of its own.** The gate is reusable for other Python projects, but lives inside
   `orchestrator.py`; and it can only run inside the judged project's environment anyway, since it starts pytest
   and mutmut with `sys.executable`, which in the binary is the binary. Decided 2026-10-24: the quality file is the

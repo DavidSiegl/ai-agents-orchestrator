@@ -140,6 +140,36 @@ smoke_appimage() {
     echo "smoke-tested dist/$(basename "$1") as the CLI"
 }
 
+# smoke_dmg DMG: get the CLI from the .dmg, an absolute path, as the README tells a Mac user to, and run it from a
+# new directory: --help and workflows through a symlink to Contents/MacOS/octoflow in the mounted Octoflow.app, and
+# --help through the app's own executable, CFBundleExecutable in its Info.plist, which runs the CLI when given
+# arguments (cli in ui/src-tauri/src/lib.rs). Each exits 0. Detaches the .dmg; exits 1, naming the check, when one
+# fails.
+smoke_dmg() {
+    smoke=$(mktemp -d)
+    smoke=$(cd "$smoke" && pwd -P)
+    mkdir "$smoke/mnt" "$smoke/bin" "$smoke/project"
+    smoke_fail() {
+        echo "build-desktop.sh: the .dmg's app as the CLI: $*" >&2
+        hdiutil detach -quiet "$smoke/mnt" 2>/dev/null || true
+        rm -rf "$smoke"
+        exit 1
+    }
+    hdiutil attach -quiet -nobrowse -readonly -mountpoint "$smoke/mnt" "$1" || smoke_fail "could not mount $1"
+    app="$smoke/mnt/Octoflow.app"
+    ln -s "$app/Contents/MacOS/octoflow" "$smoke/bin/octoflow"
+    (cd "$smoke/project" && "$smoke/bin/octoflow" --help >/dev/null) \
+        || smoke_fail "--help through a symlink did not exit 0"
+    (cd "$smoke/project" && "$smoke/bin/octoflow" workflows >/dev/null) \
+        || smoke_fail "workflows through a symlink did not exit 0"
+    exe=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist") \
+        || smoke_fail "Info.plist names no CFBundleExecutable"
+    (cd "$smoke/project" && "$app/Contents/MacOS/$exe" --help >/dev/null) || smoke_fail "$exe --help did not exit 0"
+    hdiutil detach -quiet "$smoke/mnt" || smoke_fail "could not detach $smoke/mnt"
+    rm -rf "$smoke"
+    echo "smoke-tested dist/$(basename "$1") as the CLI, by symlink and as $exe"
+}
+
 # A bundle without the sidecar still builds and opens, then says only that it cannot start the orchestrator.
 out="ui/src-tauri/target/release/bundle"
 if [ "$os" = linux ]; then
@@ -159,4 +189,5 @@ else
     [ -x "$out/macos/Octoflow.app/Contents/MacOS/octoflow" ] \
         || { echo "build-desktop.sh: Octoflow.app has no Contents/MacOS/octoflow" >&2; exit 1; }
     publish dmg "$out/dmg/Octoflow_${version}_"*.dmg
+    smoke_dmg "$PWD/dist/octoflow-desktop-$os-$arch.dmg"
 fi
