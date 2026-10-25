@@ -2818,6 +2818,8 @@ class GateFailures(NamedTuple):
     conditions: list[str]  # the failed conditions, as the file words them
     # By check, the first word of a finding's rule, or "tests" for a failing test: finding_fingerprint of each
     # finding that fails the gate, and of each failing test, in the file's order. Findings to weigh are left out.
+    # A secret, under "gitleaks", is finding_fingerprint(path, "gitleaks <rule>", "") with "-<k>" added for the k-th
+    # secret of that rule in that file, its line and commit left out, so that two rounds compare by how many each has.
     fingerprints: dict[str, list[str]]
 
     def repeats(self, earlier: "GateFailures") -> bool:
