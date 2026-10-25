@@ -116,7 +116,7 @@ lacks deleted); a resume restores a saved record again. That happens before the 
 the locked files, and `LOCKED_NOTE` tells the verdict step which files of its round were restored and where the
 diffs are.
 
-A workflow with a `proof_command` (`examples/workflows/adversarial.toml`) has its verdict step back findings with
+A workflow with a `proof_command`, such as `python -m pytest -q {proofs}`, has its verdict step back findings with
 tests in `{proofs_dir}`, `RunState.proofs_dir(n)` in the run directory, so they never enter the snapshot or the
 commit. After a review that requests changes, `Workflow._judge_proofs` runs each proof file with the command in the
 working tree (`_run_proof`: exit status 1 is a failing proof, which demonstrates the finding its name's first number

@@ -10401,18 +10401,31 @@ class TestProofs(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "proof_command must be a string"):
             orchestrator.parse_workflow("bad", {**orchestrator.workflow_definition(QUICK), "proof_command": 1}, BUILT_IN_PROMPTS)
 
+    def test_a_workflow_file_takes_proof_command_and_proofs_dir(self):
+        text = """
+proof_command = "python -m pytest -q {proofs}"
+
+[[steps]]
+use = "spec"
+
+[[steps]]
+use = "build"
+
+[[steps]]
+use = "review"
+prompt = "Back each finding with a test in {proofs_dir}; write {review_path}."
+again = "Again, with tests in {proofs_dir}; write {review_path}."
+"""
+        p = orchestrator.parse_workflow("proving", tomllib.loads(text), BUILT_IN_PROMPTS)
+        self.assertEqual(p.proof_command, "python -m pytest -q {proofs}")
+        self.assertIn("{proofs_dir}", p.step("review").prompt)
+        self.assertIn("{proofs_dir}", p.step("review").again)
+
     def test_proof_command_round_trips_through_a_workflow_file(self):
         text = orchestrator.workflow_toml(self.pipeline)
         self.assertIn('proof_command = "sh {proofs}"', text)
         self.assertEqual(orchestrator.parse_workflow("quick", tomllib.loads(text), BUILT_IN_PROMPTS), self.pipeline)
         self.assertNotIn("proof_command", orchestrator.workflow_toml(QUICK))
-
-    def test_the_adversarial_example_loads(self):
-        adversarial = orchestrator.load_workflow_file(f"{EXAMPLES}/adversarial.toml", BUILT_IN_PROMPTS)
-        self.assertEqual(orchestrator.workflow_shape(adversarial), "spec -> build -> review (back to build)")
-        self.assertIn("{proofs}", adversarial.proof_command)
-        self.assertIn("{proofs_dir}", adversarial.step("review").prompt)
-        self.assertIn("{proofs_dir}", adversarial.step("review").again)
 
 
 class TestSavedBeforeWorkflows(unittest.TestCase):
@@ -10562,18 +10575,31 @@ class TestWorkflowFiles(unittest.TestCase):
         default = orchestrator.DEFAULT_WORKFLOW
         quick = orchestrator.load_workflow_file(f"{EXAMPLES}/quick.toml", BUILT_IN_PROMPTS)
         self.assertEqual(orchestrator.workflow_shape(quick), "build -> review (back to build)")
-        tdd = orchestrator.load_workflow_file(f"{EXAMPLES}/tdd.toml", BUILT_IN_PROMPTS)
-        self.assertEqual(tdd.name, "tdd")
-        self.assertEqual(tdd.roles, {"spec": "Spec Collector", "tests": "Test Writer", "build": "Builder",
-                                     "review": "Reviewer"})
-        self.assertEqual(tdd.models, {"tests": "sonnet"})
-        spec, tests, build, review = tdd.steps
-        self.assertEqual((spec, review), (default.step("spec"), default.step("review")))
-        # use keeps every field the file does not set.
-        self.assertNotEqual(build.prompt, default.step("build").prompt)
-        self.assertEqual(Step(**{**orchestrator.step_fields(build), "prompt": default.step("build").prompt}),
-                         default.step("build"))
+        team = orchestrator.load_workflow_file(f"{EXAMPLES}/product-team.toml", BUILT_IN_PROMPTS)
+        self.assertEqual(team.name, "product-team")
+        self.assertEqual(orchestrator.workflow_shape(team), "spec -> design -> tests -> build -> review (back to build)")
+        self.assertEqual(team.roles, {"spec": "Product Manager", "design": "Architect", "tests": "QA Engineer",
+                                      "build": "Engineer", "review": "Tech Lead"})
+        self.assertEqual(team.models, {"tests": "sonnet"})
+        spec, design, tests, build, review = team.steps
+        # use keeps every field the file does not set: the interview stays human-paced, the Engineer quality-gated, the
+        # Tech Lead the verdict step looping back to the Engineer.
+        self.assertEqual(Step(**{**orchestrator.step_fields(spec), "prompt": default.step("spec").prompt}),
+                         default.step("spec"))
+        self.assertIn("first line is a `# ` heading", spec.prompt)
+        for step in (build, review):
+            fields = {"prompt", "again", "fresh_note"}
+            self.assertEqual({k: v for k, v in orchestrator.step_fields(step).items() if k not in fields},
+                             {k: v for k, v in orchestrator.step_fields(default.step(step.id)).items() if k not in fields})
+        self.assertEqual((design.file, design.edits), ("design.md", False))
         self.assertEqual((tests.role, tests.file, tests.edits, tests.locks), ("tests", "tests.md", True, True))
+        # Every round of the Engineer and the Tech Lead, and a fresh session of either, hears of the design and the
+        # locked acceptance tests, not only the first.
+        for step in (build, review):
+            for text in (step.prompt, step.again, step.fresh_note):
+                self.assertIn("{design_path}", text)
+                self.assertIn("{tests_path}", text)
+        self.assertIn("{design_path}", tests.prompt)
 
     def test_default_round_trips_through_its_file(self):
         default = orchestrator.DEFAULT_WORKFLOW
@@ -10766,14 +10792,14 @@ class TestWorkflowFiles(unittest.TestCase):
             orchestrator.load_workflow_file("/nope/x.toml", BUILT_IN_PROMPTS)
 
     def test_files_are_offered_by_name(self):
-        with open(f"{EXAMPLES}/tdd.toml") as f:
-            self.file("tdd", f.read())
+        with open(f"{EXAMPLES}/product-team.toml") as f:
+            self.file("product-team", f.read())
         self.file("broken", "nonsense\n")
         with open(os.path.join(self.workflows, "notes.txt"), "w") as f:
             f.write("not a workflow")
-        self.assertEqual(orchestrator.workflow_names(), ["broken", "default", "tdd"])
-        self.assertEqual(orchestrator.named_workflow("tdd", BUILT_IN_PROMPTS).name, "tdd")
-        with self.assertRaisesRegex(OrchestratorError, "unknown workflow nope; there are broken, default, tdd"):
+        self.assertEqual(orchestrator.workflow_names(), ["broken", "default", "product-team"])
+        self.assertEqual(orchestrator.named_workflow("product-team", BUILT_IN_PROMPTS).name, "product-team")
+        with self.assertRaisesRegex(OrchestratorError, "unknown workflow nope; there are broken, default, product-team"):
             orchestrator.named_workflow("nope", BUILT_IN_PROMPTS)
 
     def test_a_run_keeps_its_workflow_when_the_file_is_gone(self):
@@ -10830,7 +10856,7 @@ class TestWorkflowFileCLI(unittest.TestCase):
     def setUp(self):
         workflows = os.path.join(without_workflow_files(self), "ai-agents-orchestrator", "workflows")
         os.makedirs(workflows)
-        with open(f"{EXAMPLES}/tdd.toml") as src, open(f"{workflows}/tdd.toml", "w") as dst:
+        with open(f"{EXAMPLES}/product-team.toml") as src, open(f"{workflows}/product-team.toml", "w") as dst:
             dst.write(src.read())
 
     def started(self, init, *flags):
@@ -10839,9 +10865,9 @@ class TestWorkflowFileCLI(unittest.TestCase):
         return init.call_args.args[2], init.call_args.kwargs
 
     def test_run_a_workflow_file_by_name(self, _resolve, _run, init):
-        state, kw = self.started(init, "--workflow", "tdd")
-        self.assertEqual((state.workflow, state.phase), ("tdd", "spec"))
-        self.assertEqual(kw["pipeline"], orchestrator.load_workflow_file(f"{EXAMPLES}/tdd.toml", BUILT_IN_PROMPTS))
+        state, kw = self.started(init, "--workflow", "product-team")
+        self.assertEqual((state.workflow, state.phase), ("product-team", "spec"))
+        self.assertEqual(kw["pipeline"], orchestrator.load_workflow_file(f"{EXAMPLES}/product-team.toml", BUILT_IN_PROMPTS))
         self.assertEqual(kw["agents"].models, {"tests": "sonnet"})
 
     def test_run_a_workflow_file_by_path(self, _resolve, _run, init):
@@ -10849,9 +10875,9 @@ class TestWorkflowFileCLI(unittest.TestCase):
         self.assertEqual((state.workflow, state.phase, kw["pipeline"].name), ("quick", "build", "quick"))
 
     def test_model_flags_override_the_files_models(self, _resolve, _run, init):
-        _, kw = self.started(init, "--workflow", "tdd", "--model", "X")
-        self.assertEqual(kw["agents"].models, {"spec": "X", "tests": "X", "build": "X", "review": "X"})
-        _, kw = self.started(init, "--workflow", "tdd", "--role-model", "tests=haiku", "--role-model", "spec=opus",
+        _, kw = self.started(init, "--workflow", "product-team", "--model", "X")
+        self.assertEqual(kw["agents"].models, {"spec": "X", "design": "X", "tests": "X", "build": "X", "review": "X"})
+        _, kw = self.started(init, "--workflow", "product-team", "--role-model", "tests=haiku", "--role-model", "spec=opus",
                              "--build-model", "Y")
         self.assertEqual(kw["agents"].models, {"spec": "opus", "tests": "haiku", "build": "Y"})
 
@@ -10864,14 +10890,14 @@ class TestWorkflowFileCLI(unittest.TestCase):
 
     def test_bad_flags(self, _resolve, _run, init):
         for argv in (["run", "task", "--role-model", "tests"],
-                     ["run", "task", "--workflow", "tdd", "--workflow-file", "x.toml"]):
+                     ["run", "task", "--workflow", "product-team", "--workflow-file", "x.toml"]):
             with self.subTest(argv=argv), self.assertRaises(SystemExit), patch("sys.stderr"):
                 parse_args(argv)
 
     def test_resume_takes_role_model(self, _resolve, _run, init):
-        tdd = orchestrator.named_workflow("tdd", BUILT_IN_PROMPTS)
-        saved = {**asdict(saved_run("build", 1, models={"tests": "sonnet"})), "workflow": "tdd",
-                 "workflow_definition": orchestrator.workflow_definition(tdd)}
+        team = orchestrator.named_workflow("product-team", BUILT_IN_PROMPTS)
+        saved = {**asdict(saved_run("build", 1, models={"tests": "sonnet"})), "workflow": "product-team",
+                 "workflow_definition": orchestrator.workflow_definition(team)}
         args = parse_args(["resume", "a1b2c3", "--role-model", "review=opus"])
         state = orchestrator.resumable_state([(10**4, saved)], args, "/proj", "here", lambda pid: False)
         self.assertEqual(state.models, {"tests": "sonnet", "review": "opus"})
@@ -10887,20 +10913,21 @@ class TestWorkflowFileCLI(unittest.TestCase):
             "    spec -> build -> review (back to build)",
             f"broken  {workflows}/broken.toml",
             "    error: step 1: file is missing",
-            f"tdd  {workflows}/tdd.toml",
-            "    spec -> tests -> build -> review (back to build)",
-            "    Spec Collector -> Test Writer -> Builder <-> Reviewer: tests first, by another session",
+            f"product-team  {workflows}/product-team.toml",
+            "    spec -> design -> tests -> build -> review (back to build)",
+            "    Product Manager -> Architect -> QA Engineer -> Engineer <-> Tech Lead",
             "",
             f"Add one as {workflows}/NAME.toml; `orchestrator.py workflows default` prints the default as a file "
             f"to start from.",
         ])
 
     def test_workflows_prints_one_as_a_file(self, _resolve, _run, init):
-        for ref in ("tdd", f"{EXAMPLES}/tdd.toml"):
+        for ref in ("product-team", f"{EXAMPLES}/product-team.toml"):
             with self.subTest(ref=ref), patch("sys.stdout", new_callable=io.StringIO) as out:
                 self.assertEqual(main(["workflows", ref]), 0)
-                self.assertEqual(orchestrator.parse_workflow("tdd", tomllib.loads(out.getvalue()), BUILT_IN_PROMPTS),
-                                 orchestrator.named_workflow("tdd", BUILT_IN_PROMPTS))
+                self.assertEqual(orchestrator.parse_workflow("product-team", tomllib.loads(out.getvalue()),
+                                                           BUILT_IN_PROMPTS),
+                                 orchestrator.named_workflow("product-team", BUILT_IN_PROMPTS))
 
 
 class TestPromptFiles(unittest.TestCase):
@@ -15329,15 +15356,15 @@ class TestBlocked(unittest.TestCase):
         self.assertEqual((wf.state.round, wf.state.quality_round, wf.state.blocked), (1, 2, None))
 
     def test_a_step_from_a_workflow_file_can_block(self):
-        tdd = orchestrator.load_workflow_file(f"{EXAMPLES}/tdd.toml", BUILT_IN_PROMPTS)
+        team = orchestrator.load_workflow_file(f"{EXAMPLES}/product-team.toml", BUILT_IN_PROMPTS)
         def tests_md(s):
             return f"{s.dir}/tests.md"
         seen, specs, notes = [], [], []
         wf, _, host, _ = make_workflow({
-            "spec": [recording(spec_turn, specs)],
+            "spec": [recording(spec_turn, specs)], "design": [writes(lambda s: f"{s.dir}/design.md", "the design")],
             "tests": [recording(blocked_report(tests_md, "which test runner?"), seen),
                       recording(answered(tests_md, "tests written"), seen)],
-            "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, state=new_run(tdd), pipeline=tdd)
+            "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, state=new_run(team), pipeline=team)
         wf.notify = lambda title, body: notes.append((title, body))
         bounded(wf)
 
@@ -15345,7 +15372,7 @@ class TestBlocked(unittest.TestCase):
         self.assertEqual(blocked_files(host), ["tests.blocked-1.md"])
         self.assertTrue(seen[0].endswith(NOTE))
         self.assertEqual(seen[1], blocked_prompt(f"{D}/tests.md"))
-        self.assertIn(("Test Writer is blocked: which test runner?", "pane w1:p2"), notes)
+        self.assertIn(("QA Engineer is blocked: which test runner?", "pane w1:p3"), notes)
         self.assertNotIn("BLOCKED", specs[0])
 
     def test_a_blocked_verdict_file_gets_the_verdict_retry(self):
