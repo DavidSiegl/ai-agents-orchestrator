@@ -12,7 +12,7 @@ Ideas for what comes next, in no particular order. The designs behind what has s
 ## Workflows
 
 Only `default` ships ([Workflows](architecture.md#workflows)); others are workflow files, and
-[`examples/workflows/`](../examples/workflows) has `spec-build-review`, `quick`, `tdd`, `adversarial` and `product-team`. These engine gaps, by letter (G, runs without a verdict, is closed), stand
+[`examples/workflows/`](../examples/workflows) has `spec-build-review`, `quick` and `product-team`. These engine gaps, by letter (G, runs without a verdict, is closed), stand
 between the engine and the candidates below:
 
 - **A. Run inputs**: `--spec FILE` seeds `spec.md` for a workflow whose first step writes the spec (a contract

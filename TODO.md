@@ -102,7 +102,7 @@ was done.
   request's review shows them, and each may take `PROOF_TIMEOUT`. Kept: a demonstrated defect is what the human
   most needs to see in a draft. Raised by the same review.
 - **A proof in a worktree run finds the checkout's pytest configuration.** The run directory, and with it
-  `RunState.proofs_dir`, is under the project checkout, not the run's worktree, so `adversarial.toml`'s
+  `RunState.proofs_dir`, is under the project checkout, not the run's worktree, so a `proof_command` of
   `python -m pytest {proofs}` takes its rootdir and `conftest.py` from the checkout while importing the code from the
   worktree it runs in. Found while writing loop-guards ticket 05; not reproduced. Closes with `_run_proof` passing
   the working tree as pytest's rootdir and conftest root, or the proofs copied into a scratch directory of the
