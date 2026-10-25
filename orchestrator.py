@@ -153,6 +153,8 @@ CONSOLE_TAIL_LINES = 60
 GATE_OK = "OK"
 GATE_ERROR = "ERROR"
 GATE_BUILD_FAILED = "BUILD_FAILED"
+# gitleaks found a secret in the quality round's snapshot, so it was not pushed and Jenkins did not judge it.
+GATE_LEAK = "LEAK"
 # `orchestrator.py gate`: coverage of new code below GATE_MIN_COVERAGE percent fails the gate once a change has
 # GATE_MIN_NEW_LINES or more new lines to cover; a smaller change is not judged on coverage.
 GATE_MIN_COVERAGE = 80.0
@@ -2606,7 +2608,7 @@ def parse_blocked(report: str) -> str | None:
 
 def parse_gate(quality: str) -> str | None:
     """The gate on the quality file's first non-blank line, tolerating Markdown emphasis around it."""
-    return _first_line_word(quality, "GATE", (GATE_OK, GATE_ERROR, GATE_BUILD_FAILED))
+    return _first_line_word(quality, "GATE", (GATE_OK, GATE_ERROR, GATE_BUILD_FAILED, GATE_LEAK))
 
 
 def _under_gate_line(quality: str, line: str) -> str:
@@ -2796,6 +2798,13 @@ def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (),
     if edited or mutmut_state:
         out += _config_section(edited, rules_from, mutmut_state)
     return "\n".join(out) + "\n"
+
+
+def leak_report(leaks: list[Leak], intro: str) -> str:
+    """The quality file of a round whose snapshot holds secrets: GATE_LEAK, intro, and the leaks numbered, each
+    where it is, its rule and its fingerprint, never the secret."""
+    return "\n".join([f"GATE: {GATE_LEAK}", "", intro, "", "## Secrets found", "",
+                      *(f"{k}. {leak}" for k, leak in enumerate(leaks, 1))]) + "\n"
 
 
 class GateFailures(NamedTuple):
@@ -7313,6 +7322,7 @@ class Workflow:
 
     def _quality(self, n: int, q: int) -> str:
         """Quality round q of round n: have Jenkins judge the change, write quality-<n>-<q>.md, and return its gate.
+        A snapshot gitleaks finds a secret in is not pushed, and its quality file is GATE_LEAK.
 
         Each step first looks for what an earlier orchestrator already did, furthest first: the
         quality file; then, in _analyse, the chain in ci.
@@ -7332,9 +7342,13 @@ class Workflow:
             base = s.base
             if base is None:
                 raise OrchestratorError("a quality round before the run has a base")
-            build, result, quality = self._analyse(
-                ref, deadline, base, lambda: self.host.snapshot(s.work_dir, base, message))
-            text = self._jenkins.mask(self._quality_report(n, q, build, result, quality, deadline))
+            try:
+                build, result, quality = self._analyse(
+                    ref, deadline, base, lambda: self.host.snapshot(s.work_dir, base, message))
+            except LeaksFound as e:
+                text = self._leak_report(n, q, e)
+            else:
+                text = self._jenkins.mask(self._quality_report(n, q, build, result, quality, deadline))
             self.host.write(path, text)
         self._end_turn(QUALITY, path)
         gate = parse_gate(text)
@@ -7352,7 +7366,7 @@ class Workflow:
         """Have Jenkins judge a commit; returns (build, its result, the quality file it archived).
 
         commit() makes the commit, which is pushed to the branch ref once gitleaks, by base's rules, finds no secret in
-        it; a secret ends the run with LeaksFound, nothing pushed. The quality file is None when
+        it; on a secret, raises LeaksFound with nothing pushed or triggered and ci empty. The quality file is None when
         the build ended before its Gate stage. Each link of the chain is saved as soon as it is
         known, so a resume picks it up from the furthest one; a ce_task a SonarQube-era orchestrator
         saved is ignored, and its build, which archived no quality file, counts as one that failed.
@@ -7362,6 +7376,7 @@ class Workflow:
         if fresh:
             if s.ci.get("ref"):
                 delete_ci_ref(self.host, s.cwd, s.ci["ref"])
+                s.ci = {}
             sha = commit()
             self.host.push_ref(s.work_dir, sha, ref, base=base, report_path=s.leaks_path("snapshot"))
             s.ci = {"ref": ref, "sha": sha}
@@ -7460,6 +7475,16 @@ class Workflow:
                  f"ran, so nothing judged the change. Make it build first.")
         return quality_report(GATE_BUILD_FAILED, intro, tests=tests, console=console,
                               edited=edited_config(diff, changed), mutmut_state=mutmut_state_files(changed))
+
+    def _leak_report(self, n: int, q: int, found: LeaksFound) -> str:
+        """The quality file of quality round q of round n, whose snapshot was not pushed for the secrets found."""
+        s = self.state
+        intro = (f"gitleaks found {len(found.leaks)} secret{'s' if len(found.leaks) != 1 else ''} in the snapshot of "
+                 f"round {n}, quality round {q} of {s.max_quality_rounds}, so it was not pushed and Jenkins did not "
+                 f"judge the change. Take each secret below out of the change; a comment telling gitleaks to allow "
+                 f"its line counts as one too. If one is not a secret, say so in your report: only the human can let "
+                 f"it through, in .gitleaksignore on the base branch.")
+        return leak_report(found.leaks, intro)
 
     def _judged_by_orchestrator(self, quality: str, sha: str, deadline: float) -> str:
         """The build's quality file with what orchestrator_checks find in snapshot sha added (judge_run), their slow

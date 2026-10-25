@@ -3729,15 +3729,65 @@ class TestSecretScanWorkflow(unittest.TestCase):
     def script(self):
         return {"spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}
 
-    def test_a_secret_in_a_snapshot_ends_the_run_before_jenkins(self):
+    def test_a_secret_in_a_snapshot_goes_back_to_the_builder(self):
         host = FakeHost()
         host.leaks = [LEAK]
-        wf, herdr, host, fake, _ = gated(self.script(), host=host)
-        with self.assertRaisesRegex(orchestrator.LeaksFound, r"`limiter.py:3` github-pat"):
+        builds = []
+
+        def fix(prompt, state, host):
+            # The Builder takes the secret out of the working tree.
+            host.leaks = []
+            return fix_turn(1, 1)(prompt, state, host)
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "build": [build_turn(1), recording(fix, builds)],
+            "review": [review_turn(1, APPROVE)]}, host=host)
+        with patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(wf.run(), APPROVE)
+        state = wf.state
+        quality = host.files[state.quality_path(1, 1)]
+        self.assertEqual(orchestrator.parse_gate(quality), orchestrator.GATE_LEAK)
+        self.assertIn("so it was not pushed and Jenkins did not judge the change", quality)
+        self.assertIn(f"## Secrets found\n\n1. {LEAK}\n", quality)
+        self.assertEqual(state.quality_rounds[0]["gate"], orchestrator.GATE_LEAK)
+        self.assertEqual(builds, [orchestrator.QUALITY_FIX_PROMPT.format(
+            quality_path=state.quality_path(1, 1), report_path=state.quality_build_path(1, 1)) + NOTE])
+        # Only the clean second snapshot was pushed and built.
+        self.assertEqual([c for c in host.git_calls if c[:3] == ("push", "--quiet", "--force")],
+                         [("push", "--quiet", "--force", "origin", "snap2:refs/heads/orchestrator-ci/a1b2c3-1-q2")])
+        self.assertEqual(fake.triggered(), ["orchestrator-ci/a1b2c3-1-q2"])
+        self.assertTrue(host.files[state.quality_path(1, 2)].startswith("GATE: OK"))
+        self.assertEqual([scan[0] for scan in host.scans[:2]], ["snap1", "snap2"])
+        # The report gitleaks wrote is the only place the secret is.
+        self.assertNotIn(FAKE_TOKEN, err.getvalue())
+        self.assertEqual([path for path, text in host.files.items() if FAKE_TOKEN in text],
+                         [state.leaks_path("snapshot")])
+        self.assertNotIn(FAKE_TOKEN, host.prs[0]["body"])
+
+    def test_a_resume_finds_the_leak_quality_file(self):
+        host = FakeHost()
+        host.leaks = [LEAK]
+        def interrupted(prompt, state, host):
+            raise KeyboardInterrupt
+        wf, herdr, host, fake, _ = gated({"spec": [spec_turn], "build": [build_turn(1), interrupted]}, host=host)
+        with self.assertRaises(KeyboardInterrupt):
             wf.run()
-        self.assertNotIn("trigger", fake.names)
-        self.assertEqual(host.remote, {})
-        self.assertEqual(host.scans, [("snap1", "abc123", f"{wf.state.dir}/leaks-snapshot.json")])
+        self.assertEqual((wf.state.phase, wf.state.quality_round, wf.state.ci), ("build", 1, {}))
+        # As if the orchestrator had stopped after writing the quality file, before it moved on.
+        wf.state.phase = "quality"
+        scans, snapshots = len(host.scans), len(host.snapshots)
+        before_fix = []
+
+        def fix(prompt, state, host):
+            before_fix.append((len(host.scans), len(host.snapshots)))
+            host.leaks = []
+            return fix_turn(1, 1)(prompt, state, host)
+        wf, herdr, host, fake, _ = gated({"build": [fix], "review": [review_turn(1, APPROVE)]},
+                                         host=host, state=wf.state)
+        self.assertEqual(wf.run(), APPROVE)
+        # The LEAK file was taken as written: no new snapshot or scan before the fix turn.
+        self.assertEqual(before_fix, [(scans, snapshots)])
+        self.assertEqual(orchestrator.parse_gate(host.files[wf.state.quality_path(1, 1)]), orchestrator.GATE_LEAK)
+        self.assertEqual(fake.triggered(), ["orchestrator-ci/a1b2c3-1-q2"])
 
     def test_a_secret_on_the_branch_stops_publish_until_it_is_rewritten(self):
         host = FakeHost()
