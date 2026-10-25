@@ -278,11 +278,11 @@ running `after` callbacks on `tick`), and `TestRunProcess` runs real child proce
 - `packaging/build-desktop.sh`: builds the desktop app with `tauri build`, the binary `build-binary.sh` built
   copied in as its `externalBin` sidecar and `pyproject.toml`'s version, through a release config the script
   writes and merges over `tauri.conf.json`, which bundles nothing. It writes
-  `dist/orchestrator-desktop-<os>-<arch>` `.deb` and `.AppImage` on Linux, `.dmg` on macOS (signed ad hoc),
+  `dist/octoflow-desktop-<os>-<arch>` `.deb` and `.AppImage` on Linux, `.dmg` on macOS (signed ad hoc),
   each with its `.sha256`, and refuses a bundle without the sidecar. On Linux it then runs the AppImage as the
   CLI from a temporary directory: `--help` and `workflows` exit 0, and the orchestrator `serve` execs starts in
   that directory with no `$APPDIR` entry in `LD_LIBRARY_PATH` and no `PYTHONHOME`, read from its `/proc` entry.
-- `packaging/build-binary.sh`: builds `dist/orchestrator-<os>-<arch>` (`linux-x86_64`, `macos-arm64`), a
+- `packaging/build-binary.sh`: builds `dist/octoflow-<os>-<arch>` (`linux-x86_64`, `macos-arm64`), a
   PyInstaller one-file binary with Python and tkinter inside, and its `.sha256`, then smoke-tests it: `--help`,
   `workflows` lists `default`, and `gui --smoke-test` where there is a display. On Linux it builds with the
   system `python3` (`python3-tk` installed) in `build/binary-venv`, not uv's Python, whose Tk lacks Xft and so
@@ -294,7 +294,7 @@ running `after` callbacks on `tick`), and `TestRunProcess` runs real child proce
   that runs `packaging/build-binary.sh` and `packaging/build-desktop.sh` on every build but a quality build
   (`GIT_REF` set). On `main` a Release stage publishes a new `pyproject.toml` version as a GitHub release, with
   `orchestrator.py` attached as the zipapp
-  `orchestrator.pyz`, the Linux binary and the Linux desktop app, each with its `.sha256`, in one
+  `octoflow.pyz`, the Linux binary and the Linux desktop app, each with its `.sha256`, in one
   `gh release create`. Its parameter `GIT_REF` builds
   another branch; such a build never releases.
 - `.github/workflows/automerge.yml`: keeps auto-merge on for a pull request into `main` from a branch of this
@@ -302,7 +302,7 @@ running `after` callbacks on `tick`), and `TestRunProcess` runs real child proce
   requests it leaves to a human.
 - `.github/workflows/macos-binary.yml`: Jenkins has no Mac, so when a release is
   published, or by hand for an existing tag, it runs `packaging/build-binary.sh` and `packaging/build-desktop.sh`
-  on `macos-latest` and uploads `orchestrator-macos-arm64`, `orchestrator-desktop-macos-arm64.dmg` and their
+  on `macos-latest` and uploads `octoflow-macos-arm64`, `octoflow-desktop-macos-arm64.dmg` and their
   `.sha256` to that release with `gh release upload --clobber`. With only
   `contents: write`, it never creates a release or a tag; everything else stays in Jenkins.
 
