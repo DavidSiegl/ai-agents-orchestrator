@@ -12588,6 +12588,10 @@ class TestDrain(unittest.TestCase):
         self.assertEqual(self.header("a")[::2], ("in-review", PR_A))
         self.assertEqual(self.text("b"), drain_spec_text("Second", "needs-info"))
 
+    def gone(self, slug):
+        """Why drain finds the spec deleted, as read_spec_file says it."""
+        return f"cannot read spec file {self.path(slug)}: No such file or directory"
+
     def test_a_spec_deleted_while_another_runs_is_skipped(self):
         self.spec("a", drain_spec_text("First"))
         self.spec("b", drain_spec_text("Second"))
@@ -12596,12 +12600,132 @@ class TestDrain(unittest.TestCase):
         def run(wf):
             os.remove(self.path("b"))
             return approved(PR_A)(wf)
-        status, _, err = self.drain(run, approved(PR_B))
+        status, out, err = self.drain(run, approved(PR_B))
 
-        self.assertEqual(status, 0)
+        # b was ready-for-agent when drain last read it, so it is left, gone, and the drain does not end cleared.
+        self.assertEqual(status, orchestrator.EXIT_WAITING)
         self.assertEqual([state.task for state, _ in self.runs], ["First", "Third"])
         self.assertIn("b: ", err)
         self.assertIn("not running it", err)
+        self.assertEqual(err.count(f"b: {self.gone('b')}; not running it\n"), 1, err)
+        self.assertNotIn("all specs cleared", out)
+        self.assertTrue(out.endswith(f"c: ready-for-agent -> in-review  {PR_B}\nb: gone ({self.gone('b')})\n"), out)
+
+    def test_the_running_spec_deleted_during_its_run_is_not_recorded(self):
+        self.spec("a", drain_spec_text("First"))
+        self.spec("b", drain_spec_text("Second"))
+
+        def run(wf):
+            os.remove(self.path("a"))
+            return approved(PR_A)(wf)
+        status, out, err = self.drain(run, approved(PR_B))
+
+        self.assertEqual(status, orchestrator.EXIT_WAITING)
+        self.assertEqual(len(self.runs), 2)
+        self.assertFalse(os.path.exists(self.path("a")))
+        self.assertIn(f"a: {self.gone('a')}; not recording Status: in-review, PR: {PR_A}\n", err)
+        self.assertNotIn("not running it", err)
+        self.assertEqual(self.header("b")[::2], ("in-review", PR_B))
+        self.assertTrue(out.endswith(f"a: ready-for-agent -> gone\nb: ready-for-agent -> in-review  {PR_B}\n"
+                                     f"a: gone ({self.gone('a')})\n"), out)
+
+    def test_the_running_spec_emptied_during_a_failed_run_is_not_recorded(self):
+        self.spec("a", drain_spec_text("First"))
+
+        def run(wf):
+            self.spec("a", "")
+            raise OrchestratorError("the Builder's pane is gone")
+        status, out, err = self.drain(run)
+
+        run_id = self.runs[0][0].run_id
+        why = f"spec file {self.path('a')} is empty"
+        self.assertEqual(status, orchestrator.EXIT_ERROR)
+        self.assertEqual(self.text("a"), "")
+        self.assertIn("error: the Builder's pane is gone\n", err)
+        self.assertIn(f"orchestrator.py resume {run_id.rsplit('-', 1)[-1]}", err)
+        self.assertIn(f"a: {why}; not recording Status: ready-for-human\n", err)
+        self.assertNotIn("a is ready-for-human", err)
+        self.assertEqual(out, "a: ready-for-agent -> gone\n")
+
+    def test_a_spec_deleted_before_its_run_line_is_written_is_not_run(self):
+        self.spec("a", drain_spec_text("First"))
+        reread = orchestrator.QueuedSpec.reread
+        rereads = []
+
+        def deleting_on_the_second(spec):
+            # The first is next_startable's; the human deletes the spec just before drain_spec writes Run:.
+            rereads.append(spec.slug)
+            if len(rereads) == 2:
+                os.remove(self.path("a"))
+            return reread(spec)
+        with patch.object(orchestrator.QueuedSpec, "reread", autospec=True, side_effect=deleting_on_the_second):
+            status, out, err = self.drain()
+
+        self.assertEqual(status, orchestrator.EXIT_WAITING)
+        self.assertEqual(self.runs, [])
+        self.assertRegex(err, rf"a: {re.escape(self.gone('a'))}; not recording Run: \d{{8}}-\d{{6}}-\w{{6}}\n")
+        self.assertEqual(out, f"a: gone ({self.gone('a')})\n")
+
+    def test_a_blocker_deleted_mid_drain_is_shown_gone_without_its_pull_request(self):
+        self.spec("a", drain_spec_text("First"))
+        self.spec("b", drain_spec_text("Second", "in-review", f"PR: {PR_B}"))
+        self.spec("c", drain_spec_text("Third", "ready-for-agent", "Blocked by: b"))
+        self.host.pull_requests[PR_B] = {"state": "OPEN", "headRefOid": "b" * 40, "closedAt": None}
+
+        def run(wf):
+            os.remove(self.path("b"))
+            return approved(PR_A)(wf)
+        status, out, err = self.drain(run)
+
+        self.assertEqual(status, orchestrator.EXIT_WAITING)
+        self.assertEqual(err.count(f"b: {self.gone('b')}; gone\n"), 1, err)
+        self.assertNotIn("not running it", err)
+        self.assertTrue(out.endswith(f"c waits on:\n    b: gone ({self.gone('b')})\n"), out)
+        self.assertNotIn(PR_B, out)
+
+    def test_a_done_spec_deleted_mid_drain_is_logged_once(self):
+        self.spec("a", drain_spec_text("First"))
+        self.spec("b", drain_spec_text("Second"))
+        self.spec("c", drain_spec_text("Third", "done"))
+
+        def run(wf):
+            os.remove(self.path("c"))
+            return approved(PR_A)(wf)
+        status, out, err = self.drain(run, approved(PR_B))
+
+        self.assertEqual(status, 0)
+        self.assertEqual(err.count("c: "), 1, err)
+        self.assertIn(f"c: {self.gone('c')}; gone\n", err)
+        self.assertNotIn("not running it", err)
+        self.assertTrue(out.endswith("all specs cleared\n"), out)
+
+    def test_a_spec_emptied_then_restored_is_run(self):
+        self.spec("a", drain_spec_text("First"))
+        self.spec("b", drain_spec_text("Second"))
+        self.spec("c", drain_spec_text("Third"))
+
+        def emptying_b(wf):
+            self.spec("b", "")
+            return approved(PR_A)(wf)
+
+        def restoring_b(wf):
+            self.spec("b", drain_spec_text("Second"))
+            return approved(PR_B)(wf)
+        status, out, err = self.drain(emptying_b, restoring_b, approved(PR_B))
+
+        self.assertEqual(status, 0)
+        self.assertEqual([state.task for state, _ in self.runs], ["First", "Third", "Second"])
+        self.assertEqual(err.count(f"b: spec file {self.path('b')} is empty; not running it\n"), 1, err)
+        self.assertEqual(self.header("b")[::2], ("in-review", PR_B))
+        self.assertTrue(out.endswith(f"b: ready-for-agent -> in-review  {PR_B}\nc: ready-for-agent -> in-review  "
+                                     f"{PR_B}\nall specs cleared\n"), out)
+
+    def test_a_gone_spec_change_line_ends_gone(self):
+        spec = orchestrator.QueuedSpec("a", orchestrator.SpecFile(self.path("a"), drain_spec_text("A")), [],
+                                       "ready-for-agent")
+        spec.update({"Status": "in-review", "PR": PR_A}, write=False)
+        self.assertFalse(spec.reread())
+        self.assertEqual(spec.change_line(), "a: ready-for-agent -> gone")
 
     def test_a_blocked_by_line_naming_no_blocker(self):
         for line in ("Blocked by: -", "Blocked by: none", "Blocked by: None"):

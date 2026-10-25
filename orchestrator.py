@@ -8879,35 +8879,50 @@ class QueuedSpec:
     was: str | None  # its status as drain first read it
     # True once drain has changed its header, or would have but for --dry-run.
     changed: bool = False
-    # Why it could not be read again, deleted or emptied while drain ran; None while it can be.
-    unreadable: str | None = None
+    # Why the spec is gone: drain could not read it again (read_spec_file's error), deleted or emptied while drain
+    # ran, so it is neither run nor done, and file stays as drain last read it. None while it can be read.
+    gone: str | None = None
+
+    @property
+    def status_as_read(self) -> str | None:
+        """Its Status: line's value as drain last read or set it, which a gone spec keeps; None without one."""
+        return header_field(self.file.text, STATUS_KEY)
 
     @property
     def status(self) -> str | None:
-        """Its Status: line's value now; None without one, or once it is unreadable, so it is neither run nor done."""
-        return None if self.unreadable else header_field(self.file.text, STATUS_KEY)
+        """Its Status: line's value now; None without one, or once it is gone."""
+        return None if self.gone else self.status_as_read
 
     @property
     def run(self) -> str | None:
-        """The run id on its Run: line; None without one."""
-        return header_field(self.file.text, RUN_KEY)
+        """The run id on its Run: line; None without one, or once it is gone."""
+        return None if self.gone else header_field(self.file.text, RUN_KEY)
 
     @property
     def pr(self) -> str | None:
-        """The pull request's URL on its PR: line; None without one."""
-        return header_field(self.file.text, PR_KEY)
+        """The pull request's URL on its PR: line; None without one, or once it is gone."""
+        return None if self.gone else header_field(self.file.text, PR_KEY)
 
-    def reread(self) -> None:
-        """Take the file as it is on disk now, so an edit made while drain runs is kept, not overwritten. Its
-        blockers stay as drain first read them. Raises OrchestratorError as read_spec_file does."""
-        self.file = read_spec_file(self.file.path)
+    def reread(self) -> bool:
+        """Take the file as it is on disk now, so an edit made while drain runs is kept, not overwritten, and return
+        True; or return False, the spec gone, when it cannot be read. A gone spec read again is no longer gone. Its
+        blockers stay as drain first read them."""
+        try:
+            self.file = read_spec_file(self.file.path)
+        except OrchestratorError as e:
+            self.gone = str(e)
+            return False
+        self.gone = None
+        return True
 
-    def update(self, entries: dict[str, str], write: bool = True) -> None:
+    def update(self, entries: dict[str, str], write: bool = True) -> bool:
         """Set each of the header's lines that entries names, by key (with_header_field), and, with write, save the
-        file as it is on disk now with those lines changed. Raises OrchestratorError as with_header_field,
-        read_spec_file and replace_local_file do."""
-        if write:
-            self.reread()
+        file as it is on disk now with those lines changed; return True. With write, a spec found gone is left as it
+        is: it logs the entries it does not record and returns False. Raises OrchestratorError as with_header_field
+        and replace_local_file do."""
+        if write and not self.reread():
+            log(f"{self.slug}: {self.gone}; not recording {', '.join(f'{k}: {v}' for k, v in entries.items())}")
+            return False
         text = self.file.text
         for key, entry in entries.items():
             text = with_header_field(text, key, entry)
@@ -8915,10 +8930,12 @@ class QueuedSpec:
             replace_local_file(self.file.path, text)
         self.file = SpecFile(self.file.path, text)
         self.changed = True
+        return True
 
     def change_line(self) -> str:
-        """The line drain prints for a spec it changed: its slug, old and new status, and pull request."""
-        line = f"{self.slug}: {self.was} -> {self.status}"
+        """The line drain prints for a spec it changed: its slug, old and new status, `gone` for a gone one, and
+        pull request."""
+        line = f"{self.slug}: {self.was} -> {'gone' if self.gone else self.status}"
         return f"{line}  {self.pr}" if self.pr else line
 
 
@@ -9040,8 +9057,8 @@ def startable(spec: QueuedSpec, by_slug: dict[str, QueuedSpec]) -> bool:
 
 def drain_command(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str) -> int:
     """Run the specs in args.dir that are ready, one after another, recording each in its header, and return the
-    exit status: 0 once no spec is SPEC_READY, EXIT_WAITING when those left are blocked, or the status of the run
-    that stopped the drain. With args.dry_run, print what it would change and run, and change nothing.
+    exit status: 0 once no spec is SPEC_READY, EXIT_WAITING when those left are blocked or gone (drain_end), or the
+    status of the run that stopped the drain. With args.dry_run, print what it would change and run, and change nothing.
 
     cwd is the project the runs are in. Raises OrchestratorError, before any run starts, for a workflow that cannot
     take a spec (seeded_start), and as read_queue and refreshed_headers do.
@@ -9068,29 +9085,26 @@ def drain_command(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str) 
 
 def next_startable(specs: list[QueuedSpec], by_slug: dict[str, QueuedSpec]) -> QueuedSpec | None:
     """The first of specs drain runs next (startable), each read again from disk first, so a status the human
-    changed while an earlier spec ran counts; None when there is none. A spec that cannot be read again, deleted or
-    emptied meanwhile, becomes unreadable, and drain says so."""
+    changed while an earlier spec ran counts; None when there is none. Logs each spec that has become gone."""
     for spec in specs:
-        try:
-            spec.reread()
-            spec.unreadable = None
-        except OrchestratorError as e:
-            if not spec.unreadable:
-                log(f"{spec.slug}: {e}; not running it")
-            spec.unreadable = str(e)
+        was_gone = spec.gone
+        if not spec.reread() and not was_gone:
+            log(f"{spec.slug}: {spec.gone}; {'not running it' if spec.status_as_read == SPEC_READY else 'gone'}")
     return next((s for s in specs if startable(s, by_slug)), None)
 
 
 def drain_spec(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str, spec: QueuedSpec) -> int | None:
     """Run the spec as run --spec would with args's flags, and record the run and how it ended in its header.
 
-    Returns None when the run succeeded without conflicts, and the spec is SPEC_IN_REVIEW; otherwise the exit status
-    that stops the drain, having printed why. Raises OrchestratorError when the run's state cannot be made
-    (new_state) or the spec cannot be written.
+    Returns None when the run succeeded without conflicts, and the spec is SPEC_IN_REVIEW or gone, or when the spec
+    is found gone before the run starts, which it then does not; otherwise the exit status that stops the drain,
+    having printed why. A header write to a gone spec is logged instead (QueuedSpec.update). Raises
+    OrchestratorError when the run's state cannot be made (new_state) or the spec cannot be written.
     """
     given = spec.file
     state, pipeline = new_state(args, cwd, given)
-    spec.update({RUN_KEY: state.run_id})
+    if not spec.update({RUN_KEY: state.run_id}):
+        return None
     try:
         verdict = run_workflow(herdr, host, state, pipeline, given)
     except RunTakenOver as e:
@@ -9102,8 +9116,8 @@ def drain_spec(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str, spe
         # Printed first, so the run's error and its resume command survive a header write that fails too.
         print(f"error: {e}", file=sys.stderr)
         print(f"resume its run with: {resume_command(state.run_id, target_args(args))}", file=sys.stderr)
-        spec.update({STATUS_KEY: SPEC_FOR_HUMAN})
-        print(f"{spec.slug} is {SPEC_FOR_HUMAN}", file=sys.stderr)
+        if spec.update({STATUS_KEY: SPEC_FOR_HUMAN}):
+            print(f"{spec.slug} is {SPEC_FOR_HUMAN}", file=sys.stderr)
         return EXIT_ERROR
     except KeyboardInterrupt:
         print(interrupted_note(state, target_args(args)), file=sys.stderr)
@@ -9122,17 +9136,23 @@ def print_spec_changes(specs: list[QueuedSpec]) -> None:
 
 
 def drain_end(specs: list[QueuedSpec], by_slug: dict[str, QueuedSpec]) -> int:
-    """Print what is left once drain can start no spec, and return its exit status: 0 when no spec is SPEC_READY,
-    else EXIT_WAITING."""
-    left = [spec for spec in specs if spec.status == SPEC_READY]
+    """Print what is left once drain can start no spec, and return its exit status: 0 when no spec was SPEC_READY as
+    drain last read it, else EXIT_WAITING. Such a spec is left blocked, or gone."""
+    left = [spec for spec in specs if spec.status_as_read == SPEC_READY]
     if not left:
         print("all specs cleared")
         return 0
     for spec in left:
+        if spec.gone:
+            print(f"{spec.slug}: gone ({spec.gone})")
+            continue
         print(f"{spec.slug} waits on:")
         for b in spec.blockers:
             blocker = by_slug[b]
-            print(f"    {b}: {blocker.status or 'no status'}" + (f"  {blocker.pr}" if blocker.pr else ""))
+            if blocker.gone:
+                print(f"    {b}: gone ({blocker.gone})")
+            else:
+                print(f"    {b}: {blocker.status or 'no status'}" + (f"  {blocker.pr}" if blocker.pr else ""))
     return EXIT_WAITING
 
 

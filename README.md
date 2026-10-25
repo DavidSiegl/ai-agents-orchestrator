@@ -325,7 +325,7 @@ since, the agent starts a fresh session instead.
 | `0` | Approved, or `FINISHED` for a workflow without a verdict step. |
 | `3` | Changes still requested after the last round, or, for a workflow without a verdict step, `QUALITY_GATE_FAILED`: the quality gate still failed after the last quality round. Either way the pull request is a draft. |
 | `4` | Approved or finished, but the pull request conflicts with its base branch, so it is a draft. |
-| `5` | `drain` only: it ran every spec it could, and the specs left wait on blockers that are not `done`, such as a pull request still open. |
+| `5` | `drain` only: it ran every spec it could, and the specs left wait on blockers that are not `done`, such as a pull request still open, or were deleted or emptied while it ran. |
 | `1` | Error. |
 | `130` | Interrupted. |
 
@@ -469,15 +469,17 @@ finished, sets the spec's status, and if not, drain stops and says what to do: w
 the `Run:` line to start the spec over. Then drain sweeps the branches of earlier runs once, and runs each spec whose
 blockers are all `done`. It reads each spec again before choosing the next and before each header edit, so your edits
 to a spec while it runs are kept, but for the `Status:`, `Run:` and `PR:` lines of the spec it is running, which are
-drain's; a spec you set to another status meanwhile is not started; `Blocked by:` is read once, at the start. A run
-another orchestrator takes over with `resume --force` leaves its spec `ready-for-agent` for the next drain to pick
-up.
+drain's; a spec you set to another status meanwhile is not started; `Blocked by:` is read once, at the start. A
+spec you delete or empty meanwhile is *gone*: drain neither runs it nor counts it `done`, logs each header line it
+can no longer record, such as the running spec's `Status:` and `PR:`, and goes on; one you restore before drain
+next chooses is run as before. A run another orchestrator takes over with `resume --force` leaves its spec
+`ready-for-agent` for the next drain to pick up.
 
 **It stops, it does not poll.** A spec whose blocker's pull request is still open stays blocked for this drain.
-Once nothing more can start, drain prints the specs left with their blockers and pull requests, and exits `5`; the
-first run that does not end in an approved pull request without conflicts stops it at once. Either way it prints
-what it changed in each spec first. `--dry-run` prints the changes and the run order and leaves everything as it
-is.
+Once nothing more can start, drain prints the specs left with their blockers and pull requests, and each
+`ready-for-agent` spec that is gone as `<slug>: gone (<why>)`, and exits `5`; the first run that does not end in an
+approved pull request without conflicts stops it at once. Either way it prints what it changed in each spec first.
+`--dry-run` prints the changes and the run order and leaves everything as it is.
 
 Drain does not check that `DIR` is ignored by git. If it is inside the project's checkout and not ignored, the
 header edits dirty the tree, and an in-place run refuses to start on it: ignore `DIR`, or use `--worktree`.

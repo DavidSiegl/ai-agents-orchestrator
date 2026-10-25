@@ -27,15 +27,14 @@ was done.
   `drain` beside a pull request build. Raised by the
   cross-review of ci-no-debuginfo (2026-10-25): "the OOM cause is narrowed and left unrecorded". Closes with
   more memory or swap on the VM, or a lock around the cargo steps that keeps them from running side by side.
-- **drain models a spec deleted while it runs only in its status.** A spec that cannot be read again is
-  `QueuedSpec.unreadable`, which makes `status` None, but `run`, `pr`, `change_line` and the header writes do not
-  know it: the running spec deleted mid-run stops the drain at its post-run `update`; a deleted `ready-for-agent`
-  spec drops out of `drain_end`'s `left`, so the drain can end "all specs cleared"; a deleted blocker shows as `no
-  status` with its old PR, its reason never printed; `change_line` prints `-> None`; and `not running it` is logged
-  for `done` specs too. No test makes the failed-run branch's header write fail. The spec does not cover specs
-  deleted during a drain. Raised by the cross-review of drain (round 3, 2026-10-25): "'gone' is modelled only in
-  `status`". Closes with a gone state that drain_end's summary and exit status, the change lines and the writes all
-  honour, or with drain refusing to go on once a spec it read has gone.
+- **mutmut's clean test run fails on a hypothesis health check, so the gate mutation-tests nothing.** Under the
+  gate's mutmut 3.8.0, `TestChangedLines.test_names_each_changed_file_and_exactly_its_added_lines` in
+  `tests/test_properties.py` fails with `hypothesis.errors.FailedHealthCheck: ... was called from multiple
+  different executors`, mutmut exits 1 with "Failed to run clean test", and `surviving-mutants` reports `not-run`
+  for every change. Seen on Jenkins build #48 and reproduced locally at `a3b18b6` with a one-line edit to
+  `drain_end` (2026-10-25); a plain `uv run pytest` passes it. Cause not established. Closes with the test passing
+  under mutmut, e.g. by suppressing `HealthCheck.differing_executors` for it, or the gate's mutmut runs leaving
+  `tests/test_properties.py` out.
 - **`doctor --machine` probes the machine over about twenty SSH connections, one after another.** Each check is
   its own `Host.run`, so `_tool_version` asks `command -v` before `--version`, which already fails for a missing
   command, and `gh auth status` may wait up to `NETWORK_TIMEOUT`. Raised by the cross-review of the doctor command
@@ -313,6 +312,23 @@ was done.
 
 ## Fixed
 
+- **drain models a spec deleted while it runs only in its status.** A spec that cannot be read again is
+  `QueuedSpec.unreadable`, which makes `status` None, but `run`, `pr`, `change_line` and the header writes do not
+  know it: the running spec deleted mid-run stops the drain at its post-run `update`; a deleted `ready-for-agent`
+  spec drops out of `drain_end`'s `left`, so the drain can end "all specs cleared"; a deleted blocker shows as `no
+  status` with its old PR, its reason never printed; `change_line` prints `-> None`; and `not running it` is logged
+  for `done` specs too. No test makes the failed-run branch's header write fail. The spec does not cover specs
+  deleted during a drain. Raised by the cross-review of drain (round 3, 2026-10-25): "'gone' is modelled only in
+  `status`". Closes with a gone state that drain_end's summary and exit status, the change lines and the writes all
+  honour, or with drain refusing to go on once a spec it read has gone.
+  Fixed (2026-10-25): `QueuedSpec.gone` holds why a spec drain could not read again, set and cleared by `reread`,
+  and `status`, `run` and `pr` are None while it is set; `status_as_read` keeps the status as drain last read it. A
+  header write that finds the spec gone logs what it does not record and drain goes on, a gone spec before its run
+  is not run, and the failed-run branch no longer says the spec is `ready-for-human`. `drain_end` counts a spec
+  last read `ready-for-agent` and now gone as left (`<slug>: gone (<why>)`, `EXIT_WAITING`), a gone blocker shows
+  as `gone (<why>)` without its pull request, `change_line` ends `-> gone`, and `not running it` is logged only for
+  a spec last read `ready-for-agent`, another once as `<slug>: <why>; gone`. A test makes the failed-run branch's
+  write find the spec gone.
 - **A pull request whose gate was turned off shows the last analysis as the change's.** After `resume
   --no-quality-gate`, `Workflow._publish` passed `_last_quality`'s file to `pr_body` and `provenance`, so the quality
   section and the `Orchestrator-Gate` trailer judged code the Builder had since changed; only the Reviewer was told
