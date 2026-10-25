@@ -461,6 +461,111 @@ so the change you review does not hold those edits; they are in {diff_paths}. \
 If a report says a locked file is wrong, weigh that claim against the diff."""
 
 
+@dataclass(frozen=True)
+class Prompts:
+    """The texts a run sends agents besides a workflow file's own prompts: the default workflow's steps, the
+    follow-ups and the notes. Each field defaults to the constant of its name above, and a prompt file of that name
+    replaces it (load_prompts), so a text added here is overridable at once.
+
+    Each is a str.format template whose placeholders are the built-in text's; BLOCKED_NOTE has none.
+    """
+    SPEC_PROMPT: str = SPEC_PROMPT
+    BUILD_PROMPT: str = BUILD_PROMPT
+    FIX_PROMPT: str = FIX_PROMPT
+    REVIEW_PROMPT: str = REVIEW_PROMPT
+    RECHECK_PROMPT: str = RECHECK_PROMPT
+    CONTINUE_PROMPT: str = CONTINUE_PROMPT
+    RETRY_VERDICT_PROMPT: str = RETRY_VERDICT_PROMPT
+    BLOCKED_NOTE: str = BLOCKED_NOTE
+    BLOCKED_PROMPT: str = BLOCKED_PROMPT
+    REBUILD_NOTE: str = REBUILD_NOTE
+    REREVIEW_NOTE: str = REREVIEW_NOTE
+    QUALITY_FIX_PROMPT: str = QUALITY_FIX_PROMPT
+    QUALITY_PASSED_NOTE: str = QUALITY_PASSED_NOTE
+    QUALITY_UNRESOLVED_NOTE: str = QUALITY_UNRESOLVED_NOTE
+    QUALITY_STUCK_NOTE: str = QUALITY_STUCK_NOTE
+    QUALITY_OFF_NOTE: str = QUALITY_OFF_NOTE
+    PROOFS_NOTE: str = PROOFS_NOTE
+    CARRIED_PROOFS_NOTE: str = CARRIED_PROOFS_NOTE
+    LOCKED_NOTE: str = LOCKED_NOTE
+
+    @property
+    def overrides(self) -> dict[str, str]:
+        """Name -> text of each field that differs from the built-in text, in declaration order; Prompts(**overrides)
+        gives these prompts back."""
+        return {f.name: getattr(self, f.name) for f in fields(self) if getattr(self, f.name) != f.default}
+
+
+# The prompts with no prompt file: what a run without any, or saved before them, sends.
+BUILT_IN_PROMPTS = Prompts()
+
+
+def prompts_dir() -> str:
+    """Where a new run finds its prompt files, NAME.md for the field NAME of Prompts, on the orchestrator's machine."""
+    return os.path.join(config_dir(), "prompts")
+
+
+def prompt_files() -> dict[str, str]:
+    """Name -> path of each .md file in prompts_dir(), unread, in name order; none without the directory. Other files
+    are not prompt files, as an editor's backup is not."""
+    try:
+        names = os.listdir(prompts_dir())
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        raise OrchestratorError(f"cannot list {prompts_dir()}: {e.strerror}") from e
+    return {stem: os.path.join(prompts_dir(), name) for name in sorted(names)
+            for stem, ext in [os.path.splitext(name)] if ext == ".md"}
+
+
+def load_prompts() -> Prompts:
+    """The prompts a new run starts with: the built-in texts, each one a prompt file names replaced by the file's
+    content, less one trailing newline.
+
+    Raises OrchestratorError, naming the file, for one that names no field of Prompts, cannot be read, is not UTF-8,
+    or uses other placeholders than the built-in text (prompt_problem).
+    """
+    names = {f.name for f in fields(Prompts)}
+    overrides = {}
+    for name, path in prompt_files().items():
+        if name not in names:
+            close = difflib.get_close_matches(name, names, n=1)
+            hint = f"did you mean {close[0]}.md?" if close else f"the names are {', '.join(sorted(names))}"
+            raise OrchestratorError(f"{path}: {name} names no built-in prompt; {hint}")
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read().removesuffix("\n")
+        except OSError as e:
+            raise OrchestratorError(f"cannot read prompt file {path}: {e.strerror}") from e
+        except UnicodeDecodeError as e:
+            raise OrchestratorError(f"{path}: not UTF-8 text: {e}") from e
+        if problem := prompt_problem(name, text):
+            raise OrchestratorError(f"{path}: {problem}")
+        overrides[name] = text
+    return Prompts(**overrides)
+
+
+def prompt_problem(name: str, text: str) -> str | None:
+    """What stops text from replacing the built-in prompt name, a field of Prompts, or None: a placeholder the
+    built-in text lacks or a missing one it has, or a brace, format spec or conversion that cannot be filled in."""
+    built_in = getattr(BUILT_IN_PROMPTS, name)
+    try:
+        used = set(_fields_of(text))
+    except ValueError as e:
+        return f"{e}; write a literal brace as {{{{ or }}}}"
+    wanted = set(_fields_of(built_in))
+    takes = f"{name} takes {', '.join(f'{{{p}}}' for p in sorted(wanted))}" if wanted else f"{name} takes none"
+    if extra := used - wanted:
+        return f"placeholder {{{min(extra)}}} is not one of the built-in text's; {takes}"
+    if missing := wanted - used:
+        return f"placeholder {{{min(missing)}}} is missing; {takes}"
+    try:
+        text.format(**dict.fromkeys(wanted, ""))
+    except (ValueError, KeyError, IndexError, AttributeError) as e:
+        return f"cannot be filled in: {type(e).__name__}: {e}"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Workflow definitions
 # ---------------------------------------------------------------------------
@@ -852,24 +957,39 @@ def _fields_of(template: str) -> list[str]:
     return [name for _, name, _, _ in string.Formatter().parse(template) if name is not None]
 
 
-DEFAULT_WORKFLOW = Pipeline("default", dict(ROLE_LABELS), (
-    Step("spec", "spec", "spec.md", SPEC_PROMPT, human_paced=True),
-    Step("build", "build", "build-{n}.md", BUILD_PROMPT, again=FIX_PROMPT,
-         fresh_note=REBUILD_NOTE, fresh_repeats_again=True, edits=True, quality_gated=True),
-    Step("review", "review", "review-{n}.md", REVIEW_PROMPT, again=RECHECK_PROMPT,
-         fresh_note=REREVIEW_NOTE, loop_to="build"),
-))
+def default_workflow(prompts: Prompts) -> Pipeline:
+    """The default workflow, its steps worded by prompts."""
+    return Pipeline("default", dict(ROLE_LABELS), (
+        Step("spec", "spec", "spec.md", prompts.SPEC_PROMPT, human_paced=True),
+        Step("build", "build", "build-{n}.md", prompts.BUILD_PROMPT, again=prompts.FIX_PROMPT,
+             fresh_note=prompts.REBUILD_NOTE, fresh_repeats_again=True, edits=True, quality_gated=True),
+        Step("review", "review", "review-{n}.md", prompts.REVIEW_PROMPT, again=prompts.RECHECK_PROMPT,
+             fresh_note=prompts.REREVIEW_NOTE, loop_to="build"),
+    ))
 
-# The workflows `run --workflow` offers, by name.
+
+DEFAULT_WORKFLOW = default_workflow(BUILT_IN_PROMPTS)
+
+# The workflows `run --workflow` offers, by name, worded by the built-in prompts (find_workflow words them by others).
 WORKFLOWS = {w.name: w for w in (DEFAULT_WORKFLOW,)}
 
 
-def find_workflow(name: str) -> Pipeline:
+def find_workflow(name: str, prompts: Prompts) -> Pipeline:
+    """The built-in workflow of that name, worded by prompts; OrchestratorError when there is none."""
+    if name == DEFAULT_WORKFLOW.name:
+        # The one built-in workflow whose steps take their texts from Prompts.
+        return default_workflow(prompts)
     try:
         return WORKFLOWS[name]
     except KeyError:
         raise OrchestratorError(f"unknown workflow {name}; this orchestrator has "
                                 f"{', '.join(sorted(WORKFLOWS))}") from None
+
+
+def is_built_in(p: Pipeline, prompts: Prompts) -> bool:
+    """Whether p is the built-in workflow of its name as prompts word it, which a run need not save the definition of:
+    its name and prompts give it back (run_pipeline)."""
+    return p.name in WORKFLOWS and find_workflow(p.name, prompts) == p
 
 
 # ---------------------------------------------------------------------------
@@ -924,16 +1044,19 @@ def workflow_names() -> list[str]:
     return sorted(set(WORKFLOWS) | set(workflow_files()))
 
 
-def named_workflow(name: str) -> Pipeline:
-    """The built-in workflow of that name, or else the one in workflows_dir()."""
+def named_workflow(name: str, prompts: Prompts) -> Pipeline:
+    """The built-in workflow of that name, or else the one in workflows_dir(), worded by prompts as load_workflow_file
+    words one."""
     if name in WORKFLOWS:
-        return WORKFLOWS[name]
+        return find_workflow(name, prompts)
     if path := workflow_files().get(name):
-        return load_workflow_file(path)
+        return load_workflow_file(path, prompts)
     raise OrchestratorError(f"unknown workflow {name}; there are {', '.join(workflow_names())}")
 
 
-def load_workflow_file(path: str) -> Pipeline:
+def load_workflow_file(path: str, prompts: Prompts) -> Pipeline:
+    """The workflow the file at path defines, a step that uses one of the default workflow's taking its texts from
+    prompts; OrchestratorError, naming the file, when it cannot be read or defines none."""
     name = os.path.splitext(os.path.basename(path))[0]
     try:
         with open(path, "rb") as f:
@@ -947,19 +1070,21 @@ def load_workflow_file(path: str) -> Pipeline:
     if not re.fullmatch(NAME_PATTERN, name):
         raise OrchestratorError(f"{path}: a workflow's name, its file's, may use only letters, digits, - and _")
     try:
-        return parse_workflow(name, data)
+        return parse_workflow(name, data, prompts)
     except ValueError as e:
         raise OrchestratorError(f"{path}: {e}") from e
 
 
-def parse_workflow(name: str, data: dict) -> Pipeline:
-    """The workflow a definition describes; ValueError names what is wrong with it."""
-    _check_keys(data, WORKFLOW_KEYS, "the file")
-    raw_steps = data.get("steps")
+def parse_workflow(name: str, definition: dict, prompts: Prompts) -> Pipeline:
+    """The workflow a definition describes, a step with a use taking the fields of that step of the default workflow
+    as prompts words it; ValueError names what is wrong with it."""
+    _check_keys(definition, WORKFLOW_KEYS, "the file")
+    raw_steps = definition.get("steps")
     if not isinstance(raw_steps, list) or not raw_steps:
         raise ValueError("it has no [[steps]]")
-    steps = [_parse_step(i, raw) for i, raw in enumerate(raw_steps, 1)]
-    raw_roles = data.get("roles", {})
+    default = default_workflow(prompts)
+    steps = [_parse_step(i, raw, default) for i, raw in enumerate(raw_steps, 1)]
+    raw_roles = definition.get("roles", {})
     if not isinstance(raw_roles, dict):
         raise ValueError("roles must be a table")
     declared = {role: _parse_role(role, raw) for role, raw in raw_roles.items()}
@@ -968,13 +1093,13 @@ def parse_workflow(name: str, data: dict) -> Pipeline:
     labels = {role: declared.get(role, {}).get("label") or _default_label(role) for role in order}
     models = {role: table["model"] for role, table in declared.items() if table.get("model")}
     agents = {role: table["agent"] for role, table in declared.items() if table.get("agent")}
-    description = data.get("description", "")
+    description = definition.get("description", "")
     if not isinstance(description, str):
         raise ValueError("description must be a string")
-    proof_command = data.get("proof_command")
+    proof_command = definition.get("proof_command")
     if proof_command is not None and not isinstance(proof_command, str):
         raise ValueError("proof_command must be a string")
-    budget = {key: data[key] for key in BUDGET_KEYS if key in data}
+    budget = {key: definition[key] for key in BUDGET_KEYS if key in definition}
     for key, value in budget.items():
         # type(), not isinstance: true is an int to isinstance, but no number of lines.
         if type(value) is not int:
@@ -999,13 +1124,13 @@ def _parse_role(role: str, raw) -> dict[str, str]:
     return raw
 
 
-def _parse_step(i: int, raw) -> dict:
-    """Step's arguments from step i of a definition, its use resolved."""
+def _parse_step(i: int, raw, default: Pipeline) -> dict:
+    """Step's arguments from step i of a definition, its use resolved against default."""
     if not isinstance(raw, dict):
         raise ValueError(f"step {i} must be a table")
     where = f"step {i}" + (f" ({raw['id']})" if isinstance(raw.get("id"), str) else "")
     _check_keys(raw, STEP_KEYS | {"use"}, where)
-    step = _used_step(raw, where) | {k: v for k, v in raw.items() if k != "use"}
+    step = _used_step(raw, where, default) | {k: v for k, v in raw.items() if k != "use"}
     step.setdefault("role", step.get("id"))
     for key in ("id", "file", "prompt"):
         if key not in step:
@@ -1015,14 +1140,14 @@ def _parse_step(i: int, raw) -> dict:
     return step
 
 
-def _used_step(raw: dict, where: str) -> dict:
-    """The fields of the default step that raw's use names; none without a use."""
+def _used_step(raw: dict, where: str, default: Pipeline) -> dict:
+    """The fields of the step of default, the default workflow, that raw's use names; none without a use."""
     if "use" not in raw:
         return {}
-    used = DEFAULT_WORKFLOW.step(raw["use"]) if isinstance(raw["use"], str) else None
+    used = default.step(raw["use"]) if isinstance(raw["use"], str) else None
     if used is None:
         raise ValueError(f"{where}: use names no step of the default workflow; it has "
-                         f"{', '.join(st.id for st in DEFAULT_WORKFLOW.steps)}")
+                         f"{', '.join(st.id for st in default.steps)}")
     return step_fields(used)
 
 
@@ -1099,20 +1224,31 @@ def workflow_shape(p: Pipeline) -> str:
     return " -> ".join(st.id + (f" (back to {st.loop_to})" if st.loop_to else "") for st in p.steps)
 
 
-def run_pipeline(name: str, definition: dict | None) -> Pipeline:
-    """A run's workflow: the definition saved with it, or the built-in workflow of its name."""
+def run_pipeline(name: str, definition: dict | None, prompts: Prompts) -> Pipeline:
+    """A run's workflow: the definition saved with it, or the built-in workflow of its name worded by the run's
+    prompts."""
     if definition is None:
-        return find_workflow(name)
+        return find_workflow(name, prompts)
     try:
-        return parse_workflow(name, definition)
+        # A saved definition is canonical, with no use for prompts to word.
+        return parse_workflow(name, definition, prompts)
     except ValueError as e:
         raise OrchestratorError(f"the definition of workflow {name} saved with the run is invalid: {e}") from e
+
+
+def saved_prompts(overrides: dict[str, str], run_id: str) -> Prompts:
+    """The prompts a run started with, from the overrides saved with it (RunState.prompt_overrides); OrchestratorError
+    when they name a prompt this orchestrator lacks."""
+    if unknown := set(overrides) - {f.name for f in fields(Prompts)}:
+        raise OrchestratorError(f"run state {run_id} replaces prompt {min(unknown)}, which this orchestrator lacks")
+    return Prompts(**overrides)
 
 
 def saved_pipeline(saved: dict) -> Pipeline | None:
     """The workflow of a saved state, or None when this orchestrator cannot tell."""
     try:
-        return run_pipeline(saved.get("workflow") or DEFAULT_WORKFLOW.name, saved.get("workflow_definition"))
+        return run_pipeline(saved.get("workflow") or DEFAULT_WORKFLOW.name, saved.get("workflow_definition"),
+                            saved_prompts(saved.get("prompt_overrides") or {}, saved.get("run_id", "?")))
     except OrchestratorError:
         return None
 
@@ -2293,6 +2429,9 @@ class RunState:
     workflow: str = DEFAULT_WORKFLOW.name
     # The workflow_definition of one that is not built in, so a resume does not depend on its file.
     workflow_definition: dict | None = None
+    # Prompts.overrides of the prompts the run started with (load_prompts), so a resume does not depend on the prompt
+    # files either; empty for the built-in texts, as for a run saved before prompt files.
+    prompt_overrides: dict[str, str] = field(default_factory=dict)
     # What prune did with branch once the pull request was done: "deleted", or "kept: <why>". Written by
     # prune_branches, never by the run itself.
     branch_cleanup: str | None = None
@@ -2344,6 +2483,11 @@ class RunState:
         if not state.root_pane and first in state.agents:
             state.root_pane = state.agents[first]["pane"]
         return state
+
+    @property
+    def prompts(self) -> Prompts:
+        """The prompts the run sends: those it started with (saved_prompts)."""
+        return saved_prompts(self.prompt_overrides, self.run_id)
 
     @property
     def key(self) -> str:
@@ -6306,7 +6450,9 @@ class Workflow:
         self.ci = ci
         self.spec = spec
         self.pypi = pypi or PyPI()
-        self.pipeline = pipeline = pipeline or run_pipeline(state.workflow, state.workflow_definition)
+        # Every prompt a workflow sends that its definition does not word: the follow-ups and notes.
+        self.prompts = prompts = state.prompts
+        self.pipeline = pipeline = pipeline or run_pipeline(state.workflow, state.workflow_definition, prompts)
         if ci and pipeline.gated is None:
             raise OrchestratorError(f"workflow {pipeline.name} has no quality-gated step, "
                                     f"so the quality gate does not apply")
@@ -6315,7 +6461,7 @@ class Workflow:
             raise OrchestratorError(f"workflow {pipeline.name} has no editing step, "
                                     f"so it cannot end in a pull request; pass --no-pr")
         state.workflow = pipeline.name
-        state.workflow_definition = None if WORKFLOWS.get(pipeline.name) is pipeline else workflow_definition(pipeline)
+        state.workflow_definition = None if is_built_in(pipeline, prompts) else workflow_definition(pipeline)
         # Saved with the run, so a resume starts from them.
         state.max_rounds = max_rounds
         state.turn_timeout = turn_timeout
@@ -6737,7 +6883,7 @@ class Workflow:
             return ""
         paths = sorted({p for r in records for ps in r["paths"].values() for p in ps})
         lockers = sorted({locker for r in records for locker in r["paths"]})
-        return "\n\n" + LOCKED_NOTE.format(
+        return "\n\n" + self.prompts.LOCKED_NOTE.format(
             paths=", ".join(f"`{p}`" for p in paths), steps=", ".join(lockers),
             diff_paths=", ".join(f"{s.dir}/{r['file']}" for r in records))
 
@@ -6826,7 +6972,7 @@ class Workflow:
             output = [] if passed else _proof_output(p["said"])
             said = "" if passed else f", {_proof_outcome(p['said'])}"
             items.append("\n".join([f"- `{self._proof_path(p)}`: {how}{said}.", *output]))
-        return "\n\n" + CARRIED_PROOFS_NOTE.format(command=command, cwd=s.work_dir, proofs="\n\n".join(items))
+        return "\n\n" + self.prompts.CARRIED_PROOFS_NOTE.format(command=command, cwd=s.work_dir, proofs="\n\n".join(items))
 
     def _run_proof(self, command: str, path: str) -> tuple[bool, str]:
         """Whether the proof at path fails against the working tree, as proof_command's exit status 1 says, and what it
@@ -6855,7 +7001,7 @@ class Workflow:
         failing = [self._proof_path(p) for p in self._carried_proofs(n)]
         if not failing:
             return ""
-        return "\n\n" + PROOFS_NOTE.format(proofs=", ".join(failing))
+        return "\n\n" + self.prompts.PROOFS_NOTE.format(proofs=", ".join(failing))
 
     def _judge_quality(self, n: int) -> bool:
         """The current quality round of round n; False when its gate sends the change back to the gated step: when it
@@ -6930,7 +7076,9 @@ class Workflow:
         text, fresh = self._step_prompts(step, n)
         if not step.can_block:
             return text, fresh
-        return f"{text}\n\n{BLOCKED_NOTE}", fresh and f"{fresh}\n\n{BLOCKED_NOTE}"
+        # Formatted with nothing, as each prompt is a template (Prompts): an override may write a brace as {{.
+        note = self.prompts.BLOCKED_NOTE.format()
+        return f"{text}\n\n{note}", fresh and f"{fresh}\n\n{note}"
 
     def _step_prompts(self, step: Step, n: int) -> tuple[str, str | None]:
         """_prompts as the step's definition words them."""
@@ -6941,7 +7089,8 @@ class Workflow:
                    if step.loop_to is not None else "")
         first = step.prompt.format(**fill) + quality
         if q:
-            follow = QUALITY_FIX_PROMPT.format(quality_path=s.quality_path(n, q), report_path=self._own_path(step, n))
+            follow = self.prompts.QUALITY_FIX_PROMPT.format(quality_path=s.quality_path(n, q),
+                                                            report_path=self._own_path(step, n))
         elif n > 1:
             follow = (step.again or step.prompt).format(**fill) + quality
         else:
@@ -7098,12 +7247,12 @@ class Workflow:
             return ""
         q, text = last
         if self._unjudged(last):
-            return "\n\n" + QUALITY_OFF_NOTE.format(
+            return "\n\n" + self.prompts.QUALITY_OFF_NOTE.format(
                 quality_paths=", ".join(s.quality_path(n, k) for k in range(1, q + 1)))
         if parse_gate(text) == GATE_OK:
-            note = QUALITY_PASSED_NOTE
+            note = self.prompts.QUALITY_PASSED_NOTE
         else:
-            note = QUALITY_STUCK_NOTE if self._stuck(n, q) else QUALITY_UNRESOLVED_NOTE
+            note = self.prompts.QUALITY_STUCK_NOTE if self._stuck(n, q) else self.prompts.QUALITY_UNRESOLVED_NOTE
         return "\n\n" + note.format(quality_path=s.quality_path(n, q))
 
     def _last_quality(self, n: int) -> tuple[int, str] | None:
@@ -7397,13 +7546,12 @@ class Workflow:
         s = self.state
         if blocks and s.blocked is not None and s.blocked["file"] == os.path.basename(path):
             # A resume in the middle of a block.
-            self._finish_block(path)
-            out = self._unblocked(role, path)
+            self._finish_block(path, s.blocked)
+            out = self._unblocked(role, path, s.blocked)
         else:
             out = self._written(role, text, path, timeout, fresh_text, watch_stalls, announce)
             if blocks and (question := parse_blocked(out)) is not None:
-                self._block(role, path, question)
-                out = self._unblocked(role, path)
+                out = self._unblocked(role, path, self._block(role, path, question))
         if not out.strip():
             self._reject(path, f"was written empty by the {self.pipeline.roles[role]}")
         return out
@@ -7422,10 +7570,11 @@ class Workflow:
             s.retrying = None
         return out
 
-    def _unblocked(self, role: str, path: str) -> str:
-        """The report of a blocked turn once it is no longer BLOCKED; each that still is waits again (_block)."""
-        while (question := parse_blocked(out := self._block_answer(role, path))) is not None:
-            self._block(role, path, question)
+    def _unblocked(self, role: str, path: str, block: dict) -> str:
+        """The report of a blocked turn once it is no longer BLOCKED, block being the state's record of the block it
+        is in; each that still is waits again (_block)."""
+        while (question := parse_blocked(out := self._block_answer(role, path, block))) is not None:
+            block = self._block(role, path, question)
         self.state.blocked = None
         self._save()
         return out
@@ -7484,9 +7633,9 @@ class Workflow:
         self._save()
         log(f"[{role}] {file} {why}; moved it to {os.path.basename(rejected)}, prompting once more")
 
-    def _block(self, role: str, path: str, question: str) -> None:
+    def _block(self, role: str, path: str, question: str) -> dict:
         """Move a BLOCKED report aside to its next blocked name, and record the block, so that the turn waits for
-        the human's answer and then for the report again."""
+        the human's answer and then for the report again. Returns the record, RunState.blocked."""
         s, file = self.state, os.path.basename(path)
         k = s.blocked["k"] + 1 if s.blocked and s.blocked["file"] == file else 1
         blocked = self._blocked_path(path, k)
@@ -7501,25 +7650,28 @@ class Workflow:
         self._save()
         self.host.rename(path, blocked)
         log(f"[{role}] {file} is blocked: {question}; moved it to {os.path.basename(blocked)}")
+        return s.blocked
 
-    def _finish_block(self, path: str) -> None:
-        """Make the rename of a block the orchestrator saved but may have died before making."""
-        blocked = self._blocked_path(path, self.state.blocked["k"])
+    def _finish_block(self, path: str, block: dict) -> None:
+        """Make the rename of the block, RunState.blocked, that the orchestrator saved but may have died before
+        making."""
+        blocked = self._blocked_path(path, block["k"])
         if self.host.read(blocked) is None and self.host.read(path) is not None:
             self.host.rename(path, blocked)
 
-    def _block_answer(self, role: str, path: str) -> str:
-        """The role's report once the human has answered its BLOCKED question in its pane.
+    def _block_answer(self, role: str, path: str, block: dict) -> str:
+        """The role's report once the human has answered the BLOCKED question of block, RunState.blocked, in its
+        pane.
 
         As for the interview: no turn timeout and no stall notice, since the agent waits for the human. A resumed
         wait announces itself again, and prompts as _prompt_for does, with BLOCKED_PROMPT in place of the step's.
         """
         s = self.state
-        prompt = BLOCKED_PROMPT.format(path=path, blocked_path=self._blocked_path(path, s.blocked["k"]))
+        prompt = self.prompts.BLOCKED_PROMPT.format(path=path, blocked_path=self._blocked_path(path, block["k"]))
 
         def announce(_how: str) -> None:
             self.herdr.focus(s.agents[role]["name"])
-            self._ask_human(role, f"is blocked: {s.blocked['question']}")
+            self._ask_human(role, f"is blocked: {block['question']}")
 
         return self._written(role, prompt, path, None, prompt, False, announce)
 
@@ -7534,8 +7686,8 @@ class Workflow:
         return f"{stem}.rejected{ext}"
 
     def _retry_prompt(self, path: str) -> str:
-        return RETRY_VERDICT_PROMPT.format(path=path, rejected_path=self._rejected_path(path),
-                                           approve=APPROVE, changes=CHANGES_REQUESTED)
+        return self.prompts.RETRY_VERDICT_PROMPT.format(path=path, rejected_path=self._rejected_path(path),
+                                                        approve=APPROVE, changes=CHANGES_REQUESTED)
 
     def _prompt_for(self, how: str, file: str, text: str, fresh_text: str | None, path: str) -> str | None:
         """What to prompt an agent that is ready as how says with; None when it only has to be waited for."""
@@ -7544,7 +7696,7 @@ class Workflow:
         if self.state.prompted != file:
             return text
         if how == RESUMED:
-            return CONTINUE_PROMPT.format(path=path)
+            return self.prompts.CONTINUE_PROMPT.format(path=path)
         return None  # alive and already prompted for this file
 
     def _await_handoff(self, role: str, path: str, timeout: int | None, watch_stalls: bool) -> str:
@@ -8404,7 +8556,7 @@ def resumable_state(runs: list[tuple[int, dict]], args: argparse.Namespace, cwd:
     # Not even with --force: close may have deleted its worktree and branch.
     if state.closed:
         raise OrchestratorError(f"run {state.run_id} was closed; start a new run")
-    pipeline = run_pipeline(state.workflow, state.workflow_definition)
+    pipeline = run_pipeline(state.workflow, state.workflow_definition, state.prompts)
     health = run_health(saved, age, local_host, pid_alive)
     if health and health[0] == RUNNING and not args.force:
         raise OrchestratorError(
@@ -9242,7 +9394,7 @@ def drain_command(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str) 
     cwd is the project the runs are in. Raises OrchestratorError, before any run starts, for a workflow that cannot
     take a spec (seeded_start), and as read_queue and refreshed_headers do.
     """
-    seeded_start(load_workflow_file(args.workflow_file) if args.workflow_file else named_workflow(args.workflow))
+    seeded_start(flagged_workflow(args, load_prompts()))
     specs = read_queue(args.dir)
     for spec, entries in refreshed_headers(specs, host, cwd, target_args(args), socket.gethostname(), pid_alive,
                                            args.dry_run):
@@ -9337,15 +9489,33 @@ def drain_end(specs: list[QueuedSpec], by_slug: dict[str, QueuedSpec]) -> int:
 
 
 def print_workflows() -> None:
+    """Print each workflow `run --workflow` offers, then the prompt files a new run would start with."""
     for name in sorted(WORKFLOWS):
         print_workflow(name, "built in", WORKFLOWS[name])
     for name, path in workflow_files().items():
         try:
-            print_workflow(name, path, load_workflow_file(path))
+            # The shape and description only, which no prompt file changes.
+            print_workflow(name, path, load_workflow_file(path, BUILT_IN_PROMPTS))
         except OrchestratorError as e:
             print(f"{name}  {path}\n    error: {str(e).removeprefix(f'{path}: ')}")
     print(f"\nAdd one as {workflows_dir()}/NAME.toml; `orchestrator.py workflows {DEFAULT_WORKFLOW.name}` "
           f"prints the default as a file to start from.")
+    print_prompt_overrides()
+
+
+def print_prompt_overrides() -> None:
+    """Print the prompt files a new run would start with, one line each, or why it would not start; nothing without
+    any."""
+    try:
+        overrides = load_prompts().overrides
+    except OrchestratorError as e:
+        print(f"\nPrompt files in {prompts_dir()}:\n    error: {e}")
+        return
+    if not overrides:
+        return
+    print(f"\nPrompt files in {prompts_dir()}, in place of the built-in texts:")
+    for name in overrides:
+        print(f"    {name}  {os.path.join(prompts_dir(), name)}.md")
 
 
 def print_workflow(name: str, source: str, p: Pipeline) -> None:
@@ -9356,10 +9526,12 @@ def print_workflow(name: str, source: str, p: Pipeline) -> None:
 
 
 def workflow_arg(ref: str) -> Pipeline:
-    """The workflow a name or a path names: a path has a / or ends in .toml."""
+    """The workflow a name or a path names, worded by the prompt files as a new run would be: a path has a / or ends in
+    .toml."""
+    prompts = load_prompts()
     if "/" in ref or ref.endswith(".toml"):
-        return load_workflow_file(ref)
-    return named_workflow(ref)
+        return load_workflow_file(ref, prompts)
+    return named_workflow(ref, prompts)
 
 
 def main(argv: list[str]) -> int:
@@ -9757,12 +9929,15 @@ def _tkinter_check() -> Check:
 
 def new_state(args: argparse.Namespace, cwd: str, spec: SpecFile | None = None) -> tuple[RunState, Pipeline]:
     """A new run's state from the run command's flags, and its workflow; with spec, from --spec, the run
-    starts after the contract step."""
-    pipeline = load_workflow_file(args.workflow_file) if args.workflow_file else named_workflow(args.workflow)
+    starts after the contract step. Its prompts are the prompt files' as they are now (load_prompts); raises
+    OrchestratorError as load_prompts does, and for a workflow that cannot be found or loaded."""
+    prompts = load_prompts()
+    pipeline = flagged_workflow(args, prompts)
     first = seeded_start(pipeline) if spec else pipeline.steps[0]
     # parse_args leaves the task out only with --spec.
     task = args.task if args.task is not None else spec.task
-    state = RunState(new_run_id(), task, cwd, args.machine, phase=first.id, workflow=pipeline.name)
+    state = RunState(new_run_id(), task, cwd, args.machine, phase=first.id, workflow=pipeline.name,
+                     prompt_overrides=prompts.overrides)
     state.max_rounds = args.max_rounds or DEFAULT_MAX_ROUNDS
     state.turn_timeout = args.timeout or DEFAULT_TURN_TIMEOUT
     state.permission_mode = args.permission_mode
@@ -9774,6 +9949,13 @@ def new_state(args: argparse.Namespace, cwd: str, spec: SpecFile | None = None) 
     state.quality_job = args.quality_gate
     state.max_quality_rounds = args.max_quality_rounds or DEFAULT_MAX_QUALITY_ROUNDS
     return state, pipeline
+
+
+def flagged_workflow(args: argparse.Namespace, prompts: Prompts) -> Pipeline:
+    """The workflow run's or drain's --workflow-file or --workflow names, worded by prompts."""
+    if args.workflow_file:
+        return load_workflow_file(args.workflow_file, prompts)
+    return named_workflow(args.workflow, prompts)
 
 
 def seeded_start(p: Pipeline) -> Step:
@@ -9793,7 +9975,7 @@ def resumed_state(args: argparse.Namespace, host: Host, cwd: str) -> tuple[RunSt
     _off: a CI preflight, and deleting the run's refs on origin). Changes nothing on disk; raises OrchestratorError
     when the run cannot be resumed or its gate cannot be switched."""
     state = resumable_state(host.run_states(cwd), args, cwd, socket.gethostname(), pid_alive)
-    pipeline = run_pipeline(state.workflow, state.workflow_definition)
+    pipeline = run_pipeline(state.workflow, state.workflow_definition, state.prompts)
     if args.quality_gate:
         turn_quality_gate_on(state, pipeline, host, CI(args.quality_gate))
     elif args.no_quality_gate:
@@ -10268,7 +10450,9 @@ class RunWindow:
     def _show_pipeline(self) -> None:
         # Static, from the workflow's definition: the window shows no run's live phase.
         try:
-            line, style = role_chain(named_workflow(self.vars["workflow"].get())), PIPELINE_LABEL
+            # The roles only, which no prompt file changes.
+            workflow = named_workflow(self.vars["workflow"].get(), BUILT_IN_PROMPTS)
+            line, style = role_chain(workflow), PIPELINE_LABEL
         except OrchestratorError as e:
             line, style = f"error: {e}", MUTED_LABEL
         self.vars["pipeline"].set(line)

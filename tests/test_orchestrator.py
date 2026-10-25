@@ -32,6 +32,7 @@ from unittest.mock import MagicMock, patch
 import orchestrator
 from orchestrator import (
     APPROVE,
+    BUILT_IN_PROMPTS,
     CHANGES_REQUESTED,
     CI,
     HEARTBEAT_SECONDS,
@@ -9843,14 +9844,14 @@ class TestLockedFiles(unittest.TestCase):
                                               for st in FOUR.steps))
         step = 'id = "tests"\nfile = "t.md"\nprompt = "{path}"\nlocks = true\n'
         with self.assertRaisesRegex(ValueError, "step tests locks the files it changes, so it must edit"):
-            orchestrator.parse_workflow("bad", tomllib.loads(f"[[steps]]\n{step}"))
+            orchestrator.parse_workflow("bad", tomllib.loads(f"[[steps]]\n{step}"), BUILT_IN_PROMPTS)
         with self.assertRaisesRegex(ValueError, "locks must be true or false"):
-            orchestrator.parse_workflow("bad", tomllib.loads(f'[[steps]]\n{step}'.replace("true", '"yes"')))
+            orchestrator.parse_workflow("bad", tomllib.loads(f'[[steps]]\n{step}'.replace("true", '"yes"')), BUILT_IN_PROMPTS)
 
     def test_locks_round_trip_through_a_workflow_file(self):
         text = orchestrator.workflow_toml(LOCKING)
         self.assertIn("locks = true", text)
-        self.assertEqual(orchestrator.parse_workflow("locking", tomllib.loads(text)), LOCKING)
+        self.assertEqual(orchestrator.parse_workflow("locking", tomllib.loads(text), BUILT_IN_PROMPTS), LOCKING)
 
 
 # A proof run_proofs writes that fails until a Builder turn fixes it.
@@ -10118,16 +10119,16 @@ class TestProofs(unittest.TestCase):
             with self.subTest(command=command), self.assertRaisesRegex(ValueError, "proof_command"):
                 replace(QUICK, proof_command=command)
         with self.assertRaisesRegex(ValueError, "proof_command must be a string"):
-            orchestrator.parse_workflow("bad", {**orchestrator.workflow_definition(QUICK), "proof_command": 1})
+            orchestrator.parse_workflow("bad", {**orchestrator.workflow_definition(QUICK), "proof_command": 1}, BUILT_IN_PROMPTS)
 
     def test_proof_command_round_trips_through_a_workflow_file(self):
         text = orchestrator.workflow_toml(self.pipeline)
         self.assertIn('proof_command = "sh {proofs}"', text)
-        self.assertEqual(orchestrator.parse_workflow("quick", tomllib.loads(text)), self.pipeline)
+        self.assertEqual(orchestrator.parse_workflow("quick", tomllib.loads(text), BUILT_IN_PROMPTS), self.pipeline)
         self.assertNotIn("proof_command", orchestrator.workflow_toml(QUICK))
 
     def test_the_adversarial_example_loads(self):
-        adversarial = orchestrator.load_workflow_file(f"{EXAMPLES}/adversarial.toml")
+        adversarial = orchestrator.load_workflow_file(f"{EXAMPLES}/adversarial.toml", BUILT_IN_PROMPTS)
         self.assertEqual(orchestrator.workflow_shape(adversarial), "spec -> build -> review (back to build)")
         self.assertIn("{proofs}", adversarial.proof_command)
         self.assertIn("{proofs_dir}", adversarial.step("review").prompt)
@@ -10279,9 +10280,9 @@ class TestWorkflowFiles(unittest.TestCase):
 
     def test_examples_load(self):
         default = orchestrator.DEFAULT_WORKFLOW
-        quick = orchestrator.load_workflow_file(f"{EXAMPLES}/quick.toml")
+        quick = orchestrator.load_workflow_file(f"{EXAMPLES}/quick.toml", BUILT_IN_PROMPTS)
         self.assertEqual(orchestrator.workflow_shape(quick), "build -> review (back to build)")
-        tdd = orchestrator.load_workflow_file(f"{EXAMPLES}/tdd.toml")
+        tdd = orchestrator.load_workflow_file(f"{EXAMPLES}/tdd.toml", BUILT_IN_PROMPTS)
         self.assertEqual(tdd.name, "tdd")
         self.assertEqual(tdd.roles, {"spec": "Spec Collector", "tests": "Test Writer", "build": "Builder",
                                      "review": "Reviewer"})
@@ -10297,13 +10298,13 @@ class TestWorkflowFiles(unittest.TestCase):
     def test_default_round_trips_through_its_file(self):
         default = orchestrator.DEFAULT_WORKFLOW
         text = orchestrator.workflow_toml(default)
-        self.assertEqual(orchestrator.parse_workflow("default", tomllib.loads(text)), default)
+        self.assertEqual(orchestrator.parse_workflow("default", tomllib.loads(text), BUILT_IN_PROMPTS), default)
 
     def test_the_change_budget_is_the_workflows(self):
         step = 'id = "build"\nfile = "b-{n}.md"\nprompt = "{path}"\nedits = true\n'
-        p = orchestrator.load_workflow_file(self.file("small", f"max_files = 1\nmax_lines = 100\n[[steps]]\n{step}"))
+        p = orchestrator.load_workflow_file(self.file("small", f"max_files = 1\nmax_lines = 100\n[[steps]]\n{step}"), BUILT_IN_PROMPTS)
         self.assertEqual((p.max_files, p.max_lines), (1, 100))
-        self.assertEqual(orchestrator.parse_workflow("small", tomllib.loads(orchestrator.workflow_toml(p))), p)
+        self.assertEqual(orchestrator.parse_workflow("small", tomllib.loads(orchestrator.workflow_toml(p)), BUILT_IN_PROMPTS), p)
         self.assertEqual(orchestrator.workflow_definition(p)["max_lines"], 100)
         default = orchestrator.DEFAULT_WORKFLOW
         self.assertEqual((default.max_files, default.max_lines), (15, 600))
@@ -10313,7 +10314,7 @@ class TestWorkflowFiles(unittest.TestCase):
                                ('"3"', "max_lines must be a whole number"), ("true", "max_lines must be a whole number"),
                                ("1.5", "max_lines must be a whole number")):
             with self.subTest(value=value), self.assertRaisesRegex(OrchestratorError, message):
-                orchestrator.load_workflow_file(self.file("bad", f"max_lines = {value}\n[[steps]]\n{step}"))
+                orchestrator.load_workflow_file(self.file("bad", f"max_lines = {value}\n[[steps]]\n{step}"), BUILT_IN_PROMPTS)
 
     def test_any_text_round_trips(self):
         odd = ["ends in a quote '", "has ''' inside\nand a newline", "tab\there", "del\x7f", "ünïcode 🦀\n",
@@ -10321,7 +10322,7 @@ class TestWorkflowFiles(unittest.TestCase):
         p = Pipeline("odd", {"b": "Bob's \"pane\""}, tuple(
             Step(f"s{i}", "b", f"s{i}.md", text + " {path}") for i, text in enumerate(odd)),
             models={"b": "m"}, description="with ''' and '")
-        self.assertEqual(orchestrator.parse_workflow("odd", tomllib.loads(orchestrator.workflow_toml(p))), p)
+        self.assertEqual(orchestrator.parse_workflow("odd", tomllib.loads(orchestrator.workflow_toml(p)), BUILT_IN_PROMPTS), p)
 
     def test_roles_default_from_the_steps(self):
         p = orchestrator.load_workflow_file(self.file("mine", """
@@ -10337,7 +10338,7 @@ class TestWorkflowFiles(unittest.TestCase):
             again = "Fix them; report to {build_path}."
             fresh_note = "Earlier: {earlier_build_paths}."
             quality_gated = false
-        """))
+        """), BUILT_IN_PROMPTS)
         self.assertEqual(p.roles, {"test_writer": "Test Writer", "build": "Builder"})
         self.assertEqual(p.steps[0].role, "test_writer")
         self.assertEqual((p.steps[1].edits, p.steps[1].quality_gated, p.steps[1].fresh_repeats_again),
@@ -10354,7 +10355,7 @@ class TestWorkflowFiles(unittest.TestCase):
             use = "build"
             [[steps]]
             use = "review"
-        """))
+        """), BUILT_IN_PROMPTS)
         self.assertEqual(p.roles, {"spec": "Spec Collector", "build": "Implementer", "review": "Reviewer"})
         self.assertEqual(p.models, {"review": "opus"})
 
@@ -10405,7 +10406,7 @@ class TestWorkflowFiles(unittest.TestCase):
             with self.subTest(message=message):
                 path = self.file("bad", text)
                 with self.assertRaises(OrchestratorError) as e:
-                    orchestrator.load_workflow_file(path)
+                    orchestrator.load_workflow_file(path, BUILT_IN_PROMPTS)
                 self.assertTrue(str(e.exception).startswith(f"{path}: "), str(e.exception))
                 self.assertIn(message, str(e.exception))
 
@@ -10464,12 +10465,12 @@ class TestWorkflowFiles(unittest.TestCase):
     def test_a_file_cannot_replace_a_built_in_workflow(self):
         path = self.file("default", '[[steps]]\nuse = "spec"\n')
         with self.assertRaisesRegex(OrchestratorError, "workflow default is built in; give the file another name"):
-            orchestrator.load_workflow_file(path)
+            orchestrator.load_workflow_file(path, BUILT_IN_PROMPTS)
 
     def test_a_name_that_cannot_be_a_workflows(self):
         path = self.file("my flow", f"[[steps]]\nuse = \"spec\"\n")
         with self.assertRaisesRegex(OrchestratorError, "a workflow's name, its file's, may use only letters"):
-            orchestrator.load_workflow_file(path)
+            orchestrator.load_workflow_file(path, BUILT_IN_PROMPTS)
 
     def test_an_unlistable_workflows_directory(self):
         os.rmdir(self.workflows)
@@ -10482,7 +10483,7 @@ class TestWorkflowFiles(unittest.TestCase):
 
     def test_a_missing_file(self):
         with self.assertRaisesRegex(OrchestratorError, "cannot read workflow file /nope/x.toml"):
-            orchestrator.load_workflow_file("/nope/x.toml")
+            orchestrator.load_workflow_file("/nope/x.toml", BUILT_IN_PROMPTS)
 
     def test_files_are_offered_by_name(self):
         with open(f"{EXAMPLES}/tdd.toml") as f:
@@ -10491,13 +10492,13 @@ class TestWorkflowFiles(unittest.TestCase):
         with open(os.path.join(self.workflows, "notes.txt"), "w") as f:
             f.write("not a workflow")
         self.assertEqual(orchestrator.workflow_names(), ["broken", "default", "tdd"])
-        self.assertEqual(orchestrator.named_workflow("tdd").name, "tdd")
+        self.assertEqual(orchestrator.named_workflow("tdd", BUILT_IN_PROMPTS).name, "tdd")
         with self.assertRaisesRegex(OrchestratorError, "unknown workflow nope; there are broken, default, tdd"):
-            orchestrator.named_workflow("nope")
+            orchestrator.named_workflow("nope", BUILT_IN_PROMPTS)
 
     def test_a_run_keeps_its_workflow_when_the_file_is_gone(self):
         with open(f"{EXAMPLES}/quick.toml") as f:
-            quick = orchestrator.load_workflow_file(self.file("quick", f.read()))
+            quick = orchestrator.load_workflow_file(self.file("quick", f.read()), BUILT_IN_PROMPTS)
 
         def build_then_interrupt(prompt, state, host):
             build_turn(2)(prompt, state, host)
@@ -10560,7 +10561,7 @@ class TestWorkflowFileCLI(unittest.TestCase):
     def test_run_a_workflow_file_by_name(self, _resolve, _run, init):
         state, kw = self.started(init, "--workflow", "tdd")
         self.assertEqual((state.workflow, state.phase), ("tdd", "spec"))
-        self.assertEqual(kw["pipeline"], orchestrator.load_workflow_file(f"{EXAMPLES}/tdd.toml"))
+        self.assertEqual(kw["pipeline"], orchestrator.load_workflow_file(f"{EXAMPLES}/tdd.toml", BUILT_IN_PROMPTS))
         self.assertEqual(kw["agents"].models, {"tests": "sonnet"})
 
     def test_run_a_workflow_file_by_path(self, _resolve, _run, init):
@@ -10588,7 +10589,7 @@ class TestWorkflowFileCLI(unittest.TestCase):
                 parse_args(argv)
 
     def test_resume_takes_role_model(self, _resolve, _run, init):
-        tdd = orchestrator.named_workflow("tdd")
+        tdd = orchestrator.named_workflow("tdd", BUILT_IN_PROMPTS)
         saved = {**asdict(saved_run("build", 1, models={"tests": "sonnet"})), "workflow": "tdd",
                  "workflow_definition": orchestrator.workflow_definition(tdd)}
         args = parse_args(["resume", "a1b2c3", "--role-model", "review=opus"])
@@ -10618,8 +10619,231 @@ class TestWorkflowFileCLI(unittest.TestCase):
         for ref in ("tdd", f"{EXAMPLES}/tdd.toml"):
             with self.subTest(ref=ref), patch("sys.stdout", new_callable=io.StringIO) as out:
                 self.assertEqual(main(["workflows", ref]), 0)
-                self.assertEqual(orchestrator.parse_workflow("tdd", tomllib.loads(out.getvalue())),
-                                 orchestrator.named_workflow("tdd"))
+                self.assertEqual(orchestrator.parse_workflow("tdd", tomllib.loads(out.getvalue()), BUILT_IN_PROMPTS),
+                                 orchestrator.named_workflow("tdd", BUILT_IN_PROMPTS))
+
+
+class TestPromptFiles(unittest.TestCase):
+    """Prompt files in the config directory, in place of the built-in prompts."""
+
+    def setUp(self):
+        self.prompts = os.path.join(without_workflow_files(self), "ai-agents-orchestrator", "prompts")
+
+    def write(self, name, text):
+        """A prompt file; text as bytes is written as it is, a str as UTF-8 with the newline an editor ends it with."""
+        os.makedirs(self.prompts, exist_ok=True)
+        path = os.path.join(self.prompts, name)
+        with open(path, "wb") as f:
+            f.write(text if isinstance(text, bytes) else f"{text}\n".encode())
+        return path
+
+    def started(self, *flags):
+        """A new run's state and workflow, as run with flags makes them."""
+        with patch("orchestrator.new_run_id", return_value="20260929-120000-a1b2c3"):
+            return orchestrator.new_state(parse_args(["run", "task", *flags]), "/proj")
+
+    def test_a_build_prompt_file_words_the_builders_first_turn(self):
+        self.write("BUILD_PROMPT.md", "Build {spec_path} in {cwd}; report to {build_path}.")
+        state, pipeline = self.started()
+        seen = []
+        wf, *_ = make_workflow({"spec": [spec_turn], "build": [recording(build_turn(1), seen)],
+                                "review": [review_turn(1, APPROVE)]}, state=state, pipeline=pipeline,
+                               pull_request=False)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(seen, [f"Build {D}/spec.md in /proj; report to {D}/build-1.md.{NOTE}"])
+        self.assertEqual(state.prompt_overrides, {"BUILD_PROMPT": "Build {spec_path} in {cwd}; report to {build_path}."})
+        # Its name and the overrides give the workflow back, so the run saves no definition of it.
+        self.assertIsNone(state.workflow_definition)
+
+    def test_a_follow_up_file_reaches_the_turn_that_uses_it(self):
+        self.write("FIX_PROMPT.md", "Fix {prev_review_path}; report to {build_path}.")
+        state, pipeline = self.started()
+        seen = []
+        wf, *_ = make_workflow({"spec": [spec_turn], "build": [build_turn(1), recording(build_turn(2), seen)],
+                                "review": [review_turn(1, CHANGES_REQUESTED), review_turn(2, APPROVE)]},
+                               state=state, pipeline=pipeline, pull_request=False)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(seen, [f"Fix {D}/review-1.md; report to {D}/build-2.md.{NOTE}"])
+
+    def test_a_note_file_reaches_the_turn_that_uses_it(self):
+        self.write("QUALITY_PASSED_NOTE.md", "Gate passed: {quality_path}.")
+        reviews = []
+        state = quality_state(prompt_overrides=orchestrator.load_prompts().overrides)
+        wf, *_ = resume_gated(state, {"review": [recording(review_turn(1, APPROVE), reviews)]}, FakeCI(),
+                              files={lambda s: s.quality_path(1, 1): "GATE: OK\n"})
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertTrue(reviews[0].endswith(f"\n\nGate passed: {D}/quality-1-1.md."), reviews[0])
+        self.assertNotIn("The quality gate passed", reviews[0])
+
+    def test_a_note_file_reaches_every_workflow(self):
+        self.write("BLOCKED_NOTE.md", "Stuck? Write `BLOCKED: <question>` {{and stop}}.")
+        seen = []
+        state = replace(new_run(QUICK), prompt_overrides=orchestrator.load_prompts().overrides)
+        wf, *_ = make_workflow({"build": [recording(build_turn(1), seen)], "review": [review_turn(1, APPROVE)]},
+                               state=state, pipeline=QUICK, pull_request=False)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(seen, [(f"Build add a rate limiter in /proj; report to {D}/build-1.md.\n\n"
+                                 f"Stuck? Write `BLOCKED: <question>` {{and stop}}.")])
+
+    def test_a_workflow_files_own_prompt_is_not_replaced(self):
+        self.write("BUILD_PROMPT.md", "Build {spec_path} in {cwd}; report to {build_path}.")
+        self.write("FIX_PROMPT.md", "Fix {prev_review_path}; report to {build_path}.")
+        _, pipeline = self.started("--workflow-file", f"{EXAMPLES}/quick.toml")
+
+        build = pipeline.step("build")
+        # Its own prompt, and the again it takes from the default workflow's build step through use.
+        self.assertTrue(build.prompt.startswith("You are the Builder, the first of two roles"), build.prompt)
+        self.assertEqual(build.again, "Fix {prev_review_path}; report to {build_path}.")
+
+    def test_bad_files_stop_run_before_any_agent(self):
+        cases = [
+            ("BUILDER_PROMPT.md", "Build {spec_path}.",
+             "BUILDER_PROMPT names no built-in prompt; did you mean BUILD_PROMPT.md?"),
+            ("README.md", "notes", "README names no built-in prompt; the names are BLOCKED_NOTE, BLOCKED_PROMPT, "),
+            ("BUILD_PROMPT.md", "Build {spec_path} in {cwd} {nope}; report to {build_path}.",
+             ("placeholder {nope} is not one of the built-in text's; BUILD_PROMPT takes {build_path}, {cwd}, "
+              "{spec_path}")),
+            ("BUILD_PROMPT.md", "Build {spec_path} in {cwd}.",
+             "placeholder {build_path} is missing; BUILD_PROMPT takes {build_path}, {cwd}, {spec_path}"),
+            ("BLOCKED_NOTE.md", "Ask {}.", "placeholder {} is not one of the built-in text's; BLOCKED_NOTE takes none"),
+            ("CONTINUE_PROMPT.md", "Write {path!z}.", "cannot be filled in: ValueError: Unknown conversion specifier z"),
+            ("CONTINUE_PROMPT.md", "Write {path}}.",
+             "Single '}' encountered in format string; write a literal brace as {{ or }}"),
+            ("FIX_PROMPT.md", "Fix \xe9".encode("latin-1"), "not UTF-8 text"),
+        ]
+        for name, text, message in cases:
+            with self.subTest(name=name, message=message), \
+                    patch.object(Workflow, "__init__", return_value=None) as init, \
+                    patch.object(Host, "resolve_dir", return_value="/proj"), \
+                    patch.dict("os.environ", {"HERDR_ENV": "1"}), \
+                    patch("sys.stderr", new_callable=io.StringIO) as err:
+                path = self.write(name, text)
+                self.assertEqual(main(["run", "task"]), orchestrator.EXIT_ERROR)
+                self.assertTrue(err.getvalue().startswith(f"error: {path}: {message}"), err.getvalue())
+                init.assert_not_called()
+                os.remove(path)
+
+    def test_an_unreadable_file_names_it(self):
+        # A directory, which no user can read as a file, root included.
+        path = os.path.join(self.prompts, "FIX_PROMPT.md")
+        os.makedirs(path)
+        with self.assertRaisesRegex(OrchestratorError, f"cannot read prompt file {re.escape(path)}: Is a directory"):
+            orchestrator.load_prompts()
+
+    def test_a_bad_file_stops_drain_before_any_run(self):
+        self.write("BUILD_PROMPT.md", "Build {nope}.")
+        queue = tempfile.TemporaryDirectory()
+        self.addCleanup(queue.cleanup)
+        os.mkdir(os.path.join(queue.name, "a"))
+        with open(os.path.join(queue.name, "a", "spec.md"), "w") as f:
+            f.write(drain_spec_text("First"))
+        with patch.object(orchestrator, "connect", return_value=(None, FakeHost())), \
+                patch.object(Host, "resolve_dir", return_value="/proj"), \
+                patch.object(Workflow, "__init__", return_value=None) as init, \
+                patch("sys.stdout"), patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(main(["drain", queue.name]), orchestrator.EXIT_ERROR)
+        self.assertIn(f"{self.prompts}/BUILD_PROMPT.md: placeholder {{nope}}", err.getvalue())
+        init.assert_not_called()
+
+    def test_a_resume_keeps_the_prompts_the_run_started_with(self):
+        for edit in ("edited", "deleted"):
+            with self.subTest(edit=edit):
+                path = self.write("FIX_PROMPT.md", "Fix {prev_review_path}; report to {build_path}.")
+                state, pipeline = self.started()
+
+                def review_then_interrupt(prompt, state, host):
+                    raise KeyboardInterrupt
+                wf, _, host, _ = make_workflow({"spec": [spec_turn], "build": [build_turn(1)],
+                                                "review": [review_then_interrupt]},
+                                               state=state, pipeline=pipeline, pull_request=False)
+                with self.assertRaises(KeyboardInterrupt):
+                    wf.run()
+                if edit == "edited":
+                    self.write("FIX_PROMPT.md", "Changed {prev_review_path}; report to {build_path}.")
+                else:
+                    os.remove(path)
+
+                seen = []
+                saved = json.loads(host.files[f"{D}/state.json"])
+                wf2, *_ = resume(RunState.from_dict(saved), {
+                    "review": [review_turn(1, CHANGES_REQUESTED), review_turn(2, APPROVE)],
+                    "build": [recording(build_turn(2), seen)]}, host=host)
+                self.assertEqual(wf2.run(), APPROVE)
+                self.assertEqual(len(seen), 1)
+                self.assertIn(f"Fix {D}/review-1.md; report to {D}/build-2.md.", seen[0])
+                self.assertNotIn("Changed", seen[0])
+                if os.path.exists(path):
+                    os.remove(path)
+
+    def test_a_state_saved_before_prompt_files_resumes_with_the_built_in_texts(self):
+        self.write("FIX_PROMPT.md", "Fix {prev_review_path}; report to {build_path}.")
+        saved = asdict(saved_run("build", 2, agents=("spec", "build", "review")))
+        del saved["prompt_overrides"]
+        seen = []
+        state = RunState.from_dict(saved)
+        wf, *_ = resume(state, {"build": [recording(build_turn(2), seen)], "review": [review_turn(2, APPROVE)]},
+                        files={lambda s: s.review_path(1): f"**VERDICT: {CHANGES_REQUESTED}**\n1. finding",
+                               lambda s: s.build_path(1): "report 1"})
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(state.prompt_overrides, {})
+        self.assertIn(orchestrator.FIX_PROMPT.format(prev_review_path=f"{D}/review-1.md",
+                                                     build_path=f"{D}/build-2.md"), seen[0])
+
+    def test_a_state_that_replaces_an_unknown_prompt(self):
+        saved = {**asdict(saved_run("build", 1)), "prompt_overrides": {"LATER_NOTE": "x"}}
+        with self.assertRaisesRegex(OrchestratorError, "run state 20260929-120000-a1b2c3 replaces prompt LATER_NOTE, "
+                                                       "which this orchestrator lacks"):
+            orchestrator.resumable_state([(10**4, saved)], parse_args(["resume", "a1b2c3"]), "/proj", "here",
+                                         lambda pid: False)
+
+    def test_without_prompt_files_nothing_changes(self):
+        self.write("notes.txt", "not a prompt file")
+        state, pipeline = self.started()
+        self.assertEqual((state.prompt_overrides, pipeline), ({}, orchestrator.DEFAULT_WORKFLOW))
+        self.assertEqual(orchestrator.load_prompts(), BUILT_IN_PROMPTS)
+
+    def test_an_override_ends_with_one_newline_less(self):
+        self.write("BLOCKED_NOTE.md", "Ask.\n")
+        self.assertEqual(orchestrator.load_prompts().BLOCKED_NOTE, "Ask.\n")
+
+    def test_workflows_lists_the_prompt_files(self):
+        self.write("QUALITY_OFF_NOTE.md", "Off: {quality_paths}.")
+        self.write("BUILD_PROMPT.md", "Build {spec_path} in {cwd}; report to {build_path}.")
+        with patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(main(["workflows"]), 0)
+        self.assertTrue(out.getvalue().endswith(
+            f"\nPrompt files in {self.prompts}, in place of the built-in texts:\n"
+            f"    BUILD_PROMPT  {self.prompts}/BUILD_PROMPT.md\n"
+            f"    QUALITY_OFF_NOTE  {self.prompts}/QUALITY_OFF_NOTE.md\n"), out.getvalue())
+
+    def test_workflows_says_why_the_prompt_files_would_stop_a_run(self):
+        self.write("BUILD_PROMPT.md", "Build.")
+        with patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(main(["workflows"]), 0)
+        self.assertTrue(out.getvalue().endswith(
+            f"\nPrompt files in {self.prompts}:\n    error: {self.prompts}/BUILD_PROMPT.md: placeholder {{build_path}} "
+            f"is missing; BUILD_PROMPT takes {{build_path}}, {{cwd}}, {{spec_path}}\n"), out.getvalue())
+
+    def test_workflows_prints_the_default_as_the_prompt_files_word_it(self):
+        self.write("BUILD_PROMPT.md", "Build {spec_path} in {cwd}; report to {build_path}.")
+        with patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(main(["workflows", "default"]), 0)
+        default = orchestrator.parse_workflow("default", tomllib.loads(out.getvalue()), BUILT_IN_PROMPTS)
+        self.assertEqual(default.step("build").prompt, "Build {spec_path} in {cwd}; report to {build_path}.")
+
+    def test_every_built_in_prompt_is_overridable(self):
+        names = {f.name for f in orchestrator.fields(orchestrator.Prompts)}
+        constants = {k for k in vars(orchestrator) if re.fullmatch(r"[A-Z_]+_(PROMPT|NOTE)", k)}
+        # Not sent to an agent: the quality file's and the window's.
+        self.assertEqual(constants - names, {"TO_WEIGH_NOTE", "HERDR_NOTE"})
+        for name in names:
+            self.assertEqual(getattr(BUILT_IN_PROMPTS, name), getattr(orchestrator, name))
+            self.assertIsNone(orchestrator.prompt_problem(name, getattr(orchestrator, name)))
 
 
 # No verdict step: the run finishes when the Builder's one turn is done.
@@ -11026,7 +11250,7 @@ class TestWorkflowFileAgents(unittest.TestCase):
     def test_parsed_and_round_tripped(self):
         p = orchestrator.parse_workflow("mine", tomllib.loads(
             'roles.review = { agent = "codex", model = "o3" }\nroles.build = { label = "Implementer", agent = "pi" }\n'
-            '[[steps]]\nuse = "spec"\n[[steps]]\nuse = "build"\n[[steps]]\nuse = "review"\n'))
+            '[[steps]]\nuse = "spec"\n[[steps]]\nuse = "build"\n[[steps]]\nuse = "review"\n'), BUILT_IN_PROMPTS)
         self.assertEqual(p.agents, {"review": "codex", "build": "pi"})
         definition = orchestrator.workflow_definition(p)
         self.assertEqual(definition["roles"], {"spec": {"label": "Spec Collector"},
@@ -11034,8 +11258,8 @@ class TestWorkflowFileAgents(unittest.TestCase):
                                                "review": {"label": "Reviewer", "model": "o3", "agent": "codex"}})
         text = orchestrator.workflow_toml(p)
         self.assertIn('[roles.review]\nlabel = "Reviewer"\nmodel = "o3"\nagent = "codex"\n', text)
-        self.assertEqual(orchestrator.parse_workflow("mine", tomllib.loads(text)), p)
-        self.assertEqual(orchestrator.parse_workflow("mine", definition), p)
+        self.assertEqual(orchestrator.parse_workflow("mine", tomllib.loads(text), BUILT_IN_PROMPTS), p)
+        self.assertEqual(orchestrator.parse_workflow("mine", definition, BUILT_IN_PROMPTS), p)
 
     def test_workflows_prints_it(self):
         config = without_workflow_files(self)
@@ -11054,11 +11278,11 @@ class TestWorkflowFileAgents(unittest.TestCase):
                                state=new_run(p), pipeline=p, pull_request=False)
         self.assertEqual(wf.run(), APPROVE)
         self.assertEqual(wf.state.workflow_definition["roles"]["review"], {"label": "Reviewer", "agent": "codex"})
-        self.assertEqual(orchestrator.run_pipeline("coded", wf.state.workflow_definition), p)
+        self.assertEqual(orchestrator.run_pipeline("coded", wf.state.workflow_definition, BUILT_IN_PROMPTS), p)
 
     def test_invalid_agents_name_the_role(self):
         steps = '[[steps]]\nuse = "spec"\n[[steps]]\nuse = "build"\n[[steps]]\nuse = "review"\n'
-        self.assertEqual(orchestrator.parse_workflow("mine", tomllib.loads(steps)).steps,
+        self.assertEqual(orchestrator.parse_workflow("mine", tomllib.loads(steps), BUILT_IN_PROMPTS).steps,
                          orchestrator.DEFAULT_WORKFLOW.steps)
         cases = [
             ('roles.review = { agent = "cursor" }\n',
@@ -11070,7 +11294,7 @@ class TestWorkflowFileAgents(unittest.TestCase):
         for text, message in cases:
             data = tomllib.loads(text + steps)
             with self.subTest(text=text), self.assertRaises(ValueError) as cm:
-                orchestrator.parse_workflow("mine", data)
+                orchestrator.parse_workflow("mine", data, BUILT_IN_PROMPTS)
             self.assertIn(message, str(cm.exception))
         roles = dict(QUICK.roles)
         with self.assertRaisesRegex(ValueError, "an agent is set for role x, which is not one of the workflow's roles"):
@@ -12474,7 +12698,7 @@ class TestSpecCLI(unittest.TestCase):
 class TestSpecBuildReviewExample(unittest.TestCase):
     def test_it_is_the_default_workflow(self):
         # Fails when a built-in prompt or step changes; regenerate the file with `workflows default`.
-        example = orchestrator.load_workflow_file(f"{EXAMPLES}/spec-build-review.toml")
+        example = orchestrator.load_workflow_file(f"{EXAMPLES}/spec-build-review.toml", BUILT_IN_PROMPTS)
         self.assertEqual(orchestrator.workflow_definition(example),
                          orchestrator.workflow_definition(orchestrator.DEFAULT_WORKFLOW))
 
@@ -14825,7 +15049,7 @@ class TestBlocked(unittest.TestCase):
         self.assertEqual((wf.state.round, wf.state.quality_round, wf.state.blocked), (1, 2, None))
 
     def test_a_step_from_a_workflow_file_can_block(self):
-        tdd = orchestrator.load_workflow_file(f"{EXAMPLES}/tdd.toml")
+        tdd = orchestrator.load_workflow_file(f"{EXAMPLES}/tdd.toml", BUILT_IN_PROMPTS)
         def tests_md(s):
             return f"{s.dir}/tests.md"
         seen, specs, notes = [], [], []
