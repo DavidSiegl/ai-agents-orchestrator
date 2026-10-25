@@ -429,8 +429,9 @@ The quality gate still did not pass, and its last quality round failed on just w
 failed on, so the Builder was not asked again; its unresolved findings are in {quality_path}. \
 Weigh them as you would your own."""
 
-# In place of the notes above when resume --no-quality-gate turned the gate off after the round's last quality file,
-# and the Builder changed the code since.
+# In place of the notes above when the round's change went unjudged (Workflow._unjudged) and the round has a quality
+# file: resume --no-quality-gate turned the gate off after it, and the Builder changed the code since. The pull
+# request says so too (pr_body).
 QUALITY_OFF_NOTE = """\
 The quality gate was turned off before the Builder's latest change was analysed, so nothing judged that change; \
 the round's earlier quality files are {quality_paths}, and the Builder's reports since answer them."""
@@ -458,6 +459,111 @@ LOCKED_NOTE = """\
 This round changed files that step {steps} locked: {paths}. The orchestrator restored them, \
 so the change you review does not hold those edits; they are in {diff_paths}. \
 If a report says a locked file is wrong, weigh that claim against the diff."""
+
+
+@dataclass(frozen=True)
+class Prompts:
+    """The texts a run sends agents besides a workflow file's own prompts: the default workflow's steps, the
+    follow-ups and the notes. Each field defaults to the constant of its name above, and a prompt file of that name
+    replaces it (load_prompts), so a text added here is overridable at once.
+
+    Each is a str.format template whose placeholders are the built-in text's; BLOCKED_NOTE has none.
+    """
+    SPEC_PROMPT: str = SPEC_PROMPT
+    BUILD_PROMPT: str = BUILD_PROMPT
+    FIX_PROMPT: str = FIX_PROMPT
+    REVIEW_PROMPT: str = REVIEW_PROMPT
+    RECHECK_PROMPT: str = RECHECK_PROMPT
+    CONTINUE_PROMPT: str = CONTINUE_PROMPT
+    RETRY_VERDICT_PROMPT: str = RETRY_VERDICT_PROMPT
+    BLOCKED_NOTE: str = BLOCKED_NOTE
+    BLOCKED_PROMPT: str = BLOCKED_PROMPT
+    REBUILD_NOTE: str = REBUILD_NOTE
+    REREVIEW_NOTE: str = REREVIEW_NOTE
+    QUALITY_FIX_PROMPT: str = QUALITY_FIX_PROMPT
+    QUALITY_PASSED_NOTE: str = QUALITY_PASSED_NOTE
+    QUALITY_UNRESOLVED_NOTE: str = QUALITY_UNRESOLVED_NOTE
+    QUALITY_STUCK_NOTE: str = QUALITY_STUCK_NOTE
+    QUALITY_OFF_NOTE: str = QUALITY_OFF_NOTE
+    PROOFS_NOTE: str = PROOFS_NOTE
+    CARRIED_PROOFS_NOTE: str = CARRIED_PROOFS_NOTE
+    LOCKED_NOTE: str = LOCKED_NOTE
+
+    @property
+    def overrides(self) -> dict[str, str]:
+        """Name -> text of each field that differs from the built-in text, in declaration order; Prompts(**overrides)
+        gives these prompts back."""
+        return {f.name: getattr(self, f.name) for f in fields(self) if getattr(self, f.name) != f.default}
+
+
+# The prompts with no prompt file: what a run without any, or saved before them, sends.
+BUILT_IN_PROMPTS = Prompts()
+
+
+def prompts_dir() -> str:
+    """Where a new run finds its prompt files, NAME.md for the field NAME of Prompts, on the orchestrator's machine."""
+    return os.path.join(config_dir(), "prompts")
+
+
+def prompt_files() -> dict[str, str]:
+    """Name -> path of each .md file in prompts_dir(), unread, in name order; none without the directory. Other files
+    are not prompt files, as an editor's backup is not."""
+    try:
+        names = os.listdir(prompts_dir())
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        raise OrchestratorError(f"cannot list {prompts_dir()}: {e.strerror}") from e
+    return {stem: os.path.join(prompts_dir(), name) for name in sorted(names)
+            for stem, ext in [os.path.splitext(name)] if ext == ".md"}
+
+
+def load_prompts() -> Prompts:
+    """The prompts a new run starts with: the built-in texts, each one a prompt file names replaced by the file's
+    content, less one trailing newline.
+
+    Raises OrchestratorError, naming the file, for one that names no field of Prompts, cannot be read, is not UTF-8,
+    or uses other placeholders than the built-in text (prompt_problem).
+    """
+    names = {f.name for f in fields(Prompts)}
+    overrides = {}
+    for name, path in prompt_files().items():
+        if name not in names:
+            close = difflib.get_close_matches(name, names, n=1)
+            hint = f"did you mean {close[0]}.md?" if close else f"the names are {', '.join(sorted(names))}"
+            raise OrchestratorError(f"{path}: {name} names no built-in prompt; {hint}")
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read().removesuffix("\n")
+        except OSError as e:
+            raise OrchestratorError(f"cannot read prompt file {path}: {e.strerror}") from e
+        except UnicodeDecodeError as e:
+            raise OrchestratorError(f"{path}: not UTF-8 text: {e}") from e
+        if problem := prompt_problem(name, text):
+            raise OrchestratorError(f"{path}: {problem}")
+        overrides[name] = text
+    return Prompts(**overrides)
+
+
+def prompt_problem(name: str, text: str) -> str | None:
+    """What stops text from replacing the built-in prompt name, a field of Prompts, or None: a placeholder the
+    built-in text lacks or a missing one it has, or a brace, format spec or conversion that cannot be filled in."""
+    built_in = getattr(BUILT_IN_PROMPTS, name)
+    try:
+        used = set(_fields_of(text))
+    except ValueError as e:
+        return f"{e}; write a literal brace as {{{{ or }}}}"
+    wanted = set(_fields_of(built_in))
+    takes = f"{name} takes {', '.join(f'{{{p}}}' for p in sorted(wanted))}" if wanted else f"{name} takes none"
+    if extra := used - wanted:
+        return f"placeholder {{{min(extra)}}} is not one of the built-in text's; {takes}"
+    if missing := wanted - used:
+        return f"placeholder {{{min(missing)}}} is missing; {takes}"
+    try:
+        text.format(**dict.fromkeys(wanted, ""))
+    except (ValueError, KeyError, IndexError, AttributeError) as e:
+        return f"cannot be filled in: {type(e).__name__}: {e}"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -851,24 +957,39 @@ def _fields_of(template: str) -> list[str]:
     return [name for _, name, _, _ in string.Formatter().parse(template) if name is not None]
 
 
-DEFAULT_WORKFLOW = Pipeline("default", dict(ROLE_LABELS), (
-    Step("spec", "spec", "spec.md", SPEC_PROMPT, human_paced=True),
-    Step("build", "build", "build-{n}.md", BUILD_PROMPT, again=FIX_PROMPT,
-         fresh_note=REBUILD_NOTE, fresh_repeats_again=True, edits=True, quality_gated=True),
-    Step("review", "review", "review-{n}.md", REVIEW_PROMPT, again=RECHECK_PROMPT,
-         fresh_note=REREVIEW_NOTE, loop_to="build"),
-))
+def default_workflow(prompts: Prompts) -> Pipeline:
+    """The default workflow, its steps worded by prompts."""
+    return Pipeline("default", dict(ROLE_LABELS), (
+        Step("spec", "spec", "spec.md", prompts.SPEC_PROMPT, human_paced=True),
+        Step("build", "build", "build-{n}.md", prompts.BUILD_PROMPT, again=prompts.FIX_PROMPT,
+             fresh_note=prompts.REBUILD_NOTE, fresh_repeats_again=True, edits=True, quality_gated=True),
+        Step("review", "review", "review-{n}.md", prompts.REVIEW_PROMPT, again=prompts.RECHECK_PROMPT,
+             fresh_note=prompts.REREVIEW_NOTE, loop_to="build"),
+    ))
 
-# The workflows `run --workflow` offers, by name.
+
+DEFAULT_WORKFLOW = default_workflow(BUILT_IN_PROMPTS)
+
+# The workflows `run --workflow` offers, by name, worded by the built-in prompts (find_workflow words them by others).
 WORKFLOWS = {w.name: w for w in (DEFAULT_WORKFLOW,)}
 
 
-def find_workflow(name: str) -> Pipeline:
+def find_workflow(name: str, prompts: Prompts) -> Pipeline:
+    """The built-in workflow of that name, worded by prompts; OrchestratorError when there is none."""
+    if name == DEFAULT_WORKFLOW.name:
+        # The one built-in workflow whose steps take their texts from Prompts.
+        return default_workflow(prompts)
     try:
         return WORKFLOWS[name]
     except KeyError:
         raise OrchestratorError(f"unknown workflow {name}; this orchestrator has "
                                 f"{', '.join(sorted(WORKFLOWS))}") from None
+
+
+def is_built_in(p: Pipeline, prompts: Prompts) -> bool:
+    """Whether p is the built-in workflow of its name as prompts word it, which a run need not save the definition of:
+    its name and prompts give it back (run_pipeline)."""
+    return p.name in WORKFLOWS and find_workflow(p.name, prompts) == p
 
 
 # ---------------------------------------------------------------------------
@@ -923,16 +1044,19 @@ def workflow_names() -> list[str]:
     return sorted(set(WORKFLOWS) | set(workflow_files()))
 
 
-def named_workflow(name: str) -> Pipeline:
-    """The built-in workflow of that name, or else the one in workflows_dir()."""
+def named_workflow(name: str, prompts: Prompts) -> Pipeline:
+    """The built-in workflow of that name, or else the one in workflows_dir(), worded by prompts as load_workflow_file
+    words one."""
     if name in WORKFLOWS:
-        return WORKFLOWS[name]
+        return find_workflow(name, prompts)
     if path := workflow_files().get(name):
-        return load_workflow_file(path)
+        return load_workflow_file(path, prompts)
     raise OrchestratorError(f"unknown workflow {name}; there are {', '.join(workflow_names())}")
 
 
-def load_workflow_file(path: str) -> Pipeline:
+def load_workflow_file(path: str, prompts: Prompts) -> Pipeline:
+    """The workflow the file at path defines, a step that uses one of the default workflow's taking its texts from
+    prompts; OrchestratorError, naming the file, when it cannot be read or defines none."""
     name = os.path.splitext(os.path.basename(path))[0]
     try:
         with open(path, "rb") as f:
@@ -946,19 +1070,21 @@ def load_workflow_file(path: str) -> Pipeline:
     if not re.fullmatch(NAME_PATTERN, name):
         raise OrchestratorError(f"{path}: a workflow's name, its file's, may use only letters, digits, - and _")
     try:
-        return parse_workflow(name, data)
+        return parse_workflow(name, data, prompts)
     except ValueError as e:
         raise OrchestratorError(f"{path}: {e}") from e
 
 
-def parse_workflow(name: str, data: dict) -> Pipeline:
-    """The workflow a definition describes; ValueError names what is wrong with it."""
-    _check_keys(data, WORKFLOW_KEYS, "the file")
-    raw_steps = data.get("steps")
+def parse_workflow(name: str, definition: dict, prompts: Prompts) -> Pipeline:
+    """The workflow a definition describes, a step with a use taking the fields of that step of the default workflow
+    as prompts words it; ValueError names what is wrong with it."""
+    _check_keys(definition, WORKFLOW_KEYS, "the file")
+    raw_steps = definition.get("steps")
     if not isinstance(raw_steps, list) or not raw_steps:
         raise ValueError("it has no [[steps]]")
-    steps = [_parse_step(i, raw) for i, raw in enumerate(raw_steps, 1)]
-    raw_roles = data.get("roles", {})
+    default = default_workflow(prompts)
+    steps = [_parse_step(i, raw, default) for i, raw in enumerate(raw_steps, 1)]
+    raw_roles = definition.get("roles", {})
     if not isinstance(raw_roles, dict):
         raise ValueError("roles must be a table")
     declared = {role: _parse_role(role, raw) for role, raw in raw_roles.items()}
@@ -967,13 +1093,13 @@ def parse_workflow(name: str, data: dict) -> Pipeline:
     labels = {role: declared.get(role, {}).get("label") or _default_label(role) for role in order}
     models = {role: table["model"] for role, table in declared.items() if table.get("model")}
     agents = {role: table["agent"] for role, table in declared.items() if table.get("agent")}
-    description = data.get("description", "")
+    description = definition.get("description", "")
     if not isinstance(description, str):
         raise ValueError("description must be a string")
-    proof_command = data.get("proof_command")
+    proof_command = definition.get("proof_command")
     if proof_command is not None and not isinstance(proof_command, str):
         raise ValueError("proof_command must be a string")
-    budget = {key: data[key] for key in BUDGET_KEYS if key in data}
+    budget = {key: definition[key] for key in BUDGET_KEYS if key in definition}
     for key, value in budget.items():
         # type(), not isinstance: true is an int to isinstance, but no number of lines.
         if type(value) is not int:
@@ -998,13 +1124,13 @@ def _parse_role(role: str, raw) -> dict[str, str]:
     return raw
 
 
-def _parse_step(i: int, raw) -> dict:
-    """Step's arguments from step i of a definition, its use resolved."""
+def _parse_step(i: int, raw, default: Pipeline) -> dict:
+    """Step's arguments from step i of a definition, its use resolved against default."""
     if not isinstance(raw, dict):
         raise ValueError(f"step {i} must be a table")
     where = f"step {i}" + (f" ({raw['id']})" if isinstance(raw.get("id"), str) else "")
     _check_keys(raw, STEP_KEYS | {"use"}, where)
-    step = _used_step(raw, where) | {k: v for k, v in raw.items() if k != "use"}
+    step = _used_step(raw, where, default) | {k: v for k, v in raw.items() if k != "use"}
     step.setdefault("role", step.get("id"))
     for key in ("id", "file", "prompt"):
         if key not in step:
@@ -1014,14 +1140,14 @@ def _parse_step(i: int, raw) -> dict:
     return step
 
 
-def _used_step(raw: dict, where: str) -> dict:
-    """The fields of the default step that raw's use names; none without a use."""
+def _used_step(raw: dict, where: str, default: Pipeline) -> dict:
+    """The fields of the step of default, the default workflow, that raw's use names; none without a use."""
     if "use" not in raw:
         return {}
-    used = DEFAULT_WORKFLOW.step(raw["use"]) if isinstance(raw["use"], str) else None
+    used = default.step(raw["use"]) if isinstance(raw["use"], str) else None
     if used is None:
         raise ValueError(f"{where}: use names no step of the default workflow; it has "
-                         f"{', '.join(st.id for st in DEFAULT_WORKFLOW.steps)}")
+                         f"{', '.join(st.id for st in default.steps)}")
     return step_fields(used)
 
 
@@ -1098,20 +1224,31 @@ def workflow_shape(p: Pipeline) -> str:
     return " -> ".join(st.id + (f" (back to {st.loop_to})" if st.loop_to else "") for st in p.steps)
 
 
-def run_pipeline(name: str, definition: dict | None) -> Pipeline:
-    """A run's workflow: the definition saved with it, or the built-in workflow of its name."""
+def run_pipeline(name: str, definition: dict | None, prompts: Prompts) -> Pipeline:
+    """A run's workflow: the definition saved with it, or the built-in workflow of its name worded by the run's
+    prompts."""
     if definition is None:
-        return find_workflow(name)
+        return find_workflow(name, prompts)
     try:
-        return parse_workflow(name, definition)
+        # A saved definition is canonical, with no use for prompts to word.
+        return parse_workflow(name, definition, prompts)
     except ValueError as e:
         raise OrchestratorError(f"the definition of workflow {name} saved with the run is invalid: {e}") from e
+
+
+def saved_prompts(overrides: dict[str, str], run_id: str) -> Prompts:
+    """The prompts a run started with, from the overrides saved with it (RunState.prompt_overrides); OrchestratorError
+    when they name a prompt this orchestrator lacks."""
+    if unknown := set(overrides) - {f.name for f in fields(Prompts)}:
+        raise OrchestratorError(f"run state {run_id} replaces prompt {min(unknown)}, which this orchestrator lacks")
+    return Prompts(**overrides)
 
 
 def saved_pipeline(saved: dict) -> Pipeline | None:
     """The workflow of a saved state, or None when this orchestrator cannot tell."""
     try:
-        return run_pipeline(saved.get("workflow") or DEFAULT_WORKFLOW.name, saved.get("workflow_definition"))
+        return run_pipeline(saved.get("workflow") or DEFAULT_WORKFLOW.name, saved.get("workflow_definition"),
+                            saved_prompts(saved.get("prompt_overrides") or {}, saved.get("run_id", "?")))
     except OrchestratorError:
         return None
 
@@ -1863,7 +2000,22 @@ class Host:
 
     def pull_request(self, cwd: str, url: str) -> dict:
         """The pull request's state (OPEN, CLOSED or MERGED), headRefOid and closedAt, as gh reports them."""
-        args = ["pr", "view", url, "--json", "state,headRefOid,closedAt"]
+        return self._pr_view(cwd, url, "state,headRefOid,closedAt", lambda pr: (
+            isinstance(pr["state"], str) and re.fullmatch(r"[0-9a-f]{40,64}", pr["headRefOid"])
+            and (pr["closedAt"] is None or isinstance(pr["closedAt"], str))))
+
+    def pull_request_merge(self, cwd: str, url: str) -> dict:
+        """The pull request's state (OPEN, CLOSED or MERGED), isDraft, mergeable (MERGEABLE, CONFLICTING, or UNKNOWN
+        while GitHub has not computed it) and body, as gh reports them. Raises as pull_request does."""
+        return self._pr_view(cwd, url, "state,isDraft,mergeable,body", lambda pr: (
+            isinstance(pr["state"], str) and isinstance(pr["isDraft"], bool)
+            and pr["mergeable"] in ("MERGEABLE", "CONFLICTING", "UNKNOWN") and isinstance(pr["body"], str)))
+
+    def _pr_view(self, cwd: str, url: str, json_fields: str, valid: Callable[[dict], object]) -> dict:
+        """gh pr view's JSON object of json_fields, comma-separated, for the pull request at url, once valid finds it
+        truthy. Raises GhUnusable when gh is missing or logged out, and OrchestratorError when it fails otherwise or
+        prints what valid rejects, or raises KeyError or TypeError for."""
+        args = ["pr", "view", url, "--json", json_fields]
         proc = self.gh_run(cwd, *args)
         if proc.returncode in GH_UNUSABLE_STATUS:
             raise GhUnusable(f"gh {shlex.join(args)} failed with status {proc.returncode}: "
@@ -1871,13 +2023,21 @@ class Host:
         out = self._checked(["gh", *args], proc)
         try:
             pr = json.loads(out)
-            fields_ok = (isinstance(pr["state"], str) and re.fullmatch(r"[0-9a-f]{40,64}", pr["headRefOid"])
-                         and (pr["closedAt"] is None or isinstance(pr["closedAt"], str)))
+            fields_ok = valid(pr)
         except (ValueError, KeyError, TypeError) as e:
             raise OrchestratorError(f"gh pr view {url} printed {out.strip()!r}: {e}") from e
         if not fields_ok:
             raise OrchestratorError(f"gh pr view {url} printed {out.strip()!r}, not a pull request's state")
         return pr
+
+    def edit_pr_body(self, cwd: str, url: str, body: str) -> None:
+        """Make body the description of the pull request at url, with gh."""
+        argv = ["gh", "pr", "edit", url, "--body-file", "-"]
+        self.check(["sh", "-c", IN_DIR, "_", cwd, *argv], stdin=body, timeout=NETWORK_TIMEOUT)
+
+    def mark_pr_ready(self, cwd: str, url: str) -> None:
+        """Take the pull request at url out of draft, with gh."""
+        self.check(["sh", "-c", IN_DIR, "_", cwd, "gh", "pr", "ready", url], timeout=NETWORK_TIMEOUT)
 
     def create_pr(self, cwd: str, base: str, head: str, title: str, body: str, draft: bool) -> str:
         """Open a pull request with gh and return its URL."""
@@ -2227,7 +2387,8 @@ class RunState:
     branch: str | None = None
     pr_url: str | None = None
     verdict: str | None = None
-    # The files that conflicted with the base branch when the pull request was opened, as a draft.
+    # The files that conflicted with the base branch when the pull request was opened, as a draft; empty again once
+    # refresh found the pull request merging cleanly, merged or closed (refresh_conflict).
     conflicts: list[str] = field(default_factory=list)
     error: str | None = None
     # Per role: the agent's name, its pane, the harness it runs in (kind) and, once herdr reports it,
@@ -2268,6 +2429,9 @@ class RunState:
     workflow: str = DEFAULT_WORKFLOW.name
     # The workflow_definition of one that is not built in, so a resume does not depend on its file.
     workflow_definition: dict | None = None
+    # Prompts.overrides of the prompts the run started with (load_prompts), so a resume does not depend on the prompt
+    # files either; empty for the built-in texts, as for a run saved before prompt files.
+    prompt_overrides: dict[str, str] = field(default_factory=dict)
     # What prune did with branch once the pull request was done: "deleted", or "kept: <why>". Written by
     # prune_branches, never by the run itself.
     branch_cleanup: str | None = None
@@ -2319,6 +2483,11 @@ class RunState:
         if not state.root_pane and first in state.agents:
             state.root_pane = state.agents[first]["pane"]
         return state
+
+    @property
+    def prompts(self) -> Prompts:
+        """The prompts the run sends: those it started with (saved_prompts)."""
+        return saved_prompts(self.prompt_overrides, self.run_id)
 
     @property
     def key(self) -> str:
@@ -5870,43 +6039,85 @@ def commit_note(state: "RunState") -> str:
     return f"Orchestrator run {state.run_id}: {state.verdict} after {state.round} review round(s)."
 
 
-def provenance(state: "RunState", quality: tuple[int, str] | None) -> list[tuple[str, str]]:
+class QualityFile(NamedTuple):
+    """A quality file of a run, as its commit and pull request cite it."""
+    round: int  # the review round it belongs to
+    quality_round: int
+    text: str
+
+
+class GateEvidence(NamedTuple):
+    """What the quality gate said of the change a run publishes, for its commit trailers and pull request
+    (provenance, pr_body); Workflow._gate_evidence decides it."""
+    # The quality file they cite: the final round's last one, or for an unjudged change the run's last one from any
+    # round; None when there is none to cite.
+    last: QualityFile | None = None
+    # True when resume --no-quality-gate turned the gate off and no quality file judges the published code
+    # (Workflow._unjudged): last, if any, judged code the Builder has changed since.
+    unjudged: bool = False
+
+
+def provenance(state: "RunState", quality: GateEvidence) -> list[tuple[str, str]]:
     """The git trailers of the run's commit, (key, value) in order: Orchestrator-Run, Orchestrator-Workflow, an
     Orchestrator-Role per role whose agent ran, in the order they first started, as role=harness/model, the model
-    "default" where none was set, and with a quality gate Orchestrator-Gate, how the last quality round ended.
+    "default" where none was set, and with a quality file to cite Orchestrator-Gate, how its quality round ended,
+    with ", then turned off" for an unjudged change.
 
-    quality is the round's last quality file, as (its quality round, its text), None for a round without one. A role
-    that ran in two harnesses over resumes names the last. docs/design.md says what each trailer means.
+    A role that ran in two harnesses over resumes names the last. docs/design.md says what each trailer means.
     """
     s = state
     trailers = [("Orchestrator-Run", s.run_id), ("Orchestrator-Workflow", s.workflow)]
     trailers += [("Orchestrator-Role", f"{role}={agent.get('kind', DEFAULT_AGENT)}/{s.models.get(role) or 'default'}")
                  for role, agent in s.agents.items()]
-    if quality is not None:
-        q, text = quality
+    if (last := quality.last) is not None:
+        q = last.quality_round
         rounds = f"{q} quality round{'s' if q != 1 else ''}"
-        trailers.append(("Orchestrator-Gate", f"{parse_gate(text) or '?'} after {rounds}"))
+        off = ", then turned off" if quality.unjudged else ""
+        trailers.append(("Orchestrator-Gate", f"{parse_gate(last.text) or '?'} after {rounds}{off}"))
     return trailers
 
 
-def pr_body(state: "RunState", spec: str, report: str, review: str, quality: tuple[int, str] | None = None) -> str:
-    """The pull request's body; quality is the final round's last quality file, as provenance takes it."""
+def conflict_warning(base_branch: str | None, conflicts: list[str]) -> str:
+    """The paragraph that opens the body of a pull request opened over conflicts with base_branch in the files
+    conflicts, which must not be empty; without_conflict_warning takes it out again."""
+    files = "\n".join(f"> - `{f}`" for f in conflicts)
+    return (f"> [!WARNING]\n> This branch conflicts with `{base_branch}`, so this is a draft. "
+            f"Merge `{base_branch}` into it and resolve the conflicts in:\n{files}")
+
+
+def without_conflict_warning(body: str, base_branch: str | None, conflicts: list[str]) -> str:
+    """body with its first conflict_warning paragraph for base_branch and conflicts removed, and the blank line after
+    it, or before it when it ends the body; body unchanged when it has no such paragraph. Its lines may end in \r\n,
+    as GitHub's editor leaves them, and the paragraph's own lines must be as conflict_warning wrote them."""
+    block = r"\r?\n".join(re.escape(line) for line in conflict_warning(base_branch, conflicts).split("\n"))
+    paragraph = (rf"(?:\A|(?<=\n\n)|(?<=\n\r\n)){block}(?:\r?\n\r?\n|\r?\n?\Z)"
+                 rf"|\r?\n\r?\n{block}(?=\r?\n?\Z)")
+    return re.sub(paragraph, "", body, count=1)
+
+
+def pr_body(state: "RunState", spec: str, report: str, review: str, quality: GateEvidence) -> str:
+    """The pull request's body; quality is what the gate said of the change, as provenance takes it."""
     approved = state.verdict in SUCCEEDED
     head = f"Opened by ai-agents-orchestrator run `{state.run_id}`. {verdict_line(state)}"
     trailers = "\n".join(["| Commit trailer | Value |", "| --- | --- |",
                           *(f"| {key} | `{said}` |" for key, said in provenance(state, quality))])
-    warning = []
-    if state.conflicts:
-        files = "\n".join(f"> - `{f}`" for f in state.conflicts)
-        warning = [f"> [!WARNING]\n> This branch conflicts with `{state.base_branch}`, so this is a draft. "
-                   f"Merge `{state.base_branch}` into it and resolve the conflicts in:\n{files}"]
+    warning = [conflict_warning(state.base_branch, state.conflicts)] if state.conflicts else []
+    note, section = [], []
+    if quality.unjudged:
+        when = ("after its last analysis, and the Builder changed the code since, so nothing judged the final change"
+                if quality.last else "before any analysis finished, so nothing judged the change")
+        note = [f"> [!NOTE]\n> The quality gate was turned off (`resume --no-quality-gate`) {when}."]
+    if (last := quality.last) is not None:
+        label = f"round {last.round}, before the last change" if quality.unjudged else f"round {last.round}"
+        section = [_details(f"Quality gate ({label})", last.text)]
     return "\n\n".join([
         *warning,
+        *note,
         head,
         trailers,
         _details("Spec", spec, open_=True),
         _details(f"Builder report (round {state.round})", report),
-        *([_details(f"Quality gate (round {state.round})", quality[1])] if quality else []),
+        *section,
         *([] if state.verdict in (FINISHED, QUALITY_GATE_FAILED) else
           [_details(f"Review (round {state.round})", review, open_=not approved)]),
         *([_details("Run timings", turns_table(state.turns))] if state.turns else []),
@@ -6239,7 +6450,9 @@ class Workflow:
         self.ci = ci
         self.spec = spec
         self.pypi = pypi or PyPI()
-        self.pipeline = pipeline = pipeline or run_pipeline(state.workflow, state.workflow_definition)
+        # Every prompt a workflow sends that its definition does not word: the follow-ups and notes.
+        self.prompts = prompts = state.prompts
+        self.pipeline = pipeline = pipeline or run_pipeline(state.workflow, state.workflow_definition, prompts)
         if ci and pipeline.gated is None:
             raise OrchestratorError(f"workflow {pipeline.name} has no quality-gated step, "
                                     f"so the quality gate does not apply")
@@ -6248,7 +6461,7 @@ class Workflow:
             raise OrchestratorError(f"workflow {pipeline.name} has no editing step, "
                                     f"so it cannot end in a pull request; pass --no-pr")
         state.workflow = pipeline.name
-        state.workflow_definition = None if WORKFLOWS.get(pipeline.name) is pipeline else workflow_definition(pipeline)
+        state.workflow_definition = None if is_built_in(pipeline, prompts) else workflow_definition(pipeline)
         # Saved with the run, so a resume starts from them.
         state.max_rounds = max_rounds
         state.turn_timeout = turn_timeout
@@ -6670,7 +6883,7 @@ class Workflow:
             return ""
         paths = sorted({p for r in records for ps in r["paths"].values() for p in ps})
         lockers = sorted({locker for r in records for locker in r["paths"]})
-        return "\n\n" + LOCKED_NOTE.format(
+        return "\n\n" + self.prompts.LOCKED_NOTE.format(
             paths=", ".join(f"`{p}`" for p in paths), steps=", ".join(lockers),
             diff_paths=", ".join(f"{s.dir}/{r['file']}" for r in records))
 
@@ -6759,7 +6972,7 @@ class Workflow:
             output = [] if passed else _proof_output(p["said"])
             said = "" if passed else f", {_proof_outcome(p['said'])}"
             items.append("\n".join([f"- `{self._proof_path(p)}`: {how}{said}.", *output]))
-        return "\n\n" + CARRIED_PROOFS_NOTE.format(command=command, cwd=s.work_dir, proofs="\n\n".join(items))
+        return "\n\n" + self.prompts.CARRIED_PROOFS_NOTE.format(command=command, cwd=s.work_dir, proofs="\n\n".join(items))
 
     def _run_proof(self, command: str, path: str) -> tuple[bool, str]:
         """Whether the proof at path fails against the working tree, as proof_command's exit status 1 says, and what it
@@ -6788,7 +7001,7 @@ class Workflow:
         failing = [self._proof_path(p) for p in self._carried_proofs(n)]
         if not failing:
             return ""
-        return "\n\n" + PROOFS_NOTE.format(proofs=", ".join(failing))
+        return "\n\n" + self.prompts.PROOFS_NOTE.format(proofs=", ".join(failing))
 
     def _judge_quality(self, n: int) -> bool:
         """The current quality round of round n; False when its gate sends the change back to the gated step: when it
@@ -6863,7 +7076,9 @@ class Workflow:
         text, fresh = self._step_prompts(step, n)
         if not step.can_block:
             return text, fresh
-        return f"{text}\n\n{BLOCKED_NOTE}", fresh and f"{fresh}\n\n{BLOCKED_NOTE}"
+        # Formatted with nothing, as each prompt is a template (Prompts): an override may write a brace as {{.
+        note = self.prompts.BLOCKED_NOTE.format()
+        return f"{text}\n\n{note}", fresh and f"{fresh}\n\n{note}"
 
     def _step_prompts(self, step: Step, n: int) -> tuple[str, str | None]:
         """_prompts as the step's definition words them."""
@@ -6874,7 +7089,8 @@ class Workflow:
                    if step.loop_to is not None else "")
         first = step.prompt.format(**fill) + quality
         if q:
-            follow = QUALITY_FIX_PROMPT.format(quality_path=s.quality_path(n, q), report_path=self._own_path(step, n))
+            follow = self.prompts.QUALITY_FIX_PROMPT.format(quality_path=s.quality_path(n, q),
+                                                            report_path=self._own_path(step, n))
         elif n > 1:
             follow = (step.again or step.prompt).format(**fill) + quality
         else:
@@ -6960,7 +7176,7 @@ class Workflow:
                 log(f"aborted the merge an earlier orchestrator left in {wd}")
             spec = self._last_text(p.contract, 0)
             title = (spec_title(spec) or s.task.strip().split("\n", 1)[0] or s.run_id)[:72]
-            quality = self._last_quality(s.round)
+            quality = self._gate_evidence(s.round)
             if self.host.git(wd, "status", "--porcelain").strip():
                 self.host.git(wd, "add", "--all")
                 trailers = [arg for key, said in provenance(s, quality) for arg in ("--trailer", f"{key}: {said}")]
@@ -7023,20 +7239,20 @@ class Workflow:
             log(f"could not close herdr workspace {self.state.workspace_id}: {e}")
 
     def _quality_note(self, n: int) -> str:
-        """What the verdict step hears of round n's last quality file: passed, or the findings left, or with the gate
-        turned off since the Builder changed the code, QUALITY_OFF_NOTE; "" without one."""
+        """What the verdict step hears of round n's last quality file: passed, or the findings left, or for an unjudged
+        change (_unjudged), QUALITY_OFF_NOTE; "" without one."""
         s = self.state
         last = self._last_quality(n)
         if last is None:
             return ""
         q, text = last
-        if q < s.quality_round:
-            return "\n\n" + QUALITY_OFF_NOTE.format(
+        if self._unjudged(last):
+            return "\n\n" + self.prompts.QUALITY_OFF_NOTE.format(
                 quality_paths=", ".join(s.quality_path(n, k) for k in range(1, q + 1)))
         if parse_gate(text) == GATE_OK:
-            note = QUALITY_PASSED_NOTE
+            note = self.prompts.QUALITY_PASSED_NOTE
         else:
-            note = QUALITY_STUCK_NOTE if self._stuck(n, q) else QUALITY_UNRESOLVED_NOTE
+            note = self.prompts.QUALITY_STUCK_NOTE if self._stuck(n, q) else self.prompts.QUALITY_UNRESOLVED_NOTE
         return "\n\n" + note.format(quality_path=s.quality_path(n, q))
 
     def _last_quality(self, n: int) -> tuple[int, str] | None:
@@ -7051,13 +7267,40 @@ class Workflow:
                 return q, text
         return None
 
+    def _unjudged(self, last: tuple[int, str] | None) -> bool:
+        """Whether the current round's change went unjudged: resume --no-quality-gate turned the gate off, and last,
+        the round's last quality file as _last_quality gives it, is older than the Builder's latest report in the
+        round, or is None: the gate was turned off before the round's first analysis finished, or in an earlier
+        round."""
+        s = self.state
+        return s.quality_gate_disabled and (last is None or last[0] < s.quality_round)
+
+    def _gate_evidence(self, n: int) -> GateEvidence:
+        """What the quality gate said of round n's change, the run's final one: round n's last quality file, or for
+        an unjudged change (_unjudged) the run's last one from any round."""
+        s = self.state
+        last = self._last_quality(n)
+        unjudged = self._unjudged(last)
+        if last is not None or not unjudged:
+            return GateEvidence(None if last is None else QualityFile(n, *last), unjudged)
+        # Round n has none, and quality_round no longer says how far an earlier round got: its quality files are
+        # numbered from 1 without gaps, so its last is the one before the first missing.
+        for m in range(n - 1, 0, -1):
+            found, q = None, 1
+            while (text := self.host.read(s.quality_path(m, q))) is not None:
+                found, q = QualityFile(m, q, text), q + 1
+            if found is not None:
+                return GateEvidence(found, unjudged=True)
+        return GateEvidence(unjudged=True)
+
     def _gate_passed(self, n: int) -> bool:
         """Whether round n's last quality round passed the gate; True for a run without one."""
         s = self.state
         if not self.ci or not s.quality_round:
             return True
-        text = self.host.read(s.quality_path(n, s.quality_round))
-        return text is not None and parse_gate(text) == GATE_OK
+        # With the gate on, the quality loop has written the current quality round's file by now; one missing fails.
+        last = self._last_quality(n)
+        return last is not None and last[0] == s.quality_round and parse_gate(last[1]) == GATE_OK
 
     # -- The quality gate --------------------------------------------------
 
@@ -7303,13 +7546,12 @@ class Workflow:
         s = self.state
         if blocks and s.blocked is not None and s.blocked["file"] == os.path.basename(path):
             # A resume in the middle of a block.
-            self._finish_block(path)
-            out = self._unblocked(role, path)
+            self._finish_block(path, s.blocked)
+            out = self._unblocked(role, path, s.blocked)
         else:
             out = self._written(role, text, path, timeout, fresh_text, watch_stalls, announce)
             if blocks and (question := parse_blocked(out)) is not None:
-                self._block(role, path, question)
-                out = self._unblocked(role, path)
+                out = self._unblocked(role, path, self._block(role, path, question))
         if not out.strip():
             self._reject(path, f"was written empty by the {self.pipeline.roles[role]}")
         return out
@@ -7328,10 +7570,11 @@ class Workflow:
             s.retrying = None
         return out
 
-    def _unblocked(self, role: str, path: str) -> str:
-        """The report of a blocked turn once it is no longer BLOCKED; each that still is waits again (_block)."""
-        while (question := parse_blocked(out := self._block_answer(role, path))) is not None:
-            self._block(role, path, question)
+    def _unblocked(self, role: str, path: str, block: dict) -> str:
+        """The report of a blocked turn once it is no longer BLOCKED, block being the state's record of the block it
+        is in; each that still is waits again (_block)."""
+        while (question := parse_blocked(out := self._block_answer(role, path, block))) is not None:
+            block = self._block(role, path, question)
         self.state.blocked = None
         self._save()
         return out
@@ -7390,9 +7633,9 @@ class Workflow:
         self._save()
         log(f"[{role}] {file} {why}; moved it to {os.path.basename(rejected)}, prompting once more")
 
-    def _block(self, role: str, path: str, question: str) -> None:
+    def _block(self, role: str, path: str, question: str) -> dict:
         """Move a BLOCKED report aside to its next blocked name, and record the block, so that the turn waits for
-        the human's answer and then for the report again."""
+        the human's answer and then for the report again. Returns the record, RunState.blocked."""
         s, file = self.state, os.path.basename(path)
         k = s.blocked["k"] + 1 if s.blocked and s.blocked["file"] == file else 1
         blocked = self._blocked_path(path, k)
@@ -7407,25 +7650,28 @@ class Workflow:
         self._save()
         self.host.rename(path, blocked)
         log(f"[{role}] {file} is blocked: {question}; moved it to {os.path.basename(blocked)}")
+        return s.blocked
 
-    def _finish_block(self, path: str) -> None:
-        """Make the rename of a block the orchestrator saved but may have died before making."""
-        blocked = self._blocked_path(path, self.state.blocked["k"])
+    def _finish_block(self, path: str, block: dict) -> None:
+        """Make the rename of the block, RunState.blocked, that the orchestrator saved but may have died before
+        making."""
+        blocked = self._blocked_path(path, block["k"])
         if self.host.read(blocked) is None and self.host.read(path) is not None:
             self.host.rename(path, blocked)
 
-    def _block_answer(self, role: str, path: str) -> str:
-        """The role's report once the human has answered its BLOCKED question in its pane.
+    def _block_answer(self, role: str, path: str, block: dict) -> str:
+        """The role's report once the human has answered the BLOCKED question of block, RunState.blocked, in its
+        pane.
 
         As for the interview: no turn timeout and no stall notice, since the agent waits for the human. A resumed
         wait announces itself again, and prompts as _prompt_for does, with BLOCKED_PROMPT in place of the step's.
         """
         s = self.state
-        prompt = BLOCKED_PROMPT.format(path=path, blocked_path=self._blocked_path(path, s.blocked["k"]))
+        prompt = self.prompts.BLOCKED_PROMPT.format(path=path, blocked_path=self._blocked_path(path, block["k"]))
 
         def announce(_how: str) -> None:
             self.herdr.focus(s.agents[role]["name"])
-            self._ask_human(role, f"is blocked: {s.blocked['question']}")
+            self._ask_human(role, f"is blocked: {block['question']}")
 
         return self._written(role, prompt, path, None, prompt, False, announce)
 
@@ -7440,8 +7686,8 @@ class Workflow:
         return f"{stem}.rejected{ext}"
 
     def _retry_prompt(self, path: str) -> str:
-        return RETRY_VERDICT_PROMPT.format(path=path, rejected_path=self._rejected_path(path),
-                                           approve=APPROVE, changes=CHANGES_REQUESTED)
+        return self.prompts.RETRY_VERDICT_PROMPT.format(path=path, rejected_path=self._rejected_path(path),
+                                                        approve=APPROVE, changes=CHANGES_REQUESTED)
 
     def _prompt_for(self, how: str, file: str, text: str, fresh_text: str | None, path: str) -> str | None:
         """What to prompt an agent that is ready as how says with; None when it only has to be waited for."""
@@ -7450,7 +7696,7 @@ class Workflow:
         if self.state.prompted != file:
             return text
         if how == RESUMED:
-            return CONTINUE_PROMPT.format(path=path)
+            return self.prompts.CONTINUE_PROMPT.format(path=path)
         return None  # alive and already prompted for this file
 
     def _await_handoff(self, role: str, path: str, timeout: int | None, watch_stalls: bool) -> str:
@@ -7830,8 +8076,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         description=f"Run each DIR/<slug>/spec.md whose header says {SPEC_READY} and whose blockers are "
                     f"{SPEC_DONE}, one after another, as run --spec runs it, and record each in the spec's header: "
                     f"{SPEC_IN_REVIEW} with its pull request, or {SPEC_FOR_HUMAN}, which stops the drain. First "
-                    f"it marks {SPEC_DONE} each spec whose pull request has merged. Exits 0 once no spec is "
-                    f"{SPEC_READY}, and {EXIT_WAITING} when the ones left have blockers that are not {SPEC_DONE}.")
+                    f"it marks {SPEC_DONE} each spec whose pull request has merged, and refreshes the runs of "
+                    f"{SPEC_IN_REVIEW} and {SPEC_FOR_HUMAN} specs as the refresh command does, moving a "
+                    f"{SPEC_FOR_HUMAN} spec whose approved pull request no longer conflicts to {SPEC_IN_REVIEW}. "
+                    f"Exits 0 once no spec is {SPEC_READY}, and {EXIT_WAITING} when the ones left have blockers that are not {SPEC_DONE}.")
     drain.add_argument("dir", nargs="?", default=DRAIN_DIR, metavar="DIR",
                        help=f"the directory of specs, on this machine; default {DRAIN_DIR}")
     drain.add_argument("--dry-run", action="store_true",
@@ -7850,6 +8098,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                     "branch, unless that has commits beyond the run's base. A finished run keeps its worktree; "
                     "an in-place run keeps its checkout and branch. A running run is refused.")
     close.add_argument("run_ref", metavar="RUN", help=RUN_REF_HELP)
+
+    refresh = sub.add_parser(
+        "refresh", parents=[target], help="clear a resolved conflict from a run's pull request",
+        description=f"For a finished run whose pull request was opened as a draft over conflicts with its base, ask "
+                    f"gh whether it merges cleanly now. If it does, remove the conflict warning from its "
+                    f"description, keeping every other edit, mark it ready for review if the run approved or "
+                    f"finished, and forget the conflicts in the run's state; a pull request merged or closed only "
+                    f"has its run's conflicts forgotten. Without RUN, every finished run with a pull request and "
+                    f"conflicts. Prints a line per run. Exit status 0 when each conflict is cleared or forgotten, "
+                    f"{EXIT_WAITING} when a pull request still conflicts or GitHub has not computed whether it does.")
+    refresh.add_argument("run_ref", nargs="?", metavar="RUN", help=f"{RUN_REF_HELP}; default: every such run")
 
     workflows = sub.add_parser(
         "workflows", help="list the workflows, or print one as a workflow file",
@@ -8297,7 +8556,7 @@ def resumable_state(runs: list[tuple[int, dict]], args: argparse.Namespace, cwd:
     # Not even with --force: close may have deleted its worktree and branch.
     if state.closed:
         raise OrchestratorError(f"run {state.run_id} was closed; start a new run")
-    pipeline = run_pipeline(state.workflow, state.workflow_definition)
+    pipeline = run_pipeline(state.workflow, state.workflow_definition, state.prompts)
     health = run_health(saved, age, local_host, pid_alive)
     if health and health[0] == RUNNING and not args.force:
         raise OrchestratorError(
@@ -8587,10 +8846,10 @@ def deletion(dry_run: bool) -> str:
     return "would be deleted" if dry_run else BRANCH_DELETED
 
 
-def record_in_state(host: Host, path: str, saved: dict, key: str, value: str, meanwhile: str) -> None:
-    """Add key to the run's state.json, unless the run has saved since it was read as saved.
+def record_in_state(host: Host, path: str, saved: dict, key: str, recorded: object, meanwhile: str) -> None:
+    """Set key to recorded, as JSON, in the run's state.json, unless the run has saved since it was read as saved.
 
-    For what prune and close write about a run they do not drive. The file keeps its modification time,
+    For what prune, close and refresh write about a run they do not drive. The file keeps its modification time,
     which is the run's heartbeat: a stale run must not look live.
     """
     text = host.read(path)
@@ -8600,7 +8859,7 @@ def record_in_state(host: Host, path: str, saved: dict, key: str, value: str, me
         raise OrchestratorError(f"corrupt {path}: {e}") from e
     if not unchanged:
         raise OrchestratorError(f"{path} changed while {meanwhile}; {key} is not recorded")
-    host.write(path, json.dumps({**saved, key: value}) + "\n", keep_mtime=True)
+    host.write(path, json.dumps({**saved, key: recorded}) + "\n", keep_mtime=True)
 
 
 def print_pruned(pruned: list[PrunedRun]) -> None:
@@ -8708,14 +8967,111 @@ def discard_run_branch(host: Host, cwd: str, state: RunState) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Refreshing a pull request opened over conflicts
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ConflictCheck:
+    """What gh says now of the pull request a run opened over conflicts with its base (has_conflict), and so what
+    refresh_conflict does about it."""
+    run_id: str
+    url: str
+    pr_state: str  # OPEN, CLOSED or MERGED
+    # MERGEABLE, CONFLICTING, or UNKNOWN while GitHub has not computed it; it decides nothing for a pull request
+    # that is not OPEN.
+    mergeable: str
+    # The pull request's body with the run's conflict_warning removed; None when it is not OPEN and MERGEABLE, or
+    # has no such warning left to remove.
+    body: str | None
+    # True when clearing the conflict takes the pull request out of draft: it is OPEN, MERGEABLE and a draft, and the
+    # run's verdict is one of SUCCEEDED.
+    ready: bool
+
+    @property
+    def clears(self) -> bool:
+        """Whether the run's conflicts are forgotten: its pull request merges cleanly, or is merged or closed."""
+        return self.pr_state != "OPEN" or self.mergeable == "MERGEABLE"
+
+    @property
+    def line(self) -> str:
+        """What refresh prints for the run."""
+        if self.pr_state != "OPEN":
+            return f"{self.run_id}: {self.pr_state.lower()}, conflict forgotten"
+        if self.mergeable == "MERGEABLE":
+            return f"{self.run_id}: conflict cleared{', ready for review' if self.ready else ''}  {self.url}"
+        if self.mergeable == "CONFLICTING":
+            return f"{self.run_id}: still conflicts  {self.url}"
+        return f"{self.run_id}: mergeability not known yet, try again  {self.url}"
+
+
+def has_conflict(saved: dict) -> bool:
+    """Whether the run saved as saved is done, with a pull request it opened over conflicts it still records."""
+    return saved.get("phase") == DONE and bool(saved.get("pr_url")) and bool(saved.get("conflicts"))
+
+
+def refresh_conflict(host: Host, cwd: str, saved: dict, dry_run: bool = False) -> ConflictCheck:
+    """Ask gh about the pull request of the run saved as saved, which has_conflict, and, unless dry_run, act on what
+    it says: for one that merges cleanly now, remove the conflict warning from its body, every other edit to the
+    body kept, take it out of draft if the run succeeded, and record no conflicts in the run's state; for one merged
+    or closed, only that record. One that still conflicts, or whose mergeability GitHub has not computed yet, is left
+    as it is. Returns what gh said, and so what was done.
+
+    cwd is the project, where gh runs and the run's state is. Raises OrchestratorError, naming the run, when gh
+    fails or the state changed since it was read as saved (record_in_state).
+    """
+    run_id, url = saved["run_id"], saved["pr_url"]
+    try:
+        pr = host.pull_request_merge(cwd, url)
+        clean = pr["state"] == "OPEN" and pr["mergeable"] == "MERGEABLE"
+        body = without_conflict_warning(pr["body"], saved.get("base_branch"), saved["conflicts"]) if clean else None
+        check = ConflictCheck(run_id, url, pr["state"], pr["mergeable"], body if body != pr["body"] else None,
+                              clean and pr["isDraft"] and saved.get("verdict") in SUCCEEDED)
+        if dry_run or not check.clears:
+            return check
+        if check.body is not None:
+            host.edit_pr_body(cwd, url, check.body)
+        if check.ready:
+            host.mark_pr_ready(cwd, url)
+        record_in_state(host, f"{cwd}/{RUNS_DIR}/{run_id}/state.json", saved, "conflicts", [],
+                        "its pull request was refreshed")
+    except OrchestratorError as e:
+        raise OrchestratorError(f"run {run_id}: {e}") from e
+    return check
+
+
+def refresh_command(host: Host, cwd: str, ref: str | None) -> int:
+    """Refresh the run ref names (find_run), or with ref None every run in cwd that has_conflict, in run id order,
+    printing a line each (ConflictCheck.line). Returns 0 when each conflict was forgotten, or there was none to
+    refresh, and EXIT_WAITING when any pull request still conflicts or is not known to merge yet. Raises
+    OrchestratorError for a ref that names no run, or one that is not done, and as refresh_conflict does."""
+    states = host.run_states(cwd)
+    runs = [saved for _, saved in states]
+    if ref is not None:
+        _, saved = find_run(states, ref, cwd)
+        if saved.get("phase") != DONE:
+            raise OrchestratorError(f"run {saved['run_id']} is not done; refresh only looks at a finished run's "
+                                    f"pull request")
+        if not has_conflict(saved):
+            print(f"{saved['run_id']}: no conflict to clear")
+            return 0
+        runs = [saved]
+    waiting = False
+    for saved in sorted((s for s in runs if has_conflict(s)), key=lambda s: s["run_id"]):
+        check = refresh_conflict(host, cwd, saved)
+        print(check.line)
+        waiting = waiting or not check.clears
+    return EXIT_WAITING if waiting else 0
+
+
+# ---------------------------------------------------------------------------
 # Draining specs
 # ---------------------------------------------------------------------------
 
 # Where drain looks for specs when given no DIR, relative to the current directory.
 DRAIN_DIR = ".scratch"
 # The values of a spec's Status: line that drain acts on. A spec moves from SPEC_READY to SPEC_IN_REVIEW, its pull
-# request open, to SPEC_DONE, merged; or to SPEC_FOR_HUMAN, which drain never leaves. Drain leaves a spec with any
-# other value, or none, alone.
+# request open, to SPEC_DONE, merged; or to SPEC_FOR_HUMAN, which drain leaves only for SPEC_IN_REVIEW, once a
+# succeeded run's conflict is cleared (refreshed_headers). Drain leaves a spec with any other value, or none, alone.
 SPEC_READY = "ready-for-agent"
 SPEC_IN_REVIEW = "in-review"
 SPEC_DONE = "done"
@@ -8823,35 +9179,50 @@ class QueuedSpec:
     was: str | None  # its status as drain first read it
     # True once drain has changed its header, or would have but for --dry-run.
     changed: bool = False
-    # Why it could not be read again, deleted or emptied while drain ran; None while it can be.
-    unreadable: str | None = None
+    # Why the spec is gone: drain could not read it again (read_spec_file's error), deleted or emptied while drain
+    # ran, so it is neither run nor done, and file stays as drain last read it. None while it can be read.
+    gone: str | None = None
+
+    @property
+    def status_as_read(self) -> str | None:
+        """Its Status: line's value as drain last read or set it, which a gone spec keeps; None without one."""
+        return header_field(self.file.text, STATUS_KEY)
 
     @property
     def status(self) -> str | None:
-        """Its Status: line's value now; None without one, or once it is unreadable, so it is neither run nor done."""
-        return None if self.unreadable else header_field(self.file.text, STATUS_KEY)
+        """Its Status: line's value now; None without one, or once it is gone."""
+        return None if self.gone else self.status_as_read
 
     @property
     def run(self) -> str | None:
-        """The run id on its Run: line; None without one."""
-        return header_field(self.file.text, RUN_KEY)
+        """The run id on its Run: line; None without one, or once it is gone."""
+        return None if self.gone else header_field(self.file.text, RUN_KEY)
 
     @property
     def pr(self) -> str | None:
-        """The pull request's URL on its PR: line; None without one."""
-        return header_field(self.file.text, PR_KEY)
+        """The pull request's URL on its PR: line; None without one, or once it is gone."""
+        return None if self.gone else header_field(self.file.text, PR_KEY)
 
-    def reread(self) -> None:
-        """Take the file as it is on disk now, so an edit made while drain runs is kept, not overwritten. Its
-        blockers stay as drain first read them. Raises OrchestratorError as read_spec_file does."""
-        self.file = read_spec_file(self.file.path)
+    def reread(self) -> bool:
+        """Take the file as it is on disk now, so an edit made while drain runs is kept, not overwritten, and return
+        True; or return False, the spec gone, when it cannot be read. A gone spec read again is no longer gone. Its
+        blockers stay as drain first read them."""
+        try:
+            self.file = read_spec_file(self.file.path)
+        except OrchestratorError as e:
+            self.gone = str(e)
+            return False
+        self.gone = None
+        return True
 
-    def update(self, entries: dict[str, str], write: bool = True) -> None:
+    def update(self, entries: dict[str, str], write: bool = True) -> bool:
         """Set each of the header's lines that entries names, by key (with_header_field), and, with write, save the
-        file as it is on disk now with those lines changed. Raises OrchestratorError as with_header_field,
-        read_spec_file and replace_local_file do."""
-        if write:
-            self.reread()
+        file as it is on disk now with those lines changed; return True. With write, a spec found gone is left as it
+        is: it logs the entries it does not record and returns False. Raises OrchestratorError as with_header_field
+        and replace_local_file do."""
+        if write and not self.reread():
+            log(f"{self.slug}: {self.gone}; not recording {', '.join(f'{k}: {v}' for k, v in entries.items())}")
+            return False
         text = self.file.text
         for key, entry in entries.items():
             text = with_header_field(text, key, entry)
@@ -8859,10 +9230,12 @@ class QueuedSpec:
             replace_local_file(self.file.path, text)
         self.file = SpecFile(self.file.path, text)
         self.changed = True
+        return True
 
     def change_line(self) -> str:
-        """The line drain prints for a spec it changed: its slug, old and new status, and pull request."""
-        line = f"{self.slug}: {self.was} -> {self.status}"
+        """The line drain prints for a spec it changed: its slug, old and new status, `gone` for a gone one, and
+        pull request."""
+        line = f"{self.slug}: {self.was} -> {'gone' if self.gone else self.status}"
         return f"{line}  {self.pr}" if self.pr else line
 
 
@@ -8912,28 +9285,59 @@ def blocker_cycle(blockers: dict[str, list[str]]) -> list[str] | None:
 
 
 def refreshed_headers(specs: list[QueuedSpec], host: Host, cwd: str, target: list[str],
-                      local_host: str, pid_alive) -> list[tuple[QueuedSpec, dict[str, str]]]:
+                      local_host: str, pid_alive, dry_run: bool = False) -> list[tuple[QueuedSpec, dict[str, str]]]:
     """The header lines to set, by spec, for what has become of the pull requests and runs that earlier drains left
-    behind: an SPEC_IN_REVIEW spec's pull request, now merged or closed, and the run on a SPEC_READY spec's Run:
-    line, which an interrupted drain leaves (finished_run_header).
+    behind: an SPEC_IN_REVIEW spec's pull request, now merged or closed; a SPEC_FOR_HUMAN spec's run, whose conflict
+    this refreshes (refresh_conflict) and which, open with the conflict cleared and succeeded, makes it
+    SPEC_IN_REVIEW; and the run on a SPEC_READY spec's Run: line, which an interrupted drain leaves
+    (finished_run_header). It refreshes an SPEC_IN_REVIEW spec's run too, and logs what refresh_conflict did; with
+    dry_run, it does nothing of that, and gives the header lines as though it had.
 
     cwd is the project, where gh asks about pull requests and the runs are; target is the --machine and --cwd flags
-    as given, for a resume command. Raises OrchestratorError as Host.pull_request and finished_run_header do.
+    as given, for a resume command. Raises OrchestratorError as Host.pull_request, refresh_conflict and
+    finished_run_header do.
     """
-    runs = None
+    # Read once, and only when a spec's run is to be looked at.
+    statuses = (SPEC_READY, SPEC_IN_REVIEW, SPEC_FOR_HUMAN)
+    runs = host.run_states(cwd) if any(spec.run and spec.status in statuses for spec in specs) else []
     out = []
     for spec in specs:
-        if spec.status == SPEC_IN_REVIEW and spec.pr:
-            pr_state = host.pull_request(cwd, spec.pr)["state"]
-            if pr_state == "MERGED":
-                out.append((spec, {STATUS_KEY: SPEC_DONE}))
-            elif pr_state == "CLOSED":
-                out.append((spec, {STATUS_KEY: SPEC_FOR_HUMAN}))
+        if spec.status in (SPEC_IN_REVIEW, SPEC_FOR_HUMAN) and (entries := conflict_header(spec, runs, host, cwd,
+                                                                                           dry_run)):
+            out.append((spec, entries))
+        if spec.status == SPEC_IN_REVIEW and spec.pr and (entries := pull_request_header(spec.pr, host, cwd)):
+            out.append((spec, entries))
         elif spec.status == SPEC_READY and (run_id := spec.run):
-            if runs is None:
-                runs = host.run_states(cwd)
             out.append((spec, finished_run_header(spec, run_id, runs, cwd, target, local_host, pid_alive)))
     return out
+
+
+def conflict_header(spec: QueuedSpec, runs: list[tuple[int, dict]], host: Host, cwd: str,
+                    dry_run: bool) -> dict[str, str] | None:
+    """Refresh the run on the spec's Run: line, if it has_conflict, as refreshed_headers says, and return the header
+    lines that sets: SPEC_IN_REVIEW and the pull request for a SPEC_FOR_HUMAN spec whose succeeded run's pull request
+    is open and no longer conflicts; None otherwise, and for a run not among runs, Host.run_states's."""
+    saved = next((s for _, s in runs if s.get("run_id") == spec.run), None)
+    if saved is None or not has_conflict(saved):
+        return None
+    check = refresh_conflict(host, cwd, saved, dry_run)
+    if not dry_run:
+        log(check.line)
+    cleared_open = check.pr_state == "OPEN" and check.clears
+    if spec.status == SPEC_FOR_HUMAN and cleared_open and saved.get("verdict") in SUCCEEDED:
+        return {STATUS_KEY: SPEC_IN_REVIEW, PR_KEY: check.url}
+    return None
+
+
+def pull_request_header(url: str, host: Host, cwd: str) -> dict[str, str] | None:
+    """The header lines to set for an SPEC_IN_REVIEW spec whose pull request is at url: SPEC_DONE once it is merged,
+    SPEC_FOR_HUMAN once it is closed; None while it is open. Raises OrchestratorError as Host.pull_request does."""
+    pr_state = host.pull_request(cwd, url)["state"]
+    if pr_state == "MERGED":
+        return {STATUS_KEY: SPEC_DONE}
+    if pr_state == "CLOSED":
+        return {STATUS_KEY: SPEC_FOR_HUMAN}
+    return None
 
 
 def finished_run_header(spec: QueuedSpec, run_id: str, runs: list[tuple[int, dict]], cwd: str, target: list[str],
@@ -8984,15 +9388,16 @@ def startable(spec: QueuedSpec, by_slug: dict[str, QueuedSpec]) -> bool:
 
 def drain_command(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str) -> int:
     """Run the specs in args.dir that are ready, one after another, recording each in its header, and return the
-    exit status: 0 once no spec is SPEC_READY, EXIT_WAITING when those left are blocked, or the status of the run
-    that stopped the drain. With args.dry_run, print what it would change and run, and change nothing.
+    exit status: 0 once no spec is SPEC_READY, EXIT_WAITING when those left are blocked or gone (drain_end), or the
+    status of the run that stopped the drain. With args.dry_run, print what it would change and run, and change nothing.
 
     cwd is the project the runs are in. Raises OrchestratorError, before any run starts, for a workflow that cannot
     take a spec (seeded_start), and as read_queue and refreshed_headers do.
     """
-    seeded_start(load_workflow_file(args.workflow_file) if args.workflow_file else named_workflow(args.workflow))
+    seeded_start(flagged_workflow(args, load_prompts()))
     specs = read_queue(args.dir)
-    for spec, entries in refreshed_headers(specs, host, cwd, target_args(args), socket.gethostname(), pid_alive):
+    for spec, entries in refreshed_headers(specs, host, cwd, target_args(args), socket.gethostname(), pid_alive,
+                                           args.dry_run):
         spec.update(entries, write=not args.dry_run)
     by_slug = {spec.slug: spec for spec in specs}
     if args.dry_run:
@@ -9012,29 +9417,26 @@ def drain_command(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str) 
 
 def next_startable(specs: list[QueuedSpec], by_slug: dict[str, QueuedSpec]) -> QueuedSpec | None:
     """The first of specs drain runs next (startable), each read again from disk first, so a status the human
-    changed while an earlier spec ran counts; None when there is none. A spec that cannot be read again, deleted or
-    emptied meanwhile, becomes unreadable, and drain says so."""
+    changed while an earlier spec ran counts; None when there is none. Logs each spec that has become gone."""
     for spec in specs:
-        try:
-            spec.reread()
-            spec.unreadable = None
-        except OrchestratorError as e:
-            if not spec.unreadable:
-                log(f"{spec.slug}: {e}; not running it")
-            spec.unreadable = str(e)
+        was_gone = spec.gone
+        if not spec.reread() and not was_gone:
+            log(f"{spec.slug}: {spec.gone}; {'not running it' if spec.status_as_read == SPEC_READY else 'gone'}")
     return next((s for s in specs if startable(s, by_slug)), None)
 
 
 def drain_spec(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str, spec: QueuedSpec) -> int | None:
     """Run the spec as run --spec would with args's flags, and record the run and how it ended in its header.
 
-    Returns None when the run succeeded without conflicts, and the spec is SPEC_IN_REVIEW; otherwise the exit status
-    that stops the drain, having printed why. Raises OrchestratorError when the run's state cannot be made
-    (new_state) or the spec cannot be written.
+    Returns None when the run succeeded without conflicts, and the spec is SPEC_IN_REVIEW or gone, or when the spec
+    is found gone before the run starts, which it then does not; otherwise the exit status that stops the drain,
+    having printed why. A header write to a gone spec is logged instead (QueuedSpec.update). Raises
+    OrchestratorError when the run's state cannot be made (new_state) or the spec cannot be written.
     """
     given = spec.file
     state, pipeline = new_state(args, cwd, given)
-    spec.update({RUN_KEY: state.run_id})
+    if not spec.update({RUN_KEY: state.run_id}):
+        return None
     try:
         verdict = run_workflow(herdr, host, state, pipeline, given)
     except RunTakenOver as e:
@@ -9046,8 +9448,8 @@ def drain_spec(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str, spe
         # Printed first, so the run's error and its resume command survive a header write that fails too.
         print(f"error: {e}", file=sys.stderr)
         print(f"resume its run with: {resume_command(state.run_id, target_args(args))}", file=sys.stderr)
-        spec.update({STATUS_KEY: SPEC_FOR_HUMAN})
-        print(f"{spec.slug} is {SPEC_FOR_HUMAN}", file=sys.stderr)
+        if spec.update({STATUS_KEY: SPEC_FOR_HUMAN}):
+            print(f"{spec.slug} is {SPEC_FOR_HUMAN}", file=sys.stderr)
         return EXIT_ERROR
     except KeyboardInterrupt:
         print(interrupted_note(state, target_args(args)), file=sys.stderr)
@@ -9066,30 +9468,54 @@ def print_spec_changes(specs: list[QueuedSpec]) -> None:
 
 
 def drain_end(specs: list[QueuedSpec], by_slug: dict[str, QueuedSpec]) -> int:
-    """Print what is left once drain can start no spec, and return its exit status: 0 when no spec is SPEC_READY,
-    else EXIT_WAITING."""
-    left = [spec for spec in specs if spec.status == SPEC_READY]
+    """Print what is left once drain can start no spec, and return its exit status: 0 when no spec was SPEC_READY as
+    drain last read it, else EXIT_WAITING. Such a spec is left blocked, or gone."""
+    left = [spec for spec in specs if spec.status_as_read == SPEC_READY]
     if not left:
         print("all specs cleared")
         return 0
     for spec in left:
+        if spec.gone:
+            print(f"{spec.slug}: gone ({spec.gone})")
+            continue
         print(f"{spec.slug} waits on:")
         for b in spec.blockers:
             blocker = by_slug[b]
-            print(f"    {b}: {blocker.status or 'no status'}" + (f"  {blocker.pr}" if blocker.pr else ""))
+            if blocker.gone:
+                print(f"    {b}: gone ({blocker.gone})")
+            else:
+                print(f"    {b}: {blocker.status or 'no status'}" + (f"  {blocker.pr}" if blocker.pr else ""))
     return EXIT_WAITING
 
 
 def print_workflows() -> None:
+    """Print each workflow `run --workflow` offers, then the prompt files a new run would start with."""
     for name in sorted(WORKFLOWS):
         print_workflow(name, "built in", WORKFLOWS[name])
     for name, path in workflow_files().items():
         try:
-            print_workflow(name, path, load_workflow_file(path))
+            # The shape and description only, which no prompt file changes.
+            print_workflow(name, path, load_workflow_file(path, BUILT_IN_PROMPTS))
         except OrchestratorError as e:
             print(f"{name}  {path}\n    error: {str(e).removeprefix(f'{path}: ')}")
     print(f"\nAdd one as {workflows_dir()}/NAME.toml; `orchestrator.py workflows {DEFAULT_WORKFLOW.name}` "
           f"prints the default as a file to start from.")
+    print_prompt_overrides()
+
+
+def print_prompt_overrides() -> None:
+    """Print the prompt files a new run would start with, one line each, or why it would not start; nothing without
+    any."""
+    try:
+        overrides = load_prompts().overrides
+    except OrchestratorError as e:
+        print(f"\nPrompt files in {prompts_dir()}:\n    error: {e}")
+        return
+    if not overrides:
+        return
+    print(f"\nPrompt files in {prompts_dir()}, in place of the built-in texts:")
+    for name in overrides:
+        print(f"    {name}  {os.path.join(prompts_dir(), name)}.md")
 
 
 def print_workflow(name: str, source: str, p: Pipeline) -> None:
@@ -9100,10 +9526,12 @@ def print_workflow(name: str, source: str, p: Pipeline) -> None:
 
 
 def workflow_arg(ref: str) -> Pipeline:
-    """The workflow a name or a path names: a path has a / or ends in .toml."""
+    """The workflow a name or a path names, worded by the prompt files as a new run would be: a path has a / or ends in
+    .toml."""
+    prompts = load_prompts()
     if "/" in ref or ref.endswith(".toml"):
-        return load_workflow_file(ref)
-    return named_workflow(ref)
+        return load_workflow_file(ref, prompts)
+    return named_workflow(ref, prompts)
 
 
 def main(argv: list[str]) -> int:
@@ -9120,6 +9548,8 @@ def main(argv: list[str]) -> int:
             return 0
         if args.command == "drain":
             return drain_command(args, herdr, host, cwd)
+        if args.command == "refresh":
+            return refresh_command(host, cwd, args.run_ref)
         spec = read_spec_file(args.spec) if args.command == "run" and args.spec is not None else None
         # Only a run that opens a pull request: a --no-pr run's project may have no gh.
         if args.command == "run" and not args.no_pr:
@@ -9499,12 +9929,15 @@ def _tkinter_check() -> Check:
 
 def new_state(args: argparse.Namespace, cwd: str, spec: SpecFile | None = None) -> tuple[RunState, Pipeline]:
     """A new run's state from the run command's flags, and its workflow; with spec, from --spec, the run
-    starts after the contract step."""
-    pipeline = load_workflow_file(args.workflow_file) if args.workflow_file else named_workflow(args.workflow)
+    starts after the contract step. Its prompts are the prompt files' as they are now (load_prompts); raises
+    OrchestratorError as load_prompts does, and for a workflow that cannot be found or loaded."""
+    prompts = load_prompts()
+    pipeline = flagged_workflow(args, prompts)
     first = seeded_start(pipeline) if spec else pipeline.steps[0]
     # parse_args leaves the task out only with --spec.
     task = args.task if args.task is not None else spec.task
-    state = RunState(new_run_id(), task, cwd, args.machine, phase=first.id, workflow=pipeline.name)
+    state = RunState(new_run_id(), task, cwd, args.machine, phase=first.id, workflow=pipeline.name,
+                     prompt_overrides=prompts.overrides)
     state.max_rounds = args.max_rounds or DEFAULT_MAX_ROUNDS
     state.turn_timeout = args.timeout or DEFAULT_TURN_TIMEOUT
     state.permission_mode = args.permission_mode
@@ -9516,6 +9949,13 @@ def new_state(args: argparse.Namespace, cwd: str, spec: SpecFile | None = None) 
     state.quality_job = args.quality_gate
     state.max_quality_rounds = args.max_quality_rounds or DEFAULT_MAX_QUALITY_ROUNDS
     return state, pipeline
+
+
+def flagged_workflow(args: argparse.Namespace, prompts: Prompts) -> Pipeline:
+    """The workflow run's or drain's --workflow-file or --workflow names, worded by prompts."""
+    if args.workflow_file:
+        return load_workflow_file(args.workflow_file, prompts)
+    return named_workflow(args.workflow, prompts)
 
 
 def seeded_start(p: Pipeline) -> Step:
@@ -9535,7 +9975,7 @@ def resumed_state(args: argparse.Namespace, host: Host, cwd: str) -> tuple[RunSt
     _off: a CI preflight, and deleting the run's refs on origin). Changes nothing on disk; raises OrchestratorError
     when the run cannot be resumed or its gate cannot be switched."""
     state = resumable_state(host.run_states(cwd), args, cwd, socket.gethostname(), pid_alive)
-    pipeline = run_pipeline(state.workflow, state.workflow_definition)
+    pipeline = run_pipeline(state.workflow, state.workflow_definition, state.prompts)
     if args.quality_gate:
         turn_quality_gate_on(state, pipeline, host, CI(args.quality_gate))
     elif args.no_quality_gate:
@@ -10010,7 +10450,9 @@ class RunWindow:
     def _show_pipeline(self) -> None:
         # Static, from the workflow's definition: the window shows no run's live phase.
         try:
-            line, style = role_chain(named_workflow(self.vars["workflow"].get())), PIPELINE_LABEL
+            # The roles only, which no prompt file changes.
+            workflow = named_workflow(self.vars["workflow"].get(), BUILT_IN_PROMPTS)
+            line, style = role_chain(workflow), PIPELINE_LABEL
         except OrchestratorError as e:
             line, style = f"error: {e}", MUTED_LABEL
         self.vars["pipeline"].set(line)

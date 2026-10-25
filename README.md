@@ -253,6 +253,10 @@ python orchestrator.py resume e292fb --machine <machine> --cwd ~/GitHub/myprojec
 # Done with a failed or finished run: close its workspace, and a failed --worktree run's worktree and branch
 python orchestrator.py close e292fb --machine <machine> --cwd ~/GitHub/myproject
 
+# Once you have resolved a pull request's conflict and pushed: drop its warning, and its draft if it was approved;
+# without a run, every finished run whose pull request was opened over a conflict
+python orchestrator.py refresh e292fb --machine <machine> --cwd ~/GitHub/myproject
+
 # Another workflow: one of yours by name, or a workflow file anywhere; `workflows` lists them
 python orchestrator.py run --workflow tdd "add a token-bucket rate limiter"
 python orchestrator.py run --workflow-file examples/workflows/quick.toml "fix the off-by-one in the pager"
@@ -283,7 +287,7 @@ uv run python orchestrator.py gate --base main --coverage coverage.xml --out qua
 | Flag | Description |
 |---|---|
 | `--machine NAME` | Saved herdr machine to run the agents on. Requires `--cwd`. |
-| `--cwd PATH` | Project directory, on the machine if `--machine` is given. Default: current directory; `doctor` checks a project only when given one. |
+| `--cwd PATH` | Project directory, on the machine if `--machine` is given. Default: current directory; `doctor` checks a project only when given one. `list`, `show`, `metrics`, `prune`, `close` and `refresh` take only these two. |
 | `--max-rounds N` | Review rounds before giving up (default 3). |
 | `--timeout SECONDS` | How long one Builder or Reviewer turn may take (default 1800). The interview has no limit. |
 | `--agent KIND` | The [harness](#harnesses) every role runs in: `claude`, `codex`, `gemini`, `opencode` or `pi`. Overrides the `agent` of a role in the workflow file. Default: that, else `claude`. |
@@ -315,7 +319,8 @@ yet is judged first; otherwise the gate starts at the Builder's next turn. It is
 or `done`, after `--no-quality-gate`, for a run with another job, and for a `--no-pr` run in the checkout itself past
 round 0, whose tree may hold your own changes. `resume --no-quality-gate` turns the gate off for good: the run's
 `orchestrator-ci/` branches are deleted, an analysis under way is dropped, and the Reviewer is told what the round's
-last quality file found, or that the Builder changed the code after it. See
+last quality file found, or that the Builder changed the code after it; the pull request then says nothing judged
+the final change. See
 [quality gate](docs/quality-gate.md#turning-the-gate-on-or-off-on-resume).
 
 ### Harnesses
@@ -347,7 +352,7 @@ since, the agent starts a fresh session instead.
 | `0` | Approved, or `FINISHED` for a workflow without a verdict step. |
 | `3` | Changes still requested after the last round, or, for a workflow without a verdict step, `QUALITY_GATE_FAILED`: the quality gate still failed after the last quality round. Either way the pull request is a draft. |
 | `4` | Approved or finished, but the pull request conflicts with its base branch, so it is a draft. |
-| `5` | `drain` only: it ran every spec it could, and the specs left wait on blockers that are not `done`, such as a pull request still open. |
+| `5` | `drain`: it ran every spec it could, and the specs left wait on blockers that are not `done`, such as a pull request still open, or were deleted or emptied while it ran. `refresh`: a pull request still conflicts, or GitHub has not yet computed whether it does. |
 | `1` | Error. |
 | `130` | Interrupted. |
 
@@ -392,7 +397,8 @@ since, the agent starts a fresh session instead.
    it is merged in with a merge commit. The branch is pushed to `origin` and opened as a pull request with `gh`,
    a draft if changes were still requested after the last round. If the merge conflicts, it is aborted, the
    branch is pushed without it, and the pull request is a draft whose description starts with a warning listing
-   the conflicting files; you resolve them. The project goes back to its starting branch, and the workspace is
+   the conflicting files; you resolve them, and then `refresh` tidies the pull request (below). The project goes
+   back to its starting branch, and the workspace is
    closed; a `--worktree` run removes its worktree instead, and leaves the checkout alone. The branch stays,
    locally and on `origin`, until a later run's sweep or `prune` deletes it.
 7. **Summary.** Every turn is timed: an agent's from the moment its prompt is delivered, a quality analysis from
@@ -434,7 +440,13 @@ with its branch, and what `close` did. `prune` deletes the
 branch of each run whose pull request is merged, or closed for 14 days, locally and on `origin`, and prints a
 line per run. It keeps a side that has commits the pull request lacks, and a local branch checked out in any
 worktree; a later `prune` looks at kept branches again
-([Deleting run branches](docs/design.md#deleting-run-branches)). You get a herdr notification when a role is blocked, idle
+([Deleting run branches](docs/design.md#deleting-run-branches)). `refresh` looks at each finished run whose pull
+request was opened over a conflict, or the one run it is given, and asks `gh` whether it merges cleanly now. If it
+does, it removes the conflict warning from the description, leaving the rest of it, your edits included, as it is;
+marks the pull request ready for review if the run approved or finished, and leaves it a draft otherwise; and forgets
+the conflict in `state.json`, so `show` no longer lists it. A pull request merged or closed meanwhile only has its
+conflict forgotten. One that still conflicts, or whose mergeability GitHub is still computing, is left as it is, and
+`refresh` exits `5`; run it again later. It prints a line per run. You get a herdr notification when a role is blocked, idle
 for 3 minutes, or reports `BLOCKED:` with a question for you
 ([When the orchestrator needs you](docs/design.md#when-the-orchestrator-needs-you)).
 See also [design decisions](docs/design.md), [architecture](docs/architecture.md), [roadmap](docs/roadmap.md)
@@ -478,7 +490,7 @@ PR: https://github.com/o/r/pull/7
 
 - `Status:` moves from `ready-for-agent` to `in-review` while the run's pull request is open, and to `done` once it
   has merged. A run that does not approve, conflicts with its base or fails leaves its spec `ready-for-human`,
-  which drain never touches again. A spec with any other status, or none, is left alone.
+  which drain leaves, unless the conflict was all that kept it there and has since been resolved (below). A spec with any other status, or none, is left alone.
 - `Blocked by:` lists the specs that must be `done` first, each by its slug or a path ending in `<slug>/spec.md`;
   `-` or `none` names none. A blocker with no `spec.md`, or blockers in a cycle, stop drain before it runs
   anything.
@@ -486,20 +498,24 @@ PR: https://github.com/o/r/pull/7
   request.
 
 A drain first asks `gh` about each `in-review` spec's pull request: merged makes it `done`, closed
-`ready-for-human`. A `ready-for-agent` spec with a `Run:` line is one an interrupted drain left; its run, if
+`ready-for-human`. It refreshes the run on each `in-review` and `ready-for-human` spec's `Run:` line as `refresh`
+does, and a `ready-for-human` spec whose run approved or finished, with its pull request open, goes to `in-review`
+once its conflict is cleared. A `ready-for-agent` spec with a `Run:` line is one an interrupted drain left; its run, if
 finished, sets the spec's status, and if not, drain stops and says what to do: wait for it, `resume` it, or delete
 the `Run:` line to start the spec over. Then drain sweeps the branches of earlier runs once, and runs each spec whose
 blockers are all `done`. It reads each spec again before choosing the next and before each header edit, so your edits
 to a spec while it runs are kept, but for the `Status:`, `Run:` and `PR:` lines of the spec it is running, which are
-drain's; a spec you set to another status meanwhile is not started; `Blocked by:` is read once, at the start. A run
-another orchestrator takes over with `resume --force` leaves its spec `ready-for-agent` for the next drain to pick
-up.
+drain's; a spec you set to another status meanwhile is not started; `Blocked by:` is read once, at the start. A
+spec you delete or empty meanwhile is *gone*: drain neither runs it nor counts it `done`, logs each header line it
+can no longer record, such as the running spec's `Status:` and `PR:`, and goes on; one you restore before drain
+next chooses is run as before. A run another orchestrator takes over with `resume --force` leaves its spec
+`ready-for-agent` for the next drain to pick up.
 
 **It stops, it does not poll.** A spec whose blocker's pull request is still open stays blocked for this drain.
-Once nothing more can start, drain prints the specs left with their blockers and pull requests, and exits `5`; the
-first run that does not end in an approved pull request without conflicts stops it at once. Either way it prints
-what it changed in each spec first. `--dry-run` prints the changes and the run order and leaves everything as it
-is.
+Once nothing more can start, drain prints the specs left with their blockers and pull requests, and each
+`ready-for-agent` spec that is gone as `<slug>: gone (<why>)`, and exits `5`; the first run that does not end in an
+approved pull request without conflicts stops it at once. Either way it prints what it changed in each spec first.
+`--dry-run` prints the changes and the run order and leaves everything as it is.
 
 Drain does not check that `DIR` is ignored by git. If it is inside the project's checkout and not ignored, the
 header edits dirty the tree, and an in-place run refuses to start on it: ignore `DIR`, or use `--worktree`.
@@ -562,7 +578,37 @@ to its right, and each further one a split below. A role's `model` is its defaul
 likewise its `agent`, the [harness](#harnesses) it runs in, one of `claude`, `codex`, `gemini`, `opencode` and `pi`,
 which `--agent` and `--role-agent` override. The file is checked when it loads, and an error names the step and key.
 A run saves its workflow's definition, so editing or deleting the file does not change a run already started. See
-[Workflows](docs/architecture.md#workflows) for the rules.
+[Workflows](docs/architecture.md#workflows) for the rules. To change only some of the texts the agents get, the
+default workflow's prompts or the follow-ups and notes every workflow sends, a [prompt file](#prompt-files) needs
+no workflow file.
+
+## Prompt files
+
+Every prompt and note the orchestrator writes to an agent can be replaced without copying a workflow: put
+`NAME.md` in `~/.config/ai-agents-orchestrator/prompts/` (beside `workflows/`), where `NAME` is the text's name in
+`orchestrator.py`, and the file's content, less its trailing newline, is sent in its place.
+
+| File | Sent |
+|---|---|
+| `SPEC_PROMPT.md`, `BUILD_PROMPT.md`, `REVIEW_PROMPT.md` | the default workflow's first prompt to each role |
+| `FIX_PROMPT.md`, `RECHECK_PROMPT.md` | the Builder's and the Reviewer's prompt in a later round |
+| `REBUILD_NOTE.md`, `REREVIEW_NOTE.md` | to a fresh Builder or Reviewer session in a later round |
+| `QUALITY_FIX_PROMPT.md` | to the quality-gated step when the gate did not pass |
+| `QUALITY_PASSED_NOTE.md`, `QUALITY_UNRESOLVED_NOTE.md`, `QUALITY_STUCK_NOTE.md`, `QUALITY_OFF_NOTE.md` | at the end of the verdict step's prompt, on how the quality gate ended |
+| `LOCKED_NOTE.md`, `PROOFS_NOTE.md`, `CARRIED_PROOFS_NOTE.md` | on restored locked files, and on the Reviewer's failing proofs |
+| `BLOCKED_NOTE.md`, `BLOCKED_PROMPT.md` | at the end of every prompt of a step that can block, and once its report asked the human |
+| `CONTINUE_PROMPT.md`, `RETRY_VERDICT_PROMPT.md` | to a session restarted mid-turn, and after a review without a verdict line |
+
+The first seven names are the default workflow's steps, and a workflow file's step that `use`s one of them takes
+the file's text too; a step's own `prompt`, `again` or `fresh_note` in a workflow file stays as written. The others
+reach every workflow. A file uses exactly the placeholders of the text it replaces, `{build_path}` and so on, as
+`str.format` fills them; write a literal brace as `{{` or `}}`. `orchestrator.py workflows` lists the prompt files
+in effect, and `workflows default` prints the default workflow as they word it.
+
+The files are checked when `run` or `drain` starts, before any agent does: a `.md` file named after no text, one
+that is not UTF-8 or cannot be read, and one with a placeholder the built-in text lacks, or without one it has, is
+an error that names the file and the placeholder. Files not ending in `.md` are ignored. A run saves the texts it
+started with, so editing or deleting a file does not change a run already started, and `resume` never reads them.
 
 ## Running tests
 

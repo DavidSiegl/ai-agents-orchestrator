@@ -27,7 +27,20 @@ was done.
   test already points `TMPDIR` into its own directory. Found in the second build round of run 20261025-081413-327fc2
   (2026-10-25). Closes with a `TMPDIR` the build removes around `tauri build`, and with a README note, or a newer
   runtime that cleans up, for users.
-
+- **A prompt sent right after a startup dialog can be lost.** When an agent starts behind a dialog, such as Claude
+  Code's folder-trust question, `Workflow._start` waits in `_wait_for_startup` for herdr to report it `idle` and
+  returns; `Workflow._written` then sends the turn's prompt and records it in `RunState.prompted`. On 2026-10-25
+  the Builder of run 20261025-090825-73faf7, in a worktree of a clone Claude Code had not seen, was reported idle
+  as the dialog closed and before its input took text: the prompt never arrived, yet counted as delivered, and the
+  turn timed out after 1800s at an empty prompt. `resume` cannot recover it, since `_prompt_for` only waits on an
+  alive agent already prompted. Closes with `_wait_for_startup` waiting until the agent takes input, or with the
+  prompt's delivery checked (the agent turning `working`, or its handoff file appearing) and the prompt sent again
+  when neither happens.
+- **drain takes two passes to mark a spec done whose run's pull request already merged.** A `ready-for-agent` spec
+  with a `Run:` line gets `in-review` and `PR:` from `finished_run_header`, but `refreshed_headers` asks gh about
+  the pull request only for a spec that was `in-review` when the pass began, so a pull request merged since leaves
+  the spec `in-review`, its dependants blocked, until the next drain. Met on 2026-10-25 after resuming a run
+  outside drain. Closes with the pull request checked in the same pass once `finished_run_header` gives one.
 - **Two builds on agentbox0 can still run rustc out of memory.** The agent has 8 GiB, no swap and 2 executors,
   and a push to a new branch starts a branch build before its pull request exists, so two builds of one commit
   compile the Tauri crates at once (PR-74's first build: rustc SIGKILLed on `gtk`). The UI stage now builds
@@ -36,24 +49,14 @@ was done.
   `drain` beside a pull request build. Raised by the
   cross-review of ci-no-debuginfo (2026-10-25): "the OOM cause is narrowed and left unrecorded". Closes with
   more memory or swap on the VM, or a lock around the cargo steps that keeps them from running side by side.
-- **drain models a spec deleted while it runs only in its status.** A spec that cannot be read again is
-  `QueuedSpec.unreadable`, which makes `status` None, but `run`, `pr`, `change_line` and the header writes do not
-  know it: the running spec deleted mid-run stops the drain at its post-run `update`; a deleted `ready-for-agent`
-  spec drops out of `drain_end`'s `left`, so the drain can end "all specs cleared"; a deleted blocker shows as `no
-  status` with its old PR, its reason never printed; `change_line` prints `-> None`; and `not running it` is logged
-  for `done` specs too. No test makes the failed-run branch's header write fail. The spec does not cover specs
-  deleted during a drain. Raised by the cross-review of drain (round 3, 2026-10-25): "'gone' is modelled only in
-  `status`". Closes with a gone state that drain_end's summary and exit status, the change lines and the writes all
-  honour, or with drain refusing to go on once a spec it read has gone.
-- **A pull request whose gate was turned off shows the last analysis as the change's.** After `resume
-  --no-quality-gate`, `Workflow._publish` passes `_last_quality`'s file to `pr_body` and `provenance`, so the quality
-  section and the `Orchestrator-Gate` trailer judge code the Builder has since changed; only the Reviewer is told
-  (`QUALITY_OFF_NOTE`). Raised by the cross-review of resume-quality-gate (finding 8, 2026-10-24): "nothing in the PR
-  says the final change went unjudged". Closes with the PR body and trailer saying the gate was turned off after it.
-- **Two functions decide which quality file is a round's last.** `Workflow._gate_passed` reads
-  `quality_path(n, quality_round)` itself, while `_quality_note` and `_publish` use `_last_quality`; they agree only
-  because `_gate_passed` returns True whenever the run has no CI. Raised by the same review (finding 11). Closes with
-  `_gate_passed` reading `_last_quality`.
+- **mutmut's clean test run fails on a hypothesis health check, so the gate mutation-tests nothing.** Under the
+  gate's mutmut 3.8.0, `TestChangedLines.test_names_each_changed_file_and_exactly_its_added_lines` in
+  `tests/test_properties.py` fails with `hypothesis.errors.FailedHealthCheck: ... was called from multiple
+  different executors`, mutmut exits 1 with "Failed to run clean test", and `surviving-mutants` reports `not-run`
+  for every change. Seen on Jenkins build #48 and reproduced locally at `a3b18b6` with a one-line edit to
+  `drain_end` (2026-10-25); a plain `uv run pytest` passes it. Cause not established. Closes with the test passing
+  under mutmut, e.g. by suppressing `HealthCheck.differing_executors` for it, or the gate's mutmut runs leaving
+  `tests/test_properties.py` out.
 - **`doctor --machine` probes the machine over about twenty SSH connections, one after another.** Each check is
   its own `Host.run`, so `_tool_version` asks `command -v` before `--version`, which already fails for a missing
   command, and `gh auth status` may wait up to `NETWORK_TIMEOUT`. Raised by the cross-review of the doctor command
@@ -79,13 +82,13 @@ was done.
   never been built before the first release with it. Closes with a macOS build of pull requests that touch
   `packaging/` or `ui/`, or a decision that a rerun after the release is enough.
 
-- **A pull request opened over a conflict stays a draft with its warning after the conflict is resolved.** When
-  `Host.merge_upstream` finds conflicts with the base branch, `pr_body` opens the body with a `[!WARNING]` naming
-  the conflicting files and `create_pr` opens it as a draft; nothing ever edits the body or marks it ready, and
-  `RunState.conflicts` keeps the files. So once someone merges the base in and pushes, the pull request still says
-  it conflicts and stays a draft until a human edits it by hand. Met on PR #61 (2026-10-24): resolved and pushed,
-  it still showed the warning and the draft. Closes when the orchestrator, or a command of its, notices that the
-  head merges cleanly and drops the warning and the conflict-only draft.
+- **A spec left `ready-for-human` by a conflict stays there when `refresh` clears the conflict before a drain does.**
+  drain moves such a spec to `in-review` only when its own refresh clears the run's conflict (`refreshed_headers`);
+  a run cleared by `orchestrator.py refresh` beforehand has no conflicts left, so drain cannot tell the spec held
+  back only by its conflict from one the human set `ready-for-human`, and leaves it, with an open pull request
+  ready for review that no drain marks `done` once merged. Kept so that drain never overrides a status the human
+  set. Raised while building the refresh command (2026-10-25). Closes with the run recording that a refresh cleared
+  its conflict, which drain then reads, or with refresh moving the spec itself.
 - **Proofs run after the last round's review too.** No Builder turn follows to read them; only the draft pull
   request's review shows them, and each may take `PROOF_TIMEOUT`. Kept: a demonstrated defect is what the human
   most needs to see in a draft. Raised by the same review.
@@ -100,6 +103,16 @@ was done.
   tests' `GOLDEN_PR_BODY` or `GOLDEN_SUMMARY`, changes what is expected without a finding, while the same edit inside
   the assertion is one. Found while adding the provenance trailers to the pull request body (loop-guards ticket 03).
   Closes with the assertions' names resolved to module-level constants the change edits.
+- **`test-integrity` has no way to accept an expected value the spec changes.** `expected-value-changed` fails the
+  gate whenever an assertion's literals change beside code, also when the spec asks for the new output, and unlike
+  `removed-test` there is no report the Reviewer judges instead. PR #76 changed what the pull request says for a
+  gate turned off after its analysis; its edited assertions failed the PR build, and the fix was to drop them where
+  other tests already pinned the new text. One check went with them: the cross-review of that fix found that "this
+  path no longer checks the analysis text in the body", i.e. that
+  `test_off_in_quality_drops_the_analysis_and_goes_to_the_reviewer` no longer pins that the details block shows
+  quality-1-1.md's text; an `assertIn` of that text there pairs with the dropped one and is the same finding.
+  Closes with a way for the Builder to name the changed expectations in its report, judged by the Reviewer, or
+  with such a finding demoted to one to weigh; then that assertion goes back.
 - **A run that never reaches `done` keeps its local refs.** A locking step's commit stays under
   `refs/orchestrator/<key>/locked/` (`RunState.lock_ref`) until the run ends `done` (`Workflow._clean_up_locks`);
   `close` and `prune` do not delete them, so a failed run's locked snapshots are never collected by `git gc`. Closes
@@ -330,6 +343,53 @@ was done.
   `ui/src-tauri/src/lib.rs` recovers the user's shell's environment and directory (`OWD`) for the orchestrator's
   process, the sidecar and the CLI alike, and keeps the app's own for GTK; `packaging/build-desktop.sh`
   smoke-tests it on the built AppImage.
+- **A pull request opened over a conflict stays a draft with its warning after the conflict is resolved.** When
+  `Host.merge_upstream` finds conflicts with the base branch, `pr_body` opens the body with a `[!WARNING]` naming
+  the conflicting files and `create_pr` opens it as a draft; nothing ever edits the body or marks it ready, and
+  `RunState.conflicts` keeps the files. So once someone merges the base in and pushes, the pull request still says
+  it conflicts and stays a draft until a human edits it by hand. Met on PR #61 (2026-10-24): resolved and pushed,
+  it still showed the warning and the draft. Closes when the orchestrator, or a command of its, notices that the
+  head merges cleanly and drops the warning and the conflict-only draft.
+  Fixed (2026-10-25): `orchestrator.py refresh [RUN]` asks gh (`Host.pull_request_merge`) about each done run's pull
+  request with conflicts, or the one named. One that is open and `MERGEABLE` loses the `conflict_warning` paragraph
+  `pr_body` wrote (`without_conflict_warning`; the rest of the body, human edits included, stays, and a body
+  without it is not edited), is marked ready (`gh pr ready`) if it is a draft and the verdict is in `SUCCEEDED`, and
+  its run's `RunState.conflicts` is emptied; one merged or closed only has the conflicts emptied; one `CONFLICTING`
+  or `UNKNOWN` is left, and refresh exits `EXIT_WAITING`. drain refreshes the runs of `in-review` and
+  `ready-for-human` specs in `refreshed_headers`, and moves a `ready-for-human` spec whose succeeded run it cleared
+  to `in-review`. `show` and `finish` read `RunState.conflicts`, so a cleared run is no longer called a draft.
+- **drain models a spec deleted while it runs only in its status.** A spec that cannot be read again is
+  `QueuedSpec.unreadable`, which makes `status` None, but `run`, `pr`, `change_line` and the header writes do not
+  know it: the running spec deleted mid-run stops the drain at its post-run `update`; a deleted `ready-for-agent`
+  spec drops out of `drain_end`'s `left`, so the drain can end "all specs cleared"; a deleted blocker shows as `no
+  status` with its old PR, its reason never printed; `change_line` prints `-> None`; and `not running it` is logged
+  for `done` specs too. No test makes the failed-run branch's header write fail. The spec does not cover specs
+  deleted during a drain. Raised by the cross-review of drain (round 3, 2026-10-25): "'gone' is modelled only in
+  `status`". Closes with a gone state that drain_end's summary and exit status, the change lines and the writes all
+  honour, or with drain refusing to go on once a spec it read has gone.
+  Fixed (2026-10-25): `QueuedSpec.gone` holds why a spec drain could not read again, set and cleared by `reread`,
+  and `status`, `run` and `pr` are None while it is set; `status_as_read` keeps the status as drain last read it. A
+  header write that finds the spec gone logs what it does not record and drain goes on, a gone spec before its run
+  is not run, and the failed-run branch no longer says the spec is `ready-for-human`. `drain_end` counts a spec
+  last read `ready-for-agent` and now gone as left (`<slug>: gone (<why>)`, `EXIT_WAITING`), a gone blocker shows
+  as `gone (<why>)` without its pull request, `change_line` ends `-> gone`, and `not running it` is logged only for
+  a spec last read `ready-for-agent`, another once as `<slug>: <why>; gone`. A test makes the failed-run branch's
+  write find the spec gone.
+- **A pull request whose gate was turned off shows the last analysis as the change's.** After `resume
+  --no-quality-gate`, `Workflow._publish` passed `_last_quality`'s file to `pr_body` and `provenance`, so the quality
+  section and the `Orchestrator-Gate` trailer judged code the Builder had since changed; only the Reviewer was told
+  (`QUALITY_OFF_NOTE`). Raised by the cross-review of resume-quality-gate (finding 8, 2026-10-24): "nothing in the PR
+  says the final change went unjudged". Fixed (2026-10-25): `Workflow._unjudged` decides, for `_quality_note` and
+  `_publish` alike, when no quality file judges the published code; `Workflow._gate_evidence` then cites the run's
+  last quality file from any round, the trailer reads `..., then turned off`, the section `Quality gate (round R,
+  before the last change)`, and the body opens with a `[!NOTE]` saying nothing judged the final change, or that the
+  gate was turned off before any analysis finished.
+- **Two functions decide which quality file is a round's last.** `Workflow._gate_passed` read
+  `quality_path(n, quality_round)` itself, while `_quality_note` and `_publish` used `_last_quality`; they agreed only
+  because `_gate_passed` returns True whenever the run has no CI. Raised by the same review (finding 11). Fixed
+  (2026-10-25): `_gate_passed` reads `_last_quality`, and fails a quality file older than the current quality round
+  as it failed a missing one.
+
 - **A proof that failed is not run again in the next round.** `Workflow._judge_proofs` ran only the proofs the
   verdict step wrote in its own round, so a Builder told to make round N's failing proofs pass (`PROOFS_NOTE`) was
   checked only if the Reviewer wrote them again; one that still failed could be approved. Raised by the code review
