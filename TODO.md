@@ -19,20 +19,6 @@ was done.
 
 ## Open issues
 
-- **A prompt sent right after a startup dialog can be lost.** When an agent starts behind a dialog, such as Claude
-  Code's folder-trust question, `Workflow._start` waits in `_wait_for_startup` for herdr to report it `idle` and
-  returns; `Workflow._written` then sends the turn's prompt and records it in `RunState.prompted`. On 2026-10-25
-  the Builder of run 20261025-090825-73faf7, in a worktree of a clone Claude Code had not seen, was reported idle
-  as the dialog closed and before its input took text: the prompt never arrived, yet counted as delivered, and the
-  turn timed out after 1800s at an empty prompt. `resume` cannot recover it, since `_prompt_for` only waits on an
-  alive agent already prompted. Closes with `_wait_for_startup` waiting until the agent takes input, or with the
-  prompt's delivery checked (the agent turning `working`, or its handoff file appearing) and the prompt sent again
-  when neither happens.
-- **drain takes two passes to mark a spec done whose run's pull request already merged.** A `ready-for-agent` spec
-  with a `Run:` line gets `in-review` and `PR:` from `finished_run_header`, but `refreshed_headers` asks gh about
-  the pull request only for a spec that was `in-review` when the pass began, so a pull request merged since leaves
-  the spec `in-review`, its dependants blocked, until the next drain. Met on 2026-10-25 after resuming a run
-  outside drain. Closes with the pull request checked in the same pass once `finished_run_header` gives one.
 - **Two builds on agentbox0 can still run rustc out of memory.** The agent has 8 GiB, no swap and 2 executors,
   and a push to a new branch starts a branch build before its pull request exists, so two builds of one commit
   compile the Tauri crates at once (PR-74's first build: rustc SIGKILLed on `gtk`). The UI stage now builds
@@ -326,6 +312,28 @@ was done.
 
 ## Fixed
 
+- **A prompt sent right after a startup dialog can be lost.** When an agent starts behind a dialog, such as Claude
+  Code's folder-trust question, `Workflow._start` waits in `_wait_for_startup` for herdr to report it `idle` and
+  returns; `Workflow._written` then sends the turn's prompt and records it in `RunState.prompted`. On 2026-10-25
+  the Builder of run 20261025-090825-73faf7, in a worktree of a clone Claude Code had not seen, was reported idle
+  as the dialog closed and before its input took text: the prompt never arrived, yet counted as delivered, and the
+  turn timed out after 1800s at an empty prompt. `resume` cannot recover it, since `_prompt_for` only waits on an
+  alive agent already prompted. Closes with `_wait_for_startup` waiting until the agent takes input, or with the
+  prompt's delivery checked (the agent turning `working`, or its handoff file appearing) and the prompt sent again
+  when neither happens.
+  Fixed (2026-10-25): `Workflow._written` sends the prompt through `_deliver`, which counts it taken once herdr
+  reports the agent `working` or `blocked`, or its handoff file exists, within `PROMPT_DELIVERY_SECONDS` (30), and
+  otherwise sends the same prompt once more. A second miss fails the turn naming the role, the file and the pane.
+  `prompted` and the turn's record are saved only once the prompt is taken, so a `resume` of such a run prompts the
+  agent again instead of only waiting. `_wait_for_startup` is unchanged.
+- **drain takes two passes to mark a spec done whose run's pull request already merged.** A `ready-for-agent` spec
+  with a `Run:` line gets `in-review` and `PR:` from `finished_run_header`, but `refreshed_headers` asks gh about
+  the pull request only for a spec that was `in-review` when the pass began, so a pull request merged since leaves
+  the spec `in-review`, its dependants blocked, until the next drain. Met on 2026-10-25 after resuming a run
+  outside drain. Closes with the pull request checked in the same pass once `finished_run_header` gives one.
+  Fixed (2026-10-25): when `finished_run_header` makes a spec `in-review`, `refreshed_headers` asks
+  `pull_request_header` about its pull request in the same pass and merges the result into the spec's one pair, so
+  a merged one makes the spec `done` and its dependants startable in that drain, `--dry-run` included.
 - **A pull request opened over a conflict stays a draft with its warning after the conflict is resolved.** When
   `Host.merge_upstream` finds conflicts with the base branch, `pr_body` opens the body with a `[!WARNING]` naming
   the conflicting files and `create_pr` opens it as a draft; nothing ever edits the body or marks it ready, and
