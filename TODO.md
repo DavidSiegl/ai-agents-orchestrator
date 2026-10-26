@@ -336,10 +336,11 @@ was done.
   `[extend] path = ...` resolves that path outside base (process cwd), which the change may control". Closes by
   writing each extended file from the base beside the config and rewriting the path, or refusing such a config.
   Fixed (2026-10-26): `Host._write_base_rules` writes base's `.gitleaks.toml` into a `gitleaks-rules` directory and
-  follows its `[extend] path` chain (`_gitleaks_extended_file`, keys read whatever their case, as gitleaks reads them),
-  writing each file from base at its path from the top level, and `scan_unpublished` runs gitleaks from that
-  directory, so each path resolves to base's copy. An absolute path, one leaving the repository, one base has no file
-  at, a cycle, a file that is not TOML, or `[extend]`/`path` given twice in different case refuses the push.
+  follows its `[extend] path` chain as far as gitleaks reads it (`GITLEAKS_EXTEND_DEPTH`; `_gitleaks_extended_file`
+  reads keys whatever their case, as gitleaks does), writing each file from base at the path as spelled, and
+  `scan_unpublished` runs gitleaks from that directory, so each path resolves to base's copy. An absolute path, one
+  leaving the repository, one base has no file at, a symbolic link (`Host.file_at`), a cycle, a file that is not
+  TOML, or `[extend]`/`path` given twice in different case refuses the push.
 
 - **A submodule is empty in `passes-at-base`'s copy of the base.** `git archive` leaves a submodule's directory
   empty, so a changed test that imports from one fails to import at the base and gives nothing, though it might pass

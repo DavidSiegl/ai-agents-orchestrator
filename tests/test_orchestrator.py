@@ -3831,11 +3831,25 @@ class TestScanUnpublished(unittest.TestCase):
         self.assertEqual(self.seen_rule("rules/extra.toml"), "title = 'base'\n")
 
     def test_a_chain_of_extends_is_copied_whole(self):
-        self.rules({".gitleaks.toml": "[extend]\npath = './one.toml'\n",
+        self.rules({".gitleaks.toml": "[extend]\npath = 'tmp/../one.toml'\n",
                     "one.toml": "[Extend]\nPath = 'rules/two.toml'\n", "rules/two.toml": "title = 'two'\n"})
         self.push(self.commit({"one.toml": "title = 'loosened'\n", "rules/two.toml": "title = 'loosened'\n"}, "edit"))
-        self.assertEqual((self.seen_rule("one.toml"), self.seen_rule("rules/two.toml")),
+        # gitleaks opens a path as it is spelled.
+        self.assertEqual((self.seen_rule("tmp/../one.toml"), self.seen_rule("rules/two.toml")),
                          ("[Extend]\nPath = 'rules/two.toml'\n", "title = 'two'\n"))
+
+    def test_an_extend_past_the_depth_gitleaks_reads_is_not_followed(self):
+        self.rules({".gitleaks.toml": "[extend]\npath = 'one.toml'\n", "one.toml": "[extend]\npath = 'two.toml'\n",
+                    "two.toml": "[extend]\npath = 'one.toml'\n"})
+        self.push(self.commit({"b.txt": "b\n"}, "clean"))
+        self.assertEqual(self.seen_rule("two.toml"), "[extend]\npath = 'one.toml'\n")
+
+    def test_an_extended_symbolic_link_blocks_the_push(self):
+        os.symlink("one.toml", os.path.join(self.repo, "link.toml"))
+        self.rules({".gitleaks.toml": "[extend]\npath = 'link.toml'\n", "one.toml": "title = 'one'\n"})
+        with self.assertRaisesRegex(OrchestratorError, "link.toml is a symbolic link"):
+            self.push(self.commit({"b.txt": "b\n"}, "clean"))
+        self.assertNotIn("refs/heads/ci-ref", self.on_origin())
 
     def test_an_extend_the_scan_cannot_take_from_the_base_blocks_the_push(self):
         first = self.base
@@ -3845,8 +3859,8 @@ class TestScanUnpublished(unittest.TestCase):
                 ("outside", {".gitleaks.toml": "[extend]\npath = 'rules/../../extra.toml'\n"}, "../extra.toml"),
                 ("missing", {".gitleaks.toml": "[extend]\npath = 'rules/gone.toml'\n"}, "rules/gone.toml"),
                 ("cycle", {".gitleaks.toml": "[extend]\npath = 'one.toml'\n",
-                           "one.toml": "[extend]\npath = 'two.toml'\n", "two.toml": "[extend]\npath = 'one.toml'\n"},
-                 "two.toml"),
+                           "one.toml": "[extend]\npath = './.gitleaks.toml'\n"}, "one.toml -> .gitleaks.toml"),
+                ("pathspec magic", {".gitleaks.toml": "[extend]\npath = ':/a.txt'\n"}, ":/a.txt"),
                 ("not TOML", {".gitleaks.toml": "[extend]\npath = 'one.toml'\n", "one.toml": "[extend\n"}, "one.toml"),
                 ("NUL", {".gitleaks.toml": '[extend]\npath = "a\\u0000.toml"\n'}, "a\\x00.toml"),
                 ("top level", {".gitleaks.toml": "[extend]\npath = 'rules/..'\n"}, "rules/.."),
