@@ -6975,6 +6975,37 @@ class TestWeakenedTests(unittest.TestCase):
                                  ("tests/test_other.py", "tests/test_renamed.py")], key=str))
 
 
+class TestRunInSession(unittest.TestCase):
+    """_run_in_session, which runs the gate's pytest and mutmut, on shell commands."""
+
+    def run_sh(self, code, *, timeout=10, grace=0):
+        return orchestrator._run_in_session(["sh", "-c", code], tempfile.gettempdir(), dict(os.environ),
+                                            timeout=timeout, grace=grace)
+
+    def test_a_tool_that_finishes_returns_its_status_and_output(self):
+        proc, stopped = self.run_sh("echo out; echo err >&2; exit 3")
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr, stopped), (3, "out\n", "err\n", False))
+
+    def test_a_tool_that_exits_on_sigint_returns_what_it_printed(self):
+        proc, stopped = self.run_sh("trap 'echo bye; exit 5' INT; echo hi; while :; do sleep 0.1; done",
+                                    timeout=0.5, grace=5)
+        self.assertEqual((proc.returncode, proc.stdout, stopped), (5, "hi\nbye\n", True))
+
+    def test_a_tool_that_ignores_sigint_is_killed_after_the_grace(self):
+        started = time.monotonic()
+        proc, stopped = self.run_sh("trap '' INT; echo hi; exec sleep 30", timeout=0.3, grace=0.3)
+        self.assertLess(time.monotonic() - started, 0.6 + orchestrator.MUTMUT_KILL_WAIT)
+        self.assertEqual((proc.returncode, proc.stdout, stopped), (-signal.SIGKILL, "hi\n", True))
+
+    def test_a_tool_that_prints_more_than_a_pipe_holds_is_not_blocked(self):
+        proc, stopped = self.run_sh("head -c 1000000 /dev/zero | tr '\\0' x", timeout=5)
+        self.assertEqual((proc.returncode, len(proc.stdout), stopped), (0, 1000000, False))
+
+    def test_a_tool_that_cannot_start_raises_oserror(self):
+        with self.assertRaises(OSError):
+            orchestrator._run_in_session(["/nonexistent/tool"], tempfile.gettempdir(), {}, timeout=1)
+
+
 class TestFlakyTests(unittest.TestCase):
     """The flaky-tests check over a real git repository, rerunning its tests with this suite's own pytest."""
 
@@ -7044,6 +7075,34 @@ class TestFlakyTests(unittest.TestCase):
     @staticmethod
     def line_of(text, definition):
         return text.splitlines().index(definition) + 1
+
+    def test_a_server_a_test_leaves_holding_the_output_does_not_hold_up_the_reruns(self):
+        # Under -s a test's processes inherit pytest's own output; this one outlives every run, in a session of its own.
+        pids = tempfile.NamedTemporaryFile("r", delete=False)
+        self.addCleanup(os.remove, pids.name)
+
+        def kill():
+            for pid in pids.read().split():
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(int(pid), signal.SIGKILL)
+        self.addCleanup(kill)
+        self.put("pytest.ini", "[pytest]\naddopts = -s\n")
+        self.git("add", "pytest.ini")
+        self.git("commit", "--quiet", "-m", "-s")
+        self.put("tests/test_server.py", (
+            "import subprocess\nimport sys\n\n\ndef test_starts_a_server():\n"
+            "    server = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'], "
+            "start_new_session=True)\n"
+            f"    with open({pids.name!r}, 'a') as f:\n        f.write(f'{{server.pid}}\\n')\n"))
+        self.git("add", "tests/test_server.py")
+        started = time.monotonic()
+        with patch.object(orchestrator, "MUTMUT_KILL_WAIT", 0.5):
+            found = self.found()
+        self.assertLess(time.monotonic() - started, orchestrator.FLAKY_RUN_TIMEOUT)
+        self.assertEqual(found, [])
+        # One server for each seed's run, so the reruns did happen.
+        self.assertEqual(len(pids.read().split()), len(orchestrator.FLAKY_SEEDS))
+        pids.seek(0)
 
     @staticmethod
     def alternates():

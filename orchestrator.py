@@ -51,6 +51,7 @@ import posixpath
 import queue
 import re
 import secrets
+import selectors
 import shlex
 import shutil
 import signal
@@ -4436,6 +4437,82 @@ def _junit_case(node_id: str) -> str:
     return ".".join([re.sub(r"\.py$", "", path).replace("/", "."), *names]) + params
 
 
+def _run_in_session(argv: list[str], cwd: str, env: dict[str, str], *, timeout: float,
+                    grace: float = 0) -> tuple[subprocess.CompletedProcess, bool]:
+    """argv run at cwd with env as its whole environment and no input, in a session of its own, and whether it was
+    stopped for running longer than timeout seconds.
+
+    Stopped, it gets SIGINT and grace seconds to exit when grace is above 0, and is then killed. Once it has exited,
+    every process left in its process group, such as a server it started, is killed too, and what was printed is
+    read until no process holds the output open, for at most MUTMUT_KILL_WAIT seconds more: only one outside the
+    group, in a session of its own, can still hold it, and what that prints later is lost. So the call returns within timeout + grace + MUTMUT_KILL_WAIT
+    seconds. The output is decoded as _git_run's verbatim output is, so that paths in it keep their bytes; the exit
+    status is -SIGKILL when the kill is the last thing known of it. Raises OSError when argv cannot be started.
+    """
+    # The callers' fixed commands, over names their tools listed; no shell reads them.
+    proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,  # noqa: S603
+                            stderr=subprocess.PIPE, start_new_session=True)
+    # Both, by the PIPEs above: standard output, then standard error.
+    streams = [stream for stream in (proc.stdout, proc.stderr) if stream is not None]
+    printed: dict[int, list[bytes]] = {stream.fileno(): [] for stream in streams}
+    stopped = False
+    try:
+        with selectors.DefaultSelector() as pipes:
+            for fd in printed:
+                os.set_blocking(fd, False)
+                pipes.register(fd, selectors.EVENT_READ)
+            # Until the process exits, read what it prints, so that a full pipe never blocks it, polling for its exit
+            # every _TOOL_POLL seconds; at the deadline stop it, and once a grace has run out too, kill it.
+            deadline = time.monotonic() + timeout
+            while proc.poll() is None:
+                if time.monotonic() >= deadline:
+                    if grace > 0 and not stopped:
+                        proc.send_signal(signal.SIGINT)
+                        deadline = time.monotonic() + grace
+                        stopped = True
+                        continue
+                    stopped = True
+                    break
+                _read_ready(pipes, printed, min(_TOOL_POLL, deadline - time.monotonic()))
+            _kill_group(proc)
+            # What the group printed before the kill is in the pipes, ending once nothing holds them open.
+            end = time.monotonic() + MUTMUT_KILL_WAIT
+            while pipes.get_map() and (left := end - time.monotonic()) > 0:
+                _read_ready(pipes, printed, left)
+    finally:
+        _kill_group(proc)
+        for stream in streams:
+            stream.close()
+    returncode = proc.poll()
+    out, err = (os.fsdecode(b"".join(chunks)) for chunks in printed.values())
+    return subprocess.CompletedProcess(argv, -signal.SIGKILL if returncode is None else returncode, out, err), stopped
+
+
+# Seconds between two of _run_in_session's checks of whether its process has exited, so the most it waits on past
+# the exit before it reads the rest of the output.
+_TOOL_POLL = 0.05
+
+
+def _read_ready(pipes: selectors.BaseSelector, printed: dict[int, list[bytes]], timeout: float) -> None:
+    """Appends to printed, by file descriptor, what each of pipes, non-blocking, has to read within timeout seconds,
+    and unregisters a pipe at its end."""
+    for key, _ in pipes.select(max(0.0, timeout)):
+        try:
+            chunk = os.read(key.fd, 65536)
+        except BlockingIOError:
+            continue
+        if chunk:
+            printed[key.fd].append(chunk)
+        else:
+            pipes.unregister(key.fd)
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    """Kills every process in proc's process group, if any is left. macOS refuses with EPERM a group of zombies."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(proc.pid, signal.SIGKILL)
+
+
 class _PytestStopped(subprocess.CompletedProcess):
     """What a pytest run that _pytest stopped at its timeout printed until then; its returncode is the kill's."""
 
@@ -4448,11 +4525,9 @@ def _pytest(setup: _PytestSetup, doing: str, args: list[str], *, timeout: float,
     variables beside tool_env's; its output unbuffered, so that what it printed before a kill is whole. And the
     problem, a clause naming doing, when it could not start, took longer than timeout seconds or exited with a
     status outside ok (by default 0, all passed, and 1, some failed); then the run is None when pytest did not start,
-    a _PytestStopped when timeout stopped it, and else the run that exited so. pytest runs in a session of its own,
-    and when it returns every process in that session, such as a server a test started, is gone; one stopped at
-    timeout is killed with them, and what it printed is read for at most MUTMUT_KILL_WAIT seconds more. pytest
-    writes a name that is not UTF-8 as its bytes, and its output is decoded as _git_run's verbatim output is, so the
-    node ids in it hold paths as git's do, and only "\n" ends a line. pytest-randomly 5.0.0 cannot shuffle such a
+    a _PytestStopped when timeout stopped it, and else the run that exited so. pytest runs, is stopped and is read
+    as _run_in_session runs a tool, without a grace. pytest writes a name that is not UTF-8 as its bytes, so the node
+    ids in its output hold paths as git's do, and only "\n" ends a line. pytest-randomly 5.0.0 cannot shuffle such a
     name: under -p randomly pytest stops with an internal error."""
     # --verbosity sets the level outright, and pytest reads the project's addopts and PYTEST_ADDOPTS before the
     # command line, so a -v or -q of theirs cannot change what the collection prints. The list of collected tests
@@ -4464,25 +4539,14 @@ def _pytest(setup: _PytestSetup, doing: str, args: list[str], *, timeout: float,
     argv = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-c", setup.inifile, "--rootdir", setup.root,
             "--confcutdir", setup.top, "--verbosity=-1", "-o", "verbosity_test_cases=-1", *args]
     try:
-        # A fixed command over the node ids pytest itself collected; no shell reads it.
-        raw = subprocess.Popen(argv, cwd=setup.top, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,  # noqa: S603
-                               stderr=subprocess.PIPE, start_new_session=True,
-                               env={**tool_env(), **(env or {}), "PYTHONIOENCODING": "utf-8:surrogateescape",
-                                    "PYTHONUNBUFFERED": "1"})
+        proc, stopped = _run_in_session(argv, setup.top, {**tool_env(), **(env or {}), "PYTHONUNBUFFERED": "1",
+                                                          "PYTHONIOENCODING": "utf-8:surrogateescape"},
+                                        timeout=timeout)
     except OSError as e:
         return None, f"could not start pytest, {doing}: {e}"
-    try:
-        out, err = raw.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(raw.pid, signal.SIGKILL)
-        out, err = _abandon(raw)
-        return (_PytestStopped(argv, -signal.SIGKILL, os.fsdecode(out), os.fsdecode(err)),
+    if stopped:
+        return (_PytestStopped(argv, proc.returncode, proc.stdout, proc.stderr),
                 f"pytest, {doing}, did not finish within {timeout:g} seconds")
-    finally:
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(raw.pid, signal.SIGKILL)
-    proc = subprocess.CompletedProcess(argv, raw.returncode, os.fsdecode(out), os.fsdecode(err))
     if proc.returncode not in ok:
         return proc, f"pytest, {doing}, exited with status {proc.returncode}: {_said(proc)}"
     return proc, None
@@ -5169,56 +5233,18 @@ def _prefix_of(mutant: str) -> str:
 def _run_mutmut(tree_copy: str, args: list[str], timeout: float) -> tuple[subprocess.CompletedProcess, bool]:
     """mutmut with args, run in the gate's own interpreter at tree_copy, and whether it was stopped at timeout seconds.
 
-    Stopped, it gets SIGINT, on which mutmut stops trying mutants and keeps the results it has, and
-    MUTMUT_STOP_GRACE seconds to exit before its process group is killed; what it printed is then read for at most
-    MUTMUT_KILL_WAIT seconds more, and lost when a process outside the group holds its output open. So it returns
-    within timeout + MUTMUT_STOP_GRACE + MUTMUT_KILL_WAIT seconds, every process in its group gone. Its temporary
-    files, and those of the tests it runs, go into tree_copy's .tmp, so that what a test it killed left goes with
-    it. Its output is decoded as _git_run's verbatim output is, since its mutant names and diffs hold paths and
-    source lines: only "\n" ends a line. Raises OSError when it cannot be started.
+    It runs as _run_in_session runs a tool, with MUTMUT_STOP_GRACE as the grace: on SIGINT mutmut stops trying
+    mutants and keeps the results it has. So it returns within timeout + MUTMUT_STOP_GRACE + MUTMUT_KILL_WAIT seconds. Its
+    temporary files, and those of the tests it runs, go into tree_copy's .tmp, so that what a test it killed left
+    goes with it. Its mutant names and diffs hold paths and source lines, in which only "\n" ends a line. Raises
+    OSError when it cannot be started.
     """
     # `mutmut`, its console script, runs this line. `python -m mutmut` would import its __main__ a second time in each
     # forked worker, which mutmut warns against.
     argv = [sys.executable, "-c", "from mutmut.__main__ import cli; cli()", *args]
     tmp = os.path.join(tree_copy, ".tmp")
     os.makedirs(tmp, exist_ok=True)
-    # A fixed command over mutant names mutmut itself listed; no shell reads it. Its own session puts its workers in
-    # its process group, so that they can be killed with it.
-    proc = subprocess.Popen(argv, cwd=tree_copy, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,  # noqa: S603
-                            stderr=subprocess.PIPE, env={**tool_env(), "TMPDIR": tmp}, start_new_session=True)
-    stopped = False
-    try:
-        try:
-            out, err = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            stopped = True
-            proc.send_signal(signal.SIGINT)
-            try:
-                out, err = proc.communicate(timeout=MUTMUT_STOP_GRACE)
-            except subprocess.TimeoutExpired:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(proc.pid, signal.SIGKILL)
-                out, err = _abandon(proc)
-    finally:
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(proc.pid, signal.SIGKILL)
-    # A process still unreaped was killed with its group a moment ago.
-    returncode = proc.poll()
-    return subprocess.CompletedProcess(argv, -signal.SIGKILL if returncode is None else returncode, os.fsdecode(out),
-                                       os.fsdecode(err)), stopped
-
-
-def _abandon(proc: subprocess.Popen) -> tuple[bytes, bytes]:
-    """What proc, just killed, printed, read for at most MUTMUT_KILL_WAIT seconds; b"" for both when something else,
-    such as a test's helper in a session of its own, still holds its output open, whose pipes are then closed."""
-    try:
-        return proc.communicate(timeout=MUTMUT_KILL_WAIT)
-    except subprocess.TimeoutExpired:
-        for pipe in (proc.stdout, proc.stderr):
-            if pipe is not None:
-                with contextlib.suppress(OSError):
-                    pipe.close()
-        return b"", b""
+    return _run_in_session(argv, tree_copy, {**tool_env(), "TMPDIR": tmp}, timeout=timeout, grace=MUTMUT_STOP_GRACE)
 
 
 def _time_left(deadline: float) -> float:

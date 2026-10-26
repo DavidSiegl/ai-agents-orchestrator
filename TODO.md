@@ -187,15 +187,6 @@ was done.
   may supply rules. Raised by the cross-review of `push-secret-scan` (F6, 2026-10-24): "a base config using
   `[extend] path = ...` resolves that path outside base (process cwd), which the change may control". Closes by
   writing each extended file from the base beside the config and rewriting the path, or refusing such a config.
-- **A process a test leaves holding pytest's output keeps a finished run waiting until its timeout.** `_pytest`'s
-  `communicate` reads to the end of pytest's output, so a server a test started that inherits it keeps a run that has
-  finished going until the timeout, reported then as `budget-reached` (passes-at-base) or `not-rerun` (flaky-tests).
-  It was so before `_pytest` ran pytest in its own session. Raised by the cross-review of `passes-at-base` (round 2,
-  2026-10-24). Closes when `_pytest` waits for pytest itself, then kills its group and reads what is buffered.
-- **`_pytest` and `_run_mutmut` copy one stop-and-kill sequence.** Both start their tool in a session of its own,
-  kill its process group on a timeout and in `finally`, and read what is left with `_abandon`; the copies had already
-  drifted in which errors `killpg` may raise. Raised by the same review. Closes with one helper that runs a command in
-  its own session and stops it, which both use, mutmut's SIGINT grace an option of it.
 - **`vague-names` does not split CamelCase.** `vague_names` matches a whole name or its last `_`-separated word,
   so `user_data` is found but a class `InfoManager` or `UserData` is not. Closes, if the run metrics show such names
   recur, with the last CamelCase word matched too.
@@ -359,6 +350,21 @@ was done.
   files.
 
 ## Fixed
+
+- **A process a test leaves holding pytest's output keeps a finished run waiting until its timeout.** `_pytest`'s
+  `communicate` reads to the end of pytest's output, so a server a test started that inherits it keeps a run that has
+  finished going until the timeout, reported then as `budget-reached` (passes-at-base) or `not-rerun` (flaky-tests).
+  It was so before `_pytest` ran pytest in its own session. Raised by the cross-review of `passes-at-base` (round 2,
+  2026-10-24). Closes when `_pytest` waits for pytest itself, then kills its group and reads what is buffered.
+  Fixed (2026-10-26): `_run_in_session` waits for the process, reading its pipes meanwhile, then kills its group
+  and reads what is left for at most `MUTMUT_KILL_WAIT` seconds; `_pytest` runs pytest through it.
+
+- **`_pytest` and `_run_mutmut` copy one stop-and-kill sequence.** Both start their tool in a session of its own,
+  kill its process group on a timeout and in `finally`, and read what is left with `_abandon`; the copies had already
+  drifted in which errors `killpg` may raise. Raised by the same review. Closes with one helper that runs a command in
+  its own session and stops it, which both use, mutmut's SIGINT grace an option of it.
+  Fixed (2026-10-26): both run through `_run_in_session`, mutmut with `MUTMUT_STOP_GRACE` as its grace; `_abandon`
+  is gone, and one `_kill_group` suppresses the same errors for both.
 
 - **A pytest configuration below the copy's top directory is not used, so its tests are never rerun.**
   `_pytest_inifile` looks only in the top directory of `flaky_tests`' copy, and `_pytest` passes what it finds with
