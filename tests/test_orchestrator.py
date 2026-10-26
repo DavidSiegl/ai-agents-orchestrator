@@ -10,6 +10,7 @@ import json
 import os
 import queue
 import re
+import resource
 import shlex
 import shutil
 import signal
@@ -9647,6 +9648,90 @@ class TestTooComplexFunctions(unittest.TestCase):
     def test_it_fails_the_gate(self):
         [check] = [c for c in orchestrator.gate_checks(orchestrator.MUTATION_BUDGET) if c.name == "cognitive-complexity"]
         self.assertEqual((check.fails, check.find), (True, orchestrator.too_complex_functions))
+
+
+class TestChangedPythonFiles(unittest.TestCase):
+    """How flaky-tests, surviving-mutants and cognitive complexity read the Python files a change touches, end to end
+    through each check over a real git repository."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = tmp.name
+        self.host = Host()
+        self.git("init", "--quiet", "-b", "main")
+        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
+            self.git("config", key, value)
+        self.put("pyproject.toml", '[tool.mutmut]\nsource_paths = ["."]\n')
+        self.put("calc.py", "def add(a, b):\n    return a + b\n")
+        self.put("tests/test_calc.py", "import calc\n\n\ndef test_add():\n    assert calc.add(2, 3) == 5\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "base")
+
+    def git(self, *args):
+        return self.host.git(self.repo, *args)
+
+    def put(self, name, text):
+        path = os.path.join(self.repo, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    def change(self):
+        return orchestrator.GateChange.from_tree(self.repo, self.git("rev-parse", "HEAD").strip())
+
+    @staticmethod
+    @contextlib.contextmanager
+    def bounded(seconds):
+        """A context in which a check that blocks or reads without end fails the test, rather than hanging the suite
+        or taking the host's memory: SIGALRM after seconds interrupts an open() blocked on a FIFO, and an address space
+        limited to 1 GiB above the process's present size turns an endless read, as of /dev/zero, into MemoryError."""
+        def expired(signum, frame):
+            raise AssertionError(f"the check ran longer than {seconds} seconds")
+
+        with open("/proc/self/statm") as f:
+            size = int(f.read().split()[0]) * os.sysconf("SC_PAGE_SIZE")
+        limits = resource.getrlimit(resource.RLIMIT_AS)
+        cap = size + 2 ** 30 if limits[1] == resource.RLIM_INFINITY else min(size + 2 ** 30, limits[1])
+        previous = signal.signal(signal.SIGALRM, expired)
+        resource.setrlimit(resource.RLIMIT_AS, (cap, limits[1]))
+        signal.alarm(seconds)
+        try:
+            yield
+        finally:
+            signal.alarm(0)
+            resource.setrlimit(resource.RLIMIT_AS, limits)
+            signal.signal(signal.SIGALRM, previous)
+
+    def test_a_changed_symlink_to_a_fifo_or_dev_zero_is_not_read_by_the_checks_that_rerun_or_mutate(self):
+        elsewhere = tempfile.TemporaryDirectory()
+        self.addCleanup(elsewhere.cleanup)
+        fifo = os.path.join(elsewhere.name, "pipe")
+        os.mkfifo(fifo)
+        for target in (fifo, "/dev/zero"):
+            with self.subTest(target=target):
+                for name in ("x.py", "tests/test_x.py"):
+                    with contextlib.suppress(FileNotFoundError):
+                        os.remove(os.path.join(self.repo, name))
+                    os.symlink(target, os.path.join(self.repo, name))
+                self.git("add", "x.py", "tests/test_x.py")
+                with self.bounded(20):
+                    self.assertEqual(orchestrator.flaky_tests(self.change()), [])
+                    self.assertEqual(orchestrator.surviving_mutants(self.change(), budget=60), [])
+
+    def test_a_coding_cookie_naming_an_unknown_codec_is_the_same_reason_in_every_check(self):
+        source = "# -*- coding: nonsense -*-\ndef test_x():\n    pass\n"
+        self.put("x.py", source)
+        self.put("tests/test_x.py", source)
+        self.git("add", "x.py", "tests/test_x.py")
+        change = self.change()
+        found = [*orchestrator.flaky_tests(change), *orchestrator.surviving_mutants(change, budget=60),
+                 *orchestrator.too_complex_functions(change)]
+        self.assertEqual([(f["path"], f["rule"]) for f in found],
+                         [("tests/test_x.py", "not-rerun"), ("x.py", "not-run"), ("x.py", "not-scored")])
+        reasons = {f["message"].partition(", so ")[0] for f in found}
+        self.assertEqual(len(reasons), 1, reasons)
+        self.assertTrue(reasons.pop().startswith("could not be read ("))
 
 
 class TestToolFindings(unittest.TestCase):

@@ -3915,28 +3915,17 @@ def _adds_to(f: _ChangedFunction, added: set[int], removed: set[int]) -> bool:
 def _changed_python_units(change: GateChange, in_scope: Callable[[str], bool],
                           touched: Callable[[_ChangedFunction, set[int], set[int]], bool] = _adds_to,
                           ) -> tuple[list[_ChangedFunction], list[tuple[str, str]]]:
-    """The top-level functions and methods of top-level classes, in the Python files of the working tree whose paths
-    in_scope accepts, that the change touched: touched(unit, added, removed) says so, added being the lines the change
-    added to its file and removed the lines after which a hunk that only removes lines removed them, 0 for the top, as
-    _removal_points gives them. And (path, why) for each such file that could not be read or parsed, why a clause such
-    as "does not parse as Python"."""
+    """The top-level functions and methods of top-level classes that the change touched, in the Python files it adds
+    lines to or removes lines from whose paths in_scope accepts, as _parsed_changed_files gives those files:
+    touched(unit, added, removed) says so, with the file's _ChangedPythonFile.added and .removed. And (path, why) for
+    each such file that could not be read or parsed, with _ChangedPythonFile.why."""
     functions, unreadable = [], []
-    removed = _removal_points(change.diff)
-    for path, added in change.changed.items():
-        points = removed.get(path, set())
-        if not (added or points) or not path.endswith(".py") or not in_scope(path):
-            continue
-        try:
-            with open(os.path.join(change.root, path), "rb") as f:
-                text, _ = _decode_python(f.read())
-        except (OSError, SyntaxError) as e:
-            unreadable.append((path, f"could not be read ({e})"))
-            continue
-        tree = _parse_python(text)
-        if tree is None:
-            unreadable.append((path, "does not parse as Python"))
-            continue
-        functions += [unit for unit in _python_units(path, text, tree) if touched(unit, added, points)]
+    for changed in _parsed_changed_files(change, lambda path, added, removed: bool(added or removed) and in_scope(path)):
+        if changed.tree is None:
+            unreadable.append((changed.path, changed.why))
+        else:
+            functions += [unit for unit in _python_units(changed.path, changed.text, changed.tree)
+                          if touched(unit, changed.added, changed.removed)]
     return functions, unreadable
 
 
@@ -5677,24 +5666,39 @@ def _judged_files(change: GateChange) -> tuple[list[dict], dict[str, tuple[list[
     or parsed; and, by path, the scored functions of each of the others, with the lines the change adds to it."""
     out: list[dict] = []
     judged: dict[str, tuple[list[_ScoredFunction], set[int]]] = {}
-    for path, added, tree, why in _parsed_changed_files(change, skip=lambda path: path.startswith(_COMPLEXITY_EXEMPT)):
-        if tree is None:
-            out.append(_finding(path, None, "not-scored", f"{why}, so its functions were not scored.",
+    for changed in _parsed_changed_files(change, lambda path, added, removed: bool(added)
+                                         and not path.startswith(_COMPLEXITY_EXEMPT)):
+        if changed.tree is None:
+            out.append(_finding(changed.path, None, "not-scored", f"{changed.why}, so its functions were not scored.",
                                 severity="error"))
         else:
-            judged[path] = (_scored_functions(tree), added)
+            judged[changed.path] = (_scored_functions(changed.tree), changed.added)
     return out, judged
 
 
-def _parsed_changed_files(change: GateChange, skip: Callable[[str], bool] = lambda path: False,
-                          ) -> Iterator[tuple[str, set[int], ast.Module | None, str]]:
-    """Each .py file the change adds lines to, as a regular file of the working tree (_is_link_or_special) whose path
-    skip does not accept: its path, the lines the change adds to it, and its syntax tree and "", or None and why there
-    is none, as _parse_working_file gives them. Files under mutmut's state are not changed files, as
-    GateChange.from_tree says."""
+@dataclass(frozen=True)
+class _ChangedPythonFile:
+    """A .py file of the change, as the working tree holds it and _parse_working_file reads it."""
+    path: str
+    added: set[int]  # the lines the change adds to it, from 1
+    removed: set[int]  # the points it only removes lines at, as _removal_points gives them; empty when there are none
+    text: str  # its source, decoded as Python decodes it; "" when it could not be read
+    tree: ast.Module | None  # its syntax tree; None when it could not be read or does not parse
+    why: str  # why tree is None, a clause such as "does not parse as Python"; "" when it is not None
+
+
+def _parsed_changed_files(change: GateChange, wanted: Callable[[str, set[int], set[int]], bool]
+                          = lambda path, added, removed: bool(added)) -> Iterator[_ChangedPythonFile]:
+    """Each .py file the change touches that wanted(path, added, removed) accepts, by default each it adds lines to,
+    read and parsed; the arguments are what the _ChangedPythonFile fields of those names hold. Only a regular file of
+    the working tree is read: a symlink, a submodule, a FIFO or a device is left out whatever wanted says
+    (_is_link_or_special). A file the change deletes is not among them, as changed_lines says, nor is one under
+    mutmut's state, as GateChange.from_tree says."""
+    removals = _removal_points(change.diff)
     for path, added in change.changed.items():
-        if added and path.endswith(".py") and not skip(path) and not _is_link_or_special(change, path):
-            yield path, added, *_parse_working_file(change, path)
+        removed = removals.get(path, set())
+        if path.endswith(".py") and wanted(path, added, removed) and not _is_link_or_special(change, path):
+            yield _ChangedPythonFile(path, added, removed, *_parse_working_file(change, path))
 
 
 def _is_link_or_special(change: GateChange, path: str) -> bool:
@@ -5755,20 +5759,21 @@ def _holds_python(path: str, first_line: Callable[[], bytes]) -> bool:
 def _working_functions(change: GateChange, path: str) -> tuple[list[_ScoredFunction] | None, str]:
     """The scored functions of the working tree's file at path, and ""; or None and why there are none, as
     _parse_working_file says."""
-    tree, why = _parse_working_file(change, path)
+    _, tree, why = _parse_working_file(change, path)
     return (None, why) if tree is None else (_scored_functions(tree), "")
 
 
-def _parse_working_file(change: GateChange, path: str) -> tuple[ast.Module | None, str]:
-    """The syntax tree of the working tree's file at path, read as Python reads it, by its byte order mark or coding
-    cookie, and ""; or None and why there is none, a clause: it could not be read, or does not parse as Python."""
+def _parse_working_file(change: GateChange, path: str) -> tuple[str, ast.Module | None, str]:
+    """The source of the working tree's file at path, read as Python reads it, by its byte order mark or coding
+    cookie, its syntax tree, and ""; or why there is no tree, a clause, after "" and None when the file could not be
+    read, or after its source when it does not parse as Python."""
     try:
         with open(os.path.join(change.root, path), "rb") as source:
             text, _ = _decode_python(source.read())
     except (OSError, SyntaxError) as e:
-        return None, f"could not be read ({e})"
+        return "", None, f"could not be read ({e})"
     tree = _parse_python(text)
-    return (None, "does not parse as Python") if tree is None else (tree, "")
+    return (text, None, "does not parse as Python") if tree is None else (text, tree, "")
 
 
 def _base_functions(change: GateChange, path: str) -> list[_ScoredFunction]:
@@ -6117,9 +6122,10 @@ def vague_names(change: GateChange) -> list[dict]:
     add is never reported. A name is bound as _bound_names says. A changed file that cannot be read or parsed is a
     finding saying so; the files are those _parsed_changed_files gives."""
     out = []
-    for path, added, tree, why in _parsed_changed_files(change):
+    for changed in _parsed_changed_files(change):
+        path, added, tree = changed.path, changed.added, changed.tree
         if tree is None:
-            out.append(_finding(path, None, "not-read", f"{why}, so its names were not read."))
+            out.append(_finding(path, None, "not-read", f"{changed.why}, so its names were not read."))
             continue
         # Each vague name's first binding on an added line, as (line, column).
         first: dict[str, tuple[int, int]] = {}

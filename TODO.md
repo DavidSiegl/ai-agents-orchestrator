@@ -295,17 +295,6 @@ was done.
   such files only when the project's coverage measures them, since `new_coverage` reads only the files the Cobertura
   report lists. Whether the linters should read them, leave them out, or the gate refuse them is open. Closes with that
   decision.
-- **The cognitive-complexity check reads and parses changed files in a loop of its own.** `_judged_files` and
-  `_working_functions` repeat `_changed_python_units`' reading, decoding and unreadable-file handling, because that
-  walker yields only top-level functions and methods of top-level classes, the units mutmut names, while the check
-  judges every function that no other function holds (`_scored_functions`). The two copies of the except clause
-  have to be kept alike, as a coding cookie naming an odd codec has shown twice. Closes with `_changed_python_units`
-  taking the walker as a parameter, or handing its callers the parsed trees.
-- **A changed `.py` symlink is read through to its target by the other Python checks.** `_changed_python_units`
-  opens every changed `.py` path, and `open()` follows a symlink, so a change that adds `x.py` as a symlink to a FIFO
-  blocks the surviving-mutants and flaky-tests selection, and one to `/dev/zero` reads without end. The
-  cognitive-complexity check skips such paths (`_is_link_or_special`, review round 5 of ticket 06, R5-F1). Found by
-  reading the code, not reproduced. Closes with `_changed_python_units` skipping what `_is_link_or_special` names.
 - **passes-at-base misses a deleted Python script with no `.py`.** `_edits_python_source` (`orchestrator.py`)
   counts a deleted file as Python source only by its `.py`, so a change that only deletes a `#!` python script
   outside the tests edits no Python source for it. Found while fixing the cognitive-complexity check's same gap
@@ -343,6 +332,26 @@ was done.
   files.
 
 ## Fixed
+
+- **The cognitive-complexity check reads and parses changed files in a loop of its own.** `_judged_files` and
+  `_working_functions` repeat `_changed_python_units`' reading, decoding and unreadable-file handling, because that
+  walker yields only top-level functions and methods of top-level classes, the units mutmut names, while the check
+  judges every function that no other function holds (`_scored_functions`). The two copies of the except clause
+  have to be kept alike, as a coding cookie naming an odd codec has shown twice. Closes with `_changed_python_units`
+  taking the walker as a parameter, or handing its callers the parsed trees.
+  Fixed (2026-10-26): one walker, `_parsed_changed_files(change, wanted)`, reads and parses each changed `.py` file
+  through `_parse_working_file` and yields it as a `_ChangedPythonFile` (path, added lines, removal points, source,
+  tree or why not); `wanted(path, added, removed)` is each caller's filter. `_changed_python_units`, `_judged_files`
+  and `vague_names` all read through it, so the except clause and its wording live in `_parse_working_file` alone.
+
+- **A changed `.py` symlink is read through to its target by the other Python checks.** `_changed_python_units`
+  opens every changed `.py` path, and `open()` follows a symlink, so a change that adds `x.py` as a symlink to a FIFO
+  blocks the surviving-mutants and flaky-tests selection, and one to `/dev/zero` reads without end. The
+  cognitive-complexity check skips such paths (`_is_link_or_special`, review round 5 of ticket 06, R5-F1). Found by
+  reading the code, not reproduced. Closes with `_changed_python_units` skipping what `_is_link_or_special` names.
+  Fixed (2026-10-26): `_changed_python_units` reads through `_parsed_changed_files`, which skips whatever
+  `_is_link_or_special` names for every caller; `TestChangedPythonFiles` runs flaky-tests and surviving-mutants on a
+  change adding `x.py` and `tests/test_x.py` as symlinks to a FIFO and to `/dev/zero`, under a time and memory bound.
 
 - **Three gate checks repeat the make-a-scratch-directory, run, remove-it skeleton.** `flaky_tests`,
   `_mutation_test` and `passes_at_base` each call `tempfile.mkdtemp`, word their own finding when it fails, and word
