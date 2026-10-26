@@ -8546,6 +8546,26 @@ class TestCognitiveComplexity(unittest.TestCase):
                 return Box.get(None)
         """), {"T": 0, "build": 0, "Box.get": 0, "U": 0})
 
+    def test_a_type_parameter_list_in_a_class_body_sees_the_class_s_names(self):
+        self.assertEqual(self.module_scores("""
+            def f():
+                class C:
+                    def f(): return 1
+                    def m[T: f()](self): pass     # C's f, as PEP 695 reads a bound
+                return C
+            def g():
+                class C:
+                    g = object
+                    class D[T](g()): pass         # C's g, as PEP 695 reads a base
+                return C
+            def h():
+                class C:
+                    def h(): return 1
+                    def m[T](self):
+                        return h()                # the module's h: a method's body does not see C's names
+                return C
+        """), {"f": 0, "g": 0, "h": 1})
+
     def test_an_assignment_expression_in_a_comprehension_binds_in_the_function(self):
         self.assertEqual(self.module_scores("""
             def f(handlers, x):

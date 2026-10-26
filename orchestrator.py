@@ -5656,7 +5656,7 @@ def _callees(function: ast.FunctionDef | ast.AsyncFunctionDef, cls: str | None,
     # Each node still to be read, with the scope it is read in and the class that self and cls name there. The
     # scopes' names are all known only once the walk is done, as Python fixes them at compile time, so the calls are
     # resolved after it.
-    around = _Scope(None, "function", set(enclosing)) if enclosing else None
+    around = _Scope(None, "annotation", set(enclosing)) if enclosing else None
     root = _Scope(_Scope.of_type_parameters(function, around), "function", _parameters(function.args))
     todo: list[tuple[ast.AST, _Scope, str | None]] = [(s, root, cls) for s in function.body]
     while todo:
@@ -5682,11 +5682,14 @@ def _callee(callee: ast.expr, scope: "_Scope", owner: str | None) -> tuple[str |
 
 @dataclass
 class _Scope:
-    """A scope inside a function _callees reads, as Python's compiler sees it: the function's own, or a function,
-    lambda, comprehension, class body or type-parameter list nested in it. It tells what a bare name read there
-    means (https://docs.python.org/3/reference/executionmodel.html#resolution-of-names)."""
-    parent: "_Scope | None"  # the scope this one is nested in; None outside the judged function's
-    kind: str  # "function" for a function's, a lambda's or a type-parameter list's; "class"; or "comprehension"
+    """A scope _callees reads a function in, as Python's compiler sees it: the function's own; a function, lambda,
+    comprehension, class body or type-parameter list nested in it; or, around the function's own, its type-parameter
+    list and those of the classes it is a method of. It tells what a bare name read there means
+    (https://docs.python.org/3/reference/executionmodel.html#resolution-of-names)."""
+    parent: "_Scope | None"  # the scope this one is nested in; None for the outermost, beyond which is the module
+    # "function" for a function's or a lambda's; "class"; "comprehension"; or "annotation" for a type-parameter
+    # list's, PEP 695's annotation scope, which unlike a function's sees the names of a class body it is directly in
+    kind: str
     bound: set[str] = field(default_factory=set)  # the names it binds, and so means by itself
     globals: set[str] = field(default_factory=set)  # the names it declares global
     nonlocals: set[str] = field(default_factory=set)  # the names it declares nonlocal
@@ -5697,7 +5700,7 @@ class _Scope:
         """The scope node's PEP 695 type parameters open inside parent, in which its annotations, bases and the
         parameters' bounds are read and its body's scope is nested; parent itself for a node with none."""
         names = _type_parameters(node)
-        return cls(parent, "function", names) if names else parent
+        return cls(parent, "annotation", names) if names else parent
 
     def bind(self, node: ast.AST) -> None:
         """Take in what node, read in this scope, binds or declares there; nothing for any other node. A nested
@@ -5728,16 +5731,19 @@ class _Scope:
         return scope
 
     def means_module(self, name: str) -> bool:
-        """Whether name, read in this scope, means the module's name rather than one a scope of the judged function
-        binds: no scope from here out to the function's own binds it, a class body counting only for a name read in
-        it, unless one on the way declares it global. Valid once _callees has read the whole function."""
+        """Whether name, read in this scope, means the module's name rather than one bound in a scope of the chain:
+        no scope from here out to the outermost binds it, unless one on the way declares it global. A class body
+        counts only for a name read in it, or read in an annotation scope directly inside it, not in a scope nested
+        in that. Valid once _callees has read the whole function."""
         scope: _Scope | None = self
+        inner: _Scope | None = None  # the scope the walk came from, None at self
         while scope is not None:
             if name in scope.globals:
                 return True
-            if name in scope.bound and name not in scope.nonlocals and (scope is self or scope.kind != "class"):
+            sees_class = inner is None or (inner is self and inner.kind == "annotation")
+            if name in scope.bound and name not in scope.nonlocals and (scope.kind != "class" or sees_class):
                 return False
-            scope = scope.parent
+            scope, inner = scope.parent, scope
         return True
 
 
