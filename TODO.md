@@ -198,6 +198,19 @@ was done.
   computes `_removal_points` for `_judged_files` and `vague_names`, which never read them; `_ChangedPythonFile` is a
   frozen dataclass with `set` fields, so its generated `__hash__` raises; `vague_names` unpacks three fields and reads
   `.why` beside them. Closes with the four changed, in one commit, when the walker is next touched.
+- **README and docs left over from the README rewrite (PR #90).** Raised by cross-review 50 (2026-10-26), in what
+  PR #90 brought, not in code:
+  - The Jenkins job path still uses the old folder name, as
+    `--quality-gate AI-Agents-Orchestrator/py-ai-agents-orchestrator-quality` (README.md, the `--quality-gate`
+    example; also docs/quality-gate.md), where the folder is `Octoflow-AI` and the job `py-octoflow-ai-quality`. The Planned rename entry above still lists the folder as not renamed.
+  - docs/architecture.md's endpoint table gives `/files?run=ID` as a list of `{"name", "mtime"}`, while
+    `RunRequestHandler`'s docstring, which the table names as the authority, gives `{"run", "files"}`.
+  - The README's `gate` example says exit 0 for OK and 1 for ERROR, but not 2, unjudged, when no quality file is
+    written.
+  - Smaller: a short line mid-paragraph in the rename entry above; the README no longer says which commands take only
+    `--machine`/`--cwd`; the `gate` example no longer names the tools it needs (ruff, mypy, pymarkdown, shellcheck,
+    actionlint).
+  Closes with those lines corrected, or the endpoint table replaced by a pointer to the docstring.
 - **`vague-names` does not split CamelCase.** `vague_names` matches a whole name or its last `_`-separated word,
   so `user_data` is found but a class `InfoManager` or `UserData` is not. Closes, if the run metrics show such names
   recur, with the last CamelCase word matched too.
