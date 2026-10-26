@@ -85,6 +85,9 @@ AGENT_START_TIMEOUT_MS = 60_000
 POLL_SECONDS = 3
 # How long a Builder or Reviewer may sit idle without its handoff file before the human is told.
 STALL_SECONDS = 180
+# How long one attempt waits for an agent to take a prompt: herdr reports it working or blocked, or its handoff
+# file appears. An agent reported idle before its input takes text, as behind a startup dialog, drops the prompt.
+PROMPT_DELIVERY_SECONDS = 30
 # A live orchestrator rewrites state.json at least this often, so `list` can tell a live run from a dead one.
 HEARTBEAT_SECONDS = 60
 # A run whose state.json is older than this is stale: five missed beats, which rides out a slow SSH hop
@@ -97,6 +100,9 @@ GITLEAKS_TIMEOUT = 300
 # What the preflight tells a user whose machine lacks gitleaks with its `git` subcommand (8.19 and later).
 GITLEAKS_INSTALL = ("install gitleaks 8.19 or later where the agents run (https://github.com/gitleaks/gitleaks#installing; "
                     "on Arch, `pacman -S gitleaks`)")
+# The comment that makes gitleaks skip its line. Spelled in two halves so that a change moving the line that holds it
+# is not refused by the push's own check for added allow comments (Host._allow_comments).
+GITLEAKS_ALLOW = "gitleaks" ":allow"
 # The namespace that marks a branch as a run's, locally and on origin; prune touches no branch outside it.
 BRANCH_PREFIX = "orchestrator/"
 REMOTE = "origin"
@@ -135,51 +141,18 @@ QUALITY_TIMEOUT = 1200
 # The orchestrator's own environment variables that hold the credentials; no process it starts inherits them.
 CI_ENV = ("JENKINS_URL", "JENKINS_USER", "JENKINS_TOKEN")
 CI_TOKENS = ("JENKINS_TOKEN",)
-# git's switches for how it reads every pathspec, which no process the orchestrator starts inherits. Its pathspecs are
-# written in git's default syntax, and each switch breaks one of them without an error: under LITERAL the linters'
-# globs and GateChange.from_tree's exclude match nothing, under NOGLOB the globs match nothing, under GLOB "*.py"
-# matches only the top level's files, and under ICASE the exclude leaves out a Mutants/ that is not mutmut's.
+# git's switches for how it reads every pathspec, which no process the orchestrator starts inherits: its pathspecs are
+# written in git's default syntax, and each switch changes what one matches without an error, as under ICASE a
+# `:(literal)` path such as _top_literal's matches a file whose name differs in case. The gate leaves them out of
+# its own processes' environment for its own pathspecs, as tool_env says.
 GIT_PATHSPEC_ENV = ("GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS")
 JOB_PARAMETERS = ("GIT_REF",)
 # Snapshots are pushed to orchestrator-ci/<key>-<round>-q<quality round>.
 CI_REF_PREFIX = "orchestrator-ci/"
 # A run's local refs are under refs/orchestrator/<key>/ (RunState.refs_prefix).
 LOCAL_REFS_PREFIX = "refs/orchestrator/"
-# Files a change may edit that alter how Jenkins and the gate judge it.
-BUILD_CONFIG_FILES = ("Jenkinsfile", "pyproject.toml", "uv.lock")
-QUALITY_ISSUE_LIMIT = 50
+# How much of a build's console the quality file of a build that failed before its Gate stage shows.
 CONSOLE_TAIL_LINES = 60
-
-GATE_OK = "OK"
-GATE_ERROR = "ERROR"
-GATE_BUILD_FAILED = "BUILD_FAILED"
-# gitleaks found a secret in the quality round's snapshot, so it was not pushed and Jenkins did not judge it.
-GATE_LEAK = "LEAK"
-# `orchestrator.py gate`: coverage of new code below GATE_MIN_COVERAGE percent fails the gate once a change has
-# GATE_MIN_NEW_LINES or more new lines to cover; a smaller change is not judged on coverage.
-GATE_MIN_COVERAGE = 80.0
-GATE_MIN_NEW_LINES = 20
-# Seconds one linter may take before the gate counts it as failed.
-GATE_TOOL_TIMEOUT = 600
-# The flaky-tests check reruns the tests a change adds or edits once under each of these pytest-randomly seeds,
-# each pytest run, the collection before them included, within FLAKY_RUN_TIMEOUT seconds; so it adds at most
-# (1 + len(FLAKY_SEEDS)) * FLAKY_RUN_TIMEOUT seconds to the gate, well inside a build's QUALITY_TIMEOUT.
-FLAKY_SEEDS = (1, 2, 3, 4, 5)
-FLAKY_RUN_TIMEOUT = 30
-# The surviving-mutants check lets mutmut run for `gate --mutation-budget` seconds, MUTATION_BUDGET by default, then
-# stops it: SIGINT, MUTMUT_STOP_GRACE seconds to exit, a kill, and MUTMUT_KILL_WAIT seconds to read what it printed.
-# Listing its results and showing what a few survivors of each function change, about a third of a second each, then
-# get MUTMUT_REPORT_TIMEOUT seconds in all, each call's stop included. So mutmut adds at most the budget and 75 seconds
-# to the gate, and copying the tree a few more: with the flaky-tests check's 180, passes-at-base's BASE_RUN_BUDGET and
-# the test run, about 990 of a quality round's QUALITY_TIMEOUT, leaving the rest to the queue and the install.
-MUTATION_BUDGET = 600
-MUTMUT_STOP_GRACE = 10
-MUTMUT_KILL_WAIT = 5
-MUTMUT_REPORT_TIMEOUT = 60
-# The passes-at-base check runs the changed tests at the base for `gate --base-run-budget` seconds, this by default.
-BASE_RUN_BUDGET = 120
-# The gate's exit status when it could not judge the change, and so wrote no quality file.
-EXIT_GATE_UNJUDGED = 2
 
 # The default workflow's roles. Each has its own --ROLE-model flag; another workflow's roles take --model.
 ROLE_LABELS = {"spec": "Spec Collector", "build": "Builder", "review": "Reviewer"}
@@ -242,10 +215,10 @@ def child_env() -> dict[str, str]:
     GIT_PATHSPEC_ENV.
 
     So the agents, which herdr, git, ssh and gh start or reach, never inherit the tokens. They can
-    still read a file the tokens came from, as the same user. And the git that the orchestrator, a linter, a test
-    the flaky-tests check reruns or mutmut runs reads each pathspec in its default syntax, whatever switch the user
-    exported. An agent does not inherit the switches either, but its pane's shell reads the user's startup files and
-    takes any they set. Over SSH this is the local ssh process's environment; the remote git reads the remote shell's.
+    still read a file the tokens came from, as the same user. And the git the orchestrator runs reads each pathspec
+    in its default syntax, whatever switch the user exported. An agent does not inherit the switches either, but its
+    pane's shell reads the user's startup files and takes any they set. Over SSH this is the local ssh process's
+    environment; the remote git reads the remote shell's.
     """
     return {k: v for k, v in os.environ.items() if k not in CI_ENV and k not in GIT_PATHSPEC_ENV}
 
@@ -1481,6 +1454,11 @@ def _top_literal(paths: list[str]) -> list[str]:
     return [f":(top,literal){p}" for p in paths]
 
 
+def _shortened(text: str, n: int = 160) -> str:
+    """text, or its first n - 1 characters and an ellipsis when it is longer than n."""
+    return text if len(text) <= n else text[:n - 1] + "…"
+
+
 class GhUnusable(OrchestratorError):
     """gh is missing or logged out where the project is, so no gh call can succeed."""
 
@@ -1734,18 +1712,16 @@ class Host:
                          *_top_literal(paths or []), verbatim=True)
         return [p for p in names.split("\0") if p]
 
-    def change_diff(self, cwd: str, base: str, commit: str | None = None, *, pathspecs: tuple[str, ...] = ()) -> str:
+    def change_diff(self, cwd: str, base: str, commit: str | None = None) -> str:
         """`git diff -U0` from base to commit, or to the working tree's tracked files without one, in the one shape
-        changed_lines parses, whatever the user's git config. With pathspecs, git's, only the files they match: a
-        rename from a file they leave out is an added file.
+        added_lines parses, whatever the user's git config.
 
         It is verbatim, as Host.run says: a line that is not UTF-8, such as Latin-1 text or a binary file that git
         diffs as text, is kept rather than refused, so a change to such a file is judged like any other, and only
         git's "\n" ends a line, so nothing inside an added line can pass for a header.
         """
         return self.git(cwd, "-c", "core.quotePath=false", "diff", "-U0", "-M", "--no-color", "--no-ext-diff",
-                        "--src-prefix=a/", "--dst-prefix=b/", base, *([commit] if commit else []), "--", *pathspecs,
-                        verbatim=True)
+                        "--src-prefix=a/", "--dst-prefix=b/", base, *([commit] if commit else []), "--", verbatim=True)
 
     def file_at(self, cwd: str, commit: str, path: str) -> str | None:
         """The file at path, relative to the repository's top level, as commit has it, verbatim as Host.run says, so
@@ -1756,27 +1732,6 @@ class Host:
         if entry.split("\t")[0].split(" ")[1:2] != ["blob"]:
             return None
         return self.git(cwd, "cat-file", "blob", f"{commit}:{path}", verbatim=True)
-
-    def changed_files(self, cwd: str, base: str, *,
-                      pathspecs: tuple[str, ...] = ()) -> list[tuple[str | None, str | None]]:
-        """(path at base, path in the working tree) of each tracked file changed since base, a rename paired as
-        change_diff pairs it; None on the side where the file does not exist. pathspecs are as for change_diff. The
-        paths are verbatim, as Host.run says, so each opens the file it names."""
-        fields = self.git(cwd, "diff", "--name-status", "-z", "-M", "--no-ext-diff", base, "--", *pathspecs,
-                          verbatim=True).split("\0")
-        out: list[tuple[str | None, str | None]] = []
-        i = 0
-        # -z gives each entry as its status, then one path, or two for a rename; the list ends with an empty field.
-        while i + 1 < len(fields):
-            status = fields[i]
-            if status.startswith("R"):
-                out.append((fields[i + 1], fields[i + 2]))
-                i += 3
-                continue
-            path = fields[i + 1]
-            out.append((None, path) if status == "A" else (path, None) if status == "D" else (path, path))
-            i += 2
-        return out
 
     def changed_line_counts(self, cwd: str, base: str, commit: str) -> list[ChangedFile]:
         """Each file the change from base to commit touches, a rename paired as change_diff pairs it, with the lines it
@@ -1882,7 +1837,7 @@ class Host:
                          "--no-banner", "--no-color", "--exit-code", "1", "--report-format", "json", "--report-path",
                          report_path, "--config", config, "--gitleaks-ignore-path", ignore, source],
                         timeout=GITLEAKS_TIMEOUT)
-        said = _clip(proc.stderr.strip().rsplit("\n", 1)[-1] or "nothing")
+        said = _shortened(proc.stderr.strip().rsplit("\n", 1)[-1] or "nothing")
         if proc.returncode not in (0, 1):
             raise OrchestratorError(f"{failed}: it exited with status {proc.returncode}: {said}")
         text = self.read(report_path)
@@ -1910,7 +1865,8 @@ class Host:
         for block in ("\n" + out).split("\n\x00")[1:]:
             commit, _, patch = block.partition("\n")
             leaks += [Leak("gitleaks-allow", path, line, commit, f"{commit}:{path}:gitleaks-allow:{line}")
-                      for path, line, text in _added_lines(patch) if "gitleaks:allow" in text]
+                      for path, lines in added_lines(patch).items() for line, text in lines.items()
+                      if GITLEAKS_ALLOW in text]
         return leaks
 
     def delete_remote_branch(self, cwd: str, branch: str) -> None:
@@ -2367,7 +2323,7 @@ def _license(info: dict) -> str | None:
     if expression := (info.get("license_expression") or "").strip():
         return expression
     if text := (info.get("license") or "").strip():
-        return _clip(text.splitlines()[0], 80)
+        return _shortened(text.splitlines()[0], 80)
     classifiers = [c for c in info.get("classifiers") or [] if c.startswith("License :: ")]
     return classifiers[0].rsplit(" :: ", 1)[1] if classifiers else None
 
@@ -2610,9 +2566,31 @@ def parse_blocked(report: str) -> str | None:
     return None
 
 
+# The engine's copy of what it needs of the quality file's format. The gate, which writes the file, is the home of
+# that format: quality_report and its sections, in the gate's block below. TestQualityFileContract checks that the
+# two agree.
+# The words of the gate line, the file's first non-blank one. Only the engine writes BUILD_FAILED, for a build that
+# ended before its Gate stage (Workflow._quality_report).
+QUALITY_OK = "OK"
+QUALITY_ERROR = "ERROR"
+QUALITY_BUILD_FAILED = "BUILD_FAILED"
+# Only the engine writes LEAK too: gitleaks found a secret in the quality round's snapshot, so it was not pushed and
+# Jenkins did not judge it (leak_report).
+QUALITY_LEAK = "LEAK"
+# The headings of the sections gate_failures reads, besides its numbered findings.
+QUALITY_FAILED_CONDITIONS = "## Failed conditions"
+QUALITY_FAILING_TESTS = "## Failing tests"
+# leak_report's section, numbering each Leak as its str gives it.
+QUALITY_SECRETS_FOUND = "## Secrets found"
+# Leads the findings to weigh, in a section of the gate's or the orchestrator's checks'.
+QUALITY_TO_WEIGH_NOTE = "These do not fail the gate. Fix each, or say in your report why it should stand."
+# The most findings a quality file lists, numbered as one list, and the most failing tests; the rest are counted.
+QUALITY_FINDINGS_LIMIT = 50
+
+
 def parse_gate(quality: str) -> str | None:
     """The gate on the quality file's first non-blank line, tolerating Markdown emphasis around it."""
-    return _first_line_word(quality, "GATE", (GATE_OK, GATE_ERROR, GATE_BUILD_FAILED, GATE_LEAK))
+    return _first_line_word(quality, "GATE", (QUALITY_OK, QUALITY_ERROR, QUALITY_BUILD_FAILED, QUALITY_LEAK))
 
 
 def _under_gate_line(quality: str, line: str) -> str:
@@ -2620,6 +2598,318 @@ def _under_gate_line(quality: str, line: str) -> str:
     lines = quality.split("\n")
     at = next((i for i, x in enumerate(lines) if x.strip()), len(lines) - 1)
     return "\n".join([*lines[:at + 1], "", line, *lines[at + 1:]])
+
+
+def leak_report(leaks: list[Leak], intro: str) -> str:
+    """The quality file of a round whose snapshot holds secrets: QUALITY_LEAK, intro, and the leaks numbered, each
+    where it is, its rule and its fingerprint, never the secret."""
+    return "\n".join([f"GATE: {QUALITY_LEAK}", "", intro, "", QUALITY_SECRETS_FOUND, "",
+                      *(f"{k}. {leak}" for k, leak in enumerate(leaks, 1))]) + "\n"
+
+
+class GateFailures(NamedTuple):
+    """What a quality file says failed the gate, in a form two quality rounds can be compared by."""
+    conditions: list[str]  # the failed conditions, as the file words them
+    # By check, the first word of a finding's rule, or "tests" for a failing test: finding_fingerprint of each
+    # finding that fails the gate, and of each failing test, in the file's order. Findings to weigh are left out.
+    # A secret, under "gitleaks", is finding_fingerprint(path, "gitleaks <rule>", "") with "-<k>" added for the k-th
+    # secret of that rule in that file, its line and commit left out, so that two rounds compare by how many each has.
+    fingerprints: dict[str, list[str]]
+
+    def repeats(self, earlier: "GateFailures") -> bool:
+        """Whether these failures are the earlier ones again: something failed, nothing that failed before was
+        fixed, and nothing new failed. A finding counts as the same wherever it moved (finding_fingerprint), a
+        condition only when its words are."""
+        now = self._all()
+        return bool(now) and now == earlier._all()
+
+    def _all(self) -> set[str]:
+        return {*self.conditions, *(f for fs in self.fingerprints.values() for f in fs)}
+
+
+def finding_fingerprint(path: str | None, rule: str, message: str) -> str:
+    """A short hash that names a finding however its line moves: its path, its rule and its message without
+    digits, since a line number in it moves too. A finding about the whole change has no path."""
+    key = "\0".join([path or "", rule, re.sub(r"\d", "", message)])
+    return hashlib.sha256(key.encode("utf-8", "surrogateescape")).hexdigest()[:16]
+
+
+# A numbered finding as _numbered_finding writes it: where, then severity, rule and message.
+_NUMBERED_FINDING = re.compile(r"\d+\. (?:`(?P<path>.+?)(?::\d+| \(the whole file\))`|The change as a whole:) "
+                               r"\S+ (?P<rule>.+?): (?P<message>.*)")
+_FAILING_TEST = re.compile(r"- `(?P<name>.+)`: .*")
+# A numbered Leak under QUALITY_SECRETS_FOUND; its commit and fingerprint name the round's snapshot, new in each round.
+_SECRET_FOUND = re.compile(r"\d+\. `(?P<path>.+):\d+` (?P<rule>\S+) in \S+ \(fingerprint `.*`\)")
+
+
+def gate_failures(quality: str) -> GateFailures:
+    """What the quality file, as the gate, judge_run and leak_report write it, says failed the gate: its failed
+    conditions, the numbered findings before a QUALITY_TO_WEIGH_NOTE in each section, its failing tests, and its
+    secrets under the check "gitleaks", each as the k-th secret of its rule in its file, wherever its line moved and
+    whichever snapshot held it, so that a round which removes one of a file's two keys of a kind is not the same
+    again."""
+    conditions: list[str] = []
+    fingerprints: dict[str, list[str]] = {}
+    secrets: collections.Counter[tuple[str, str]] = collections.Counter()
+    section, weighing = "", False
+    for line in quality.split("\n"):
+        if line.startswith("## "):
+            section, weighing = line, False
+        elif line == QUALITY_TO_WEIGH_NOTE:
+            weighing = True
+        elif section == QUALITY_FAILED_CONDITIONS and line.startswith("- "):
+            conditions.append(line[2:])
+        elif section == QUALITY_FAILING_TESTS and (test := _FAILING_TEST.fullmatch(line)):
+            fingerprints.setdefault("tests", []).append(finding_fingerprint(test["name"], "tests", ""))
+        elif section == QUALITY_SECRETS_FOUND and (secret := _SECRET_FOUND.fullmatch(line)):
+            key = (secret["path"], f"gitleaks {secret['rule']}")
+            secrets[key] += 1
+            fingerprints.setdefault("gitleaks", []).append(f"{finding_fingerprint(*key, '')}-{secrets[key]}")
+        elif not weighing and (finding := _NUMBERED_FINDING.fullmatch(line)):
+            fingerprints.setdefault(finding["rule"].split(" ", 1)[0], []).append(
+                finding_fingerprint(finding["path"], finding["rule"], finding["message"]))
+    return GateFailures(conditions, fingerprints)
+
+
+def build_failed_report(intro: str, tests: list[tuple[str, str]] | None, console: str) -> str:
+    """The quality file of a build that ended before its Gate stage, so that nothing judged the change: GATE:
+    BUILD_FAILED, then intro, then a section of tests, the (name, detail) of the failing tests Jenkins reported, None
+    when it has no test report, and one of console, the end of the build's console, unless it is empty."""
+    out = [f"GATE: {QUALITY_BUILD_FAILED}", "", intro, "", QUALITY_FAILING_TESTS, ""]
+    if tests is None:
+        out.append("Jenkins has no test report for this build.")
+    else:
+        out += [f"- `{name}`: {detail.strip().splitlines()[0] if detail.strip() else 'failed'}"
+                for name, detail in tests[:QUALITY_FINDINGS_LIMIT]] or ["None."]
+        if len(tests) > QUALITY_FINDINGS_LIMIT:
+            out.append(f"- and {len(tests) - QUALITY_FINDINGS_LIMIT} more.")
+    if console:
+        out += ["", f"## The last {CONSOLE_TAIL_LINES} lines of the build's console", "", "````", console, "````"]
+    return "\n".join(out) + "\n"
+
+
+def _scan_git_env(git_dir: str, empty_tree: str) -> list[str]:
+    """The `env` prefix under which the secret scan runs git, and gitleaks, which runs git: the repository at
+    git_dir, with no tree's attributes, so that no .gitattributes the change commits or the base holds decides how
+    git diffs a file; git diffs as text every file it takes for text by its content. empty_tree is the repository's
+    empty tree. $GIT_DIR/info/attributes and core.attributesFile still apply, which only the repository's or the
+    user's own files set, never a change.
+
+    GIT_DIR, from a directory outside the working tree, leaves out the working tree's .gitattributes. attr.tree goes
+    in as GIT_CONFIG_COUNT sets config, so that it reaches the git gitleaks starts and overrides the user's.
+    GIT_WORK_TREE, GIT_ATTR_SOURCE and GIT_CONFIG_PARAMETERS (which `git -c` exports, read after GIT_CONFIG_COUNT)
+    would bring a tree's attributes back, and are unset."""
+    return ["env", "-u", "GIT_WORK_TREE", "-u", "GIT_ATTR_SOURCE", "-u", "GIT_CONFIG_PARAMETERS",
+            f"GIT_DIR={git_dir}", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=attr.tree", f"GIT_CONFIG_VALUE_0={empty_tree}"]
+
+
+def added_lines(diff: str) -> dict[str, dict[int, str]]:
+    """For each file a `git diff -U0` touches, by its path in the new tree, the lines it gains: each one's text
+    without the +, by its line there. A file the diff touches without adding a line, such as a pure rename, one that
+    only loses lines or an empty new file, maps to an empty dict; a deleted file is left out. Only `diff --git` and
+    `@@` lines are read inside a hunk, since an added line can itself start with `+++ `. Only "\n" ends a line, as
+    in git's output: an added line can hold a carriage return, a form feed or U+2028.
+
+    The engine's own reading of Host.change_diff's shape; the gate's changed_lines reads the same shape and is the
+    home of how, so a fix to one belongs in both.
+    """
+    out: dict[str, dict[int, str]] = {}
+    path, line, in_hunk = None, 0, False
+    for text in diff.split("\n"):
+        if text.startswith("diff --git "):
+            path, in_hunk = _patch_git_path(text[len("diff --git "):]), False
+        elif text.startswith("@@"):
+            in_hunk = True
+            m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", text)
+            line = int(m.group(1)) if m else 0
+        elif not in_hunk:
+            path = _patch_header_path(out, path, text)
+        elif text.startswith("+") and path is not None:
+            out[path][line] = text[1:]
+            line += 1
+        if path is not None:
+            out.setdefault(path, {})
+    return out
+
+
+def _patch_header_path(out: dict[str, dict[int, str]], path: str | None, text: str) -> str | None:
+    """The file the diff is about after text, a header line outside a hunk, path before it; a deleted file is
+    dropped from out, as added_lines says."""
+    if text.startswith("deleted file mode") and path is not None:
+        out.pop(path, None)
+        return None
+    if text.startswith("rename to "):
+        return _patch_unquote(text[len("rename to "):])
+    if text.startswith("+++ "):
+        # git ends the name with a tab when it holds a space.
+        name = _patch_unquote(text[len("+++ "):].removesuffix("\t"))
+        return None if name == "/dev/null" else name.removeprefix("b/")
+    return path
+
+
+def _patch_git_path(names: str) -> str | None:
+    """The path of `a/<path> b/<path>`; None when the two differ, as for a rename, which later lines name."""
+    if m := re.fullmatch(r'("(?:[^"\\]|\\.)*") ("(?:[^"\\]|\\.)*")', names):
+        a, b = _patch_unquote(m.group(1)), _patch_unquote(m.group(2))
+    else:
+        half = (len(names) - 1) // 2
+        a, b = names[:half], names[half + 1:]
+    if a.startswith("a/") and b.startswith("b/") and a[2:] == b[2:]:
+        return b[2:]
+    return None
+
+
+def _patch_unquote(name: str) -> str:
+    """A path as git quotes it when it holds a quote, a backslash or a control character, or, with core.quotePath
+    on, a byte above 0x7f; any other name as it is. The path comes back as os.fsdecode makes it."""
+    if len(name) < 2 or not (name.startswith('"') and name.endswith('"')):
+        return name
+    escapes = {"a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v", '"': '"', "\\": "\\"}
+    # An octal escape is one byte of the name, so a character above 0x7f is a run of them: gather the bytes and
+    # decode them together.
+    raw = bytearray()
+    for m in re.finditer(r'\\([0-3][0-7]{2}|.)|[^\\]+|\\', name[1:-1], re.DOTALL):
+        if m.group(1) is None:
+            raw += os.fsencode(m.group(0))
+        elif len(m.group(1)) == 3:
+            raw.append(int(m.group(1), 8))
+        else:
+            raw += os.fsencode(escapes.get(m.group(1), m.group(1)))
+    return os.fsdecode(bytes(raw))
+
+
+# ---------------------------------------------------------------------------
+# The quality gate: `orchestrator.py gate`
+# ---------------------------------------------------------------------------
+
+# Everything from here to the line that ends the gate's block is the quality gate, the program behind `orchestrator.py
+# gate` that judges a change for the quality job, and nothing else: it uses no definition from outside this block,
+# and nothing outside uses one of its definitions but the gate subcommand (parse_args, herdrless_command). Where
+# both sides need a fact, each has its own copy: the gate's is its home, and the engine's comment points here.
+# The engine reads and amends what the gate writes only through the quality file (QUALITY_OK and below, above);
+# TestQualityFileContract checks that the two agree.
+
+# Files a change may edit that alter how Jenkins and the gate judge it.
+BUILD_CONFIG_FILES = ("Jenkinsfile", "pyproject.toml", "uv.lock")
+# The most findings the quality file lists, issues and findings to weigh numbered as one list, and the most failing
+# tests; the rest are counted.
+QUALITY_ISSUE_LIMIT = 50
+# The words of the quality file's first line, the gate line.
+GATE_OK = "OK"
+GATE_ERROR = "ERROR"
+# Coverage of new code below GATE_MIN_COVERAGE percent fails the gate once a change has GATE_MIN_NEW_LINES or more
+# new lines to cover; a smaller change is not judged on coverage.
+GATE_MIN_COVERAGE = 80.0
+GATE_MIN_NEW_LINES = 20
+# Seconds one linter may take before the gate counts it as failed.
+GATE_TOOL_TIMEOUT = 600
+# The flaky-tests check reruns the tests a change adds or edits once under each of these pytest-randomly seeds,
+# each pytest run, the collection before them included, within FLAKY_RUN_TIMEOUT seconds; so it adds at most
+# (1 + len(FLAKY_SEEDS)) * FLAKY_RUN_TIMEOUT seconds to the gate, well inside a build's QUALITY_TIMEOUT.
+FLAKY_SEEDS = (1, 2, 3, 4, 5)
+FLAKY_RUN_TIMEOUT = 30
+# The surviving-mutants check lets mutmut run for `gate --mutation-budget` seconds, MUTATION_BUDGET by default, then
+# stops it: SIGINT, MUTMUT_STOP_GRACE seconds to exit, a kill, and MUTMUT_KILL_WAIT seconds to read what it printed.
+# Listing its results and showing what a few survivors of each function change, about a third of a second each, then
+# get MUTMUT_REPORT_TIMEOUT seconds in all, each call's stop included. So mutmut adds at most the budget and 75 seconds
+# to the gate, and copying the tree a few more: with the flaky-tests check's 180, passes-at-base's BASE_RUN_BUDGET and
+# the test run, about 990 of a quality round's QUALITY_TIMEOUT, leaving the rest to the queue and the install.
+MUTATION_BUDGET = 600
+MUTMUT_STOP_GRACE = 10
+MUTMUT_KILL_WAIT = 5
+MUTMUT_REPORT_TIMEOUT = 60
+# The passes-at-base check runs the changed tests at the base for `gate --base-run-budget` seconds, this by default.
+BASE_RUN_BUDGET = 120
+# The gate's exit status when it could not judge the change, and so wrote no quality file.
+EXIT_GATE_UNJUDGED = 2
+
+
+class GateError(Exception):
+    """A failure that stops the gate judging a change, so it writes no quality file; the message is shown to the
+    user."""
+
+
+def tool_env() -> dict[str, str]:
+    """The environment for every process the gate starts, git, a linter, pytest or mutmut: its own, without the CI
+    credentials the orchestrator reads (JENKINS_USER and JENKINS_TOKEN, and JENKINS_URL with them) and without git's
+    switches for how it reads every pathspec.
+
+    So a test the change brings, which the flaky-tests check reruns or mutmut runs, never inherits the tokens when
+    the gate runs where they are set. And the gate's pathspecs are written in git's default syntax, which each switch
+    breaks without an error: under GIT_LITERAL_PATHSPECS the linters' globs and GateChange.from_tree's exclude match
+    nothing, under GIT_NOGLOB_PATHSPECS the globs match nothing, under GIT_GLOB_PATHSPECS "*.py" matches only the top
+    level's files, and under GIT_ICASE_PATHSPECS the exclude leaves out a Mutants/ that is not mutmut's.
+    """
+    left_out = ("JENKINS_URL", "JENKINS_USER", "JENKINS_TOKEN", "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS",
+                "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS")
+    return {k: v for k, v in os.environ.items() if k not in left_out}
+
+
+def _git_run(cwd: str, *args: str, timeout: float = 60, verbatim: bool = False) -> subprocess.CompletedProcess:
+    """git args in cwd, with tool_env, for a command whose failure the caller interprets: its exit status, standard
+    output and standard error, as text.
+
+    The output is decoded strictly in the locale's encoding, each line end made "\n". verbatim keeps it as git
+    printed it, for output that carries paths or file contents: line ends stay as they are, and bytes the file
+    system's encoding cannot decode become lone surrogates, as os.fsdecode makes them, so a path in it opens the file
+    it names. Raises GateError when git cannot be started, runs longer than timeout seconds, or, without verbatim,
+    prints what the locale's encoding cannot decode.
+    """
+    argv = ["git", "-C", cwd, *args]
+    try:
+        if not verbatim:
+            return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=tool_env(),  # noqa: S603
+                                  check=False)
+        # Bytes, decoded here: text mode cannot leave line ends alone.
+        proc = subprocess.run(argv, capture_output=True, timeout=timeout, env=tool_env(), check=False)  # noqa: S603
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise GateError(f"{shlex.join(argv)}: {e}") from e
+    except UnicodeDecodeError as e:
+        raise GateError(f"{shlex.join(argv)}: printed what is not {e.encoding.upper()}: {e}") from e
+    return subprocess.CompletedProcess(proc.args, proc.returncode, os.fsdecode(proc.stdout), os.fsdecode(proc.stderr))
+
+
+def _git(cwd: str, *args: str, timeout: float = 60, verbatim: bool = False) -> str:
+    """The standard output of git args in cwd; timeout and verbatim as for _git_run. Raises GateError as _git_run
+    does, and when git exits with a status other than 0."""
+    proc = _git_run(cwd, *args, timeout=timeout, verbatim=verbatim)
+    if proc.returncode != 0:
+        raise GateError(f"{shlex.join(['git', '-C', cwd, *args])} failed: {proc.stderr.strip()}")
+    return proc.stdout
+
+
+def _change_diff(root: str, base: str, pathspecs: tuple[str, ...] = ()) -> str:
+    """`git diff -U0` from base to the working tree's tracked files, in the one shape changed_lines parses, whatever
+    the user's git config. With pathspecs, git's, only the files they match: a rename from a file they leave out is
+    an added file.
+
+    It is verbatim, as _git_run says: a line that is not UTF-8, such as Latin-1 text or a binary file that git diffs
+    as text, is kept rather than refused, so a change to such a file is judged like any other, and only git's "\n"
+    ends a line, so nothing inside an added line can pass for a header. Raises GateError as _git does.
+    """
+    return _git(root, "-c", "core.quotePath=false", "diff", "-U0", "-M", "--no-color", "--no-ext-diff",
+                "--src-prefix=a/", "--dst-prefix=b/", base, "--", *pathspecs, verbatim=True)
+
+
+def _changed_files(root: str, base: str, pathspecs: tuple[str, ...] = ()) -> list[tuple[str | None, str | None]]:
+    """(path at base, path in the working tree) of each tracked file changed since base, a rename paired as
+    _change_diff pairs it; None on the side where the file does not exist. pathspecs are as for _change_diff. The
+    paths are verbatim, as _git_run says, so each opens the file it names. Raises GateError as _git does."""
+    fields = _git(root, "diff", "--name-status", "-z", "-M", "--no-ext-diff", base, "--", *pathspecs,
+                  verbatim=True).split("\0")
+    out: list[tuple[str | None, str | None]] = []
+    i = 0
+    # -z gives each entry as its status, then one path, or two for a rename; the list ends with an empty field.
+    while i + 1 < len(fields):
+        status = fields[i]
+        if status.startswith("R"):
+            out.append((fields[i + 1], fields[i + 2]))
+            i += 3
+            continue
+        path = fields[i + 1]
+        out.append((None, path) if status == "A" else (path, None) if status == "D" else (path, path))
+        i += 2
+    return out
 
 
 def changed_lines(diff: str) -> dict[str, set[int]]:
@@ -2655,38 +2945,6 @@ def _hunk_positions(diff: str, positions: Callable[[str], Iterable[int]]) -> dic
         elif not in_hunk:
             path = _header_path(out, path, line)
     return out
-
-
-def _scan_git_env(git_dir: str, empty_tree: str) -> list[str]:
-    """The `env` prefix under which the secret scan runs git, and gitleaks, which runs git: the repository at
-    git_dir, with no tree's attributes, so that no .gitattributes the change commits or the base holds decides how
-    git diffs a file; git diffs as text every file it takes for text by its content. empty_tree is the repository's
-    empty tree. $GIT_DIR/info/attributes and core.attributesFile still apply, which only the repository's or the
-    user's own files set, never a change.
-
-    GIT_DIR, from a directory outside the working tree, leaves out the working tree's .gitattributes. attr.tree goes
-    in as GIT_CONFIG_COUNT sets config, so that it reaches the git gitleaks starts and overrides the user's.
-    GIT_WORK_TREE, GIT_ATTR_SOURCE and GIT_CONFIG_PARAMETERS (which `git -c` exports, read after GIT_CONFIG_COUNT)
-    would bring a tree's attributes back, and are unset."""
-    return ["env", "-u", "GIT_WORK_TREE", "-u", "GIT_ATTR_SOURCE", "-u", "GIT_CONFIG_PARAMETERS",
-            f"GIT_DIR={git_dir}", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=attr.tree", f"GIT_CONFIG_VALUE_0={empty_tree}"]
-
-
-def _added_lines(diff: str) -> Iterator[tuple[str, int, str]]:
-    """Each line a `git diff -U0` adds, as (its file's path in the new tree, its line there, its text without the
-    +), the headers read as changed_lines reads them: inside a hunk only `diff --git` and `@@` lines are structure."""
-    paths: dict[str, set[int]] = {}
-    path, line, in_hunk = None, 0, False
-    for text in diff.split("\n"):
-        if text.startswith("diff --git "):
-            path, in_hunk = _note_path(paths, _diff_git_path(text[len("diff --git "):])), False
-        elif text.startswith("@@"):
-            in_hunk, line = True, _hunk_lines(text).start
-        elif not in_hunk:
-            path = _header_path(paths, path, text)
-        elif text.startswith("+") and path is not None:
-            yield path, line, text[1:]
-            line += 1
 
 
 def _note_path(out: dict[str, set[int]], path: str | None) -> str | None:
@@ -2757,123 +3015,46 @@ def _unquote(name: str) -> str:
     return os.fsdecode(bytes(raw))
 
 
-# quality_report's default for tests: the file has no tests section, as when the gate wrote it, which runs no tests.
-_NO_TESTS_SECTION: list = []
-# The headings of the quality file's sections that gate_failures reads, besides its numbered findings.
+# The headings of the quality file's sections that the orchestrator reads back, besides its numbered findings, to
+# tell whether a quality round failed as the one before it did; the format's home, as the block's opening says.
 FAILED_CONDITIONS = "## Failed conditions"
 FAILING_TESTS = "## Failing tests"
-# leak_report's section, numbering each Leak as its str gives it.
-SECRETS_FOUND = "## Secrets found"
 
 
 def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (), issues=(), to_weigh=(),
-                   elsewhere: int = 0, tests: list[tuple[str, str]] | None = _NO_TESTS_SECTION,
+                   elsewhere: int = 0, tests: list[tuple[str, str]] | None = None,
                    coverage: str | None = None, suppressions: list[tuple[str, int, str]] | tuple = (),
-                   console: str = "", edited=(), rules_from: str | None = None, mutmut_state=()) -> str:
-    """The quality file: the gate on its first line, then what the Builder has to answer.
+                   edited=(), rules_from: str | None = None, mutmut_state=()) -> str:
+    """The quality file: the gate, GATE_OK or GATE_ERROR, on its first line, then what the Builder has to answer.
 
     conditions are the failed ones, each a sentence. issues, the findings that fail the gate, and to_weigh,
     the ones that do not, are {path, line, severity, rule, message} as tool_findings gives them, line None
     for one about the whole file and path None for one about the whole change. Both are listed in the order
     given and numbered as one list, issues first, at most QUALITY_ISSUE_LIMIT in all; the rest are counted.
-    elsewhere counts the linter findings left out for not being on lines the change added. With gate
-    BUILD_FAILED, nothing judged the change, so neither list nor the count appears. tests are the failing
-    tests Jenkins reported, None when it has no test report; left out, the file has no tests section.
-    coverage is the sentence about coverage of new code, None for no such section. suppressions are the
-    (path, line, text) of lint suppressions the change added. edited are the BUILD_CONFIG_FILES the change
-    edits; rules_from names the file the gate took its rules from when that was not the edited
-    pyproject.toml. mutmut_state are the files the change adds or edits under mutmut's state, as mutmut_state_files
-    gives them.
+    elsewhere counts the linter findings left out for not being on lines the change added. tests are the
+    (name, detail) of the failing tests of the test report the gate was given, None for no tests section, as when
+    it was given none. coverage is the sentence about coverage of new code, None for no such section.
+    suppressions are the (path, line, text) of lint suppressions the change added. edited are the
+    BUILD_CONFIG_FILES the change edits; rules_from names the file the gate took its rules from when that was not
+    the edited pyproject.toml. mutmut_state are the files the change adds or edits under mutmut's state, as
+    mutmut_state_files gives them.
     """
     out = [f"GATE: {gate}", "", intro]
     if conditions:
         out += ["", FAILED_CONDITIONS, "", *(f"- {c}" for c in conditions)]
-    if gate != GATE_BUILD_FAILED:
-        out += _issues_section(issues, elsewhere)
-        if to_weigh:
-            out += _to_weigh_section(to_weigh, after=min(len(issues), QUALITY_ISSUE_LIMIT))
-    if tests is not _NO_TESTS_SECTION:
+    out += _issues_section(issues, elsewhere)
+    if to_weigh:
+        out += _to_weigh_section(to_weigh, after=min(len(issues), QUALITY_ISSUE_LIMIT))
+    if tests is not None:
         out += _tests_section(tests)
     if coverage is not None:
         out += ["", "## Coverage on new code", "", coverage]
     if suppressions:
         out += ["", "## Suppressions added", "",
                 *(f"- `{path}:{line}` `{text}`" for path, line, text in suppressions)]
-    if console:
-        out += ["", f"## The last {CONSOLE_TAIL_LINES} lines of the build's console", "", "````", console, "````"]
     if edited or mutmut_state:
         out += _config_section(edited, rules_from, mutmut_state)
     return "\n".join(out) + "\n"
-
-
-def leak_report(leaks: list[Leak], intro: str) -> str:
-    """The quality file of a round whose snapshot holds secrets: GATE_LEAK, intro, and the leaks numbered, each
-    where it is, its rule and its fingerprint, never the secret."""
-    return "\n".join([f"GATE: {GATE_LEAK}", "", intro, "", SECRETS_FOUND, "",
-                      *(f"{k}. {leak}" for k, leak in enumerate(leaks, 1))]) + "\n"
-
-
-class GateFailures(NamedTuple):
-    """What a quality file says failed the gate, in a form two quality rounds can be compared by."""
-    conditions: list[str]  # the failed conditions, as the file words them
-    # By check, the first word of a finding's rule, or "tests" for a failing test: finding_fingerprint of each
-    # finding that fails the gate, and of each failing test, in the file's order. Findings to weigh are left out.
-    # A secret, under "gitleaks", is finding_fingerprint(path, "gitleaks <rule>", "") with "-<k>" added for the k-th
-    # secret of that rule in that file, its line and commit left out, so that two rounds compare by how many each has.
-    fingerprints: dict[str, list[str]]
-
-    def repeats(self, earlier: "GateFailures") -> bool:
-        """Whether these failures are the earlier ones again: something failed, nothing that failed before was
-        fixed, and nothing new failed. A finding counts as the same wherever it moved (finding_fingerprint), a
-        condition only when its words are."""
-        now = self._all()
-        return bool(now) and now == earlier._all()
-
-    def _all(self) -> set[str]:
-        return {*self.conditions, *(f for fs in self.fingerprints.values() for f in fs)}
-
-
-def finding_fingerprint(path: str | None, rule: str, message: str) -> str:
-    """A short hash that names a finding however its line moves: its path, its rule and its message without
-    digits, since a line number in it moves too. A finding about the whole change has no path."""
-    key = "\0".join([path or "", rule, re.sub(r"\d", "", message)])
-    return hashlib.sha256(key.encode("utf-8", "surrogateescape")).hexdigest()[:16]
-
-
-# A numbered finding as _numbered writes it: where, then severity, rule and message.
-_NUMBERED_FINDING = re.compile(r"\d+\. (?:`(?P<path>.+?)(?::\d+| \(the whole file\))`|The change as a whole:) "
-                               r"\S+ (?P<rule>.+?): (?P<message>.*)")
-_FAILING_TEST = re.compile(r"- `(?P<name>.+)`: .*")
-# A numbered Leak under SECRETS_FOUND; its commit and fingerprint name the round's snapshot, new in each round.
-_SECRET_FOUND = re.compile(r"\d+\. `(?P<path>.+):\d+` (?P<rule>\S+) in \S+ \(fingerprint `.*`\)")
-
-
-def gate_failures(quality: str) -> GateFailures:
-    """What the quality file, as quality_report, judge_run and leak_report write it, says failed the gate: its failed
-    conditions, the numbered findings before a TO_WEIGH_NOTE in each section, its failing tests, and its secrets
-    under the check "gitleaks", each as the k-th secret of its rule in its file, wherever its line moved and whichever
-    snapshot held it, so that a round which removes one of a file's two keys of a kind is not the same again."""
-    conditions: list[str] = []
-    fingerprints: dict[str, list[str]] = {}
-    secrets: collections.Counter[tuple[str, str]] = collections.Counter()
-    section, weighing = "", False
-    for line in quality.split("\n"):
-        if line.startswith("## "):
-            section, weighing = line, False
-        elif line == TO_WEIGH_NOTE:
-            weighing = True
-        elif section == FAILED_CONDITIONS and line.startswith("- "):
-            conditions.append(line[2:])
-        elif section == FAILING_TESTS and (test := _FAILING_TEST.fullmatch(line)):
-            fingerprints.setdefault("tests", []).append(finding_fingerprint(test["name"], "tests", ""))
-        elif section == SECRETS_FOUND and (secret := _SECRET_FOUND.fullmatch(line)):
-            key = (secret["path"], f"gitleaks {secret['rule']}")
-            secrets[key] += 1
-            fingerprints.setdefault("gitleaks", []).append(f"{finding_fingerprint(*key, '')}-{secrets[key]}")
-        elif not weighing and (finding := _NUMBERED_FINDING.fullmatch(line)):
-            fingerprints.setdefault(finding["rule"].split(" ", 1)[0], []).append(
-                finding_fingerprint(finding["path"], finding["rule"], finding["message"]))
-    return GateFailures(conditions, fingerprints)
 
 
 # The sections of quality_report after its first, each as lines that start with a blank one.
@@ -2896,7 +3077,7 @@ def _issues_section(issues, elsewhere: int) -> list[str]:
     return out
 
 
-# Leads the findings to weigh, in a section of the gate's or the orchestrator's checks'.
+# Leads the findings to weigh; the orchestrator reads the numbered findings after it as ones that do not fail the gate.
 TO_WEIGH_NOTE = "These do not fail the gate. Fix each, or say in your report why it should stand."
 
 
@@ -2923,10 +3104,8 @@ def _numbered(k: int, finding: dict) -> str:
     return f"{k}. {where} {finding['severity']} {finding['rule']}: {finding['message']}"
 
 
-def _tests_section(tests: list[tuple[str, str]] | None) -> list[str]:
+def _tests_section(tests: list[tuple[str, str]]) -> list[str]:
     out = ["", FAILING_TESTS, ""]
-    if tests is None:
-        return out + ["Jenkins has no test report for this build."]
     out += [f"- `{name}`: {detail.strip().splitlines()[0] if detail.strip() else 'failed'}"
             for name, detail in tests[:QUALITY_ISSUE_LIMIT]] or ["None."]
     if len(tests) > QUALITY_ISSUE_LIMIT:
@@ -2965,10 +3144,6 @@ def mutmut_state_files(changed: dict[str, set[int]]) -> list[str]:
     gives it: the files GateChange.from_tree leaves out of what the checks see."""
     return sorted(f for f in changed if f == _MUTMUT_STATE or f.startswith(f"{_MUTMUT_STATE}/"))
 
-
-# ---------------------------------------------------------------------------
-# The quality gate: `orchestrator.py gate`
-# ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class GateTool:
@@ -3024,9 +3199,9 @@ class GateChange:
     """The change the gate judges, as each GateCheck is given it; from_tree makes one."""
     root: str  # the repository's top level; its working tree is the change's new side
     base: str  # the commit the change is judged against, a full sha
-    diff: str  # Host.change_diff from base to the working tree, of the files the checks see
+    diff: str  # _change_diff from base to the working tree, of the files the checks see
     changed: dict[str, set[int]]  # changed_lines(diff)
-    files: list[tuple[str | None, str | None]]  # Host.changed_files from base, of the files the checks see
+    files: list[tuple[str | None, str | None]]  # _changed_files from base, of the files the checks see
     # The path of the pyproject.toml whose rules judge the change, as judge_change passes it: `gate --config`'s, else
     # the tree's own. None, which only a caller other than judge_change passes, also means the tree's own.
     rules: str | None = None
@@ -3041,10 +3216,10 @@ class GateChange:
         file moved out of it is an added file, and one moved into it a deleted one. That is the one place mutmut's
         state is left out; the linters and the build-configuration listing see it as any other tracked file.
 
-        Raises OrchestratorError when git cannot diff the tree against base."""
-        host, pathspecs = Host(), (f":(top,exclude,literal){_MUTMUT_STATE}",)
-        diff = host.change_diff(root, base, pathspecs=pathspecs)
-        return cls(root, base, diff, changed_lines(diff), host.changed_files(root, base, pathspecs=pathspecs), rules)
+        Raises GateError when git cannot diff the tree against base."""
+        pathspecs = (f":(top,exclude,literal){_MUTMUT_STATE}",)
+        diff = _change_diff(root, base, pathspecs)
+        return cls(root, base, diff, changed_lines(diff), _changed_files(root, base, pathspecs), rules)
 
 
 @dataclass(frozen=True)
@@ -3117,30 +3292,29 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
     against it. Paths are absolute or relative to the process's working directory. A file name that is not UTF-8 appears
     in the quality file with each byte it cannot decode as `\\xNN`.
 
-    Raises OrchestratorError when it cannot judge: cwd is not in a git work tree, base names no commit, there
+    Raises GateError when it cannot judge: cwd is not in a git work tree, base names no commit, there
     is no rules file, the test or coverage report cannot be read, or git prints what it cannot decode outside
     the paths and diffs it reads verbatim, such as a work tree whose own path is not UTF-8.
     """
-    host = Host()
-    proc = host.git_run(cwd, "rev-parse", "--show-toplevel")
+    proc = _git_run(cwd, "rev-parse", "--show-toplevel")
     if proc.returncode != 0:
-        raise OrchestratorError(f"{cwd} is not in a git work tree")
+        raise GateError(f"{cwd} is not in a git work tree")
     root = proc.stdout.strip()
-    proc = host.git_run(root, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}")
+    proc = _git_run(root, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}")
     if proc.returncode != 0:
-        raise OrchestratorError(f"{base} names no commit in {root}")
+        raise GateError(f"{base} names no commit in {root}")
     base_sha = proc.stdout.strip()
     rules_path = os.path.abspath(rules) if rules else os.path.join(root, "pyproject.toml")
     if not os.path.isfile(rules_path):
-        raise OrchestratorError(f"no rules: {rules_path} is not a file")
+        raise GateError(f"no rules: {rules_path} is not a file")
 
-    diff = host.change_diff(root, base_sha)
+    diff = _change_diff(root, base_sha)
     changed = changed_lines(diff)
-    tracked = {f for f in host.git(root, "ls-files", "-z", verbatim=True).split("\0") if f}
+    tracked = {f for f in _git(root, "ls-files", "-z", verbatim=True).split("\0") if f}
     conditions, findings = [], []
     reads: list[tuple[GateTool, list[str]]] = []  # each linter, with the tracked files it reads
     for tool in GATE_TOOLS:
-        files = [f for f in host.git(root, "ls-files", "-z", "--", *tool.pathspecs, verbatim=True).split("\0")
+        files = [f for f in _git(root, "ls-files", "-z", "--", *tool.pathspecs, verbatim=True).split("\0")
                  if f]
         reads.append((tool, files))
         if files:
@@ -3167,7 +3341,7 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
             issues += errors
             conditions.append(_check_condition(check.name, len(errors)))
 
-    failing = _NO_TESTS_SECTION
+    failing: list[tuple[str, str]] | None = None
     if tests:
         failing = failing_tests(os.path.abspath(tests))
         if failing:
@@ -3182,7 +3356,7 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
                               f"least {GATE_MIN_COVERAGE:g}% once a change has {GATE_MIN_NEW_LINES} or more new "
                               f"lines to cover.")
 
-    head = host.git(root, "rev-parse", "HEAD").strip()
+    head = _git(root, "rev-parse", "HEAD").strip()
     intro = (f"`orchestrator.py gate` judged the working tree at `{head}` against the base `{base_sha}`"
              + (f", by the rules in `{rules}`." if rules else "."))
     text = quality_report(GATE_ERROR if conditions else GATE_OK, intro, conditions=conditions, issues=issues,
@@ -3201,14 +3375,14 @@ def _run_gate_tool(tool: GateTool, root: str, rules: str, files: list[str],
     try:
         # The command is a fixed tool's, and the files are git's list of tracked ones; no shell reads either.
         proc = subprocess.run(tool.command(rules, files), cwd=root, capture_output=True,  # noqa: S603
-                              timeout=GATE_TOOL_TIMEOUT, env=child_env(), check=False)
+                              timeout=GATE_TOOL_TIMEOUT, env=tool_env(), check=False)
     except FileNotFoundError:
         return [], f"`{tool.name}` is not installed: it is not on PATH."
     except subprocess.TimeoutExpired:
         return [], f"`{tool.name}` did not finish within {GATE_TOOL_TIMEOUT} seconds."
     except OSError as e:
         return [], f"`{tool.name}` could not be started: {e}."
-    # Decoded as Host.run's verbatim output is, so the paths it prints match git's and keep their line ends.
+    # Decoded as _git_run's verbatim output is, so the paths it prints match git's and keep their line ends.
     stdout, stderr = os.fsdecode(proc.stdout), os.fsdecode(proc.stderr)
     found = tool_findings(tool, stdout, root, tracked)
     if proc.returncode == 0 or (proc.returncode == tool.findings_status and found):
@@ -3260,7 +3434,7 @@ def _lossy_names(tracked: set[str]) -> dict[str, str | None]:
 
 def failing_tests(report: str) -> list[tuple[str, str]]:
     """(test, what failed) for each failing or erroring test case of a JUnit XML report, such as pytest's
-    --junitxml. Raises OrchestratorError when the report cannot be read or parsed."""
+    --junitxml. Raises GateError when the report cannot be read or parsed."""
     return [(name, detail) for name, outcome, detail in junit_outcomes(report) if outcome == "failed"]
 
 
@@ -3268,12 +3442,12 @@ def junit_outcomes(report: str) -> list[tuple[str, str, str]]:
     """(test, outcome, what failed) for each test case of a JUnit XML report, such as pytest's --junitxml, test
     named classname.name. outcome is "failed" for a failure or an error, with its message; else, with "",
     "xfailed" for a test that failed as an xfail mark expected (pytest's <skipped type="pytest.xfail">), "skipped"
-    for any other skip, or "passed". Raises OrchestratorError when the report cannot be read or parsed."""
+    for any other skip, or "passed". Raises GateError when the report cannot be read or parsed."""
     try:
         # As for new_coverage: the build's own test run wrote it, and expat refuses the S314 attacks.
         tree = ElementTree.parse(report)  # noqa: S314
     except (OSError, ElementTree.ParseError) as e:
-        raise OrchestratorError(f"cannot read the test report {report}: {e}") from e
+        raise GateError(f"cannot read the test report {report}: {e}") from e
     out = []
     for case in tree.iter("testcase"):
         name = f"{case.get('classname', '')}.{case.get('name', '')}".strip(".")
@@ -3291,14 +3465,14 @@ def new_coverage(report: str, root: str, changed: dict[str, set[int]]) -> NewCov
     """Coverage of the changed lines, from a Cobertura report such as pytest-cov's coverage.xml.
 
     The report's paths are relative to its <source> directories; a changed line it does not list is not
-    coverable, like a comment. Raises OrchestratorError when the report cannot be read or parsed.
+    coverable, like a comment. Raises GateError when the report cannot be read or parsed.
     """
     try:
         # The report comes from the build's own test run, and the expat Python 3.13 bundles refuses the entity
         # expansion attacks S314 is about (https://docs.python.org/3/library/xml.html#xml-vulnerabilities).
         tree = ElementTree.parse(report)  # noqa: S314
     except (OSError, ElementTree.ParseError) as e:
-        raise OrchestratorError(f"cannot read the coverage report {report}: {e}") from e
+        raise GateError(f"cannot read the coverage report {report}: {e}") from e
     sources = [s.text.strip() for s in tree.iterfind("sources/source") if s.text and s.text.strip()] or [root]
     real_root = os.path.realpath(root)
     lines = covered_lines = conditions = covered_conditions = 0
@@ -3319,7 +3493,7 @@ def new_coverage(report: str, root: str, changed: dict[str, set[int]]) -> NewCov
                     covered_conditions += int(m.group(1))
                     conditions += int(m.group(2))
             except ValueError as e:
-                raise OrchestratorError(f"the coverage report {report} has a line it cannot read: {e}") from e
+                raise GateError(f"the coverage report {report} has a line it cannot read: {e}") from e
     return NewCoverage(lines, covered_lines, conditions, covered_conditions)
 
 
@@ -3338,7 +3512,7 @@ def _floor_tenth(percent: float) -> str:
 
 def added_suppressions(root: str, changed: dict[str, set[int]]) -> list[tuple[str, int, str]]:
     """The (path, line, text) of each added line, in the working tree at root, that silences a linter or coverage.
-    Raises OrchestratorError when a file the change adds lines to cannot be read."""
+    Raises GateError when a file the change adds lines to cannot be read."""
     out = []
     for path, added, lines in _files_with_added_lines(root, changed):
         for n, line in enumerate(lines, 1):
@@ -3352,7 +3526,7 @@ def stray_line_ends(root: str, changed: dict[str, set[int]],
     """(path, line, the character) for each file in changed that a linter reads and whose working tree at root
     holds one of that linter's GateTool.line_ends at or before the last line the change added: the first line that
     holds one, whichever commit added it. reads pairs each linter with the tracked files it reads. Raises
-    OrchestratorError when such a file cannot be read.
+    GateError when such a file cannot be read.
     """
     line_ends: dict[str, set[str]] = {}
     for tool, files in reads:
@@ -3374,7 +3548,7 @@ def _files_with_added_lines(root: str, changed: dict[str, set[int]]) -> Iterator
 
     The lines are numbered as git numbers them: split at b"\n" alone, each without it, so line n is lines[n - 1].
     A symlink's one line is the name it points to, which is what git diffs, not its target's text. A directory,
-    such as a submodule, whose commit is what changed, is left out. Raises OrchestratorError when a file cannot be
+    such as a submodule, whose commit is what changed, is left out. Raises GateError when a file cannot be
     read.
     """
     for path, added in sorted(changed.items()):
@@ -3390,7 +3564,7 @@ def _files_with_added_lines(root: str, changed: dict[str, set[int]]) -> Iterator
         except IsADirectoryError:
             continue
         except OSError as e:
-            raise OrchestratorError(f"cannot read {path}, which the change edits: {e}") from e
+            raise GateError(f"cannot read {path}, which the change edits: {e}") from e
         yield path, added, text.split(b"\n")
 
 
@@ -3422,7 +3596,6 @@ def weakened_tests(change: GateChange) -> list[dict]:
     """The test-integrity check's find: in each WEAKENED_TESTS_DETECTORS language, the tests the change removed,
     skipped, stripped of assertions or wrapped in a swallowed error, and the expected values it changed together
     with the code under test. The change leaves out mutmut's state, as GateChange.from_tree says."""
-    host = Host()
     out: list[dict] = []
     for detector in WEAKENED_TESTS_DETECTORS:
         files, unreadable = [], []
@@ -3431,10 +3604,10 @@ def weakened_tests(change: GateChange) -> list[dict]:
                 continue
             try:
                 files.append(ChangedTestFile(
-                    old, new, before=host.git(change.root, "show", f"{change.base}:{old}") if old else "",
+                    old, new, before=_git(change.root, "show", f"{change.base}:{old}") if old else "",
                     after=_read_text(os.path.join(change.root, new)) if new else "",
                     added=change.changed.get(new, set()) if new else set()))
-            except (OrchestratorError, OSError, UnicodeDecodeError) as e:
+            except (GateError, OSError, UnicodeDecodeError) as e:
                 unreadable.append(_finding(new or old, None, "unreadable",
                                            f"could not be read, so its tests were not checked: {e}", severity="error"))
         code_changed = any(detector.is_source(p) and not detector.is_test(p)
@@ -3841,7 +4014,7 @@ def _rerun_findings(root: str, tmp: str, tests: dict[tuple[str, str], int]) -> l
     tree = os.path.join(tmp, "tree")
     try:
         _copy_tracked(root, tree)
-    except (OSError, OrchestratorError) as e:
+    except (OSError, GateError) as e:
         return [_finding(None, None, "not-rerun", f"could not copy the tracked files to rerun the changed "
                                                   f"tests in: {e}; the changed tests were not rerun.")]
     try:
@@ -3967,9 +4140,9 @@ def _ini_sections(text: str) -> list[str]:
 def _copy_tracked(root: str, dest: str) -> None:
     """Copy the files git tracks in the working tree at root, as they are there, to the same paths under dest, a
     directory it makes, with its parents. A symbolic link is copied as a link and a submodule as its directory; a
-    tracked file missing from the working tree is left out. Raises OrchestratorError when git cannot list the files,
+    tracked file missing from the working tree is left out. Raises GateError when git cannot list the files,
     and OSError when dest exists or a file cannot be copied; dest may then hold part of the copy."""
-    names = sorted({n for n in Host().git(root, "ls-files", "-z", verbatim=True).split("\0") if n})
+    names = sorted({n for n in _git(root, "ls-files", "-z", verbatim=True).split("\0") if n})
     os.makedirs(dest)
     for name in names:
         src, dst = os.path.join(root, name), os.path.join(dest, name)
@@ -4058,7 +4231,7 @@ def _rerun_python_tests(root: str, inifile: str, ids: list[str], seed: int,
         return {}, f"pytest, {doing}, wrote no test report: {_said(proc)}"
     try:
         cases = junit_outcomes(report)
-    except OrchestratorError as e:
+    except GateError as e:
         return {}, f"pytest, {doing}, wrote a report the gate cannot read: {e}"
     by_case = {_junit_case(i): i for i in ids}
     rank = ("skipped", "passed", "xfailed", "failed")
@@ -4085,13 +4258,13 @@ def _pytest(root: str, inifile: str, doing: str, args: list[str], *, timeout: fl
             env: dict[str, str] | None = None) -> tuple[subprocess.CompletedProcess | None, str | None]:
     """pytest run at verbosity -1, for test cases too, in the gate's own interpreter at root, without its cache, with
     the configuration in inifile and args, taking no configuration or conftest.py from above root, and env's
-    variables beside child_env's; its output unbuffered, so that what it printed before a kill is whole. And the
+    variables beside tool_env's; its output unbuffered, so that what it printed before a kill is whole. And the
     problem, a clause naming doing, when it could not start, took longer than timeout seconds or exited with a
     status outside ok (by default 0, all passed, and 1, some failed); then the run is None when pytest did not start,
     a _PytestStopped when timeout stopped it, and else the run that exited so. pytest runs in a session of its own,
     and when it returns every process in that session, such as a server a test started, is gone; one stopped at
     timeout is killed with them, and what it printed is read for at most MUTMUT_KILL_WAIT seconds more. pytest
-    writes a name that is not UTF-8 as its bytes, and its output is decoded as Host.run's verbatim output is, so the
+    writes a name that is not UTF-8 as its bytes, and its output is decoded as _git_run's verbatim output is, so the
     node ids in it hold paths as git's do, and only "\n" ends a line. pytest-randomly 5.0.0 cannot shuffle such a
     name: under -p randomly pytest stops with an internal error."""
     # --verbosity sets the level outright, and pytest reads the project's addopts and PYTEST_ADDOPTS before the
@@ -4107,7 +4280,7 @@ def _pytest(root: str, inifile: str, doing: str, args: list[str], *, timeout: fl
         # A fixed command over the node ids pytest itself collected; no shell reads it.
         raw = subprocess.Popen(argv, cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,  # noqa: S603
                                stderr=subprocess.PIPE, start_new_session=True,
-                               env={**child_env(), **(env or {}), "PYTHONIOENCODING": "utf-8:surrogateescape",
+                               env={**tool_env(), **(env or {}), "PYTHONIOENCODING": "utf-8:surrogateescape",
                                     "PYTHONUNBUFFERED": "1"})
     except OSError as e:
         return None, f"could not start pytest, {doing}: {e}"
@@ -4131,7 +4304,7 @@ def _pytest(root: str, inifile: str, doing: str, args: list[str], *, timeout: fl
 def _said(proc: subprocess.CompletedProcess) -> str:
     """What a tool that went wrong, such as pytest or mutmut, said about it, in a line: the exception of a pytest
     internal error, else the exception that ended it when it printed a traceback, else the first line of its
-    standard error, else the last line of its output. Only "\n" ends a line, as in the verbatim output of Host.run,
+    standard error, else the last line of its output. Only "\n" ends a line, as in the verbatim output of _git_run,
     so a path in it stays whole."""
     err = [line.strip() for line in proc.stderr.split("\n") if line.strip()]
     out = [line.strip() for line in proc.stdout.split("\n") if line.strip()]
@@ -4230,7 +4403,7 @@ def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str]
     try:
         _copy_base_with_tests(change, tree, os.path.join(tmp, "base.tar"))
         os.mkdir(scratch)
-    except (OSError, tarfile.TarError, OrchestratorError) as e:
+    except (OSError, tarfile.TarError, GateError) as e:
         return [_finding(None, None, "not-run", f"could not copy the base to run the changed tests in: {e}; the "
                                                 f"changed tests were not run there.")]
     try:
@@ -4262,7 +4435,7 @@ def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str]
         return [_finding(None, None, "not-run", f"{problem}; the changed tests were not judged.")]
     try:
         cases = junit_outcomes(report)
-    except OrchestratorError as e:
+    except GateError as e:
         return [_finding(None, None, "not-run", f"pytest, running the changed tests at the base, wrote no report the "
                                                 f"gate can read ({e}): {_said(proc)}")]
     # Each test's outcomes at the base, its skips left out.
@@ -4341,9 +4514,9 @@ def _copy_base_with_tests(change: GateChange, dest: str, archive: str) -> None:
     wherever it points, and no file is written or removed through one: a link on the way to a replaced file is
     replaced by a directory, as the working tree has one there. A submodule is an empty directory, as git archive
     leaves it.
-    Raises OrchestratorError when git cannot write the archive, tarfile.TarError when it cannot be unpacked, and
+    Raises GateError when git cannot write the archive, tarfile.TarError when it cannot be unpacked, and
     OSError when dest exists or a file cannot be written."""
-    Host().git(change.root, "archive", "--format=tar", f"--output={archive}", change.base, timeout=GATE_TOOL_TIMEOUT)
+    _git(change.root, "archive", "--format=tar", f"--output={archive}", change.base, timeout=GATE_TOOL_TIMEOUT)
     os.makedirs(dest)
     with tarfile.open(archive) as tar:
         # "tar", not "data": a tracked link out of the tree is the repository's own; both refuse a member whose path
@@ -4494,7 +4667,7 @@ def _mutmut_on_copy(root: str, tmp: str, functions: list[_ChangedFunction], tabl
         _use_mutmut_table(tree_copy, {**table, "also_copy": also_copy,
                                       "pytest_add_cli_args": [*added, "-c", config, "--confcutdir", mutants]})
         run, stopped = _run_mutmut(tree_copy, ["run"], budget)
-    except (OSError, OrchestratorError) as e:
+    except (OSError, GateError) as e:
         return [_mutation_not_run(f"could not start mutmut: {e}")]
     except ValueError as e:
         return [_mutation_not_run(str(e))]
@@ -4787,7 +4960,7 @@ def _run_mutmut(tree_copy: str, args: list[str], timeout: float) -> tuple[subpro
     MUTMUT_KILL_WAIT seconds more, and lost when a process outside the group holds its output open. So it returns
     within timeout + MUTMUT_STOP_GRACE + MUTMUT_KILL_WAIT seconds, every process in its group gone. Its temporary
     files, and those of the tests it runs, go into tree_copy's .tmp, so that what a test it killed left goes with
-    it. Its output is decoded as Host.run's verbatim output is, since its mutant names and diffs hold paths and
+    it. Its output is decoded as _git_run's verbatim output is, since its mutant names and diffs hold paths and
     source lines: only "\n" ends a line. Raises OSError when it cannot be started.
     """
     # `mutmut`, its console script, runs this line. `python -m mutmut` would import its __main__ a second time in each
@@ -4798,7 +4971,7 @@ def _run_mutmut(tree_copy: str, args: list[str], timeout: float) -> tuple[subpro
     # A fixed command over mutant names mutmut itself listed; no shell reads it. Its own session puts its workers in
     # its process group, so that they can be killed with it.
     proc = subprocess.Popen(argv, cwd=tree_copy, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,  # noqa: S603
-                            stderr=subprocess.PIPE, env={**child_env(), "TMPDIR": tmp}, start_new_session=True)
+                            stderr=subprocess.PIPE, env={**tool_env(), "TMPDIR": tmp}, start_new_session=True)
     stopped = False
     try:
         try:
@@ -5230,8 +5403,8 @@ def _base_functions(change: GateChange, path: str) -> list[_ScoredFunction]:
     try:
         # Verbatim, so that os.fsencode gives back the bytes git stores, which _decode_python decodes as Python would.
         tree = _parse_python(_decode_python(os.fsencode(
-            Host().git(change.root, "cat-file", "blob", f"{change.base}:{path}", verbatim=True)))[0])
-    except (OrchestratorError, SyntaxError):
+            _git(change.root, "cat-file", "blob", f"{change.base}:{path}", verbatim=True)))[0])
+    except (GateError, SyntaxError):
         return []
     return _scored_functions(tree) if tree else []
 
@@ -5467,6 +5640,100 @@ def gate_checks(mutation_budget: float = MUTATION_BUDGET,
     )
 
 
+def _check_condition(name: str, n: int) -> str:
+    """The failed condition of a check with n findings that fail the gate."""
+    return f"{n} findings of the `{name}` check; each is listed below."
+
+
+def gate_command(base: str, rules: str | None, coverage: str | None, tests: str | None, out: str | None,
+                 mutation_budget: float, base_run_budget: float) -> int:
+    """Write the quality file judge_change gives for the current directory, with gate_checks's checks, to out or
+    standard output.
+
+    Returns 0 for GATE: OK and 1 for GATE: ERROR; EXIT_GATE_UNJUDGED, having written nothing, when the change
+    could not be judged or out could not be written.
+    """
+    try:
+        text = judge_change(os.getcwd(), base, gate_checks(mutation_budget, base_run_budget), rules=rules,
+                            coverage=coverage, tests=tests)
+        if out:
+            write_quality_file(out, text)
+    except GateError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return EXIT_GATE_UNJUDGED
+    # quality_report's first line: the gate's own words, with no emphasis to tolerate.
+    gate = text.split("\n", 1)[0].removeprefix("GATE: ")
+    if out:
+        print(f"GATE: {gate}, in {out}", file=sys.stderr)
+    else:
+        print(text, end="")
+    return 0 if gate == GATE_OK else 1
+
+
+def seconds_arg(text: str) -> int:
+    """A time budget given on the command line, in whole seconds, at least 1."""
+    try:
+        seconds = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a whole number of seconds, not {text!r}") from None
+    if seconds < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, not {seconds}")
+    return seconds
+
+
+def add_gate_arguments(parser: argparse.ArgumentParser) -> None:
+    """Give parser the gate's description and options, which gate_command's parameters take, as its dest names
+    them."""
+    parser.description = (
+        f"Run ruff, mypy, pymarkdown, shellcheck and actionlint over the files the repository tracks and write the "
+        f"quality file: GATE: OK or GATE: ERROR on its first line, then the failed conditions, the findings on lines "
+        f"added since --base and the checks' errors, the findings to weigh, failing tests, coverage of new code, "
+        f"suppressions added and edited build configuration. Any finding on an added line or a check's error "
+        f"fails the gate, and so do a linter that is missing or fails, a failing test, and coverage below "
+        f"{GATE_MIN_COVERAGE:g}% on {GATE_MIN_NEW_LINES} or more new lines to cover. Exit status 0 for OK, 1 for "
+        f"ERROR, {EXIT_GATE_UNJUDGED} when it could not judge, writing no quality file.")
+    parser.add_argument("--base", required=True, metavar="REV", help="the commit the change is measured from")
+    parser.add_argument("--config", metavar="PYPROJECT",
+                        help="take the linters' rules from this pyproject.toml instead of the tree's own")
+    parser.add_argument("--coverage", metavar="XML",
+                        help="a Cobertura coverage report of the tree, such as pytest-cov's coverage.xml; without "
+                             "it, coverage is not judged")
+    parser.add_argument("--tests", metavar="XML",
+                        help="a JUnit report of the tree's tests, such as pytest's --junitxml; without it, tests are "
+                             "not judged")
+    parser.add_argument("--out", metavar="FILE", help="write the quality file here instead of to standard output")
+    parser.add_argument("--mutation-budget", type=seconds_arg, default=MUTATION_BUDGET, metavar="SECONDS",
+                        help=f"stop mutmut, which mutation-tests the functions the change edits, after this long, "
+                             f"and report how many of its mutants it tried; default {MUTATION_BUDGET}")
+    parser.add_argument("--base-run-budget", type=seconds_arg, default=BASE_RUN_BUDGET, metavar="SECONDS",
+                        help=f"stop the run of the changed tests against the base's code, which finds tests that "
+                             f"pass without the change, after this long; default {BASE_RUN_BUDGET}")
+
+
+def write_quality_file(path: str, text: str) -> None:
+    """Make text, line endings as they are, the contents of the file at path.
+
+    Written aside and renamed into place, so a failed write leaves the old file, not half a new one. A symlink at
+    path is followed, so the link stays and its target changes, and an existing file keeps its permissions. Raises
+    GateError when it cannot be written.
+    """
+    real = os.path.realpath(path)
+    tmp = f"{real}.tmp.{os.getpid()}"
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+        with contextlib.suppress(FileNotFoundError):
+            shutil.copymode(real, tmp)
+        os.replace(tmp, real)
+    except OSError as e:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+        raise GateError(f"cannot write {path}: {e}") from e
+
+
+# The end of the gate's block.
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator checks: the quality round's own, after the build's gate
 # ---------------------------------------------------------------------------
@@ -5486,7 +5753,7 @@ class RunChange:
     spec: str  # the run's spec: its contract step's file, or its task for a workflow without one
     base: str  # the run's base commit
     commit: str  # the snapshot the round judges, whose only parent is base
-    changed: dict[str, set[int]]  # changed_lines of Host.change_diff from base to commit: the lines each file gains
+    changed: dict[str, set[int]]  # added_lines of Host.change_diff from base to commit: the lines each file gains
     files: list[ChangedFile]  # Host.changed_line_counts from base to commit: every file the change touches
     # (commit, path) -> the file at path, relative to the repository's top level, as commit has it, verbatim as
     # Host.file_at gives it; None where it has none. Raises OrchestratorError when git fails on the agents' machine.
@@ -5533,7 +5800,7 @@ def judge_run(quality: str, checks: tuple[OrchestratorCheck, ...], change: RunCh
 
     A check with failing findings is a failed condition, which turns GATE: OK into GATE: ERROR. Every finding is
     listed in a section of their own at the end, failing ones first, numbered on from the file's last number while
-    the file lists at most QUALITY_ISSUE_LIMIT in all; the rest are counted. quality comes back as it is when they
+    the file lists at most QUALITY_FINDINGS_LIMIT in all; the rest are counted. quality comes back as it is when they
     find nothing.
     """
     conditions, issues, to_weigh = [], [], []
@@ -5541,7 +5808,7 @@ def judge_run(quality: str, checks: tuple[OrchestratorCheck, ...], change: RunCh
         found, weigh = (_named_findings(check.name, part) for part in check.find(change))
         if found:
             issues += found
-            conditions.append(_check_condition(check.name, len(found)))
+            conditions.append(_orchestrator_condition(check.name, len(found)))
         to_weigh += weigh
     if not issues and not to_weigh:
         return quality
@@ -5557,8 +5824,9 @@ def _named_findings(name: str, findings: list[dict]) -> list[dict]:
     return [{**f, "rule": f"{name} {f['rule']}" if f["rule"] else name} for f in findings]
 
 
-def _check_condition(name: str, n: int) -> str:
-    """The failed condition of a check with n findings that fail the gate."""
+def _orchestrator_condition(name: str, n: int) -> str:
+    """The failed condition of an orchestrator check that fails the gate with n findings, worded as the gate's
+    _check_condition words its own checks'."""
     return f"{n} findings of the `{name}` check; each is listed below."
 
 
@@ -5568,16 +5836,16 @@ def _failed_by(quality: str, conditions: list[str]) -> str:
     it is itself a `## ` heading, so parse_gate reads ERROR from the result."""
     lines = quality.split("\n")
     at = next((i for i, x in enumerate(lines) if x.strip()), 0)
-    lines[at] = re.sub(_labelled_word("GATE", (GATE_OK,)), rf"\g<1>{GATE_ERROR}", lines[at], count=1)
+    lines[at] = re.sub(_labelled_word("GATE", (QUALITY_OK,)), rf"\g<1>{QUALITY_ERROR}", lines[at], count=1)
     bullets = [f"- {c}" for c in conditions]
-    if FAILED_CONDITIONS in lines:
-        end = lines.index(FAILED_CONDITIONS) + 2
+    if QUALITY_FAILED_CONDITIONS in lines:
+        end = lines.index(QUALITY_FAILED_CONDITIONS) + 2
         while end < len(lines) and lines[end].startswith("- "):
             end += 1
         lines[end:end] = bullets
     else:
         first = next((i for i in range(at + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
-        lines[first:first] = [FAILED_CONDITIONS, "", *bullets, ""]
+        lines[first:first] = [QUALITY_FAILED_CONDITIONS, "", *bullets, ""]
     return "\n".join(lines)
 
 
@@ -5587,17 +5855,35 @@ def _orchestrator_section(issues: list[dict], to_weigh: list[dict], after: int) 
            ("The orchestrator ran these itself after the build, with what the build does not see: the run's spec and "
             "its workflow.")]
     # The limit is the whole file's, the build's findings included.
-    room = max(QUALITY_ISSUE_LIMIT - after, 0)
+    room = max(QUALITY_FINDINGS_LIMIT - after, 0)
     listed_issues = issues[:room]
     listed_weigh = to_weigh[:room - len(listed_issues)]
     if listed_issues:
-        out += ["", *(_numbered(k, f) for k, f in enumerate(listed_issues, after + 1))]
+        out += ["", *(_numbered_finding(k, f) for k, f in enumerate(listed_issues, after + 1))]
     if listed_weigh:
-        out += ["", TO_WEIGH_NOTE, "",
-                *(_numbered(k, f) for k, f in enumerate(listed_weigh, after + len(listed_issues) + 1))]
+        out += ["", QUALITY_TO_WEIGH_NOTE, "",
+                *(_numbered_finding(k, f) for k, f in enumerate(listed_weigh, after + len(listed_issues) + 1))]
     if more := len(issues) + len(to_weigh) - len(listed_issues) - len(listed_weigh):
         out += ["", f"{more} more findings of the orchestrator's checks are not listed."]
     return out
+
+
+def _numbered_finding(k: int, finding: dict) -> str:
+    """The finding as the k-th of the quality file's numbered list, as the gate's _numbered writes it and
+    _NUMBERED_FINDING reads it."""
+    if finding["path"] is None:
+        where = "The change as a whole:"
+    elif finding["line"] is None:
+        where = f"`{finding['path']} (the whole file)`"
+    else:
+        where = f"`{finding['path']}:{finding['line']}`"
+    return f"{k}. {where} {finding['severity']} {finding['rule']}: {finding['message']}"
+
+
+def _check_finding(path: str | None, line: int | None, rule: str, message: str, severity: str = "warning") -> dict:
+    """A finding as OrchestratorCheck.find returns it, of the gate's checks' shape (the gate's _finding): a check
+    gives warnings for what it only reports, and errors for what fails the gate."""
+    return {"path": path, "line": line, "severity": severity, "rule": rule, "message": message}
 
 
 # -- New dependencies ------------------------------------------------------
@@ -5837,10 +6123,10 @@ def new_dependencies(change: RunChange, *, pypi: "PyPI") -> CheckFindings:
             fails, finding = judged
             (issues if fails else to_weigh).append(finding)
     for path, described in pulled_in.items():
-        to_weigh.append(_finding(path, None, "pulled-in", (
+        to_weigh.append(_check_finding(path, None, "pulled-in", (
             f"{len(described)} new packages that the change's dependencies pull in: {', '.join(described)}.")))
     if unasked := list(dict.fromkeys(p.key for p in packages if not p.source and p.key not in known)):
-        issues.append(_finding(None, None, "unchecked", (
+        issues.append(_check_finding(None, None, "unchecked", (
             f"PyPI could not be asked about {', '.join(f'`{k}`' for k in unasked)}: {failure}; whether they exist is "
             f"not known."), severity="error"))
     return CheckFindings(issues, to_weigh)
@@ -5853,15 +6139,15 @@ def _package_finding(p: _NewPackage, named: set[str], known: dict[str, PyPIProje
     adds, or one that PyPI was not asked about, which is unchecked."""
     member = p.source is not None and p.source.kind == "workspace"
     if p.direct and p.key not in named and not member:
-        return True, _finding(p.path, p.line, "not-in-spec", (
+        return True, _check_finding(p.path, p.line, "not-in-spec", (
             f"`{p.key}` is a new dependency that the spec does not name{_whence(p, known, now, '; ')}."),
             severity="error")
     if p.key in known and known[p.key] is None:
-        return True, _finding(p.path, p.line, "not-on-pypi", (
+        return True, _check_finding(p.path, p.line, "not-on-pypi", (
             f"PyPI does not know `{p.key}`: the name may be mistyped, or name a package that does not exist yet, "
             f"which anyone could register (slopsquatting)."), severity="error")
     if p.direct and (p.source or p.key in known):
-        return False, _finding(p.path, p.line, _added_rule(p, known.get(p.key), now), (
+        return False, _check_finding(p.path, p.line, _added_rule(p, known.get(p.key), now), (
             f"`{p.key}`{', which the spec names' if p.key in named else ''}: {_whence(p, known, now)}."))
     return None
 
@@ -5926,7 +6212,7 @@ def _compare_dependencies(ecosystem: DependencyEcosystem, before: Dependencies, 
     moved = []
     for path, was, now, line in ((ecosystem.manifest, before.direct, after.direct, line_naming),
                                  (ecosystem.lock_file, before.locked, lock_only, lambda key: None)):
-        moved += [_finding(path, line(key), "source-changed", (
+        moved += [_check_finding(path, line(key), "source-changed", (
                       f"`{key}`: at the base, {_source_text(was[key])}; in the change, {_source_text(source)}."))
                   for key, source in now.items() if key in was and was[key] != source]
     return new, moved
@@ -5937,7 +6223,7 @@ def _source_text(source: PackageSource | None) -> str:
 
 
 def _unreadable(path: str, why: str, where: str, severity: str) -> dict:
-    return _finding(path, None, "unreadable", (f"`{path}` cannot be read {where}: {why}; the change's new "
+    return _check_finding(path, None, "unreadable", (f"`{path}` cannot be read {where}: {why}; the change's new "
                                                 f"dependencies were not checked."), severity=severity)
 
 
@@ -6002,7 +6288,7 @@ def diff_budget(change: RunChange, *, max_files: int, max_lines: int) -> CheckFi
         over.append(f"{added + removed} lines ({added} added, {removed} removed), over {whose} max_lines of {max_lines}")
     if not over:
         return CheckFindings([], [])
-    return CheckFindings([], [_finding(None, None, "", (
+    return CheckFindings([], [_check_finding(None, None, "", (
         f"The change touches {', and '.join(over)}. Say in your report why it cannot be smaller."))])
 
 
@@ -6011,7 +6297,7 @@ def unexpected_paths(change: RunChange) -> CheckFindings:
     name. A rename is judged at its new path only, and a path or name counts as mentioned only where it appears whole
     in the spec, as a plain substring: naming a directory does not cover the files in it."""
     return CheckFindings([], [
-        _finding(path, None, "", "the spec mentions neither this path nor its file name.")
+        _check_finding(path, None, "", "the spec mentions neither this path nor its file name.")
         for path in sorted({f.path for f in change.files})
         if path not in change.spec and posixpath.basename(path) not in change.spec])
 
@@ -6142,7 +6428,7 @@ def without_conflict_warning(body: str, base_branch: str | None, conflicts: list
 def pr_body(state: "RunState", spec: str, report: str, review: str, quality: GateEvidence) -> str:
     """The pull request's body; quality is what the gate said of the change, as provenance takes it."""
     approved = state.verdict in SUCCEEDED
-    head = f"Opened by ai-agents-orchestrator run `{state.run_id}`. {verdict_line(state)}"
+    head = f"Opened by Octoflow AI run `{state.run_id}`. {verdict_line(state)}"
     trailers = "\n".join(["| Commit trailer | Value |", "| --- | --- |",
                           *(f"| {key} | `{said}` |" for key, said in provenance(state, quality))])
     warning = [conflict_warning(state.base_branch, state.conflicts)] if state.conflicts else []
@@ -7056,7 +7342,7 @@ class Workflow:
         q = s.quality_round
         gate = self._quality(n, q)
         # As for review rounds: a saved round beyond a lowered limit ends here too.
-        if gate == GATE_OK or q >= s.max_quality_rounds:
+        if gate == QUALITY_OK or q >= s.max_quality_rounds:
             return True
         if self._stuck(n, q):
             log(f"[quality] round {n}, quality round {q} failed on just what quality round {q - 1} failed on; "
@@ -7293,7 +7579,7 @@ class Workflow:
         if self._unjudged(last):
             return "\n\n" + self.prompts.QUALITY_OFF_NOTE.format(
                 quality_paths=", ".join(s.quality_path(n, k) for k in range(1, q + 1)))
-        if parse_gate(text) == GATE_OK:
+        if parse_gate(text) == QUALITY_OK:
             note = self.prompts.QUALITY_PASSED_NOTE
         else:
             note = self.prompts.QUALITY_STUCK_NOTE if self._stuck(n, q) else self.prompts.QUALITY_UNRESOLVED_NOTE
@@ -7344,7 +7630,7 @@ class Workflow:
             return True
         # With the gate on, the quality loop has written the current quality round's file by now; one missing fails.
         last = self._last_quality(n)
-        return last is not None and last[0] == s.quality_round and parse_gate(last[1]) == GATE_OK
+        return last is not None and last[0] == s.quality_round and parse_gate(last[1]) == QUALITY_OK
 
     # -- The quality gate --------------------------------------------------
 
@@ -7357,7 +7643,7 @@ class Workflow:
 
     def _quality(self, n: int, q: int) -> str:
         """Quality round q of round n: have Jenkins judge the change, write quality-<n>-<q>.md, and return its gate.
-        A snapshot gitleaks finds a secret in is not pushed, and its quality file is GATE_LEAK.
+        A snapshot gitleaks finds a secret in is not pushed, and its quality file is QUALITY_LEAK.
 
         Each step first looks for what an earlier orchestrator already did, furthest first: the
         quality file; then, in _analyse, the chain in ci.
@@ -7513,16 +7799,13 @@ class Workflow:
         if quality is not None:
             return _under_gate_line(self._judged_by_orchestrator(quality, sha, deadline),
                                     f"Jenkins build #{build} judged snapshot `{sha}` ({where}) and ended {result}.")
-        diff = self.host.change_diff(s.work_dir, s.base, sha)
-        changed = changed_lines(diff)
         tests = self._once(f"reading the test report of Jenkins build #{build}", deadline,
                            lambda: self._jenkins.failed_tests(build))
         console = "" if tests else self._once(f"reading the console of Jenkins build #{build}", deadline,
                                               lambda: self._jenkins.console_tail(build))
         intro = (f"Jenkins build #{build} of snapshot `{sha}` ({where}) ended {result} before the quality gate "
                  f"ran, so nothing judged the change. Make it build first.")
-        return quality_report(GATE_BUILD_FAILED, intro, tests=tests, console=console,
-                              edited=edited_config(diff, changed), mutmut_state=mutmut_state_files(changed))
+        return build_failed_report(intro, tests, console)
 
     def _where(self, n: int, q: int) -> str:
         """Quality round q of round n, as a quality file's intro names it."""
@@ -7546,7 +7829,8 @@ class Workflow:
             raise OrchestratorError("a quality round before the run has a base")
         # A workflow without a contract step has only its task to say what the change is for.
         spec = self._last_text(self.pipeline.contract, 0) or s.task
-        change = RunChange(spec, base, sha, changed_lines(self.host.change_diff(s.work_dir, base, sha)),
+        added = added_lines(self.host.change_diff(s.work_dir, base, sha))
+        change = RunChange(spec, base, sha, {path: set(lines) for path, lines in added.items()},
                            self.host.changed_line_counts(s.work_dir, base, sha),
                            functools.partial(self.host.file_at, s.work_dir), self.wallclock(),
                            functools.partial(self._in_time, deadline))
@@ -7675,8 +7959,8 @@ class Workflow:
             # A resumed or restarted turn keeps its record and start. Read before the prompt goes out, so that
             # no agent can write its file before its turn started.
             started = None if self._open_turn(file) else self.host.now()
-            self.herdr.prompt(agent["name"], message)
-            # Recorded only once the prompt is delivered. Dying in between costs one duplicate
+            self._deliver(role, path, message)
+            # Recorded only once the prompt is taken. Dying between sending and confirming costs one duplicate
             # prompt, which the role answers by writing the same file again.
             s.prompted = file
             if started is not None:
@@ -7686,6 +7970,47 @@ class Workflow:
         log(f"[{role}] wrote {file}")
         self._end_turn(role, path)
         return out
+
+    def _deliver(self, role: str, path: str, message: str) -> None:
+        """Prompt the role's agent with message until it takes it (_taken), sending it at most twice.
+
+        Raises OrchestratorError when the agent takes neither prompt, naming what a resume does about it, or exits
+        meanwhile; HerdrError as Herdr does.
+        """
+        name = self.state.agents[role]["name"]
+        self.herdr.prompt(name, message)
+        if self._taken(role, path):
+            return
+        log(f"[{role}] did not take its prompt within {PROMPT_DELIVERY_SECONDS}s; sending it again")
+        self.herdr.prompt(name, message)
+        if not self._taken(role, path):
+            label, pane = self.pipeline.roles[role], self.state.agents[role]["pane"]
+            raise OrchestratorError(f"the {label} did not take its prompt to write {path}, sent twice; see pane "
+                                    f"{pane}, and resume to send it again")
+
+    def _taken(self, role: str, path: str) -> bool:
+        """Whether the role's agent took the prompt just sent, within PROMPT_DELIVERY_SECONDS: herdr reports it
+        working or blocked, or path, its handoff file, exists. idle and done do not count, since an agent shows
+        them before taking a prompt too.
+
+        Raises OrchestratorError when the agent exits without writing path; HerdrError as Herdr.wait does.
+        """
+        name = self.state.agents[role]["name"]
+        # First, for a turn so quick that the agent is done before the wait begins.
+        if self.host.read(path) is not None:
+            return True
+        try:
+            self.herdr.wait(name, PROMPT_DELIVERY_SECONDS * 1000, until=("working", "blocked"))
+            return True
+        except HerdrError as e:
+            # herdr's wait on an agent that has exited fails with agent_not_found, which is told apart below.
+            if e.code not in ("timeout", "agent_not_found"):
+                raise
+        if self.host.read(path) is not None:
+            return True
+        if self.herdr.agent(name) is None:
+            raise OrchestratorError(f"the {self.pipeline.roles[role]} exited without writing {path}")
+        return False
 
     def _retry(self, role: str, path: str, out: str) -> None:
         """Move a malformed verdict file aside so its role writes it again; end the run if its retry is used."""
@@ -8193,33 +8518,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                     f"at that path, as a workflow file, a starting point for your own.")
     workflows.add_argument("workflow", nargs="?", metavar="WORKFLOW", help="a workflow's name, or a file's path")
 
-    gate = sub.add_parser(
-        "gate", help="judge the change since a commit as the quality job does, and write the quality file",
-        description=f"Run ruff, mypy, pymarkdown, shellcheck and actionlint over the files the repository tracks and "
-                    f"write the quality file: GATE: OK or GATE: ERROR on its first line, then the failed "
-                    f"conditions, the findings on lines added since --base and the checks' errors, the findings "
-                    f"to weigh, failing tests, coverage of new code, suppressions added and edited build "
-                    f"configuration. Any finding on an added line or a check's error fails the gate, and so do "
-                    f"a linter that is missing or fails, a failing test, and coverage below "
-                    f"{GATE_MIN_COVERAGE:g}% on "
-                    f"{GATE_MIN_NEW_LINES} or more new lines to cover. Exit status 0 for OK, 1 for ERROR, "
-                    f"{EXIT_GATE_UNJUDGED} when it could not judge, writing no quality file.")
-    gate.add_argument("--base", required=True, metavar="REV", help="the commit the change is measured from")
-    gate.add_argument("--config", metavar="PYPROJECT",
-                      help="take the linters' rules from this pyproject.toml instead of the tree's own")
-    gate.add_argument("--coverage", metavar="XML",
-                      help="a Cobertura coverage report of the tree, such as pytest-cov's coverage.xml; without "
-                           "it, coverage is not judged")
-    gate.add_argument("--tests", metavar="XML",
-                      help="a JUnit report of the tree's tests, such as pytest's --junitxml; without it, tests are "
-                           "not judged")
-    gate.add_argument("--out", metavar="FILE", help="write the quality file here instead of to standard output")
-    gate.add_argument("--mutation-budget", type=seconds_arg, default=MUTATION_BUDGET, metavar="SECONDS",
-                      help=f"stop mutmut, which mutation-tests the functions the change edits, after this long, "
-                           f"and report how many of its mutants it tried; default {MUTATION_BUDGET}")
-    gate.add_argument("--base-run-budget", type=seconds_arg, default=BASE_RUN_BUDGET, metavar="SECONDS",
-                      help=f"stop the run of the changed tests against the base's code, which finds tests that pass "
-                           f"without the change, after this long; default {BASE_RUN_BUDGET}")
+    add_gate_arguments(sub.add_parser(
+        "gate", help="judge the change since a commit as the quality job does, and write the quality file"))
 
     sub.add_parser(
         "doctor", parents=[target], help="check what a run needs, and say what to run for each that is missing",
@@ -8290,17 +8590,6 @@ def offered_workflows() -> list[str]:
         return workflow_names()
     except OrchestratorError:
         return sorted(WORKFLOWS)  # the workflows command shows why the directory cannot be listed
-
-
-def seconds_arg(text: str) -> int:
-    """A time budget given on the command line, in whole seconds, at least 1."""
-    try:
-        seconds = int(text)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"expected a whole number of seconds, not {text!r}") from None
-    if seconds < 1:
-        raise argparse.ArgumentTypeError(f"must be at least 1, not {seconds}")
-    return seconds
 
 
 def role_model_arg(text: str) -> tuple[str, str]:
@@ -9366,8 +9655,11 @@ def refreshed_headers(specs: list[QueuedSpec], host: Host, cwd: str, target: lis
     behind: an SPEC_IN_REVIEW spec's pull request, now merged or closed; a SPEC_FOR_HUMAN spec's run, whose conflict
     this refreshes (refresh_conflict) and which, open with the conflict cleared and succeeded, makes it
     SPEC_IN_REVIEW; and the run on a SPEC_READY spec's Run: line, which an interrupted drain leaves
-    (finished_run_header). It refreshes an SPEC_IN_REVIEW spec's run too, and logs what refresh_conflict did; with
-    dry_run, it does nothing of that, and gives the header lines as though it had.
+    (finished_run_header), whose pull request, once finished_run_header makes the spec SPEC_IN_REVIEW, it asks about
+    in the same pass, merging pull_request_header's lines into the one pair, so that a pull request already merged
+    or closed settles the spec, and frees its dependants, in this drain. It refreshes an SPEC_IN_REVIEW spec's run
+    too, and logs what refresh_conflict did; with dry_run, it does nothing of that, and gives the header lines as
+    though it had.
 
     cwd is the project, where gh asks about pull requests and the runs are; target is the --machine and --cwd flags
     as given, for a resume command. Raises OrchestratorError as Host.pull_request, refresh_conflict and
@@ -9384,7 +9676,10 @@ def refreshed_headers(specs: list[QueuedSpec], host: Host, cwd: str, target: lis
         if spec.status == SPEC_IN_REVIEW and spec.pr and (entries := pull_request_header(spec.pr, host, cwd)):
             out.append((spec, entries))
         elif spec.status == SPEC_READY and (run_id := spec.run):
-            out.append((spec, finished_run_header(spec, run_id, runs, cwd, target, local_host, pid_alive)))
+            entries = finished_run_header(spec, run_id, runs, cwd, target, local_host, pid_alive)
+            if entries[STATUS_KEY] == SPEC_IN_REVIEW and (merged := pull_request_header(entries[PR_KEY], host, cwd)):
+                entries |= merged
+            out.append((spec, entries))
     return out
 
 
@@ -9700,30 +9995,6 @@ def runs_command(args: argparse.Namespace, herdr: Herdr, host: Host, cwd: str) -
             print(json.dumps(record))
     else:
         print_pruned(prune_branches(host, cwd, time.time, local_host, pid_alive, dry_run=args.dry_run, revisit=True))
-
-
-def gate_command(base: str, rules: str | None, coverage: str | None, tests: str | None, out: str | None,
-                 mutation_budget: float, base_run_budget: float) -> int:
-    """Write the quality file judge_change gives for the current directory, with gate_checks's checks, to out or
-    standard output.
-
-    Returns 0 for GATE: OK and 1 for GATE: ERROR; EXIT_GATE_UNJUDGED, having written nothing, when the change
-    could not be judged or out could not be written.
-    """
-    try:
-        text = judge_change(os.getcwd(), base, gate_checks(mutation_budget, base_run_budget), rules=rules,
-                            coverage=coverage, tests=tests)
-        if out:
-            replace_local_file(out, text)
-    except OrchestratorError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return EXIT_GATE_UNJUDGED
-    gate = parse_gate(text)
-    if out:
-        print(f"GATE: {gate}, in {out}", file=sys.stderr)
-    else:
-        print(text, end="")
-    return 0 if gate == GATE_OK else 1
 
 
 def workflows_command(ref: str | None) -> None:
@@ -10360,7 +10631,7 @@ class RunWindow:
         self._closed = False
         self._listed = None  # the form whose project the run list shows
         self._listings = queue.Queue()
-        root.title("ai-agents-orchestrator")
+        root.title("Octoflow AI")
         root.protocol("WM_DELETE_WINDOW", self.close)
         # The header and the form keep their size; at the window's least, the run list and the output still
         # show a few lines each.
@@ -10486,7 +10757,7 @@ class RunWindow:
         h.grid(row=0, column=0, sticky="ew", padx=16, pady=(12, 12))
         h.columnconfigure(1, weight=1)
         ttk.Label(h, image=self.logo, style="Header.TLabel").grid(row=0, column=0, rowspan=2, padx=(0, 12))
-        ttk.Label(h, text="ai-agents-orchestrator", style="Title.TLabel").grid(row=0, column=1, sticky="sw")
+        ttk.Label(h, text="Octoflow AI", style="Title.TLabel").grid(row=0, column=1, sticky="sw")
         # Wrapped, so that a long error, such as a workflow file's path, does not widen the window.
         self.pipeline_label = ttk.Label(h, textvariable=self.vars["pipeline"], style=PIPELINE_LABEL,
                                         wraplength=640)
@@ -10765,7 +11036,6 @@ def gui_command(smoke_test: bool) -> int:
         root.after(SMOKE_TEST_MS, window.close)
     root.mainloop()
     return 0
-
 
 
 # ---------------------------------------------------------------------------

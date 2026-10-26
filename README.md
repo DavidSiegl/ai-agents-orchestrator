@@ -8,10 +8,10 @@
   <a href="https://ko-fi.com/davidsiegl"><img src="https://img.shields.io/badge/Ko--fi-support%20me-FF5E5B?logo=kofi&logoColor=white" alt="Support me on Ko-fi"></a>
 </p>
 
-# ai-agents-orchestrator
+# Octoflow AI
 
-A role-based handoff workflow for coding agents running in [herdr](https://herdr.dev), each role in the agent
-of your choice: [Claude Code, Codex, Gemini CLI, opencode or pi](#five-coding-agents-in-any-mix). The default
+Coding agents in relay, no role judging its own work: a handoff workflow running in [herdr](https://herdr.dev),
+each role in the agent of your choice: [Claude Code, Codex, Gemini CLI, opencode or pi](#five-coding-agents-in-any-mix). The default
 workflow:
 
 ```
@@ -90,25 +90,25 @@ Each [release](https://github.com/DavidSiegl/ai-agents-orchestrator/releases) ha
 Linux x86_64 and for Apple Silicon macOS, which needs no Python, and each with its `.sha256`:
 
 ```bash
-# Linux x86_64; on an Apple Silicon Mac, orchestrator-macos-arm64 and `shasum -a 256 -c`
-curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/orchestrator-linux-x86_64
-curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/orchestrator-linux-x86_64.sha256
-sha256sum -c orchestrator-linux-x86_64.sha256 && chmod +x orchestrator-linux-x86_64
-./orchestrator-linux-x86_64 run "add a token-bucket rate limiter to the API client"
+# Linux x86_64; on an Apple Silicon Mac, octoflow-macos-arm64 and `shasum -a 256 -c`
+curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/octoflow-linux-x86_64
+curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/octoflow-linux-x86_64.sha256
+sha256sum -c octoflow-linux-x86_64.sha256 && chmod +x octoflow-linux-x86_64
+./octoflow-linux-x86_64 run "add a token-bucket rate limiter to the API client"
 ```
 
 The macOS binary is not signed or notarized. Downloaded with a browser, macOS refuses to open it the first time:
-right-click it and choose Open once, or run `xattr -d com.apple.quarantine orchestrator-macos-arm64`. A file
+right-click it and choose Open once, or run `xattr -d com.apple.quarantine octoflow-macos-arm64`. A file
 `curl` downloads is not quarantined, so it opens straight away.
 
-Everywhere else, use `orchestrator.pyz`, an executable of `orchestrator.py` that needs Python 3.13+, and tkinter
+Everywhere else, use `octoflow.pyz`, an executable of `orchestrator.py` that needs Python 3.13+, and tkinter
 for the GUI:
 
 ```bash
-curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/orchestrator.pyz
-curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/orchestrator.pyz.sha256
-sha256sum -c orchestrator.pyz.sha256 && chmod +x orchestrator.pyz
-./orchestrator.pyz run "add a token-bucket rate limiter to the API client"
+curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/octoflow.pyz
+curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/octoflow.pyz.sha256
+sha256sum -c octoflow.pyz.sha256 && chmod +x octoflow.pyz
+./octoflow.pyz run "add a token-bucket rate limiter to the API client"
 ```
 
 Both take the same commands and flags as `python orchestrator.py` in a checkout, which the examples below use.
@@ -142,8 +142,8 @@ A Python without tkinter makes `gui` exit with status 1 and the command to insta
 A desktop app is taking over from the window, one step at a time. So far it is read-only: it shows one
 project's runs and their handoff files live, without Refresh, and it starts no runs. It is a Tauri 2 app in
 [`ui/`](ui), a React and TypeScript frontend in a native window. Each release has it for Linux x86_64, as
-`orchestrator-desktop-linux-x86_64.deb` and `.AppImage`, and for Apple Silicon macOS, as
-`orchestrator-desktop-macos-arm64.dmg`, each with its `.sha256` and the orchestrator binary inside, so it needs
+`octoflow-desktop-linux-x86_64.deb` and `.AppImage`, and for Apple Silicon macOS, as
+`octoflow-desktop-macos-arm64.dmg`, each with its `.sha256` and the orchestrator binary inside, so it needs
 neither Python nor a checkout. The macOS app is signed ad hoc only, not notarized: macOS refuses to open it the
 first time, as it does the binary (see [Install](#install)).
 
@@ -163,19 +163,19 @@ window:
   environment of your shell:
 
   ```bash
-  chmod +x orchestrator-desktop-linux-x86_64.AppImage
-  ./orchestrator-desktop-linux-x86_64.AppImage run "add a token-bucket rate limiter to the API client"
+  chmod +x octoflow-desktop-linux-x86_64.AppImage
+  ./octoflow-desktop-linux-x86_64.AppImage run "add a token-bucket rate limiter to the API client"
   ```
 
-- **`.deb`:** it installs the orchestrator as `/usr/bin/orchestrator`, so `orchestrator run "..."`.
+- **`.deb`:** it installs the orchestrator as `/usr/bin/octoflow`, so `octoflow run "..."`.
 - **macOS:** a `.app` is a folder, so link the orchestrator inside it onto your `PATH`:
 
   ```bash
-  ln -s /Applications/Orchestrator.app/Contents/MacOS/orchestrator /usr/local/bin/orchestrator
+  ln -s /Applications/Octoflow.app/Contents/MacOS/octoflow /usr/local/bin/octoflow
   ```
 
   If macOS refuses to run it, the app was downloaded with a browser and is quarantined: open the app once with
-  right-click and Open, or run `xattr -dr com.apple.quarantine /Applications/Orchestrator.app`. Not yet checked on
+  right-click and Open, or run `xattr -dr com.apple.quarantine /Applications/Octoflow.app`. Not yet checked on
   a real Mac.
 - **Headless machines and CI:** the plain binaries in [Install](#install). They need neither WebKit nor, as an
   AppImage does, FUSE, and are a seventh of its size.
@@ -192,7 +192,7 @@ sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev
 cd ui
 npm ci
 npm run tauri dev     # the window, rebuilt as you edit
-npm run tauri build   # an optimized build, src-tauri/target/release/orchestrator-ui
+npm run tauri build   # an optimized build, src-tauri/target/release/octoflow-ui
 npm test              # the frontend's tests; npm run typecheck and npm run lint check it too
 (cd src-tauri && cargo test)   # the shell's, which start and stop a real serve
 ```
@@ -258,7 +258,7 @@ python orchestrator.py close e292fb --machine <machine> --cwd ~/GitHub/myproject
 python orchestrator.py refresh e292fb --machine <machine> --cwd ~/GitHub/myproject
 
 # Another workflow: one of yours by name, or a workflow file anywhere; `workflows` lists them
-python orchestrator.py run --workflow tdd "add a token-bucket rate limiter"
+python orchestrator.py run --workflow product-team "add a token-bucket rate limiter"
 python orchestrator.py run --workflow-file examples/workflows/quick.toml "fix the off-by-one in the pager"
 
 # In a git worktree of the run's own, so the checkout stays yours and several runs can work at once
@@ -300,7 +300,7 @@ uv run python orchestrator.py gate --base main --coverage coverage.xml --out qua
 | `--role-model ROLE=MODEL` | Model for one role of the workflow, by its key, e.g. `tests=sonnet`. Overrides `--model`; repeatable. |
 | `--workflow NAME` | `run` and `drain`: the workflow the run goes through: `default`, the run described below, or one of [your own](#your-own-workflows) in `~/.config/ai-agents-orchestrator/workflows/`. `--help` lists the choices; a resumed run keeps its workflow. |
 | `--workflow-file FILE` | `run` and `drain`: like `--workflow`, for the workflow file at `FILE`, such as one kept in the project. |
-| `--spec FILE` | `run` only: skip the interview. `FILE`, read on this machine (a relative path is from the current directory, not `--cwd`), is copied into the run as the handoff file of the workflow's first step, `spec.md` in `default`, and the run starts at the step after it. The task is then optional: without one it is the spec's `# ` title, or else `FILE`'s name. Needs a workflow whose first step writes the spec, such as `default` or `tdd`, not `quick`. |
+| `--spec FILE` | `run` only: skip the interview. `FILE`, read on this machine (a relative path is from the current directory, not `--cwd`), is copied into the run as the handoff file of the workflow's first step, `spec.md` in `default`, and the run starts at the step after it. The task is then optional: without one it is the spec's first line, when that is a level-one heading, or else `FILE`'s name. Needs a workflow whose first step writes the spec, such as `default` or `product-team`, not `quick`. |
 | `--no-pr` | `run` only: leave the change uncommitted and the workspace open instead of opening a pull request. Works outside git. |
 | `--worktree` | `run` and `drain`: work in a git worktree of the run's own, `.orchestrator/worktrees/<key>`, checked out from `origin`'s version of the branch the project is on, instead of in the project's checkout, which then need not be clean and stays yours to use. Needs a branch checked out and an `origin`, also with `--no-pr`. See [Worktree runs](#worktree-runs). |
 | `--quality-gate JOB` | `run` and `drain`: after each Builder turn, have this Jenkins job, by its full name with folders, judge the change with `orchestrator.py gate`, and send the findings back to the Builder before the Reviewer. Needs `JENKINS_URL`, `JENKINS_USER` and `JENKINS_TOKEN`, from the environment or `~/.config/ai-agents-orchestrator/ci.env`. On `resume`, turns the gate on for a run started without it; see below. |
@@ -502,7 +502,8 @@ A drain first asks `gh` about each `in-review` spec's pull request: merged makes
 `ready-for-human`. It refreshes the run on each `in-review` and `ready-for-human` spec's `Run:` line as `refresh`
 does, and a `ready-for-human` spec whose run approved or finished, with its pull request open, goes to `in-review`
 once its conflict is cleared. A `ready-for-agent` spec with a `Run:` line is one an interrupted drain left; its run, if
-finished, sets the spec's status, and if not, drain stops and says what to do: wait for it, `resume` it, or delete
+finished, sets the spec's status, and one that makes it `in-review` has its pull request asked about at once, so
+a pull request merged meanwhile makes it `done` in this drain; if not finished, drain stops and says what to do: wait for it, `resume` it, or delete
 the `Run:` line to start the spec over. Then drain sweeps the branches of earlier runs once, and runs each spec whose
 blockers are all `done`. It reads each spec again before choosing the next and before each header edit, so your edits
 to a spec while it runs are kept, but for the `Status:`, `Run:` and `PR:` lines of the spec it is running, which are
@@ -527,32 +528,34 @@ The roles, their prompts and their order are a workflow. Besides the built-in `d
 without touching the code: a TOML file in `~/.config/ai-agents-orchestrator/workflows/`, named after the
 workflow, or a file anywhere passed with `--workflow-file`. `python orchestrator.py workflows` lists them and
 shows why one does not load; `python orchestrator.py workflows default > ~/.config/ai-agents-orchestrator/workflows/mine.toml`
-gives you the default's full definition to edit. [`examples/workflows/`](examples/workflows) has four more:
+gives you the default's full definition to edit. [`examples/workflows/`](examples/workflows) has three more:
 `spec-build-review` (the built-in `default` as a file, to copy and edit), `quick` (Builder ⇄ Reviewer, the task
-as the contract), `tdd` (a Test Writer before the Builder) and `adversarial` (a Reviewer who backs each finding with
-a failing test).
+as the contract) and `product-team` (Product Manager → Architect → QA Engineer → Engineer ⇄ Tech Lead: requirements
+in business terms, a design against the code, and acceptance tests written and locked before the code).
 
 ```toml
-description = "Spec Collector -> Test Writer -> Builder <-> Reviewer"
+# An abridged product-team.toml: the Architect's design before the default Builder and Reviewer.
+description = "Product Manager -> Architect -> Engineer <-> Tech Lead"
 
 [roles]                    # optional: labels, default models and harnesses
-tests = { label = "Test Writer", model = "sonnet" }
-review = { agent = "codex" }
+spec = "Product Manager"
+design = { label = "Architect", model = "sonnet" }
+review = { label = "Tech Lead", agent = "codex" }
 
 [[steps]]
 use = "spec"               # a step of the default workflow, as it is
 
 [[steps]]
-id = "tests"               # also the role, unless role = "..." says otherwise
-file = "tests.md"          # the handoff file that ends the turn; {n} in it makes one per round
-edits = true               # the run's branch is created before the first editing step
+id = "design"              # also the role, unless role = "..." says otherwise
+file = "design.md"         # the handoff file that ends the turn; {n} in it makes one per round
 prompt = """
-You are the Test Writer. Write failing tests for the spec in {spec_path} in {cwd}.
-As your last step, write a report to {tests_path} in a single write."""
+You are the Architect. Design how to meet the requirements in {spec_path} in the code in {cwd}; change no file.
+As your last step, write the design to {design_path} in a single write."""
 
 [[steps]]
 use = "build"              # the default Builder step, with only its first prompt replaced
-prompt = "... the tests in {tests_path} ... write a report to {build_path} in a single write."
+edits = true               # as it already is: the run's branch is created before the first editing step
+prompt = "... the design in {design_path} ... write a report to {build_path} in a single write."
 
 [[steps]]
 use = "review"
@@ -565,7 +568,7 @@ workflow without one ends `FINISHED` when its last step is done, and its pull re
 change; with `--quality-gate`, a gate that still failed after the last quality round ends it `QUALITY_GATE_FAILED`
 instead, a draft, as under [Exit status](#exit-status)), and the flags `human_paced`, `edits`, `quality_gated`,
 `fresh_repeats_again` (a fresh session gets `again` too) and `locks`: the first editing step, outside the review loop, can lock the files it
-changes, as `tdd`'s Test Writer does; every later turn's change to them is undone, and the Reviewer told where it
+changes, as `product-team`'s QA Engineer does; every later turn's change to them is undone, and the Reviewer told where it
 is. A workflow's `proof_command`, such as `"python -m pytest -q {proofs}"`, runs each test the verdict step wrote in
 `{proofs_dir}` with a review that requests changes, in the working tree, and exits 1 when the test fails: the review
 gains which findings their tests demonstrate, and the next round's prompt tells the step it loops back to to make

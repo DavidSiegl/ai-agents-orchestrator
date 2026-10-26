@@ -5,10 +5,20 @@ was done.
 
 ## Planned
 
+- **The rename to Octoflow AI, the rest of it.** The product is Octoflow AI (README, window titles, pull request
+  text) and the binaries, release assets, `.deb` path, Tauri bundle and crates are `octoflow`; the bundle name has
+  no space because Tauri names the `.deb`, `.app` and `.dmg` after it verbatim. Still under the old name, each a
+  decision of its own: the GitHub repository, so every URL in the README and the badges stays until it is renamed
+  (GitHub redirects the old URL afterwards, never the new one before); `~/.config/ai-agents-orchestrator/`, the
+  `.orchestrator/` project directory and the `orchestrator-ci/` branches, which are on users' disks and remotes and
+  need a fallback that reads the old location; `orchestrator.py` and the `Orchestrator-*` commit trailers; the
+  Jenkins folder `AI-Agents-Orchestrator`. The macOS app could show "Octoflow AI" in Finder while staying
+  `Octoflow.app`, with `CFBundleDisplayName` in a `src-tauri/Info.plist`, unchecked on a Mac. Agreed 2026-10-25.
+
 - **The desktop app as the terminal client too: the macOS check.** Started with arguments, the app execs the
   orchestrator it bundles (`cli` in `ui/src-tauri/src/lib.rs`), so the AppImage is the CLI too and the README says
   how to get the CLI from each download; on macOS, where a `.app` is a directory, the CLI is a symlink to
-  `Orchestrator.app/Contents/MacOS/orchestrator`. Left: smoke-testing that on macOS, in
+  `Octoflow.app/Contents/MacOS/octoflow`. Left: smoke-testing that on macOS, in
   `.github/workflows/macos-binary.yml` (`.scratch/desktop-cli/issues/02-macos-cli-symlink.md`), which runs only on
   a published release or a dispatch for an existing tag, and checking the README's quarantine advice for the
   `.dmg` against a downloaded copy. The plain CLI binaries stay released: 13 MB against the AppImage's 120 MB of
@@ -16,6 +26,21 @@ was done.
   platform, by embedding the orchestrator's bytes in the Rust executable and unpacking them at start
   (PyInstaller's onefile done twice), or by Python hosting the window, which [ui-options.md](docs/ui-options.md)
   chose against. Agreed 2026-10-24.
+- **The quality gate in a `gate.py` of its own.** The gate is reusable for other Python projects, but lives inside
+  `orchestrator.py`; and it can only run inside the judged project's environment anyway, since it starts pytest
+  and mutmut with `sys.executable`, which in the binary is the binary. Decided 2026-10-24: the quality file is the
+  one interface: the engine reads and amends it (`parse_gate`, `gate_failures`, `judge_run`) and imports nothing
+  from the gate; each side keeps its own copy of the pieces of the format it needs, the gate's the home, and
+  `TestQualityFileContract` checks they agree. The engine writes a BUILD_FAILED file itself, minimally
+  (`build_failed_report`: status line, intro, failing tests or the console's end, no build-configuration or
+  mutmut-state listing). `gate.py` is one stdlib-only file beside `orchestrator.py`, so a quality build can still
+  take main's with `git show origin/main:gate.py`; it is the whole program, `python gate.py --base REV ...`, with
+  no subcommand, and the orchestrator loses `gate`. During the cutover, while main has no `gate.py`, the
+  Jenkinsfile falls back to main's `orchestrator.py gate`. The gate moves to its own repository only once a second
+  project uses it. The seam is drawn: the gate's block in `orchestrator.py` (from "Everything from here to the line
+  that ends the gate's block" to that line) uses nothing outside it, and nothing outside uses it but the `gate`
+  subcommand (`add_gate_arguments`, `gate_command`). Left: the cut itself, with its tests, CI and docs, then the
+  fallback's removal, then making the test-file patterns a setting for other projects.
 
 ## Open issues
 
@@ -23,6 +48,13 @@ was done.
   (`tests/test_orchestrator.py`) puts git's own directory on `PATH` after the stubs, so on a machine with
   `/usr/bin/shellcheck` (agentbox, Debian's package) removing the stub still finds the real one and the gate passes.
   Seen 2026-10-25 on `main` at `9448612`. Closes with `PATH` holding a directory with only a link to `git`.
+- **unexpected-paths reads only the contract step's file.** `unexpected_paths` judges each path the change touches
+  against `RunChange.spec`, the contract step's file, so a workflow whose contract is in business terms, such as
+  `examples/workflows/product-team.toml`, whose requirements name no file and whose `design.md` lists the
+  components, gets a finding to weigh for every path on every quality round. Raised by review 20 of
+  product-team-workflow (F4, 2026-10-25): "the gate reads file names from the spec and this spec is in business
+  terms by design". The example's header says so. Closes with the check reading every non-editing step's file that
+  precedes the first editing step, or with a workflow key naming the file that holds the paths.
 - **An AppImage run without FUSE passes no signal on to the orchestrator.** Under `APPIMAGE_EXTRACT_AND_RUN` the
   AppImage's runtime forks, runs `AppRun` in the child and waits, so the process a caller started is the runtime,
   and `Cli::exec` (`ui/src-tauri/src/lib.rs`) only replaces the child. Raised by the cross-review of desktop-cli
@@ -40,25 +72,12 @@ was done.
   test already points `TMPDIR` into its own directory. Found in the second build round of run 20261025-081413-327fc2
   (2026-10-25). Closes with a `TMPDIR` the build removes around `tauri build`, and with a README note, or a newer
   runtime that cleans up, for users.
-- **A prompt sent right after a startup dialog can be lost.** When an agent starts behind a dialog, such as Claude
-  Code's folder-trust question, `Workflow._start` waits in `_wait_for_startup` for herdr to report it `idle` and
-  returns; `Workflow._written` then sends the turn's prompt and records it in `RunState.prompted`. On 2026-10-25
-  the Builder of run 20261025-090825-73faf7, in a worktree of a clone Claude Code had not seen, was reported idle
-  as the dialog closed and before its input took text: the prompt never arrived, yet counted as delivered, and the
-  turn timed out after 1800s at an empty prompt. `resume` cannot recover it, since `_prompt_for` only waits on an
-  alive agent already prompted. Closes with `_wait_for_startup` waiting until the agent takes input, or with the
-  prompt's delivery checked (the agent turning `working`, or its handoff file appearing) and the prompt sent again
-  when neither happens.
-- **drain takes two passes to mark a spec done whose run's pull request already merged.** A `ready-for-agent` spec
-  with a `Run:` line gets `in-review` and `PR:` from `finished_run_header`, but `refreshed_headers` asks gh about
-  the pull request only for a spec that was `in-review` when the pass began, so a pull request merged since leaves
-  the spec `in-review`, its dependants blocked, until the next drain. Met on 2026-10-25 after resuming a run
-  outside drain. Closes with the pull request checked in the same pass once `finished_run_header` gives one.
-- **`ci/cargo-lock.sh` has not yet run on the Jenkins agent.** Checked only on the development host, so whether
-  the agent image has `flock` and whether `${JENKINS_AGENT_WORKDIR:-$HOME}` is writable there is unchecked; if
-  either fails, every UI and Package stage fails. Raised by cross-review 25 (F3): "the ticket's Verify step has no
-  evidence". Closes with a pull request build and a branch build of one commit run at once on agentbox0, one
-  saying that it waits for the lock and both passing.
+- **No build has yet been seen waiting for `ci/cargo-lock.sh` on the Jenkins agent.** PR #88's builds ran both
+  cargo steps through it on agentbox0 (builds 1-3, 2026-10-25), so the agent image has `flock` and the lock file's
+  directory is writable, and a quality-style build (`GIT_REF` set) ran `--no-wait`; but the two run side by side
+  reached their cargo steps 15 s apart, the lock free each time, so the wait and its message were seen only on the
+  development host. Raised by cross-review 25 (F3). Closes with two builds whose cargo steps overlap on agentbox0,
+  one saying that it waits for the lock and both passing.
 - **Is 3 GB the right memory limit for the agentbox0 Jenkins agent?** All builds on the node share its
   container's `mem_limit: 3g` (Homelab `jenkins/agentbox0.yaml`), which this repo cannot change. Since
   `ci/cargo-lock.sh`, two of this repository's builds compile Rust at once only when a quality build starts its
@@ -109,7 +128,7 @@ was done.
   request's review shows them, and each may take `PROOF_TIMEOUT`. Kept: a demonstrated defect is what the human
   most needs to see in a draft. Raised by the same review.
 - **A proof in a worktree run finds the checkout's pytest configuration.** The run directory, and with it
-  `RunState.proofs_dir`, is under the project checkout, not the run's worktree, so `adversarial.toml`'s
+  `RunState.proofs_dir`, is under the project checkout, not the run's worktree, so a `proof_command` of
   `python -m pytest {proofs}` takes its rootdir and `conftest.py` from the checkout while importing the code from the
   worktree it runs in. Found while writing loop-guards ticket 05; not reproduced. Closes with `_run_proof` passing
   the working tree as pytest's rootdir and conftest root, or the proofs copied into a scratch directory of the
@@ -354,6 +373,28 @@ was done.
   stages too, against `QUALITY_TIMEOUT`. What else shares the 3 GB stays open under "Is 3 GB the right memory
   limit".
 
+- **A prompt sent right after a startup dialog can be lost.** When an agent starts behind a dialog, such as Claude
+  Code's folder-trust question, `Workflow._start` waits in `_wait_for_startup` for herdr to report it `idle` and
+  returns; `Workflow._written` then sends the turn's prompt and records it in `RunState.prompted`. On 2026-10-25
+  the Builder of run 20261025-090825-73faf7, in a worktree of a clone Claude Code had not seen, was reported idle
+  as the dialog closed and before its input took text: the prompt never arrived, yet counted as delivered, and the
+  turn timed out after 1800s at an empty prompt. `resume` cannot recover it, since `_prompt_for` only waits on an
+  alive agent already prompted. Closes with `_wait_for_startup` waiting until the agent takes input, or with the
+  prompt's delivery checked (the agent turning `working`, or its handoff file appearing) and the prompt sent again
+  when neither happens.
+  Fixed (2026-10-25): `Workflow._written` sends the prompt through `_deliver`, which counts it taken once herdr
+  reports the agent `working` or `blocked`, or its handoff file exists, within `PROMPT_DELIVERY_SECONDS` (30), and
+  otherwise sends the same prompt once more. A second miss fails the turn naming the role, the file and the pane.
+  `prompted` and the turn's record are saved only once the prompt is taken, so a `resume` of such a run prompts the
+  agent again instead of only waiting. `_wait_for_startup` is unchanged.
+- **drain takes two passes to mark a spec done whose run's pull request already merged.** A `ready-for-agent` spec
+  with a `Run:` line gets `in-review` and `PR:` from `finished_run_header`, but `refreshed_headers` asks gh about
+  the pull request only for a spec that was `in-review` when the pass began, so a pull request merged since leaves
+  the spec `in-review`, its dependants blocked, until the next drain. Met on 2026-10-25 after resuming a run
+  outside drain. Closes with the pull request checked in the same pass once `finished_run_header` gives one.
+  Fixed (2026-10-25): when `finished_run_header` makes a spec `in-review`, `refreshed_headers` asks
+  `pull_request_header` about its pull request in the same pass and merges the result into the spec's one pair, so
+  a merged one makes the spec `done` and its dependants startable in that drain, `--dry-run` included.
 - **`test-integrity` has no way to accept an expected value the spec changes.** `expected-value-changed` fails the
   gate whenever an assertion's literals change beside code, also when the spec asks for the new output, and unlike
   `removed-test` there is no report the Reviewer judges instead. PR #76 changed what the pull request says for a

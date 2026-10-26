@@ -18,14 +18,19 @@ from hypothesis import strategies as st
 from orchestrator import (
     APPROVE,
     CHANGES_REQUESTED,
-    GATE_BUILD_FAILED,
     GATE_ERROR,
-    GATE_LEAK,
     GATE_OK,
+    QUALITY_BUILD_FAILED,
+    QUALITY_ERROR,
+    QUALITY_LEAK,
+    QUALITY_OK,
     Host,
     OrchestratorError,
     _failed_by,
+    _patch_unquote,
     _unquote,
+    added_lines,
+    build_failed_report,
     changed_lines,
     ci_credentials,
     parse_gate,
@@ -138,7 +143,8 @@ def is_subsequence(short: list[str], long: list[str]) -> bool:
 
 
 class TestChangedLines(unittest.TestCase):
-    """changed_lines on what Host.change_diff gets from real git for two generated trees. Runs git."""
+    """changed_lines, the gate's, and added_lines, the engine's, on what Host.change_diff gets from real git for two
+    generated trees. Runs git."""
 
     @given(changes())
     # An added line holding a lone carriage return, then text like a hunk header: read as a header, it added nine
@@ -149,8 +155,13 @@ class TestChangedLines(unittest.TestCase):
         with tempfile.TemporaryDirectory() as repo, patch.dict(os.environ, GIT_ENV):
             git(repo, "init", "-q")
             base_commit, new_commit = commit_tree(repo, base), commit_tree(repo, new)
-            got = changed_lines(Host().change_diff(repo, base_commit, new_commit))
+            diff = Host().change_diff(repo, base_commit, new_commit)
+            got = changed_lines(diff)
             counts = added_counts(repo, base_commit, new_commit)
+        added = added_lines(diff)
+        self.assertEqual({path: set(lines) for path, lines in added.items()}, got)
+        for path, lines in added.items():
+            self.assertEqual(list(lines.values()), [file_lines(new[path])[n - 1] for n in lines], path)
         self.assertEqual(set(got), {path for path, content in new.items() if base.get(path) != content})
         for path, added in got.items():
             lines = file_lines(new[path])
@@ -165,7 +176,8 @@ class TestChangedLines(unittest.TestCase):
 
 
 class TestUnquote(unittest.TestCase):
-    """_unquote against git's own quoting of a file name, with core.quotePath on and off. Runs git."""
+    """_unquote, the gate's, and _patch_unquote, the engine's, against git's own quoting of a file name, with
+    core.quotePath on and off. Runs git."""
 
     @given(file_names)
     @example("\x80")  # quoted as two octal escapes, one per byte of its UTF-8, which became two characters
@@ -178,6 +190,7 @@ class TestUnquote(unittest.TestCase):
             for quote_path in ("true", "false"):
                 listed = git(repo, "-c", f"core.quotePath={quote_path}", "ls-files").removesuffix("\n")
                 self.assertEqual(_unquote(listed), name, f"core.quotePath={quote_path}: {listed}")
+                self.assertEqual(_patch_unquote(listed), name, f"core.quotePath={quote_path}: {listed}")
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +313,7 @@ class TestEnvFile(unittest.TestCase):
 # The first line of a handoff file: parse_gate and parse_verdict
 # ---------------------------------------------------------------------------
 
-GATES = (GATE_OK, GATE_ERROR, GATE_BUILD_FAILED, GATE_LEAK)
+GATES = (QUALITY_OK, QUALITY_ERROR, QUALITY_BUILD_FAILED, QUALITY_LEAK)
 VERDICTS = (APPROVE, CHANGES_REQUESTED)
 blank_lines = st.lists(padding).map(lambda ls: "".join(line + "\n" for line in ls))
 emphasis = st.sampled_from([("", ""), ("**", "**"), ("_", "_"), ("`", "`"), ("# ", ""), ("## ", ""), ("> ", "")])
@@ -323,14 +336,14 @@ class TestFirstLineParsers(unittest.TestCase):
         self.assertIn(parse_verdict(text), (*VERDICTS, None))
 
     @given(blank_lines, emphasis, st.sampled_from(GATES), st.sampled_from(VERDICTS), after_word, st.text())
-    @example("", ("_", "_"), GATE_OK, APPROVE, "", "")  # the closing underscore read as the word going on
+    @example("", ("_", "_"), QUALITY_OK, APPROVE, "", "")  # the closing underscore read as the word going on
     def test_read_the_word_on_the_first_non_blank_line(self, blanks, marks, gate, verdict, after, rest):
         before, behind = marks
         self.assertEqual(parse_gate(f"{blanks}{before}GATE: {gate}{behind}{after}\n{rest}"), gate)
         self.assertEqual(parse_verdict(f"{blanks}{before}VERDICT: {verdict}{behind}{after}\n{rest}"), verdict)
 
     @given(blank_lines, st.sampled_from(GATES), st.sampled_from(VERDICTS), word_going_on, st.text())
-    @example("", GATE_OK, APPROVE, "D_WITH_CHANGES", "")
+    @example("", QUALITY_OK, APPROVE, "D_WITH_CHANGES", "")
     def test_refuse_a_word_that_goes_on(self, blanks, gate, verdict, going_on, rest):
         self.assertIsNone(parse_gate(f"{blanks}GATE: {gate}{going_on}\n{rest}"))
         self.assertIsNone(parse_verdict(f"{blanks}VERDICT: {verdict}{going_on}\n{rest}"))
@@ -340,14 +353,18 @@ class TestFirstLineParsers(unittest.TestCase):
         self.assertEqual(parse_gate(f"{blanks}{first}\n{rest}"), parse_gate(first))
         self.assertEqual(parse_verdict(f"{blanks}{first}\n{rest}"), parse_verdict(first))
 
-    @given(st.sampled_from(GATES), st.text())
+    @given(st.sampled_from((GATE_OK, GATE_ERROR)), st.text())
     def test_read_back_the_gate_quality_report_writes(self, gate, intro):
         self.assertEqual(parse_gate(quality_report(gate, intro)), gate)
+
+    @given(st.text(), st.text())
+    def test_read_back_the_gate_of_a_build_failed_report(self, intro, console):
+        self.assertEqual(parse_gate(build_failed_report(intro, None, console)), QUALITY_BUILD_FAILED)
 
     @given(blank_lines, emphasis, after_word, st.text())
     @example("", ("_", "_"), "", "")  # _failed_by matched the word with its own \b, which fails before "_"
     @example("", ("## ", ""), "", "")  # _failed_by put its new section above the gate line, the first `## ` one
     def test_a_gate_read_as_ok_reads_as_error_once_a_check_fails_it(self, blanks, marks, after, rest):
         before, behind = marks
-        quality = f"{blanks}{before}GATE: {GATE_OK}{behind}{after}\n{rest}"
-        self.assertEqual(parse_gate(_failed_by(quality, ["a check failed"])), GATE_ERROR)
+        quality = f"{blanks}{before}GATE: {QUALITY_OK}{behind}{after}\n{rest}"
+        self.assertEqual(parse_gate(_failed_by(quality, ["a check failed"])), QUALITY_ERROR)

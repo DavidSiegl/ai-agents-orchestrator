@@ -419,7 +419,11 @@ class FakeHerdr:
         self.kinds = []  # (name, kind) of each agent started, in order
         self.workspaces = set()
         self.live_panes = set()
-        self.waits = []
+        self.waits = []  # the until of each wait but a delivery check's
+        self.deliveries = []  # (name, timeout_ms) of each wait for an agent to take a prompt
+        self.dropped = {}  # by role, how many of its next prompts its agent drops: it stays as it was and writes nothing
+        self.prompts = []  # (name, text) of each prompt sent, dropped or not
+        self.taken = {}  # by name, whether the agent took its last prompt
         self.blocked_at_start = set()
         self.cwds = []  # (what, cwd) of each workspace created and pane split
 
@@ -458,9 +462,24 @@ class FakeHerdr:
 
     def prompt(self, name, text):
         self.calls.append(("prompt", name))
-        self.statuses[name] = self.script[self._role(name)].pop(0)(text, self.state, self.host)
+        self.prompts.append((name, text))
+        role = self._role(name)
+        if self.dropped.get(role):
+            self.dropped[role] -= 1
+            self.taken[name] = False
+            return
+        self.taken[name] = True
+        self.statuses[name] = self.script[role].pop(0)(text, self.state, self.host)
 
     def wait(self, name, timeout_ms, until=()):
+        if "working" in until:
+            # A taken prompt had the agent working, whatever it shows now.
+            self.deliveries.append((name, timeout_ms))
+            if name not in self.statuses:
+                raise orchestrator.HerdrError("agent_not_found", f"agent target {name} not found")
+            if not self.taken.get(name):
+                raise orchestrator.HerdrError("timeout", f"agent {name} did not reach {until}")
+            return "working"
         self.waits.append(until)
         return "done"
 
@@ -2155,6 +2174,120 @@ class TestResume(unittest.TestCase):
             RunState.from_dict({"run_id": "r-abc"})
 
 
+class TestPromptDelivery(unittest.TestCase):
+    """A prompt counts as delivered only once its agent takes it, and is sent once more when it does not."""
+
+    BUILD = "build-a1b2c3"
+
+    def default_run(self, build=None, **kw):
+        return make_workflow({"spec": [spec_turn], "build": build or [build_turn(1)],
+                              "review": [review_turn(1, APPROVE)]}, **kw)
+
+    def build_prompts(self, herdr):
+        return [text for name, text in herdr.prompts if name == self.BUILD]
+
+    def failed_twice(self):
+        """A default run whose Builder drops both prompts; its host and the state it saved."""
+        wf, herdr, host, _ = self.default_run()
+        herdr.dropped["build"] = 2
+        with patch("sys.stderr"), self.assertRaises(OrchestratorError) as raised:
+            wf.run()
+        return raised.exception, host, json.loads(host.files[f"{wf.state.dir}/state.json"])
+
+    def test_an_agent_that_turns_working_is_prompted_once(self):
+        wf, herdr, host, _ = make_workflow({"spec": [idle], "build": [build_turn(1)],
+                                            "review": [review_turn(1, APPROVE)]})
+        prompted = []
+
+        def collector_writes_late():
+            if wf.clock.now > orchestrator.STALL_SECONDS and wf.state.spec_path not in host.files:
+                prompted.append(json.loads(host.files[f"{wf.state.dir}/state.json"])["prompted"])
+                host.write(wf.state.spec_path, "spec")
+        wf.clock.hooks.append(collector_writes_late)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(herdr.calls.count(("prompt", "spec-a1b2c3")), 1)
+        self.assertEqual(prompted, ["spec.md"])
+        self.assertEqual(orchestrator.PROMPT_DELIVERY_SECONDS, 30)
+        self.assertEqual(herdr.deliveries, [("spec-a1b2c3", 30_000)])
+
+    def test_an_agent_that_writes_its_file_unseen_working_is_prompted_once(self):
+        wf, herdr, *_ = self.default_run()
+        # Every turn here writes its file during the prompt, before a wait could see the agent working.
+        herdr.wait = None
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(len(self.build_prompts(herdr)), 1)
+        self.assertEqual(wf.state.prompted, "review-1.md")
+
+    def test_a_file_written_while_the_wait_times_out_counts_as_taken(self):
+        wf, herdr, host, _ = self.default_run(build=[idle])
+
+        def unseen_working(name, timeout_ms, until=()):
+            build_turn(1)(None, wf.state, host)
+            raise orchestrator.HerdrError("timeout", "agent wait timed out")
+        herdr.wait = unseen_working
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(len(self.build_prompts(herdr)), 1)
+
+    def test_a_dropped_prompt_is_sent_once_more(self):
+        wf, herdr, *_ = self.default_run()
+        herdr.dropped["build"] = 1
+
+        with patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(wf.run(), APPROVE)
+        first, again = self.build_prompts(herdr)
+        self.assertEqual(again, first)
+        self.assertIn("[build] did not take its prompt within 30s; sending it again\n", err.getvalue())
+        self.assertEqual(herdr.deliveries, [(self.BUILD, 30_000)])
+
+    def test_two_dropped_prompts_fail_the_turn_unrecorded(self):
+        error, _, saved = self.failed_twice()
+
+        self.assertEqual(str(error), f"the Builder did not take its prompt to write {D}/build-1.md, sent twice; see "
+                                     "pane w1:p2, and resume to send it again")
+        self.assertEqual(saved["prompted"], "spec.md")
+        self.assertNotIn("build-1.md", [t["file"] for t in saved["turns"]])
+
+    def test_a_resume_after_two_dropped_prompts_sends_the_prompt_again(self):
+        _, host, saved = self.failed_twice()
+        # Alive, and exited with a session to resume: neither is only waited on, and both get the step's prompt.
+        for agent in ({"alive": ["build"]}, {"sessions": {"build": "s-build"}}):
+            with self.subTest(agent=agent):
+                seen = []
+                wf, *_ = resume(RunState.from_dict(saved), {
+                    "build": [recording(build_turn(1), seen)], "review": [review_turn(1, APPROVE)]},
+                    host=copy.deepcopy(host), **agent)
+
+                self.assertEqual(wf.run(), APPROVE)
+                self.assertEqual(len(seen), 1)
+                self.assertTrue(seen[0].startswith("You are the Builder"), seen[0])
+
+    def test_a_herdr_error_other_than_a_timeout_propagates(self):
+        wf, herdr, *_ = self.default_run(build=[idle])
+
+        def wait(name, timeout_ms, until=()):
+            raise orchestrator.HerdrError("server_error", "herdr is gone")
+        herdr.wait = wait
+
+        with patch("sys.stderr"), self.assertRaisesRegex(orchestrator.HerdrError, "herdr server_error"):
+            wf.run()
+
+    def test_an_agent_exiting_while_its_prompt_is_awaited_fails_the_turn(self):
+        wf, herdr, *_ = self.default_run(build=[idle])
+        wait = herdr.wait
+
+        def exiting(name, timeout_ms, until=()):
+            herdr.statuses.pop(name, None)
+            return wait(name, timeout_ms, until)
+        herdr.wait = exiting
+
+        with patch("sys.stderr"), self.assertRaisesRegex(OrchestratorError,
+                                                         f"^the Builder exited without writing {D}/build-1.md$"):
+            wf.run()
+
+
 class TestResumePullRequest(unittest.TestCase):
     BRANCH = "orchestrator/add-a-token-bucket-rate-limiter-a1b2c3"
     ON_BRANCH = ("rev-parse", "--abbrev-ref", "HEAD")
@@ -3751,10 +3884,10 @@ class TestSecretScanWorkflow(unittest.TestCase):
             self.assertEqual(wf.run(), APPROVE)
         state = wf.state
         quality = host.files[state.quality_path(1, 1)]
-        self.assertEqual(orchestrator.parse_gate(quality), orchestrator.GATE_LEAK)
+        self.assertEqual(orchestrator.parse_gate(quality), orchestrator.QUALITY_LEAK)
         self.assertIn("so it was not pushed and Jenkins did not judge the change", quality)
         self.assertIn(f"## Secrets found\n\n1. {replace(LEAK, commit='snap1')}\n", quality)
-        self.assertEqual(state.quality_rounds[0]["gate"], orchestrator.GATE_LEAK)
+        self.assertEqual(state.quality_rounds[0]["gate"], orchestrator.QUALITY_LEAK)
         self.assertEqual(builds, [orchestrator.QUALITY_FIX_PROMPT.format(
             quality_path=state.quality_path(1, 1), report_path=state.quality_build_path(1, 1)) + NOTE])
         # Only the clean second snapshot was pushed and built.
@@ -3792,7 +3925,7 @@ class TestSecretScanWorkflow(unittest.TestCase):
         self.assertEqual(wf.run(), APPROVE)
         # The LEAK file was taken as written: no new snapshot or scan before the fix turn.
         self.assertEqual(before_fix, [(scans, snapshots)])
-        self.assertEqual(orchestrator.parse_gate(host.files[wf.state.quality_path(1, 1)]), orchestrator.GATE_LEAK)
+        self.assertEqual(orchestrator.parse_gate(host.files[wf.state.quality_path(1, 1)]), orchestrator.QUALITY_LEAK)
         self.assertEqual(fake.triggered(), ["orchestrator-ci/a1b2c3-1-q2"])
 
     def test_a_secret_the_builder_leaves_in_stops_the_loop_early(self):
@@ -3826,7 +3959,7 @@ class TestSecretScanWorkflow(unittest.TestCase):
             "review": [review_turn(1, APPROVE)]}, host=host)
         self.assertEqual(wf.run(), APPROVE)
         s = wf.state
-        self.assertEqual([r["gate"] for r in s.quality_rounds], [orchestrator.GATE_LEAK, orchestrator.GATE_LEAK, "OK"])
+        self.assertEqual([r["gate"] for r in s.quality_rounds], [orchestrator.QUALITY_LEAK, orchestrator.QUALITY_LEAK, "OK"])
         self.assertEqual(herdr.calls.count(("prompt", "build-a1b2c3")), 3)
 
     def test_a_secret_in_the_base_fails_the_run(self):
@@ -5695,6 +5828,84 @@ class TestJudgeRun(unittest.TestCase):
         self.assertIn("over the workflow's max_lines of 40", finding["message"])
 
 
+class TestQualityFileContract(unittest.TestCase):
+    """The quality file is the one interface between the gate and the engine: what the gate's quality_report writes,
+    over every section it can write, the engine's parse_gate and gate_failures read back, and judge_run's
+    amendments leave a file they still read. Each side keeps its own copy of the format, which this checks agree."""
+
+    def finding(self, path, line, rule, message="m", severity="error"):
+        return {"path": path, "line": line, "severity": severity, "rule": rule, "message": message}
+
+    def full_report(self, gate, n_issues=3):
+        """A quality file with every section quality_report can write, and the inputs it was written from."""
+        conditions = ["`ruff` is not installed: it is not on PATH.", "2 tests fail; each is listed below."]
+        kinds = [("a.py", 3), ("b.py", None), (None, None)]
+        issues = [self.finding(*kinds[k % 3], f"ruff F{k}", f"m{k} at 1{k}") for k in range(n_issues)]
+        to_weigh = [self.finding("t.py", 9, "flaky-tests mixed-results", severity="warning"),
+                    self.finding(None, None, "surviving-mutants budget-reached", severity="warning")]
+        tests = [("t.T.test_a", "AssertionError: 1 != 2\ntraceback"), ("t.T.test_b", "")]
+        text = quality_report(gate, "intro", conditions=conditions, issues=issues, to_weigh=to_weigh, elsewhere=4,
+                              tests=tests, coverage="62.5% of 40 new lines to cover.",
+                              suppressions=[("a.py", 3, "x = 1  # noqa: F401")],
+                              edited=list(orchestrator.BUILD_CONFIG_FILES), rules_from="`main.toml`",
+                              mutmut_state=["mutants/a.py.meta"])
+        return text, conditions, issues, tests
+
+    def expected_fingerprints(self, issues, tests):
+        out: dict[str, list[str]] = {}
+        for i in issues[:orchestrator.QUALITY_ISSUE_LIMIT]:
+            out.setdefault(i["rule"].split(" ", 1)[0], []).append(
+                orchestrator.finding_fingerprint(i["path"], i["rule"], i["message"]))
+        out["tests"] = [orchestrator.finding_fingerprint(name, "tests", "") for name, _ in tests]
+        return out
+
+    def test_the_engine_reads_every_section_the_gate_writes(self):
+        for gate, n_issues in ((orchestrator.GATE_OK, 0), (orchestrator.GATE_ERROR, 3),
+                               (orchestrator.GATE_ERROR, orchestrator.QUALITY_ISSUE_LIMIT + 2)):
+            with self.subTest(gate=gate, n_issues=n_issues):
+                text, conditions, issues, tests = self.full_report(gate, n_issues)
+                for heading in ("## Failed conditions", "## Issues on changed lines", "## Findings to weigh",
+                                "## Failing tests", "## Coverage on new code", "## Suppressions added",
+                                "## Build configuration"):
+                    self.assertIn(f"\n{heading}\n", text)
+                self.assertEqual(parse_gate(text), gate)
+                failures = orchestrator.gate_failures(text)
+                self.assertEqual(failures.conditions, conditions)
+                self.assertEqual(failures.fingerprints, self.expected_fingerprints(issues, tests))
+
+    def test_judge_run_s_amendments_leave_a_file_the_engine_reads(self):
+        text, conditions, issues, tests = self.full_report(orchestrator.GATE_OK, 0)
+        found = self.finding("pyproject.toml", 5, "not-in-spec", "names a package at 7")
+        weigh = self.finding(None, None, "over-budget", severity="warning")
+        check = orchestrator.OrchestratorCheck(
+            "new-dependencies", lambda change: orchestrator.CheckFindings([found], [weigh]))
+        amended = orchestrator.judge_run(text, (check,), run_change(""))
+        self.assertEqual(parse_gate(amended), orchestrator.QUALITY_ERROR)
+        failures = orchestrator.gate_failures(amended)
+        self.assertEqual(failures.conditions,
+                         [*conditions, "1 findings of the `new-dependencies` check; each is listed below."])
+        expected = self.expected_fingerprints(issues, tests)
+        expected["new-dependencies"] = [orchestrator.finding_fingerprint(
+            "pyproject.toml", "new-dependencies not-in-spec", "names a package at 7")]
+        self.assertEqual(failures.fingerprints, expected)
+
+    def test_the_engine_s_copies_match_the_gate_s(self):
+        self.assertEqual((orchestrator.QUALITY_OK, orchestrator.QUALITY_ERROR),
+                         (orchestrator.GATE_OK, orchestrator.GATE_ERROR))
+        self.assertEqual(orchestrator.QUALITY_FAILED_CONDITIONS, orchestrator.FAILED_CONDITIONS)
+        self.assertEqual(orchestrator.QUALITY_FAILING_TESTS, orchestrator.FAILING_TESTS)
+        self.assertEqual(orchestrator.QUALITY_TO_WEIGH_NOTE, orchestrator.TO_WEIGH_NOTE)
+        self.assertEqual(orchestrator.QUALITY_FINDINGS_LIMIT, orchestrator.QUALITY_ISSUE_LIMIT)
+        self.assertEqual(orchestrator._orchestrator_condition("c", 2), orchestrator._check_condition("c", 2))
+        for path, line in (("a.py", 3), ("a.py", None), (None, None)):
+            f = orchestrator._check_finding(path, line, "r", "m", severity="error")
+            self.assertEqual(f, orchestrator._finding(path, line, "r", "m", severity="error"))
+            self.assertEqual(orchestrator._numbered_finding(7, f), orchestrator._numbered(7, f))
+        text = "x" * 200
+        self.assertEqual(orchestrator._shortened(text), orchestrator._clip(text))
+        self.assertEqual(orchestrator._shortened(text, 80), orchestrator._clip(text, 80))
+
+
 class TestChangedLines(unittest.TestCase):
     def test_added_modified_and_deleted_files(self):
         diff = ("diff --git a/new.py b/new.py\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n"
@@ -5743,12 +5954,59 @@ class TestChangedLines(unittest.TestCase):
                         f"+x = 1{sep}diff --git a/g.py b/g.py{sep}@@ -5,0 +6,2 @@\n+y\n+z\n")
                 self.assertEqual(changed_lines(diff), {"f.py": {4, 5, 6}})
 
+    def test_added_lines_the_engine_s_reads_each_diff_as_changed_lines_does(self):
+        diffs = [
+            "diff --git a/f.py b/f.py\n--- a/f.py\n+++ b/f.py\n@@ -5,2 +4,0 @@\n-a\n-b\n",
+            ("diff --git a/my file.py b/my file.py\nnew file mode 100644\nindex 0000000..e69de29\n"
+             "diff --git a/x y.py b/x y.py\n--- a/x y.py\t\n+++ b/x y.py\t\n@@ -1 +1 @@\n-a\n+b\n"),
+            ('diff --git "a/tab\\there.py" "b/tab\\there.py"\n--- "a/tab\\there.py"\n+++ "b/tab\\there.py"\n'
+             "@@ -0,0 +1 @@\n+x\n"),
+            "diff --git a/f.md b/f.md\n--- a/f.md\n+++ b/f.md\n@@ -1,0 +2,3 @@\n+++ b/evil.md\n+--- a/x\n+rename to y\n",
+            ("diff --git a/old.py b/new.py\nsimilarity index 90%\nrename from old.py\nrename to new.py\n"
+             "--- a/old.py\n+++ b/new.py\n@@ -2,0 +3 @@\n+z = 1\r\n"
+             "diff --git a/uv.lock b/uv.lock\ndeleted file mode 100644\n--- a/uv.lock\n+++ /dev/null\n@@ -1 +0,0 @@\n"
+             "-x\n"),
+        ]
+        for diff in diffs:
+            with self.subTest(diff=diff):
+                added = orchestrator.added_lines(diff)
+                self.assertEqual({path: set(lines) for path, lines in added.items()}, changed_lines(diff))
+        self.assertEqual(orchestrator.added_lines(diffs[3]),
+                         {"f.md": {2: "++ b/evil.md", 3: "--- a/x", 4: "rename to y"}})
+        self.assertEqual(orchestrator.added_lines(diffs[4]), {"new.py": {3: "z = 1\r"}})
+
     def test_build_config_edits(self):
         diff = ("diff --git a/Jenkinsfile b/Jenkinsfile\n--- a/Jenkinsfile\n+++ b/Jenkinsfile\n@@ -1 +1 @@\n-a\n+b\n"
                 "diff --git a/uv.lock b/uv.lock\ndeleted file mode 100644\n"
                 "--- a/uv.lock\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n")
         self.assertEqual(orchestrator.edited_config(diff, changed_lines(diff)), ["Jenkinsfile", "uv.lock"])
         self.assertEqual(orchestrator.edited_config("", {}), [])
+
+
+class TestBuildFailedReport(unittest.TestCase):
+    """build_failed_report, the engine's quality file for a build that ended before its Gate stage."""
+
+    def test_no_test_report_and_the_console(self):
+        text = orchestrator.build_failed_report("intro", None, "last\nlines")
+        self.assertTrue(text.startswith("GATE: BUILD_FAILED\n\nintro\n"))
+        self.assertIn("## Failing tests\n\nJenkins has no test report for this build.\n", text)
+        self.assertIn(f"## The last {orchestrator.CONSOLE_TAIL_LINES} lines of the build's console\n\n"
+                      "````\nlast\nlines\n````\n", text)
+        self.assertNotIn("Issues on changed lines", text)
+        self.assertNotIn("Findings to weigh", text)
+
+    def test_failing_tests_without_a_console(self):
+        text = orchestrator.build_failed_report("intro", [("t.T.test_x", "AssertionError\ntraceback")], "")
+        self.assertIn("## Failing tests\n\n- `t.T.test_x`: AssertionError\n", text)
+        self.assertNotIn("console", text)
+        self.assertIn("## Failing tests\n\nNone.\n", orchestrator.build_failed_report("intro", [], ""))
+
+    def test_failing_tests_beyond_the_limit_are_counted(self):
+        tests = [(f"t.T.test_{k}", "") for k in range(orchestrator.QUALITY_FINDINGS_LIMIT + 3)]
+        text = orchestrator.build_failed_report("intro", tests, "")
+        self.assertIn("- `t.T.test_0`: failed\n", text)
+        self.assertIn("- and 3 more.\n", text)
+        self.assertNotIn(f"test_{orchestrator.QUALITY_FINDINGS_LIMIT}`", text)
 
 
 class TestQualityReport(unittest.TestCase):
@@ -5807,18 +6065,19 @@ class TestQualityReport(unittest.TestCase):
 
     def test_no_findings_to_weigh_no_section(self):
         self.assertNotIn("Findings to weigh", quality_report("OK", "intro"))
-        self.assertNotIn("Findings to weigh", quality_report("BUILD_FAILED", "intro", to_weigh=[self.finding("t", 1)]))
+        self.assertNotIn("Findings to weigh", quality_report("ERROR", "intro", issues=self.issues(1)))
 
-    def test_tests_coverage_and_console(self):
-        text = quality_report("BUILD_FAILED", "intro", tests=None, console="last\nlines")
-        self.assertIn("Jenkins has no test report for this build.", text)
-        self.assertIn("````\nlast\nlines\n````", text)
-        self.assertNotIn("Issues on changed lines", text)
+    def test_tests_and_coverage(self):
+        # The console's end is the engine's to write (TestBuildFailedReport): the gate's file never has one.
         text = quality_report("OK", "intro", tests=[("t.T.test_x", "AssertionError\ntraceback")],
                               coverage="62.5% of 40 new lines to cover.")
         self.assertIn("- `t.T.test_x`: AssertionError\n", text)
         self.assertIn("## Coverage on new code\n\n62.5% of 40 new lines to cover.\n", text)
         self.assertIn("None.", text)
+        self.assertNotIn("console", text)
+        self.assertNotIn("Jenkins has no test report", text)
+        self.assertNotIn("## Failing tests", quality_report("OK", "intro", tests=None))
+        self.assertIn("## Failing tests\n\nNone.\n", quality_report("OK", "intro", tests=[]))
 
     def test_sections_left_out_by_default(self):
         text = quality_report("OK", "intro")
@@ -6028,7 +6287,7 @@ class TestGate(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("- `f.py:5` holds `\\r`, which a linter that reads the file ends a line at", out)
         self.assertNotIn("`f.py:4`", out)
-        with self.assertRaisesRegex(OrchestratorError, "cannot read gone.py, which the change edits"):
+        with self.assertRaisesRegex(orchestrator.GateError, "cannot read gone.py, which the change edits"):
             orchestrator.stray_line_ends(self.repo, {"gone.py": {1}}, [(orchestrator.GATE_TOOLS[0], ["gone.py"])])
 
     def test_a_carriage_return_in_a_file_no_linter_reads_passes(self):
@@ -6643,7 +6902,7 @@ class TestWeakenedTests(unittest.TestCase):
         self.put("new.py", "x = 1\n")
         self.git("add", "new.py")
         self.edit("tests/test_calc.py", "import unittest\n", "import unittest  # edited\n")
-        self.assertEqual(sorted(self.host.changed_files(self.repo, "HEAD"), key=str),
+        self.assertEqual(sorted(orchestrator._changed_files(self.repo, "HEAD"), key=str),
                          sorted([("calc.py", None), (None, "new.py"), ("tests/test_calc.py", "tests/test_calc.py"),
                                  ("tests/test_other.py", "tests/test_renamed.py")], key=str))
 
@@ -8468,7 +8727,7 @@ class TestTooComplexFunctions(unittest.TestCase):
         # Lines enough of its own that git does not take other.py for calc.py renamed.
         self.put("other.py", "".join(f"CONSTANT_{k} = {k}\n" for k in range(200)) + "\n\n" + flat("big", 20))
         self.git("add", "other.py")
-        self.assertIn(("calc.py", None), self.host.changed_files(self.repo, self.git("rev-parse", "HEAD").strip()))
+        self.assertIn(("calc.py", None), orchestrator._changed_files(self.repo, self.git("rev-parse", "HEAD").strip()))
         self.assertEqual(self.found()[0], [])
 
     def test_an_unchanged_function_made_a_method_in_its_file_is_compared_with_its_old_self(self):
@@ -8790,14 +9049,14 @@ class TestTooComplexFunctions(unittest.TestCase):
 
     def test_a_base_that_cannot_be_read_leaves_its_functions_judged_as_new(self):
         self.nest_under("big", 19)
-        git = Host.git
+        git = orchestrator._git
 
-        def no_blob(host, cwd, *args, **kw):
+        def no_blob(cwd, *args, **kw):
             if "cat-file" in args:
-                raise OrchestratorError("git cat-file failed")
-            return git(host, cwd, *args, **kw)
+                raise orchestrator.GateError("git cat-file failed")
+            return git(cwd, *args, **kw)
 
-        with patch.object(Host, "git", no_blob):
+        with patch.object(orchestrator, "_git", no_blob):
             where, found = self.found()
         self.assertEqual(where, [("calc.py", self.def_line("big"), "over-limit")])
         self.assertEqual(found[0]["message"], "`big`: cognitive complexity 22, a new function; the limit is 15.")
@@ -9170,6 +9429,14 @@ class TestChildEnvironment(unittest.TestCase):
         self.assertFalse([k for k in orchestrator.CI_ENV if f"{k}=" in out])
         self.assertFalse(leaks(out))
 
+    @patch.dict("os.environ", {**ENV, **{k: "1" for k in orchestrator.GIT_PATHSPEC_ENV}})
+    def test_the_gate_s_processes_get_no_credentials_and_no_pathspec_switches(self):
+        # tool_env is the gate's own copy of child_env, which the gate cannot use; both leave out the same names.
+        env = orchestrator.tool_env()
+        self.assert_scrubbed(env)
+        self.assertFalse(set(orchestrator.GIT_PATHSPEC_ENV) & set(env))
+        self.assertEqual(env, orchestrator.child_env())
+
 
 class TestQualityCLI(unittest.TestCase):
     def refused(self, argv):
@@ -9375,7 +9642,7 @@ GOLDEN = {
         f'Your session was restarted in the middle of this turn. Continue where you left off; the turn still ends when you write {D}/build-2.md in a single write.'),
 }
 GOLDEN_PR_BODY = (
-    'Opened by ai-agents-orchestrator run `20260929-120000-a1b2c3`. Reviewer verdict after 2 rounds: **APPROVE**.\n'
+    'Opened by Octoflow AI run `20260929-120000-a1b2c3`. Reviewer verdict after 2 rounds: **APPROVE**.\n'
     '\n'
     '| Commit trailer | Value |\n'
     '| --- | --- |\n'
@@ -10267,18 +10534,31 @@ class TestProofs(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "proof_command must be a string"):
             orchestrator.parse_workflow("bad", {**orchestrator.workflow_definition(QUICK), "proof_command": 1}, BUILT_IN_PROMPTS)
 
+    def test_a_workflow_file_takes_proof_command_and_proofs_dir(self):
+        text = """
+proof_command = "python -m pytest -q {proofs}"
+
+[[steps]]
+use = "spec"
+
+[[steps]]
+use = "build"
+
+[[steps]]
+use = "review"
+prompt = "Back each finding with a test in {proofs_dir}; write {review_path}."
+again = "Again, with tests in {proofs_dir}; write {review_path}."
+"""
+        p = orchestrator.parse_workflow("proving", tomllib.loads(text), BUILT_IN_PROMPTS)
+        self.assertEqual(p.proof_command, "python -m pytest -q {proofs}")
+        self.assertIn("{proofs_dir}", p.step("review").prompt)
+        self.assertIn("{proofs_dir}", p.step("review").again)
+
     def test_proof_command_round_trips_through_a_workflow_file(self):
         text = orchestrator.workflow_toml(self.pipeline)
         self.assertIn('proof_command = "sh {proofs}"', text)
         self.assertEqual(orchestrator.parse_workflow("quick", tomllib.loads(text), BUILT_IN_PROMPTS), self.pipeline)
         self.assertNotIn("proof_command", orchestrator.workflow_toml(QUICK))
-
-    def test_the_adversarial_example_loads(self):
-        adversarial = orchestrator.load_workflow_file(f"{EXAMPLES}/adversarial.toml", BUILT_IN_PROMPTS)
-        self.assertEqual(orchestrator.workflow_shape(adversarial), "spec -> build -> review (back to build)")
-        self.assertIn("{proofs}", adversarial.proof_command)
-        self.assertIn("{proofs_dir}", adversarial.step("review").prompt)
-        self.assertIn("{proofs_dir}", adversarial.step("review").again)
 
 
 class TestSavedBeforeWorkflows(unittest.TestCase):
@@ -10428,18 +10708,31 @@ class TestWorkflowFiles(unittest.TestCase):
         default = orchestrator.DEFAULT_WORKFLOW
         quick = orchestrator.load_workflow_file(f"{EXAMPLES}/quick.toml", BUILT_IN_PROMPTS)
         self.assertEqual(orchestrator.workflow_shape(quick), "build -> review (back to build)")
-        tdd = orchestrator.load_workflow_file(f"{EXAMPLES}/tdd.toml", BUILT_IN_PROMPTS)
-        self.assertEqual(tdd.name, "tdd")
-        self.assertEqual(tdd.roles, {"spec": "Spec Collector", "tests": "Test Writer", "build": "Builder",
-                                     "review": "Reviewer"})
-        self.assertEqual(tdd.models, {"tests": "sonnet"})
-        spec, tests, build, review = tdd.steps
-        self.assertEqual((spec, review), (default.step("spec"), default.step("review")))
-        # use keeps every field the file does not set.
-        self.assertNotEqual(build.prompt, default.step("build").prompt)
-        self.assertEqual(Step(**{**orchestrator.step_fields(build), "prompt": default.step("build").prompt}),
-                         default.step("build"))
+        team = orchestrator.load_workflow_file(f"{EXAMPLES}/product-team.toml", BUILT_IN_PROMPTS)
+        self.assertEqual(team.name, "product-team")
+        self.assertEqual(orchestrator.workflow_shape(team), "spec -> design -> tests -> build -> review (back to build)")
+        self.assertEqual(team.roles, {"spec": "Product Manager", "design": "Architect", "tests": "QA Engineer",
+                                      "build": "Engineer", "review": "Tech Lead"})
+        self.assertEqual(team.models, {"tests": "sonnet"})
+        spec, design, tests, build, review = team.steps
+        # use keeps every field the file does not set: the interview stays human-paced, the Engineer quality-gated, the
+        # Tech Lead the verdict step looping back to the Engineer.
+        self.assertEqual(Step(**{**orchestrator.step_fields(spec), "prompt": default.step("spec").prompt}),
+                         default.step("spec"))
+        self.assertIn("first line is a `# ` heading", spec.prompt)
+        for step in (build, review):
+            fields = {"prompt", "again", "fresh_note"}
+            self.assertEqual({k: v for k, v in orchestrator.step_fields(step).items() if k not in fields},
+                             {k: v for k, v in orchestrator.step_fields(default.step(step.id)).items() if k not in fields})
+        self.assertEqual((design.file, design.edits), ("design.md", False))
         self.assertEqual((tests.role, tests.file, tests.edits, tests.locks), ("tests", "tests.md", True, True))
+        # Every round of the Engineer and the Tech Lead, and a fresh session of either, hears of the design and the
+        # locked acceptance tests, not only the first.
+        for step in (build, review):
+            for text in (step.prompt, step.again, step.fresh_note):
+                self.assertIn("{design_path}", text)
+                self.assertIn("{tests_path}", text)
+        self.assertIn("{design_path}", tests.prompt)
 
     def test_default_round_trips_through_its_file(self):
         default = orchestrator.DEFAULT_WORKFLOW
@@ -10632,14 +10925,14 @@ class TestWorkflowFiles(unittest.TestCase):
             orchestrator.load_workflow_file("/nope/x.toml", BUILT_IN_PROMPTS)
 
     def test_files_are_offered_by_name(self):
-        with open(f"{EXAMPLES}/tdd.toml") as f:
-            self.file("tdd", f.read())
+        with open(f"{EXAMPLES}/product-team.toml") as f:
+            self.file("product-team", f.read())
         self.file("broken", "nonsense\n")
         with open(os.path.join(self.workflows, "notes.txt"), "w") as f:
             f.write("not a workflow")
-        self.assertEqual(orchestrator.workflow_names(), ["broken", "default", "tdd"])
-        self.assertEqual(orchestrator.named_workflow("tdd", BUILT_IN_PROMPTS).name, "tdd")
-        with self.assertRaisesRegex(OrchestratorError, "unknown workflow nope; there are broken, default, tdd"):
+        self.assertEqual(orchestrator.workflow_names(), ["broken", "default", "product-team"])
+        self.assertEqual(orchestrator.named_workflow("product-team", BUILT_IN_PROMPTS).name, "product-team")
+        with self.assertRaisesRegex(OrchestratorError, "unknown workflow nope; there are broken, default, product-team"):
             orchestrator.named_workflow("nope", BUILT_IN_PROMPTS)
 
     def test_a_run_keeps_its_workflow_when_the_file_is_gone(self):
@@ -10696,7 +10989,7 @@ class TestWorkflowFileCLI(unittest.TestCase):
     def setUp(self):
         workflows = os.path.join(without_workflow_files(self), "ai-agents-orchestrator", "workflows")
         os.makedirs(workflows)
-        with open(f"{EXAMPLES}/tdd.toml") as src, open(f"{workflows}/tdd.toml", "w") as dst:
+        with open(f"{EXAMPLES}/product-team.toml") as src, open(f"{workflows}/product-team.toml", "w") as dst:
             dst.write(src.read())
 
     def started(self, init, *flags):
@@ -10705,9 +10998,9 @@ class TestWorkflowFileCLI(unittest.TestCase):
         return init.call_args.args[2], init.call_args.kwargs
 
     def test_run_a_workflow_file_by_name(self, _resolve, _run, init):
-        state, kw = self.started(init, "--workflow", "tdd")
-        self.assertEqual((state.workflow, state.phase), ("tdd", "spec"))
-        self.assertEqual(kw["pipeline"], orchestrator.load_workflow_file(f"{EXAMPLES}/tdd.toml", BUILT_IN_PROMPTS))
+        state, kw = self.started(init, "--workflow", "product-team")
+        self.assertEqual((state.workflow, state.phase), ("product-team", "spec"))
+        self.assertEqual(kw["pipeline"], orchestrator.load_workflow_file(f"{EXAMPLES}/product-team.toml", BUILT_IN_PROMPTS))
         self.assertEqual(kw["agents"].models, {"tests": "sonnet"})
 
     def test_run_a_workflow_file_by_path(self, _resolve, _run, init):
@@ -10715,9 +11008,9 @@ class TestWorkflowFileCLI(unittest.TestCase):
         self.assertEqual((state.workflow, state.phase, kw["pipeline"].name), ("quick", "build", "quick"))
 
     def test_model_flags_override_the_files_models(self, _resolve, _run, init):
-        _, kw = self.started(init, "--workflow", "tdd", "--model", "X")
-        self.assertEqual(kw["agents"].models, {"spec": "X", "tests": "X", "build": "X", "review": "X"})
-        _, kw = self.started(init, "--workflow", "tdd", "--role-model", "tests=haiku", "--role-model", "spec=opus",
+        _, kw = self.started(init, "--workflow", "product-team", "--model", "X")
+        self.assertEqual(kw["agents"].models, {"spec": "X", "design": "X", "tests": "X", "build": "X", "review": "X"})
+        _, kw = self.started(init, "--workflow", "product-team", "--role-model", "tests=haiku", "--role-model", "spec=opus",
                              "--build-model", "Y")
         self.assertEqual(kw["agents"].models, {"spec": "opus", "tests": "haiku", "build": "Y"})
 
@@ -10730,14 +11023,14 @@ class TestWorkflowFileCLI(unittest.TestCase):
 
     def test_bad_flags(self, _resolve, _run, init):
         for argv in (["run", "task", "--role-model", "tests"],
-                     ["run", "task", "--workflow", "tdd", "--workflow-file", "x.toml"]):
+                     ["run", "task", "--workflow", "product-team", "--workflow-file", "x.toml"]):
             with self.subTest(argv=argv), self.assertRaises(SystemExit), patch("sys.stderr"):
                 parse_args(argv)
 
     def test_resume_takes_role_model(self, _resolve, _run, init):
-        tdd = orchestrator.named_workflow("tdd", BUILT_IN_PROMPTS)
-        saved = {**asdict(saved_run("build", 1, models={"tests": "sonnet"})), "workflow": "tdd",
-                 "workflow_definition": orchestrator.workflow_definition(tdd)}
+        team = orchestrator.named_workflow("product-team", BUILT_IN_PROMPTS)
+        saved = {**asdict(saved_run("build", 1, models={"tests": "sonnet"})), "workflow": "product-team",
+                 "workflow_definition": orchestrator.workflow_definition(team)}
         args = parse_args(["resume", "a1b2c3", "--role-model", "review=opus"])
         state = orchestrator.resumable_state([(10**4, saved)], args, "/proj", "here", lambda pid: False)
         self.assertEqual(state.models, {"tests": "sonnet", "review": "opus"})
@@ -10753,20 +11046,21 @@ class TestWorkflowFileCLI(unittest.TestCase):
             "    spec -> build -> review (back to build)",
             f"broken  {workflows}/broken.toml",
             "    error: step 1: file is missing",
-            f"tdd  {workflows}/tdd.toml",
-            "    spec -> tests -> build -> review (back to build)",
-            "    Spec Collector -> Test Writer -> Builder <-> Reviewer: tests first, by another session",
+            f"product-team  {workflows}/product-team.toml",
+            "    spec -> design -> tests -> build -> review (back to build)",
+            "    Product Manager -> Architect -> QA Engineer -> Engineer <-> Tech Lead",
             "",
             f"Add one as {workflows}/NAME.toml; `orchestrator.py workflows default` prints the default as a file "
             f"to start from.",
         ])
 
     def test_workflows_prints_one_as_a_file(self, _resolve, _run, init):
-        for ref in ("tdd", f"{EXAMPLES}/tdd.toml"):
+        for ref in ("product-team", f"{EXAMPLES}/product-team.toml"):
             with self.subTest(ref=ref), patch("sys.stdout", new_callable=io.StringIO) as out:
                 self.assertEqual(main(["workflows", ref]), 0)
-                self.assertEqual(orchestrator.parse_workflow("tdd", tomllib.loads(out.getvalue()), BUILT_IN_PROMPTS),
-                                 orchestrator.named_workflow("tdd", BUILT_IN_PROMPTS))
+                self.assertEqual(orchestrator.parse_workflow("product-team", tomllib.loads(out.getvalue()),
+                                                           BUILT_IN_PROMPTS),
+                                 orchestrator.named_workflow("product-team", BUILT_IN_PROMPTS))
 
 
 class TestPromptFiles(unittest.TestCase):
@@ -10986,7 +11280,7 @@ class TestPromptFiles(unittest.TestCase):
         names = {f.name for f in orchestrator.fields(orchestrator.Prompts)}
         constants = {k for k in vars(orchestrator) if re.fullmatch(r"[A-Z_]+_(PROMPT|NOTE)", k)}
         # Not sent to an agent: the quality file's and the window's.
-        self.assertEqual(constants - names, {"TO_WEIGH_NOTE", "HERDR_NOTE"})
+        self.assertEqual(constants - names, {"TO_WEIGH_NOTE", "QUALITY_TO_WEIGH_NOTE", "HERDR_NOTE"})
         for name in names:
             self.assertEqual(getattr(BUILT_IN_PROMPTS, name), getattr(orchestrator, name))
             self.assertIsNone(orchestrator.prompt_problem(name, getattr(orchestrator, name)))
@@ -11011,7 +11305,7 @@ class TestWorkflowWithoutAVerdict(unittest.TestCase):
         self.assertFalse(pr["draft"])
         # The head line, then the commit's trailers, then the spec.
         head, trailers, rest = pr["body"].split("\n\n", 2)
-        self.assertEqual(head, "Opened by ai-agents-orchestrator run `20260929-120000-a1b2c3`. **FINISHED**: its "
+        self.assertEqual(head, "Opened by Octoflow AI run `20260929-120000-a1b2c3`. **FINISHED**: its "
                                "workflow has no review step, so no agent reviewed this change.")
         self.assertEqual(trailers, "| Commit trailer | Value |\n| --- | --- |\n"
                                    "| Orchestrator-Run | `20260929-120000-a1b2c3` |\n"
@@ -11052,7 +11346,7 @@ class TestWorkflowWithoutAVerdict(unittest.TestCase):
         pr = host.prs[0]
         self.assertTrue(pr["draft"])
         head, trailers, rest = pr["body"].split("\n\n", 2)
-        self.assertEqual(head, "Opened by ai-agents-orchestrator run `20260929-120000-a1b2c3`. "
+        self.assertEqual(head, "Opened by Octoflow AI run `20260929-120000-a1b2c3`. "
                                "**QUALITY_GATE_FAILED**: its workflow has no review step, and the quality gate still "
                                "did not pass after the last quality round, so this is a draft.")
         self.assertIn("| Orchestrator-Gate | `ERROR after 2 quality rounds` |", trailers.split("\n"))
@@ -11538,7 +11832,7 @@ class TestSelfCommand(unittest.TestCase):
 
     def test_zipapp(self):
         with tempfile.TemporaryDirectory() as d:
-            pyz = os.path.join(d, "orchestrator.pyz")
+            pyz = os.path.join(d, "octoflow.pyz")
             with open(pyz, "wb") as f:
                 f.write(b"PK")
             with patch.object(orchestrator, "__file__", os.path.join(pyz, "orchestrator.py")):
@@ -11546,8 +11840,8 @@ class TestSelfCommand(unittest.TestCase):
 
     def test_pyinstaller_binary(self):
         with patch.object(orchestrator.sys, "frozen", True, create=True), \
-                patch.object(orchestrator.sys, "executable", "/opt/orchestrator-linux-x86_64"):
-            self.assertEqual(orchestrator.self_command(), ["/opt/orchestrator-linux-x86_64"])
+                patch.object(orchestrator.sys, "executable", "/opt/octoflow-linux-x86_64"):
+            self.assertEqual(orchestrator.self_command(), ["/opt/octoflow-linux-x86_64"])
 
 
 class TestRunProcess(unittest.TestCase):
@@ -12121,7 +12415,7 @@ class TestRunWindowLook(unittest.TestCase):
 
     def test_the_header_names_the_selected_workflows_roles(self):
         texts = [w.options.get("text") for w, _ in self.ttk_widgets()]
-        self.assertIn("ai-agents-orchestrator", texts)
+        self.assertIn("Octoflow AI", texts)
         self.assertEqual(self.header(), ("Spec Collector → Builder → Reviewer", "Pipeline.TLabel"))
         with open(f"{EXAMPLES}/quick.toml") as src, open(f"{self.workflows}/quick.toml", "w") as dst:
             dst.write(src.read())
@@ -13256,12 +13550,47 @@ class TestDrain(unittest.TestCase):
             with self.subTest(fields=fields):
                 self.spec("a", drain_spec_text("First", "ready-for-agent", "Run: 20261024-100000-aaaaaa"))
                 self.saved_run("a", "20261024-100000-aaaaaa", 10**4, phase="done", **fields)
+                self.host.pull_requests[PR_A] = {"state": "OPEN", "headRefOid": "a" * 40, "closedAt": None}
 
                 status, out, _ = self.drain()
 
                 self.assertEqual(self.header("a"), (spec_after, "20261024-100000-aaaaaa", pr))
                 self.assertEqual(status, 0)
                 self.assertIn(f"a: ready-for-agent -> {spec_after}", out)
+
+    def test_a_finished_runs_pull_request_is_followed_in_the_same_pass(self):
+        cases = [("MERGED", "done"), ("CLOSED", "ready-for-human"), ("OPEN", "in-review")]
+        run_id = "20261024-100000-aaaaaa"
+        for pr_state, spec_after in cases:
+            with self.subTest(pr_state=pr_state):
+                self.spec("a", drain_spec_text("First", "ready-for-agent", f"Run: {run_id}"))
+                [spec] = orchestrator.read_queue(self.dir)
+                self.saved_run("a", run_id, 10**4, phase="done", verdict=APPROVE, pr_url=PR_A)
+                self.host.pull_requests[PR_A] = {"state": pr_state, "headRefOid": "a" * 40, "closedAt": None}
+
+                got = orchestrator.refreshed_headers([spec], self.host, "/proj", [], "here", lambda pid: False)
+
+                self.assertEqual(got, [(spec, {"Status": spec_after, "PR": PR_A})])
+
+    def test_one_drain_marks_a_merged_finished_run_done_and_runs_its_dependant(self):
+        run_id = "20261024-100000-aaaaaa"
+        self.spec("a", drain_spec_text("First", "ready-for-agent", f"Run: {run_id}"))
+        self.spec("b", drain_spec_text("Second", "ready-for-agent", "Blocked by: a"))
+        self.saved_run("a", run_id, 10**4, phase="done", verdict=APPROVE, pr_url=PR_A)
+        self.host.pull_requests[PR_A] = {"state": "MERGED", "headRefOid": "a" * 40, "closedAt": None}
+
+        status, out, _ = self.drain(argv=["--dry-run"])
+
+        self.assertEqual(status, 0)
+        self.assertEqual(out, f"a: ready-for-agent -> done  {PR_A}\nwould run, in order: b\n")
+        self.assertEqual(self.header("a"), ("ready-for-agent", run_id, None))
+
+        status, out, _ = self.drain(approved(PR_B))
+
+        self.assertEqual(status, 0)
+        self.assertEqual(self.header("a"), ("done", run_id, PR_A))
+        self.assertEqual([state.task for state, _ in self.runs], ["Second"])
+        self.assertEqual(self.header("b")[::2], ("in-review", PR_B))
 
     def conflicted_spec(self, status="ready-for-human", verdict=APPROVE, **pr):
         """Spec a, of status, whose run with verdict opened PR_A over a conflict in x.py, and what gh says of PR_A:
@@ -13408,6 +13737,7 @@ class TestDrain(unittest.TestCase):
                 text = drain_spec_text("First", None, *header, "## Notes", "PR: not in the header", nl=nl)
                 self.spec("a", text)
                 self.saved_run("a", "stale", phase="done", verdict=APPROVE, pr_url=PR_A)
+                self.host.pull_requests[PR_A] = {"state": "OPEN", "headRefOid": "a" * 40, "closedAt": None}
 
                 self.assertEqual(self.drain()[0], 0)
 
@@ -13450,6 +13780,7 @@ class TestDrain(unittest.TestCase):
         self.spec("e", drain_spec_text("E", "ready-for-agent", "Blocked by: d"))
         self.host.pull_requests[PR_A] = {"state": "MERGED", "headRefOid": "a" * 40, "closedAt": None}
         self.saved_run("c", "20261024-100000-cccccc", phase="done", verdict=APPROVE, pr_url=PR_B)
+        self.host.pull_requests[PR_B] = {"state": "OPEN", "headRefOid": "b" * 40, "closedAt": None}
         before = {slug: self.text(slug) for slug in "abcde"}
 
         status, out, _ = self.drain(argv=["--dry-run"])
@@ -15117,6 +15448,18 @@ class TestBlocked(unittest.TestCase):
         self.assertIn(f"The Builder's report is in {BUILD_1}.", reviews[0])
         self.assertIsNone(wf.state.blocked)
 
+    def test_a_dropped_answer_prompt_is_sent_once_more(self):
+        def blocking(prompt, state, host):
+            herdr.dropped["build"] = 1  # the prompt after the human's answer
+            return blocked_report(lambda s: BUILD_1)(prompt, state, host)
+        wf, herdr, host, _, seen, *_ = self.run_blocked([blocking, answered(lambda s: BUILD_1, "report 1")])
+
+        with patch("sys.stderr"):
+            self.assertEqual(wf.run(), APPROVE)
+        builds = [text for name, text in herdr.prompts if name == "build-a1b2c3"]
+        self.assertEqual(builds[1:], [blocked_prompt(BUILD_1)] * 2)
+        self.assertEqual(host.files[BUILD_1], "report 1")
+
     def test_the_wait_is_saved_and_listed(self):
         during = []
 
@@ -15195,15 +15538,15 @@ class TestBlocked(unittest.TestCase):
         self.assertEqual((wf.state.round, wf.state.quality_round, wf.state.blocked), (1, 2, None))
 
     def test_a_step_from_a_workflow_file_can_block(self):
-        tdd = orchestrator.load_workflow_file(f"{EXAMPLES}/tdd.toml", BUILT_IN_PROMPTS)
+        team = orchestrator.load_workflow_file(f"{EXAMPLES}/product-team.toml", BUILT_IN_PROMPTS)
         def tests_md(s):
             return f"{s.dir}/tests.md"
         seen, specs, notes = [], [], []
         wf, _, host, _ = make_workflow({
-            "spec": [recording(spec_turn, specs)],
+            "spec": [recording(spec_turn, specs)], "design": [writes(lambda s: f"{s.dir}/design.md", "the design")],
             "tests": [recording(blocked_report(tests_md, "which test runner?"), seen),
                       recording(answered(tests_md, "tests written"), seen)],
-            "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, state=new_run(tdd), pipeline=tdd)
+            "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, state=new_run(team), pipeline=team)
         wf.notify = lambda title, body: notes.append((title, body))
         bounded(wf)
 
@@ -15211,7 +15554,7 @@ class TestBlocked(unittest.TestCase):
         self.assertEqual(blocked_files(host), ["tests.blocked-1.md"])
         self.assertTrue(seen[0].endswith(NOTE))
         self.assertEqual(seen[1], blocked_prompt(f"{D}/tests.md"))
-        self.assertIn(("Test Writer is blocked: which test runner?", "pane w1:p2"), notes)
+        self.assertIn(("QA Engineer is blocked: which test runner?", "pane w1:p3"), notes)
         self.assertNotIn("BLOCKED", specs[0])
 
     def test_a_blocked_verdict_file_gets_the_verdict_retry(self):

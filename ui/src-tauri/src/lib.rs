@@ -20,7 +20,7 @@ const ORCHESTRATOR_ENV: &str = "ORCHESTRATOR_PY";
 /// The orchestrator binary's file name in a release bundle, beside the app's own executable: Tauri's
 /// `externalBin` in tauri.release.conf.json, which drops the target triple that packaging/build-desktop.sh gives
 /// it on disk.
-const BUNDLED_NAME: &str = if cfg!(windows) { "orchestrator.exe" } else { "orchestrator" };
+const BUNDLED_NAME: &str = if cfg!(windows) { "octoflow.exe" } else { "octoflow" };
 
 /// The orchestrator the app serves.
 #[derive(Debug, PartialEq)]
@@ -269,11 +269,11 @@ impl Cli {
     pub fn exec(mut self) -> ! {
         use std::os::unix::process::CommandExt;
         if let Some(why) = self.why_not_started() {
-            eprintln!("orchestrator-ui: {why}");
+            eprintln!("octoflow-ui: {why}");
             std::process::exit(1)
         }
         let e = self.command.exec();
-        eprintln!("orchestrator-ui: cannot run {}: {e}", self.orchestrator);
+        eprintln!("octoflow-ui: cannot run {}: {e}", self.orchestrator);
         std::process::exit(1)
     }
 
@@ -414,7 +414,7 @@ mod tests {
 
     /// A new empty directory of this test's own under the system's temporary directory.
     fn scratch_dir(test: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("orchestrator-ui-{test}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("octoflow-ui-{test}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch directory");
         dir
@@ -531,7 +531,7 @@ mod tests {
         let env =
             vars(&[("APPDIR", "/opt/x"), ("LD_LIBRARY_PATH", "/opt/x/lib"), ("PYTHONHOME", "/opt/x"), ("OWD", "/")]);
         assert_eq!(shell_of(env.clone()), UserShell { vars: env.clone(), dir: None });
-        let elsewhere = UserShell::from_vars(env.clone(), Some(Path::new("/usr/bin/orchestrator-ui")));
+        let elsewhere = UserShell::from_vars(env.clone(), Some(Path::new("/usr/bin/octoflow-ui")));
         assert_eq!(elsewhere, UserShell { vars: env, dir: None });
     }
 
@@ -542,7 +542,7 @@ mod tests {
         std::fs::write(root.join("AppRun"), "").expect("a stand-in AppRun");
         let python_home = format!("{}/usr/", root.display());
         let env = vars(&[("APPDIR", root.to_str().unwrap()), ("PYTHONHOME", &python_home), ("PWD", "/u/p")]);
-        let exe = root.join("usr/bin/orchestrator-ui");
+        let exe = root.join("usr/bin/octoflow-ui");
         let shell = UserShell::from_vars(env.clone(), Some(&exe));
         assert_eq!(shell, UserShell { vars: vars(&[("PWD", "/u/p")]), dir: Some("/u/p".into()) });
         // Without AppRun, an APPDIR that holds the executable is a user's, not a bundle.
@@ -554,7 +554,7 @@ mod tests {
     fn an_empty_relative_or_root_appdir_is_no_appimage() {
         for appdir in ["", "/", "squashfs-root"] {
             let env = vars(&[("APPDIR", appdir), ("APPIMAGE", "/a.AppImage"), ("PATH", "/usr/bin:/bin")]);
-            let shell = UserShell::from_vars(env.clone(), Some(Path::new("/usr/bin/orchestrator-ui")));
+            let shell = UserShell::from_vars(env.clone(), Some(Path::new("/usr/bin/octoflow-ui")));
             assert_eq!(shell, UserShell { vars: env, dir: None }, "APPDIR={appdir:?}");
         }
     }

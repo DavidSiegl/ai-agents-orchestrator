@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build dist/orchestrator-<os>-<arch>, a PyInstaller one-file binary of orchestrator.py with Python and tkinter
+# Build dist/octoflow-<os>-<arch>, a PyInstaller one-file binary of orchestrator.py with Python and tkinter
 # inside, write its .sha256 beside it, and smoke-test it. Jenkins's Package stage builds the Linux binary with
 # it, and .github/workflows/macos-binary.yml the macOS one, so the two builds cannot drift apart.
 set -eu
@@ -16,7 +16,7 @@ case "$(uname -m)" in
     arm64 | aarch64) arch=arm64 ;;
     *) echo "build-binary.sh: no binary is built for $(uname -m)" >&2; exit 1 ;;
 esac
-name="orchestrator-$os-$arch"
+name="octoflow-$os-$arch"
 bin="dist/$name"
 
 # On Linux, the distribution's Python, not uv's own: uv's Tk is built without Xft, so it draws every font with

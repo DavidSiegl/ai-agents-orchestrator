@@ -62,8 +62,10 @@ about a different run. Two runs that start together each see the other's claim a
 and model of its agent (none for a quality analysis, whose role is `quality`), whether it is human-paced, and
 `started_at`, `ended_at` and `seconds`.
 
-- An agent's turn starts when its prompt is delivered: the record is opened and saved together with
-  `prompted`. A quality analysis starts when the orchestrator starts analysing.
+- An agent's turn starts when its prompt is first sent. The prompt counts as delivered once the agent takes it:
+  herdr reports it `working` or `blocked`, or its handoff file appears, within `PROMPT_DELIVERY_SECONDS`. One it
+  does not take is sent once more, and a second miss fails the turn, which a resume prompts again. Only then is
+  the record opened and saved together with `prompted`. A quality analysis starts when the orchestrator starts analysing.
 - A resume, or an agent restarted mid-turn and prompted again, keeps the open record and its start.
 - A turn ends when its handoff file is found, at the file's modification time, so a file written while no
   orchestrator ran still ends its turn when it was written, not when a resume found it.
