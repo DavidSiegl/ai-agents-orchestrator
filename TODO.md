@@ -19,10 +19,9 @@ was done.
   orchestrator it bundles (`cli` in `ui/src-tauri/src/lib.rs`), so the AppImage is the CLI too and the README says
   how to get the CLI from each download; on macOS, where a `.app` is a directory, the CLI is a symlink to
   `Octoflow.app/Contents/MacOS/octoflow`. Left: smoke-testing that on macOS, in
-  `.github/workflows/macos-binary.yml` (`.scratch/desktop-cli/issues/02-macos-cli-symlink.md`), which runs only on
-  a published release or a dispatch for an existing tag, and checking the README's quarantine advice for the
-  `.dmg` against a downloaded copy. The plain CLI binaries stay released: 13 MB against the AppImage's 120 MB of
-  WebKit, and they start without FUSE on headless machines and in CI. Decided against: one file on every
+  `.github/workflows/macos-binary.yml` (`.scratch/desktop-cli/issues/02-macos-cli-symlink.md`), and checking the
+  README's quarantine advice for the `.dmg` against a downloaded copy. The plain CLI binaries stay released: 13 MB
+  against the AppImage's 120 MB of WebKit, and they start without FUSE on headless machines and in CI. Decided against: one file on every
   platform, by embedding the orchestrator's bytes in the Rust executable and unpacking them at start
   (PyInstaller's onefile done twice), or by Python hosting the window, which [ui-options.md](docs/ui-options.md)
   chose against. Agreed 2026-10-24.

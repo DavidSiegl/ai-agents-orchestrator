@@ -300,10 +300,11 @@ running `after` callbacks on `tick`), and `TestRunProcess` runs real child proce
 - `.github/workflows/automerge.yml`: keeps auto-merge on for a pull request into `main` from a branch of this
   repository, so it merges with a merge commit once Jenkins' required check passes; its header lists the pull
   requests it leaves to a human.
-- `.github/workflows/macos-binary.yml`: Jenkins has no Mac, so when a release is
-  published, or by hand for an existing tag, it runs `packaging/build-binary.sh` and `packaging/build-desktop.sh`
-  on `macos-latest` and uploads `octoflow-macos-arm64`, `octoflow-desktop-macos-arm64.dmg` and their
-  `.sha256` to that release with `gh release upload --clobber`. With only
-  `contents: write`, it never creates a release or a tag; everything else stays in Jenkins.
+- `.github/workflows/macos-binary.yml`: Jenkins has no Mac, so it runs `packaging/build-binary.sh` and
+  `packaging/build-desktop.sh` on `macos-latest`. When a release is published, or by hand for an existing tag, a
+  second job uploads `octoflow-macos-arm64`, `octoflow-desktop-macos-arm64.dmg` and their `.sha256` to that release
+  with `gh release upload --clobber`; with only `contents: write`, it never creates a release or a tag. For a pull
+  request that touches the packaging, the UI, the code or the Python they build with, it only builds, with
+  `contents: read`, as an advisory check. Everything else stays in Jenkins.
 
 How to set Jenkins up for it is in [quality-gate.md](quality-gate.md).
