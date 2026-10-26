@@ -8742,7 +8742,7 @@ class TestSurvivingMutants(unittest.TestCase):
         # gate knows calc.py was reached.
         self.put("calc.py", self.BASE.replace("b + a", "a + b")
                  .replace("def unchecked(a, b):", "def unchecked(a, b):  # pragma: no mutate block"))
-        self.fake_mutmut("mkdir -p mutants; touch mutants/calc.py.meta; exec sleep 30",
+        self.fake_mutmut("mkdir -p mutants; echo {} > mutants/calc.py.meta; exec sleep 30",
                          results="    calc.x_checked__mutmut_1: not checked\n")
         found = self.found(budget=1)
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
@@ -8757,7 +8757,7 @@ class TestSurvivingMutants(unittest.TestCase):
         self.git("commit", "--quiet", "-m", "more")
         self.put("more.py", "def g(a):  # pragma: no mutate block\n    return a + 2\n")
         self.change_the_functions("checked")
-        self.fake_mutmut("mkdir -p mutants; touch mutants/calc.py.meta mutants/more.py.meta; exec sleep 30",
+        self.fake_mutmut("mkdir -p mutants; for m in calc more; do echo {} > mutants/$m.py.meta; done; exec sleep 30",
                          results="    calc.x_checked__mutmut_1: not checked\n")
         found = self.found(budget=1, rules=self.rules({"source_paths": ["calc.py", "more.py"]}))
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
@@ -8842,7 +8842,7 @@ class TestSurvivingMutants(unittest.TestCase):
     LISTS_WITHOUT_CALC_META = "[ ! -e mutants/calc.py.meta ]"
     CUTS_OFF_CALC_META = "mkdir -p mutants; printf '{\"exit' > mutants/calc.py.meta"
 
-    def test_a_listing_that_fails_again_without_the_cut_off_save_is_not_run(self):
+    def test_a_listing_that_fails_once_the_cut_off_save_is_removed_is_not_run_and_says_so(self):
         self.change_the_functions("checked")
         listed = os.path.join(self.bin, "listed")
         self.fake_mutmut(f"{self.CUTS_OFF_CALC_META}; exec sleep 30",
@@ -8851,27 +8851,30 @@ class TestSurvivingMutants(unittest.TestCase):
         self.assertEqual([f["rule"] for f in found], ["not-run"])
         self.assertIn("mutmut could not list its results", found[0]["message"])
         self.assertIn("broken", found[0]["message"])
-        with open(listed) as f:
-            self.assertEqual(f.read(), "\n\n")
-
-    def test_a_failed_listing_after_a_stop_without_a_cut_off_save_is_not_run_and_not_repeated(self):
-        self.change_the_functions("checked")
-        listed = os.path.join(self.bin, "listed")
-        # A .meta that cannot be opened is no save the stop cut off, so it stays.
-        self.fake_mutmut("mkdir -p mutants; ln -s nowhere mutants/calc.py.meta; exec sleep 30",
-                         listing=f"echo >> {listed}; echo broken >&2; exit 1")
-        found = self.found(budget=1)
-        self.assertEqual([f["rule"] for f in found], ["not-run"])
-        self.assertIn("broken", found[0]["message"])
+        self.assertIn("after the gate removed the cut-off results of calc.py", found[0]["message"])
         with open(listed) as f:
             self.assertEqual(f.read(), "\n")
 
-    def test_a_cut_off_save_after_a_stop_is_dropped_and_the_rest_listed(self):
+    def test_a_meta_that_cannot_be_opened_after_a_stop_is_left_to_mutmut(self):
         self.change_the_functions("checked")
-        self.fake_mutmut(f"{self.CUTS_OFF_CALC_META}; exec sleep 30", listing=self.LISTS_WITHOUT_CALC_META)
+        # mutmut reads a .meta that is not there as no results; this one is a dangling link, which the listing needs.
+        self.fake_mutmut("mkdir -p mutants; ln -s nowhere mutants/calc.py.meta; exec sleep 30",
+                         listing="[ -L mutants/calc.py.meta ] && printf '    calc.x_checked__mutmut_1: killed\\n'")
         found = self.found(budget=1)
         self.assertEqual([f["rule"] for f in found], ["budget-reached"])
-        self.assertIn("the stop cut off mutmut's save of its results for `checked` in calc.py", found[0]["message"])
+        self.assertTrue(found[0]["message"].startswith("budget reached after 1 of 1 mutants:"), found[0]["message"])
+
+    def test_a_cut_off_save_after_a_stop_is_dropped_and_the_rest_listed(self):
+        self.change_the_functions("checked")
+        # notes.meta is the project's own file, which mutmut copies into mutants/ as it copies every file it finds.
+        self.fake_mutmut(f"{self.CUTS_OFF_CALC_META}; echo notes > mutants/notes.meta; exec sleep 30",
+                         listing=f"[ -e mutants/notes.meta ] && {self.LISTS_WITHOUT_CALC_META}")
+        found = self.found(budget=1)
+        self.assertEqual([f["rule"] for f in found], ["budget-reached"])
+        self.assertEqual(found[0]["message"],
+                         "budget reached with none of the mutants mutmut made left to list: mutmut was stopped at 1 "
+                         "seconds (`--mutation-budget`), so the mutants it did not try may survive too; the stop cut "
+                         "off mutmut's save of its results for `checked` in calc.py, so they count as not reached.")
 
     def test_a_cut_off_save_without_a_stop_is_not_dropped(self):
         self.change_the_functions("checked")
@@ -8892,8 +8895,23 @@ class TestSurvivingMutants(unittest.TestCase):
         with patch.object(orchestrator.os, "remove", refuse_meta):
             found = self.found(budget=1)
         self.assertEqual([f["rule"] for f in found], ["not-run"])
-        self.assertIn("mutmut could not list its results", found[0]["message"])
-        self.assertIn("could not remove the results mutmut's stop cut off", found[0]["message"])
+        self.assertIn("could not clear the results mutmut's stop cut off", found[0]["message"])
+        self.assertIn("Permission denied", found[0]["message"])
+
+    def test_a_state_that_cannot_be_searched_after_a_stop_is_not_run_and_says_why(self):
+        self.change_the_functions("checked")
+        self.fake_mutmut(f"{self.CUTS_OFF_CALC_META}; exec sleep 30", listing=self.LISTS_WITHOUT_CALC_META)
+        walk = os.walk
+
+        def refuse_mutants(top, *args, onerror=None, **kwargs):
+            if os.path.basename(top) == "mutants" and onerror is not None:
+                onerror(PermissionError(13, "Permission denied", top))
+                return iter(())
+            return walk(top, *args, onerror=onerror, **kwargs)
+        with patch.object(orchestrator.os, "walk", refuse_mutants):
+            found = self.found(budget=1)
+        self.assertEqual([f["rule"] for f in found], ["not-run"])
+        self.assertIn("could not clear the results mutmut's stop cut off", found[0]["message"])
         self.assertIn("Permission denied", found[0]["message"])
 
     def test_a_series_reads_as_a_list_in_prose(self):

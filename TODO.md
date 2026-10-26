@@ -335,10 +335,10 @@ was done.
   then exits with a `JSONDecodeError`, and `_mutmut_findings` reports `not-run`, "mutmut could not list its results",
   without the `budget-reached` finding or anything the run had shown. Seen once in another branch's gate run. Closes
   with the stop waiting for a save to end, or with the gate reading what remains and saying the budget stopped it.
-  Fixed (2026-10-26): when the run was stopped and `mutmut results` fails, `_mutmut_findings` has
-  `_drop_cut_off_saves` remove each `.meta` under the copy's `mutants/` that does not parse as JSON and lists again.
-  The functions of those modules count as not reached, and `_budget_reached` says the stop cut off mutmut's save of
-  their results; the other modules' findings stand. A listing failure without a stop, a second failure, or a `.meta`
+  Fixed (2026-10-26): on a run the budget stopped, `_statuses_after_run` has `_drop_cut_off_saves` remove each
+  `mutants/<path>.py.meta` in the copy that does not parse as JSON before `mutmut results` lists the rest. The
+  functions of those modules count as not reached, and `_budget_reached` says the stop cut off mutmut's save of their
+  results; the other modules' findings stand. A listing failure without a stop, one after the removal, or a `.meta`
   that cannot be removed stays `not-run`. Not closed: those modules' results are lost, not recovered.
 - **A submodule is empty in `passes-at-base`'s copy of the base.** `git archive` leaves a submodule's directory
   empty, so a changed test that imports from one fails to import at the base and gives nothing, though it might pass

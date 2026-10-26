@@ -5244,34 +5244,40 @@ def _mutmut_findings(tree_copy: str, functions: list[_ChangedFunction], run: sub
 def _statuses_after_run(tree_copy: str, stopped: bool, deadline: float) -> tuple[dict[str, str], list[str], str | None]:
     """_mutant_statuses's listing of the mutants a run of mutmut made in tree_copy, by deadline, a time.monotonic()
     time, with the paths of the modules whose results the run's stop lost, sorted; stopped is whether the budget
-    stopped it. Or {}, [] and the problem, a clause, when they could not be listed.
+    stopped the run. Or {}, [] and the problem, a clause, when they could not be listed.
 
-    The stop can land while mutmut rewrites a module's .meta, which `mutmut results` then fails to read. So when a
-    stopped run's listing fails, the .meta files that do not parse are removed and the rest listed again: a module
-    without one lists no mutant, as one the budget kept mutmut from.
+    The stop can land while mutmut rewrites a module's .meta, which `mutmut results` cannot read, so a stopped run's
+    cut-off .meta files are removed from tree_copy first; their modules then list no mutant, as one the budget kept
+    mutmut from does.
     """
+    cut_off: list[str] = []
+    if stopped:
+        try:
+            cut_off = _drop_cut_off_saves(tree_copy)
+        except OSError as e:
+            return {}, [], f"could not clear the results mutmut's stop cut off: {e}"
     statuses, problem = _mutant_statuses(tree_copy, deadline)
-    if not (problem and stopped):
-        return statuses, [], problem
-    try:
-        cut_off = _drop_cut_off_saves(tree_copy)
-    except OSError as e:
-        return {}, [], f"{problem}; could not remove the results mutmut's stop cut off: {e}"
-    if not cut_off:
-        return {}, [], problem
-    statuses, problem = _mutant_statuses(tree_copy, deadline)
-    return statuses, [] if problem else cut_off, problem
+    if problem:
+        lost = f" after the gate removed the cut-off results of {_series(cut_off, limit=5)}" if cut_off else ""
+        return {}, [], problem + lost
+    return statuses, cut_off, None
 
 
 def _drop_cut_off_saves(tree_copy: str) -> list[str]:
-    """Removes each .meta under tree_copy's mutmut state that does not parse as JSON, as a save of mutmut's that was
-    cut off leaves one, and returns the paths of their modules in the tree, sorted, as the gate names a changed file;
-    [] when there is none. A .meta that cannot be read is left as it is. Raises OSError when one cannot be removed."""
+    """Removes each of mutmut's saves of a module's results, mutants/<path>.py.meta, in tree_copy that does not parse
+    as JSON, as one cut off mid-write leaves it, and returns the paths of their modules in the tree, sorted, as the
+    gate names a changed file; [] when there is none. A save that cannot be opened is left as it is. Raises OSError
+    when mutants/ cannot be searched or a save cannot be removed."""
     state = os.path.join(tree_copy, _MUTMUT_STATE)
+    if not os.path.isdir(state):
+        return []
+
+    def refuse(e: OSError) -> None:
+        raise e
     out = []
-    for parent, _, names in os.walk(state):
+    for parent, _, names in os.walk(state, onerror=refuse):
         for name in names:
-            if not name.endswith(".meta"):
+            if not name.endswith(".py.meta"):
                 continue
             path = os.path.join(parent, name)
             try:
@@ -5281,7 +5287,8 @@ def _drop_cut_off_saves(tree_copy: str) -> list[str]:
                 os.remove(path)
                 out.append(os.path.relpath(path, state).replace(os.sep, "/").removesuffix(".meta"))
             except OSError:
-                # No cut-off save, so mutmut's own failure to read it is the finding.
+                # Not a cut-off save. mutmut reads a missing one as no results (SourceFileMutationData.load), and
+                # fails to list on any other, which is then the finding.
                 pass
     return sorted(out)
 
@@ -5316,6 +5323,7 @@ def _budget_reached(statuses: dict[str, str], budget: float, unreached: list[_Ch
         clauses.append(f"the stop cut off mutmut's save of its results for {named(lost)}, so they count as not reached")
     return _finding(None, None, "budget-reached", (
         f"budget reached after {tried} of {len(statuses)} mutants" if statuses
+        else "budget reached with none of the mutants mutmut made left to list" if lost
         else "budget reached before mutmut had made its mutants")
         + f": mutmut was stopped at {budget:g} seconds (`--mutation-budget`), so the mutants it did not try may "
           f"survive too"
