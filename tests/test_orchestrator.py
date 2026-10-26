@@ -6129,6 +6129,25 @@ class TestQualityReport(unittest.TestCase):
         self.assertEqual(len(failures.fingerprints["ruff"]), 3)
         self.assertTrue(failures.repeats(orchestrator.gate_failures(quality_report("ERROR", "other", issues=issues))))
 
+    def test_every_writer_of_a_quality_file_keeps_a_line_break_in_an_item_on_its_line(self):
+        name = "c\nd .py"
+        finding = {"path": name, "line": 1, "severity": "error", "rule": "flaky x", "message": f"`{name}::t` failed"}
+        texts = {
+            "gate": quality_report("ERROR", "intro", conditions=[f"`{name}:1` holds a stray line end."],
+                                   issues=[finding], tests=[(f"{name}::t", "boom")]),
+            "judge_run conditions": orchestrator._failed_by("GATE: OK\n\nintro\n", [f"`{name}` failed."]),
+            "judge_run findings": "\n".join(orchestrator._orchestrator_section([finding], [], 0)),
+            "build failed": orchestrator.build_failed_report("intro", [(f"{name}::t", "boom")], ""),
+            "leaks": orchestrator.leak_report([orchestrator.Leak("aws", name, 3, "a" * 40, "fp")], "intro"),
+        }
+        for writer, text in texts.items():
+            with self.subTest(writer):
+                self.assertEqual(text.splitlines(), text.rstrip("\n").split("\n"))
+                self.assertIn("c\\x0ad\\u2028.py", text)
+        failures = orchestrator.gate_failures(texts["gate"])
+        self.assertEqual((len(failures.conditions), len(failures.fingerprints["flaky"]),
+                          len(failures.fingerprints["tests"])), (1, 1, 1))
+
     def test_findings_to_weigh_are_numbered_after_the_issues(self):
         text = quality_report("ERROR", "intro", issues=self.issues(2), to_weigh=[self.finding("t.py", 9)])
         self.assertLess(text.index("2. `f.py:2` HIGH r: m2"), text.index("## Findings to weigh"))
@@ -6463,7 +6482,7 @@ class TestGate(unittest.TestCase):
             text = f.read()
         self.assertIn("- 4 findings on lines the change added", text)
         for name in names:
-            self.assertIn(f"`{orchestrator.escaped_path(name)}:1` error ruff F401", text)
+            self.assertIn(f"`{orchestrator.one_line(name)}:1` error ruff F401", text)
 
     def test_a_file_name_that_is_not_utf8_is_judged(self):
         name = os.fsdecode(b"f\xe9.py")

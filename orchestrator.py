@@ -2685,7 +2685,7 @@ def leak_report(leaks: list[Leak], intro: str) -> str:
     """The quality file of a round whose snapshot holds secrets: QUALITY_LEAK, intro, and the leaks numbered, each
     where it is, its rule and its fingerprint, never the secret."""
     return "\n".join([f"GATE: {QUALITY_LEAK}", "", intro, "", QUALITY_SECRETS_FOUND, "",
-                      *(f"{k}. {leak}" for k, leak in enumerate(leaks, 1))]) + "\n"
+                      *(one_line(f"{k}. {leak}") for k, leak in enumerate(leaks, 1))]) + "\n"
 
 
 class GateFailures(NamedTuple):
@@ -2760,7 +2760,7 @@ def build_failed_report(intro: str, tests: list[tuple[str, str]] | None, console
     if tests is None:
         out.append("Jenkins has no test report for this build.")
     else:
-        out += [f"- `{name}`: {detail.strip().splitlines()[0] if detail.strip() else 'failed'}"
+        out += [one_line(f"- `{name}`: {detail.strip().splitlines()[0] if detail.strip() else 'failed'}")
                 for name, detail in tests[:QUALITY_FINDINGS_LIMIT]] or ["None."]
         if len(tests) > QUALITY_FINDINGS_LIMIT:
             out.append(f"- and {len(tests) - QUALITY_FINDINGS_LIMIT} more.")
@@ -3122,7 +3122,7 @@ def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (),
     """
     out = [f"GATE: {gate}", "", intro]
     if conditions:
-        out += ["", FAILED_CONDITIONS, "", *(f"- {c}" for c in conditions)]
+        out += ["", FAILED_CONDITIONS, "", *(one_line(f"- {c}") for c in conditions)]
     out += _issues_section(issues, elsewhere)
     if to_weigh:
         out += _to_weigh_section(to_weigh, after=min(len(issues), QUALITY_ISSUE_LIMIT))
@@ -3132,7 +3132,7 @@ def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (),
         out += ["", "## Coverage on new code", "", coverage]
     if suppressions:
         out += ["", "## Suppressions added", "",
-                *(f"- `{escaped_path(path)}:{line}` `{text}`" for path, line, text in suppressions)]
+                *(one_line(f"- `{path}:{line}` `{text}`") for path, line, text in suppressions)]
     if edited or mutmut_state:
         out += _config_section(edited, rules_from, mutmut_state)
     return "\n".join(out) + "\n"
@@ -3175,32 +3175,34 @@ def _to_weigh_section(to_weigh, after: int) -> list[str]:
     return out
 
 
-# The characters that end a line in some reader of the quality file, a Markdown renderer or Python's
-# str.splitlines; quality_path writes each as an escape, so a name that holds one stays on its own line.
-_LINE_BREAKERS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
+# Each character that ends a line in some reader of the quality file, a Markdown renderer or Python's
+# str.splitlines, mapped to the escape one_line writes it as: \xNN, or \uNNNN past \xff, the convention by which
+# judge_change also writes a byte that is not UTF-8.
+_LINE_BREAK_ESCAPES = str.maketrans({c: f"\\x{ord(c):02x}" if ord(c) <= 0xFF else f"\\u{ord(c):04x}"
+                                     for c in "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"})
 
 
-def escaped_path(path: str) -> str:
-    """path as the quality file writes it: with each character that ends a line written as \\xNN, or \\uNNNN past
-    \\xff, the convention judge_change also writes a byte that is not UTF-8 by. A name without one is written as it
-    is. The escape is what the orchestrator then reads back, the same in every round."""
-    return "".join((f"\\x{ord(c):02x}" if ord(c) <= 0xFF else f"\\u{ord(c):04x}") if c in _LINE_BREAKERS else c
-                   for c in path)
+def one_line(text: str) -> str:
+    """text as a quality file writes it within one of its lines, such as one item of a list or a path named in a
+    sentence: each character that ends a line in some reader written as an escape (_LINE_BREAK_ESCAPES), anything
+    else as it is. The orchestrator reads a quality file back line by line, so the escape is what it reads, the
+    same in every round."""
+    return text.translate(_LINE_BREAK_ESCAPES)
 
 
 def _numbered(k: int, finding: dict) -> str:
     if finding["path"] is None:
         where = "The change as a whole:"
     elif finding["line"] is None:
-        where = f"`{escaped_path(finding['path'])} (the whole file)`"
+        where = f"`{finding['path']} (the whole file)`"
     else:
-        where = f"`{escaped_path(finding['path'])}:{finding['line']}`"
-    return f"{k}. {where} {finding['severity']} {finding['rule']}: {finding['message']}"
+        where = f"`{finding['path']}:{finding['line']}`"
+    return one_line(f"{k}. {where} {finding['severity']} {finding['rule']}: {finding['message']}")
 
 
 def _tests_section(tests: list[tuple[str, str]]) -> list[str]:
     out = ["", FAILING_TESTS, ""]
-    out += [f"- `{name}`: {detail.strip().splitlines()[0] if detail.strip() else 'failed'}"
+    out += [one_line(f"- `{name}`: {detail.strip().splitlines()[0] if detail.strip() else 'failed'}")
             for name, detail in tests[:QUALITY_ISSUE_LIMIT]] or ["None."]
     if len(tests) > QUALITY_ISSUE_LIMIT:
         out.append(f"- and {len(tests) - QUALITY_ISSUE_LIMIT} more.")
@@ -3220,7 +3222,7 @@ def _config_section(edited, rules_from: str | None, mutmut_state) -> list[str]:
     if "uv.lock" in edited:
         out.append("- The change edits `uv.lock`, which pins the versions of the linters the gate ran.")
     if mutmut_state:
-        named = _series([f"`{escaped_path(f)}`" for f in mutmut_state], limit=5)
+        named = _series([f"`{one_line(f)}`" for f in mutmut_state], limit=5)
         out.append(f"- The change adds or edits {named} under "
                    f"`{_MUTMUT_STATE}/`, where mutmut keeps its state. The gate's checks leave them out: none selects "
                    f"a test or a function in them or counts them as a change to the code, and the surviving-mutants "
@@ -3594,7 +3596,7 @@ def new_coverage(report: str, root: str, changed: dict[str, set[int]]) -> NewCov
 
 def _coverage_sentence(c: NewCoverage, unmeasured: list[str]) -> str:
     """The quality file's coverage section for c: how much of the new code is covered, then, by name, the changed
-    files in unmeasured, which the coverage report has no entry for, so that c leaves their lines out of both counts."""
+    files in unmeasured, whose names coverage.py cannot record, so that c leaves their lines out of both counts."""
     if not c.lines:
         sentence = "No new lines to cover."
     else:
@@ -3602,7 +3604,7 @@ def _coverage_sentence(c: NewCoverage, unmeasured: list[str]) -> str:
         sentence = (f"{_floor_tenth(c.percent())}% of {c.lines} new lines to cover{branches}; "
                     f"{c.lines - c.covered_lines} lines are not covered.")
     if unmeasured:
-        named = _series([f"`{escaped_path(path)}`" for path in unmeasured], limit=5)
+        named = _series([f"`{one_line(path)}`" for path in unmeasured], limit=5)
         sentence += f"\n\nNot measured: {named}; coverage.py records no data for a file whose name is not UTF-8."
     return sentence
 
@@ -6360,7 +6362,7 @@ def _failed_by(quality: str, conditions: list[str]) -> str:
     lines = quality.split("\n")
     at = next((i for i, x in enumerate(lines) if x.strip()), 0)
     lines[at] = re.sub(_labelled_word("GATE", (QUALITY_OK,)), rf"\g<1>{QUALITY_ERROR}", lines[at], count=1)
-    bullets = [f"- {c}" for c in conditions]
+    bullets = [one_line(f"- {c}") for c in conditions]
     if QUALITY_FAILED_CONDITIONS in lines:
         end = lines.index(QUALITY_FAILED_CONDITIONS) + 2
         while end < len(lines) and lines[end].startswith("- "):
@@ -6400,7 +6402,7 @@ def _numbered_finding(k: int, finding: dict) -> str:
         where = f"`{finding['path']} (the whole file)`"
     else:
         where = f"`{finding['path']}:{finding['line']}`"
-    return f"{k}. {where} {finding['severity']} {finding['rule']}: {finding['message']}"
+    return one_line(f"{k}. {where} {finding['severity']} {finding['rule']}: {finding['message']}")
 
 
 def _check_finding(path: str | None, line: int | None, rule: str, message: str, severity: str = "warning") -> dict:
