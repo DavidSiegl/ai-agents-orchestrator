@@ -6463,7 +6463,7 @@ class TestGate(unittest.TestCase):
             text = f.read()
         self.assertIn("- 4 findings on lines the change added", text)
         for name in names:
-            self.assertIn(f"`{name}:1` error ruff F401", text)
+            self.assertIn(f"`{orchestrator.escaped_path(name)}:1` error ruff F401", text)
 
     def test_a_file_name_that_is_not_utf8_is_judged(self):
         name = os.fsdecode(b"f\xe9.py")

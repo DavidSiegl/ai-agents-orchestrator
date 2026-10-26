@@ -360,7 +360,7 @@ was done.
 - **A file name that holds a line separator breaks its list item in the quality file.** `quality_report` writes
   names as they are, so `\r` or U+2028 in one shows as a line break in some renderers. The finding is still
   matched to the right file. Closes with names escaped when the quality file is written.
-  Fixed (2026-10-26): `quality_path` writes each character that ends a line in some reader (`\n`, `\r`, `\v`, `\f`,
+  Fixed (2026-10-26): `escaped_path` writes each character that ends a line in some reader (`\n`, `\r`, `\v`, `\f`,
   `\x1c`-`\x1e`, `\x85`, U+2028, U+2029) as `\xNN` or `\uNNNN`, and every path the quality file names goes through
   it; `gate_failures` reads back the escaped name, the same in every round.
 

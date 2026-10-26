@@ -300,7 +300,7 @@ ends a line at is still the failed condition above. A test file that `test-integ
 
 A file whose name is not UTF-8 is read the same way, and the quality file writes each byte it cannot decode as
 `\xNN`. By the same convention it writes a character in a name that ends a line in some reader, such as `\r`,
-`\x85` or U+2028, as `\x0d`, `\x85` or `\u2028`, so that each name stays on its line; `quality_path` in
+`\x85` or U+2028, as `\x0d`, `\x85` or `\u2028`, so that each name stays on its line; `escaped_path` in
 `orchestrator.py` is where that convention lives. Not every tool can read such a name:
 
 - ruff prints it with U+FFFD for each such byte, which the gate matches to the tracked file, so ruff's findings
