@@ -244,19 +244,19 @@ the changed tests it collected, all within the one time limit:
 
 - `passes-at-base`: a test that passed at the base, each of its parameter sets that pytest did not skip included, at
   its `def`. A test that fails or errors there tests the change and gives nothing; so does one pytest does not collect
-  there: a test whose file cannot be imported at the base, or that lies under a `conftest.py` the change edits that
-  fails to load there, whatever it raises, typically because it reaches for what the change adds (such a `conftest.py`
-  hides only the tests under it, and the others are collected in one more run), and a `test_*` method of a class
-  pytest does not take for a test class. A refactor that keeps behaviour gives these
-  findings rightly: the Builder says it is one, and the Reviewer judges;
+  there: a test whose file cannot be imported at the base, or that lies under a `conftest.py` that fails to load there
+  through a file the change edits, the `conftest.py` itself or a helper it imports, whatever it raises, typically
+  because it reaches for what the change adds (such a `conftest.py` hides only the tests under it, and the others are
+  collected in one more run), and a `test_*` method of a class pytest does not take for a test class. A refactor that
+  keeps behaviour gives these findings rightly: the Builder says it is one, and the Reviewer judges;
 - `budget-reached`: `--base-run-budget SECONDS`, 120 by default, shared by the collection and the run, ran out; the
   finding says when, and how many of its test cases the run had run. pytest runs in a session of its own, and is
   killed with every process it started;
 - `not-run`: pytest could not start, stopped before it collected (as for a plugin a `conftest.py` names that cannot be
-  imported), failed to load a `conftest.py` the change does not edit, as the base itself fails there, stopped with
-  another usage error, or wrote no readable report; the run imported the project's code
-  from the working tree (below); a submodule was left empty (above); a changed test file could not be read or parsed;
-  or the copy could not be made;
+  imported), failed to load a `conftest.py` through no file the change edits, as the base itself fails there, stopped
+  with another usage error, or wrote no readable report; the run imported the project's code from the working tree
+  (below); a submodule was left empty (above); a changed test file could not be read or parsed; or the copy could not
+  be made;
 - `not-removed`: the copy could not be removed afterwards; the findings stand.
 
 The base's code is what the copy's import roots, its top and its `src/` when it has one, and its configuration, such
@@ -264,7 +264,8 @@ as `[tool.pytest.ini_options] pythonpath`, put on the path. The roots go on `PYT
 what an editable install puts there, so a `src/` layout installed editable into the gate's interpreter is judged at
 its base. A project whose code the run still imports from the working tree cannot be judged: one installed editable
 from a directory other than those roots, or through an import hook placed ahead of Python's own path search. The run
-tells where each module came from, and such a run is one `not-run` finding naming the packages, with no test judged.
+writes where each module it imported came from, and one that took a project file of the working tree's under a
+top-level module the changed tests import is one `not-run` finding naming those modules, with no test judged.
 
 **Vague names** lists the names a change binds that tell a reader nothing about what they hold: `data`, `info`,
 `value`, `status`, `handle` and `manager` (`VAGUE_NAME_WORDS`), or a name ending in one after an underscore, such as

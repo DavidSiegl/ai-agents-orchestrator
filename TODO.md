@@ -206,6 +206,16 @@ was done.
   method marked `@override` is skipped (`_bound_names`). Raised by the cross-review of `written-rules` (F6,
   2026-10-24): "names fixed by a parent class or framework are reported, though they cannot be renamed". Closes, if
   the run metrics show it is common, with methods whose class has a base from outside the repository left out.
+- **`passes-at-base` lists the whole tree of the base, and of each submodule, to find its submodules.**
+  `_unpack_commit` runs `git ls-tree -r -z` on every run, even in a repository without `.gitmodules`, and splits the
+  whole listing, only to find the entries of mode 160000. Raised by cross-review 41 (F9, 2026-10-26): "a full
+  recursive `ls-tree` on every run, only to find gitlinks". Checking `<commit>:.gitmodules` first would skip a gitlink
+  that has no `.gitmodules` entry, such as a nested repository added by mistake, which is filled today. Closes, if run
+  metrics show the listing costs, by listing only the paths `.gitmodules` names, with such gitlinks left out.
+- **The copy's `src/` on `PYTHONPATH` comes before the standard library in `passes-at-base`'s run at the base.** A
+  module there named as one of the standard library's, such as `src/token.py`, shadows it, as one at the copy's top
+  already did through `python -m`. Raised by cross-review 41 (round 1, not recorded, 2026-10-26). Not seen failing.
+  Closes, if it is, by putting the roots on the path after the standard library and before site-packages.
 - **A test file that cannot be imported at the base hides all its changed tests from `passes-at-base`.** A
   module-level import of something the change adds makes pytest's collection of the whole file fail at the base,
   which `_collect_at_base` takes as the expected outcome for every changed test in it, including ones that would pass
@@ -344,10 +354,11 @@ was done.
   cross-review of `passes-at-base` (round 3, 2026-10-24). Closes by telling a conftest.py the change edits from one
   it does not, and taking any failure of the first as the expected outcome.
   Fixed (2026-10-26): `_failing_conftest` reads the path of the `conftest.py` that stopped pytest from pytest's
-  "ImportError while loading conftest '<path>'", which pytest 9 prints for any exception, and `_collect_at_base` asks
-  `change.changed`, through the `_BaseRun` it is given, whether the change edits it: the tests under one it edits give
-  nothing, whatever it raised, and one it does not edit is a `not-run` finding naming it, as the base itself fails
-  there.
+  "ImportError while loading conftest '<path>'", which pytest 9 prints for any exception, and the files its traceback
+  passes through; `_outside_failed_conftest` asks `change.changed`, through the `_BaseCopy` it is given, whether the
+  change edits any of them, the `conftest.py` or a helper beside the tests that it imports: the tests under one that
+  failed so give nothing, whatever it raised, and one that failed through no file the change edits is a `not-run`
+  finding naming it, as the base itself fails there.
 
 - **The fallback collection runs one pytest per changed test file.** When a `conftest.py` cannot be imported at the
   base, `_collect_at_base` collects each changed file on its own, each paying pytest's start-up from the shared
@@ -366,11 +377,14 @@ was done.
   judge.
   Fixed (2026-10-26): `_base_run_findings` puts the copy's import roots, its top and its `src/` when it has one, on
   `PYTHONPATH` ahead of what was there, so they come before site-packages and the editable install's `.pth` path or
-  import finder. The run at the base loads a pytest plugin, `_BASE_IMPORTS_PLUGIN`, which writes where each module in
-  `sys.modules` came from; `_imported_from_working_tree` picks those that are the working tree's files of the project,
-  and a run that imported any judges none of its tests and is one `not-run` finding naming them, as for a package
+  import finder. The run at the base loads a pytest plugin, `_BASE_IMPORTS_PLUGIN`, which writes the file each module
+  in `sys.modules` came from, each pytest-xdist worker its own; `_imported_from_working_tree` picks those that are the
+  working tree's files of the project, under a top-level module the changed tests import (`_top_level_imports`), and
+  a run that imported any judges none of its tests and is one `not-run` finding naming those modules, as for a package
   installed editable from a directory other than those roots. Not closed: an import of the working tree's code that
-  leaves no module behind, such as a file a test runs with `runpy` or reads, is not seen.
+  leaves no module behind, such as a file a test runs with `runpy` or reads, or one under a module only a conftest.py
+  or a helper imports, is not seen. The xdist worker reports are read but not run here: pytest-xdist is not in the
+  dev dependencies.
 
 - **Three gate checks repeat the make-a-scratch-directory, run, remove-it skeleton.** `flaky_tests`,
   `_mutation_test` and `passes_at_base` each call `tempfile.mkdtemp`, word their own finding when it fails, and word
