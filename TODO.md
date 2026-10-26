@@ -44,6 +44,19 @@ was done.
 
 ## Open issues
 
+- **surviving-mutants takes only the top directory's pytest configuration.** Since `_pytest_groups`, flaky-tests and
+  passes-at-base run each changed test under the configuration pytest finds for it below the copy's top, but
+  `_pytest_config`, which surviving-mutants gives mutmut, still looks in the top directory alone, so a project whose
+  configuration is in `tests/pytest.ini` or `pkg/pyproject.toml` runs its mutants without that configuration's
+  `pythonpath`, `addopts` and plugins. Raised by cross-review 35 (R1-6). Closes with mutmut's runs taking the changed
+  functions' tests' configurations, which mutmut's one `pytest_add_cli_args` makes one per run at most.
+- **flaky-tests' reruns get one time limit a run, whatever the number of configurations.** Each pytest run of
+  flaky-tests has `FLAKY_RUN_TIMEOUT` of its own, and since `_pytest_groups` a change whose tests fall under several
+  configurations collects and reruns once for each, so its worst case grows with them (3 configurations and 5 seeds:
+  3 x 6 x 30 s), against `QUALITY_TIMEOUT`. passes-at-base's groups share its one budget. Raised by cross-review 35
+  (R1-5), which reads the spec's "the per-group runs share the check's time budget" as meant for passes-at-base,
+  flaky-tests having none. Closes with the shared budget `.scratch/gate-open-decisions/issues/01-shared-time-budget.md`
+  asks about.
 - **SSH connection sharing has not been timed on a real `--machine`.** `ssh_sharing_options` was measured against
   a user-level sshd on this host only, 20 commands in 0.24 s shared against 1.78 s unshared; no herdr machine is
   saved here, so `doctor --machine` was not timed before and after
@@ -249,15 +262,6 @@ was done.
   build past `QUALITY_TIMEOUT` beside the mutation budget, so the user kept 30 s (2026-10-24). `not-rerun` is a finding
   to weigh, never a wrong verdict. Closes with one time budget the reruns and mutmut share, or lighter tests for the
   gate's own checks.
-- **A pytest configuration below the copy's top directory is not used, so its tests are never rerun.**
-  `_pytest_inifile` looks only in the top directory of `flaky_tests`' copy, and `_pytest` passes what it finds with
-  `-c`, or an empty `pytest.ini`. A project whose pytest configuration is in a subdirectory (`pkg/pyproject.toml`,
-  `tests/pytest.ini`) loses that configuration's `pythonpath`, `addopts`, plugins and markers, so every change to
-  its tests gets `not-rerun` (typically a collection error) and no test is rerun. Before `-c`, pytest's
-  `locate_config` walked up from the changed test files and found it, but it also walked past the copy into
-  `TMPDIR` (review F12). Raised by the cross-review of `flaky-tests` (F13, 2026-10-23). Closes when each changed
-  test's configuration is found by walking from its directory up to the copy's top and no further, in
-  `locate_config`'s order, and the reruns run once per configuration found.
 - **A file name that holds a line separator breaks its list item in the quality file.** `quality_report` writes
   names as they are, so `\r` or U+2028 in one shows as a line break in some renderers. The finding is still
   matched to the right file. Closes with names escaped when the quality file is written.
@@ -356,6 +360,20 @@ was done.
 
 ## Fixed
 
+- **A pytest configuration below the copy's top directory is not used, so its tests are never rerun.**
+  `_pytest_inifile` looks only in the top directory of `flaky_tests`' copy, and `_pytest` passes what it finds with
+  `-c`, or an empty `pytest.ini`. A project whose pytest configuration is in a subdirectory (`pkg/pyproject.toml`,
+  `tests/pytest.ini`) loses that configuration's `pythonpath`, `addopts`, plugins and markers, so every change to
+  its tests gets `not-rerun` (typically a collection error) and no test is rerun. Before `-c`, pytest's
+  `locate_config` walked up from the changed test files and found it, but it also walked past the copy into
+  `TMPDIR` (review F12). Raised by the cross-review of `flaky-tests` (F13, 2026-10-23). Closes when each changed
+  test's configuration is found by walking from its directory up to the copy's top and no further, in
+  `locate_config`'s order, and the reruns run once per configuration found.
+  Fixed (2026-10-26): `_pytest_groups` walks each changed test file's directory up to the copy's top, taking the first
+  configuration `_pytest_inifile` finds, and flaky-tests and passes-at-base run once per group (`_PytestGroup`), each
+  with its `-c`, `--rootdir` its directory, pytest still started from the copy's top and `--confcutdir` the copy; the
+  groups of passes-at-base share its budget, and a group that cannot run is a finding about its tests alone, as are
+  the groups a spent budget leaves unrun. surviving-mutants still takes the top directory's (Open issues).
 - **`doctor --machine` asks the machine twice for each tool.** Each check is its own `Host.run`, so `_tool_version`
   asks `command -v` before `--version`, which already fails for a missing command, and `_gh_logged_in` before
   `gh auth status`, which may wait up to `NETWORK_TIMEOUT`. Since `ssh_sharing_options` the commands share one SSH

@@ -7292,6 +7292,48 @@ class TestFlakyTests(unittest.TestCase):
                 found = orchestrator._pytest_inifile(tree)
                 self.assertEqual(found and os.path.basename(found), expected)
 
+    def test_a_configuration_below_the_top_configures_the_tests_under_it(self):
+        # tests/pytest.ini puts tests/src on the path, which the changed test needs to import; and the alternating
+        # test from BASE shows it was rerun and judged.
+        self.put("tests/pytest.ini", "[pytest]\npythonpath = src\n")
+        self.put("tests/src/helper.py", "VALUE = 1\n")
+        self.git("add", "tests/pytest.ini", "tests/src/helper.py")
+        self.git("commit", "--quiet", "-m", "nested config")
+        self.put("tests/test_state.py", "import helper\n" + self.BASE.replace("self.skipTest('not yet')",
+                                                                          "self.assertEqual(helper.VALUE, 1)"))
+        with patch.object(orchestrator, "FLAKY_SEEDS", (1, 2)):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                         [("tests/test_state.py", 16, "mixed-results")])
+
+    def test_tests_under_two_configurations_are_rerun_once_by_each(self):
+        for name, text in (("a/pyproject.toml", "[tool.pytest.ini_options]\n"), ("b/tox.ini", "[pytest]\n")):
+            self.put(name, text)
+            self.put(f"{os.path.dirname(name)}/test_{name[0]}.py", "def test_old():\n    assert True\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "two configs")
+        for where in ("a", "b"):
+            self.put(f"{where}/test_{where}.py", "def test_old():\n    assert True\n\n\ndef test_new():\n    assert True\n")
+        runs = []
+        real = orchestrator._pytest
+
+        def recording(setup, doing, args, **kwargs):
+            runs.append((os.path.relpath(setup.root, setup.top), os.path.relpath(setup.inifile, setup.top), doing))
+            return real(setup, doing, args, **kwargs)
+        with patch.object(orchestrator, "_pytest", recording), patch.object(orchestrator, "FLAKY_SEEDS", (1, 2)):
+            self.assertEqual(self.found(), [])
+        self.assertEqual(sorted({r[:2] for r in runs}), [("a", "a/pyproject.toml"), ("b", "b/tox.ini")])
+        self.assertEqual(sorted(r[0] for r in runs if r[2] == "collecting the changed tests"), ["a", "b"])
+
+    def test_a_group_s_label_names_its_configuration_or_its_lack_of_one(self):
+        top = "/w/tree"
+
+        def group(inifile):
+            return orchestrator._PytestGroup(orchestrator._PytestSetup(top, inifile, top), frozenset())
+        self.assertEqual(group("/w/pytest.ini").label(), "the changed tests with no pytest configuration")
+        self.assertEqual(group("/w/tree/..ci/pytest.ini").label(), "the changed tests configured by ..ci/pytest.ini")
+        self.assertEqual(group("/w/tree/b/tox.ini").label(), "the changed tests configured by b/tox.ini")
+
     def failing_in_the_copy(self, base, changed, extra=None):
         """The findings on tests/test_g.py changed from base to changed, with extra files beside it untracked."""
         self.put("tests/test_g.py", base)
@@ -7327,10 +7369,10 @@ class TestFlakyTests(unittest.TestCase):
         self.put("tests/test_state.py", self.BASE + extra)
         rerun = orchestrator._rerun_python_tests
 
-        def times_out(tree, inifile, ids, s, report):
+        def times_out(setup, ids, s, report):
             if s == seed:
                 return {}, f"pytest, rerunning them under seed {seed}, did not finish within 30 seconds"
-            return rerun(tree, inifile, ids, s, report)
+            return rerun(setup, ids, s, report)
         with patch.object(orchestrator, "_rerun_python_tests", times_out):
             return {(f["line"], f["rule"]): f["message"] for f in self.found()}
 
@@ -7507,6 +7549,16 @@ class TestPassesAtBase(unittest.TestCase):
         self.fix_add()
         self.assertEqual(self.found(), [])
 
+    def test_a_configuration_below_the_top_configures_the_run_at_the_base(self):
+        # The base's own configuration is tests/pytest.ini, whose pythonpath puts tests/src on the path for helper.
+        self.put("tests/pytest.ini", "[pytest]\npythonpath = src\n")
+        self.put("tests/src/helper.py", "ONE = 1\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "nested config")
+        self.fix_add("\n\ndef test_mul_again():\n    from helper import ONE\n    assert mul(ONE, ONE) == 1\n")
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in self.found()],
+                         [("tests/test_calc.py", 12, "passes-at-base")])
+
     def test_a_test_of_code_the_change_left_alone_passes_at_the_base(self):
         # The fixture comes from a conftest.py the change adds, so the test runs at the base only with it overlaid.
         self.put("tests/conftest.py", "import pytest\n\n\n@pytest.fixture\ndef three():\n    return 3\n")
@@ -7543,6 +7595,23 @@ class TestPassesAtBase(unittest.TestCase):
         p = patch.object(orchestrator.sys, "executable", fake)
         p.start()
         self.addCleanup(p.stop)
+
+    def test_a_budget_spent_on_one_configuration_says_the_later_ones_were_not_run(self):
+        for where in ("a", "b"):
+            self.put(f"{where}/pytest.ini", "[pytest]\n")
+            self.put(f"{where}/test_{where}.py", "def test_old():\n    assert True\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "two configs")
+        self.put("calc.py", self.CALC.replace("a - b", "a + b"))
+        for where in ("a", "b"):
+            self.put(f"{where}/test_{where}.py", "def test_old():\n    assert True\n\n\ndef test_new():\n    pass\n")
+        self.fake_pytest("exec sleep 30", "exit 0")
+        found = self.found(budget=1)
+        self.assertEqual([(f["rule"], f["message"]) for f in found], [
+            ("budget-reached", ("pytest was stopped at 1 seconds (`--base-run-budget`) while it collected the changed "
+                                "tests configured by a/pytest.ini, so none of them was judged.")),
+            ("not-run", ("the run at the base used its 1 seconds (`--base-run-budget`) before it reached the changed "
+                         "tests configured by b/pytest.ini, so they were not run there."))])
 
     def test_a_run_past_the_budget_says_how_many_test_cases_ran(self):
         self.fix_add("\n\ndef test_more():\n    assert add(1, 1) == 2\n")

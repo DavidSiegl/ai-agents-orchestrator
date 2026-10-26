@@ -4067,9 +4067,11 @@ def flaky_tests(change: GateChange) -> list[dict]:
     pytest decides which of those defs are tests, so a helper named test_* that it does not collect is not rerun.
     pytest and pytest-randomly must be importable by the gate's own interpreter, as a `uv run` of the project makes
     them. A pytest run that cannot start, takes longer than FLAKY_RUN_TIMEOUT, ends in a usage or collection error
-    or writes no readable report ends the reruns with a finding saying so, after what the runs before it showed; so
-    does a changed test file that cannot be read or parsed, and a copy that cannot be made. One that cannot be
-    removed afterwards is a finding of its own, beside the results.
+    or writes no readable report ends the reruns of the tests under its configuration with a finding saying so, after
+    what the runs before it showed, and the tests under other configurations are rerun still; a changed test file
+    that cannot be read or parsed, and a copy that cannot be made, are findings too; a copy that cannot be removed
+    afterwards is a finding of its own, beside the results. Each run has FLAKY_RUN_TIMEOUT of its own, so each
+    configuration the changed tests fall under adds its runs to the check's time.
     """
     tests, unreadable = _changed_python_tests(change)
     out = [_finding(path, None, "not-rerun", f"{why}, so its tests were not rerun.") for path, why in unreadable]
@@ -4091,7 +4093,8 @@ def flaky_tests(change: GateChange) -> list[dict]:
 
 def _rerun_findings(root: str, tmp: str, tests: dict[tuple[str, str], int]) -> list[dict]:
     """flaky_tests' findings on tests, as _changed_python_tests gives them, rerun in a copy of root's tracked files
-    that it makes in tmp, an empty directory, beside the runs' reports."""
+    that it makes in tmp, an empty directory, beside the runs' reports: once for each pytest configuration the
+    changed test files take (_pytest_groups), so that a group that cannot run leaves the others' findings."""
     tree = os.path.join(tmp, "tree")
     try:
         _copy_tracked(root, tree)
@@ -4099,12 +4102,31 @@ def _rerun_findings(root: str, tmp: str, tests: dict[tuple[str, str], int]) -> l
         return [_finding(None, None, "not-rerun", f"could not copy the tracked files to rerun the changed "
                                                   f"tests in: {e}; the changed tests were not rerun.")]
     try:
-        inifile = _pytest_config(tree, tmp)
+        groups = _pytest_groups(tree, tmp, {path for path, _ in tests})
     except OSError as e:
         return [_finding(None, None, "not-rerun", f"could not write an empty pytest configuration for the "
                                                   f"reruns: {e}; the changed tests were not rerun.")]
-    ids, problem = _collect_python_tests(tree, inifile, tests)
-    reruns = _Reruns.run(tree, inifile, ids, tmp)
+    out = []
+    for n, (group, label) in enumerate(zip(groups, _labels(groups), strict=True)):
+        reports = os.path.join(tmp, f"reports-{n}")
+        try:
+            os.mkdir(reports)
+        except OSError as e:
+            out.append(_finding(None, None, "not-rerun", f"could not make a directory for the reruns' reports: {e}; "
+                                                         f"{label or 'the changed tests'} were not rerun."))
+            continue
+        out += [group.in_tree(f) for f in _group_rerun_findings(group, group.own(tests), reports, label)]
+    return out
+
+
+def _group_rerun_findings(group: "_PytestGroup", tests: dict[tuple[str, str], int], reports: str,
+                          label: str | None) -> list[dict]:
+    """_rerun_findings' findings on tests, keyed by their paths from group's directory, as pytest names them there,
+    rerun by group's configuration, with the runs' reports in reports, an empty directory; their paths are from
+    group's directory too. label names the group's tests in a finding about all of them, as _PytestGroup.label
+    does; None when they are all the change's tests."""
+    ids, problem = _collect_python_tests(group.setup, tests)
+    reruns = _Reruns.run(group.setup, ids, reports)
     problem = problem or reruns.problem
     out = []
     for i in reruns.outcomes:
@@ -4113,8 +4135,8 @@ def _rerun_findings(root: str, tmp: str, tests: dict[tuple[str, str], int]) -> l
             out.append(_finding(path, tests[(path, ".".join(names))], *judged))
     if problem:
         out.append(_finding(None, None, "not-rerun", f"{problem}; " + (
-            f"only the reruns under {_seeds(reruns.seeds)} were judged." if reruns.seeds
-            else "the changed tests were not rerun.")))
+            f"only the reruns{f' of {label}' if label else ''} under {_seeds(reruns.seeds)} were judged."
+            if reruns.seeds else f"{label or 'the changed tests'} were not rerun.")))
     return out
 
 
@@ -4127,13 +4149,13 @@ class _Reruns:
     problem: str | None  # what went wrong with the run under stopped, a clause; None with it
 
     @classmethod
-    def run(cls, tree: str, inifile: str, ids: list[str], tmp: str) -> "_Reruns":
-        """Rerun the tests of node ids ids at tree, with the configuration in inifile, once under each of FLAKY_SEEDS,
-        until a run goes wrong, writing the runs' reports in tmp. For no ids, no run."""
+    def run(cls, setup: "_PytestSetup", ids: list[str], reports: str) -> "_Reruns":
+        """Rerun the tests of node ids ids by setup, once under each of FLAKY_SEEDS, until a run goes wrong, writing
+        the runs' reports in reports. For no ids, no run."""
         outcomes: dict[str, dict[int, str]] = {i: {} for i in ids}
         seeds: list[int] = []
         for seed in FLAKY_SEEDS if ids else ():
-            reported, problem = _rerun_python_tests(tree, inifile, ids, seed, os.path.join(tmp, f"seed-{seed}.xml"))
+            reported, problem = _rerun_python_tests(setup, ids, seed, os.path.join(reports, f"seed-{seed}.xml"))
             if problem:
                 return cls(outcomes, seeds, seed, problem)
             seeds.append(seed)
@@ -4200,16 +4222,97 @@ def _pytest_inifile(tree: str) -> str | None:
     return None
 
 
+@dataclass(frozen=True)
+class _PytestSetup:
+    """Where, and by what configuration, the gate runs pytest in a copy of a tree: for _pytest."""
+    root: str  # pytest's rootdir, the configuration's directory, from which its node ids and reports name paths
+    inifile: str  # the configuration file, given with -c, so that pytest looks for none above the copy
+    # The copy's top directory: where pytest runs, as the gate always ran it, so that `python -m` puts it on the
+    # path; and above which no conftest.py is imported (--confcutdir).
+    top: str
+
+    @property
+    def where(self) -> str:
+        """root, by its path in the copy: "" for the top."""
+        where = os.path.relpath(self.root, self.top)
+        return "" if where == "." else where
+
+    def argument(self, name: str) -> str:
+        """name, a test file's path or a node id from root, as pytest is to be given it, run from top."""
+        return os.path.join(self.where, name) if self.where else name
+
+
+@dataclass(frozen=True)
+class _PytestGroup:
+    """Changed test files that take one pytest configuration, as _pytest_groups finds them."""
+    setup: _PytestSetup  # how to run them, rooted at the configuration's directory
+    paths: frozenset[str]  # the files, by their paths in the copy
+
+    def own(self, tests: dict[tuple[str, str], int]) -> dict[tuple[str, str], int]:
+        """Those of tests, keyed by (path in the copy, qualified name), whose files are the group's, keyed by their
+        paths from the group's directory, as pytest names them run there."""
+        where = self.setup.where
+        return {(os.path.relpath(path, where) if where else path, name): line
+                for (path, name), line in tests.items() if path in self.paths}
+
+    def in_tree(self, finding: dict) -> dict:
+        """finding, its path one from the group's directory or None, with its path in the copy instead."""
+        path, where = finding["path"], self.setup.where
+        return {**finding, "path": os.path.join(where, path) if path and where else path}
+
+    def label(self) -> str:
+        """The group's tests, as a finding about all of them names them when the change's tests fall in more than
+        one group: by their configuration file's path in the copy."""
+        # The empty configuration is the one file given with -c that lies outside the copy (_empty_pytest_ini).
+        if os.path.commonpath([self.setup.inifile, self.setup.top]) != self.setup.top:
+            return "the changed tests with no pytest configuration"
+        return f"the changed tests configured by {os.path.relpath(self.setup.inifile, self.setup.top)}"
+
+
+def _labels(groups: list[_PytestGroup]) -> list[str | None]:
+    """How a finding about all of each of groups' tests names them, as _PytestGroup.label does when there is more
+    than one group; None for each when there is one, whose tests are all the changed tests."""
+    return [group.label() if len(groups) > 1 else None for group in groups]
+
+
+def _pytest_groups(tree: str, tmp: str, paths: set[str]) -> list[_PytestGroup]:
+    """paths, test files by their paths in tree, a copy of a tree, grouped by the pytest configuration pytest takes
+    for each: the one _pytest_inifile finds in the file's directory, else in the nearest directory above it that has
+    one, up to tree's top and never above it, as pytest 9's locate_config walks up from the files it is given (its
+    _pytest/config/findpaths.py). In the order of their directories. Files with none share the empty configuration
+    _empty_pytest_ini writes in tmp. Raises OSError as that does."""
+    seen: dict[str, str | None] = {}  # each directory read, by its path in tree, and the configuration it holds
+
+    def inifile_in(where: str) -> str | None:
+        if where not in seen:
+            seen[where] = _pytest_inifile(os.path.join(tree, where))
+        return seen[where]
+
+    found: dict[str, tuple[str | None, set[str]]] = {}
+    for path in sorted(paths):
+        where = os.path.dirname(path)
+        while (project_ini := inifile_in(where)) is None and where:
+            where = os.path.dirname(where)
+        found.setdefault(where if project_ini else "", (project_ini, set()))[1].add(path)
+    return [_PytestGroup(_PytestSetup(os.path.join(tree, where) if where else tree,
+                                      project_ini or _empty_pytest_ini(tmp), tree), frozenset(members))
+            for where, (project_ini, members) in sorted(found.items())]
+
+
 def _pytest_config(tree: str, tmp: str) -> str:
-    """The pytest configuration to run the tests of tree, a copy of a tree, by: its own, as _pytest_inifile finds
-    it, else an empty pytest.ini that this writes in tmp, the private directory beside tree, so that pytest, given it
-    with -c, does not look for one above the copy, where another account may write. Raises OSError when that file
-    cannot be written."""
-    inifile = _pytest_inifile(tree)
-    if inifile is None:
-        inifile = os.path.join(tmp, "pytest.ini")
-        with open(inifile, "x", encoding="utf-8"):
-            pass
+    """The pytest configuration to run all the tests of tree, a copy of a tree, by from its top, as surviving-mutants
+    does: its own, as _pytest_inifile finds it, else the empty configuration _empty_pytest_ini writes in tmp. Raises
+    OSError as that does."""
+    return _pytest_inifile(tree) or _empty_pytest_ini(tmp)
+
+
+def _empty_pytest_ini(tmp: str) -> str:
+    """The path of an empty pytest.ini that this writes in tmp, the private directory beside a copy, where none is
+    yet, so that pytest, given it with -c, does not look for a configuration above the copy, where another account
+    may write. Raises OSError when it cannot be written, or tmp has one already."""
+    inifile = os.path.join(tmp, "pytest.ini")
+    with open(inifile, "x", encoding="utf-8"):
+        pass
     return inifile
 
 
@@ -4264,14 +4367,15 @@ def _node_parts(node_id: str) -> tuple[str, list[str], str]:
     return path, names, bracket + params
 
 
-def _collect_python_tests(root: str, inifile: str, tests: dict[tuple[str, str], int]) -> tuple[list[str], str | None]:
-    """The pytest node ids of tests, one per parameter set, collected at root with the configuration in inifile,
-    and the problem, a clause, when pytest could not collect them; then the ids are []."""
+def _collect_python_tests(setup: _PytestSetup, tests: dict[tuple[str, str], int]) -> tuple[list[str], str | None]:
+    """The pytest node ids of tests, keyed by their paths from setup's root, one per parameter set, collected by
+    setup, and the problem, a clause, when pytest could not collect them; then the ids are []."""
     files = sorted({path for path, _ in tests})
     # Exit status 5: pytest collected no test from the files, as for a file of helpers named test_*.
     # Without pytest-randomly, which only shuffles the list, and cannot hash a node id that is not UTF-8.
-    proc, problem = _pytest(root, inifile, "collecting the changed tests",
-                            ["-p", "no:randomly", "--collect-only", *files], ok=(0, 5), timeout=FLAKY_RUN_TIMEOUT)
+    proc, problem = _pytest(setup, "collecting the changed tests",
+                            ["-p", "no:randomly", "--collect-only", *map(setup.argument, files)], ok=(0, 5),
+                            timeout=FLAKY_RUN_TIMEOUT)
     if problem or proc is None:
         return [], problem
     return _listed_tests(proc, "collecting the changed tests", tests)
@@ -4296,15 +4400,16 @@ def _listed_tests(proc: subprocess.CompletedProcess, doing: str,
     return wanted, None
 
 
-def _rerun_python_tests(root: str, inifile: str, ids: list[str], seed: int,
+def _rerun_python_tests(setup: _PytestSetup, ids: list[str], seed: int,
                         report: str) -> tuple[dict[str, str], str | None]:
-    """The outcome, as junit_outcomes gives it, of each of ids that pytest reported when it ran them at root, with
-    the configuration in inifile, in the order pytest-randomly's seed gives, writing its JUnit report to report; a
+    """The outcome, as junit_outcomes gives it, of each of ids that pytest reported when it ran them by setup, in the
+    order pytest-randomly's seed gives, writing its JUnit report to report; a
     test reported more than once takes the first of failed, xfailed and passed that any of its cases has, else
     skipped. And the problem, a clause, when that run told nothing, then with {}."""
     doing = f"rerunning them under seed {seed}"
-    proc, problem = _pytest(root, inifile, doing,
-                            ["-p", "randomly", f"--randomly-seed={seed}", f"--junitxml={report}", *ids],
+    proc, problem = _pytest(setup, doing,
+                            ["-p", "randomly", f"--randomly-seed={seed}", f"--junitxml={report}",
+                             *map(setup.argument, ids)],
                             timeout=FLAKY_RUN_TIMEOUT)
     if problem or proc is None:
         return {}, problem
@@ -4335,10 +4440,11 @@ class _PytestStopped(subprocess.CompletedProcess):
     """What a pytest run that _pytest stopped at its timeout printed until then; its returncode is the kill's."""
 
 
-def _pytest(root: str, inifile: str, doing: str, args: list[str], *, timeout: float, ok: tuple[int, ...] = (0, 1),
+def _pytest(setup: _PytestSetup, doing: str, args: list[str], *, timeout: float, ok: tuple[int, ...] = (0, 1),
             env: dict[str, str] | None = None) -> tuple[subprocess.CompletedProcess | None, str | None]:
-    """pytest run at verbosity -1, for test cases too, in the gate's own interpreter at root, without its cache, with
-    the configuration in inifile and args, taking no configuration or conftest.py from above root, and env's
+    """pytest run at verbosity -1, for test cases too, in the gate's own interpreter at setup's root, without its
+    cache, with setup's configuration and args, taking no configuration from anywhere else and no conftest.py from
+    above setup's top, and env's
     variables beside tool_env's; its output unbuffered, so that what it printed before a kill is whole. And the
     problem, a clause naming doing, when it could not start, took longer than timeout seconds or exited with a
     status outside ok (by default 0, all passed, and 1, some failed); then the run is None when pytest did not start,
@@ -4354,12 +4460,12 @@ def _pytest(root: str, inifile: str, doing: str, args: list[str], *, timeout: fl
     # no other option changes the list.
     # Without -c pytest looks for its configuration in every directory above the test files, and the copy is in a
     # temporary directory another account may write to, along with a conftest.py beside it: -c ends that search,
-    # and --confcutdir keeps conftest.py files above root from being imported.
-    argv = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-c", inifile, "--rootdir", root,
-            "--confcutdir", root, "--verbosity=-1", "-o", "verbosity_test_cases=-1", *args]
+    # and --confcutdir keeps conftest.py files above the copy from being imported.
+    argv = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-c", setup.inifile, "--rootdir", setup.root,
+            "--confcutdir", setup.top, "--verbosity=-1", "-o", "verbosity_test_cases=-1", *args]
     try:
         # A fixed command over the node ids pytest itself collected; no shell reads it.
-        raw = subprocess.Popen(argv, cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,  # noqa: S603
+        raw = subprocess.Popen(argv, cwd=setup.top, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,  # noqa: S603
                                stderr=subprocess.PIPE, start_new_session=True,
                                env={**tool_env(), **(env or {}), "PYTHONIOENCODING": "utf-8:surrogateescape",
                                     "PYTHONUNBUFFERED": "1"})
@@ -4433,11 +4539,13 @@ def passes_at_base(change: GateChange, *, budget: float) -> list[dict]:
     pytest's pythonpath, imports; a project installed into the gate's interpreter imports the working tree's instead,
     and every test of it then passes at the base.
 
-    The collection and the run together may take budget seconds; a stop there is a budget-reached finding saying
-    when, and how many test cases the run had run; none of their outcomes is reported. A pytest that cannot start,
-    stops before it collects, stops with a usage error other than a conftest.py's ImportError, or writes no readable
-    report, a changed test file that cannot be read or parsed, and a copy that cannot be made are not-run findings
-    saying so; a copy that cannot be removed afterwards is a finding of its own.
+    The collections and runs together, one of each for every configuration the changed tests fall under, may take
+    budget seconds; a stop there is a budget-reached finding saying when, and how many test cases the run had run,
+    and none of that configuration's outcomes is reported; the configurations after it are not run, each a not-run
+    finding saying so. A pytest that cannot start, stops before it collects, stops with a usage error other than a
+    conftest.py's ImportError, or writes no readable report, a changed test file that cannot be read or parsed, and a
+    copy that cannot be made are not-run findings saying so; a copy that cannot be removed afterwards is a finding of
+    its own.
     """
     if not _edits_python_source(change):
         return []
@@ -4478,8 +4586,9 @@ def _beside_tests(path: str) -> bool:
 
 def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str], int], budget: float) -> list[dict]:
     """passes_at_base's findings on tests, as _changed_python_tests gives them, collected and then run, within budget
-    seconds for both, in a copy of the base that it makes in tmp, an empty directory, beside the runs' reports and
-    their TMPDIR."""
+    seconds for all of it, in a copy of the base that it makes in tmp, an empty directory, beside the runs' reports
+    and their TMPDIR: once for each pytest configuration the changed test files take there (_pytest_groups), one
+    after another while the budget lasts."""
     tree, scratch = os.path.join(tmp, "tree"), os.path.join(tmp, "tmp")
     try:
         _copy_base_with_tests(change, tree, os.path.join(tmp, "base.tar"))
@@ -4488,37 +4597,60 @@ def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str]
         return [_finding(None, None, "not-run", f"could not copy the base to run the changed tests in: {e}; the "
                                                 f"changed tests were not run there.")]
     try:
-        inifile = _pytest_config(tree, tmp)
+        groups = _pytest_groups(tree, tmp, {path for path, _ in tests})
     except OSError as e:
         return [_finding(None, None, "not-run", f"could not write an empty pytest configuration for the run at the "
                                                 f"base: {e}; the changed tests were not run there.")]
     deadline = time.monotonic() + budget
     # No bytecode: a test that imports through a tracked link out of the tree would write it there.
     env = {"TMPDIR": scratch, "PYTHONDONTWRITEBYTECODE": "1"}
-    ids, stopped, problem = _collect_at_base(tree, inifile, tests, deadline, env)
+    out: list[dict] = []
+    for n, (group, label) in enumerate(zip(groups, _labels(groups), strict=True)):
+        report = os.path.join(tmp, f"base-{n}.xml")
+        found, stopped = _base_group_findings(group, group.own(tests), deadline, env, report, budget, label)
+        out += [group.in_tree(f) for f in found]
+        if stopped:
+            out += [_finding(None, None, "not-run", f"the run at the base used its {budget:g} seconds "
+                                                    f"(`--base-run-budget`) before it reached {later.label()}, so "
+                                                    f"they were not run there.") for later in groups[n + 1:]]
+            break
+    return out
+
+
+def _base_group_findings(group: _PytestGroup, tests: dict[tuple[str, str], int], deadline: float,
+                         env: dict[str, str], report: str, budget: float,
+                         label: str | None) -> tuple[list[dict], bool]:
+    """_base_run_findings' findings on tests, keyed by their paths from group's directory, as pytest names them
+    there, collected and run at the base by group's configuration with env by deadline, a time.monotonic() time,
+    writing the run's report to report; their paths are from group's directory too. And whether the deadline, of
+    the check's budget seconds, stopped it, which leaves no time for another group. label names the group's tests in
+    a finding about all of them, as _PytestGroup.label does; None when they are all the change's tests."""
+    which = label or "the changed tests"
+    ids, stopped, problem = _collect_at_base(group.setup, tests, deadline, env)
     if stopped:
-        return [_base_run_budget_reached(budget, "while it collected the changed tests")]
+        return [_base_run_budget_reached(budget, f"while it collected {which}")], True
     if problem:
-        return [_finding(None, None, "not-run", f"{problem}; the changed tests were not run there.")]
+        return [_finding(None, None, "not-run", f"{problem}; {which} were not run there.")], False
     if not ids:
-        return []
+        return [], False
     left = deadline - time.monotonic()
     if left <= 0:
-        return [_base_run_budget_reached(budget, "once it had collected the changed tests, before it ran them")]
-    report = os.path.join(tmp, "base.xml")
-    proc, problem = _pytest(tree, inifile, "running the changed tests at the base",
-                            ["-p", "no:randomly", f"--junitxml={report}", *ids], timeout=left, env=env)
+        return [_base_run_budget_reached(budget, f"once it had collected {which}, before it ran them")], True
+    proc, problem = _pytest(group.setup, "running the changed tests at the base",
+                            ["-p", "no:randomly", f"--junitxml={report}", *map(group.setup.argument, ids)],
+                            timeout=left, env=env)
     if isinstance(proc, _PytestStopped):
         ran = sum(len(m[1]) for m in re.finditer(r"^([.FEsxX]+) *(?:\[ *\d+%\])?$", proc.stdout, re.MULTILINE))
-        return [_base_run_budget_reached(budget, f"after {ran} of the {len(ids)} test cases it was given, before it "
-                                                 f"reported them")]
+        of = f" of {label}" if label else ""
+        return [_base_run_budget_reached(budget, f"after {ran} of the {len(ids)} test cases{of} it was given, before "
+                                                 f"it reported them")], True
     if problem or proc is None:
-        return [_finding(None, None, "not-run", f"{problem}; the changed tests were not judged.")]
+        return [_finding(None, None, "not-run", f"{problem}; {which} were not judged.")], False
     try:
         cases = junit_outcomes(report)
     except GateError as e:
         return [_finding(None, None, "not-run", f"pytest, running the changed tests at the base, wrote no report the "
-                                                f"gate can read ({e}): {_said(proc)}")]
+                                                f"gate can read ({e}): {_said(proc)}")], False
     # Each test's outcomes at the base, its skips left out.
     outcomes: dict[tuple[str, str], set[str]] = {}
     by_case = {_junit_case(i): i for i in ids}
@@ -4528,23 +4660,24 @@ def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str]
             outcomes.setdefault((path, ".".join(names)), set()).add(outcome)
     return [_finding(path, tests[(path, name)], "passes-at-base",
                      f"`{name}` passes without the change, so it does not test it.")
-            for (path, name), seen in sorted(outcomes.items()) if seen == {"passed"}]
+            for (path, name), seen in sorted(outcomes.items()) if seen == {"passed"}], False
 
 
-def _collect_at_base(tree: str, inifile: str, tests: dict[tuple[str, str], int], deadline: float,
+def _collect_at_base(setup: _PytestSetup, tests: dict[tuple[str, str], int], deadline: float,
                      env: dict[str, str]) -> tuple[list[str], bool, str | None]:
-    """The node ids, one per parameter set, of those of tests that pytest collects in tree, the copy of the base, by
-    the configuration in inifile and with env, by deadline, a time.monotonic() time; whether the deadline stopped it;
-    and the problem, a clause, when it went wrong otherwise. A test file that cannot be imported at the base, or a
-    conftest.py whose import raises ImportError there, gives no ids for the tests it covers and no problem: that is
-    the expected outcome for a test of what the change adds. So does a test pytest does not collect, such as a test_*
-    method of a class not named Test*. A pytest that stops before it collects, as for a plugin that cannot be
+    """The node ids, one per parameter set, of those of tests, keyed by their paths from setup's root, that pytest
+    collects by setup in the copy of the base, with env, by deadline, a time.monotonic() time; whether the deadline
+    stopped it; and the problem, a clause, when it went wrong otherwise. A test file that cannot be imported at the
+    base, or a conftest.py whose import raises ImportError there, gives no ids for the tests it covers and no problem:
+    that is the expected outcome for a test of what the change adds. So does a test pytest does not collect, such as a
+    test_* method of a class not named Test*. A pytest that stops before it collects, as for a plugin that cannot be
     imported, is a problem."""
     files = sorted({path for path, _ in tests})
     # Exit status 1: some file could not be collected, which --continue-on-collection-errors lets the others outlive;
     # 4, a usage error, which a conftest.py that cannot be imported gives; 5: no test was collected.
-    proc, problem = _pytest(tree, inifile, "collecting the changed tests at the base",
-                            ["-p", "no:randomly", "--collect-only", "--continue-on-collection-errors", *files],
+    proc, problem = _pytest(setup, "collecting the changed tests at the base",
+                            ["-p", "no:randomly", "--collect-only", "--continue-on-collection-errors",
+                             *map(setup.argument, files)],
                             timeout=deadline - time.monotonic(), ok=(0, 1, 4, 5), env=env)
     if isinstance(proc, _PytestStopped):
         return [], True, None
@@ -4565,7 +4698,7 @@ def _collect_at_base(tree: str, inifile: str, tests: dict[tuple[str, str], int],
     # imported stops them all: each file is collected on its own, and only those under it give nothing.
     collected: list[str] = []
     for path in files:
-        found, stopped, problem = _collect_at_base(tree, inifile, {t: n for t, n in tests.items() if t[0] == path},
+        found, stopped, problem = _collect_at_base(setup, {t: n for t, n in tests.items() if t[0] == path},
                                                    deadline, env)
         if stopped or problem:
             return [], stopped, problem

@@ -139,13 +139,14 @@ decides which of those are tests. It runs them five times, alone, under pytest-r
 so the project's environment that `uv run` gives, whatever `pytest` is on `PATH`) and within 30 seconds. They run in
 a temporary copy of the files git tracks, so a report the project's `addopts` write, such as `coverage.xml`, lands in
 the copy and the build's own stays as the gate reads it; a test that needs an untracked file, such as a build
-product, does not find it there. pytest takes its configuration only from the copy's top directory, in pytest's
-order (`pytest.toml`, `.pytest.toml`, `pytest.ini`, `.pytest.ini`, then `pyproject.toml`, `tox.ini` and `setup.cfg`
-with a pytest table or section), given with `-c`, or an empty one when it has none; `--confcutdir` is the copy. So
-no `pytest.ini` or `conftest.py` that another account put above the temporary directory is read. The top directory
-is where a build that runs pytest there takes its configuration. A configuration in a subdirectory, such as
-`pkg/pyproject.toml` or `tests/pytest.ini`, is not used: the reruns get the top directory's, or the empty one when
-the top has none, and a project that needs the subdirectory's usually gets `not-rerun` (see `TODO.md`):
+product, does not find it there. Each changed test file takes the configuration pytest would find for it: the first
+in its own directory, else in the nearest one above it, up to the copy's top and never above it, in pytest's order
+within a directory (`pytest.toml`, `.pytest.toml`, `pytest.ini`, `.pytest.ini`, then `pyproject.toml`, `tox.ini` and
+`setup.cfg` with a pytest table or section). The tests are rerun once for each configuration found, given with `-c`
+and with `--rootdir` its directory, or with an empty configuration for files under none; pytest runs from the copy's
+top, and `--confcutdir` is the copy. So a `tests/pytest.ini` or `pkg/pyproject.toml` configures the tests under it,
+and no `pytest.ini` or `conftest.py` that another account put above the temporary directory is read. A group that
+cannot run is a finding about its tests alone:
 
 - `mixed-results`: a test that failed under some seeds and passed under the others, at its `def`, naming the seeds
   of each. It depends on the order of the tests, on state another test leaves, or on randomness pytest-randomly
@@ -207,8 +208,9 @@ what can be mutated (`source_paths`, `only_mutate`, `do_not_mutate`), which test
 (`pytest_add_cli_args_test_selection`), what the tests read beside the code (`also_copy`), and which lines are left
 alone (`do_not_mutate_patterns`); see [whose rules judge a change](#whose-rules-judge-a-change). Python files are read
 as Python reads them, by a byte order mark or a coding cookie. mutmut runs pytest in the copy's `mutants/`, where it
-puts the mutated code. Its runs get the configuration flaky-tests' reruns get, with `-c`: the project's own, which
-`also_copy` puts in `mutants/` so that paths in it, such as `pythonpath`, name the mutated code, or an empty one; and
+puts the mutated code. Its runs get, with `-c`, the configuration of the copy's top directory, in the order the
+reruns look in a directory: the project's own, which `also_copy` puts in `mutants/` so that paths in it, such as
+`pythonpath`, name the mutated code, or an empty one; and
 `--confcutdir` is `mutants/`. Both are added to the table's `pytest_add_cli_args`, so these runs too read no
 `pytest.ini` or `conftest.py` from above the copy. In a repository without mutmut, a change to a function gets a
 `not-run` finding.
@@ -234,9 +236,9 @@ test integrity), a `conftest.py` or under a `tests` directory. A change to the t
 docs, has no "without the change" a test could see. The base is the files git tracked at `--base`, as `git archive`
 writes them, with every one of the change's files that belong with the tests (those three kinds) taken from the
 working tree, or removed where the change removed it, so the changed tests keep their fixtures and data. A submodule is
-an empty directory there. pytest, in the gate's interpreter, with the configuration flaky-tests' reruns get and the
-copy's own `TMPDIR`, first collects the changed test files with `--continue-on-collection-errors`, then runs those of
-the changed tests it collected:
+an empty directory there. pytest, in the gate's interpreter, with the configurations flaky-tests' reruns get, found
+the same way in the base, once for each, and the copy's own `TMPDIR`, first collects the changed test files with
+`--continue-on-collection-errors`, then runs those of the changed tests it collected, all within the one time limit:
 
 - `passes-at-base`: a test that passed at the base, each of its parameter sets that pytest did not skip included, at
   its `def`. A test that fails or errors there tests the change and gives nothing; so does one pytest does not collect
