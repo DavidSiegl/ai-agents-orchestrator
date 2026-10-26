@@ -4569,7 +4569,8 @@ def _read_ready(pipes: selectors.BaseSelector, printed: dict[int, list[bytes]], 
 @contextlib.contextmanager
 def _not_ignored_in_children(sig: signal.Signals | None) -> Iterator[None]:
     """While open, a process this one starts gets sig with its default disposition, also when this process ignores
-    it, as a command a Jenkins sh step runs ignores SIGINT; afterwards this process treats sig as it did before. An
+    it, as a command a Jenkins sh step runs ignores SIGINT; afterwards this process treats sig as it did before. The
+    disposition is the process's, so a child another thread starts meanwhile, such as the GUI's ssh, gets it too. An
     ignored signal stays ignored across exec, and a Python started so never raises KeyboardInterrupt, so a soft stop
     by it would reach a tool that ignores it. Meanwhile sig is caught and dropped here, as ignoring it would. Only the
     main thread can set a handler, so elsewhere, and for sig None, nothing changes."""

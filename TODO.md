@@ -193,6 +193,12 @@ was done.
   than holds for it. `gate_failures` does not read the intro, so no round is misjudged. Raised by cross-review 38
   (round 3, 2026-10-26). Closes with the intro written through `one_line`, or with each quality-file writer escaping
   once where it joins its lines.
+- **Small leftovers in the changed-file walker and its decorators.** Raised by cross-review 45 (F2-F5, 2026-10-26),
+  none giving a wrong result: `_ChangedFunction.decorators` unparses each decorator only for `_unmutatable`'s
+  `staticmethod`/`classmethod` test, which an `ast.Name` check would make without `_unparsed`; `_parsed_changed_files`
+  computes `_removal_points` for `_judged_files` and `vague_names`, which never read them; `_ChangedPythonFile` is a
+  frozen dataclass with `set` fields, so its generated `__hash__` raises; `vague_names` unpacks three fields and reads
+  `.why` beside them. Closes with the four changed, in one commit, when the walker is next touched.
 - **`vague-names` does not split CamelCase.** `vague_names` matches a whole name or its last `_`-separated word,
   so `user_data` is found but a class `InfoManager` or `UserData` is not. Closes, if the run metrics show such names
   recur, with the last CamelCase word matched too.
