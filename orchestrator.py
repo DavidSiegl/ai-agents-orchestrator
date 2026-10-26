@@ -1822,10 +1822,12 @@ class Host:
         """What file_at gives for path, and whether commit has a symbolic link there, whose text is then the path it
         points to; None where file_at gives None. Raises as file_at."""
         # Each entry is `<mode> <type> <object>\t<path>`; a directory's type is tree, a symbolic link's mode 120000.
+        # A path ending in "/", or none, lists a directory's entries instead, so only an entry at path itself counts.
         entry = self.git(cwd, "ls-tree", "--full-tree", "-z", commit, "--", *_top_literal([path]),
                          verbatim=True).split("\0")[0]
-        mode, kind, blob = (entry.split("\t")[0].split(" ") + ["", "", ""])[:3]
-        if kind != "blob":
+        fields, _, listed = entry.partition("\t")
+        mode, kind, blob = (fields.split(" ") + ["", "", ""])[:3]
+        if kind != "blob" or listed != path:
             return None
         return self.git(cwd, "cat-file", "blob", blob, verbatim=True), mode == "120000"
 

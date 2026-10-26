@@ -3751,6 +3751,14 @@ class TestScanUnpublished(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
 
+    def test_a_base_blob_is_read_only_at_the_path_asked_for(self):
+        commit = self.commit({"rules/extra.toml": "x = 1\n"}, "rules")
+        self.assertEqual(self.host._blob_at(self.repo, commit, "rules/extra.toml"), ("x = 1\n", False))
+        # ls-tree lists the directory's entries for these, which are not the file asked for.
+        for path in ("rules/", "rules", ""):
+            with self.subTest(path=path):
+                self.assertIsNone(self.host._blob_at(self.repo, commit, path))
+
     def git(self, *args):
         return self.host.git(self.repo, *args)
 
