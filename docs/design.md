@@ -233,8 +233,7 @@ goes to `in-review` once its conflict is cleared. A `ready-for-agent` spec with 
 interrupted drain left; its run, if finished, sets the spec's status, and one that makes it `in-review` has its
 pull request asked about at once, so a pull request merged meanwhile makes it `done` in this drain; if not
 finished, drain stops and says what to do: wait for it, `resume` it, or delete the `Run:` line to start the spec
-over. Then drain sweeps the branches of
-earlier runs once, and runs each spec whose blockers are all `done`.
+over. Then drain sweeps the branches of earlier runs once, and runs each spec whose blockers are all `done`.
 
 **Specs edited while drain runs.** Drain reads each spec again before choosing the next and before each header
 edit, so your edits are kept, except the `Status:`, `Run:` and `PR:` lines of the spec it is running, which are
