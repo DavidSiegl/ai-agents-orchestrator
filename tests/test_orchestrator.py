@@ -7789,6 +7789,18 @@ class TestPassesAtBase(unittest.TestCase):
         self.assertEqual([(f["rule"], "`ns` (`src/ns/extra.py`)" in f["message"]) for f in self.found()],
                          [("not-run", True)])
 
+    def test_a_package_only_a_conftest_imports_from_the_working_tree_cannot_be_judged(self):
+        # The changed test reaches calc only through a fixture of the conftest.py, which imports it from lib/.
+        self.installed_editable("lib")
+        self.put("tests/conftest.py", "import pytest\n\n\n@pytest.fixture\ndef calc_module():\n"
+                                      "    import calc\n    return calc\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "fixture")
+        self.put("lib/calc.py", self.CALC + "\n\ndef sub(a, b):\n    return a - b\n")
+        self.put("tests/test_sub.py", "def test_sub(calc_module):\n    assert calc_module.sub(3, 1) == 2\n")
+        self.assertEqual([(f["rule"], "`calc` (`lib/calc.py`)" in f["message"]) for f in self.found()],
+                         [("not-run", True)])
+
     def test_an_editable_install_by_an_import_finder_imports_the_base(self):
         # The finder comes after Python's own path search, which finds calc in the copy's src/ first.
         self.installed_editable("src", finder=True)
@@ -7891,7 +7903,7 @@ class TestPassesAtBase(unittest.TestCase):
         self.put("new/sub.py", "")
         self.git("add", "-A")
         change = orchestrator.GateChange.from_tree(self.repo, self.git("rev-parse", "HEAD").strip())
-        base_copy = orchestrator._BaseCopy(change, tree, {}, 0.0, 1.0, frozenset({"calc", "new", "pytest", "w"}))
+        base_copy = orchestrator._BaseCopy(change, tree, {}, 0.0, 1.0)
         reports = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, reports)
         report = os.path.join(reports, "base-0-imports.json")
@@ -7899,22 +7911,41 @@ class TestPassesAtBase(unittest.TestCase):
         def write(path, text):
             with open(path, "w") as f:
                 f.write(text)
-        # Tracked at the base, as the copy shows, or added by the change: the project's, named by the top-level
-        # module the changed tests import; a virtual environment's under the top is not; one the changed tests do
-        # not import is not judged. A pytest-xdist worker's report beside the controller's counts too.
-        write(report, '{"calc": "lib/calc.py", "new.sub": "new/sub.py", "pytest": ".venv/lib/pytest/__init__.py", '
-                      '"other": "lib/calc.py"}')
+        # Tracked at the base, as the copy shows, or added by the change: the project's, named by its top-level
+        # module; a virtual environment's under the top is not. A pytest-xdist worker's report beside the
+        # controller's counts too.
+        write(report, '{"calc": "lib/calc.py", "new.sub": "new/sub.py", "pytest": ".venv/lib/pytest/__init__.py"}')
         write(f"{report}-gw0", '{"w": "lib/calc.py"}')
         self.assertEqual(orchestrator._imported_from_working_tree(base_copy, report),
                          [("calc", "lib/calc.py"), ("new", "new/sub.py"), ("w", "lib/calc.py")])
-        for text in ("[]", "{"):
-            with self.subTest(text=text):
-                write(f"{report}-gw0", text)
-                with self.assertRaises(orchestrator.GateError):
-                    orchestrator._imported_from_working_tree(base_copy, report)
+        # A report that cannot be read is named, the controller's or a worker's.
+        for bad in (report, f"{report}-gw0"):
+            for text in ("[]", "{"):
+                with self.subTest(bad=bad, text=text):
+                    write(report, "{}")
+                    write(f"{report}-gw0", "{}")
+                    write(bad, text)
+                    with self.assertRaisesRegex(orchestrator.GateError, f"^{re.escape(bad)}: "):
+                        orchestrator._imported_from_working_tree(base_copy, report)
         os.remove(report)
-        with self.assertRaises(orchestrator.GateError):
+        with self.assertRaisesRegex(orchestrator.GateError, f"^{re.escape(report)}: "):
             orchestrator._imported_from_working_tree(base_copy, report)
+
+    def test_the_imports_plugin_writes_a_worker_s_report_beside_the_controller_s(self):
+        plugin = ModuleType("plugin")
+        exec(orchestrator._BASE_IMPORTS_PLUGIN_SOURCE, plugin.__dict__)  # noqa: S102
+        reports = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, reports)
+        report = os.path.join(reports, "imports.json")
+        options = {"gate_imports_root": os.path.dirname(orchestrator.__file__), "gate_imports_report": report}
+        # A pytest the gate runs inside an xdist worker of its own inherits PYTEST_XDIST_WORKER, but is no worker.
+        with patch.dict(os.environ, {"PYTEST_XDIST_WORKER": "gw7"}):
+            for config in (SimpleNamespace(getoption=options.get),
+                           SimpleNamespace(getoption=options.get, workerinput={"workerid": "gw1"})):
+                plugin.pytest_sessionfinish(SimpleNamespace(config=config))
+        self.assertEqual(sorted(os.listdir(reports)), ["imports.json", "imports.json-gw1"])
+        with open(report) as f:
+            self.assertEqual(json.load(f)["orchestrator"], "orchestrator.py")
 
     def test_a_usage_error_without_a_conftest_is_a_finding(self):
         self.fix_add()

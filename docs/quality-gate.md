@@ -264,8 +264,8 @@ as `[tool.pytest.ini_options] pythonpath`, put on the path. The roots go on `PYT
 what an editable install puts there, so a `src/` layout installed editable into the gate's interpreter is judged at
 its base. A project whose code the run still imports from the working tree cannot be judged: one installed editable
 from a directory other than those roots, or through an import hook placed ahead of Python's own path search. The run
-writes where each module it imported came from, and one that took a project file of the working tree's under a
-top-level module the changed tests import is one `not-run` finding naming those modules, with no test judged.
+writes where each module it imported came from, and one that took a project file of the working tree's, whether for a
+changed test, a `conftest.py` or a helper, is one `not-run` finding naming the packages, with no test judged.
 
 **Vague names** lists the names a change binds that tell a reader nothing about what they hold: `data`, `info`,
 `value`, `status`, `handle` and `manager` (`VAGUE_NAME_WORDS`), or a name ending in one after an underscore, such as

@@ -379,12 +379,11 @@ was done.
   `PYTHONPATH` ahead of what was there, so they come before site-packages and the editable install's `.pth` path or
   import finder. The run at the base loads a pytest plugin, `_BASE_IMPORTS_PLUGIN`, which writes the file each module
   in `sys.modules` came from, each pytest-xdist worker its own; `_imported_from_working_tree` picks those that are the
-  working tree's files of the project, under a top-level module the changed tests import (`_top_level_imports`), and
-  a run that imported any judges none of its tests and is one `not-run` finding naming those modules, as for a package
-  installed editable from a directory other than those roots. Not closed: an import of the working tree's code that
-  leaves no module behind, such as a file a test runs with `runpy` or reads, or one under a module only a conftest.py
-  or a helper imports, is not seen. The xdist worker reports are read but not run here: pytest-xdist is not in the
-  dev dependencies.
+  working tree's files of the project, whatever imported them, the changed tests, a conftest.py or a helper, and a run
+  that imported any judges none of its tests and is one `not-run` finding naming their top-level modules, as for a
+  package installed editable from a directory other than those roots. Not closed: an import of the working tree's code
+  that leaves no module behind, such as a file a test runs with `runpy` or reads, is not seen. The xdist worker
+  reports are read but not run here: pytest-xdist is not in the dev dependencies.
 
 - **Three gate checks repeat the make-a-scratch-directory, run, remove-it skeleton.** `flaky_tests`,
   `_mutation_test` and `passes_at_base` each call `tempfile.mkdtemp`, word their own finding when it fails, and word

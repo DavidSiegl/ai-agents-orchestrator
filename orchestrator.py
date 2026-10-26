@@ -4660,9 +4660,9 @@ def passes_at_base(change: GateChange, *, budget: float) -> list[dict]:
     whatever it raises and whatever the test itself checks, and a test_* method of a class pytest does not take for a
     test class. The base's code is what the copy's import roots, its top and its src/, and its own configuration, such
     as pytest's pythonpath, import, ahead of what is installed into the gate's interpreter, an editable install of the
-    project included. A run that still imports, under a top-level module the changed tests import, the project's code
-    from the working tree, as from a package an editable install finds outside those roots, judges none of its tests
-    and is a not-run finding naming the module.
+    project included. A run that still imports the project's code from the working tree, whether a changed test, a
+    conftest.py or a helper imports it, as from a package an editable install finds outside those roots, judges none
+    of its tests and is a not-run finding naming the package.
 
     The collections and runs together, one of each for every configuration the changed tests fall under, may take budget
     seconds; a stop there is a budget-reached finding saying when, and how many test cases the run had run, and none of
@@ -4708,19 +4708,17 @@ class _BaseCopy:
     env: dict[str, str]  # the variables each pytest run takes beside tool_env's
     deadline: float  # the time.monotonic() time by which every collection and run must be done
     budget: float  # the seconds the check had for all of them, from when the copy was made, as findings name it
-    # The top-level modules the changed test files import (_top_level_imports): those whose origin
-    # _imported_from_working_tree judges.
-    imported: frozenset[str]
 
 
 # The pytest plugin, a module of this name written beside the copy and put on the runs' path, by which a run at the
 # base tells where the modules it imported came from. At the end of the session it writes, as JSON to the file
 # --gate-imports-report names, each module in sys.modules whose __file__ lies under the directory --gate-imports-root
-# names, by its name, to that file's path from there. Under pytest-xdist each worker, which
-# imports the tests where the controller does not, writes its own, the file's name followed by "-" and the worker's
-# id. The file's directory is resolved, and the root, so that a link on the way to either changes nothing; the file
-# itself is not, so that a module that is a link is named by the link. A namespace package has no __file__, and none
-# is written.
+# names, by its name, to that file's path from there. Under pytest-xdist each worker, which imports the tests where
+# the controller does not, writes its own, the file's name followed by "-" and the worker's id, as xdist gives the
+# worker its config.workerinput; not PYTEST_XDIST_WORKER, which a pytest the gate runs from inside a worker of its own
+# inherits. The file's directory is resolved, and the root, so that a link on the way to either changes nothing; the
+# file itself is not, so that a module that is a link is named by the link. A namespace package has no __file__, and
+# none is written.
 _BASE_IMPORTS_PLUGIN = "_octoflow_gate_base_imports"
 _BASE_IMPORTS_PLUGIN_SOURCE = """\
 import json
@@ -4746,7 +4744,7 @@ def pytest_sessionfinish(session):
             if real.startswith(root + os.sep):
                 found[name] = os.path.relpath(real, root)
     report = session.config.getoption("gate_imports_report")
-    worker = os.environ.get("PYTEST_XDIST_WORKER")
+    worker = getattr(session.config, "workerinput", {}).get("workerid")
     with open(f"{report}-{worker}" if worker else report, "w", encoding="utf-8") as f:
         json.dump(found, f)
 """
@@ -4781,8 +4779,7 @@ def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str]
     inherited = [os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else []
     # No bytecode: a test that imports through a tracked link out of the tree would write it there.
     env = {"TMPDIR": scratch, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": os.pathsep.join([*roots, *inherited])}
-    base_copy = _BaseCopy(change, tree, env, time.monotonic() + budget, budget,
-                          _top_level_imports(change.root, {path for path, _ in tests}))
+    base_copy = _BaseCopy(change, tree, env, time.monotonic() + budget, budget)
     out: list[dict] = []
     if empty:
         noun, pronoun = ("a submodule", "it") if len(empty) == 1 else ("submodules", "them")
@@ -4799,25 +4796,6 @@ def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str]
                                                     f"they were not run there.") for later in groups[n + 1:]]
             break
     return out
-
-
-def _top_level_imports(root: str, paths: set[str]) -> frozenset[str]:
-    """The top-level modules that the Python files at paths, repository paths under root, import by an absolute
-    import anywhere in them: `a` for `import a.b` and for `from a.b import c`. A file that cannot be read or parsed
-    adds none: _changed_python_tests has read each changed test file already, and names one it could not."""
-    out: set[str] = set()
-    for path in paths:
-        try:
-            with open(os.path.join(root, path), "rb") as f:
-                text, _ = _decode_python(f.read())
-        except (OSError, SyntaxError):
-            continue
-        for node in ast.walk(_parse_python(text) or ast.Module(body=[], type_ignores=[])):
-            if isinstance(node, ast.Import):
-                out.update(alias.name.partition(".")[0] for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                out.add(node.module.partition(".")[0])
-    return frozenset(out)
 
 
 def _base_group_findings(base_copy: _BaseCopy, group: _PytestGroup, tests: dict[tuple[str, str], int], reports: str,
@@ -4882,31 +4860,33 @@ def _passed_tests(cases: list[tuple[str, str, str]], ids: list[str]) -> list[tup
 
 
 def _imported_from_working_tree(base_copy: _BaseCopy, imports: str) -> list[tuple[str, str]]:
-    """Those of base_copy's imported modules that a run at the base imported, wholly or in part, from the working
-    tree's files of the project rather than from the copy, as the reports _BASE_IMPORTS_PLUGIN wrote at imports, and
-    beside it for pytest-xdist's workers, tell them: each by its name and the path, from the working tree's top, of
-    the file of the first of its modules in name order that came from there, itself or one below it, sorted. The
-    project's files are those git tracks at the base, which the copy holds, and those the change adds; others under
-    the top, such as a virtual environment's, are not the project's. Raises GateError when a report cannot be read."""
+    """The top-level modules under which a run at the base imported a module from the working tree's files of the
+    project rather than from the copy, whichever of the changed tests, their conftest.py files or their helpers
+    imported it, as the reports _BASE_IMPORTS_PLUGIN wrote at imports, and beside it for pytest-xdist's workers, tell
+    them: each by its name and the path, from the working tree's top, of the file of the first such module in name
+    order, itself or one below it, sorted. The project's files are those git tracks at the base, which the copy
+    holds, and those the change adds; others under the top, such as a virtual environment's, are not the project's.
+    Raises GateError when a report cannot be read, naming it."""
     folder, stem = os.path.split(imports)
-    located: dict = {}
     try:
         workers = sorted(name for name in os.listdir(folder) if name.startswith(f"{stem}-"))
-        for path in [imports, *(os.path.join(folder, name) for name in workers)]:
+    except OSError as e:
+        raise GateError(f"{folder}: {e}") from e
+    located: dict = {}
+    for path in [imports, *(os.path.join(folder, name) for name in workers)]:
+        try:
             with open(path, encoding="utf-8") as f:
                 part = json.load(f)
-            if not isinstance(part, dict):
-                raise GateError(f"{path}: not a JSON object")
-            located.update(part)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
-        raise GateError(f"{imports}: {e}") from e
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise GateError(f"{path}: {e}") from e
+        if not isinstance(part, dict):
+            raise GateError(f"{path}: not a JSON object")
+        located.update(part)
     added = {new for _, new in base_copy.change.files if new is not None}
     out: dict[str, str] = {}
     for name, path in sorted(located.items()):
-        top = name.partition(".")[0]
-        if top in base_copy.imported and isinstance(path, str) and (
-                os.path.lexists(os.path.join(base_copy.tree, path)) or path in added):
-            out.setdefault(top, path)
+        if isinstance(path, str) and (os.path.lexists(os.path.join(base_copy.tree, path)) or path in added):
+            out.setdefault(name.partition(".")[0], path)
     return sorted(out.items())
 
 
@@ -4917,11 +4897,13 @@ def _collect_at_base(base_copy: _BaseCopy, setup: _PytestSetup,
     clause, when it went wrong otherwise.
 
     A test file that cannot be imported at the base gives no ids for the tests it covers and no problem: that is the
-    expected outcome for a test of what the change adds. So does each test under a conftest.py that fails to load
-    there, whatever it raises, through a file the change edits, itself or one it imports, such as a helper beside the
-    tests, and a test pytest does not collect, such as a test_* method of a class not named Test*. A conftest.py that
-    fails through no file the change edits is a problem: the base itself fails there. So is a pytest that stops
-    before it collects, as for a plugin that cannot be imported."""
+    expected outcome for a test of what the change adds. So does a test pytest does not collect, such as a test_*
+    method of a class not named Test*, and each test under a conftest.py that fails to load there, whatever it raises,
+    through a file the change edits: the conftest.py itself, a helper beside the tests that it imports, which the copy
+    holds as the working tree has it, or source the copy holds as the base has it. Without the change's edit of that
+    file, the conftest.py fails, so the failure is the change's. One that fails through no file the change edits is a
+    problem: the base itself fails there. So is a pytest that stops before it collects, as for a plugin that cannot be
+    imported."""
     files = sorted({path for path, _ in tests})
     doing = "collecting the changed tests at the base"
     # pytest loads the conftest.py files above every path it is given before it collects any, so one that fails stops
