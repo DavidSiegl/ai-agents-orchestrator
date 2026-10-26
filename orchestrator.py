@@ -4495,13 +4495,13 @@ def _run_in_session(argv: list[str], cwd: str, env: dict[str, str], *, timeout: 
 
     Stopped, it is killed, or with soft_stop, a (signal, grace) pair, first sent that signal and given grace seconds
     to exit; called on the main thread, it starts with that signal's default disposition even where this process
-    ignores it (_not_ignored_in_children). Once it has
-    exited, every process left in its process group, such as a server it started, is killed too, and what was
-    printed is read until no process holds the output open, for at most TOOL_KILL_WAIT seconds more: only one
-    outside the group, in a session of its own, can still hold it, and what that prints later is lost. So the call
-    returns within timeout + grace + TOOL_KILL_WAIT seconds, the process reaped unless it could not exit within
-    them. The output is decoded as _git_run's verbatim output is, so that paths in it keep their bytes; the exit
-    status is -SIGKILL when the kill is the last thing known of it. Raises OSError when argv cannot be started.
+    ignores it (_not_ignored_in_children). Once it has exited, every process left in its process group, such as a
+    server it started, is killed too, and what was printed is read until no process holds the output open, for at
+    most TOOL_KILL_WAIT seconds more: only one outside the group, in a session of its own, can still hold it, and
+    what that prints later is lost. So the call returns within timeout + grace + TOOL_KILL_WAIT seconds, the process
+    reaped unless it could not exit within them. The output is decoded as _git_run's verbatim output is, so that
+    paths in it keep their bytes; the exit status is -SIGKILL when the kill is the last thing known of it. Raises
+    OSError when argv cannot be started.
     """
     # The callers' fixed commands, over names their tools listed; no shell reads them.
     with _not_ignored_in_children(soft_stop[0] if soft_stop else None):
@@ -11221,9 +11221,10 @@ class RunProcess:
     """A CLI command the GUI started, its stdout and stderr read together on a thread."""
 
     def __init__(self, argv: list[str], popen=subprocess.Popen):
-        # A session of its own, so Stop can signal its process group as Ctrl-C in a terminal does, which a GUI
-        # started as a background job of a non-interactive shell would otherwise pass on ignored.
-        # Unbuffered, so the output arrives as it is printed rather than when the run ends.
+        # A session of its own, so Stop can signal its process group as Ctrl-C in a terminal does; and SIGINT not
+        # ignored there, which a GUI started as a background job of a non-interactive shell would pass on (the
+        # with below, not the session, is what keeps it). Unbuffered, so the output arrives as it is printed rather
+        # than when the run ends.
         with _not_ignored_in_children(signal.SIGINT):
             self.proc = popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                               text=True, errors="replace", start_new_session=True,
