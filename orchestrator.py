@@ -3132,7 +3132,7 @@ def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (),
         out += ["", "## Coverage on new code", "", coverage]
     if suppressions:
         out += ["", "## Suppressions added", "",
-                *(f"- `{path}:{line}` `{text}`" for path, line, text in suppressions)]
+                *(f"- `{quality_path(path)}:{line}` `{text}`" for path, line, text in suppressions)]
     if edited or mutmut_state:
         out += _config_section(edited, rules_from, mutmut_state)
     return "\n".join(out) + "\n"
@@ -3175,13 +3175,26 @@ def _to_weigh_section(to_weigh, after: int) -> list[str]:
     return out
 
 
+# The characters that end a line in some reader of the quality file, a Markdown renderer or Python's
+# str.splitlines; quality_path writes each as an escape, so a name that holds one stays on its own line.
+_LINE_BREAKERS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
+
+
+def quality_path(path: str) -> str:
+    """path as the quality file writes it: with each character that ends a line written as \\xNN, or \\uNNNN past
+    \\xff, the convention judge_change also writes a byte that is not UTF-8 by. A name without one is written as it
+    is. The escape is what the orchestrator then reads back, the same in every round."""
+    return "".join((f"\\x{ord(c):02x}" if ord(c) <= 0xFF else f"\\u{ord(c):04x}") if c in _LINE_BREAKERS else c
+                   for c in path)
+
+
 def _numbered(k: int, finding: dict) -> str:
     if finding["path"] is None:
         where = "The change as a whole:"
     elif finding["line"] is None:
-        where = f"`{finding['path']} (the whole file)`"
+        where = f"`{quality_path(finding['path'])} (the whole file)`"
     else:
-        where = f"`{finding['path']}:{finding['line']}`"
+        where = f"`{quality_path(finding['path'])}:{finding['line']}`"
     return f"{k}. {where} {finding['severity']} {finding['rule']}: {finding['message']}"
 
 
@@ -3207,7 +3220,8 @@ def _config_section(edited, rules_from: str | None, mutmut_state) -> list[str]:
     if "uv.lock" in edited:
         out.append("- The change edits `uv.lock`, which pins the versions of the linters the gate ran.")
     if mutmut_state:
-        out.append(f"- The change adds or edits {_series([f'`{f}`' for f in mutmut_state], limit=5)} under "
+        named = _series([f"`{quality_path(f)}`" for f in mutmut_state], limit=5)
+        out.append(f"- The change adds or edits {named} under "
                    f"`{_MUTMUT_STATE}/`, where mutmut keeps its state. The gate's checks leave them out: none selects "
                    f"a test or a function in them or counts them as a change to the code, and the surviving-mutants "
                    f"check runs mutmut without them. The linters read them as they read any tracked file.")

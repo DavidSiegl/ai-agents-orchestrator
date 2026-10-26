@@ -6114,6 +6114,21 @@ class TestQualityReport(unittest.TestCase):
                       "2. `t.py (the whole file)` warning flaky test_x: m\n"
                       "3. The change as a whole: warning mutants budget: m\n", text)
 
+    def test_a_path_with_a_line_break_stays_on_its_own_line_and_compares_alike_in_every_round(self):
+        issues = [{"path": p, "line": 2, "severity": "error", "rule": "ruff F401", "message": "unused"}
+                  for p in ("a b.py", "c\rd.py", "e\u2028f.py")]
+        text = quality_report("ERROR", "intro", issues=issues, suppressions=[("g\nh.py", 1, "# noqa")],
+                              mutmut_state=["mutants/i\x85j.py"])
+        self.assertIn("1. `a b.py:2` error ruff F401: unused\n", text)
+        self.assertIn("2. `c\\x0dd.py:2` error ruff F401: unused\n", text)
+        self.assertIn("3. `e\\u2028f.py:2` error ruff F401: unused\n", text)
+        self.assertIn("- `g\\x0ah.py:1` `# noqa`\n", text)
+        self.assertIn("`mutants/i\\x85j.py`", text)
+        self.assertEqual(text.splitlines(), text.split("\n")[:-1])
+        failures = orchestrator.gate_failures(text)
+        self.assertEqual(len(failures.fingerprints["ruff"]), 3)
+        self.assertTrue(failures.repeats(orchestrator.gate_failures(quality_report("ERROR", "other", issues=issues))))
+
     def test_findings_to_weigh_are_numbered_after_the_issues(self):
         text = quality_report("ERROR", "intro", issues=self.issues(2), to_weigh=[self.finding("t.py", 9)])
         self.assertLess(text.index("2. `f.py:2` HIGH r: m2"), text.index("## Findings to weigh"))

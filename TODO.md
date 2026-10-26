@@ -262,9 +262,6 @@ was done.
   build past `QUALITY_TIMEOUT` beside the mutation budget, so the user kept 30 s (2026-10-24). `not-rerun` is a finding
   to weigh, never a wrong verdict. Closes with one time budget the reruns and mutmut share, or lighter tests for the
   gate's own checks.
-- **A file name that holds a line separator breaks its list item in the quality file.** `quality_report` writes
-  names as they are, so `\r` or U+2028 in one shows as a line break in some renderers. The finding is still
-  matched to the right file. Closes with names escaped when the quality file is written.
 - **A quality round waits for the whole build, not for its quality file.** `Workflow._analyse` polls the build's
   result until the build ends and only then reads `quality.md`, which the Gate stage archived before any later
   stage ran. So every stage after Gate counts against `QUALITY_TIMEOUT`; the Package stage was taken out of quality
@@ -359,6 +356,13 @@ was done.
   files.
 
 ## Fixed
+
+- **A file name that holds a line separator breaks its list item in the quality file.** `quality_report` writes
+  names as they are, so `\r` or U+2028 in one shows as a line break in some renderers. The finding is still
+  matched to the right file. Closes with names escaped when the quality file is written.
+  Fixed (2026-10-26): `quality_path` writes each character that ends a line in some reader (`\n`, `\r`, `\v`, `\f`,
+  `\x1c`-`\x1e`, `\x85`, U+2028, U+2029) as `\xNN` or `\uNNNN`, and every path the quality file names goes through
+  it; `gate_failures` reads back the escaped name, the same in every round.
 
 - **A pytest configuration below the copy's top directory is not used, so its tests are never rerun.**
   `_pytest_inifile` looks only in the top directory of `flaky_tests`' copy, and `_pytest` passes what it finds with
