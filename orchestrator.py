@@ -2252,6 +2252,14 @@ class CIError(OrchestratorError):
         return self.status is None or self.status >= 500
 
 
+@dataclass(frozen=True)
+class QualityBuild:
+    """A build of the quality job, as Jenkins lists it."""
+    number: int
+    result: str | None  # such as SUCCESS, UNSTABLE, FAILURE or ABORTED; None while it runs
+    description: str | None  # as the build set it, verbatim; None when it set none
+
+
 class CI:
     """Jenkins's quality job, over HTTP from the orchestrator's own machine.
 
@@ -2374,6 +2382,21 @@ class CI:
             if params.get("GIT_REF") == ref and isinstance(number, int) and number not in skip:
                 return number
         return None
+
+    def retained_builds(self) -> list[QualityBuild]:
+        """The job's builds that Jenkins still keeps, newest first, the newest 100 at most.
+
+        Raises OrchestratorError, before asking, when credentials are missing; CIError when Jenkins gives no answer,
+        an HTTP error, or an answer that is not a list of builds.
+        """
+        url = f"{self.job_url}api/json?{urllib.parse.urlencode({'tree': 'builds[number,result,description]{0,100}'})}"
+        builds = self._jenkins_json(url).get("builds")
+        # type() rather than isinstance: a JSON true is a bool, which is an int.
+        if not isinstance(builds, list) or not all(
+                isinstance(b, dict) and type(b.get("number")) is int and isinstance(b.get("result"), str | None)
+                and isinstance(b.get("description"), str | None) for b in builds):
+            raise CIError(self.mask(f"GET {url}: the answer is not the job's builds"))
+        return [QualityBuild(b["number"], b.get("result"), b.get("description")) for b in builds]
 
     def build_result(self, number: int) -> str | None:
         """The finished build's result, such as SUCCESS, UNSTABLE, FAILURE or ABORTED; None while it runs."""
@@ -5332,14 +5355,15 @@ def _mutmut_findings(tree_copy: str, functions: list[_ChangedFunction], run: sub
     if run.returncode != 0 and not stopped and not no_tests:
         return [_mutation_not_run(f"mutmut exited with status {run.returncode}: {_said_by_mutmut(run)}")]
     deadline = time.monotonic() + MUTMUT_REPORT_TIMEOUT
-    statuses, problem = _mutant_statuses(tree_copy, deadline)
+    statuses, cut_off, problem = _statuses_after_run(tree_copy, stopped, deadline)
     if problem:
         return [_mutation_not_run(problem)]
     if no_tests:
         statuses = dict.fromkeys(statuses, "no tests")
     mutants = _mutants_by_function(statuses, functions)
     # A function mutmut was given but listed no mutant of. mutmut saves a module's mutants, none or more, in
-    # mutants/<path>.meta once it has made them all, so stopped by the budget it had not reached a module without one.
+    # mutants/<path>.meta once it has made them all, so stopped by the budget it had not reached a module without one,
+    # or the stop lost its results (_statuses_after_run).
     unlisted = [f for f in functions if f not in mutants]
     unreached = [f for f in unlisted
                  if stopped and not os.path.exists(os.path.join(tree_copy, _MUTMUT_STATE, f"{f.path}.meta"))]
@@ -5354,8 +5378,60 @@ def _mutmut_findings(tree_copy: str, functions: list[_ChangedFunction], run: sub
             out.append(_finding(f.path, f.line, "untested", f"no test calls `{f.name}`, so none of its "
                                                             f"{len(by_status['no tests'])} mutants can make one fail."))
     if stopped:
-        out.append(_budget_reached(statuses, budget, unreached))
+        out.append(_budget_reached(statuses, budget, unreached, cut_off))
     return out
+
+
+def _statuses_after_run(tree_copy: str, stopped: bool, deadline: float) -> tuple[dict[str, str], list[str], str | None]:
+    """_mutant_statuses's listing of the mutants a run of mutmut made in tree_copy, by deadline, a time.monotonic()
+    time, with the paths of the modules whose results the run's stop lost, sorted; stopped is whether the budget
+    stopped the run. Or {}, [] and the problem, a clause, when they could not be listed.
+
+    The stop can land while mutmut rewrites a module's .meta, which `mutmut results` cannot read, so a stopped run's
+    cut-off .meta files are removed from tree_copy first; their modules then list no mutant, as one the budget kept
+    mutmut from does.
+    """
+    cut_off: list[str] = []
+    if stopped:
+        try:
+            cut_off = _drop_cut_off_saves(tree_copy)
+        except OSError as e:
+            return {}, [], f"could not clear the results mutmut's stop cut off: {e}"
+    statuses, problem = _mutant_statuses(tree_copy, deadline)
+    if problem:
+        lost = f" after the gate removed the cut-off results of {_series(cut_off, limit=5)}" if cut_off else ""
+        return {}, [], problem + lost
+    return statuses, cut_off, None
+
+
+def _drop_cut_off_saves(tree_copy: str) -> list[str]:
+    """Removes each of mutmut's saves of a module's results, mutants/<path>.py.meta, in tree_copy that does not parse
+    as JSON, as one cut off mid-write leaves it, and returns the paths of their modules in the tree, sorted, as the
+    gate names a changed file; [] when there is none. A save that cannot be opened is left as it is. Raises OSError
+    when mutants/ cannot be searched or a save cannot be removed."""
+    state = os.path.join(tree_copy, _MUTMUT_STATE)
+    if not os.path.isdir(state):
+        return []
+
+    def refuse(e: OSError) -> None:
+        raise e
+    out = []
+    for parent, _, names in os.walk(state, onerror=refuse):
+        for name in names:
+            if not name.endswith(".py.meta"):
+                continue
+            path = os.path.join(parent, name)
+            try:
+                with open(path, "rb") as f:
+                    json.loads(f.read())
+            except ValueError:
+                os.remove(path)
+                out.append(os.path.relpath(path, state).replace(os.sep, "/").removesuffix(".meta"))
+            except OSError:
+                # Not a cut-off save. mutmut reads a missing one as no results (SourceFileMutationData.load), and
+                # fails to list on any other, which is then the finding.
+                pass
+    return sorted(out)
 
 
 def _mutants_by_function(statuses: dict[str, str], functions: list[_ChangedFunction],
@@ -5372,17 +5448,27 @@ def _mutants_by_function(statuses: dict[str, str], functions: list[_ChangedFunct
     return out
 
 
-def _budget_reached(statuses: dict[str, str], budget: float, unreached: list[_ChangedFunction]) -> dict:
+def _budget_reached(statuses: dict[str, str], budget: float, unreached: list[_ChangedFunction],
+                    cut_off: list[str]) -> dict:
     """The finding that the budget of budget seconds stopped mutmut, having made the mutants of statuses, mutmut's
-    status of each by its name, and none yet of unreached, the functions it was given in modules it had not reached."""
+    status of each by its name, and none yet of unreached, the functions it was given in modules it had not reached;
+    of those, the ones in cut_off, paths of modules whose results the stop lost mid-save, are said to be so."""
     tried = sum(1 for status in statuses.values() if status not in _MUTMUT_UNTRIED)
+
+    def named(fs: list[_ChangedFunction]) -> str:
+        return _series([f"`{f.name}` in {f.path}" for f in fs], limit=5)
+    unmade = [f for f in unreached if f.path not in cut_off]
+    lost = [f for f in unreached if f.path in cut_off]
+    clauses = [f"mutmut made no mutant of {named(unmade)} before the budget ran out"] if unmade else []
+    if lost:
+        clauses.append(f"the stop cut off mutmut's save of its results for {named(lost)}, so they count as not reached")
     return _finding(None, None, "budget-reached", (
         f"budget reached after {tried} of {len(statuses)} mutants" if statuses
+        else "budget reached with none of the mutants mutmut made left to list" if lost
         else "budget reached before mutmut had made its mutants")
         + f": mutmut was stopped at {budget:g} seconds (`--mutation-budget`), so the mutants it did not try may "
           f"survive too"
-        + (f"; mutmut made no mutant of {_series([f'`{f.name}` in {f.path}' for f in unreached], limit=5)} "
-           f"before the budget ran out." if unreached else "."))
+        + "".join(f"; {c}" for c in clauses) + ".")
 
 
 def _why_no_mutant(f: _ChangedFunction, table: dict) -> str:
@@ -6611,6 +6697,110 @@ def add_gate_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--base-run-budget", type=seconds_arg, default=BASE_RUN_BUDGET, metavar="SECONDS",
                         help=f"stop the run of the changed tests against the base's code, which finds tests that "
                              f"pass without the change, after this long; default {BASE_RUN_BUDGET}")
+
+
+# The files that decide how a change is judged: the stages, the gate, its rules, the versions of its tools and the
+# Python they run on. judged_in_quality trusts a quality build only when none of them differs.
+JUDGING_FILES = ("Jenkinsfile", "orchestrator.py", "pyproject.toml", "uv.lock", ".python-version")
+# A quality build's description, in the format the comment above the Jenkinsfile's Checkout stage defines; a sha is
+# SHA-1's 40 hex digits or SHA-256's 64.
+_SHA = r"[0-9a-f]{40}(?:[0-9a-f]{24})?"
+JUDGED_DESCRIPTION = re.compile(rf"judged tree=(?P<tree>{_SHA}) parent=(?P<parent>{_SHA}) main=(?P<main>{_SHA})")
+
+
+def judged_in_quality_command(job: str, target: str) -> int:
+    """Say whether a build of the Jenkins quality job job already judged the current directory's HEAD, as
+    judged_in_quality decides it for a pull request into the branch target.
+
+    Returns 0, naming the build on standard output, when one did. Otherwise returns EXIT_ERROR, with one line on
+    standard error saying why: the condition the closest build fails, or what stopped the question being answered.
+    No error returns 0.
+    """
+    try:
+        number = judged_in_quality(os.getcwd(), CI(job), target)
+    # OSError: such as os.getcwd's, for a working directory that is gone.
+    except (OrchestratorError, GateError, OSError) as e:
+        print(f"judged-in-quality: {' '.join(str(e).splitlines())}", file=sys.stderr)
+        return EXIT_ERROR
+    print(f"judged-in-quality: build #{number} of {job} judged HEAD's tree from its merge base with {target}")
+    return 0
+
+
+def judged_in_quality(root: str, ci: CI, target: str) -> int:
+    """The number of a build of ci's job that judged the HEAD of the checkout at root as a pull request's build
+    into the branch target would, so that build need not judge it again.
+
+    Such a build is among ci.retained_builds and meets each of these conditions, in this order: its description is
+    in JUDGED_DESCRIPTION's format; it names HEAD's tree; it names as parent the merge base of HEAD and REMOTE's
+    target; it ended SUCCESS; and each of JUDGING_FILES is the same, or absent alike, at the main commit it names as
+    in HEAD and at that merge base.
+
+    Fetches target from REMOTE into refs/remotes/REMOTE/target, and a build's main commit when root lacks it.
+    Raises OrchestratorError when no build meets them all, naming the first condition that the closest build fails:
+    the newest of those that meet the most conditions in a row. Raises it too for a target that is not a branch
+    name, a HEAD with no merge base or one whose JUDGING_FILES differ from it, and missing credentials; CIError as
+    ci.retained_builds does; GateError when git fails or a main commit cannot be fetched, as _git says.
+    """
+    # A leading "-" is refused as `check-ref-format --branch` refuses it; --branch itself is not used, since it
+    # turns @{-N} into the branch checked out N switches ago.
+    if target.startswith("-") or _git_run(root, "check-ref-format", f"refs/heads/{target}").returncode != 0:
+        raise OrchestratorError(f"{target!r} is not a branch name")
+    tracking = f"refs/remotes/{REMOTE}/{target}"
+    _git(root, "fetch", "--quiet", REMOTE, f"+refs/heads/{target}:{tracking}")
+    tree = _git(root, "rev-parse", "--verify", "HEAD^{tree}").strip()
+    merge_base = _git_run(root, "merge-base", "HEAD", tracking)
+    if merge_base.returncode != 0:
+        # merge-base exits 1, printing nothing, when the commits have no common ancestor.
+        raise OrchestratorError(f"HEAD has no merge base with {REMOTE}/{target}: "
+                                f"{merge_base.stderr.strip() or 'no common ancestor'}")
+    base = merge_base.stdout.strip()
+    if changed := _judging_changes(root, base, "HEAD"):
+        raise OrchestratorError(f"HEAD changes {', '.join(changed)} since its merge base {base}, which decide how "
+                                f"it is judged")
+    builds = ci.retained_builds()
+    if not builds:
+        raise OrchestratorError(f"the quality job {ci.job} has no builds")
+    refusals = []
+    for build in builds:
+        met, why = _build_trust(root, build, tree, base)
+        if why is None:
+            return build.number
+        refusals.append((met, why))
+    # max keeps the first of equals, and the builds are newest first. A description is text from Jenkins, of any
+    # length, so it is masked before the cut, which could split a token.
+    raise OrchestratorError(_shortened(ci.mask(max(refusals, key=lambda r: r[0])[1]), 400))
+
+
+def _build_trust(root: str, build: QualityBuild, tree: str, base: str) -> tuple[int, str | None]:
+    """How many of judged_in_quality's conditions build meets in a row, for HEAD's tree and merge base base, and
+    why it fails the first it does not, None when it meets them all. The reason quotes the build's description
+    whole, unmasked. Fetches the build's main commit, as judged_in_quality says, only when it meets the conditions
+    before that one. Raises GateError as _git does."""
+    m = JUDGED_DESCRIPTION.fullmatch(build.description or "")
+    if not m:
+        return 0, (f"build #{build.number}'s description is not `judged tree=<sha> parent=<sha> main=<sha>`: "
+                   f"{build.description!r}")
+    if m["tree"] != tree:
+        return 1, f"build #{build.number} judged the tree {m['tree']}, not HEAD's {tree}"
+    if m["parent"] != base:
+        return 2, f"build #{build.number} judged from {m['parent']}, not from HEAD's merge base {base}"
+    if build.result != "SUCCESS":
+        return 3, f"build #{build.number} {'is still running' if build.result is None else 'ended ' + build.result}"
+    if _git_run(root, "cat-file", "-e", f"{m['main']}^{{commit}}").returncode != 0:
+        _git(root, "fetch", "--quiet", REMOTE, m["main"])
+    if changed := _judging_changes(root, base, m["main"]):
+        return 4, (f"build #{build.number} judged by main at {m['main']}, where {', '.join(changed)} differ from "
+                   f"HEAD's")
+    return 5, None
+
+
+def _judging_changes(root: str, a: str, b: str) -> list[str]:
+    """Those of JUDGING_FILES whose file differs between commits a and b, its mode included, or that only one of
+    them has. Raises GateError as _git does."""
+    # --no-relative: under the user's diff.relative, a diff run in a subdirectory lists none of the top's files.
+    names = _git(root, "diff", "--name-only", "-z", "--no-relative", "--no-renames", "--no-ext-diff", a, b, "--",
+                 *_top_literal(list(JUDGING_FILES)), verbatim=True)
+    return [p for p in names.split("\0") if p]
 
 
 def write_quality_file(path: str, text: str) -> None:
@@ -9424,6 +9614,18 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     add_gate_arguments(sub.add_parser(
         "gate", help="judge the change since a commit as the quality job does, and write the quality file"))
 
+    judged = sub.add_parser(
+        "judged-in-quality", help="exit 0 when a quality build already judged HEAD as its pull request's build would",
+        description=f"Exit 0 when a build of the quality job JOB already judged HEAD as a pull request's build "
+                    f"into BRANCH would, so that build need not judge it again; docs/quality-gate.md says when. "
+                    f"Fetches BRANCH, and the main commit a build names. Otherwise, and on any error, exit "
+                    f"{EXIT_ERROR}, saying why in one line on standard error. Needs JENKINS_URL, JENKINS_USER and "
+                    f"JENKINS_TOKEN, from the environment or {ci_env_path()}.")
+    judged.add_argument("--quality-gate", required=True, metavar="JOB",
+                        help="the quality job's full name, folders included")
+    judged.add_argument("--target", required=True, metavar="BRANCH",
+                        help="the branch the pull request would merge into")
+
     sub.add_parser(
         "doctor", parents=[target], help="check what a run needs, and say what to run for each that is missing",
         description=f"Check what a run needs where the agents run, on this machine or with --machine on that one: "
@@ -10912,6 +11114,8 @@ def herdrless_command(args: argparse.Namespace) -> int | None:
     if args.command == "gate":
         return gate_command(args.base, args.config, args.coverage, args.tests, args.out, args.mutation_budget,
                             args.base_run_budget)
+    if args.command == "judged-in-quality":
+        return judged_in_quality_command(args.quality_gate, args.target)
     return None
 
 

@@ -33,6 +33,8 @@ from dataclasses import asdict, replace
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from gitrepo import RepositoryTest
+
 import orchestrator
 from orchestrator import (
     APPROVE,
@@ -1538,8 +1540,8 @@ class TestHostGit(unittest.TestCase):
     def clone(self, name):
         path = f"{self.dir}/{name}"
         self.sh("git", "clone", "--quiet", f"{self.dir}/origin.git", path)
-        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
-            self.sh("git", "-C", path, "config", key, value)
+        for key, setting in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
+            self.sh("git", "-C", path, "config", key, setting)
         return path
 
     def commit(self, repo, name, text):
@@ -3520,13 +3522,14 @@ class FakeResponse:
         return False
 
 
-def outcome(gate="OK", *, archived=True, result=None, findings=(), tests=(), test_report=True, console="", polls=2):
+def outcome(gate="OK", *, archived=True, result=None, findings=(), tests=(), test_report=True, console="", polls=2,
+            description=None):
     """What one Jenkins build does.
 
     gate: the GATE of the quality.md its Gate stage archives; archived=False for a build that ended before that
     stage. result defaults to what the Jenkinsfile ends with. findings: the numbered lines of quality.md.
     tests: (className, name, errorDetails) of each failing test in Jenkins's test report. polls: how many polls
-    still see it building.
+    still see it building. description: the build's description, None when it has none.
     """
     if result is None:
         result = ("SUCCESS" if gate == "OK" else "UNSTABLE") if archived else "FAILURE"
@@ -3536,7 +3539,7 @@ def outcome(gate="OK", *, archived=True, result=None, findings=(), tests=(), tes
         quality = (f"GATE: {gate}\n\n`orchestrator.py gate` judged the working tree.\n\n"
                    f"## Issues on changed lines\n\n{numbered}\n")
     return dict(result=result, quality=quality, tests=list(tests), test_report=test_report, console=console,
-                polls=polls)
+                polls=polls, description=description)
 
 
 RED = dict(gate="ERROR", findings=["`limiter.py:3` error ruff F401: `os` imported but unused"])
@@ -3614,6 +3617,10 @@ class FakeCI:
         rest = path[len(JOB_PATH):]
         if rest == "api/json" and "property" in query.get("tree", ""):
             return "parameters", {"property": [{}, {"parameterDefinitions": [{"name": p} for p in self.parameters]}]}
+        if rest == "api/json" and "description" in query.get("tree", ""):
+            return "builds", {"builds": [
+                {"number": n, "result": None if b["left"] else b["result"], "description": b["description"]}
+                for n, b in sorted(self.builds.items(), reverse=True)]}
         if rest == "api/json":
             builds = sorted(self.builds.items(), reverse=True)[:20]
             return "find", {"builds": [{"number": n, "actions": [{}, {"parameters": [
@@ -3723,25 +3730,19 @@ sys.exit(2 if mode == "crash" else 1)
 '''
 
 
-class TestScanUnpublished(unittest.TestCase):
+class TestScanUnpublished(RepositoryTest):
     """Host's scan before a push, over a real repository and a bare origin, with a fake gitleaks on PATH."""
 
+    BASE_FILES = {"a.txt": "a\n"}
+
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.tmp = tmp.name
-        self.repo, self.origin, self.bin = (os.path.join(self.tmp, d) for d in ("repo", "origin.git", "bin"))
-        self.run_dir = os.path.join(self.tmp, "run")
-        self.host = Host()
+        super().setUp()
+        self.origin, self.bin = (os.path.join(self.outside, d) for d in ("origin.git", "bin"))
+        self.run_dir = os.path.join(self.outside, "run")
         os.makedirs(self.bin)
-        self.host.git(self.tmp, "init", "--quiet", "--bare", self.origin)
-        self.host.git(self.tmp, "init", "--quiet", "-b", "main", self.repo)
-        for key, setting in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
-            self.git("config", key, setting)
-        self.commit({"a.txt": "a\n"}, "base")
+        self.host.git(self.outside, "init", "--quiet", "--bare", self.origin)
         self.git("remote", "add", "origin", self.origin)
         self.git("push", "--quiet", "origin", "main")
-        self.base = self.git("rev-parse", "HEAD").strip()
         path = os.path.join(self.bin, "gitleaks")
         with open(path, "w") as f:
             f.write(FAKE_GITLEAKS.replace("PYTHON", sys.executable))
@@ -3758,18 +3759,6 @@ class TestScanUnpublished(unittest.TestCase):
         for path in ("rules/", "rules", ""):
             with self.subTest(path=path):
                 self.assertIsNone(self.host._blob_at(self.repo, commit, path))
-
-    def git(self, *args):
-        return self.host.git(self.repo, *args)
-
-    def commit(self, files, message):
-        for name, text in files.items():
-            os.makedirs(os.path.dirname(os.path.join(self.repo, name)), exist_ok=True)
-            with open(os.path.join(self.repo, name), "w") as f:
-                f.write(text)
-        self.git("add", "-A")
-        self.git("commit", "--quiet", "-m", message)
-        return self.git("rev-parse", "HEAD").strip()
 
     def mode(self, mode):
         with open(os.path.join(self.bin, "mode"), "w") as f:
@@ -6333,14 +6322,15 @@ class TestQualityReport(unittest.TestCase):
         self.assertEqual(CI(JOB, env={}).mask("text"), "text")
 
 
-class TestGate(unittest.TestCase):
+class TestGate(RepositoryTest):
     """`orchestrator.py gate` over a real git repository, with stub linters on PATH that print what each one does."""
 
+    BASE_FILES = {"pyproject.toml": "[tool.ruff]\n", "f.py": "".join(f"line{n} = {n}\n" for n in range(1, 4))}
+
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.repo, self.bin, self.stubs = (os.path.join(tmp.name, d) for d in ("repo", "bin", "stubs"))
-        for d in (self.repo, self.bin, self.stubs):
+        super().setUp()
+        self.bin, self.stubs = (os.path.join(self.outside, d) for d in ("bin", "stubs"))
+        for d in (self.bin, self.stubs):
             os.mkdir(d)
         for tool in ("ruff", "mypy", "pymarkdown", "shellcheck", "actionlint"):
             self.stub(tool)
@@ -6348,14 +6338,6 @@ class TestGate(unittest.TestCase):
                                       "STUB_DIR": self.stubs})
         env.start()
         self.addCleanup(env.stop)
-        self.host = Host()
-        self.git("init", "--quiet", "-b", "main")
-        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
-            self.git("config", key, value)
-        self.put("pyproject.toml", "[tool.ruff]\n")
-        self.put("f.py", "".join(f"line{n} = {n}\n" for n in range(1, 4)))
-        self.git("add", "-A")
-        self.git("commit", "--quiet", "-m", "base")
 
     def stub(self, tool):
         """A stub tool that records its arguments and prints $STUB_DIR/<tool>.out and .err, exiting with .status."""
@@ -6374,15 +6356,6 @@ class TestGate(unittest.TestCase):
     def argv(self, tool):
         with open(os.path.join(self.stubs, f"{tool}.argv")) as f:
             return f.read().splitlines()
-
-    def git(self, *args):
-        return self.host.git(self.repo, *args)
-
-    def put(self, name, text):
-        path = os.path.join(self.repo, name)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(text)
 
     def gate(self, *args):
         """The exit status, standard output and standard error of `orchestrator.py gate --base HEAD ARGS` in the
@@ -6844,10 +6817,10 @@ class TestTestIntegrityCheck(unittest.TestCase):
         self.assertEqual(check.weighed, {"removed-test", "fewer-assertions", "expected-value-changed"})
 
 
-class TestWeakenedTests(unittest.TestCase):
+class TestWeakenedTests(RepositoryTest):
     """The test-integrity check over a real git repository: a base commit, then the change in its working tree."""
 
-    BASE = {
+    BASE_FILES = {
         "tests/test_calc.py": (
             "import unittest\n"                                # 1
             "\n"                                               # 2
@@ -6879,34 +6852,6 @@ class TestWeakenedTests(unittest.TestCase):
         "calc.py": "def add(a, b):\n    return a + b\n",
     }
 
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.repo = tmp.name
-        self.host = Host()
-        self.git("init", "--quiet", "-b", "main")
-        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
-            self.git("config", key, value)
-        for name, text in self.BASE.items():
-            self.put(name, text)
-        self.git("add", "-A")
-        self.git("commit", "--quiet", "-m", "base")
-
-    def git(self, *args):
-        return self.host.git(self.repo, *args)
-
-    def put(self, name, text):
-        path = os.path.join(self.repo, name)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(text)
-
-    def edit(self, name, old, new):
-        with open(os.path.join(self.repo, name)) as f:
-            text = f.read()
-        self.assertEqual(text.count(old), 1, old)
-        self.put(name, text.replace(old, new))
-
     def found(self):
         """(path, line, rule) of each finding on the working tree's change, and the findings themselves."""
         base = self.git("rev-parse", "HEAD").strip()
@@ -6924,9 +6869,9 @@ class TestWeakenedTests(unittest.TestCase):
         self.assertIn("line 11 at the base", found[0]["message"])
 
     def test_a_removed_class_is_one_finding_with_its_tests(self):
-        self.edit("tests/test_calc.py", self.BASE["tests/test_calc.py"][
-            self.BASE["tests/test_calc.py"].index("class TestNegative"):
-            self.BASE["tests/test_calc.py"].index("def test_function")], "")
+        self.edit("tests/test_calc.py", self.BASE_FILES["tests/test_calc.py"][
+            self.BASE_FILES["tests/test_calc.py"].index("class TestNegative"):
+            self.BASE_FILES["tests/test_calc.py"].index("def test_function")], "")
         where, found = self.found()
         self.assertEqual(where, [("tests/test_calc.py", 15, "removed-test")])
         self.assertIn("`TestNegative` and its 2 tests", found[0]["message"])
@@ -7050,7 +6995,7 @@ class TestWeakenedTests(unittest.TestCase):
 
     def commit_mutmut_state(self):
         """Commit what mutmut leaves in mutants/ after a run: its copy of the code and of the tests beside it."""
-        for name, text in self.BASE.items():
+        for name, text in self.BASE_FILES.items():
             self.put(f"mutants/{name}", text)
         self.git("add", "mutants")
         self.git("commit", "--quiet", "-m", "mutmut's state")
@@ -7171,7 +7116,7 @@ class TestRunInSession(unittest.TestCase):
             signal.signal(signal.SIGINT, before)
 
 
-class TestFlakyTests(unittest.TestCase):
+class TestFlakyTests(RepositoryTest):
     """The flaky-tests check over a real git repository, rerunning its tests with this suite's own pytest."""
 
     BASE = (
@@ -7199,27 +7144,7 @@ class TestFlakyTests(unittest.TestCase):
     # The reader and writer pairs change_the_tests adds.
     PAIRS = 8
 
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.repo = tmp.name
-        self.host = Host()
-        self.git("init", "--quiet", "-b", "main")
-        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
-            self.git("config", key, value)
-        self.put("tests/test_state.py", self.BASE)
-        self.put("calc.py", "def add(a, b):\n    return a + b\n")
-        self.git("add", "-A")
-        self.git("commit", "--quiet", "-m", "base")
-
-    def git(self, *args):
-        return self.host.git(self.repo, *args)
-
-    def put(self, name, text):
-        path = os.path.join(self.repo, name)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(text)
+    BASE_FILES = {"tests/test_state.py": BASE, "calc.py": "def add(a, b):\n    return a + b\n"}
 
     def found(self):
         base = self.git("rev-parse", "HEAD").strip()
@@ -7243,7 +7168,7 @@ class TestFlakyTests(unittest.TestCase):
 
     def test_a_server_a_test_leaves_holding_the_output_does_not_hold_up_the_reruns(self):
         # Under -s a test's processes inherit pytest's own output; this one outlives every run, in a session of its own.
-        pids = os.path.join(self.repo, "..", f"{os.path.basename(self.repo)}-servers")
+        pids = os.path.join(self.outside, "servers")
 
         def started_servers():
             with contextlib.suppress(FileNotFoundError), open(pids) as f:
@@ -7732,35 +7657,14 @@ class TestFlakyTests(unittest.TestCase):
         self.assertEqual((check.fails, check.find), (False, orchestrator.flaky_tests))
 
 
-class TestPassesAtBase(unittest.TestCase):
+class TestPassesAtBase(RepositoryTest):
     """The passes-at-base check over a real git repository, running its tests with this suite's own pytest."""
 
     # add is wrong at the base; mul is right, and stays so.
     CALC = "def add(a, b):\n    return a - b\n\n\ndef mul(a, b):\n    return a * b\n"
     TESTS = "from calc import mul\n\n\ndef test_mul():\n    assert mul(2, 3) == 6\n"
 
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.repo = tmp.name
-        self.host = Host()
-        self.git("init", "--quiet", "-b", "main")
-        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
-            self.git("config", key, value)
-        self.put("calc.py", self.CALC)
-        self.put("tests/test_calc.py", self.TESTS)
-        self.put("pytest.ini", "[pytest]\npythonpath = .\n")
-        self.git("add", "-A")
-        self.git("commit", "--quiet", "-m", "base")
-
-    def git(self, *args):
-        return self.host.git(self.repo, *args)
-
-    def put(self, name, text):
-        path = os.path.join(self.repo, name)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(text)
+    BASE_FILES = {"calc.py": CALC, "tests/test_calc.py": TESTS, "pytest.ini": "[pytest]\npythonpath = .\n"}
 
     def found(self, budget=orchestrator.BASE_RUN_BUDGET):
         """The check's findings on the working tree, every file in it tracked."""
@@ -8316,31 +8220,12 @@ class TestWrittenRules(unittest.TestCase):
         self.assertEqual(self.ruff("store.py", text), [(8, "BLE001")])
 
 
-class TestVagueNames(unittest.TestCase):
+class TestVagueNames(RepositoryTest):
     """The vague-names check over a real git repository: a base commit, then the change in its working tree."""
 
     BASE = "data = 1\n\n\ndef old(value):\n    return value\n"
 
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.repo = tmp.name
-        self.host = Host()
-        self.git("init", "--quiet", "-b", "main")
-        for key, setting in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
-            self.git("config", key, setting)
-        self.put("calc.py", self.BASE)
-        self.git("add", "-A")
-        self.git("commit", "--quiet", "-m", "base")
-
-    def git(self, *args):
-        return self.host.git(self.repo, *args)
-
-    def put(self, name, text):
-        path = os.path.join(self.repo, name)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(text)
+    BASE_FILES = {"calc.py": BASE}
 
     def found(self):
         """(path, line, rule, message) of each finding on the working tree's change, every file in it tracked."""
@@ -8439,7 +8324,7 @@ class TestVagueNames(unittest.TestCase):
         self.assertEqual((check.fails, check.find), (False, orchestrator.vague_names))
 
 
-class TestSurvivingMutants(unittest.TestCase):
+class TestSurvivingMutants(RepositoryTest):
     """The surviving-mutants check over a real git repository, with this suite's own mutmut, or a fake one."""
 
     BASE = (
@@ -8483,32 +8368,18 @@ class TestSurvivingMutants(unittest.TestCase):
         "def test_box():\n    calc.Box().size()\n    calc.Box().other()\n"
     )
 
+    BASE_FILES = {
+        "pyproject.toml": ('[tool.mutmut]\nsource_paths = ["calc.py"]\n'
+                           'pytest_add_cli_args_test_selection = ["tests/"]\n'
+                           f'do_not_mutate_patterns = {json.dumps(PATTERNS)}\n'),
+        "calc.py": BASE,
+        "tests/test_calc.py": TESTS,
+    }
+
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.repo, self.bin = (os.path.join(tmp.name, d) for d in ("repo", "bin"))
-        os.mkdir(self.repo)
+        super().setUp()
+        self.bin = os.path.join(self.outside, "bin")
         os.mkdir(self.bin)
-        self.host = Host()
-        self.git("init", "--quiet", "-b", "main")
-        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
-            self.git("config", key, value)
-        self.put("pyproject.toml", '[tool.mutmut]\nsource_paths = ["calc.py"]\n'
-                                   'pytest_add_cli_args_test_selection = ["tests/"]\n'
-                                   f'do_not_mutate_patterns = {json.dumps(self.PATTERNS)}\n')
-        self.put("calc.py", self.BASE)
-        self.put("tests/test_calc.py", self.TESTS)
-        self.git("add", "-A")
-        self.git("commit", "--quiet", "-m", "base")
-
-    def git(self, *args):
-        return self.host.git(self.repo, *args)
-
-    def put(self, name, text):
-        path = os.path.join(self.repo, name)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(text)
 
     def found(self, budget=60, rules=None):
         base = self.git("rev-parse", "HEAD").strip()
@@ -8839,7 +8710,7 @@ class TestSurvivingMutants(unittest.TestCase):
         # gate knows calc.py was reached.
         self.put("calc.py", self.BASE.replace("b + a", "a + b")
                  .replace("def unchecked(a, b):", "def unchecked(a, b):  # pragma: no mutate block"))
-        self.fake_mutmut("mkdir -p mutants; touch mutants/calc.py.meta; exec sleep 30",
+        self.fake_mutmut("mkdir -p mutants; echo {} > mutants/calc.py.meta; exec sleep 30",
                          results="    calc.x_checked__mutmut_1: not checked\n")
         found = self.found(budget=1)
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
@@ -8854,7 +8725,7 @@ class TestSurvivingMutants(unittest.TestCase):
         self.git("commit", "--quiet", "-m", "more")
         self.put("more.py", "def g(a):  # pragma: no mutate block\n    return a + 2\n")
         self.change_the_functions("checked")
-        self.fake_mutmut("mkdir -p mutants; touch mutants/calc.py.meta mutants/more.py.meta; exec sleep 30",
+        self.fake_mutmut("mkdir -p mutants; for m in calc more; do echo {} > mutants/$m.py.meta; done; exec sleep 30",
                          results="    calc.x_checked__mutmut_1: not checked\n")
         found = self.found(budget=1, rules=self.rules({"source_paths": ["calc.py", "more.py"]}))
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
@@ -8903,6 +8774,113 @@ class TestSurvivingMutants(unittest.TestCase):
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "budget-reached")])
         self.assertIn("mutmut made no mutant of `run` in a.py and `run` in b.py before the budget ran out",
                       found[0]["message"])
+
+    def test_a_save_the_stop_cut_off_loses_that_module_s_results_alone(self):
+        # mutmut rewrites a module's .meta in place after each mutant, so the stop can leave one cut off. The run
+        # below is a real one, ended as one the budget stopped would be, with more.py's .meta cut off at half.
+        self.put("more.py", "def g(a):\n    return a + 1\n")
+        self.git("add", "more.py")
+        self.git("commit", "--quiet", "-m", "more")
+        self.put("more.py", "def g(a):\n    return a + 2\n")
+        self.change_the_functions()
+        run_mutmut = orchestrator._run_mutmut
+
+        def stopped_mid_save(tree_copy, args, timeout):
+            run, stopped = run_mutmut(tree_copy, args, timeout)
+            if args != ["run"]:
+                return run, stopped
+            meta = os.path.join(tree_copy, "mutants", "more.py.meta")
+            with open(meta, "rb") as f:
+                saved = f.read()
+            with open(meta, "wb") as f:
+                f.write(saved[:len(saved) // 2])
+            return run, True
+        with patch.object(orchestrator, "_run_mutmut", stopped_mid_save):
+            found = self.found(rules=self.rules({"source_paths": ["calc.py", "more.py"],
+                                                 "pytest_add_cli_args_test_selection": ["tests/"]}))
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                         [(None, None, "budget-reached"), ("calc.py", 5, "survived"), ("calc.py", 13, "untested"),
+                          ("calc.py", 18, "survived")])
+        self.assertIn("the stop cut off mutmut's save of its results for `g` in more.py, so they count as not "
+                      "reached", found[0]["message"])
+        self.assertNotIn("before the budget ran out", found[0]["message"])
+
+    # A fake `mutmut results` that fails while mutants/calc.py.meta is there, as mutmut's does on one cut off, and
+    # lists nothing once it is gone.
+    LISTS_WITHOUT_CALC_META = "[ ! -e mutants/calc.py.meta ]"
+    CUTS_OFF_CALC_META = "mkdir -p mutants; printf '{\"exit' > mutants/calc.py.meta"
+
+    def test_a_listing_that_fails_once_the_cut_off_save_is_removed_is_not_run_and_says_so(self):
+        self.change_the_functions("checked")
+        listed = os.path.join(self.bin, "listed")
+        self.fake_mutmut(f"{self.CUTS_OFF_CALC_META}; exec sleep 30",
+                         listing=f"echo >> {listed}; echo broken >&2; exit 1")
+        found = self.found(budget=1)
+        self.assertEqual([f["rule"] for f in found], ["not-run"])
+        self.assertIn("mutmut could not list its results", found[0]["message"])
+        self.assertIn("broken", found[0]["message"])
+        self.assertIn("after the gate removed the cut-off results of calc.py", found[0]["message"])
+        with open(listed) as f:
+            self.assertEqual(f.read(), "\n")
+
+    def test_a_meta_that_cannot_be_opened_after_a_stop_is_left_to_mutmut(self):
+        self.change_the_functions("checked")
+        # mutmut reads a .meta that is not there as no results; this one is a dangling link, which the listing needs.
+        self.fake_mutmut("mkdir -p mutants; ln -s nowhere mutants/calc.py.meta; exec sleep 30",
+                         listing="[ -L mutants/calc.py.meta ] && printf '    calc.x_checked__mutmut_1: killed\\n'")
+        found = self.found(budget=1)
+        self.assertEqual([f["rule"] for f in found], ["budget-reached"])
+        self.assertTrue(found[0]["message"].startswith("budget reached after 1 of 1 mutants:"), found[0]["message"])
+
+    def test_a_cut_off_save_after_a_stop_is_dropped_and_the_rest_listed(self):
+        self.change_the_functions("checked")
+        # notes.meta is the project's own file, which mutmut copies into mutants/ as it copies every file it finds.
+        self.fake_mutmut(f"{self.CUTS_OFF_CALC_META}; echo notes > mutants/notes.meta; exec sleep 30",
+                         listing=f"[ -e mutants/notes.meta ] && {self.LISTS_WITHOUT_CALC_META}")
+        found = self.found(budget=1)
+        self.assertEqual([f["rule"] for f in found], ["budget-reached"])
+        self.assertEqual(found[0]["message"],
+                         "budget reached with none of the mutants mutmut made left to list: mutmut was stopped at 1 "
+                         "seconds (`--mutation-budget`), so the mutants it did not try may survive too; the stop cut "
+                         "off mutmut's save of its results for `checked` in calc.py, so they count as not reached.")
+
+    def test_a_cut_off_save_without_a_stop_is_not_dropped(self):
+        self.change_the_functions("checked")
+        self.fake_mutmut(self.CUTS_OFF_CALC_META, listing=self.LISTS_WITHOUT_CALC_META)
+        found = self.found()
+        self.assertEqual([f["rule"] for f in found], ["not-run"])
+        self.assertIn("mutmut could not list its results", found[0]["message"])
+
+    def test_a_cut_off_save_that_cannot_be_removed_is_not_run_and_says_why(self):
+        self.change_the_functions("checked")
+        self.fake_mutmut(f"{self.CUTS_OFF_CALC_META}; exec sleep 30", listing=self.LISTS_WITHOUT_CALC_META)
+        remove = os.remove
+
+        def refuse_meta(path, *args, **kwargs):
+            if str(path).endswith(".meta"):
+                raise PermissionError(13, "Permission denied", path)
+            return remove(path, *args, **kwargs)
+        with patch.object(orchestrator.os, "remove", refuse_meta):
+            found = self.found(budget=1)
+        self.assertEqual([f["rule"] for f in found], ["not-run"])
+        self.assertIn("could not clear the results mutmut's stop cut off", found[0]["message"])
+        self.assertIn("Permission denied", found[0]["message"])
+
+    def test_a_state_that_cannot_be_searched_after_a_stop_is_not_run_and_says_why(self):
+        self.change_the_functions("checked")
+        self.fake_mutmut(f"{self.CUTS_OFF_CALC_META}; exec sleep 30", listing=self.LISTS_WITHOUT_CALC_META)
+        walk = os.walk
+
+        def refuse_mutants(top, *args, onerror=None, **kwargs):
+            if os.path.basename(top) == "mutants" and onerror is not None:
+                onerror(PermissionError(13, "Permission denied", top))
+                return iter(())
+            return walk(top, *args, onerror=onerror, **kwargs)
+        with patch.object(orchestrator.os, "walk", refuse_mutants):
+            found = self.found(budget=1)
+        self.assertEqual([f["rule"] for f in found], ["not-run"])
+        self.assertIn("could not clear the results mutmut's stop cut off", found[0]["message"])
+        self.assertIn("Permission denied", found[0]["message"])
 
     def test_a_series_reads_as_a_list_in_prose(self):
         series = orchestrator._series
@@ -9506,37 +9484,12 @@ def flat(name, n, indent=""):
     return f"{indent}def {name}(x):\n{body}{indent}    return x\n"
 
 
-class TestTooComplexFunctions(unittest.TestCase):
+class TestTooComplexFunctions(RepositoryTest):
     """The cognitive-complexity check over a real git repository: a base commit, then the change in its working tree."""
 
     BASE = flat("grow", 14) + "\n\n" + flat("big", 20) + "\n\n" + flat("small", 3)
 
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.repo = tmp.name
-        self.host = Host()
-        self.git("init", "--quiet", "-b", "main")
-        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
-            self.git("config", key, value)
-        self.put("calc.py", self.BASE)
-        self.git("add", "-A")
-        self.git("commit", "--quiet", "-m", "base")
-
-    def git(self, *args):
-        return self.host.git(self.repo, *args)
-
-    def put(self, name, text):
-        path = os.path.join(self.repo, name)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(text)
-
-    def edit(self, name, old, new):
-        with open(os.path.join(self.repo, name)) as f:
-            text = f.read()
-        self.assertEqual(text.count(old), 1, old)
-        self.put(name, text.replace(old, new))
+    BASE_FILES = {"calc.py": BASE}
 
     def change(self):
         return orchestrator.GateChange.from_tree(self.repo, self.git("rev-parse", "HEAD").strip())
@@ -9646,13 +9599,13 @@ class TestTooComplexFunctions(unittest.TestCase):
                          ["`big`: cognitive complexity 22, a new function; the limit is 15."])
 
     def test_a_file_renamed_from_any_name_is_compared_with_its_base(self):
-        self.commit_file("bin/tool", flat("helper", 20))
+        self.commit({"bin/tool": flat("helper", 20)}, "base")
         self.git("mv", "bin/tool", "bin/tool.py")
         self.edit("bin/tool.py", "x += 3\n", "x += 30\n")  # still 20
         self.assertEqual(self.found()[0], [])
 
     def test_a_function_moved_unchanged_out_of_a_deleted_python_script_keeps_its_base(self):
-        self.commit_file("bin/tool", "#!/usr/bin/env python3\n" + flat("helper", 20))
+        self.commit({"bin/tool": "#!/usr/bin/env python3\n" + flat("helper", 20)}, "base")
         self.git("rm", "--quiet", "bin/tool")
         self.put("calc.py", self.BASE + "\n\n" + flat("helper", 20))  # an edit, so git sees no rename
         self.assertEqual(self.found()[0], [])
@@ -9663,14 +9616,14 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.assertEqual(self.found()[0], [])
 
     def test_a_deleted_script_that_is_not_python_lends_no_base(self):
-        self.commit_file("bin/tool", "#!/bin/sh\n" + flat("helper", 20))
+        self.commit({"bin/tool": "#!/bin/sh\n" + flat("helper", 20)}, "base")
         self.git("rm", "--quiet", "bin/tool")
         self.put("calc.py", self.BASE + "\n\n" + flat("helper", 20))  # an edit, so git sees no rename
         self.assertEqual([f["message"] for f in self.found()[1]],
                          ["`helper`: cognitive complexity 20, a new function; the limit is 15."])
 
     def test_a_function_out_of_tests_is_judged_as_new_as_tests_were_never_held_to_the_limit(self):
-        self.commit_file("tests/helpers.py", flat("helper", 20) + "\n\n" + flat("other_helper", 20))
+        self.commit({"tests/helpers.py": flat("helper", 20) + "\n\n" + flat("other_helper", 20)}, "base")
         os.makedirs(os.path.join(self.repo, "lib"))
         self.git("mv", "tests/helpers.py", "lib/helpers.py")  # renamed, with both functions
         self.edit("lib/helpers.py", "'helper 3':\n        x += 3\n", "'helper 3':\n        x += 30\n")  # still 20
@@ -9683,7 +9636,7 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.assertEqual(self.found()[0], [])  # lib/helpers.py's base is lib/, now held to the limit
 
     def test_a_function_moved_unchanged_out_of_tests_is_judged_as_new(self):
-        self.commit_file("tests/helpers.py", "X = 0\n\n\n" + flat("helper", 20))
+        self.commit({"tests/helpers.py": "X = 0\n\n\n" + flat("helper", 20)}, "base")
         self.put("tests/helpers.py", "X = 0\n")
         self.put("lib.py", flat("helper", 20))
         self.git("add", "lib.py")
@@ -9731,7 +9684,7 @@ class TestTooComplexFunctions(unittest.TestCase):
 
     def test_a_function_in_a_file_the_check_does_not_judge_keeps_its_own_base_from_a_moved_twin(self):
         big = flat("big", 20)
-        self.commit_file("tests/helpers.py", "X = 0\n\n\n" + big)
+        self.commit({"tests/helpers.py": "X = 0\n\n\n" + big}, "base")
         self.edit("tests/helpers.py", "X = 0\n", "X = 1\n")
         self.put("calc.py", self.BASE.replace("\n\n" + big, ""))
         self.put("lib.py", big)  # calc.py's big, moved unchanged
@@ -9774,7 +9727,7 @@ class TestTooComplexFunctions(unittest.TestCase):
 
     def test_an_unchanged_copy_in_a_file_the_check_does_not_judge_takes_no_base_from_its_original(self):
         big = flat("big", 20)
-        self.commit_file("tests/helpers.py", "X = 0\n\n\n" + big)
+        self.commit({"tests/helpers.py": "X = 0\n\n\n" + big}, "base")
         self.edit("calc.py", "'big 3':\n        x += 3\n", "'big 3':\n        x += 30\n")  # edited in place: still 20
         self.edit("tests/helpers.py", "X = 0\n", "X = 1\n")  # the copy at the base, in a file edited elsewhere
         self.assertEqual(self.found()[0], [])
@@ -9809,7 +9762,7 @@ class TestTooComplexFunctions(unittest.TestCase):
         # Two functions named _, as @singledispatch registrations are: the one scoring 20 moves where nothing is
         # judged, the other stays, and a copy of the first is added elsewhere.
         moved, stays = flat("_", 20).replace("'_ ", "'moved "), flat("_", 3).replace("'_ ", "'stays ")
-        self.commit_file("disp.py", moved + "\n\n" + stays)
+        self.commit({"disp.py": moved + "\n\n" + stays}, "base")
         self.put("disp.py", stays)
         self.put("tests/helpers.py", moved)
         self.put("lib.py", moved)
@@ -9883,23 +9836,18 @@ class TestTooComplexFunctions(unittest.TestCase):
     # A function named _ that does nothing, as one @singledispatch registration or @overload stub can be.
     TRIVIAL = "def _(a):\n    return a\n\n\n"
 
-    def commit_file(self, name, text):
-        self.put(name, text)
-        self.git("add", name)
-        self.git("commit", "--quiet", "-m", name)
-
     def test_a_namesake_removed_above_a_function_leaves_it_compared_with_its_own_base(self):
-        self.commit_file("disp.py", self.TRIVIAL + flat("_", 20))
+        self.commit({"disp.py": self.TRIVIAL + flat("_", 20)}, "base")
         self.put("disp.py", flat("_", 20).replace("x += 3\n", "x += 30\n"))  # the trivial one gone; still 20
         self.assertEqual(self.found()[0], [])
 
     def test_a_namesake_added_above_a_function_leaves_it_compared_with_its_own_base(self):
-        self.commit_file("disp.py", flat("_", 20))
+        self.commit({"disp.py": flat("_", 20)}, "base")
         self.put("disp.py", self.TRIVIAL + flat("_", 20).replace("x += 3\n", "x += 30\n"))  # still 20
         self.assertEqual(self.found()[0], [])
 
     def test_a_rise_of_a_function_whose_name_others_share_is_found(self):
-        self.commit_file("disp.py", flat("_", 20))
+        self.commit({"disp.py": flat("_", 20)}, "base")
         self.put("disp.py", flat("_", 20).replace("        x += 19\n", "        x += 19\n        if x:\n            x -= 1\n"))
         self.assertEqual([f["message"] for f in self.found()[1]],
                          ["`_`: cognitive complexity 22, 20 at the base; the limit is 15."])
@@ -10040,35 +9988,18 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.assertEqual((check.fails, check.find), (True, orchestrator.too_complex_functions))
 
 
-class TestChangedPythonFiles(unittest.TestCase):
+class TestChangedPythonFiles(RepositoryTest):
     """How flaky-tests, surviving-mutants and cognitive complexity read the Python files a change touches, end to end
     through each check over a real git repository."""
 
     # d is a decorator that takes an argument, for the decorators below.
     CALC = "def d(_):\n    return lambda f: f\n\n\ndef add(a, b):\n    return a + b\n"
 
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.repo = tmp.name
-        self.host = Host()
-        self.git("init", "--quiet", "-b", "main")
-        for key, setting in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
-            self.git("config", key, setting)
-        self.put("pyproject.toml", '[tool.mutmut]\nsource_paths = ["."]\n')
-        self.put("calc.py", self.CALC)
-        self.put("tests/test_calc.py", "import calc\n\n\ndef test_add():\n    assert calc.add(2, 3) == 5\n")
-        self.git("add", "-A")
-        self.git("commit", "--quiet", "-m", "base")
-
-    def git(self, *args):
-        return self.host.git(self.repo, *args)
-
-    def put(self, name, text):
-        path = os.path.join(self.repo, name)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(text)
+    BASE_FILES = {
+        "pyproject.toml": '[tool.mutmut]\nsource_paths = ["."]\n',
+        "calc.py": CALC,
+        "tests/test_calc.py": "import calc\n\n\ndef test_add():\n    assert calc.add(2, 3) == 5\n",
+    }
 
     def change(self):
         return orchestrator.GateChange.from_tree(self.repo, self.git("rev-parse", "HEAD").strip())
@@ -10364,36 +10295,245 @@ class TestCI(unittest.TestCase):
             ci.trigger(REF_1_1)
 
 
-class TestHostSnapshot(unittest.TestCase):
-    """Host.snapshot on real git."""
+class TestJudgedInQuality(RepositoryTest):
+    """`orchestrator.py judged-in-quality` in a repository with a real bare origin, with the quality job on a FakeCI.
+
+    The repository's HEAD is a pull request's head, one commit on top of main's base commit, as a run publishes a tree
+    its last quality build judged.
+    """
+
+    JUDGING = ("Jenkinsfile", "orchestrator.py", "pyproject.toml", "uv.lock", ".python-version")
+    BASE_FILES = {name: f"{name} 1\n" for name in (*JUDGING, "f.py")}
 
     def setUp(self):
-        import tempfile
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.repo = tmp.name
-        self.host = Host()
-        self.git("init", "--quiet", "-b", "main")
-        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
-            self.git("config", key, value)
+        super().setUp()
+        self.origin = os.path.join(self.outside, "origin.git")
+        self.host.git(self.outside, "init", "--quiet", "--bare", "-b", "main", self.origin)
+        # As GitHub does, so a commit is fetched by its sha.
+        self.host.git(self.origin, "config", "uploadpack.allowReachableSHA1InWant", "true")
+        self.git("remote", "add", "origin", self.origin)
+        self.git("push", "--quiet", "origin", "HEAD:refs/heads/main")
+        self.git("checkout", "--quiet", "-b", "pr")
+        self.head = self.commit({"f.py": "f.py 2\n"}, "change")
+        self.tree = self.git("rev-parse", "HEAD^{tree}").strip()
+        self.fake = FakeCI()
 
-    def git(self, *args):
-        return self.host.git(self.repo, *args)
+    def build(self, *, tree=None, parent=None, main=None, description=None, **kw):
+        """A build of the quality job, SUCCESS on HEAD's tree from its base by main at the base unless kw say
+        otherwise; returns its number."""
+        if description is None:
+            description = (f"judged tree={tree or self.tree} parent={parent or self.base} "
+                           f"main={main or self.base}")
+        return self.fake.add_build("orchestrator-ci/r-1-q1", outcome(polls=0, description=description, **kw))
 
-    def put(self, name, text):
-        path = f"{self.repo}/{name}"
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
+    def push_main(self, name, text):
+        """Move origin's main by a commit that changes name, made in another clone so this one lacks it; returns
+        its sha."""
+        other = os.path.join(self.outside, "other")
+        if not os.path.isdir(other):
+            self.host.git(self.outside, "clone", "--quiet", "-b", "main", self.origin, other)
+        with open(os.path.join(other, name), "w") as f:
             f.write(text)
+        self.host.git(other, "add", "-A")
+        self.host.git(other, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false",
+                      "commit", "--quiet", "-m", "main moves")
+        self.host.git(other, "push", "--quiet", "origin", "HEAD:refs/heads/main")
+        return self.host.git(other, "rev-parse", "HEAD").strip()
+
+    def judged(self, *args, env=None):
+        """The exit status, standard output and standard error of `orchestrator.py judged-in-quality` in the
+        clone, asking self.fake; args replace `--quality-gate JOB --target main`."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.chdir(self.repo), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                patch("orchestrator.CI", side_effect=lambda job: CI(job, env=CREDENTIALS if env is None else env,
+                                                                     urlopen=self.fake)):
+            exit_code = main(["judged-in-quality", *(args or ("--quality-gate", JOB, "--target", "main"))])
+        return exit_code, out.getvalue(), err.getvalue()
+
+    def assert_refused(self, pattern, **kw):
+        exit_code, out, err = self.judged(**kw)
+        self.assertNotEqual(exit_code, 0)
+        self.assertEqual(out, "")
+        self.assertEqual(err.count("\n"), 1, err)
+        self.assertRegex(err, pattern)
+        self.assertFalse(leaks(err))
+        return err
+
+    def test_a_successful_build_of_head_s_tree_from_its_merge_base_trusts_it(self):
+        n = self.build()
+        exit_code, out, err = self.judged()
+        self.assertEqual((exit_code, err), (0, ""))
+        self.assertIn(f"#{n}", out)
+        self.assertIn("builds", self.fake.names)
+
+    def test_an_older_build_trusts_it_behind_newer_ones_that_do_not(self):
+        n = self.build()
+        self.build(tree="1" * 40)
+        self.build(result="UNSTABLE")
+        exit_code, out, _ = self.judged()
+        self.assertEqual(exit_code, 0)
+        self.assertIn(f"#{n}", out)
+
+    def test_a_build_that_did_not_succeed_does_not(self):
+        for result in ("UNSTABLE", "FAILURE", "ABORTED"):
+            with self.subTest(result):
+                self.fake.builds.clear()
+                n = self.build(result=result)
+                self.assert_refused(rf"#{n}.*{result}")
+
+    def test_a_build_still_running_does_not(self):
+        n = self.fake.add_build("orchestrator-ci/r-1-q1", outcome(
+            polls=1, description=f"judged tree={self.tree} parent={self.base} main={self.base}"))
+        self.assert_refused(rf"#{n}.*still running")
+
+    def test_a_build_of_another_tree_does_not(self):
+        n = self.build(tree="1" * 40)
+        self.assert_refused(rf"#{n}.*{'1' * 40}.*{self.tree}")
+
+    def test_a_build_from_another_base_does_not(self):
+        n = self.build(parent=self.head)
+        self.assert_refused(rf"#{n}.*{self.head}.*{self.base}")
+
+    def test_a_change_to_a_file_that_decides_the_judging_is_judged_in_full(self):
+        for name in self.JUDGING:
+            with self.subTest(name):
+                self.git("checkout", "--quiet", self.head)
+                self.put(name, "changed\n")
+                self.commit({}, f"edit {name}")
+                self.tree = self.git("rev-parse", "HEAD^{tree}").strip()
+                self.fake.builds.clear()
+                self.fake.names.clear()
+                self.build()
+                self.assert_refused(re.escape(name))
+
+    def test_the_judging_files_are_compared_whole_from_a_subdirectory_under_diff_relative(self):
+        self.git("config", "diff.relative", "true")
+        os.mkdir(os.path.join(self.repo, "sub"))
+        self.put("sub/g.py", "g\n")
+        self.put("Jenkinsfile", "changed\n")
+        self.commit({}, "edit Jenkinsfile")
+        self.tree = self.git("rev-parse", "HEAD^{tree}").strip()
+        self.build()
+        self.repo = os.path.join(self.repo, "sub")
+        self.assert_refused("Jenkinsfile")
+
+    def test_a_build_by_a_main_with_other_judging_files_does_not(self):
+        main_sha = self.push_main("orchestrator.py", "a newer gate\n")
+        n = self.build(main=main_sha)
+        self.assert_refused(rf"#{n}.*{main_sha}.*orchestrator\.py")
+
+    def test_a_build_by_a_main_that_moved_without_touching_them_trusts_it(self):
+        main_sha = self.push_main("other.py", "x\n")
+        # The fetch of the target leaves out a main this clone lacks: a pull request into another branch.
+        self.git("push", "--quiet", "origin", f"{self.base}:refs/heads/release")
+        n = self.build(main=main_sha)
+        exit_code, out, err = self.judged("--quality-gate", JOB, "--target", "release")
+        self.assertEqual((exit_code, err), (0, ""))
+        self.assertIn(f"#{n}", out)
+
+    def test_a_main_commit_that_cannot_be_fetched_fails(self):
+        self.build(main="2" * 40)
+        self.assert_refused("2" * 40)
+
+    def test_a_build_without_the_description_does_not(self):
+        for description in ("", f"judged tree={self.tree} parent={self.base}",
+                            f"judged tree={self.tree} parent={self.base} main={self.base} extra",
+                            f"judged tree={self.tree.upper()} parent={self.base} main={self.base}",
+                            f"judged  tree={self.tree} parent={self.base} main={self.base}",
+                            f"judged tree={self.tree[:12]} parent={self.base} main={self.base}",
+                            f"judged tree={JENKINS_TOKEN}"):
+            with self.subTest(description):
+                self.fake.builds.clear()
+                n = self.build(description=description)
+                self.assert_refused(rf"#{n}.*description")
+
+    def test_a_long_description_is_shortened_with_its_token_masked_whole(self):
+        # 150 characters before the token, so a cut at 160 would split it.
+        self.build(description="y" * 150 + JENKINS_TOKEN + "z" * 500)
+        err = self.assert_refused("description")
+        self.assertNotIn(JENKINS_TOKEN[:6], err)
+        self.assertIn("****", err)
+        self.assertLess(len(err), 1000)
+
+    def test_a_build_with_no_description_at_all_does_not(self):
+        n = self.fake.add_build("orchestrator-ci/r-1-q1", outcome(polls=0))
+        self.assert_refused(rf"#{n}.*description")
+
+    def test_the_closest_build_is_the_one_named(self):
+        n = self.build(result="UNSTABLE")
+        self.build(tree="1" * 40)
+        self.build(description="")
+        self.assert_refused(rf"#{n}.*UNSTABLE")
+
+    def test_a_job_without_builds_fails(self):
+        self.assert_refused("no builds")
+
+    def test_jenkins_down_fails_with_its_token_masked(self):
+        self.build()
+        self.fake.down.add("jenkins")
+        self.assert_refused("Connection refused")
+
+    def test_an_http_error_fails(self):
+        self.build()
+        for code in (403, 404, 500):
+            with self.subTest(code):
+                self.fake.fail[("GET", JOB_PATH + "api/json")] = code
+                self.assert_refused(f"HTTP {code}")
+
+    def test_an_answer_that_is_not_the_job_s_builds_fails(self):
+        for answer in ({"builds": "x"}, {"builds": ["x"]}, {"builds": [{"number": "7", "result": "SUCCESS"}]}):
+            with self.subTest(answer), patch.object(FakeCI, "jenkins", return_value=("builds", answer)):
+                self.assert_refused("api/json")
+
+    def test_missing_credentials_fail_before_any_request(self):
+        self.build()
+        self.assert_refused("JENKINS_USER", env={"JENKINS_URL": JENKINS})
+        self.assertEqual(self.fake.requests, [])
+
+    def test_a_target_branch_origin_lacks_fails(self):
+        self.build()
+        exit_code, out, err = self.judged("--quality-gate", JOB, "--target", "nowhere")
+        self.assertNotEqual(exit_code, 0)
+        self.assertEqual(err.count("\n"), 1, err)
+        self.assertIn("nowhere", err)
+
+    def test_a_target_that_is_not_a_branch_name_fails_before_git_fetches_it(self):
+        self.build()
+        for target in ("main:refs/heads/x", "-q", "a..b", "x.lock"):
+            with self.subTest(target), patch("orchestrator._git", wraps=orchestrator._git) as git:
+                exit_code, _, err = self.judged("--quality-gate", JOB, f"--target={target}")
+                self.assertNotEqual(exit_code, 0)
+                self.assertEqual(err.count("\n"), 1, err)
+                self.assertIn(f"{target!r} is not a branch name", err)
+                git.assert_not_called()
+        self.assertEqual(self.fake.requests, [])
+
+    def test_a_working_directory_that_is_gone_fails_in_one_line(self):
+        self.build()
+        gone = os.path.join(self.outside, "gone")
+        os.mkdir(gone)
+        err = io.StringIO()
+        with contextlib.chdir(gone), contextlib.redirect_stderr(err), \
+                patch("orchestrator.CI", side_effect=lambda job: CI(job, env=CREDENTIALS, urlopen=self.fake)):
+            os.rmdir(gone)
+            exit_code = main(["judged-in-quality", "--quality-gate", JOB, "--target", "main"])
+        self.assertNotEqual(exit_code, 0)
+        self.assertEqual(err.getvalue().count("\n"), 1, err.getvalue())
+        self.assertIn("No such file or directory", err.getvalue())
+
+    def test_without_a_merge_base_it_fails(self):
+        self.git("checkout", "--quiet", "--orphan", "lone")
+        self.put("f.py", "alone\n")
+        self.commit({}, "lone")
+        self.build(tree=self.git("rev-parse", "HEAD^{tree}").strip())
+        self.assert_refused("merge base")
+
+
+class TestHostSnapshot(RepositoryTest):
+    """Host.snapshot on real git."""
 
     def test_snapshot_of_the_working_tree(self):
-        self.put("keep.py", "a\n")
-        self.put("mod.py", "1\n2\n")
-        self.put("del.py", "x\n")
-        self.put(".gitignore", "*.log\n")
-        self.git("add", "-A")
-        self.git("commit", "--quiet", "-m", "base")
-        base = self.host.git_head(self.repo)
+        base = self.commit({"keep.py": "a\n", "mod.py": "1\n2\n", "del.py": "x\n", ".gitignore": "*.log\n"}, "base")
         self.put("mod.py", "1\ntwo\n3\n")
         os.remove(f"{self.repo}/del.py")
         self.put("untracked.py", "new\n")

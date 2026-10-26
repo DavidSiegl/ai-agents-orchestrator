@@ -8,8 +8,7 @@ was done.
 - **The rename to Octoflow AI, the rest of it.** The product is Octoflow AI (README, window titles, pull request
   text) and the binaries, release assets, `.deb` path, Tauri bundle and crates are `octoflow`; the bundle name has
   no space because Tauri names the `.deb`, `.app` and `.dmg` after it verbatim. Still under the old name, each a
-  decision of its own: the GitHub repository, so every URL in the README and the badges stays until it is renamed
-  (GitHub redirects the old URL afterwards, never the new one before); `~/.config/ai-agents-orchestrator/`, the
+  decision of its own: `~/.config/ai-agents-orchestrator/`, the
   `.orchestrator/` project directory and the `orchestrator-ci/` branches, which are on users' disks and remotes and
   need a fallback that reads the old location; `orchestrator.py` and the `Orchestrator-*` commit trailers; the
   Jenkins folder `AI-Agents-Orchestrator`. The macOS app could show "Octoflow AI" in Finder while staying
@@ -193,16 +192,30 @@ was done.
   computes `_removal_points` for `_judged_files` and `vague_names`, which never read them; `_ChangedPythonFile` is a
   frozen dataclass with `set` fields, so its generated `__hash__` raises; `vague_names` unpacks three fields and reads
   `.why` beside them. Closes with the four changed, in one commit, when the walker is next touched.
+- **A flaky-tests rerun sometimes waits out `FLAKY_RUN_TIMEOUT` on Jenkins.**
+  `TestFlakyTests.test_a_server_a_test_leaves_holding_the_output_does_not_hold_up_the_reruns` takes 8.0 s on
+  Jenkins (PR-98, PR-99/3, PR-100), but 14.4 s on PR-101 build 1 and 31.0 s on build 3, failing its 30 s bound: one
+  of its six pytest runs waited about the whole `FLAKY_RUN_TIMEOUT`. PR-101 changes only the tests' git fixture.
+  Twenty runs here under the load of a parallel suite, with SIGINT ignored, all passed. A rerun that hangs gives a
+  `not-rerun` warning, not a wrong verdict. Closes when the run that waits is caught, e.g. with each pytest run's
+  wall time and exit in the test's failure message, and its cause fixed.
+- **README and docs left over from the README rewrite (PR #90).** Raised by cross-review 50 (2026-10-26), in what
+  PR #90 brought, not in code:
+  - The Jenkins job path still uses the old folder name, as
+    `--quality-gate AI-Agents-Orchestrator/py-ai-agents-orchestrator-quality` (README.md, the `--quality-gate`
+    example; also docs/quality-gate.md), where the folder is `Octoflow-AI` and the job `py-octoflow-ai-quality`.
+    The Planned rename entry above still lists the folder as not renamed.
+  - docs/architecture.md's endpoint table gives `/files?run=ID` as a list of `{"name", "mtime"}`, while
+    `RunRequestHandler`'s docstring, which the table names as the authority, gives `{"run", "files"}`.
+  - The README's `gate` example says exit 0 for OK and 1 for ERROR, but not 2, unjudged, when no quality file is
+    written.
+  - Smaller: a short line mid-paragraph in the rename entry above; the README no longer says which commands take only
+    `--machine`/`--cwd`; the `gate` example no longer names the tools it needs (ruff, mypy, pymarkdown, shellcheck,
+    actionlint).
+  Closes with those lines corrected, or the endpoint table replaced by a pointer to the docstring.
 - **`vague-names` does not split CamelCase.** `vague_names` matches a whole name or its last `_`-separated word,
   so `user_data` is found but a class `InfoManager` or `UserData` is not. Closes, if the run metrics show such names
   recur, with the last CamelCase word matched too.
-- **Ten test classes copy the same git-repository fixture.** `TestFlakyTests`, `TestPassesAtBase`, `TestVagueNames`,
-  `TestTooComplexFunctions`, `TestChangedPythonFiles` and five more each define a `setUp` that makes a repository,
-  configures it and commits a base, most with the same `git` and `put` helpers; eight of the copies bind the vague
-  `value` that `vague-names` now reports on added lines, and `TestVagueNames`' and `TestChangedPythonFiles`' bind
-  `setting`. Raised again by the cross-review of `written-rules` (F8, 2026-10-24), and by that of
-  `gate-python-files` ("`TestChangedPythonFiles` copies the repo scaffolding once more", R1-F5, 2026-10-26). Closes
-  with one mixin or base class those tests share.
 - **`vague-names` reports a name an undecorated override cannot change.** A `def handle(self)` in a
   `socketserver.BaseRequestHandler` subclass, or a parameter the overridden signature names, has no fix; only a
   method marked `@override` is skipped (`_bound_names`). Raised by the cross-review of `written-rules` (F6,
@@ -273,12 +286,6 @@ was done.
   (`_edits_test`). Kept as the ticket states it. Closes with a decision to pass `_edits_test`-like counting to
   `_changed_python_functions`. The cognitive-complexity check has a walker of its own (`_scored_functions`), so it
   is not affected.
-- **A run the budget stops can leave mutmut's results unreadable.** mutmut 3.8.0 saves a module's results by
-  rewriting `mutants/<path>.meta` in place after each mutant (`SourceFileMutationData.save`, `open(..., "w")` then
-  `json.dump`), so the SIGINT at the budget, or the kill after `MUTMUT_STOP_GRACE`, can land mid-write. `mutmut results`
-  then exits with a `JSONDecodeError`, and `_mutmut_findings` reports `not-run`, "mutmut could not list its results",
-  without the `budget-reached` finding or anything the run had shown. Seen once in another branch's gate run. Closes
-  with the stop waiting for a save to end, or with the gate reading what remains and saying the budget stopped it.
 - **Committed mutmut output is read as the change's own code by the linters.** The checks leave `mutants/` out, by the
   user's decision of 2026-10-24 (review round 9, F33): `GateChange.from_tree` diffs the tree without it, so no check
   (test-integrity, flaky-tests, surviving-mutants, cognitive-complexity) selects a test, a function or a changed line
@@ -326,6 +333,15 @@ was done.
   a new function under its old name (review round 6, R6-F1). Decided by the user in review round 4 of ticket 06.
   Closes with a way to tell a copy from a rename, such as git's copy detection (`git diff -C`) on the change's
   files.
+- **`Host._paths_between` follows the user's `diff.relative`.** Its `git diff --name-only` has no `--no-relative`,
+  so with `diff.relative=true` in the user's git config and a `cwd` that is a subdirectory of the repository (not
+  checked whether a run can pass one), it lists only the paths under that subdirectory, and its `_top_literal`
+  pathspecs for files elsewhere match nothing. `Host.lock` then returns fewer locked paths and
+  `Host.locked_changes` misses edits to them; `locked_changes`'s own `git diff` has the same exposure. Raised by the
+  cross-review of `trust-quality-at-pr` (review 49, F7, 2026-10-26), which found it in `_judging_changes` and fixed
+  it there with `--no-relative`; of `Host._paths_between` it said: "has the same exposure, but it is outside this
+  range". Closes with `--no-relative` on both calls and a test that sets `diff.relative` and locks from a
+  subdirectory.
 
 ## Fixed
 
@@ -342,6 +358,37 @@ was done.
   leaving the repository, one base has no file at, a cycle, a file that is not TOML, or `[extend]`/`path` given twice
   in different case refuses the push; so does a symbolic link in the chain, or a linked `.gitleaksignore`
   (`Host._base_rules_file`).
+
+- **A run the budget stops can leave mutmut's results unreadable.** mutmut 3.8.0 saves a module's results by
+  rewriting `mutants/<path>.meta` in place after each mutant (`SourceFileMutationData.save`, `open(..., "w")` then
+  `json.dump`), so the SIGINT at the budget, or the kill after `MUTMUT_STOP_GRACE`, can land mid-write. `mutmut results`
+  then exits with a `JSONDecodeError`, and `_mutmut_findings` reports `not-run`, "mutmut could not list its results",
+  without the `budget-reached` finding or anything the run had shown. Seen once in another branch's gate run. Closes
+  with the stop waiting for a save to end, or with the gate reading what remains and saying the budget stopped it.
+  Fixed (2026-10-26): on a run the budget stopped, `_statuses_after_run` has `_drop_cut_off_saves` remove each
+  `mutants/<path>.py.meta` in the copy that does not parse as JSON before `mutmut results` lists the rest. The
+  functions of those modules count as not reached, and `_budget_reached` says the stop cut off mutmut's save of their
+  results; the other modules' findings stand. A listing failure without a stop, one after the removal, or a `.meta`
+  that cannot be removed stays `not-run`. Not closed: those modules' results are lost, not recovered.
+
+- **Ten test classes copy the same git-repository fixture.** `TestFlakyTests`, `TestPassesAtBase`, `TestVagueNames`,
+  `TestTooComplexFunctions`, `TestChangedPythonFiles` and five more each define a `setUp` that makes a repository,
+  configures it and commits a base, most with the same `git` and `put` helpers; eight of the copies bind the vague
+  `value` that `vague-names` now reports on added lines, and `TestVagueNames`' and `TestChangedPythonFiles`' bind
+  `setting`. Raised again by the cross-review of `written-rules` (F8, 2026-10-24), and by that of
+  `gate-python-files` ("`TestChangedPythonFiles` copies the repo scaffolding once more", R1-F5, 2026-10-26). Closes
+  with one mixin or base class those tests share.
+  Fixed (2026-10-26): `tests/gitrepo.py`'s `RepositoryTest` makes the repository in `setUp`, configures it, commits
+  the class's `BASE_FILES` as "base", and gives `git`, `put`, `edit` and `commit`; `TestScanUnpublished`, `TestGate`,
+  `TestWeakenedTests`, `TestFlakyTests`, `TestPassesAtBase`, `TestVagueNames`, `TestSurvivingMutants`,
+  `TestTooComplexFunctions`, `TestChangedPythonFiles`, `TestHostSnapshot` and `TestJudgedInQuality` derive from it,
+  and what their `setUp`s kept out of the tree (stub tools, a bare origin, a rules file) is under the base's
+  `outside`. `TestHostGit` keeps a `setUp` of its own, since it makes two clones of a bare origin rather than one
+  repository; its `clone` binds `setting` now. Not closed: single tests still make a repository or a directory of
+  their own, such as `TestPassesAtBase`'s submodule.
+
+- **The GitHub repository still had the old name.** It is `DavidSiegl/octoflow-ai` now, and the README's URLs and
+  badges point there; GitHub redirects the old URLs.
 
 - **A submodule is empty in `passes-at-base`'s copy of the base.** `git archive` leaves a submodule's directory
   empty, so a changed test that imports from one fails to import at the base and gives nothing, though it might pass
