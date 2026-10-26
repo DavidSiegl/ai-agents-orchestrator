@@ -4494,7 +4494,8 @@ def _run_in_session(argv: list[str], cwd: str, env: dict[str, str], *, timeout: 
     stopped for running longer than timeout seconds.
 
     Stopped, it is killed, or with soft_stop, a (signal, grace) pair, first sent that signal and given grace seconds
-    to exit; it starts with that signal's default disposition even where this process ignores it. Once it has
+    to exit; called on the main thread, it starts with that signal's default disposition even where this process
+    ignores it (_not_ignored_in_children). Once it has
     exited, every process left in its process group, such as a server it started, is killed too, and what was
     printed is read until no process holds the output open, for at most TOOL_KILL_WAIT seconds more: only one
     outside the group, in a session of its own, can still hold it, and what that prints later is lost. So the call
@@ -11199,16 +11200,13 @@ class RunProcess:
     """A CLI command the GUI started, its stdout and stderr read together on a thread."""
 
     def __init__(self, argv: list[str], popen=subprocess.Popen):
-        # An ignored SIGINT stays ignored across exec, and a Python started so never raises KeyboardInterrupt:
-        # in a GUI started that way, as a non-interactive shell starts a background job, Stop would do nothing.
-        # exec resets a handler to the default, so handling it here lets the command take Ctrl-C again.
-        if signal.getsignal(signal.SIGINT) == signal.SIG_IGN:
-            signal.signal(signal.SIGINT, signal.default_int_handler)
-        # A session of its own, so Stop can signal its process group as Ctrl-C in a terminal does.
+        # A session of its own, so Stop can signal its process group as Ctrl-C in a terminal does, which a GUI
+        # started as a background job of a non-interactive shell would otherwise pass on ignored.
         # Unbuffered, so the output arrives as it is printed rather than when the run ends.
-        self.proc = popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                          text=True, errors="replace", start_new_session=True,
-                          env={**os.environ, "PYTHONUNBUFFERED": "1"})
+        with _not_ignored_in_children(signal.SIGINT):
+            self.proc = popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, errors="replace", start_new_session=True,
+                              env={**os.environ, "PYTHONUNBUFFERED": "1"})
         self._lines = queue.Queue()
         threading.Thread(target=self._read, daemon=True).start()
 

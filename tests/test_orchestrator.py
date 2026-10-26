@@ -7061,6 +7061,16 @@ class TestRunInSession(unittest.TestCase):
         with self.assertRaises(OSError):
             orchestrator._run_in_session(["/nonexistent/tool"], tempfile.gettempdir(), {}, timeout=1)
 
+    def test_an_ignored_soft_stop_signal_stays_ignored_here_when_the_tool_cannot_start(self):
+        before = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            with self.assertRaises(OSError):
+                orchestrator._run_in_session(["/nonexistent/tool"], tempfile.gettempdir(), {}, timeout=1,
+                                             soft_stop=(signal.SIGINT, 1))
+            self.assertEqual(signal.getsignal(signal.SIGINT), signal.SIG_IGN)
+        finally:
+            signal.signal(signal.SIGINT, before)
+
 
 class TestFlakyTests(unittest.TestCase):
     """The flaky-tests check over a real git repository, rerunning its tests with this suite's own pytest."""
