@@ -299,7 +299,10 @@ ends a line at is still the failed condition above. A test file that `test-integ
 `unreadable` finding of that check, since its tests cannot be compared.
 
 A file whose name is not UTF-8 is read the same way, and the quality file writes each byte it cannot decode as
-`\xNN`. Not every tool can read such a name:
+`\xNN`. By the same convention it writes a character that ends a line in some reader, such as `\r`, `\x85` or
+U+2028, as `\x0d`, `\x85` or `\u2028`, wherever it appears in a list item or a name, so that each item stays on
+its line and reads the same in every round; `one_line` in `orchestrator.py` is where that convention lives. Not
+every tool can read such a name:
 
 - ruff prints it with U+FFFD for each such byte, which the gate matches to the tracked file, so ruff's findings
   on it are listed as usual.
@@ -307,7 +310,8 @@ A file whose name is not UTF-8 is read the same way, and the quality file writes
   pymarkdown stops with `Configuration Error: 'utf-8' codec can't encode character` when it has a finding in such
   a `.md` file. Either is a failed condition quoting the tool's first line, which need not name the file; mypy's
   comes back on every change until the file has a UTF-8 name.
-- coverage.py collects no data for such a file, so its added lines count as not coverable.
+- coverage.py collects no data for such a file, so its added lines count as not coverable; the quality file names
+  each such `.py` file the change adds lines to under the coverage sentence, as not measured.
 - `flaky-tests` collects the tests of such a test file, but pytest-randomly stops with an internal error,
   `UnicodeEncodeError`, when it shuffles them, so a change to one of them is a `not-rerun` finding quoting it.
 

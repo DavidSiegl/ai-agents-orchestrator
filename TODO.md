@@ -241,10 +241,6 @@ was done.
   each rerun then crashes, and `flaky_tests` reports `not-rerun` quoting the `UnicodeEncodeError`. Raised by the
   cross-review of `flaky-tests` (F10, 2026-10-23). Closes when pytest-randomly hashes the id's bytes, or when the
   reruns can seed such a test without it.
-- **Coverage of a file whose name is not UTF-8 is never measured.** coverage.py 7.14 collects no data for it, so
-  `new_coverage` finds none of its added lines in `coverage.xml` and counts them as not coverable: the coverage
-  condition can pass a change whose new code there is untested. `docs/quality-gate.md` states it. Closes with a
-  coverage.py that records such files, or with the gate naming them as unmeasured.
 - **The reruns' time limit is too short for slow tests on the Jenkins agent.** `FLAKY_RUN_TIMEOUT` is 30 s a run. On
   `flaky-tests`' own change each run took about 9 s on an idle laptop and about twice that under load. Measured on
   Jenkins on 2026-10-24 (PR #50, surviving-mutants' change): the first rerun did not finish within 30 s, so the check
@@ -253,9 +249,6 @@ was done.
   build past `QUALITY_TIMEOUT` beside the mutation budget, so the user kept 30 s (2026-10-24). `not-rerun` is a finding
   to weigh, never a wrong verdict. Closes with one time budget the reruns and mutmut share, or lighter tests for the
   gate's own checks.
-- **A file name that holds a line separator breaks its list item in the quality file.** `quality_report` writes
-  names as they are, so `\r` or U+2028 in one shows as a line break in some renderers. The finding is still
-  matched to the right file. Closes with names escaped when the quality file is written.
 - **A quality round waits for the whole build, not for its quality file.** `Workflow._analyse` polls the build's
   result until the build ends and only then reads `quality.md`, which the Gate stage archived before any later
   stage ran. So every stage after Gate counts against `QUALITY_TIMEOUT`; the Package stage was taken out of quality
@@ -375,6 +368,22 @@ was done.
   its own session and stops it, which both use, mutmut's SIGINT grace an option of it.
   Fixed (2026-10-26): both run through `_run_in_session`, mutmut with `MUTMUT_STOP_GRACE` as its grace; `_abandon`
   is gone, and one `_kill_group` suppresses the same errors for both.
+
+- **A file name that holds a line separator breaks its list item in the quality file.** `quality_report` writes
+  names as they are, so `\r` or U+2028 in one shows as a line break in some renderers. The finding is still
+  matched to the right file. Closes with names escaped when the quality file is written.
+  Fixed (2026-10-26): `one_line` writes each character that ends a line in some reader (`\n`, `\r`, `\v`, `\f`,
+  `\x1c`-`\x1e`, `\x85`, U+2028, U+2029) as `\xNN` or `\uNNNN`. Every list item of a quality file goes through it
+  whole, path and message alike: the gate's conditions, findings, failing tests and suppressions, judge_run's
+  findings and conditions, `build_failed_report`'s tests and `leak_report`'s secrets; so do the names the gate lists
+  in a sentence. `gate_failures` reads back the escaped item, the same in every round.
+
+- **Coverage of a file whose name is not UTF-8 is never measured.** coverage.py 7.14 collects no data for it, so
+  `new_coverage` finds none of its added lines in `coverage.xml` and counts them as not coverable: the coverage
+  condition can pass a change whose new code there is untested. `docs/quality-gate.md` states it. Closes with a
+  coverage.py that records such files, or with the gate naming them as unmeasured.
+  Fixed (2026-10-26): the quality file names each such `.py` file the change adds lines to under the coverage
+  sentence, as `Not measured`; the coverage condition is judged as before, without its lines.
 
 - **A pytest configuration below the copy's top directory is not used, so its tests are never rerun.**
   `_pytest_inifile` looks only in the top directory of `flaky_tests`' copy, and `_pytest` passes what it finds with
