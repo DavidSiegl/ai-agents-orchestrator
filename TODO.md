@@ -297,6 +297,15 @@ was done.
   such files only when the project's coverage measures them, since `new_coverage` reads only the files the Cobertura
   report lists. Whether the linters should read them, leave them out, or the gate refuse them is open. Closes with that
   decision.
+- **mutmut reads a symlinked `.py` file in the surviving-mutants copy.** `_copy_tracked` copies a tracked symlink
+  as a link (`orchestrator.py`), `_mark_for_mutmut` leaves links unmarked, and mutmut 3.8.0's `walk_all_files` lists
+  a symlink to a file and `create_mutants_for_file` opens it. So once any changed function starts mutmut, a change
+  adding `x.py -> calc.py` has every function of `calc.py` mutated a second time, as `x.py`, spending the budget on
+  mutants no finding reports; and `x.py -> /dev/zero` or a FIFO reads without end or blocks until the budget runs
+  out. The gate's own selection skips such links (`_parsed_changed_files`). Raised by the cross-review of
+  `gate-python-files` (R2-F1, 2026-10-26); rests on mutmut's source, not on a run. Closes with the copy or
+  `_mark_for_mutmut` keeping links out of mutmut's walk, without breaking a tracked link the tests import through,
+  and a test that also edits a real function.
 - **passes-at-base misses a deleted Python script with no `.py`.** `_edits_python_source` (`orchestrator.py`)
   counts a deleted file as Python source only by its `.py`, so a change that only deletes a `#!` python script
   outside the tests edits no Python source for it. Found while fixing the cognitive-complexity check's same gap

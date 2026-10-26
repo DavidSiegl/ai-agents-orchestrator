@@ -4913,8 +4913,10 @@ def surviving_mutants(change: GateChange, *, budget: float) -> list[dict]:
     not notice, with how many of its mutants they were and what the first _SURVIVOR_EXAMPLES change, as a line before
     and after; and each such function that no test calls. The change leaves out mutmut's state, as
     GateChange.from_tree says, so no function there is mutated. A changed path that is a symlink, a submodule or a
-    special file is not read (_is_link_or_special): no function is mutated through a symlink, whose target is mutated
-    only as a file the change edits.
+    special file is not read to choose the functions (_is_link_or_special), so none of its functions is a changed
+    one; a symlink's target has its functions chosen only as a file the change edits. mutmut's own walk of the copy
+    still reads a symlink to a .py file, and makes mutants of it that no finding reports, once any changed function
+    starts it.
 
     mutmut runs in the gate's own interpreter, as flaky_tests runs pytest, on a copy of the files git tracks. The copy
     leaves out what the tree tracks under mutmut's state, so mutmut starts without a cache. mutmut runs there by the
