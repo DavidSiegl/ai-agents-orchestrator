@@ -202,7 +202,8 @@ was done.
   PR #90 brought, not in code:
   - The Jenkins job path still uses the old folder name, as
     `--quality-gate AI-Agents-Orchestrator/py-ai-agents-orchestrator-quality` (README.md, the `--quality-gate`
-    example; also docs/quality-gate.md), where the folder is `Octoflow-AI` and the job `py-octoflow-ai-quality`. The Planned rename entry above still lists the folder as not renamed.
+    example; also docs/quality-gate.md), where the folder is `Octoflow-AI` and the job `py-octoflow-ai-quality`.
+    The Planned rename entry above still lists the folder as not renamed.
   - docs/architecture.md's endpoint table gives `/files?run=ID` as a list of `{"name", "mtime"}`, while
     `RunRequestHandler`'s docstring, which the table names as the authority, gives `{"run", "files"}`.
   - The README's `gate` example says exit 0 for OK and 1 for ERROR, but not 2, unjudged, when no quality file is
