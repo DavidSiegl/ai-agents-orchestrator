@@ -8486,7 +8486,7 @@ class TestCognitiveComplexity(unittest.TestCase):
                 return e(items)
         """), {"a": 0, "b": 0, "c": 0, "d": 0, "e": 0, "f": 0})
 
-    def test_every_way_of_binding_a_name_shadows_the_module_s_function(self):
+    def test_every_way_of_binding_a_name_shadows_the_module_s_function_but_global(self):
         self.assertEqual(self.module_scores("""
             def a(x):
                 import b
@@ -8510,11 +8510,41 @@ class TestCognitiveComplexity(unittest.TestCase):
             def h(): return a(0)
             def i(): return a(0)
             def j():
-                global k              # bound, so taken as local: a missed call, never an invented one
-                k = None
-                return k()
+                global k
+                k = wrap(k)
+                return k()            # the module's k, which it has just rebound
             def k(): return j()
-        """), {"a": 2, "b": 0, "e": 0, "f": 0, "g": 0, "h": 0, "i": 0, "j": 0, "k": 0})  # a: except, match
+        """), {"a": 2, "b": 0, "e": 0, "f": 0, "g": 0, "h": 0, "i": 0, "j": 1, "k": 1})  # a: except, match
+
+    def test_a_name_bound_only_in_a_nested_scope_leaves_the_function_s_own_call_to_the_module(self):
+        self.assertEqual(self.module_scores("""
+            def f(x):
+                items = [f for f in x]     # the comprehension's own f
+                return f(x[1:])            # +1, recursion
+            def walk(node):
+                key = lambda walk: walk.name
+                return walk(node.child)    # +1, recursion
+            def g(x):
+                def inner():
+                    h = 1
+                    return h
+                return h(x)                # +1, the cycle with h
+            def h(x):
+                return g(x)
+        """), {"f": 1, "walk": 1, "g": 1, "h": 1})
+
+    def test_a_type_parameter_is_not_the_module_s_function(self):
+        self.assertEqual(self.module_scores("""
+            def T():
+                return build(0)
+            def build[T](x):
+                return T(x)
+            class Box[U]:
+                def get(self):
+                    return U()
+            def U():
+                return Box().get()
+        """), {"T": 0, "build": 0, "Box.get": 0, "U": 0})
 
     def test_a_global_or_nonlocal_in_a_nested_scope_leaves_the_outer_binding_alone(self):
         self.assertEqual(self.module_scores("""

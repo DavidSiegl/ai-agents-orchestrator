@@ -5644,56 +5644,117 @@ def _callees(function: ast.FunctionDef | ast.AsyncFunctionDef, cls: str | None) 
     (the name of the class it is a method of, None outside a class; its name). cls is the name of the class function
     is a method of, or None, as the class names in the result are: qualified, as _scored_functions gives them.
 
-    Calls resolve by name, as Python's scopes do: f() calls the module's f unless function binds f itself
-    (_local_names); C.m() the method m of the module's class C, unless function binds C; and self.m() or cls.m() the
-    method m of cls, or in a class nested in function, of that class, which is no class of the module. A call of
-    anything else, such as an alias or an imported module's function, resolves to no function here."""
-    local = _local_names(function)
-    out: set[tuple[str | None, str]] = set()
-    # Each node still to be read, with the class that self and cls name there.
-    todo: list[tuple[ast.AST, str | None]] = [(s, cls) for s in function.body]
+    Calls resolve by name, as Python's scopes do (_Scope): f() calls the module's f unless a scope the call is read in
+    binds f, as a parameter, a local, a nested function or a type parameter; C.m() the method m of the module's class
+    C, under the same proviso for C; and self.m() or cls.m() the method m of cls, or in a class nested in function,
+    of that class, which is no class of the module. A call of anything else, such as an alias or an imported module's
+    function, resolves to no function here."""
+    calls: list[tuple[ast.expr, _Scope, str | None]] = []
+    # Each node still to be read, with the scope it is read in and the class that self and cls name there. The
+    # scopes' names are all known only once the walk is done, as Python fixes them at compile time, so the calls are
+    # resolved after it.
+    root = _Scope.of_function(function, None)
+    todo: list[tuple[ast.AST, _Scope, str | None]] = [(s, root, cls) for s in function.body]
     while todo:
-        node, owner = todo.pop()
-        if isinstance(node, ast.ClassDef):
-            todo += [(c, f"<{node.name} in {function.name}>") for c in node.body]
-            todo += [(c, owner) for c in [*node.decorator_list, *node.bases, *node.keywords]]
-            continue
-        todo += [(c, owner) for c in ast.iter_child_nodes(node)]
-        if not isinstance(node, ast.Call):
-            continue
-        callee = node.func
-        if isinstance(callee, ast.Name) and callee.id not in local:
+        node, scope, owner = todo.pop()
+        if isinstance(node, ast.Call):
+            calls.append((node.func, scope, owner))
+        scope.bind(node)
+        todo += _in_scopes(node, scope, owner, function.name)
+    out: set[tuple[str | None, str]] = set()
+    for callee, scope, owner in calls:
+        if isinstance(callee, ast.Name) and scope.means_module(callee.id):
             out.add((None, callee.id))
         elif isinstance(callee, ast.Attribute) and isinstance(callee.value, ast.Name):
             name = callee.value.id
             if owner is not None and name in ("self", "cls"):
                 out.add((owner, callee.attr))
-            elif name not in local:
+            elif scope.means_module(name):
                 out.add((name, callee.attr))
     return out
 
 
-def _local_names(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
-    """The names function binds, which a call by that name in its body may then mean rather than the module's: its
-    parameters, and each name its body binds, in the functions, lambdas and classes nested in it too. Every scope's
-    names count, and a global or nonlocal declaration takes none away, so a call taken here for the module's is one
-    no scope in function can mean otherwise: a call can be missed, as one to a name declared global and bound, but
-    never invented."""
-    names = {a.arg for a in ast.walk(function.args) if isinstance(a, ast.arg)}
-    for node in (node for statement in function.body for node in ast.walk(statement)):
+@dataclass
+class _Scope:
+    """A scope inside a function _callees reads, as Python's compiler sees it: the function's own, or a function,
+    lambda, comprehension, class body or type-parameter list nested in it. It tells what a bare name read there
+    means (https://docs.python.org/3/reference/executionmodel.html#resolution-of-names)."""
+    parent: "_Scope | None"  # the scope this one is nested in; None for the judged function's own
+    is_class: bool  # a class body, whose names the scopes nested in it do not see
+    bound: set[str] = field(default_factory=set)  # the names it binds, and so means by itself
+    globals: set[str] = field(default_factory=set)  # the names it declares global
+    nonlocals: set[str] = field(default_factory=set)  # the names it declares nonlocal
+
+    @classmethod
+    def of_function(cls, function: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda,
+                    parent: "_Scope | None") -> "_Scope":
+        """The scope of function's body, nested in parent, binding its parameters and type parameters; its body's
+        own names are added as _callees reads them."""
+        names = {a.arg for a in ast.walk(function.args) if isinstance(a, ast.arg)}
+        return cls(parent, False, names | _type_parameters(function))
+
+    def bind(self, node: ast.AST) -> None:
+        """Take in what node, read in this scope, binds or declares there; nothing for any other node. A nested
+        function's or class's own scope is _in_scopes'."""
         if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
-            names.add(node.id)
-        elif isinstance(node, ast.arg):
-            names.add(node.arg)
+            self.bound.add(node.id)
         elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-            names.add(node.name)
+            self.bound.add(node.name)
         elif isinstance(node, ast.alias):
-            names.add((node.asname or node.name).partition(".")[0])
+            self.bound.add((node.asname or node.name).partition(".")[0])
         elif isinstance(node, ast.ExceptHandler | ast.MatchAs | ast.MatchStar) and node.name:
-            names.add(node.name)
+            self.bound.add(node.name)
         elif isinstance(node, ast.MatchMapping) and node.rest:
-            names.add(node.rest)
-    return names
+            self.bound.add(node.rest)
+        elif isinstance(node, ast.Global):
+            self.globals.update(node.names)
+        elif isinstance(node, ast.Nonlocal):
+            self.nonlocals.update(node.names)
+
+    def means_module(self, name: str) -> bool:
+        """Whether name, read in this scope, means the module's name rather than one a scope of the judged function
+        binds: no scope from here out to the function's own binds it, a class body counting only for a name read in
+        it, unless one on the way declares it global. Valid once _callees has read the whole function."""
+        scope: _Scope | None = self
+        while scope is not None:
+            if name in scope.globals:
+                return True
+            if name in scope.bound and name not in scope.nonlocals and (scope is self or not scope.is_class):
+                return False
+            scope = scope.parent
+        return True
+
+
+def _type_parameters(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef) -> set[str]:
+    """The names of node's PEP 695 type parameters, as in def f[T](): none for a lambda, which has none."""
+    return {t.name for t in getattr(node, "type_params", [])
+            if isinstance(t, ast.TypeVar | ast.ParamSpec | ast.TypeVarTuple)}
+
+
+# The nodes that open a scope of their own as a function's body does: comprehensions, whose loop variables stay in.
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def _in_scopes(node: ast.AST, scope: _Scope, owner: str | None, function: str) -> list[tuple[ast.AST, _Scope, str | None]]:
+    """What node holds, each with the scope it is read in and the class self and cls name there, for _callees: a
+    nested function's or lambda's body, a comprehension and a class body in scopes of their own, its decorators,
+    defaults and bases in scope; anything else in scope, as node is. function is the judged function's name, which
+    marks a class nested in it as none of the module's."""
+    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+        outside = [*node.args.defaults, *node.args.kw_defaults, *getattr(node, "decorator_list", [])]
+        inner = _Scope.of_function(node, scope)
+        body = node.body if isinstance(node.body, list) else [node.body]
+        return [*((o, scope, owner) for o in outside if o is not None), *((s, inner, owner) for s in body)]
+    if isinstance(node, ast.ClassDef):
+        outer = _Scope(scope, False, _type_parameters(node)) if node.type_params else scope
+        members = _Scope(outer, True)
+        outside = [*node.decorator_list, *node.bases, *node.keywords]
+        marker = f"<{node.name} in {function}>"
+        return [*((o, outer, owner) for o in outside), *((s, members, marker) for s in node.body)]
+    if isinstance(node, _COMPREHENSIONS):
+        inner = _Scope(scope, False)
+        return [(child, inner, owner) for child in ast.iter_child_nodes(node)]
+    return [(child, scope, owner) for child in ast.iter_child_nodes(node)]
 
 
 # Vague names: names that fit anything, which tell a reader nothing about what they hold.
