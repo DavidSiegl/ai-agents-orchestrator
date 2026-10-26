@@ -10,6 +10,7 @@ import json
 import os
 import queue
 import re
+import resource
 import shlex
 import shutil
 import signal
@@ -7035,9 +7036,17 @@ class TestRunInSession(unittest.TestCase):
         self.assertEqual((proc.returncode, proc.stdout, proc.stderr, stopped), (3, "out\n", "err\n", False))
 
     def test_a_tool_that_exits_on_sigint_returns_what_it_printed(self):
-        proc, stopped = self.run_sh("trap 'echo bye; exit 5' INT; echo hi; while :; do sleep 0.1; done",
-                                    timeout=0.5, soft_stop=(signal.SIGINT, 5))
-        self.assertEqual((proc.returncode, proc.stdout, stopped), (5, "hi\nbye\n", True))
+        # Ignored, as in a Jenkins sh step, which starts its command as a background job of a non-interactive shell.
+        for here in (signal.SIG_IGN, signal.default_int_handler):
+            with self.subTest(sigint=here):
+                before = signal.signal(signal.SIGINT, here)
+                try:
+                    proc, stopped = self.run_sh("trap 'echo bye; exit 5' INT; echo hi; while :; do sleep 0.1; done",
+                                                timeout=0.5, soft_stop=(signal.SIGINT, 5))
+                    self.assertEqual(signal.getsignal(signal.SIGINT), here)
+                finally:
+                    signal.signal(signal.SIGINT, before)
+                self.assertEqual((proc.returncode, proc.stdout, stopped), (5, "hi\nbye\n", True))
 
     def test_a_tool_that_ignores_sigint_is_killed_after_the_grace(self):
         started = time.monotonic()
@@ -7052,6 +7061,16 @@ class TestRunInSession(unittest.TestCase):
     def test_a_tool_that_cannot_start_raises_oserror(self):
         with self.assertRaises(OSError):
             orchestrator._run_in_session(["/nonexistent/tool"], tempfile.gettempdir(), {}, timeout=1)
+
+    def test_an_ignored_soft_stop_signal_stays_ignored_here_when_the_tool_cannot_start(self):
+        before = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            with self.assertRaises(OSError):
+                orchestrator._run_in_session(["/nonexistent/tool"], tempfile.gettempdir(), {}, timeout=1,
+                                             soft_stop=(signal.SIGINT, 1))
+            self.assertEqual(signal.getsignal(signal.SIGINT), signal.SIG_IGN)
+        finally:
+            signal.signal(signal.SIGINT, before)
 
 
 class TestFlakyTests(unittest.TestCase):
@@ -9647,6 +9666,122 @@ class TestTooComplexFunctions(unittest.TestCase):
     def test_it_fails_the_gate(self):
         [check] = [c for c in orchestrator.gate_checks(orchestrator.MUTATION_BUDGET) if c.name == "cognitive-complexity"]
         self.assertEqual((check.fails, check.find), (True, orchestrator.too_complex_functions))
+
+
+class TestChangedPythonFiles(unittest.TestCase):
+    """How flaky-tests, surviving-mutants and cognitive complexity read the Python files a change touches, end to end
+    through each check over a real git repository."""
+
+    # d is a decorator that takes an argument, for the decorators below.
+    CALC = "def d(_):\n    return lambda f: f\n\n\ndef add(a, b):\n    return a + b\n"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = tmp.name
+        self.host = Host()
+        self.git("init", "--quiet", "-b", "main")
+        for key, setting in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
+            self.git("config", key, setting)
+        self.put("pyproject.toml", '[tool.mutmut]\nsource_paths = ["."]\n')
+        self.put("calc.py", self.CALC)
+        self.put("tests/test_calc.py", "import calc\n\n\ndef test_add():\n    assert calc.add(2, 3) == 5\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "base")
+
+    def git(self, *args):
+        return self.host.git(self.repo, *args)
+
+    def put(self, name, text):
+        path = os.path.join(self.repo, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    def change(self):
+        return orchestrator.GateChange.from_tree(self.repo, self.git("rev-parse", "HEAD").strip())
+
+    @staticmethod
+    @contextlib.contextmanager
+    def bounded(seconds):
+        """A context in which a check that blocks or reads without end fails the test, rather than hanging the suite
+        or taking the host's memory: SIGALRM after seconds interrupts an open() blocked on a FIFO, and on Linux an
+        address space limited to 1 GiB above the process's present size turns an endless read, as of /dev/zero, into
+        MemoryError. Elsewhere the address space is left as it is: macOS has no /proc and does not enforce
+        RLIMIT_AS."""
+        def expired(signum, frame):
+            raise AssertionError(f"the check ran longer than {seconds} seconds")
+
+        limits = resource.getrlimit(resource.RLIMIT_AS)
+        cap = limits[0]
+        if sys.platform == "linux":
+            with open("/proc/self/statm") as f:
+                size = int(f.read().split()[0]) * os.sysconf("SC_PAGE_SIZE")
+            cap = size + 2 ** 30 if limits[1] == resource.RLIM_INFINITY else min(size + 2 ** 30, limits[1])
+        previous = signal.signal(signal.SIGALRM, expired)
+        resource.setrlimit(resource.RLIMIT_AS, (cap, limits[1]))
+        signal.alarm(seconds)
+        try:
+            yield
+        finally:
+            signal.alarm(0)
+            resource.setrlimit(resource.RLIMIT_AS, limits)
+            signal.signal(signal.SIGALRM, previous)
+
+    def test_a_changed_symlink_to_a_fifo_or_dev_zero_is_not_read_by_the_checks_that_rerun_or_mutate(self):
+        elsewhere = tempfile.TemporaryDirectory()
+        self.addCleanup(elsewhere.cleanup)
+        fifo = os.path.join(elsewhere.name, "pipe")
+        os.mkfifo(fifo)
+        # /dev/zero only where bounded() can bound the endless read a regression would make of it.
+        for target in (fifo, "/dev/zero") if sys.platform == "linux" else (fifo,):
+            with self.subTest(target=target):
+                for name in ("x.py", "tests/test_x.py"):
+                    with contextlib.suppress(FileNotFoundError):
+                        os.remove(os.path.join(self.repo, name))
+                    os.symlink(target, os.path.join(self.repo, name))
+                self.git("add", "x.py", "tests/test_x.py")
+                with self.bounded(20):
+                    self.assertEqual(orchestrator.flaky_tests(self.change()), [])
+                    self.assertEqual(orchestrator.surviving_mutants(self.change(), budget=60), [])
+
+    def test_a_coding_cookie_naming_an_unknown_codec_is_the_same_reason_in_every_check(self):
+        source = "# -*- coding: nonsense -*-\ndef test_x():\n    pass\n"
+        self.put("x.py", source)
+        self.put("tests/test_x.py", source)
+        self.git("add", "x.py", "tests/test_x.py")
+        change = self.change()
+        found = [*orchestrator.flaky_tests(change), *orchestrator.surviving_mutants(change, budget=60),
+                 *orchestrator.too_complex_functions(change)]
+        self.assertEqual([(f["path"], f["rule"]) for f in found],
+                         [("tests/test_x.py", "not-rerun"), ("x.py", "not-run"), ("x.py", "not-scored")])
+        reasons = {f["message"].partition(", so ")[0] for f in found}
+        self.assertEqual(len(reasons), 1, reasons)
+        self.assertTrue(reasons.pop().startswith("could not be read ("))
+
+    # Decorators that ast.unparse cannot write: a sum too deep for its recursion, and an int, as hexadecimal, of
+    # more than sys.get_int_max_str_digits() decimal digits, which it writes in decimal.
+    DEEP_DECORATORS = {"deep": "@d(" + " + ".join(["1"] * 5000) + ")", "long": "@d(0x" + "f" * 4200 + ")"}
+
+    def test_a_changed_test_with_a_decorator_too_deep_or_too_long_to_write_is_still_rerun(self):
+        for kind, decorator in self.DEEP_DECORATORS.items():
+            with self.subTest(kind=kind), patch.object(orchestrator, "FLAKY_SEEDS", (1, 2)):
+                self.put("tests/test_calc.py", (
+                    "import calc\n\n\ndef d(_):\n    return lambda f: f\n\n\n"
+                    f"{decorator}\ndef test_add():\n    assert calc.add(2, 3) == 6\n"))
+                found = orchestrator.flaky_tests(self.change())
+                self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                                 [("tests/test_calc.py", 9, "failed-every-run")])
+
+    def test_a_changed_function_with_a_decorator_too_deep_or_too_long_to_write_is_not_mutated(self):
+        for kind, decorator in self.DEEP_DECORATORS.items():
+            with self.subTest(kind=kind):
+                self.put("calc.py", self.CALC.replace("def add(a, b):\n    return a + b",
+                                                      f"{decorator}\ndef add(a, b):\n    return b + a"))
+                found = orchestrator.surviving_mutants(self.change(), budget=60)
+                self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                                 [("calc.py", 6, "not-mutated")])
+                self.assertIn("mutmut does not mutate a decorated function", found[0]["message"])
 
 
 class TestToolFindings(unittest.TestCase):

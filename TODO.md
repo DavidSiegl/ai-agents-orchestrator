@@ -196,11 +196,13 @@ was done.
 - **`vague-names` does not split CamelCase.** `vague_names` matches a whole name or its last `_`-separated word,
   so `user_data` is found but a class `InfoManager` or `UserData` is not. Closes, if the run metrics show such names
   recur, with the last CamelCase word matched too.
-- **Nine test classes copy the same git-repository fixture.** `TestFlakyTests`, `TestPassesAtBase`, `TestVagueNames`,
-  `TestTooComplexFunctions` and five more each define a `setUp` that makes a repository, configures it and commits a
-  base, most with the same `git` and `put` helpers; eight of the copies bind the vague `value` that `vague-names` now
-  reports on added lines, and `TestVagueNames`' binds `setting`. Raised again by the cross-review of `written-rules`
-  (F8, 2026-10-24). Closes with one mixin or base class those tests share.
+- **Ten test classes copy the same git-repository fixture.** `TestFlakyTests`, `TestPassesAtBase`, `TestVagueNames`,
+  `TestTooComplexFunctions`, `TestChangedPythonFiles` and five more each define a `setUp` that makes a repository,
+  configures it and commits a base, most with the same `git` and `put` helpers; eight of the copies bind the vague
+  `value` that `vague-names` now reports on added lines, and `TestVagueNames`' and `TestChangedPythonFiles`' bind
+  `setting`. Raised again by the cross-review of `written-rules` (F8, 2026-10-24), and by that of
+  `gate-python-files` ("`TestChangedPythonFiles` copies the repo scaffolding once more", R1-F5, 2026-10-26). Closes
+  with one mixin or base class those tests share.
 - **`vague-names` reports a name an undecorated override cannot change.** A `def handle(self)` in a
   `socketserver.BaseRequestHandler` subclass, or a parameter the overridden signature names, has no fix; only a
   method marked `@override` is skipped (`_bound_names`). Raised by the cross-review of `written-rules` (F6,
@@ -295,29 +297,19 @@ was done.
   such files only when the project's coverage measures them, since `new_coverage` reads only the files the Cobertura
   report lists. Whether the linters should read them, leave them out, or the gate refuse them is open. Closes with that
   decision.
-- **The cognitive-complexity check reads and parses changed files in a loop of its own.** `_judged_files` and
-  `_working_functions` repeat `_changed_python_units`' reading, decoding and unreadable-file handling, because that
-  walker yields only top-level functions and methods of top-level classes, the units mutmut names, while the check
-  judges every function that no other function holds (`_scored_functions`). The two copies of the except clause
-  have to be kept alike, as a coding cookie naming an odd codec has shown twice. Closes with `_changed_python_units`
-  taking the walker as a parameter, or handing its callers the parsed trees.
-- **A changed `.py` symlink is read through to its target by the other Python checks.** `_changed_python_units`
-  opens every changed `.py` path, and `open()` follows a symlink, so a change that adds `x.py` as a symlink to a FIFO
-  blocks the surviving-mutants and flaky-tests selection, and one to `/dev/zero` reads without end. The
-  cognitive-complexity check skips such paths (`_is_link_or_special`, review round 5 of ticket 06, R5-F1). Found by
-  reading the code, not reproduced. Closes with `_changed_python_units` skipping what `_is_link_or_special` names.
+- **mutmut reads a symlinked `.py` file in the surviving-mutants copy.** `_copy_tracked` copies a tracked symlink
+  as a link (`orchestrator.py`), `_mark_for_mutmut` leaves links unmarked, and mutmut 3.8.0's `walk_all_files` lists
+  a symlink to a file and `create_mutants_for_file` opens it. So once any changed function starts mutmut, a change
+  adding `x.py -> calc.py` has every function of `calc.py` mutated a second time, as `x.py`, spending the budget on
+  mutants no finding reports; and `x.py -> /dev/zero` or a FIFO reads without end or blocks until the budget runs
+  out. The gate's own selection skips such links (`_parsed_changed_files`). Raised by the cross-review of
+  `gate-python-files` (R2-F1, 2026-10-26); rests on mutmut's source, not on a run. Closes with the copy or
+  `_mark_for_mutmut` keeping links out of mutmut's walk, without breaking a tracked link the tests import through,
+  and a test that also edits a real function.
 - **passes-at-base misses a deleted Python script with no `.py`.** `_edits_python_source` (`orchestrator.py`)
   counts a deleted file as Python source only by its `.py`, so a change that only deletes a `#!` python script
   outside the tests edits no Python source for it. Found while fixing the cognitive-complexity check's same gap
   (2026-10-25). Closes with that branch asking `_was_python_source`, which the complexity check now uses.
-- **A deep decorator can crash flaky-tests and surviving-mutants.** `_changed_python_units`, which both select
-  through (`_changed_python_tests`, `_changed_python_functions`), writes each decorator of a changed function with
-  `ast.unparse(d)`, which recurses as deep as the expression goes, so a function decorated with a deep expression,
-  such as a sum of a few thousand terms, can raise `RecursionError` out of the check, which GateCheck says must not
-  raise; an int of more than 4300 digits in one raises `ValueError` the same way. Raised by review round 5 of ticket
-  06 (R5-F5), its check named right in round 6 (R6-F3); confirmed at the node only, not end to end; the code is
-  surviving-mutants'. `_code` already survives both for findings' messages. Closes with the decorators compared by
-  `_body_fingerprint`-like fingerprints rather than their text, or the unparse guarded as `_code` guards it.
 - **A Python script with no `.py` is never judged by the cognitive-complexity check.** `_judged_files` judges only
   paths ending in `.py`, while the pairing reads a script whose `#!` line names python as Python
   (`_is_python_source`), so a function moved unchanged into `bin/tool` keeps its base, but one the change grows
@@ -343,6 +335,40 @@ was done.
   files.
 
 ## Fixed
+
+- **A deep decorator can crash flaky-tests and surviving-mutants.** `_changed_python_units`, which both select
+  through (`_changed_python_tests`, `_changed_python_functions`), writes each decorator of a changed function with
+  `ast.unparse(d)`, which recurses as deep as the expression goes, so a function decorated with a deep expression,
+  such as a sum of a few thousand terms, can raise `RecursionError` out of the check, which GateCheck says must not
+  raise; an int of more than 4300 digits in one raises `ValueError` the same way. Raised by review round 5 of ticket
+  06 (R5-F5), its check named right in round 6 (R6-F3); confirmed at the node only, not end to end; the code is
+  surviving-mutants'. `_code` already survives both for findings' messages. Closes with the decorators compared by
+  `_body_fingerprint`-like fingerprints rather than their text, or the unparse guarded as `_code` guards it.
+  Fixed (2026-10-26): `_python_units` writes each decorator through `_unparsed`, the guard `_code` now shares, which
+  gives why instead of raising; `_ChangedFunction.decorators` holds None for a decorator too deep or too long to
+  write, which `_unmutatable`, its one reader, counts as a decorator like any other. `TestChangedPythonFiles` runs
+  flaky-tests and surviving-mutants end to end on a sum of 5000 terms and on an int of 5058 decimal digits, written
+  in hexadecimal since a decimal literal that long does not parse.
+
+- **The cognitive-complexity check reads and parses changed files in a loop of its own.** `_judged_files` and
+  `_working_functions` repeat `_changed_python_units`' reading, decoding and unreadable-file handling, because that
+  walker yields only top-level functions and methods of top-level classes, the units mutmut names, while the check
+  judges every function that no other function holds (`_scored_functions`). The two copies of the except clause
+  have to be kept alike, as a coding cookie naming an odd codec has shown twice. Closes with `_changed_python_units`
+  taking the walker as a parameter, or handing its callers the parsed trees.
+  Fixed (2026-10-26): one walker, `_parsed_changed_files(change, wanted)`, reads and parses each changed `.py` file
+  through `_parse_working_file` and yields it as a `_ChangedPythonFile` (path, added lines, removal points, source,
+  tree or why not); `wanted(path, added, removed)` is each caller's filter. `_changed_python_units`, `_judged_files`
+  and `vague_names` all read through it, so the except clause and its wording live in `_parse_working_file` alone.
+
+- **A changed `.py` symlink is read through to its target by the other Python checks.** `_changed_python_units`
+  opens every changed `.py` path, and `open()` follows a symlink, so a change that adds `x.py` as a symlink to a FIFO
+  blocks the surviving-mutants and flaky-tests selection, and one to `/dev/zero` reads without end. The
+  cognitive-complexity check skips such paths (`_is_link_or_special`, review round 5 of ticket 06, R5-F1). Found by
+  reading the code, not reproduced. Closes with `_changed_python_units` skipping what `_is_link_or_special` names.
+  Fixed (2026-10-26): `_changed_python_units` reads through `_parsed_changed_files`, which skips whatever
+  `_is_link_or_special` names for every caller; `TestChangedPythonFiles` runs flaky-tests and surviving-mutants on a
+  change adding `x.py` and `tests/test_x.py` as symlinks to a FIFO and to `/dev/zero`, under a time and memory bound.
 
 - **Three gate checks repeat the make-a-scratch-directory, run, remove-it skeleton.** `flaky_tests`,
   `_mutation_test` and `passes_at_base` each call `tempfile.mkdtemp`, word their own finding when it fails, and word

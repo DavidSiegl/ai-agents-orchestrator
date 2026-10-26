@@ -3896,7 +3896,9 @@ class _ChangedFunction:
     line: int  # the line of its def
     first: int  # the line it starts on, its decorators included
     source: tuple[str, ...]  # its lines, from first on, as the working tree has them
-    decorators: tuple[str, ...] = ()  # each as written, without its @
+    # Each of its decorators as ast.unparse writes it, without its @; None for one too deep or too long for it to write,
+    # as _unparsed says.
+    decorators: tuple[str | None, ...] = ()
     # The last line of the statement before it in its module or class, else its class's first line, else 0.
     floor: int = 0
 
@@ -3915,28 +3917,17 @@ def _adds_to(f: _ChangedFunction, added: set[int], removed: set[int]) -> bool:
 def _changed_python_units(change: GateChange, in_scope: Callable[[str], bool],
                           touched: Callable[[_ChangedFunction, set[int], set[int]], bool] = _adds_to,
                           ) -> tuple[list[_ChangedFunction], list[tuple[str, str]]]:
-    """The top-level functions and methods of top-level classes, in the Python files of the working tree whose paths
-    in_scope accepts, that the change touched: touched(unit, added, removed) says so, added being the lines the change
-    added to its file and removed the lines after which a hunk that only removes lines removed them, 0 for the top, as
-    _removal_points gives them. And (path, why) for each such file that could not be read or parsed, why a clause such
-    as "does not parse as Python"."""
+    """The top-level functions and methods of top-level classes that the change touched, in the Python files it adds
+    lines to or removes lines from whose paths in_scope accepts, as _parsed_changed_files gives those files:
+    touched(unit, added, removed) says so, with the file's _ChangedPythonFile.added and .removed. And (path, why) for
+    each such file that could not be read or parsed, with _ChangedPythonFile.why."""
     functions, unreadable = [], []
-    removed = _removal_points(change.diff)
-    for path, added in change.changed.items():
-        points = removed.get(path, set())
-        if not (added or points) or not path.endswith(".py") or not in_scope(path):
-            continue
-        try:
-            with open(os.path.join(change.root, path), "rb") as f:
-                text, _ = _decode_python(f.read())
-        except (OSError, SyntaxError) as e:
-            unreadable.append((path, f"could not be read ({e})"))
-            continue
-        tree = _parse_python(text)
-        if tree is None:
-            unreadable.append((path, "does not parse as Python"))
-            continue
-        functions += [unit for unit in _python_units(path, text, tree) if touched(unit, added, points)]
+    for changed in _parsed_changed_files(change, lambda path, added, removed: bool(added or removed) and in_scope(path)):
+        if changed.tree is None:
+            unreadable.append((changed.path, changed.why))
+        else:
+            functions += [unit for unit in _python_units(changed.path, changed.text, changed.tree)
+                          if touched(unit, changed.added, changed.removed)]
     return functions, unreadable
 
 
@@ -3957,7 +3948,7 @@ def _python_units(path: str, text: str, tree: ast.Module) -> list[_ChangedFuncti
                 first = min([unit.lineno, *(d.lineno for d in unit.decorator_list)])
                 out.append(_ChangedFunction(path, prefix + unit.name, unit.lineno, first,
                                             tuple(lines[first - 1:unit.end_lineno or unit.lineno]),
-                                            tuple(ast.unparse(d) for d in unit.decorator_list), floor))
+                                            tuple(_unparsed(d)[0] or None for d in unit.decorator_list), floor))
     return out
 
 
@@ -4084,17 +4075,24 @@ def _literals(node: ast.AST) -> list:
 
 def _code(node: ast.AST) -> str:
     """node as Python source, for a finding's message: its first line, clipped; or a note that it is too deep or too
-    long to print. ast.unparse recurses as deep as the tree goes, and so overflows the stack on valid code such as a
-    sum of a few thousand terms; and it writes an int with repr, which refuses one of more than
-    sys.get_int_max_str_digits() decimal digits."""
-    where = f"code at line {getattr(node, 'lineno', '?')}"
-    try:
-        text = ast.unparse(node)
-    except RecursionError:
-        return f"({where}, too deep to print)"
-    except ValueError:
-        return f"({where}, too long to print)"
+    long to print, as _unparsed says."""
+    text, why = _unparsed(node)
+    if why:
+        return f"(code at line {getattr(node, 'lineno', '?')}, {why} to print)"
     return _clip(text.splitlines()[0] if text else text)
+
+
+def _unparsed(node: ast.AST) -> tuple[str, str]:
+    """node as Python source, as ast.unparse writes it, and ""; or "" and why it cannot be written, "too deep" or "too
+    long". ast.unparse recurses as deep as the tree goes, and so overflows the stack on valid code such as a sum of a
+    few thousand terms; and it writes an int with repr, which refuses one of more than sys.get_int_max_str_digits()
+    decimal digits."""
+    try:
+        return ast.unparse(node), ""
+    except RecursionError:
+        return "", "too deep"
+    except ValueError:
+        return "", "too long"
 
 
 def _clip(text: str, n: int = 160) -> str:
@@ -4127,6 +4125,8 @@ def flaky_tests(change: GateChange) -> list[dict]:
     no run told anything, the finding about the run that went wrong stands for them all.
 
     pytest decides which of those defs are tests, so a helper named test_* that it does not collect is not rerun.
+    A changed path that is a symlink, a submodule or a special file holds no test the change edits, and is not read
+    (_is_link_or_special): no test is rerun through a symlink, whose target is rerun only as a file the change edits.
     pytest and pytest-randomly must be importable by the gate's own interpreter, as a `uv run` of the project makes
     them. A pytest run that cannot start, takes longer than FLAKY_RUN_TIMEOUT, ends in a usage or collection error
     or writes no readable report ends the reruns of the tests under its configuration with a finding saying so, after
@@ -4494,17 +4494,19 @@ def _run_in_session(argv: list[str], cwd: str, env: dict[str, str], *, timeout: 
     stopped for running longer than timeout seconds.
 
     Stopped, it is killed, or with soft_stop, a (signal, grace) pair, first sent that signal and given grace seconds
-    to exit. Once it has exited, every process left in its process group, such as a server it started, is killed
-    too, and what was printed is read until no process holds the output open, for at most TOOL_KILL_WAIT seconds
-    more: only one outside the group, in a session of its own, can still hold it, and what that prints later is
-    lost. So the call returns within timeout + grace + TOOL_KILL_WAIT seconds, the process reaped unless it could not
-    exit within them. The output is decoded as _git_run's verbatim output is, so that paths in it keep their bytes;
-    the exit status is -SIGKILL when the kill is the last thing known of it. Raises OSError when argv cannot be
-    started.
+    to exit; called on the main thread, it starts with that signal's default disposition even where this process
+    ignores it (_not_ignored_in_children). Once it has exited, every process left in its process group, such as a
+    server it started, is killed too, and what was printed is read until no process holds the output open, for at
+    most TOOL_KILL_WAIT seconds more: only one outside the group, in a session of its own, can still hold it, and
+    what that prints later is lost. So the call returns within timeout + grace + TOOL_KILL_WAIT seconds, the process
+    reaped unless it could not exit within them. The output is decoded as _git_run's verbatim output is, so that
+    paths in it keep their bytes; the exit status is -SIGKILL when the kill is the last thing known of it. Raises
+    OSError when argv cannot be started.
     """
     # The callers' fixed commands, over names their tools listed; no shell reads them.
-    proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,  # noqa: S603
-                            stderr=subprocess.PIPE, start_new_session=True)
+    with _not_ignored_in_children(soft_stop[0] if soft_stop else None):
+        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,  # noqa: S603
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     # Both, by the PIPEs above: standard output, then standard error.
     streams = [stream for stream in (proc.stdout, proc.stderr) if stream is not None]
     printed: dict[int, list[bytes]] = {stream.fileno(): [] for stream in streams}
@@ -4562,6 +4564,25 @@ def _read_ready(pipes: selectors.BaseSelector, printed: dict[int, list[bytes]], 
             printed[key.fd].append(chunk)
         else:
             pipes.unregister(key.fd)
+
+
+@contextlib.contextmanager
+def _not_ignored_in_children(sig: signal.Signals | None) -> Iterator[None]:
+    """While open, a process this one starts gets sig with its default disposition, also when this process ignores
+    it, as a command a Jenkins sh step runs ignores SIGINT; afterwards this process treats sig as it did before. An
+    ignored signal stays ignored across exec, and a Python started so never raises KeyboardInterrupt, so a soft stop
+    by it would reach a tool that ignores it. Meanwhile sig is caught and dropped here, as ignoring it would. Only the
+    main thread can set a handler, so elsewhere, and for sig None, nothing changes."""
+    if (sig is None or signal.getsignal(sig) != signal.SIG_IGN
+            or threading.current_thread() is not threading.main_thread()):
+        yield
+        return
+    # A handler is reset to the default on exec, which ignoring is not.
+    signal.signal(sig, lambda *_: None)
+    try:
+        yield
+    finally:
+        signal.signal(sig, signal.SIG_IGN)
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
@@ -4912,7 +4933,11 @@ def surviving_mutants(change: GateChange, *, budget: float) -> list[dict]:
     a line to in a Python file outside the tests. Reports at its def each such function that has mutants the tests did
     not notice, with how many of its mutants they were and what the first _SURVIVOR_EXAMPLES change, as a line before
     and after; and each such function that no test calls. The change leaves out mutmut's state, as
-    GateChange.from_tree says, so no function there is mutated.
+    GateChange.from_tree says, so no function there is mutated. A changed path that is a symlink, a submodule or a
+    special file is not read to choose the functions (_is_link_or_special), so none of its functions is a changed
+    one; a symlink's target has its functions chosen only as a file the change edits. mutmut's own walk of the copy
+    still reads a symlink to a .py file, and makes mutants of it that no finding reports, once any changed function
+    starts it.
 
     mutmut runs in the gate's own interpreter, as flaky_tests runs pytest, on a copy of the files git tracks. The copy
     leaves out what the tree tracks under mutmut's state, so mutmut starts without a cache. mutmut runs there by the
@@ -5677,24 +5702,39 @@ def _judged_files(change: GateChange) -> tuple[list[dict], dict[str, tuple[list[
     or parsed; and, by path, the scored functions of each of the others, with the lines the change adds to it."""
     out: list[dict] = []
     judged: dict[str, tuple[list[_ScoredFunction], set[int]]] = {}
-    for path, added, tree, why in _parsed_changed_files(change, skip=lambda path: path.startswith(_COMPLEXITY_EXEMPT)):
-        if tree is None:
-            out.append(_finding(path, None, "not-scored", f"{why}, so its functions were not scored.",
+    for changed in _parsed_changed_files(change, lambda path, added, removed: bool(added)
+                                         and not path.startswith(_COMPLEXITY_EXEMPT)):
+        if changed.tree is None:
+            out.append(_finding(changed.path, None, "not-scored", f"{changed.why}, so its functions were not scored.",
                                 severity="error"))
         else:
-            judged[path] = (_scored_functions(tree), added)
+            judged[changed.path] = (_scored_functions(changed.tree), changed.added)
     return out, judged
 
 
-def _parsed_changed_files(change: GateChange, skip: Callable[[str], bool] = lambda path: False,
-                          ) -> Iterator[tuple[str, set[int], ast.Module | None, str]]:
-    """Each .py file the change adds lines to, as a regular file of the working tree (_is_link_or_special) whose path
-    skip does not accept: its path, the lines the change adds to it, and its syntax tree and "", or None and why there
-    is none, as _parse_working_file gives them. Files under mutmut's state are not changed files, as
-    GateChange.from_tree says."""
+@dataclass(frozen=True)
+class _ChangedPythonFile:
+    """A .py file of the change, as the working tree holds it and _parse_working_file reads it."""
+    path: str
+    added: set[int]  # the lines the change adds to it, from 1
+    removed: set[int]  # the points it only removes lines at, as _removal_points gives them; empty when there are none
+    text: str  # its source, decoded as Python decodes it; "" when it could not be read
+    tree: ast.Module | None  # its syntax tree; None when it could not be read or does not parse
+    why: str  # why tree is None, a clause such as "does not parse as Python"; "" when it is not None
+
+
+def _parsed_changed_files(change: GateChange, wanted: Callable[[str, set[int], set[int]], bool]
+                          = lambda path, added, removed: bool(added)) -> Iterator[_ChangedPythonFile]:
+    """Each .py file the change touches that wanted(path, added, removed) accepts, by default each it adds lines to,
+    read and parsed; the arguments are what the _ChangedPythonFile fields of those names hold. Only a regular file of
+    the working tree is read: a symlink, a submodule, a FIFO or a device is left out whatever wanted says
+    (_is_link_or_special). A file the change deletes is not among them, as changed_lines says, nor is one under
+    mutmut's state, as GateChange.from_tree says."""
+    removals = _removal_points(change.diff)
     for path, added in change.changed.items():
-        if added and path.endswith(".py") and not skip(path) and not _is_link_or_special(change, path):
-            yield path, added, *_parse_working_file(change, path)
+        removed = removals.get(path, set())
+        if path.endswith(".py") and wanted(path, added, removed) and not _is_link_or_special(change, path):
+            yield _ChangedPythonFile(path, added, removed, *_parse_working_file(change, path))
 
 
 def _is_link_or_special(change: GateChange, path: str) -> bool:
@@ -5755,20 +5795,21 @@ def _holds_python(path: str, first_line: Callable[[], bytes]) -> bool:
 def _working_functions(change: GateChange, path: str) -> tuple[list[_ScoredFunction] | None, str]:
     """The scored functions of the working tree's file at path, and ""; or None and why there are none, as
     _parse_working_file says."""
-    tree, why = _parse_working_file(change, path)
+    _, tree, why = _parse_working_file(change, path)
     return (None, why) if tree is None else (_scored_functions(tree), "")
 
 
-def _parse_working_file(change: GateChange, path: str) -> tuple[ast.Module | None, str]:
-    """The syntax tree of the working tree's file at path, read as Python reads it, by its byte order mark or coding
-    cookie, and ""; or None and why there is none, a clause: it could not be read, or does not parse as Python."""
+def _parse_working_file(change: GateChange, path: str) -> tuple[str, ast.Module | None, str]:
+    """The source of the working tree's file at path, read as Python reads it, by its byte order mark or coding
+    cookie, its syntax tree, and ""; or why there is no tree, a clause, after "" and None when the file could not be
+    read, or after its source when it does not parse as Python."""
     try:
         with open(os.path.join(change.root, path), "rb") as source:
             text, _ = _decode_python(source.read())
     except (OSError, SyntaxError) as e:
-        return None, f"could not be read ({e})"
+        return "", None, f"could not be read ({e})"
     tree = _parse_python(text)
-    return (None, "does not parse as Python") if tree is None else (tree, "")
+    return (text, None, "does not parse as Python") if tree is None else (text, tree, "")
 
 
 def _base_functions(change: GateChange, path: str) -> list[_ScoredFunction]:
@@ -6117,9 +6158,10 @@ def vague_names(change: GateChange) -> list[dict]:
     add is never reported. A name is bound as _bound_names says. A changed file that cannot be read or parsed is a
     finding saying so; the files are those _parsed_changed_files gives."""
     out = []
-    for path, added, tree, why in _parsed_changed_files(change):
+    for changed in _parsed_changed_files(change):
+        path, added, tree = changed.path, changed.added, changed.tree
         if tree is None:
-            out.append(_finding(path, None, "not-read", f"{why}, so its names were not read."))
+            out.append(_finding(path, None, "not-read", f"{changed.why}, so its names were not read."))
             continue
         # Each vague name's first binding on an added line, as (line, column).
         first: dict[str, tuple[int, int]] = {}
@@ -11179,16 +11221,14 @@ class RunProcess:
     """A CLI command the GUI started, its stdout and stderr read together on a thread."""
 
     def __init__(self, argv: list[str], popen=subprocess.Popen):
-        # An ignored SIGINT stays ignored across exec, and a Python started so never raises KeyboardInterrupt:
-        # in a GUI started that way, as a non-interactive shell starts a background job, Stop would do nothing.
-        # exec resets a handler to the default, so handling it here lets the command take Ctrl-C again.
-        if signal.getsignal(signal.SIGINT) == signal.SIG_IGN:
-            signal.signal(signal.SIGINT, signal.default_int_handler)
-        # A session of its own, so Stop can signal its process group as Ctrl-C in a terminal does.
-        # Unbuffered, so the output arrives as it is printed rather than when the run ends.
-        self.proc = popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                          text=True, errors="replace", start_new_session=True,
-                          env={**os.environ, "PYTHONUNBUFFERED": "1"})
+        # A session of its own, so Stop can signal its process group as Ctrl-C in a terminal does; and SIGINT not
+        # ignored there, which a GUI started as a background job of a non-interactive shell would pass on (the
+        # with below, not the session, is what keeps it). Unbuffered, so the output arrives as it is printed rather
+        # than when the run ends.
+        with _not_ignored_in_children(signal.SIGINT):
+            self.proc = popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, errors="replace", start_new_session=True,
+                              env={**os.environ, "PYTHONUNBUFFERED": "1"})
         self._lines = queue.Queue()
         threading.Thread(target=self._read, daemon=True).start()
 
