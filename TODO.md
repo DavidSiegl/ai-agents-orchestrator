@@ -212,16 +212,6 @@ was done.
   there. Accepted: the check reports only, and splitting the file's tests from its imports would mean rewriting
   them. Closes, if its run metrics show these files are common, by importing such names inside the tests that use
   them, or by running each test with the failing import stubbed.
-- **A `conftest.py` that fails at the base other than by `ImportError` makes `passes-at-base` not-run.** One that
-  reaches a name the change adds by attribute (`import calc; calc.TWO`, an `AttributeError`) stops pytest with exit 4
-  as an `ImportError` does, but `_conftest_import_failed` accepts only `ImportError` and `ModuleNotFoundError`, so
-  the whole check is `not-run`, where a test file failing the same way gives nothing. Loud, not wrong. Raised by the
-  cross-review of `passes-at-base` (round 3, 2026-10-24). Closes by telling a conftest.py the change edits from one
-  it does not, and taking any failure of the first as the expected outcome.
-- **The fallback collection runs one pytest per changed test file.** When a `conftest.py` cannot be imported at the
-  base, `_collect_at_base` collects each changed file on its own, each paying pytest's start-up from the shared
-  budget, and a failing root `conftest.py` makes every file repeat the failure. Raised by the same review. Closes by
-  reading the failing conftest's path from pytest's output and leaving out only the files under it, in one more run.
 - **A submodule is empty in `passes-at-base`'s copy of the base.** `git archive` leaves a submodule's directory
   empty, so a changed test that imports from one fails to import at the base and gives nothing, though it might pass
   there; the check misses it. Raised by the cross-review of `passes-at-base` (R1-5, 2026-10-24): "`git archive` omits
@@ -336,6 +326,26 @@ was done.
   files.
 
 ## Fixed
+
+- **A `conftest.py` that fails at the base other than by `ImportError` makes `passes-at-base` not-run.** One that
+  reaches a name the change adds by attribute (`import calc; calc.TWO`, an `AttributeError`) stops pytest with exit 4
+  as an `ImportError` does, but `_conftest_import_failed` accepts only `ImportError` and `ModuleNotFoundError`, so
+  the whole check is `not-run`, where a test file failing the same way gives nothing. Loud, not wrong. Raised by the
+  cross-review of `passes-at-base` (round 3, 2026-10-24). Closes by telling a conftest.py the change edits from one
+  it does not, and taking any failure of the first as the expected outcome.
+  Fixed (2026-10-26): `_failing_conftest` reads the path of the `conftest.py` that stopped pytest from pytest's
+  "ImportError while loading conftest '<path>'", which pytest 9 prints for any exception, and `_collect_at_base` asks
+  `change.changed`, through the `_BaseRun` it is given, whether the change edits it: the tests under one it edits give
+  nothing, whatever it raised, and one it does not edit is a `not-run` finding naming it, as the base itself fails
+  there.
+
+- **The fallback collection runs one pytest per changed test file.** When a `conftest.py` cannot be imported at the
+  base, `_collect_at_base` collects each changed file on its own, each paying pytest's start-up from the shared
+  budget, and a failing root `conftest.py` makes every file repeat the failure. Raised by the same review. Closes by
+  reading the failing conftest's path from pytest's output and leaving out only the files under it, in one more run.
+  Fixed (2026-10-26): `_collect_at_base` leaves out the changed files under the failing `conftest.py`
+  (`_failing_conftest`) and collects the rest in one more run, repeating only while a run names another; a failing
+  root `conftest.py` costs one collection.
 
 - **`passes-at-base` reads every changed test as passing in a project installed into the gate's interpreter.**
   `_base_run_findings` runs pytest in the gate's interpreter, so the base's code is whatever the copy's

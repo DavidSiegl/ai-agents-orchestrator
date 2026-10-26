@@ -7840,14 +7840,48 @@ class TestPassesAtBase(unittest.TestCase):
         self.assertEqual([(f["path"], f["message"].split("`")[1]) for f in self.found()],
                          [("tests/test_calc.py", "test_mul_one")])
 
-    def test_a_conftest_broken_otherwise_is_a_finding(self):
+    def test_a_conftest_the_change_does_not_edit_failing_is_a_finding(self):
         self.put("calc.py", self.CALC.replace("a - b", "a + b"))
         self.put("tests/conftest.py", "raise RuntimeError('broken')\n")
         self.git("add", "tests/conftest.py")
         self.git("commit", "--quiet", "-m", "broken conftest")
         self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_one():\n    assert mul(1, 1) == 1\n")
-        self.assertEqual([(f["rule"], "exited with status 4" in f["message"]) for f in self.found()],
-                         [("not-run", True)])
+        self.assertEqual([(f["path"], f["rule"], f["message"]) for f in self.found()], [(
+            None, "not-run", ("pytest, collecting the changed tests at the base, could not load `tests/conftest.py`, "
+                              "which the change does not edit, so the base fails there: RuntimeError: broken; the "
+                              "changed tests were not run there."))])
+
+    def test_a_conftest_the_change_edits_failing_otherwise_hides_only_the_tests_under_it(self):
+        # At the base, calc has no TWO, so the conftest.py the change edits raises AttributeError there.
+        self.put("tests/b/conftest.py", "import calc\n")
+        self.git("add", "tests/b/conftest.py")
+        self.git("commit", "--quiet", "-m", "conftest")
+        self.put("calc.py", self.CALC.replace("a - b", "a + b") + "\n\nTWO = 2\n")
+        self.put("tests/b/conftest.py", "import calc\n\nTWO = calc.TWO\n")
+        self.put("tests/b/test_two.py", "from calc import mul\n\n\ndef test_two():\n    assert mul(2, 1) == 2\n")
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_one():\n    assert mul(1, 1) == 1\n")
+        self.assertEqual([(f["path"], f["message"].split("`")[1]) for f in self.found()],
+                         [("tests/test_calc.py", "test_mul_one")])
+
+    def test_a_failing_root_conftest_costs_one_collection(self):
+        self.put("calc.py", self.CALC.replace("a - b", "a + b") + "\n\nTWO = 2\n")
+        self.put("conftest.py", "import calc\n\nTWO = calc.TWO\n")
+        for name in ("a", "b", "c"):
+            self.put(f"tests/test_{name}.py", "from calc import mul\n\n\ndef test_one():\n    assert mul(1, 1) == 1\n")
+        with patch.object(orchestrator, "_pytest", wraps=orchestrator._pytest) as pytest_run:
+            self.assertEqual(self.found(), [])
+        self.assertLessEqual(pytest_run.call_count, 2)
+
+    def test_a_failing_conftest_above_none_of_the_changed_tests_is_a_finding(self):
+        # Real pytest fails only at a conftest.py above a file it was given; a fake one names another, which ends
+        # the collection rather than repeating it.
+        self.put("elsewhere/conftest.py", "")
+        self.fix_add()
+        self.fake_pytest("echo \"ImportError while loading conftest 'elsewhere/conftest.py'.\"; "
+                         "echo 'E   AttributeError: x'; exit 4", "exit 0")
+        self.assertEqual([(f["rule"], f["message"]) for f in self.found()], [(
+            "not-run", ("pytest, collecting the changed tests at the base, could not load `elsewhere/conftest.py`, "
+                        "above none of the changed tests: AttributeError: x; the changed tests were not run there."))])
 
     def test_nothing_is_written_through_a_link_the_change_replaces(self):
         outside = tempfile.mkdtemp()

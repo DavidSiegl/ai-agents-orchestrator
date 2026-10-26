@@ -4650,24 +4650,24 @@ def passes_at_base(change: GateChange, *, budget: float) -> list[dict]:
 
     The tests run with pytest, in the gate's own interpreter, in the files git tracked at the base, as `git archive`
     writes them (so a path the base's .gitattributes marks export-ignore is missing there, and a submodule is empty),
-    with every file of the tests the change touches, conftest.py and data included, taken from the working tree
-    instead, or removed where the change removed it. pytest first collects the changed test files there, then runs
-    those of the changed tests it collected. A test passes there when pytest passed each of its cases that it did not
-    skip, all its parameter sets included. One that fails or errors there tests the change, which is what the check
-    expects, and gives nothing; so does one that pytest does not collect there: a test whose file cannot be imported at
-    the base, or whose conftest.py raises ImportError there, whatever the test itself checks, and a test_* method of a
-    class pytest does not take for a test class. The base's code is what the copy's import roots, its top and its src/,
-    and its own configuration, such as pytest's pythonpath, import, ahead of what is installed into the gate's
-    interpreter, an editable install of the project included. A run that still imports the project's code from the
-    working tree, as from a package an editable install finds outside those roots, judges none of its tests and is a
-    not-run finding naming the package.
+    with every file of the tests the change touches, conftest.py and data included, taken from the working tree instead,
+    or removed where the change removed it. pytest first collects the changed test files there, then runs those of the
+    changed tests it collected. A test passes there when pytest passed each of its cases that it did not skip, all its
+    parameter sets included. One that fails or errors there tests the change, which is what the check expects, and gives
+    nothing; so does one that pytest does not collect there: a test whose file cannot be imported at the base, or that
+    lies under a conftest.py the change edits that fails to load there, whatever it raises and whatever the test itself
+    checks, and a test_* method of a class pytest does not take for a test class. The base's code is what the copy's
+    import roots, its top and its src/, and its own configuration, such as pytest's pythonpath, import, ahead of what is
+    installed into the gate's interpreter, an editable install of the project included. A run that still imports the
+    project's code from the working tree, as from a package an editable install finds outside those roots, judges none
+    of its tests and is a not-run finding naming the package.
 
-    The collections and runs together, one of each for every configuration the changed tests fall under, may take
-    budget seconds; a stop there is a budget-reached finding saying when, and how many test cases the run had run,
-    and none of that configuration's outcomes is reported; the configurations after it are not run, each a not-run
-    finding saying so. A pytest that cannot start, stops before it collects, stops with a usage error other than a
-    conftest.py's ImportError, or writes no readable report, a changed test file that cannot be read or parsed, and a
-    copy that cannot be made are not-run findings saying so; a copy that cannot be removed afterwards is a finding of
+    The collections and runs together, one of each for every configuration the changed tests fall under, may take budget
+    seconds; a stop there is a budget-reached finding saying when, and how many test cases the run had run, and none of
+    that configuration's outcomes is reported; the configurations after it are not run, each a not-run finding saying
+    so. A pytest that cannot start, stops before it collects, fails to load a conftest.py the change does not edit,
+    stops with another usage error, or writes no readable report, a changed test file that cannot be read or parsed, and
+    a copy that cannot be made are not-run findings saying so; a copy that cannot be removed afterwards is a finding of
     its own.
     """
     if not _edits_python_source(change):
@@ -4866,50 +4866,65 @@ def _collect_at_base(run: _BaseRun, setup: _PytestSetup,
                      tests: dict[tuple[str, str], int]) -> tuple[list[str], bool, str | None]:
     """The node ids, one per parameter set, of those of tests, keyed by their paths from setup's root, that pytest
     collects by setup in run's copy of the base, with its env, by its deadline; whether the deadline stopped it; and
-    the problem, a clause, when it went wrong otherwise. A test file that cannot be imported at the base, or a
-    conftest.py whose import raises ImportError there, gives no ids for the tests it covers and no problem:
-    that is the expected outcome for a test of what the change adds. So does a test pytest does not collect, such as a
-    test_* method of a class not named Test*. A pytest that stops before it collects, as for a plugin that cannot be
-    imported, is a problem."""
+    the problem, a clause, when it went wrong otherwise.
+
+    A test file that cannot be imported at the base gives no ids for the tests it covers and no problem: that is the
+    expected outcome for a test of what the change adds. So does each test under a conftest.py the change edits that
+    fails to load there, whatever it raises, and a test pytest does not collect, such as a test_* method of a class
+    not named Test*. A conftest.py the change does not edit that fails to load is a problem: the base itself fails
+    there. So is a pytest that stops before it collects, as for a plugin that cannot be imported."""
     files = sorted({path for path, _ in tests})
-    # Exit status 1: some file could not be collected, which --continue-on-collection-errors lets the others outlive;
-    # 4, a usage error, which a conftest.py that cannot be imported gives; 5: no test was collected.
-    proc, problem = _pytest(setup, "collecting the changed tests at the base",
-                            ["-p", "no:randomly", "--collect-only", "--continue-on-collection-errors",
-                             *map(setup.argument, files)],
-                            timeout=run.deadline - time.monotonic(), ok=(0, 1, 4, 5), env=run.env)
-    if isinstance(proc, _PytestStopped):
-        return [], True, None
-    if problem or proc is None:
-        return [], False, problem
-    # pytest exits 1 too when it stops before collecting, as for a plugin a conftest.py names that cannot be imported;
-    # then it prints a traceback and no summary of what it collected.
-    if proc.returncode == 1 and not re.search(r"^(?:no tests|\d+ tests?) collected\b", proc.stdout, re.MULTILINE):
-        return [], False, f"pytest stopped before it collected the changed tests at the base: {_said(proc)}"
-    if proc.returncode != 4:
-        ids, problem = _listed_tests(proc, "collecting the changed tests at the base", tests)
-        return ids, False, problem
-    if not _conftest_import_failed(proc):
-        return [], False, f"pytest, collecting the changed tests at the base, exited with status 4: {_said(proc)}"
-    if len(files) == 1:
-        return [], False, None
-    # pytest loads the conftest.py files of every path it is given before it collects any, so one that cannot be
-    # imported stops them all: each file is collected on its own, and only those under it give nothing.
-    collected: list[str] = []
-    for path in files:
-        found, stopped, problem = _collect_at_base(run, setup, {t: n for t, n in tests.items() if t[0] == path})
-        if stopped or problem:
-            return [], stopped, problem
-        collected += found
-    return collected, False, None
+    doing = "collecting the changed tests at the base"
+    # pytest loads the conftest.py files above every path it is given before it collects any, so one that fails stops
+    # them all: the files under it are left out, and the others collected again, until none fails. Each round leaves
+    # out at least the file that led pytest to the conftest.py.
+    while files:
+        # Exit status 1: some file could not be collected, which --continue-on-collection-errors lets the others
+        # outlive; 4, a usage error, which a conftest.py that fails to load gives; 5: no test was collected.
+        proc, problem = _pytest(setup, doing,
+                                ["-p", "no:randomly", "--collect-only", "--continue-on-collection-errors",
+                                 *map(setup.argument, files)],
+                                timeout=run.deadline - time.monotonic(), ok=(0, 1, 4, 5), env=run.env)
+        if isinstance(proc, _PytestStopped):
+            return [], True, None
+        if problem or proc is None:
+            return [], False, problem
+        # pytest exits 1 too when it stops before collecting, as for a plugin a conftest.py names that cannot be
+        # imported; then it prints a traceback and no summary of what it collected.
+        if proc.returncode == 1 and not re.search(r"^(?:no tests|\d+ tests?) collected\b", proc.stdout, re.MULTILINE):
+            return [], False, f"pytest stopped before it collected the changed tests at the base: {_said(proc)}"
+        if proc.returncode != 4:
+            ids, problem = _listed_tests(proc, doing, tests)
+            return ids, False, problem
+        failed = _failing_conftest(proc, setup.top)
+        if failed is None:
+            return [], False, f"pytest, {doing}, exited with status 4: {_said(proc)}"
+        conftest, error = failed
+        if conftest not in run.change.changed:
+            return [], False, (f"pytest, {doing}, could not load `{conftest}`, which the change does not edit, so the "
+                               f"base fails there: {error}")
+        # One at the top, whose directory is "", covers every file.
+        under = os.path.dirname(conftest)
+        left = [path for path in files if under and not setup.argument(path).startswith(f"{under}/")]
+        if left == files:
+            return [], False, f"pytest, {doing}, could not load `{conftest}`, above none of the changed tests: {error}"
+        files = left
+    return [], False, None
 
 
-def _conftest_import_failed(proc: subprocess.CompletedProcess) -> bool:
-    """Whether proc, a pytest run that exited with status 4, stopped because a conftest.py raised ImportError (or
-    ModuleNotFoundError) as it loaded, as pytest 9 words that: not for any other exception a conftest.py raises."""
+def _failing_conftest(proc: subprocess.CompletedProcess, top: str) -> tuple[str, str] | None:
+    """The conftest.py that stopped proc, a pytest run that exited with status 4, as it loaded, whatever it raised,
+    by its path from top, the directory pytest ran in: as pytest 9 words that (print_conftest_import_error in its
+    _pytest/config/__init__.py), "ImportError while loading conftest '<path>'." for any exception. And the exception,
+    as the first line pytest marks "E" below that, or the conftest line itself when there is none. None when proc
+    names no such file."""
     said = proc.stdout + proc.stderr
-    return ("ImportError while loading conftest" in said
-            and re.search(r"^E\s+(?:ImportError|ModuleNotFoundError)\b", said, re.MULTILINE) is not None)
+    found = re.search(r"^ImportError while loading conftest '(.*)'\.$", said, re.MULTILINE)
+    if found is None:
+        return None
+    raised = re.compile(r"^E\s+(\S.*)$", re.MULTILINE).search(said, found.end())
+    path = os.path.relpath(os.path.realpath(os.path.join(top, found[1])), os.path.realpath(top))
+    return path.replace(os.sep, "/"), _clip(raised[1].strip() if raised else found[0])
 
 
 def _base_run_budget_reached(budget: float, when: str) -> dict:
