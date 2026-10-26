@@ -44,6 +44,10 @@ was done.
 
 ## Open issues
 
+- **`TestGate.test_a_missing_tool_fails_naming_it` fails where shellcheck lives beside git.** `TestGate.setUp`
+  (`tests/test_orchestrator.py`) puts git's own directory on `PATH` after the stubs, so on a machine with
+  `/usr/bin/shellcheck` (agentbox, Debian's package) removing the stub still finds the real one and the gate passes.
+  Seen 2026-10-25 on `main` at `9448612`. Closes with `PATH` holding a directory with only a link to `git`.
 - **unexpected-paths reads only the contract step's file.** `unexpected_paths` judges each path the change touches
   against `RunChange.spec`, the contract step's file, so a workflow whose contract is in business terms, such as
   `examples/workflows/product-team.toml`, whose requirements name no file and whose `design.md` lists the
@@ -68,28 +72,18 @@ was done.
   test already points `TMPDIR` into its own directory. Found in the second build round of run 20261025-081413-327fc2
   (2026-10-25). Closes with a `TMPDIR` the build removes around `tauri build`, and with a README note, or a newer
   runtime that cleans up, for users.
-- **A prompt sent right after a startup dialog can be lost.** When an agent starts behind a dialog, such as Claude
-  Code's folder-trust question, `Workflow._start` waits in `_wait_for_startup` for herdr to report it `idle` and
-  returns; `Workflow._written` then sends the turn's prompt and records it in `RunState.prompted`. On 2026-10-25
-  the Builder of run 20261025-090825-73faf7, in a worktree of a clone Claude Code had not seen, was reported idle
-  as the dialog closed and before its input took text: the prompt never arrived, yet counted as delivered, and the
-  turn timed out after 1800s at an empty prompt. `resume` cannot recover it, since `_prompt_for` only waits on an
-  alive agent already prompted. Closes with `_wait_for_startup` waiting until the agent takes input, or with the
-  prompt's delivery checked (the agent turning `working`, or its handoff file appearing) and the prompt sent again
-  when neither happens.
-- **drain takes two passes to mark a spec done whose run's pull request already merged.** A `ready-for-agent` spec
-  with a `Run:` line gets `in-review` and `PR:` from `finished_run_header`, but `refreshed_headers` asks gh about
-  the pull request only for a spec that was `in-review` when the pass began, so a pull request merged since leaves
-  the spec `in-review`, its dependants blocked, until the next drain. Met on 2026-10-25 after resuming a run
-  outside drain. Closes with the pull request checked in the same pass once `finished_run_header` gives one.
-- **Two builds on agentbox0 can still run rustc out of memory.** The agent has 8 GiB, no swap and 2 executors,
-  and a push to a new branch starts a branch build before its pull request exists, so two builds of one commit
-  compile the Tauri crates at once (PR-74's first build: rustc SIGKILLed on `gtk`). The UI stage now builds
-  without debug info (`Jenkinsfile`, stage UI), which lowers its peak only. Nothing keeps two builds' cargo
-  steps from running side by side, among them the Package stage's release build, or a quality build during
-  `drain` beside a pull request build. Raised by the
-  cross-review of ci-no-debuginfo (2026-10-25): "the OOM cause is narrowed and left unrecorded". Closes with
-  more memory or swap on the VM, or a lock around the cargo steps that keeps them from running side by side.
+- **No build has yet been seen waiting for `ci/cargo-lock.sh` on the Jenkins agent.** PR #88's builds ran both
+  cargo steps through it on agentbox0 (builds 1-3, 2026-10-25), so the agent image has `flock` and the lock file's
+  directory is writable, and a quality-style build (`GIT_REF` set) ran `--no-wait`; but the two run side by side
+  reached their cargo steps 15 s apart, the lock free each time, so the wait and its message were seen only on the
+  development host. Raised by cross-review 25 (F3). Closes with two builds whose cargo steps overlap on agentbox0,
+  one saying that it waits for the lock and both passing.
+- **Is 3 GB the right memory limit for the agentbox0 Jenkins agent?** All builds on the node share its
+  container's `mem_limit: 3g` (Homelab `jenkins/agentbox0.yaml`), which this repo cannot change. Since
+  `ci/cargo-lock.sh`, two of this repository's builds compile Rust at once only when a quality build starts its
+  `cargo test` beside another build's cargo step, but everything else they run (pytest, mutmut, PyInstaller, npm)
+  still shares the 3 GB beside a locked rustc, as do other jobs' builds on the node. Open in
+  `.scratch/ci-cargo-memory/issues/02-agent-container-memory.md`; closes with the Homelab keeping or raising it.
 - **mutmut's clean test run fails on a hypothesis health check, so the gate mutation-tests nothing.** Under the
   gate's mutmut 3.8.0, `TestChangedLines.test_names_each_changed_file_and_exactly_its_added_lines` in
   `tests/test_properties.py` fails with `hypothesis.errors.FailedHealthCheck: ... was called from multiple
@@ -371,6 +365,42 @@ was done.
   (https://github.com/DavidSiegl/octoflow-ai/actions/runs/40283655516). The release path is first run by the next
   release.
 
+- **Two builds on agentbox0 can still run rustc out of memory.** All builds on the node share its Jenkins agent
+  container's 3 GB (`mem_limit: 3g`, not the VM's 8 GiB), and a push to a new branch starts a branch build before
+  its pull request exists, so two builds of one commit compiled the Tauri crates at once (PR-74's first build:
+  rustc SIGKILLed on `gtk`). Building the UI stage without debug info lowered one build's peak only. Raised by the
+  cross-review of ci-no-debuginfo (2026-10-25): "the OOM cause is narrowed and left unrecorded".
+  Fixed (2026-10-25): the UI stage's `cargo test` and the Package stage's `build-desktop.sh` run under
+  `ci/cargo-lock.sh`, a `flock` on a file outside every workspace that every build of this repository on the node
+  takes, and say so when they wait. A quality build never waits: its rounds already take up to 1174 s of
+  `QUALITY_TIMEOUT`'s 1200 s, and a Package stage holds the lock for about 300 s, so it takes the lock only when it
+  is free and otherwise compiles beside the other build, saying so. Chosen over serialising whole builds: Jenkins
+  has neither Lockable Resources nor Throttle Concurrent Builds, and one executor would queue the Python-only
+  stages too, against `QUALITY_TIMEOUT`. What else shares the 3 GB stays open under "Is 3 GB the right memory
+  limit".
+
+- **A prompt sent right after a startup dialog can be lost.** When an agent starts behind a dialog, such as Claude
+  Code's folder-trust question, `Workflow._start` waits in `_wait_for_startup` for herdr to report it `idle` and
+  returns; `Workflow._written` then sends the turn's prompt and records it in `RunState.prompted`. On 2026-10-25
+  the Builder of run 20261025-090825-73faf7, in a worktree of a clone Claude Code had not seen, was reported idle
+  as the dialog closed and before its input took text: the prompt never arrived, yet counted as delivered, and the
+  turn timed out after 1800s at an empty prompt. `resume` cannot recover it, since `_prompt_for` only waits on an
+  alive agent already prompted. Closes with `_wait_for_startup` waiting until the agent takes input, or with the
+  prompt's delivery checked (the agent turning `working`, or its handoff file appearing) and the prompt sent again
+  when neither happens.
+  Fixed (2026-10-25): `Workflow._written` sends the prompt through `_deliver`, which counts it taken once herdr
+  reports the agent `working` or `blocked`, or its handoff file exists, within `PROMPT_DELIVERY_SECONDS` (30), and
+  otherwise sends the same prompt once more. A second miss fails the turn naming the role, the file and the pane.
+  `prompted` and the turn's record are saved only once the prompt is taken, so a `resume` of such a run prompts the
+  agent again instead of only waiting. `_wait_for_startup` is unchanged.
+- **drain takes two passes to mark a spec done whose run's pull request already merged.** A `ready-for-agent` spec
+  with a `Run:` line gets `in-review` and `PR:` from `finished_run_header`, but `refreshed_headers` asks gh about
+  the pull request only for a spec that was `in-review` when the pass began, so a pull request merged since leaves
+  the spec `in-review`, its dependants blocked, until the next drain. Met on 2026-10-25 after resuming a run
+  outside drain. Closes with the pull request checked in the same pass once `finished_run_header` gives one.
+  Fixed (2026-10-25): when `finished_run_header` makes a spec `in-review`, `refreshed_headers` asks
+  `pull_request_header` about its pull request in the same pass and merges the result into the spec's one pair, so
+  a merged one makes the spec `done` and its dependants startable in that drain, `--dry-run` included.
 - **`test-integrity` has no way to accept an expected value the spec changes.** `expected-value-changed` fails the
   gate whenever an assertion's literals change beside code, also when the spec asks for the new output, and unlike
   `removed-test` there is no report the Reviewer judges instead. PR #76 changed what the pull request says for a

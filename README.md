@@ -502,7 +502,8 @@ A drain first asks `gh` about each `in-review` spec's pull request: merged makes
 `ready-for-human`. It refreshes the run on each `in-review` and `ready-for-human` spec's `Run:` line as `refresh`
 does, and a `ready-for-human` spec whose run approved or finished, with its pull request open, goes to `in-review`
 once its conflict is cleared. A `ready-for-agent` spec with a `Run:` line is one an interrupted drain left; its run, if
-finished, sets the spec's status, and if not, drain stops and says what to do: wait for it, `resume` it, or delete
+finished, sets the spec's status, and one that makes it `in-review` has its pull request asked about at once, so
+a pull request merged meanwhile makes it `done` in this drain; if not finished, drain stops and says what to do: wait for it, `resume` it, or delete
 the `Run:` line to start the spec over. Then drain sweeps the branches of earlier runs once, and runs each spec whose
 blockers are all `done`. It reads each spec again before choosing the next and before each header edit, so your edits
 to a spec while it runs are kept, but for the `Status:`, `Run:` and `PR:` lines of the spec it is running, which are
