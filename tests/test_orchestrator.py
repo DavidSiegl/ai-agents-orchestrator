@@ -3856,7 +3856,20 @@ class TestScanUnpublished(unittest.TestCase):
         self.rules({})
         with self.assertRaisesRegex(OrchestratorError, "its .gitleaks.toml is a symbolic link"):
             self.push(self.commit({"c.txt": "c\n"}, "clean"))
+        self.assertNotIn("refs/heads/ci-ref", self.on_origin())
         self.assertEqual(self.host.file_at(self.repo, self.base, ".gitleaks.toml"), "one.toml")
+
+    def test_a_linked_gitleaksignore_in_the_base_blocks_the_push(self):
+        # Its text would be the path it points to, which drops every fingerprint the base ignores.
+        os.makedirs(os.path.join(self.repo, "security"))
+        os.symlink("security/leaks.ignore", os.path.join(self.repo, ".gitleaksignore"))
+        self.rules({"security/leaks.ignore": "anything\n"})
+        with self.assertRaises(OrchestratorError) as caught:
+            self.push(self.commit({"b.txt": "b\n"}, "clean"))
+        self.assertNotIsInstance(caught.exception, orchestrator.LeaksFound)
+        self.assertIn("nothing was pushed", str(caught.exception))
+        self.assertIn(".gitleaksignore is a symbolic link", str(caught.exception))
+        self.assertNotIn("refs/heads/ci-ref", self.on_origin())
 
     def test_an_extend_the_scan_cannot_take_from_the_base_blocks_the_push(self):
         first = self.base

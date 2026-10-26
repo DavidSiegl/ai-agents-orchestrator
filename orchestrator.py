@@ -1824,10 +1824,19 @@ class Host:
         # Each entry is `<mode> <type> <object>\t<path>`; a directory's type is tree, a symbolic link's mode 120000.
         entry = self.git(cwd, "ls-tree", "--full-tree", "-z", commit, "--", *_top_literal([path]),
                          verbatim=True).split("\0")[0]
-        mode, kind = (entry.split("\t")[0].split(" ") + ["", ""])[:2]
+        mode, kind, blob = (entry.split("\t")[0].split(" ") + ["", "", ""])[:3]
         if kind != "blob":
             return None
-        return self.git(cwd, "cat-file", "blob", f"{commit}:{path}", verbatim=True), mode == "120000"
+        return self.git(cwd, "cat-file", "blob", blob, verbatim=True), mode == "120000"
+
+    def _base_rules_file(self, cwd: str, base: str, name: str) -> str | None:
+        """base's file at name, one the secret scan takes its rules from, as file_at gives it; None where base has
+        none. Raises OrchestratorError, failing closed as _base_rules_refused says, when base has a symbolic link
+        there, whose target this does not follow, and as file_at."""
+        found = self._blob_at(cwd, base, name)
+        if found and found[1]:
+            raise _base_rules_refused(base, f"{name} is a symbolic link in base, and only a file is read there")
+        return found[0] if found else None
 
     def changed_line_counts(self, cwd: str, base: str, commit: str) -> list[ChangedFile]:
         """Each file the change from base to commit touches, a rename paired as change_diff pairs it, with the lines it
@@ -1897,20 +1906,18 @@ class Host:
         every file gitleaks reads is base's. Whatever rules held before is removed.
 
         Raises OrchestratorError, failing closed and naming the file, when a file in the chain is refused by
-        _gitleaks_extended_file or is a symbolic link in base, whose target this does not follow, or extends what is no
-        file in base or a file already in the chain; and when git cannot read base."""
+        _gitleaks_extended_file or _base_rules_file, or extends what is no file in base or a file already in the
+        chain; and when git cannot read base."""
         self.check(["rm", "-rf", "--", rules])
         chain = [".gitleaks.toml"]
 
         def refused(why: str) -> OrchestratorError:
-            return OrchestratorError(f"nothing was pushed: the secret scan takes its rules from base {base[:12]}, but "
-                                     f"its {chain[-1]} {why}")
+            return _base_rules_refused(base, f"{chain[-1]} {why}")
         config, spelled = f"{rules}/{chain[0]}", chain[0]
-        found = self._blob_at(cwd, base, chain[0]) or ("[extend]\nuseDefault = true\n", False)
+        text = self._base_rules_file(cwd, base, chain[0])
+        if text is None:
+            text = "[extend]\nuseDefault = true\n"
         while True:
-            text, link = found
-            if link:
-                raise refused("is a symbolic link in base, and only a file is read there")
             self.write(f"{rules}/{spelled}", text)
             if len(chain) > GITLEAKS_EXTEND_DEPTH:
                 return config
@@ -1925,11 +1932,11 @@ class Host:
             name = posixpath.normpath(extended)
             if name in chain:
                 raise refused(f"extends {extended!r}, which comes back round: {' -> '.join([*chain, name])}")
-            blob = self._blob_at(cwd, base, name)
-            if blob is None:
+            text = self._base_rules_file(cwd, base, name)
+            if text is None:
                 raise refused(f"extends {extended!r}, which is no file in base")
             chain.append(name)
-            spelled, found = extended, blob
+            spelled = extended
 
     def scan_unpublished(self, cwd: str, commit: str, base: str, report_path: str) -> list[Leak]:
         """The secrets gitleaks finds, and the `gitleaks:allow` comments added, in the commits a push of commit would
@@ -1951,14 +1958,15 @@ class Host:
         the .gitleaksignore copy, the rules directory _write_base_rules fills and the empty directory this makes there.
 
         Raises OrchestratorError, failing closed, when git cannot read base or the range, base's rules cannot be taken
-        whole from base as _write_base_rules says, the range holds an octopus merge, or gitleaks cannot be started,
-        exits other than 0 or 1, writes no report or one that is not a list of findings, or exits 1 with an empty one:
-        gitleaks also exits 1 when it cannot load its config, writing nothing. git runs where cwd is, as every Host
+        whole from base as _write_base_rules says or its .gitleaksignore is a symbolic link, the range holds an
+        octopus merge, or gitleaks cannot be started, exits other than 0 or 1, writes no report or one that is not a
+        list of findings, or exits 1 with an empty one: gitleaks also exits 1 when it cannot load its config, writing
+        nothing. git runs where cwd is, as every Host
         command does, and gitleaks in the directory of rules."""
         directory = report_path.rsplit("/", 1)[0]
         rules, ignore, source = (f"{directory}/gitleaks{name}" for name in ("-rules", "ignore", "-source"))
         config = self._write_base_rules(cwd, base, rules)
-        self.write(ignore, self.file_at(cwd, base, ".gitleaksignore") or "")
+        self.write(ignore, self._base_rules_file(cwd, base, ".gitleaksignore") or "")
         # gitleaks also reads <source>/.gitleaksignore, which in the working tree the change could write: it scans
         # from an empty directory, the repository named by GIT_DIR. And a report an earlier scan left would be read
         # as this one's.
@@ -2842,6 +2850,12 @@ def _scan_git_env(git_dir: str, empty_tree: str) -> list[str]:
     would bring a tree's attributes back, and are unset."""
     return ["env", "-u", "GIT_WORK_TREE", "-u", "GIT_ATTR_SOURCE", "-u", "GIT_CONFIG_PARAMETERS",
             f"GIT_DIR={git_dir}", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=attr.tree", f"GIT_CONFIG_VALUE_0={empty_tree}"]
+
+
+def _base_rules_refused(base: str, why: str) -> OrchestratorError:
+    """The error the secret scan fails closed with when it cannot take its rules from base, a commit, as gitleaks
+    would read them; why names the file and says what is wrong with it, and follows "its"."""
+    return OrchestratorError(f"nothing was pushed: the secret scan takes its rules from base {base[:12]}, but its {why}")
 
 
 def _gitleaks_extended_file(config: str) -> str | None:
