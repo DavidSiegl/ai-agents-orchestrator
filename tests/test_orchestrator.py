@@ -7035,9 +7035,17 @@ class TestRunInSession(unittest.TestCase):
         self.assertEqual((proc.returncode, proc.stdout, proc.stderr, stopped), (3, "out\n", "err\n", False))
 
     def test_a_tool_that_exits_on_sigint_returns_what_it_printed(self):
-        proc, stopped = self.run_sh("trap 'echo bye; exit 5' INT; echo hi; while :; do sleep 0.1; done",
-                                    timeout=0.5, soft_stop=(signal.SIGINT, 5))
-        self.assertEqual((proc.returncode, proc.stdout, stopped), (5, "hi\nbye\n", True))
+        # Ignored, as in a Jenkins sh step, which starts its command as a background job of a non-interactive shell.
+        for here in (signal.SIG_IGN, signal.default_int_handler):
+            with self.subTest(sigint=here):
+                before = signal.signal(signal.SIGINT, here)
+                try:
+                    proc, stopped = self.run_sh("trap 'echo bye; exit 5' INT; echo hi; while :; do sleep 0.1; done",
+                                                timeout=0.5, soft_stop=(signal.SIGINT, 5))
+                    self.assertEqual(signal.getsignal(signal.SIGINT), here)
+                finally:
+                    signal.signal(signal.SIGINT, before)
+                self.assertEqual((proc.returncode, proc.stdout, stopped), (5, "hi\nbye\n", True))
 
     def test_a_tool_that_ignores_sigint_is_killed_after_the_grace(self):
         started = time.monotonic()

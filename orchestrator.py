@@ -4494,17 +4494,18 @@ def _run_in_session(argv: list[str], cwd: str, env: dict[str, str], *, timeout: 
     stopped for running longer than timeout seconds.
 
     Stopped, it is killed, or with soft_stop, a (signal, grace) pair, first sent that signal and given grace seconds
-    to exit. Once it has exited, every process left in its process group, such as a server it started, is killed
-    too, and what was printed is read until no process holds the output open, for at most TOOL_KILL_WAIT seconds
-    more: only one outside the group, in a session of its own, can still hold it, and what that prints later is
-    lost. So the call returns within timeout + grace + TOOL_KILL_WAIT seconds, the process reaped unless it could not
-    exit within them. The output is decoded as _git_run's verbatim output is, so that paths in it keep their bytes;
-    the exit status is -SIGKILL when the kill is the last thing known of it. Raises OSError when argv cannot be
-    started.
+    to exit; it starts with that signal's default disposition even where this process ignores it. Once it has
+    exited, every process left in its process group, such as a server it started, is killed too, and what was
+    printed is read until no process holds the output open, for at most TOOL_KILL_WAIT seconds more: only one
+    outside the group, in a session of its own, can still hold it, and what that prints later is lost. So the call
+    returns within timeout + grace + TOOL_KILL_WAIT seconds, the process reaped unless it could not exit within
+    them. The output is decoded as _git_run's verbatim output is, so that paths in it keep their bytes; the exit
+    status is -SIGKILL when the kill is the last thing known of it. Raises OSError when argv cannot be started.
     """
     # The callers' fixed commands, over names their tools listed; no shell reads them.
-    proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,  # noqa: S603
-                            stderr=subprocess.PIPE, start_new_session=True)
+    with _not_ignored_in_children(soft_stop[0] if soft_stop else None):
+        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,  # noqa: S603
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     # Both, by the PIPEs above: standard output, then standard error.
     streams = [stream for stream in (proc.stdout, proc.stderr) if stream is not None]
     printed: dict[int, list[bytes]] = {stream.fileno(): [] for stream in streams}
@@ -4562,6 +4563,25 @@ def _read_ready(pipes: selectors.BaseSelector, printed: dict[int, list[bytes]], 
             printed[key.fd].append(chunk)
         else:
             pipes.unregister(key.fd)
+
+
+@contextlib.contextmanager
+def _not_ignored_in_children(sig: signal.Signals | None) -> Iterator[None]:
+    """While open, a process this one starts gets sig with its default disposition, also when this process ignores
+    it, as a command a Jenkins sh step runs ignores SIGINT; afterwards this process treats sig as it did before. An
+    ignored signal stays ignored across exec, and a Python started so never raises KeyboardInterrupt, so a soft stop
+    by it would reach a tool that ignores it. Meanwhile sig is caught and dropped here, as ignoring it would. Only the
+    main thread can set a handler, so elsewhere, and for sig None, nothing changes."""
+    if (sig is None or signal.getsignal(sig) != signal.SIG_IGN
+            or threading.current_thread() is not threading.main_thread()):
+        yield
+        return
+    # A handler is reset to the default on exec, which ignoring is not.
+    signal.signal(sig, lambda *_: None)
+    try:
+        yield
+    finally:
+        signal.signal(sig, signal.SIG_IGN)
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
