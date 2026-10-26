@@ -4832,16 +4832,22 @@ def _base_group_findings(run: _BaseRun, group: _PytestGroup, tests: dict[tuple[s
         return [_finding(None, None, "not-run", f"{which} imported {named} from the working tree, not from the copy "
                                                 f"of the base, as from a project installed into the gate's "
                                                 f"interpreter, so they were not judged.")], False
-    # Each test's outcomes at the base, its skips left out.
+    return [_finding(path, tests[(path, name)], "passes-at-base",
+                     f"`{name}` passes without the change, so it does not test it.")
+            for path, name in _passed_tests(cases, ids)], False
+
+
+def _passed_tests(cases: list[tuple[str, str, str]], ids: list[str]) -> list[tuple[str, str]]:
+    """The tests, as (path, qualified name) and sorted, of which cases, a run's outcomes as junit_outcomes gives them,
+    passed every case of ids, the node ids the run was given, that it did not skip; a test whose cases were all
+    skipped is not one."""
     outcomes: dict[tuple[str, str], set[str]] = {}
     by_case = {_junit_case(i): i for i in ids}
     for case, outcome, _ in cases:
         if (i := by_case.get(case)) is not None and outcome != "skipped":
             path, names, _ = _node_parts(i)
             outcomes.setdefault((path, ".".join(names)), set()).add(outcome)
-    return [_finding(path, tests[(path, name)], "passes-at-base",
-                     f"`{name}` passes without the change, so it does not test it.")
-            for (path, name), seen in sorted(outcomes.items()) if seen == {"passed"}], False
+    return [test for test, seen in sorted(outcomes.items()) if seen == {"passed"}]
 
 
 def _imported_from_working_tree(run: _BaseRun, imports: str) -> list[tuple[str, str]]:
@@ -4902,20 +4908,32 @@ def _collect_at_base(run: _BaseRun, setup: _PytestSetup,
         if proc.returncode != 4:
             ids, problem = _listed_tests(proc, doing, tests)
             return ids, False, problem
-        failed = _failing_conftest(proc, setup.top)
-        if failed is None:
-            return [], False, f"pytest, {doing}, exited with status 4: {_said(proc)}"
-        conftest, error = failed
-        if conftest not in run.change.changed:
-            return [], False, (f"pytest, {doing}, could not load `{conftest}`, which the change does not edit, so the "
-                               f"base fails there: {error}")
-        # One at the top, whose directory is "", covers every file.
-        under = os.path.dirname(conftest)
-        left = [path for path in files if under and not setup.argument(path).startswith(f"{under}/")]
-        if left == files:
-            return [], False, f"pytest, {doing}, could not load `{conftest}`, above none of the changed tests: {error}"
-        files = left
+        files, problem = _outside_failed_conftest(run, setup, proc, files)
+        if problem:
+            return [], False, problem
     return [], False, None
+
+
+def _outside_failed_conftest(run: _BaseRun, setup: _PytestSetup, proc: subprocess.CompletedProcess,
+                             files: list[str]) -> tuple[list[str], str | None]:
+    """Those of files, test files by their paths from setup's root, that are not under the conftest.py that stopped
+    proc, their collection by _collect_at_base that exited with status 4, when the change edits it; at least one is
+    under it. Else [] and the problem, a clause: the conftest.py is one the change does not edit, so the base itself
+    fails there, it lies above none of files, or proc names none (_failing_conftest)."""
+    doing = "collecting the changed tests at the base"
+    failed = _failing_conftest(proc, setup.top)
+    if failed is None:
+        return [], f"pytest, {doing}, exited with status 4: {_said(proc)}"
+    conftest, error = failed
+    if conftest not in run.change.changed:
+        return [], (f"pytest, {doing}, could not load `{conftest}`, which the change does not edit, so the base "
+                    f"fails there: {error}")
+    # One at the top, whose directory is "", covers every file.
+    under = os.path.dirname(conftest)
+    left = [path for path in files if under and not setup.argument(path).startswith(f"{under}/")]
+    if left == files:
+        return [], f"pytest, {doing}, could not load `{conftest}`, above none of the changed tests: {error}"
+    return left, None
 
 
 def _failing_conftest(proc: subprocess.CompletedProcess, top: str) -> tuple[str, str] | None:

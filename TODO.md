@@ -212,6 +212,11 @@ was done.
   there. Accepted: the check reports only, and splitting the file's tests from its imports would mean rewriting
   them. Closes, if its run metrics show these files are common, by importing such names inside the tests that use
   them, or by running each test with the failing import stubbed.
+- **A submodule under `tests/` whose commit the change moves makes `passes-at-base` not-run.** `_beside_tests`
+  takes the submodule's path for a file that goes with the tests, so `_copy_base_with_tests` removes it with
+  `os.remove`, which refuses a directory, and the copy fails as a whole (`could not copy the base`). It was so before
+  submodules were filled (`_unpack_commit`). Found while filling them (2026-10-26), not seen failing. Closes when the
+  overlay leaves a path the base records as a submodule (mode 160000) to `_unpack_commit`.
 - **A test file whose name is not UTF-8 is never rerun by `flaky-tests`.** pytest-randomly 5.0.0 hashes each node
   id as strict UTF-8 (`pytest_randomly._crc32`, called from `pytest_runtest_setup` and its neighbours) and stops
   with an internal error, exit status 3. `_pytest` already lets pytest print such an id

@@ -7720,17 +7720,14 @@ class TestPassesAtBase(unittest.TestCase):
         path, commit that as the base, and make the gate's interpreter a new virtual environment's Python into which
         the project is installed editable: a .pth file there puts the working tree's where on the path, as setuptools'
         and hatchling's editable installs write one. The environment sees this suite's packages, pytest among them,
-        through another .pth file. Skips the test when the environment cannot be made."""
+        through another .pth file. Making it takes the standard library alone, without pip, and no network."""
         venv = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, venv)
-        try:
-            subprocess.run([sys.executable, "-m", "venv", "--without-pip", venv],  # noqa: S603
-                           check=True, capture_output=True, timeout=120)
-            python = os.path.join(venv, "bin", "python")
-            site_dir = subprocess.run([python, "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],  # noqa: S603
-                                      check=True, capture_output=True, text=True, timeout=60).stdout.strip()
-        except (OSError, subprocess.SubprocessError) as e:
-            self.skipTest(f"could not make a virtual environment: {e}")
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", venv],  # noqa: S603
+                       check=True, capture_output=True, timeout=120)
+        python = os.path.join(venv, "bin", "python")
+        site_dir = subprocess.run([python, "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],  # noqa: S603
+                                  check=True, capture_output=True, text=True, timeout=60).stdout.strip()
         with open(os.path.join(site_dir, "suite.pth"), "w") as f:
             f.write(sysconfig.get_path("purelib") + "\n")
         with open(os.path.join(site_dir, "__editable__.calc-0.pth"), "w") as f:
