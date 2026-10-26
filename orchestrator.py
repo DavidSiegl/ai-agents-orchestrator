@@ -4125,6 +4125,8 @@ def flaky_tests(change: GateChange) -> list[dict]:
     no run told anything, the finding about the run that went wrong stands for them all.
 
     pytest decides which of those defs are tests, so a helper named test_* that it does not collect is not rerun.
+    A changed path that is a symlink, a submodule or a special file holds no test the change edits, and is not read
+    (_is_link_or_special): no test is rerun through a symlink, whose target is rerun only as a file the change edits.
     pytest and pytest-randomly must be importable by the gate's own interpreter, as a `uv run` of the project makes
     them. A pytest run that cannot start, takes longer than FLAKY_RUN_TIMEOUT, ends in a usage or collection error
     or writes no readable report ends the reruns of the tests under its configuration with a finding saying so, after
@@ -4910,7 +4912,9 @@ def surviving_mutants(change: GateChange, *, budget: float) -> list[dict]:
     a line to in a Python file outside the tests. Reports at its def each such function that has mutants the tests did
     not notice, with how many of its mutants they were and what the first _SURVIVOR_EXAMPLES change, as a line before
     and after; and each such function that no test calls. The change leaves out mutmut's state, as
-    GateChange.from_tree says, so no function there is mutated.
+    GateChange.from_tree says, so no function there is mutated. A changed path that is a symlink, a submodule or a
+    special file is not read (_is_link_or_special): no function is mutated through a symlink, whose target is mutated
+    only as a file the change edits.
 
     mutmut runs in the gate's own interpreter, as flaky_tests runs pytest, on a copy of the files git tracks. The copy
     leaves out what the tree tracks under mutmut's state, so mutmut starts without a cache. mutmut runs there by the
