@@ -7837,6 +7837,40 @@ class TestPassesAtBase(unittest.TestCase):
         self.assertEqual([(f["path"], f["message"].split("`")[1]) for f in self.found()],
                          [("tests/test_calc.py", "test_mul_one")])
 
+    def test_where_the_run_at_the_base_imported_from_is_read_from_its_report(self):
+        tree = os.path.join(self.repo, "copy")
+        os.makedirs(os.path.join(tree, "lib"))
+        self.put("copy/lib/calc.py", "")
+        self.put("new/pkg/__init__.py", "")
+        self.git("add", "-A")
+        change = orchestrator.GateChange.from_tree(self.repo, self.git("rev-parse", "HEAD").strip())
+        run = orchestrator._BaseRun(change, tree, {}, 0.0, 1.0)
+        report = os.path.join(self.repo, "imports.json")
+        for text, expected in [
+                # Tracked at the base, as the copy shows, or added by the change: the project's; a virtual
+                # environment's under the top is not.
+                ('{"calc": "lib/calc.py", "pkg.sub": "new/pkg", "pytest": ".venv/lib/pytest/__init__.py"}',
+                 [("calc", "lib/calc.py"), ("pkg", "new/pkg")]),
+                ("[]", orchestrator.GateError), ("{", orchestrator.GateError)]:
+            with self.subTest(text=text):
+                with open(report, "w") as f:
+                    f.write(text)
+                if expected is orchestrator.GateError:
+                    with self.assertRaises(orchestrator.GateError):
+                        orchestrator._imported_from_working_tree(run, report)
+                else:
+                    self.assertEqual(orchestrator._imported_from_working_tree(run, report), expected)
+        os.remove(report)
+        with self.assertRaises(orchestrator.GateError):
+            orchestrator._imported_from_working_tree(run, report)
+
+    def test_a_usage_error_without_a_conftest_is_a_finding(self):
+        self.fix_add()
+        self.fake_pytest("echo 'ERROR: usage: no such option'; exit 4", "exit 0")
+        self.assertEqual([(f["rule"], f["message"]) for f in self.found()], [(
+            "not-run", ("pytest, collecting the changed tests at the base, exited with status 4: ERROR: usage: no such "
+                        "option; the changed tests were not run there."))])
+
     def test_a_conftest_the_change_does_not_edit_failing_is_a_finding(self):
         self.put("calc.py", self.CALC.replace("a - b", "a + b"))
         self.put("tests/conftest.py", "raise RuntimeError('broken')\n")
