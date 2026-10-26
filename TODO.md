@@ -279,12 +279,6 @@ was done.
   (`_edits_test`). Kept as the ticket states it. Closes with a decision to pass `_edits_test`-like counting to
   `_changed_python_functions`. The cognitive-complexity check has a walker of its own (`_scored_functions`), so it
   is not affected.
-- **A run the budget stops can leave mutmut's results unreadable.** mutmut 3.8.0 saves a module's results by
-  rewriting `mutants/<path>.meta` in place after each mutant (`SourceFileMutationData.save`, `open(..., "w")` then
-  `json.dump`), so the SIGINT at the budget, or the kill after `MUTMUT_STOP_GRACE`, can land mid-write. `mutmut results`
-  then exits with a `JSONDecodeError`, and `_mutmut_findings` reports `not-run`, "mutmut could not list its results",
-  without the `budget-reached` finding or anything the run had shown. Seen once in another branch's gate run. Closes
-  with the stop waiting for a save to end, or with the gate reading what remains and saying the budget stopped it.
 - **Committed mutmut output is read as the change's own code by the linters.** The checks leave `mutants/` out, by the
   user's decision of 2026-10-24 (review round 9, F33): `GateChange.from_tree` diffs the tree without it, so no check
   (test-integrity, flaky-tests, surviving-mutants, cognitive-complexity) selects a test, a function or a changed line
@@ -335,6 +329,17 @@ was done.
 
 ## Fixed
 
+- **A run the budget stops can leave mutmut's results unreadable.** mutmut 3.8.0 saves a module's results by
+  rewriting `mutants/<path>.meta` in place after each mutant (`SourceFileMutationData.save`, `open(..., "w")` then
+  `json.dump`), so the SIGINT at the budget, or the kill after `MUTMUT_STOP_GRACE`, can land mid-write. `mutmut results`
+  then exits with a `JSONDecodeError`, and `_mutmut_findings` reports `not-run`, "mutmut could not list its results",
+  without the `budget-reached` finding or anything the run had shown. Seen once in another branch's gate run. Closes
+  with the stop waiting for a save to end, or with the gate reading what remains and saying the budget stopped it.
+  Fixed (2026-10-26): when the run was stopped and `mutmut results` fails, `_mutmut_findings` has
+  `_drop_cut_off_saves` remove each `.meta` under the copy's `mutants/` that does not parse as JSON and lists again.
+  The functions of those modules count as not reached, and `_budget_reached` says the stop cut off mutmut's save of
+  their results; the other modules' findings stand. A listing failure without a stop, a second failure, or a `.meta`
+  that cannot be removed stays `not-run`. Not closed: those modules' results are lost, not recovered.
 - **A submodule is empty in `passes-at-base`'s copy of the base.** `git archive` leaves a submodule's directory
   empty, so a changed test that imports from one fails to import at the base and gives nothing, though it might pass
   there; the check misses it. Raised by the cross-review of `passes-at-base` (R1-5, 2026-10-24): "`git archive` omits

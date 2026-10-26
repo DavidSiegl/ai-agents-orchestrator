@@ -5214,14 +5214,15 @@ def _mutmut_findings(tree_copy: str, functions: list[_ChangedFunction], run: sub
     if run.returncode != 0 and not stopped and not no_tests:
         return [_mutation_not_run(f"mutmut exited with status {run.returncode}: {_said_by_mutmut(run)}")]
     deadline = time.monotonic() + MUTMUT_REPORT_TIMEOUT
-    statuses, problem = _mutant_statuses(tree_copy, deadline)
+    statuses, cut_off, problem = _statuses_after_run(tree_copy, stopped, deadline)
     if problem:
         return [_mutation_not_run(problem)]
     if no_tests:
         statuses = dict.fromkeys(statuses, "no tests")
     mutants = _mutants_by_function(statuses, functions)
     # A function mutmut was given but listed no mutant of. mutmut saves a module's mutants, none or more, in
-    # mutants/<path>.meta once it has made them all, so stopped by the budget it had not reached a module without one.
+    # mutants/<path>.meta once it has made them all, so stopped by the budget it had not reached a module without one,
+    # or the stop lost its results (_statuses_after_run).
     unlisted = [f for f in functions if f not in mutants]
     unreached = [f for f in unlisted
                  if stopped and not os.path.exists(os.path.join(tree_copy, _MUTMUT_STATE, f"{f.path}.meta"))]
@@ -5236,8 +5237,53 @@ def _mutmut_findings(tree_copy: str, functions: list[_ChangedFunction], run: sub
             out.append(_finding(f.path, f.line, "untested", f"no test calls `{f.name}`, so none of its "
                                                             f"{len(by_status['no tests'])} mutants can make one fail."))
     if stopped:
-        out.append(_budget_reached(statuses, budget, unreached))
+        out.append(_budget_reached(statuses, budget, unreached, cut_off))
     return out
+
+
+def _statuses_after_run(tree_copy: str, stopped: bool, deadline: float) -> tuple[dict[str, str], list[str], str | None]:
+    """_mutant_statuses's listing of the mutants a run of mutmut made in tree_copy, by deadline, a time.monotonic()
+    time, with the paths of the modules whose results the run's stop lost, sorted; stopped is whether the budget
+    stopped it. Or {}, [] and the problem, a clause, when they could not be listed.
+
+    The stop can land while mutmut rewrites a module's .meta, which `mutmut results` then fails to read. So when a
+    stopped run's listing fails, the .meta files that do not parse are removed and the rest listed again: a module
+    without one lists no mutant, as one the budget kept mutmut from.
+    """
+    statuses, problem = _mutant_statuses(tree_copy, deadline)
+    if not (problem and stopped):
+        return statuses, [], problem
+    try:
+        cut_off = _drop_cut_off_saves(tree_copy)
+    except OSError as e:
+        return {}, [], f"{problem}; could not remove the results mutmut's stop cut off: {e}"
+    if not cut_off:
+        return {}, [], problem
+    statuses, problem = _mutant_statuses(tree_copy, deadline)
+    return statuses, [] if problem else cut_off, problem
+
+
+def _drop_cut_off_saves(tree_copy: str) -> list[str]:
+    """Removes each .meta under tree_copy's mutmut state that does not parse as JSON, as a save of mutmut's that was
+    cut off leaves one, and returns the paths of their modules in the tree, sorted, as the gate names a changed file;
+    [] when there is none. A .meta that cannot be read is left as it is. Raises OSError when one cannot be removed."""
+    state = os.path.join(tree_copy, _MUTMUT_STATE)
+    out = []
+    for parent, _, names in os.walk(state):
+        for name in names:
+            if not name.endswith(".meta"):
+                continue
+            path = os.path.join(parent, name)
+            try:
+                with open(path, "rb") as f:
+                    json.loads(f.read())
+            except ValueError:
+                os.remove(path)
+                out.append(os.path.relpath(path, state).replace(os.sep, "/").removesuffix(".meta"))
+            except OSError:
+                # No cut-off save, so mutmut's own failure to read it is the finding.
+                pass
+    return sorted(out)
 
 
 def _mutants_by_function(statuses: dict[str, str], functions: list[_ChangedFunction],
@@ -5254,17 +5300,26 @@ def _mutants_by_function(statuses: dict[str, str], functions: list[_ChangedFunct
     return out
 
 
-def _budget_reached(statuses: dict[str, str], budget: float, unreached: list[_ChangedFunction]) -> dict:
+def _budget_reached(statuses: dict[str, str], budget: float, unreached: list[_ChangedFunction],
+                    cut_off: list[str]) -> dict:
     """The finding that the budget of budget seconds stopped mutmut, having made the mutants of statuses, mutmut's
-    status of each by its name, and none yet of unreached, the functions it was given in modules it had not reached."""
+    status of each by its name, and none yet of unreached, the functions it was given in modules it had not reached;
+    of those, the ones in cut_off, paths of modules whose results the stop lost mid-save, are said to be so."""
     tried = sum(1 for status in statuses.values() if status not in _MUTMUT_UNTRIED)
+
+    def named(fs: list[_ChangedFunction]) -> str:
+        return _series([f"`{f.name}` in {f.path}" for f in fs], limit=5)
+    unmade = [f for f in unreached if f.path not in cut_off]
+    lost = [f for f in unreached if f.path in cut_off]
+    clauses = [f"mutmut made no mutant of {named(unmade)} before the budget ran out"] if unmade else []
+    if lost:
+        clauses.append(f"the stop cut off mutmut's save of its results for {named(lost)}, so they count as not reached")
     return _finding(None, None, "budget-reached", (
         f"budget reached after {tried} of {len(statuses)} mutants" if statuses
         else "budget reached before mutmut had made its mutants")
         + f": mutmut was stopped at {budget:g} seconds (`--mutation-budget`), so the mutants it did not try may "
           f"survive too"
-        + (f"; mutmut made no mutant of {_series([f'`{f.name}` in {f.path}' for f in unreached], limit=5)} "
-           f"before the budget ran out." if unreached else "."))
+        + "".join(f"; {c}" for c in clauses) + ".")
 
 
 def _why_no_mutant(f: _ChangedFunction, table: dict) -> str:
