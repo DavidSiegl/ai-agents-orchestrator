@@ -33,8 +33,9 @@ env:
   TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
 
 # A newer push to a pull request replaces its build in progress. Runs for one tag, a release's and a dispatch's, wait
-# for each other rather than both uploading with --clobber; such a run is never cancelled. The tag is TAG's, written
-# again here because a concurrency group cannot read env.
+# for each other rather than both uploading with --clobber: the one in progress always finishes, and a newer one
+# replaces one still waiting, as GitHub keeps one pending run per group; it builds and uploads the same tag. The tag
+# is TAG's, written again here because a concurrency group cannot read env.
 concurrency:
   group: >-
     macos-binary-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number)

@@ -290,8 +290,8 @@ a change that breaks it fails before it is merged; not in a quality build) and, 
 the version, the release with `orchestrator.pyz` and the Linux binary. Jenkins has no Mac, so one GitHub Action
 builds the macOS binary when that release is published and uploads it there. It can only add files to a release
 that exists. It also builds, without uploading, every pull request that touches what goes into the binary, so a
-change that breaks the macOS build fails before it is merged too. Both build with `packaging/build-binary.sh`, so the binaries cannot be built or smoke-tested
-differently. The macOS binary is built only for Apple Silicon and is unsigned, apart from PyInstaller's ad-hoc
+change that breaks the macOS build fails before it is merged too. Both build with `packaging/build-binary.sh`, so
+the binaries cannot be built or smoke-tested differently. The macOS binary is built only for Apple Silicon and is unsigned, apart from PyInstaller's ad-hoc
 signature, and nobody tests it by hand: the Action's smoke tests, the window opened and closed included, are its
 check. A second Action merges a pull request into `main` once Jenkins passes it, unless a human is to merge it;
 the orchestrator's own pull requests merge the same way, except a draft, which a run opens when it did not succeed
