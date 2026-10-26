@@ -33,6 +33,8 @@ from dataclasses import asdict, replace
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from gitrepo import RepositoryTest
+
 import orchestrator
 from orchestrator import (
     APPROVE,
@@ -3720,22 +3722,17 @@ sys.exit(2 if mode == "crash" else 1)
 '''
 
 
-class TestScanUnpublished(unittest.TestCase):
+class TestScanUnpublished(RepositoryTest):
     """Host's scan before a push, over a real repository and a bare origin, with a fake gitleaks on PATH."""
 
+    BASE_FILES = {"a.txt": "a\n"}
+
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.tmp = tmp.name
-        self.repo, self.origin, self.bin = (os.path.join(self.tmp, d) for d in ("repo", "origin.git", "bin"))
-        self.run_dir = os.path.join(self.tmp, "run")
-        self.host = Host()
+        super().setUp()
+        self.origin, self.bin = (os.path.join(self.outside, d) for d in ("origin.git", "bin"))
+        self.run_dir = os.path.join(self.outside, "run")
         os.makedirs(self.bin)
-        self.host.git(self.tmp, "init", "--quiet", "--bare", self.origin)
-        self.host.git(self.tmp, "init", "--quiet", "-b", "main", self.repo)
-        for key, setting in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
-            self.git("config", key, setting)
-        self.commit({"a.txt": "a\n"}, "base")
+        self.host.git(self.outside, "init", "--quiet", "--bare", self.origin)
         self.git("remote", "add", "origin", self.origin)
         self.git("push", "--quiet", "origin", "main")
         self.base = self.git("rev-parse", "HEAD").strip()
@@ -3747,17 +3744,6 @@ class TestScanUnpublished(unittest.TestCase):
         env = patch.dict(os.environ, {"PATH": f"{self.bin}:{os.environ['PATH']}", "TOKEN": FAKE_TOKEN})
         env.start()
         self.addCleanup(env.stop)
-
-    def git(self, *args):
-        return self.host.git(self.repo, *args)
-
-    def commit(self, files, message):
-        for name, text in files.items():
-            with open(os.path.join(self.repo, name), "w") as f:
-                f.write(text)
-        self.git("add", "-A")
-        self.git("commit", "--quiet", "-m", message)
-        return self.git("rev-parse", "HEAD").strip()
 
     def mode(self, mode):
         with open(os.path.join(self.bin, "mode"), "w") as f:
@@ -6236,14 +6222,15 @@ class TestQualityReport(unittest.TestCase):
         self.assertEqual(CI(JOB, env={}).mask("text"), "text")
 
 
-class TestGate(unittest.TestCase):
+class TestGate(RepositoryTest):
     """`orchestrator.py gate` over a real git repository, with stub linters on PATH that print what each one does."""
 
+    BASE_FILES = {"pyproject.toml": "[tool.ruff]\n", "f.py": "".join(f"line{n} = {n}\n" for n in range(1, 4))}
+
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.repo, self.bin, self.stubs = (os.path.join(tmp.name, d) for d in ("repo", "bin", "stubs"))
-        for d in (self.repo, self.bin, self.stubs):
+        super().setUp()
+        self.bin, self.stubs = (os.path.join(self.outside, d) for d in ("bin", "stubs"))
+        for d in (self.bin, self.stubs):
             os.mkdir(d)
         for tool in ("ruff", "mypy", "pymarkdown", "shellcheck", "actionlint"):
             self.stub(tool)
@@ -6251,14 +6238,6 @@ class TestGate(unittest.TestCase):
                                       "STUB_DIR": self.stubs})
         env.start()
         self.addCleanup(env.stop)
-        self.host = Host()
-        self.git("init", "--quiet", "-b", "main")
-        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
-            self.git("config", key, value)
-        self.put("pyproject.toml", "[tool.ruff]\n")
-        self.put("f.py", "".join(f"line{n} = {n}\n" for n in range(1, 4)))
-        self.git("add", "-A")
-        self.git("commit", "--quiet", "-m", "base")
 
     def stub(self, tool):
         """A stub tool that records its arguments and prints $STUB_DIR/<tool>.out and .err, exiting with .status."""
@@ -6277,15 +6256,6 @@ class TestGate(unittest.TestCase):
     def argv(self, tool):
         with open(os.path.join(self.stubs, f"{tool}.argv")) as f:
             return f.read().splitlines()
-
-    def git(self, *args):
-        return self.host.git(self.repo, *args)
-
-    def put(self, name, text):
-        path = os.path.join(self.repo, name)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(text)
 
     def gate(self, *args):
         """The exit status, standard output and standard error of `orchestrator.py gate --base HEAD ARGS` in the
@@ -6747,10 +6717,10 @@ class TestTestIntegrityCheck(unittest.TestCase):
         self.assertEqual(check.weighed, {"removed-test", "fewer-assertions", "expected-value-changed"})
 
 
-class TestWeakenedTests(unittest.TestCase):
+class TestWeakenedTests(RepositoryTest):
     """The test-integrity check over a real git repository: a base commit, then the change in its working tree."""
 
-    BASE = {
+    BASE_FILES = {
         "tests/test_calc.py": (
             "import unittest\n"                                # 1
             "\n"                                               # 2
@@ -6782,34 +6752,6 @@ class TestWeakenedTests(unittest.TestCase):
         "calc.py": "def add(a, b):\n    return a + b\n",
     }
 
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.repo = tmp.name
-        self.host = Host()
-        self.git("init", "--quiet", "-b", "main")
-        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
-            self.git("config", key, value)
-        for name, text in self.BASE.items():
-            self.put(name, text)
-        self.git("add", "-A")
-        self.git("commit", "--quiet", "-m", "base")
-
-    def git(self, *args):
-        return self.host.git(self.repo, *args)
-
-    def put(self, name, text):
-        path = os.path.join(self.repo, name)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(text)
-
-    def edit(self, name, old, new):
-        with open(os.path.join(self.repo, name)) as f:
-            text = f.read()
-        self.assertEqual(text.count(old), 1, old)
-        self.put(name, text.replace(old, new))
-
     def found(self):
         """(path, line, rule) of each finding on the working tree's change, and the findings themselves."""
         base = self.git("rev-parse", "HEAD").strip()
@@ -6827,9 +6769,9 @@ class TestWeakenedTests(unittest.TestCase):
         self.assertIn("line 11 at the base", found[0]["message"])
 
     def test_a_removed_class_is_one_finding_with_its_tests(self):
-        self.edit("tests/test_calc.py", self.BASE["tests/test_calc.py"][
-            self.BASE["tests/test_calc.py"].index("class TestNegative"):
-            self.BASE["tests/test_calc.py"].index("def test_function")], "")
+        self.edit("tests/test_calc.py", self.BASE_FILES["tests/test_calc.py"][
+            self.BASE_FILES["tests/test_calc.py"].index("class TestNegative"):
+            self.BASE_FILES["tests/test_calc.py"].index("def test_function")], "")
         where, found = self.found()
         self.assertEqual(where, [("tests/test_calc.py", 15, "removed-test")])
         self.assertIn("`TestNegative` and its 2 tests", found[0]["message"])
@@ -6953,7 +6895,7 @@ class TestWeakenedTests(unittest.TestCase):
 
     def commit_mutmut_state(self):
         """Commit what mutmut leaves in mutants/ after a run: its copy of the code and of the tests beside it."""
-        for name, text in self.BASE.items():
+        for name, text in self.BASE_FILES.items():
             self.put(f"mutants/{name}", text)
         self.git("add", "mutants")
         self.git("commit", "--quiet", "-m", "mutmut's state")
@@ -7074,7 +7016,7 @@ class TestRunInSession(unittest.TestCase):
             signal.signal(signal.SIGINT, before)
 
 
-class TestFlakyTests(unittest.TestCase):
+class TestFlakyTests(RepositoryTest):
     """The flaky-tests check over a real git repository, rerunning its tests with this suite's own pytest."""
 
     BASE = (
@@ -7102,27 +7044,7 @@ class TestFlakyTests(unittest.TestCase):
     # The reader and writer pairs change_the_tests adds.
     PAIRS = 8
 
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.repo = tmp.name
-        self.host = Host()
-        self.git("init", "--quiet", "-b", "main")
-        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
-            self.git("config", key, value)
-        self.put("tests/test_state.py", self.BASE)
-        self.put("calc.py", "def add(a, b):\n    return a + b\n")
-        self.git("add", "-A")
-        self.git("commit", "--quiet", "-m", "base")
-
-    def git(self, *args):
-        return self.host.git(self.repo, *args)
-
-    def put(self, name, text):
-        path = os.path.join(self.repo, name)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(text)
+    BASE_FILES = {"tests/test_state.py": BASE, "calc.py": "def add(a, b):\n    return a + b\n"}
 
     def found(self):
         base = self.git("rev-parse", "HEAD").strip()
@@ -7635,35 +7557,14 @@ class TestFlakyTests(unittest.TestCase):
         self.assertEqual((check.fails, check.find), (False, orchestrator.flaky_tests))
 
 
-class TestPassesAtBase(unittest.TestCase):
+class TestPassesAtBase(RepositoryTest):
     """The passes-at-base check over a real git repository, running its tests with this suite's own pytest."""
 
     # add is wrong at the base; mul is right, and stays so.
     CALC = "def add(a, b):\n    return a - b\n\n\ndef mul(a, b):\n    return a * b\n"
     TESTS = "from calc import mul\n\n\ndef test_mul():\n    assert mul(2, 3) == 6\n"
 
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.repo = tmp.name
-        self.host = Host()
-        self.git("init", "--quiet", "-b", "main")
-        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
-            self.git("config", key, value)
-        self.put("calc.py", self.CALC)
-        self.put("tests/test_calc.py", self.TESTS)
-        self.put("pytest.ini", "[pytest]\npythonpath = .\n")
-        self.git("add", "-A")
-        self.git("commit", "--quiet", "-m", "base")
-
-    def git(self, *args):
-        return self.host.git(self.repo, *args)
-
-    def put(self, name, text):
-        path = os.path.join(self.repo, name)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(text)
+    BASE_FILES = {"calc.py": CALC, "tests/test_calc.py": TESTS, "pytest.ini": "[pytest]\npythonpath = .\n"}
 
     def found(self, budget=orchestrator.BASE_RUN_BUDGET):
         """The check's findings on the working tree, every file in it tracked."""
@@ -8219,31 +8120,12 @@ class TestWrittenRules(unittest.TestCase):
         self.assertEqual(self.ruff("store.py", text), [(8, "BLE001")])
 
 
-class TestVagueNames(unittest.TestCase):
+class TestVagueNames(RepositoryTest):
     """The vague-names check over a real git repository: a base commit, then the change in its working tree."""
 
     BASE = "data = 1\n\n\ndef old(value):\n    return value\n"
 
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.repo = tmp.name
-        self.host = Host()
-        self.git("init", "--quiet", "-b", "main")
-        for key, setting in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
-            self.git("config", key, setting)
-        self.put("calc.py", self.BASE)
-        self.git("add", "-A")
-        self.git("commit", "--quiet", "-m", "base")
-
-    def git(self, *args):
-        return self.host.git(self.repo, *args)
-
-    def put(self, name, text):
-        path = os.path.join(self.repo, name)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(text)
+    BASE_FILES = {"calc.py": BASE}
 
     def found(self):
         """(path, line, rule, message) of each finding on the working tree's change, every file in it tracked."""
@@ -8342,7 +8224,7 @@ class TestVagueNames(unittest.TestCase):
         self.assertEqual((check.fails, check.find), (False, orchestrator.vague_names))
 
 
-class TestSurvivingMutants(unittest.TestCase):
+class TestSurvivingMutants(RepositoryTest):
     """The surviving-mutants check over a real git repository, with this suite's own mutmut, or a fake one."""
 
     BASE = (
@@ -8386,32 +8268,18 @@ class TestSurvivingMutants(unittest.TestCase):
         "def test_box():\n    calc.Box().size()\n    calc.Box().other()\n"
     )
 
+    BASE_FILES = {
+        "pyproject.toml": ('[tool.mutmut]\nsource_paths = ["calc.py"]\n'
+                           'pytest_add_cli_args_test_selection = ["tests/"]\n'
+                           f'do_not_mutate_patterns = {json.dumps(PATTERNS)}\n'),
+        "calc.py": BASE,
+        "tests/test_calc.py": TESTS,
+    }
+
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.repo, self.bin = (os.path.join(tmp.name, d) for d in ("repo", "bin"))
-        os.mkdir(self.repo)
+        super().setUp()
+        self.bin = os.path.join(self.outside, "bin")
         os.mkdir(self.bin)
-        self.host = Host()
-        self.git("init", "--quiet", "-b", "main")
-        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
-            self.git("config", key, value)
-        self.put("pyproject.toml", '[tool.mutmut]\nsource_paths = ["calc.py"]\n'
-                                   'pytest_add_cli_args_test_selection = ["tests/"]\n'
-                                   f'do_not_mutate_patterns = {json.dumps(self.PATTERNS)}\n')
-        self.put("calc.py", self.BASE)
-        self.put("tests/test_calc.py", self.TESTS)
-        self.git("add", "-A")
-        self.git("commit", "--quiet", "-m", "base")
-
-    def git(self, *args):
-        return self.host.git(self.repo, *args)
-
-    def put(self, name, text):
-        path = os.path.join(self.repo, name)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(text)
 
     def found(self, budget=60, rules=None):
         base = self.git("rev-parse", "HEAD").strip()
@@ -9409,37 +9277,12 @@ def flat(name, n, indent=""):
     return f"{indent}def {name}(x):\n{body}{indent}    return x\n"
 
 
-class TestTooComplexFunctions(unittest.TestCase):
+class TestTooComplexFunctions(RepositoryTest):
     """The cognitive-complexity check over a real git repository: a base commit, then the change in its working tree."""
 
     BASE = flat("grow", 14) + "\n\n" + flat("big", 20) + "\n\n" + flat("small", 3)
 
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.repo = tmp.name
-        self.host = Host()
-        self.git("init", "--quiet", "-b", "main")
-        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
-            self.git("config", key, value)
-        self.put("calc.py", self.BASE)
-        self.git("add", "-A")
-        self.git("commit", "--quiet", "-m", "base")
-
-    def git(self, *args):
-        return self.host.git(self.repo, *args)
-
-    def put(self, name, text):
-        path = os.path.join(self.repo, name)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(text)
-
-    def edit(self, name, old, new):
-        with open(os.path.join(self.repo, name)) as f:
-            text = f.read()
-        self.assertEqual(text.count(old), 1, old)
-        self.put(name, text.replace(old, new))
+    BASE_FILES = {"calc.py": BASE}
 
     def change(self):
         return orchestrator.GateChange.from_tree(self.repo, self.git("rev-parse", "HEAD").strip())
@@ -9943,35 +9786,18 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.assertEqual((check.fails, check.find), (True, orchestrator.too_complex_functions))
 
 
-class TestChangedPythonFiles(unittest.TestCase):
+class TestChangedPythonFiles(RepositoryTest):
     """How flaky-tests, surviving-mutants and cognitive complexity read the Python files a change touches, end to end
     through each check over a real git repository."""
 
     # d is a decorator that takes an argument, for the decorators below.
     CALC = "def d(_):\n    return lambda f: f\n\n\ndef add(a, b):\n    return a + b\n"
 
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.repo = tmp.name
-        self.host = Host()
-        self.git("init", "--quiet", "-b", "main")
-        for key, setting in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
-            self.git("config", key, setting)
-        self.put("pyproject.toml", '[tool.mutmut]\nsource_paths = ["."]\n')
-        self.put("calc.py", self.CALC)
-        self.put("tests/test_calc.py", "import calc\n\n\ndef test_add():\n    assert calc.add(2, 3) == 5\n")
-        self.git("add", "-A")
-        self.git("commit", "--quiet", "-m", "base")
-
-    def git(self, *args):
-        return self.host.git(self.repo, *args)
-
-    def put(self, name, text):
-        path = os.path.join(self.repo, name)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(text)
+    BASE_FILES = {
+        "pyproject.toml": '[tool.mutmut]\nsource_paths = ["."]\n',
+        "calc.py": CALC,
+        "tests/test_calc.py": "import calc\n\n\ndef test_add():\n    assert calc.add(2, 3) == 5\n",
+    }
 
     def change(self):
         return orchestrator.GateChange.from_tree(self.repo, self.git("rev-parse", "HEAD").strip())
@@ -10267,27 +10093,8 @@ class TestCI(unittest.TestCase):
             ci.trigger(REF_1_1)
 
 
-class TestHostSnapshot(unittest.TestCase):
+class TestHostSnapshot(RepositoryTest):
     """Host.snapshot on real git."""
-
-    def setUp(self):
-        import tempfile
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.repo = tmp.name
-        self.host = Host()
-        self.git("init", "--quiet", "-b", "main")
-        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
-            self.git("config", key, value)
-
-    def git(self, *args):
-        return self.host.git(self.repo, *args)
-
-    def put(self, name, text):
-        path = f"{self.repo}/{name}"
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(text)
 
     def test_snapshot_of_the_working_tree(self):
         self.put("keep.py", "a\n")
