@@ -3896,7 +3896,9 @@ class _ChangedFunction:
     line: int  # the line of its def
     first: int  # the line it starts on, its decorators included
     source: tuple[str, ...]  # its lines, from first on, as the working tree has them
-    decorators: tuple[str, ...] = ()  # each as written, without its @
+    # Each of its decorators as ast.unparse writes it, without its @; None for one too deep or too long for it to write,
+    # as _unparsed says.
+    decorators: tuple[str | None, ...] = ()
     # The last line of the statement before it in its module or class, else its class's first line, else 0.
     floor: int = 0
 
@@ -3946,7 +3948,7 @@ def _python_units(path: str, text: str, tree: ast.Module) -> list[_ChangedFuncti
                 first = min([unit.lineno, *(d.lineno for d in unit.decorator_list)])
                 out.append(_ChangedFunction(path, prefix + unit.name, unit.lineno, first,
                                             tuple(lines[first - 1:unit.end_lineno or unit.lineno]),
-                                            tuple(ast.unparse(d) for d in unit.decorator_list), floor))
+                                            tuple(_unparsed(d)[0] or None for d in unit.decorator_list), floor))
     return out
 
 
@@ -4073,17 +4075,24 @@ def _literals(node: ast.AST) -> list:
 
 def _code(node: ast.AST) -> str:
     """node as Python source, for a finding's message: its first line, clipped; or a note that it is too deep or too
-    long to print. ast.unparse recurses as deep as the tree goes, and so overflows the stack on valid code such as a
-    sum of a few thousand terms; and it writes an int with repr, which refuses one of more than
-    sys.get_int_max_str_digits() decimal digits."""
-    where = f"code at line {getattr(node, 'lineno', '?')}"
-    try:
-        text = ast.unparse(node)
-    except RecursionError:
-        return f"({where}, too deep to print)"
-    except ValueError:
-        return f"({where}, too long to print)"
+    long to print, as _unparsed says."""
+    text, why = _unparsed(node)
+    if why:
+        return f"(code at line {getattr(node, 'lineno', '?')}, {why} to print)"
     return _clip(text.splitlines()[0] if text else text)
+
+
+def _unparsed(node: ast.AST) -> tuple[str, str]:
+    """node as Python source, as ast.unparse writes it, and ""; or "" and why it cannot be written, "too deep" or "too
+    long". ast.unparse recurses as deep as the tree goes, and so overflows the stack on valid code such as a sum of a
+    few thousand terms; and it writes an int with repr, which refuses one of more than sys.get_int_max_str_digits()
+    decimal digits."""
+    try:
+        return ast.unparse(node), ""
+    except RecursionError:
+        return "", "too deep"
+    except ValueError:
+        return "", "too long"
 
 
 def _clip(text: str, n: int = 160) -> str:

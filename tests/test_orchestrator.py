@@ -9654,6 +9654,9 @@ class TestChangedPythonFiles(unittest.TestCase):
     """How flaky-tests, surviving-mutants and cognitive complexity read the Python files a change touches, end to end
     through each check over a real git repository."""
 
+    # d is a decorator that takes an argument, for the decorators below.
+    CALC = "def d(_):\n    return lambda f: f\n\n\ndef add(a, b):\n    return a + b\n"
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -9663,7 +9666,7 @@ class TestChangedPythonFiles(unittest.TestCase):
         for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
             self.git("config", key, value)
         self.put("pyproject.toml", '[tool.mutmut]\nsource_paths = ["."]\n')
-        self.put("calc.py", "def add(a, b):\n    return a + b\n")
+        self.put("calc.py", self.CALC)
         self.put("tests/test_calc.py", "import calc\n\n\ndef test_add():\n    assert calc.add(2, 3) == 5\n")
         self.git("add", "-A")
         self.git("commit", "--quiet", "-m", "base")
@@ -9732,6 +9735,30 @@ class TestChangedPythonFiles(unittest.TestCase):
         reasons = {f["message"].partition(", so ")[0] for f in found}
         self.assertEqual(len(reasons), 1, reasons)
         self.assertTrue(reasons.pop().startswith("could not be read ("))
+
+    # Decorators that ast.unparse cannot write: a sum too deep for its recursion, and an int, as hexadecimal, of
+    # more than sys.get_int_max_str_digits() decimal digits, which it writes in decimal.
+    DEEP_DECORATORS = {"deep": "@d(" + " + ".join(["1"] * 5000) + ")", "long": "@d(0x" + "f" * 4200 + ")"}
+
+    def test_a_changed_test_with_a_decorator_too_deep_or_too_long_to_write_is_still_rerun(self):
+        for kind, decorator in self.DEEP_DECORATORS.items():
+            with self.subTest(kind=kind), patch.object(orchestrator, "FLAKY_SEEDS", (1, 2)):
+                self.put("tests/test_calc.py", (
+                    "import calc\n\n\ndef d(_):\n    return lambda f: f\n\n\n"
+                    f"{decorator}\ndef test_add():\n    assert calc.add(2, 3) == 6\n"))
+                found = orchestrator.flaky_tests(self.change())
+                self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                                 [("tests/test_calc.py", 9, "failed-every-run")])
+
+    def test_a_changed_function_with_a_decorator_too_deep_or_too_long_to_write_is_not_mutated(self):
+        for kind, decorator in self.DEEP_DECORATORS.items():
+            with self.subTest(kind=kind):
+                self.put("calc.py", self.CALC.replace("def add(a, b):\n    return a + b",
+                                                      f"{decorator}\ndef add(a, b):\n    return b + a"))
+                found = orchestrator.surviving_mutants(self.change(), budget=60)
+                self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                                 [("calc.py", 6, "not-mutated")])
+                self.assertIn("mutmut does not mutate a decorated function", found[0]["message"])
 
 
 class TestToolFindings(unittest.TestCase):

@@ -299,14 +299,6 @@ was done.
   counts a deleted file as Python source only by its `.py`, so a change that only deletes a `#!` python script
   outside the tests edits no Python source for it. Found while fixing the cognitive-complexity check's same gap
   (2026-10-25). Closes with that branch asking `_was_python_source`, which the complexity check now uses.
-- **A deep decorator can crash flaky-tests and surviving-mutants.** `_changed_python_units`, which both select
-  through (`_changed_python_tests`, `_changed_python_functions`), writes each decorator of a changed function with
-  `ast.unparse(d)`, which recurses as deep as the expression goes, so a function decorated with a deep expression,
-  such as a sum of a few thousand terms, can raise `RecursionError` out of the check, which GateCheck says must not
-  raise; an int of more than 4300 digits in one raises `ValueError` the same way. Raised by review round 5 of ticket
-  06 (R5-F5), its check named right in round 6 (R6-F3); confirmed at the node only, not end to end; the code is
-  surviving-mutants'. `_code` already survives both for findings' messages. Closes with the decorators compared by
-  `_body_fingerprint`-like fingerprints rather than their text, or the unparse guarded as `_code` guards it.
 - **A Python script with no `.py` is never judged by the cognitive-complexity check.** `_judged_files` judges only
   paths ending in `.py`, while the pairing reads a script whose `#!` line names python as Python
   (`_is_python_source`), so a function moved unchanged into `bin/tool` keeps its base, but one the change grows
@@ -332,6 +324,20 @@ was done.
   files.
 
 ## Fixed
+
+- **A deep decorator can crash flaky-tests and surviving-mutants.** `_changed_python_units`, which both select
+  through (`_changed_python_tests`, `_changed_python_functions`), writes each decorator of a changed function with
+  `ast.unparse(d)`, which recurses as deep as the expression goes, so a function decorated with a deep expression,
+  such as a sum of a few thousand terms, can raise `RecursionError` out of the check, which GateCheck says must not
+  raise; an int of more than 4300 digits in one raises `ValueError` the same way. Raised by review round 5 of ticket
+  06 (R5-F5), its check named right in round 6 (R6-F3); confirmed at the node only, not end to end; the code is
+  surviving-mutants'. `_code` already survives both for findings' messages. Closes with the decorators compared by
+  `_body_fingerprint`-like fingerprints rather than their text, or the unparse guarded as `_code` guards it.
+  Fixed (2026-10-26): `_python_units` writes each decorator through `_unparsed`, the guard `_code` now shares, which
+  gives why instead of raising; `_ChangedFunction.decorators` holds None for a decorator too deep or too long to
+  write, which `_unmutatable`, its one reader, counts as a decorator like any other. `TestChangedPythonFiles` runs
+  flaky-tests and surviving-mutants end to end on a sum of 5000 terms and on an int of 5058 decimal digits, written
+  in hexadecimal since a decimal literal that long does not parse.
 
 - **The cognitive-complexity check reads and parses changed files in a loop of its own.** `_judged_files` and
   `_working_functions` repeat `_changed_python_units`' reading, decoding and unreadable-file handling, because that
