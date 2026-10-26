@@ -6537,7 +6537,7 @@ def judged_in_quality_command(job: str, target: str) -> int:
     """
     try:
         number = judged_in_quality(os.getcwd(), CI(job), target)
-    # OSError: os.getcwd, for a working directory that is gone.
+    # OSError: such as os.getcwd's, for a working directory that is gone.
     except (OrchestratorError, GateError, OSError) as e:
         print(f"judged-in-quality: {' '.join(str(e).splitlines())}", file=sys.stderr)
         return EXIT_ERROR
@@ -6560,7 +6560,8 @@ def judged_in_quality(root: str, ci: CI, target: str) -> int:
     name, a HEAD with no merge base or one whose JUDGING_FILES differ from it, and missing credentials; CIError as
     ci.retained_builds does; GateError when git fails or a main commit cannot be fetched, as _git says.
     """
-    # As `check-ref-format --branch` refuses a leading "-", which it would also expand @{-N} in.
+    # A leading "-" is refused as `check-ref-format --branch` refuses it; --branch itself is not used, since it
+    # turns @{-N} into the branch checked out N switches ago.
     if target.startswith("-") or _git_run(root, "check-ref-format", f"refs/heads/{target}").returncode != 0:
         raise OrchestratorError(f"{target!r} is not a branch name")
     tracking = f"refs/remotes/{REMOTE}/{target}"
@@ -6615,7 +6616,8 @@ def _build_trust(root: str, build: QualityBuild, tree: str, base: str) -> tuple[
 def _judging_changes(root: str, a: str, b: str) -> list[str]:
     """Those of JUDGING_FILES whose file differs between commits a and b, its mode included, or that only one of
     them has. Raises GateError as _git does."""
-    names = _git(root, "diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", a, b, "--",
+    # --no-relative: under the user's diff.relative, a diff run in a subdirectory lists none of the top's files.
+    names = _git(root, "diff", "--name-only", "-z", "--no-relative", "--no-renames", "--no-ext-diff", a, b, "--",
                  *_top_literal(list(JUDGING_FILES)), verbatim=True)
     return [p for p in names.split("\0") if p]
 

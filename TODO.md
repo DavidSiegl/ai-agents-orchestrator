@@ -332,6 +332,14 @@ was done.
   a new function under its old name (review round 6, R6-F1). Decided by the user in review round 4 of ticket 06.
   Closes with a way to tell a copy from a rename, such as git's copy detection (`git diff -C`) on the change's
   files.
+- **`Host._paths_between` follows the user's `diff.relative`.** Its `git diff --name-only` has no `--no-relative`,
+  so with `diff.relative=true` in the user's git config and a `cwd` that is a subdirectory of the repository (not
+  checked whether a run can pass one), it lists only the paths under that subdirectory, and its `_top_literal` pathspecs for files elsewhere
+  match nothing. `Host.lock` then returns fewer locked paths and `Host.locked_changes` misses edits to them. Raised
+  by the cross-review of `trust-quality-at-pr` (review 49, F7, 2026-10-26), which found it in `_judging_changes` and
+  fixed it there with `--no-relative`; of `Host._paths_between` it said: "has the same exposure, but it is outside
+  this range". Closes with `--no-relative` on that call and a test that sets `diff.relative` and locks from a
+  subdirectory.
 
 ## Fixed
 

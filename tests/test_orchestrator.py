@@ -10403,6 +10403,17 @@ class TestJudgedInQuality(unittest.TestCase):
                 self.build()
                 self.assert_refused(re.escape(name))
 
+    def test_the_judging_files_are_compared_whole_from_a_subdirectory_under_diff_relative(self):
+        self.git("config", "diff.relative", "true")
+        os.mkdir(os.path.join(self.repo, "sub"))
+        self.put("sub/g.py", "g\n")
+        self.put("Jenkinsfile", "changed\n")
+        self.commit("edit Jenkinsfile")
+        self.tree = self.git("rev-parse", "HEAD^{tree}").strip()
+        self.build()
+        self.repo = os.path.join(self.repo, "sub")
+        self.assert_refused("Jenkinsfile")
+
     def test_a_build_by_a_main_with_other_judging_files_does_not(self):
         main_sha = self.push_main("orchestrator.py", "a newer gate\n")
         n = self.build(main=main_sha)
