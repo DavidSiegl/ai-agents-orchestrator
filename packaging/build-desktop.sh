@@ -171,9 +171,10 @@ smoke_dmg() {
     smoke_cli "$smoke/project" "$smoke/bin/octoflow"
     exe=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist") \
         || smoke_fail "Info.plist names no CFBundleExecutable"
-    # Without PATH or ORCHESTRATOR_PY, the app can run only the orchestrator it bundles: its fallback for a build
-    # with none, python3 with the checkout's orchestrator.py (Orchestrator::locate_from), would pass here, since this
-    # script runs in that checkout.
+    # With PATH an empty directory and no ORCHESTRATOR_PY, the app can run only the orchestrator it bundles: its
+    # fallback for a build with none, python3 with the checkout's orchestrator.py (Orchestrator::locate_from), would
+    # pass here, since this script runs in that checkout. PATH is emptied, not unset: unset, execvp would search the
+    # default /usr/bin:/bin, where macOS has a python3.
     (cd "$smoke/project" && env -u ORCHESTRATOR_PY PATH=/var/empty "$app/Contents/MacOS/$exe" --help >/dev/null) \
         || smoke_fail "$exe --help did not exit 0 with only the bundled orchestrator to run"
     # The volume can be busy for a moment after the processes started from it exit, as Spotlight looks at it.
