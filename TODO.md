@@ -198,6 +198,13 @@ was done.
   computes `_removal_points` for `_judged_files` and `vague_names`, which never read them; `_ChangedPythonFile` is a
   frozen dataclass with `set` fields, so its generated `__hash__` raises; `vague_names` unpacks three fields and reads
   `.why` beside them. Closes with the four changed, in one commit, when the walker is next touched.
+- **A flaky-tests rerun sometimes waits out `FLAKY_RUN_TIMEOUT` on Jenkins.**
+  `TestFlakyTests.test_a_server_a_test_leaves_holding_the_output_does_not_hold_up_the_reruns` takes 8.0 s on
+  Jenkins (PR-98, PR-99/3, PR-100), but 14.4 s on PR-101 build 1 and 31.0 s on build 3, failing its 30 s bound: one
+  of its six pytest runs waited about the whole `FLAKY_RUN_TIMEOUT`. PR-101 changes only the tests' git fixture.
+  Twenty runs here under the load of a parallel suite, with SIGINT ignored, all passed. A rerun that hangs gives a
+  `not-rerun` warning, not a wrong verdict. Closes when the run that waits is caught, e.g. with each pytest run's
+  wall time and exit in the test's failure message, and its cause fixed.
 - **`vague-names` does not split CamelCase.** `vague_names` matches a whole name or its last `_`-separated word,
   so `user_data` is found but a class `InfoManager` or `UserData` is not. Closes, if the run metrics show such names
   recur, with the last CamelCase word matched too.
@@ -342,6 +349,7 @@ was done.
 
 - **The GitHub repository still had the old name.** It is `DavidSiegl/octoflow-ai` now, and the README's URLs and
   badges point there; GitHub redirects the old URLs.
+
 - **A submodule is empty in `passes-at-base`'s copy of the base.** `git archive` leaves a submodule's directory
   empty, so a changed test that imports from one fails to import at the base and gives nothing, though it might pass
   there; the check misses it. Raised by the cross-review of `passes-at-base` (R1-5, 2026-10-24): "`git archive` omits
