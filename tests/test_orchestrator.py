@@ -1567,6 +1567,10 @@ class TestHostGit(unittest.TestCase):
         self.assertEqual(self.host.file_at(f"{self.a}/sub", second, "sub/lib.py"), "two\n")
         self.assertIsNone(self.host.file_at(self.a, first, "sub/lib.py"))
         self.assertIsNone(self.host.file_at(self.a, second, "sub"))
+        # git ls-tree lists a directory's entries, not the directory, for a path ending in "/" and for none.
+        for path in ("sub/", ""):
+            with self.subTest(path=path):
+                self.assertIsNone(self.host.file_at(self.a, second, path))
         self.assertEqual(self.host.file_at(self.a, first, "app.py"), "one\n")
         with self.assertRaises(OrchestratorError):
             self.host.file_at(self.a, "0" * 40, "app.py")
@@ -3695,7 +3699,8 @@ def leaks(text):
 # A token-shaped string, built so that no scanner takes this file for a leak.
 FAKE_TOKEN = "ghp_" + "Zq7" * 12
 
-# The fake gitleaks: writes its argv and the config it was given beside itself, then acts as the file `mode` says.
+# The fake gitleaks: writes its argv, its working directory and the config it was given beside itself, then acts
+# as the file `mode` says.
 FAKE_GITLEAKS = r'''#!PYTHON
 import json, os, sys
 here = os.path.dirname(os.path.abspath(__file__))
@@ -3704,6 +3709,8 @@ with open(os.path.join(here, "argv"), "w") as f:
     json.dump(args, f)
 with open(os.path.join(here, "env"), "w") as f:
     f.write("\n".join(f"{k}={v}" for k, v in sorted(os.environ.items()) if k.startswith("GIT_")))
+with open(os.path.join(here, "cwd"), "w") as f:
+    f.write(os.getcwd())
 mode = open(os.path.join(here, "mode")).read().strip()
 if args[:2] == ["git", "--help"]:
     sys.exit(1 if mode == "old" else 0)
@@ -3797,6 +3804,91 @@ class TestScanUnpublished(RepositoryTest):
         self.git("push", "--quiet", "origin", "main")
         self.push(self.commit({".gitleaks.toml": "title = 'loosened'\n"}, "loosen"))
         self.assertEqual(self.seen("config-seen"), "title = 'base rules'\n")
+
+    def rules(self, files):
+        """Make base a commit that adds files, pushed to origin."""
+        self.base = self.commit(files, "rules")
+        self.git("push", "--quiet", "--force", "origin", "main")
+
+    def seen_rule(self, path):
+        """The file at path, from the top level of the repository, that gitleaks could read in its last run."""
+        with open(os.path.join(self.seen("cwd"), path)) as f:
+            return f.read()
+
+    def test_a_file_the_base_s_config_extends_is_the_base_s_copy(self):
+        self.rules({".gitleaks.toml": "[extend]\npath = 'rules/extra.toml'\n", "rules/extra.toml": "title = 'base'\n"})
+        self.push(self.commit({"rules/extra.toml": "[allowlist]\npaths = ['cfg.py']\n"}, "allowlist itself"))
+        argv = json.loads(self.seen("argv"))
+        # gitleaks resolves an extended path against its working directory.
+        self.assertEqual(os.path.join(self.seen("cwd"), ".gitleaks.toml"), argv[argv.index("--config") + 1])
+        self.assertEqual(self.seen_rule("rules/extra.toml"), "title = 'base'\n")
+
+    def test_a_chain_of_extends_is_copied_whole(self):
+        self.rules({".gitleaks.toml": "[extend]\npath = 'tmp/../one.toml'\n",
+                    "one.toml": "[Extend]\nPath = 'rules/two.toml'\n", "rules/two.toml": "title = 'two'\n"})
+        self.push(self.commit({"one.toml": "title = 'loosened'\n", "rules/two.toml": "title = 'loosened'\n"}, "edit"))
+        # gitleaks opens a path as it is spelled.
+        self.assertEqual((self.seen_rule("tmp/../one.toml"), self.seen_rule("rules/two.toml")),
+                         ("[Extend]\nPath = 'rules/two.toml'\n", "title = 'two'\n"))
+
+    def test_an_extend_past_the_depth_gitleaks_reads_is_not_followed(self):
+        self.rules({".gitleaks.toml": "[extend]\npath = 'one.toml'\n", "one.toml": "[extend]\npath = 'two.toml'\n",
+                    "two.toml": "[extend]\npath = 'one.toml'\n"})
+        self.push(self.commit({"b.txt": "b\n"}, "clean"))
+        self.assertEqual(self.seen_rule("two.toml"), "[extend]\npath = 'one.toml'\n")
+
+    def test_an_extended_symbolic_link_blocks_the_push(self):
+        os.symlink("one.toml", os.path.join(self.repo, "link.toml"))
+        self.rules({".gitleaks.toml": "[extend]\npath = 'link.toml'\n", "one.toml": "title = 'one'\n"})
+        with self.assertRaisesRegex(OrchestratorError, "nothing was pushed: .* its link.toml is a symbolic link"):
+            self.push(self.commit({"b.txt": "b\n"}, "clean"))
+        self.assertNotIn("refs/heads/ci-ref", self.on_origin())
+        # Nor is the base's own config followed through one; file_at, which the gate reads manifests with, still is.
+        self.git("rm", "--quiet", ".gitleaks.toml")
+        os.symlink("one.toml", os.path.join(self.repo, ".gitleaks.toml"))
+        self.rules({})
+        with self.assertRaisesRegex(OrchestratorError, "its .gitleaks.toml is a symbolic link"):
+            self.push(self.commit({"c.txt": "c\n"}, "clean"))
+        self.assertNotIn("refs/heads/ci-ref", self.on_origin())
+        self.assertEqual(self.host.file_at(self.repo, self.base, ".gitleaks.toml"), "one.toml")
+
+    def test_a_linked_gitleaksignore_in_the_base_blocks_the_push(self):
+        # Its text would be the path it points to, which drops every fingerprint the base ignores.
+        os.makedirs(os.path.join(self.repo, "security"))
+        os.symlink("security/leaks.ignore", os.path.join(self.repo, ".gitleaksignore"))
+        self.rules({"security/leaks.ignore": "anything\n"})
+        with self.assertRaises(OrchestratorError) as caught:
+            self.push(self.commit({"b.txt": "b\n"}, "clean"))
+        self.assertNotIsInstance(caught.exception, orchestrator.LeaksFound)
+        self.assertIn("nothing was pushed", str(caught.exception))
+        self.assertIn(".gitleaksignore is a symbolic link", str(caught.exception))
+        self.assertNotIn("refs/heads/ci-ref", self.on_origin())
+
+    def test_an_extend_the_scan_cannot_take_from_the_base_blocks_the_push(self):
+        first = self.base
+        for case, files, named in [
+                ("absolute", {".gitleaks.toml": "[extend]\npath = '/etc/extra.toml'\n"}, "/etc/extra.toml"),
+                ("in other case", {".gitleaks.toml": "[EXTEND]\nPATH = '/etc/extra.toml'\n"}, "/etc/extra.toml"),
+                ("outside", {".gitleaks.toml": "[extend]\npath = 'rules/../../extra.toml'\n"}, "../extra.toml"),
+                ("missing", {".gitleaks.toml": "[extend]\npath = 'rules/gone.toml'\n"}, "rules/gone.toml"),
+                ("cycle", {".gitleaks.toml": "[extend]\npath = 'one.toml'\n",
+                           "one.toml": "[extend]\npath = './.gitleaks.toml'\n"}, "one.toml -> .gitleaks.toml"),
+                ("pathspec magic", {".gitleaks.toml": "[extend]\npath = ':/a.txt'\n"}, ":/a.txt"),
+                ("not TOML", {".gitleaks.toml": "[extend]\npath = 'one.toml'\n", "one.toml": "[extend\n"}, "one.toml"),
+                ("NUL", {".gitleaks.toml": '[extend]\npath = "a\\u0000.toml"\n'}, "a\\x00.toml"),
+                ("top level", {".gitleaks.toml": "[extend]\npath = 'rules/..'\n"}, "rules/.."),
+                ("not a string", {".gitleaks.toml": "[extend]\npath = 1\n"}, ".gitleaks.toml gives a path"),
+                ("twice", {".gitleaks.toml": "[extend]\npath = 'a.toml'\nPath = 'b.toml'\n"}, ".gitleaks.toml")]:
+            with self.subTest(case=case):
+                self.git("reset", "--quiet", "--hard", first)
+                self.rules(files)
+                commit = self.commit({"b.txt": "b\n"}, "clean")
+                with self.assertRaises(OrchestratorError) as caught:
+                    self.push(commit)
+                self.assertNotIsInstance(caught.exception, orchestrator.LeaksFound)
+                self.assertIn(named, str(caught.exception))
+                self.assertIn("nothing was pushed", str(caught.exception))
+                self.assertNotIn("refs/heads/ci-ref", self.on_origin())
 
     def test_an_added_gitleaks_allow_is_a_leak(self):
         allowed = self.commit({"c.py": "x = 1\ny = 2  # gitleaks:allow\n"}, "allow")

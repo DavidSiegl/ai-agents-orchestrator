@@ -105,6 +105,10 @@ GITLEAKS_INSTALL = ("install gitleaks 8.19 or later where the agents run (https:
 # The comment that makes gitleaks skip its line. Spelled in two halves so that a change moving the line that holds it
 # is not refused by the push's own check for added allow comments (Host._allow_comments).
 GITLEAKS_ALLOW = "gitleaks" ":allow"
+# How many `[extend] path` steps gitleaks follows from its --config: the files one and two steps away are read, and an
+# [extend] in the second is not (maxExtendDepth in gitleaks' config/config.go; 8.30.1 checked). A gitleaks that
+# follows more steps finds no copy of the third file in Host._write_base_rules' directory, and fails to load.
+GITLEAKS_EXTEND_DEPTH = 2
 # The namespace that marks a branch as a run's, locally and on origin; prune touches no branch outside it.
 BRANCH_PREFIX = "orchestrator/"
 REMOTE = "origin"
@@ -1446,7 +1450,8 @@ def _herdr_error(proc: subprocess.CompletedProcess) -> HerdrError:
 MISSING_FILE_STATUS = 3
 # gh's exit status when it is not logged in, and sh's when gh is not installed: no gh call can succeed then.
 GH_UNUSABLE_STATUS = (4, 127)
-# Runs a command in a directory, for gh, which finds the repository from its working directory and has no -C.
+# Runs a command in a directory: gh, which finds the repository from its working directory and has no -C, and
+# gitleaks, which reads an `[extend] path` from its working directory.
 IN_DIR = 'cd -- "$1" && shift && exec "$@"'
 
 
@@ -1806,14 +1811,34 @@ class Host:
                         "--src-prefix=a/", "--dst-prefix=b/", base, *([commit] if commit else []), "--", verbatim=True)
 
     def file_at(self, cwd: str, commit: str, path: str) -> str | None:
-        """The file at path, relative to the repository's top level, as commit has it, verbatim as Host.run says, so
-        os.fsencode gives back the bytes git stores; None where commit has no file there. Raises OrchestratorError
-        when git cannot read commit, or cwd is not in a git repository."""
-        # Each entry is `<mode> <type> <object>\t<path>`; a directory's type is tree.
-        entry = self.git(cwd, "ls-tree", "--full-tree", "-z", commit, "--", path, verbatim=True).split("\0")[0]
-        if entry.split("\t")[0].split(" ")[1:2] != ["blob"]:
+        """The file at path, relative to the repository's top level and taken literally, as commit has it, verbatim
+        as Host.run says, so os.fsencode gives back the bytes git stores; None where commit has no file there. A
+        symbolic link gives the path it points to, as git stores it. Raises OrchestratorError when git cannot read
+        commit, or cwd is not in a git repository."""
+        found = self._blob_at(cwd, commit, path)
+        return None if found is None else found[0]
+
+    def _blob_at(self, cwd: str, commit: str, path: str) -> tuple[str, bool] | None:
+        """What file_at gives for path, and whether commit has a symbolic link there, whose text is then the path it
+        points to; None where file_at gives None. Raises as file_at."""
+        # Each entry is `<mode> <type> <object>\t<path>`; a directory's type is tree, a symbolic link's mode 120000.
+        # A path ending in "/", or none, lists a directory's entries instead, so only an entry at path itself counts.
+        entry = self.git(cwd, "ls-tree", "--full-tree", "-z", commit, "--", *_top_literal([path]),
+                         verbatim=True).split("\0")[0]
+        fields, _, listed = entry.partition("\t")
+        mode, kind, blob = (fields.split(" ") + ["", "", ""])[:3]
+        if kind != "blob" or listed != path:
             return None
-        return self.git(cwd, "cat-file", "blob", f"{commit}:{path}", verbatim=True)
+        return self.git(cwd, "cat-file", "blob", blob, verbatim=True), mode == "120000"
+
+    def _base_rules_file(self, cwd: str, base: str, name: str) -> str | None:
+        """base's file at name, one the secret scan takes its rules from, as file_at gives it; None where base has
+        none. Raises OrchestratorError, failing closed as _base_rules_refused says, when base has a symbolic link
+        there, whose target this does not follow, and as file_at."""
+        found = self._blob_at(cwd, base, name)
+        if found and found[1]:
+            raise _base_rules_refused(base, f"{name} is a symbolic link in base, and only a file is read there")
+        return found[0] if found else None
 
     def changed_line_counts(self, cwd: str, base: str, commit: str) -> list[ChangedFile]:
         """Each file the change from base to commit touches, a rename paired as change_diff pairs it, with the lines it
@@ -1874,6 +1899,47 @@ class Host:
         if leaks:
             raise LeaksFound(leaks, report_path)
 
+    def _write_base_rules(self, cwd: str, base: str, rules: str) -> str:
+        """Make the directory rules hold base's gitleaks rules, for a gitleaks run with rules as its working
+        directory, and return the path to give it as --config, in rules: base's .gitleaks.toml, or gitleaks' defaults
+        where base has none. Each file it extends with `[extend] path`, and each one that file extends in turn, as
+        far as GITLEAKS_EXTEND_DEPTH says gitleaks reads, is written from base at that path under rules: gitleaks
+        reads such a path from its working directory, and base's authors write it from the repository's top level, so
+        every file gitleaks reads is base's. Whatever rules held before is removed.
+
+        Raises OrchestratorError, failing closed and naming the file, when a file in the chain is refused by
+        _gitleaks_extended_file or _base_rules_file, or extends what is no file in base or a file already in the
+        chain; and when git cannot read base."""
+        self.check(["rm", "-rf", "--", rules])
+        chain = [".gitleaks.toml"]
+
+        def refused(why: str) -> OrchestratorError:
+            return _base_rules_refused(base, f"{chain[-1]} {why}")
+        config, spelled = f"{rules}/{chain[0]}", chain[0]
+        text = self._base_rules_file(cwd, base, chain[0])
+        if text is None:
+            text = "[extend]\nuseDefault = true\n"
+        while True:
+            self.write(f"{rules}/{spelled}", text)
+            if len(chain) > GITLEAKS_EXTEND_DEPTH:
+                return config
+            try:
+                extended = _gitleaks_extended_file(text)
+            except ValueError as e:
+                raise refused(str(e)) from e
+            if extended is None:
+                return config
+            # gitleaks opens the path as spelled, and the copy is written so; every directory on the way is one this
+            # makes, so the path reaches that copy, which in base is at the path's normal form.
+            name = posixpath.normpath(extended)
+            if name in chain:
+                raise refused(f"extends {extended!r}, which comes back round: {' -> '.join([*chain, name])}")
+            text = self._base_rules_file(cwd, base, name)
+            if text is None:
+                raise refused(f"extends {extended!r}, which is no file in base")
+            chain.append(name)
+            spelled = extended
+
     def scan_unpublished(self, cwd: str, commit: str, base: str, report_path: str) -> list[Leak]:
         """The secrets gitleaks finds, and the `gitleaks:allow` comments added, in the commits a push of commit would
         publish: those reachable from it and from no origin ref, as git log's `<commit> --not --remotes=origin`
@@ -1883,24 +1949,26 @@ class Host:
         remote-tracking ref for a branch origin has since deleted or rewritten narrows the range: what only it reaches
         was public once, and is not scanned again.
 
-        The rules come from base, a commit before the change: its .gitleaks.toml (else gitleaks' defaults) and its
-        .gitleaksignore (else none), and nothing the change holds, in the working tree or committed, so that the
-        change cannot allowlist itself. Every file git takes for text by its content is diffed as text, with no
-        textconv, whatever any .gitattributes says, as _scan_git_env sets git up; one whose first 8000 bytes hold a
-        NUL is binary to git and scanned by neither gitleaks nor the comment check (see TODO.md);
+        The rules come from base, a commit before the change: its .gitleaks.toml (else gitleaks' defaults), each file
+        it extends with `[extend] path`, in turn, and its .gitleaksignore (else none), and nothing the change holds, in
+        the working tree or committed, so that the change cannot allowlist itself. Every file git takes for text by its
+        content is diffed as text, with no textconv, whatever any .gitattributes says, as _scan_git_env sets git up;
+        one whose first 8000 bytes hold a NUL is binary to git and scanned by neither gitleaks nor the comment check
+        (see TODO.md);
         gitleaks honours a `gitleaks:allow` comment silently, so each one an added line holds is a Leak of its own.
         gitleaks runs with --redact and writes its JSON report to report_path, a path in the run's directory, beside
-        the config files and the empty directory this makes there.
+        the .gitleaksignore copy, the rules directory _write_base_rules fills and the empty directory this makes there.
 
-        Raises OrchestratorError, failing closed, when git cannot read base or the range, the range holds an octopus
-        merge, or gitleaks cannot be started, exits other than 0 or 1, writes no report or one that is not a list of
-        findings, or exits 1 with an empty one: gitleaks also exits 1 when it cannot load its config, writing
-        nothing. Runs where cwd is, as every Host command does."""
+        Raises OrchestratorError, failing closed, when git cannot read base or the range, base's rules cannot be taken
+        whole from base as _write_base_rules says or its .gitleaksignore is a symbolic link, the range holds an
+        octopus merge, or gitleaks cannot be started, exits other than 0 or 1, writes no report or one that is not a
+        list of findings, or exits 1 with an empty one: gitleaks also exits 1 when it cannot load its config, writing
+        nothing. git runs where cwd is, as every Host
+        command does, and gitleaks in the directory of rules."""
         directory = report_path.rsplit("/", 1)[0]
-        config, ignore, source = (f"{directory}/gitleaks{name}" for name in (".toml", "ignore", "-source"))
-        base_config = self.file_at(cwd, base, ".gitleaks.toml")
-        self.write(config, "[extend]\nuseDefault = true\n" if base_config is None else base_config)
-        self.write(ignore, self.file_at(cwd, base, ".gitleaksignore") or "")
+        rules, ignore, source = (f"{directory}/gitleaks{name}" for name in ("-rules", "ignore", "-source"))
+        config = self._write_base_rules(cwd, base, rules)
+        self.write(ignore, self._base_rules_file(cwd, base, ".gitleaksignore") or "")
         # gitleaks also reads <source>/.gitleaksignore, which in the working tree the change could write: it scans
         # from an empty directory, the repository named by GIT_DIR. And a report an earlier scan left would be read
         # as this one's.
@@ -1915,7 +1983,8 @@ class Host:
                                     f"diff of what such a merge adds; merge its branches one at a time")
         log_opts = f"--diff-merges=remerge --no-textconv {commit} --not --remotes={REMOTE}"
         git_env = _scan_git_env(git_dir, self.git(cwd, "hash-object", "-t", "tree", os.devnull).strip())
-        proc = self.run([*git_env, "gitleaks", "git", f"--log-opts={log_opts}", "--redact",
+        proc = self.run(["sh", "-c", IN_DIR, "_", rules,
+                         *git_env, "gitleaks", "git", f"--log-opts={log_opts}", "--redact",
                          "--no-banner", "--no-color", "--exit-code", "1", "--report-format", "json", "--report-path",
                          report_path, "--config", config, "--gitleaks-ignore-path", ignore, source],
                         timeout=GITLEAKS_TIMEOUT)
@@ -2806,6 +2875,55 @@ def _scan_git_env(git_dir: str, empty_tree: str) -> list[str]:
     would bring a tree's attributes back, and are unset."""
     return ["env", "-u", "GIT_WORK_TREE", "-u", "GIT_ATTR_SOURCE", "-u", "GIT_CONFIG_PARAMETERS",
             f"GIT_DIR={git_dir}", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=attr.tree", f"GIT_CONFIG_VALUE_0={empty_tree}"]
+
+
+def _base_rules_refused(base: str, why: str) -> OrchestratorError:
+    """The error the secret scan fails closed with when it cannot take its rules from base, a commit, as gitleaks
+    would read them; why names the file and says what is wrong with it, and follows "its"."""
+    return OrchestratorError(f"nothing was pushed: the secret scan takes its rules from base {base[:12]}, but its {why}")
+
+
+def _gitleaks_extended_file(config: str) -> str | None:
+    """The path of the file that config, a gitleaks config's text, extends with `[extend] path`, as config spells it,
+    from the repository's top level, from which a gitleaks run there reads it; None where config extends none (no
+    [extend], no path, or an empty one). gitleaks reads its config's keys whatever their case, so `[Extend] Path`
+    counts too.
+
+    Raises ValueError, saying why in words that follow the config file's name, when config is not TOML, gives [extend]
+    or its path twice in letters that differ only in case, or one that is not a table or a string, or the path is
+    absolute, holds a NUL, or leaves the repository (`..`)."""
+    try:
+        parsed = tomllib.loads(config)
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f"is not TOML: {e}") from e
+    extend = _gitleaks_key(parsed, "extend", dict)
+    path = _gitleaks_key(extend, "path", str) if extend else None
+    if not path:
+        return None
+    name = posixpath.normpath(path)
+    if posixpath.isabs(path):
+        why = "is an absolute path"
+    elif "\0" in path:
+        why = "holds a NUL"
+    elif name == ".." or name.startswith("../"):
+        why = "leaves the repository"
+    elif name == ".":
+        why = "is the top level, no file"
+    else:
+        return path
+    raise ValueError(f"extends {path!r}, which {why}")
+
+
+def _gitleaks_key(table: dict, key: str, kind: type) -> Any:
+    """table's entry for key, a lower-case key of a gitleaks config, in whatever case table spells it, as gitleaks
+    reads it; None where table has none. Raises ValueError, saying why as _gitleaks_extended_file's errors do, when
+    table spells key more than one way or its entry is not of kind (dict for a table, str for a string)."""
+    found = [v for k, v in table.items() if k.lower() == key]
+    if len(found) > 1:
+        raise ValueError(f"gives {key} {len(found)} times, in letters that differ only in case")
+    if found and not isinstance(found[0], kind):
+        raise ValueError(f"gives a {key} that is not a {'table' if kind is dict else 'string'}")
+    return found[0] if found else None
 
 
 def added_lines(diff: str) -> dict[str, dict[int, str]]:

@@ -180,12 +180,6 @@ was done.
   own `git` mode has the same blind spot. Raised by the cross-review of `push-secret-scan` (F15, 2026-10-24). Closes
   with a decision in the spec whether binary content is in scope, and, if it is, a `--text` diff or a scan of the
   blobs themselves (`gitleaks dir` over the pushed files).
-- **A base `.gitleaks.toml` that extends another file reads that file from outside the base.** `scan_unpublished`
-  writes the base's `.gitleaks.toml` into the run directory and passes it with `--config`; an `[extend] path = ...`
-  in it is resolved by gitleaks against its working directory, not against the base, so a file the change can edit
-  may supply rules. Raised by the cross-review of `push-secret-scan` (F6, 2026-10-24): "a base config using
-  `[extend] path = ...` resolves that path outside base (process cwd), which the change may control". Closes by
-  writing each extended file from the base beside the config and rewriting the path, or refusing such a config.
 - **The gate's intro writes the `--rules` path as it is.** `judge_change`'s intro names the rules file without
   `one_line` (`orchestrator.py`, `intro = ...` in `judge_change`), so a rules path holding a line breaker splits the
   quality file's third line, and `docs/quality-gate.md`'s "wherever it appears in a list item or a name" says more
@@ -350,6 +344,20 @@ was done.
   subdirectory.
 
 ## Fixed
+
+- **A base `.gitleaks.toml` that extends another file reads that file from outside the base.** `scan_unpublished`
+  writes the base's `.gitleaks.toml` into the run directory and passes it with `--config`; an `[extend] path = ...`
+  in it is resolved by gitleaks against its working directory, not against the base, so a file the change can edit
+  may supply rules. Raised by the cross-review of `push-secret-scan` (F6, 2026-10-24): "a base config using
+  `[extend] path = ...` resolves that path outside base (process cwd), which the change may control". Closes by
+  writing each extended file from the base beside the config and rewriting the path, or refusing such a config.
+  Fixed (2026-10-26): `Host._write_base_rules` writes base's `.gitleaks.toml` into a `gitleaks-rules` directory and
+  follows its `[extend] path` chain as far as gitleaks reads it (`GITLEAKS_EXTEND_DEPTH`; `_gitleaks_extended_file`
+  reads keys whatever their case, as gitleaks does), writing each file from base at the path as spelled, and
+  `scan_unpublished` runs gitleaks from that directory, so each path resolves to base's copy. An absolute path, one
+  leaving the repository, one base has no file at, a cycle, a file that is not TOML, or `[extend]`/`path` given twice
+  in different case refuses the push; so does a symbolic link in the chain, or a linked `.gitleaksignore`
+  (`Host._base_rules_file`).
 
 - **A run the budget stops can leave mutmut's results unreadable.** mutmut 3.8.0 saves a module's results by
   rewriting `mutants/<path>.meta` in place after each mutant (`SourceFileMutationData.save`, `open(..., "w")` then
