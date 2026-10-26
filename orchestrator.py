@@ -6537,7 +6537,8 @@ def judged_in_quality_command(job: str, target: str) -> int:
     """
     try:
         number = judged_in_quality(os.getcwd(), CI(job), target)
-    except (OrchestratorError, GateError) as e:
+    # OSError: os.getcwd, for a working directory that is gone.
+    except (OrchestratorError, GateError, OSError) as e:
         print(f"judged-in-quality: {' '.join(str(e).splitlines())}", file=sys.stderr)
         return EXIT_ERROR
     print(f"judged-in-quality: build #{number} of {job} judged HEAD's tree from its merge base with {target}")
@@ -6559,7 +6560,8 @@ def judged_in_quality(root: str, ci: CI, target: str) -> int:
     name, a HEAD with no merge base or one whose JUDGING_FILES differ from it, and missing credentials; CIError as
     ci.retained_builds does; GateError when git fails or a main commit cannot be fetched, as _git says.
     """
-    if _git_run(root, "check-ref-format", f"refs/heads/{target}").returncode != 0:
+    # As `check-ref-format --branch` refuses a leading "-", which it would also expand @{-N} in.
+    if target.startswith("-") or _git_run(root, "check-ref-format", f"refs/heads/{target}").returncode != 0:
         raise OrchestratorError(f"{target!r} is not a branch name")
     tracking = f"refs/remotes/{REMOTE}/{target}"
     _git(root, "fetch", "--quiet", REMOTE, f"+refs/heads/{target}:{tracking}")
@@ -6570,8 +6572,7 @@ def judged_in_quality(root: str, ci: CI, target: str) -> int:
         raise OrchestratorError(f"HEAD has no merge base with {REMOTE}/{target}: "
                                 f"{merge_base.stderr.strip() or 'no common ancestor'}")
     base = merge_base.stdout.strip()
-    judging = _judging_files(root, base)
-    if changed := _differing_files(judging, _judging_files(root, "HEAD")):
+    if changed := _judging_changes(root, base, "HEAD"):
         raise OrchestratorError(f"HEAD changes {', '.join(changed)} since its merge base {base}, which decide how "
                                 f"it is judged")
     builds = ci.retained_builds()
@@ -6579,24 +6580,24 @@ def judged_in_quality(root: str, ci: CI, target: str) -> int:
         raise OrchestratorError(f"the quality job {ci.job} has no builds")
     refusals = []
     for build in builds:
-        met, why = _build_trust(root, build, tree, base, judging)
+        met, why = _build_trust(root, build, tree, base)
         if why is None:
             return build.number
         refusals.append((met, why))
-    # max keeps the first of equals, and the builds are newest first. A description is text from Jenkins.
-    raise OrchestratorError(ci.mask(max(refusals, key=lambda r: r[0])[1]))
+    # max keeps the first of equals, and the builds are newest first. A description is text from Jenkins, of any
+    # length, so it is masked before the cut, which could split a token.
+    raise OrchestratorError(_shortened(ci.mask(max(refusals, key=lambda r: r[0])[1]), 400))
 
 
-def _build_trust(root: str, build: QualityBuild, tree: str, base: str, judging: dict[str, str]
-                 ) -> tuple[int, str | None]:
-    """How many of judged_in_quality's conditions build meets in a row, for HEAD's tree and merge base base, at
-    which _judging_files gave judging; and why it fails the first it does not, None when it meets them all.
-    Fetches the build's main commit, as judged_in_quality says, only when it meets the conditions before that one.
-    Raises GateError as _git does."""
+def _build_trust(root: str, build: QualityBuild, tree: str, base: str) -> tuple[int, str | None]:
+    """How many of judged_in_quality's conditions build meets in a row, for HEAD's tree and merge base base, and
+    why it fails the first it does not, None when it meets them all. The reason quotes the build's description
+    whole, unmasked. Fetches the build's main commit, as judged_in_quality says, only when it meets the conditions
+    before that one. Raises GateError as _git does."""
     m = JUDGED_DESCRIPTION.fullmatch(build.description or "")
     if not m:
         return 0, (f"build #{build.number}'s description is not `judged tree=<sha> parent=<sha> main=<sha>`: "
-                   f"{_shortened(repr(build.description))}")
+                   f"{build.description!r}")
     if m["tree"] != tree:
         return 1, f"build #{build.number} judged the tree {m['tree']}, not HEAD's {tree}"
     if m["parent"] != base:
@@ -6605,27 +6606,18 @@ def _build_trust(root: str, build: QualityBuild, tree: str, base: str, judging: 
         return 3, f"build #{build.number} {'is still running' if build.result is None else 'ended ' + build.result}"
     if _git_run(root, "cat-file", "-e", f"{m['main']}^{{commit}}").returncode != 0:
         _git(root, "fetch", "--quiet", REMOTE, m["main"])
-    if changed := _differing_files(judging, _judging_files(root, m["main"])):
+    if changed := _judging_changes(root, base, m["main"]):
         return 4, (f"build #{build.number} judged by main at {m['main']}, where {', '.join(changed)} differ from "
                    f"HEAD's")
     return 5, None
 
 
-def _judging_files(root: str, commit: str) -> dict[str, str]:
-    """The mode and object of each of JUDGING_FILES at commit, by path; a file absent there is left out. Raises
-    GateError as _git does."""
-    out = {}
-    # -z: each entry is "<mode> <type> <object>\t<path>", ended by a NUL.
-    for entry in _git(root, "ls-tree", "-z", "--full-tree", commit, "--", *JUDGING_FILES).split("\0"):
-        if entry:
-            meta, _, path = entry.partition("\t")
-            out[path] = meta
-    return out
-
-
-def _differing_files(a: dict[str, str], b: dict[str, str]) -> list[str]:
-    """Those of JUDGING_FILES that _judging_files gave differently in a and b, in JUDGING_FILES's order."""
-    return [path for path in JUDGING_FILES if a.get(path) != b.get(path)]
+def _judging_changes(root: str, a: str, b: str) -> list[str]:
+    """Those of JUDGING_FILES whose file differs between commits a and b, its mode included, or that only one of
+    them has. Raises GateError as _git does."""
+    names = _git(root, "diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", a, b, "--",
+                 *_top_literal(list(JUDGING_FILES)), verbatim=True)
+    return [p for p in names.split("\0") if p]
 
 
 def write_quality_file(path: str, text: str) -> None:
@@ -9441,11 +9433,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
     judged = sub.add_parser(
         "judged-in-quality", help="exit 0 when a quality build already judged HEAD as its pull request's build would",
-        description=f"Exit 0 when a build of the quality job JOB, among those Jenkins keeps, judged HEAD as a pull "
-                    f"request's build into BRANCH would: it ended SUCCESS, and its description names HEAD's tree, "
-                    f"the merge base of HEAD and {REMOTE}/BRANCH as its parent, and a main commit. None of "
-                    f"{', '.join(JUDGING_FILES)} may differ between HEAD, that merge base and that main commit. "
-                    f"Fetches BRANCH, and the main commit when it is missing. Otherwise, and on any error, exit "
+        description=f"Exit 0 when a build of the quality job JOB already judged HEAD as a pull request's build "
+                    f"into BRANCH would, so that build need not judge it again; docs/quality-gate.md says when. "
+                    f"Fetches BRANCH, and the main commit a build names. Otherwise, and on any error, exit "
                     f"{EXIT_ERROR}, saying why in one line on standard error. Needs JENKINS_URL, JENKINS_USER and "
                     f"JENKINS_TOKEN, from the environment or {ci_env_path()}.")
     judged.add_argument("--quality-gate", required=True, metavar="JOB",

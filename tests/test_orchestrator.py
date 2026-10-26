@@ -10433,6 +10433,14 @@ class TestJudgedInQuality(unittest.TestCase):
                 n = self.build(description=description)
                 self.assert_refused(rf"#{n}.*description")
 
+    def test_a_long_description_is_shortened_with_its_token_masked_whole(self):
+        # 150 characters before the token, so a cut at 160 would split it.
+        self.build(description="y" * 150 + JENKINS_TOKEN + "z" * 500)
+        err = self.assert_refused("description")
+        self.assertNotIn(JENKINS_TOKEN[:6], err)
+        self.assertIn("****", err)
+        self.assertLess(len(err), 1000)
+
     def test_a_build_with_no_description_at_all_does_not(self):
         n = self.fake.add_build("orchestrator-ci/r-1-q1", outcome(polls=0))
         self.assert_refused(rf"#{n}.*description")
@@ -10477,14 +10485,27 @@ class TestJudgedInQuality(unittest.TestCase):
 
     def test_a_target_that_is_not_a_branch_name_fails_before_git_fetches_it(self):
         self.build()
-        refs = self.git("for-each-ref")
-        for target in ("main:refs/heads/x", "-q", "a..b"):
-            with self.subTest(target):
+        for target in ("main:refs/heads/x", "-q", "a..b", "x.lock"):
+            with self.subTest(target), patch("orchestrator._git", wraps=orchestrator._git) as git:
                 exit_code, _, err = self.judged("--quality-gate", JOB, f"--target={target}")
                 self.assertNotEqual(exit_code, 0)
                 self.assertEqual(err.count("\n"), 1, err)
-                self.assertIn(target, err)
-        self.assertEqual(self.git("for-each-ref"), refs)
+                self.assertIn(f"{target!r} is not a branch name", err)
+                git.assert_not_called()
+        self.assertEqual(self.fake.requests, [])
+
+    def test_a_working_directory_that_is_gone_fails_in_one_line(self):
+        self.build()
+        gone = os.path.join(self.tmp, "gone")
+        os.mkdir(gone)
+        err = io.StringIO()
+        with contextlib.chdir(gone), contextlib.redirect_stderr(err), \
+                patch("orchestrator.CI", side_effect=lambda job: CI(job, env=CREDENTIALS, urlopen=self.fake)):
+            os.rmdir(gone)
+            exit_code = main(["judged-in-quality", "--quality-gate", JOB, "--target", "main"])
+        self.assertNotEqual(exit_code, 0)
+        self.assertEqual(err.getvalue().count("\n"), 1, err.getvalue())
+        self.assertIn("No such file or directory", err.getvalue())
 
     def test_without_a_merge_base_it_fails(self):
         self.git("checkout", "--quiet", "--orphan", "lone")
