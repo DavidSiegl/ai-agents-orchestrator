@@ -7540,8 +7540,8 @@ class TestFlakyTests(unittest.TestCase):
         with patch.object(orchestrator.tempfile, "mkdtemp", side_effect=OSError(28, "No space left on device")):
             found = self.found()
         self.assertEqual([(f["path"], f["line"], f["rule"], f["message"]) for f in found], [(
-            None, None, "not-rerun", "could not make a directory to rerun the changed tests in: [Errno 28] No space "
-                                     "left on device; nothing ran, so the check judged nothing.")])
+            None, None, "not-rerun", ("could not make a directory to rerun the changed tests in: [Errno 28] No space "
+                                      "left on device; nothing ran, so the check judged nothing."))])
 
     def test_the_reruns_leave_the_build_s_reports_alone(self):
         # The project's addopts write a coverage report, as the build's own run did before the gate reads it.
@@ -7662,8 +7662,8 @@ class TestPassesAtBase(unittest.TestCase):
         with patch.object(orchestrator.tempfile, "mkdtemp", side_effect=OSError(28, "No space left on device")):
             found = self.found()
         self.assertEqual([(f["path"], f["line"], f["rule"], f["message"]) for f in found], [(
-            None, None, "not-run", "could not make a directory to run the changed tests at the base in: [Errno 28] No "
-                                   "space left on device; nothing ran, so the check judged nothing.")])
+            None, None, "not-run", ("could not make a directory to run the changed tests at the base in: [Errno 28] "
+                                    "No space left on device; nothing ran, so the check judged nothing."))])
 
     def test_a_base_run_directory_left_behind_is_a_finding_beside_the_results(self):
         self.fix_add()
@@ -8281,8 +8281,8 @@ class TestSurvivingMutants(unittest.TestCase):
         with patch.object(orchestrator.tempfile, "mkdtemp", side_effect=OSError(28, "No space left on device")):
             found = self.found()
         self.assertEqual([(f["path"], f["line"], f["rule"], f["message"]) for f in found], [(
-            None, None, "not-run", "could not make a directory to run mutmut on a copy of the tree in: [Errno 28] No "
-                                   "space left on device; nothing ran, so the check judged nothing.")])
+            None, None, "not-run", ("could not make a directory to run mutmut on a copy of the tree in: [Errno 28] "
+                                    "No space left on device; nothing ran, so the check judged nothing."))])
 
     def test_a_copy_that_cannot_be_removed_is_a_finding_beside_the_others(self):
         self.change_the_functions("orphan")
