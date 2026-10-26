@@ -115,13 +115,6 @@ was done.
   verdict step's turn, which follows the quality loop by construction, but every proof test uses `QUICK`, which has
   no quality-gated step. Raised by the cross-review of the proof reruns (R1-F5, 2026-10-24): "no test would notice
   the rerun moving before it". Closes with a proof test on a quality-gated workflow, through the CI fakes.
-- **The macOS builds are first tried on a published release.** `.github/workflows/macos-binary.yml` runs only on
-  `release: published` or by hand for an existing tag, so a change that breaks the macOS binary or
-  `packaging/build-desktop.sh` on macOS merges green, and the release then lacks those assets until it is fixed and
-  the workflow is run again for the tag. Found adding the desktop app to releases (2026-10-24), whose `.dmg` had
-  never been built before the first release with it. Closes with a macOS build of pull requests that touch
-  `packaging/` or `ui/`, or a decision that a rerun after the release is enough.
-
 - **A spec left `ready-for-human` by a conflict stays there when `refresh` clears the conflict before a drain does.**
   drain moves such a spec to `in-review` only when its own refresh clears the run's conflict (`refreshed_headers`);
   a run cleared by `orchestrator.py refresh` beforehand has no conflicts left, so drain cannot tell the spec held
@@ -363,6 +356,19 @@ was done.
   files.
 
 ## Fixed
+
+- **The macOS builds are first tried on a published release.** `.github/workflows/macos-binary.yml` runs only on
+  `release: published` or by hand for an existing tag, so a change that breaks the macOS binary or
+  `packaging/build-desktop.sh` on macOS merges green, and the release then lacks those assets until it is fixed and
+  the workflow is run again for the tag. Found adding the desktop app to releases (2026-10-24), whose `.dmg` had
+  never been built before the first release with it. Closes with a macOS build of pull requests that touch
+  `packaging/` or `ui/`, or a decision that a rerun after the release is enough.
+  Fixed (2026-10-26): `.github/workflows/macos-binary.yml` builds every pull request that touches `packaging/`,
+  `ui/`, `pyproject.toml`, `uv.lock`, `.python-version`, `orchestrator.py` or the workflow, in a `build` job with
+  `contents: read`; a separate `upload` job, the only one with `contents: write`, adds the build's artifact to a
+  release or a dispatch's tag. PR #89's own run built both on `macos-latest`, its upload skipped
+  (https://github.com/DavidSiegl/octoflow-ai/actions/runs/40283655516). The release path is first run by the next
+  release.
 
 - **`test-integrity` has no way to accept an expected value the spec changes.** `expected-value-changed` fails the
   gate whenever an assertion's literals change beside code, also when the spec asks for the new output, and unlike
