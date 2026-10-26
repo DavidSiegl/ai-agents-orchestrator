@@ -21,15 +21,24 @@ on:
       - ui/**
       - pyproject.toml
       - uv.lock
+      - .python-version
       - orchestrator.py
       - .github/workflows/macos-binary.yml
 
 # Each job asks for what it needs: only upload, which runs no code of the change, may write to releases.
 permissions: {}
 
-# A newer push to a pull request replaces its build in progress; a release's or a dispatch's run is never cancelled.
+env:
+  # The release's tag, which the build checks out and the upload adds to; empty for a pull request.
+  TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+
+# A newer push to a pull request replaces its build in progress. Runs for one tag, a release's and a dispatch's, wait
+# for each other rather than both uploading with --clobber; such a run is never cancelled. The tag is TAG's, written
+# again here because a concurrency group cannot read env.
 concurrency:
-  group: macos-binary-${{ github.event.pull_request.number || github.run_id }}
+  group: >-
+    macos-binary-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number)
+    || format('tag-{0}', github.event.release.tag_name || inputs.tag) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -50,7 +59,7 @@ jobs:
         with:
           ref: >-
             ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha
-            || format('refs/tags/{0}', github.event_name == 'release' && github.event.release.tag_name || inputs.tag) }}
+            || format('refs/tags/{0}', env.TAG) }}
 
       - uses: astral-sh/setup-uv@v6
 
@@ -75,7 +84,8 @@ jobs:
             dist/octoflow-desktop-macos-arm64.dmg
             dist/octoflow-desktop-macos-arm64.dmg.sha256
           if-no-files-found: error
-          retention-days: 1
+          # Long enough to re-run a failed upload on its own, without building again.
+          retention-days: 7
 
   upload:
     needs: build
@@ -83,9 +93,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    env:
-      TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
     steps:
+      # dist/ then holds the build's artifact and nothing else, the asset list above.
       - uses: actions/download-artifact@v4
         with:
           name: macos-assets
@@ -95,6 +104,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: |
-          gh release upload "$TAG" dist/octoflow-macos-arm64 dist/octoflow-macos-arm64.sha256 \
-            dist/octoflow-desktop-macos-arm64.dmg dist/octoflow-desktop-macos-arm64.dmg.sha256 --clobber
+        run: gh release upload "$TAG" dist/* --clobber
