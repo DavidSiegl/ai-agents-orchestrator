@@ -1,4 +1,5 @@
 import ast
+import atexit
 import base64
 import contextlib
 import copy
@@ -9,10 +10,12 @@ import json
 import os
 import queue
 import re
+import resource
 import shlex
 import shutil
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -419,7 +422,11 @@ class FakeHerdr:
         self.kinds = []  # (name, kind) of each agent started, in order
         self.workspaces = set()
         self.live_panes = set()
-        self.waits = []
+        self.waits = []  # the until of each wait but a delivery check's
+        self.deliveries = []  # (name, timeout_ms) of each wait for an agent to take a prompt
+        self.dropped = {}  # by role, how many of its next prompts its agent drops: it stays as it was and writes nothing
+        self.prompts = []  # (name, text) of each prompt sent, dropped or not
+        self.taken = {}  # by name, whether the agent took its last prompt
         self.blocked_at_start = set()
         self.cwds = []  # (what, cwd) of each workspace created and pane split
 
@@ -458,9 +465,24 @@ class FakeHerdr:
 
     def prompt(self, name, text):
         self.calls.append(("prompt", name))
-        self.statuses[name] = self.script[self._role(name)].pop(0)(text, self.state, self.host)
+        self.prompts.append((name, text))
+        role = self._role(name)
+        if self.dropped.get(role):
+            self.dropped[role] -= 1
+            self.taken[name] = False
+            return
+        self.taken[name] = True
+        self.statuses[name] = self.script[role].pop(0)(text, self.state, self.host)
 
     def wait(self, name, timeout_ms, until=()):
+        if "working" in until:
+            # A taken prompt had the agent working, whatever it shows now.
+            self.deliveries.append((name, timeout_ms))
+            if name not in self.statuses:
+                raise orchestrator.HerdrError("agent_not_found", f"agent target {name} not found")
+            if not self.taken.get(name):
+                raise orchestrator.HerdrError("timeout", f"agent {name} did not reach {until}")
+            return "working"
         self.waits.append(until)
         return "done"
 
@@ -1321,6 +1343,20 @@ class TestHerdr(unittest.TestCase):
             herdr.call("agent", "list")
 
 
+# The runtime directory this process's SSH control directory is made in, so that the argv Host.run builds for SSH is
+# known in advance; in /tmp, as tempfile's default on macOS would leave the socket's path too long. The tests that
+# make their own give ssh_sharing_options a control of their own (fresh_ssh_control).
+os.environ["XDG_RUNTIME_DIR"] = tempfile.mkdtemp(prefix="o-", dir="/tmp")
+atexit.register(shutil.rmtree, os.environ["XDG_RUNTIME_DIR"], True)
+# What Host.run puts before an SSH command's target.
+SSH = ["ssh", "-o", "BatchMode=yes", *orchestrator.ssh_sharing_options()]
+
+
+def fresh_ssh_control():
+    """A patch that gives ssh_sharing_options a control that has made no directory yet."""
+    return patch.object(orchestrator, "_SSH_CONTROL", orchestrator._SshControl())
+
+
 class TestHost(unittest.TestCase):
     def test_ssh_wraps_command(self):
         run = MagicMock(return_value=completed("/home/user/proj\n"))
@@ -1328,9 +1364,61 @@ class TestHost(unittest.TestCase):
 
         self.assertEqual(cwd, "/home/user/proj")
         argv = run.call_args.args[0]
-        self.assertEqual(argv[:4], ["ssh", "-o", "BatchMode=yes", "remote-host"])
-        self.assertIn('"$HOME$1"', argv[4])
-        self.assertTrue(argv[4].endswith(" _ /proj"))
+        self.assertEqual(argv[:-1], [*SSH, "remote-host"])
+        self.assertIn('"$HOME$1"', argv[-1])
+        self.assertTrue(argv[-1].endswith(" _ /proj"))
+
+    def test_commands_over_ssh_share_one_connection_through_a_private_directory(self):
+        run = MagicMock(return_value=completed())
+        Host("remote-host", run=run).run(["true"])
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[3:-2], ["-o", "ControlMaster=auto", "-o", "ControlPersist=60",
+                                      "-o", f"ControlPath={orchestrator._SSH_CONTROL.dir}/%C",
+                                      "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3"])
+        self.assertEqual(stat.S_IMODE(os.stat(orchestrator._SSH_CONTROL.dir).st_mode), 0o700)
+
+    def test_a_control_directory_that_has_gone_is_made_again(self):
+        with tempfile.TemporaryDirectory(prefix="o-", dir="/tmp") as runtime, patch.dict(os.environ, {"XDG_RUNTIME_DIR": runtime}), \
+                fresh_ssh_control():
+            first = orchestrator.ssh_sharing_options()[5]
+            shutil.rmtree(orchestrator._SSH_CONTROL.dir)
+            again = orchestrator.ssh_sharing_options()[5]
+            self.assertTrue(first.startswith(f"ControlPath={runtime}/octoflow-ssh-"))
+            self.assertNotEqual(first, again)
+            self.assertTrue(os.path.isdir(orchestrator._SSH_CONTROL.dir))
+
+    def test_a_control_directory_others_could_use_is_replaced(self):
+        with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, {"XDG_RUNTIME_DIR": runtime}), \
+                fresh_ssh_control():
+            first = orchestrator.ssh_sharing_options()[5]
+            os.chmod(orchestrator._SSH_CONTROL.dir, 0o740)  # readable by its group: no longer private
+            self.assertNotEqual(orchestrator.ssh_sharing_options()[5], first)
+            shutil.rmtree(orchestrator._SSH_CONTROL.dir)
+            os.symlink(runtime, orchestrator._SSH_CONTROL.dir)  # a name another could make again, as a link
+            self.assertNotIn(orchestrator._SSH_CONTROL.dir, orchestrator.ssh_sharing_options()[5])
+
+    def test_an_unusable_runtime_directory_falls_back_to_tmp(self):
+        with tempfile.TemporaryDirectory() as runtime:
+            spaced = os.path.join(runtime, "my dir")
+            os.mkdir(spaced)
+            for where in [os.path.join(runtime, "missing"), spaced]:
+                with self.subTest(where), patch.dict(os.environ, {"XDG_RUNTIME_DIR": where}), \
+                        fresh_ssh_control():
+                    self.assertTrue(orchestrator.ssh_sharing_options()[5].startswith("ControlPath=/tmp/octoflow-ssh-"))
+
+    def test_without_a_usable_control_path_a_command_runs_on_a_connection_of_its_own(self):
+        """OpenSSH 10 fails a command whose ControlPath it cannot bind, its directory missing or the path too long
+        (exit status 255, "ControlPath too long"), rather than connect without sharing; so then no option is
+        passed. Measured against a real sshd, which CI does not have; here the argv is checked."""
+        run = MagicMock(return_value=completed())
+        with tempfile.TemporaryDirectory() as runtime:
+            long_dir = os.path.join(runtime, "x" * 80)
+            os.mkdir(long_dir)
+            with patch.dict(os.environ, {"XDG_RUNTIME_DIR": long_dir}), \
+                    fresh_ssh_control(), \
+                    patch.object(orchestrator.tempfile, "mkdtemp", side_effect=OSError(28, "No space left on device")):
+                Host("remote-host", run=run).run(["true"])
+                self.assertEqual(run.call_args.args[0], ["ssh", "-o", "BatchMode=yes", "remote-host", "true"])
 
     def test_read_missing_file(self):
         run = MagicMock(return_value=completed(returncode=orchestrator.MISSING_FILE_STATUS))
@@ -1352,7 +1440,7 @@ class TestHost(unittest.TestCase):
         url = Host("remote-host", run=run).create_pr("/proj", "main", "orchestrator/x", "Title", "body", draft=True)
 
         self.assertEqual(url, "https://github.com/o/r/pull/7")
-        remote = run.call_args.args[0][4]
+        remote = run.call_args.args[0][-1]
         self.assertIn("_ /proj gh pr create --base main --head orchestrator/x", remote)
         self.assertTrue(remote.endswith("--body-file - --draft"))
         self.assertEqual(run.call_args.kwargs["input"], "body")
@@ -1401,10 +1489,10 @@ class TestHost(unittest.TestCase):
         run = MagicMock(return_value=completed("1791000000\n"))
         host = Host("remote-host", run=run)
         self.assertEqual(host.now(), 1_791_000_000)
-        self.assertEqual(run.call_args.args[0], ["ssh", "-o", "BatchMode=yes", "remote-host", "date +%s"])
+        self.assertEqual(run.call_args.args[0], [*SSH, "remote-host", "date +%s"])
         self.assertEqual(host.mtime("/x/review-1.md"), 1_791_000_000)
-        self.assertEqual(run.call_args.args[0][:4], ["ssh", "-o", "BatchMode=yes", "remote-host"])
-        self.assertTrue(run.call_args.args[0][4].endswith(" _ /x/review-1.md"))
+        self.assertEqual(run.call_args.args[0][:-1], [*SSH, "remote-host"])
+        self.assertTrue(run.call_args.args[0][-1].endswith(" _ /x/review-1.md"))
 
     def test_a_time_that_is_no_number_raises(self):
         host = Host(run=MagicMock(return_value=completed("soon\n")))
@@ -1415,7 +1503,7 @@ class TestHost(unittest.TestCase):
         run = MagicMock(return_value=completed())
         Host("remote-host", run=run).rename("/x/review-1.md", "/x/review 1.rejected.md")
         self.assertEqual(run.call_args.args[0],
-                         ["ssh", "-o", "BatchMode=yes", "remote-host", "mv -f -- /x/review-1.md '/x/review 1.rejected.md'"])
+                         [*SSH, "remote-host", "mv -f -- /x/review-1.md '/x/review 1.rejected.md'"])
 
     def test_rename_failure_raises(self):
         host = Host(run=MagicMock(return_value=completed(stderr="No such file or directory", returncode=1)))
@@ -2153,6 +2241,120 @@ class TestResume(unittest.TestCase):
     def test_from_dict_incomplete(self):
         with self.assertRaisesRegex(OrchestratorError, "run state r-abc is incomplete"):
             RunState.from_dict({"run_id": "r-abc"})
+
+
+class TestPromptDelivery(unittest.TestCase):
+    """A prompt counts as delivered only once its agent takes it, and is sent once more when it does not."""
+
+    BUILD = "build-a1b2c3"
+
+    def default_run(self, build=None, **kw):
+        return make_workflow({"spec": [spec_turn], "build": build or [build_turn(1)],
+                              "review": [review_turn(1, APPROVE)]}, **kw)
+
+    def build_prompts(self, herdr):
+        return [text for name, text in herdr.prompts if name == self.BUILD]
+
+    def failed_twice(self):
+        """A default run whose Builder drops both prompts; its host and the state it saved."""
+        wf, herdr, host, _ = self.default_run()
+        herdr.dropped["build"] = 2
+        with patch("sys.stderr"), self.assertRaises(OrchestratorError) as raised:
+            wf.run()
+        return raised.exception, host, json.loads(host.files[f"{wf.state.dir}/state.json"])
+
+    def test_an_agent_that_turns_working_is_prompted_once(self):
+        wf, herdr, host, _ = make_workflow({"spec": [idle], "build": [build_turn(1)],
+                                            "review": [review_turn(1, APPROVE)]})
+        prompted = []
+
+        def collector_writes_late():
+            if wf.clock.now > orchestrator.STALL_SECONDS and wf.state.spec_path not in host.files:
+                prompted.append(json.loads(host.files[f"{wf.state.dir}/state.json"])["prompted"])
+                host.write(wf.state.spec_path, "spec")
+        wf.clock.hooks.append(collector_writes_late)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(herdr.calls.count(("prompt", "spec-a1b2c3")), 1)
+        self.assertEqual(prompted, ["spec.md"])
+        self.assertEqual(orchestrator.PROMPT_DELIVERY_SECONDS, 30)
+        self.assertEqual(herdr.deliveries, [("spec-a1b2c3", 30_000)])
+
+    def test_an_agent_that_writes_its_file_unseen_working_is_prompted_once(self):
+        wf, herdr, *_ = self.default_run()
+        # Every turn here writes its file during the prompt, before a wait could see the agent working.
+        herdr.wait = None
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(len(self.build_prompts(herdr)), 1)
+        self.assertEqual(wf.state.prompted, "review-1.md")
+
+    def test_a_file_written_while_the_wait_times_out_counts_as_taken(self):
+        wf, herdr, host, _ = self.default_run(build=[idle])
+
+        def unseen_working(name, timeout_ms, until=()):
+            build_turn(1)(None, wf.state, host)
+            raise orchestrator.HerdrError("timeout", "agent wait timed out")
+        herdr.wait = unseen_working
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(len(self.build_prompts(herdr)), 1)
+
+    def test_a_dropped_prompt_is_sent_once_more(self):
+        wf, herdr, *_ = self.default_run()
+        herdr.dropped["build"] = 1
+
+        with patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(wf.run(), APPROVE)
+        first, again = self.build_prompts(herdr)
+        self.assertEqual(again, first)
+        self.assertIn("[build] did not take its prompt within 30s; sending it again\n", err.getvalue())
+        self.assertEqual(herdr.deliveries, [(self.BUILD, 30_000)])
+
+    def test_two_dropped_prompts_fail_the_turn_unrecorded(self):
+        error, _, saved = self.failed_twice()
+
+        self.assertEqual(str(error), f"the Builder did not take its prompt to write {D}/build-1.md, sent twice; see "
+                                     "pane w1:p2, and resume to send it again")
+        self.assertEqual(saved["prompted"], "spec.md")
+        self.assertNotIn("build-1.md", [t["file"] for t in saved["turns"]])
+
+    def test_a_resume_after_two_dropped_prompts_sends_the_prompt_again(self):
+        _, host, saved = self.failed_twice()
+        # Alive, and exited with a session to resume: neither is only waited on, and both get the step's prompt.
+        for agent in ({"alive": ["build"]}, {"sessions": {"build": "s-build"}}):
+            with self.subTest(agent=agent):
+                seen = []
+                wf, *_ = resume(RunState.from_dict(saved), {
+                    "build": [recording(build_turn(1), seen)], "review": [review_turn(1, APPROVE)]},
+                    host=copy.deepcopy(host), **agent)
+
+                self.assertEqual(wf.run(), APPROVE)
+                self.assertEqual(len(seen), 1)
+                self.assertTrue(seen[0].startswith("You are the Builder"), seen[0])
+
+    def test_a_herdr_error_other_than_a_timeout_propagates(self):
+        wf, herdr, *_ = self.default_run(build=[idle])
+
+        def wait(name, timeout_ms, until=()):
+            raise orchestrator.HerdrError("server_error", "herdr is gone")
+        herdr.wait = wait
+
+        with patch("sys.stderr"), self.assertRaisesRegex(orchestrator.HerdrError, "herdr server_error"):
+            wf.run()
+
+    def test_an_agent_exiting_while_its_prompt_is_awaited_fails_the_turn(self):
+        wf, herdr, *_ = self.default_run(build=[idle])
+        wait = herdr.wait
+
+        def exiting(name, timeout_ms, until=()):
+            herdr.statuses.pop(name, None)
+            return wait(name, timeout_ms, until)
+        herdr.wait = exiting
+
+        with patch("sys.stderr"), self.assertRaisesRegex(OrchestratorError,
+                                                         f"^the Builder exited without writing {D}/build-1.md$"):
+            wf.run()
 
 
 class TestResumePullRequest(unittest.TestCase):
@@ -5913,6 +6115,41 @@ class TestQualityReport(unittest.TestCase):
                       "2. `t.py (the whole file)` warning flaky test_x: m\n"
                       "3. The change as a whole: warning mutants budget: m\n", text)
 
+    def test_a_path_with_a_line_break_stays_on_its_own_line_and_compares_alike_in_every_round(self):
+        issues = [{"path": p, "line": 2, "severity": "error", "rule": "ruff F401", "message": "unused"}
+                  for p in ("a b.py", "c\rd.py", "e\u2028f.py")]
+        text = quality_report("ERROR", "intro", issues=issues, suppressions=[("g\nh.py", 1, "# noqa")],
+                              mutmut_state=["mutants/i\x85j.py"])
+        self.assertIn("1. `a b.py:2` error ruff F401: unused\n", text)
+        self.assertIn("2. `c\\x0dd.py:2` error ruff F401: unused\n", text)
+        self.assertIn("3. `e\\u2028f.py:2` error ruff F401: unused\n", text)
+        self.assertIn("- `g\\x0ah.py:1` `# noqa`\n", text)
+        self.assertIn("`mutants/i\\x85j.py`", text)
+        self.assertEqual(text.splitlines(), text.split("\n")[:-1])
+        failures = orchestrator.gate_failures(text)
+        self.assertEqual(len(failures.fingerprints["ruff"]), 3)
+        self.assertTrue(failures.repeats(orchestrator.gate_failures(quality_report("ERROR", "other", issues=issues))))
+
+    def test_every_writer_of_a_quality_file_keeps_a_line_break_in_an_item_on_its_line(self):
+        name = "c\nd .py"
+        finding = {"path": name, "line": 1, "severity": "error", "rule": "flaky x", "message": f"`{name}::t` failed"}
+        texts = {
+            "gate": quality_report("ERROR", "intro", conditions=[f"`{name}:1` holds a stray line end."],
+                                   issues=[finding], tests=[(f"{name}::t", "boom")], edited=["pyproject.toml"],
+                                   rules_from=f"`/tmp/{name}`"),
+            "judge_run conditions": orchestrator._failed_by("GATE: OK\n\nintro\n", [f"`{name}` failed."]),
+            "judge_run findings": "\n".join(orchestrator._orchestrator_section([finding], [], 0)),
+            "build failed": orchestrator.build_failed_report("intro", [(f"{name}::t", "boom")], ""),
+            "leaks": orchestrator.leak_report([orchestrator.Leak("aws", name, 3, "a" * 40, "fp")], "intro"),
+        }
+        for writer, text in texts.items():
+            with self.subTest(writer):
+                self.assertEqual(text.splitlines(), text.rstrip("\n").split("\n"))
+                self.assertIn("c\\x0ad\\u2028.py", text)
+        failures = orchestrator.gate_failures(texts["gate"])
+        self.assertEqual((len(failures.conditions), len(failures.fingerprints["flaky"]),
+                          len(failures.fingerprints["tests"])), (1, 1, 1))
+
     def test_findings_to_weigh_are_numbered_after_the_issues(self):
         text = quality_report("ERROR", "intro", issues=self.issues(2), to_weigh=[self.finding("t.py", 9)])
         self.assertLess(text.index("2. `f.py:2` HIGH r: m2"), text.index("## Findings to weigh"))
@@ -6247,7 +6484,7 @@ class TestGate(unittest.TestCase):
             text = f.read()
         self.assertIn("- 4 findings on lines the change added", text)
         for name in names:
-            self.assertIn(f"`{name}:1` error ruff F401", text)
+            self.assertIn(f"`{orchestrator.one_line(name)}:1` error ruff F401", text)
 
     def test_a_file_name_that_is_not_utf8_is_judged(self):
         name = os.fsdecode(b"f\xe9.py")
@@ -6321,6 +6558,19 @@ class TestGate(unittest.TestCase):
         _, out, _ = self.gate("--coverage", self.coverage({4: (1, "1/2"), 5: 0, 2: 1}))
         # (1 covered condition + 1 covered line) / (2 conditions + 2 lines); line 2 is not new.
         self.assertIn("50.0% of 2 new lines to cover, counting their 2 branch outcomes; 1 lines are not covered.", out)
+
+    def test_coverage_names_a_file_it_cannot_measure_and_judges_without_it(self):
+        name = os.fsdecode(b"m\xff.py")
+        self.put(name, "".join(f"m{k} = {k}\n" for k in range(30)))
+        self.git("add", name)
+        self.add_lines(1)
+        status, _, _ = self.gate("--coverage", self.coverage({4: 1}), "--out", "quality.md")
+        # 30 uncovered lines would fail the gate; coverage.py has no entry for them, so only f.py's line counts.
+        self.assertEqual(status, 0)
+        with open(os.path.join(self.repo, "quality.md"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("100.0% of 1 new lines to cover; 0 lines are not covered.\n\nNot measured: `m\\xff.py`; "
+                      "coverage.py records no data for a file whose name is not UTF-8.", text)
 
     def test_an_unreadable_coverage_report_writes_nothing(self):
         self.add_lines(1)
@@ -6774,6 +7024,55 @@ class TestWeakenedTests(unittest.TestCase):
                                  ("tests/test_other.py", "tests/test_renamed.py")], key=str))
 
 
+class TestRunInSession(unittest.TestCase):
+    """_run_in_session, which runs the gate's pytest and mutmut, on shell commands."""
+
+    def run_sh(self, code, *, timeout=10, soft_stop=None):
+        return orchestrator._run_in_session(["sh", "-c", code], tempfile.gettempdir(), dict(os.environ),
+                                            timeout=timeout, soft_stop=soft_stop)
+
+    def test_a_tool_that_finishes_returns_its_status_and_output(self):
+        proc, stopped = self.run_sh("echo out; echo err >&2; exit 3")
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr, stopped), (3, "out\n", "err\n", False))
+
+    def test_a_tool_that_exits_on_sigint_returns_what_it_printed(self):
+        # Ignored, as in a Jenkins sh step, which starts its command as a background job of a non-interactive shell.
+        for here in (signal.SIG_IGN, signal.default_int_handler):
+            with self.subTest(sigint=here):
+                before = signal.signal(signal.SIGINT, here)
+                try:
+                    proc, stopped = self.run_sh("trap 'echo bye; exit 5' INT; echo hi; while :; do sleep 0.1; done",
+                                                timeout=0.5, soft_stop=(signal.SIGINT, 5))
+                    self.assertEqual(signal.getsignal(signal.SIGINT), here)
+                finally:
+                    signal.signal(signal.SIGINT, before)
+                self.assertEqual((proc.returncode, proc.stdout, stopped), (5, "hi\nbye\n", True))
+
+    def test_a_tool_that_ignores_sigint_is_killed_after_the_grace(self):
+        started = time.monotonic()
+        proc, stopped = self.run_sh("trap '' INT; echo hi; exec sleep 30", timeout=0.3, soft_stop=(signal.SIGINT, 0.3))
+        self.assertLess(time.monotonic() - started, 0.6 + orchestrator.TOOL_KILL_WAIT)
+        self.assertEqual((proc.returncode, proc.stdout, stopped), (-signal.SIGKILL, "hi\n", True))
+
+    def test_a_tool_that_prints_more_than_a_pipe_holds_is_not_blocked(self):
+        proc, stopped = self.run_sh("head -c 1000000 /dev/zero | tr '\\0' x", timeout=5)
+        self.assertEqual((proc.returncode, len(proc.stdout), stopped), (0, 1000000, False))
+
+    def test_a_tool_that_cannot_start_raises_oserror(self):
+        with self.assertRaises(OSError):
+            orchestrator._run_in_session(["/nonexistent/tool"], tempfile.gettempdir(), {}, timeout=1)
+
+    def test_an_ignored_soft_stop_signal_stays_ignored_here_when_the_tool_cannot_start(self):
+        before = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            with self.assertRaises(OSError):
+                orchestrator._run_in_session(["/nonexistent/tool"], tempfile.gettempdir(), {}, timeout=1,
+                                             soft_stop=(signal.SIGINT, 1))
+            self.assertEqual(signal.getsignal(signal.SIGINT), signal.SIG_IGN)
+        finally:
+            signal.signal(signal.SIGINT, before)
+
+
 class TestFlakyTests(unittest.TestCase):
     """The flaky-tests check over a real git repository, rerunning its tests with this suite's own pytest."""
 
@@ -6843,6 +7142,39 @@ class TestFlakyTests(unittest.TestCase):
     @staticmethod
     def line_of(text, definition):
         return text.splitlines().index(definition) + 1
+
+    def test_a_server_a_test_leaves_holding_the_output_does_not_hold_up_the_reruns(self):
+        # Under -s a test's processes inherit pytest's own output; this one outlives every run, in a session of its own.
+        pids = os.path.join(self.repo, "..", f"{os.path.basename(self.repo)}-servers")
+
+        def started_servers():
+            with contextlib.suppress(FileNotFoundError), open(pids) as f:
+                return [int(pid) for pid in f.read().split()]
+            return []
+
+        def kill():
+            for pid in started_servers():
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(pids)
+        self.addCleanup(kill)
+        self.put("pytest.ini", "[pytest]\naddopts = -s\n")
+        self.git("add", "pytest.ini")
+        self.git("commit", "--quiet", "-m", "-s")
+        self.put("tests/test_server.py", (
+            "import subprocess\nimport sys\n\n\ndef test_starts_a_server():\n"
+            "    server = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'], "
+            "start_new_session=True)\n"
+            f"    with open({pids!r}, 'a') as f:\n        f.write(f'{{server.pid}}\\n')\n"))
+        self.git("add", "tests/test_server.py")
+        started = time.monotonic()
+        with patch.object(orchestrator, "TOOL_KILL_WAIT", 0.5):
+            found = self.found()
+        self.assertLess(time.monotonic() - started, orchestrator.FLAKY_RUN_TIMEOUT)
+        self.assertEqual(found, [])
+        # One server for each seed's run, so the reruns did happen.
+        self.assertEqual(len(started_servers()), len(orchestrator.FLAKY_SEEDS))
 
     @staticmethod
     def alternates():
@@ -7091,6 +7423,48 @@ class TestFlakyTests(unittest.TestCase):
                 found = orchestrator._pytest_inifile(tree)
                 self.assertEqual(found and os.path.basename(found), expected)
 
+    def test_a_configuration_below_the_top_configures_the_tests_under_it(self):
+        # tests/pytest.ini puts tests/src on the path, which the changed test needs to import; and the alternating
+        # test from BASE shows it was rerun and judged.
+        self.put("tests/pytest.ini", "[pytest]\npythonpath = src\n")
+        self.put("tests/src/helper.py", "VALUE = 1\n")
+        self.git("add", "tests/pytest.ini", "tests/src/helper.py")
+        self.git("commit", "--quiet", "-m", "nested config")
+        self.put("tests/test_state.py", "import helper\n" + self.BASE.replace("self.skipTest('not yet')",
+                                                                          "self.assertEqual(helper.VALUE, 1)"))
+        with patch.object(orchestrator, "FLAKY_SEEDS", (1, 2)):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                         [("tests/test_state.py", 16, "mixed-results")])
+
+    def test_tests_under_two_configurations_are_rerun_once_by_each(self):
+        for name, text in (("a/pyproject.toml", "[tool.pytest.ini_options]\n"), ("b/tox.ini", "[pytest]\n")):
+            self.put(name, text)
+            self.put(f"{os.path.dirname(name)}/test_{name[0]}.py", "def test_old():\n    assert True\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "two configs")
+        for where in ("a", "b"):
+            self.put(f"{where}/test_{where}.py", "def test_old():\n    assert True\n\n\ndef test_new():\n    assert True\n")
+        runs = []
+        real = orchestrator._pytest
+
+        def recording(setup, doing, args, **kwargs):
+            runs.append((os.path.relpath(setup.root, setup.top), os.path.relpath(setup.inifile, setup.top), doing))
+            return real(setup, doing, args, **kwargs)
+        with patch.object(orchestrator, "_pytest", recording), patch.object(orchestrator, "FLAKY_SEEDS", (1, 2)):
+            self.assertEqual(self.found(), [])
+        self.assertEqual(sorted({r[:2] for r in runs}), [("a", "a/pyproject.toml"), ("b", "b/tox.ini")])
+        self.assertEqual(sorted(r[0] for r in runs if r[2] == "collecting the changed tests"), ["a", "b"])
+
+    def test_a_group_s_label_names_its_configuration_or_its_lack_of_one(self):
+        top = "/w/tree"
+
+        def group(inifile):
+            return orchestrator._PytestGroup(orchestrator._PytestSetup(top, inifile, top), frozenset())
+        self.assertEqual(group("/w/pytest.ini").label(), "the changed tests with no pytest configuration")
+        self.assertEqual(group("/w/tree/..ci/pytest.ini").label(), "the changed tests configured by ..ci/pytest.ini")
+        self.assertEqual(group("/w/tree/b/tox.ini").label(), "the changed tests configured by b/tox.ini")
+
     def failing_in_the_copy(self, base, changed, extra=None):
         """The findings on tests/test_g.py changed from base to changed, with extra files beside it untracked."""
         self.put("tests/test_g.py", base)
@@ -7126,10 +7500,10 @@ class TestFlakyTests(unittest.TestCase):
         self.put("tests/test_state.py", self.BASE + extra)
         rerun = orchestrator._rerun_python_tests
 
-        def times_out(tree, inifile, ids, s, report):
+        def times_out(setup, ids, s, report):
             if s == seed:
                 return {}, f"pytest, rerunning them under seed {seed}, did not finish within 30 seconds"
-            return rerun(tree, inifile, ids, s, report)
+            return rerun(setup, ids, s, report)
         with patch.object(orchestrator, "_rerun_python_tests", times_out):
             return {(f["line"], f["rule"]): f["message"] for f in self.found()}
 
@@ -7182,11 +7556,11 @@ class TestFlakyTests(unittest.TestCase):
 
     def test_no_room_for_the_reruns_is_a_finding(self):
         self.change_the_tests()
-        with patch.object(tempfile, "tempdir", os.path.join(self.repo, "no-such-dir")):
+        with patch.object(orchestrator.tempfile, "mkdtemp", side_effect=OSError(28, "No space left on device")):
             found = self.found()
-        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-rerun")])
-        self.assertRegex(found[0]["message"], r"^could not make a directory to rerun the changed tests in: .*No such "
-                                              r"file.*; the changed tests were not rerun\.$")
+        self.assertEqual([(f["path"], f["line"], f["rule"], f["message"]) for f in found], [(
+            None, None, "not-rerun", ("could not make a directory to rerun the changed tests in: [Errno 28] No space "
+                                      "left on device; nothing ran, so the check judged nothing."))])
 
     def test_the_reruns_leave_the_build_s_reports_alone(self):
         # The project's addopts write a coverage report, as the build's own run did before the gate reads it.
@@ -7239,7 +7613,7 @@ class TestFlakyTests(unittest.TestCase):
         self.assertIn((15, "mixed-results"), [(f["line"], f["rule"]) for f in found])
         [left] = [f for f in found if f["rule"] == "not-removed"]
         self.assertEqual((left["path"], left["line"]), (None, None))
-        self.assertRegex(left["message"], r"^could not remove the directory the changed tests were rerun in, .+: "
+        self.assertRegex(left["message"], r"^could not remove the directory to rerun the changed tests in, `.+`: "
                                           r".*Permission denied")
 
     def test_a_test_file_that_does_not_collect_is_a_finding(self):
@@ -7302,9 +7676,41 @@ class TestPassesAtBase(unittest.TestCase):
         self.put("tests/test_calc.py", self.TESTS.replace("import mul", "import add, mul")
                  + "\n\ndef test_add():\n    assert add(2, 2) == 4\n" + tests)
 
+    def test_no_room_for_the_run_at_the_base_is_a_finding(self):
+        self.fix_add()
+        with patch.object(orchestrator.tempfile, "mkdtemp", side_effect=OSError(28, "No space left on device")):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"], f["message"]) for f in found], [(
+            None, None, "not-run", ("could not make a directory to run the changed tests at the base in: [Errno 28] "
+                                    "No space left on device; nothing ran, so the check judged nothing."))])
+
+    def test_a_base_run_directory_left_behind_is_a_finding_beside_the_results(self):
+        self.fix_add()
+        rmtree = shutil.rmtree
+
+        def refuse(path):
+            self.addCleanup(rmtree, path)
+            raise PermissionError(13, "Permission denied", path)
+        with patch.object(orchestrator.shutil, "rmtree", refuse):
+            found = self.found()
+        [left] = found
+        self.assertEqual((left["path"], left["line"], left["rule"]), (None, None, "not-removed"))
+        self.assertRegex(left["message"], r"^could not remove the directory to run the changed tests at the base in, "
+                                          r"`.+`: .*Permission denied")
+
     def test_a_test_that_fails_without_the_fix_gives_nothing(self):
         self.fix_add()
         self.assertEqual(self.found(), [])
+
+    def test_a_configuration_below_the_top_configures_the_run_at_the_base(self):
+        # The base's own configuration is tests/pytest.ini, whose pythonpath puts tests/src on the path for helper.
+        self.put("tests/pytest.ini", "[pytest]\npythonpath = src\n")
+        self.put("tests/src/helper.py", "ONE = 1\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "nested config")
+        self.fix_add("\n\ndef test_mul_again():\n    from helper import ONE\n    assert mul(ONE, ONE) == 1\n")
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in self.found()],
+                         [("tests/test_calc.py", 12, "passes-at-base")])
 
     def test_a_test_of_code_the_change_left_alone_passes_at_the_base(self):
         # The fixture comes from a conftest.py the change adds, so the test runs at the base only with it overlaid.
@@ -7343,6 +7749,23 @@ class TestPassesAtBase(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
 
+    def test_a_budget_spent_on_one_configuration_says_the_later_ones_were_not_run(self):
+        for where in ("a", "b"):
+            self.put(f"{where}/pytest.ini", "[pytest]\n")
+            self.put(f"{where}/test_{where}.py", "def test_old():\n    assert True\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "two configs")
+        self.put("calc.py", self.CALC.replace("a - b", "a + b"))
+        for where in ("a", "b"):
+            self.put(f"{where}/test_{where}.py", "def test_old():\n    assert True\n\n\ndef test_new():\n    pass\n")
+        self.fake_pytest("exec sleep 30", "exit 0")
+        found = self.found(budget=1)
+        self.assertEqual([(f["rule"], f["message"]) for f in found], [
+            ("budget-reached", ("pytest was stopped at 1 seconds (`--base-run-budget`) while it collected the changed "
+                                "tests configured by a/pytest.ini, so none of them was judged.")),
+            ("not-run", ("the run at the base used its 1 seconds (`--base-run-budget`) before it reached the changed "
+                         "tests configured by b/pytest.ini, so they were not run there."))])
+
     def test_a_run_past_the_budget_says_how_many_test_cases_ran(self):
         self.fix_add("\n\ndef test_more():\n    assert add(1, 1) == 2\n")
         # The sleep in the background holds pytest's output open too: only killing its process group ends the run.
@@ -7350,7 +7773,7 @@ class TestPassesAtBase(unittest.TestCase):
                          "printf '.'; sleep 30 & exec sleep 30")
         start = time.monotonic()
         found = self.found(budget=1)
-        self.assertLess(time.monotonic() - start, orchestrator.MUTMUT_KILL_WAIT)
+        self.assertLess(time.monotonic() - start, orchestrator.TOOL_KILL_WAIT)
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "budget-reached")])
         self.assertEqual(found[0]["message"], "pytest was stopped at 1 seconds (`--base-run-budget`) after 1 of the 2 "
                                               "test cases it was given, before it reported them, so none of them was "
@@ -7876,8 +8299,9 @@ class TestSurvivingMutants(unittest.TestCase):
         self.change_the_functions()
         with patch.object(orchestrator.tempfile, "mkdtemp", side_effect=OSError(28, "No space left on device")):
             found = self.found()
-        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
-        self.assertIn("No space left on device", found[0]["message"])
+        self.assertEqual([(f["path"], f["line"], f["rule"], f["message"]) for f in found], [(
+            None, None, "not-run", ("could not make a directory to run mutmut on a copy of the tree in: [Errno 28] "
+                                    "No space left on device; nothing ran, so the check judged nothing."))])
 
     def test_a_copy_that_cannot_be_removed_is_a_finding_beside_the_others(self):
         self.change_the_functions("orphan")
@@ -7886,8 +8310,9 @@ class TestSurvivingMutants(unittest.TestCase):
         with patch.object(orchestrator.shutil, "rmtree", side_effect=OSError(16, "Device or resource busy")):
             found = self.found()
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
-                         [(None, None, "cleanup"), ("calc.py", 13, "untested")])
-        self.assertIn("Device or resource busy", found[0]["message"])
+                         [(None, None, "not-removed"), ("calc.py", 13, "untested")])
+        self.assertRegex(found[0]["message"], r"^could not remove the directory to run mutmut on a copy of the tree "
+                                              r"in, `.+`: .*Device or resource busy")
         left = re.search(r"`([^`]+)`", found[0]["message"]).group(1)
         self.assertTrue(os.path.isdir(left))
         rmtree(left)
@@ -7909,7 +8334,7 @@ class TestSurvivingMutants(unittest.TestCase):
         # mutmut ignores SIGINT here, so it is killed after the grace, and a helper keeps its output open after that.
         self.fake_mutmut(f"trap '' INT; {self.helper_holding_the_output()} exec sleep 30")
         started = time.monotonic()
-        with patch.multiple(orchestrator, MUTMUT_STOP_GRACE=0.5, MUTMUT_KILL_WAIT=0.5):
+        with patch.multiple(orchestrator, MUTMUT_STOP_GRACE=0.5, TOOL_KILL_WAIT=0.5):
             found = self.found(budget=1)
         self.assertLess(time.monotonic() - started, 6)
         self.assertEqual([f["rule"] for f in found], ["budget-reached"])
@@ -7919,7 +8344,7 @@ class TestSurvivingMutants(unittest.TestCase):
         self.fake_mutmut("exit 0", listing="trap '' INT; exec sleep 30")
         started = time.monotonic()
         # Without its stop counted in, the listing would get all 4 seconds, and then the grace on top.
-        with patch.multiple(orchestrator, MUTMUT_REPORT_TIMEOUT=4, MUTMUT_STOP_GRACE=1.5, MUTMUT_KILL_WAIT=0.5):
+        with patch.multiple(orchestrator, MUTMUT_REPORT_TIMEOUT=4, MUTMUT_STOP_GRACE=1.5, TOOL_KILL_WAIT=0.5):
             found = self.found()
         self.assertLess(time.monotonic() - started, 5)
         self.assertEqual([f["rule"] for f in found], ["not-run"])
@@ -8242,13 +8667,13 @@ S3776_FUNCTIONS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data
 
 
 def score(source, cls=None):
-    """The cognitive complexity of the first function in source, or of its class cls's first method."""
+    """The cognitive complexity of the first function in source, or of its class cls's first method, as the check
+    scores it in its module."""
     tree = ast.parse(textwrap.dedent(source))
-    if cls is not None:
-        [owner] = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls]
-        tree = owner
-    function = next(n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
-    return orchestrator.cognitive_complexity(function, cls)
+    owner = tree if cls is None else next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls)
+    function = next(n for n in owner.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
+    name = function.name if cls is None else f"{cls}.{function.name}"
+    return next(f.score for f in orchestrator._scored_functions(tree) if f.name == name)
 
 
 class TestCognitiveComplexity(unittest.TestCase):
@@ -8419,8 +8844,235 @@ class TestCognitiveComplexity(unittest.TestCase):
                     return cls.build(n - 1)                 # +1
         """
         self.assertEqual(score(source, "Tree"), 1)
-        tree = ast.parse(textwrap.dedent(source)).body[0]
-        self.assertEqual([orchestrator.cognitive_complexity(m, "Tree") for m in tree.body], [1, 1, 0, 1])
+        self.assertEqual(self.module_scores(source), {"Tree.depth": 1, "Tree.size": 1, "Tree.leaves": 0, "Tree.build": 1})
+
+    def module_scores(self, source):
+        """The score of each function of source that the check judges as one, by its qualified name."""
+        return {f.name: f.score for f in orchestrator._scored_functions(ast.parse(textwrap.dedent(source)))}
+
+    def test_each_function_in_a_cycle_of_two_scores_the_recursion_point(self):
+        self.assertEqual(self.module_scores("""
+            def even(n):
+                return n == 0 or odd(n - 1)   # +1 or, +1 cycle
+            def odd(n):
+                return n != 0 and even(n - 1)  # +1 and, +1 cycle
+            def unrelated(n):
+                return even(n)
+        """), {"even": 2, "odd": 2, "unrelated": 0})
+
+    def test_each_function_in_a_cycle_of_three_scores_the_recursion_point_and_one_leading_into_it_none(self):
+        self.assertEqual(self.module_scores("""
+            def a(x):
+                return b(x)
+            def b(x):
+                return c(x)
+            def c(x):
+                return a(x)
+            def enter(x):
+                return a(x)
+        """), {"a": 1, "b": 1, "c": 1, "enter": 0})
+
+    def test_methods_in_a_cycle_through_self_score_the_recursion_point(self):
+        self.assertEqual(self.module_scores("""
+            class Parser:
+                def x(self, s):
+                    return self.y(s)
+                def y(self, s):
+                    return Parser.x(self, s)
+                def z(self, s):
+                    return self.x(s)
+        """), {"Parser.x": 1, "Parser.y": 1, "Parser.z": 0})
+
+    def test_a_cycle_through_an_alias_is_not_found(self):
+        self.assertEqual(self.module_scores("""
+            def a(x):
+                f = b
+                return f(x)
+            def b(x):
+                return a(x)
+        """), {"a": 0, "b": 0})
+
+    def test_a_call_to_a_name_the_function_binds_is_not_a_call_to_the_module_s_function(self):
+        self.assertEqual(self.module_scores("""
+            def a(b):
+                return b()            # the parameter
+            def b():
+                return a(len)
+            def c():
+                def d():
+                    return 1
+                return d()            # the nested function
+            def d():
+                return c()
+            def e(items):
+                f = sorted
+                return f(items)       # the local
+            def f(items):
+                return e(items)
+        """), {"a": 0, "b": 0, "c": 0, "d": 0, "e": 0, "f": 0})
+
+    def test_every_way_of_binding_a_name_shadows_the_module_s_function_but_global(self):
+        self.assertEqual(self.module_scores("""
+            def a(x):
+                import b
+                from c import d as e
+                try:
+                    pass
+                except ValueError as f:
+                    pass
+                match x:
+                    case [*g]:
+                        pass
+                    case {**h}:
+                        pass
+                    case i:
+                        pass
+                return b() + e() + f() + g() + h() + i()
+            def b(): return a(0)
+            def e(): return a(0)
+            def f(): return a(0)
+            def g(): return a(0)
+            def h(): return a(0)
+            def i(): return a(0)
+            def j():
+                global k
+                k = wrap(k)
+                return k()            # the module's k, which it has just rebound
+            def k(): return j()
+        """), {"a": 2, "b": 0, "e": 0, "f": 0, "g": 0, "h": 0, "i": 0, "j": 1, "k": 1})  # a: except, match
+
+    def test_a_name_bound_only_in_a_nested_scope_leaves_the_function_s_own_call_to_the_module(self):
+        self.assertEqual(self.module_scores("""
+            def f(x):
+                items = [f for f in x]     # the comprehension's own f
+                return f(x[1:])            # +1, recursion
+            def walk(node):
+                key = lambda walk: walk.name
+                return walk(node.child)    # +1, recursion
+            def g(x):
+                def inner():
+                    h = 1
+                    return h
+                return h(x)                # +1, the cycle with h
+            def h(x):
+                return g(x)
+        """), {"f": 1, "walk": 1, "g": 1, "h": 1})
+
+    def test_a_type_parameter_is_not_the_module_s_function(self):
+        self.assertEqual(self.module_scores("""
+            def T():
+                return build(0)
+            def build[T](x):
+                return T(x)
+            class Box[U]:
+                def get(self):
+                    return U()            # the class's type parameter
+            def U():
+                return Box.get(None)
+        """), {"T": 0, "build": 0, "Box.get": 0, "U": 0})
+
+    def test_a_type_parameter_list_in_a_class_body_sees_the_class_s_names(self):
+        self.assertEqual(self.module_scores("""
+            def f():
+                class C:
+                    def f(): return 1
+                    def m[T: f()](self): pass     # C's f, as PEP 695 reads a bound
+                return C
+            def g():
+                class C:
+                    g = object
+                    class D[T](g()): pass         # C's g, as PEP 695 reads a base
+                return C
+            def h():
+                class C:
+                    def h(): return 1
+                    def m[T](self):
+                        return h()                # the module's h: a method's body does not see C's names
+                return C
+        """), {"f": 0, "g": 0, "h": 1})
+
+    def test_an_assignment_expression_in_a_comprehension_binds_in_the_function(self):
+        self.assertEqual(self.module_scores("""
+            def f(handlers, x):
+                if any((g := h) for h in handlers):   # +1 if
+                    return g(x)                       # the g the walrus bound
+            def g(x):
+                return f([], x)
+        """), {"f": 1, "g": 0})
+
+    def test_what_python_reads_outside_a_nested_scope_is_read_in_the_function(self):
+        self.assertEqual(self.module_scores("""
+            def a(x):
+                return [a for a in a(x[1:])]          # +1, the first iterable is read in a's scope
+            def b(x, key=lambda b: b):
+                return b(x[1:])                       # +1, the lambda's b is the lambda's alone
+            def c(x):
+                def inner(y: c(x) = 0):               # +1, an annotation is read in c's scope
+                    pass
+                return inner
+            def d():
+                class C[T: d()]:                      # +1, a bound is read in the type parameters' scope
+                    pass
+                return C
+            def e():
+                @e()                                  # +1, a decorator is read outside the type parameters
+                class C[e]:
+                    pass
+                return C
+        """), {"a": 1, "b": 1, "c": 1, "d": 1, "e": 1})
+
+    def test_a_global_or_nonlocal_in_a_nested_scope_leaves_the_outer_binding_alone(self):
+        self.assertEqual(self.module_scores("""
+            def f():
+                g = make()
+                def reset():
+                    nonlocal g
+                    g = make()
+                return g()
+            def g():
+                return f()
+            def k():
+                return m()
+            def m():
+                global k
+                def inner(k):
+                    return k()
+                return inner
+        """), {"f": 0, "g": 0, "k": 0, "m": 0})
+
+    def test_self_in_a_class_nested_in_a_method_is_that_class_s(self):
+        self.assertEqual(self.module_scores("""
+            class C:
+                def x(self):
+                    class D:
+                        def z(self):
+                            return self.y()
+                    return D
+                def y(self):
+                    return self.x()
+        """), {"C.x": 0, "C.y": 0})
+
+    def test_methods_of_two_nested_classes_of_one_name_are_told_apart(self):
+        self.assertEqual(self.module_scores("""
+            class A:
+                class Meta:
+                    def x(self):
+                        return self.y()
+            class B:
+                class Meta:
+                    def y(self):
+                        return self.x()
+        """), {"A.Meta.x": 0, "B.Meta.y": 0})
+
+    def test_a_function_that_calls_itself_and_lies_on_a_cycle_scores_the_point_once(self):
+        self.assertEqual(self.module_scores("""
+            def walk(node):
+                return walk(node.left) + visit(node)
+            def visit(node):
+                return walk(node.right)
+            def alone(n):
+                return alone(n - 1)
+        """), {"walk": 1, "visit": 1, "alone": 1})
 
     def test_a_method_of_a_class_nested_in_the_function_recurses_as_a_method_does(self):
         self.assertEqual(score("""
@@ -8462,11 +9114,7 @@ class TestCognitiveComplexity(unittest.TestCase):
     def test_the_seven_functions_sonarqube_flagged_score_over_the_limit(self):
         with open(S3776_FUNCTIONS) as f:
             tree = ast.parse(f.read())
-        scores = {}
-        for node in tree.body:
-            cls = node.name if isinstance(node, ast.ClassDef) else None
-            for function in node.body if cls else [node]:
-                scores[function.name] = orchestrator.cognitive_complexity(function, cls)
+        scores = {f.name.rpartition(".")[2]: f.score for f in orchestrator._scored_functions(tree)}
         self.assertEqual(sorted(scores), sorted(["main", "_turn", "_poll", "quality_report", "changed_lines",
                                                  "_shared_name", "_parse_step"]))
         for name, n in scores.items():
@@ -8630,6 +9278,24 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.git("mv", "bin/tool", "bin/tool.py")
         self.edit("bin/tool.py", "x += 3\n", "x += 30\n")  # still 20
         self.assertEqual(self.found()[0], [])
+
+    def test_a_function_moved_unchanged_out_of_a_deleted_python_script_keeps_its_base(self):
+        self.commit_file("bin/tool", "#!/usr/bin/env python3\n" + flat("helper", 20))
+        self.git("rm", "--quiet", "bin/tool")
+        self.put("calc.py", self.BASE + "\n\n" + flat("helper", 20))  # an edit, so git sees no rename
+        self.assertEqual(self.found()[0], [])
+        # Into a new file, which git may pair with the deleted script as its rename.
+        self.put("calc.py", self.BASE)
+        self.put("lib.py", flat("helper", 20))
+        self.git("add", "lib.py")
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_deleted_script_that_is_not_python_lends_no_base(self):
+        self.commit_file("bin/tool", "#!/bin/sh\n" + flat("helper", 20))
+        self.git("rm", "--quiet", "bin/tool")
+        self.put("calc.py", self.BASE + "\n\n" + flat("helper", 20))  # an edit, so git sees no rename
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`helper`: cognitive complexity 20, a new function; the limit is 15."])
 
     def test_a_function_out_of_tests_is_judged_as_new_as_tests_were_never_held_to_the_limit(self):
         self.commit_file("tests/helpers.py", flat("helper", 20) + "\n\n" + flat("other_helper", 20))
@@ -9000,6 +9666,122 @@ class TestTooComplexFunctions(unittest.TestCase):
     def test_it_fails_the_gate(self):
         [check] = [c for c in orchestrator.gate_checks(orchestrator.MUTATION_BUDGET) if c.name == "cognitive-complexity"]
         self.assertEqual((check.fails, check.find), (True, orchestrator.too_complex_functions))
+
+
+class TestChangedPythonFiles(unittest.TestCase):
+    """How flaky-tests, surviving-mutants and cognitive complexity read the Python files a change touches, end to end
+    through each check over a real git repository."""
+
+    # d is a decorator that takes an argument, for the decorators below.
+    CALC = "def d(_):\n    return lambda f: f\n\n\ndef add(a, b):\n    return a + b\n"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = tmp.name
+        self.host = Host()
+        self.git("init", "--quiet", "-b", "main")
+        for key, setting in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
+            self.git("config", key, setting)
+        self.put("pyproject.toml", '[tool.mutmut]\nsource_paths = ["."]\n')
+        self.put("calc.py", self.CALC)
+        self.put("tests/test_calc.py", "import calc\n\n\ndef test_add():\n    assert calc.add(2, 3) == 5\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "base")
+
+    def git(self, *args):
+        return self.host.git(self.repo, *args)
+
+    def put(self, name, text):
+        path = os.path.join(self.repo, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    def change(self):
+        return orchestrator.GateChange.from_tree(self.repo, self.git("rev-parse", "HEAD").strip())
+
+    @staticmethod
+    @contextlib.contextmanager
+    def bounded(seconds):
+        """A context in which a check that blocks or reads without end fails the test, rather than hanging the suite
+        or taking the host's memory: SIGALRM after seconds interrupts an open() blocked on a FIFO, and on Linux an
+        address space limited to 1 GiB above the process's present size turns an endless read, as of /dev/zero, into
+        MemoryError. Elsewhere the address space is left as it is: macOS has no /proc and does not enforce
+        RLIMIT_AS."""
+        def expired(signum, frame):
+            raise AssertionError(f"the check ran longer than {seconds} seconds")
+
+        limits = resource.getrlimit(resource.RLIMIT_AS)
+        cap = limits[0]
+        if sys.platform == "linux":
+            with open("/proc/self/statm") as f:
+                size = int(f.read().split()[0]) * os.sysconf("SC_PAGE_SIZE")
+            cap = size + 2 ** 30 if limits[1] == resource.RLIM_INFINITY else min(size + 2 ** 30, limits[1])
+        previous = signal.signal(signal.SIGALRM, expired)
+        resource.setrlimit(resource.RLIMIT_AS, (cap, limits[1]))
+        signal.alarm(seconds)
+        try:
+            yield
+        finally:
+            signal.alarm(0)
+            resource.setrlimit(resource.RLIMIT_AS, limits)
+            signal.signal(signal.SIGALRM, previous)
+
+    def test_a_changed_symlink_to_a_fifo_or_dev_zero_is_not_read_by_the_checks_that_rerun_or_mutate(self):
+        elsewhere = tempfile.TemporaryDirectory()
+        self.addCleanup(elsewhere.cleanup)
+        fifo = os.path.join(elsewhere.name, "pipe")
+        os.mkfifo(fifo)
+        # /dev/zero only where bounded() can bound the endless read a regression would make of it.
+        for target in (fifo, "/dev/zero") if sys.platform == "linux" else (fifo,):
+            with self.subTest(target=target):
+                for name in ("x.py", "tests/test_x.py"):
+                    with contextlib.suppress(FileNotFoundError):
+                        os.remove(os.path.join(self.repo, name))
+                    os.symlink(target, os.path.join(self.repo, name))
+                self.git("add", "x.py", "tests/test_x.py")
+                with self.bounded(20):
+                    self.assertEqual(orchestrator.flaky_tests(self.change()), [])
+                    self.assertEqual(orchestrator.surviving_mutants(self.change(), budget=60), [])
+
+    def test_a_coding_cookie_naming_an_unknown_codec_is_the_same_reason_in_every_check(self):
+        source = "# -*- coding: nonsense -*-\ndef test_x():\n    pass\n"
+        self.put("x.py", source)
+        self.put("tests/test_x.py", source)
+        self.git("add", "x.py", "tests/test_x.py")
+        change = self.change()
+        found = [*orchestrator.flaky_tests(change), *orchestrator.surviving_mutants(change, budget=60),
+                 *orchestrator.too_complex_functions(change)]
+        self.assertEqual([(f["path"], f["rule"]) for f in found],
+                         [("tests/test_x.py", "not-rerun"), ("x.py", "not-run"), ("x.py", "not-scored")])
+        reasons = {f["message"].partition(", so ")[0] for f in found}
+        self.assertEqual(len(reasons), 1, reasons)
+        self.assertTrue(reasons.pop().startswith("could not be read ("))
+
+    # Decorators that ast.unparse cannot write: a sum too deep for its recursion, and an int, as hexadecimal, of
+    # more than sys.get_int_max_str_digits() decimal digits, which it writes in decimal.
+    DEEP_DECORATORS = {"deep": "@d(" + " + ".join(["1"] * 5000) + ")", "long": "@d(0x" + "f" * 4200 + ")"}
+
+    def test_a_changed_test_with_a_decorator_too_deep_or_too_long_to_write_is_still_rerun(self):
+        for kind, decorator in self.DEEP_DECORATORS.items():
+            with self.subTest(kind=kind), patch.object(orchestrator, "FLAKY_SEEDS", (1, 2)):
+                self.put("tests/test_calc.py", (
+                    "import calc\n\n\ndef d(_):\n    return lambda f: f\n\n\n"
+                    f"{decorator}\ndef test_add():\n    assert calc.add(2, 3) == 6\n"))
+                found = orchestrator.flaky_tests(self.change())
+                self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                                 [("tests/test_calc.py", 9, "failed-every-run")])
+
+    def test_a_changed_function_with_a_decorator_too_deep_or_too_long_to_write_is_not_mutated(self):
+        for kind, decorator in self.DEEP_DECORATORS.items():
+            with self.subTest(kind=kind):
+                self.put("calc.py", self.CALC.replace("def add(a, b):\n    return a + b",
+                                                      f"{decorator}\ndef add(a, b):\n    return b + a"))
+                found = orchestrator.surviving_mutants(self.change(), budget=60)
+                self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                                 [("calc.py", 6, "not-mutated")])
+                self.assertIn("mutmut does not mutate a decorated function", found[0]["message"])
 
 
 class TestToolFindings(unittest.TestCase):
@@ -10401,18 +11183,31 @@ class TestProofs(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "proof_command must be a string"):
             orchestrator.parse_workflow("bad", {**orchestrator.workflow_definition(QUICK), "proof_command": 1}, BUILT_IN_PROMPTS)
 
+    def test_a_workflow_file_takes_proof_command_and_proofs_dir(self):
+        text = """
+proof_command = "python -m pytest -q {proofs}"
+
+[[steps]]
+use = "spec"
+
+[[steps]]
+use = "build"
+
+[[steps]]
+use = "review"
+prompt = "Back each finding with a test in {proofs_dir}; write {review_path}."
+again = "Again, with tests in {proofs_dir}; write {review_path}."
+"""
+        p = orchestrator.parse_workflow("proving", tomllib.loads(text), BUILT_IN_PROMPTS)
+        self.assertEqual(p.proof_command, "python -m pytest -q {proofs}")
+        self.assertIn("{proofs_dir}", p.step("review").prompt)
+        self.assertIn("{proofs_dir}", p.step("review").again)
+
     def test_proof_command_round_trips_through_a_workflow_file(self):
         text = orchestrator.workflow_toml(self.pipeline)
         self.assertIn('proof_command = "sh {proofs}"', text)
         self.assertEqual(orchestrator.parse_workflow("quick", tomllib.loads(text), BUILT_IN_PROMPTS), self.pipeline)
         self.assertNotIn("proof_command", orchestrator.workflow_toml(QUICK))
-
-    def test_the_adversarial_example_loads(self):
-        adversarial = orchestrator.load_workflow_file(f"{EXAMPLES}/adversarial.toml", BUILT_IN_PROMPTS)
-        self.assertEqual(orchestrator.workflow_shape(adversarial), "spec -> build -> review (back to build)")
-        self.assertIn("{proofs}", adversarial.proof_command)
-        self.assertIn("{proofs_dir}", adversarial.step("review").prompt)
-        self.assertIn("{proofs_dir}", adversarial.step("review").again)
 
 
 class TestSavedBeforeWorkflows(unittest.TestCase):
@@ -10562,18 +11357,31 @@ class TestWorkflowFiles(unittest.TestCase):
         default = orchestrator.DEFAULT_WORKFLOW
         quick = orchestrator.load_workflow_file(f"{EXAMPLES}/quick.toml", BUILT_IN_PROMPTS)
         self.assertEqual(orchestrator.workflow_shape(quick), "build -> review (back to build)")
-        tdd = orchestrator.load_workflow_file(f"{EXAMPLES}/tdd.toml", BUILT_IN_PROMPTS)
-        self.assertEqual(tdd.name, "tdd")
-        self.assertEqual(tdd.roles, {"spec": "Spec Collector", "tests": "Test Writer", "build": "Builder",
-                                     "review": "Reviewer"})
-        self.assertEqual(tdd.models, {"tests": "sonnet"})
-        spec, tests, build, review = tdd.steps
-        self.assertEqual((spec, review), (default.step("spec"), default.step("review")))
-        # use keeps every field the file does not set.
-        self.assertNotEqual(build.prompt, default.step("build").prompt)
-        self.assertEqual(Step(**{**orchestrator.step_fields(build), "prompt": default.step("build").prompt}),
-                         default.step("build"))
+        team = orchestrator.load_workflow_file(f"{EXAMPLES}/product-team.toml", BUILT_IN_PROMPTS)
+        self.assertEqual(team.name, "product-team")
+        self.assertEqual(orchestrator.workflow_shape(team), "spec -> design -> tests -> build -> review (back to build)")
+        self.assertEqual(team.roles, {"spec": "Product Manager", "design": "Architect", "tests": "QA Engineer",
+                                      "build": "Engineer", "review": "Tech Lead"})
+        self.assertEqual(team.models, {"tests": "sonnet"})
+        spec, design, tests, build, review = team.steps
+        # use keeps every field the file does not set: the interview stays human-paced, the Engineer quality-gated, the
+        # Tech Lead the verdict step looping back to the Engineer.
+        self.assertEqual(Step(**{**orchestrator.step_fields(spec), "prompt": default.step("spec").prompt}),
+                         default.step("spec"))
+        self.assertIn("first line is a `# ` heading", spec.prompt)
+        for step in (build, review):
+            fields = {"prompt", "again", "fresh_note"}
+            self.assertEqual({k: v for k, v in orchestrator.step_fields(step).items() if k not in fields},
+                             {k: v for k, v in orchestrator.step_fields(default.step(step.id)).items() if k not in fields})
+        self.assertEqual((design.file, design.edits), ("design.md", False))
         self.assertEqual((tests.role, tests.file, tests.edits, tests.locks), ("tests", "tests.md", True, True))
+        # Every round of the Engineer and the Tech Lead, and a fresh session of either, hears of the design and the
+        # locked acceptance tests, not only the first.
+        for step in (build, review):
+            for text in (step.prompt, step.again, step.fresh_note):
+                self.assertIn("{design_path}", text)
+                self.assertIn("{tests_path}", text)
+        self.assertIn("{design_path}", tests.prompt)
 
     def test_default_round_trips_through_its_file(self):
         default = orchestrator.DEFAULT_WORKFLOW
@@ -10766,14 +11574,14 @@ class TestWorkflowFiles(unittest.TestCase):
             orchestrator.load_workflow_file("/nope/x.toml", BUILT_IN_PROMPTS)
 
     def test_files_are_offered_by_name(self):
-        with open(f"{EXAMPLES}/tdd.toml") as f:
-            self.file("tdd", f.read())
+        with open(f"{EXAMPLES}/product-team.toml") as f:
+            self.file("product-team", f.read())
         self.file("broken", "nonsense\n")
         with open(os.path.join(self.workflows, "notes.txt"), "w") as f:
             f.write("not a workflow")
-        self.assertEqual(orchestrator.workflow_names(), ["broken", "default", "tdd"])
-        self.assertEqual(orchestrator.named_workflow("tdd", BUILT_IN_PROMPTS).name, "tdd")
-        with self.assertRaisesRegex(OrchestratorError, "unknown workflow nope; there are broken, default, tdd"):
+        self.assertEqual(orchestrator.workflow_names(), ["broken", "default", "product-team"])
+        self.assertEqual(orchestrator.named_workflow("product-team", BUILT_IN_PROMPTS).name, "product-team")
+        with self.assertRaisesRegex(OrchestratorError, "unknown workflow nope; there are broken, default, product-team"):
             orchestrator.named_workflow("nope", BUILT_IN_PROMPTS)
 
     def test_a_run_keeps_its_workflow_when_the_file_is_gone(self):
@@ -10830,7 +11638,7 @@ class TestWorkflowFileCLI(unittest.TestCase):
     def setUp(self):
         workflows = os.path.join(without_workflow_files(self), "ai-agents-orchestrator", "workflows")
         os.makedirs(workflows)
-        with open(f"{EXAMPLES}/tdd.toml") as src, open(f"{workflows}/tdd.toml", "w") as dst:
+        with open(f"{EXAMPLES}/product-team.toml") as src, open(f"{workflows}/product-team.toml", "w") as dst:
             dst.write(src.read())
 
     def started(self, init, *flags):
@@ -10839,9 +11647,9 @@ class TestWorkflowFileCLI(unittest.TestCase):
         return init.call_args.args[2], init.call_args.kwargs
 
     def test_run_a_workflow_file_by_name(self, _resolve, _run, init):
-        state, kw = self.started(init, "--workflow", "tdd")
-        self.assertEqual((state.workflow, state.phase), ("tdd", "spec"))
-        self.assertEqual(kw["pipeline"], orchestrator.load_workflow_file(f"{EXAMPLES}/tdd.toml", BUILT_IN_PROMPTS))
+        state, kw = self.started(init, "--workflow", "product-team")
+        self.assertEqual((state.workflow, state.phase), ("product-team", "spec"))
+        self.assertEqual(kw["pipeline"], orchestrator.load_workflow_file(f"{EXAMPLES}/product-team.toml", BUILT_IN_PROMPTS))
         self.assertEqual(kw["agents"].models, {"tests": "sonnet"})
 
     def test_run_a_workflow_file_by_path(self, _resolve, _run, init):
@@ -10849,9 +11657,9 @@ class TestWorkflowFileCLI(unittest.TestCase):
         self.assertEqual((state.workflow, state.phase, kw["pipeline"].name), ("quick", "build", "quick"))
 
     def test_model_flags_override_the_files_models(self, _resolve, _run, init):
-        _, kw = self.started(init, "--workflow", "tdd", "--model", "X")
-        self.assertEqual(kw["agents"].models, {"spec": "X", "tests": "X", "build": "X", "review": "X"})
-        _, kw = self.started(init, "--workflow", "tdd", "--role-model", "tests=haiku", "--role-model", "spec=opus",
+        _, kw = self.started(init, "--workflow", "product-team", "--model", "X")
+        self.assertEqual(kw["agents"].models, {"spec": "X", "design": "X", "tests": "X", "build": "X", "review": "X"})
+        _, kw = self.started(init, "--workflow", "product-team", "--role-model", "tests=haiku", "--role-model", "spec=opus",
                              "--build-model", "Y")
         self.assertEqual(kw["agents"].models, {"spec": "opus", "tests": "haiku", "build": "Y"})
 
@@ -10864,14 +11672,14 @@ class TestWorkflowFileCLI(unittest.TestCase):
 
     def test_bad_flags(self, _resolve, _run, init):
         for argv in (["run", "task", "--role-model", "tests"],
-                     ["run", "task", "--workflow", "tdd", "--workflow-file", "x.toml"]):
+                     ["run", "task", "--workflow", "product-team", "--workflow-file", "x.toml"]):
             with self.subTest(argv=argv), self.assertRaises(SystemExit), patch("sys.stderr"):
                 parse_args(argv)
 
     def test_resume_takes_role_model(self, _resolve, _run, init):
-        tdd = orchestrator.named_workflow("tdd", BUILT_IN_PROMPTS)
-        saved = {**asdict(saved_run("build", 1, models={"tests": "sonnet"})), "workflow": "tdd",
-                 "workflow_definition": orchestrator.workflow_definition(tdd)}
+        team = orchestrator.named_workflow("product-team", BUILT_IN_PROMPTS)
+        saved = {**asdict(saved_run("build", 1, models={"tests": "sonnet"})), "workflow": "product-team",
+                 "workflow_definition": orchestrator.workflow_definition(team)}
         args = parse_args(["resume", "a1b2c3", "--role-model", "review=opus"])
         state = orchestrator.resumable_state([(10**4, saved)], args, "/proj", "here", lambda pid: False)
         self.assertEqual(state.models, {"tests": "sonnet", "review": "opus"})
@@ -10887,20 +11695,21 @@ class TestWorkflowFileCLI(unittest.TestCase):
             "    spec -> build -> review (back to build)",
             f"broken  {workflows}/broken.toml",
             "    error: step 1: file is missing",
-            f"tdd  {workflows}/tdd.toml",
-            "    spec -> tests -> build -> review (back to build)",
-            "    Spec Collector -> Test Writer -> Builder <-> Reviewer: tests first, by another session",
+            f"product-team  {workflows}/product-team.toml",
+            "    spec -> design -> tests -> build -> review (back to build)",
+            "    Product Manager -> Architect -> QA Engineer -> Engineer <-> Tech Lead",
             "",
             f"Add one as {workflows}/NAME.toml; `orchestrator.py workflows default` prints the default as a file "
             f"to start from.",
         ])
 
     def test_workflows_prints_one_as_a_file(self, _resolve, _run, init):
-        for ref in ("tdd", f"{EXAMPLES}/tdd.toml"):
+        for ref in ("product-team", f"{EXAMPLES}/product-team.toml"):
             with self.subTest(ref=ref), patch("sys.stdout", new_callable=io.StringIO) as out:
                 self.assertEqual(main(["workflows", ref]), 0)
-                self.assertEqual(orchestrator.parse_workflow("tdd", tomllib.loads(out.getvalue()), BUILT_IN_PROMPTS),
-                                 orchestrator.named_workflow("tdd", BUILT_IN_PROMPTS))
+                self.assertEqual(orchestrator.parse_workflow("product-team", tomllib.loads(out.getvalue()),
+                                                           BUILT_IN_PROMPTS),
+                                 orchestrator.named_workflow("product-team", BUILT_IN_PROMPTS))
 
 
 class TestPromptFiles(unittest.TestCase):
@@ -12669,8 +13478,8 @@ class TestShow(unittest.TestCase):
         review = f"{SHOW_DIR}/review-1.md"
 
         def remote(argv, **kw):
-            self.assertEqual(argv[:4], ["ssh", "-o", "BatchMode=yes", "remote-host"])
-            script, *args = shlex.split(argv[4])[2:]
+            self.assertEqual(argv[:-1], [*SSH, "remote-host"])
+            script, *args = shlex.split(argv[-1])[2:]
             if "pwd" in script:
                 return completed("/proj\n")
             if "state.json; do" in script:
@@ -12691,8 +13500,8 @@ class TestShow(unittest.TestCase):
             f"\nfiles\n    {SHOW_DIR}/spec.md\n    {SHOW_DIR}/build-1.md\n    {review}\n"
             f"\nlast review: {review}\nremote findings\n"))
         self.assertIn("resume: orchestrator.py resume a1b2c3 --machine M --cwd '~/proj'", out.getvalue())
-        reads = [shlex.split(c.args[0][4])[-1] for c in run.call_args_list
-                 if f"|| exit {orchestrator.MISSING_FILE_STATUS}; cat" in c.args[0][4]]
+        reads = [shlex.split(c.args[0][-1])[-1] for c in run.call_args_list
+                 if f"|| exit {orchestrator.MISSING_FILE_STATUS}; cat" in c.args[0][-1]]
         self.assertEqual(reads, [f"{SHOW_DIR}/review-2.md", review])
 
     def test_help(self):
@@ -12727,9 +13536,9 @@ class TestRunFiles(unittest.TestCase):
         run = MagicMock(return_value=completed("5 /r/b.md\0" "5 /r/a b.md\0" "3 /r/c.md\0"))
         self.assertEqual(Host("remote-host", run=run).run_files("/r"), [("/r/c.md", 3), ("/r/a b.md", 5), ("/r/b.md", 5)])
         run.assert_called_once()
-        self.assertEqual(run.call_args.args[0][:4], ["ssh", "-o", "BatchMode=yes", "remote-host"])
-        self.assertIn("stat -c %Y", run.call_args.args[0][4])
-        self.assertIn("stat -f %m", run.call_args.args[0][4])
+        self.assertEqual(run.call_args.args[0][:-1], [*SSH, "remote-host"])
+        self.assertIn("stat -c %Y", run.call_args.args[0][-1])
+        self.assertIn("stat -f %m", run.call_args.args[0][-1])
 
     def test_failure_raises(self):
         host = Host(run=MagicMock(return_value=completed(stderr="Permission denied", returncode=1)))
@@ -13390,12 +14199,49 @@ class TestDrain(unittest.TestCase):
             with self.subTest(fields=fields):
                 self.spec("a", drain_spec_text("First", "ready-for-agent", "Run: 20261024-100000-aaaaaa"))
                 self.saved_run("a", "20261024-100000-aaaaaa", 10**4, phase="done", **fields)
+                self.host.pull_requests[PR_A] = {"state": "OPEN", "headRefOid": "a" * 40, "closedAt": None}
 
                 status, out, _ = self.drain()
 
                 self.assertEqual(self.header("a"), (spec_after, "20261024-100000-aaaaaa", pr))
                 self.assertEqual(status, 0)
                 self.assertIn(f"a: ready-for-agent -> {spec_after}", out)
+
+    def test_a_finished_runs_pull_request_is_followed_in_the_same_pass(self):
+        cases = [("MERGED", "done"), ("CLOSED", "ready-for-human"), ("OPEN", "in-review")]
+        run_id = "20261024-100000-aaaaaa"
+        for pr_state, spec_after in cases:
+            with self.subTest(pr_state=pr_state):
+                self.spec("a", drain_spec_text("First", "ready-for-agent", f"Run: {run_id}"))
+                [spec] = orchestrator.read_queue(self.dir)
+                self.saved_run("a", run_id, 10**4, phase="done", verdict=APPROVE, pr_url=PR_A)
+                self.host.pull_requests[PR_A] = {"state": pr_state, "headRefOid": "a" * 40, "closedAt": None}
+
+                self.host.gh_calls.clear()
+                got = orchestrator.refreshed_headers([spec], self.host, "/proj", [], "here", lambda pid: False)
+
+                self.assertEqual(got, [(spec, {"Status": spec_after, "PR": PR_A})])
+                self.assertEqual([c[:3] for c in self.host.gh_calls], [("pr", "view", PR_A)])
+
+    def test_one_drain_marks_a_merged_finished_run_done_and_runs_its_dependant(self):
+        run_id = "20261024-100000-aaaaaa"
+        self.spec("a", drain_spec_text("First", "ready-for-agent", f"Run: {run_id}"))
+        self.spec("b", drain_spec_text("Second", "ready-for-agent", "Blocked by: a"))
+        self.saved_run("a", run_id, 10**4, phase="done", verdict=APPROVE, pr_url=PR_A)
+        self.host.pull_requests[PR_A] = {"state": "MERGED", "headRefOid": "a" * 40, "closedAt": None}
+
+        status, out, _ = self.drain(argv=["--dry-run"])
+
+        self.assertEqual(status, 0)
+        self.assertEqual(out, f"a: ready-for-agent -> done  {PR_A}\nwould run, in order: b\n")
+        self.assertEqual(self.header("a"), ("ready-for-agent", run_id, None))
+
+        status, out, _ = self.drain(approved(PR_B))
+
+        self.assertEqual(status, 0)
+        self.assertEqual(self.header("a"), ("done", run_id, PR_A))
+        self.assertEqual([state.task for state, _ in self.runs], ["Second"])
+        self.assertEqual(self.header("b")[::2], ("in-review", PR_B))
 
     def conflicted_spec(self, status="ready-for-human", verdict=APPROVE, **pr):
         """Spec a, of status, whose run with verdict opened PR_A over a conflict in x.py, and what gh says of PR_A:
@@ -13441,6 +14287,40 @@ class TestDrain(unittest.TestCase):
         self.assertEqual(self.header("a"), ("in-review", run_id, PR_A))
         self.assertEqual(self.run_conflicts(run_id), [])
         self.assertEqual(out, "all specs cleared\n")
+
+    def test_an_in_review_spec_whose_refresh_finds_its_pull_request_merged_is_done_asking_gh_once(self):
+        self.conflicted_spec("in-review", state="MERGED")
+        [spec] = orchestrator.read_queue(self.dir)
+        self.host.gh_calls.clear()
+        got = orchestrator.refreshed_headers([spec], self.host, "/proj", [], "here", lambda pid: False)
+        self.assertEqual(got, [(spec, {"Status": "done"})])
+        self.assertEqual([c[:3] for c in self.host.gh_calls], [("pr", "view", PR_A)])
+
+    def test_a_spec_for_the_human_whose_conflict_clears_has_one_entry_and_gh_asked_once(self):
+        self.conflicted_spec()
+        [spec] = orchestrator.read_queue(self.dir)
+        self.host.gh_calls.clear()
+        got = orchestrator.refreshed_headers([spec], self.host, "/proj", [], "here", lambda pid: False)
+        self.assertEqual(got, [(spec, {"Status": "in-review", "PR": PR_A})])
+        self.assertEqual([c[:3] for c in self.host.gh_calls], [("pr", "view", PR_A)])
+
+    def test_a_spec_for_the_human_whose_refresh_finds_its_pull_request_merged_is_done_asking_gh_once(self):
+        self.conflicted_spec(state="MERGED")
+        [spec] = orchestrator.read_queue(self.dir)
+        self.host.gh_calls.clear()
+        got = orchestrator.refreshed_headers([spec], self.host, "/proj", [], "here", lambda pid: False)
+        self.assertEqual(got, [(spec, {"Status": "done"})])
+        self.assertEqual([c[:3] for c in self.host.gh_calls], [("pr", "view", PR_A)])
+
+    def test_a_refresh_of_another_pull_request_than_the_spec_s_settles_nothing_by_it(self):
+        run_id = self.conflicted_spec("in-review", state="MERGED")
+        self.spec("a", drain_spec_text("First", "in-review", f"Run: {run_id}", f"PR: {PR_B}"))
+        self.host.pull_requests[PR_B] = {"state": "OPEN", "headRefOid": "b" * 40, "closedAt": None}
+        [spec] = orchestrator.read_queue(self.dir)
+        self.host.gh_calls.clear()
+        got = orchestrator.refreshed_headers([spec], self.host, "/proj", [], "here", lambda pid: False)
+        self.assertEqual(got, [])
+        self.assertEqual([c[:3] for c in self.host.gh_calls], [("pr", "view", PR_A), ("pr", "view", PR_B)])
 
     def test_a_dry_run_shows_the_move_and_refreshes_nothing(self):
         run_id = self.conflicted_spec()
@@ -13542,6 +14422,7 @@ class TestDrain(unittest.TestCase):
                 text = drain_spec_text("First", None, *header, "## Notes", "PR: not in the header", nl=nl)
                 self.spec("a", text)
                 self.saved_run("a", "stale", phase="done", verdict=APPROVE, pr_url=PR_A)
+                self.host.pull_requests[PR_A] = {"state": "OPEN", "headRefOid": "a" * 40, "closedAt": None}
 
                 self.assertEqual(self.drain()[0], 0)
 
@@ -13584,6 +14465,7 @@ class TestDrain(unittest.TestCase):
         self.spec("e", drain_spec_text("E", "ready-for-agent", "Blocked by: d"))
         self.host.pull_requests[PR_A] = {"state": "MERGED", "headRefOid": "a" * 40, "closedAt": None}
         self.saved_run("c", "20261024-100000-cccccc", phase="done", verdict=APPROVE, pr_url=PR_B)
+        self.host.pull_requests[PR_B] = {"state": "OPEN", "headRefOid": "b" * 40, "closedAt": None}
         before = {slug: self.text(slug) for slug in "abcde"}
 
         status, out, _ = self.drain(argv=["--dry-run"])
@@ -14038,9 +14920,9 @@ class TestHostPullRequest(unittest.TestCase):
         edit = run.call_args
         host.mark_pr_ready("/proj", self.URL)
         ready = run.call_args
-        self.assertTrue(edit.args[0][4].endswith(f"_ /proj gh pr edit {self.URL} --body-file -"), edit.args[0])
+        self.assertTrue(edit.args[0][-1].endswith(f"_ /proj gh pr edit {self.URL} --body-file -"), edit.args[0])
         self.assertEqual(edit.kwargs["input"], "new body")
-        self.assertTrue(ready.args[0][4].endswith(f"_ /proj gh pr ready {self.URL}"), ready.args[0])
+        self.assertTrue(ready.args[0][-1].endswith(f"_ /proj gh pr ready {self.URL}"), ready.args[0])
         self.assertEqual({edit.kwargs["timeout"], ready.kwargs["timeout"]}, {orchestrator.NETWORK_TIMEOUT})
 
     def test_a_failed_edit_raises(self):
@@ -15251,6 +16133,18 @@ class TestBlocked(unittest.TestCase):
         self.assertIn(f"The Builder's report is in {BUILD_1}.", reviews[0])
         self.assertIsNone(wf.state.blocked)
 
+    def test_a_dropped_answer_prompt_is_sent_once_more(self):
+        def blocking(prompt, state, host):
+            herdr.dropped["build"] = 1  # the prompt after the human's answer
+            return blocked_report(lambda s: BUILD_1)(prompt, state, host)
+        wf, herdr, host, _, seen, *_ = self.run_blocked([blocking, answered(lambda s: BUILD_1, "report 1")])
+
+        with patch("sys.stderr"):
+            self.assertEqual(wf.run(), APPROVE)
+        builds = [text for name, text in herdr.prompts if name == "build-a1b2c3"]
+        self.assertEqual(builds[1:], [blocked_prompt(BUILD_1)] * 2)
+        self.assertEqual(host.files[BUILD_1], "report 1")
+
     def test_the_wait_is_saved_and_listed(self):
         during = []
 
@@ -15329,15 +16223,15 @@ class TestBlocked(unittest.TestCase):
         self.assertEqual((wf.state.round, wf.state.quality_round, wf.state.blocked), (1, 2, None))
 
     def test_a_step_from_a_workflow_file_can_block(self):
-        tdd = orchestrator.load_workflow_file(f"{EXAMPLES}/tdd.toml", BUILT_IN_PROMPTS)
+        team = orchestrator.load_workflow_file(f"{EXAMPLES}/product-team.toml", BUILT_IN_PROMPTS)
         def tests_md(s):
             return f"{s.dir}/tests.md"
         seen, specs, notes = [], [], []
         wf, _, host, _ = make_workflow({
-            "spec": [recording(spec_turn, specs)],
+            "spec": [recording(spec_turn, specs)], "design": [writes(lambda s: f"{s.dir}/design.md", "the design")],
             "tests": [recording(blocked_report(tests_md, "which test runner?"), seen),
                       recording(answered(tests_md, "tests written"), seen)],
-            "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, state=new_run(tdd), pipeline=tdd)
+            "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, state=new_run(team), pipeline=team)
         wf.notify = lambda title, body: notes.append((title, body))
         bounded(wf)
 
@@ -15345,7 +16239,7 @@ class TestBlocked(unittest.TestCase):
         self.assertEqual(blocked_files(host), ["tests.blocked-1.md"])
         self.assertTrue(seen[0].endswith(NOTE))
         self.assertEqual(seen[1], blocked_prompt(f"{D}/tests.md"))
-        self.assertIn(("Test Writer is blocked: which test runner?", "pane w1:p2"), notes)
+        self.assertIn(("QA Engineer is blocked: which test runner?", "pane w1:p3"), notes)
         self.assertNotIn("BLOCKED", specs[0])
 
     def test_a_blocked_verdict_file_gets_the_verdict_retry(self):
@@ -16217,7 +17111,7 @@ class FakeTools:
     def __call__(self, argv, **kwargs):
         target = None
         if argv[0] == "ssh":
-            target, argv = argv[3], shlex.split(argv[4])
+            target, argv = argv[-2], shlex.split(argv[-1])
             if target not in self.targets:
                 return completed(stderr=f"ssh: connect to host {target}: Connection refused", returncode=255)
         self.calls.append((target, argv))
@@ -16230,6 +17124,9 @@ class FakeTools:
             path = ("/home/u" if "$HOME" in argv[2] else "") + argv[-1]
             return completed(f"{path}\n") if path in self.dirs else completed(stderr="cd: no such dir", returncode=2)
         if argv[0] not in self.paths and argv[0] != "gitleaks":
+            # The remote shell answers for a command it cannot find; locally it cannot be started at all.
+            if target:
+                return completed(stderr=f"sh: 1: {argv[0]}: not found\n", returncode=127)
             raise FileNotFoundError(2, "No such file or directory", argv[0])
         answer = self.answers[tuple(argv)]
         if isinstance(answer, BaseException):
@@ -16397,6 +17294,16 @@ class TestCheckSetup(unittest.TestCase):
         gh = self.check(tools)["gh"]
         self.assertEqual((gh.detail, gh.fix), ("gh is not on PATH", "install gh (https://cli.github.com)"))
 
+    def test_a_missing_git_or_gh_is_found_by_running_it_once(self):
+        for machine, target in ((None, None), ("box", "me@box")):
+            for tool, argv in (("git", ["git", "--version"]), ("gh", ["gh", "auth", "status"])):
+                with self.subTest(machine=machine, tool=tool):
+                    tools = FakeTools()
+                    del tools.paths[tool]
+                    self.assertEqual(self.check(tools, machine=machine)[tool].detail, f"{tool} is not on PATH")
+                    asked = [a for t, a in tools.calls if t == target and (a[:1] == [tool] or a[-1:] == [tool])]
+                    self.assertEqual(asked, [argv])
+
     def test_gh_times_out(self):
         tools = FakeTools()
         tools.answers["gh", "auth", "status"] = subprocess.TimeoutExpired(["gh"], orchestrator.NETWORK_TIMEOUT)
@@ -16468,9 +17375,11 @@ class TestCheckSetup(unittest.TestCase):
         self.assertEqual((checks["herdr"].detail, checks["herdr on box"].detail), ("herdr 0.9.1", "herdr 0.9.1"))
         # Only the herdr a run drives is checked here; everything else goes over SSH to the machine.
         local = [argv for target, argv in tools.calls if target is None]
-        self.assertEqual(local, [["sh", "-c", 'command -v -- "$1"', "_", "herdr"], ["herdr", "--version"],
-                                 ["herdr", "machine", "list", "--json"]])
+        self.assertEqual(local, [["herdr", "--version"], ["herdr", "machine", "list", "--json"]])
         remote = {tuple(argv) for target, argv in tools.calls if target == "me@box"}
+        # A tool whose version or login is checked is run, never first looked up; only the agent CLIs are.
+        looked_up = {argv[-1] for argv in remote if argv[:3] == ("sh", "-c", 'command -v -- "$1"')}
+        self.assertEqual(looked_up, set(orchestrator.AGENT_KINDS))
         for argv in (("herdr", "--version"), ("herdr", "integration", "status"), ("git", "--version"),
                      ("gh", "auth", "status"), ("gitleaks", "git", "--help"),
                      ("git", "-C", "/proj", "rev-parse", "--show-toplevel"),
@@ -16515,7 +17424,7 @@ class TestCheckSetup(unittest.TestCase):
 
                 def answer(argv, run=tools.__call__, versions=versions, **kwargs):
                     if argv == ["herdr", "--version"] or argv[-1:] == ["herdr --version"]:
-                        return completed(versions[None if argv[0] == "herdr" else argv[3]])
+                        return completed(versions[None if argv[0] == "herdr" else argv[-2]])
                     return run(argv, **kwargs)
 
                 with with_tkinter():

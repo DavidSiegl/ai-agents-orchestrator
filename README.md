@@ -68,7 +68,8 @@ is missing.
   a finding
 - Python 3.13+, standard library only, unless you use a [binary](#install); tkinter for the [GUI](#gui);
   [uv](https://github.com/astral-sh/uv) only for the tests and the build
-- For `--machine`: the machine saved in herdr and non-interactive SSH to it; see
+- For `--machine`: the machine saved in herdr and non-interactive SSH to it, which the orchestrator's
+  commands share one connection to (OpenSSH's `ControlMaster`); see
   [Running the agents on another machine](docs/design.md#running-the-agents-on-another-machine)
 - For `--quality-gate`: a Jenkins quality job set up as in [quality gate](docs/quality-gate.md), its
   credentials in `~/.config/ai-agents-orchestrator/ci.env` or the environment, and a git checkout with an
@@ -187,7 +188,7 @@ python orchestrator.py run --worktree "add a token-bucket rate limiter"
 python orchestrator.py run --spec docs/specs/rate-limiter.md
 
 # Another workflow: one of yours by name, or a workflow file anywhere; `workflows` lists them
-python orchestrator.py run --workflow tdd "add a token-bucket rate limiter"
+python orchestrator.py run --workflow product-team "add a token-bucket rate limiter"
 python orchestrator.py run --workflow-file examples/workflows/quick.toml "fix the off-by-one in the pager"
 
 # With the quality gate after each Builder turn
@@ -238,7 +239,7 @@ uv run python orchestrator.py gate --base main --coverage coverage.xml --out qua
 | `--role-model ROLE=MODEL` | Model for one role, by its key, e.g. `tests=sonnet`. Overrides `--model`; repeatable. |
 | `--workflow NAME` | `run` and `drain`: `default`, or one of [your own](#your-own-workflows). A resumed run keeps its workflow. |
 | `--workflow-file FILE` | `run` and `drain`: like `--workflow`, for the workflow file at `FILE`. |
-| `--spec FILE` | `run` only: skip the interview. `FILE` is read on this machine, a relative path from the current directory, not `--cwd`. It becomes the first step's handoff file, and the run starts at the step after it. Without a task, the task is the spec's top-level heading, or else `FILE`'s name. Needs a workflow whose first step writes the spec, such as `default` or `tdd`. |
+| `--spec FILE` | `run` only: skip the interview. `FILE` is read on this machine, a relative path from the current directory, not `--cwd`. It becomes the first step's handoff file, and the run starts at the step after it. Without a task, the task is the spec's first line, when that is a level-one heading, or else `FILE`'s name. Needs a workflow whose first step writes the spec, such as `default` or `product-team`. |
 | `--no-pr` | `run` only: leave the change uncommitted and the workspace open instead of opening a pull request. Works outside git. |
 | `--worktree` | `run` and `drain`: work in a git worktree of the run's own; see [Worktree runs](#worktree-runs). |
 | `--quality-gate JOB` | `run`, `drain` and `resume`: after each Builder turn, have this Jenkins job, by its full name with folders, judge the change. Needs `JENKINS_URL`, `JENKINS_USER` and `JENKINS_TOKEN`, from the environment or `~/.config/ai-agents-orchestrator/ci.env`. |
@@ -373,31 +374,33 @@ The roles, their prompts and their order are a workflow. Besides the built-in `d
 file in `~/.config/ai-agents-orchestrator/workflows/`, named after the workflow, or anywhere with
 `--workflow-file`. `python orchestrator.py workflows` lists them and says why one does not load, and
 `workflows default` prints the default's full definition to start from. [`examples/workflows/`](examples/workflows)
-has four more: `spec-build-review` (the default as a file), `quick` (Builder ⇄ Reviewer, the task as the
-contract), `tdd` (a Test Writer before the Builder) and `adversarial` (a Reviewer who backs each finding with a
-failing test).
+has three more: `spec-build-review` (the default as a file), `quick` (Builder ⇄ Reviewer, the task as the
+contract) and `product-team` (Product Manager → Architect → QA Engineer → Engineer ⇄ Tech Lead: requirements in
+business terms, a design against the code, and acceptance tests written and locked before the code).
 
 ```toml
-description = "Spec Collector -> Test Writer -> Builder <-> Reviewer"
+# An abridged product-team.toml: the Architect's design before the default Builder and Reviewer.
+description = "Product Manager -> Architect -> Engineer <-> Tech Lead"
 
 [roles]                    # optional: labels, default models and harnesses
-tests = { label = "Test Writer", model = "sonnet" }
-review = { agent = "codex" }
+spec = "Product Manager"
+design = { label = "Architect", model = "sonnet" }
+review = { label = "Tech Lead", agent = "codex" }
 
 [[steps]]
 use = "spec"               # a step of the default workflow, as it is
 
 [[steps]]
-id = "tests"               # also the role, unless role = "..." says otherwise
-file = "tests.md"          # the handoff file that ends the turn; {n} in it makes one per round
-edits = true               # the run's branch is created before the first editing step
+id = "design"              # also the role, unless role = "..." says otherwise
+file = "design.md"         # the handoff file that ends the turn; {n} in it makes one per round
 prompt = """
-You are the Test Writer. Write failing tests for the spec in {spec_path} in {cwd}.
-As your last step, write a report to {tests_path} in a single write."""
+You are the Architect. Design how to meet the requirements in {spec_path} in the code in {cwd}; change no file.
+As your last step, write the design to {design_path} in a single write."""
 
 [[steps]]
 use = "build"              # the default Builder step, with only its first prompt replaced
-prompt = "... the tests in {tests_path} ... write a report to {build_path} in a single write."
+edits = true               # as it already is: the run's branch is created before the first editing step
+prompt = "... the design in {design_path} ... write a report to {build_path} in a single write."
 
 [[steps]]
 use = "review"
@@ -411,7 +414,7 @@ use = "review"
 | `use` | `"spec"`, `"build"` or `"review"`: start from that default step and override only the keys given. |
 | `loop_to` | Makes this the verdict step, which sends `CHANGES_REQUESTED` back to the step it names. |
 | `edits`, `human_paced`, `quality_gated` | The step edits the code, waits on you, or is the one the quality gate follows. |
-| `locks` | The first editing step locks the files it changes; later turns' changes to them are undone. |
+| `locks` | The first editing step locks the files it changes, as `product-team`'s QA Engineer does; later turns' changes to them are undone. |
 | `fresh_repeats_again` | A fresh session in a later round gets `again` too. |
 
 A workflow without a verdict step ends `FINISHED`, and its pull request says no agent reviewed the change. A

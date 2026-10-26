@@ -87,18 +87,24 @@ function holds, a method of a nested class and a function under a module-level `
 nested in another is part of that one. Files are read as Python reads them, by their byte order mark or coding
 cookie. Its score is G. Ann Campbell's [cognitive complexity](https://www.sonarsource.com/docs/CognitiveComplexity.pdf),
 which SonarQube's rule S3776 measured: a point for each `if`, `elif`, `else`, ternary, loop, `except`, `match`,
-sequence of like boolean operators and call of a function to itself, and one more for each level of nesting on those
-that nest. The comment above `COGNITIVE_COMPLEXITY_LIMIT` in `orchestrator.py` says how each Python construct maps to
-the paper's rules. Each of these is a finding:
+sequence of like boolean operators and recursion, and one more for each level of nesting on those that nest.
+Recursion is a function that calls itself, or one on a cycle of calls through other functions of its module, each of
+which then scores the point. Calls are followed by name, as Python's scopes resolve them, so a call to a parameter
+or a local of the same name is not one to the module's function; not through an alias, nor into another module. The
+comment above `COGNITIVE_COMPLEXITY_LIMIT` in `orchestrator.py` says how each Python construct maps to the paper's
+rules. Each of these is a finding:
 
 - `over-limit`: a function over 15, at its `def` line, when it is new or the change raised its score, as
   "`_poll`: cognitive complexity 19, 14 at the base; the limit is 15". A function already over 15 that the change
   leaves no worse is not a finding, since the gate judges the change. Its base is a function of the base, and each
   base function is the base of one function at most:
   - first, one with the same body, since an unchanged function is that function whatever its name: of its name in
-    its file's base, then of its name in the base of another Python file the change touches, then of any name in its
-    file's base, then elsewhere. So a function moved to another module, renamed or made a method, but otherwise
-    unchanged, keeps its score, and a new function given its old name is new. Of a function moved unchanged and a
+    its file's base, then of its name in the base of another Python file the change touches, a file it deletes
+    included, which counts as Python by its `.py` or its `#!` line at the base, then of any name in its file's base,
+    then elsewhere. So a function moved to another module, renamed or made a method, but otherwise
+    unchanged, keeps its score, and a new function given its old name is new. Its score itself can rise with the
+    move: two functions that call each other from two modules score no recursion, and moved into one they each
+    score its point. Of a function moved unchanged and a
     copy of it, the one that kept the name takes it, and a function moved unchanged into a file the check does not
     judge, such as one under `tests/` or a script with no `.py` whose `#!` line names python, takes its own before
     any copy can, whatever the copy's name. A function takes the base of a function in another file only when that
@@ -133,13 +139,14 @@ decides which of those are tests. It runs them five times, alone, under pytest-r
 so the project's environment that `uv run` gives, whatever `pytest` is on `PATH`) and within 30 seconds. They run in
 a temporary copy of the files git tracks, so a report the project's `addopts` write, such as `coverage.xml`, lands in
 the copy and the build's own stays as the gate reads it; a test that needs an untracked file, such as a build
-product, does not find it there. pytest takes its configuration only from the copy's top directory, in pytest's
-order (`pytest.toml`, `.pytest.toml`, `pytest.ini`, `.pytest.ini`, then `pyproject.toml`, `tox.ini` and `setup.cfg`
-with a pytest table or section), given with `-c`, or an empty one when it has none; `--confcutdir` is the copy. So
-no `pytest.ini` or `conftest.py` that another account put above the temporary directory is read. The top directory
-is where a build that runs pytest there takes its configuration. A configuration in a subdirectory, such as
-`pkg/pyproject.toml` or `tests/pytest.ini`, is not used: the reruns get the top directory's, or the empty one when
-the top has none, and a project that needs the subdirectory's usually gets `not-rerun` (see `TODO.md`):
+product, does not find it there. Each changed test file takes the configuration pytest would find for it: the first
+in its own directory, else in the nearest one above it, up to the copy's top and never above it, in pytest's order
+within a directory (`pytest.toml`, `.pytest.toml`, `pytest.ini`, `.pytest.ini`, then `pyproject.toml`, `tox.ini` and
+`setup.cfg` with a pytest table or section). The tests are rerun once for each configuration found, given with `-c`
+and with `--rootdir` its directory, or with an empty configuration for files under none; pytest runs from the copy's
+top, and `--confcutdir` is the copy. So a `tests/pytest.ini` or `pkg/pyproject.toml` configures the tests under it,
+and no `pytest.ini` or `conftest.py` that another account put above the temporary directory is read. A group that
+cannot run is a finding about its tests alone:
 
 - `mixed-results`: a test that failed under some seeds and passed under the others, at its `def`, naming the seeds
   of each. It depends on the order of the tests, on state another test leaves, or on randomness pytest-randomly
@@ -190,7 +197,7 @@ call the function:
 - `not-run`: mutmut could not start, failed, as it does when a test fails, or left results the gate could not read; the
   rules name no `source_paths`, or give a key the gate reads or writes a value of another shape; the directory to copy
   the tree into could not be made; or a changed file could not be read or parsed;
-- `cleanup`: the copy mutmut ran in could not be removed afterwards, named so that it can be.
+- `not-removed`: the copy mutmut ran in could not be removed afterwards, named so that it can be; the findings stand.
 
 mutmut runs in the gate's own interpreter, on a copy of the files git tracks, so the working tree stays as it was; its
 state, `mutants/`, goes into the copy too. Its own selector, mutant names such as
@@ -201,8 +208,9 @@ what can be mutated (`source_paths`, `only_mutate`, `do_not_mutate`), which test
 (`pytest_add_cli_args_test_selection`), what the tests read beside the code (`also_copy`), and which lines are left
 alone (`do_not_mutate_patterns`); see [whose rules judge a change](#whose-rules-judge-a-change). Python files are read
 as Python reads them, by a byte order mark or a coding cookie. mutmut runs pytest in the copy's `mutants/`, where it
-puts the mutated code. Its runs get the configuration flaky-tests' reruns get, with `-c`: the project's own, which
-`also_copy` puts in `mutants/` so that paths in it, such as `pythonpath`, name the mutated code, or an empty one; and
+puts the mutated code. Its runs get, with `-c`, the configuration of the copy's top directory, in the order the
+reruns look in a directory: the project's own, which `also_copy` puts in `mutants/` so that paths in it, such as
+`pythonpath`, name the mutated code, or an empty one; and
 `--confcutdir` is `mutants/`. Both are added to the table's `pytest_add_cli_args`, so these runs too read no
 `pytest.ini` or `conftest.py` from above the copy. In a repository without mutmut, a change to a function gets a
 `not-run` finding.
@@ -228,9 +236,9 @@ test integrity), a `conftest.py` or under a `tests` directory. A change to the t
 docs, has no "without the change" a test could see. The base is the files git tracked at `--base`, as `git archive`
 writes them, with every one of the change's files that belong with the tests (those three kinds) taken from the
 working tree, or removed where the change removed it, so the changed tests keep their fixtures and data. A submodule is
-an empty directory there. pytest, in the gate's interpreter, with the configuration flaky-tests' reruns get and the
-copy's own `TMPDIR`, first collects the changed test files with `--continue-on-collection-errors`, then runs those of
-the changed tests it collected:
+an empty directory there. pytest, in the gate's interpreter, with the configurations flaky-tests' reruns get, found
+the same way in the base, once for each, and the copy's own `TMPDIR`, first collects the changed test files with
+`--continue-on-collection-errors`, then runs those of the changed tests it collected, all within the one time limit:
 
 - `passes-at-base`: a test that passed at the base, each of its parameter sets that pytest did not skip included, at
   its `def`. A test that fails or errors there tests the change and gives nothing; so does one pytest does not collect
@@ -291,7 +299,10 @@ ends a line at is still the failed condition above. A test file that `test-integ
 `unreadable` finding of that check, since its tests cannot be compared.
 
 A file whose name is not UTF-8 is read the same way, and the quality file writes each byte it cannot decode as
-`\xNN`. Not every tool can read such a name:
+`\xNN`. By the same convention it writes a character that ends a line in some reader, such as `\r`, `\x85` or
+U+2028, as `\x0d`, `\x85` or `\u2028`, wherever it appears in a list item or a name, so that each item stays on
+its line and reads the same in every round; `one_line` in `orchestrator.py` is where that convention lives. Not
+every tool can read such a name:
 
 - ruff prints it with U+FFFD for each such byte, which the gate matches to the tracked file, so ruff's findings
   on it are listed as usual.
@@ -299,7 +310,8 @@ A file whose name is not UTF-8 is read the same way, and the quality file writes
   pymarkdown stops with `Configuration Error: 'utf-8' codec can't encode character` when it has a finding in such
   a `.md` file. Either is a failed condition quoting the tool's first line, which need not name the file; mypy's
   comes back on every change until the file has a UTF-8 name.
-- coverage.py collects no data for such a file, so its added lines count as not coverable.
+- coverage.py collects no data for such a file, so its added lines count as not coverable; the quality file names
+  each such `.py` file the change adds lines to under the coverage sentence, as not measured.
 - `flaky-tests` collects the tests of such a test file, but pytest-randomly stops with an internal error,
   `UnicodeEncodeError`, when it shuffles them, so a change to one of them is a `not-rerun` finding quoting it.
 

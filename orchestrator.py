@@ -31,6 +31,7 @@ window over the same CLI: it starts run and resume as child processes.
 
 import argparse
 import ast
+import atexit
 import base64
 import bisect
 import collections
@@ -50,6 +51,7 @@ import posixpath
 import queue
 import re
 import secrets
+import selectors
 import shlex
 import shutil
 import signal
@@ -85,6 +87,9 @@ AGENT_START_TIMEOUT_MS = 60_000
 POLL_SECONDS = 3
 # How long a Builder or Reviewer may sit idle without its handoff file before the human is told.
 STALL_SECONDS = 180
+# How long one attempt waits for an agent to take a prompt: herdr reports it working or blocked, or its handoff
+# file appears. An agent reported idle before its input takes text, as behind a startup dialog, drops the prompt.
+PROMPT_DELIVERY_SECONDS = 30
 # A live orchestrator rewrites state.json at least this often, so `list` can tell a live run from a dead one.
 HEARTBEAT_SECONDS = 60
 # A run whose state.json is older than this is stale: five missed beats, which rides out a slow SSH hop
@@ -1474,8 +1479,86 @@ class RunFile(NamedTuple):
     mtime: int  # when it was last modified, in seconds since the epoch by its host's clock
 
 
+# How long, in seconds, an SSH master connection (ssh_sharing_options) outlives the last command that used it.
+SSH_CONTROL_PERSIST_SECONDS = 60
+# How often, in seconds, an SSH master asks its server whether the connection is alive, and how many asks left
+# unanswered end it: so one that died without a reset ends within 30 s, and the next command opens a new one,
+# rather than waiting on it until TCP gives up, while the commands keep it from ever idling out.
+SSH_ALIVE_INTERVAL_SECONDS = 10
+SSH_ALIVE_COUNT = 3
+# The longest control socket path ssh can bind, in bytes: a Unix socket's path is at most 103 on macOS (sun_path
+# holds 104 with its NUL; 108 on Linux), and ssh binds a temporary name 17 bytes longer before renaming it.
+_SSH_SOCKET_PATH_MAX = 103 - 17
+# The name of a control directory: this prefix, then the 8 characters mkdtemp adds.
+_SSH_DIR_PREFIX = "octoflow-ssh-"
+
+
+class _SshControl:
+    """This process's SSH control sockets, for ssh_sharing_options."""
+
+    def __init__(self) -> None:
+        self.dir: str | None = None  # the directory, made by this process, they are in; None while there is none
+        self.options: list[str] = []  # ssh_sharing_options' answer while dir is that directory
+
+
+_SSH_CONTROL = _SshControl()
+
+
+def ssh_sharing_options() -> list[str]:
+    """The ssh options that let this process's commands to one target share a single connection (ssh_config(5),
+    ControlMaster), which ends SSH_CONTROL_PERSIST_SECONDS after its last command, or once it stops answering
+    (SSH_ALIVE_INTERVAL_SECONDS). Its socket is in a directory only the user can use, under $XDG_RUNTIME_DIR, else
+    /tmp, made on the first call, made again when it is gone or no longer the user's alone, and removed when the
+    process exits.
+
+    An empty list when no such directory with a socket path ssh accepts can be made: ssh would fail the command,
+    not connect on its own (ssh_config(5), ControlPath), so the command runs unshared."""
+    control = _SSH_CONTROL
+    if control.dir is None or not _private_dir(control.dir):
+        control.dir, control.options = None, []
+        # /tmp rather than tempfile's default, whose path on macOS leaves no room for the socket's; mkdtemp's
+        # directory there is private and unguessable, and _private_dir sees that it stays so.
+        for parent in (os.environ.get("XDG_RUNTIME_DIR"), "/tmp"):  # noqa: S108
+            if made := _new_ssh_control_dir(parent):
+                control.dir = made
+                control.options = ["-o", "ControlMaster=auto", "-o", f"ControlPersist={SSH_CONTROL_PERSIST_SECONDS}",
+                                   "-o", f"ControlPath={made}/%C",
+                                   "-o", f"ServerAliveInterval={SSH_ALIVE_INTERVAL_SECONDS}",
+                                   "-o", f"ServerAliveCountMax={SSH_ALIVE_COUNT}"]
+                break
+    return control.options
+
+
+def _new_ssh_control_dir(parent: str | None) -> str | None:
+    """A new directory for SSH control sockets in parent, only the user's, its removal at exit registered; None when
+    parent is unset, would give a socket path ssh rejects, too long or with a character its option parser takes
+    apart, or the directory cannot be made."""
+    if not parent or any(c.isspace() or c in "%\"'\\" for c in parent):
+        return None
+    # The socket's path: parent, the directory's name, and %C, the hash of the connection's endpoints, 40 hex digits.
+    if len(os.fsencode(parent)) + 1 + len(_SSH_DIR_PREFIX) + 8 + 1 + 40 > _SSH_SOCKET_PATH_MAX:
+        return None
+    try:
+        made = tempfile.mkdtemp(prefix=_SSH_DIR_PREFIX, dir=parent)
+    except OSError:
+        return None
+    atexit.register(shutil.rmtree, made, True)
+    return made
+
+
+def _private_dir(path: str) -> bool:
+    """Whether path is still a directory, not a symlink, that is the user's and no one else's (mode 0700): one this
+    process made may have been removed, and in /tmp another user, who sees its name in ps, may make one so named."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() and stat.S_IMODE(st.st_mode) == 0o700
+
+
 class Host:
-    """Runs commands on the machine where the agents run: locally, or over SSH."""
+    """Runs commands on the machine where the agents run: locally, or over SSH, one shared connection per target
+    (ssh_sharing_options)."""
 
     def __init__(self, ssh_target: str | None = None, run=subprocess.run):
         self.ssh_target = ssh_target
@@ -1498,7 +1581,7 @@ class Host:
         """
         if self.ssh_target:
             # BatchMode fails fast instead of hanging on a password prompt nobody can see.
-            argv = ["ssh", "-o", "BatchMode=yes", self.ssh_target, shlex.join(argv)]
+            argv = ["ssh", "-o", "BatchMode=yes", *ssh_sharing_options(), self.ssh_target, shlex.join(argv)]
         try:
             if not verbatim:
                 return self._run(argv, input=stdin, capture_output=True, text=True, timeout=timeout, env=child_env())
@@ -1513,9 +1596,11 @@ class Host:
                                            os.fsdecode(proc.stderr))
 
     def check(self, argv: list[str], stdin: str | None = None, timeout: float = 60) -> str:
-        return self._checked(argv, self.run(argv, stdin, timeout))
+        return self.checked(argv, self.run(argv, stdin, timeout))
 
-    def _checked(self, argv: list[str], proc: subprocess.CompletedProcess) -> str:
+    def checked(self, argv: list[str], proc: subprocess.CompletedProcess) -> str:
+        """proc's standard output, proc being argv run on this host; raises OrchestratorError naming argv, the SSH
+        target if any, and its standard error, when it exited with a status other than 0."""
         if proc.returncode != 0:
             where = f" on {self.ssh_target}" if self.ssh_target else ""
             raise OrchestratorError(f"{shlex.join(argv)} failed{where}: {proc.stderr.strip()}")
@@ -1580,7 +1665,7 @@ class Host:
     def git(self, cwd: str, *args: str, timeout: float = 60, verbatim: bool = False) -> str:
         """The standard output of git args in cwd; timeout and verbatim as for run. Raises OrchestratorError when
         git exits with a status other than 0."""
-        return self._checked(["git", "-C", cwd, *args], self.git_run(cwd, *args, timeout=timeout, verbatim=verbatim))
+        return self.checked(["git", "-C", cwd, *args], self.git_run(cwd, *args, timeout=timeout, verbatim=verbatim))
 
     def git_run(self, cwd: str, *args: str, timeout: float = 60,
                 verbatim: bool = False) -> subprocess.CompletedProcess:
@@ -1592,7 +1677,7 @@ class Host:
         """Whether a yes-or-no git command answers yes: status 0 is yes, 1 is no, anything else an error."""
         proc = self.git_run(cwd, *args)
         if proc.returncode not in (0, 1):
-            self._checked(["git", "-C", cwd, *args], proc)
+            self.checked(["git", "-C", cwd, *args], proc)
         return proc.returncode == 0
 
     def fetch(self, cwd: str, branch: str) -> str:
@@ -1855,7 +1940,7 @@ class Host:
         _scan_git_env gives it, so both read the same patch."""
         argv = [*git_env, "git", "-C", source, "-c", "core.quotePath=false", "log", "-p", "-U0", "--no-color",
                 "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", "--format=%x00%H", *log_opts.split()]
-        out = self._checked(argv, self.run(argv, timeout=GITLEAKS_TIMEOUT, verbatim=True))
+        out = self.checked(argv, self.run(argv, timeout=GITLEAKS_TIMEOUT, verbatim=True))
         leaks = []
         # Each commit's patch follows its sha on a line of its own that starts with a NUL; a NUL inside a line of a
         # patch does not start one.
@@ -1902,7 +1987,7 @@ class Host:
         proc = self.git_run(cwd, *argv)
         if proc.returncode == 1:
             return None
-        return self._checked(["git", "-C", cwd, *argv], proc).strip()
+        return self.checked(["git", "-C", cwd, *argv], proc).strip()
 
     def has_commit(self, cwd: str, commit: str) -> bool:
         return self._git_test(cwd, "rev-parse", "-q", "--verify", f"{commit}^{{commit}}")
@@ -1979,7 +2064,7 @@ class Host:
         if proc.returncode in GH_UNUSABLE_STATUS:
             raise GhUnusable(f"gh {shlex.join(args)} failed with status {proc.returncode}: "
                              f"{(proc.stderr or proc.stdout).strip()}")
-        out = self._checked(["gh", *args], proc)
+        out = self.checked(["gh", *args], proc)
         try:
             pr = json.loads(out)
             fields_ok = valid(pr)
@@ -2044,7 +2129,7 @@ class Host:
         proc = self.run(["sh", "-c", script, "_", pattern.format(session=session)], verbatim=True)
         if proc.returncode == MISSING_FILE_STATUS:
             return None
-        return self._checked(["sh", "-c", script], proc)
+        return self.checked(["sh", "-c", script], proc)
 
     def run_metrics(self, cwd: str) -> list[dict]:
         """The metrics.json of each run of the project at cwd that has one, oldest run first."""
@@ -2601,7 +2686,7 @@ def leak_report(leaks: list[Leak], intro: str) -> str:
     """The quality file of a round whose snapshot holds secrets: QUALITY_LEAK, intro, and the leaks numbered, each
     where it is, its rule and its fingerprint, never the secret."""
     return "\n".join([f"GATE: {QUALITY_LEAK}", "", intro, "", QUALITY_SECRETS_FOUND, "",
-                      *(f"{k}. {leak}" for k, leak in enumerate(leaks, 1))]) + "\n"
+                      *(one_line(f"{k}. {leak}") for k, leak in enumerate(leaks, 1))]) + "\n"
 
 
 class GateFailures(NamedTuple):
@@ -2676,7 +2761,7 @@ def build_failed_report(intro: str, tests: list[tuple[str, str]] | None, console
     if tests is None:
         out.append("Jenkins has no test report for this build.")
     else:
-        out += [f"- `{name}`: {detail.strip().splitlines()[0] if detail.strip() else 'failed'}"
+        out += [one_line(f"- `{name}`: {detail.strip().splitlines()[0] if detail.strip() else 'failed'}")
                 for name, detail in tests[:QUALITY_FINDINGS_LIMIT]] or ["None."]
         if len(tests) > QUALITY_FINDINGS_LIMIT:
             out.append(f"- and {len(tests) - QUALITY_FINDINGS_LIMIT} more.")
@@ -2800,20 +2885,22 @@ GATE_MIN_COVERAGE = 80.0
 GATE_MIN_NEW_LINES = 20
 # Seconds one linter may take before the gate counts it as failed.
 GATE_TOOL_TIMEOUT = 600
+# Seconds a pytest or mutmut run the gate started is read for after it exited or was killed (_run_in_session), at
+# most: what a process outside its group, still holding its output, prints after that is lost.
+TOOL_KILL_WAIT = 5
 # The flaky-tests check reruns the tests a change adds or edits once under each of these pytest-randomly seeds,
 # each pytest run, the collection before them included, within FLAKY_RUN_TIMEOUT seconds; so it adds at most
 # (1 + len(FLAKY_SEEDS)) * FLAKY_RUN_TIMEOUT seconds to the gate, well inside a build's QUALITY_TIMEOUT.
 FLAKY_SEEDS = (1, 2, 3, 4, 5)
 FLAKY_RUN_TIMEOUT = 30
 # The surviving-mutants check lets mutmut run for `gate --mutation-budget` seconds, MUTATION_BUDGET by default, then
-# stops it: SIGINT, MUTMUT_STOP_GRACE seconds to exit, a kill, and MUTMUT_KILL_WAIT seconds to read what it printed.
+# stops it: SIGINT, MUTMUT_STOP_GRACE seconds to exit, a kill, and TOOL_KILL_WAIT seconds to read what it printed.
 # Listing its results and showing what a few survivors of each function change, about a third of a second each, then
 # get MUTMUT_REPORT_TIMEOUT seconds in all, each call's stop included. So mutmut adds at most the budget and 75 seconds
 # to the gate, and copying the tree a few more: with the flaky-tests check's 180, passes-at-base's BASE_RUN_BUDGET and
 # the test run, about 990 of a quality round's QUALITY_TIMEOUT, leaving the rest to the queue and the install.
 MUTATION_BUDGET = 600
 MUTMUT_STOP_GRACE = 10
-MUTMUT_KILL_WAIT = 5
 MUTMUT_REPORT_TIMEOUT = 60
 # The passes-at-base check runs the changed tests at the base for `gate --base-run-budget` seconds, this by default.
 BASE_RUN_BUDGET = 120
@@ -3038,7 +3125,7 @@ def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (),
     """
     out = [f"GATE: {gate}", "", intro]
     if conditions:
-        out += ["", FAILED_CONDITIONS, "", *(f"- {c}" for c in conditions)]
+        out += ["", FAILED_CONDITIONS, "", *(one_line(f"- {c}") for c in conditions)]
     out += _issues_section(issues, elsewhere)
     if to_weigh:
         out += _to_weigh_section(to_weigh, after=min(len(issues), QUALITY_ISSUE_LIMIT))
@@ -3048,7 +3135,7 @@ def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (),
         out += ["", "## Coverage on new code", "", coverage]
     if suppressions:
         out += ["", "## Suppressions added", "",
-                *(f"- `{path}:{line}` `{text}`" for path, line, text in suppressions)]
+                *(one_line(f"- `{path}:{line}` `{text}`") for path, line, text in suppressions)]
     if edited or mutmut_state:
         out += _config_section(edited, rules_from, mutmut_state)
     return "\n".join(out) + "\n"
@@ -3091,6 +3178,21 @@ def _to_weigh_section(to_weigh, after: int) -> list[str]:
     return out
 
 
+# Each character that ends a line in some reader of the quality file, a Markdown renderer or Python's
+# str.splitlines, mapped to the escape one_line writes it as: \xNN, or \uNNNN past \xff, the convention by which
+# judge_change also writes a byte that is not UTF-8.
+_LINE_BREAK_ESCAPES = str.maketrans({c: f"\\x{ord(c):02x}" if ord(c) <= 0xFF else f"\\u{ord(c):04x}"
+                                     for c in "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"})
+
+
+def one_line(text: str) -> str:
+    """text as a quality file writes it within one of its lines, such as one item of a list or a path named in a
+    sentence: each character that ends a line in some reader written as an escape (_LINE_BREAK_ESCAPES), anything
+    else as it is. The orchestrator reads a quality file back line by line, so the escape is what it reads, the
+    same in every round."""
+    return text.translate(_LINE_BREAK_ESCAPES)
+
+
 def _numbered(k: int, finding: dict) -> str:
     if finding["path"] is None:
         where = "The change as a whole:"
@@ -3098,12 +3200,12 @@ def _numbered(k: int, finding: dict) -> str:
         where = f"`{finding['path']} (the whole file)`"
     else:
         where = f"`{finding['path']}:{finding['line']}`"
-    return f"{k}. {where} {finding['severity']} {finding['rule']}: {finding['message']}"
+    return one_line(f"{k}. {where} {finding['severity']} {finding['rule']}: {finding['message']}")
 
 
 def _tests_section(tests: list[tuple[str, str]]) -> list[str]:
     out = ["", FAILING_TESTS, ""]
-    out += [f"- `{name}`: {detail.strip().splitlines()[0] if detail.strip() else 'failed'}"
+    out += [one_line(f"- `{name}`: {detail.strip().splitlines()[0] if detail.strip() else 'failed'}")
             for name, detail in tests[:QUALITY_ISSUE_LIMIT]] or ["None."]
     if len(tests) > QUALITY_ISSUE_LIMIT:
         out.append(f"- and {len(tests) - QUALITY_ISSUE_LIMIT} more.")
@@ -3123,11 +3225,12 @@ def _config_section(edited, rules_from: str | None, mutmut_state) -> list[str]:
     if "uv.lock" in edited:
         out.append("- The change edits `uv.lock`, which pins the versions of the linters the gate ran.")
     if mutmut_state:
-        out.append(f"- The change adds or edits {_series([f'`{f}`' for f in mutmut_state], limit=5)} under "
+        named = _series([f"`{one_line(f)}`" for f in mutmut_state], limit=5)
+        out.append(f"- The change adds or edits {named} under "
                    f"`{_MUTMUT_STATE}/`, where mutmut keeps its state. The gate's checks leave them out: none selects "
                    f"a test or a function in them or counts them as a change to the code, and the surviving-mutants "
                    f"check runs mutmut without them. The linters read them as they read any tracked file.")
-    return out
+    return [one_line(line) for line in out]
 
 
 def edited_config(diff: str, changed: dict[str, set[int]]) -> list[str]:
@@ -3347,7 +3450,7 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
     covered, coverage_sentence = None, None
     if coverage:
         covered = new_coverage(os.path.abspath(coverage), root, changed)
-        coverage_sentence = _coverage_sentence(covered)
+        coverage_sentence = _coverage_sentence(covered, _unmeasured_files(changed))
         if covered.lines >= GATE_MIN_NEW_LINES and covered.percent() < GATE_MIN_COVERAGE:
             conditions.append(f"Coverage of new code is {_floor_tenth(covered.percent())}%; the gate wants at "
                               f"least {GATE_MIN_COVERAGE:g}% once a change has {GATE_MIN_NEW_LINES} or more new "
@@ -3494,12 +3597,34 @@ def new_coverage(report: str, root: str, changed: dict[str, set[int]]) -> NewCov
     return NewCoverage(lines, covered_lines, conditions, covered_conditions)
 
 
-def _coverage_sentence(c: NewCoverage) -> str:
+def _coverage_sentence(c: NewCoverage, unmeasured: list[str]) -> str:
+    """The quality file's coverage section for c: how much of the new code is covered, then, by name, the changed
+    files in unmeasured, whose names coverage.py cannot record, so that c leaves their lines out of both counts."""
     if not c.lines:
-        return "No new lines to cover."
-    branches = f", counting their {c.conditions} branch outcomes" if c.conditions else ""
-    return (f"{_floor_tenth(c.percent())}% of {c.lines} new lines to cover{branches}; "
-            f"{c.lines - c.covered_lines} lines are not covered.")
+        sentence = "No new lines to cover."
+    else:
+        branches = f", counting their {c.conditions} branch outcomes" if c.conditions else ""
+        sentence = (f"{_floor_tenth(c.percent())}% of {c.lines} new lines to cover{branches}; "
+                    f"{c.lines - c.covered_lines} lines are not covered.")
+    if unmeasured:
+        named = _series([f"`{one_line(path)}`" for path in unmeasured], limit=5)
+        sentence += f"\n\nNot measured: {named}; coverage.py records no data for a file whose name is not UTF-8."
+    return sentence
+
+
+def _unmeasured_files(changed: dict[str, set[int]]) -> list[str]:
+    """The Python files changed, by changed_lines, adds lines to whose names are not UTF-8 (they hold lone
+    surrogates, as git's verbatim output decodes them), in order: coverage.py 7.14 collects no data for such a file."""
+    return sorted(path for path, added in changed.items() if added and path.endswith(".py") and not _is_utf8(path))
+
+
+def _is_utf8(name: str) -> bool:
+    """Whether name, decoded with os.fsdecode, came from UTF-8 bytes: it holds no lone surrogate."""
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _floor_tenth(percent: float) -> str:
@@ -3622,6 +3747,27 @@ def _finding(path: str | None, line: int | None, rule: str, message: str, severi
     """A finding as GateCheck.find returns it, its severity as the check grades it; GateCheck.judged sets the one the
     gate lists."""
     return {"path": path, "line": line, "severity": severity, "rule": rule, "message": message}
+
+
+def _in_scratch_directory(rule: str, purpose: str, run: Callable[[str], list[dict]]) -> list[dict]:
+    """The findings of run(tmp), tmp a new empty directory only the gate's account can enter, which is removed
+    afterwards whatever run does; purpose says what it is for, as a clause such as "to rerun the changed tests in".
+    When the directory cannot be made, run is not called, and the one finding is of rule, saying so; when it cannot
+    be removed, a not-removed finding naming it follows run's."""
+    try:
+        tmp = tempfile.mkdtemp(prefix="gate-")
+    except OSError as e:
+        return [_finding(None, None, rule,
+                         f"could not make a directory {purpose}: {e}; nothing ran, so the check judged nothing.")]
+    out: list[dict] = []
+    try:
+        out = run(tmp)
+    finally:
+        try:
+            shutil.rmtree(tmp)
+        except OSError as e:
+            out.append(_finding(None, None, "not-removed", f"could not remove the directory {purpose}, `{tmp}`: {e}"))
+    return out
 
 
 def _python_test_file(path: str) -> bool:
@@ -3750,7 +3896,9 @@ class _ChangedFunction:
     line: int  # the line of its def
     first: int  # the line it starts on, its decorators included
     source: tuple[str, ...]  # its lines, from first on, as the working tree has them
-    decorators: tuple[str, ...] = ()  # each as written, without its @
+    # Each of its decorators as ast.unparse writes it, without its @; None for one too deep or too long for it to write,
+    # as _unparsed says.
+    decorators: tuple[str | None, ...] = ()
     # The last line of the statement before it in its module or class, else its class's first line, else 0.
     floor: int = 0
 
@@ -3769,28 +3917,17 @@ def _adds_to(f: _ChangedFunction, added: set[int], removed: set[int]) -> bool:
 def _changed_python_units(change: GateChange, in_scope: Callable[[str], bool],
                           touched: Callable[[_ChangedFunction, set[int], set[int]], bool] = _adds_to,
                           ) -> tuple[list[_ChangedFunction], list[tuple[str, str]]]:
-    """The top-level functions and methods of top-level classes, in the Python files of the working tree whose paths
-    in_scope accepts, that the change touched: touched(unit, added, removed) says so, added being the lines the change
-    added to its file and removed the lines after which a hunk that only removes lines removed them, 0 for the top, as
-    _removal_points gives them. And (path, why) for each such file that could not be read or parsed, why a clause such
-    as "does not parse as Python"."""
+    """The top-level functions and methods of top-level classes that the change touched, in the Python files it adds
+    lines to or removes lines from whose paths in_scope accepts, as _parsed_changed_files gives those files:
+    touched(unit, added, removed) says so, with the file's _ChangedPythonFile.added and .removed. And (path, why) for
+    each such file that could not be read or parsed, with _ChangedPythonFile.why."""
     functions, unreadable = [], []
-    removed = _removal_points(change.diff)
-    for path, added in change.changed.items():
-        points = removed.get(path, set())
-        if not (added or points) or not path.endswith(".py") or not in_scope(path):
-            continue
-        try:
-            with open(os.path.join(change.root, path), "rb") as f:
-                text, _ = _decode_python(f.read())
-        except (OSError, SyntaxError) as e:
-            unreadable.append((path, f"could not be read ({e})"))
-            continue
-        tree = _parse_python(text)
-        if tree is None:
-            unreadable.append((path, "does not parse as Python"))
-            continue
-        functions += [unit for unit in _python_units(path, text, tree) if touched(unit, added, points)]
+    for changed in _parsed_changed_files(change, lambda path, added, removed: bool(added or removed) and in_scope(path)):
+        if changed.tree is None:
+            unreadable.append((changed.path, changed.why))
+        else:
+            functions += [unit for unit in _python_units(changed.path, changed.text, changed.tree)
+                          if touched(unit, changed.added, changed.removed)]
     return functions, unreadable
 
 
@@ -3811,7 +3948,7 @@ def _python_units(path: str, text: str, tree: ast.Module) -> list[_ChangedFuncti
                 first = min([unit.lineno, *(d.lineno for d in unit.decorator_list)])
                 out.append(_ChangedFunction(path, prefix + unit.name, unit.lineno, first,
                                             tuple(lines[first - 1:unit.end_lineno or unit.lineno]),
-                                            tuple(ast.unparse(d) for d in unit.decorator_list), floor))
+                                            tuple(_unparsed(d)[0] or None for d in unit.decorator_list), floor))
     return out
 
 
@@ -3938,17 +4075,24 @@ def _literals(node: ast.AST) -> list:
 
 def _code(node: ast.AST) -> str:
     """node as Python source, for a finding's message: its first line, clipped; or a note that it is too deep or too
-    long to print. ast.unparse recurses as deep as the tree goes, and so overflows the stack on valid code such as a
-    sum of a few thousand terms; and it writes an int with repr, which refuses one of more than
-    sys.get_int_max_str_digits() decimal digits."""
-    where = f"code at line {getattr(node, 'lineno', '?')}"
-    try:
-        text = ast.unparse(node)
-    except RecursionError:
-        return f"({where}, too deep to print)"
-    except ValueError:
-        return f"({where}, too long to print)"
+    long to print, as _unparsed says."""
+    text, why = _unparsed(node)
+    if why:
+        return f"(code at line {getattr(node, 'lineno', '?')}, {why} to print)"
     return _clip(text.splitlines()[0] if text else text)
+
+
+def _unparsed(node: ast.AST) -> tuple[str, str]:
+    """node as Python source, as ast.unparse writes it, and ""; or "" and why it cannot be written, "too deep" or "too
+    long". ast.unparse recurses as deep as the tree goes, and so overflows the stack on valid code such as a sum of a
+    few thousand terms; and it writes an int with repr, which refuses one of more than sys.get_int_max_str_digits()
+    decimal digits."""
+    try:
+        return ast.unparse(node), ""
+    except RecursionError:
+        return "", "too deep"
+    except ValueError:
+        return "", "too long"
 
 
 def _clip(text: str, n: int = 160) -> str:
@@ -3981,33 +4125,28 @@ def flaky_tests(change: GateChange) -> list[dict]:
     no run told anything, the finding about the run that went wrong stands for them all.
 
     pytest decides which of those defs are tests, so a helper named test_* that it does not collect is not rerun.
+    A changed path that is a symlink, a submodule or a special file holds no test the change edits, and is not read
+    (_is_link_or_special): no test is rerun through a symlink, whose target is rerun only as a file the change edits.
     pytest and pytest-randomly must be importable by the gate's own interpreter, as a `uv run` of the project makes
     them. A pytest run that cannot start, takes longer than FLAKY_RUN_TIMEOUT, ends in a usage or collection error
-    or writes no readable report ends the reruns with a finding saying so, after what the runs before it showed; so
-    does a changed test file that cannot be read or parsed, and a copy that cannot be made. One that cannot be
-    removed afterwards is a finding of its own, beside the results.
+    or writes no readable report ends the reruns of the tests under its configuration with a finding saying so, after
+    what the runs before it showed, and the tests under other configurations are rerun still; a changed test file
+    that cannot be read or parsed, and a copy that cannot be made, are findings too; a copy that cannot be removed
+    afterwards is a finding of its own, beside the results. Each run has FLAKY_RUN_TIMEOUT of its own, so each
+    configuration the changed tests fall under adds its runs to the check's time.
     """
     tests, unreadable = _changed_python_tests(change)
     out = [_finding(path, None, "not-rerun", f"{why}, so its tests were not rerun.") for path, why in unreadable]
     if tests:
-        try:
-            tmp = tempfile.mkdtemp(prefix="flaky-tests-")
-        except OSError as e:
-            out.append(_finding(None, None, "not-rerun", f"could not make a directory to rerun the changed "
-                                                         f"tests in: {e}; the changed tests were not rerun."))
-        else:
-            out += _rerun_findings(change.root, tmp, tests)
-            try:
-                shutil.rmtree(tmp)
-            except OSError as e:
-                out.append(_finding(None, None, "not-removed", f"could not remove the directory the changed "
-                                                               f"tests were rerun in, {tmp}: {e}"))
+        out += _in_scratch_directory("not-rerun", "to rerun the changed tests in",
+                                     lambda tmp: _rerun_findings(change.root, tmp, tests))
     return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
 
 
 def _rerun_findings(root: str, tmp: str, tests: dict[tuple[str, str], int]) -> list[dict]:
     """flaky_tests' findings on tests, as _changed_python_tests gives them, rerun in a copy of root's tracked files
-    that it makes in tmp, an empty directory, beside the runs' reports."""
+    that it makes in tmp, an empty directory, beside the runs' reports: once for each pytest configuration the
+    changed test files take (_pytest_groups), so that a group that cannot run leaves the others' findings."""
     tree = os.path.join(tmp, "tree")
     try:
         _copy_tracked(root, tree)
@@ -4015,12 +4154,31 @@ def _rerun_findings(root: str, tmp: str, tests: dict[tuple[str, str], int]) -> l
         return [_finding(None, None, "not-rerun", f"could not copy the tracked files to rerun the changed "
                                                   f"tests in: {e}; the changed tests were not rerun.")]
     try:
-        inifile = _pytest_config(tree, tmp)
+        groups = _pytest_groups(tree, tmp, {path for path, _ in tests})
     except OSError as e:
         return [_finding(None, None, "not-rerun", f"could not write an empty pytest configuration for the "
                                                   f"reruns: {e}; the changed tests were not rerun.")]
-    ids, problem = _collect_python_tests(tree, inifile, tests)
-    reruns = _Reruns.run(tree, inifile, ids, tmp)
+    out = []
+    for n, (group, label) in enumerate(zip(groups, _labels(groups), strict=True)):
+        reports = os.path.join(tmp, f"reports-{n}")
+        try:
+            os.mkdir(reports)
+        except OSError as e:
+            out.append(_finding(None, None, "not-rerun", f"could not make a directory for the reruns' reports: {e}; "
+                                                         f"{label or 'the changed tests'} were not rerun."))
+            continue
+        out += [group.in_tree(f) for f in _group_rerun_findings(group, group.own(tests), reports, label)]
+    return out
+
+
+def _group_rerun_findings(group: "_PytestGroup", tests: dict[tuple[str, str], int], reports: str,
+                          label: str | None) -> list[dict]:
+    """_rerun_findings' findings on tests, keyed by their paths from group's directory, as pytest names them there,
+    rerun by group's configuration, with the runs' reports in reports, an empty directory; their paths are from
+    group's directory too. label names the group's tests in a finding about all of them, as _PytestGroup.label
+    does; None when they are all the change's tests."""
+    ids, problem = _collect_python_tests(group.setup, tests)
+    reruns = _Reruns.run(group.setup, ids, reports)
     problem = problem or reruns.problem
     out = []
     for i in reruns.outcomes:
@@ -4029,8 +4187,8 @@ def _rerun_findings(root: str, tmp: str, tests: dict[tuple[str, str], int]) -> l
             out.append(_finding(path, tests[(path, ".".join(names))], *judged))
     if problem:
         out.append(_finding(None, None, "not-rerun", f"{problem}; " + (
-            f"only the reruns under {_seeds(reruns.seeds)} were judged." if reruns.seeds
-            else "the changed tests were not rerun.")))
+            f"only the reruns{f' of {label}' if label else ''} under {_seeds(reruns.seeds)} were judged."
+            if reruns.seeds else f"{label or 'the changed tests'} were not rerun.")))
     return out
 
 
@@ -4043,13 +4201,13 @@ class _Reruns:
     problem: str | None  # what went wrong with the run under stopped, a clause; None with it
 
     @classmethod
-    def run(cls, tree: str, inifile: str, ids: list[str], tmp: str) -> "_Reruns":
-        """Rerun the tests of node ids ids at tree, with the configuration in inifile, once under each of FLAKY_SEEDS,
-        until a run goes wrong, writing the runs' reports in tmp. For no ids, no run."""
+    def run(cls, setup: "_PytestSetup", ids: list[str], reports: str) -> "_Reruns":
+        """Rerun the tests of node ids ids by setup, once under each of FLAKY_SEEDS, until a run goes wrong, writing
+        the runs' reports in reports. For no ids, no run."""
         outcomes: dict[str, dict[int, str]] = {i: {} for i in ids}
         seeds: list[int] = []
         for seed in FLAKY_SEEDS if ids else ():
-            reported, problem = _rerun_python_tests(tree, inifile, ids, seed, os.path.join(tmp, f"seed-{seed}.xml"))
+            reported, problem = _rerun_python_tests(setup, ids, seed, os.path.join(reports, f"seed-{seed}.xml"))
             if problem:
                 return cls(outcomes, seeds, seed, problem)
             seeds.append(seed)
@@ -4116,16 +4274,97 @@ def _pytest_inifile(tree: str) -> str | None:
     return None
 
 
+@dataclass(frozen=True)
+class _PytestSetup:
+    """Where, and by what configuration, the gate runs pytest in a copy of a tree: for _pytest."""
+    root: str  # pytest's rootdir, the configuration's directory, from which its node ids and reports name paths
+    inifile: str  # the configuration file, given with -c, so that pytest looks for none above the copy
+    # The copy's top directory: where pytest runs, as the gate always ran it, so that `python -m` puts it on the
+    # path; and above which no conftest.py is imported (--confcutdir).
+    top: str
+
+    @property
+    def where(self) -> str:
+        """root, by its path in the copy: "" for the top."""
+        where = os.path.relpath(self.root, self.top)
+        return "" if where == "." else where
+
+    def argument(self, name: str) -> str:
+        """name, a test file's path or a node id from root, as pytest is to be given it, run from top."""
+        return os.path.join(self.where, name) if self.where else name
+
+
+@dataclass(frozen=True)
+class _PytestGroup:
+    """Changed test files that take one pytest configuration, as _pytest_groups finds them."""
+    setup: _PytestSetup  # how to run them, rooted at the configuration's directory
+    paths: frozenset[str]  # the files, by their paths in the copy
+
+    def own(self, tests: dict[tuple[str, str], int]) -> dict[tuple[str, str], int]:
+        """Those of tests, keyed by (path in the copy, qualified name), whose files are the group's, keyed by their
+        paths from the group's directory, as pytest names them run there."""
+        where = self.setup.where
+        return {(os.path.relpath(path, where) if where else path, name): line
+                for (path, name), line in tests.items() if path in self.paths}
+
+    def in_tree(self, finding: dict) -> dict:
+        """finding, its path one from the group's directory or None, with its path in the copy instead."""
+        path, where = finding["path"], self.setup.where
+        return {**finding, "path": os.path.join(where, path) if path and where else path}
+
+    def label(self) -> str:
+        """The group's tests, as a finding about all of them names them when the change's tests fall in more than
+        one group: by their configuration file's path in the copy."""
+        # The empty configuration is the one file given with -c that lies outside the copy (_empty_pytest_ini).
+        if os.path.commonpath([self.setup.inifile, self.setup.top]) != self.setup.top:
+            return "the changed tests with no pytest configuration"
+        return f"the changed tests configured by {os.path.relpath(self.setup.inifile, self.setup.top)}"
+
+
+def _labels(groups: list[_PytestGroup]) -> list[str | None]:
+    """How a finding about all of each of groups' tests names them, as _PytestGroup.label does when there is more
+    than one group; None for each when there is one, whose tests are all the changed tests."""
+    return [group.label() if len(groups) > 1 else None for group in groups]
+
+
+def _pytest_groups(tree: str, tmp: str, paths: set[str]) -> list[_PytestGroup]:
+    """paths, test files by their paths in tree, a copy of a tree, grouped by the pytest configuration pytest takes
+    for each: the one _pytest_inifile finds in the file's directory, else in the nearest directory above it that has
+    one, up to tree's top and never above it, as pytest 9's locate_config walks up from the files it is given (its
+    _pytest/config/findpaths.py). In the order of their directories. Files with none share the empty configuration
+    _empty_pytest_ini writes in tmp. Raises OSError as that does."""
+    seen: dict[str, str | None] = {}  # each directory read, by its path in tree, and the configuration it holds
+
+    def inifile_in(where: str) -> str | None:
+        if where not in seen:
+            seen[where] = _pytest_inifile(os.path.join(tree, where))
+        return seen[where]
+
+    found: dict[str, tuple[str | None, set[str]]] = {}
+    for path in sorted(paths):
+        where = os.path.dirname(path)
+        while (project_ini := inifile_in(where)) is None and where:
+            where = os.path.dirname(where)
+        found.setdefault(where if project_ini else "", (project_ini, set()))[1].add(path)
+    return [_PytestGroup(_PytestSetup(os.path.join(tree, where) if where else tree,
+                                      project_ini or _empty_pytest_ini(tmp), tree), frozenset(members))
+            for where, (project_ini, members) in sorted(found.items())]
+
+
 def _pytest_config(tree: str, tmp: str) -> str:
-    """The pytest configuration to run the tests of tree, a copy of a tree, by: its own, as _pytest_inifile finds
-    it, else an empty pytest.ini that this writes in tmp, the private directory beside tree, so that pytest, given it
-    with -c, does not look for one above the copy, where another account may write. Raises OSError when that file
-    cannot be written."""
-    inifile = _pytest_inifile(tree)
-    if inifile is None:
-        inifile = os.path.join(tmp, "pytest.ini")
-        with open(inifile, "x", encoding="utf-8"):
-            pass
+    """The pytest configuration to run all the tests of tree, a copy of a tree, by from its top, as surviving-mutants
+    does: its own, as _pytest_inifile finds it, else the empty configuration _empty_pytest_ini writes in tmp. Raises
+    OSError as that does."""
+    return _pytest_inifile(tree) or _empty_pytest_ini(tmp)
+
+
+def _empty_pytest_ini(tmp: str) -> str:
+    """The path of an empty pytest.ini that this writes in tmp, the private directory beside a copy, where none is
+    yet, so that pytest, given it with -c, does not look for a configuration above the copy, where another account
+    may write. Raises OSError when it cannot be written, or tmp has one already."""
+    inifile = os.path.join(tmp, "pytest.ini")
+    with open(inifile, "x", encoding="utf-8"):
+        pass
     return inifile
 
 
@@ -4180,14 +4419,15 @@ def _node_parts(node_id: str) -> tuple[str, list[str], str]:
     return path, names, bracket + params
 
 
-def _collect_python_tests(root: str, inifile: str, tests: dict[tuple[str, str], int]) -> tuple[list[str], str | None]:
-    """The pytest node ids of tests, one per parameter set, collected at root with the configuration in inifile,
-    and the problem, a clause, when pytest could not collect them; then the ids are []."""
+def _collect_python_tests(setup: _PytestSetup, tests: dict[tuple[str, str], int]) -> tuple[list[str], str | None]:
+    """The pytest node ids of tests, keyed by their paths from setup's root, one per parameter set, collected by
+    setup, and the problem, a clause, when pytest could not collect them; then the ids are []."""
     files = sorted({path for path, _ in tests})
     # Exit status 5: pytest collected no test from the files, as for a file of helpers named test_*.
     # Without pytest-randomly, which only shuffles the list, and cannot hash a node id that is not UTF-8.
-    proc, problem = _pytest(root, inifile, "collecting the changed tests",
-                            ["-p", "no:randomly", "--collect-only", *files], ok=(0, 5), timeout=FLAKY_RUN_TIMEOUT)
+    proc, problem = _pytest(setup, "collecting the changed tests",
+                            ["-p", "no:randomly", "--collect-only", *map(setup.argument, files)], ok=(0, 5),
+                            timeout=FLAKY_RUN_TIMEOUT)
     if problem or proc is None:
         return [], problem
     return _listed_tests(proc, "collecting the changed tests", tests)
@@ -4212,15 +4452,16 @@ def _listed_tests(proc: subprocess.CompletedProcess, doing: str,
     return wanted, None
 
 
-def _rerun_python_tests(root: str, inifile: str, ids: list[str], seed: int,
+def _rerun_python_tests(setup: _PytestSetup, ids: list[str], seed: int,
                         report: str) -> tuple[dict[str, str], str | None]:
-    """The outcome, as junit_outcomes gives it, of each of ids that pytest reported when it ran them at root, with
-    the configuration in inifile, in the order pytest-randomly's seed gives, writing its JUnit report to report; a
+    """The outcome, as junit_outcomes gives it, of each of ids that pytest reported when it ran them by setup, in the
+    order pytest-randomly's seed gives, writing its JUnit report to report; a
     test reported more than once takes the first of failed, xfailed and passed that any of its cases has, else
     skipped. And the problem, a clause, when that run told nothing, then with {}."""
     doing = f"rerunning them under seed {seed}"
-    proc, problem = _pytest(root, inifile, doing,
-                            ["-p", "randomly", f"--randomly-seed={seed}", f"--junitxml={report}", *ids],
+    proc, problem = _pytest(setup, doing,
+                            ["-p", "randomly", f"--randomly-seed={seed}", f"--junitxml={report}",
+                             *map(setup.argument, ids)],
                             timeout=FLAKY_RUN_TIMEOUT)
     if problem or proc is None:
         return {}, problem
@@ -4247,22 +4488,124 @@ def _junit_case(node_id: str) -> str:
     return ".".join([re.sub(r"\.py$", "", path).replace("/", "."), *names]) + params
 
 
+def _run_in_session(argv: list[str], cwd: str, env: dict[str, str], *, timeout: float,
+                    soft_stop: tuple[signal.Signals, float] | None = None) -> tuple[subprocess.CompletedProcess, bool]:
+    """argv run at cwd with env as its whole environment and no input, in a session of its own, and whether it was
+    stopped for running longer than timeout seconds.
+
+    Stopped, it is killed, or with soft_stop, a (signal, grace) pair, first sent that signal and given grace seconds
+    to exit; called on the main thread, it starts with that signal's default disposition even where this process
+    ignores it (_not_ignored_in_children). Once it has exited, every process left in its process group, such as a
+    server it started, is killed too, and what was printed is read until no process holds the output open, for at
+    most TOOL_KILL_WAIT seconds more: only one outside the group, in a session of its own, can still hold it, and
+    what that prints later is lost. So the call returns within timeout + grace + TOOL_KILL_WAIT seconds, the process
+    reaped unless it could not exit within them. The output is decoded as _git_run's verbatim output is, so that
+    paths in it keep their bytes; the exit status is -SIGKILL when the kill is the last thing known of it. Raises
+    OSError when argv cannot be started.
+    """
+    # The callers' fixed commands, over names their tools listed; no shell reads them.
+    with _not_ignored_in_children(soft_stop[0] if soft_stop else None):
+        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,  # noqa: S603
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    # Both, by the PIPEs above: standard output, then standard error.
+    streams = [stream for stream in (proc.stdout, proc.stderr) if stream is not None]
+    printed: dict[int, list[bytes]] = {stream.fileno(): [] for stream in streams}
+    stopped = False
+    try:
+        with selectors.DefaultSelector() as pipes:
+            for fd in printed:
+                os.set_blocking(fd, False)
+                pipes.register(fd, selectors.EVENT_READ)
+            # Until the process exits, read what it prints, so that a full pipe never blocks it, polling for its exit
+            # every _TOOL_POLL seconds; at the deadline stop it, and once a soft stop's grace has run out too, kill it.
+            deadline = time.monotonic() + timeout
+            while proc.poll() is None:
+                if time.monotonic() >= deadline:
+                    if soft_stop and not stopped:
+                        proc.send_signal(soft_stop[0])
+                        deadline = time.monotonic() + soft_stop[1]
+                        stopped = True
+                        continue
+                    stopped = True
+                    break
+                _read_ready(pipes, printed, min(_TOOL_POLL, deadline - time.monotonic()))
+            _kill_group(proc)
+            # What the group printed before the kill is in the pipes, ending once nothing holds them open.
+            end = time.monotonic() + TOOL_KILL_WAIT
+            while pipes.get_map() and (left := end - time.monotonic()) > 0:
+                _read_ready(pipes, printed, left)
+            # Killed a moment ago, the process may not have been reaped yet; what is left of the read's time is its
+            # to exit in (a wait of 0 still reaps one that has), and one still there after it is left to a later Popen.
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=max(0.0, end - time.monotonic()))
+    finally:
+        _kill_group(proc)
+        for stream in streams:
+            stream.close()
+    returncode = proc.poll()
+    out, err = (os.fsdecode(b"".join(chunks)) for chunks in printed.values())
+    return subprocess.CompletedProcess(argv, -signal.SIGKILL if returncode is None else returncode, out, err), stopped
+
+
+# Seconds between two of _run_in_session's checks of whether its process has exited, so the most it waits on past
+# the exit before it reads the rest of the output.
+_TOOL_POLL = 0.05
+
+
+def _read_ready(pipes: selectors.BaseSelector, printed: dict[int, list[bytes]], timeout: float) -> None:
+    """Appends to printed, by file descriptor, what each of pipes, non-blocking, has to read within timeout seconds,
+    and unregisters a pipe at its end."""
+    for key, _ in pipes.select(max(0.0, timeout)):
+        try:
+            chunk = os.read(key.fd, 65536)
+        except BlockingIOError:
+            continue
+        if chunk:
+            printed[key.fd].append(chunk)
+        else:
+            pipes.unregister(key.fd)
+
+
+@contextlib.contextmanager
+def _not_ignored_in_children(sig: signal.Signals | None) -> Iterator[None]:
+    """While open, a process this one starts gets sig with its default disposition, also when this process ignores
+    it, as a command a Jenkins sh step runs ignores SIGINT; afterwards this process treats sig as it did before. An
+    ignored signal stays ignored across exec, and a Python started so never raises KeyboardInterrupt, so a soft stop
+    by it would reach a tool that ignores it. Meanwhile sig is caught and dropped here, as ignoring it would. Only the
+    main thread can set a handler, so elsewhere, and for sig None, nothing changes."""
+    if (sig is None or signal.getsignal(sig) != signal.SIG_IGN
+            or threading.current_thread() is not threading.main_thread()):
+        yield
+        return
+    # A handler is reset to the default on exec, which ignoring is not.
+    signal.signal(sig, lambda *_: None)
+    try:
+        yield
+    finally:
+        signal.signal(sig, signal.SIG_IGN)
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    """Kills every process in proc's process group, if any is left. macOS refuses with EPERM a group of zombies."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(proc.pid, signal.SIGKILL)
+
+
 class _PytestStopped(subprocess.CompletedProcess):
     """What a pytest run that _pytest stopped at its timeout printed until then; its returncode is the kill's."""
 
 
-def _pytest(root: str, inifile: str, doing: str, args: list[str], *, timeout: float, ok: tuple[int, ...] = (0, 1),
+def _pytest(setup: _PytestSetup, doing: str, args: list[str], *, timeout: float, ok: tuple[int, ...] = (0, 1),
             env: dict[str, str] | None = None) -> tuple[subprocess.CompletedProcess | None, str | None]:
-    """pytest run at verbosity -1, for test cases too, in the gate's own interpreter at root, without its cache, with
-    the configuration in inifile and args, taking no configuration or conftest.py from above root, and env's
+    """pytest run at verbosity -1, for test cases too, in the gate's own interpreter at setup's root, without its
+    cache, with setup's configuration and args, taking no configuration from anywhere else and no conftest.py from
+    above setup's top, and env's
     variables beside tool_env's; its output unbuffered, so that what it printed before a kill is whole. And the
     problem, a clause naming doing, when it could not start, took longer than timeout seconds or exited with a
     status outside ok (by default 0, all passed, and 1, some failed); then the run is None when pytest did not start,
-    a _PytestStopped when timeout stopped it, and else the run that exited so. pytest runs in a session of its own,
-    and when it returns every process in that session, such as a server a test started, is gone; one stopped at
-    timeout is killed with them, and what it printed is read for at most MUTMUT_KILL_WAIT seconds more. pytest
-    writes a name that is not UTF-8 as its bytes, and its output is decoded as _git_run's verbatim output is, so the
-    node ids in it hold paths as git's do, and only "\n" ends a line. pytest-randomly 5.0.0 cannot shuffle such a
+    a _PytestStopped when timeout stopped it, and else the run that exited so. pytest runs, is stopped and is read
+    as _run_in_session runs a tool, killed at once. pytest writes a name that is not UTF-8 as its bytes, so the node
+    ids in its output hold paths as git's do, and only "\n" ends a line. pytest-randomly 5.0.0 cannot shuffle such a
     name: under -p randomly pytest stops with an internal error."""
     # --verbosity sets the level outright, and pytest reads the project's addopts and PYTEST_ADDOPTS before the
     # command line, so a -v or -q of theirs cannot change what the collection prints. The list of collected tests
@@ -4270,29 +4613,18 @@ def _pytest(root: str, inifile: str, doing: str, args: list[str], *, timeout: fl
     # no other option changes the list.
     # Without -c pytest looks for its configuration in every directory above the test files, and the copy is in a
     # temporary directory another account may write to, along with a conftest.py beside it: -c ends that search,
-    # and --confcutdir keeps conftest.py files above root from being imported.
-    argv = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-c", inifile, "--rootdir", root,
-            "--confcutdir", root, "--verbosity=-1", "-o", "verbosity_test_cases=-1", *args]
+    # and --confcutdir keeps conftest.py files above the copy from being imported.
+    argv = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-c", setup.inifile, "--rootdir", setup.root,
+            "--confcutdir", setup.top, "--verbosity=-1", "-o", "verbosity_test_cases=-1", *args]
     try:
-        # A fixed command over the node ids pytest itself collected; no shell reads it.
-        raw = subprocess.Popen(argv, cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,  # noqa: S603
-                               stderr=subprocess.PIPE, start_new_session=True,
-                               env={**tool_env(), **(env or {}), "PYTHONIOENCODING": "utf-8:surrogateescape",
-                                    "PYTHONUNBUFFERED": "1"})
+        proc, stopped = _run_in_session(argv, setup.top, {**tool_env(), **(env or {}), "PYTHONUNBUFFERED": "1",
+                                                          "PYTHONIOENCODING": "utf-8:surrogateescape"},
+                                        timeout=timeout)
     except OSError as e:
         return None, f"could not start pytest, {doing}: {e}"
-    try:
-        out, err = raw.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(raw.pid, signal.SIGKILL)
-        out, err = _abandon(raw)
-        return (_PytestStopped(argv, -signal.SIGKILL, os.fsdecode(out), os.fsdecode(err)),
+    if stopped:
+        return (_PytestStopped(argv, proc.returncode, proc.stdout, proc.stderr),
                 f"pytest, {doing}, did not finish within {timeout:g} seconds")
-    finally:
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(raw.pid, signal.SIGKILL)
-    proc = subprocess.CompletedProcess(argv, raw.returncode, os.fsdecode(out), os.fsdecode(err))
     if proc.returncode not in ok:
         return proc, f"pytest, {doing}, exited with status {proc.returncode}: {_said(proc)}"
     return proc, None
@@ -4349,11 +4681,13 @@ def passes_at_base(change: GateChange, *, budget: float) -> list[dict]:
     pytest's pythonpath, imports; a project installed into the gate's interpreter imports the working tree's instead,
     and every test of it then passes at the base.
 
-    The collection and the run together may take budget seconds; a stop there is a budget-reached finding saying
-    when, and how many test cases the run had run; none of their outcomes is reported. A pytest that cannot start,
-    stops before it collects, stops with a usage error other than a conftest.py's ImportError, or writes no readable
-    report, a changed test file that cannot be read or parsed, and a copy that cannot be made are not-run findings
-    saying so; a copy that cannot be removed afterwards is a finding of its own.
+    The collections and runs together, one of each for every configuration the changed tests fall under, may take
+    budget seconds; a stop there is a budget-reached finding saying when, and how many test cases the run had run,
+    and none of that configuration's outcomes is reported; the configurations after it are not run, each a not-run
+    finding saying so. A pytest that cannot start, stops before it collects, stops with a usage error other than a
+    conftest.py's ImportError, or writes no readable report, a changed test file that cannot be read or parsed, and a
+    copy that cannot be made are not-run findings saying so; a copy that cannot be removed afterwards is a finding of
+    its own.
     """
     if not _edits_python_source(change):
         return []
@@ -4361,18 +4695,8 @@ def passes_at_base(change: GateChange, *, budget: float) -> list[dict]:
     out = [_finding(path, None, "not-run", f"{why}, so its tests were not run at the base.")
            for path, why in unreadable]
     if tests:
-        try:
-            tmp = tempfile.mkdtemp(prefix="passes-at-base-")
-        except OSError as e:
-            out.append(_finding(None, None, "not-run", f"could not make a directory to run the changed tests at the "
-                                                       f"base in: {e}; the changed tests were not run there."))
-        else:
-            out += _base_run_findings(change, tmp, tests, budget)
-            try:
-                shutil.rmtree(tmp)
-            except OSError as e:
-                out.append(_finding(None, None, "not-removed", f"could not remove the directory the changed tests "
-                                                               f"were run at the base in, {tmp}: {e}"))
+        out += _in_scratch_directory("not-run", "to run the changed tests at the base in",
+                                     lambda tmp: _base_run_findings(change, tmp, tests, budget))
     return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
 
 
@@ -4394,8 +4718,9 @@ def _beside_tests(path: str) -> bool:
 
 def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str], int], budget: float) -> list[dict]:
     """passes_at_base's findings on tests, as _changed_python_tests gives them, collected and then run, within budget
-    seconds for both, in a copy of the base that it makes in tmp, an empty directory, beside the runs' reports and
-    their TMPDIR."""
+    seconds for all of it, in a copy of the base that it makes in tmp, an empty directory, beside the runs' reports
+    and their TMPDIR: once for each pytest configuration the changed test files take there (_pytest_groups), one
+    after another while the budget lasts."""
     tree, scratch = os.path.join(tmp, "tree"), os.path.join(tmp, "tmp")
     try:
         _copy_base_with_tests(change, tree, os.path.join(tmp, "base.tar"))
@@ -4404,37 +4729,60 @@ def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str]
         return [_finding(None, None, "not-run", f"could not copy the base to run the changed tests in: {e}; the "
                                                 f"changed tests were not run there.")]
     try:
-        inifile = _pytest_config(tree, tmp)
+        groups = _pytest_groups(tree, tmp, {path for path, _ in tests})
     except OSError as e:
         return [_finding(None, None, "not-run", f"could not write an empty pytest configuration for the run at the "
                                                 f"base: {e}; the changed tests were not run there.")]
     deadline = time.monotonic() + budget
     # No bytecode: a test that imports through a tracked link out of the tree would write it there.
     env = {"TMPDIR": scratch, "PYTHONDONTWRITEBYTECODE": "1"}
-    ids, stopped, problem = _collect_at_base(tree, inifile, tests, deadline, env)
+    out: list[dict] = []
+    for n, (group, label) in enumerate(zip(groups, _labels(groups), strict=True)):
+        report = os.path.join(tmp, f"base-{n}.xml")
+        found, stopped = _base_group_findings(group, group.own(tests), deadline, env, report, budget, label)
+        out += [group.in_tree(f) for f in found]
+        if stopped:
+            out += [_finding(None, None, "not-run", f"the run at the base used its {budget:g} seconds "
+                                                    f"(`--base-run-budget`) before it reached {later.label()}, so "
+                                                    f"they were not run there.") for later in groups[n + 1:]]
+            break
+    return out
+
+
+def _base_group_findings(group: _PytestGroup, tests: dict[tuple[str, str], int], deadline: float,
+                         env: dict[str, str], report: str, budget: float,
+                         label: str | None) -> tuple[list[dict], bool]:
+    """_base_run_findings' findings on tests, keyed by their paths from group's directory, as pytest names them
+    there, collected and run at the base by group's configuration with env by deadline, a time.monotonic() time,
+    writing the run's report to report; their paths are from group's directory too. And whether the deadline, of
+    the check's budget seconds, stopped it, which leaves no time for another group. label names the group's tests in
+    a finding about all of them, as _PytestGroup.label does; None when they are all the change's tests."""
+    which = label or "the changed tests"
+    ids, stopped, problem = _collect_at_base(group.setup, tests, deadline, env)
     if stopped:
-        return [_base_run_budget_reached(budget, "while it collected the changed tests")]
+        return [_base_run_budget_reached(budget, f"while it collected {which}")], True
     if problem:
-        return [_finding(None, None, "not-run", f"{problem}; the changed tests were not run there.")]
+        return [_finding(None, None, "not-run", f"{problem}; {which} were not run there.")], False
     if not ids:
-        return []
+        return [], False
     left = deadline - time.monotonic()
     if left <= 0:
-        return [_base_run_budget_reached(budget, "once it had collected the changed tests, before it ran them")]
-    report = os.path.join(tmp, "base.xml")
-    proc, problem = _pytest(tree, inifile, "running the changed tests at the base",
-                            ["-p", "no:randomly", f"--junitxml={report}", *ids], timeout=left, env=env)
+        return [_base_run_budget_reached(budget, f"once it had collected {which}, before it ran them")], True
+    proc, problem = _pytest(group.setup, "running the changed tests at the base",
+                            ["-p", "no:randomly", f"--junitxml={report}", *map(group.setup.argument, ids)],
+                            timeout=left, env=env)
     if isinstance(proc, _PytestStopped):
         ran = sum(len(m[1]) for m in re.finditer(r"^([.FEsxX]+) *(?:\[ *\d+%\])?$", proc.stdout, re.MULTILINE))
-        return [_base_run_budget_reached(budget, f"after {ran} of the {len(ids)} test cases it was given, before it "
-                                                 f"reported them")]
+        of = f" of {label}" if label else ""
+        return [_base_run_budget_reached(budget, f"after {ran} of the {len(ids)} test cases{of} it was given, before "
+                                                 f"it reported them")], True
     if problem or proc is None:
-        return [_finding(None, None, "not-run", f"{problem}; the changed tests were not judged.")]
+        return [_finding(None, None, "not-run", f"{problem}; {which} were not judged.")], False
     try:
         cases = junit_outcomes(report)
     except GateError as e:
         return [_finding(None, None, "not-run", f"pytest, running the changed tests at the base, wrote no report the "
-                                                f"gate can read ({e}): {_said(proc)}")]
+                                                f"gate can read ({e}): {_said(proc)}")], False
     # Each test's outcomes at the base, its skips left out.
     outcomes: dict[tuple[str, str], set[str]] = {}
     by_case = {_junit_case(i): i for i in ids}
@@ -4444,23 +4792,24 @@ def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str]
             outcomes.setdefault((path, ".".join(names)), set()).add(outcome)
     return [_finding(path, tests[(path, name)], "passes-at-base",
                      f"`{name}` passes without the change, so it does not test it.")
-            for (path, name), seen in sorted(outcomes.items()) if seen == {"passed"}]
+            for (path, name), seen in sorted(outcomes.items()) if seen == {"passed"}], False
 
 
-def _collect_at_base(tree: str, inifile: str, tests: dict[tuple[str, str], int], deadline: float,
+def _collect_at_base(setup: _PytestSetup, tests: dict[tuple[str, str], int], deadline: float,
                      env: dict[str, str]) -> tuple[list[str], bool, str | None]:
-    """The node ids, one per parameter set, of those of tests that pytest collects in tree, the copy of the base, by
-    the configuration in inifile and with env, by deadline, a time.monotonic() time; whether the deadline stopped it;
-    and the problem, a clause, when it went wrong otherwise. A test file that cannot be imported at the base, or a
-    conftest.py whose import raises ImportError there, gives no ids for the tests it covers and no problem: that is
-    the expected outcome for a test of what the change adds. So does a test pytest does not collect, such as a test_*
-    method of a class not named Test*. A pytest that stops before it collects, as for a plugin that cannot be
+    """The node ids, one per parameter set, of those of tests, keyed by their paths from setup's root, that pytest
+    collects by setup in the copy of the base, with env, by deadline, a time.monotonic() time; whether the deadline
+    stopped it; and the problem, a clause, when it went wrong otherwise. A test file that cannot be imported at the
+    base, or a conftest.py whose import raises ImportError there, gives no ids for the tests it covers and no problem:
+    that is the expected outcome for a test of what the change adds. So does a test pytest does not collect, such as a
+    test_* method of a class not named Test*. A pytest that stops before it collects, as for a plugin that cannot be
     imported, is a problem."""
     files = sorted({path for path, _ in tests})
     # Exit status 1: some file could not be collected, which --continue-on-collection-errors lets the others outlive;
     # 4, a usage error, which a conftest.py that cannot be imported gives; 5: no test was collected.
-    proc, problem = _pytest(tree, inifile, "collecting the changed tests at the base",
-                            ["-p", "no:randomly", "--collect-only", "--continue-on-collection-errors", *files],
+    proc, problem = _pytest(setup, "collecting the changed tests at the base",
+                            ["-p", "no:randomly", "--collect-only", "--continue-on-collection-errors",
+                             *map(setup.argument, files)],
                             timeout=deadline - time.monotonic(), ok=(0, 1, 4, 5), env=env)
     if isinstance(proc, _PytestStopped):
         return [], True, None
@@ -4481,7 +4830,7 @@ def _collect_at_base(tree: str, inifile: str, tests: dict[tuple[str, str], int],
     # imported stops them all: each file is collected on its own, and only those under it give nothing.
     collected: list[str] = []
     for path in files:
-        found, stopped, problem = _collect_at_base(tree, inifile, {t: n for t, n in tests.items() if t[0] == path},
+        found, stopped, problem = _collect_at_base(setup, {t: n for t, n in tests.items() if t[0] == path},
                                                    deadline, env)
         if stopped or problem:
             return [], stopped, problem
@@ -4584,7 +4933,11 @@ def surviving_mutants(change: GateChange, *, budget: float) -> list[dict]:
     a line to in a Python file outside the tests. Reports at its def each such function that has mutants the tests did
     not notice, with how many of its mutants they were and what the first _SURVIVOR_EXAMPLES change, as a line before
     and after; and each such function that no test calls. The change leaves out mutmut's state, as
-    GateChange.from_tree says, so no function there is mutated.
+    GateChange.from_tree says, so no function there is mutated. A changed path that is a symlink, a submodule or a
+    special file is not read to choose the functions (_is_link_or_special), so none of its functions is a changed
+    one; a symlink's target has its functions chosen only as a file the change edits. mutmut's own walk of the copy
+    still reads a symlink to a .py file, and makes mutants of it that no finding reports, once any changed function
+    starts it.
 
     mutmut runs in the gate's own interpreter, as flaky_tests runs pytest, on a copy of the files git tracks. The copy
     leaves out what the tree tracks under mutmut's state, so mutmut starts without a cache. mutmut runs there by the
@@ -4617,19 +4970,8 @@ def _mutation_test(change: GateChange, functions: list[_ChangedFunction], budget
             mutated.append(f)
     if not mutated:
         return out
-    try:
-        tmp = tempfile.mkdtemp(prefix="gate-mutmut-")
-    except OSError as e:
-        return [*out, _mutation_not_run(f"could not make a directory to copy the tree into: {e}")]
-    try:
-        out += _mutmut_on_copy(change.root, tmp, mutated, table, budget)
-    finally:
-        try:
-            shutil.rmtree(tmp)
-        except OSError as e:
-            out.append(_finding(None, None, "cleanup", f"the copy of the tree mutmut ran in, `{tmp}`, could not be "
-                                                       f"removed: {e}"))
-    return out
+    return out + _in_scratch_directory("not-run", "to run mutmut on a copy of the tree in",
+                                       lambda tmp: _mutmut_on_copy(change.root, tmp, mutated, table, budget))
 
 
 def _mutmut_on_copy(root: str, tmp: str, functions: list[_ChangedFunction], table: dict, budget: float) -> list[dict]:
@@ -4952,61 +5294,24 @@ def _prefix_of(mutant: str) -> str:
 def _run_mutmut(tree_copy: str, args: list[str], timeout: float) -> tuple[subprocess.CompletedProcess, bool]:
     """mutmut with args, run in the gate's own interpreter at tree_copy, and whether it was stopped at timeout seconds.
 
-    Stopped, it gets SIGINT, on which mutmut stops trying mutants and keeps the results it has, and
-    MUTMUT_STOP_GRACE seconds to exit before its process group is killed; what it printed is then read for at most
-    MUTMUT_KILL_WAIT seconds more, and lost when a process outside the group holds its output open. So it returns
-    within timeout + MUTMUT_STOP_GRACE + MUTMUT_KILL_WAIT seconds, every process in its group gone. Its temporary
-    files, and those of the tests it runs, go into tree_copy's .tmp, so that what a test it killed left goes with
-    it. Its output is decoded as _git_run's verbatim output is, since its mutant names and diffs hold paths and
-    source lines: only "\n" ends a line. Raises OSError when it cannot be started.
+    It runs as _run_in_session runs a tool, stopped softly with SIGINT and MUTMUT_STOP_GRACE: on SIGINT mutmut stops
+    trying mutants and keeps the results it has. So it returns within timeout + MUTMUT_STOP_GRACE + TOOL_KILL_WAIT
+    seconds. Its temporary files, and those of the tests it runs, go into tree_copy's .tmp, so that what a test it
+    killed left goes with it. Its mutant names and diffs hold paths and source lines, in which only "\n" ends a
+    line. Raises OSError when it cannot be started.
     """
     # `mutmut`, its console script, runs this line. `python -m mutmut` would import its __main__ a second time in each
     # forked worker, which mutmut warns against.
     argv = [sys.executable, "-c", "from mutmut.__main__ import cli; cli()", *args]
     tmp = os.path.join(tree_copy, ".tmp")
     os.makedirs(tmp, exist_ok=True)
-    # A fixed command over mutant names mutmut itself listed; no shell reads it. Its own session puts its workers in
-    # its process group, so that they can be killed with it.
-    proc = subprocess.Popen(argv, cwd=tree_copy, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,  # noqa: S603
-                            stderr=subprocess.PIPE, env={**tool_env(), "TMPDIR": tmp}, start_new_session=True)
-    stopped = False
-    try:
-        try:
-            out, err = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            stopped = True
-            proc.send_signal(signal.SIGINT)
-            try:
-                out, err = proc.communicate(timeout=MUTMUT_STOP_GRACE)
-            except subprocess.TimeoutExpired:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(proc.pid, signal.SIGKILL)
-                out, err = _abandon(proc)
-    finally:
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(proc.pid, signal.SIGKILL)
-    # A process still unreaped was killed with its group a moment ago.
-    returncode = proc.poll()
-    return subprocess.CompletedProcess(argv, -signal.SIGKILL if returncode is None else returncode, os.fsdecode(out),
-                                       os.fsdecode(err)), stopped
-
-
-def _abandon(proc: subprocess.Popen) -> tuple[bytes, bytes]:
-    """What proc, just killed, printed, read for at most MUTMUT_KILL_WAIT seconds; b"" for both when something else,
-    such as a test's helper in a session of its own, still holds its output open, whose pipes are then closed."""
-    try:
-        return proc.communicate(timeout=MUTMUT_KILL_WAIT)
-    except subprocess.TimeoutExpired:
-        for pipe in (proc.stdout, proc.stderr):
-            if pipe is not None:
-                with contextlib.suppress(OSError):
-                    pipe.close()
-        return b"", b""
+    return _run_in_session(argv, tree_copy, {**tool_env(), "TMPDIR": tmp}, timeout=timeout,
+                           soft_stop=(signal.SIGINT, MUTMUT_STOP_GRACE))
 
 
 def _time_left(deadline: float) -> float:
     """The seconds a mutmut run may be given that must end by deadline, a time.monotonic() time, stop included."""
-    return deadline - time.monotonic() - MUTMUT_STOP_GRACE - MUTMUT_KILL_WAIT
+    return deadline - time.monotonic() - MUTMUT_STOP_GRACE - TOOL_KILL_WAIT
 
 
 def _mutant_statuses(tree_copy: str, deadline: float) -> tuple[dict[str, str], str | None]:
@@ -5132,9 +5437,11 @@ def _mutation_not_run(problem: str) -> dict:
 #   is itself an `and` or `or` continues its parent's sequence. The syntax tree keeps no parentheses, so
 #   `a and (b and c)` is one sequence, one point, where Sonar's analyzer, which sees them, gives two. `not` starts a
 #   sequence of its own.
-# - Recursion is one point for each function, the judged one or one nested in it, that calls itself, however often:
-#   by its name, or a method `m` of a class `C` as `self.m`, `cls.m` or `C.m`. A cycle through other functions, which
-#   the paper also counts, is not found. Sonar's analyzer counts no recursion.
+# - Recursion is one point for each function that recurses, however often: the judged one when it calls itself or
+#   lies on a cycle of calls through other judged functions of its module, as the paper counts each function in a
+#   recursion cycle (_recursive_functions); and one nested in it that calls itself. Calls resolve by name, as Python's
+#   scopes do, as _callees says. A call through an alias or into another module is not followed, nor a cycle through
+#   a function nested in another. Sonar's analyzer counts no recursion.
 
 # The cognitive-complexity check's limit: a function the change edits fails the gate above it, as with SonarQube's
 # default for S3776.
@@ -5153,31 +5460,97 @@ class _ScoredFunction:
     first: int  # the line it starts on, its decorators included
     last: int  # the line it ends on
     line: int  # the line of its def
-    score: int  # its cognitive_complexity
+    score: int  # its cognitive_complexity, recursive as _recursive_functions tells it
     body: str  # what its body does, as _body_fingerprint gives it: equal for a function moved or renamed unchanged
 
 
 def _scored_functions(tree: ast.Module) -> list[_ScoredFunction]:
     """Each function of tree that the cognitive-complexity check judges as one, scored, in the order they are
     written."""
-    found: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef, str | None]] = []
-    # The nodes whose statements are still to be read, each with the qualified-name prefix there and the class a
-    # function there is a method of. A stack rather than recursion, as cognitive_complexity has.
-    todo: list[tuple[ast.AST, str, str | None]] = [(tree, "", None)]
+    found: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef, str | None, frozenset[str]]] = []
+    # The nodes whose statements are still to be read, each with the qualified-name prefix there, the qualified name
+    # of the class a function there is a method of, and the type parameters of the classes around it. A stack rather
+    # than recursion, as cognitive_complexity has.
+    todo: list[tuple[ast.AST, str, str | None, frozenset[str]]] = [(tree, "", None, frozenset())]
     while todo:
-        node, prefix, cls = todo.pop()
+        node, prefix, cls, typed = todo.pop()
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
-                found.append((prefix + child.name, child, cls))
+                found.append((prefix + child.name, child, cls, typed))
             elif isinstance(child, ast.ClassDef):
-                todo.append((child, f"{prefix}{child.name}.", child.name))
+                todo.append((child, f"{prefix}{child.name}.", prefix + child.name, typed | _type_parameters(child)))
             elif isinstance(child, ast.stmt | ast.excepthandler | ast.match_case):
-                todo.append((child, prefix, cls))
+                todo.append((child, prefix, cls, typed))
+    found.sort(key=lambda x: x[1].lineno)
+    recursive = _recursive_functions([(node, cls, typed) for _, node, cls, typed in found])
     out = []
-    for name, node, cls in sorted(found, key=lambda x: x[1].lineno):
+    for i, (name, node, _, _) in enumerate(found):
         first = min([node.lineno, *(d.lineno for d in node.decorator_list)])
         out.append(_ScoredFunction(name, first, node.end_lineno or node.lineno, node.lineno,
-                                   cognitive_complexity(node, cls), _body_fingerprint(node)))
+                                   cognitive_complexity(node, recursive=i in recursive), _body_fingerprint(node)))
+    return out
+
+
+def _recursive_functions(
+        functions: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, str | None, frozenset[str]]]) -> set[int]:
+    """The indexes of those of functions that recurse: that call themselves, or lie on a cycle of calls through
+    others of them, a strongly connected component of more than one in the graph of their calls to each other.
+    functions are one module's, as _scored_functions finds them, each with the qualified name of the class it is a
+    method of, or None, and the type parameters of the classes around it; calls resolve as _callees resolves them,
+    and a call to anything else, a function nested in one of them included, is not followed."""
+    by_key: dict[tuple[str | None, str], list[int]] = collections.defaultdict(list)
+    for i, (node, cls, _) in enumerate(functions):
+        by_key[(cls, node.name)].append(i)
+    edges = [[j for key in _callees(node, cls, typed) for j in by_key.get(key, [])] for node, cls, typed in functions]
+    return {i for component in _strong_components(edges) for i in component if len(component) > 1 or i in edges[i]}
+
+
+def _strong_components(edges: list[list[int]]) -> list[list[int]]:
+    """The strongly connected components of the graph whose vertices are edges' indexes, with an edge from v to each
+    of edges[v]: each vertex in exactly one component, by Kosaraju's algorithm. Iterative, as cognitive_complexity's
+    walk is, so that no graph is too deep for it."""
+    reverse: list[list[int]] = [[] for _ in edges]
+    for v, targets in enumerate(edges):
+        for w in targets:
+            reverse[w].append(v)
+    seen: set[int] = set()
+    return [_reach(reverse, v, seen) for v in reversed(_finish_order(edges)) if v not in seen]
+
+
+def _finish_order(edges: list[list[int]]) -> list[int]:
+    """Each vertex of the graph edges gives, as _strong_components says, once, in the order a depth-first search from
+    each unvisited vertex in turn finishes it."""
+    order: list[int] = []
+    seen: set[int] = set()
+    for root in range(len(edges)):
+        if root in seen:
+            continue
+        seen.add(root)
+        walk = [(root, iter(edges[root]))]
+        while walk:
+            v, rest = walk[-1]
+            w = next((w for w in rest if w not in seen), None)
+            if w is None:
+                walk.pop()
+                order.append(v)
+            else:
+                seen.add(w)
+                walk.append((w, iter(edges[w])))
+    return order
+
+
+def _reach(edges: list[list[int]], v: int, seen: set[int]) -> list[int]:
+    """v, which is not in seen, and each vertex the graph edges leads to from v through vertices not in seen; each is
+    added to seen."""
+    seen.add(v)
+    out = [v]
+    todo = [v]
+    while todo:
+        for w in edges[todo.pop()]:
+            if w not in seen:
+                seen.add(w)
+                out.append(w)
+                todo.append(w)
     return out
 
 
@@ -5254,7 +5627,7 @@ def _base_scores(change: GateChange,
     old_paths = {new: old for old, new in change.files if new}
     homes = {path: old_paths.get(path, path) for path in working}
     pool = _BasePool({old: _base_functions(change, old) for old, new in change.files
-                      if old and (new in working or old.endswith(".py"))},
+                      if old and (new in working or _was_python_source(change, old))},
                      {old: working.get(new, []) if new else [] for old, new in change.files if old})
     for same_name, same_file in _BODY_STEPS:
         for path in [*unjudged, *judged]:
@@ -5329,24 +5702,39 @@ def _judged_files(change: GateChange) -> tuple[list[dict], dict[str, tuple[list[
     or parsed; and, by path, the scored functions of each of the others, with the lines the change adds to it."""
     out: list[dict] = []
     judged: dict[str, tuple[list[_ScoredFunction], set[int]]] = {}
-    for path, added, tree, why in _parsed_changed_files(change, skip=lambda path: path.startswith(_COMPLEXITY_EXEMPT)):
-        if tree is None:
-            out.append(_finding(path, None, "not-scored", f"{why}, so its functions were not scored.",
+    for changed in _parsed_changed_files(change, lambda path, added, removed: bool(added)
+                                         and not path.startswith(_COMPLEXITY_EXEMPT)):
+        if changed.tree is None:
+            out.append(_finding(changed.path, None, "not-scored", f"{changed.why}, so its functions were not scored.",
                                 severity="error"))
         else:
-            judged[path] = (_scored_functions(tree), added)
+            judged[changed.path] = (_scored_functions(changed.tree), changed.added)
     return out, judged
 
 
-def _parsed_changed_files(change: GateChange, skip: Callable[[str], bool] = lambda path: False,
-                          ) -> Iterator[tuple[str, set[int], ast.Module | None, str]]:
-    """Each .py file the change adds lines to, as a regular file of the working tree (_is_link_or_special) whose path
-    skip does not accept: its path, the lines the change adds to it, and its syntax tree and "", or None and why there
-    is none, as _parse_working_file gives them. Files under mutmut's state are not changed files, as
-    GateChange.from_tree says."""
+@dataclass(frozen=True)
+class _ChangedPythonFile:
+    """A .py file of the change, as the working tree holds it and _parse_working_file reads it."""
+    path: str
+    added: set[int]  # the lines the change adds to it, from 1
+    removed: set[int]  # the points it only removes lines at, as _removal_points gives them; empty when there are none
+    text: str  # its source, decoded as Python decodes it; "" when it could not be read
+    tree: ast.Module | None  # its syntax tree; None when it could not be read or does not parse
+    why: str  # why tree is None, a clause such as "does not parse as Python"; "" when it is not None
+
+
+def _parsed_changed_files(change: GateChange, wanted: Callable[[str, set[int], set[int]], bool]
+                          = lambda path, added, removed: bool(added)) -> Iterator[_ChangedPythonFile]:
+    """Each .py file the change touches that wanted(path, added, removed) accepts, by default each it adds lines to,
+    read and parsed; the arguments are what the _ChangedPythonFile fields of those names hold. Only a regular file of
+    the working tree is read: a symlink, a submodule, a FIFO or a device is left out whatever wanted says
+    (_is_link_or_special). A file the change deletes is not among them, as changed_lines says, nor is one under
+    mutmut's state, as GateChange.from_tree says."""
+    removals = _removal_points(change.diff)
     for path, added in change.changed.items():
-        if added and path.endswith(".py") and not skip(path) and not _is_link_or_special(change, path):
-            yield path, added, *_parse_working_file(change, path)
+        removed = removals.get(path, set())
+        if path.endswith(".py") and wanted(path, added, removed) and not _is_link_or_special(change, path):
+            yield _ChangedPythonFile(path, added, removed, *_parse_working_file(change, path))
 
 
 def _is_link_or_special(change: GateChange, path: str) -> bool:
@@ -5361,37 +5749,67 @@ def _is_link_or_special(change: GateChange, path: str) -> bool:
 
 
 def _is_python_source(change: GateChange, path: str) -> bool:
-    """Whether the working tree's path is a regular file of Python source: named *.py, or a script whose first line
-    is a #! naming python. False for anything _is_link_or_special names, and for a file that cannot be read."""
+    """Whether the working tree's path is a regular file of Python source, as _holds_python tells it. False for
+    anything _is_link_or_special names, and for a file that cannot be read unless it is named *.py."""
     if _is_link_or_special(change, path):
         return False
+
+    def first_line() -> bytes:
+        try:
+            with open(os.path.join(change.root, path), "rb") as source:
+                return source.readline(_FIRST_LINE_BYTES)
+        except OSError:
+            return b""
+
+    return _holds_python(path, first_line)
+
+
+def _was_python_source(change: GateChange, path: str) -> bool:
+    """Whether the change's base holds Python source at path, as _holds_python tells it: True for any path named
+    *.py, without asking git; for another, False when the base holds no file there or git cannot read it."""
+
+    def first_line() -> bytes:
+        try:
+            blob = _git(change.root, "cat-file", "blob", f"{change.base}:{path}", verbatim=True)
+        except GateError:
+            return b""
+        return os.fsencode(blob)[:_FIRST_LINE_BYTES].split(b"\n", 1)[0]
+
+    return _holds_python(path, first_line)
+
+
+# How much of a file's first line _holds_python reads, in bytes: enough for any #! line.
+_FIRST_LINE_BYTES = 256
+
+
+def _holds_python(path: str, first_line: Callable[[], bytes]) -> bool:
+    """Whether a file at path holds Python source: the path ends in .py, or the file's first line is a #! naming
+    python. first_line gives that line, or its first _FIRST_LINE_BYTES bytes, and b"" for a file that cannot be read;
+    it is called only when the name does not decide."""
     if path.endswith(".py"):
         return True
-    try:
-        with open(os.path.join(change.root, path), "rb") as source:
-            first = source.readline(256)
-    except OSError:
-        return False
+    first = first_line()
     return first.startswith(b"#!") and b"python" in first
 
 
 def _working_functions(change: GateChange, path: str) -> tuple[list[_ScoredFunction] | None, str]:
     """The scored functions of the working tree's file at path, and ""; or None and why there are none, as
     _parse_working_file says."""
-    tree, why = _parse_working_file(change, path)
+    _, tree, why = _parse_working_file(change, path)
     return (None, why) if tree is None else (_scored_functions(tree), "")
 
 
-def _parse_working_file(change: GateChange, path: str) -> tuple[ast.Module | None, str]:
-    """The syntax tree of the working tree's file at path, read as Python reads it, by its byte order mark or coding
-    cookie, and ""; or None and why there is none, a clause: it could not be read, or does not parse as Python."""
+def _parse_working_file(change: GateChange, path: str) -> tuple[str, ast.Module | None, str]:
+    """The source of the working tree's file at path, read as Python reads it, by its byte order mark or coding
+    cookie, its syntax tree, and ""; or why there is no tree, a clause, after "" and None when the file could not be
+    read, or after its source when it does not parse as Python."""
     try:
         with open(os.path.join(change.root, path), "rb") as source:
             text, _ = _decode_python(source.read())
     except (OSError, SyntaxError) as e:
-        return None, f"could not be read ({e})"
+        return "", None, f"could not be read ({e})"
     tree = _parse_python(text)
-    return (None, "does not parse as Python") if tree is None else (tree, "")
+    return (text, None, "does not parse as Python") if tree is None else (text, tree, "")
 
 
 def _base_functions(change: GateChange, path: str) -> list[_ScoredFunction]:
@@ -5412,15 +5830,16 @@ _Held = list[tuple[ast.AST | None, int]]
 _CognitiveRule = Callable[[Any, int], tuple[int, _Held]]
 
 
-def cognitive_complexity(function: ast.FunctionDef | ast.AsyncFunctionDef, cls: str | None = None) -> int:
-    """function's cognitive complexity, by the rules above, the functions nested in it included. cls is the name of
-    the class function is a method of, None for one outside a class; it decides which calls are recursive. function's
-    own decorators and defaults are not scored: they run where it is defined, not when it is called."""
+def cognitive_complexity(function: ast.FunctionDef | ast.AsyncFunctionDef, *, recursive: bool = False) -> int:
+    """function's cognitive complexity, by the rules above, the functions nested in it included. recursive says
+    whether function itself recurses, which takes its module to tell (_recursive_functions); a function nested in it
+    recurses when it calls itself. function's own decorators and defaults are not scored: they run where it is
+    defined, not when it is called."""
     # A walk with a stack of its own rather than recursion: a syntax tree can be deeper than the interpreter lets a
     # recursive walk go, as a sum of a few hundred terms or an if with a thousand elifs are. Each node's points do not
     # depend on what it holds, so the order nodes are taken in does not matter. Each node goes with its nesting level
     # and the class whose body holds it directly, None outside one, which decides how a nested function recurses.
-    points = int(_calls_itself(function, cls))
+    points = int(recursive)
     todo: list[tuple[ast.AST | None, int, str | None]] = [(s, 0, None) for s in function.body]
     while todo:
         node, nesting, owner = todo.pop()
@@ -5536,18 +5955,193 @@ _COGNITIVE_RULES: dict[type[ast.AST], _CognitiveRule] = {
 
 
 def _calls_itself(function: ast.FunctionDef | ast.AsyncFunctionDef, cls: str | None) -> bool:
-    """Whether function's body calls function: by its name, or as self.m, cls.m or C.m when it is the method m of the
-    class C, cls."""
-    for node in (node for statement in function.body for node in ast.walk(statement)):
-        if not isinstance(node, ast.Call):
-            continue
-        callee = node.func
-        if cls is None and isinstance(callee, ast.Name) and callee.id == function.name:
-            return True
-        if (cls is not None and isinstance(callee, ast.Attribute) and callee.attr == function.name
-                and isinstance(callee.value, ast.Name) and callee.value.id in ("self", "cls", cls)):
-            return True
-    return False
+    """Whether function's body calls function, as _callees resolves calls; cls is the name of the class function is a
+    method of, None for one outside a class."""
+    return (cls, function.name) in _callees(function, cls)
+
+
+def _callees(function: ast.FunctionDef | ast.AsyncFunctionDef, cls: str | None,
+             enclosing: frozenset[str] = frozenset()) -> set[tuple[str | None, str]]:
+    """The functions of its module that function's body calls, the bodies of functions nested in it included, each as
+    (the name of the class it is a method of, None outside a class; its name). cls is the name of the class function
+    is a method of, or None, as the class names in the result are: qualified, as _scored_functions gives them.
+    enclosing are the names the scopes around function bind for its body: the type parameters of the classes it is a
+    method of.
+
+    Calls resolve by name, as Python's scopes do (_Scope): f() calls the module's f unless a scope the call is read in
+    binds f, as a parameter, a local, a nested function or a type parameter, and declares it neither global nor
+    nonlocal; C.m() the method m of the module's class C, under the same proviso for C; and self.m() or cls.m() the
+    method m of cls, or in a class nested in function, of that class, which is no class of the module. A call of
+    anything else, such as an alias or an imported module's function, resolves to no function here."""
+    calls: list[tuple[ast.expr, _Scope, str | None]] = []
+    # Each node still to be read, with the scope it is read in and the class that self and cls name there. The
+    # scopes' names are all known only once the walk is done, as Python fixes them at compile time, so the calls are
+    # resolved after it.
+    around = _Scope(None, "annotation", set(enclosing)) if enclosing else None
+    root = _Scope(_Scope.of_type_parameters(function, around), "function", _parameters(function.args))
+    todo: list[tuple[ast.AST, _Scope, str | None]] = [(s, root, cls) for s in function.body]
+    while todo:
+        node, scope, owner = todo.pop()
+        if isinstance(node, ast.Call):
+            calls.append((node.func, scope, owner))
+        scope.bind(node)
+        todo += _in_scopes(node, scope, owner, function.name)
+    return {key for callee, scope, owner in calls if (key := _callee(callee, scope, owner)) is not None}
+
+
+def _callee(callee: ast.expr, scope: "_Scope", owner: str | None) -> tuple[str | None, str] | None:
+    """The function of the module that a call of callee, read in scope where self and cls name the class owner, calls,
+    as _callees gives it; None for a call of anything else."""
+    if isinstance(callee, ast.Name):
+        return (None, callee.id) if scope.means_module(callee.id) else None
+    if not (isinstance(callee, ast.Attribute) and isinstance(callee.value, ast.Name)):
+        return None
+    if owner is not None and callee.value.id in ("self", "cls"):
+        return owner, callee.attr
+    return (callee.value.id, callee.attr) if scope.means_module(callee.value.id) else None
+
+
+@dataclass
+class _Scope:
+    """A scope _callees reads a function in, as Python's compiler sees it: the function's own; a function, lambda,
+    comprehension, class body or type-parameter list nested in it; or, around the function's own, its type-parameter
+    list and those of the classes it is a method of. It tells what a bare name read there means
+    (https://docs.python.org/3/reference/executionmodel.html#resolution-of-names)."""
+    parent: "_Scope | None"  # the scope this one is nested in; None for the outermost, beyond which is the module
+    # "function" for a function's or a lambda's; "class"; "comprehension"; or "annotation" for a type-parameter
+    # list's, PEP 695's annotation scope, which unlike a function's sees the names of a class body it is directly in
+    kind: str
+    bound: set[str] = field(default_factory=set)  # the names it binds, and so means by itself
+    globals: set[str] = field(default_factory=set)  # the names it declares global
+    nonlocals: set[str] = field(default_factory=set)  # the names it declares nonlocal
+
+    @classmethod
+    def of_type_parameters(cls, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef,
+                           parent: "_Scope | None") -> "_Scope | None":
+        """The scope node's PEP 695 type parameters open inside parent, in which its annotations, bases and the
+        parameters' bounds are read and its body's scope is nested; parent itself for a node with none."""
+        names = _type_parameters(node)
+        return cls(parent, "annotation", names) if names else parent
+
+    def bind(self, node: ast.AST) -> None:
+        """Take in what node, read in this scope, binds or declares there; nothing for any other node. A nested
+        function's or class's own scope is _in_scopes'."""
+        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            self.bound.add(node.id)
+        elif isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
+            self._around_comprehensions().bound.add(node.target.id)
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            self.bound.add(node.name)
+        elif isinstance(node, ast.alias):
+            self.bound.add((node.asname or node.name).partition(".")[0])
+        elif isinstance(node, ast.ExceptHandler | ast.MatchAs | ast.MatchStar) and node.name:
+            self.bound.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            self.bound.add(node.rest)
+        elif isinstance(node, ast.Global):
+            self.globals.update(node.names)
+        elif isinstance(node, ast.Nonlocal):
+            self.nonlocals.update(node.names)
+
+    def _around_comprehensions(self) -> "_Scope":
+        """This scope, or for a comprehension's, the nearest one around it that is no comprehension's: where an
+        assignment expression read here binds its target (PEP 572)."""
+        scope = self
+        while scope.kind == "comprehension" and scope.parent is not None:
+            scope = scope.parent
+        return scope
+
+    def means_module(self, name: str) -> bool:
+        """Whether name, read in this scope, means the module's name rather than one bound in a scope of the chain:
+        no scope from here out to the outermost binds it, unless one on the way declares it global. A class body
+        counts only for a name read in it, or read in an annotation scope directly inside it, not in a scope nested
+        in that. Valid once _callees has read the whole function."""
+        scope: _Scope | None = self
+        inner: _Scope | None = None  # the scope the walk came from, None at self
+        while scope is not None:
+            if name in scope.globals:
+                return True
+            sees_class = inner is None or (inner is self and inner.kind == "annotation")
+            if name in scope.bound and name not in scope.nonlocals and (scope.kind != "class" or sees_class):
+                return False
+            scope, inner = scope.parent, scope
+        return True
+
+
+def _parameters(args: ast.arguments) -> set[str]:
+    """The names args binds in its function's own scope; what its defaults and annotations hold is read outside."""
+    return {a.arg for a in [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg] if a is not None}
+
+
+# The nodes that open a scope of their own as a function's body does.
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def _in_scopes(node: ast.AST, scope: _Scope, owner: str | None, function: str) -> list[tuple[ast.AST, _Scope, str | None]]:
+    """What node holds, each with the scope it is read in and the class self and cls name there, for _callees, as
+    Python reads it: a nested function, lambda, class and comprehension as _function_parts, _class_parts and
+    _comprehension_parts say; an assignment expression's value, its target being _Scope.bind's; anything else in
+    scope, as node is. function is the judged function's name, which marks a class nested in it as none of the
+    module's."""
+    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+        return _function_parts(node, scope, owner)
+    if isinstance(node, ast.ClassDef):
+        return _class_parts(node, scope, owner, f"<{node.name} in {function}>")
+    if isinstance(node, _COMPREHENSIONS):
+        return _comprehension_parts(node, scope, owner)
+    if isinstance(node, ast.NamedExpr):
+        return [(node.value, scope, owner)]
+    return [(child, scope, owner) for child in ast.iter_child_nodes(node)]
+
+
+def _function_parts(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda, scope: _Scope,
+                    owner: str | None) -> list[tuple[ast.AST, _Scope, str | None]]:
+    """For _in_scopes: a nested function's or lambda's decorators and defaults, read in scope; its annotations and
+    its type parameters' bounds, in its type parameters' scope; its body, in its own scope inside that."""
+    args = node.args
+    outside = [*getattr(node, "decorator_list", []), *args.defaults, *(d for d in args.kw_defaults if d is not None)]
+    annotated = [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]
+    annotations = [a.annotation for a in annotated if a is not None and a.annotation is not None]
+    annotations += [r for r in [getattr(node, "returns", None)] if r is not None] + _type_parameter_parts(node)
+    typed = _Scope.of_type_parameters(node, scope) or scope
+    inner = _Scope(typed, "function", _parameters(args))
+    body = node.body if isinstance(node.body, list) else [node.body]
+    return [*((o, scope, owner) for o in outside), *((a, typed, owner) for a in annotations),
+            *((s, inner, owner) for s in body)]
+
+
+def _class_parts(node: ast.ClassDef, scope: _Scope, owner: str | None,
+                 marker: str) -> list[tuple[ast.AST, _Scope, str | None]]:
+    """For _in_scopes: a nested class's decorators, read in scope; its bases, keywords and its type parameters'
+    bounds, in its type parameters' scope; its body, in a class scope inside that, where self and cls name marker."""
+    typed = _Scope.of_type_parameters(node, scope) or scope
+    members = _Scope(typed, "class")
+    inside = [*node.bases, *node.keywords, *_type_parameter_parts(node)]
+    return [*((d, scope, owner) for d in node.decorator_list), *((x, typed, owner) for x in inside),
+            *((s, members, marker) for s in node.body)]
+
+
+def _comprehension_parts(node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp, scope: _Scope,
+                         owner: str | None) -> list[tuple[ast.AST, _Scope, str | None]]:
+    """For _in_scopes: a comprehension's first iterable, read in scope, as Python evaluates it before the
+    comprehension starts; everything else, its loop targets included, in the comprehension's own scope."""
+    inner = _Scope(scope, "comprehension")
+    first, *rest = node.generators
+    elements: list[ast.expr] = [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
+    return [(first.iter, scope, owner), *((x, inner, owner) for x in [first.target, *first.ifs, *rest, *elements])]
+
+
+def _type_parameters(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef) -> set[str]:
+    """The names of node's PEP 695 type parameters, as in def f[T](): none for a lambda, which has none."""
+    return {t.name for t in getattr(node, "type_params", [])
+            if isinstance(t, ast.TypeVar | ast.ParamSpec | ast.TypeVarTuple)}
+
+
+def _type_parameter_parts(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef) -> list[ast.expr]:
+    """The bounds and defaults of node's PEP 695 type parameters, as in def f[T: int = bool](), which are read in the
+    type parameters' own scope."""
+    parts = [getattr(t, attr, None) for t in getattr(node, "type_params", []) for attr in ("bound", "default_value")]
+    return [p for p in parts if p is not None]
 
 
 # Vague names: names that fit anything, which tell a reader nothing about what they hold.
@@ -5564,9 +6158,10 @@ def vague_names(change: GateChange) -> list[dict]:
     add is never reported. A name is bound as _bound_names says. A changed file that cannot be read or parsed is a
     finding saying so; the files are those _parsed_changed_files gives."""
     out = []
-    for path, added, tree, why in _parsed_changed_files(change):
+    for changed in _parsed_changed_files(change):
+        path, added, tree = changed.path, changed.added, changed.tree
         if tree is None:
-            out.append(_finding(path, None, "not-read", f"{why}, so its names were not read."))
+            out.append(_finding(path, None, "not-read", f"{changed.why}, so its names were not read."))
             continue
         # Each vague name's first binding on an added line, as (line, column).
         first: dict[str, tuple[int, int]] = {}
@@ -5834,7 +6429,7 @@ def _failed_by(quality: str, conditions: list[str]) -> str:
     lines = quality.split("\n")
     at = next((i for i, x in enumerate(lines) if x.strip()), 0)
     lines[at] = re.sub(_labelled_word("GATE", (QUALITY_OK,)), rf"\g<1>{QUALITY_ERROR}", lines[at], count=1)
-    bullets = [f"- {c}" for c in conditions]
+    bullets = [one_line(f"- {c}") for c in conditions]
     if QUALITY_FAILED_CONDITIONS in lines:
         end = lines.index(QUALITY_FAILED_CONDITIONS) + 2
         while end < len(lines) and lines[end].startswith("- "):
@@ -5874,7 +6469,7 @@ def _numbered_finding(k: int, finding: dict) -> str:
         where = f"`{finding['path']} (the whole file)`"
     else:
         where = f"`{finding['path']}:{finding['line']}`"
-    return f"{k}. {where} {finding['severity']} {finding['rule']}: {finding['message']}"
+    return one_line(f"{k}. {where} {finding['severity']} {finding['rule']}: {finding['message']}")
 
 
 def _check_finding(path: str | None, line: int | None, rule: str, message: str, severity: str = "warning") -> dict:
@@ -7956,8 +8551,8 @@ class Workflow:
             # A resumed or restarted turn keeps its record and start. Read before the prompt goes out, so that
             # no agent can write its file before its turn started.
             started = None if self._open_turn(file) else self.host.now()
-            self.herdr.prompt(agent["name"], message)
-            # Recorded only once the prompt is delivered. Dying in between costs one duplicate
+            self._deliver(role, path, message)
+            # Recorded only once the prompt is taken. Dying between sending and confirming costs one duplicate
             # prompt, which the role answers by writing the same file again.
             s.prompted = file
             if started is not None:
@@ -7967,6 +8562,47 @@ class Workflow:
         log(f"[{role}] wrote {file}")
         self._end_turn(role, path)
         return out
+
+    def _deliver(self, role: str, path: str, message: str) -> None:
+        """Prompt the role's agent with message until it takes it (_taken), sending it at most twice.
+
+        Raises OrchestratorError when the agent takes neither prompt, naming what a resume does about it, or exits
+        meanwhile; HerdrError as Herdr does.
+        """
+        name = self.state.agents[role]["name"]
+        self.herdr.prompt(name, message)
+        if self._taken(role, path):
+            return
+        log(f"[{role}] did not take its prompt within {PROMPT_DELIVERY_SECONDS}s; sending it again")
+        self.herdr.prompt(name, message)
+        if not self._taken(role, path):
+            label, pane = self.pipeline.roles[role], self.state.agents[role]["pane"]
+            raise OrchestratorError(f"the {label} did not take its prompt to write {path}, sent twice; see pane "
+                                    f"{pane}, and resume to send it again")
+
+    def _taken(self, role: str, path: str) -> bool:
+        """Whether the role's agent took the prompt just sent, within PROMPT_DELIVERY_SECONDS: herdr reports it
+        working or blocked, or path, its handoff file, exists. idle and done do not count, since an agent shows
+        them before taking a prompt too.
+
+        Raises OrchestratorError when the agent exits without writing path; HerdrError as Herdr.wait does.
+        """
+        name = self.state.agents[role]["name"]
+        # First, for a turn so quick that the agent is done before the wait begins.
+        if self.host.read(path) is not None:
+            return True
+        try:
+            self.herdr.wait(name, PROMPT_DELIVERY_SECONDS * 1000, until=("working", "blocked"))
+            return True
+        except HerdrError as e:
+            # herdr's wait on an agent that has exited fails with agent_not_found, which is told apart below.
+            if e.code not in ("timeout", "agent_not_found"):
+                raise
+        if self.host.read(path) is not None:
+            return True
+        if self.herdr.agent(name) is None:
+            raise OrchestratorError(f"the {self.pipeline.roles[role]} exited without writing {path}")
+        return False
 
     def _retry(self, role: str, path: str, out: str) -> None:
         """Move a malformed verdict file aside so its role writes it again; end the run if its retry is used."""
@@ -9608,11 +10244,10 @@ def blocker_cycle(blockers: dict[str, list[str]]) -> list[str] | None:
 def refreshed_headers(specs: list[QueuedSpec], host: Host, cwd: str, target: list[str],
                       local_host: str, pid_alive, dry_run: bool = False) -> list[tuple[QueuedSpec, dict[str, str]]]:
     """The header lines to set, by spec, for what has become of the pull requests and runs that earlier drains left
-    behind: an SPEC_IN_REVIEW spec's pull request, now merged or closed; a SPEC_FOR_HUMAN spec's run, whose conflict
-    this refreshes (refresh_conflict) and which, open with the conflict cleared and succeeded, makes it
-    SPEC_IN_REVIEW; and the run on a SPEC_READY spec's Run: line, which an interrupted drain leaves
-    (finished_run_header). It refreshes an SPEC_IN_REVIEW spec's run too, and logs what refresh_conflict did; with
-    dry_run, it does nothing of that, and gives the header lines as though it had.
+    behind, one pair for each spec that has any, each followed to where it settles in this pass (settled_header), so
+    that a pull request already merged or closed frees the spec's dependants in this drain. It refreshes a run's
+    conflict and logs what refresh_conflict did; with dry_run, it does nothing of that, and gives the header lines as
+    though it had.
 
     cwd is the project, where gh asks about pull requests and the runs are; target is the --machine and --cwd flags
     as given, for a resume command. Raises OrchestratorError as Host.pull_request, refresh_conflict and
@@ -9621,44 +10256,90 @@ def refreshed_headers(specs: list[QueuedSpec], host: Host, cwd: str, target: lis
     # Read once, and only when a spec's run is to be looked at.
     statuses = (SPEC_READY, SPEC_IN_REVIEW, SPEC_FOR_HUMAN)
     runs = host.run_states(cwd) if any(spec.run and spec.status in statuses for spec in specs) else []
-    out = []
-    for spec in specs:
-        if spec.status in (SPEC_IN_REVIEW, SPEC_FOR_HUMAN) and (entries := conflict_header(spec, runs, host, cwd,
-                                                                                           dry_run)):
-            out.append((spec, entries))
-        if spec.status == SPEC_IN_REVIEW and spec.pr and (entries := pull_request_header(spec.pr, host, cwd)):
-            out.append((spec, entries))
-        elif spec.status == SPEC_READY and (run_id := spec.run):
-            out.append((spec, finished_run_header(spec, run_id, runs, cwd, target, local_host, pid_alive)))
-    return out
+    settle = functools.partial(settled_header, runs=runs, prs=_PullRequestStates(host, cwd), target=target,
+                               local_host=local_host, pid_alive=pid_alive, dry_run=dry_run)
+    return [(spec, entries) for spec in specs if (entries := settle(spec))]
 
 
-def conflict_header(spec: QueuedSpec, runs: list[tuple[int, dict]], host: Host, cwd: str,
-                    dry_run: bool) -> dict[str, str] | None:
-    """Refresh the run on the spec's Run: line, if it has_conflict, as refreshed_headers says, and return the header
-    lines that sets: SPEC_IN_REVIEW and the pull request for a SPEC_FOR_HUMAN spec whose succeeded run's pull request
-    is open and no longer conflicts; None otherwise, and for a run not among runs, Host.run_states's."""
+class _PullRequestStates:
+    """The states gh gives pull requests in one refreshed_headers pass, OPEN, CLOSED or MERGED by URL: each asked of
+    gh once at most, or taken from what a conflict refresh was told (learn)."""
+
+    def __init__(self, host: Host, cwd: str):
+        self.host, self.cwd = host, cwd  # whom to ask, and in which project, as refreshed_headers says
+        self._states: dict[str, str] = {}
+
+    def learn(self, url: str, state: str) -> None:
+        """Take state as the pull request's at url for the rest of the pass, as gh gave it another way."""
+        self._states[url] = state
+
+    def known(self, url: str) -> str | None:
+        """The pull request's state at url, if this pass has heard it; None, asking no one, if not."""
+        return self._states.get(url)
+
+    def state(self, url: str) -> str:
+        """The pull request's state at url, asking gh unless this pass has heard it. Raises OrchestratorError as
+        Host.pull_request does."""
+        if url not in self._states:
+            self._states[url] = self.host.pull_request(self.cwd, url)["state"]
+        return self._states[url]
+
+
+def settled_header(spec: QueuedSpec, *, runs: list[tuple[int, dict]], prs: _PullRequestStates, target: list[str],
+                   local_host: str, pid_alive, dry_run: bool) -> dict[str, str]:
+    """The header lines to set for spec, empty for none, from these steps in this order, each on the status the one
+    before it left:
+
+    1. a SPEC_IN_REVIEW or SPEC_FOR_HUMAN spec's run, its conflict refreshed (conflict_header), which can make a
+       SPEC_FOR_HUMAN spec SPEC_IN_REVIEW with its pull request;
+    2. a SPEC_READY spec's finished run on its Run: line, which an interrupted drain leaves (finished_run_header):
+       SPEC_IN_REVIEW with its pull request, or SPEC_FOR_HUMAN;
+    3. a spec now SPEC_IN_REVIEW with a pull request, or SPEC_FOR_HUMAN with one whose state step 1 heard: SPEC_DONE
+       once it is merged, SPEC_FOR_HUMAN once it is closed (pull_request_header).
+
+    gh hears of each pull request once a pass (prs). runs are Host.run_states's; the rest is as refreshed_headers
+    says. Raises OrchestratorError as those steps do.
+    """
+    entries: dict[str, str] = {}
+    if spec.status in (SPEC_IN_REVIEW, SPEC_FOR_HUMAN):
+        entries |= conflict_header(spec, runs, prs, dry_run)
+    elif spec.status == SPEC_READY and spec.run:
+        entries |= finished_run_header(spec, spec.run, runs, prs.cwd, target, local_host, pid_alive)
+    status, pr = entries.get(STATUS_KEY, spec.status), entries.get(PR_KEY, spec.pr)
+    if pr and (status == SPEC_IN_REVIEW or (status == SPEC_FOR_HUMAN and prs.known(pr))):
+        settled = pull_request_header(prs.state(pr))
+        if settled.get(STATUS_KEY, status) != status:
+            entries |= settled
+    return entries
+
+
+def conflict_header(spec: QueuedSpec, runs: list[tuple[int, dict]], prs: _PullRequestStates,
+                    dry_run: bool) -> dict[str, str]:
+    """Refresh the run on the spec's Run: line, if it has_conflict, as refreshed_headers says, telling prs the state
+    gh gave its pull request, and return the header lines that sets: SPEC_IN_REVIEW and the pull request for a
+    SPEC_FOR_HUMAN spec whose succeeded run's pull request is open and no longer conflicts; none otherwise, and for a
+    run not among runs, Host.run_states's."""
     saved = next((s for _, s in runs if s.get("run_id") == spec.run), None)
     if saved is None or not has_conflict(saved):
-        return None
-    check = refresh_conflict(host, cwd, saved, dry_run)
+        return {}
+    check = refresh_conflict(prs.host, prs.cwd, saved, dry_run)
     if not dry_run:
         log(check.line)
+    prs.learn(check.url, check.pr_state)
     cleared_open = check.pr_state == "OPEN" and check.clears
     if spec.status == SPEC_FOR_HUMAN and cleared_open and saved.get("verdict") in SUCCEEDED:
         return {STATUS_KEY: SPEC_IN_REVIEW, PR_KEY: check.url}
-    return None
+    return {}
 
 
-def pull_request_header(url: str, host: Host, cwd: str) -> dict[str, str] | None:
-    """The header lines to set for an SPEC_IN_REVIEW spec whose pull request is at url: SPEC_DONE once it is merged,
-    SPEC_FOR_HUMAN once it is closed; None while it is open. Raises OrchestratorError as Host.pull_request does."""
-    pr_state = host.pull_request(cwd, url)["state"]
-    if pr_state == "MERGED":
+def pull_request_header(state: str) -> dict[str, str]:
+    """The header lines to set for a spec whose pull request is in state, as gh gives it: SPEC_DONE for MERGED,
+    SPEC_FOR_HUMAN for CLOSED; none for OPEN."""
+    if state == "MERGED":
         return {STATUS_KEY: SPEC_DONE}
-    if pr_state == "CLOSED":
+    if state == "CLOSED":
         return {STATUS_KEY: SPEC_FOR_HUMAN}
-    return None
+    return {}
 
 
 def finished_run_header(spec: QueuedSpec, run_id: str, runs: list[tuple[int, dict]], cwd: str, target: list[str],
@@ -10131,11 +10812,31 @@ def _on_path(host: Host, command: str) -> str:
     return proc.stdout.strip()
 
 
+# The exit status a POSIX shell gives a command it cannot find, as the shell an SSH command runs in does.
+COMMAND_NOT_FOUND_EXIT = 127
+
+
+def _run_tool(host: Host, argv: list[str], timeout: float = 60) -> subprocess.CompletedProcess:
+    """host.run(argv, timeout=timeout); raises the _Unmet _on_path raises when argv[0] is not on host's PATH: it
+    cannot be started here, or over SSH the remote shell exits COMMAND_NOT_FOUND_EXIT. Raises OrchestratorError as
+    Host.run does for any other failure to run it."""
+    try:
+        proc = host.run(argv, timeout=timeout)
+    except OrchestratorError as e:
+        if isinstance(e.__cause__, FileNotFoundError):
+            raise _Unmet(f"{argv[0]} is not on PATH") from e
+        raise
+    if host.ssh_target and proc.returncode == COMMAND_NOT_FOUND_EXIT:
+        raise _Unmet(f"{argv[0]} is not on PATH")
+    return proc
+
+
 def _tool_version(host: Host, command: str, minimum: tuple[int, ...]) -> str:
     """What `command --version` prints, once it is on host's PATH and the first version number it prints is minimum
-    or later; raises _Unmet when it is missing, prints no version or an older one."""
-    _on_path(host, command)
-    said = host.check([command, "--version"]).strip()
+    or later; raises _Unmet when it is missing, prints no version or an older one, and OrchestratorError when it
+    fails."""
+    argv = [command, "--version"]
+    said = host.checked(argv, _run_tool(host, argv)).strip()
     number = re.search(r"\d+(?:\.\d+)+", said)
     if number is None:
         raise _Unmet(f"{command} --version prints no version number: {said!r}")
@@ -10183,8 +10884,7 @@ def integration_states(listing: str) -> dict[str, str]:
 
 def _gh_logged_in(host: Host) -> str:
     """That gh is on host's PATH and logged in; raises _Unmet with the fix for what is not."""
-    _on_path(host, "gh")
-    proc = host.run(["gh", "auth", "status"], timeout=NETWORK_TIMEOUT)
+    proc = _run_tool(host, ["gh", "auth", "status"], timeout=NETWORK_TIMEOUT)
     if proc.returncode != 0:
         said = " ".join(line.strip() for line in (proc.stderr.strip() or proc.stdout.strip()).splitlines()[:4])
         raise _Unmet(f"gh auth status fails{': ' + said if said else ''}", "gh auth login")
@@ -10521,16 +11221,14 @@ class RunProcess:
     """A CLI command the GUI started, its stdout and stderr read together on a thread."""
 
     def __init__(self, argv: list[str], popen=subprocess.Popen):
-        # An ignored SIGINT stays ignored across exec, and a Python started so never raises KeyboardInterrupt:
-        # in a GUI started that way, as a non-interactive shell starts a background job, Stop would do nothing.
-        # exec resets a handler to the default, so handling it here lets the command take Ctrl-C again.
-        if signal.getsignal(signal.SIGINT) == signal.SIG_IGN:
-            signal.signal(signal.SIGINT, signal.default_int_handler)
-        # A session of its own, so Stop can signal its process group as Ctrl-C in a terminal does.
-        # Unbuffered, so the output arrives as it is printed rather than when the run ends.
-        self.proc = popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                          text=True, errors="replace", start_new_session=True,
-                          env={**os.environ, "PYTHONUNBUFFERED": "1"})
+        # A session of its own, so Stop can signal its process group as Ctrl-C in a terminal does; and SIGINT not
+        # ignored there, which a GUI started as a background job of a non-interactive shell would pass on (the
+        # with below, not the session, is what keeps it). Unbuffered, so the output arrives as it is printed rather
+        # than when the run ends.
+        with _not_ignored_in_children(signal.SIGINT):
+            self.proc = popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, errors="replace", start_new_session=True,
+                              env={**os.environ, "PYTHONUNBUFFERED": "1"})
         self._lines = queue.Queue()
         threading.Thread(target=self._read, daemon=True).start()
 

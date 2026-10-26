@@ -17,14 +17,14 @@ was done.
 - **The desktop app as the terminal client too: the macOS check.** Started with arguments, the app execs the
   orchestrator it bundles (`cli` in `ui/src-tauri/src/lib.rs`), so the AppImage is the CLI too and the README says
   how to get the CLI from each download; on macOS, where a `.app` is a directory, the CLI is a symlink to
-  `Octoflow.app/Contents/MacOS/octoflow`. Left: smoke-testing that on macOS, in
-  `.github/workflows/macos-binary.yml` (`.scratch/desktop-cli/issues/02-macos-cli-symlink.md`), which runs only on
-  a published release or a dispatch for an existing tag, and checking the README's quarantine advice for the
-  `.dmg` against a downloaded copy. The plain CLI binaries stay released: 13 MB against the AppImage's 120 MB of
-  WebKit, and they start without FUSE on headless machines and in CI. Decided against: one file on every
-  platform, by embedding the orchestrator's bytes in the Rust executable and unpacking them at start
-  (PyInstaller's onefile done twice), or by Python hosting the window, which [ui-options.md](docs/ui-options.md)
-  chose against. Agreed 2026-10-24.
+  `Octoflow.app/Contents/MacOS/octoflow`. `build-desktop.sh`'s `smoke_dmg` mounts the `.dmg` and runs the CLI
+  through such a symlink and as the app's own executable, in `.github/workflows/macos-binary.yml`'s build of each
+  release and of each pull request that touches the packaging. Left: checking the README's quarantine advice for
+  the `.dmg` against a downloaded copy (`.scratch/desktop-cli/issues/02-macos-cli-symlink.md`). The plain CLI
+  binaries stay released: 13 MB against the AppImage's 120 MB of WebKit, and they start without FUSE on headless
+  machines and in CI. Decided against: one file on every platform, by embedding the orchestrator's bytes in the
+  Rust executable and unpacking them at start (PyInstaller's onefile done twice), or by Python hosting the window,
+  which [ui-options.md](docs/ui-options.md) chose against. Agreed 2026-10-24.
 - **The quality gate in a `gate.py` of its own.** The gate is reusable for other Python projects, but lives inside
   `orchestrator.py`; and it can only run inside the judged project's environment anyway, since it starts pytest
   and mutmut with `sys.executable`, which in the binary is the binary. Decided 2026-10-24: the quality file is the
@@ -43,6 +43,44 @@ was done.
 
 ## Open issues
 
+- **surviving-mutants takes only the top directory's pytest configuration.** Since `_pytest_groups`, flaky-tests and
+  passes-at-base run each changed test under the configuration pytest finds for it below the copy's top, but
+  `_pytest_config`, which surviving-mutants gives mutmut, still looks in the top directory alone, so a project whose
+  configuration is in `tests/pytest.ini` or `pkg/pyproject.toml` runs its mutants without that configuration's
+  `pythonpath`, `addopts` and plugins. Raised by cross-review 35 (R1-6). Closes with mutmut's runs taking the changed
+  functions' tests' configurations, which mutmut's one `pytest_add_cli_args` makes one per run at most.
+- **flaky-tests' reruns get one time limit a run, whatever the number of configurations.** Each pytest run of
+  flaky-tests has `FLAKY_RUN_TIMEOUT` of its own, and since `_pytest_groups` a change whose tests fall under several
+  configurations collects and reruns once for each, so its worst case grows with them (3 configurations and 5 seeds:
+  3 x 6 x 30 s), against `QUALITY_TIMEOUT`. passes-at-base's groups share its one budget. Raised by cross-review 35
+  (R1-5), which reads the spec's "the per-group runs share the check's time budget" as meant for passes-at-base,
+  flaky-tests having none. Closes with the shared budget `.scratch/gate-open-decisions/issues/01-shared-time-budget.md`
+  asks about.
+- **SSH connection sharing has not been timed on a real `--machine`.** `ssh_sharing_options` was measured against
+  a user-level sshd on this host only, 20 commands in 0.24 s shared against 1.78 s unshared; no herdr machine is
+  saved here, so `doctor --machine` was not timed before and after
+  (`.scratch/doctor-ssh/issues/01-ssh-connection-sharing.md`, requirement 4). Raised by cross-review 33 (F7). Closes
+  with `time orchestrator.py doctor --machine <m>` on the herdr machine, before and after, both times written into
+  that ticket.
+- **`--machine` over SSH assumes a POSIX login shell and a server that takes several sessions.** Since
+  `_run_tool`, doctor takes a remote command's exit status 127 for not on PATH: a csh or tcsh login shell exits 1
+  ("Command not found."), so a missing gh reads as `gh auth status fails` and a missing git as a failed
+  `--version`; and a tool on PATH that exits 127 itself, such as a shim whose target is gone, reads as not on PATH.
+  And `ssh_sharing_options` overrides a target's own `ControlMaster no`, so a server with `MaxSessions 1` refuses
+  the second of two commands run at once on the shared connection (the GUI and `serve` run several), which ssh
+  then fails. Raised by cross-review 33 (F4, F6), neither reproduced. Closes with doctor asking through `sh -c`, as
+  `_on_path` did, and with an explicit `ControlMaster`/`ControlPath` in `ssh -G <target>` left in place.
+- **`TestGate.test_a_missing_tool_fails_naming_it` fails where shellcheck lives beside git.** `TestGate.setUp`
+  (`tests/test_orchestrator.py`) puts git's own directory on `PATH` after the stubs, so on a machine with
+  `/usr/bin/shellcheck` (agentbox, Debian's package) removing the stub still finds the real one and the gate passes.
+  Seen 2026-10-25 on `main` at `9448612`. Closes with `PATH` holding a directory with only a link to `git`.
+- **unexpected-paths reads only the contract step's file.** `unexpected_paths` judges each path the change touches
+  against `RunChange.spec`, the contract step's file, so a workflow whose contract is in business terms, such as
+  `examples/workflows/product-team.toml`, whose requirements name no file and whose `design.md` lists the
+  components, gets a finding to weigh for every path on every quality round. Raised by review 20 of
+  product-team-workflow (F4, 2026-10-25): "the gate reads file names from the spec and this spec is in business
+  terms by design". The example's header says so. Closes with the check reading every non-editing step's file that
+  precedes the first editing step, or with a workflow key naming the file that holds the paths.
 - **An AppImage run without FUSE passes no signal on to the orchestrator.** Under `APPIMAGE_EXTRACT_AND_RUN` the
   AppImage's runtime forks, runs `AppRun` in the child and waits, so the process a caller started is the runtime,
   and `Cli::exec` (`ui/src-tauri/src/lib.rs`) only replaces the child. Raised by the cross-review of desktop-cli
@@ -60,28 +98,18 @@ was done.
   test already points `TMPDIR` into its own directory. Found in the second build round of run 20261025-081413-327fc2
   (2026-10-25). Closes with a `TMPDIR` the build removes around `tauri build`, and with a README note, or a newer
   runtime that cleans up, for users.
-- **A prompt sent right after a startup dialog can be lost.** When an agent starts behind a dialog, such as Claude
-  Code's folder-trust question, `Workflow._start` waits in `_wait_for_startup` for herdr to report it `idle` and
-  returns; `Workflow._written` then sends the turn's prompt and records it in `RunState.prompted`. On 2026-10-25
-  the Builder of run 20261025-090825-73faf7, in a worktree of a clone Claude Code had not seen, was reported idle
-  as the dialog closed and before its input took text: the prompt never arrived, yet counted as delivered, and the
-  turn timed out after 1800s at an empty prompt. `resume` cannot recover it, since `_prompt_for` only waits on an
-  alive agent already prompted. Closes with `_wait_for_startup` waiting until the agent takes input, or with the
-  prompt's delivery checked (the agent turning `working`, or its handoff file appearing) and the prompt sent again
-  when neither happens.
-- **drain takes two passes to mark a spec done whose run's pull request already merged.** A `ready-for-agent` spec
-  with a `Run:` line gets `in-review` and `PR:` from `finished_run_header`, but `refreshed_headers` asks gh about
-  the pull request only for a spec that was `in-review` when the pass began, so a pull request merged since leaves
-  the spec `in-review`, its dependants blocked, until the next drain. Met on 2026-10-25 after resuming a run
-  outside drain. Closes with the pull request checked in the same pass once `finished_run_header` gives one.
-- **Two builds on agentbox0 can still run rustc out of memory.** The agent has 8 GiB, no swap and 2 executors,
-  and a push to a new branch starts a branch build before its pull request exists, so two builds of one commit
-  compile the Tauri crates at once (PR-74's first build: rustc SIGKILLed on `gtk`). The UI stage now builds
-  without debug info (`Jenkinsfile`, stage UI), which lowers its peak only. Nothing keeps two builds' cargo
-  steps from running side by side, among them the Package stage's release build, or a quality build during
-  `drain` beside a pull request build. Raised by the
-  cross-review of ci-no-debuginfo (2026-10-25): "the OOM cause is narrowed and left unrecorded". Closes with
-  more memory or swap on the VM, or a lock around the cargo steps that keeps them from running side by side.
+- **No build has yet been seen waiting for `ci/cargo-lock.sh` on the Jenkins agent.** PR #88's builds ran both
+  cargo steps through it on agentbox0 (builds 1-3, 2026-10-25), so the agent image has `flock` and the lock file's
+  directory is writable, and a quality-style build (`GIT_REF` set) ran `--no-wait`; but the two run side by side
+  reached their cargo steps 15 s apart, the lock free each time, so the wait and its message were seen only on the
+  development host. Raised by cross-review 25 (F3). Closes with two builds whose cargo steps overlap on agentbox0,
+  one saying that it waits for the lock and both passing.
+- **Is 3 GB the right memory limit for the agentbox0 Jenkins agent?** All builds on the node share its
+  container's `mem_limit: 3g` (Homelab `jenkins/agentbox0.yaml`), which this repo cannot change. Since
+  `ci/cargo-lock.sh`, two of this repository's builds compile Rust at once only when a quality build starts its
+  `cargo test` beside another build's cargo step, but everything else they run (pytest, mutmut, PyInstaller, npm)
+  still shares the 3 GB beside a locked rustc, as do other jobs' builds on the node. Open in
+  `.scratch/ci-cargo-memory/issues/02-agent-container-memory.md`; closes with the Homelab keeping or raising it.
 - **mutmut's clean test run fails on a hypothesis health check, so the gate mutation-tests nothing.** Under the
   gate's mutmut 3.8.0, `TestChangedLines.test_names_each_changed_file_and_exactly_its_added_lines` in
   `tests/test_properties.py` fails with `hypothesis.errors.FailedHealthCheck: ... was called from multiple
@@ -90,11 +118,6 @@ was done.
   `drain_end` (2026-10-25); a plain `uv run pytest` passes it. Cause not established. Closes with the test passing
   under mutmut, e.g. by suppressing `HealthCheck.differing_executors` for it, or the gate's mutmut runs leaving
   `tests/test_properties.py` out.
-- **`doctor --machine` probes the machine over about twenty SSH connections, one after another.** Each check is
-  its own `Host.run`, so `_tool_version` asks `command -v` before `--version`, which already fails for a missing
-  command, and `gh auth status` may wait up to `NETWORK_TIMEOUT`. Raised by the cross-review of the doctor command
-  (F8, 2026-10-24): "redundant probes, each one SSH connection with `--machine`". Closes with the probes run in one
-  shell over one connection, or SSH connection sharing for `Host`.
 - **herdr 0.9.1 lists no `gemini` integration.** `herdr integration status` on this host lists `antigravity-cli`
   (whose hook is under `~/.gemini/`) but no `gemini`, so `doctor` warns that it does not list gemini, and the
   README's `herdr integration install gemini` may name a kind herdr no longer has. Found by the doctor run
@@ -108,13 +131,6 @@ was done.
   verdict step's turn, which follows the quality loop by construction, but every proof test uses `QUICK`, which has
   no quality-gated step. Raised by the cross-review of the proof reruns (R1-F5, 2026-10-24): "no test would notice
   the rerun moving before it". Closes with a proof test on a quality-gated workflow, through the CI fakes.
-- **The macOS builds are first tried on a published release.** `.github/workflows/macos-binary.yml` runs only on
-  `release: published` or by hand for an existing tag, so a change that breaks the macOS binary or
-  `packaging/build-desktop.sh` on macOS merges green, and the release then lacks those assets until it is fixed and
-  the workflow is run again for the tag. Found adding the desktop app to releases (2026-10-24), whose `.dmg` had
-  never been built before the first release with it. Closes with a macOS build of pull requests that touch
-  `packaging/` or `ui/`, or a decision that a rerun after the release is enough.
-
 - **A spec left `ready-for-human` by a conflict stays there when `refresh` clears the conflict before a drain does.**
   drain moves such a spec to `in-review` only when its own refresh clears the run's conflict (`refreshed_headers`);
   a run cleared by `orchestrator.py refresh` beforehand has no conflicts left, so drain cannot tell the spec held
@@ -126,7 +142,7 @@ was done.
   request's review shows them, and each may take `PROOF_TIMEOUT`. Kept: a demonstrated defect is what the human
   most needs to see in a draft. Raised by the same review.
 - **A proof in a worktree run finds the checkout's pytest configuration.** The run directory, and with it
-  `RunState.proofs_dir`, is under the project checkout, not the run's worktree, so `adversarial.toml`'s
+  `RunState.proofs_dir`, is under the project checkout, not the run's worktree, so a `proof_command` of
   `python -m pytest {proofs}` takes its rootdir and `conftest.py` from the checkout while importing the code from the
   worktree it runs in. Found while writing loop-guards ticket 05; not reproduced. Closes with `_run_proof` passing
   the working tree as pytest's rootdir and conftest root, or the proofs copied into a scratch directory of the
@@ -170,23 +186,22 @@ was done.
   may supply rules. Raised by the cross-review of `push-secret-scan` (F6, 2026-10-24): "a base config using
   `[extend] path = ...` resolves that path outside base (process cwd), which the change may control". Closes by
   writing each extended file from the base beside the config and rewriting the path, or refusing such a config.
-- **A process a test leaves holding pytest's output keeps a finished run waiting until its timeout.** `_pytest`'s
-  `communicate` reads to the end of pytest's output, so a server a test started that inherits it keeps a run that has
-  finished going until the timeout, reported then as `budget-reached` (passes-at-base) or `not-rerun` (flaky-tests).
-  It was so before `_pytest` ran pytest in its own session. Raised by the cross-review of `passes-at-base` (round 2,
-  2026-10-24). Closes when `_pytest` waits for pytest itself, then kills its group and reads what is buffered.
-- **`_pytest` and `_run_mutmut` copy one stop-and-kill sequence.** Both start their tool in a session of its own,
-  kill its process group on a timeout and in `finally`, and read what is left with `_abandon`; the copies had already
-  drifted in which errors `killpg` may raise. Raised by the same review. Closes with one helper that runs a command in
-  its own session and stops it, which both use, mutmut's SIGINT grace an option of it.
+- **The gate's intro writes the `--rules` path as it is.** `judge_change`'s intro names the rules file without
+  `one_line` (`orchestrator.py`, `intro = ...` in `judge_change`), so a rules path holding a line breaker splits the
+  quality file's third line, and `docs/quality-gate.md`'s "wherever it appears in a list item or a name" says more
+  than holds for it. `gate_failures` does not read the intro, so no round is misjudged. Raised by cross-review 38
+  (round 3, 2026-10-26). Closes with the intro written through `one_line`, or with each quality-file writer escaping
+  once where it joins its lines.
 - **`vague-names` does not split CamelCase.** `vague_names` matches a whole name or its last `_`-separated word,
   so `user_data` is found but a class `InfoManager` or `UserData` is not. Closes, if the run metrics show such names
   recur, with the last CamelCase word matched too.
-- **Nine test classes copy the same git-repository fixture.** `TestFlakyTests`, `TestPassesAtBase`, `TestVagueNames`,
-  `TestTooComplexFunctions` and five more each define a `setUp` that makes a repository, configures it and commits a
-  base, most with the same `git` and `put` helpers; eight of the copies bind the vague `value` that `vague-names` now
-  reports on added lines, and `TestVagueNames`' binds `setting`. Raised again by the cross-review of `written-rules`
-  (F8, 2026-10-24). Closes with one mixin or base class those tests share.
+- **Ten test classes copy the same git-repository fixture.** `TestFlakyTests`, `TestPassesAtBase`, `TestVagueNames`,
+  `TestTooComplexFunctions`, `TestChangedPythonFiles` and five more each define a `setUp` that makes a repository,
+  configures it and commits a base, most with the same `git` and `put` helpers; eight of the copies bind the vague
+  `value` that `vague-names` now reports on added lines, and `TestVagueNames`' and `TestChangedPythonFiles`' bind
+  `setting`. Raised again by the cross-review of `written-rules` (F8, 2026-10-24), and by that of
+  `gate-python-files` ("`TestChangedPythonFiles` copies the repo scaffolding once more", R1-F5, 2026-10-26). Closes
+  with one mixin or base class those tests share.
 - **`vague-names` reports a name an undecorated override cannot change.** A `def handle(self)` in a
   `socketserver.BaseRequestHandler` subclass, or a parameter the overridden signature names, has no fix; only a
   method marked `@override` is skipped (`_bound_names`). Raised by the cross-review of `written-rules` (F6,
@@ -220,12 +235,6 @@ was done.
   there; the check misses it. Raised by the cross-review of `passes-at-base` (R1-5, 2026-10-24): "`git archive` omits
   submodule contents, so a test that imports from a submodule fails import at the base and is silently 'nothing'".
   Closes when `_copy_base_with_tests` checks out each submodule at the commit the base records for it.
-- **Three gate checks repeat the make-a-scratch-directory, run, remove-it skeleton.** `flaky_tests`,
-  `_mutation_test` and `passes_at_base` each call `tempfile.mkdtemp`, word their own finding when it fails, and word
-  another when `shutil.rmtree` fails (`not-removed` twice, `cleanup` once). The cross-review of `passes-at-base`
-  (R1-8, 2026-10-24) raised it as "a third copy of the scratch-directory skeleton ... with reworded messages". Closes
-  with one helper that takes the check's rule and what it was doing, and the three findings worded one way, with the
-  flaky-tests and surviving-mutants tests that quote today's wording.
 - **A test file whose name is not UTF-8 is never rerun by `flaky-tests`.** pytest-randomly 5.0.0 hashes each node
   id as strict UTF-8 (`pytest_randomly._crc32`, called from `pytest_runtest_setup` and its neighbours) and stops
   with an internal error, exit status 3. `_pytest` already lets pytest print such an id
@@ -233,10 +242,6 @@ was done.
   each rerun then crashes, and `flaky_tests` reports `not-rerun` quoting the `UnicodeEncodeError`. Raised by the
   cross-review of `flaky-tests` (F10, 2026-10-23). Closes when pytest-randomly hashes the id's bytes, or when the
   reruns can seed such a test without it.
-- **Coverage of a file whose name is not UTF-8 is never measured.** coverage.py 7.14 collects no data for it, so
-  `new_coverage` finds none of its added lines in `coverage.xml` and counts them as not coverable: the coverage
-  condition can pass a change whose new code there is untested. `docs/quality-gate.md` states it. Closes with a
-  coverage.py that records such files, or with the gate naming them as unmeasured.
 - **The reruns' time limit is too short for slow tests on the Jenkins agent.** `FLAKY_RUN_TIMEOUT` is 30 s a run. On
   `flaky-tests`' own change each run took about 9 s on an idle laptop and about twice that under load. Measured on
   Jenkins on 2026-10-24 (PR #50, surviving-mutants' change): the first rerun did not finish within 30 s, so the check
@@ -245,18 +250,6 @@ was done.
   build past `QUALITY_TIMEOUT` beside the mutation budget, so the user kept 30 s (2026-10-24). `not-rerun` is a finding
   to weigh, never a wrong verdict. Closes with one time budget the reruns and mutmut share, or lighter tests for the
   gate's own checks.
-- **A pytest configuration below the copy's top directory is not used, so its tests are never rerun.**
-  `_pytest_inifile` looks only in the top directory of `flaky_tests`' copy, and `_pytest` passes what it finds with
-  `-c`, or an empty `pytest.ini`. A project whose pytest configuration is in a subdirectory (`pkg/pyproject.toml`,
-  `tests/pytest.ini`) loses that configuration's `pythonpath`, `addopts`, plugins and markers, so every change to
-  its tests gets `not-rerun` (typically a collection error) and no test is rerun. Before `-c`, pytest's
-  `locate_config` walked up from the changed test files and found it, but it also walked past the copy into
-  `TMPDIR` (review F12). Raised by the cross-review of `flaky-tests` (F13, 2026-10-23). Closes when each changed
-  test's configuration is found by walking from its directory up to the copy's top and no further, in
-  `locate_config`'s order, and the reruns run once per configuration found.
-- **A file name that holds a line separator breaks its list item in the quality file.** `quality_report` writes
-  names as they are, so `\r` or U+2028 in one shows as a line break in some renderers. The finding is still
-  matched to the right file. Closes with names escaped when the quality file is written.
 - **A quality round waits for the whole build, not for its quality file.** `Workflow._analyse` polls the build's
   result until the build ends and only then reads `quality.md`, which the Gate stage archived before any later
   stage ran. So every stage after Gate counts against `QUALITY_TIMEOUT`; the Package stage was taken out of quality
@@ -303,40 +296,25 @@ was done.
   such files only when the project's coverage measures them, since `new_coverage` reads only the files the Cobertura
   report lists. Whether the linters should read them, leave them out, or the gate refuse them is open. Closes with that
   decision.
-- **The cognitive-complexity check reads and parses changed files in a loop of its own.** `_judged_files` and
-  `_working_functions` repeat `_changed_python_units`' reading, decoding and unreadable-file handling, because that
-  walker yields only top-level functions and methods of top-level classes, the units mutmut names, while the check
-  judges every function that no other function holds (`_scored_functions`). The two copies of the except clause
-  have to be kept alike, as a coding cookie naming an odd codec has shown twice. Closes with `_changed_python_units`
-  taking the walker as a parameter, or handing its callers the parsed trees.
-- **A changed `.py` symlink is read through to its target by the other Python checks.** `_changed_python_units`
-  opens every changed `.py` path, and `open()` follows a symlink, so a change that adds `x.py` as a symlink to a FIFO
-  blocks the surviving-mutants and flaky-tests selection, and one to `/dev/zero` reads without end. The
-  cognitive-complexity check skips such paths (`_is_link_or_special`, review round 5 of ticket 06, R5-F1). Found by
-  reading the code, not reproduced. Closes with `_changed_python_units` skipping what `_is_link_or_special` names.
-- **A function moved out of a Python script the change deletes is judged as new.** The cognitive-complexity check
-  reads the base of a changed file whose old name has no `.py` only when the file is still Python now
-  (`_base_scores`: `new in working`), so the functions of a deleted `bin/tool` lend no score, and one moved unchanged
-  from it into `lib.py` is reported as new. Closes with the base read whenever its first line is a `#!` naming
-  python, as `_is_python_source` asks of the working tree.
-- **A deep decorator can crash flaky-tests and surviving-mutants.** `_changed_python_units`, which both select
-  through (`_changed_python_tests`, `_changed_python_functions`), writes each decorator of a changed function with
-  `ast.unparse(d)`, which recurses as deep as the expression goes, so a function decorated with a deep expression,
-  such as a sum of a few thousand terms, can raise `RecursionError` out of the check, which GateCheck says must not
-  raise; an int of more than 4300 digits in one raises `ValueError` the same way. Raised by review round 5 of ticket
-  06 (R5-F5), its check named right in round 6 (R6-F3); confirmed at the node only, not end to end; the code is
-  surviving-mutants'. `_code` already survives both for findings' messages. Closes with the decorators compared by
-  `_body_fingerprint`-like fingerprints rather than their text, or the unparse guarded as `_code` guards it.
+- **mutmut reads a symlinked `.py` file in the surviving-mutants copy.** `_copy_tracked` copies a tracked symlink
+  as a link (`orchestrator.py`), `_mark_for_mutmut` leaves links unmarked, and mutmut 3.8.0's `walk_all_files` lists
+  a symlink to a file and `create_mutants_for_file` opens it. So once any changed function starts mutmut, a change
+  adding `x.py -> calc.py` has every function of `calc.py` mutated a second time, as `x.py`, spending the budget on
+  mutants no finding reports; and `x.py -> /dev/zero` or a FIFO reads without end or blocks until the budget runs
+  out. The gate's own selection skips such links (`_parsed_changed_files`). Raised by the cross-review of
+  `gate-python-files` (R2-F1, 2026-10-26); rests on mutmut's source, not on a run. Closes with the copy or
+  `_mark_for_mutmut` keeping links out of mutmut's walk, without breaking a tracked link the tests import through,
+  and a test that also edits a real function.
+- **passes-at-base misses a deleted Python script with no `.py`.** `_edits_python_source` (`orchestrator.py`)
+  counts a deleted file as Python source only by its `.py`, so a change that only deletes a `#!` python script
+  outside the tests edits no Python source for it. Found while fixing the cognitive-complexity check's same gap
+  (2026-10-25). Closes with that branch asking `_was_python_source`, which the complexity check now uses.
 - **A Python script with no `.py` is never judged by the cognitive-complexity check.** `_judged_files` judges only
   paths ending in `.py`, while the pairing reads a script whose `#!` line names python as Python
   (`_is_python_source`), so a function moved unchanged into `bin/tool` keeps its base, but one the change grows
   there, or writes new over the limit, is not a finding. `docs/quality-gate.md` says "a `.py` file". Raised by the
   spec-conformance pass of review round 6 of ticket 06; ticket 06's "the Python functions the change touches" can be
   read either way. Closes with `_judged_files` taking `_is_python_source`, or a decision that `.py` is the scope.
-- **Cognitive complexity scores direct recursion only.** Campbell's paper gives a point to each function in a
-  recursion cycle; `_calls_itself` sees a function calling itself by name, or a method as `self.m`, `cls.m` or
-  `C.m`, but not a cycle through other functions, nor a call through an alias. A function that recurses through a
-  helper scores a point less than the paper says. Closes with a call graph of the module, scored per cycle.
 - **A body moved into a file hides a function with that body moved out of it, which is then judged as new.** The
   cognitive-complexity check takes a base function as gone from its file when the file now holds its body fewer times
   than the base did (`_BasePool._gone`), without asking where the working tree's copies came from. So when `calc.py`'s
@@ -360,6 +338,181 @@ was done.
 - **The GitHub repository still had the old name.** It is `DavidSiegl/octoflow-ai` now, and the README's URLs and
   badges point there; GitHub redirects the old URLs.
 
+- **A deep decorator can crash flaky-tests and surviving-mutants.** `_changed_python_units`, which both select
+  through (`_changed_python_tests`, `_changed_python_functions`), writes each decorator of a changed function with
+  `ast.unparse(d)`, which recurses as deep as the expression goes, so a function decorated with a deep expression,
+  such as a sum of a few thousand terms, can raise `RecursionError` out of the check, which GateCheck says must not
+  raise; an int of more than 4300 digits in one raises `ValueError` the same way. Raised by review round 5 of ticket
+  06 (R5-F5), its check named right in round 6 (R6-F3); confirmed at the node only, not end to end; the code is
+  surviving-mutants'. `_code` already survives both for findings' messages. Closes with the decorators compared by
+  `_body_fingerprint`-like fingerprints rather than their text, or the unparse guarded as `_code` guards it.
+  Fixed (2026-10-26): `_python_units` writes each decorator through `_unparsed`, the guard `_code` now shares, which
+  gives why instead of raising; `_ChangedFunction.decorators` holds None for a decorator too deep or too long to
+  write, which `_unmutatable`, its one reader, counts as a decorator like any other. `TestChangedPythonFiles` runs
+  flaky-tests and surviving-mutants end to end on a sum of 5000 terms and on an int of 5058 decimal digits, written
+  in hexadecimal since a decimal literal that long does not parse.
+
+- **The cognitive-complexity check reads and parses changed files in a loop of its own.** `_judged_files` and
+  `_working_functions` repeat `_changed_python_units`' reading, decoding and unreadable-file handling, because that
+  walker yields only top-level functions and methods of top-level classes, the units mutmut names, while the check
+  judges every function that no other function holds (`_scored_functions`). The two copies of the except clause
+  have to be kept alike, as a coding cookie naming an odd codec has shown twice. Closes with `_changed_python_units`
+  taking the walker as a parameter, or handing its callers the parsed trees.
+  Fixed (2026-10-26): one walker, `_parsed_changed_files(change, wanted)`, reads and parses each changed `.py` file
+  through `_parse_working_file` and yields it as a `_ChangedPythonFile` (path, added lines, removal points, source,
+  tree or why not); `wanted(path, added, removed)` is each caller's filter. `_changed_python_units`, `_judged_files`
+  and `vague_names` all read through it, so the except clause and its wording live in `_parse_working_file` alone.
+
+- **A changed `.py` symlink is read through to its target by the other Python checks.** `_changed_python_units`
+  opens every changed `.py` path, and `open()` follows a symlink, so a change that adds `x.py` as a symlink to a FIFO
+  blocks the surviving-mutants and flaky-tests selection, and one to `/dev/zero` reads without end. The
+  cognitive-complexity check skips such paths (`_is_link_or_special`, review round 5 of ticket 06, R5-F1). Found by
+  reading the code, not reproduced. Closes with `_changed_python_units` skipping what `_is_link_or_special` names.
+  Fixed (2026-10-26): `_changed_python_units` reads through `_parsed_changed_files`, which skips whatever
+  `_is_link_or_special` names for every caller; `TestChangedPythonFiles` runs flaky-tests and surviving-mutants on a
+  change adding `x.py` and `tests/test_x.py` as symlinks to a FIFO and to `/dev/zero`, under a time and memory bound.
+
+- **Three gate checks repeat the make-a-scratch-directory, run, remove-it skeleton.** `flaky_tests`,
+  `_mutation_test` and `passes_at_base` each call `tempfile.mkdtemp`, word their own finding when it fails, and word
+  another when `shutil.rmtree` fails (`not-removed` twice, `cleanup` once). The cross-review of `passes-at-base`
+  (R1-8, 2026-10-24) raised it as "a third copy of the scratch-directory skeleton ... with reworded messages". Closes
+  with one helper that takes the check's rule and what it was doing, and the three findings worded one way, with the
+  flaky-tests and surviving-mutants tests that quote today's wording.
+  Fixed (2026-10-26): all three run through `_in_scratch_directory(rule, purpose, run)`, which words both failures
+  one way, "could not make a directory <purpose>" under the check's rule and "could not remove the directory
+  <purpose>, `<path>`" as `not-removed`, and removes the directory even when `run` raises.
+
+- **A process a test leaves holding pytest's output keeps a finished run waiting until its timeout.** `_pytest`'s
+  `communicate` reads to the end of pytest's output, so a server a test started that inherits it keeps a run that has
+  finished going until the timeout, reported then as `budget-reached` (passes-at-base) or `not-rerun` (flaky-tests).
+  It was so before `_pytest` ran pytest in its own session. Raised by the cross-review of `passes-at-base` (round 2,
+  2026-10-24). Closes when `_pytest` waits for pytest itself, then kills its group and reads what is buffered.
+  Fixed (2026-10-26): `_run_in_session` waits for the process, reading its pipes meanwhile, then kills its group
+  and reads what is left for at most `TOOL_KILL_WAIT` seconds; `_pytest` runs pytest through it.
+
+- **`_pytest` and `_run_mutmut` copy one stop-and-kill sequence.** Both start their tool in a session of its own,
+  kill its process group on a timeout and in `finally`, and read what is left with `_abandon`; the copies had already
+  drifted in which errors `killpg` may raise. Raised by the same review. Closes with one helper that runs a command in
+  its own session and stops it, which both use, mutmut's SIGINT grace an option of it.
+  Fixed (2026-10-26): both run through `_run_in_session`, mutmut with `MUTMUT_STOP_GRACE` as its grace; `_abandon`
+  is gone, and one `_kill_group` suppresses the same errors for both.
+
+- **A file name that holds a line separator breaks its list item in the quality file.** `quality_report` writes
+  names as they are, so `\r` or U+2028 in one shows as a line break in some renderers. The finding is still
+  matched to the right file. Closes with names escaped when the quality file is written.
+  Fixed (2026-10-26): `one_line` writes each character that ends a line in some reader (`\n`, `\r`, `\v`, `\f`,
+  `\x1c`-`\x1e`, `\x85`, U+2028, U+2029) as `\xNN` or `\uNNNN`. Every list item of a quality file goes through it
+  whole, path and message alike: the gate's conditions, findings, failing tests and suppressions, judge_run's
+  findings and conditions, `build_failed_report`'s tests and `leak_report`'s secrets; so do the names the gate lists
+  in a sentence. `gate_failures` reads back the escaped item, the same in every round.
+
+- **Coverage of a file whose name is not UTF-8 is never measured.** coverage.py 7.14 collects no data for it, so
+  `new_coverage` finds none of its added lines in `coverage.xml` and counts them as not coverable: the coverage
+  condition can pass a change whose new code there is untested. `docs/quality-gate.md` states it. Closes with a
+  coverage.py that records such files, or with the gate naming them as unmeasured.
+  Fixed (2026-10-26): the quality file names each such `.py` file the change adds lines to under the coverage
+  sentence, as `Not measured`; the coverage condition is judged as before, without its lines.
+
+- **A pytest configuration below the copy's top directory is not used, so its tests are never rerun.**
+  `_pytest_inifile` looks only in the top directory of `flaky_tests`' copy, and `_pytest` passes what it finds with
+  `-c`, or an empty `pytest.ini`. A project whose pytest configuration is in a subdirectory (`pkg/pyproject.toml`,
+  `tests/pytest.ini`) loses that configuration's `pythonpath`, `addopts`, plugins and markers, so every change to
+  its tests gets `not-rerun` (typically a collection error) and no test is rerun. Before `-c`, pytest's
+  `locate_config` walked up from the changed test files and found it, but it also walked past the copy into
+  `TMPDIR` (review F12). Raised by the cross-review of `flaky-tests` (F13, 2026-10-23). Closes when each changed
+  test's configuration is found by walking from its directory up to the copy's top and no further, in
+  `locate_config`'s order, and the reruns run once per configuration found.
+  Fixed (2026-10-26): `_pytest_groups` walks each changed test file's directory up to the copy's top, taking the first
+  configuration `_pytest_inifile` finds, and flaky-tests and passes-at-base run once per group (`_PytestGroup`), each
+  with its `-c`, `--rootdir` its directory, pytest still started from the copy's top and `--confcutdir` the copy; the
+  groups of passes-at-base share its budget, and a group that cannot run is a finding about its tests alone, as are
+  the groups a spent budget leaves unrun. surviving-mutants still takes the top directory's (Open issues).
+- **`doctor --machine` asks the machine twice for each tool.** Each check is its own `Host.run`, so `_tool_version`
+  asks `command -v` before `--version`, which already fails for a missing command, and `_gh_logged_in` before
+  `gh auth status`, which may wait up to `NETWORK_TIMEOUT`. Since `ssh_sharing_options` the commands share one SSH
+  connection, so each costs a round trip, no longer a handshake. Raised by the cross-review of the doctor command
+  (F8, 2026-10-24): "redundant probes, each one SSH connection with `--machine`". Closes with each tool asked once
+  (`.scratch/doctor-ssh/issues/02-drop-redundant-probes.md`).
+  Fixed (2026-10-26): `_tool_version` and `_gh_logged_in` run the tool once through `_run_tool`, which gives the
+  same "<command> is not on PATH" for a command that cannot start locally or that the remote shell answers with
+  127; `_on_path` stays for the agent CLIs, whose checks only ask whether they exist. With `ssh_sharing_options`,
+  20 commands to a user-level sshd on this host took 0.24 s against 1.78 s unshared; `doctor --machine` on a real
+  machine was not timed, as none is saved in herdr here.
+
+- **Cognitive complexity scores direct recursion only.** Campbell's paper gives a point to each function in a
+  recursion cycle; `_calls_itself` sees a function calling itself by name, or a method as `self.m`, `cls.m` or
+  `C.m`, but not a cycle through other functions, nor a call through an alias. A function that recurses through a
+  helper scores a point less than the paper says. Closes with a call graph of the module, scored per cycle.
+  Fixed (2026-10-25): `_recursive_functions` builds each module's call graph from `_callees`, the name resolution
+  `_calls_itself` now asks too, which resolves a call as Python's scopes do (a parameter, local or nested function
+  of the caller's name is not the module's), and finds its strongly connected components by Kosaraju's algorithm;
+  each function on one, or calling itself, scores the point once, which `cognitive_complexity` is told as
+  `recursive`. A call through an alias or into another module, and a cycle through a nested function, stay
+  unfollowed, as the comment above `COGNITIVE_COMPLEXITY_LIMIT` says; a move that brings two functions calling
+  each other into one module raises both by the point (`docs/quality-gate.md`). No function of `orchestrator.py`
+  changed its score.
+
+- **A function moved out of a Python script the change deletes is judged as new.** The cognitive-complexity check
+  reads the base of a changed file whose old name has no `.py` only when the file is still Python now
+  (`_base_scores`: `new in working`), so the functions of a deleted `bin/tool` lend no score, and one moved unchanged
+  from it into `lib.py` is reported as new. Closes with the base read whenever its first line is a `#!` naming
+  python, as `_is_python_source` asks of the working tree.
+  Fixed (2026-10-25): `_base_scores` reads an old path's base when `_was_python_source` says the base's blob is
+  Python, by `_holds_python`, the one test of a path and its first line that `_is_python_source` uses for the
+  working tree too.
+
+- **The macOS builds are first tried on a published release.** `.github/workflows/macos-binary.yml` runs only on
+  `release: published` or by hand for an existing tag, so a change that breaks the macOS binary or
+  `packaging/build-desktop.sh` on macOS merges green, and the release then lacks those assets until it is fixed and
+  the workflow is run again for the tag. Found adding the desktop app to releases (2026-10-24), whose `.dmg` had
+  never been built before the first release with it. Closes with a macOS build of pull requests that touch
+  `packaging/` or `ui/`, or a decision that a rerun after the release is enough.
+  Fixed (2026-10-26): `.github/workflows/macos-binary.yml` builds every pull request that touches `packaging/`,
+  `ui/`, `pyproject.toml`, `uv.lock`, `.python-version`, `orchestrator.py` or the workflow, in a `build` job with
+  `contents: read`; a separate `upload` job, the only one with `contents: write`, adds the build's artifact to a
+  release or a dispatch's tag. PR #89's own run built both on `macos-latest`, its upload skipped
+  (https://github.com/DavidSiegl/octoflow-ai/actions/runs/40283655516). The release path is first run by the next
+  release.
+
+- **Two builds on agentbox0 can still run rustc out of memory.** All builds on the node share its Jenkins agent
+  container's 3 GB (`mem_limit: 3g`, not the VM's 8 GiB), and a push to a new branch starts a branch build before
+  its pull request exists, so two builds of one commit compiled the Tauri crates at once (PR-74's first build:
+  rustc SIGKILLed on `gtk`). Building the UI stage without debug info lowered one build's peak only. Raised by the
+  cross-review of ci-no-debuginfo (2026-10-25): "the OOM cause is narrowed and left unrecorded".
+  Fixed (2026-10-25): the UI stage's `cargo test` and the Package stage's `build-desktop.sh` run under
+  `ci/cargo-lock.sh`, a `flock` on a file outside every workspace that every build of this repository on the node
+  takes, and say so when they wait. A quality build never waits: its rounds already take up to 1174 s of
+  `QUALITY_TIMEOUT`'s 1200 s, and a Package stage holds the lock for about 300 s, so it takes the lock only when it
+  is free and otherwise compiles beside the other build, saying so. Chosen over serialising whole builds: Jenkins
+  has neither Lockable Resources nor Throttle Concurrent Builds, and one executor would queue the Python-only
+  stages too, against `QUALITY_TIMEOUT`. What else shares the 3 GB stays open under "Is 3 GB the right memory
+  limit".
+
+- **A prompt sent right after a startup dialog can be lost.** When an agent starts behind a dialog, such as Claude
+  Code's folder-trust question, `Workflow._start` waits in `_wait_for_startup` for herdr to report it `idle` and
+  returns; `Workflow._written` then sends the turn's prompt and records it in `RunState.prompted`. On 2026-10-25
+  the Builder of run 20261025-090825-73faf7, in a worktree of a clone Claude Code had not seen, was reported idle
+  as the dialog closed and before its input took text: the prompt never arrived, yet counted as delivered, and the
+  turn timed out after 1800s at an empty prompt. `resume` cannot recover it, since `_prompt_for` only waits on an
+  alive agent already prompted. Closes with `_wait_for_startup` waiting until the agent takes input, or with the
+  prompt's delivery checked (the agent turning `working`, or its handoff file appearing) and the prompt sent again
+  when neither happens.
+  Fixed (2026-10-25): `Workflow._written` sends the prompt through `_deliver`, which counts it taken once herdr
+  reports the agent `working` or `blocked`, or its handoff file exists, within `PROMPT_DELIVERY_SECONDS` (30), and
+  otherwise sends the same prompt once more. A second miss fails the turn naming the role, the file and the pane.
+  `prompted` and the turn's record are saved only once the prompt is taken, so a `resume` of such a run prompts the
+  agent again instead of only waiting. `_wait_for_startup` is unchanged.
+- **drain takes two passes to mark a spec done whose run's pull request already merged.** A `ready-for-agent` spec
+  with a `Run:` line gets `in-review` and `PR:` from `finished_run_header`, but `refreshed_headers` asks gh about
+  the pull request only for a spec that was `in-review` when the pass began, so a pull request merged since leaves
+  the spec `in-review`, its dependants blocked, until the next drain. Met on 2026-10-25 after resuming a run
+  outside drain. Closes with the pull request checked in the same pass once `finished_run_header` gives one.
+  Fixed (2026-10-25): when `finished_run_header` makes a spec `in-review`, `refreshed_headers` asks
+  `pull_request_header` about its pull request in the same pass and merges the result into the spec's one pair, so
+  a merged one makes the spec `done` and its dependants startable in that drain, `--dry-run` included.
+  Since 2026-10-26 `settled_header` holds those steps, in order, for every spec, so a spec gets one pair a pass, and
+  gh is asked once a pass about each pull request (`_PullRequestStates`): an `in-review` or `ready-for-human` spec
+  whose conflict refresh finds its pull request merged is `done` from that refresh's answer.
 - **`test-integrity` has no way to accept an expected value the spec changes.** `expected-value-changed` fails the
   gate whenever an assertion's literals change beside code, also when the spec asks for the new output, and unlike
   `removed-test` there is no report the Reviewer judges instead. PR #76 changed what the pull request says for a

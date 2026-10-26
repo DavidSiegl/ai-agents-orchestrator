@@ -116,7 +116,7 @@ lacks deleted); a resume restores a saved record again. That happens before the 
 the locked files, and `LOCKED_NOTE` tells the verdict step which files of its round were restored and where the
 diffs are.
 
-A workflow with a `proof_command` (`examples/workflows/adversarial.toml`) has its verdict step back findings with
+A workflow with a `proof_command`, such as `python -m pytest -q {proofs}`, has its verdict step back findings with
 tests in `{proofs_dir}`, `RunState.proofs_dir(n)` in the run directory, so they never enter the snapshot or the
 commit. After a review that requests changes, `Workflow._judge_proofs` runs each proof file with the command in the
 working tree (`_run_proof`: exit status 1 is a failing proof, which demonstrates the finding its name's first number
@@ -307,10 +307,11 @@ running `after` callbacks on `tick`), and `TestRunProcess` runs real child proce
 - `.github/workflows/automerge.yml`: keeps auto-merge on for a pull request into `main` from a branch of this
   repository, so it merges with a merge commit once Jenkins' required check passes; its header lists the pull
   requests it leaves to a human.
-- `.github/workflows/macos-binary.yml`: Jenkins has no Mac, so when a release is
-  published, or by hand for an existing tag, it runs `packaging/build-binary.sh` and `packaging/build-desktop.sh`
-  on `macos-latest` and uploads `octoflow-macos-arm64`, `octoflow-desktop-macos-arm64.dmg` and their
-  `.sha256` to that release with `gh release upload --clobber`. With only
-  `contents: write`, it never creates a release or a tag; everything else stays in Jenkins.
+- `.github/workflows/macos-binary.yml`: Jenkins has no Mac, so it runs `packaging/build-binary.sh` and
+  `packaging/build-desktop.sh` on `macos-latest`. When a release is published, or by hand for an existing tag, a
+  second job uploads `octoflow-macos-arm64`, `octoflow-desktop-macos-arm64.dmg` and their `.sha256` to that release
+  with `gh release upload --clobber`; with only `contents: write`, it never creates a release or a tag. For a pull
+  request that touches the packaging, the UI, the code or the Python they build with, it only builds, with
+  `contents: read`, as an advisory check. Everything else stays in Jenkins.
 
 How to set Jenkins up for it is in [quality-gate.md](quality-gate.md).
