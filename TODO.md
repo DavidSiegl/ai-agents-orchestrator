@@ -205,16 +205,23 @@ was done.
   Twenty runs here under the load of a parallel suite, with SIGINT ignored, all passed. A rerun that hangs gives a
   `not-rerun` warning, not a wrong verdict. Closes when the run that waits is caught, e.g. with each pytest run's
   wall time and exit in the test's failure message, and its cause fixed.
+- **README and docs left over from the README rewrite (PR #90).** Raised by cross-review 50 (2026-10-26), in what
+  PR #90 brought, not in code:
+  - The Jenkins job path still uses the old folder name, as
+    `--quality-gate AI-Agents-Orchestrator/py-ai-agents-orchestrator-quality` (README.md, the `--quality-gate`
+    example; also docs/quality-gate.md), where the folder is `Octoflow-AI` and the job `py-octoflow-ai-quality`.
+    The Planned rename entry above still lists the folder as not renamed.
+  - docs/architecture.md's endpoint table gives `/files?run=ID` as a list of `{"name", "mtime"}`, while
+    `RunRequestHandler`'s docstring, which the table names as the authority, gives `{"run", "files"}`.
+  - The README's `gate` example says exit 0 for OK and 1 for ERROR, but not 2, unjudged, when no quality file is
+    written.
+  - Smaller: a short line mid-paragraph in the rename entry above; the README no longer says which commands take only
+    `--machine`/`--cwd`; the `gate` example no longer names the tools it needs (ruff, mypy, pymarkdown, shellcheck,
+    actionlint).
+  Closes with those lines corrected, or the endpoint table replaced by a pointer to the docstring.
 - **`vague-names` does not split CamelCase.** `vague_names` matches a whole name or its last `_`-separated word,
   so `user_data` is found but a class `InfoManager` or `UserData` is not. Closes, if the run metrics show such names
   recur, with the last CamelCase word matched too.
-- **Ten test classes copy the same git-repository fixture.** `TestFlakyTests`, `TestPassesAtBase`, `TestVagueNames`,
-  `TestTooComplexFunctions`, `TestChangedPythonFiles` and five more each define a `setUp` that makes a repository,
-  configures it and commits a base, most with the same `git` and `put` helpers; eight of the copies bind the vague
-  `value` that `vague-names` now reports on added lines, and `TestVagueNames`' and `TestChangedPythonFiles`' bind
-  `setting`. Raised again by the cross-review of `written-rules` (F8, 2026-10-24), and by that of
-  `gate-python-files` ("`TestChangedPythonFiles` copies the repo scaffolding once more", R1-F5, 2026-10-26). Closes
-  with one mixin or base class those tests share.
 - **`vague-names` reports a name an undecorated override cannot change.** A `def handle(self)` in a
   `socketserver.BaseRequestHandler` subclass, or a parameter the overridden signature names, has no fix; only a
   method marked `@override` is skipped (`_bound_names`). Raised by the cross-review of `written-rules` (F6,
@@ -346,6 +353,22 @@ was done.
   functions of those modules count as not reached, and `_budget_reached` says the stop cut off mutmut's save of their
   results; the other modules' findings stand. A listing failure without a stop, one after the removal, or a `.meta`
   that cannot be removed stays `not-run`. Not closed: those modules' results are lost, not recovered.
+
+- **Ten test classes copy the same git-repository fixture.** `TestFlakyTests`, `TestPassesAtBase`, `TestVagueNames`,
+  `TestTooComplexFunctions`, `TestChangedPythonFiles` and five more each define a `setUp` that makes a repository,
+  configures it and commits a base, most with the same `git` and `put` helpers; eight of the copies bind the vague
+  `value` that `vague-names` now reports on added lines, and `TestVagueNames`' and `TestChangedPythonFiles`' bind
+  `setting`. Raised again by the cross-review of `written-rules` (F8, 2026-10-24), and by that of
+  `gate-python-files` ("`TestChangedPythonFiles` copies the repo scaffolding once more", R1-F5, 2026-10-26). Closes
+  with one mixin or base class those tests share.
+  Fixed (2026-10-26): `tests/gitrepo.py`'s `RepositoryTest` makes the repository in `setUp`, configures it, commits
+  the class's `BASE_FILES` as "base", and gives `git`, `put`, `edit` and `commit`; `TestScanUnpublished`, `TestGate`,
+  `TestWeakenedTests`, `TestFlakyTests`, `TestPassesAtBase`, `TestVagueNames`, `TestSurvivingMutants`,
+  `TestTooComplexFunctions`, `TestChangedPythonFiles` and `TestHostSnapshot` derive from it, and what their `setUp`s
+  kept out of the tree (stub tools, a bare origin, a rules file) is under the base's `outside`. `TestHostGit` keeps
+  a `setUp` of its own, since it makes two clones of a bare origin rather than one repository; its `clone` binds
+  `setting` now. Not closed: single tests still make a repository or a directory of their own, such as
+  `TestPassesAtBase`'s submodule.
 
 - **The GitHub repository still had the old name.** It is `DavidSiegl/octoflow-ai` now, and the README's URLs and
   badges point there; GitHub redirects the old URLs.
