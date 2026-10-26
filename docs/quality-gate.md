@@ -235,10 +235,12 @@ Python source outside the tests: a `.py` file, or a script whose `#!` names pyth
 test integrity), a `conftest.py` or under a `tests` directory. A change to the tests alone, or to the tests and the
 docs, has no "without the change" a test could see. The base is the files git tracked at `--base`, as `git archive`
 writes them, with every one of the change's files that belong with the tests (those three kinds) taken from the
-working tree, or removed where the change removed it, so the changed tests keep their fixtures and data. A submodule is
-an empty directory there. pytest, in the gate's interpreter, with the configurations flaky-tests' reruns get, found
-the same way in the base, once for each, and the copy's own `TMPDIR`, first collects the changed test files with
-`--continue-on-collection-errors`, then runs those of the changed tests it collected, all within the one time limit:
+working tree, or removed where the change removed it, so the changed tests keep their fixtures and data. A submodule
+holds the files of the commit the base records for it, from its own repository in the working tree; one that is not
+initialised there, or lacks that commit, is left empty, and a `not-run` finding names it. pytest, in the gate's
+interpreter, with the configurations flaky-tests' reruns get, found the same way in the base, once for each, and the
+copy's own `TMPDIR`, first collects the changed test files with `--continue-on-collection-errors`, then runs those of
+the changed tests it collected, all within the one time limit:
 
 - `passes-at-base`: a test that passed at the base, each of its parameter sets that pytest did not skip included, at
   its `def`. A test that fails or errors there tests the change and gives nothing; so does one pytest does not collect
@@ -253,7 +255,8 @@ the same way in the base, once for each, and the copy's own `TMPDIR`, first coll
 - `not-run`: pytest could not start, stopped before it collected (as for a plugin a `conftest.py` names that cannot be
   imported), failed to load a `conftest.py` the change does not edit, as the base itself fails there, stopped with
   another usage error, or wrote no readable report; the run imported the project's code
-  from the working tree (below); a changed test file could not be read or parsed; or the copy could not be made;
+  from the working tree (below); a submodule was left empty (above); a changed test file could not be read or parsed;
+  or the copy could not be made;
 - `not-removed`: the copy could not be removed afterwards; the findings stand.
 
 The base's code is what the copy's import roots, its top and its `src/` when it has one, and its configuration, such

@@ -7883,6 +7883,45 @@ class TestPassesAtBase(unittest.TestCase):
             "not-run", ("pytest, collecting the changed tests at the base, could not load `elsewhere/conftest.py`, "
                         "above none of the changed tests: AttributeError: x; the changed tests were not run there."))])
 
+    def add_submodule(self):
+        """Commit, as the base, a submodule at vendor/lib whose helper.py defines ONE, on pytest's path; then fix add,
+        and add test_mul_again, which imports ONE from it and passes at the base."""
+        lib = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, lib)
+        self.host.git(lib, "init", "--quiet", "-b", "main")
+        with open(os.path.join(lib, "helper.py"), "w") as f:
+            f.write("ONE = 1\n")
+        self.host.git(lib, "add", "helper.py")
+        self.host.git(lib, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false",
+                      "commit", "--quiet", "-m", "lib")
+        self.git("-c", "protocol.file.allow=always", "submodule", "--quiet", "add", lib, "vendor/lib")
+        self.put("pytest.ini", "[pytest]\npythonpath = . vendor/lib\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "submodule")
+        self.fix_add("\n\ndef test_mul_again():\n    from helper import ONE\n    assert mul(ONE, ONE) == 1\n")
+
+    def test_a_test_importing_from_a_submodule_is_judged_at_the_base(self):
+        self.add_submodule()
+        self.assertEqual([(f["rule"], f["message"].split("`")[1]) for f in self.found()],
+                         [("passes-at-base", "test_mul_again")])
+
+    def test_a_submodule_not_initialised_is_one_finding(self):
+        self.add_submodule()
+        self.git("submodule", "--quiet", "deinit", "--force", "vendor/lib")
+        self.assertEqual([(f["path"], f["rule"], f["message"]) for f in self.found()], [(
+            None, "not-run", ("the copy of the base leaves a submodule empty, so the changed tests that import from "
+                              "it were not judged: `vendor/lib`, which is not initialised in the working tree."))])
+
+    def test_a_submodule_without_the_base_s_commit_is_one_finding(self):
+        self.add_submodule()
+        # The base records a commit that the submodule's repository in the working tree never had.
+        self.git("update-index", "--cacheinfo", f"160000,{'1' * 40},vendor/lib")
+        self.git("commit", "--quiet", "-m", "unknown submodule commit")
+        self.assertEqual([(f["path"], f["rule"], f["message"]) for f in self.found()], [(
+            None, "not-run", ("the copy of the base leaves a submodule empty, so the changed tests that import from "
+                              "it were not judged: `vendor/lib`, whose repository in the working tree does not have "
+                              "the base's commit 111111111111."))])
+
     def test_nothing_is_written_through_a_link_the_change_replaces(self):
         outside = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, outside)

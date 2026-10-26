@@ -212,11 +212,6 @@ was done.
   there. Accepted: the check reports only, and splitting the file's tests from its imports would mean rewriting
   them. Closes, if its run metrics show these files are common, by importing such names inside the tests that use
   them, or by running each test with the failing import stubbed.
-- **A submodule is empty in `passes-at-base`'s copy of the base.** `git archive` leaves a submodule's directory
-  empty, so a changed test that imports from one fails to import at the base and gives nothing, though it might pass
-  there; the check misses it. Raised by the cross-review of `passes-at-base` (R1-5, 2026-10-24): "`git archive` omits
-  submodule contents, so a test that imports from a submodule fails import at the base and is silently 'nothing'".
-  Closes when `_copy_base_with_tests` checks out each submodule at the commit the base records for it.
 - **A test file whose name is not UTF-8 is never rerun by `flaky-tests`.** pytest-randomly 5.0.0 hashes each node
   id as strict UTF-8 (`pytest_randomly._crc32`, called from `pytest_runtest_setup` and its neighbours) and stops
   with an internal error, exit status 3. `_pytest` already lets pytest print such an id
@@ -326,6 +321,16 @@ was done.
   files.
 
 ## Fixed
+
+- **A submodule is empty in `passes-at-base`'s copy of the base.** `git archive` leaves a submodule's directory
+  empty, so a changed test that imports from one fails to import at the base and gives nothing, though it might pass
+  there; the check misses it. Raised by the cross-review of `passes-at-base` (R1-5, 2026-10-24): "`git archive` omits
+  submodule contents, so a test that imports from a submodule fails import at the base and is silently 'nothing'".
+  Closes when `_copy_base_with_tests` checks out each submodule at the commit the base records for it.
+  Fixed (2026-10-26): `_copy_base_with_tests` unpacks the base through `_unpack_commit`, which lists the commit's
+  submodules (`git ls-tree`, mode 160000) and fills each one's directory with `git -C <path> archive` of the commit
+  the base records, from its repository in the working tree, its own submodules too. One not initialised there, or
+  whose repository lacks that commit, is left empty, and `_base_run_findings` names them in one `not-run` finding.
 
 - **A `conftest.py` that fails at the base other than by `ImportError` makes `passes-at-base` not-run.** One that
   reaches a name the change adds by attribute (`import calc; calc.TWO`, an `AttributeError`) stops pytest with exit 4

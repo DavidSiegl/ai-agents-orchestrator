@@ -4649,7 +4649,8 @@ def passes_at_base(change: GateChange, *, budget: float) -> list[dict]:
     them in, and one to docs alone none that a test could see.
 
     The tests run with pytest, in the gate's own interpreter, in the files git tracked at the base, as `git archive`
-    writes them (so a path the base's .gitattributes marks export-ignore is missing there, and a submodule is empty),
+    writes them (so a path the base's .gitattributes marks export-ignore is missing there), each submodule filled from
+    its own repository in the working tree at the commit the base records, or left empty, which a not-run finding names,
     with every file of the tests the change touches, conftest.py and data included, taken from the working tree instead,
     or removed where the change removed it. pytest first collects the changed test files there, then runs those of the
     changed tests it collected. A test passes there when pytest passed each of its cases that it did not skip, all its
@@ -4753,7 +4754,7 @@ def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str]
     puts there, which would import the working tree's code."""
     tree, scratch, plugins = os.path.join(tmp, "tree"), os.path.join(tmp, "tmp"), os.path.join(tmp, "plugins")
     try:
-        _copy_base_with_tests(change, tree, os.path.join(tmp, "base.tar"))
+        empty = _copy_base_with_tests(change, tree, os.path.join(tmp, "base.tar"))
         os.mkdir(scratch)
         os.mkdir(plugins)
         with open(os.path.join(plugins, f"{_BASE_IMPORTS_PLUGIN}.py"), "x", encoding="utf-8") as f:
@@ -4772,6 +4773,11 @@ def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str]
     env = {"TMPDIR": scratch, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": os.pathsep.join([*roots, *inherited])}
     run = _BaseRun(change, tree, env, time.monotonic() + budget, budget)
     out: list[dict] = []
+    if empty:
+        noun, pronoun = ("a submodule", "it") if len(empty) == 1 else ("submodules", "them")
+        named = "; ".join(f"`{path}`, {why}" for path, why in empty)
+        out.append(_finding(None, None, "not-run", f"the copy of the base leaves {noun} empty, so the changed tests "
+                                                f"that import from {pronoun} were not judged: {named}."))
     for n, (group, label) in enumerate(zip(groups, _labels(groups), strict=True)):
         found, stopped = _base_group_findings(run, group, group.own(tests), os.path.join(tmp, f"base-{n}"), label)
         out += [group.in_tree(f) for f in found]
@@ -4934,21 +4940,19 @@ def _base_run_budget_reached(budget: float, when: str) -> dict:
                                                   f"{when}, so none of them was judged.")
 
 
-def _copy_base_with_tests(change: GateChange, dest: str, archive: str) -> None:
+def _copy_base_with_tests(change: GateChange, dest: str, archive: str) -> list[tuple[str, str]]:
     """Write the files git tracked at change.base to dest, a directory it makes, through a tar file at archive, then
     replace each file of the change's that _beside_tests accepts with the working tree's: removed at its path at the
     base, and copied, a symbolic link as a link, to its path in the working tree. A symbolic link is written as it is,
     wherever it points, and no file is written or removed through one: a link on the way to a replaced file is
-    replaced by a directory, as the working tree has one there. A submodule is an empty directory, as git archive
-    leaves it.
-    Raises GateError when git cannot write the archive, tarfile.TarError when it cannot be unpacked, and
-    OSError when dest exists or a file cannot be written."""
-    _git(change.root, "archive", "--format=tar", f"--output={archive}", change.base, timeout=GATE_TOOL_TIMEOUT)
+    replaced by a directory, as the working tree has one there. A submodule holds the files of the commit the base
+    records for it, as _unpack_commit writes them.
+
+    Returns the submodules left empty, as _unpack_commit does. Raises GateError when git cannot list or write a
+    commit, tarfile.TarError when an archive cannot be unpacked, and OSError when dest exists or a file cannot be
+    written."""
     os.makedirs(dest)
-    with tarfile.open(archive) as tar:
-        # "tar", not "data": a tracked link out of the tree is the repository's own; both refuse a member whose path
-        # leads out of dest, through a link or otherwise.
-        tar.extractall(dest, filter="tar")
+    empty = _unpack_commit(change.root, change.base, dest, archive)
     # A path the base tracks has no link above it there.
     for old, _ in change.files:
         if old is not None and _beside_tests(old) and os.path.lexists(path := os.path.join(dest, old)):
@@ -4962,6 +4966,43 @@ def _copy_base_with_tests(change: GateChange, dest: str, archive: str) -> None:
             elif os.path.lexists(dst):
                 os.remove(dst)
             shutil.copy2(src, dst, follow_symlinks=False)
+    return empty
+
+
+def _unpack_commit(repo: str, commit: str, dest: str, archive: str, prefix: str = "") -> list[tuple[str, str]]:
+    """Write the files git tracked at commit in the repository whose working tree's top is repo to dest, an existing
+    directory, through a tar file at archive, which it overwrites; then fill each submodule's directory the same way,
+    from the submodule's own repository in repo's working tree, at the commit that commit records for it, its own
+    submodules too. A submodule that is not initialised there, or whose repository lacks that commit, is left an empty
+    directory, as git archive leaves it.
+
+    Returns those, each by its path with prefix before it, and why, a clause such as "which is not initialised in the
+    working tree". Raises GateError when git cannot list or write a commit, and tarfile.TarError when an archive
+    cannot be unpacked."""
+    _git(repo, "archive", "--format=tar", f"--output={archive}", commit, timeout=GATE_TOOL_TIMEOUT)
+    with tarfile.open(archive) as tar:
+        # "tar", not "data": a tracked link out of the tree is the repository's own; both refuse a member whose path
+        # leads out of dest, through a link or otherwise.
+        tar.extractall(dest, filter="tar")
+    # Each entry is "<mode> <type> <object>\t<path>"; a submodule's mode is 160000 and its object the commit.
+    listing = _git(repo, "ls-tree", "-r", "-z", commit, timeout=GATE_TOOL_TIMEOUT, verbatim=True)
+    empty: list[tuple[str, str]] = []
+    for entry in listing.split("\0"):
+        meta, _, path = entry.partition("\t")
+        if not meta.startswith("160000 "):
+            continue
+        recorded, name, sub = meta.split()[2], f"{prefix}{path}", os.path.join(repo, path)
+        # The submodule's directory is the top of a repository of its own only once it is initialised: before, git
+        # finds the superproject above it, and names the directory as a prefix within it.
+        own = _git_run(sub, "rev-parse", "--show-prefix", timeout=GATE_TOOL_TIMEOUT, verbatim=True)
+        if own.returncode != 0 or own.stdout.strip("\n"):
+            empty.append((name, "which is not initialised in the working tree"))
+        elif _git_run(sub, "cat-file", "-e", f"{recorded}^{{commit}}", timeout=GATE_TOOL_TIMEOUT).returncode != 0:
+            why = f"whose repository in the working tree does not have the base's commit {recorded[:12]}"
+            empty.append((name, why))
+        else:
+            empty += _unpack_commit(sub, recorded, os.path.join(dest, path), archive, f"{name}/")
+    return empty
 
 
 def _unlinked_path(dest: str, path: str) -> str:
