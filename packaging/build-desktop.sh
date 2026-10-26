@@ -73,8 +73,18 @@ publish() {
     echo "built dist/$name and dist/$name.sha256"
 }
 
-# smoke_appimage APPIMAGE: run the AppImage, an absolute path, as the CLI from a new directory, as a user would from
-# a project: --help and workflows exit 0, and the orchestrator that serve execs starts in that directory without
+# smoke_cli DIR PROGRAM: run PROGRAM, an absolute path, as the CLI from DIR, as a user would from a project: --help
+# exits 0, and workflows exits 0 listing the built-in default, as build-binary.sh asks of the binary. Calls
+# smoke_fail, which the caller defines, naming the check, when one fails.
+smoke_cli() {
+    (cd "$1" && "$2" --help >/dev/null) || smoke_fail "$2 --help did not exit 0"
+    (cd "$1" && "$2" workflows >"$1/workflows.out") || smoke_fail "$2 workflows did not exit 0"
+    grep -q '^default ' "$1/workflows.out" || smoke_fail "$2 workflows did not list the default workflow"
+    rm -f "$1/workflows.out"
+}
+
+# smoke_appimage APPIMAGE: run the AppImage, an absolute path, as the CLI from a new directory, as smoke_cli does,
+# and check that the orchestrator that serve execs starts in that directory without
 # the bundle's LD_LIBRARY_PATH entries or PYTHONHOME (UserShell in ui/src-tauri/src/lib.rs). serve is the one
 # command that needs no herdr and stays up long enough to read its /proc entry. Exits 1, naming the check, when
 # one fails.
@@ -92,8 +102,7 @@ smoke_appimage() {
         rm -rf "$smoke"
         exit 1
     }
-    (cd "$smoke" && "$1" --help >/dev/null) || smoke_fail "--help did not exit 0"
-    (cd "$smoke" && "$1" workflows >/dev/null) || smoke_fail "workflows did not exit 0"
+    smoke_cli "$smoke" "$1"
 
     (cd "$smoke" && exec "$1" serve >serve.out) &
     serve_pid=$!
@@ -140,6 +149,49 @@ smoke_appimage() {
     echo "smoke-tested dist/$(basename "$1") as the CLI"
 }
 
+# smoke_dmg DMG: get the CLI from the .dmg, an absolute path, as the README tells a Mac user to, and run it from a
+# new directory: as smoke_cli does, through a symlink to Contents/MacOS/octoflow in the mounted Octoflow.app; and
+# --help, exiting 0, through the app's own executable, CFBundleExecutable in its Info.plist, which runs the CLI when
+# given arguments (cli in ui/src-tauri/src/lib.rs). Detaches the .dmg; exits 1, naming the check, when one fails.
+smoke_dmg() {
+    smoke=$(mktemp -d)
+    smoke=$(cd "$smoke" && pwd -P)
+    mounted=''
+    smoke_fail() {
+        echo "build-desktop.sh: the .dmg's app as the CLI: $*" >&2
+        [ -z "$mounted" ] || hdiutil detach -quiet -force "$smoke/mnt" 2>/dev/null || true
+        rm -rf "$smoke"
+        exit 1
+    }
+    mkdir "$smoke/mnt" "$smoke/bin" "$smoke/project" || smoke_fail "could not make directories in $smoke"
+    hdiutil attach -quiet -nobrowse -readonly -mountpoint "$smoke/mnt" "$1" || smoke_fail "could not mount $1"
+    mounted=yes
+    app="$smoke/mnt/Octoflow.app"
+    ln -s "$app/Contents/MacOS/octoflow" "$smoke/bin/octoflow" || smoke_fail "could not link the orchestrator"
+    smoke_cli "$smoke/project" "$smoke/bin/octoflow"
+    exe=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist") \
+        || smoke_fail "Info.plist names no CFBundleExecutable"
+    # With PATH an empty directory and no ORCHESTRATOR_PY, the app can run only the orchestrator it bundles: its
+    # fallback for a build with none, python3 with the checkout's orchestrator.py (Orchestrator::locate_from), would
+    # pass here, since this script runs in that checkout. PATH is emptied, not unset: unset, execvp would search the
+    # default /usr/bin:/bin, where macOS has a python3.
+    (cd "$smoke/project" && env -u ORCHESTRATOR_PY PATH=/var/empty "$app/Contents/MacOS/$exe" --help >/dev/null) \
+        || smoke_fail "$exe --help did not exit 0 with only the bundled orchestrator to run"
+    # The volume can be busy for a moment after the processes started from it exit, as Spotlight looks at it.
+    tries=0
+    until hdiutil detach -quiet "$smoke/mnt"; do
+        tries=$((tries + 1))
+        if [ "$tries" -ge 5 ]; then
+            hdiutil detach -quiet -force "$smoke/mnt" || smoke_fail "could not detach $smoke/mnt"
+            break
+        fi
+        sleep 2
+    done
+    mounted=''
+    rm -rf "$smoke"
+    echo "smoke-tested dist/$(basename "$1") as the CLI, by symlink and as $exe"
+}
+
 # A bundle without the sidecar still builds and opens, then says only that it cannot start the orchestrator.
 out="ui/src-tauri/target/release/bundle"
 if [ "$os" = linux ]; then
@@ -159,4 +211,5 @@ else
     [ -x "$out/macos/Octoflow.app/Contents/MacOS/octoflow" ] \
         || { echo "build-desktop.sh: Octoflow.app has no Contents/MacOS/octoflow" >&2; exit 1; }
     publish dmg "$out/dmg/Octoflow_${version}_"*.dmg
+    smoke_dmg "$PWD/dist/octoflow-desktop-$os-$arch.dmg"
 fi
