@@ -1532,7 +1532,7 @@ def _new_ssh_control_dir(parent: str | None) -> str | None:
     """A new directory for SSH control sockets in parent, only the user's, its removal at exit registered; None when
     parent is unset, would give a socket path ssh rejects, too long or with a character its option parser takes
     apart, or the directory cannot be made."""
-    if not parent or any(c.isspace() or c in "%\"'" for c in parent):
+    if not parent or any(c.isspace() or c in "%\"'\\" for c in parent):
         return None
     # The socket's path: parent, the directory's name, and %C, the hash of the connection's endpoints, 40 hex digits.
     if len(os.fsencode(parent)) + 1 + len(_SSH_DIR_PREFIX) + 8 + 1 + 40 > _SSH_SOCKET_PATH_MAX:

@@ -1345,7 +1345,7 @@ class TestHerdr(unittest.TestCase):
 # The runtime directory this process's SSH control directory is made in, so that the argv Host.run builds for SSH is
 # known in advance; in /tmp, as tempfile's default on macOS would leave the socket's path too long. The tests that
 # make their own give ssh_sharing_options a control of their own (fresh_ssh_control).
-os.environ["XDG_RUNTIME_DIR"] = tempfile.mkdtemp(prefix="octoflow-run-test-", dir="/tmp")
+os.environ["XDG_RUNTIME_DIR"] = tempfile.mkdtemp(prefix="o-", dir="/tmp")
 atexit.register(shutil.rmtree, os.environ["XDG_RUNTIME_DIR"], True)
 # What Host.run puts before an SSH command's target.
 SSH = ["ssh", "-o", "BatchMode=yes", *orchestrator.ssh_sharing_options()]
@@ -1377,7 +1377,7 @@ class TestHost(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(orchestrator._SSH_CONTROL.dir).st_mode), 0o700)
 
     def test_a_control_directory_that_has_gone_is_made_again(self):
-        with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, {"XDG_RUNTIME_DIR": runtime}), \
+        with tempfile.TemporaryDirectory(prefix="o-", dir="/tmp") as runtime, patch.dict(os.environ, {"XDG_RUNTIME_DIR": runtime}), \
                 fresh_ssh_control():
             first = orchestrator.ssh_sharing_options()[5]
             shutil.rmtree(orchestrator._SSH_CONTROL.dir)

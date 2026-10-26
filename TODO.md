@@ -44,6 +44,12 @@ was done.
 
 ## Open issues
 
+- **SSH connection sharing has not been timed on a real `--machine`.** `ssh_sharing_options` was measured against
+  a user-level sshd on this host only, 20 commands in 0.24 s shared against 1.78 s unshared; no herdr machine is
+  saved here, so `doctor --machine` was not timed before and after
+  (`.scratch/doctor-ssh/issues/01-ssh-connection-sharing.md`, requirement 4). Raised by cross-review 33 (F7). Closes
+  with `time orchestrator.py doctor --machine <m>` on the herdr machine, before and after, both times written into
+  that ticket.
 - **`--machine` over SSH assumes a POSIX login shell and a server that takes several sessions.** Since
   `_run_tool`, doctor takes a remote command's exit status 127 for not on PATH: a csh or tcsh login shell exits 1
   ("Command not found."), so a missing gh reads as `gh auth status fails` and a missing git as a failed
