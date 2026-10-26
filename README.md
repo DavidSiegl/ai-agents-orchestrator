@@ -70,8 +70,9 @@ is missing.
   [uv](https://github.com/astral-sh/uv) only for the tests and the build
 - For `--machine`: the machine saved in herdr and non-interactive SSH to it; see
   [Running the agents on another machine](docs/design.md#running-the-agents-on-another-machine)
-- For `--quality-gate`: a Jenkins quality job set up as in [quality gate](docs/quality-gate.md), and its
-  credentials in `~/.config/ai-agents-orchestrator/ci.env` or the environment
+- For `--quality-gate`: a Jenkins quality job set up as in [quality gate](docs/quality-gate.md), its
+  credentials in `~/.config/ai-agents-orchestrator/ci.env` or the environment, and a git checkout with an
+  `origin`, also with `--no-pr`
 
 ## Install
 
@@ -106,13 +107,15 @@ Both take the same commands and flags as `python orchestrator.py` in a checkout,
 Run without arguments, or with `gui`, the orchestrator opens a window where a display is available: always on
 macOS, and on Linux when `DISPLAY` or `WAYLAND_DISPLAY` is set; otherwise it prints its usage. The window fills
 in and starts a run, lists the project's runs, resumes one, and follows its output, which Stop interrupts as
-Ctrl-C would. Per-role harnesses and models stay on the command line. Zoom with Ctrl (⌘ on macOS) and +, − or 0.
+Ctrl-C would. Per-role harnesses and models stay on the command line. Zoom from 75% to 200% with the − and +
+buttons, with Ctrl (⌘ on macOS) and +, − or 0, or with Ctrl and the mouse wheel.
 
 The role agents still run in herdr, so open `herdr` in a terminal to answer the Spec Collector. A run without a
 machine has to start from a herdr pane, so start the window from one, or give a machine. Launched from a file
 manager, the binary sees only that session's `PATH`, which must hold `herdr`, `git`, `gh` and each harness's CLI.
-A Python without tkinter makes `gui` exit with status 1 and print the command to install it; the binaries
-include it. See [The GUI](docs/design.md#the-gui).
+A Python without tkinter makes `gui` exit with status 1 and print the command to install it, such as
+`apt install python3-tk` or `brew install python-tk@3.13`; the binaries include it. See
+[The GUI](docs/design.md#the-gui).
 
 ### Desktop app
 
@@ -120,7 +123,8 @@ A desktop app is taking over from the window, one step at a time. So far it is r
 runs and their handoff files live, and starts no runs. It is a Tauri 2 app in [`ui/`](ui). Each release has it
 for Linux x86_64, as `octoflow-desktop-linux-x86_64.deb` and `.AppImage`, and for Apple Silicon macOS, as
 `octoflow-desktop-macos-arm64.dmg`, each with its `.sha256` and the orchestrator inside, so it needs neither
-Python nor a checkout. The macOS app is signed ad hoc only, so macOS quarantines it like the binary.
+Python nor a checkout. The macOS app is signed ad hoc only, not notarized, so macOS refuses to open it the
+first time when a browser downloaded it, as it does the binary.
 
 - **Overview:** each run's task, its progress through the workflow, its round, the current role, whether it is
   running or stale, the question it is blocked on, its verdict and its pull request.
@@ -134,12 +138,14 @@ window:
 
 - **AppImage:** the file itself, e.g. `./octoflow-desktop-linux-x86_64.AppImage run "..."` after `chmod +x`.
 - **`.deb`:** it installs the orchestrator as `/usr/bin/octoflow`.
-- **macOS:** link the orchestrator inside the app onto your `PATH`. Not yet checked on a real Mac:
+- **macOS:** link the orchestrator inside the app onto your `PATH`:
 
   ```bash
   ln -s /Applications/Octoflow.app/Contents/MacOS/octoflow /usr/local/bin/octoflow
-  xattr -dr com.apple.quarantine /Applications/Octoflow.app   # if it was downloaded with a browser
   ```
+
+  If macOS refuses to run it, the app was downloaded with a browser: open it once with right-click and Open, or
+  run `xattr -dr com.apple.quarantine /Applications/Octoflow.app`. Not yet checked on a real Mac.
 
 - **Headless machines and CI:** the plain binaries in [Install](#install), which need neither WebKit nor FUSE.
 
@@ -165,7 +171,7 @@ Ctrl-C or SIGTERM. Its endpoints and security checks are in [serve](docs/archite
 ## Usage
 
 ```bash
-# What a run needs, checked up front: a fix under each that is missing; exit status 1 if any is
+# Check what a run needs, and print a fix for each missing piece; exit status 1 if any is missing
 python orchestrator.py doctor --machine <machine> --cwd ~/GitHub/myproject
 
 # From a herdr pane, on the project in the current directory
@@ -215,8 +221,8 @@ python orchestrator.py metrics | jq -s 'map(.rounds) | add / length'
 uv run python orchestrator.py gate --base main --coverage coverage.xml --out quality.md
 ```
 
-`--machine` and `--cwd` work the same way for every command; `list`, `show`, `metrics`, `prune`, `close` and
-`refresh` take only those two, and `doctor` checks a project only when given `--cwd`.
+`--machine` and `--cwd` work the same way for every command, and `doctor` checks a project only when given
+`--cwd`.
 
 | Flag | Description |
 |---|---|
@@ -232,7 +238,7 @@ uv run python orchestrator.py gate --base main --coverage coverage.xml --out qua
 | `--role-model ROLE=MODEL` | Model for one role, by its key, e.g. `tests=sonnet`. Overrides `--model`; repeatable. |
 | `--workflow NAME` | `run` and `drain`: `default`, or one of [your own](#your-own-workflows). A resumed run keeps its workflow. |
 | `--workflow-file FILE` | `run` and `drain`: like `--workflow`, for the workflow file at `FILE`. |
-| `--spec FILE` | `run` only: skip the interview. `FILE`, read on this machine, becomes the first step's handoff file, and the run starts at the step after it. Without a task, the spec's top-level heading is the task. Needs a workflow whose first step writes the spec, such as `default` or `tdd`. |
+| `--spec FILE` | `run` only: skip the interview. `FILE` is read on this machine, a relative path from the current directory, not `--cwd`. It becomes the first step's handoff file, and the run starts at the step after it. Without a task, the task is the spec's top-level heading, or else `FILE`'s name. Needs a workflow whose first step writes the spec, such as `default` or `tdd`. |
 | `--no-pr` | `run` only: leave the change uncommitted and the workspace open instead of opening a pull request. Works outside git. |
 | `--worktree` | `run` and `drain`: work in a git worktree of the run's own; see [Worktree runs](#worktree-runs). |
 | `--quality-gate JOB` | `run`, `drain` and `resume`: after each Builder turn, have this Jenkins job, by its full name with folders, judge the change. Needs `JENKINS_URL`, `JENKINS_USER` and `JENKINS_TOKEN`, from the environment or `~/.config/ai-agents-orchestrator/ci.env`. |
@@ -271,7 +277,7 @@ for pi and opencode, and `codex resume <id>`. A role whose harness changed since
 | `0` | Approved, or `FINISHED` for a workflow without a verdict step. |
 | `3` | Changes still requested after the last round, or `QUALITY_GATE_FAILED` for a workflow without a verdict step. The pull request is a draft. |
 | `4` | Approved or finished, but the pull request conflicts with its base branch, so it is a draft. |
-| `5` | `drain`: the specs left wait on blockers that are not `done`. `refresh`: a pull request still conflicts, or GitHub has not yet computed whether it does. |
+| `5` | `drain`: the specs left wait on blockers that are not `done`, or were deleted or emptied while it ran. `refresh`: a pull request still conflicts, or GitHub has not yet computed whether it does. |
 | `1` | Error. |
 | `130` | Interrupted. |
 
@@ -280,8 +286,9 @@ for pi and opencode, and `codex resume <id>`. A role whose harness changed since
 ## How a run works
 
 1. **Workspace.** The run gets its own herdr workspace, with a pane per role. The project must be on a branch
-   with a clean working tree, which is fetched and fast-forwarded from `origin`; the pull request targets that
-   branch. A `--worktree` run checks `origin`'s version of the branch out in its own worktree instead. A run that
+   with a clean working tree; the pull request targets that branch. The branch is fetched from `origin` and
+   fast-forwarded, and if that fails, for example offline or because it has diverged, the run stops before the
+   interview. A `--worktree` run checks `origin`'s version of the branch out in its own worktree instead. A run that
    will open a pull request first deletes the branches of earlier runs whose pull request is done, as `prune` does.
 2. **Spec Collector.** A notification tells you it is waiting. Answer its questions in its pane; once you approve
    the spec, it writes `spec.md`. With `--spec`, there is no interview.
