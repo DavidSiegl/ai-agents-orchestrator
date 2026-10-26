@@ -193,6 +193,12 @@ was done.
   than holds for it. `gate_failures` does not read the intro, so no round is misjudged. Raised by cross-review 38
   (round 3, 2026-10-26). Closes with the intro written through `one_line`, or with each quality-file writer escaping
   once where it joins its lines.
+- **Small leftovers in the changed-file walker and its decorators.** Raised by cross-review 45 (F2-F5, 2026-10-26),
+  none giving a wrong result: `_ChangedFunction.decorators` unparses each decorator only for `_unmutatable`'s
+  `staticmethod`/`classmethod` test, which an `ast.Name` check would make without `_unparsed`; `_parsed_changed_files`
+  computes `_removal_points` for `_judged_files` and `vague_names`, which never read them; `_ChangedPythonFile` is a
+  frozen dataclass with `set` fields, so its generated `__hash__` raises; `vague_names` unpacks three fields and reads
+  `.why` beside them. Closes with the four changed, in one commit, when the walker is next touched.
 - **`vague-names` does not split CamelCase.** `vague_names` matches a whole name or its last `_`-separated word,
   so `user_data` is found but a class `InfoManager` or `UserData` is not. Closes, if the run metrics show such names
   recur, with the last CamelCase word matched too.
@@ -208,34 +214,27 @@ was done.
   method marked `@override` is skipped (`_bound_names`). Raised by the cross-review of `written-rules` (F6,
   2026-10-24): "names fixed by a parent class or framework are reported, though they cannot be renamed". Closes, if
   the run metrics show it is common, with methods whose class has a base from outside the repository left out.
-- **`passes-at-base` reads every changed test as passing in a project installed into the gate's interpreter.**
-  `_base_run_findings` runs pytest in the gate's interpreter, so the base's code is whatever the copy's
-  configuration puts on `sys.path` (`pythonpath = ["."]` here). An editable install, as a `src/` layout under
-  `uv sync` has, resolves the package to the working tree first, so the base run tests the change and every changed
-  test is reported. This repository is not installed (no `[build-system]`), so it is unaffected. Closes when the run
-  at the base puts the copy's own package directories before site-packages, or names such a project as one it cannot
-  judge.
+- **`passes-at-base` lists the whole tree of the base, and of each submodule, to find its submodules.**
+  `_unpack_commit` runs `git ls-tree -r -z` on every run, even in a repository without `.gitmodules`, and splits the
+  whole listing, only to find the entries of mode 160000. Raised by cross-review 41 (F9, 2026-10-26): "a full
+  recursive `ls-tree` on every run, only to find gitlinks". Checking `<commit>:.gitmodules` first would skip a gitlink
+  that has no `.gitmodules` entry, such as a nested repository added by mistake, which is filled today. Closes, if run
+  metrics show the listing costs, by listing only the paths `.gitmodules` names, with such gitlinks left out.
+- **The copy's `src/` on `PYTHONPATH` comes before the standard library in `passes-at-base`'s run at the base.** A
+  module there named as one of the standard library's, such as `src/token.py`, shadows it, as one at the copy's top
+  already did through `python -m`. Raised by cross-review 41 (round 1, not recorded, 2026-10-26). Not seen failing.
+  Closes, if it is, by putting the roots on the path after the standard library and before site-packages.
 - **A test file that cannot be imported at the base hides all its changed tests from `passes-at-base`.** A
   module-level import of something the change adds makes pytest's collection of the whole file fail at the base,
   which `_collect_at_base` takes as the expected outcome for every changed test in it, including ones that would pass
   there. Accepted: the check reports only, and splitting the file's tests from its imports would mean rewriting
   them. Closes, if its run metrics show these files are common, by importing such names inside the tests that use
   them, or by running each test with the failing import stubbed.
-- **A `conftest.py` that fails at the base other than by `ImportError` makes `passes-at-base` not-run.** One that
-  reaches a name the change adds by attribute (`import calc; calc.TWO`, an `AttributeError`) stops pytest with exit 4
-  as an `ImportError` does, but `_conftest_import_failed` accepts only `ImportError` and `ModuleNotFoundError`, so
-  the whole check is `not-run`, where a test file failing the same way gives nothing. Loud, not wrong. Raised by the
-  cross-review of `passes-at-base` (round 3, 2026-10-24). Closes by telling a conftest.py the change edits from one
-  it does not, and taking any failure of the first as the expected outcome.
-- **The fallback collection runs one pytest per changed test file.** When a `conftest.py` cannot be imported at the
-  base, `_collect_at_base` collects each changed file on its own, each paying pytest's start-up from the shared
-  budget, and a failing root `conftest.py` makes every file repeat the failure. Raised by the same review. Closes by
-  reading the failing conftest's path from pytest's output and leaving out only the files under it, in one more run.
-- **A submodule is empty in `passes-at-base`'s copy of the base.** `git archive` leaves a submodule's directory
-  empty, so a changed test that imports from one fails to import at the base and gives nothing, though it might pass
-  there; the check misses it. Raised by the cross-review of `passes-at-base` (R1-5, 2026-10-24): "`git archive` omits
-  submodule contents, so a test that imports from a submodule fails import at the base and is silently 'nothing'".
-  Closes when `_copy_base_with_tests` checks out each submodule at the commit the base records for it.
+- **A submodule under `tests/` whose commit the change moves makes `passes-at-base` not-run.** `_beside_tests`
+  takes the submodule's path for a file that goes with the tests, so `_copy_base_with_tests` removes it with
+  `os.remove`, which refuses a directory, and the copy fails as a whole (`could not copy the base`). It was so before
+  submodules were filled (`_unpack_commit`). Found while filling them (2026-10-26), not seen failing. Closes when the
+  overlay leaves a path the base records as a submodule (mode 160000) to `_unpack_commit`.
 - **A test file whose name is not UTF-8 is never rerun by `flaky-tests`.** pytest-randomly 5.0.0 hashes each node
   id as strict UTF-8 (`pytest_randomly._crc32`, called from `pytest_runtest_setup` and its neighbours) and stops
   with an internal error, exit status 3. `_pytest` already lets pytest print such an id
@@ -335,6 +334,54 @@ was done.
   files.
 
 ## Fixed
+
+- **A submodule is empty in `passes-at-base`'s copy of the base.** `git archive` leaves a submodule's directory
+  empty, so a changed test that imports from one fails to import at the base and gives nothing, though it might pass
+  there; the check misses it. Raised by the cross-review of `passes-at-base` (R1-5, 2026-10-24): "`git archive` omits
+  submodule contents, so a test that imports from a submodule fails import at the base and is silently 'nothing'".
+  Closes when `_copy_base_with_tests` checks out each submodule at the commit the base records for it.
+  Fixed (2026-10-26): `_copy_base_with_tests` unpacks the base through `_unpack_commit`, which lists the commit's
+  submodules (`git ls-tree`, mode 160000) and fills each one's directory with `git -C <path> archive` of the commit
+  the base records, from its repository in the working tree, its own submodules too. One not initialised there, or
+  whose repository lacks that commit, is left empty, and `_base_run_findings` names them in one `not-run` finding.
+
+- **A `conftest.py` that fails at the base other than by `ImportError` makes `passes-at-base` not-run.** One that
+  reaches a name the change adds by attribute (`import calc; calc.TWO`, an `AttributeError`) stops pytest with exit 4
+  as an `ImportError` does, but `_conftest_import_failed` accepts only `ImportError` and `ModuleNotFoundError`, so
+  the whole check is `not-run`, where a test file failing the same way gives nothing. Loud, not wrong. Raised by the
+  cross-review of `passes-at-base` (round 3, 2026-10-24). Closes by telling a conftest.py the change edits from one
+  it does not, and taking any failure of the first as the expected outcome.
+  Fixed (2026-10-26): `_failing_conftest` reads the path of the `conftest.py` that stopped pytest from pytest's
+  "ImportError while loading conftest '<path>'", which pytest 9 prints for any exception, and the files its traceback
+  passes through; `_outside_failed_conftest` asks `change.changed`, through the `_BaseCopy` it is given, whether the
+  change edits any of them, the `conftest.py` or a helper beside the tests that it imports: the tests under one that
+  failed so give nothing, whatever it raised, and one that failed through no file the change edits is a `not-run`
+  finding naming it, as the base itself fails there.
+
+- **The fallback collection runs one pytest per changed test file.** When a `conftest.py` cannot be imported at the
+  base, `_collect_at_base` collects each changed file on its own, each paying pytest's start-up from the shared
+  budget, and a failing root `conftest.py` makes every file repeat the failure. Raised by the same review. Closes by
+  reading the failing conftest's path from pytest's output and leaving out only the files under it, in one more run.
+  Fixed (2026-10-26): `_collect_at_base` leaves out the changed files under the failing `conftest.py`
+  (`_failing_conftest`) and collects the rest in one more run, repeating only while a run names another; a failing
+  root `conftest.py` costs one collection.
+
+- **`passes-at-base` reads every changed test as passing in a project installed into the gate's interpreter.**
+  `_base_run_findings` runs pytest in the gate's interpreter, so the base's code is whatever the copy's
+  configuration puts on `sys.path` (`pythonpath = ["."]` here). An editable install, as a `src/` layout under
+  `uv sync` has, resolves the package to the working tree first, so the base run tests the change and every changed
+  test is reported. This repository is not installed (no `[build-system]`), so it is unaffected. Closes when the run
+  at the base puts the copy's own package directories before site-packages, or names such a project as one it cannot
+  judge.
+  Fixed (2026-10-26): `_base_run_findings` puts the copy's import roots, its top and its `src/` when it has one, on
+  `PYTHONPATH` ahead of what was there, so they come before site-packages and the editable install's `.pth` path or
+  import finder. The run at the base loads a pytest plugin, `_BASE_IMPORTS_PLUGIN`, which writes the file each module
+  in `sys.modules` came from, each pytest-xdist worker its own; `_imported_from_working_tree` picks those that are the
+  working tree's files of the project, whatever imported them, the changed tests, a conftest.py or a helper, and a run
+  that imported any judges none of its tests and is one `not-run` finding naming their top-level modules, as for a
+  package installed editable from a directory other than those roots. Not closed: an import of the working tree's code
+  that leaves no module behind, such as a file a test runs with `runpy` or reads, is not seen. The xdist worker
+  reports are read but not run here: pytest-xdist is not in the dev dependencies.
 
 - **A deep decorator can crash flaky-tests and surviving-mutants.** `_changed_python_units`, which both select
   through (`_changed_python_tests`, `_changed_python_functions`), writes each decorator of a changed function with
