@@ -339,7 +339,7 @@ was done.
   follows its `[extend] path` chain as far as gitleaks reads it (`GITLEAKS_EXTEND_DEPTH`; `_gitleaks_extended_file`
   reads keys whatever their case, as gitleaks does), writing each file from base at the path as spelled, and
   `scan_unpublished` runs gitleaks from that directory, so each path resolves to base's copy. An absolute path, one
-  leaving the repository, one base has no file at, a symbolic link (`Host.file_at`), a cycle, a file that is not
+  leaving the repository, one base has no file at, a symbolic link (`Host._blob_at`), a cycle, a file that is not
   TOML, or `[extend]`/`path` given twice in different case refuses the push.
 
 - **A submodule is empty in `passes-at-base`'s copy of the base.** `git archive` leaves a submodule's directory

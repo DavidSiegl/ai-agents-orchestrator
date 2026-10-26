@@ -1812,18 +1812,22 @@ class Host:
 
     def file_at(self, cwd: str, commit: str, path: str) -> str | None:
         """The file at path, relative to the repository's top level and taken literally, as commit has it, verbatim
-        as Host.run says, so os.fsencode gives back the bytes git stores; None where commit has no file there.
-        Raises OrchestratorError when git cannot read commit, cwd is not in a git repository, or path is a symbolic
-        link in commit, whose target this does not follow."""
+        as Host.run says, so os.fsencode gives back the bytes git stores; None where commit has no file there. A
+        symbolic link gives the path it points to, as git stores it. Raises OrchestratorError when git cannot read
+        commit, or cwd is not in a git repository."""
+        found = self._blob_at(cwd, commit, path)
+        return None if found is None else found[0]
+
+    def _blob_at(self, cwd: str, commit: str, path: str) -> tuple[str, bool] | None:
+        """What file_at gives for path, and whether commit has a symbolic link there, whose text is then the path it
+        points to; None where file_at gives None. Raises as file_at."""
         # Each entry is `<mode> <type> <object>\t<path>`; a directory's type is tree, a symbolic link's mode 120000.
-        entry = self.git(cwd, "--literal-pathspecs", "ls-tree", "--full-tree", "-z", commit, "--", path,
+        entry = self.git(cwd, "ls-tree", "--full-tree", "-z", commit, "--", *_top_literal([path]),
                          verbatim=True).split("\0")[0]
         mode, kind = (entry.split("\t")[0].split(" ") + ["", ""])[:2]
         if kind != "blob":
             return None
-        if mode == "120000":
-            raise OrchestratorError(f"{path} is a symbolic link in {commit[:12]}, and only a file is read there")
-        return self.git(cwd, "cat-file", "blob", f"{commit}:{path}", verbatim=True)
+        return self.git(cwd, "cat-file", "blob", f"{commit}:{path}", verbatim=True), mode == "120000"
 
     def changed_line_counts(self, cwd: str, base: str, commit: str) -> list[ChangedFile]:
         """Each file the change from base to commit touches, a rename paired as change_diff pairs it, with the lines it
@@ -1893,18 +1897,20 @@ class Host:
         every file gitleaks reads is base's. Whatever rules held before is removed.
 
         Raises OrchestratorError, failing closed and naming the file, when a file in the chain is refused by
-        _gitleaks_extended_file or file_at, or extends what is no file in base or a file already in the chain; and
-        when git cannot read base."""
+        _gitleaks_extended_file or is a symbolic link in base, whose target this does not follow, or extends what is no
+        file in base or a file already in the chain; and when git cannot read base."""
         self.check(["rm", "-rf", "--", rules])
         chain = [".gitleaks.toml"]
-        config, spelled, text = f"{rules}/{chain[0]}", chain[0], self.file_at(cwd, base, chain[0])
-        if text is None:
-            text = "[extend]\nuseDefault = true\n"
 
         def refused(why: str) -> OrchestratorError:
             return OrchestratorError(f"nothing was pushed: the secret scan takes its rules from base {base[:12]}, but "
                                      f"its {chain[-1]} {why}")
+        config, spelled = f"{rules}/{chain[0]}", chain[0]
+        found = self._blob_at(cwd, base, chain[0]) or ("[extend]\nuseDefault = true\n", False)
         while True:
+            text, link = found
+            if link:
+                raise refused("is a symbolic link in base, and only a file is read there")
             self.write(f"{rules}/{spelled}", text)
             if len(chain) > GITLEAKS_EXTEND_DEPTH:
                 return config
@@ -1919,11 +1925,11 @@ class Host:
             name = posixpath.normpath(extended)
             if name in chain:
                 raise refused(f"extends {extended!r}, which comes back round: {' -> '.join([*chain, name])}")
-            text = self.file_at(cwd, base, name)
-            if text is None:
+            blob = self._blob_at(cwd, base, name)
+            if blob is None:
                 raise refused(f"extends {extended!r}, which is no file in base")
             chain.append(name)
-            spelled = extended
+            spelled, found = extended, blob
 
     def scan_unpublished(self, cwd: str, commit: str, base: str, report_path: str) -> list[Leak]:
         """The secrets gitleaks finds, and the `gitleaks:allow` comments added, in the commits a push of commit would

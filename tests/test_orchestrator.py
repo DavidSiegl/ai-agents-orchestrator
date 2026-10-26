@@ -3847,9 +3847,16 @@ class TestScanUnpublished(unittest.TestCase):
     def test_an_extended_symbolic_link_blocks_the_push(self):
         os.symlink("one.toml", os.path.join(self.repo, "link.toml"))
         self.rules({".gitleaks.toml": "[extend]\npath = 'link.toml'\n", "one.toml": "title = 'one'\n"})
-        with self.assertRaisesRegex(OrchestratorError, "link.toml is a symbolic link"):
+        with self.assertRaisesRegex(OrchestratorError, "nothing was pushed: .* its link.toml is a symbolic link"):
             self.push(self.commit({"b.txt": "b\n"}, "clean"))
         self.assertNotIn("refs/heads/ci-ref", self.on_origin())
+        # Nor is the base's own config followed through one; file_at, which the gate reads manifests with, still is.
+        self.git("rm", "--quiet", ".gitleaks.toml")
+        os.symlink("one.toml", os.path.join(self.repo, ".gitleaks.toml"))
+        self.rules({})
+        with self.assertRaisesRegex(OrchestratorError, "its .gitleaks.toml is a symbolic link"):
+            self.push(self.commit({"c.txt": "c\n"}, "clean"))
+        self.assertEqual(self.host.file_at(self.repo, self.base, ".gitleaks.toml"), "one.toml")
 
     def test_an_extend_the_scan_cannot_take_from_the_base_blocks_the_push(self):
         first = self.base
