@@ -1567,6 +1567,10 @@ class TestHostGit(unittest.TestCase):
         self.assertEqual(self.host.file_at(f"{self.a}/sub", second, "sub/lib.py"), "two\n")
         self.assertIsNone(self.host.file_at(self.a, first, "sub/lib.py"))
         self.assertIsNone(self.host.file_at(self.a, second, "sub"))
+        # git ls-tree lists a directory's entries, not the directory, for a path ending in "/" and for none.
+        for path in ("sub/", ""):
+            with self.subTest(path=path):
+                self.assertIsNone(self.host.file_at(self.a, second, path))
         self.assertEqual(self.host.file_at(self.a, first, "app.py"), "one\n")
         with self.assertRaises(OrchestratorError):
             self.host.file_at(self.a, "0" * 40, "app.py")
@@ -3751,14 +3755,6 @@ class TestScanUnpublished(RepositoryTest):
         env = patch.dict(os.environ, {"PATH": f"{self.bin}:{os.environ['PATH']}", "TOKEN": FAKE_TOKEN})
         env.start()
         self.addCleanup(env.stop)
-
-    def test_a_base_blob_is_read_only_at_the_path_asked_for(self):
-        commit = self.commit({"rules/extra.toml": "x = 1\n"}, "rules")
-        self.assertEqual(self.host._blob_at(self.repo, commit, "rules/extra.toml"), ("x = 1\n", False))
-        # ls-tree lists the directory's entries for these, which are not the file asked for.
-        for path in ("rules/", "rules", ""):
-            with self.subTest(path=path):
-                self.assertIsNone(self.host._blob_at(self.repo, commit, path))
 
     def mode(self, mode):
         with open(os.path.join(self.bin, "mode"), "w") as f:
