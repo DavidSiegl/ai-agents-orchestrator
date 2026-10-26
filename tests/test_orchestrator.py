@@ -7484,11 +7484,11 @@ class TestFlakyTests(unittest.TestCase):
 
     def test_no_room_for_the_reruns_is_a_finding(self):
         self.change_the_tests()
-        with patch.object(tempfile, "tempdir", os.path.join(self.repo, "no-such-dir")):
+        with patch.object(orchestrator.tempfile, "mkdtemp", side_effect=OSError(28, "No space left on device")):
             found = self.found()
-        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-rerun")])
-        self.assertRegex(found[0]["message"], r"^could not make a directory to rerun the changed tests in: .*No such "
-                                              r"file.*; the changed tests were not rerun\.$")
+        self.assertEqual([(f["path"], f["line"], f["rule"], f["message"]) for f in found], [(
+            None, None, "not-rerun", "could not make a directory to rerun the changed tests in: [Errno 28] No space "
+                                     "left on device; nothing ran there.")])
 
     def test_the_reruns_leave_the_build_s_reports_alone(self):
         # The project's addopts write a coverage report, as the build's own run did before the gate reads it.
@@ -7541,7 +7541,7 @@ class TestFlakyTests(unittest.TestCase):
         self.assertIn((15, "mixed-results"), [(f["line"], f["rule"]) for f in found])
         [left] = [f for f in found if f["rule"] == "not-removed"]
         self.assertEqual((left["path"], left["line"]), (None, None))
-        self.assertRegex(left["message"], r"^could not remove the directory the changed tests were rerun in, .+: "
+        self.assertRegex(left["message"], r"^could not remove the directory to rerun the changed tests in, `.+`: "
                                           r".*Permission denied")
 
     def test_a_test_file_that_does_not_collect_is_a_finding(self):
@@ -7603,6 +7603,28 @@ class TestPassesAtBase(unittest.TestCase):
         self.put("calc.py", self.CALC.replace("a - b", "a + b"))
         self.put("tests/test_calc.py", self.TESTS.replace("import mul", "import add, mul")
                  + "\n\ndef test_add():\n    assert add(2, 2) == 4\n" + tests)
+
+    def test_no_room_for_the_run_at_the_base_is_a_finding(self):
+        self.fix_add()
+        with patch.object(orchestrator.tempfile, "mkdtemp", side_effect=OSError(28, "No space left on device")):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"], f["message"]) for f in found], [(
+            None, None, "not-run", "could not make a directory to run the changed tests at the base in: [Errno 28] No "
+                                   "space left on device; nothing ran there.")])
+
+    def test_a_base_run_directory_left_behind_is_a_finding_beside_the_results(self):
+        self.fix_add()
+        rmtree = shutil.rmtree
+
+        def refuse(path):
+            self.addCleanup(rmtree, path)
+            raise PermissionError(13, "Permission denied", path)
+        with patch.object(orchestrator.shutil, "rmtree", refuse):
+            found = self.found()
+        [left] = found
+        self.assertEqual((left["path"], left["line"], left["rule"]), (None, None, "not-removed"))
+        self.assertRegex(left["message"], r"^could not remove the directory to run the changed tests at the base in, "
+                                          r"`.+`: .*Permission denied")
 
     def test_a_test_that_fails_without_the_fix_gives_nothing(self):
         self.fix_add()
@@ -8205,8 +8227,9 @@ class TestSurvivingMutants(unittest.TestCase):
         self.change_the_functions()
         with patch.object(orchestrator.tempfile, "mkdtemp", side_effect=OSError(28, "No space left on device")):
             found = self.found()
-        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
-        self.assertIn("No space left on device", found[0]["message"])
+        self.assertEqual([(f["path"], f["line"], f["rule"], f["message"]) for f in found], [(
+            None, None, "not-run", "could not make a directory to run mutmut on a copy of the tree in: [Errno 28] No "
+                                   "space left on device; nothing ran there.")])
 
     def test_a_copy_that_cannot_be_removed_is_a_finding_beside_the_others(self):
         self.change_the_functions("orphan")
@@ -8215,8 +8238,9 @@ class TestSurvivingMutants(unittest.TestCase):
         with patch.object(orchestrator.shutil, "rmtree", side_effect=OSError(16, "Device or resource busy")):
             found = self.found()
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
-                         [(None, None, "cleanup"), ("calc.py", 13, "untested")])
-        self.assertIn("Device or resource busy", found[0]["message"])
+                         [(None, None, "not-removed"), ("calc.py", 13, "untested")])
+        self.assertRegex(found[0]["message"], r"^could not remove the directory to run mutmut on a copy of the tree in, "
+                                              r"`.+`: .*Device or resource busy")
         left = re.search(r"`([^`]+)`", found[0]["message"]).group(1)
         self.assertTrue(os.path.isdir(left))
         rmtree(left)

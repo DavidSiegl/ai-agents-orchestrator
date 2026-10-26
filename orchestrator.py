@@ -3709,6 +3709,26 @@ def _finding(path: str | None, line: int | None, rule: str, message: str, severi
     return {"path": path, "line": line, "severity": severity, "rule": rule, "message": message}
 
 
+def _in_scratch_directory(rule: str, purpose: str, run: Callable[[str], list[dict]]) -> list[dict]:
+    """The findings of run(tmp), tmp a new empty directory only the gate's account can enter, which is removed
+    afterwards whatever run does; purpose says what it is for, as a clause such as "to rerun the changed tests in".
+    When the directory cannot be made, run is not called, and the one finding is of rule, saying so; when it cannot
+    be removed, a not-removed finding naming it follows run's."""
+    try:
+        tmp = tempfile.mkdtemp(prefix="gate-")
+    except OSError as e:
+        return [_finding(None, None, rule, f"could not make a directory {purpose}: {e}; nothing ran there.")]
+    out: list[dict] = []
+    try:
+        out = run(tmp)
+    finally:
+        try:
+            shutil.rmtree(tmp)
+        except OSError as e:
+            out.append(_finding(None, None, "not-removed", f"could not remove the directory {purpose}, `{tmp}`: {e}"))
+    return out
+
+
 def _python_test_file(path: str) -> bool:
     """pytest's and unittest's usual places: under a tests directory, test_*.py or *_test.py."""
     *dirs, name = path.split("/")
@@ -4077,18 +4097,8 @@ def flaky_tests(change: GateChange) -> list[dict]:
     tests, unreadable = _changed_python_tests(change)
     out = [_finding(path, None, "not-rerun", f"{why}, so its tests were not rerun.") for path, why in unreadable]
     if tests:
-        try:
-            tmp = tempfile.mkdtemp(prefix="flaky-tests-")
-        except OSError as e:
-            out.append(_finding(None, None, "not-rerun", f"could not make a directory to rerun the changed "
-                                                         f"tests in: {e}; the changed tests were not rerun."))
-        else:
-            out += _rerun_findings(change.root, tmp, tests)
-            try:
-                shutil.rmtree(tmp)
-            except OSError as e:
-                out.append(_finding(None, None, "not-removed", f"could not remove the directory the changed "
-                                                               f"tests were rerun in, {tmp}: {e}"))
+        out += _in_scratch_directory("not-rerun", "to rerun the changed tests in",
+                                     lambda tmp: _rerun_findings(change.root, tmp, tests))
     return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
 
 
@@ -4617,18 +4627,8 @@ def passes_at_base(change: GateChange, *, budget: float) -> list[dict]:
     out = [_finding(path, None, "not-run", f"{why}, so its tests were not run at the base.")
            for path, why in unreadable]
     if tests:
-        try:
-            tmp = tempfile.mkdtemp(prefix="passes-at-base-")
-        except OSError as e:
-            out.append(_finding(None, None, "not-run", f"could not make a directory to run the changed tests at the "
-                                                       f"base in: {e}; the changed tests were not run there."))
-        else:
-            out += _base_run_findings(change, tmp, tests, budget)
-            try:
-                shutil.rmtree(tmp)
-            except OSError as e:
-                out.append(_finding(None, None, "not-removed", f"could not remove the directory the changed tests "
-                                                               f"were run at the base in, {tmp}: {e}"))
+        out += _in_scratch_directory("not-run", "to run the changed tests at the base in",
+                                     lambda tmp: _base_run_findings(change, tmp, tests, budget))
     return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
 
 
@@ -4898,19 +4898,8 @@ def _mutation_test(change: GateChange, functions: list[_ChangedFunction], budget
             mutated.append(f)
     if not mutated:
         return out
-    try:
-        tmp = tempfile.mkdtemp(prefix="gate-mutmut-")
-    except OSError as e:
-        return [*out, _mutation_not_run(f"could not make a directory to copy the tree into: {e}")]
-    try:
-        out += _mutmut_on_copy(change.root, tmp, mutated, table, budget)
-    finally:
-        try:
-            shutil.rmtree(tmp)
-        except OSError as e:
-            out.append(_finding(None, None, "cleanup", f"the copy of the tree mutmut ran in, `{tmp}`, could not be "
-                                                       f"removed: {e}"))
-    return out
+    return out + _in_scratch_directory("not-run", "to run mutmut on a copy of the tree in",
+                                       lambda tmp: _mutmut_on_copy(change.root, tmp, mutated, table, budget))
 
 
 def _mutmut_on_copy(root: str, tmp: str, functions: list[_ChangedFunction], table: dict, budget: float) -> list[dict]:

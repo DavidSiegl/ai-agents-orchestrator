@@ -228,12 +228,6 @@ was done.
   there; the check misses it. Raised by the cross-review of `passes-at-base` (R1-5, 2026-10-24): "`git archive` omits
   submodule contents, so a test that imports from a submodule fails import at the base and is silently 'nothing'".
   Closes when `_copy_base_with_tests` checks out each submodule at the commit the base records for it.
-- **Three gate checks repeat the make-a-scratch-directory, run, remove-it skeleton.** `flaky_tests`,
-  `_mutation_test` and `passes_at_base` each call `tempfile.mkdtemp`, word their own finding when it fails, and word
-  another when `shutil.rmtree` fails (`not-removed` twice, `cleanup` once). The cross-review of `passes-at-base`
-  (R1-8, 2026-10-24) raised it as "a third copy of the scratch-directory skeleton ... with reworded messages". Closes
-  with one helper that takes the check's rule and what it was doing, and the three findings worded one way, with the
-  flaky-tests and surviving-mutants tests that quote today's wording.
 - **A test file whose name is not UTF-8 is never rerun by `flaky-tests`.** pytest-randomly 5.0.0 hashes each node
   id as strict UTF-8 (`pytest_randomly._crc32`, called from `pytest_runtest_setup` and its neighbours) and stops
   with an internal error, exit status 3. `_pytest` already lets pytest print such an id
@@ -350,6 +344,16 @@ was done.
   files.
 
 ## Fixed
+
+- **Three gate checks repeat the make-a-scratch-directory, run, remove-it skeleton.** `flaky_tests`,
+  `_mutation_test` and `passes_at_base` each call `tempfile.mkdtemp`, word their own finding when it fails, and word
+  another when `shutil.rmtree` fails (`not-removed` twice, `cleanup` once). The cross-review of `passes-at-base`
+  (R1-8, 2026-10-24) raised it as "a third copy of the scratch-directory skeleton ... with reworded messages". Closes
+  with one helper that takes the check's rule and what it was doing, and the three findings worded one way, with the
+  flaky-tests and surviving-mutants tests that quote today's wording.
+  Fixed (2026-10-26): all three run through `_in_scratch_directory(rule, purpose, run)`, which words both failures
+  one way, "could not make a directory <purpose>" under the check's rule and "could not remove the directory
+  <purpose>, `<path>`" as `not-removed`, and removes the directory even when `run` raises.
 
 - **A process a test leaves holding pytest's output keeps a finished run waiting until its timeout.** `_pytest`'s
   `communicate` reads to the end of pytest's output, so a server a test started that inherits it keeps a run that has
