@@ -92,11 +92,12 @@ was done.
   `drain_end` (2026-10-25); a plain `uv run pytest` passes it. Cause not established. Closes with the test passing
   under mutmut, e.g. by suppressing `HealthCheck.differing_executors` for it, or the gate's mutmut runs leaving
   `tests/test_properties.py` out.
-- **`doctor --machine` probes the machine over about twenty SSH connections, one after another.** Each check is
-  its own `Host.run`, so `_tool_version` asks `command -v` before `--version`, which already fails for a missing
-  command, and `gh auth status` may wait up to `NETWORK_TIMEOUT`. Raised by the cross-review of the doctor command
-  (F8, 2026-10-24): "redundant probes, each one SSH connection with `--machine`". Closes with the probes run in one
-  shell over one connection, or SSH connection sharing for `Host`.
+- **`doctor --machine` asks the machine twice for each tool.** Each check is its own `Host.run`, so `_tool_version`
+  asks `command -v` before `--version`, which already fails for a missing command, and `_gh_logged_in` before
+  `gh auth status`, which may wait up to `NETWORK_TIMEOUT`. Since `ssh_sharing_options` the commands share one SSH
+  connection, so each costs a round trip, no longer a handshake. Raised by the cross-review of the doctor command
+  (F8, 2026-10-24): "redundant probes, each one SSH connection with `--machine`". Closes with each tool asked once
+  (`.scratch/doctor-ssh/issues/02-drop-redundant-probes.md`).
 - **herdr 0.9.1 lists no `gemini` integration.** `herdr integration status` on this host lists `antigravity-cli`
   (whose hook is under `~/.gemini/`) but no `gemini`, so `doctor` warns that it does not list gemini, and the
   README's `herdr integration install gemini` may name a kind herdr no longer has. Found by the doctor run

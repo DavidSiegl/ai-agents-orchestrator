@@ -31,6 +31,7 @@ window over the same CLI: it starts run and resume as child processes.
 
 import argparse
 import ast
+import atexit
 import base64
 import bisect
 import collections
@@ -1477,8 +1478,41 @@ class RunFile(NamedTuple):
     mtime: int  # when it was last modified, in seconds since the epoch by its host's clock
 
 
+# How long, in seconds, an SSH master connection (ssh_sharing_options) outlives the last command that used it.
+SSH_CONTROL_PERSIST_SECONDS = 60
+# The longest control socket path ssh can bind, in bytes: a Unix socket's path is at most 103 on macOS (sun_path
+# holds 104 with its NUL; 108 on Linux), and ssh binds a temporary name 17 bytes longer before renaming it.
+_SSH_SOCKET_PATH_MAX = 103 - 17
+# The directory of this process's SSH control sockets, made by ssh_sharing_options on its first call; None before.
+_ssh_control_dir: str | None = None
+
+
+def ssh_sharing_options() -> list[str]:
+    """The ssh options that let this process's commands to one target share a single connection: ControlMaster,
+    ControlPersist (SSH_CONTROL_PERSIST_SECONDS) and a ControlPath in a directory only the user can read, made on the
+    first call, under $XDG_RUNTIME_DIR when set, else /tmp, and removed when the process exits. /tmp rather than
+    tempfile's default, whose macOS path would leave the socket's too long. A directory gone since is made again.
+
+    None of them, an empty list, when the directory cannot be made or the socket's path would be too long: OpenSSH
+    does not then fall back to a connection of its own, it fails the command (ssh_config(5), ControlPath), so the
+    command runs unshared instead."""
+    global _ssh_control_dir
+    if _ssh_control_dir is None or not os.path.isdir(_ssh_control_dir):
+        try:
+            _ssh_control_dir = tempfile.mkdtemp(prefix="octoflow-ssh-", dir=os.environ.get("XDG_RUNTIME_DIR") or "/tmp")
+        except OSError:
+            return []
+        atexit.register(shutil.rmtree, _ssh_control_dir, True)
+    # %C is the hash of the connection's endpoints, 40 hex digits.
+    if len(os.fsencode(_ssh_control_dir)) + 1 + 40 > _SSH_SOCKET_PATH_MAX:
+        return []
+    return ["-o", "ControlMaster=auto", "-o", f"ControlPersist={SSH_CONTROL_PERSIST_SECONDS}",
+            "-o", f"ControlPath={_ssh_control_dir}/%C"]
+
+
 class Host:
-    """Runs commands on the machine where the agents run: locally, or over SSH."""
+    """Runs commands on the machine where the agents run: locally, or over SSH, one shared connection per target
+    (ssh_sharing_options)."""
 
     def __init__(self, ssh_target: str | None = None, run=subprocess.run):
         self.ssh_target = ssh_target
@@ -1501,7 +1535,7 @@ class Host:
         """
         if self.ssh_target:
             # BatchMode fails fast instead of hanging on a password prompt nobody can see.
-            argv = ["ssh", "-o", "BatchMode=yes", self.ssh_target, shlex.join(argv)]
+            argv = ["ssh", "-o", "BatchMode=yes", *ssh_sharing_options(), self.ssh_target, shlex.join(argv)]
         try:
             if not verbatim:
                 return self._run(argv, input=stdin, capture_output=True, text=True, timeout=timeout, env=child_env())

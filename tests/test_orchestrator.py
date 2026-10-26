@@ -1,4 +1,5 @@
 import ast
+import atexit
 import base64
 import contextlib
 import copy
@@ -13,6 +14,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -1340,6 +1342,14 @@ class TestHerdr(unittest.TestCase):
             herdr.call("agent", "list")
 
 
+# This process's SSH control directory, made here so that the argv Host.run builds for SSH is known in advance; the
+# tests that make their own restore it.
+orchestrator._ssh_control_dir = tempfile.mkdtemp(prefix="octoflow-ssh-test-")
+atexit.register(shutil.rmtree, orchestrator._ssh_control_dir, True)
+# What Host.run puts before an SSH command's target.
+SSH = ["ssh", "-o", "BatchMode=yes", *orchestrator.ssh_sharing_options()]
+
+
 class TestHost(unittest.TestCase):
     def test_ssh_wraps_command(self):
         run = MagicMock(return_value=completed("/home/user/proj\n"))
@@ -1347,9 +1357,41 @@ class TestHost(unittest.TestCase):
 
         self.assertEqual(cwd, "/home/user/proj")
         argv = run.call_args.args[0]
-        self.assertEqual(argv[:4], ["ssh", "-o", "BatchMode=yes", "remote-host"])
-        self.assertIn('"$HOME$1"', argv[4])
-        self.assertTrue(argv[4].endswith(" _ /proj"))
+        self.assertEqual(argv[:-1], [*SSH, "remote-host"])
+        self.assertIn('"$HOME$1"', argv[-1])
+        self.assertTrue(argv[-1].endswith(" _ /proj"))
+
+    def test_commands_over_ssh_share_one_connection_through_a_private_directory(self):
+        run = MagicMock(return_value=completed())
+        Host("remote-host", run=run).run(["true"])
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[3:9], ["-o", "ControlMaster=auto", "-o", "ControlPersist=60",
+                                     "-o", f"ControlPath={orchestrator._ssh_control_dir}/%C"])
+        self.assertEqual(stat.S_IMODE(os.stat(orchestrator._ssh_control_dir).st_mode), 0o700)
+
+    def test_a_control_directory_that_has_gone_is_made_again(self):
+        with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, {"XDG_RUNTIME_DIR": runtime}), \
+                patch.object(orchestrator, "_ssh_control_dir", None):
+            first = orchestrator.ssh_sharing_options()[-1]
+            shutil.rmtree(orchestrator._ssh_control_dir)
+            again = orchestrator.ssh_sharing_options()[-1]
+            self.assertTrue(first.startswith(f"ControlPath={runtime}/octoflow-ssh-"))
+            self.assertNotEqual(first, again)
+            self.assertTrue(os.path.isdir(orchestrator._ssh_control_dir))
+
+    def test_without_a_usable_control_path_a_command_runs_on_a_connection_of_its_own(self):
+        """OpenSSH 10 fails a command whose ControlPath it cannot bind, its directory missing or the path too long
+        (exit status 255, "ControlPath too long"), rather than connect without sharing; so then no option is
+        passed. Measured against a real sshd, which CI does not have; here the argv is checked."""
+        run = MagicMock(return_value=completed())
+        with tempfile.TemporaryDirectory() as runtime:
+            long_dir = os.path.join(runtime, "x" * 80)
+            os.mkdir(long_dir)
+            for where in [long_dir, os.path.join(runtime, "missing", "dir")]:
+                with self.subTest(where), patch.dict(os.environ, {"XDG_RUNTIME_DIR": where}), \
+                        patch.object(orchestrator, "_ssh_control_dir", None):
+                    Host("remote-host", run=run).run(["true"])
+                    self.assertEqual(run.call_args.args[0], ["ssh", "-o", "BatchMode=yes", "remote-host", "true"])
 
     def test_read_missing_file(self):
         run = MagicMock(return_value=completed(returncode=orchestrator.MISSING_FILE_STATUS))
@@ -1371,7 +1413,7 @@ class TestHost(unittest.TestCase):
         url = Host("remote-host", run=run).create_pr("/proj", "main", "orchestrator/x", "Title", "body", draft=True)
 
         self.assertEqual(url, "https://github.com/o/r/pull/7")
-        remote = run.call_args.args[0][4]
+        remote = run.call_args.args[0][-1]
         self.assertIn("_ /proj gh pr create --base main --head orchestrator/x", remote)
         self.assertTrue(remote.endswith("--body-file - --draft"))
         self.assertEqual(run.call_args.kwargs["input"], "body")
@@ -1420,10 +1462,10 @@ class TestHost(unittest.TestCase):
         run = MagicMock(return_value=completed("1791000000\n"))
         host = Host("remote-host", run=run)
         self.assertEqual(host.now(), 1_791_000_000)
-        self.assertEqual(run.call_args.args[0], ["ssh", "-o", "BatchMode=yes", "remote-host", "date +%s"])
+        self.assertEqual(run.call_args.args[0], [*SSH, "remote-host", "date +%s"])
         self.assertEqual(host.mtime("/x/review-1.md"), 1_791_000_000)
-        self.assertEqual(run.call_args.args[0][:4], ["ssh", "-o", "BatchMode=yes", "remote-host"])
-        self.assertTrue(run.call_args.args[0][4].endswith(" _ /x/review-1.md"))
+        self.assertEqual(run.call_args.args[0][:-1], [*SSH, "remote-host"])
+        self.assertTrue(run.call_args.args[0][-1].endswith(" _ /x/review-1.md"))
 
     def test_a_time_that_is_no_number_raises(self):
         host = Host(run=MagicMock(return_value=completed("soon\n")))
@@ -1434,7 +1476,7 @@ class TestHost(unittest.TestCase):
         run = MagicMock(return_value=completed())
         Host("remote-host", run=run).rename("/x/review-1.md", "/x/review 1.rejected.md")
         self.assertEqual(run.call_args.args[0],
-                         ["ssh", "-o", "BatchMode=yes", "remote-host", "mv -f -- /x/review-1.md '/x/review 1.rejected.md'"])
+                         [*SSH, "remote-host", "mv -f -- /x/review-1.md '/x/review 1.rejected.md'"])
 
     def test_rename_failure_raises(self):
         host = Host(run=MagicMock(return_value=completed(stderr="No such file or directory", returncode=1)))
@@ -13070,8 +13112,8 @@ class TestShow(unittest.TestCase):
         review = f"{SHOW_DIR}/review-1.md"
 
         def remote(argv, **kw):
-            self.assertEqual(argv[:4], ["ssh", "-o", "BatchMode=yes", "remote-host"])
-            script, *args = shlex.split(argv[4])[2:]
+            self.assertEqual(argv[:-1], [*SSH, "remote-host"])
+            script, *args = shlex.split(argv[-1])[2:]
             if "pwd" in script:
                 return completed("/proj\n")
             if "state.json; do" in script:
@@ -13092,8 +13134,8 @@ class TestShow(unittest.TestCase):
             f"\nfiles\n    {SHOW_DIR}/spec.md\n    {SHOW_DIR}/build-1.md\n    {review}\n"
             f"\nlast review: {review}\nremote findings\n"))
         self.assertIn("resume: orchestrator.py resume a1b2c3 --machine M --cwd '~/proj'", out.getvalue())
-        reads = [shlex.split(c.args[0][4])[-1] for c in run.call_args_list
-                 if f"|| exit {orchestrator.MISSING_FILE_STATUS}; cat" in c.args[0][4]]
+        reads = [shlex.split(c.args[0][-1])[-1] for c in run.call_args_list
+                 if f"|| exit {orchestrator.MISSING_FILE_STATUS}; cat" in c.args[0][-1]]
         self.assertEqual(reads, [f"{SHOW_DIR}/review-2.md", review])
 
     def test_help(self):
@@ -13128,9 +13170,9 @@ class TestRunFiles(unittest.TestCase):
         run = MagicMock(return_value=completed("5 /r/b.md\0" "5 /r/a b.md\0" "3 /r/c.md\0"))
         self.assertEqual(Host("remote-host", run=run).run_files("/r"), [("/r/c.md", 3), ("/r/a b.md", 5), ("/r/b.md", 5)])
         run.assert_called_once()
-        self.assertEqual(run.call_args.args[0][:4], ["ssh", "-o", "BatchMode=yes", "remote-host"])
-        self.assertIn("stat -c %Y", run.call_args.args[0][4])
-        self.assertIn("stat -f %m", run.call_args.args[0][4])
+        self.assertEqual(run.call_args.args[0][:-1], [*SSH, "remote-host"])
+        self.assertIn("stat -c %Y", run.call_args.args[0][-1])
+        self.assertIn("stat -f %m", run.call_args.args[0][-1])
 
     def test_failure_raises(self):
         host = Host(run=MagicMock(return_value=completed(stderr="Permission denied", returncode=1)))
@@ -14476,9 +14518,9 @@ class TestHostPullRequest(unittest.TestCase):
         edit = run.call_args
         host.mark_pr_ready("/proj", self.URL)
         ready = run.call_args
-        self.assertTrue(edit.args[0][4].endswith(f"_ /proj gh pr edit {self.URL} --body-file -"), edit.args[0])
+        self.assertTrue(edit.args[0][-1].endswith(f"_ /proj gh pr edit {self.URL} --body-file -"), edit.args[0])
         self.assertEqual(edit.kwargs["input"], "new body")
-        self.assertTrue(ready.args[0][4].endswith(f"_ /proj gh pr ready {self.URL}"), ready.args[0])
+        self.assertTrue(ready.args[0][-1].endswith(f"_ /proj gh pr ready {self.URL}"), ready.args[0])
         self.assertEqual({edit.kwargs["timeout"], ready.kwargs["timeout"]}, {orchestrator.NETWORK_TIMEOUT})
 
     def test_a_failed_edit_raises(self):
@@ -16667,7 +16709,7 @@ class FakeTools:
     def __call__(self, argv, **kwargs):
         target = None
         if argv[0] == "ssh":
-            target, argv = argv[3], shlex.split(argv[4])
+            target, argv = argv[-2], shlex.split(argv[-1])
             if target not in self.targets:
                 return completed(stderr=f"ssh: connect to host {target}: Connection refused", returncode=255)
         self.calls.append((target, argv))
@@ -16965,7 +17007,7 @@ class TestCheckSetup(unittest.TestCase):
 
                 def answer(argv, run=tools.__call__, versions=versions, **kwargs):
                     if argv == ["herdr", "--version"] or argv[-1:] == ["herdr --version"]:
-                        return completed(versions[None if argv[0] == "herdr" else argv[3]])
+                        return completed(versions[None if argv[0] == "herdr" else argv[-2]])
                     return run(argv, **kwargs)
 
                 with with_tkinter():
