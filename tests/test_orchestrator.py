@@ -1344,8 +1344,8 @@ class TestHerdr(unittest.TestCase):
 
 # This process's SSH control directory, made here so that the argv Host.run builds for SSH is known in advance; the
 # tests that make their own restore it.
-orchestrator._ssh_control_dir = tempfile.mkdtemp(prefix="octoflow-ssh-test-")
-atexit.register(shutil.rmtree, orchestrator._ssh_control_dir, True)
+orchestrator._SSH_CONTROL.dir = tempfile.mkdtemp(prefix="octoflow-ssh-test-")
+atexit.register(shutil.rmtree, orchestrator._SSH_CONTROL.dir, True)
 # What Host.run puts before an SSH command's target.
 SSH = ["ssh", "-o", "BatchMode=yes", *orchestrator.ssh_sharing_options()]
 
@@ -1366,18 +1366,18 @@ class TestHost(unittest.TestCase):
         Host("remote-host", run=run).run(["true"])
         argv = run.call_args.args[0]
         self.assertEqual(argv[3:9], ["-o", "ControlMaster=auto", "-o", "ControlPersist=60",
-                                     "-o", f"ControlPath={orchestrator._ssh_control_dir}/%C"])
-        self.assertEqual(stat.S_IMODE(os.stat(orchestrator._ssh_control_dir).st_mode), 0o700)
+                                     "-o", f"ControlPath={orchestrator._SSH_CONTROL.dir}/%C"])
+        self.assertEqual(stat.S_IMODE(os.stat(orchestrator._SSH_CONTROL.dir).st_mode), 0o700)
 
     def test_a_control_directory_that_has_gone_is_made_again(self):
         with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, {"XDG_RUNTIME_DIR": runtime}), \
-                patch.object(orchestrator, "_ssh_control_dir", None):
+                patch.object(orchestrator._SSH_CONTROL, "dir", None):
             first = orchestrator.ssh_sharing_options()[-1]
-            shutil.rmtree(orchestrator._ssh_control_dir)
+            shutil.rmtree(orchestrator._SSH_CONTROL.dir)
             again = orchestrator.ssh_sharing_options()[-1]
             self.assertTrue(first.startswith(f"ControlPath={runtime}/octoflow-ssh-"))
             self.assertNotEqual(first, again)
-            self.assertTrue(os.path.isdir(orchestrator._ssh_control_dir))
+            self.assertTrue(os.path.isdir(orchestrator._SSH_CONTROL.dir))
 
     def test_without_a_usable_control_path_a_command_runs_on_a_connection_of_its_own(self):
         """OpenSSH 10 fails a command whose ControlPath it cannot bind, its directory missing or the path too long
@@ -1389,7 +1389,7 @@ class TestHost(unittest.TestCase):
             os.mkdir(long_dir)
             for where in [long_dir, os.path.join(runtime, "missing", "dir")]:
                 with self.subTest(where), patch.dict(os.environ, {"XDG_RUNTIME_DIR": where}), \
-                        patch.object(orchestrator, "_ssh_control_dir", None):
+                        patch.object(orchestrator._SSH_CONTROL, "dir", None):
                     Host("remote-host", run=run).run(["true"])
                     self.assertEqual(run.call_args.args[0], ["ssh", "-o", "BatchMode=yes", "remote-host", "true"])
 

@@ -1483,8 +1483,16 @@ SSH_CONTROL_PERSIST_SECONDS = 60
 # The longest control socket path ssh can bind, in bytes: a Unix socket's path is at most 103 on macOS (sun_path
 # holds 104 with its NUL; 108 on Linux), and ssh binds a temporary name 17 bytes longer before renaming it.
 _SSH_SOCKET_PATH_MAX = 103 - 17
-# The directory of this process's SSH control sockets, made by ssh_sharing_options on its first call; None before.
-_ssh_control_dir: str | None = None
+
+
+class _SshControl:
+    """This process's SSH control sockets, for ssh_sharing_options."""
+
+    def __init__(self) -> None:
+        self.dir: str | None = None  # the directory they are in, made on the first SSH command; None before it
+
+
+_SSH_CONTROL = _SshControl()
 
 
 def ssh_sharing_options() -> list[str]:
@@ -1496,18 +1504,20 @@ def ssh_sharing_options() -> list[str]:
     None of them, an empty list, when the directory cannot be made or the socket's path would be too long: OpenSSH
     does not then fall back to a connection of its own, it fails the command (ssh_config(5), ControlPath), so the
     command runs unshared instead."""
-    global _ssh_control_dir
-    if _ssh_control_dir is None or not os.path.isdir(_ssh_control_dir):
+    control = _SSH_CONTROL
+    if control.dir is None or not os.path.isdir(control.dir):
         try:
-            _ssh_control_dir = tempfile.mkdtemp(prefix="octoflow-ssh-", dir=os.environ.get("XDG_RUNTIME_DIR") or "/tmp")
+            # mkdtemp's directory is private and unguessable, so /tmp is safe here; see above for why not its default.
+            control.dir = tempfile.mkdtemp(prefix="octoflow-ssh-",
+                                           dir=os.environ.get("XDG_RUNTIME_DIR") or "/tmp")  # noqa: S108
         except OSError:
             return []
-        atexit.register(shutil.rmtree, _ssh_control_dir, True)
+        atexit.register(shutil.rmtree, control.dir, True)
     # %C is the hash of the connection's endpoints, 40 hex digits.
-    if len(os.fsencode(_ssh_control_dir)) + 1 + 40 > _SSH_SOCKET_PATH_MAX:
+    if len(os.fsencode(control.dir)) + 1 + 40 > _SSH_SOCKET_PATH_MAX:
         return []
     return ["-o", "ControlMaster=auto", "-o", f"ControlPersist={SSH_CONTROL_PERSIST_SECONDS}",
-            "-o", f"ControlPath={_ssh_control_dir}/%C"]
+            "-o", f"ControlPath={control.dir}/%C"]
 
 
 class Host:
@@ -10489,12 +10499,12 @@ def _on_path(host: Host, command: str) -> str:
 
 
 # The exit status a POSIX shell gives a command it cannot find, as the shell an SSH command runs in does.
-COMMAND_NOT_FOUND_STATUS = 127
+COMMAND_NOT_FOUND_EXIT = 127
 
 
 def _run_tool(host: Host, argv: list[str], timeout: float = 60) -> subprocess.CompletedProcess:
     """host.run(argv, timeout=timeout); raises the _Unmet _on_path raises when argv[0] is not on host's PATH: it
-    cannot be started here, or over SSH the remote shell exits COMMAND_NOT_FOUND_STATUS. Raises OrchestratorError as
+    cannot be started here, or over SSH the remote shell exits COMMAND_NOT_FOUND_EXIT. Raises OrchestratorError as
     Host.run does for any other failure to run it."""
     try:
         proc = host.run(argv, timeout=timeout)
@@ -10502,7 +10512,7 @@ def _run_tool(host: Host, argv: list[str], timeout: float = 60) -> subprocess.Co
         if isinstance(e.__cause__, FileNotFoundError):
             raise _Unmet(f"{argv[0]} is not on PATH") from e
         raise
-    if host.ssh_target and proc.returncode == COMMAND_NOT_FOUND_STATUS:
+    if host.ssh_target and proc.returncode == COMMAND_NOT_FOUND_EXIT:
         raise _Unmet(f"{argv[0]} is not on PATH")
     return proc
 
