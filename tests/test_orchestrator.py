@@ -8541,10 +8541,40 @@ class TestCognitiveComplexity(unittest.TestCase):
                 return T(x)
             class Box[U]:
                 def get(self):
-                    return U()
+                    return U()            # the class's type parameter
             def U():
-                return Box().get()
+                return Box.get(None)
         """), {"T": 0, "build": 0, "Box.get": 0, "U": 0})
+
+    def test_an_assignment_expression_in_a_comprehension_binds_in_the_function(self):
+        self.assertEqual(self.module_scores("""
+            def f(handlers, x):
+                if any((g := h) for h in handlers):   # +1 if
+                    return g(x)                       # the g the walrus bound
+            def g(x):
+                return f([], x)
+        """), {"f": 1, "g": 0})
+
+    def test_what_python_reads_outside_a_nested_scope_is_read_in_the_function(self):
+        self.assertEqual(self.module_scores("""
+            def a(x):
+                return [a for a in a(x[1:])]          # +1, the first iterable is read in a's scope
+            def b(x, key=lambda b: b):
+                return b(x[1:])                       # +1, the lambda's b is the lambda's alone
+            def c(x):
+                def inner(y: c(x) = 0):               # +1, an annotation is read in c's scope
+                    pass
+                return inner
+            def d():
+                class C[T: d()]:                      # +1, a bound is read in the type parameters' scope
+                    pass
+                return C
+            def e():
+                @e()                                  # +1, a decorator is read outside the type parameters
+                class C[e]:
+                    pass
+                return C
+        """), {"a": 1, "b": 1, "c": 1, "d": 1, "e": 1})
 
     def test_a_global_or_nonlocal_in_a_nested_scope_leaves_the_outer_binding_alone(self):
         self.assertEqual(self.module_scores("""
