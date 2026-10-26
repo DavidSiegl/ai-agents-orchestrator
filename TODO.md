@@ -250,10 +250,6 @@ was done.
   each rerun then crashes, and `flaky_tests` reports `not-rerun` quoting the `UnicodeEncodeError`. Raised by the
   cross-review of `flaky-tests` (F10, 2026-10-23). Closes when pytest-randomly hashes the id's bytes, or when the
   reruns can seed such a test without it.
-- **Coverage of a file whose name is not UTF-8 is never measured.** coverage.py 7.14 collects no data for it, so
-  `new_coverage` finds none of its added lines in `coverage.xml` and counts them as not coverable: the coverage
-  condition can pass a change whose new code there is untested. `docs/quality-gate.md` states it. Closes with a
-  coverage.py that records such files, or with the gate naming them as unmeasured.
 - **The reruns' time limit is too short for slow tests on the Jenkins agent.** `FLAKY_RUN_TIMEOUT` is 30 s a run. On
   `flaky-tests`' own change each run took about 9 s on an idle laptop and about twice that under load. Measured on
   Jenkins on 2026-10-24 (PR #50, surviving-mutants' change): the first rerun did not finish within 30 s, so the check
@@ -363,6 +359,13 @@ was done.
   Fixed (2026-10-26): `escaped_path` writes each character that ends a line in some reader (`\n`, `\r`, `\v`, `\f`,
   `\x1c`-`\x1e`, `\x85`, U+2028, U+2029) as `\xNN` or `\uNNNN`, and every path the quality file names goes through
   it; `gate_failures` reads back the escaped name, the same in every round.
+
+- **Coverage of a file whose name is not UTF-8 is never measured.** coverage.py 7.14 collects no data for it, so
+  `new_coverage` finds none of its added lines in `coverage.xml` and counts them as not coverable: the coverage
+  condition can pass a change whose new code there is untested. `docs/quality-gate.md` states it. Closes with a
+  coverage.py that records such files, or with the gate naming them as unmeasured.
+  Fixed (2026-10-26): the quality file names each such `.py` file the change adds lines to under the coverage
+  sentence, as `Not measured`; the coverage condition is judged as before, without its lines.
 
 - **A pytest configuration below the copy's top directory is not used, so its tests are never rerun.**
   `_pytest_inifile` looks only in the top directory of `flaky_tests`' copy, and `_pytest` passes what it finds with

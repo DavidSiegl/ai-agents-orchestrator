@@ -309,7 +309,8 @@ A file whose name is not UTF-8 is read the same way, and the quality file writes
   pymarkdown stops with `Configuration Error: 'utf-8' codec can't encode character` when it has a finding in such
   a `.md` file. Either is a failed condition quoting the tool's first line, which need not name the file; mypy's
   comes back on every change until the file has a UTF-8 name.
-- coverage.py collects no data for such a file, so its added lines count as not coverable.
+- coverage.py collects no data for such a file, so its added lines count as not coverable; the quality file names
+  each such `.py` file the change adds lines to under the coverage sentence, as not measured.
 - `flaky-tests` collects the tests of such a test file, but pytest-randomly stops with an internal error,
   `UnicodeEncodeError`, when it shuffles them, so a change to one of them is a `not-rerun` finding quoting it.
 

@@ -3445,7 +3445,7 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
     covered, coverage_sentence = None, None
     if coverage:
         covered = new_coverage(os.path.abspath(coverage), root, changed)
-        coverage_sentence = _coverage_sentence(covered)
+        coverage_sentence = _coverage_sentence(covered, _unmeasured_files(changed))
         if covered.lines >= GATE_MIN_NEW_LINES and covered.percent() < GATE_MIN_COVERAGE:
             conditions.append(f"Coverage of new code is {_floor_tenth(covered.percent())}%; the gate wants at "
                               f"least {GATE_MIN_COVERAGE:g}% once a change has {GATE_MIN_NEW_LINES} or more new "
@@ -3592,12 +3592,34 @@ def new_coverage(report: str, root: str, changed: dict[str, set[int]]) -> NewCov
     return NewCoverage(lines, covered_lines, conditions, covered_conditions)
 
 
-def _coverage_sentence(c: NewCoverage) -> str:
+def _coverage_sentence(c: NewCoverage, unmeasured: list[str]) -> str:
+    """The quality file's coverage section for c: how much of the new code is covered, then, by name, the changed
+    files in unmeasured, which the coverage report has no entry for, so that c leaves their lines out of both counts."""
     if not c.lines:
-        return "No new lines to cover."
-    branches = f", counting their {c.conditions} branch outcomes" if c.conditions else ""
-    return (f"{_floor_tenth(c.percent())}% of {c.lines} new lines to cover{branches}; "
-            f"{c.lines - c.covered_lines} lines are not covered.")
+        sentence = "No new lines to cover."
+    else:
+        branches = f", counting their {c.conditions} branch outcomes" if c.conditions else ""
+        sentence = (f"{_floor_tenth(c.percent())}% of {c.lines} new lines to cover{branches}; "
+                    f"{c.lines - c.covered_lines} lines are not covered.")
+    if unmeasured:
+        named = _series([f"`{escaped_path(path)}`" for path in unmeasured], limit=5)
+        sentence += f"\n\nNot measured: {named}; coverage.py records no data for a file whose name is not UTF-8."
+    return sentence
+
+
+def _unmeasured_files(changed: dict[str, set[int]]) -> list[str]:
+    """The Python files changed, by changed_lines, adds lines to whose names are not UTF-8 (they hold lone
+    surrogates, as git's verbatim output decodes them), in order: coverage.py 7.14 collects no data for such a file."""
+    return sorted(path for path, added in changed.items() if added and path.endswith(".py") and not _is_utf8(path))
+
+
+def _is_utf8(name: str) -> bool:
+    """Whether name, decoded with os.fsdecode, came from UTF-8 bytes: it holds no lone surrogate."""
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _floor_tenth(percent: float) -> str:

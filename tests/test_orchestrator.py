@@ -6538,6 +6538,19 @@ class TestGate(unittest.TestCase):
         # (1 covered condition + 1 covered line) / (2 conditions + 2 lines); line 2 is not new.
         self.assertIn("50.0% of 2 new lines to cover, counting their 2 branch outcomes; 1 lines are not covered.", out)
 
+    def test_coverage_names_a_file_it_cannot_measure_and_judges_without_it(self):
+        name = os.fsdecode(b"m\xff.py")
+        self.put(name, "".join(f"m{k} = {k}\n" for k in range(30)))
+        self.git("add", name)
+        self.add_lines(1)
+        status, _, _ = self.gate("--coverage", self.coverage({4: 1}), "--out", "quality.md")
+        # 30 uncovered lines would fail the gate; coverage.py has no entry for them, so only f.py's line counts.
+        self.assertEqual(status, 0)
+        with open(os.path.join(self.repo, "quality.md"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("100.0% of 1 new lines to cover; 0 lines are not covered.\n\nNot measured: `m\\xff.py`; "
+                      "coverage.py records no data for a file whose name is not UTF-8.", text)
+
     def test_an_unreadable_coverage_report_writes_nothing(self):
         self.add_lines(1)
         self.put("coverage.xml", "<coverage")
