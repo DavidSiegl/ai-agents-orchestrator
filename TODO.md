@@ -92,12 +92,6 @@ was done.
   `drain_end` (2026-10-25); a plain `uv run pytest` passes it. Cause not established. Closes with the test passing
   under mutmut, e.g. by suppressing `HealthCheck.differing_executors` for it, or the gate's mutmut runs leaving
   `tests/test_properties.py` out.
-- **`doctor --machine` asks the machine twice for each tool.** Each check is its own `Host.run`, so `_tool_version`
-  asks `command -v` before `--version`, which already fails for a missing command, and `_gh_logged_in` before
-  `gh auth status`, which may wait up to `NETWORK_TIMEOUT`. Since `ssh_sharing_options` the commands share one SSH
-  connection, so each costs a round trip, no longer a handshake. Raised by the cross-review of the doctor command
-  (F8, 2026-10-24): "redundant probes, each one SSH connection with `--machine`". Closes with each tool asked once
-  (`.scratch/doctor-ssh/issues/02-drop-redundant-probes.md`).
 - **herdr 0.9.1 lists no `gemini` integration.** `herdr integration status` on this host lists `antigravity-cli`
   (whose hook is under `~/.gemini/`) but no `gemini`, so `doctor` warns that it does not list gemini, and the
   README's `herdr integration install gemini` may name a kind herdr no longer has. Found by the doctor run
@@ -347,6 +341,18 @@ was done.
   files.
 
 ## Fixed
+
+- **`doctor --machine` asks the machine twice for each tool.** Each check is its own `Host.run`, so `_tool_version`
+  asks `command -v` before `--version`, which already fails for a missing command, and `_gh_logged_in` before
+  `gh auth status`, which may wait up to `NETWORK_TIMEOUT`. Since `ssh_sharing_options` the commands share one SSH
+  connection, so each costs a round trip, no longer a handshake. Raised by the cross-review of the doctor command
+  (F8, 2026-10-24): "redundant probes, each one SSH connection with `--machine`". Closes with each tool asked once
+  (`.scratch/doctor-ssh/issues/02-drop-redundant-probes.md`).
+  Fixed (2026-10-26): `_tool_version` and `_gh_logged_in` run the tool once through `_run_tool`, which gives the
+  same "<command> is not on PATH" for a command that cannot start locally or that the remote shell answers with
+  127; `_on_path` stays for the agent CLIs, whose checks only ask whether they exist. With `ssh_sharing_options`,
+  20 commands to a user-level sshd on this host took 0.24 s against 1.78 s unshared; `doctor --machine` on a real
+  machine was not timed, as none is saved in herdr here.
 
 - **Cognitive complexity scores direct recursion only.** Campbell's paper gives a point to each function in a
   recursion cycle; `_calls_itself` sees a function calling itself by name, or a method as `self.m`, `cls.m` or

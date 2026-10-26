@@ -10488,11 +10488,31 @@ def _on_path(host: Host, command: str) -> str:
     return proc.stdout.strip()
 
 
+# The exit status a POSIX shell gives a command it cannot find, as the shell an SSH command runs in does.
+COMMAND_NOT_FOUND_STATUS = 127
+
+
+def _run_tool(host: Host, argv: list[str], timeout: float = 60) -> subprocess.CompletedProcess:
+    """host.run(argv, timeout=timeout); raises the _Unmet _on_path raises when argv[0] is not on host's PATH: it
+    cannot be started here, or over SSH the remote shell exits COMMAND_NOT_FOUND_STATUS. Raises OrchestratorError as
+    Host.run does for any other failure to run it."""
+    try:
+        proc = host.run(argv, timeout=timeout)
+    except OrchestratorError as e:
+        if isinstance(e.__cause__, FileNotFoundError):
+            raise _Unmet(f"{argv[0]} is not on PATH") from e
+        raise
+    if host.ssh_target and proc.returncode == COMMAND_NOT_FOUND_STATUS:
+        raise _Unmet(f"{argv[0]} is not on PATH")
+    return proc
+
+
 def _tool_version(host: Host, command: str, minimum: tuple[int, ...]) -> str:
     """What `command --version` prints, once it is on host's PATH and the first version number it prints is minimum
-    or later; raises _Unmet when it is missing, prints no version or an older one."""
-    _on_path(host, command)
-    said = host.check([command, "--version"]).strip()
+    or later; raises _Unmet when it is missing, prints no version or an older one, and OrchestratorError when it
+    fails."""
+    argv = [command, "--version"]
+    said = host._checked(argv, _run_tool(host, argv)).strip()
     number = re.search(r"\d+(?:\.\d+)+", said)
     if number is None:
         raise _Unmet(f"{command} --version prints no version number: {said!r}")
@@ -10540,8 +10560,7 @@ def integration_states(listing: str) -> dict[str, str]:
 
 def _gh_logged_in(host: Host) -> str:
     """That gh is on host's PATH and logged in; raises _Unmet with the fix for what is not."""
-    _on_path(host, "gh")
-    proc = host.run(["gh", "auth", "status"], timeout=NETWORK_TIMEOUT)
+    proc = _run_tool(host, ["gh", "auth", "status"], timeout=NETWORK_TIMEOUT)
     if proc.returncode != 0:
         said = " ".join(line.strip() for line in (proc.stderr.strip() or proc.stdout.strip()).splitlines()[:4])
         raise _Unmet(f"gh auth status fails{': ' + said if said else ''}", "gh auth login")

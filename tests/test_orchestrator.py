@@ -16722,6 +16722,9 @@ class FakeTools:
             path = ("/home/u" if "$HOME" in argv[2] else "") + argv[-1]
             return completed(f"{path}\n") if path in self.dirs else completed(stderr="cd: no such dir", returncode=2)
         if argv[0] not in self.paths and argv[0] != "gitleaks":
+            # The remote shell answers for a command it cannot find; locally it cannot be started at all.
+            if target:
+                return completed(stderr=f"sh: 1: {argv[0]}: not found\n", returncode=127)
             raise FileNotFoundError(2, "No such file or directory", argv[0])
         answer = self.answers[tuple(argv)]
         if isinstance(answer, BaseException):
@@ -16889,6 +16892,16 @@ class TestCheckSetup(unittest.TestCase):
         gh = self.check(tools)["gh"]
         self.assertEqual((gh.detail, gh.fix), ("gh is not on PATH", "install gh (https://cli.github.com)"))
 
+    def test_a_missing_git_or_gh_is_found_by_running_it_once(self):
+        for machine, target in ((None, None), ("box", "me@box")):
+            for tool, argv in (("git", ["git", "--version"]), ("gh", ["gh", "auth", "status"])):
+                with self.subTest(machine=machine, tool=tool):
+                    tools = FakeTools()
+                    del tools.paths[tool]
+                    self.assertEqual(self.check(tools, machine=machine)[tool].detail, f"{tool} is not on PATH")
+                    asked = [a for t, a in tools.calls if t == target and (a[:1] == [tool] or a[-1:] == [tool])]
+                    self.assertEqual(asked, [argv])
+
     def test_gh_times_out(self):
         tools = FakeTools()
         tools.answers["gh", "auth", "status"] = subprocess.TimeoutExpired(["gh"], orchestrator.NETWORK_TIMEOUT)
@@ -16960,9 +16973,11 @@ class TestCheckSetup(unittest.TestCase):
         self.assertEqual((checks["herdr"].detail, checks["herdr on box"].detail), ("herdr 0.9.1", "herdr 0.9.1"))
         # Only the herdr a run drives is checked here; everything else goes over SSH to the machine.
         local = [argv for target, argv in tools.calls if target is None]
-        self.assertEqual(local, [["sh", "-c", 'command -v -- "$1"', "_", "herdr"], ["herdr", "--version"],
-                                 ["herdr", "machine", "list", "--json"]])
+        self.assertEqual(local, [["herdr", "--version"], ["herdr", "machine", "list", "--json"]])
         remote = {tuple(argv) for target, argv in tools.calls if target == "me@box"}
+        # A tool whose version or login is checked is run, never first looked up; only the agent CLIs are.
+        looked_up = {argv[-1] for argv in remote if argv[:3] == ("sh", "-c", 'command -v -- "$1"')}
+        self.assertEqual(looked_up, set(orchestrator.AGENT_KINDS))
         for argv in (("herdr", "--version"), ("herdr", "integration", "status"), ("git", "--version"),
                      ("gh", "auth", "status"), ("gitleaks", "git", "--help"),
                      ("git", "-C", "/proj", "rev-parse", "--show-toplevel"),
