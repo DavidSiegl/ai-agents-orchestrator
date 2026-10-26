@@ -1,4 +1,5 @@
 import ast
+import atexit
 import base64
 import contextlib
 import copy
@@ -13,6 +14,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -1340,6 +1342,20 @@ class TestHerdr(unittest.TestCase):
             herdr.call("agent", "list")
 
 
+# The runtime directory this process's SSH control directory is made in, so that the argv Host.run builds for SSH is
+# known in advance; in /tmp, as tempfile's default on macOS would leave the socket's path too long. The tests that
+# make their own give ssh_sharing_options a control of their own (fresh_ssh_control).
+os.environ["XDG_RUNTIME_DIR"] = tempfile.mkdtemp(prefix="o-", dir="/tmp")
+atexit.register(shutil.rmtree, os.environ["XDG_RUNTIME_DIR"], True)
+# What Host.run puts before an SSH command's target.
+SSH = ["ssh", "-o", "BatchMode=yes", *orchestrator.ssh_sharing_options()]
+
+
+def fresh_ssh_control():
+    """A patch that gives ssh_sharing_options a control that has made no directory yet."""
+    return patch.object(orchestrator, "_SSH_CONTROL", orchestrator._SshControl())
+
+
 class TestHost(unittest.TestCase):
     def test_ssh_wraps_command(self):
         run = MagicMock(return_value=completed("/home/user/proj\n"))
@@ -1347,9 +1363,61 @@ class TestHost(unittest.TestCase):
 
         self.assertEqual(cwd, "/home/user/proj")
         argv = run.call_args.args[0]
-        self.assertEqual(argv[:4], ["ssh", "-o", "BatchMode=yes", "remote-host"])
-        self.assertIn('"$HOME$1"', argv[4])
-        self.assertTrue(argv[4].endswith(" _ /proj"))
+        self.assertEqual(argv[:-1], [*SSH, "remote-host"])
+        self.assertIn('"$HOME$1"', argv[-1])
+        self.assertTrue(argv[-1].endswith(" _ /proj"))
+
+    def test_commands_over_ssh_share_one_connection_through_a_private_directory(self):
+        run = MagicMock(return_value=completed())
+        Host("remote-host", run=run).run(["true"])
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[3:-2], ["-o", "ControlMaster=auto", "-o", "ControlPersist=60",
+                                      "-o", f"ControlPath={orchestrator._SSH_CONTROL.dir}/%C",
+                                      "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3"])
+        self.assertEqual(stat.S_IMODE(os.stat(orchestrator._SSH_CONTROL.dir).st_mode), 0o700)
+
+    def test_a_control_directory_that_has_gone_is_made_again(self):
+        with tempfile.TemporaryDirectory(prefix="o-", dir="/tmp") as runtime, patch.dict(os.environ, {"XDG_RUNTIME_DIR": runtime}), \
+                fresh_ssh_control():
+            first = orchestrator.ssh_sharing_options()[5]
+            shutil.rmtree(orchestrator._SSH_CONTROL.dir)
+            again = orchestrator.ssh_sharing_options()[5]
+            self.assertTrue(first.startswith(f"ControlPath={runtime}/octoflow-ssh-"))
+            self.assertNotEqual(first, again)
+            self.assertTrue(os.path.isdir(orchestrator._SSH_CONTROL.dir))
+
+    def test_a_control_directory_others_could_use_is_replaced(self):
+        with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, {"XDG_RUNTIME_DIR": runtime}), \
+                fresh_ssh_control():
+            first = orchestrator.ssh_sharing_options()[5]
+            os.chmod(orchestrator._SSH_CONTROL.dir, 0o740)  # readable by its group: no longer private
+            self.assertNotEqual(orchestrator.ssh_sharing_options()[5], first)
+            shutil.rmtree(orchestrator._SSH_CONTROL.dir)
+            os.symlink(runtime, orchestrator._SSH_CONTROL.dir)  # a name another could make again, as a link
+            self.assertNotIn(orchestrator._SSH_CONTROL.dir, orchestrator.ssh_sharing_options()[5])
+
+    def test_an_unusable_runtime_directory_falls_back_to_tmp(self):
+        with tempfile.TemporaryDirectory() as runtime:
+            spaced = os.path.join(runtime, "my dir")
+            os.mkdir(spaced)
+            for where in [os.path.join(runtime, "missing"), spaced]:
+                with self.subTest(where), patch.dict(os.environ, {"XDG_RUNTIME_DIR": where}), \
+                        fresh_ssh_control():
+                    self.assertTrue(orchestrator.ssh_sharing_options()[5].startswith("ControlPath=/tmp/octoflow-ssh-"))
+
+    def test_without_a_usable_control_path_a_command_runs_on_a_connection_of_its_own(self):
+        """OpenSSH 10 fails a command whose ControlPath it cannot bind, its directory missing or the path too long
+        (exit status 255, "ControlPath too long"), rather than connect without sharing; so then no option is
+        passed. Measured against a real sshd, which CI does not have; here the argv is checked."""
+        run = MagicMock(return_value=completed())
+        with tempfile.TemporaryDirectory() as runtime:
+            long_dir = os.path.join(runtime, "x" * 80)
+            os.mkdir(long_dir)
+            with patch.dict(os.environ, {"XDG_RUNTIME_DIR": long_dir}), \
+                    fresh_ssh_control(), \
+                    patch.object(orchestrator.tempfile, "mkdtemp", side_effect=OSError(28, "No space left on device")):
+                Host("remote-host", run=run).run(["true"])
+                self.assertEqual(run.call_args.args[0], ["ssh", "-o", "BatchMode=yes", "remote-host", "true"])
 
     def test_read_missing_file(self):
         run = MagicMock(return_value=completed(returncode=orchestrator.MISSING_FILE_STATUS))
@@ -1371,7 +1439,7 @@ class TestHost(unittest.TestCase):
         url = Host("remote-host", run=run).create_pr("/proj", "main", "orchestrator/x", "Title", "body", draft=True)
 
         self.assertEqual(url, "https://github.com/o/r/pull/7")
-        remote = run.call_args.args[0][4]
+        remote = run.call_args.args[0][-1]
         self.assertIn("_ /proj gh pr create --base main --head orchestrator/x", remote)
         self.assertTrue(remote.endswith("--body-file - --draft"))
         self.assertEqual(run.call_args.kwargs["input"], "body")
@@ -1420,10 +1488,10 @@ class TestHost(unittest.TestCase):
         run = MagicMock(return_value=completed("1791000000\n"))
         host = Host("remote-host", run=run)
         self.assertEqual(host.now(), 1_791_000_000)
-        self.assertEqual(run.call_args.args[0], ["ssh", "-o", "BatchMode=yes", "remote-host", "date +%s"])
+        self.assertEqual(run.call_args.args[0], [*SSH, "remote-host", "date +%s"])
         self.assertEqual(host.mtime("/x/review-1.md"), 1_791_000_000)
-        self.assertEqual(run.call_args.args[0][:4], ["ssh", "-o", "BatchMode=yes", "remote-host"])
-        self.assertTrue(run.call_args.args[0][4].endswith(" _ /x/review-1.md"))
+        self.assertEqual(run.call_args.args[0][:-1], [*SSH, "remote-host"])
+        self.assertTrue(run.call_args.args[0][-1].endswith(" _ /x/review-1.md"))
 
     def test_a_time_that_is_no_number_raises(self):
         host = Host(run=MagicMock(return_value=completed("soon\n")))
@@ -1434,7 +1502,7 @@ class TestHost(unittest.TestCase):
         run = MagicMock(return_value=completed())
         Host("remote-host", run=run).rename("/x/review-1.md", "/x/review 1.rejected.md")
         self.assertEqual(run.call_args.args[0],
-                         ["ssh", "-o", "BatchMode=yes", "remote-host", "mv -f -- /x/review-1.md '/x/review 1.rejected.md'"])
+                         [*SSH, "remote-host", "mv -f -- /x/review-1.md '/x/review 1.rejected.md'"])
 
     def test_rename_failure_raises(self):
         host = Host(run=MagicMock(return_value=completed(stderr="No such file or directory", returncode=1)))
@@ -13139,8 +13207,8 @@ class TestShow(unittest.TestCase):
         review = f"{SHOW_DIR}/review-1.md"
 
         def remote(argv, **kw):
-            self.assertEqual(argv[:4], ["ssh", "-o", "BatchMode=yes", "remote-host"])
-            script, *args = shlex.split(argv[4])[2:]
+            self.assertEqual(argv[:-1], [*SSH, "remote-host"])
+            script, *args = shlex.split(argv[-1])[2:]
             if "pwd" in script:
                 return completed("/proj\n")
             if "state.json; do" in script:
@@ -13161,8 +13229,8 @@ class TestShow(unittest.TestCase):
             f"\nfiles\n    {SHOW_DIR}/spec.md\n    {SHOW_DIR}/build-1.md\n    {review}\n"
             f"\nlast review: {review}\nremote findings\n"))
         self.assertIn("resume: orchestrator.py resume a1b2c3 --machine M --cwd '~/proj'", out.getvalue())
-        reads = [shlex.split(c.args[0][4])[-1] for c in run.call_args_list
-                 if f"|| exit {orchestrator.MISSING_FILE_STATUS}; cat" in c.args[0][4]]
+        reads = [shlex.split(c.args[0][-1])[-1] for c in run.call_args_list
+                 if f"|| exit {orchestrator.MISSING_FILE_STATUS}; cat" in c.args[0][-1]]
         self.assertEqual(reads, [f"{SHOW_DIR}/review-2.md", review])
 
     def test_help(self):
@@ -13197,9 +13265,9 @@ class TestRunFiles(unittest.TestCase):
         run = MagicMock(return_value=completed("5 /r/b.md\0" "5 /r/a b.md\0" "3 /r/c.md\0"))
         self.assertEqual(Host("remote-host", run=run).run_files("/r"), [("/r/c.md", 3), ("/r/a b.md", 5), ("/r/b.md", 5)])
         run.assert_called_once()
-        self.assertEqual(run.call_args.args[0][:4], ["ssh", "-o", "BatchMode=yes", "remote-host"])
-        self.assertIn("stat -c %Y", run.call_args.args[0][4])
-        self.assertIn("stat -f %m", run.call_args.args[0][4])
+        self.assertEqual(run.call_args.args[0][:-1], [*SSH, "remote-host"])
+        self.assertIn("stat -c %Y", run.call_args.args[0][-1])
+        self.assertIn("stat -f %m", run.call_args.args[0][-1])
 
     def test_failure_raises(self):
         host = Host(run=MagicMock(return_value=completed(stderr="Permission denied", returncode=1)))
@@ -13878,9 +13946,11 @@ class TestDrain(unittest.TestCase):
                 self.saved_run("a", run_id, 10**4, phase="done", verdict=APPROVE, pr_url=PR_A)
                 self.host.pull_requests[PR_A] = {"state": pr_state, "headRefOid": "a" * 40, "closedAt": None}
 
+                self.host.gh_calls.clear()
                 got = orchestrator.refreshed_headers([spec], self.host, "/proj", [], "here", lambda pid: False)
 
                 self.assertEqual(got, [(spec, {"Status": spec_after, "PR": PR_A})])
+                self.assertEqual([c[:3] for c in self.host.gh_calls], [("pr", "view", PR_A)])
 
     def test_one_drain_marks_a_merged_finished_run_done_and_runs_its_dependant(self):
         run_id = "20261024-100000-aaaaaa"
@@ -13946,6 +14016,40 @@ class TestDrain(unittest.TestCase):
         self.assertEqual(self.header("a"), ("in-review", run_id, PR_A))
         self.assertEqual(self.run_conflicts(run_id), [])
         self.assertEqual(out, "all specs cleared\n")
+
+    def test_an_in_review_spec_whose_refresh_finds_its_pull_request_merged_is_done_asking_gh_once(self):
+        self.conflicted_spec("in-review", state="MERGED")
+        [spec] = orchestrator.read_queue(self.dir)
+        self.host.gh_calls.clear()
+        got = orchestrator.refreshed_headers([spec], self.host, "/proj", [], "here", lambda pid: False)
+        self.assertEqual(got, [(spec, {"Status": "done"})])
+        self.assertEqual([c[:3] for c in self.host.gh_calls], [("pr", "view", PR_A)])
+
+    def test_a_spec_for_the_human_whose_conflict_clears_has_one_entry_and_gh_asked_once(self):
+        self.conflicted_spec()
+        [spec] = orchestrator.read_queue(self.dir)
+        self.host.gh_calls.clear()
+        got = orchestrator.refreshed_headers([spec], self.host, "/proj", [], "here", lambda pid: False)
+        self.assertEqual(got, [(spec, {"Status": "in-review", "PR": PR_A})])
+        self.assertEqual([c[:3] for c in self.host.gh_calls], [("pr", "view", PR_A)])
+
+    def test_a_spec_for_the_human_whose_refresh_finds_its_pull_request_merged_is_done_asking_gh_once(self):
+        self.conflicted_spec(state="MERGED")
+        [spec] = orchestrator.read_queue(self.dir)
+        self.host.gh_calls.clear()
+        got = orchestrator.refreshed_headers([spec], self.host, "/proj", [], "here", lambda pid: False)
+        self.assertEqual(got, [(spec, {"Status": "done"})])
+        self.assertEqual([c[:3] for c in self.host.gh_calls], [("pr", "view", PR_A)])
+
+    def test_a_refresh_of_another_pull_request_than_the_spec_s_settles_nothing_by_it(self):
+        run_id = self.conflicted_spec("in-review", state="MERGED")
+        self.spec("a", drain_spec_text("First", "in-review", f"Run: {run_id}", f"PR: {PR_B}"))
+        self.host.pull_requests[PR_B] = {"state": "OPEN", "headRefOid": "b" * 40, "closedAt": None}
+        [spec] = orchestrator.read_queue(self.dir)
+        self.host.gh_calls.clear()
+        got = orchestrator.refreshed_headers([spec], self.host, "/proj", [], "here", lambda pid: False)
+        self.assertEqual(got, [])
+        self.assertEqual([c[:3] for c in self.host.gh_calls], [("pr", "view", PR_A), ("pr", "view", PR_B)])
 
     def test_a_dry_run_shows_the_move_and_refreshes_nothing(self):
         run_id = self.conflicted_spec()
@@ -14545,9 +14649,9 @@ class TestHostPullRequest(unittest.TestCase):
         edit = run.call_args
         host.mark_pr_ready("/proj", self.URL)
         ready = run.call_args
-        self.assertTrue(edit.args[0][4].endswith(f"_ /proj gh pr edit {self.URL} --body-file -"), edit.args[0])
+        self.assertTrue(edit.args[0][-1].endswith(f"_ /proj gh pr edit {self.URL} --body-file -"), edit.args[0])
         self.assertEqual(edit.kwargs["input"], "new body")
-        self.assertTrue(ready.args[0][4].endswith(f"_ /proj gh pr ready {self.URL}"), ready.args[0])
+        self.assertTrue(ready.args[0][-1].endswith(f"_ /proj gh pr ready {self.URL}"), ready.args[0])
         self.assertEqual({edit.kwargs["timeout"], ready.kwargs["timeout"]}, {orchestrator.NETWORK_TIMEOUT})
 
     def test_a_failed_edit_raises(self):
@@ -16736,7 +16840,7 @@ class FakeTools:
     def __call__(self, argv, **kwargs):
         target = None
         if argv[0] == "ssh":
-            target, argv = argv[3], shlex.split(argv[4])
+            target, argv = argv[-2], shlex.split(argv[-1])
             if target not in self.targets:
                 return completed(stderr=f"ssh: connect to host {target}: Connection refused", returncode=255)
         self.calls.append((target, argv))
@@ -16749,6 +16853,9 @@ class FakeTools:
             path = ("/home/u" if "$HOME" in argv[2] else "") + argv[-1]
             return completed(f"{path}\n") if path in self.dirs else completed(stderr="cd: no such dir", returncode=2)
         if argv[0] not in self.paths and argv[0] != "gitleaks":
+            # The remote shell answers for a command it cannot find; locally it cannot be started at all.
+            if target:
+                return completed(stderr=f"sh: 1: {argv[0]}: not found\n", returncode=127)
             raise FileNotFoundError(2, "No such file or directory", argv[0])
         answer = self.answers[tuple(argv)]
         if isinstance(answer, BaseException):
@@ -16916,6 +17023,16 @@ class TestCheckSetup(unittest.TestCase):
         gh = self.check(tools)["gh"]
         self.assertEqual((gh.detail, gh.fix), ("gh is not on PATH", "install gh (https://cli.github.com)"))
 
+    def test_a_missing_git_or_gh_is_found_by_running_it_once(self):
+        for machine, target in ((None, None), ("box", "me@box")):
+            for tool, argv in (("git", ["git", "--version"]), ("gh", ["gh", "auth", "status"])):
+                with self.subTest(machine=machine, tool=tool):
+                    tools = FakeTools()
+                    del tools.paths[tool]
+                    self.assertEqual(self.check(tools, machine=machine)[tool].detail, f"{tool} is not on PATH")
+                    asked = [a for t, a in tools.calls if t == target and (a[:1] == [tool] or a[-1:] == [tool])]
+                    self.assertEqual(asked, [argv])
+
     def test_gh_times_out(self):
         tools = FakeTools()
         tools.answers["gh", "auth", "status"] = subprocess.TimeoutExpired(["gh"], orchestrator.NETWORK_TIMEOUT)
@@ -16987,9 +17104,11 @@ class TestCheckSetup(unittest.TestCase):
         self.assertEqual((checks["herdr"].detail, checks["herdr on box"].detail), ("herdr 0.9.1", "herdr 0.9.1"))
         # Only the herdr a run drives is checked here; everything else goes over SSH to the machine.
         local = [argv for target, argv in tools.calls if target is None]
-        self.assertEqual(local, [["sh", "-c", 'command -v -- "$1"', "_", "herdr"], ["herdr", "--version"],
-                                 ["herdr", "machine", "list", "--json"]])
+        self.assertEqual(local, [["herdr", "--version"], ["herdr", "machine", "list", "--json"]])
         remote = {tuple(argv) for target, argv in tools.calls if target == "me@box"}
+        # A tool whose version or login is checked is run, never first looked up; only the agent CLIs are.
+        looked_up = {argv[-1] for argv in remote if argv[:3] == ("sh", "-c", 'command -v -- "$1"')}
+        self.assertEqual(looked_up, set(orchestrator.AGENT_KINDS))
         for argv in (("herdr", "--version"), ("herdr", "integration", "status"), ("git", "--version"),
                      ("gh", "auth", "status"), ("gitleaks", "git", "--help"),
                      ("git", "-C", "/proj", "rev-parse", "--show-toplevel"),
@@ -17034,7 +17153,7 @@ class TestCheckSetup(unittest.TestCase):
 
                 def answer(argv, run=tools.__call__, versions=versions, **kwargs):
                     if argv == ["herdr", "--version"] or argv[-1:] == ["herdr --version"]:
-                        return completed(versions[None if argv[0] == "herdr" else argv[3]])
+                        return completed(versions[None if argv[0] == "herdr" else argv[-2]])
                     return run(argv, **kwargs)
 
                 with with_tkinter():

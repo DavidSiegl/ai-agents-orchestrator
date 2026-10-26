@@ -31,6 +31,7 @@ window over the same CLI: it starts run and resume as child processes.
 
 import argparse
 import ast
+import atexit
 import base64
 import bisect
 import collections
@@ -1477,8 +1478,86 @@ class RunFile(NamedTuple):
     mtime: int  # when it was last modified, in seconds since the epoch by its host's clock
 
 
+# How long, in seconds, an SSH master connection (ssh_sharing_options) outlives the last command that used it.
+SSH_CONTROL_PERSIST_SECONDS = 60
+# How often, in seconds, an SSH master asks its server whether the connection is alive, and how many asks left
+# unanswered end it: so one that died without a reset ends within 30 s, and the next command opens a new one,
+# rather than waiting on it until TCP gives up, while the commands keep it from ever idling out.
+SSH_ALIVE_INTERVAL_SECONDS = 10
+SSH_ALIVE_COUNT = 3
+# The longest control socket path ssh can bind, in bytes: a Unix socket's path is at most 103 on macOS (sun_path
+# holds 104 with its NUL; 108 on Linux), and ssh binds a temporary name 17 bytes longer before renaming it.
+_SSH_SOCKET_PATH_MAX = 103 - 17
+# The name of a control directory: this prefix, then the 8 characters mkdtemp adds.
+_SSH_DIR_PREFIX = "octoflow-ssh-"
+
+
+class _SshControl:
+    """This process's SSH control sockets, for ssh_sharing_options."""
+
+    def __init__(self) -> None:
+        self.dir: str | None = None  # the directory, made by this process, they are in; None while there is none
+        self.options: list[str] = []  # ssh_sharing_options' answer while dir is that directory
+
+
+_SSH_CONTROL = _SshControl()
+
+
+def ssh_sharing_options() -> list[str]:
+    """The ssh options that let this process's commands to one target share a single connection (ssh_config(5),
+    ControlMaster), which ends SSH_CONTROL_PERSIST_SECONDS after its last command, or once it stops answering
+    (SSH_ALIVE_INTERVAL_SECONDS). Its socket is in a directory only the user can use, under $XDG_RUNTIME_DIR, else
+    /tmp, made on the first call, made again when it is gone or no longer the user's alone, and removed when the
+    process exits.
+
+    An empty list when no such directory with a socket path ssh accepts can be made: ssh would fail the command,
+    not connect on its own (ssh_config(5), ControlPath), so the command runs unshared."""
+    control = _SSH_CONTROL
+    if control.dir is None or not _private_dir(control.dir):
+        control.dir, control.options = None, []
+        # /tmp rather than tempfile's default, whose path on macOS leaves no room for the socket's; mkdtemp's
+        # directory there is private and unguessable, and _private_dir sees that it stays so.
+        for parent in (os.environ.get("XDG_RUNTIME_DIR"), "/tmp"):  # noqa: S108
+            if made := _new_ssh_control_dir(parent):
+                control.dir = made
+                control.options = ["-o", "ControlMaster=auto", "-o", f"ControlPersist={SSH_CONTROL_PERSIST_SECONDS}",
+                                   "-o", f"ControlPath={made}/%C",
+                                   "-o", f"ServerAliveInterval={SSH_ALIVE_INTERVAL_SECONDS}",
+                                   "-o", f"ServerAliveCountMax={SSH_ALIVE_COUNT}"]
+                break
+    return control.options
+
+
+def _new_ssh_control_dir(parent: str | None) -> str | None:
+    """A new directory for SSH control sockets in parent, only the user's, its removal at exit registered; None when
+    parent is unset, would give a socket path ssh rejects, too long or with a character its option parser takes
+    apart, or the directory cannot be made."""
+    if not parent or any(c.isspace() or c in "%\"'\\" for c in parent):
+        return None
+    # The socket's path: parent, the directory's name, and %C, the hash of the connection's endpoints, 40 hex digits.
+    if len(os.fsencode(parent)) + 1 + len(_SSH_DIR_PREFIX) + 8 + 1 + 40 > _SSH_SOCKET_PATH_MAX:
+        return None
+    try:
+        made = tempfile.mkdtemp(prefix=_SSH_DIR_PREFIX, dir=parent)
+    except OSError:
+        return None
+    atexit.register(shutil.rmtree, made, True)
+    return made
+
+
+def _private_dir(path: str) -> bool:
+    """Whether path is still a directory, not a symlink, that is the user's and no one else's (mode 0700): one this
+    process made may have been removed, and in /tmp another user, who sees its name in ps, may make one so named."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() and stat.S_IMODE(st.st_mode) == 0o700
+
+
 class Host:
-    """Runs commands on the machine where the agents run: locally, or over SSH."""
+    """Runs commands on the machine where the agents run: locally, or over SSH, one shared connection per target
+    (ssh_sharing_options)."""
 
     def __init__(self, ssh_target: str | None = None, run=subprocess.run):
         self.ssh_target = ssh_target
@@ -1501,7 +1580,7 @@ class Host:
         """
         if self.ssh_target:
             # BatchMode fails fast instead of hanging on a password prompt nobody can see.
-            argv = ["ssh", "-o", "BatchMode=yes", self.ssh_target, shlex.join(argv)]
+            argv = ["ssh", "-o", "BatchMode=yes", *ssh_sharing_options(), self.ssh_target, shlex.join(argv)]
         try:
             if not verbatim:
                 return self._run(argv, input=stdin, capture_output=True, text=True, timeout=timeout, env=child_env())
@@ -1516,9 +1595,11 @@ class Host:
                                            os.fsdecode(proc.stderr))
 
     def check(self, argv: list[str], stdin: str | None = None, timeout: float = 60) -> str:
-        return self._checked(argv, self.run(argv, stdin, timeout))
+        return self.checked(argv, self.run(argv, stdin, timeout))
 
-    def _checked(self, argv: list[str], proc: subprocess.CompletedProcess) -> str:
+    def checked(self, argv: list[str], proc: subprocess.CompletedProcess) -> str:
+        """proc's standard output, proc being argv run on this host; raises OrchestratorError naming argv, the SSH
+        target if any, and its standard error, when it exited with a status other than 0."""
         if proc.returncode != 0:
             where = f" on {self.ssh_target}" if self.ssh_target else ""
             raise OrchestratorError(f"{shlex.join(argv)} failed{where}: {proc.stderr.strip()}")
@@ -1583,7 +1664,7 @@ class Host:
     def git(self, cwd: str, *args: str, timeout: float = 60, verbatim: bool = False) -> str:
         """The standard output of git args in cwd; timeout and verbatim as for run. Raises OrchestratorError when
         git exits with a status other than 0."""
-        return self._checked(["git", "-C", cwd, *args], self.git_run(cwd, *args, timeout=timeout, verbatim=verbatim))
+        return self.checked(["git", "-C", cwd, *args], self.git_run(cwd, *args, timeout=timeout, verbatim=verbatim))
 
     def git_run(self, cwd: str, *args: str, timeout: float = 60,
                 verbatim: bool = False) -> subprocess.CompletedProcess:
@@ -1595,7 +1676,7 @@ class Host:
         """Whether a yes-or-no git command answers yes: status 0 is yes, 1 is no, anything else an error."""
         proc = self.git_run(cwd, *args)
         if proc.returncode not in (0, 1):
-            self._checked(["git", "-C", cwd, *args], proc)
+            self.checked(["git", "-C", cwd, *args], proc)
         return proc.returncode == 0
 
     def fetch(self, cwd: str, branch: str) -> str:
@@ -1858,7 +1939,7 @@ class Host:
         _scan_git_env gives it, so both read the same patch."""
         argv = [*git_env, "git", "-C", source, "-c", "core.quotePath=false", "log", "-p", "-U0", "--no-color",
                 "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", "--format=%x00%H", *log_opts.split()]
-        out = self._checked(argv, self.run(argv, timeout=GITLEAKS_TIMEOUT, verbatim=True))
+        out = self.checked(argv, self.run(argv, timeout=GITLEAKS_TIMEOUT, verbatim=True))
         leaks = []
         # Each commit's patch follows its sha on a line of its own that starts with a NUL; a NUL inside a line of a
         # patch does not start one.
@@ -1905,7 +1986,7 @@ class Host:
         proc = self.git_run(cwd, *argv)
         if proc.returncode == 1:
             return None
-        return self._checked(["git", "-C", cwd, *argv], proc).strip()
+        return self.checked(["git", "-C", cwd, *argv], proc).strip()
 
     def has_commit(self, cwd: str, commit: str) -> bool:
         return self._git_test(cwd, "rev-parse", "-q", "--verify", f"{commit}^{{commit}}")
@@ -1982,7 +2063,7 @@ class Host:
         if proc.returncode in GH_UNUSABLE_STATUS:
             raise GhUnusable(f"gh {shlex.join(args)} failed with status {proc.returncode}: "
                              f"{(proc.stderr or proc.stdout).strip()}")
-        out = self._checked(["gh", *args], proc)
+        out = self.checked(["gh", *args], proc)
         try:
             pr = json.loads(out)
             fields_ok = valid(pr)
@@ -2047,7 +2128,7 @@ class Host:
         proc = self.run(["sh", "-c", script, "_", pattern.format(session=session)], verbatim=True)
         if proc.returncode == MISSING_FILE_STATUS:
             return None
-        return self._checked(["sh", "-c", script], proc)
+        return self.checked(["sh", "-c", script], proc)
 
     def run_metrics(self, cwd: str) -> list[dict]:
         """The metrics.json of each run of the project at cwd that has one, oldest run first."""
@@ -10058,13 +10139,9 @@ def blocker_cycle(blockers: dict[str, list[str]]) -> list[str] | None:
 def refreshed_headers(specs: list[QueuedSpec], host: Host, cwd: str, target: list[str],
                       local_host: str, pid_alive, dry_run: bool = False) -> list[tuple[QueuedSpec, dict[str, str]]]:
     """The header lines to set, by spec, for what has become of the pull requests and runs that earlier drains left
-    behind: an SPEC_IN_REVIEW spec's pull request, now merged or closed; a SPEC_FOR_HUMAN spec's run, whose conflict
-    this refreshes (refresh_conflict) and which, open with the conflict cleared and succeeded, makes it
-    SPEC_IN_REVIEW; and the run on a SPEC_READY spec's Run: line, which an interrupted drain leaves
-    (finished_run_header), whose pull request, once finished_run_header makes the spec SPEC_IN_REVIEW, it asks about
-    in the same pass, merging pull_request_header's lines into the one pair, so that a pull request already merged
-    or closed settles the spec, and frees its dependants, in this drain. It refreshes an SPEC_IN_REVIEW spec's run
-    too, and logs what refresh_conflict did; with dry_run, it does nothing of that, and gives the header lines as
+    behind, one pair for each spec that has any, each followed to where it settles in this pass (settled_header), so
+    that a pull request already merged or closed frees the spec's dependants in this drain. It refreshes a run's
+    conflict and logs what refresh_conflict did; with dry_run, it does nothing of that, and gives the header lines as
     though it had.
 
     cwd is the project, where gh asks about pull requests and the runs are; target is the --machine and --cwd flags
@@ -10074,47 +10151,90 @@ def refreshed_headers(specs: list[QueuedSpec], host: Host, cwd: str, target: lis
     # Read once, and only when a spec's run is to be looked at.
     statuses = (SPEC_READY, SPEC_IN_REVIEW, SPEC_FOR_HUMAN)
     runs = host.run_states(cwd) if any(spec.run and spec.status in statuses for spec in specs) else []
-    out = []
-    for spec in specs:
-        if spec.status in (SPEC_IN_REVIEW, SPEC_FOR_HUMAN) and (entries := conflict_header(spec, runs, host, cwd,
-                                                                                           dry_run)):
-            out.append((spec, entries))
-        if spec.status == SPEC_IN_REVIEW and spec.pr and (entries := pull_request_header(spec.pr, host, cwd)):
-            out.append((spec, entries))
-        elif spec.status == SPEC_READY and (run_id := spec.run):
-            entries = finished_run_header(spec, run_id, runs, cwd, target, local_host, pid_alive)
-            if entries[STATUS_KEY] == SPEC_IN_REVIEW and (merged := pull_request_header(entries[PR_KEY], host, cwd)):
-                entries |= merged
-            out.append((spec, entries))
-    return out
+    settle = functools.partial(settled_header, runs=runs, prs=_PullRequestStates(host, cwd), target=target,
+                               local_host=local_host, pid_alive=pid_alive, dry_run=dry_run)
+    return [(spec, entries) for spec in specs if (entries := settle(spec))]
 
 
-def conflict_header(spec: QueuedSpec, runs: list[tuple[int, dict]], host: Host, cwd: str,
-                    dry_run: bool) -> dict[str, str] | None:
-    """Refresh the run on the spec's Run: line, if it has_conflict, as refreshed_headers says, and return the header
-    lines that sets: SPEC_IN_REVIEW and the pull request for a SPEC_FOR_HUMAN spec whose succeeded run's pull request
-    is open and no longer conflicts; None otherwise, and for a run not among runs, Host.run_states's."""
+class _PullRequestStates:
+    """The states gh gives pull requests in one refreshed_headers pass, OPEN, CLOSED or MERGED by URL: each asked of
+    gh once at most, or taken from what a conflict refresh was told (learn)."""
+
+    def __init__(self, host: Host, cwd: str):
+        self.host, self.cwd = host, cwd  # whom to ask, and in which project, as refreshed_headers says
+        self._states: dict[str, str] = {}
+
+    def learn(self, url: str, state: str) -> None:
+        """Take state as the pull request's at url for the rest of the pass, as gh gave it another way."""
+        self._states[url] = state
+
+    def known(self, url: str) -> str | None:
+        """The pull request's state at url, if this pass has heard it; None, asking no one, if not."""
+        return self._states.get(url)
+
+    def state(self, url: str) -> str:
+        """The pull request's state at url, asking gh unless this pass has heard it. Raises OrchestratorError as
+        Host.pull_request does."""
+        if url not in self._states:
+            self._states[url] = self.host.pull_request(self.cwd, url)["state"]
+        return self._states[url]
+
+
+def settled_header(spec: QueuedSpec, *, runs: list[tuple[int, dict]], prs: _PullRequestStates, target: list[str],
+                   local_host: str, pid_alive, dry_run: bool) -> dict[str, str]:
+    """The header lines to set for spec, empty for none, from these steps in this order, each on the status the one
+    before it left:
+
+    1. a SPEC_IN_REVIEW or SPEC_FOR_HUMAN spec's run, its conflict refreshed (conflict_header), which can make a
+       SPEC_FOR_HUMAN spec SPEC_IN_REVIEW with its pull request;
+    2. a SPEC_READY spec's finished run on its Run: line, which an interrupted drain leaves (finished_run_header):
+       SPEC_IN_REVIEW with its pull request, or SPEC_FOR_HUMAN;
+    3. a spec now SPEC_IN_REVIEW with a pull request, or SPEC_FOR_HUMAN with one whose state step 1 heard: SPEC_DONE
+       once it is merged, SPEC_FOR_HUMAN once it is closed (pull_request_header).
+
+    gh hears of each pull request once a pass (prs). runs are Host.run_states's; the rest is as refreshed_headers
+    says. Raises OrchestratorError as those steps do.
+    """
+    entries: dict[str, str] = {}
+    if spec.status in (SPEC_IN_REVIEW, SPEC_FOR_HUMAN):
+        entries |= conflict_header(spec, runs, prs, dry_run)
+    elif spec.status == SPEC_READY and spec.run:
+        entries |= finished_run_header(spec, spec.run, runs, prs.cwd, target, local_host, pid_alive)
+    status, pr = entries.get(STATUS_KEY, spec.status), entries.get(PR_KEY, spec.pr)
+    if pr and (status == SPEC_IN_REVIEW or (status == SPEC_FOR_HUMAN and prs.known(pr))):
+        settled = pull_request_header(prs.state(pr))
+        if settled.get(STATUS_KEY, status) != status:
+            entries |= settled
+    return entries
+
+
+def conflict_header(spec: QueuedSpec, runs: list[tuple[int, dict]], prs: _PullRequestStates,
+                    dry_run: bool) -> dict[str, str]:
+    """Refresh the run on the spec's Run: line, if it has_conflict, as refreshed_headers says, telling prs the state
+    gh gave its pull request, and return the header lines that sets: SPEC_IN_REVIEW and the pull request for a
+    SPEC_FOR_HUMAN spec whose succeeded run's pull request is open and no longer conflicts; none otherwise, and for a
+    run not among runs, Host.run_states's."""
     saved = next((s for _, s in runs if s.get("run_id") == spec.run), None)
     if saved is None or not has_conflict(saved):
-        return None
-    check = refresh_conflict(host, cwd, saved, dry_run)
+        return {}
+    check = refresh_conflict(prs.host, prs.cwd, saved, dry_run)
     if not dry_run:
         log(check.line)
+    prs.learn(check.url, check.pr_state)
     cleared_open = check.pr_state == "OPEN" and check.clears
     if spec.status == SPEC_FOR_HUMAN and cleared_open and saved.get("verdict") in SUCCEEDED:
         return {STATUS_KEY: SPEC_IN_REVIEW, PR_KEY: check.url}
-    return None
+    return {}
 
 
-def pull_request_header(url: str, host: Host, cwd: str) -> dict[str, str] | None:
-    """The header lines to set for an SPEC_IN_REVIEW spec whose pull request is at url: SPEC_DONE once it is merged,
-    SPEC_FOR_HUMAN once it is closed; None while it is open. Raises OrchestratorError as Host.pull_request does."""
-    pr_state = host.pull_request(cwd, url)["state"]
-    if pr_state == "MERGED":
+def pull_request_header(state: str) -> dict[str, str]:
+    """The header lines to set for a spec whose pull request is in state, as gh gives it: SPEC_DONE for MERGED,
+    SPEC_FOR_HUMAN for CLOSED; none for OPEN."""
+    if state == "MERGED":
         return {STATUS_KEY: SPEC_DONE}
-    if pr_state == "CLOSED":
+    if state == "CLOSED":
         return {STATUS_KEY: SPEC_FOR_HUMAN}
-    return None
+    return {}
 
 
 def finished_run_header(spec: QueuedSpec, run_id: str, runs: list[tuple[int, dict]], cwd: str, target: list[str],
@@ -10587,11 +10707,31 @@ def _on_path(host: Host, command: str) -> str:
     return proc.stdout.strip()
 
 
+# The exit status a POSIX shell gives a command it cannot find, as the shell an SSH command runs in does.
+COMMAND_NOT_FOUND_EXIT = 127
+
+
+def _run_tool(host: Host, argv: list[str], timeout: float = 60) -> subprocess.CompletedProcess:
+    """host.run(argv, timeout=timeout); raises the _Unmet _on_path raises when argv[0] is not on host's PATH: it
+    cannot be started here, or over SSH the remote shell exits COMMAND_NOT_FOUND_EXIT. Raises OrchestratorError as
+    Host.run does for any other failure to run it."""
+    try:
+        proc = host.run(argv, timeout=timeout)
+    except OrchestratorError as e:
+        if isinstance(e.__cause__, FileNotFoundError):
+            raise _Unmet(f"{argv[0]} is not on PATH") from e
+        raise
+    if host.ssh_target and proc.returncode == COMMAND_NOT_FOUND_EXIT:
+        raise _Unmet(f"{argv[0]} is not on PATH")
+    return proc
+
+
 def _tool_version(host: Host, command: str, minimum: tuple[int, ...]) -> str:
     """What `command --version` prints, once it is on host's PATH and the first version number it prints is minimum
-    or later; raises _Unmet when it is missing, prints no version or an older one."""
-    _on_path(host, command)
-    said = host.check([command, "--version"]).strip()
+    or later; raises _Unmet when it is missing, prints no version or an older one, and OrchestratorError when it
+    fails."""
+    argv = [command, "--version"]
+    said = host.checked(argv, _run_tool(host, argv)).strip()
     number = re.search(r"\d+(?:\.\d+)+", said)
     if number is None:
         raise _Unmet(f"{command} --version prints no version number: {said!r}")
@@ -10639,8 +10779,7 @@ def integration_states(listing: str) -> dict[str, str]:
 
 def _gh_logged_in(host: Host) -> str:
     """That gh is on host's PATH and logged in; raises _Unmet with the fix for what is not."""
-    _on_path(host, "gh")
-    proc = host.run(["gh", "auth", "status"], timeout=NETWORK_TIMEOUT)
+    proc = _run_tool(host, ["gh", "auth", "status"], timeout=NETWORK_TIMEOUT)
     if proc.returncode != 0:
         said = " ".join(line.strip() for line in (proc.stderr.strip() or proc.stdout.strip()).splitlines()[:4])
         raise _Unmet(f"gh auth status fails{': ' + said if said else ''}", "gh auth login")
