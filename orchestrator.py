@@ -4656,9 +4656,11 @@ def passes_at_base(change: GateChange, *, budget: float) -> list[dict]:
     skip, all its parameter sets included. One that fails or errors there tests the change, which is what the check
     expects, and gives nothing; so does one that pytest does not collect there: a test whose file cannot be imported at
     the base, or whose conftest.py raises ImportError there, whatever the test itself checks, and a test_* method of a
-    class pytest does not take for a test class. The base's code is what the copy's own configuration, such as
-    pytest's pythonpath, imports; a project installed into the gate's interpreter imports the working tree's instead,
-    and every test of it then passes at the base.
+    class pytest does not take for a test class. The base's code is what the copy's import roots, its top and its src/,
+    and its own configuration, such as pytest's pythonpath, import, ahead of what is installed into the gate's
+    interpreter, an editable install of the project included. A run that still imports the project's code from the
+    working tree, as from a package an editable install finds outside those roots, judges none of its tests and is a
+    not-run finding naming the package.
 
     The collections and runs together, one of each for every configuration the changed tests fall under, may take
     budget seconds; a stop there is a budget-reached finding saying when, and how many test cases the run had run,
@@ -4695,15 +4697,67 @@ def _beside_tests(path: str) -> bool:
     return _python_test_file(path) or name == "conftest.py" or "tests" in dirs
 
 
+@dataclass(frozen=True)
+class _BaseRun:
+    """What every pytest run of one passes_at_base call at the base shares, as _base_run_findings sets it up."""
+    change: GateChange
+    tree: str  # the copy of the base, every group's top
+    env: dict[str, str]  # the variables each run takes beside tool_env's
+    deadline: float  # the time.monotonic() time by which every collection and run must be done
+    budget: float  # the seconds the check had for all of them, from when the copy was made, as findings name it
+
+
+# The pytest plugin, a module of this name written beside the copy and put on the run's path, by which a run at the
+# base tells where its modules came from: at the end of the session it writes, as JSON to the file
+# --gate-imports-report names, each module in sys.modules that lies under the directory --gate-imports-root names,
+# by its name, to its path from there; real paths both, so a link on either way changes nothing. A package's place is
+# its __init__.py, a namespace package's the first of its directories that lies there.
+_BASE_IMPORTS_PLUGIN = "_octoflow_gate_base_imports"
+_BASE_IMPORTS_PLUGIN_SOURCE = """\
+import json
+import os
+import sys
+
+
+def pytest_addoption(parser):
+    parser.addoption("--gate-imports-root")
+    parser.addoption("--gate-imports-report")
+
+
+def pytest_sessionfinish(session):
+    root = os.path.realpath(session.config.getoption("gate_imports_root"))
+    found = {}
+    for name, module in list(sys.modules.items()):
+        try:
+            places = [module.__file__] if getattr(module, "__file__", None) else list(getattr(module, "__path__", ()))
+        except Exception:
+            continue
+        for place in places:
+            real = os.path.realpath(place) if isinstance(place, str) else ""
+            if real.startswith(root + os.sep):
+                found[name] = os.path.relpath(real, root)
+                break
+    with open(session.config.getoption("gate_imports_report"), "w", encoding="utf-8") as f:
+        json.dump(found, f)
+"""
+
+
 def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str], int], budget: float) -> list[dict]:
     """passes_at_base's findings on tests, as _changed_python_tests gives them, collected and then run, within budget
-    seconds for all of it, in a copy of the base that it makes in tmp, an empty directory, beside the runs' reports
-    and their TMPDIR: once for each pytest configuration the changed test files take there (_pytest_groups), one
-    after another while the budget lasts."""
-    tree, scratch = os.path.join(tmp, "tree"), os.path.join(tmp, "tmp")
+    seconds for all of it, in a copy of the base that it makes in tmp, an empty directory, beside the runs' reports,
+    their TMPDIR and the plugin _BASE_IMPORTS_PLUGIN names: once for each pytest configuration the changed test files
+    take there (_pytest_groups), one after another while the budget lasts.
+
+    The runs import the base's code from the copy's import roots, its top and its src/ when it has one, which are put
+    on PYTHONPATH ahead of what was there: so they come before site-packages, and before what an editable install
+    puts there, which would import the working tree's code."""
+    tree, scratch, plugins = os.path.join(tmp, "tree"), os.path.join(tmp, "tmp"), os.path.join(tmp, "plugins")
     try:
         _copy_base_with_tests(change, tree, os.path.join(tmp, "base.tar"))
         os.mkdir(scratch)
+        os.mkdir(plugins)
+        with open(os.path.join(plugins, f"{_BASE_IMPORTS_PLUGIN}.py"), "x", encoding="utf-8") as f:
+            f.write(_BASE_IMPORTS_PLUGIN_SOURCE)
     except (OSError, tarfile.TarError, GateError) as e:
         return [_finding(None, None, "not-run", f"could not copy the base to run the changed tests in: {e}; the "
                                                 f"changed tests were not run there.")]
@@ -4712,13 +4766,14 @@ def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str]
     except OSError as e:
         return [_finding(None, None, "not-run", f"could not write an empty pytest configuration for the run at the "
                                                 f"base: {e}; the changed tests were not run there.")]
-    deadline = time.monotonic() + budget
+    roots = [tree, *[src for src in [os.path.join(tree, "src")] if os.path.isdir(src)], plugins]
+    inherited = [os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else []
     # No bytecode: a test that imports through a tracked link out of the tree would write it there.
-    env = {"TMPDIR": scratch, "PYTHONDONTWRITEBYTECODE": "1"}
+    env = {"TMPDIR": scratch, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": os.pathsep.join([*roots, *inherited])}
+    run = _BaseRun(change, tree, env, time.monotonic() + budget, budget)
     out: list[dict] = []
     for n, (group, label) in enumerate(zip(groups, _labels(groups), strict=True)):
-        report = os.path.join(tmp, f"base-{n}.xml")
-        found, stopped = _base_group_findings(group, group.own(tests), deadline, env, report, budget, label)
+        found, stopped = _base_group_findings(run, group, group.own(tests), os.path.join(tmp, f"base-{n}"), label)
         out += [group.in_tree(f) for f in found]
         if stopped:
             out += [_finding(None, None, "not-run", f"the run at the base used its {budget:g} seconds "
@@ -4728,40 +4783,49 @@ def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str]
     return out
 
 
-def _base_group_findings(group: _PytestGroup, tests: dict[tuple[str, str], int], deadline: float,
-                         env: dict[str, str], report: str, budget: float,
+def _base_group_findings(run: _BaseRun, group: _PytestGroup, tests: dict[tuple[str, str], int], reports: str,
                          label: str | None) -> tuple[list[dict], bool]:
     """_base_run_findings' findings on tests, keyed by their paths from group's directory, as pytest names them
-    there, collected and run at the base by group's configuration with env by deadline, a time.monotonic() time,
-    writing the run's report to report; their paths are from group's directory too. And whether the deadline, of
-    the check's budget seconds, stopped it, which leaves no time for another group. label names the group's tests in
-    a finding about all of them, as _PytestGroup.label does; None when they are all the change's tests."""
+    there, collected and run at the base by group's configuration, in run, writing the run's reports to paths that
+    start with reports; their paths are from group's directory too. And whether run's deadline stopped it, which
+    leaves no time for another group. label names the group's tests in a finding about all of them, as
+    _PytestGroup.label does; None when they are all the change's tests. When the run imported first-party code from
+    the working tree, as _imported_from_working_tree tells, no test is judged, and one not-run finding names it."""
     which = label or "the changed tests"
-    ids, stopped, problem = _collect_at_base(group.setup, tests, deadline, env)
+    ids, stopped, problem = _collect_at_base(run, group.setup, tests)
     if stopped:
-        return [_base_run_budget_reached(budget, f"while it collected {which}")], True
+        return [_base_run_budget_reached(run.budget, f"while it collected {which}")], True
     if problem:
         return [_finding(None, None, "not-run", f"{problem}; {which} were not run there.")], False
     if not ids:
         return [], False
-    left = deadline - time.monotonic()
+    left = run.deadline - time.monotonic()
     if left <= 0:
-        return [_base_run_budget_reached(budget, f"once it had collected {which}, before it ran them")], True
+        return [_base_run_budget_reached(run.budget, f"once it had collected {which}, before it ran them")], True
+    report, imports = f"{reports}.xml", f"{reports}-imports.json"
     proc, problem = _pytest(group.setup, "running the changed tests at the base",
-                            ["-p", "no:randomly", f"--junitxml={report}", *map(group.setup.argument, ids)],
-                            timeout=left, env=env)
+                            ["-p", "no:randomly", "-p", _BASE_IMPORTS_PLUGIN, f"--gate-imports-root={run.change.root}",
+                             f"--gate-imports-report={imports}", f"--junitxml={report}",
+                             *map(group.setup.argument, ids)],
+                            timeout=left, env=run.env)
     if isinstance(proc, _PytestStopped):
         ran = sum(len(m[1]) for m in re.finditer(r"^([.FEsxX]+) *(?:\[ *\d+%\])?$", proc.stdout, re.MULTILINE))
         of = f" of {label}" if label else ""
-        return [_base_run_budget_reached(budget, f"after {ran} of the {len(ids)} test cases{of} it was given, before "
-                                                 f"it reported them")], True
+        return [_base_run_budget_reached(run.budget, f"after {ran} of the {len(ids)} test cases{of} it was given, "
+                                                     f"before it reported them")], True
     if problem or proc is None:
         return [_finding(None, None, "not-run", f"{problem}; {which} were not judged.")], False
     try:
         cases = junit_outcomes(report)
+        outside = _imported_from_working_tree(run, imports)
     except GateError as e:
         return [_finding(None, None, "not-run", f"pytest, running the changed tests at the base, wrote no report the "
                                                 f"gate can read ({e}): {_said(proc)}")], False
+    if outside:
+        named = _series([f"`{name}` (`{path}`)" for name, path in outside], limit=5)
+        return [_finding(None, None, "not-run", f"{which} imported {named} from the working tree, not from the copy "
+                                                f"of the base, as from a project installed into the gate's "
+                                                f"interpreter, so they were not judged.")], False
     # Each test's outcomes at the base, its skips left out.
     outcomes: dict[tuple[str, str], set[str]] = {}
     by_case = {_junit_case(i): i for i in ids}
@@ -4774,12 +4838,36 @@ def _base_group_findings(group: _PytestGroup, tests: dict[tuple[str, str], int],
             for (path, name), seen in sorted(outcomes.items()) if seen == {"passed"}], False
 
 
-def _collect_at_base(setup: _PytestSetup, tests: dict[tuple[str, str], int], deadline: float,
-                     env: dict[str, str]) -> tuple[list[str], bool, str | None]:
+def _imported_from_working_tree(run: _BaseRun, imports: str) -> list[tuple[str, str]]:
+    """The top-level modules that a run at the base imported, wholly or in part, from the working tree's files of
+    the project rather than from the copy, as the report at imports that _BASE_IMPORTS_PLUGIN wrote tells them: each
+    by its name and the path, from the working tree's top, of the first such module of its in name order. The
+    project's files are those git tracks at the base, which the copy holds, and those the change adds; others under
+    the top, such as a virtual environment's, are not the project's. Raises GateError when the report cannot be
+    read."""
+    try:
+        with open(imports, encoding="utf-8") as f:
+            located = json.load(f)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise GateError(f"{imports}: {e}") from e
+    if not isinstance(located, dict):
+        raise GateError(f"{imports}: not a JSON object")
+    added = [new for _, new in run.change.files if new is not None]
+    out: dict[str, str] = {}
+    for name, path in sorted(located.items()):
+        project = isinstance(path, str) and (os.path.lexists(os.path.join(run.tree, path))
+                                             or any(new == path or new.startswith(f"{path}/") for new in added))
+        if project:
+            out.setdefault(name.partition(".")[0], path)
+    return sorted(out.items())
+
+
+def _collect_at_base(run: _BaseRun, setup: _PytestSetup,
+                     tests: dict[tuple[str, str], int]) -> tuple[list[str], bool, str | None]:
     """The node ids, one per parameter set, of those of tests, keyed by their paths from setup's root, that pytest
-    collects by setup in the copy of the base, with env, by deadline, a time.monotonic() time; whether the deadline
-    stopped it; and the problem, a clause, when it went wrong otherwise. A test file that cannot be imported at the
-    base, or a conftest.py whose import raises ImportError there, gives no ids for the tests it covers and no problem:
+    collects by setup in run's copy of the base, with its env, by its deadline; whether the deadline stopped it; and
+    the problem, a clause, when it went wrong otherwise. A test file that cannot be imported at the base, or a
+    conftest.py whose import raises ImportError there, gives no ids for the tests it covers and no problem:
     that is the expected outcome for a test of what the change adds. So does a test pytest does not collect, such as a
     test_* method of a class not named Test*. A pytest that stops before it collects, as for a plugin that cannot be
     imported, is a problem."""
@@ -4789,7 +4877,7 @@ def _collect_at_base(setup: _PytestSetup, tests: dict[tuple[str, str], int], dea
     proc, problem = _pytest(setup, "collecting the changed tests at the base",
                             ["-p", "no:randomly", "--collect-only", "--continue-on-collection-errors",
                              *map(setup.argument, files)],
-                            timeout=deadline - time.monotonic(), ok=(0, 1, 4, 5), env=env)
+                            timeout=run.deadline - time.monotonic(), ok=(0, 1, 4, 5), env=run.env)
     if isinstance(proc, _PytestStopped):
         return [], True, None
     if problem or proc is None:
@@ -4809,8 +4897,7 @@ def _collect_at_base(setup: _PytestSetup, tests: dict[tuple[str, str], int], dea
     # imported stops them all: each file is collected on its own, and only those under it give nothing.
     collected: list[str] = []
     for path in files:
-        found, stopped, problem = _collect_at_base(setup, {t: n for t, n in tests.items() if t[0] == path},
-                                                   deadline, env)
+        found, stopped, problem = _collect_at_base(run, setup, {t: n for t, n in tests.items() if t[0] == path})
         if stopped or problem:
             return [], stopped, problem
         collected += found

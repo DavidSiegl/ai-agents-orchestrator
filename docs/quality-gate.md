@@ -251,13 +251,16 @@ the same way in the base, once for each, and the copy's own `TMPDIR`, first coll
   killed with every process it started;
 - `not-run`: pytest could not start, stopped before it collected (as for a plugin a `conftest.py` names that cannot be
   imported), stopped with a usage error other than a `conftest.py`'s `ImportError` (such as one whose `AttributeError`
-  reaches for what the change adds; see `TODO.md`), or wrote no readable report; a changed test file could not be
-  read or parsed; or the copy could not be made;
+  reaches for what the change adds; see `TODO.md`), or wrote no readable report; the run imported the project's code
+  from the working tree (below); a changed test file could not be read or parsed; or the copy could not be made;
 - `not-removed`: the copy could not be removed afterwards; the findings stand.
 
-The base's code is what the copy's configuration, such as `[tool.pytest.ini_options] pythonpath`, puts on the path. A
-project installed into the gate's interpreter, as an editable install of a `src/` layout is, imports the working tree's
-code instead, and every changed test then passes at the base (see `TODO.md`).
+The base's code is what the copy's import roots, its top and its `src/` when it has one, and its configuration, such
+as `[tool.pytest.ini_options] pythonpath`, put on the path. The roots go on `PYTHONPATH`, ahead of site-packages and of
+what an editable install puts there, so a `src/` layout installed editable into the gate's interpreter is judged at
+its base. A project whose code the run still imports from the working tree cannot be judged: one installed editable
+from a directory other than those roots, or through an import hook placed ahead of Python's own path search. The run
+tells where each module came from, and such a run is one `not-run` finding naming the packages, with no test judged.
 
 **Vague names** lists the names a change binds that tell a reader nothing about what they hold: `data`, `info`,
 `value`, `status`, `handle` and `manager` (`VAGUE_NAME_WORDS`), or a name ending in one after an underscore, such as

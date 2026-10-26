@@ -18,6 +18,7 @@ import stat
 import struct
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import textwrap
 import threading
@@ -7713,6 +7714,56 @@ class TestPassesAtBase(unittest.TestCase):
         self.put("calc.py", self.CALC + "\n\ndef sub(a, b):\n    return a - b\n")
         self.put("tests/test_sub.py", "from calc import sub\n\n\ndef test_sub():\n    assert sub(3, 1) == 2\n")
         self.assertEqual(self.found(), [])
+
+    def installed_editable(self, where):
+        """Move calc.py to where/calc.py, a directory of the repository, with a pytest.ini that puts nothing on the
+        path, commit that as the base, and make the gate's interpreter a new virtual environment's Python into which
+        the project is installed editable: a .pth file there puts the working tree's where on the path, as setuptools'
+        and hatchling's editable installs write one. The environment sees this suite's packages, pytest among them,
+        through another .pth file. Skips the test when the environment cannot be made."""
+        venv = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, venv)
+        try:
+            subprocess.run([sys.executable, "-m", "venv", "--without-pip", venv],  # noqa: S603
+                           check=True, capture_output=True, timeout=120)
+            python = os.path.join(venv, "bin", "python")
+            site_dir = subprocess.run([python, "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],  # noqa: S603
+                                      check=True, capture_output=True, text=True, timeout=60).stdout.strip()
+        except (OSError, subprocess.SubprocessError) as e:
+            self.skipTest(f"could not make a virtual environment: {e}")
+        with open(os.path.join(site_dir, "suite.pth"), "w") as f:
+            f.write(sysconfig.get_path("purelib") + "\n")
+        with open(os.path.join(site_dir, "__editable__.calc-0.pth"), "w") as f:
+            f.write(os.path.join(self.repo, where) + "\n")
+        os.makedirs(os.path.join(self.repo, where))
+        self.git("mv", "calc.py", f"{where}/calc.py")
+        self.put("pytest.ini", "[pytest]\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", f"{where} layout")
+        p = patch.object(orchestrator.sys, "executable", python)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def add_sub(self, where):
+        """Add sub to where/calc.py, and test_sub, which calc.sub at the base cannot pass, to tests/test_calc.py."""
+        self.put(f"{where}/calc.py", self.CALC + "\n\ndef sub(a, b):\n    return a - b\n")
+        self.put("tests/test_calc.py", "import calc\n\n" + self.TESTS
+                 + "\n\ndef test_sub():\n    assert calc.sub(3, 1) == 2\n")
+
+    def test_an_editable_install_of_a_src_layout_imports_the_base(self):
+        # The run at the base puts the copy's src/ on the path, ahead of the installed working tree's.
+        self.installed_editable("src")
+        self.add_sub("src")
+        self.assertEqual(self.found(), [])
+
+    def test_a_package_imported_from_the_working_tree_cannot_be_judged(self):
+        # lib/ is no import root of the copy's, so calc comes from the working tree, through the editable install.
+        self.installed_editable("lib")
+        self.add_sub("lib")
+        self.assertEqual([(f["path"], f["line"], f["rule"], f["message"]) for f in self.found()], [(
+            None, None, "not-run", ("the changed tests imported `calc` (`lib/calc.py`) from the working tree, not "
+                                    "from the copy of the base, as from a project installed into the gate's "
+                                    "interpreter, so they were not judged."))])
 
     def test_a_change_to_the_tests_alone_is_not_run(self):
         self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_zero():\n    assert mul(0, 5) == 0\n")

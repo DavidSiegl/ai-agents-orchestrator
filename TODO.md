@@ -206,13 +206,6 @@ was done.
   method marked `@override` is skipped (`_bound_names`). Raised by the cross-review of `written-rules` (F6,
   2026-10-24): "names fixed by a parent class or framework are reported, though they cannot be renamed". Closes, if
   the run metrics show it is common, with methods whose class has a base from outside the repository left out.
-- **`passes-at-base` reads every changed test as passing in a project installed into the gate's interpreter.**
-  `_base_run_findings` runs pytest in the gate's interpreter, so the base's code is whatever the copy's
-  configuration puts on `sys.path` (`pythonpath = ["."]` here). An editable install, as a `src/` layout under
-  `uv sync` has, resolves the package to the working tree first, so the base run tests the change and every changed
-  test is reported. This repository is not installed (no `[build-system]`), so it is unaffected. Closes when the run
-  at the base puts the copy's own package directories before site-packages, or names such a project as one it cannot
-  judge.
 - **A test file that cannot be imported at the base hides all its changed tests from `passes-at-base`.** A
   module-level import of something the change adds makes pytest's collection of the whole file fail at the base,
   which `_collect_at_base` takes as the expected outcome for every changed test in it, including ones that would pass
@@ -343,6 +336,21 @@ was done.
   files.
 
 ## Fixed
+
+- **`passes-at-base` reads every changed test as passing in a project installed into the gate's interpreter.**
+  `_base_run_findings` runs pytest in the gate's interpreter, so the base's code is whatever the copy's
+  configuration puts on `sys.path` (`pythonpath = ["."]` here). An editable install, as a `src/` layout under
+  `uv sync` has, resolves the package to the working tree first, so the base run tests the change and every changed
+  test is reported. This repository is not installed (no `[build-system]`), so it is unaffected. Closes when the run
+  at the base puts the copy's own package directories before site-packages, or names such a project as one it cannot
+  judge.
+  Fixed (2026-10-26): `_base_run_findings` puts the copy's import roots, its top and its `src/` when it has one, on
+  `PYTHONPATH` ahead of what was there, so they come before site-packages and the editable install's `.pth` path or
+  import finder. The run at the base loads a pytest plugin, `_BASE_IMPORTS_PLUGIN`, which writes where each module in
+  `sys.modules` came from; `_imported_from_working_tree` picks those that are the working tree's files of the project,
+  and a run that imported any judges none of its tests and is one `not-run` finding naming them, as for a package
+  installed editable from a directory other than those roots. Not closed: an import of the working tree's code that
+  leaves no module behind, such as a file a test runs with `runpy` or reads, is not seen.
 
 - **Three gate checks repeat the make-a-scratch-directory, run, remove-it skeleton.** `flaky_tests`,
   `_mutation_test` and `passes_at_base` each call `tempfile.mkdtemp`, word their own finding when it fails, and word
