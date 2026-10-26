@@ -44,6 +44,14 @@ was done.
 
 ## Open issues
 
+- **`--machine` over SSH assumes a POSIX login shell and a server that takes several sessions.** Since
+  `_run_tool`, doctor takes a remote command's exit status 127 for not on PATH: a csh or tcsh login shell exits 1
+  ("Command not found."), so a missing gh reads as `gh auth status fails` and a missing git as a failed
+  `--version`; and a tool on PATH that exits 127 itself, such as a shim whose target is gone, reads as not on PATH.
+  And `ssh_sharing_options` overrides a target's own `ControlMaster no`, so a server with `MaxSessions 1` refuses
+  the second of two commands run at once on the shared connection (the GUI and `serve` run several), which ssh
+  then fails. Raised by cross-review 33 (F4, F6), neither reproduced. Closes with doctor asking through `sh -c`, as
+  `_on_path` did, and with an explicit `ControlMaster`/`ControlPath` in `ssh -G <target>` left in place.
 - **`TestGate.test_a_missing_tool_fails_naming_it` fails where shellcheck lives beside git.** `TestGate.setUp`
   (`tests/test_orchestrator.py`) puts git's own directory on `PATH` after the stubs, so on a machine with
   `/usr/bin/shellcheck` (agentbox, Debian's package) removing the stub still finds the real one and the gate passes.

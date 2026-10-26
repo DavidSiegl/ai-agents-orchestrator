@@ -1342,12 +1342,18 @@ class TestHerdr(unittest.TestCase):
             herdr.call("agent", "list")
 
 
-# This process's SSH control directory, made here so that the argv Host.run builds for SSH is known in advance; the
-# tests that make their own restore it.
-orchestrator._SSH_CONTROL.dir = tempfile.mkdtemp(prefix="octoflow-ssh-test-")
-atexit.register(shutil.rmtree, orchestrator._SSH_CONTROL.dir, True)
+# The runtime directory this process's SSH control directory is made in, so that the argv Host.run builds for SSH is
+# known in advance; in /tmp, as tempfile's default on macOS would leave the socket's path too long. The tests that
+# make their own give ssh_sharing_options a control of their own (fresh_ssh_control).
+os.environ["XDG_RUNTIME_DIR"] = tempfile.mkdtemp(prefix="octoflow-run-test-", dir="/tmp")
+atexit.register(shutil.rmtree, os.environ["XDG_RUNTIME_DIR"], True)
 # What Host.run puts before an SSH command's target.
 SSH = ["ssh", "-o", "BatchMode=yes", *orchestrator.ssh_sharing_options()]
+
+
+def fresh_ssh_control():
+    """A patch that gives ssh_sharing_options a control that has made no directory yet."""
+    return patch.object(orchestrator, "_SSH_CONTROL", orchestrator._SshControl())
 
 
 class TestHost(unittest.TestCase):
@@ -1365,19 +1371,39 @@ class TestHost(unittest.TestCase):
         run = MagicMock(return_value=completed())
         Host("remote-host", run=run).run(["true"])
         argv = run.call_args.args[0]
-        self.assertEqual(argv[3:9], ["-o", "ControlMaster=auto", "-o", "ControlPersist=60",
-                                     "-o", f"ControlPath={orchestrator._SSH_CONTROL.dir}/%C"])
+        self.assertEqual(argv[3:-2], ["-o", "ControlMaster=auto", "-o", "ControlPersist=60",
+                                      "-o", f"ControlPath={orchestrator._SSH_CONTROL.dir}/%C",
+                                      "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3"])
         self.assertEqual(stat.S_IMODE(os.stat(orchestrator._SSH_CONTROL.dir).st_mode), 0o700)
 
     def test_a_control_directory_that_has_gone_is_made_again(self):
         with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, {"XDG_RUNTIME_DIR": runtime}), \
-                patch.object(orchestrator._SSH_CONTROL, "dir", None):
-            first = orchestrator.ssh_sharing_options()[-1]
+                fresh_ssh_control():
+            first = orchestrator.ssh_sharing_options()[5]
             shutil.rmtree(orchestrator._SSH_CONTROL.dir)
-            again = orchestrator.ssh_sharing_options()[-1]
+            again = orchestrator.ssh_sharing_options()[5]
             self.assertTrue(first.startswith(f"ControlPath={runtime}/octoflow-ssh-"))
             self.assertNotEqual(first, again)
             self.assertTrue(os.path.isdir(orchestrator._SSH_CONTROL.dir))
+
+    def test_a_control_directory_others_could_use_is_replaced(self):
+        with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, {"XDG_RUNTIME_DIR": runtime}), \
+                fresh_ssh_control():
+            first = orchestrator.ssh_sharing_options()[5]
+            os.chmod(orchestrator._SSH_CONTROL.dir, 0o740)  # readable by its group: no longer private
+            self.assertNotEqual(orchestrator.ssh_sharing_options()[5], first)
+            shutil.rmtree(orchestrator._SSH_CONTROL.dir)
+            os.symlink(runtime, orchestrator._SSH_CONTROL.dir)  # a name another could make again, as a link
+            self.assertNotIn(orchestrator._SSH_CONTROL.dir, orchestrator.ssh_sharing_options()[5])
+
+    def test_an_unusable_runtime_directory_falls_back_to_tmp(self):
+        with tempfile.TemporaryDirectory() as runtime:
+            spaced = os.path.join(runtime, "my dir")
+            os.mkdir(spaced)
+            for where in [os.path.join(runtime, "missing"), spaced]:
+                with self.subTest(where), patch.dict(os.environ, {"XDG_RUNTIME_DIR": where}), \
+                        fresh_ssh_control():
+                    self.assertTrue(orchestrator.ssh_sharing_options()[5].startswith("ControlPath=/tmp/octoflow-ssh-"))
 
     def test_without_a_usable_control_path_a_command_runs_on_a_connection_of_its_own(self):
         """OpenSSH 10 fails a command whose ControlPath it cannot bind, its directory missing or the path too long
@@ -1387,11 +1413,11 @@ class TestHost(unittest.TestCase):
         with tempfile.TemporaryDirectory() as runtime:
             long_dir = os.path.join(runtime, "x" * 80)
             os.mkdir(long_dir)
-            for where in [long_dir, os.path.join(runtime, "missing", "dir")]:
-                with self.subTest(where), patch.dict(os.environ, {"XDG_RUNTIME_DIR": where}), \
-                        patch.object(orchestrator._SSH_CONTROL, "dir", None):
-                    Host("remote-host", run=run).run(["true"])
-                    self.assertEqual(run.call_args.args[0], ["ssh", "-o", "BatchMode=yes", "remote-host", "true"])
+            with patch.dict(os.environ, {"XDG_RUNTIME_DIR": long_dir}), \
+                    fresh_ssh_control(), \
+                    patch.object(orchestrator.tempfile, "mkdtemp", side_effect=OSError(28, "No space left on device")):
+                Host("remote-host", run=run).run(["true"])
+                self.assertEqual(run.call_args.args[0], ["ssh", "-o", "BatchMode=yes", "remote-host", "true"])
 
     def test_read_missing_file(self):
         run = MagicMock(return_value=completed(returncode=orchestrator.MISSING_FILE_STATUS))
