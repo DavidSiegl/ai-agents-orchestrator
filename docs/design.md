@@ -62,8 +62,10 @@ about a different run. Two runs that start together each see the other's claim a
 and model of its agent (none for a quality analysis, whose role is `quality`), whether it is human-paced, and
 `started_at`, `ended_at` and `seconds`.
 
-- An agent's turn starts when its prompt is delivered: the record is opened and saved together with
-  `prompted`. A quality analysis starts when the orchestrator starts analysing.
+- An agent's turn starts when its prompt is first sent. The prompt counts as delivered once the agent takes it:
+  herdr reports it `working` or `blocked`, or its handoff file appears, within `PROMPT_DELIVERY_SECONDS`. One it
+  does not take is sent once more, and a second miss fails the turn, which a resume prompts again. Only then is
+  the record opened and saved together with `prompted`. A quality analysis starts when the orchestrator starts analysing.
 - A resume, or an agent restarted mid-turn and prompted again, keeps the open record and its start.
 - A turn ends when its handoff file is found, at the file's modification time, so a file written while no
   orchestrator ran still ends its turn when it was written, not when a resume found it.
@@ -289,8 +291,9 @@ Jenkins does the building and releasing: the tests, the Linux binary (on every p
 a change that breaks it fails before it is merged; not in a quality build) and, on a merge into `main` that raises
 the version, the release with `orchestrator.pyz` and the Linux binary. Jenkins has no Mac, so one GitHub Action
 builds the macOS binary when that release is published and uploads it there. It can only add files to a release
-that exists. Both build with `packaging/build-binary.sh`, so the binaries cannot be built or smoke-tested
-differently. The macOS binary is built only for Apple Silicon and is unsigned, apart from PyInstaller's ad-hoc
+that exists. It also builds, without uploading, every pull request that touches what goes into the binary, so a
+change that breaks the macOS build fails before it is merged too. Both build with `packaging/build-binary.sh`, so
+the binaries cannot be built or smoke-tested differently. The macOS binary is built only for Apple Silicon and is unsigned, apart from PyInstaller's ad-hoc
 signature, and nobody tests it by hand: the Action's smoke tests, the window opened and closed included, are its
 check. A second Action merges a pull request into `main` once Jenkins passes it, unless a human is to merge it;
 the orchestrator's own pull requests merge the same way, except a draft, which a run opens when it did not succeed

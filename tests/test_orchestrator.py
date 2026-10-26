@@ -419,7 +419,11 @@ class FakeHerdr:
         self.kinds = []  # (name, kind) of each agent started, in order
         self.workspaces = set()
         self.live_panes = set()
-        self.waits = []
+        self.waits = []  # the until of each wait but a delivery check's
+        self.deliveries = []  # (name, timeout_ms) of each wait for an agent to take a prompt
+        self.dropped = {}  # by role, how many of its next prompts its agent drops: it stays as it was and writes nothing
+        self.prompts = []  # (name, text) of each prompt sent, dropped or not
+        self.taken = {}  # by name, whether the agent took its last prompt
         self.blocked_at_start = set()
         self.cwds = []  # (what, cwd) of each workspace created and pane split
 
@@ -458,9 +462,24 @@ class FakeHerdr:
 
     def prompt(self, name, text):
         self.calls.append(("prompt", name))
-        self.statuses[name] = self.script[self._role(name)].pop(0)(text, self.state, self.host)
+        self.prompts.append((name, text))
+        role = self._role(name)
+        if self.dropped.get(role):
+            self.dropped[role] -= 1
+            self.taken[name] = False
+            return
+        self.taken[name] = True
+        self.statuses[name] = self.script[role].pop(0)(text, self.state, self.host)
 
     def wait(self, name, timeout_ms, until=()):
+        if "working" in until:
+            # A taken prompt had the agent working, whatever it shows now.
+            self.deliveries.append((name, timeout_ms))
+            if name not in self.statuses:
+                raise orchestrator.HerdrError("agent_not_found", f"agent target {name} not found")
+            if not self.taken.get(name):
+                raise orchestrator.HerdrError("timeout", f"agent {name} did not reach {until}")
+            return "working"
         self.waits.append(until)
         return "done"
 
@@ -2153,6 +2172,120 @@ class TestResume(unittest.TestCase):
     def test_from_dict_incomplete(self):
         with self.assertRaisesRegex(OrchestratorError, "run state r-abc is incomplete"):
             RunState.from_dict({"run_id": "r-abc"})
+
+
+class TestPromptDelivery(unittest.TestCase):
+    """A prompt counts as delivered only once its agent takes it, and is sent once more when it does not."""
+
+    BUILD = "build-a1b2c3"
+
+    def default_run(self, build=None, **kw):
+        return make_workflow({"spec": [spec_turn], "build": build or [build_turn(1)],
+                              "review": [review_turn(1, APPROVE)]}, **kw)
+
+    def build_prompts(self, herdr):
+        return [text for name, text in herdr.prompts if name == self.BUILD]
+
+    def failed_twice(self):
+        """A default run whose Builder drops both prompts; its host and the state it saved."""
+        wf, herdr, host, _ = self.default_run()
+        herdr.dropped["build"] = 2
+        with patch("sys.stderr"), self.assertRaises(OrchestratorError) as raised:
+            wf.run()
+        return raised.exception, host, json.loads(host.files[f"{wf.state.dir}/state.json"])
+
+    def test_an_agent_that_turns_working_is_prompted_once(self):
+        wf, herdr, host, _ = make_workflow({"spec": [idle], "build": [build_turn(1)],
+                                            "review": [review_turn(1, APPROVE)]})
+        prompted = []
+
+        def collector_writes_late():
+            if wf.clock.now > orchestrator.STALL_SECONDS and wf.state.spec_path not in host.files:
+                prompted.append(json.loads(host.files[f"{wf.state.dir}/state.json"])["prompted"])
+                host.write(wf.state.spec_path, "spec")
+        wf.clock.hooks.append(collector_writes_late)
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(herdr.calls.count(("prompt", "spec-a1b2c3")), 1)
+        self.assertEqual(prompted, ["spec.md"])
+        self.assertEqual(orchestrator.PROMPT_DELIVERY_SECONDS, 30)
+        self.assertEqual(herdr.deliveries, [("spec-a1b2c3", 30_000)])
+
+    def test_an_agent_that_writes_its_file_unseen_working_is_prompted_once(self):
+        wf, herdr, *_ = self.default_run()
+        # Every turn here writes its file during the prompt, before a wait could see the agent working.
+        herdr.wait = None
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(len(self.build_prompts(herdr)), 1)
+        self.assertEqual(wf.state.prompted, "review-1.md")
+
+    def test_a_file_written_while_the_wait_times_out_counts_as_taken(self):
+        wf, herdr, host, _ = self.default_run(build=[idle])
+
+        def unseen_working(name, timeout_ms, until=()):
+            build_turn(1)(None, wf.state, host)
+            raise orchestrator.HerdrError("timeout", "agent wait timed out")
+        herdr.wait = unseen_working
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(len(self.build_prompts(herdr)), 1)
+
+    def test_a_dropped_prompt_is_sent_once_more(self):
+        wf, herdr, *_ = self.default_run()
+        herdr.dropped["build"] = 1
+
+        with patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(wf.run(), APPROVE)
+        first, again = self.build_prompts(herdr)
+        self.assertEqual(again, first)
+        self.assertIn("[build] did not take its prompt within 30s; sending it again\n", err.getvalue())
+        self.assertEqual(herdr.deliveries, [(self.BUILD, 30_000)])
+
+    def test_two_dropped_prompts_fail_the_turn_unrecorded(self):
+        error, _, saved = self.failed_twice()
+
+        self.assertEqual(str(error), f"the Builder did not take its prompt to write {D}/build-1.md, sent twice; see "
+                                     "pane w1:p2, and resume to send it again")
+        self.assertEqual(saved["prompted"], "spec.md")
+        self.assertNotIn("build-1.md", [t["file"] for t in saved["turns"]])
+
+    def test_a_resume_after_two_dropped_prompts_sends_the_prompt_again(self):
+        _, host, saved = self.failed_twice()
+        # Alive, and exited with a session to resume: neither is only waited on, and both get the step's prompt.
+        for agent in ({"alive": ["build"]}, {"sessions": {"build": "s-build"}}):
+            with self.subTest(agent=agent):
+                seen = []
+                wf, *_ = resume(RunState.from_dict(saved), {
+                    "build": [recording(build_turn(1), seen)], "review": [review_turn(1, APPROVE)]},
+                    host=copy.deepcopy(host), **agent)
+
+                self.assertEqual(wf.run(), APPROVE)
+                self.assertEqual(len(seen), 1)
+                self.assertTrue(seen[0].startswith("You are the Builder"), seen[0])
+
+    def test_a_herdr_error_other_than_a_timeout_propagates(self):
+        wf, herdr, *_ = self.default_run(build=[idle])
+
+        def wait(name, timeout_ms, until=()):
+            raise orchestrator.HerdrError("server_error", "herdr is gone")
+        herdr.wait = wait
+
+        with patch("sys.stderr"), self.assertRaisesRegex(orchestrator.HerdrError, "herdr server_error"):
+            wf.run()
+
+    def test_an_agent_exiting_while_its_prompt_is_awaited_fails_the_turn(self):
+        wf, herdr, *_ = self.default_run(build=[idle])
+        wait = herdr.wait
+
+        def exiting(name, timeout_ms, until=()):
+            herdr.statuses.pop(name, None)
+            return wait(name, timeout_ms, until)
+        herdr.wait = exiting
+
+        with patch("sys.stderr"), self.assertRaisesRegex(OrchestratorError,
+                                                         f"^the Builder exited without writing {D}/build-1.md$"):
+            wf.run()
 
 
 class TestResumePullRequest(unittest.TestCase):
@@ -13658,12 +13791,47 @@ class TestDrain(unittest.TestCase):
             with self.subTest(fields=fields):
                 self.spec("a", drain_spec_text("First", "ready-for-agent", "Run: 20261024-100000-aaaaaa"))
                 self.saved_run("a", "20261024-100000-aaaaaa", 10**4, phase="done", **fields)
+                self.host.pull_requests[PR_A] = {"state": "OPEN", "headRefOid": "a" * 40, "closedAt": None}
 
                 status, out, _ = self.drain()
 
                 self.assertEqual(self.header("a"), (spec_after, "20261024-100000-aaaaaa", pr))
                 self.assertEqual(status, 0)
                 self.assertIn(f"a: ready-for-agent -> {spec_after}", out)
+
+    def test_a_finished_runs_pull_request_is_followed_in_the_same_pass(self):
+        cases = [("MERGED", "done"), ("CLOSED", "ready-for-human"), ("OPEN", "in-review")]
+        run_id = "20261024-100000-aaaaaa"
+        for pr_state, spec_after in cases:
+            with self.subTest(pr_state=pr_state):
+                self.spec("a", drain_spec_text("First", "ready-for-agent", f"Run: {run_id}"))
+                [spec] = orchestrator.read_queue(self.dir)
+                self.saved_run("a", run_id, 10**4, phase="done", verdict=APPROVE, pr_url=PR_A)
+                self.host.pull_requests[PR_A] = {"state": pr_state, "headRefOid": "a" * 40, "closedAt": None}
+
+                got = orchestrator.refreshed_headers([spec], self.host, "/proj", [], "here", lambda pid: False)
+
+                self.assertEqual(got, [(spec, {"Status": spec_after, "PR": PR_A})])
+
+    def test_one_drain_marks_a_merged_finished_run_done_and_runs_its_dependant(self):
+        run_id = "20261024-100000-aaaaaa"
+        self.spec("a", drain_spec_text("First", "ready-for-agent", f"Run: {run_id}"))
+        self.spec("b", drain_spec_text("Second", "ready-for-agent", "Blocked by: a"))
+        self.saved_run("a", run_id, 10**4, phase="done", verdict=APPROVE, pr_url=PR_A)
+        self.host.pull_requests[PR_A] = {"state": "MERGED", "headRefOid": "a" * 40, "closedAt": None}
+
+        status, out, _ = self.drain(argv=["--dry-run"])
+
+        self.assertEqual(status, 0)
+        self.assertEqual(out, f"a: ready-for-agent -> done  {PR_A}\nwould run, in order: b\n")
+        self.assertEqual(self.header("a"), ("ready-for-agent", run_id, None))
+
+        status, out, _ = self.drain(approved(PR_B))
+
+        self.assertEqual(status, 0)
+        self.assertEqual(self.header("a"), ("done", run_id, PR_A))
+        self.assertEqual([state.task for state, _ in self.runs], ["Second"])
+        self.assertEqual(self.header("b")[::2], ("in-review", PR_B))
 
     def conflicted_spec(self, status="ready-for-human", verdict=APPROVE, **pr):
         """Spec a, of status, whose run with verdict opened PR_A over a conflict in x.py, and what gh says of PR_A:
@@ -13810,6 +13978,7 @@ class TestDrain(unittest.TestCase):
                 text = drain_spec_text("First", None, *header, "## Notes", "PR: not in the header", nl=nl)
                 self.spec("a", text)
                 self.saved_run("a", "stale", phase="done", verdict=APPROVE, pr_url=PR_A)
+                self.host.pull_requests[PR_A] = {"state": "OPEN", "headRefOid": "a" * 40, "closedAt": None}
 
                 self.assertEqual(self.drain()[0], 0)
 
@@ -13852,6 +14021,7 @@ class TestDrain(unittest.TestCase):
         self.spec("e", drain_spec_text("E", "ready-for-agent", "Blocked by: d"))
         self.host.pull_requests[PR_A] = {"state": "MERGED", "headRefOid": "a" * 40, "closedAt": None}
         self.saved_run("c", "20261024-100000-cccccc", phase="done", verdict=APPROVE, pr_url=PR_B)
+        self.host.pull_requests[PR_B] = {"state": "OPEN", "headRefOid": "b" * 40, "closedAt": None}
         before = {slug: self.text(slug) for slug in "abcde"}
 
         status, out, _ = self.drain(argv=["--dry-run"])
@@ -15518,6 +15688,18 @@ class TestBlocked(unittest.TestCase):
         self.assertEqual((at_review[0]["blocked"], at_review[0]["round"]), (None, 1))
         self.assertIn(f"The Builder's report is in {BUILD_1}.", reviews[0])
         self.assertIsNone(wf.state.blocked)
+
+    def test_a_dropped_answer_prompt_is_sent_once_more(self):
+        def blocking(prompt, state, host):
+            herdr.dropped["build"] = 1  # the prompt after the human's answer
+            return blocked_report(lambda s: BUILD_1)(prompt, state, host)
+        wf, herdr, host, _, seen, *_ = self.run_blocked([blocking, answered(lambda s: BUILD_1, "report 1")])
+
+        with patch("sys.stderr"):
+            self.assertEqual(wf.run(), APPROVE)
+        builds = [text for name, text in herdr.prompts if name == "build-a1b2c3"]
+        self.assertEqual(builds[1:], [blocked_prompt(BUILD_1)] * 2)
+        self.assertEqual(host.files[BUILD_1], "report 1")
 
     def test_the_wait_is_saved_and_listed(self):
         during = []
