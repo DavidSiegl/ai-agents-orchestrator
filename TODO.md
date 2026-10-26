@@ -309,11 +309,10 @@ was done.
   blocks the surviving-mutants and flaky-tests selection, and one to `/dev/zero` reads without end. The
   cognitive-complexity check skips such paths (`_is_link_or_special`, review round 5 of ticket 06, R5-F1). Found by
   reading the code, not reproduced. Closes with `_changed_python_units` skipping what `_is_link_or_special` names.
-- **A function moved out of a Python script the change deletes is judged as new.** The cognitive-complexity check
-  reads the base of a changed file whose old name has no `.py` only when the file is still Python now
-  (`_base_scores`: `new in working`), so the functions of a deleted `bin/tool` lend no score, and one moved unchanged
-  from it into `lib.py` is reported as new. Closes with the base read whenever its first line is a `#!` naming
-  python, as `_is_python_source` asks of the working tree.
+- **passes-at-base misses a deleted Python script with no `.py`.** `_edits_python_source` (`orchestrator.py`)
+  counts a deleted file as Python source only by its `.py`, so a change that only deletes a `#!` python script
+  outside the tests edits no Python source for it. Found while fixing the cognitive-complexity check's same gap
+  (2026-10-25). Closes with that branch asking `_was_python_source`, which the complexity check now uses.
 - **A deep decorator can crash flaky-tests and surviving-mutants.** `_changed_python_units`, which both select
   through (`_changed_python_tests`, `_changed_python_functions`), writes each decorator of a changed function with
   `ast.unparse(d)`, which recurses as deep as the expression goes, so a function decorated with a deep expression,
@@ -328,10 +327,6 @@ was done.
   there, or writes new over the limit, is not a finding. `docs/quality-gate.md` says "a `.py` file". Raised by the
   spec-conformance pass of review round 6 of ticket 06; ticket 06's "the Python functions the change touches" can be
   read either way. Closes with `_judged_files` taking `_is_python_source`, or a decision that `.py` is the scope.
-- **Cognitive complexity scores direct recursion only.** Campbell's paper gives a point to each function in a
-  recursion cycle; `_calls_itself` sees a function calling itself by name, or a method as `self.m`, `cls.m` or
-  `C.m`, but not a cycle through other functions, nor a call through an alias. A function that recurses through a
-  helper scores a point less than the paper says. Closes with a call graph of the module, scored per cycle.
 - **A body moved into a file hides a function with that body moved out of it, which is then judged as new.** The
   cognitive-complexity check takes a base function as gone from its file when the file now holds its body fewer times
   than the base did (`_BasePool._gone`), without asking where the working tree's copies came from. So when `calc.py`'s
@@ -351,6 +346,28 @@ was done.
   files.
 
 ## Fixed
+
+- **Cognitive complexity scores direct recursion only.** Campbell's paper gives a point to each function in a
+  recursion cycle; `_calls_itself` sees a function calling itself by name, or a method as `self.m`, `cls.m` or
+  `C.m`, but not a cycle through other functions, nor a call through an alias. A function that recurses through a
+  helper scores a point less than the paper says. Closes with a call graph of the module, scored per cycle.
+  Fixed (2026-10-25): `_recursive_functions` builds each module's call graph from `_callees`, the name resolution
+  `_calls_itself` now asks too, which resolves a call as Python's scopes do (a parameter, local or nested function
+  of the caller's name is not the module's), and finds its strongly connected components by Kosaraju's algorithm;
+  each function on one, or calling itself, scores the point once, which `cognitive_complexity` is told as
+  `recursive`. A call through an alias or into another module, and a cycle through a nested function, stay
+  unfollowed, as the comment above `COGNITIVE_COMPLEXITY_LIMIT` says; a move that brings two functions calling
+  each other into one module raises both by the point (`docs/quality-gate.md`). No function of `orchestrator.py`
+  changed its score.
+
+- **A function moved out of a Python script the change deletes is judged as new.** The cognitive-complexity check
+  reads the base of a changed file whose old name has no `.py` only when the file is still Python now
+  (`_base_scores`: `new in working`), so the functions of a deleted `bin/tool` lend no score, and one moved unchanged
+  from it into `lib.py` is reported as new. Closes with the base read whenever its first line is a `#!` naming
+  python, as `_is_python_source` asks of the working tree.
+  Fixed (2026-10-25): `_base_scores` reads an old path's base when `_was_python_source` says the base's blob is
+  Python, by `_holds_python`, the one test of a path and its first line that `_is_python_source` uses for the
+  working tree too.
 
 - **The macOS builds are first tried on a published release.** `.github/workflows/macos-binary.yml` runs only on
   `release: published` or by hand for an existing tag, so a change that breaks the macOS binary or

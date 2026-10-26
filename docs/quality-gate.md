@@ -87,18 +87,24 @@ function holds, a method of a nested class and a function under a module-level `
 nested in another is part of that one. Files are read as Python reads them, by their byte order mark or coding
 cookie. Its score is G. Ann Campbell's [cognitive complexity](https://www.sonarsource.com/docs/CognitiveComplexity.pdf),
 which SonarQube's rule S3776 measured: a point for each `if`, `elif`, `else`, ternary, loop, `except`, `match`,
-sequence of like boolean operators and call of a function to itself, and one more for each level of nesting on those
-that nest. The comment above `COGNITIVE_COMPLEXITY_LIMIT` in `orchestrator.py` says how each Python construct maps to
-the paper's rules. Each of these is a finding:
+sequence of like boolean operators and recursion, and one more for each level of nesting on those that nest.
+Recursion is a function that calls itself, or one on a cycle of calls through other functions of its module, each of
+which then scores the point. Calls are followed by name, as Python's scopes resolve them, so a call to a parameter
+or a local of the same name is not one to the module's function; not through an alias, nor into another module. The
+comment above `COGNITIVE_COMPLEXITY_LIMIT` in `orchestrator.py` says how each Python construct maps to the paper's
+rules. Each of these is a finding:
 
 - `over-limit`: a function over 15, at its `def` line, when it is new or the change raised its score, as
   "`_poll`: cognitive complexity 19, 14 at the base; the limit is 15". A function already over 15 that the change
   leaves no worse is not a finding, since the gate judges the change. Its base is a function of the base, and each
   base function is the base of one function at most:
   - first, one with the same body, since an unchanged function is that function whatever its name: of its name in
-    its file's base, then of its name in the base of another Python file the change touches, then of any name in its
-    file's base, then elsewhere. So a function moved to another module, renamed or made a method, but otherwise
-    unchanged, keeps its score, and a new function given its old name is new. Of a function moved unchanged and a
+    its file's base, then of its name in the base of another Python file the change touches, a file it deletes
+    included, which counts as Python by its `.py` or its `#!` line at the base, then of any name in its file's base,
+    then elsewhere. So a function moved to another module, renamed or made a method, but otherwise
+    unchanged, keeps its score, and a new function given its old name is new. Its score itself can rise with the
+    move: two functions that call each other from two modules score no recursion, and moved into one they each
+    score its point. Of a function moved unchanged and a
     copy of it, the one that kept the name takes it, and a function moved unchanged into a file the check does not
     judge, such as one under `tests/` or a script with no `.py` whose `#!` line names python, takes its own before
     any copy can, whatever the copy's name. A function takes the base of a function in another file only when that

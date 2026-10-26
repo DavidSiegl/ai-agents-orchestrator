@@ -8375,13 +8375,13 @@ S3776_FUNCTIONS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data
 
 
 def score(source, cls=None):
-    """The cognitive complexity of the first function in source, or of its class cls's first method."""
+    """The cognitive complexity of the first function in source, or of its class cls's first method, as the check
+    scores it in its module."""
     tree = ast.parse(textwrap.dedent(source))
-    if cls is not None:
-        [owner] = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls]
-        tree = owner
-    function = next(n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
-    return orchestrator.cognitive_complexity(function, cls)
+    owner = tree if cls is None else next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls)
+    function = next(n for n in owner.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
+    name = function.name if cls is None else f"{cls}.{function.name}"
+    return next(f.score for f in orchestrator._scored_functions(tree) if f.name == name)
 
 
 class TestCognitiveComplexity(unittest.TestCase):
@@ -8552,8 +8552,235 @@ class TestCognitiveComplexity(unittest.TestCase):
                     return cls.build(n - 1)                 # +1
         """
         self.assertEqual(score(source, "Tree"), 1)
-        tree = ast.parse(textwrap.dedent(source)).body[0]
-        self.assertEqual([orchestrator.cognitive_complexity(m, "Tree") for m in tree.body], [1, 1, 0, 1])
+        self.assertEqual(self.module_scores(source), {"Tree.depth": 1, "Tree.size": 1, "Tree.leaves": 0, "Tree.build": 1})
+
+    def module_scores(self, source):
+        """The score of each function of source that the check judges as one, by its qualified name."""
+        return {f.name: f.score for f in orchestrator._scored_functions(ast.parse(textwrap.dedent(source)))}
+
+    def test_each_function_in_a_cycle_of_two_scores_the_recursion_point(self):
+        self.assertEqual(self.module_scores("""
+            def even(n):
+                return n == 0 or odd(n - 1)   # +1 or, +1 cycle
+            def odd(n):
+                return n != 0 and even(n - 1)  # +1 and, +1 cycle
+            def unrelated(n):
+                return even(n)
+        """), {"even": 2, "odd": 2, "unrelated": 0})
+
+    def test_each_function_in_a_cycle_of_three_scores_the_recursion_point_and_one_leading_into_it_none(self):
+        self.assertEqual(self.module_scores("""
+            def a(x):
+                return b(x)
+            def b(x):
+                return c(x)
+            def c(x):
+                return a(x)
+            def enter(x):
+                return a(x)
+        """), {"a": 1, "b": 1, "c": 1, "enter": 0})
+
+    def test_methods_in_a_cycle_through_self_score_the_recursion_point(self):
+        self.assertEqual(self.module_scores("""
+            class Parser:
+                def x(self, s):
+                    return self.y(s)
+                def y(self, s):
+                    return Parser.x(self, s)
+                def z(self, s):
+                    return self.x(s)
+        """), {"Parser.x": 1, "Parser.y": 1, "Parser.z": 0})
+
+    def test_a_cycle_through_an_alias_is_not_found(self):
+        self.assertEqual(self.module_scores("""
+            def a(x):
+                f = b
+                return f(x)
+            def b(x):
+                return a(x)
+        """), {"a": 0, "b": 0})
+
+    def test_a_call_to_a_name_the_function_binds_is_not_a_call_to_the_module_s_function(self):
+        self.assertEqual(self.module_scores("""
+            def a(b):
+                return b()            # the parameter
+            def b():
+                return a(len)
+            def c():
+                def d():
+                    return 1
+                return d()            # the nested function
+            def d():
+                return c()
+            def e(items):
+                f = sorted
+                return f(items)       # the local
+            def f(items):
+                return e(items)
+        """), {"a": 0, "b": 0, "c": 0, "d": 0, "e": 0, "f": 0})
+
+    def test_every_way_of_binding_a_name_shadows_the_module_s_function_but_global(self):
+        self.assertEqual(self.module_scores("""
+            def a(x):
+                import b
+                from c import d as e
+                try:
+                    pass
+                except ValueError as f:
+                    pass
+                match x:
+                    case [*g]:
+                        pass
+                    case {**h}:
+                        pass
+                    case i:
+                        pass
+                return b() + e() + f() + g() + h() + i()
+            def b(): return a(0)
+            def e(): return a(0)
+            def f(): return a(0)
+            def g(): return a(0)
+            def h(): return a(0)
+            def i(): return a(0)
+            def j():
+                global k
+                k = wrap(k)
+                return k()            # the module's k, which it has just rebound
+            def k(): return j()
+        """), {"a": 2, "b": 0, "e": 0, "f": 0, "g": 0, "h": 0, "i": 0, "j": 1, "k": 1})  # a: except, match
+
+    def test_a_name_bound_only_in_a_nested_scope_leaves_the_function_s_own_call_to_the_module(self):
+        self.assertEqual(self.module_scores("""
+            def f(x):
+                items = [f for f in x]     # the comprehension's own f
+                return f(x[1:])            # +1, recursion
+            def walk(node):
+                key = lambda walk: walk.name
+                return walk(node.child)    # +1, recursion
+            def g(x):
+                def inner():
+                    h = 1
+                    return h
+                return h(x)                # +1, the cycle with h
+            def h(x):
+                return g(x)
+        """), {"f": 1, "walk": 1, "g": 1, "h": 1})
+
+    def test_a_type_parameter_is_not_the_module_s_function(self):
+        self.assertEqual(self.module_scores("""
+            def T():
+                return build(0)
+            def build[T](x):
+                return T(x)
+            class Box[U]:
+                def get(self):
+                    return U()            # the class's type parameter
+            def U():
+                return Box.get(None)
+        """), {"T": 0, "build": 0, "Box.get": 0, "U": 0})
+
+    def test_a_type_parameter_list_in_a_class_body_sees_the_class_s_names(self):
+        self.assertEqual(self.module_scores("""
+            def f():
+                class C:
+                    def f(): return 1
+                    def m[T: f()](self): pass     # C's f, as PEP 695 reads a bound
+                return C
+            def g():
+                class C:
+                    g = object
+                    class D[T](g()): pass         # C's g, as PEP 695 reads a base
+                return C
+            def h():
+                class C:
+                    def h(): return 1
+                    def m[T](self):
+                        return h()                # the module's h: a method's body does not see C's names
+                return C
+        """), {"f": 0, "g": 0, "h": 1})
+
+    def test_an_assignment_expression_in_a_comprehension_binds_in_the_function(self):
+        self.assertEqual(self.module_scores("""
+            def f(handlers, x):
+                if any((g := h) for h in handlers):   # +1 if
+                    return g(x)                       # the g the walrus bound
+            def g(x):
+                return f([], x)
+        """), {"f": 1, "g": 0})
+
+    def test_what_python_reads_outside_a_nested_scope_is_read_in_the_function(self):
+        self.assertEqual(self.module_scores("""
+            def a(x):
+                return [a for a in a(x[1:])]          # +1, the first iterable is read in a's scope
+            def b(x, key=lambda b: b):
+                return b(x[1:])                       # +1, the lambda's b is the lambda's alone
+            def c(x):
+                def inner(y: c(x) = 0):               # +1, an annotation is read in c's scope
+                    pass
+                return inner
+            def d():
+                class C[T: d()]:                      # +1, a bound is read in the type parameters' scope
+                    pass
+                return C
+            def e():
+                @e()                                  # +1, a decorator is read outside the type parameters
+                class C[e]:
+                    pass
+                return C
+        """), {"a": 1, "b": 1, "c": 1, "d": 1, "e": 1})
+
+    def test_a_global_or_nonlocal_in_a_nested_scope_leaves_the_outer_binding_alone(self):
+        self.assertEqual(self.module_scores("""
+            def f():
+                g = make()
+                def reset():
+                    nonlocal g
+                    g = make()
+                return g()
+            def g():
+                return f()
+            def k():
+                return m()
+            def m():
+                global k
+                def inner(k):
+                    return k()
+                return inner
+        """), {"f": 0, "g": 0, "k": 0, "m": 0})
+
+    def test_self_in_a_class_nested_in_a_method_is_that_class_s(self):
+        self.assertEqual(self.module_scores("""
+            class C:
+                def x(self):
+                    class D:
+                        def z(self):
+                            return self.y()
+                    return D
+                def y(self):
+                    return self.x()
+        """), {"C.x": 0, "C.y": 0})
+
+    def test_methods_of_two_nested_classes_of_one_name_are_told_apart(self):
+        self.assertEqual(self.module_scores("""
+            class A:
+                class Meta:
+                    def x(self):
+                        return self.y()
+            class B:
+                class Meta:
+                    def y(self):
+                        return self.x()
+        """), {"A.Meta.x": 0, "B.Meta.y": 0})
+
+    def test_a_function_that_calls_itself_and_lies_on_a_cycle_scores_the_point_once(self):
+        self.assertEqual(self.module_scores("""
+            def walk(node):
+                return walk(node.left) + visit(node)
+            def visit(node):
+                return walk(node.right)
+            def alone(n):
+                return alone(n - 1)
+        """), {"walk": 1, "visit": 1, "alone": 1})
 
     def test_a_method_of_a_class_nested_in_the_function_recurses_as_a_method_does(self):
         self.assertEqual(score("""
@@ -8595,11 +8822,7 @@ class TestCognitiveComplexity(unittest.TestCase):
     def test_the_seven_functions_sonarqube_flagged_score_over_the_limit(self):
         with open(S3776_FUNCTIONS) as f:
             tree = ast.parse(f.read())
-        scores = {}
-        for node in tree.body:
-            cls = node.name if isinstance(node, ast.ClassDef) else None
-            for function in node.body if cls else [node]:
-                scores[function.name] = orchestrator.cognitive_complexity(function, cls)
+        scores = {f.name.rpartition(".")[2]: f.score for f in orchestrator._scored_functions(tree)}
         self.assertEqual(sorted(scores), sorted(["main", "_turn", "_poll", "quality_report", "changed_lines",
                                                  "_shared_name", "_parse_step"]))
         for name, n in scores.items():
@@ -8763,6 +8986,24 @@ class TestTooComplexFunctions(unittest.TestCase):
         self.git("mv", "bin/tool", "bin/tool.py")
         self.edit("bin/tool.py", "x += 3\n", "x += 30\n")  # still 20
         self.assertEqual(self.found()[0], [])
+
+    def test_a_function_moved_unchanged_out_of_a_deleted_python_script_keeps_its_base(self):
+        self.commit_file("bin/tool", "#!/usr/bin/env python3\n" + flat("helper", 20))
+        self.git("rm", "--quiet", "bin/tool")
+        self.put("calc.py", self.BASE + "\n\n" + flat("helper", 20))  # an edit, so git sees no rename
+        self.assertEqual(self.found()[0], [])
+        # Into a new file, which git may pair with the deleted script as its rename.
+        self.put("calc.py", self.BASE)
+        self.put("lib.py", flat("helper", 20))
+        self.git("add", "lib.py")
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_deleted_script_that_is_not_python_lends_no_base(self):
+        self.commit_file("bin/tool", "#!/bin/sh\n" + flat("helper", 20))
+        self.git("rm", "--quiet", "bin/tool")
+        self.put("calc.py", self.BASE + "\n\n" + flat("helper", 20))  # an edit, so git sees no rename
+        self.assertEqual([f["message"] for f in self.found()[1]],
+                         ["`helper`: cognitive complexity 20, a new function; the limit is 15."])
 
     def test_a_function_out_of_tests_is_judged_as_new_as_tests_were_never_held_to_the_limit(self):
         self.commit_file("tests/helpers.py", flat("helper", 20) + "\n\n" + flat("other_helper", 20))
