@@ -7023,6 +7023,37 @@ class TestWeakenedTests(unittest.TestCase):
                                  ("tests/test_other.py", "tests/test_renamed.py")], key=str))
 
 
+class TestRunInSession(unittest.TestCase):
+    """_run_in_session, which runs the gate's pytest and mutmut, on shell commands."""
+
+    def run_sh(self, code, *, timeout=10, soft_stop=None):
+        return orchestrator._run_in_session(["sh", "-c", code], tempfile.gettempdir(), dict(os.environ),
+                                            timeout=timeout, soft_stop=soft_stop)
+
+    def test_a_tool_that_finishes_returns_its_status_and_output(self):
+        proc, stopped = self.run_sh("echo out; echo err >&2; exit 3")
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr, stopped), (3, "out\n", "err\n", False))
+
+    def test_a_tool_that_exits_on_sigint_returns_what_it_printed(self):
+        proc, stopped = self.run_sh("trap 'echo bye; exit 5' INT; echo hi; while :; do sleep 0.1; done",
+                                    timeout=0.5, soft_stop=(signal.SIGINT, 5))
+        self.assertEqual((proc.returncode, proc.stdout, stopped), (5, "hi\nbye\n", True))
+
+    def test_a_tool_that_ignores_sigint_is_killed_after_the_grace(self):
+        started = time.monotonic()
+        proc, stopped = self.run_sh("trap '' INT; echo hi; exec sleep 30", timeout=0.3, soft_stop=(signal.SIGINT, 0.3))
+        self.assertLess(time.monotonic() - started, 0.6 + orchestrator.TOOL_KILL_WAIT)
+        self.assertEqual((proc.returncode, proc.stdout, stopped), (-signal.SIGKILL, "hi\n", True))
+
+    def test_a_tool_that_prints_more_than_a_pipe_holds_is_not_blocked(self):
+        proc, stopped = self.run_sh("head -c 1000000 /dev/zero | tr '\\0' x", timeout=5)
+        self.assertEqual((proc.returncode, len(proc.stdout), stopped), (0, 1000000, False))
+
+    def test_a_tool_that_cannot_start_raises_oserror(self):
+        with self.assertRaises(OSError):
+            orchestrator._run_in_session(["/nonexistent/tool"], tempfile.gettempdir(), {}, timeout=1)
+
+
 class TestFlakyTests(unittest.TestCase):
     """The flaky-tests check over a real git repository, rerunning its tests with this suite's own pytest."""
 
@@ -7092,6 +7123,39 @@ class TestFlakyTests(unittest.TestCase):
     @staticmethod
     def line_of(text, definition):
         return text.splitlines().index(definition) + 1
+
+    def test_a_server_a_test_leaves_holding_the_output_does_not_hold_up_the_reruns(self):
+        # Under -s a test's processes inherit pytest's own output; this one outlives every run, in a session of its own.
+        pids = os.path.join(self.repo, "..", f"{os.path.basename(self.repo)}-servers")
+
+        def started_servers():
+            with contextlib.suppress(FileNotFoundError), open(pids) as f:
+                return [int(pid) for pid in f.read().split()]
+            return []
+
+        def kill():
+            for pid in started_servers():
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(pids)
+        self.addCleanup(kill)
+        self.put("pytest.ini", "[pytest]\naddopts = -s\n")
+        self.git("add", "pytest.ini")
+        self.git("commit", "--quiet", "-m", "-s")
+        self.put("tests/test_server.py", (
+            "import subprocess\nimport sys\n\n\ndef test_starts_a_server():\n"
+            "    server = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'], "
+            "start_new_session=True)\n"
+            f"    with open({pids!r}, 'a') as f:\n        f.write(f'{{server.pid}}\\n')\n"))
+        self.git("add", "tests/test_server.py")
+        started = time.monotonic()
+        with patch.object(orchestrator, "TOOL_KILL_WAIT", 0.5):
+            found = self.found()
+        self.assertLess(time.monotonic() - started, orchestrator.FLAKY_RUN_TIMEOUT)
+        self.assertEqual(found, [])
+        # One server for each seed's run, so the reruns did happen.
+        self.assertEqual(len(started_servers()), len(orchestrator.FLAKY_SEEDS))
 
     @staticmethod
     def alternates():
@@ -7473,11 +7537,11 @@ class TestFlakyTests(unittest.TestCase):
 
     def test_no_room_for_the_reruns_is_a_finding(self):
         self.change_the_tests()
-        with patch.object(tempfile, "tempdir", os.path.join(self.repo, "no-such-dir")):
+        with patch.object(orchestrator.tempfile, "mkdtemp", side_effect=OSError(28, "No space left on device")):
             found = self.found()
-        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-rerun")])
-        self.assertRegex(found[0]["message"], r"^could not make a directory to rerun the changed tests in: .*No such "
-                                              r"file.*; the changed tests were not rerun\.$")
+        self.assertEqual([(f["path"], f["line"], f["rule"], f["message"]) for f in found], [(
+            None, None, "not-rerun", ("could not make a directory to rerun the changed tests in: [Errno 28] No space "
+                                      "left on device; nothing ran, so the check judged nothing."))])
 
     def test_the_reruns_leave_the_build_s_reports_alone(self):
         # The project's addopts write a coverage report, as the build's own run did before the gate reads it.
@@ -7530,7 +7594,7 @@ class TestFlakyTests(unittest.TestCase):
         self.assertIn((15, "mixed-results"), [(f["line"], f["rule"]) for f in found])
         [left] = [f for f in found if f["rule"] == "not-removed"]
         self.assertEqual((left["path"], left["line"]), (None, None))
-        self.assertRegex(left["message"], r"^could not remove the directory the changed tests were rerun in, .+: "
+        self.assertRegex(left["message"], r"^could not remove the directory to rerun the changed tests in, `.+`: "
                                           r".*Permission denied")
 
     def test_a_test_file_that_does_not_collect_is_a_finding(self):
@@ -7592,6 +7656,28 @@ class TestPassesAtBase(unittest.TestCase):
         self.put("calc.py", self.CALC.replace("a - b", "a + b"))
         self.put("tests/test_calc.py", self.TESTS.replace("import mul", "import add, mul")
                  + "\n\ndef test_add():\n    assert add(2, 2) == 4\n" + tests)
+
+    def test_no_room_for_the_run_at_the_base_is_a_finding(self):
+        self.fix_add()
+        with patch.object(orchestrator.tempfile, "mkdtemp", side_effect=OSError(28, "No space left on device")):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"], f["message"]) for f in found], [(
+            None, None, "not-run", ("could not make a directory to run the changed tests at the base in: [Errno 28] "
+                                    "No space left on device; nothing ran, so the check judged nothing."))])
+
+    def test_a_base_run_directory_left_behind_is_a_finding_beside_the_results(self):
+        self.fix_add()
+        rmtree = shutil.rmtree
+
+        def refuse(path):
+            self.addCleanup(rmtree, path)
+            raise PermissionError(13, "Permission denied", path)
+        with patch.object(orchestrator.shutil, "rmtree", refuse):
+            found = self.found()
+        [left] = found
+        self.assertEqual((left["path"], left["line"], left["rule"]), (None, None, "not-removed"))
+        self.assertRegex(left["message"], r"^could not remove the directory to run the changed tests at the base in, "
+                                          r"`.+`: .*Permission denied")
 
     def test_a_test_that_fails_without_the_fix_gives_nothing(self):
         self.fix_add()
@@ -7668,7 +7754,7 @@ class TestPassesAtBase(unittest.TestCase):
                          "printf '.'; sleep 30 & exec sleep 30")
         start = time.monotonic()
         found = self.found(budget=1)
-        self.assertLess(time.monotonic() - start, orchestrator.MUTMUT_KILL_WAIT)
+        self.assertLess(time.monotonic() - start, orchestrator.TOOL_KILL_WAIT)
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "budget-reached")])
         self.assertEqual(found[0]["message"], "pytest was stopped at 1 seconds (`--base-run-budget`) after 1 of the 2 "
                                               "test cases it was given, before it reported them, so none of them was "
@@ -8194,8 +8280,9 @@ class TestSurvivingMutants(unittest.TestCase):
         self.change_the_functions()
         with patch.object(orchestrator.tempfile, "mkdtemp", side_effect=OSError(28, "No space left on device")):
             found = self.found()
-        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-run")])
-        self.assertIn("No space left on device", found[0]["message"])
+        self.assertEqual([(f["path"], f["line"], f["rule"], f["message"]) for f in found], [(
+            None, None, "not-run", ("could not make a directory to run mutmut on a copy of the tree in: [Errno 28] "
+                                    "No space left on device; nothing ran, so the check judged nothing."))])
 
     def test_a_copy_that_cannot_be_removed_is_a_finding_beside_the_others(self):
         self.change_the_functions("orphan")
@@ -8204,8 +8291,9 @@ class TestSurvivingMutants(unittest.TestCase):
         with patch.object(orchestrator.shutil, "rmtree", side_effect=OSError(16, "Device or resource busy")):
             found = self.found()
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
-                         [(None, None, "cleanup"), ("calc.py", 13, "untested")])
-        self.assertIn("Device or resource busy", found[0]["message"])
+                         [(None, None, "not-removed"), ("calc.py", 13, "untested")])
+        self.assertRegex(found[0]["message"], r"^could not remove the directory to run mutmut on a copy of the tree "
+                                              r"in, `.+`: .*Device or resource busy")
         left = re.search(r"`([^`]+)`", found[0]["message"]).group(1)
         self.assertTrue(os.path.isdir(left))
         rmtree(left)
@@ -8227,7 +8315,7 @@ class TestSurvivingMutants(unittest.TestCase):
         # mutmut ignores SIGINT here, so it is killed after the grace, and a helper keeps its output open after that.
         self.fake_mutmut(f"trap '' INT; {self.helper_holding_the_output()} exec sleep 30")
         started = time.monotonic()
-        with patch.multiple(orchestrator, MUTMUT_STOP_GRACE=0.5, MUTMUT_KILL_WAIT=0.5):
+        with patch.multiple(orchestrator, MUTMUT_STOP_GRACE=0.5, TOOL_KILL_WAIT=0.5):
             found = self.found(budget=1)
         self.assertLess(time.monotonic() - started, 6)
         self.assertEqual([f["rule"] for f in found], ["budget-reached"])
@@ -8237,7 +8325,7 @@ class TestSurvivingMutants(unittest.TestCase):
         self.fake_mutmut("exit 0", listing="trap '' INT; exec sleep 30")
         started = time.monotonic()
         # Without its stop counted in, the listing would get all 4 seconds, and then the grace on top.
-        with patch.multiple(orchestrator, MUTMUT_REPORT_TIMEOUT=4, MUTMUT_STOP_GRACE=1.5, MUTMUT_KILL_WAIT=0.5):
+        with patch.multiple(orchestrator, MUTMUT_REPORT_TIMEOUT=4, MUTMUT_STOP_GRACE=1.5, TOOL_KILL_WAIT=0.5):
             found = self.found()
         self.assertLess(time.monotonic() - started, 5)
         self.assertEqual([f["rule"] for f in found], ["not-run"])
