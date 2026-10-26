@@ -10199,48 +10199,28 @@ class TestCI(unittest.TestCase):
             ci.trigger(REF_1_1)
 
 
-class TestJudgedInQuality(unittest.TestCase):
-    """`orchestrator.py judged-in-quality` in a clone of a real origin, with the quality job on a FakeCI.
+class TestJudgedInQuality(RepositoryTest):
+    """`orchestrator.py judged-in-quality` in a repository with a real bare origin, with the quality job on a FakeCI.
 
-    The clone's HEAD is a pull request's head, one commit on top of main's base commit, as a run publishes a tree
+    The repository's HEAD is a pull request's head, one commit on top of main's base commit, as a run publishes a tree
     its last quality build judged.
     """
 
     JUDGING = ("Jenkinsfile", "orchestrator.py", "pyproject.toml", "uv.lock", ".python-version")
+    BASE_FILES = {name: f"{name} 1\n" for name in (*JUDGING, "f.py")}
 
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.tmp = tmp.name
-        self.origin, self.repo = (os.path.join(tmp.name, d) for d in ("origin.git", "repo"))
-        self.host = Host()
-        self.host.git(self.tmp, "init", "--quiet", "--bare", "-b", "main", self.origin)
+        super().setUp()
+        self.origin = os.path.join(self.outside, "origin.git")
+        self.host.git(self.outside, "init", "--quiet", "--bare", "-b", "main", self.origin)
         # As GitHub does, so a commit is fetched by its sha.
         self.host.git(self.origin, "config", "uploadpack.allowReachableSHA1InWant", "true")
-        self.host.git(self.tmp, "clone", "--quiet", self.origin, self.repo)
-        for key, setting in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
-            self.git("config", key, setting)
-        for name in (*self.JUDGING, "f.py"):
-            self.put(name, f"{name} 1\n")
-        self.base = self.commit("base")
+        self.git("remote", "add", "origin", self.origin)
         self.git("push", "--quiet", "origin", "HEAD:refs/heads/main")
         self.git("checkout", "--quiet", "-b", "pr")
-        self.put("f.py", "f.py 2\n")
-        self.head = self.commit("change")
+        self.head = self.commit({"f.py": "f.py 2\n"}, "change")
         self.tree = self.git("rev-parse", "HEAD^{tree}").strip()
         self.fake = FakeCI()
-
-    def git(self, *args):
-        return self.host.git(self.repo, *args)
-
-    def put(self, name, text):
-        with open(os.path.join(self.repo, name), "w") as f:
-            f.write(text)
-
-    def commit(self, message):
-        self.git("add", "-A")
-        self.git("commit", "--quiet", "-m", message)
-        return self.git("rev-parse", "HEAD").strip()
 
     def build(self, *, tree=None, parent=None, main=None, description=None, **kw):
         """A build of the quality job, SUCCESS on HEAD's tree from its base by main at the base unless kw say
@@ -10253,9 +10233,9 @@ class TestJudgedInQuality(unittest.TestCase):
     def push_main(self, name, text):
         """Move origin's main by a commit that changes name, made in another clone so this one lacks it; returns
         its sha."""
-        other = os.path.join(self.tmp, "other")
+        other = os.path.join(self.outside, "other")
         if not os.path.isdir(other):
-            self.host.git(self.tmp, "clone", "--quiet", "-b", "main", self.origin, other)
+            self.host.git(self.outside, "clone", "--quiet", "-b", "main", self.origin, other)
         with open(os.path.join(other, name), "w") as f:
             f.write(text)
         self.host.git(other, "add", "-A")
@@ -10323,7 +10303,7 @@ class TestJudgedInQuality(unittest.TestCase):
             with self.subTest(name):
                 self.git("checkout", "--quiet", self.head)
                 self.put(name, "changed\n")
-                self.commit(f"edit {name}")
+                self.commit({}, f"edit {name}")
                 self.tree = self.git("rev-parse", "HEAD^{tree}").strip()
                 self.fake.builds.clear()
                 self.fake.names.clear()
@@ -10335,7 +10315,7 @@ class TestJudgedInQuality(unittest.TestCase):
         os.mkdir(os.path.join(self.repo, "sub"))
         self.put("sub/g.py", "g\n")
         self.put("Jenkinsfile", "changed\n")
-        self.commit("edit Jenkinsfile")
+        self.commit({}, "edit Jenkinsfile")
         self.tree = self.git("rev-parse", "HEAD^{tree}").strip()
         self.build()
         self.repo = os.path.join(self.repo, "sub")
@@ -10434,7 +10414,7 @@ class TestJudgedInQuality(unittest.TestCase):
 
     def test_a_working_directory_that_is_gone_fails_in_one_line(self):
         self.build()
-        gone = os.path.join(self.tmp, "gone")
+        gone = os.path.join(self.outside, "gone")
         os.mkdir(gone)
         err = io.StringIO()
         with contextlib.chdir(gone), contextlib.redirect_stderr(err), \
@@ -10448,7 +10428,7 @@ class TestJudgedInQuality(unittest.TestCase):
     def test_without_a_merge_base_it_fails(self):
         self.git("checkout", "--quiet", "--orphan", "lone")
         self.put("f.py", "alone\n")
-        self.commit("lone")
+        self.commit({}, "lone")
         self.build(tree=self.git("rev-parse", "HEAD^{tree}").strip())
         self.assert_refused("merge base")
 

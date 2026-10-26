@@ -373,11 +373,11 @@ was done.
   Fixed (2026-10-26): `tests/gitrepo.py`'s `RepositoryTest` makes the repository in `setUp`, configures it, commits
   the class's `BASE_FILES` as "base", and gives `git`, `put`, `edit` and `commit`; `TestScanUnpublished`, `TestGate`,
   `TestWeakenedTests`, `TestFlakyTests`, `TestPassesAtBase`, `TestVagueNames`, `TestSurvivingMutants`,
-  `TestTooComplexFunctions`, `TestChangedPythonFiles` and `TestHostSnapshot` derive from it, and what their `setUp`s
-  kept out of the tree (stub tools, a bare origin, a rules file) is under the base's `outside`. `TestHostGit` keeps
-  a `setUp` of its own, since it makes two clones of a bare origin rather than one repository; its `clone` binds
-  `setting` now. Not closed: single tests still make a repository or a directory of their own, such as
-  `TestPassesAtBase`'s submodule.
+  `TestTooComplexFunctions`, `TestChangedPythonFiles`, `TestHostSnapshot` and `TestJudgedInQuality` derive from it,
+  and what their `setUp`s kept out of the tree (stub tools, a bare origin, a rules file) is under the base's
+  `outside`. `TestHostGit` keeps a `setUp` of its own, since it makes two clones of a bare origin rather than one
+  repository; its `clone` binds `setting` now. Not closed: single tests still make a repository or a directory of
+  their own, such as `TestPassesAtBase`'s submodule.
 
 - **The GitHub repository still had the old name.** It is `DavidSiegl/octoflow-ai` now, and the README's URLs and
   badges point there; GitHub redirects the old URLs.
