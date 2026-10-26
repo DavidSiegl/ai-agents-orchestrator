@@ -3988,9 +3988,9 @@ def flaky_tests(change: GateChange) -> list[dict]:
     them. A pytest run that cannot start, takes longer than FLAKY_RUN_TIMEOUT, ends in a usage or collection error
     or writes no readable report ends the reruns of the tests under its configuration with a finding saying so, after
     what the runs before it showed, and the tests under other configurations are rerun still; a changed test file
-    that cannot be read or parsed, and a copy that cannot be made, are findings too. Each run has FLAKY_RUN_TIMEOUT
-    of its own, so each configuration the changed tests fall under adds its runs to the check's time. One that cannot be
-    removed afterwards is a finding of its own, beside the results.
+    that cannot be read or parsed, and a copy that cannot be made, are findings too; a copy that cannot be removed
+    afterwards is a finding of its own, beside the results. Each run has FLAKY_RUN_TIMEOUT of its own, so each
+    configuration the changed tests fall under adds its runs to the check's time.
     """
     tests, unreadable = _changed_python_tests(change)
     out = [_finding(path, None, "not-rerun", f"{why}, so its tests were not rerun.") for path, why in unreadable]
@@ -4026,16 +4026,14 @@ def _rerun_findings(root: str, tmp: str, tests: dict[tuple[str, str], int]) -> l
         return [_finding(None, None, "not-rerun", f"could not write an empty pytest configuration for the "
                                                   f"reruns: {e}; the changed tests were not rerun.")]
     out = []
-    for n, group in enumerate(groups):
+    for n, (group, label) in enumerate(zip(groups, _labels(groups), strict=True)):
         reports = os.path.join(tmp, f"reports-{n}")
         try:
             os.mkdir(reports)
         except OSError as e:
-            which = group.label() if len(groups) > 1 else "the changed tests"
             out.append(_finding(None, None, "not-rerun", f"could not make a directory for the reruns' reports: {e}; "
-                                                         f"{which} were not rerun."))
+                                                         f"{label or 'the changed tests'} were not rerun."))
             continue
-        label = group.label() if len(groups) > 1 else None
         out += [group.in_tree(f) for f in _group_rerun_findings(group, group.own(tests), reports, label)]
     return out
 
@@ -4184,10 +4182,16 @@ class _PytestGroup:
     def label(self) -> str:
         """The group's tests, as a finding about all of them names them when the change's tests fall in more than
         one group: by their configuration file's path in the copy."""
-        inifile = os.path.relpath(self.setup.inifile, self.setup.top)
-        if inifile.startswith(".."):  # the empty configuration, beside the copy
+        # The empty configuration is the one file given with -c that lies outside the copy (_empty_pytest_ini).
+        if os.path.commonpath([self.setup.inifile, self.setup.top]) != self.setup.top:
             return "the changed tests with no pytest configuration"
-        return f"the changed tests configured by {inifile}"
+        return f"the changed tests configured by {os.path.relpath(self.setup.inifile, self.setup.top)}"
+
+
+def _labels(groups: list[_PytestGroup]) -> list[str | None]:
+    """How a finding about all of each of groups' tests names them, as _PytestGroup.label does when there is more
+    than one group; None for each when there is one, whose tests are all the changed tests."""
+    return [group.label() if len(groups) > 1 else None for group in groups]
 
 
 def _pytest_groups(tree: str, tmp: str, paths: set[str]) -> list[_PytestGroup]:
@@ -4222,13 +4226,12 @@ def _pytest_config(tree: str, tmp: str) -> str:
 
 
 def _empty_pytest_ini(tmp: str) -> str:
-    """The path of an empty pytest.ini in tmp, the private directory beside a copy, which this writes the first
-    time, so that pytest, given it with -c, does not look for a configuration above the copy, where another account
-    may write. Raises OSError when it cannot be written."""
+    """The path of an empty pytest.ini that this writes in tmp, the private directory beside a copy, where none is
+    yet, so that pytest, given it with -c, does not look for a configuration above the copy, where another account
+    may write. Raises OSError when it cannot be written, or tmp has one already."""
     inifile = os.path.join(tmp, "pytest.ini")
-    if not os.path.isfile(inifile):
-        with open(inifile, "x", encoding="utf-8"):
-            pass
+    with open(inifile, "x", encoding="utf-8"):
+        pass
     return inifile
 
 
@@ -4458,10 +4461,10 @@ def passes_at_base(change: GateChange, *, budget: float) -> list[dict]:
     The collections and runs together, one of each for every configuration the changed tests fall under, may take
     budget seconds; a stop there is a budget-reached finding saying when, and how many test cases the run had run,
     and none of that configuration's outcomes is reported; the configurations after it are not run, each a not-run
-    finding saying so. A pytest that cannot start,
-    stops before it collects, stops with a usage error other than a conftest.py's ImportError, or writes no readable
-    report, a changed test file that cannot be read or parsed, and a copy that cannot be made are not-run findings
-    saying so; a copy that cannot be removed afterwards is a finding of its own.
+    finding saying so. A pytest that cannot start, stops before it collects, stops with a usage error other than a
+    conftest.py's ImportError, or writes no readable report, a changed test file that cannot be read or parsed, and a
+    copy that cannot be made are not-run findings saying so; a copy that cannot be removed afterwards is a finding of
+    its own.
     """
     if not _edits_python_source(change):
         return []
@@ -4521,13 +4524,11 @@ def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str]
     # No bytecode: a test that imports through a tracked link out of the tree would write it there.
     env = {"TMPDIR": scratch, "PYTHONDONTWRITEBYTECODE": "1"}
     out: list[dict] = []
-    for n, group in enumerate(groups):
-        label = group.label() if len(groups) > 1 else None
+    for n, (group, label) in enumerate(zip(groups, _labels(groups), strict=True)):
         report = os.path.join(tmp, f"base-{n}.xml")
         found, stopped = _base_group_findings(group, group.own(tests), deadline, env, report, budget, label)
         out += [group.in_tree(f) for f in found]
         if stopped:
-            # The budget is the check's: the groups after the one it stopped get no run, which each says.
             out += [_finding(None, None, "not-run", f"the run at the base used its {budget:g} seconds "
                                                     f"(`--base-run-budget`) before it reached {later.label()}, so "
                                                     f"they were not run there.") for later in groups[n + 1:]]

@@ -7257,6 +7257,15 @@ class TestFlakyTests(unittest.TestCase):
         self.assertEqual(sorted({r[:2] for r in runs}), [("a", "a/pyproject.toml"), ("b", "b/tox.ini")])
         self.assertEqual(sorted(r[0] for r in runs if r[2] == "collecting the changed tests"), ["a", "b"])
 
+    def test_a_group_s_label_names_its_configuration_or_its_lack_of_one(self):
+        top = "/w/tree"
+
+        def group(inifile):
+            return orchestrator._PytestGroup(orchestrator._PytestSetup(top, inifile, top), frozenset())
+        self.assertEqual(group("/w/pytest.ini").label(), "the changed tests with no pytest configuration")
+        self.assertEqual(group("/w/tree/..ci/pytest.ini").label(), "the changed tests configured by ..ci/pytest.ini")
+        self.assertEqual(group("/w/tree/b/tox.ini").label(), "the changed tests configured by b/tox.ini")
+
     def failing_in_the_copy(self, base, changed, extra=None):
         """The findings on tests/test_g.py changed from base to changed, with extra files beside it untracked."""
         self.put("tests/test_g.py", base)
