@@ -1,6 +1,7 @@
-# Jenkins tests, builds and releases; it has no macOS machine, so this adds only the macOS binary and the desktop
-# app around it to a release Jenkins has published. It never creates a release or a tag: gh release upload fails
-# if the release is missing.
+# Jenkins tests, builds and releases; it has no macOS machine, so this builds the macOS binary and the desktop app
+# around it. For a release Jenkins has published, or a dispatch for an existing one, it adds them to that release; it
+# never creates a release or a tag: gh release upload fails if the release is missing. For a pull request that
+# touches what goes into them, it only builds them, so that a change breaking the macOS build fails before it merges.
 name: macOS binary
 
 on:
@@ -13,23 +14,43 @@ on:
         description: Tag of the existing release, e.g. v0.5.0
         required: true
         type: string
+  # Advisory, not required by the ci-cd ruleset. Only for what the build reads, since macOS runner minutes cost.
+  pull_request:
+    paths:
+      - packaging/**
+      - ui/**
+      - pyproject.toml
+      - uv.lock
+      - orchestrator.py
+      - .github/workflows/macos-binary.yml
 
-permissions:
-  contents: write
+# Each job asks for what it needs: only upload, which runs no code of the change, may write to releases.
+permissions: {}
+
+# A newer push to a pull request replaces its build in progress; a release's or a dispatch's run is never cancelled.
+concurrency:
+  group: macos-binary-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  macos-binary:
+  build:
     runs-on: macos-latest
+    # A release build takes about 4 minutes; a check that hangs fails the job here rather than after 6 hours.
+    timeout-minutes: 30
+    permissions:
+      contents: read
     env:
-      TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
       # uv's own Python, which bundles Tcl/Tk. uv would otherwise take the runner's Homebrew python@3.14, which has
       # no tkinter, and PyInstaller would leave the GUI out of the binary. Set here, not in build-binary.sh, so a
       # rebuild of a tag cut before this fix gets it too.
       UV_PYTHON_PREFERENCE: only-managed
     steps:
+      # A pull request's head, as it was pushed; a release's or a dispatch's tag.
       - uses: actions/checkout@v5
         with:
-          ref: refs/tags/${{ env.TAG }}
+          ref: >-
+            ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha
+            || format('refs/tags/{0}', github.event_name == 'release' && github.event.release.tag_name || inputs.tag) }}
 
       - uses: astral-sh/setup-uv@v6
 
@@ -43,6 +64,32 @@ jobs:
 
       # The script Jenkins builds the Linux app with, around that binary.
       - run: packaging/build-desktop.sh
+
+      - if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-assets
+          path: |
+            dist/octoflow-macos-arm64
+            dist/octoflow-macos-arm64.sha256
+            dist/octoflow-desktop-macos-arm64.dmg
+            dist/octoflow-desktop-macos-arm64.dmg.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  upload:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-assets
+          path: dist
 
       - name: Upload to the release
         env:
