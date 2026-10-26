@@ -31,6 +31,7 @@ window over the same CLI: it starts run and resume as child processes.
 
 import argparse
 import ast
+import atexit
 import base64
 import bisect
 import collections
@@ -1477,8 +1478,86 @@ class RunFile(NamedTuple):
     mtime: int  # when it was last modified, in seconds since the epoch by its host's clock
 
 
+# How long, in seconds, an SSH master connection (ssh_sharing_options) outlives the last command that used it.
+SSH_CONTROL_PERSIST_SECONDS = 60
+# How often, in seconds, an SSH master asks its server whether the connection is alive, and how many asks left
+# unanswered end it: so one that died without a reset ends within 30 s, and the next command opens a new one,
+# rather than waiting on it until TCP gives up, while the commands keep it from ever idling out.
+SSH_ALIVE_INTERVAL_SECONDS = 10
+SSH_ALIVE_COUNT = 3
+# The longest control socket path ssh can bind, in bytes: a Unix socket's path is at most 103 on macOS (sun_path
+# holds 104 with its NUL; 108 on Linux), and ssh binds a temporary name 17 bytes longer before renaming it.
+_SSH_SOCKET_PATH_MAX = 103 - 17
+# The name of a control directory: this prefix, then the 8 characters mkdtemp adds.
+_SSH_DIR_PREFIX = "octoflow-ssh-"
+
+
+class _SshControl:
+    """This process's SSH control sockets, for ssh_sharing_options."""
+
+    def __init__(self) -> None:
+        self.dir: str | None = None  # the directory, made by this process, they are in; None while there is none
+        self.options: list[str] = []  # ssh_sharing_options' answer while dir is that directory
+
+
+_SSH_CONTROL = _SshControl()
+
+
+def ssh_sharing_options() -> list[str]:
+    """The ssh options that let this process's commands to one target share a single connection (ssh_config(5),
+    ControlMaster), which ends SSH_CONTROL_PERSIST_SECONDS after its last command, or once it stops answering
+    (SSH_ALIVE_INTERVAL_SECONDS). Its socket is in a directory only the user can use, under $XDG_RUNTIME_DIR, else
+    /tmp, made on the first call, made again when it is gone or no longer the user's alone, and removed when the
+    process exits.
+
+    An empty list when no such directory with a socket path ssh accepts can be made: ssh would fail the command,
+    not connect on its own (ssh_config(5), ControlPath), so the command runs unshared."""
+    control = _SSH_CONTROL
+    if control.dir is None or not _private_dir(control.dir):
+        control.dir, control.options = None, []
+        # /tmp rather than tempfile's default, whose path on macOS leaves no room for the socket's; mkdtemp's
+        # directory there is private and unguessable, and _private_dir sees that it stays so.
+        for parent in (os.environ.get("XDG_RUNTIME_DIR"), "/tmp"):  # noqa: S108
+            if made := _new_ssh_control_dir(parent):
+                control.dir = made
+                control.options = ["-o", "ControlMaster=auto", "-o", f"ControlPersist={SSH_CONTROL_PERSIST_SECONDS}",
+                                   "-o", f"ControlPath={made}/%C",
+                                   "-o", f"ServerAliveInterval={SSH_ALIVE_INTERVAL_SECONDS}",
+                                   "-o", f"ServerAliveCountMax={SSH_ALIVE_COUNT}"]
+                break
+    return control.options
+
+
+def _new_ssh_control_dir(parent: str | None) -> str | None:
+    """A new directory for SSH control sockets in parent, only the user's, its removal at exit registered; None when
+    parent is unset, would give a socket path ssh rejects, too long or with a character its option parser takes
+    apart, or the directory cannot be made."""
+    if not parent or any(c.isspace() or c in "%\"'\\" for c in parent):
+        return None
+    # The socket's path: parent, the directory's name, and %C, the hash of the connection's endpoints, 40 hex digits.
+    if len(os.fsencode(parent)) + 1 + len(_SSH_DIR_PREFIX) + 8 + 1 + 40 > _SSH_SOCKET_PATH_MAX:
+        return None
+    try:
+        made = tempfile.mkdtemp(prefix=_SSH_DIR_PREFIX, dir=parent)
+    except OSError:
+        return None
+    atexit.register(shutil.rmtree, made, True)
+    return made
+
+
+def _private_dir(path: str) -> bool:
+    """Whether path is still a directory, not a symlink, that is the user's and no one else's (mode 0700): one this
+    process made may have been removed, and in /tmp another user, who sees its name in ps, may make one so named."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() and stat.S_IMODE(st.st_mode) == 0o700
+
+
 class Host:
-    """Runs commands on the machine where the agents run: locally, or over SSH."""
+    """Runs commands on the machine where the agents run: locally, or over SSH, one shared connection per target
+    (ssh_sharing_options)."""
 
     def __init__(self, ssh_target: str | None = None, run=subprocess.run):
         self.ssh_target = ssh_target
@@ -1501,7 +1580,7 @@ class Host:
         """
         if self.ssh_target:
             # BatchMode fails fast instead of hanging on a password prompt nobody can see.
-            argv = ["ssh", "-o", "BatchMode=yes", self.ssh_target, shlex.join(argv)]
+            argv = ["ssh", "-o", "BatchMode=yes", *ssh_sharing_options(), self.ssh_target, shlex.join(argv)]
         try:
             if not verbatim:
                 return self._run(argv, input=stdin, capture_output=True, text=True, timeout=timeout, env=child_env())
@@ -1516,9 +1595,11 @@ class Host:
                                            os.fsdecode(proc.stderr))
 
     def check(self, argv: list[str], stdin: str | None = None, timeout: float = 60) -> str:
-        return self._checked(argv, self.run(argv, stdin, timeout))
+        return self.checked(argv, self.run(argv, stdin, timeout))
 
-    def _checked(self, argv: list[str], proc: subprocess.CompletedProcess) -> str:
+    def checked(self, argv: list[str], proc: subprocess.CompletedProcess) -> str:
+        """proc's standard output, proc being argv run on this host; raises OrchestratorError naming argv, the SSH
+        target if any, and its standard error, when it exited with a status other than 0."""
         if proc.returncode != 0:
             where = f" on {self.ssh_target}" if self.ssh_target else ""
             raise OrchestratorError(f"{shlex.join(argv)} failed{where}: {proc.stderr.strip()}")
@@ -1583,7 +1664,7 @@ class Host:
     def git(self, cwd: str, *args: str, timeout: float = 60, verbatim: bool = False) -> str:
         """The standard output of git args in cwd; timeout and verbatim as for run. Raises OrchestratorError when
         git exits with a status other than 0."""
-        return self._checked(["git", "-C", cwd, *args], self.git_run(cwd, *args, timeout=timeout, verbatim=verbatim))
+        return self.checked(["git", "-C", cwd, *args], self.git_run(cwd, *args, timeout=timeout, verbatim=verbatim))
 
     def git_run(self, cwd: str, *args: str, timeout: float = 60,
                 verbatim: bool = False) -> subprocess.CompletedProcess:
@@ -1595,7 +1676,7 @@ class Host:
         """Whether a yes-or-no git command answers yes: status 0 is yes, 1 is no, anything else an error."""
         proc = self.git_run(cwd, *args)
         if proc.returncode not in (0, 1):
-            self._checked(["git", "-C", cwd, *args], proc)
+            self.checked(["git", "-C", cwd, *args], proc)
         return proc.returncode == 0
 
     def fetch(self, cwd: str, branch: str) -> str:
@@ -1858,7 +1939,7 @@ class Host:
         _scan_git_env gives it, so both read the same patch."""
         argv = [*git_env, "git", "-C", source, "-c", "core.quotePath=false", "log", "-p", "-U0", "--no-color",
                 "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", "--format=%x00%H", *log_opts.split()]
-        out = self._checked(argv, self.run(argv, timeout=GITLEAKS_TIMEOUT, verbatim=True))
+        out = self.checked(argv, self.run(argv, timeout=GITLEAKS_TIMEOUT, verbatim=True))
         leaks = []
         # Each commit's patch follows its sha on a line of its own that starts with a NUL; a NUL inside a line of a
         # patch does not start one.
@@ -1905,7 +1986,7 @@ class Host:
         proc = self.git_run(cwd, *argv)
         if proc.returncode == 1:
             return None
-        return self._checked(["git", "-C", cwd, *argv], proc).strip()
+        return self.checked(["git", "-C", cwd, *argv], proc).strip()
 
     def has_commit(self, cwd: str, commit: str) -> bool:
         return self._git_test(cwd, "rev-parse", "-q", "--verify", f"{commit}^{{commit}}")
@@ -1982,7 +2063,7 @@ class Host:
         if proc.returncode in GH_UNUSABLE_STATUS:
             raise GhUnusable(f"gh {shlex.join(args)} failed with status {proc.returncode}: "
                              f"{(proc.stderr or proc.stdout).strip()}")
-        out = self._checked(["gh", *args], proc)
+        out = self.checked(["gh", *args], proc)
         try:
             pr = json.loads(out)
             fields_ok = valid(pr)
@@ -2047,7 +2128,7 @@ class Host:
         proc = self.run(["sh", "-c", script, "_", pattern.format(session=session)], verbatim=True)
         if proc.returncode == MISSING_FILE_STATUS:
             return None
-        return self._checked(["sh", "-c", script], proc)
+        return self.checked(["sh", "-c", script], proc)
 
     def run_metrics(self, cwd: str) -> list[dict]:
         """The metrics.json of each run of the project at cwd that has one, oldest run first."""
@@ -10454,11 +10535,31 @@ def _on_path(host: Host, command: str) -> str:
     return proc.stdout.strip()
 
 
+# The exit status a POSIX shell gives a command it cannot find, as the shell an SSH command runs in does.
+COMMAND_NOT_FOUND_EXIT = 127
+
+
+def _run_tool(host: Host, argv: list[str], timeout: float = 60) -> subprocess.CompletedProcess:
+    """host.run(argv, timeout=timeout); raises the _Unmet _on_path raises when argv[0] is not on host's PATH: it
+    cannot be started here, or over SSH the remote shell exits COMMAND_NOT_FOUND_EXIT. Raises OrchestratorError as
+    Host.run does for any other failure to run it."""
+    try:
+        proc = host.run(argv, timeout=timeout)
+    except OrchestratorError as e:
+        if isinstance(e.__cause__, FileNotFoundError):
+            raise _Unmet(f"{argv[0]} is not on PATH") from e
+        raise
+    if host.ssh_target and proc.returncode == COMMAND_NOT_FOUND_EXIT:
+        raise _Unmet(f"{argv[0]} is not on PATH")
+    return proc
+
+
 def _tool_version(host: Host, command: str, minimum: tuple[int, ...]) -> str:
     """What `command --version` prints, once it is on host's PATH and the first version number it prints is minimum
-    or later; raises _Unmet when it is missing, prints no version or an older one."""
-    _on_path(host, command)
-    said = host.check([command, "--version"]).strip()
+    or later; raises _Unmet when it is missing, prints no version or an older one, and OrchestratorError when it
+    fails."""
+    argv = [command, "--version"]
+    said = host.checked(argv, _run_tool(host, argv)).strip()
     number = re.search(r"\d+(?:\.\d+)+", said)
     if number is None:
         raise _Unmet(f"{command} --version prints no version number: {said!r}")
@@ -10506,8 +10607,7 @@ def integration_states(listing: str) -> dict[str, str]:
 
 def _gh_logged_in(host: Host) -> str:
     """That gh is on host's PATH and logged in; raises _Unmet with the fix for what is not."""
-    _on_path(host, "gh")
-    proc = host.run(["gh", "auth", "status"], timeout=NETWORK_TIMEOUT)
+    proc = _run_tool(host, ["gh", "auth", "status"], timeout=NETWORK_TIMEOUT)
     if proc.returncode != 0:
         said = " ".join(line.strip() for line in (proc.stderr.strip() or proc.stdout.strip()).splitlines()[:4])
         raise _Unmet(f"gh auth status fails{': ' + said if said else ''}", "gh auth login")

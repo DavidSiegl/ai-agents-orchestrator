@@ -44,6 +44,20 @@ was done.
 
 ## Open issues
 
+- **SSH connection sharing has not been timed on a real `--machine`.** `ssh_sharing_options` was measured against
+  a user-level sshd on this host only, 20 commands in 0.24 s shared against 1.78 s unshared; no herdr machine is
+  saved here, so `doctor --machine` was not timed before and after
+  (`.scratch/doctor-ssh/issues/01-ssh-connection-sharing.md`, requirement 4). Raised by cross-review 33 (F7). Closes
+  with `time orchestrator.py doctor --machine <m>` on the herdr machine, before and after, both times written into
+  that ticket.
+- **`--machine` over SSH assumes a POSIX login shell and a server that takes several sessions.** Since
+  `_run_tool`, doctor takes a remote command's exit status 127 for not on PATH: a csh or tcsh login shell exits 1
+  ("Command not found."), so a missing gh reads as `gh auth status fails` and a missing git as a failed
+  `--version`; and a tool on PATH that exits 127 itself, such as a shim whose target is gone, reads as not on PATH.
+  And `ssh_sharing_options` overrides a target's own `ControlMaster no`, so a server with `MaxSessions 1` refuses
+  the second of two commands run at once on the shared connection (the GUI and `serve` run several), which ssh
+  then fails. Raised by cross-review 33 (F4, F6), neither reproduced. Closes with doctor asking through `sh -c`, as
+  `_on_path` did, and with an explicit `ControlMaster`/`ControlPath` in `ssh -G <target>` left in place.
 - **`TestGate.test_a_missing_tool_fails_naming_it` fails where shellcheck lives beside git.** `TestGate.setUp`
   (`tests/test_orchestrator.py`) puts git's own directory on `PATH` after the stubs, so on a machine with
   `/usr/bin/shellcheck` (agentbox, Debian's package) removing the stub still finds the real one and the gate passes.
@@ -92,11 +106,6 @@ was done.
   `drain_end` (2026-10-25); a plain `uv run pytest` passes it. Cause not established. Closes with the test passing
   under mutmut, e.g. by suppressing `HealthCheck.differing_executors` for it, or the gate's mutmut runs leaving
   `tests/test_properties.py` out.
-- **`doctor --machine` probes the machine over about twenty SSH connections, one after another.** Each check is
-  its own `Host.run`, so `_tool_version` asks `command -v` before `--version`, which already fails for a missing
-  command, and `gh auth status` may wait up to `NETWORK_TIMEOUT`. Raised by the cross-review of the doctor command
-  (F8, 2026-10-24): "redundant probes, each one SSH connection with `--machine`". Closes with the probes run in one
-  shell over one connection, or SSH connection sharing for `Host`.
 - **herdr 0.9.1 lists no `gemini` integration.** `herdr integration status` on this host lists `antigravity-cli`
   (whose hook is under `~/.gemini/`) but no `gemini`, so `doctor` warns that it does not list gemini, and the
   README's `herdr integration install gemini` may name a kind herdr no longer has. Found by the doctor run
@@ -346,6 +355,18 @@ was done.
   files.
 
 ## Fixed
+
+- **`doctor --machine` asks the machine twice for each tool.** Each check is its own `Host.run`, so `_tool_version`
+  asks `command -v` before `--version`, which already fails for a missing command, and `_gh_logged_in` before
+  `gh auth status`, which may wait up to `NETWORK_TIMEOUT`. Since `ssh_sharing_options` the commands share one SSH
+  connection, so each costs a round trip, no longer a handshake. Raised by the cross-review of the doctor command
+  (F8, 2026-10-24): "redundant probes, each one SSH connection with `--machine`". Closes with each tool asked once
+  (`.scratch/doctor-ssh/issues/02-drop-redundant-probes.md`).
+  Fixed (2026-10-26): `_tool_version` and `_gh_logged_in` run the tool once through `_run_tool`, which gives the
+  same "<command> is not on PATH" for a command that cannot start locally or that the remote shell answers with
+  127; `_on_path` stays for the agent CLIs, whose checks only ask whether they exist. With `ssh_sharing_options`,
+  20 commands to a user-level sshd on this host took 0.24 s against 1.78 s unshared; `doctor --machine` on a real
+  machine was not timed, as none is saved in herdr here.
 
 - **Cognitive complexity scores direct recursion only.** Campbell's paper gives a point to each function in a
   recursion cycle; `_calls_itself` sees a function calling itself by name, or a method as `self.m`, `cls.m` or
