@@ -419,8 +419,8 @@ was done.
   `pull_request_header` about its pull request in the same pass and merges the result into the spec's one pair, so
   a merged one makes the spec `done` and its dependants startable in that drain, `--dry-run` included.
   Since 2026-10-26 `settled_header` holds those steps, in order, for every spec, so a spec gets one pair a pass, and
-  gh is asked once a pass about its pull request: an `in-review` spec whose conflict refresh finds it merged is
-  `done` from that refresh's answer.
+  gh is asked once a pass about each pull request (`_PullRequestStates`): an `in-review` or `ready-for-human` spec
+  whose conflict refresh finds its pull request merged is `done` from that refresh's answer.
 - **`test-integrity` has no way to accept an expected value the spec changes.** `expected-value-changed` fails the
   gate whenever an assertion's literals change beside code, also when the spec asks for the new output, and unlike
   `removed-test` there is no report the Reviewer judges instead. PR #76 changed what the pull request says for a
