@@ -187,6 +187,12 @@ was done.
   may supply rules. Raised by the cross-review of `push-secret-scan` (F6, 2026-10-24): "a base config using
   `[extend] path = ...` resolves that path outside base (process cwd), which the change may control". Closes by
   writing each extended file from the base beside the config and rewriting the path, or refusing such a config.
+- **The gate's intro writes the `--rules` path as it is.** `judge_change`'s intro names the rules file without
+  `one_line` (`orchestrator.py`, `intro = ...` in `judge_change`), so a rules path holding a line breaker splits the
+  quality file's third line, and `docs/quality-gate.md`'s "wherever it appears in a list item or a name" says more
+  than holds for it. `gate_failures` does not read the intro, so no round is misjudged. Raised by cross-review 38
+  (round 3, 2026-10-26). Closes with the intro written through `one_line`, or with each quality-file writer escaping
+  once where it joins its lines.
 - **`vague-names` does not split CamelCase.** `vague_names` matches a whole name or its last `_`-separated word,
   so `user_data` is found but a class `InfoManager` or `UserData` is not. Closes, if the run metrics show such names
   recur, with the last CamelCase word matched too.
@@ -361,7 +367,7 @@ was done.
   It was so before `_pytest` ran pytest in its own session. Raised by the cross-review of `passes-at-base` (round 2,
   2026-10-24). Closes when `_pytest` waits for pytest itself, then kills its group and reads what is buffered.
   Fixed (2026-10-26): `_run_in_session` waits for the process, reading its pipes meanwhile, then kills its group
-  and reads what is left for at most `MUTMUT_KILL_WAIT` seconds; `_pytest` runs pytest through it.
+  and reads what is left for at most `TOOL_KILL_WAIT` seconds; `_pytest` runs pytest through it.
 
 - **`_pytest` and `_run_mutmut` copy one stop-and-kill sequence.** Both start their tool in a session of its own,
   kill its process group on a timeout and in `finally`, and read what is left with `_abandon`; the copies had already
