@@ -198,6 +198,13 @@ was done.
   computes `_removal_points` for `_judged_files` and `vague_names`, which never read them; `_ChangedPythonFile` is a
   frozen dataclass with `set` fields, so its generated `__hash__` raises; `vague_names` unpacks three fields and reads
   `.why` beside them. Closes with the four changed, in one commit, when the walker is next touched.
+- **A flaky-tests rerun sometimes waits out `FLAKY_RUN_TIMEOUT` on Jenkins.**
+  `TestFlakyTests.test_a_server_a_test_leaves_holding_the_output_does_not_hold_up_the_reruns` takes 8.0 s on
+  Jenkins (PR-98, PR-99/3, PR-100), but 14.4 s on PR-101 build 1 and 31.0 s on build 3, failing its 30 s bound: one
+  of its six pytest runs waited about the whole `FLAKY_RUN_TIMEOUT`. PR-101 changes only the tests' git fixture.
+  Twenty runs here under the load of a parallel suite, with SIGINT ignored, all passed. A rerun that hangs gives a
+  `not-rerun` warning, not a wrong verdict. Closes when the run that waits is caught, e.g. with each pytest run's
+  wall time and exit in the test's failure message, and its cause fixed.
 - **README and docs left over from the README rewrite (PR #90).** Raised by cross-review 50 (2026-10-26), in what
   PR #90 brought, not in code:
   - The Jenkins job path still uses the old folder name, as
@@ -285,12 +292,6 @@ was done.
   (`_edits_test`). Kept as the ticket states it. Closes with a decision to pass `_edits_test`-like counting to
   `_changed_python_functions`. The cognitive-complexity check has a walker of its own (`_scored_functions`), so it
   is not affected.
-- **A run the budget stops can leave mutmut's results unreadable.** mutmut 3.8.0 saves a module's results by
-  rewriting `mutants/<path>.meta` in place after each mutant (`SourceFileMutationData.save`, `open(..., "w")` then
-  `json.dump`), so the SIGINT at the budget, or the kill after `MUTMUT_STOP_GRACE`, can land mid-write. `mutmut results`
-  then exits with a `JSONDecodeError`, and `_mutmut_findings` reports `not-run`, "mutmut could not list its results",
-  without the `budget-reached` finding or anything the run had shown. Seen once in another branch's gate run. Closes
-  with the stop waiting for a save to end, or with the gate reading what remains and saying the budget stopped it.
 - **Committed mutmut output is read as the change's own code by the linters.** The checks leave `mutants/` out, by the
   user's decision of 2026-10-24 (review round 9, F33): `GateChange.from_tree` diffs the tree without it, so no check
   (test-integrity, flaky-tests, surviving-mutants, cognitive-complexity) selects a test, a function or a changed line
@@ -340,6 +341,18 @@ was done.
   files.
 
 ## Fixed
+
+- **A run the budget stops can leave mutmut's results unreadable.** mutmut 3.8.0 saves a module's results by
+  rewriting `mutants/<path>.meta` in place after each mutant (`SourceFileMutationData.save`, `open(..., "w")` then
+  `json.dump`), so the SIGINT at the budget, or the kill after `MUTMUT_STOP_GRACE`, can land mid-write. `mutmut results`
+  then exits with a `JSONDecodeError`, and `_mutmut_findings` reports `not-run`, "mutmut could not list its results",
+  without the `budget-reached` finding or anything the run had shown. Seen once in another branch's gate run. Closes
+  with the stop waiting for a save to end, or with the gate reading what remains and saying the budget stopped it.
+  Fixed (2026-10-26): on a run the budget stopped, `_statuses_after_run` has `_drop_cut_off_saves` remove each
+  `mutants/<path>.py.meta` in the copy that does not parse as JSON before `mutmut results` lists the rest. The
+  functions of those modules count as not reached, and `_budget_reached` says the stop cut off mutmut's save of their
+  results; the other modules' findings stand. A listing failure without a stop, one after the removal, or a `.meta`
+  that cannot be removed stays `not-run`. Not closed: those modules' results are lost, not recovered.
 
 - **Ten test classes copy the same git-repository fixture.** `TestFlakyTests`, `TestPassesAtBase`, `TestVagueNames`,
   `TestTooComplexFunctions`, `TestChangedPythonFiles` and five more each define a `setUp` that makes a repository,
