@@ -8,8 +8,7 @@ was done.
 - **The rename to Octoflow AI, the rest of it.** The product is Octoflow AI (README, window titles, pull request
   text) and the binaries, release assets, `.deb` path, Tauri bundle and crates are `octoflow`; the bundle name has
   no space because Tauri names the `.deb`, `.app` and `.dmg` after it verbatim. Still under the old name, each a
-  decision of its own: the GitHub repository, so every URL in the README and the badges stays until it is renamed
-  (GitHub redirects the old URL afterwards, never the new one before); `~/.config/ai-agents-orchestrator/`, the
+  decision of its own: `~/.config/ai-agents-orchestrator/`, the
   `.orchestrator/` project directory and the `orchestrator-ci/` branches, which are on users' disks and remotes and
   need a fallback that reads the old location; `orchestrator.py` and the `Orchestrator-*` commit trailers; the
   Jenkins folder `AI-Agents-Orchestrator`. The macOS app could show "Octoflow AI" in Finder while staying
@@ -340,6 +339,9 @@ was done.
   functions of those modules count as not reached, and `_budget_reached` says the stop cut off mutmut's save of their
   results; the other modules' findings stand. A listing failure without a stop, one after the removal, or a `.meta`
   that cannot be removed stays `not-run`. Not closed: those modules' results are lost, not recovered.
+
+- **The GitHub repository still had the old name.** It is `DavidSiegl/octoflow-ai` now, and the README's URLs and
+  badges point there; GitHub redirects the old URLs.
 - **A submodule is empty in `passes-at-base`'s copy of the base.** `git archive` leaves a submodule's directory
   empty, so a changed test that imports from one fails to import at the base and gives nothing, though it might pass
   there; the check misses it. Raised by the cross-review of `passes-at-base` (R1-5, 2026-10-24): "`git archive` omits
