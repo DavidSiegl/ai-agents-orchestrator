@@ -6134,7 +6134,8 @@ class TestQualityReport(unittest.TestCase):
         finding = {"path": name, "line": 1, "severity": "error", "rule": "flaky x", "message": f"`{name}::t` failed"}
         texts = {
             "gate": quality_report("ERROR", "intro", conditions=[f"`{name}:1` holds a stray line end."],
-                                   issues=[finding], tests=[(f"{name}::t", "boom")]),
+                                   issues=[finding], tests=[(f"{name}::t", "boom")], edited=["pyproject.toml"],
+                                   rules_from=f"`/tmp/{name}`"),
             "judge_run conditions": orchestrator._failed_by("GATE: OK\n\nintro\n", [f"`{name}` failed."]),
             "judge_run findings": "\n".join(orchestrator._orchestrator_section([finding], [], 0)),
             "build failed": orchestrator.build_failed_report("intro", [(f"{name}::t", "boom")], ""),

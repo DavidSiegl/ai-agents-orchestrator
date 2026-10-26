@@ -3227,7 +3227,7 @@ def _config_section(edited, rules_from: str | None, mutmut_state) -> list[str]:
                    f"`{_MUTMUT_STATE}/`, where mutmut keeps its state. The gate's checks leave them out: none selects "
                    f"a test or a function in them or counts them as a change to the code, and the surviving-mutants "
                    f"check runs mutmut without them. The linters read them as they read any tracked file.")
-    return out
+    return [one_line(line) for line in out]
 
 
 def edited_config(diff: str, changed: dict[str, set[int]]) -> list[str]:
