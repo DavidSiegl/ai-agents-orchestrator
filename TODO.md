@@ -18,13 +18,14 @@ was done.
 - **The desktop app as the terminal client too: the macOS check.** Started with arguments, the app execs the
   orchestrator it bundles (`cli` in `ui/src-tauri/src/lib.rs`), so the AppImage is the CLI too and the README says
   how to get the CLI from each download; on macOS, where a `.app` is a directory, the CLI is a symlink to
-  `Octoflow.app/Contents/MacOS/octoflow`. Left: smoke-testing that on macOS, in
-  `.github/workflows/macos-binary.yml` (`.scratch/desktop-cli/issues/02-macos-cli-symlink.md`), and checking the
-  README's quarantine advice for the `.dmg` against a downloaded copy. The plain CLI binaries stay released: 13 MB
-  against the AppImage's 120 MB of WebKit, and they start without FUSE on headless machines and in CI. Decided against: one file on every
-  platform, by embedding the orchestrator's bytes in the Rust executable and unpacking them at start
-  (PyInstaller's onefile done twice), or by Python hosting the window, which [ui-options.md](docs/ui-options.md)
-  chose against. Agreed 2026-10-24.
+  `Octoflow.app/Contents/MacOS/octoflow`. `build-desktop.sh`'s `smoke_dmg` mounts the `.dmg` and runs the CLI
+  through such a symlink and as the app's own executable, in `.github/workflows/macos-binary.yml`'s build of each
+  release and of each pull request that touches the packaging. Left: checking the README's quarantine advice for
+  the `.dmg` against a downloaded copy (`.scratch/desktop-cli/issues/02-macos-cli-symlink.md`). The plain CLI
+  binaries stay released: 13 MB against the AppImage's 120 MB of WebKit, and they start without FUSE on headless
+  machines and in CI. Decided against: one file on every platform, by embedding the orchestrator's bytes in the
+  Rust executable and unpacking them at start (PyInstaller's onefile done twice), or by Python hosting the window,
+  which [ui-options.md](docs/ui-options.md) chose against. Agreed 2026-10-24.
 - **The quality gate in a `gate.py` of its own.** The gate is reusable for other Python projects, but lives inside
   `orchestrator.py`; and it can only run inside the judged project's environment anyway, since it starts pytest
   and mutmut with `sys.executable`, which in the binary is the binary. Decided 2026-10-24: the quality file is the
@@ -109,13 +110,6 @@ was done.
   verdict step's turn, which follows the quality loop by construction, but every proof test uses `QUICK`, which has
   no quality-gated step. Raised by the cross-review of the proof reruns (R1-F5, 2026-10-24): "no test would notice
   the rerun moving before it". Closes with a proof test on a quality-gated workflow, through the CI fakes.
-- **The macOS builds are first tried on a published release.** `.github/workflows/macos-binary.yml` runs only on
-  `release: published` or by hand for an existing tag, so a change that breaks the macOS binary or
-  `packaging/build-desktop.sh` on macOS merges green, and the release then lacks those assets until it is fixed and
-  the workflow is run again for the tag. Found adding the desktop app to releases (2026-10-24), whose `.dmg` had
-  never been built before the first release with it. Closes with a macOS build of pull requests that touch
-  `packaging/` or `ui/`, or a decision that a rerun after the release is enough.
-
 - **A spec left `ready-for-human` by a conflict stays there when `refresh` clears the conflict before a drain does.**
   drain moves such a spec to `in-review` only when its own refresh clears the run's conflict (`refreshed_headers`);
   a run cleared by `orchestrator.py refresh` beforehand has no conflicts left, so drain cannot tell the spec held
@@ -357,6 +351,19 @@ was done.
   files.
 
 ## Fixed
+
+- **The macOS builds are first tried on a published release.** `.github/workflows/macos-binary.yml` runs only on
+  `release: published` or by hand for an existing tag, so a change that breaks the macOS binary or
+  `packaging/build-desktop.sh` on macOS merges green, and the release then lacks those assets until it is fixed and
+  the workflow is run again for the tag. Found adding the desktop app to releases (2026-10-24), whose `.dmg` had
+  never been built before the first release with it. Closes with a macOS build of pull requests that touch
+  `packaging/` or `ui/`, or a decision that a rerun after the release is enough.
+  Fixed (2026-10-26): `.github/workflows/macos-binary.yml` builds every pull request that touches `packaging/`,
+  `ui/`, `pyproject.toml`, `uv.lock`, `.python-version`, `orchestrator.py` or the workflow, in a `build` job with
+  `contents: read`; a separate `upload` job, the only one with `contents: write`, adds the build's artifact to a
+  release or a dispatch's tag. PR #89's own run built both on `macos-latest`, its upload skipped
+  (https://github.com/DavidSiegl/octoflow-ai/actions/runs/40283655516). The release path is first run by the next
+  release.
 
 - **Two builds on agentbox0 can still run rustc out of memory.** All builds on the node share its Jenkins agent
   container's 3 GB (`mem_limit: 3g`, not the VM's 8 GiB), and a push to a new branch starts a branch build before
