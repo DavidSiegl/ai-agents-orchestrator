@@ -8,8 +8,7 @@ was done.
 - **The rename to Octoflow AI, the rest of it.** The product is Octoflow AI (README, window titles, pull request
   text) and the binaries, release assets, `.deb` path, Tauri bundle and crates are `octoflow`; the bundle name has
   no space because Tauri names the `.deb`, `.app` and `.dmg` after it verbatim. Still under the old name, each a
-  decision of its own: the GitHub repository, so every URL in the README and the badges stays until it is renamed
-  (GitHub redirects the old URL afterwards, never the new one before); `~/.config/ai-agents-orchestrator/`, the
+  decision of its own: `~/.config/ai-agents-orchestrator/`, the
   `.orchestrator/` project directory and the `orchestrator-ci/` branches, which are on users' disks and remotes and
   need a fallback that reads the old location; `orchestrator.py` and the `Orchestrator-*` commit trailers; the
   Jenkins folder `AI-Agents-Orchestrator`. The macOS app could show "Octoflow AI" in Finder while staying
@@ -357,6 +356,9 @@ was done.
   files.
 
 ## Fixed
+
+- **The GitHub repository still had the old name.** It is `DavidSiegl/octoflow-ai` now, and the README's URLs and
+  badges point there; GitHub redirects the old URLs.
 
 - **`test-integrity` has no way to accept an expected value the spec changes.** `expected-value-changed` fails the
   gate whenever an assertion's literals change beside code, also when the spec asks for the new output, and unlike

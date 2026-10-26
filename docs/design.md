@@ -193,6 +193,21 @@ not changed since `close` read it. `list` and `show` print it, a second `close` 
 `resume` refuses a closed run, `--force` or not, since its worktree and branch may be gone. A closed run that was
 stale is no longer marked `stale` in `list`, and its line offers no `resume` command, which would be refused.
 
+## Refreshing a conflicted pull request
+
+A run whose merge of the base branch conflicts pushes its branch without the merge and opens a draft whose
+description starts with a warning listing the conflicting files. Once you have resolved them and pushed,
+`refresh` looks at each finished run whose pull request was opened over a conflict, or the one run it is given,
+and asks `gh` whether it merges cleanly now. If it does, `refresh`:
+
+- removes the conflict warning from the description, leaving the rest of it, your edits included, as it is;
+- marks the pull request ready for review if the run approved or finished, and leaves it a draft otherwise;
+- forgets the conflict in `state.json`, so `show` no longer lists it.
+
+A pull request merged or closed meanwhile only has its conflict forgotten. One that still conflicts, or whose
+mergeability GitHub is still computing, is left as it is, and `refresh` exits `5`; run it again later. It prints
+a line per run.
+
 ## Draining specs
 
 `drain` is a command of its own, not a workflow. A workflow is the steps of one run, with one verdict loop, and a
@@ -208,6 +223,31 @@ otherwise stops before running anything, since a second run of the same spec wou
 Drain stops rather than polls. A spec whose blocker's pull request is open waits for a later drain: merging is
 the human's, and every run starts from `origin`'s base branch, so a dependent spec cannot run until its blocker has
 merged.
+
+**What one drain does, in order.** It first asks `gh` about each `in-review` spec's pull request: merged makes it
+`done`, closed `ready-for-human`. It refreshes the run on each `in-review` and `ready-for-human` spec's `Run:`
+line as `refresh` does, and a `ready-for-human` spec whose run approved or finished, with its pull request open,
+goes to `in-review` once its conflict is cleared. A `ready-for-agent` spec with a `Run:` line is one an
+interrupted drain left; its run, if finished, sets the spec's status, and if not, drain stops and says what to do:
+wait for it, `resume` it, or delete the `Run:` line to start the spec over. Then drain sweeps the branches of
+earlier runs once, and runs each spec whose blockers are all `done`.
+
+**Specs edited while drain runs.** Drain reads each spec again before choosing the next and before each header
+edit, so your edits are kept, except the `Status:`, `Run:` and `PR:` lines of the spec it is running, which are
+drain's. A spec you set to another status meanwhile is not started. `Blocked by:` is read once, at the start. A
+spec you delete or empty meanwhile is *gone*: drain neither runs it nor counts it `done`, logs each header line it
+can no longer record, such as the running spec's `Status:` and `PR:`, and goes on; one you restore before drain
+next chooses is run as before. A run another orchestrator takes over with `resume --force` leaves its spec
+`ready-for-agent` for the next drain to pick up.
+
+**Where it stops.** Once nothing more can start, drain prints the specs left with their blockers and pull
+requests, and each `ready-for-agent` spec that is gone as `<slug>: gone (<why>)`, and exits `5`. The first run that
+does not end in an approved pull request without conflicts stops it at once. Either way it prints what it changed
+in each spec first.
+
+Drain does not check that its directory is ignored by git. If it is inside the project's checkout and not
+ignored, the header edits dirty the tree, and an in-place run refuses to start on it: ignore the directory, or use
+`--worktree`.
 
 ## When the orchestrator needs you
 
@@ -258,6 +298,20 @@ Steps 1–3 run on the machine you start the orchestrator from.
 With `--machine`, every herdr command is forwarded with `herdr --machine`. The orchestrator can also run on the
 remote machine itself: copy `orchestrator.py` there and run it with the system `python3` (3.13+) from a herdr
 pane, without `--machine`.
+
+## Prompt files
+
+A prompt file replaces one built-in text by name, so the texts can change without copying a workflow. The files
+named after the default workflow's steps (`SPEC_PROMPT`, `BUILD_PROMPT`, `REVIEW_PROMPT`, `FIX_PROMPT`,
+`RECHECK_PROMPT`, `REBUILD_NOTE`, `REREVIEW_NOTE`) also reach a workflow file's step that `use`s one of them; a
+step's own `prompt`, `again` or `fresh_note` in a workflow file stays as written. The other files reach every
+workflow.
+
+The files are checked when `run` or `drain` starts, before any agent does. Each of these is an error that names
+the file and the placeholder: a `.md` file named after no text, one that is not UTF-8 or cannot be read, and one
+with a placeholder the built-in text lacks, or without one it has. Files not ending in `.md` are ignored. A run
+saves the texts it started with, so editing or deleting a file does not change a run already started, and
+`resume` never reads them.
 
 ## The GUI
 

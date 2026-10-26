@@ -1,32 +1,30 @@
 <p align="center"><img src="docs/logo.svg" alt="An octopus holding a terminal, a robot and a chat bubble" width="200"></p>
 
 <p align="center">
-  <a href="https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest"><img src="https://img.shields.io/github/v/release/DavidSiegl/ai-agents-orchestrator" alt="Latest release"></a>
-  <a href="pyproject.toml"><img src="https://img.shields.io/python/required-version-toml?tomlFilePath=https://raw.githubusercontent.com/DavidSiegl/ai-agents-orchestrator/main/pyproject.toml" alt="Python version"></a>
-  <a href="https://github.com/DavidSiegl/ai-agents-orchestrator/actions/workflows/macos-binary.yml"><img src="https://img.shields.io/github/actions/workflow/status/DavidSiegl/ai-agents-orchestrator/macos-binary.yml?label=macOS%20binary" alt="macOS binary build"></a>
-  <a href="https://github.com/DavidSiegl/ai-agents-orchestrator/commits/main"><img src="https://img.shields.io/github/last-commit/DavidSiegl/ai-agents-orchestrator" alt="Last commit"></a>
+  <a href="https://github.com/DavidSiegl/octoflow-ai/releases/latest"><img src="https://img.shields.io/github/v/release/DavidSiegl/octoflow-ai" alt="Latest release"></a>
+  <a href="pyproject.toml"><img src="https://img.shields.io/python/required-version-toml?tomlFilePath=https://raw.githubusercontent.com/DavidSiegl/octoflow-ai/main/pyproject.toml" alt="Python version"></a>
+  <a href="https://github.com/DavidSiegl/octoflow-ai/actions/workflows/macos-binary.yml"><img src="https://img.shields.io/github/actions/workflow/status/DavidSiegl/octoflow-ai/macos-binary.yml?label=macOS%20binary" alt="macOS binary build"></a>
+  <a href="https://github.com/DavidSiegl/octoflow-ai/commits/main"><img src="https://img.shields.io/github/last-commit/DavidSiegl/octoflow-ai" alt="Last commit"></a>
   <a href="https://ko-fi.com/davidsiegl"><img src="https://img.shields.io/badge/Ko--fi-support%20me-FF5E5B?logo=kofi&logoColor=white" alt="Support me on Ko-fi"></a>
 </p>
 
 # Octoflow AI
 
 Coding agents in relay, no role judging its own work: a handoff workflow running in [herdr](https://herdr.dev),
-each role in the agent of your choice: [Claude Code, Codex, Gemini CLI, opencode or pi](#five-coding-agents-in-any-mix). The default
-workflow:
+each role in the agent of your choice: [Claude Code, Codex, Gemini CLI, opencode or pi](#five-coding-agents-in-any-mix).
+The default workflow:
 
-```
+```text
 Spec Collector ──spec.md──▶ Builder ──build-N.md──▶ Reviewer ──review-N.md──▶ APPROVE ──▶ pull request
                                ▲                                   │
                                └──────── CHANGES_REQUESTED ────────┘
 ```
 
-With `--quality-gate`, a Jenkins build running `orchestrator.py gate` (linters, tests and coverage of new code)
-sits between the Builder and the Reviewer, and sends its findings back to the Builder first
+Each role is a separate interactive agent session in its own herdr pane, so you can watch or step into any of
+them. The agents run on this machine or on another one saved in herdr. Each feature is built on its own branch
+and ends as a pull request on GitHub, where you review it. With `--quality-gate`, a Jenkins build judges the
+Builder's change (linters, tests, coverage of new code) before the Reviewer sees it
 ([quality gate](docs/quality-gate.md)).
-
-Each role is a separate interactive agent session in its own herdr pane, so no role judges its own
-work, and you can watch or step into any of them. The agents run on this machine or on another one saved in
-herdr. Each feature is built on its own branch and ends as a pull request on GitHub, where you review it.
 
 ## Five coding agents, in any mix
 
@@ -44,69 +42,59 @@ that wrote it:
 - **A second opinion from another model.** `--role-agent review=codex` has Claude Code write the change and
   Codex review it, so the review does not share the builder's blind spots.
 - **One flag for every role, or one role at a time.** `--agent gemini` moves the whole run; `--role-agent
-  ROLE=KIND`, repeatable, moves one role; a [workflow file](#your-own-workflows) can pin `agent = "codex"` to a
-  role. Models work the same way, with `--model`, `--build-model` or `--role-model ROLE=MODEL`.
+  ROLE=KIND` moves one role; a [workflow file](#your-own-workflows) can pin `agent = "codex"` to a role. Models
+  work the same way, with `--model` or `--role-model ROLE=MODEL`.
 - **One permission vocabulary.** `--permission-mode` takes Claude Code's mode names and gives each harness its
-  own equivalent: `acceptEdits` is `--full-auto` for Codex and `--approval-mode auto_edit` for Gemini CLI. The log
-  says when a harness has none.
+  own equivalent ([Harnesses](#harnesses)).
 - **Sessions that survive.** An agent that exits is relaunched into its saved session, with its harness's own
-  resume syntax. Switch a role's harness on `resume`, and its next agent starts fresh in the new one.
-- **You answer the Spec Collector in its pane**, whichever harness it runs in.
+  resume syntax.
 
 ```bash
 python orchestrator.py run "add a token-bucket rate limiter" --role-agent review=codex --role-agent spec=gemini
 ```
 
-Each harness a run uses needs its CLI and its herdr integration where the agents run; see
-[Requirements](#requirements) and, for the precedence and the exact flags, [Harnesses](#harnesses).
-
 ## Requirements
 
-`python orchestrator.py doctor` checks these, here and where the agents run, and says what to run for each that is missing;
-see [Usage](#usage).
+`python orchestrator.py doctor` checks these, here and where the agents run, and says how to fix each one that
+is missing.
 
-- herdr 0.9+ where the agents run, with the integration of each harness a run uses installed there
+- herdr 0.9+ where the agents run, with the integration of each harness a run uses
   (`herdr integration install <kind>`, e.g. `herdr integration install claude`)
-- The CLI of each harness a run uses on `PATH` where the agents run: `claude` by default, and `codex`, `gemini`,
-  `opencode` or `pi` for a role that runs in one of those
-- Where the agents run, unless you use `--no-pr`: a git checkout with an `origin` it can push to, and
-  [`gh`](https://cli.github.com) logged in (`gh auth status`); with `--worktree`, a branch checked out and an
-  `origin` even with `--no-pr`
-- Python 3.13+, standard library only, unless you use a [binary](#install), which brings its own; tkinter for the
-  [GUI](#gui); [uv](https://github.com/astral-sh/uv) only for the tests and the build
-- For `--machine`: the machine saved in herdr and non-interactive SSH to its target; see
+- The CLI of each harness a run uses on `PATH` where the agents run: `claude` by default
+- Unless you use `--no-pr`: a git checkout with an `origin` it can push to, and [`gh`](https://cli.github.com)
+  logged in; with `--worktree`, a branch checked out and an `origin` even with `--no-pr`
+- For any run that pushes: [gitleaks](https://github.com/gitleaks/gitleaks#installing) 8.19+ and git 2.36+.
+  Every push is scanned for secrets first, by the base's `.gitleaks.toml` and `.gitleaksignore`, and refused on
+  a finding
+- Python 3.13+, standard library only, unless you use a [binary](#install); tkinter for the [GUI](#gui);
+  [uv](https://github.com/astral-sh/uv) only for the tests and the build
+- For `--machine`: the machine saved in herdr and non-interactive SSH to it; see
   [Running the agents on another machine](docs/design.md#running-the-agents-on-another-machine)
-- Where the agents run, for any run that pushes (a pull request, or `--quality-gate`):
-  [gitleaks](https://github.com/gitleaks/gitleaks#installing) 8.19 or later on `PATH`, and git 2.36 or later. Every push is scanned for
-  secrets first, by the base's `.gitleaks.toml` and `.gitleaksignore`, and refused on a finding; the run checks for
-  gitleaks before it starts
-- For `--quality-gate`: a Jenkins quality job set up as in [quality gate](docs/quality-gate.md), its
-  credentials in `~/.config/ai-agents-orchestrator/ci.env` or the environment, and a git checkout with an
-  `origin`
+- For `--quality-gate`: a Jenkins quality job set up as in [quality gate](docs/quality-gate.md), and its
+  credentials in `~/.config/ai-agents-orchestrator/ci.env` or the environment
 
 ## Install
 
-Each [release](https://github.com/DavidSiegl/ai-agents-orchestrator/releases) has a single-file executable for
-Linux x86_64 and for Apple Silicon macOS, which needs no Python, and each with its `.sha256`:
+Each [release](https://github.com/DavidSiegl/octoflow-ai/releases) has a single-file executable for Linux
+x86_64 and for Apple Silicon macOS, which needs no Python, each with its `.sha256`:
 
 ```bash
 # Linux x86_64; on an Apple Silicon Mac, octoflow-macos-arm64 and `shasum -a 256 -c`
-curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/octoflow-linux-x86_64
-curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/octoflow-linux-x86_64.sha256
+curl -fLO https://github.com/DavidSiegl/octoflow-ai/releases/latest/download/octoflow-linux-x86_64
+curl -fLO https://github.com/DavidSiegl/octoflow-ai/releases/latest/download/octoflow-linux-x86_64.sha256
 sha256sum -c octoflow-linux-x86_64.sha256 && chmod +x octoflow-linux-x86_64
 ./octoflow-linux-x86_64 run "add a token-bucket rate limiter to the API client"
 ```
 
-The macOS binary is not signed or notarized. Downloaded with a browser, macOS refuses to open it the first time:
-right-click it and choose Open once, or run `xattr -d com.apple.quarantine octoflow-macos-arm64`. A file
-`curl` downloads is not quarantined, so it opens straight away.
+The macOS binary is not signed or notarized. Downloaded with a browser, it is quarantined: right-click it and
+choose Open once, or run `xattr -d com.apple.quarantine octoflow-macos-arm64`. A file `curl` downloads opens
+straight away.
 
-Everywhere else, use `octoflow.pyz`, an executable of `orchestrator.py` that needs Python 3.13+, and tkinter
-for the GUI:
+Everywhere else, use `octoflow.pyz`, which needs Python 3.13+:
 
 ```bash
-curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/octoflow.pyz
-curl -fLO https://github.com/DavidSiegl/ai-agents-orchestrator/releases/latest/download/octoflow.pyz.sha256
+curl -fLO https://github.com/DavidSiegl/octoflow-ai/releases/latest/download/octoflow.pyz
+curl -fLO https://github.com/DavidSiegl/octoflow-ai/releases/latest/download/octoflow.pyz.sha256
 sha256sum -c octoflow.pyz.sha256 && chmod +x octoflow.pyz
 ./octoflow.pyz run "add a token-bucket rate limiter to the API client"
 ```
@@ -116,79 +104,51 @@ Both take the same commands and flags as `python orchestrator.py` in a checkout,
 ### GUI
 
 Run without arguments, or with `gui`, the orchestrator opens a window where a display is available: always on
-macOS, and on Linux when `DISPLAY` or `WAYLAND_DISPLAY` is set; otherwise it prints its usage. In the
-window you fill in a run (the task, the project folder, and optionally a machine, the workflow, the harness for
-every role, the model, the permission mode, `--no-pr` and a quality-gate job; per-role harnesses and models stay
-on the command line), see the project's runs as `list` shows them, resume one, and follow the output of the
-run, which Stop interrupts as Ctrl-C would. The window starts the same `run` or `resume` command you would type,
-one at a time, and shows it at the top of the output. The window wears the octopus logo's dark navy: its
-header names the selected workflow's roles, each run's status is in color, and the output is in a terminal-style
-pane.
+macOS, and on Linux when `DISPLAY` or `WAYLAND_DISPLAY` is set; otherwise it prints its usage. The window fills
+in and starts a run, lists the project's runs, resumes one, and follows its output, which Stop interrupts as
+Ctrl-C would. Per-role harnesses and models stay on the command line. Zoom with Ctrl (⌘ on macOS) and +, − or 0.
 
-The role agents still run in herdr, so open `herdr` in a terminal to answer the Spec Collector. As on the
-command line, a run without a machine has to start from a herdr pane: start the window from one, or give a
-machine. Launched from a file manager instead of a shell, the binary sees only that session's `PATH`, so
-`herdr`, `git`, `gh` and the CLI of each harness a run uses must be on it.
-
-The text is set in Roboto where it is installed, and in the platform's font otherwise. Zoom it from 75% to 200%
-with the − and + buttons at the top right, with Ctrl (⌘ on macOS) and +, − or 0, or with Ctrl and the mouse
-wheel; the percentage between the buttons sets it back to 100%.
-
-A Python without tkinter makes `gui` exit with status 1 and the command to install it, such as
-`apt install python3-tk` or `brew install python-tk@3.13`; the binaries include it.
+The role agents still run in herdr, so open `herdr` in a terminal to answer the Spec Collector. A run without a
+machine has to start from a herdr pane, so start the window from one, or give a machine. Launched from a file
+manager, the binary sees only that session's `PATH`, which must hold `herdr`, `git`, `gh` and each harness's CLI.
+A Python without tkinter makes `gui` exit with status 1 and print the command to install it; the binaries
+include it. See [The GUI](docs/design.md#the-gui).
 
 ### Desktop app
 
-A desktop app is taking over from the window, one step at a time. So far it is read-only: it shows one
-project's runs and their handoff files live, without Refresh, and it starts no runs. It is a Tauri 2 app in
-[`ui/`](ui), a React and TypeScript frontend in a native window. Each release has it for Linux x86_64, as
-`octoflow-desktop-linux-x86_64.deb` and `.AppImage`, and for Apple Silicon macOS, as
-`octoflow-desktop-macos-arm64.dmg`, each with its `.sha256` and the orchestrator binary inside, so it needs
-neither Python nor a checkout. The macOS app is signed ad hoc only, not notarized: macOS refuses to open it the
-first time, as it does the binary (see [Install](#install)).
+A desktop app is taking over from the window, one step at a time. So far it is read-only: it shows one project's
+runs and their handoff files live, and starts no runs. It is a Tauri 2 app in [`ui/`](ui). Each release has it
+for Linux x86_64, as `octoflow-desktop-linux-x86_64.deb` and `.AppImage`, and for Apple Silicon macOS, as
+`octoflow-desktop-macos-arm64.dmg`, each with its `.sha256` and the orchestrator inside, so it needs neither
+Python nor a checkout. The macOS app is signed ad hoc only, so macOS quarantines it like the binary.
 
-- **Overview:** each run's key and task, its progress through the workflow's steps, its round and quality
-  round, the current role, whether it is running or stale with the age of its heartbeat, the question it is
-  blocked on, its verdict and its pull request.
-- **Run detail:** click a run to see its progress and the files in its run directory, and the newest one, or the
-  one you pick, rendered as Markdown. The list gains new files as they are written, and the file shown is shown
-  again when it changes.
-- **Project bar:** a project folder and, for agents on another machine, a saved herdr machine, as in the window.
-  The app opens the project you opened last; until then, run from a checkout, it opens that checkout.
+- **Overview:** each run's task, its progress through the workflow, its round, the current role, whether it is
+  running or stale, the question it is blocked on, its verdict and its pull request.
+- **Run detail:** the files in a run's directory, the newest or the one you pick rendered as Markdown, updated
+  as they are written.
+- **Project bar:** a project folder and, for agents on another machine, a saved herdr machine. The app reopens
+  the project you opened last.
 
 Each download is the CLI too, with the same commands and flags; started without arguments, the app opens its
 window:
 
-- **AppImage:** the file itself. Started with arguments it runs the orchestrator inside it, in the directory and
-  environment of your shell:
-
-  ```bash
-  chmod +x octoflow-desktop-linux-x86_64.AppImage
-  ./octoflow-desktop-linux-x86_64.AppImage run "add a token-bucket rate limiter to the API client"
-  ```
-
-- **`.deb`:** it installs the orchestrator as `/usr/bin/octoflow`, so `octoflow run "..."`.
-- **macOS:** a `.app` is a folder, so link the orchestrator inside it onto your `PATH`:
+- **AppImage:** the file itself, e.g. `./octoflow-desktop-linux-x86_64.AppImage run "..."` after `chmod +x`.
+- **`.deb`:** it installs the orchestrator as `/usr/bin/octoflow`.
+- **macOS:** link the orchestrator inside the app onto your `PATH`. Not yet checked on a real Mac:
 
   ```bash
   ln -s /Applications/Octoflow.app/Contents/MacOS/octoflow /usr/local/bin/octoflow
+  xattr -dr com.apple.quarantine /Applications/Octoflow.app   # if it was downloaded with a browser
   ```
 
-  If macOS refuses to run it, the app was downloaded with a browser and is quarantined: open the app once with
-  right-click and Open, or run `xattr -dr com.apple.quarantine /Applications/Octoflow.app`. Not yet checked on
-  a real Mac.
-- **Headless machines and CI:** the plain binaries in [Install](#install). They need neither WebKit nor, as an
-  AppImage does, FUSE, and are a seventh of its size.
+- **Headless machines and CI:** the plain binaries in [Install](#install), which need neither WebKit nor FUSE.
 
-To run the app from a checkout instead, it needs Node 20.19 or later with npm, and Rust ([rustup](https://rustup.rs))
-with [Tauri 2's system packages](https://v2.tauri.app/start/prerequisites/). On Debian or Ubuntu those are:
+To run the app from a checkout, it needs Node 20.19+ with npm, and Rust with
+[Tauri 2's system packages](https://v2.tauri.app/start/prerequisites/). On Debian or Ubuntu:
 
 ```bash
 sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev \
   libayatana-appindicator3-dev librsvg2-dev pkg-config
-```
-
-```bash
 cd ui
 npm ci
 npm run tauri dev     # the window, rebuilt as you edit
@@ -197,32 +157,15 @@ npm test              # the frontend's tests; npm run typecheck and npm run lint
 (cd src-tauri && cargo test)   # the shell's, which start and stop a real serve
 ```
 
-The app starts the orchestrator's `serve` beside it and stops it when its window closes: a release's own binary,
-or from a checkout `python3 ../orchestrator.py serve`. To serve another copy of the orchestrator, set
-`ORCHESTRATOR_PY` to its path before starting the app. Projects on a
-machine are read over SSH every 5 seconds; local ones are read every second.
-
-`serve` works without the app too. It prints one JSON line, `{"url": "http://127.0.0.1:<port>", "token":
-"..."}`, and serves on that free port of `127.0.0.1` until you press Ctrl-C or send SIGTERM. It exits with status 1
-if it cannot print that line, as when whatever started it has stopped reading. Every request names
-the project by `?cwd=` and, optionally, `?machine=`, and needs the token, as an `Authorization: Bearer` header
-or as `?token=`:
-
-| Endpoint | Gives |
-|---|---|
-| `/runs` | `{"version": 1, "runs": [...]}`, the records `list --json` prints |
-| `/files?run=ID` | the files in the run's directory, oldest first, each `{"name", "mtime"}` |
-| `/file?run=ID&name=NAME` | `{"run", "name", "text"}` for one of them |
-| `/events` | a `text/event-stream`: `record` with `{"run", "record"}` when a run appears, changes or goes (`record` is `null` then), `files` with `{"run", "files"}` when its files change, and `problem` with `{"error"}` while the project cannot be read |
-
-The server only answers a `Host` header that is its own address and an `Origin` that is its own or one given
-with `--origin`, which the app passes for its webview.
+The app starts `orchestrator.py serve` beside it and stops it when its window closes; set `ORCHESTRATOR_PY` to
+serve another copy. `serve` works without the app too: it prints one JSON line,
+`{"url": "http://127.0.0.1:<port>", "token": "..."}`, and serves the project's runs read-only on that port until
+Ctrl-C or SIGTERM. Its endpoints and security checks are in [serve](docs/architecture.md#serve).
 
 ## Usage
 
 ```bash
-# What a run needs, checked before one fails on it: herdr, each harness's CLI and integration, git, gh, gitleaks,
-# tkinter, and with --cwd the project's checkout and origin. A fix under each that is missing; exit status 1 if any is
+# What a run needs, checked up front: a fix under each that is missing; exit status 1 if any is
 python orchestrator.py doctor --machine <machine> --cwd ~/GitHub/myproject
 
 # From a herdr pane, on the project in the current directory
@@ -231,106 +174,83 @@ python orchestrator.py run "add a token-bucket rate limiter to the API client"
 # Agents on a machine saved in herdr, driven from anywhere; --cwd is a path on that machine
 python orchestrator.py run "add a token-bucket rate limiter" --machine <machine> --cwd ~/GitHub/myproject
 
-# Runs recorded for a project, and whether each one is still running
-python orchestrator.py list --machine <machine> --cwd ~/GitHub/myproject
+# In a git worktree of the run's own, so the checkout stays yours and several runs can work at once
+python orchestrator.py run --worktree "add a token-bucket rate limiter"
 
-# The same runs as one JSON document for scripts, {"version": 1, "runs": [...]}; --pr-state adds each pull
-# request's state (OPEN, CLOSED or MERGED) from gh
-python orchestrator.py list --json --pr-state
-
-# Every finished run's metrics.json, one JSON line each: outcome, roles, turns with times and tokens, quality rounds
-python orchestrator.py metrics --machine <machine> --cwd ~/GitHub/myproject | jq -s 'map(.rounds) | add / length'
-
-# One run in full: its state, branch and pull request, agents, handoff files and last review
-python orchestrator.py show e292fb --machine <machine> --cwd ~/GitHub/myproject
-
-# Delete the branches of runs whose pull request is merged, or closed 14 days ago; --dry-run only prints
-python orchestrator.py prune --dry-run --machine <machine> --cwd ~/GitHub/myproject
-
-# Continue a stopped run, by its run id or the six-character key at its end
-python orchestrator.py resume e292fb --machine <machine> --cwd ~/GitHub/myproject
-
-# Done with a failed or finished run: close its workspace, and a failed --worktree run's worktree and branch
-python orchestrator.py close e292fb --machine <machine> --cwd ~/GitHub/myproject
-
-# Once you have resolved a pull request's conflict and pushed: drop its warning, and its draft if it was approved;
-# without a run, every finished run whose pull request was opened over a conflict
-python orchestrator.py refresh e292fb --machine <machine> --cwd ~/GitHub/myproject
+# Skip the interview: a spec you already have is the contract
+python orchestrator.py run --spec docs/specs/rate-limiter.md
 
 # Another workflow: one of yours by name, or a workflow file anywhere; `workflows` lists them
 python orchestrator.py run --workflow tdd "add a token-bucket rate limiter"
 python orchestrator.py run --workflow-file examples/workflows/quick.toml "fix the off-by-one in the pager"
 
-# In a git worktree of the run's own, so the checkout stays yours and several runs can work at once
-python orchestrator.py run --worktree "add a token-bucket rate limiter"
-
-# Skip the interview: a spec you already have is the contract, and the Builder starts on it
-python orchestrator.py run --spec docs/specs/rate-limiter.md
+# With the quality gate after each Builder turn
+python orchestrator.py run --quality-gate AI-Agents-Orchestrator/py-ai-agents-orchestrator-quality "add a token-bucket rate limiter"
 
 # Run every ready spec under .scratch/<slug>/spec.md, one pull request each; see Draining specs
 python orchestrator.py drain --worktree
 
-# With the quality gate after each Builder turn; credentials from ~/.config/ai-agents-orchestrator/ci.env
-python orchestrator.py run --quality-gate AI-Agents-Orchestrator/py-ai-agents-orchestrator-quality "add a token-bucket rate limiter"
+# A project's runs and whether each is still running; --json for scripts, --pr-state adds each PR's state
+python orchestrator.py list --machine <machine> --cwd ~/GitHub/myproject
 
-# The window to start, list and resume runs in; no arguments open it too where there is a display
-python orchestrator.py gui
+# One run in full, by its run id or the six-character key at its end
+python orchestrator.py show e292fb
 
-# Serve any project's runs read-only on 127.0.0.1 for the desktop app; prints {"url": ..., "token": ...} first
-python orchestrator.py serve
+# Continue a stopped run
+python orchestrator.py resume e292fb
 
-# Judge the change since a commit as the quality gate does, by the rules in pyproject.toml; exit status 0 for
-# GATE: OK, 1 for GATE: ERROR. Needs ruff, mypy and pymarkdown (uv's dev group), shellcheck and actionlint on PATH
+# Done with a failed or finished run: close its workspace, and a failed --worktree run's worktree and branch
+python orchestrator.py close e292fb
+
+# After you resolved a pull request's conflict and pushed: drop its warning, and its draft if it was approved
+python orchestrator.py refresh e292fb
+
+# Delete the branches of runs whose pull request is merged, or closed 14 days ago
+python orchestrator.py prune --dry-run
+
+# Every finished run's metrics.json, one JSON line each: outcome, roles, turns with times and tokens
+python orchestrator.py metrics | jq -s 'map(.rounds) | add / length'
+
+# Judge the change since a commit as the quality gate does; exit status 0 for GATE: OK, 1 for GATE: ERROR
 uv run python orchestrator.py gate --base main --coverage coverage.xml --out quality.md
 ```
+
+`--machine` and `--cwd` work the same way for every command; `list`, `show`, `metrics`, `prune`, `close` and
+`refresh` take only those two, and `doctor` checks a project only when given `--cwd`.
 
 | Flag | Description |
 |---|---|
 | `--machine NAME` | Saved herdr machine to run the agents on. Requires `--cwd`. |
-| `--cwd PATH` | Project directory, on the machine if `--machine` is given. Default: current directory; `doctor` checks a project only when given one. `list`, `show`, `metrics`, `prune`, `close` and `refresh` take only these two. |
+| `--cwd PATH` | Project directory, on the machine if `--machine` is given. Default: current directory. |
 | `--max-rounds N` | Review rounds before giving up (default 3). |
 | `--timeout SECONDS` | How long one Builder or Reviewer turn may take (default 1800). The interview has no limit. |
-| `--agent KIND` | The [harness](#harnesses) every role runs in: `claude`, `codex`, `gemini`, `opencode` or `pi`. Overrides the `agent` of a role in the workflow file. Default: that, else `claude`. |
-| `--role-agent ROLE=KIND` | The harness of one role of the workflow, by its key, e.g. `review=codex`. Overrides `--agent`; repeatable. |
-| `--permission-mode MODE` | Permission mode for every role, by Claude Code's names, e.g. `auto` or `acceptEdits`; each other harness gets its [equivalent](#harnesses), if it has one. |
-| `--model MODEL` | Model for every role, e.g. `sonnet`, passed to its harness as `--model MODEL` unchanged. Default: the workflow file's model for the role, else the harness's own. |
-| `--spec-model MODEL` | Model for the Spec Collector. Overrides `--model`. |
-| `--build-model MODEL` | Model for the Builder. Overrides `--model`. |
-| `--review-model MODEL` | Model for the Reviewer. Overrides `--model`. |
-| `--role-model ROLE=MODEL` | Model for one role of the workflow, by its key, e.g. `tests=sonnet`. Overrides `--model`; repeatable. |
-| `--workflow NAME` | `run` and `drain`: the workflow the run goes through: `default`, the run described below, or one of [your own](#your-own-workflows) in `~/.config/ai-agents-orchestrator/workflows/`. `--help` lists the choices; a resumed run keeps its workflow. |
-| `--workflow-file FILE` | `run` and `drain`: like `--workflow`, for the workflow file at `FILE`, such as one kept in the project. |
-| `--spec FILE` | `run` only: skip the interview. `FILE`, read on this machine (a relative path is from the current directory, not `--cwd`), is copied into the run as the handoff file of the workflow's first step, `spec.md` in `default`, and the run starts at the step after it. The task is then optional: without one it is the spec's `# ` title, or else `FILE`'s name. Needs a workflow whose first step writes the spec, such as `default` or `tdd`, not `quick`. |
+| `--agent KIND` | The [harness](#harnesses) every role runs in. Overrides a role's `agent` in the workflow file. |
+| `--role-agent ROLE=KIND` | The harness of one role, by its key, e.g. `review=codex`. Overrides `--agent`; repeatable. |
+| `--permission-mode MODE` | Permission mode for every role, by Claude Code's names; each other harness gets its [equivalent](#harnesses). |
+| `--model MODEL` | Model for every role, passed to its harness unchanged. Default: the workflow file's model for the role, else the harness's own. |
+| `--spec-model`, `--build-model`, `--review-model MODEL` | Model for the Spec Collector, Builder or Reviewer. Overrides `--model`. |
+| `--role-model ROLE=MODEL` | Model for one role, by its key, e.g. `tests=sonnet`. Overrides `--model`; repeatable. |
+| `--workflow NAME` | `run` and `drain`: `default`, or one of [your own](#your-own-workflows). A resumed run keeps its workflow. |
+| `--workflow-file FILE` | `run` and `drain`: like `--workflow`, for the workflow file at `FILE`. |
+| `--spec FILE` | `run` only: skip the interview. `FILE`, read on this machine, becomes the first step's handoff file, and the run starts at the step after it. Without a task, the spec's top-level heading is the task. Needs a workflow whose first step writes the spec, such as `default` or `tdd`. |
 | `--no-pr` | `run` only: leave the change uncommitted and the workspace open instead of opening a pull request. Works outside git. |
-| `--worktree` | `run` and `drain`: work in a git worktree of the run's own, `.orchestrator/worktrees/<key>`, checked out from `origin`'s version of the branch the project is on, instead of in the project's checkout, which then need not be clean and stays yours to use. Needs a branch checked out and an `origin`, also with `--no-pr`. See [Worktree runs](#worktree-runs). |
-| `--quality-gate JOB` | `run` and `drain`: after each Builder turn, have this Jenkins job, by its full name with folders, judge the change with `orchestrator.py gate`, and send the findings back to the Builder before the Reviewer. Needs `JENKINS_URL`, `JENKINS_USER` and `JENKINS_TOKEN`, from the environment or `~/.config/ai-agents-orchestrator/ci.env`. On `resume`, turns the gate on for a run started without it; see below. |
-| `--no-quality-gate` | `resume` only: turn the run's quality gate off for good; see below. |
-| `--max-quality-rounds N` | With the gate: quality builds per review round before the Reviewer gets the change anyway (default 3). Not with `--no-quality-gate`. |
+| `--worktree` | `run` and `drain`: work in a git worktree of the run's own; see [Worktree runs](#worktree-runs). |
+| `--quality-gate JOB` | `run`, `drain` and `resume`: after each Builder turn, have this Jenkins job, by its full name with folders, judge the change. Needs `JENKINS_URL`, `JENKINS_USER` and `JENKINS_TOKEN`, from the environment or `~/.config/ai-agents-orchestrator/ci.env`. |
+| `--no-quality-gate` | `resume` only: turn the run's quality gate off for good. |
+| `--max-quality-rounds N` | With the gate: quality builds per review round before the Reviewer gets the change anyway (default 3). |
 | `--force` | `resume` only: take over a run that still looks alive. |
-| `--dry-run` | `prune`: print what would become of each branch, and delete and record nothing. `drain`: print the status changes and the specs it would run, in order, and write, run and sweep nothing. |
+| `--dry-run` | `prune` and `drain`: print what would happen, and change nothing. |
 
-A run saves its settings. `resume` takes the same flags as `run` except `--no-pr`, `--worktree`,
-`--workflow`, `--workflow-file` and `--spec`, and a flag given to `resume` overrides the saved value; one left out keeps it.
-A harness changed by `resume` applies to each role's next agent; one still running keeps its own.
-
-`resume --quality-gate JOB` turns the gate on for a run started without it, after the same preflight as `run`'s (past
-round 0: an `origin`, gitleaks, the credentials and the job). A Builder report the Reviewer has not been prompted for
-yet is judged first; otherwise the gate starts at the Builder's next turn. It is refused once the run is in `publish`
-or `done`, after `--no-quality-gate`, for a run with another job, and for a `--no-pr` run in the checkout itself past
-round 0, whose tree may hold your own changes. `resume --no-quality-gate` turns the gate off for good: the run's
-`orchestrator-ci/` branches are deleted, an analysis under way is dropped, and the Reviewer is told what the round's
-last quality file found, or that the Builder changed the code after it; the pull request then says nothing judged
-the final change. See
+A run saves its settings. `resume` takes the same flags as `run` except `--no-pr`, `--worktree`, `--workflow`,
+`--workflow-file` and `--spec`; a flag given to `resume` overrides the saved value. Turning the quality gate on or
+off on `resume` has rules of its own; see
 [quality gate](docs/quality-gate.md#turning-the-gate-on-or-off-on-resume).
 
 ### Harnesses
 
-A role's harness is herdr's `--kind` for its agent: `claude` (Claude Code, the default), `codex`, `gemini`,
-`opencode` or `pi`. The precedence is `--role-agent`, then `--agent`, then the role's `agent` in the workflow file,
-then `claude`. A model name is passed as it is, never translated between harnesses, so give each role a model its
-harness knows.
-
-`--permission-mode` takes Claude Code's mode names, and each harness gets its own equivalent:
+A role's harness is herdr's `--kind` for its agent. The precedence is `--role-agent`, then `--agent`, then the
+role's `agent` in the workflow file, then `claude`. A model name is passed as it is, never translated, so give
+each role a model its harness knows.
 
 | `--permission-mode` | claude | gemini | codex | pi, opencode |
 |---|---|---|---|---|
@@ -340,19 +260,18 @@ harness knows.
 | `plan` | `--permission-mode plan` | dropped | `--sandbox read-only` | dropped |
 | `auto`, `dontAsk`, any other | passed through | dropped | dropped | dropped |
 
-A dropped mode is not passed to the agent, which then starts with its own default, and the log says so once per
-role. An agent that exited is relaunched into its saved session with its harness's own syntax: `--resume <id>` for
-claude and gemini, `--session <id>` for pi and opencode, and `codex resume <id>`. If the role's harness has changed
-since, the agent starts a fresh session instead.
+A dropped mode is not passed, so the agent starts with its own default, and the log says so once per role. An
+agent that exited is relaunched into its saved session: `--resume <id>` for claude and gemini, `--session <id>`
+for pi and opencode, and `codex resume <id>`. A role whose harness changed since starts a fresh session.
 
 ### Exit status
 
 | Status | Meaning |
 |---|---|
 | `0` | Approved, or `FINISHED` for a workflow without a verdict step. |
-| `3` | Changes still requested after the last round, or, for a workflow without a verdict step, `QUALITY_GATE_FAILED`: the quality gate still failed after the last quality round. Either way the pull request is a draft. |
+| `3` | Changes still requested after the last round, or `QUALITY_GATE_FAILED` for a workflow without a verdict step. The pull request is a draft. |
 | `4` | Approved or finished, but the pull request conflicts with its base branch, so it is a draft. |
-| `5` | `drain`: it ran every spec it could, and the specs left wait on blockers that are not `done`, such as a pull request still open, or were deleted or emptied while it ran. `refresh`: a pull request still conflicts, or GitHub has not yet computed whether it does. |
+| `5` | `drain`: the specs left wait on blockers that are not `done`. `refresh`: a pull request still conflicts, or GitHub has not yet computed whether it does. |
 | `1` | Error. |
 | `130` | Interrupted. |
 
@@ -361,124 +280,64 @@ since, the agent starts a fresh session instead.
 ## How a run works
 
 1. **Workspace.** The run gets its own herdr workspace, with a pane per role. The project must be on a branch
-   with a clean working tree; the pull request targets that branch. That branch is fetched from `origin` and
-   fast-forwarded, so the Spec Collector reads current code. If that fails, for example offline or because the
-   local branch has diverged from `origin`'s, the run stops before the interview. A `--worktree` run instead
-   fetches that branch and checks `origin`'s version of it out, on a detached HEAD, in its own worktree
-   `.orchestrator/worktrees/<key>`, where its panes open; the checkout need not be clean and is never switched
-   or fast-forwarded. Before all that, a run that
-   will open a pull request deletes the branches of earlier runs whose pull request is done, as `prune` does,
-   skipping any it kept before; a failure there is logged and the run goes on.
-2. **Spec Collector.** A notification tells you it is waiting. Answer its questions in its pane; once you
-   approve the spec, it writes `spec.md`. With `--spec FILE` there is no interview: `FILE` is copied to
-   `spec.md`, no Spec Collector starts, and the Builder takes the root pane.
-3. **Builder.** The orchestrator fetches and fast-forwards the base branch again, since the interview can take
-   hours, and creates the branch `orchestrator/<spec title>-<id>` from it; a `--worktree` run creates it in its
-   worktree, from `origin`'s base branch. The Builder implements the spec there, verifies it, and writes
-   `build-N.md` without committing. If it cannot go on without a decision from you, it writes a report whose
-   first line is `BLOCKED: <question>` instead. The orchestrator moves that report aside to
-   `build-N.blocked-K.md`, notifies you with the question, focuses the Builder's pane, and waits, with no timeout,
-   for you to answer there; `list` shows the run as `blocked: <question> (pane …)`. Once the question is
-   resolved, the Builder writes `build-N.md` again and the run goes on, in the same round. Any step but the
-   interview and the verdict step can block like this, a step of your own workflow and an answer to the quality
-   gate included.
-4. **Quality gate**, with `--quality-gate`. The orchestrator snapshots the working tree, pushes it to a
-   throwaway branch `orchestrator-ci/<id>-N-qQ`, and has the Jenkins job judge it with `orchestrator.py gate`.
-   It writes `quality-N-Q.md`, the build's own quality file, which starts with `GATE: OK`, `GATE: ERROR` or
-   `GATE: BUILD_FAILED` and lists the findings on the lines the change added and the failing tests. A snapshot
-   holding a secret is not pushed; its quality file is `GATE: LEAK`, listing where each secret is. If the gate
-   does not pass, the Builder answers it in `build-N-qQ.md` and the change is judged again, up to
-   `--max-quality-rounds` times, or until a quality round fails on just what the one before it did; then it
-   goes to the Reviewer either way, who is told whether the gate passed.
-   The throwaway branches are deleted when the run finishes; see
-   [quality gate](docs/quality-gate.md).
+   with a clean working tree, which is fetched and fast-forwarded from `origin`; the pull request targets that
+   branch. A `--worktree` run checks `origin`'s version of the branch out in its own worktree instead. A run that
+   will open a pull request first deletes the branches of earlier runs whose pull request is done, as `prune` does.
+2. **Spec Collector.** A notification tells you it is waiting. Answer its questions in its pane; once you approve
+   the spec, it writes `spec.md`. With `--spec`, there is no interview.
+3. **Builder.** The base branch is fast-forwarded again, and the branch `orchestrator/<spec title>-<id>` is
+   created from it. The Builder implements the spec, verifies it, and writes `build-N.md` without committing. If
+   it needs a decision from you, it writes `BLOCKED: <question>` instead, and the run notifies you and waits for
+   your answer in its pane ([When the orchestrator needs you](docs/design.md#when-the-orchestrator-needs-you)).
+4. **Quality gate**, with `--quality-gate`. A snapshot of the working tree is pushed to a throwaway branch and
+   judged by the Jenkins job. If the gate does not pass, the Builder answers its findings, up to
+   `--max-quality-rounds` times; then the change goes to the Reviewer either way, who is told whether the gate
+   passed. A snapshot holding a secret is never pushed. See [quality gate](docs/quality-gate.md).
 5. **Reviewer.** A fresh session checks the change against the spec and writes `review-N.md`, which starts with
    `VERDICT: APPROVE` or `VERDICT: CHANGES_REQUESTED`; requested changes go back to the Builder.
-6. **Pull request.** The change is committed as one commit. If the base branch on `origin` has moved on since,
-   it is merged in with a merge commit. The branch is pushed to `origin` and opened as a pull request with `gh`,
-   a draft if changes were still requested after the last round. If the merge conflicts, it is aborted, the
-   branch is pushed without it, and the pull request is a draft whose description starts with a warning listing
-   the conflicting files; you resolve them, and then `refresh` tidies the pull request (below). The project goes
-   back to its starting branch, and the workspace is
-   closed; a `--worktree` run removes its worktree instead, and leaves the checkout alone. The branch stays,
-   locally and on `origin`, until a later run's sweep or `prune` deletes it.
-7. **Summary.** Every turn is timed: an agent's from the moment its prompt is delivered, a quality analysis from
-   the moment it starts, each until its handoff file's modification time, all by the clock of the machine the
-   agents run on. Whenever the run ends, done, failed or interrupted, the orchestrator writes `summary.md`: the
-   task, the outcome or the error, the pull request and branch, each role's harness and model, the total wall
-   time, a table of the turns with their start and duration, and each round's quality gates and verdict. A
-   resume that ends again rewrites it. The pull request gets the same table, collapsed under "Run timings". A
-   run that is done also writes `metrics.json`, the same as one JSON object with each turn's tokens where its
-   harness records them, and each quality round's gate, failed conditions and finding fingerprints; `metrics`
-   prints every run's.
+6. **Pull request.** The change is committed as one commit, the base branch is merged in if it moved on, and the
+   branch is opened as a pull request with `gh`. It is a draft if changes were still requested after the last
+   round, or if the merge conflicts; then you resolve the conflict and run `refresh`
+   ([Refreshing a conflicted pull request](docs/design.md#refreshing-a-conflicted-pull-request)). The workspace
+   is closed, and the branch stays until a later run's sweep or `prune` deletes it
+   ([Deleting run branches](docs/design.md#deleting-run-branches)).
+7. **Summary.** Whenever the run ends, it writes `summary.md`: the outcome, the pull request, each role's harness
+   and model, and a table of the turns with their durations, which the pull request gets too. A finished run also
+   writes `metrics.json`, which `metrics` prints
+   ([Turn timings and the summary](docs/design.md#turn-timings-and-the-summary)).
 
-One run at a time per checkout: runs in one project directory share its working tree, so a run, `--no-pr`
-or not, refuses to start or resume while another run there is `running` (see `list`). A stale, finished or
-failed run does not count. A `--worktree` run has a working tree of its own, so it neither refuses nor is
-refused by any other run. To run in parallel, use `--worktree`, or give each run its own clone.
+Everything a run writes stays in `<project>/.orchestrator/runs/<run-id>/`, which git ignores. Runs in one checkout
+share its working tree, so a run refuses to start or resume while another run there is `running`; use
+`--worktree`, or a clone per run, to run in parallel.
 
-Everything a run writes stays in `<project>/.orchestrator/runs/<run-id>/`: the handoff files, `state.json`, which
-records the phase, round, panes, branch, pull request, verdict, any error, and in `turns` each handoff file's turn
-(step, role, round, harness, model, session, start, end, seconds and tokens), and `summary.md` once the run has
-ended, and `metrics.json` once it is done ([Turn timings and the summary](docs/design.md#turn-timings-and-the-
-summary)). A turn whose file was written before turns were recorded has no start, and the tables show `?` for it; a
-spec given with `--spec` has no turn. A workflow's step cannot name its file `summary.md` or `metrics.json`.
-`.orchestrator/` ignores itself, so it never shows up in the diff or the commit. A failed run keeps its workspace
-open and stays on its branch, and a `--no-pr` run keeps its workspace open too. `close` closes it when you are done,
-and records that in `state.json`; `resume` then refuses the run. A failed or stale `--worktree` run also loses its
-worktree, uncommitted changes included, which `close` lists first, and its branch, unless the branch has commits
-beyond the run's base. A finished run keeps its worktree, and an in-place run its checkout and branch. `close`
-refuses a run that is `running`. `list` ends a closed run's line with what `close` did, in place of `stale` and its
-`resume` command ([Closing a run](docs/design.md#closing-a-run)).
+A failed run keeps its workspace open and stays on its branch, and so does a `--no-pr` run. `resume` continues a
+stopped run where `state.json` says ([Resuming a run](docs/design.md#resuming-a-run)), and `close` cleans up after
+one you are done with ([Closing a run](docs/design.md#closing-a-run)). `list` marks a run `stale` after five
+minutes without a heartbeat ([Stale runs](docs/design.md#stale-runs)).
 
-`resume` continues a run whose orchestrator stopped where `state.json` says, reusing or relaunching its agents
-([Resuming a run](docs/design.md#resuming-a-run)). It refuses while another branch than the run's is checked
-out, and names the one to check out. `list` marks a run `stale` after five minutes without a
-heartbeat ([Stale runs](docs/design.md#stale-runs)). `show` prints one run in full, without opening
-`state.json`: its `list` line and whole task, its workflow, branch and pull request, each role's agent and pane,
-its turns with their start and duration, the paths of its handoff files, the last review, what `prune` did
-with its branch, and what `close` did. `prune` deletes the
-branch of each run whose pull request is merged, or closed for 14 days, locally and on `origin`, and prints a
-line per run. It keeps a side that has commits the pull request lacks, and a local branch checked out in any
-worktree; a later `prune` looks at kept branches again
-([Deleting run branches](docs/design.md#deleting-run-branches)). `refresh` looks at each finished run whose pull
-request was opened over a conflict, or the one run it is given, and asks `gh` whether it merges cleanly now. If it
-does, it removes the conflict warning from the description, leaving the rest of it, your edits included, as it is;
-marks the pull request ready for review if the run approved or finished, and leaves it a draft otherwise; and forgets
-the conflict in `state.json`, so `show` no longer lists it. A pull request merged or closed meanwhile only has its
-conflict forgotten. One that still conflicts, or whose mergeability GitHub is still computing, is left as it is, and
-`refresh` exits `5`; run it again later. It prints a line per run. You get a herdr notification when a role is blocked, idle
-for 3 minutes, or reports `BLOCKED:` with a question for you
-([When the orchestrator needs you](docs/design.md#when-the-orchestrator-needs-you)).
 See also [design decisions](docs/design.md), [architecture](docs/architecture.md), [roadmap](docs/roadmap.md)
 and [quality gate](docs/quality-gate.md).
 
 ### Worktree runs
 
-A `--worktree` run's worktree holds what git tracks, as `origin` has it. Untracked and ignored files in the
-project, such as a gitignored `CLAUDE.md` or a `.venv`, are not in it; Claude Code still reads the project's
-`CLAUDE.md`, since the worktree is inside the project and Claude Code reads the `CLAUDE.md` of each
-parent directory too. The handoff files stay in the project's run
-directory, outside the worktree: claude and codex get it with `--add-dir`, gemini with `--include-directories`.
-opencode and pi have no such flag and may ask before writing a handoff file there; herdr's notification that the
-agent is blocked brings you in to allow it.
+A `--worktree` run works in `.orchestrator/worktrees/<key>`, checked out from `origin`'s version of the project's
+branch, so the project's checkout need not be clean and stays yours to use. The worktree holds what git tracks.
+Untracked and ignored files, such as a `.venv`, are not in it, though Claude Code still reads the project's
+`CLAUDE.md` from the parent directory. The handoff files stay in the project's run directory. claude, codex and
+gemini are given access to it; opencode and pi may ask before writing there, and herdr notifies you to allow it.
 
-The worktree is removed once the pull request is open. A `--no-pr` run leaves its change uncommitted in the
-worktree, whose path it logs and `show` prints, and a failed run keeps its worktree, as an in-place run keeps its
-branch. A `--worktree` run whose worktree is gone cannot be resumed, unless its pull request is already open.
-`close` removes a failed run's worktree, discarding its changes. A finished `--no-pr` run's worktree holds the
-change, so `close` keeps it and prints its path; remove it by `git worktree remove .orchestrator/worktrees/<key>`
-in the project once you have taken the change.
+The worktree is removed once the pull request is open. A failed or `--no-pr` run keeps its worktree, whose path
+`show` prints. `close` removes a failed run's worktree, discarding its changes, but keeps a finished `--no-pr`
+run's, which holds the change. A `--worktree` run whose worktree is gone cannot be resumed, unless its pull
+request is already open.
 
 ## Draining specs
 
-`drain [DIR]` works through a directory of specs, `.scratch/` by default, read on this machine like `run --spec`'s
-file. Each `DIR/<slug>/spec.md` is a candidate, and drain runs the ones that are ready, one after another, in slug
-order, each as `run --spec` would, with the flags drain was given. Each run ends in its own pull request. You
-merge the pull requests and run `drain` again, until every spec is cleared.
+`drain [DIR]` works through a directory of specs, `.scratch/` by default. Each `DIR/<slug>/spec.md` is a
+candidate, and drain runs the ready ones one after another, in slug order, each as `run --spec` would, each
+ending in its own pull request. You merge the pull requests and run `drain` again until every spec is done.
 
-Drain reads and writes a few lines of the spec's header, the lines before its first `##` heading, and nothing
-else in the file:
+Drain reads and writes only the spec's header, the lines before its first `##` heading:
 
 ```markdown
 # Add a token-bucket rate limiter
@@ -490,47 +349,26 @@ PR: https://github.com/o/r/pull/7
 ```
 
 - `Status:` moves from `ready-for-agent` to `in-review` while the run's pull request is open, and to `done` once it
-  has merged. A run that does not approve, conflicts with its base or fails leaves its spec `ready-for-human`,
-  which drain leaves, unless the conflict was all that kept it there and has since been resolved (below). A spec with any other status, or none, is left alone.
-- `Blocked by:` lists the specs that must be `done` first, each by its slug or a path ending in `<slug>/spec.md`;
-  `-` or `none` names none. A blocker with no `spec.md`, or blockers in a cycle, stop drain before it runs
-  anything.
-- `Run:` and `PR:` are written by drain: the run it started for the spec, before the run starts, and its pull
-  request.
+  has merged. A run that does not approve, conflicts or fails leaves its spec `ready-for-human`. Any other status
+  is left alone.
+- `Blocked by:` lists the specs that must be `done` first, by slug or by a path ending in `<slug>/spec.md`. A
+  missing blocker, or blockers in a cycle, stop drain before it runs anything.
+- `Run:` and `PR:` are written by drain.
 
-A drain first asks `gh` about each `in-review` spec's pull request: merged makes it `done`, closed
-`ready-for-human`. It refreshes the run on each `in-review` and `ready-for-human` spec's `Run:` line as `refresh`
-does, and a `ready-for-human` spec whose run approved or finished, with its pull request open, goes to `in-review`
-once its conflict is cleared. A `ready-for-agent` spec with a `Run:` line is one an interrupted drain left; its run, if
-finished, sets the spec's status, and if not, drain stops and says what to do: wait for it, `resume` it, or delete
-the `Run:` line to start the spec over. Then drain sweeps the branches of earlier runs once, and runs each spec whose
-blockers are all `done`. It reads each spec again before choosing the next and before each header edit, so your edits
-to a spec while it runs are kept, but for the `Status:`, `Run:` and `PR:` lines of the spec it is running, which are
-drain's; a spec you set to another status meanwhile is not started; `Blocked by:` is read once, at the start. A
-spec you delete or empty meanwhile is *gone*: drain neither runs it nor counts it `done`, logs each header line it
-can no longer record, such as the running spec's `Status:` and `PR:`, and goes on; one you restore before drain
-next chooses is run as before. A run another orchestrator takes over with `resume --force` leaves its spec
-`ready-for-agent` for the next drain to pick up.
-
-**It stops, it does not poll.** A spec whose blocker's pull request is still open stays blocked for this drain.
-Once nothing more can start, drain prints the specs left with their blockers and pull requests, and each
-`ready-for-agent` spec that is gone as `<slug>: gone (<why>)`, and exits `5`; the first run that does not end in an
-approved pull request without conflicts stops it at once. Either way it prints what it changed in each spec first.
-`--dry-run` prints the changes and the run order and leaves everything as it is.
-
-Drain does not check that `DIR` is ignored by git. If it is inside the project's checkout and not ignored, the
-header edits dirty the tree, and an in-place run refuses to start on it: ignore `DIR`, or use `--worktree`.
+Drain stops rather than polls: a spec whose blocker's pull request is still open waits for the next drain. If
+the specs directory is inside the checkout, ignore it in git, or use `--worktree`, since the header edits would
+otherwise dirty the tree. See [Draining specs](docs/design.md#draining-specs) for what a drain does in order and
+how it treats specs you edit while it runs.
 
 ## Your own workflows
 
-The roles, their prompts and their order are a workflow. Besides the built-in `default`, you can add your own
-without touching the code: a TOML file in `~/.config/ai-agents-orchestrator/workflows/`, named after the
-workflow, or a file anywhere passed with `--workflow-file`. `python orchestrator.py workflows` lists them and
-shows why one does not load; `python orchestrator.py workflows default > ~/.config/ai-agents-orchestrator/workflows/mine.toml`
-gives you the default's full definition to edit. [`examples/workflows/`](examples/workflows) has four more:
-`spec-build-review` (the built-in `default` as a file, to copy and edit), `quick` (Builder ⇄ Reviewer, the task
-as the contract), `tdd` (a Test Writer before the Builder) and `adversarial` (a Reviewer who backs each finding with
-a failing test).
+The roles, their prompts and their order are a workflow. Besides the built-in `default`, add your own as a TOML
+file in `~/.config/ai-agents-orchestrator/workflows/`, named after the workflow, or anywhere with
+`--workflow-file`. `python orchestrator.py workflows` lists them and says why one does not load, and
+`workflows default` prints the default's full definition to start from. [`examples/workflows/`](examples/workflows)
+has four more: `spec-build-review` (the default as a file), `quick` (Builder ⇄ Reviewer, the task as the
+contract), `tdd` (a Test Writer before the Builder) and `adversarial` (a Reviewer who backs each finding with a
+failing test).
 
 ```toml
 description = "Spec Collector -> Test Writer -> Builder <-> Reviewer"
@@ -558,36 +396,29 @@ prompt = "... the tests in {tests_path} ... write a report to {build_path} in a 
 use = "review"
 ```
 
-A step takes `id`, `role`, `file` (a plain file name in the run directory, which no other step's file can match in
-any round), `prompt`, and optionally `again` (its prompt in a later round), `fresh_note` (for a fresh session in a
-later round), `loop_to`, which makes it the verdict step that sends `CHANGES_REQUESTED` back to the step it names (a
-workflow without one ends `FINISHED` when its last step is done, and its pull request says no agent reviewed the
-change; with `--quality-gate`, a gate that still failed after the last quality round ends it `QUALITY_GATE_FAILED`
-instead, a draft, as under [Exit status](#exit-status)), and the flags `human_paced`, `edits`, `quality_gated`,
-`fresh_repeats_again` (a fresh session gets `again` too) and `locks`: the first editing step, outside the review loop, can lock the files it
-changes, as `tdd`'s Test Writer does; every later turn's change to them is undone, and the Reviewer told where it
-is. A workflow's `proof_command`, such as `"python -m pytest -q {proofs}"`, runs each test the verdict step wrote in
-`{proofs_dir}` with a review that requests changes, in the working tree, and exits 1 when the test fails: the review
-gains which findings their tests demonstrate, and the next round's prompt tells the step it loops back to to make
-those tests pass. `use = "spec"`, `"build"` or `"review"` starts from that default step and overrides only the keys
-you give. Prompts fill in `{task}`, `{cwd}`, `{n}`, `{change}`, `{path}` (the step's own file), `{proofs_dir}` (the
-round's directory for proofs), and for every step `X`: `{X_path}`, `{prev_X_path}` and `{earlier_X_paths}`; write a
-literal brace as `{{` or `}}`. A role you do not list in `[roles]`, or list without a label, keeps the default
-workflow's label for that key (`build` is "Builder"), and is otherwise labelled after its key (`test_writer` is
-"Test Writer"). The panes follow the steps: the first role to take a turn gets the root pane, the next one a split
-to its right, and each further one a split below. A role's `model` is its default, and any model flag overrides it;
-likewise its `agent`, the [harness](#harnesses) it runs in, one of `claude`, `codex`, `gemini`, `opencode` and `pi`,
-which `--agent` and `--role-agent` override. The file is checked when it loads, and an error names the step and key.
-A run saves its workflow's definition, so editing or deleting the file does not change a run already started. See
-[Workflows](docs/architecture.md#workflows) for the rules. To change only some of the texts the agents get, the
-default workflow's prompts or the follow-ups and notes every workflow sends, a [prompt file](#prompt-files) needs
-no workflow file.
+| Step key | Meaning |
+|---|---|
+| `id`, `role` | The step's id, and the role that takes it, the id by default. |
+| `file` | The handoff file in the run directory that ends the turn; `{n}` in it makes one per round. |
+| `prompt`, `again`, `fresh_note` | The first prompt, the prompt in a later round, and the note for a fresh session in a later round. |
+| `use` | `"spec"`, `"build"` or `"review"`: start from that default step and override only the keys given. |
+| `loop_to` | Makes this the verdict step, which sends `CHANGES_REQUESTED` back to the step it names. |
+| `edits`, `human_paced`, `quality_gated` | The step edits the code, waits on you, or is the one the quality gate follows. |
+| `locks` | The first editing step locks the files it changes; later turns' changes to them are undone. |
+| `fresh_repeats_again` | A fresh session in a later round gets `again` too. |
+
+A workflow without a verdict step ends `FINISHED`, and its pull request says no agent reviewed the change. A
+workflow's `proof_command`, such as `"python -m pytest -q {proofs}"`, runs the tests the verdict step wrote to back
+its findings. Prompts fill in `{task}`, `{cwd}`, `{n}`, `{change}`, `{path}`, `{proofs_dir}`, and for every step
+`X`, `{X_path}`, `{prev_X_path}` and `{earlier_X_paths}`; write a literal brace as `{{` or `}}`. The file is
+checked when it loads, and a run saves its workflow, so editing the file does not change a run already started.
+[Workflows](docs/architecture.md#workflows) has the full rules.
 
 ## Prompt files
 
-Every prompt and note the orchestrator writes to an agent can be replaced without copying a workflow: put
-`NAME.md` in `~/.config/ai-agents-orchestrator/prompts/` (beside `workflows/`), where `NAME` is the text's name in
-`orchestrator.py`, and the file's content, less its trailing newline, is sent in its place.
+To change only some of the texts the agents get, put `NAME.md` in `~/.config/ai-agents-orchestrator/prompts/`,
+where `NAME` is the text's name in `orchestrator.py`. Its content, less its trailing newline, is sent in its
+place, with exactly the placeholders of the text it replaces.
 
 | File | Sent |
 |---|---|
@@ -600,16 +431,8 @@ Every prompt and note the orchestrator writes to an agent can be replaced withou
 | `BLOCKED_NOTE.md`, `BLOCKED_PROMPT.md` | at the end of every prompt of a step that can block, and once its report asked the human |
 | `CONTINUE_PROMPT.md`, `RETRY_VERDICT_PROMPT.md` | to a session restarted mid-turn, and after a review without a verdict line |
 
-The first seven names are the default workflow's steps, and a workflow file's step that `use`s one of them takes
-the file's text too; a step's own `prompt`, `again` or `fresh_note` in a workflow file stays as written. The others
-reach every workflow. A file uses exactly the placeholders of the text it replaces, `{build_path}` and so on, as
-`str.format` fills them; write a literal brace as `{{` or `}}`. `orchestrator.py workflows` lists the prompt files
-in effect, and `workflows default` prints the default workflow as they word it.
-
-The files are checked when `run` or `drain` starts, before any agent does: a `.md` file named after no text, one
-that is not UTF-8 or cannot be read, and one with a placeholder the built-in text lacks, or without one it has, is
-an error that names the file and the placeholder. Files not ending in `.md` are ignored. A run saves the texts it
-started with, so editing or deleting a file does not change a run already started, and `resume` never reads them.
+`workflows` lists the prompt files in effect. A bad file stops `run` or `drain` before any agent starts; see
+[Prompt files](docs/design.md#prompt-files).
 
 ## Running tests
 
@@ -618,8 +441,6 @@ uv run pytest
 uv run pytest --cov=orchestrator --cov-branch --cov-report=xml && uv run python orchestrator.py gate --base main --coverage coverage.xml
 ```
 
-`tests/test_properties.py` holds property-based tests, which Hypothesis feeds generated inputs: 25 per test by
-default, 250 with `HYPOTHESIS_PROFILE=ci`, as Jenkins runs them (`tests/conftest.py`).
-
-`packaging/build-binary.sh` builds the binary for the machine it runs on into `dist/`, with PyInstaller from the
-`build` dependency group, and smoke-tests it; see [Tooling](docs/architecture.md#tooling).
+`tests/test_properties.py` holds property-based tests: 25 inputs per test by default, 250 with
+`HYPOTHESIS_PROFILE=ci`, as Jenkins runs them. `packaging/build-binary.sh` builds and smoke-tests the binary for
+the machine it runs on; see [Tooling](docs/architecture.md#tooling).

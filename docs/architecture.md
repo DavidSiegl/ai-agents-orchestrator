@@ -185,9 +185,16 @@ the flush at exit cannot fail again. Like `gui` and
   `RunServer.project` connects each pair once through `project_host`, which `project_runs` also uses: the
   `Host` that reaches the machine, and the directory resolved on it. It keeps them as a `ProjectRuns`, with
   `target_args` of the pair for the records' resume commands.
-- **Endpoints.** `RunRequestHandler`'s docstring lists them: `/runs` is `list --json`'s document (`run_record` of
-  each of `Host.run_states`), `/files` is `Host.run_files` with each file's mtime, `/file` reads one file
-  through `Host.read`, and `/events` is a `text/event-stream`.
+- **Endpoints.** Every request names the project by `?cwd=` and, optionally, `?machine=`, and needs the token:
+
+  | Endpoint | Gives |
+  |---|---|
+  | `/runs` | `{"version": 1, "runs": [...]}`, `list --json`'s document (`run_record` of each of `Host.run_states`) |
+  | `/files?run=ID` | the files in the run's directory (`Host.run_files`), oldest first, each `{"name", "mtime"}` |
+  | `/file?run=ID&name=NAME` | `{"run", "name", "text"}` for one of them, read through `Host.read` |
+  | `/events` | a `text/event-stream` of `record`, `files` and `problem` events; see Events below |
+
+  `RunRequestHandler`'s docstring is the authority on them.
 - **Events.** Each `/events` stream has its own `RunWatch`. It polls `run_states` every `SERVE_POLL_SECONDS`,
   and for a `--machine` project every `SERVE_REMOTE_POLL_SECONDS`, and compares what it reads with what the stream
   last sent. A run whose record changed, other than in `AGING_RECORD_KEYS`, gets a `record` event, and one whose
