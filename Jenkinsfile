@@ -28,6 +28,12 @@ pipeline {
     }
 
     stages {
+        // A quality build (GIT_REF set) records what it judges as its build description, before Install runs any
+        // code of the change: exactly `judged tree=<sha> parent=<sha> main=<sha>`, full lowercase shas, one space
+        // apart. tree is the snapshot's tree, parent its only parent, the run's base, and main the origin/main
+        // commit whose orchestrator.py and pyproject.toml the Gate stage judges with. `orchestrator.py
+        // judged-in-quality` parses it, by JUDGED_DESCRIPTION. A build restarted from a later stage records none, so
+        // nothing trusts it.
         stage('Checkout') {
             steps {
                 script {
@@ -36,6 +42,16 @@ pipeline {
                         checkedOut = checkout([$class: 'GitSCM',
                                                branches: [[name: "refs/heads/${params.GIT_REF}"]],
                                                userRemoteConfigs: scm.userRemoteConfigs])
+                        sh 'git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main'
+                        env.JUDGED_MAIN = sh(returnStdout: true,
+                                             script: 'git rev-parse --verify "origin/main^{commit}"').trim()
+                        // Each assignment fails the step on its own, under sh's -e, where a substitution inside
+                        // printf's arguments would not.
+                        currentBuild.description = sh(returnStdout: true, script: '''
+                            tree=$(git rev-parse --verify 'HEAD^{tree}')
+                            parent=$(git rev-parse --verify 'HEAD^')
+                            printf 'judged tree=%s parent=%s main=%s' "$tree" "$parent" "$JUDGED_MAIN"
+                        ''').trim()
                     } else {
                         checkedOut = checkout scm
                     }
@@ -143,11 +159,12 @@ pipeline {
                     if (params.GIT_REF) {
                         // The snapshot's only parent is the run's base.
                         base = 'HEAD^'
+                        // The main commit Checkout named in the build's description, fetched there.
                         sh '''
-                            git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main
+                            : "${JUDGED_MAIN:?is unset; run the whole build, not a restart from a later stage}"
                             mkdir -p "$WORKSPACE_TMP/main"
-                            git show origin/main:orchestrator.py > "$WORKSPACE_TMP/main/orchestrator.py"
-                            git show origin/main:pyproject.toml > "$WORKSPACE_TMP/main/pyproject.toml"
+                            git show "$JUDGED_MAIN:orchestrator.py" > "$WORKSPACE_TMP/main/orchestrator.py"
+                            git show "$JUDGED_MAIN:pyproject.toml" > "$WORKSPACE_TMP/main/pyproject.toml"
                         '''
                         gate = "${env.WORKSPACE_TMP}/main/orchestrator.py"
                         rules = "${env.WORKSPACE_TMP}/main/pyproject.toml"

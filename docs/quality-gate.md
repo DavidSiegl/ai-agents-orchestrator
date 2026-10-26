@@ -429,9 +429,16 @@ empty `GIT_REF`, before it accepts `buildWithParameters`.
 
 | Build | `--base` | Gate and rules |
 |---|---|---|
-| Quality build (`GIT_REF` set) | `HEAD^`: the snapshot's only parent is the run's base | `main`'s `orchestrator.py` and `pyproject.toml`, from `origin/main` |
+| Quality build (`GIT_REF` set) | `HEAD^`: the snapshot's only parent is the run's base | `main`'s `orchestrator.py` and `pyproject.toml`, from the `origin/main` commit its description names (below) |
 | Pull request (`CHANGE_TARGET` set) | the merge base with the target branch, fetched first | its own, `Jenkinsfile` included (below) |
 | `main` | the last successful build's commit, else `HEAD^1` | its own; none when judged at its pull request (below) |
+
+Before Install runs any code of the change, a quality build's Checkout stage sets its build description to
+`judged tree=<sha> parent=<sha> main=<sha>`, exactly: full lowercase shas, one space apart. `tree` is the
+snapshot's tree, `parent` its only parent, the run's base, and `main` the `origin/main` commit fetched then,
+whose gate and rules the Gate stage judges with. `orchestrator.py judged-in-quality` reads it to decide whether a
+pull request's head is a tree such a build already judged. A build restarted from a later stage skips Checkout,
+records nothing and so is never trusted; its Gate stage refuses to run without the recorded commit.
 
 A pull request is judged by the gate and rules it brings, and most from a branch of this repository merge once
 Jenkins's App reports `pr-head` green, with no human in between (`.github/workflows/automerge.yml` says which).
