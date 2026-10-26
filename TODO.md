@@ -196,11 +196,13 @@ was done.
 - **`vague-names` does not split CamelCase.** `vague_names` matches a whole name or its last `_`-separated word,
   so `user_data` is found but a class `InfoManager` or `UserData` is not. Closes, if the run metrics show such names
   recur, with the last CamelCase word matched too.
-- **Nine test classes copy the same git-repository fixture.** `TestFlakyTests`, `TestPassesAtBase`, `TestVagueNames`,
-  `TestTooComplexFunctions` and five more each define a `setUp` that makes a repository, configures it and commits a
-  base, most with the same `git` and `put` helpers; eight of the copies bind the vague `value` that `vague-names` now
-  reports on added lines, and `TestVagueNames`' binds `setting`. Raised again by the cross-review of `written-rules`
-  (F8, 2026-10-24). Closes with one mixin or base class those tests share.
+- **Ten test classes copy the same git-repository fixture.** `TestFlakyTests`, `TestPassesAtBase`, `TestVagueNames`,
+  `TestTooComplexFunctions`, `TestChangedPythonFiles` and five more each define a `setUp` that makes a repository,
+  configures it and commits a base, most with the same `git` and `put` helpers; eight of the copies bind the vague
+  `value` that `vague-names` now reports on added lines, and `TestVagueNames`' and `TestChangedPythonFiles`' bind
+  `setting`. Raised again by the cross-review of `written-rules` (F8, 2026-10-24), and by that of
+  `gate-python-files` ("`TestChangedPythonFiles` copies the repo scaffolding once more", R1-F5, 2026-10-26). Closes
+  with one mixin or base class those tests share.
 - **`vague-names` reports a name an undecorated override cannot change.** A `def handle(self)` in a
   `socketserver.BaseRequestHandler` subclass, or a parameter the overridden signature names, has no fix; only a
   method marked `@override` is skipped (`_bound_names`). Raised by the cross-review of `written-rules` (F6,

@@ -9663,8 +9663,8 @@ class TestChangedPythonFiles(unittest.TestCase):
         self.repo = tmp.name
         self.host = Host()
         self.git("init", "--quiet", "-b", "main")
-        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
-            self.git("config", key, value)
+        for key, setting in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
+            self.git("config", key, setting)
         self.put("pyproject.toml", '[tool.mutmut]\nsource_paths = ["."]\n')
         self.put("calc.py", self.CALC)
         self.put("tests/test_calc.py", "import calc\n\n\ndef test_add():\n    assert calc.add(2, 3) == 5\n")
@@ -9687,15 +9687,19 @@ class TestChangedPythonFiles(unittest.TestCase):
     @contextlib.contextmanager
     def bounded(seconds):
         """A context in which a check that blocks or reads without end fails the test, rather than hanging the suite
-        or taking the host's memory: SIGALRM after seconds interrupts an open() blocked on a FIFO, and an address space
-        limited to 1 GiB above the process's present size turns an endless read, as of /dev/zero, into MemoryError."""
+        or taking the host's memory: SIGALRM after seconds interrupts an open() blocked on a FIFO, and on Linux an
+        address space limited to 1 GiB above the process's present size turns an endless read, as of /dev/zero, into
+        MemoryError. Elsewhere the address space is left as it is: macOS has no /proc and does not enforce
+        RLIMIT_AS."""
         def expired(signum, frame):
             raise AssertionError(f"the check ran longer than {seconds} seconds")
 
-        with open("/proc/self/statm") as f:
-            size = int(f.read().split()[0]) * os.sysconf("SC_PAGE_SIZE")
         limits = resource.getrlimit(resource.RLIMIT_AS)
-        cap = size + 2 ** 30 if limits[1] == resource.RLIM_INFINITY else min(size + 2 ** 30, limits[1])
+        cap = limits[0]
+        if sys.platform == "linux":
+            with open("/proc/self/statm") as f:
+                size = int(f.read().split()[0]) * os.sysconf("SC_PAGE_SIZE")
+            cap = size + 2 ** 30 if limits[1] == resource.RLIM_INFINITY else min(size + 2 ** 30, limits[1])
         previous = signal.signal(signal.SIGALRM, expired)
         resource.setrlimit(resource.RLIMIT_AS, (cap, limits[1]))
         signal.alarm(seconds)
@@ -9711,7 +9715,8 @@ class TestChangedPythonFiles(unittest.TestCase):
         self.addCleanup(elsewhere.cleanup)
         fifo = os.path.join(elsewhere.name, "pipe")
         os.mkfifo(fifo)
-        for target in (fifo, "/dev/zero"):
+        # /dev/zero only where bounded() can bound the endless read a regression would make of it.
+        for target in (fifo, "/dev/zero") if sys.platform == "linux" else (fifo,):
             with self.subTest(target=target):
                 for name in ("x.py", "tests/test_x.py"):
                     with contextlib.suppress(FileNotFoundError):
