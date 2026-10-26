@@ -13878,6 +13878,22 @@ class TestDrain(unittest.TestCase):
         self.assertEqual(self.run_conflicts(run_id), [])
         self.assertEqual(out, "all specs cleared\n")
 
+    def test_an_in_review_spec_whose_refresh_finds_its_pull_request_merged_is_done_asking_gh_once(self):
+        self.conflicted_spec("in-review", state="MERGED")
+        [spec] = orchestrator.read_queue(self.dir)
+        self.host.gh_calls.clear()
+        got = orchestrator.refreshed_headers([spec], self.host, "/proj", [], "here", lambda pid: False)
+        self.assertEqual(got, [(spec, {"Status": "done"})])
+        self.assertEqual([c[:3] for c in self.host.gh_calls], [("pr", "view", PR_A)])
+
+    def test_a_spec_for_the_human_whose_conflict_clears_has_one_entry_and_gh_asked_once(self):
+        self.conflicted_spec()
+        [spec] = orchestrator.read_queue(self.dir)
+        self.host.gh_calls.clear()
+        got = orchestrator.refreshed_headers([spec], self.host, "/proj", [], "here", lambda pid: False)
+        self.assertEqual(got, [(spec, {"Status": "in-review", "PR": PR_A})])
+        self.assertEqual([c[:3] for c in self.host.gh_calls], [("pr", "view", PR_A)])
+
     def test_a_dry_run_shows_the_move_and_refreshes_nothing(self):
         run_id = self.conflicted_spec()
         before = self.text("a")

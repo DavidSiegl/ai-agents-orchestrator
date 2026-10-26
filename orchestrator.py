@@ -9925,13 +9925,9 @@ def blocker_cycle(blockers: dict[str, list[str]]) -> list[str] | None:
 def refreshed_headers(specs: list[QueuedSpec], host: Host, cwd: str, target: list[str],
                       local_host: str, pid_alive, dry_run: bool = False) -> list[tuple[QueuedSpec, dict[str, str]]]:
     """The header lines to set, by spec, for what has become of the pull requests and runs that earlier drains left
-    behind: an SPEC_IN_REVIEW spec's pull request, now merged or closed; a SPEC_FOR_HUMAN spec's run, whose conflict
-    this refreshes (refresh_conflict) and which, open with the conflict cleared and succeeded, makes it
-    SPEC_IN_REVIEW; and the run on a SPEC_READY spec's Run: line, which an interrupted drain leaves
-    (finished_run_header), whose pull request, once finished_run_header makes the spec SPEC_IN_REVIEW, it asks about
-    in the same pass, merging pull_request_header's lines into the one pair, so that a pull request already merged
-    or closed settles the spec, and frees its dependants, in this drain. It refreshes an SPEC_IN_REVIEW spec's run
-    too, and logs what refresh_conflict did; with dry_run, it does nothing of that, and gives the header lines as
+    behind, one pair for each spec that has any, each followed to where it settles in this pass (settled_header), so
+    that a pull request already merged or closed frees the spec's dependants in this drain. It refreshes a run's
+    conflict and logs what refresh_conflict did; with dry_run, it does nothing of that, and gives the header lines as
     though it had.
 
     cwd is the project, where gh asks about pull requests and the runs are; target is the --machine and --cwd flags
@@ -9941,47 +9937,68 @@ def refreshed_headers(specs: list[QueuedSpec], host: Host, cwd: str, target: lis
     # Read once, and only when a spec's run is to be looked at.
     statuses = (SPEC_READY, SPEC_IN_REVIEW, SPEC_FOR_HUMAN)
     runs = host.run_states(cwd) if any(spec.run and spec.status in statuses for spec in specs) else []
-    out = []
-    for spec in specs:
-        if spec.status in (SPEC_IN_REVIEW, SPEC_FOR_HUMAN) and (entries := conflict_header(spec, runs, host, cwd,
-                                                                                           dry_run)):
-            out.append((spec, entries))
-        if spec.status == SPEC_IN_REVIEW and spec.pr and (entries := pull_request_header(spec.pr, host, cwd)):
-            out.append((spec, entries))
-        elif spec.status == SPEC_READY and (run_id := spec.run):
-            entries = finished_run_header(spec, run_id, runs, cwd, target, local_host, pid_alive)
-            if entries[STATUS_KEY] == SPEC_IN_REVIEW and (merged := pull_request_header(entries[PR_KEY], host, cwd)):
-                entries |= merged
-            out.append((spec, entries))
-    return out
+    settle = functools.partial(settled_header, runs=runs, host=host, cwd=cwd, target=target, local_host=local_host,
+                               pid_alive=pid_alive, dry_run=dry_run)
+    return [(spec, entries) for spec in specs if (entries := settle(spec))]
+
+
+def settled_header(spec: QueuedSpec, *, runs: list[tuple[int, dict]], host: Host, cwd: str, target: list[str],
+                   local_host: str, pid_alive, dry_run: bool) -> dict[str, str]:
+    """The header lines to set for spec, empty for none, from these steps in this order, each on the status the one
+    before it left:
+
+    1. a SPEC_IN_REVIEW or SPEC_FOR_HUMAN spec's run, its conflict refreshed (conflict_header), which can make a
+       SPEC_FOR_HUMAN spec SPEC_IN_REVIEW with its pull request;
+    2. a SPEC_READY spec's finished run on its Run: line, which an interrupted drain leaves (finished_run_header):
+       SPEC_IN_REVIEW with its pull request, or SPEC_FOR_HUMAN;
+    3. a spec now SPEC_IN_REVIEW with a pull request: SPEC_DONE once it is merged, SPEC_FOR_HUMAN once it is closed
+       (pull_request_header), gh asked only when step 1 did not already, so gh hears of it once a pass.
+
+    runs are Host.run_states's; the rest is as refreshed_headers says. Raises OrchestratorError as those steps do.
+    """
+    entries: dict[str, str] = {}
+    known = None  # the state step 1's refresh found the pull request in; None when it asked gh nothing
+    if spec.status in (SPEC_IN_REVIEW, SPEC_FOR_HUMAN):
+        lines, known = conflict_header(spec, runs, host, cwd, dry_run)
+        entries |= lines
+    elif spec.status == SPEC_READY and spec.run:
+        entries |= finished_run_header(spec, spec.run, runs, cwd, target, local_host, pid_alive)
+    pr = entries.get(PR_KEY, spec.pr)
+    if entries.get(STATUS_KEY, spec.status) == SPEC_IN_REVIEW and pr:
+        entries |= pull_request_header(pr, host, cwd, known)
+    return entries
 
 
 def conflict_header(spec: QueuedSpec, runs: list[tuple[int, dict]], host: Host, cwd: str,
-                    dry_run: bool) -> dict[str, str] | None:
+                    dry_run: bool) -> tuple[dict[str, str], str | None]:
     """Refresh the run on the spec's Run: line, if it has_conflict, as refreshed_headers says, and return the header
-    lines that sets: SPEC_IN_REVIEW and the pull request for a SPEC_FOR_HUMAN spec whose succeeded run's pull request
-    is open and no longer conflicts; None otherwise, and for a run not among runs, Host.run_states's."""
+    lines that sets, and the state gh gave the pull request whose lines those are, or the spec's PR: line's: OPEN,
+    CLOSED or MERGED; None when the refresh asked gh about no such pull request. The lines are SPEC_IN_REVIEW and
+    the pull request for a SPEC_FOR_HUMAN spec whose succeeded run's pull request is open and no longer conflicts;
+    none otherwise, and for a run not among runs, Host.run_states's."""
     saved = next((s for _, s in runs if s.get("run_id") == spec.run), None)
     if saved is None or not has_conflict(saved):
-        return None
+        return {}, None
     check = refresh_conflict(host, cwd, saved, dry_run)
     if not dry_run:
         log(check.line)
+    known = check.pr_state if check.url == spec.pr else None
     cleared_open = check.pr_state == "OPEN" and check.clears
     if spec.status == SPEC_FOR_HUMAN and cleared_open and saved.get("verdict") in SUCCEEDED:
-        return {STATUS_KEY: SPEC_IN_REVIEW, PR_KEY: check.url}
-    return None
+        return {STATUS_KEY: SPEC_IN_REVIEW, PR_KEY: check.url}, check.pr_state
+    return {}, known
 
 
-def pull_request_header(url: str, host: Host, cwd: str) -> dict[str, str] | None:
+def pull_request_header(url: str, host: Host, cwd: str, state: str | None = None) -> dict[str, str]:
     """The header lines to set for an SPEC_IN_REVIEW spec whose pull request is at url: SPEC_DONE once it is merged,
-    SPEC_FOR_HUMAN once it is closed; None while it is open. Raises OrchestratorError as Host.pull_request does."""
-    pr_state = host.pull_request(cwd, url)["state"]
+    SPEC_FOR_HUMAN once it is closed; none while it is open. state is the pull request's state, OPEN, CLOSED or
+    MERGED, when it is already known this pass; None to ask gh. Raises OrchestratorError as Host.pull_request does."""
+    pr_state = state or host.pull_request(cwd, url)["state"]
     if pr_state == "MERGED":
         return {STATUS_KEY: SPEC_DONE}
     if pr_state == "CLOSED":
         return {STATUS_KEY: SPEC_FOR_HUMAN}
-    return None
+    return {}
 
 
 def finished_run_header(spec: QueuedSpec, run_id: str, runs: list[tuple[int, dict]], cwd: str, target: list[str],
