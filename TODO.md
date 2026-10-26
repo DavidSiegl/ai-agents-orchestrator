@@ -44,6 +44,19 @@ was done.
 
 ## Open issues
 
+- **surviving-mutants takes only the top directory's pytest configuration.** Since `_pytest_groups`, flaky-tests and
+  passes-at-base run each changed test under the configuration pytest finds for it below the copy's top, but
+  `_pytest_config`, which surviving-mutants gives mutmut, still looks in the top directory alone, so a project whose
+  configuration is in `tests/pytest.ini` or `pkg/pyproject.toml` runs its mutants without that configuration's
+  `pythonpath`, `addopts` and plugins. Raised by cross-review 35 (R1-6). Closes with mutmut's runs taking the changed
+  functions' tests' configurations, which mutmut's one `pytest_add_cli_args` makes one per run at most.
+- **flaky-tests' reruns get one time limit a run, whatever the number of configurations.** Each pytest run of
+  flaky-tests has `FLAKY_RUN_TIMEOUT` of its own, and since `_pytest_groups` a change whose tests fall under several
+  configurations collects and reruns once for each, so its worst case grows with them (3 configurations and 5 seeds:
+  3 x 6 x 30 s), against `QUALITY_TIMEOUT`. passes-at-base's groups share its one budget. Raised by cross-review 35
+  (R1-5), which reads the spec's "the per-group runs share the check's time budget" as meant for passes-at-base,
+  flaky-tests having none. Closes with the shared budget `.scratch/gate-open-decisions/issues/01-shared-time-budget.md`
+  asks about.
 - **`TestGate.test_a_missing_tool_fails_naming_it` fails where shellcheck lives beside git.** `TestGate.setUp`
   (`tests/test_orchestrator.py`) puts git's own directory on `PATH` after the stubs, so on a machine with
   `/usr/bin/shellcheck` (agentbox, Debian's package) removing the stub still finds the real one and the gate passes.
@@ -350,8 +363,8 @@ was done.
   Fixed (2026-10-26): `_pytest_groups` walks each changed test file's directory up to the copy's top, taking the first
   configuration `_pytest_inifile` finds, and flaky-tests and passes-at-base run once per group (`_PytestGroup`), each
   with its `-c`, `--rootdir` its directory, pytest still started from the copy's top and `--confcutdir` the copy; the
-  groups of passes-at-base share its budget, and a group that cannot run is a finding about its tests alone.
-  surviving-mutants still takes the top directory's.
+  groups of passes-at-base share its budget, and a group that cannot run is a finding about its tests alone, as are
+  the groups a spent budget leaves unrun. surviving-mutants still takes the top directory's (Open issues).
 
 - **Cognitive complexity scores direct recursion only.** Campbell's paper gives a point to each function in a
   recursion cycle; `_calls_itself` sees a function calling itself by name, or a method as `self.m`, `cls.m` or

@@ -7519,6 +7519,23 @@ class TestPassesAtBase(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
 
+    def test_a_budget_spent_on_one_configuration_says_the_later_ones_were_not_run(self):
+        for where in ("a", "b"):
+            self.put(f"{where}/pytest.ini", "[pytest]\n")
+            self.put(f"{where}/test_{where}.py", "def test_old():\n    assert True\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "two configs")
+        self.put("calc.py", self.CALC.replace("a - b", "a + b"))
+        for where in ("a", "b"):
+            self.put(f"{where}/test_{where}.py", "def test_old():\n    assert True\n\n\ndef test_new():\n    pass\n")
+        self.fake_pytest("exec sleep 30", "exit 0")
+        found = self.found(budget=1)
+        self.assertEqual([(f["rule"], f["message"]) for f in found], [
+            ("budget-reached", ("pytest was stopped at 1 seconds (`--base-run-budget`) while it collected the changed "
+                                "tests configured by a/pytest.ini, so none of them was judged.")),
+            ("not-run", ("the run at the base used its 1 seconds (`--base-run-budget`) before it reached the changed "
+                         "tests configured by b/pytest.ini, so they were not run there."))])
+
     def test_a_run_past_the_budget_says_how_many_test_cases_ran(self):
         self.fix_add("\n\ndef test_more():\n    assert add(1, 1) == 2\n")
         # The sleep in the background holds pytest's output open too: only killing its process group ends the run.
