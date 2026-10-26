@@ -3520,13 +3520,14 @@ class FakeResponse:
         return False
 
 
-def outcome(gate="OK", *, archived=True, result=None, findings=(), tests=(), test_report=True, console="", polls=2):
+def outcome(gate="OK", *, archived=True, result=None, findings=(), tests=(), test_report=True, console="", polls=2,
+            description=None):
     """What one Jenkins build does.
 
     gate: the GATE of the quality.md its Gate stage archives; archived=False for a build that ended before that
     stage. result defaults to what the Jenkinsfile ends with. findings: the numbered lines of quality.md.
     tests: (className, name, errorDetails) of each failing test in Jenkins's test report. polls: how many polls
-    still see it building.
+    still see it building. description: the build's description, None when it has none.
     """
     if result is None:
         result = ("SUCCESS" if gate == "OK" else "UNSTABLE") if archived else "FAILURE"
@@ -3536,7 +3537,7 @@ def outcome(gate="OK", *, archived=True, result=None, findings=(), tests=(), tes
         quality = (f"GATE: {gate}\n\n`orchestrator.py gate` judged the working tree.\n\n"
                    f"## Issues on changed lines\n\n{numbered}\n")
     return dict(result=result, quality=quality, tests=list(tests), test_report=test_report, console=console,
-                polls=polls)
+                polls=polls, description=description)
 
 
 RED = dict(gate="ERROR", findings=["`limiter.py:3` error ruff F401: `os` imported but unused"])
@@ -3614,6 +3615,10 @@ class FakeCI:
         rest = path[len(JOB_PATH):]
         if rest == "api/json" and "property" in query.get("tree", ""):
             return "parameters", {"property": [{}, {"parameterDefinitions": [{"name": p} for p in self.parameters]}]}
+        if rest == "api/json" and "description" in query.get("tree", ""):
+            return "builds", {"builds": [
+                {"number": n, "result": None if b["left"] else b["result"], "description": b["description"]}
+                for n, b in sorted(self.builds.items(), reverse=True)]}
         if rest == "api/json":
             builds = sorted(self.builds.items(), reverse=True)[:20]
             return "find", {"builds": [{"number": n, "actions": [{}, {"parameters": [
@@ -10265,6 +10270,228 @@ class TestCI(unittest.TestCase):
             self.assertTrue(cm.exception.transient)
         with self.assertRaisesRegex(OrchestratorError, "named no queue item"):
             ci.trigger(REF_1_1)
+
+
+class TestJudgedInQuality(unittest.TestCase):
+    """`orchestrator.py judged-in-quality` in a clone of a real origin, with the quality job on a FakeCI.
+
+    The clone's HEAD is a pull request's head, one commit on top of main's base commit, as a run publishes a tree
+    its last quality build judged.
+    """
+
+    JUDGING = ("Jenkinsfile", "orchestrator.py", "pyproject.toml", "uv.lock", ".python-version")
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+        self.origin, self.repo = (os.path.join(tmp.name, d) for d in ("origin.git", "repo"))
+        self.host = Host()
+        self.host.git(self.tmp, "init", "--quiet", "--bare", "-b", "main", self.origin)
+        # As GitHub does, so a commit is fetched by its sha.
+        self.host.git(self.origin, "config", "uploadpack.allowReachableSHA1InWant", "true")
+        self.host.git(self.tmp, "clone", "--quiet", self.origin, self.repo)
+        for key, setting in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
+            self.git("config", key, setting)
+        for name in (*self.JUDGING, "f.py"):
+            self.put(name, f"{name} 1\n")
+        self.base = self.commit("base")
+        self.git("push", "--quiet", "origin", "HEAD:refs/heads/main")
+        self.git("checkout", "--quiet", "-b", "pr")
+        self.put("f.py", "f.py 2\n")
+        self.head = self.commit("change")
+        self.tree = self.git("rev-parse", "HEAD^{tree}").strip()
+        self.fake = FakeCI()
+
+    def git(self, *args):
+        return self.host.git(self.repo, *args)
+
+    def put(self, name, text):
+        with open(os.path.join(self.repo, name), "w") as f:
+            f.write(text)
+
+    def commit(self, message):
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", message)
+        return self.git("rev-parse", "HEAD").strip()
+
+    def build(self, *, tree=None, parent=None, main=None, description=None, **kw):
+        """A build of the quality job, SUCCESS on HEAD's tree from its base by main at the base unless kw say
+        otherwise; returns its number."""
+        if description is None:
+            description = (f"judged tree={tree or self.tree} parent={parent or self.base} "
+                           f"main={main or self.base}")
+        return self.fake.add_build("orchestrator-ci/r-1-q1", outcome(polls=0, description=description, **kw))
+
+    def push_main(self, name, text):
+        """Move origin's main by a commit that changes name, made in another clone so this one lacks it; returns
+        its sha."""
+        other = os.path.join(self.tmp, "other")
+        if not os.path.isdir(other):
+            self.host.git(self.tmp, "clone", "--quiet", "-b", "main", self.origin, other)
+        with open(os.path.join(other, name), "w") as f:
+            f.write(text)
+        self.host.git(other, "add", "-A")
+        self.host.git(other, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false",
+                      "commit", "--quiet", "-m", "main moves")
+        self.host.git(other, "push", "--quiet", "origin", "HEAD:refs/heads/main")
+        return self.host.git(other, "rev-parse", "HEAD").strip()
+
+    def judged(self, *args, env=None):
+        """The exit status, standard output and standard error of `orchestrator.py judged-in-quality` in the
+        clone, asking self.fake; args replace `--quality-gate JOB --target main`."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.chdir(self.repo), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                patch("orchestrator.CI", side_effect=lambda job: CI(job, env=CREDENTIALS if env is None else env,
+                                                                     urlopen=self.fake)):
+            exit_code = main(["judged-in-quality", *(args or ("--quality-gate", JOB, "--target", "main"))])
+        return exit_code, out.getvalue(), err.getvalue()
+
+    def assert_refused(self, pattern, **kw):
+        exit_code, out, err = self.judged(**kw)
+        self.assertNotEqual(exit_code, 0)
+        self.assertEqual(out, "")
+        self.assertEqual(err.count("\n"), 1, err)
+        self.assertRegex(err, pattern)
+        self.assertFalse(leaks(err))
+        return err
+
+    def test_a_successful_build_of_head_s_tree_from_its_merge_base_trusts_it(self):
+        n = self.build()
+        exit_code, out, err = self.judged()
+        self.assertEqual((exit_code, err), (0, ""))
+        self.assertIn(f"#{n}", out)
+        self.assertIn("builds", self.fake.names)
+
+    def test_an_older_build_trusts_it_behind_newer_ones_that_do_not(self):
+        n = self.build()
+        self.build(tree="1" * 40)
+        self.build(result="UNSTABLE")
+        exit_code, out, _ = self.judged()
+        self.assertEqual(exit_code, 0)
+        self.assertIn(f"#{n}", out)
+
+    def test_a_build_that_did_not_succeed_does_not(self):
+        for result in ("UNSTABLE", "FAILURE", "ABORTED"):
+            with self.subTest(result):
+                self.fake.builds.clear()
+                n = self.build(result=result)
+                self.assert_refused(rf"#{n}.*{result}")
+
+    def test_a_build_still_running_does_not(self):
+        n = self.fake.add_build("orchestrator-ci/r-1-q1", outcome(
+            polls=1, description=f"judged tree={self.tree} parent={self.base} main={self.base}"))
+        self.assert_refused(rf"#{n}.*still running")
+
+    def test_a_build_of_another_tree_does_not(self):
+        n = self.build(tree="1" * 40)
+        self.assert_refused(rf"#{n}.*{'1' * 40}.*{self.tree}")
+
+    def test_a_build_from_another_base_does_not(self):
+        n = self.build(parent=self.head)
+        self.assert_refused(rf"#{n}.*{self.head}.*{self.base}")
+
+    def test_a_change_to_a_file_that_decides_the_judging_is_judged_in_full(self):
+        for name in self.JUDGING:
+            with self.subTest(name):
+                self.git("checkout", "--quiet", self.head)
+                self.put(name, "changed\n")
+                self.commit(f"edit {name}")
+                self.tree = self.git("rev-parse", "HEAD^{tree}").strip()
+                self.fake.builds.clear()
+                self.fake.names.clear()
+                self.build()
+                self.assert_refused(re.escape(name))
+
+    def test_a_build_by_a_main_with_other_judging_files_does_not(self):
+        main_sha = self.push_main("orchestrator.py", "a newer gate\n")
+        n = self.build(main=main_sha)
+        self.assert_refused(rf"#{n}.*{main_sha}.*orchestrator\.py")
+
+    def test_a_build_by_a_main_that_moved_without_touching_them_trusts_it(self):
+        main_sha = self.push_main("other.py", "x\n")
+        # The fetch of the target leaves out a main this clone lacks: a pull request into another branch.
+        self.git("push", "--quiet", "origin", f"{self.base}:refs/heads/release")
+        n = self.build(main=main_sha)
+        exit_code, out, err = self.judged("--quality-gate", JOB, "--target", "release")
+        self.assertEqual((exit_code, err), (0, ""))
+        self.assertIn(f"#{n}", out)
+
+    def test_a_main_commit_that_cannot_be_fetched_fails(self):
+        self.build(main="2" * 40)
+        self.assert_refused("2" * 40)
+
+    def test_a_build_without_the_description_does_not(self):
+        for description in ("", f"judged tree={self.tree} parent={self.base}",
+                            f"judged tree={self.tree} parent={self.base} main={self.base} extra",
+                            f"judged tree={self.tree.upper()} parent={self.base} main={self.base}",
+                            f"judged  tree={self.tree} parent={self.base} main={self.base}",
+                            f"judged tree={self.tree[:12]} parent={self.base} main={self.base}",
+                            f"judged tree={JENKINS_TOKEN}"):
+            with self.subTest(description):
+                self.fake.builds.clear()
+                n = self.build(description=description)
+                self.assert_refused(rf"#{n}.*description")
+
+    def test_a_build_with_no_description_at_all_does_not(self):
+        n = self.fake.add_build("orchestrator-ci/r-1-q1", outcome(polls=0))
+        self.assert_refused(rf"#{n}.*description")
+
+    def test_the_closest_build_is_the_one_named(self):
+        n = self.build(result="UNSTABLE")
+        self.build(tree="1" * 40)
+        self.build(description="")
+        self.assert_refused(rf"#{n}.*UNSTABLE")
+
+    def test_a_job_without_builds_fails(self):
+        self.assert_refused("no builds")
+
+    def test_jenkins_down_fails_with_its_token_masked(self):
+        self.build()
+        self.fake.down.add("jenkins")
+        self.assert_refused("Connection refused")
+
+    def test_an_http_error_fails(self):
+        self.build()
+        for code in (403, 404, 500):
+            with self.subTest(code):
+                self.fake.fail[("GET", JOB_PATH + "api/json")] = code
+                self.assert_refused(f"HTTP {code}")
+
+    def test_an_answer_that_is_not_the_job_s_builds_fails(self):
+        for answer in ({"builds": "x"}, {"builds": ["x"]}, {"builds": [{"number": "7", "result": "SUCCESS"}]}):
+            with self.subTest(answer), patch.object(FakeCI, "jenkins", return_value=("builds", answer)):
+                self.assert_refused("api/json")
+
+    def test_missing_credentials_fail_before_any_request(self):
+        self.build()
+        self.assert_refused("JENKINS_USER", env={"JENKINS_URL": JENKINS})
+        self.assertEqual(self.fake.requests, [])
+
+    def test_a_target_branch_origin_lacks_fails(self):
+        self.build()
+        exit_code, out, err = self.judged("--quality-gate", JOB, "--target", "nowhere")
+        self.assertNotEqual(exit_code, 0)
+        self.assertEqual(err.count("\n"), 1, err)
+        self.assertIn("nowhere", err)
+
+    def test_a_target_that_is_not_a_branch_name_fails_before_git_fetches_it(self):
+        self.build()
+        refs = self.git("for-each-ref")
+        for target in ("main:refs/heads/x", "-q", "a..b"):
+            with self.subTest(target):
+                exit_code, _, err = self.judged("--quality-gate", JOB, f"--target={target}")
+                self.assertNotEqual(exit_code, 0)
+                self.assertEqual(err.count("\n"), 1, err)
+                self.assertIn(target, err)
+        self.assertEqual(self.git("for-each-ref"), refs)
+
+    def test_without_a_merge_base_it_fails(self):
+        self.git("checkout", "--quiet", "--orphan", "lone")
+        self.put("f.py", "alone\n")
+        self.commit("lone")
+        self.build(tree=self.git("rev-parse", "HEAD^{tree}").strip())
+        self.assert_refused("merge base")
 
 
 class TestHostSnapshot(unittest.TestCase):

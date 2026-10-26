@@ -2183,6 +2183,14 @@ class CIError(OrchestratorError):
         return self.status is None or self.status >= 500
 
 
+@dataclass(frozen=True)
+class QualityBuild:
+    """A build of the quality job, as Jenkins lists it."""
+    number: int
+    result: str | None  # such as SUCCESS, UNSTABLE, FAILURE or ABORTED; None while it runs
+    description: str | None  # as the build set it, verbatim; None when it set none
+
+
 class CI:
     """Jenkins's quality job, over HTTP from the orchestrator's own machine.
 
@@ -2305,6 +2313,21 @@ class CI:
             if params.get("GIT_REF") == ref and isinstance(number, int) and number not in skip:
                 return number
         return None
+
+    def retained_builds(self) -> list[QualityBuild]:
+        """The job's builds that Jenkins still keeps, newest first, the newest 100 at most.
+
+        Raises OrchestratorError, before asking, when credentials are missing; CIError when Jenkins gives no answer,
+        an HTTP error, or an answer that is not a list of builds.
+        """
+        url = f"{self.job_url}api/json?{urllib.parse.urlencode({'tree': 'builds[number,result,description]{0,100}'})}"
+        builds = self._jenkins_json(url).get("builds")
+        # type() rather than isinstance: a JSON true is a bool, which is an int.
+        if not isinstance(builds, list) or not all(
+                isinstance(b, dict) and type(b.get("number")) is int and isinstance(b.get("result"), str | None)
+                and isinstance(b.get("description"), str | None) for b in builds):
+            raise CIError(self.mask(f"GET {url}: the answer is not the job's builds"))
+        return [QualityBuild(b["number"], b.get("result"), b.get("description")) for b in builds]
 
     def build_result(self, number: int) -> str | None:
         """The finished build's result, such as SUCCESS, UNSTABLE, FAILURE or ABORTED; None while it runs."""
@@ -6495,6 +6518,116 @@ def add_gate_arguments(parser: argparse.ArgumentParser) -> None:
                              f"pass without the change, after this long; default {BASE_RUN_BUDGET}")
 
 
+# The files that decide how a change is judged: the stages, the gate, its rules, the versions of its tools and the
+# Python they run on. judged_in_quality trusts a quality build only when none of them differs.
+JUDGING_FILES = ("Jenkinsfile", "orchestrator.py", "pyproject.toml", "uv.lock", ".python-version")
+# A quality build's description, in the format the comment above the Jenkinsfile's Checkout stage defines; a sha is
+# SHA-1's 40 hex digits or SHA-256's 64.
+_SHA = r"[0-9a-f]{40}(?:[0-9a-f]{24})?"
+JUDGED_DESCRIPTION = re.compile(rf"judged tree=(?P<tree>{_SHA}) parent=(?P<parent>{_SHA}) main=(?P<main>{_SHA})")
+
+
+def judged_in_quality_command(job: str, target: str) -> int:
+    """Say whether a build of the Jenkins quality job job already judged the current directory's HEAD, as
+    judged_in_quality decides it for a pull request into the branch target.
+
+    Returns 0, naming the build on standard output, when one did. Otherwise returns EXIT_ERROR, with one line on
+    standard error saying why: the condition the closest build fails, or what stopped the question being answered.
+    No error returns 0.
+    """
+    try:
+        number = judged_in_quality(os.getcwd(), CI(job), target)
+    except (OrchestratorError, GateError) as e:
+        print(f"judged-in-quality: {' '.join(str(e).splitlines())}", file=sys.stderr)
+        return EXIT_ERROR
+    print(f"judged-in-quality: build #{number} of {job} judged HEAD's tree from its merge base with {target}")
+    return 0
+
+
+def judged_in_quality(root: str, ci: CI, target: str) -> int:
+    """The number of a build of ci's job that judged the HEAD of the checkout at root as a pull request's build
+    into the branch target would, so that build need not judge it again.
+
+    Such a build is among ci.retained_builds and meets each of these conditions, in this order: its description is
+    in JUDGED_DESCRIPTION's format; it names HEAD's tree; it names as parent the merge base of HEAD and REMOTE's
+    target; it ended SUCCESS; and each of JUDGING_FILES is the same, or absent alike, at the main commit it names as
+    in HEAD and at that merge base.
+
+    Fetches target from REMOTE into refs/remotes/REMOTE/target, and a build's main commit when root lacks it.
+    Raises OrchestratorError when no build meets them all, naming the first condition that the closest build fails:
+    the newest of those that meet the most conditions in a row. Raises it too for a target that is not a branch
+    name, a HEAD with no merge base or one whose JUDGING_FILES differ from it, and missing credentials; CIError as
+    ci.retained_builds does; GateError when git fails or a main commit cannot be fetched, as _git says.
+    """
+    if _git_run(root, "check-ref-format", f"refs/heads/{target}").returncode != 0:
+        raise OrchestratorError(f"{target!r} is not a branch name")
+    tracking = f"refs/remotes/{REMOTE}/{target}"
+    _git(root, "fetch", "--quiet", REMOTE, f"+refs/heads/{target}:{tracking}")
+    tree = _git(root, "rev-parse", "--verify", "HEAD^{tree}").strip()
+    merge_base = _git_run(root, "merge-base", "HEAD", tracking)
+    if merge_base.returncode != 0:
+        # merge-base exits 1, printing nothing, when the commits have no common ancestor.
+        raise OrchestratorError(f"HEAD has no merge base with {REMOTE}/{target}: "
+                                f"{merge_base.stderr.strip() or 'no common ancestor'}")
+    base = merge_base.stdout.strip()
+    judging = _judging_files(root, base)
+    if changed := _differing_files(judging, _judging_files(root, "HEAD")):
+        raise OrchestratorError(f"HEAD changes {', '.join(changed)} since its merge base {base}, which decide how "
+                                f"it is judged")
+    builds = ci.retained_builds()
+    if not builds:
+        raise OrchestratorError(f"the quality job {ci.job} has no builds")
+    refusals = []
+    for build in builds:
+        met, why = _build_trust(root, build, tree, base, judging)
+        if why is None:
+            return build.number
+        refusals.append((met, why))
+    # max keeps the first of equals, and the builds are newest first. A description is text from Jenkins.
+    raise OrchestratorError(ci.mask(max(refusals, key=lambda r: r[0])[1]))
+
+
+def _build_trust(root: str, build: QualityBuild, tree: str, base: str, judging: dict[str, str]
+                 ) -> tuple[int, str | None]:
+    """How many of judged_in_quality's conditions build meets in a row, for HEAD's tree and merge base base, at
+    which _judging_files gave judging; and why it fails the first it does not, None when it meets them all.
+    Fetches the build's main commit, as judged_in_quality says, only when it meets the conditions before that one.
+    Raises GateError as _git does."""
+    m = JUDGED_DESCRIPTION.fullmatch(build.description or "")
+    if not m:
+        return 0, (f"build #{build.number}'s description is not `judged tree=<sha> parent=<sha> main=<sha>`: "
+                   f"{_shortened(repr(build.description))}")
+    if m["tree"] != tree:
+        return 1, f"build #{build.number} judged the tree {m['tree']}, not HEAD's {tree}"
+    if m["parent"] != base:
+        return 2, f"build #{build.number} judged from {m['parent']}, not from HEAD's merge base {base}"
+    if build.result != "SUCCESS":
+        return 3, f"build #{build.number} {'is still running' if build.result is None else 'ended ' + build.result}"
+    if _git_run(root, "cat-file", "-e", f"{m['main']}^{{commit}}").returncode != 0:
+        _git(root, "fetch", "--quiet", REMOTE, m["main"])
+    if changed := _differing_files(judging, _judging_files(root, m["main"])):
+        return 4, (f"build #{build.number} judged by main at {m['main']}, where {', '.join(changed)} differ from "
+                   f"HEAD's")
+    return 5, None
+
+
+def _judging_files(root: str, commit: str) -> dict[str, str]:
+    """The mode and object of each of JUDGING_FILES at commit, by path; a file absent there is left out. Raises
+    GateError as _git does."""
+    out = {}
+    # -z: each entry is "<mode> <type> <object>\t<path>", ended by a NUL.
+    for entry in _git(root, "ls-tree", "-z", "--full-tree", commit, "--", *JUDGING_FILES).split("\0"):
+        if entry:
+            meta, _, path = entry.partition("\t")
+            out[path] = meta
+    return out
+
+
+def _differing_files(a: dict[str, str], b: dict[str, str]) -> list[str]:
+    """Those of JUDGING_FILES that _judging_files gave differently in a and b, in JUDGING_FILES's order."""
+    return [path for path in JUDGING_FILES if a.get(path) != b.get(path)]
+
+
 def write_quality_file(path: str, text: str) -> None:
     """Make text, line endings as they are, the contents of the file at path.
 
@@ -9306,6 +9439,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     add_gate_arguments(sub.add_parser(
         "gate", help="judge the change since a commit as the quality job does, and write the quality file"))
 
+    judged = sub.add_parser(
+        "judged-in-quality", help="exit 0 when a quality build already judged HEAD as its pull request's build would",
+        description=f"Exit 0 when a build of the quality job JOB, among those Jenkins keeps, judged HEAD as a pull "
+                    f"request's build into BRANCH would: it ended SUCCESS, and its description names HEAD's tree, "
+                    f"the merge base of HEAD and {REMOTE}/BRANCH as its parent, and a main commit. None of "
+                    f"{', '.join(JUDGING_FILES)} may differ between HEAD, that merge base and that main commit. "
+                    f"Fetches BRANCH, and the main commit when it is missing. Otherwise, and on any error, exit "
+                    f"{EXIT_ERROR}, saying why in one line on standard error. Needs JENKINS_URL, JENKINS_USER and "
+                    f"JENKINS_TOKEN, from the environment or {ci_env_path()}.")
+    judged.add_argument("--quality-gate", required=True, metavar="JOB",
+                        help="the quality job's full name, folders included")
+    judged.add_argument("--target", required=True, metavar="BRANCH",
+                        help="the branch the pull request would merge into")
+
     sub.add_parser(
         "doctor", parents=[target], help="check what a run needs, and say what to run for each that is missing",
         description=f"Check what a run needs where the agents run, on this machine or with --machine on that one: "
@@ -10794,6 +10941,8 @@ def herdrless_command(args: argparse.Namespace) -> int | None:
     if args.command == "gate":
         return gate_command(args.base, args.config, args.coverage, args.tests, args.out, args.mutation_budget,
                             args.base_run_budget)
+    if args.command == "judged-in-quality":
+        return judged_in_quality_command(args.quality_gate, args.target)
     return None
 
 

@@ -728,6 +728,14 @@ without the gate. `resume` refuses a limit below `quality_round` in phase `quali
 q ≥ 1, where the Builder is answering quality round q. `resume` also takes `--quality-gate JOB` or
 `--no-quality-gate`, below; `--max-quality-rounds` goes with the first and is a usage error with the second.
 
+`judged-in-quality --quality-gate JOB --target BRANCH` exits 0 when a quality build of `JOB` already judged
+`HEAD` as a pull request's build into `BRANCH` would: among the builds Jenkins keeps, it ended SUCCESS, and its
+description (above) names `HEAD`'s tree, the merge base of `HEAD` and `origin/BRANCH` as its parent, and a `main`
+commit at which `Jenkinsfile`, `orchestrator.py`, `pyproject.toml`, `uv.lock` and `.python-version` are as in
+`HEAD` and at that merge base. Otherwise, and on any error, such as Jenkins unreachable, an HTTP error or a
+commit it cannot fetch, it exits 1 with one line on standard error naming the condition the closest build fails,
+or what stopped it asking. It needs the same `JENKINS_*` credentials as `--quality-gate`. No build calls it yet.
+
 ### Turning the gate on or off on resume
 
 `turn_quality_gate_on` or `turn_quality_gate_off` applies the flag to the saved state before the run goes on; a refusal exits 1 and leaves
