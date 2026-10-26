@@ -6114,6 +6114,41 @@ class TestQualityReport(unittest.TestCase):
                       "2. `t.py (the whole file)` warning flaky test_x: m\n"
                       "3. The change as a whole: warning mutants budget: m\n", text)
 
+    def test_a_path_with_a_line_break_stays_on_its_own_line_and_compares_alike_in_every_round(self):
+        issues = [{"path": p, "line": 2, "severity": "error", "rule": "ruff F401", "message": "unused"}
+                  for p in ("a b.py", "c\rd.py", "e\u2028f.py")]
+        text = quality_report("ERROR", "intro", issues=issues, suppressions=[("g\nh.py", 1, "# noqa")],
+                              mutmut_state=["mutants/i\x85j.py"])
+        self.assertIn("1. `a b.py:2` error ruff F401: unused\n", text)
+        self.assertIn("2. `c\\x0dd.py:2` error ruff F401: unused\n", text)
+        self.assertIn("3. `e\\u2028f.py:2` error ruff F401: unused\n", text)
+        self.assertIn("- `g\\x0ah.py:1` `# noqa`\n", text)
+        self.assertIn("`mutants/i\\x85j.py`", text)
+        self.assertEqual(text.splitlines(), text.split("\n")[:-1])
+        failures = orchestrator.gate_failures(text)
+        self.assertEqual(len(failures.fingerprints["ruff"]), 3)
+        self.assertTrue(failures.repeats(orchestrator.gate_failures(quality_report("ERROR", "other", issues=issues))))
+
+    def test_every_writer_of_a_quality_file_keeps_a_line_break_in_an_item_on_its_line(self):
+        name = "c\nd .py"
+        finding = {"path": name, "line": 1, "severity": "error", "rule": "flaky x", "message": f"`{name}::t` failed"}
+        texts = {
+            "gate": quality_report("ERROR", "intro", conditions=[f"`{name}:1` holds a stray line end."],
+                                   issues=[finding], tests=[(f"{name}::t", "boom")], edited=["pyproject.toml"],
+                                   rules_from=f"`/tmp/{name}`"),
+            "judge_run conditions": orchestrator._failed_by("GATE: OK\n\nintro\n", [f"`{name}` failed."]),
+            "judge_run findings": "\n".join(orchestrator._orchestrator_section([finding], [], 0)),
+            "build failed": orchestrator.build_failed_report("intro", [(f"{name}::t", "boom")], ""),
+            "leaks": orchestrator.leak_report([orchestrator.Leak("aws", name, 3, "a" * 40, "fp")], "intro"),
+        }
+        for writer, text in texts.items():
+            with self.subTest(writer):
+                self.assertEqual(text.splitlines(), text.rstrip("\n").split("\n"))
+                self.assertIn("c\\x0ad\\u2028.py", text)
+        failures = orchestrator.gate_failures(texts["gate"])
+        self.assertEqual((len(failures.conditions), len(failures.fingerprints["flaky"]),
+                          len(failures.fingerprints["tests"])), (1, 1, 1))
+
     def test_findings_to_weigh_are_numbered_after_the_issues(self):
         text = quality_report("ERROR", "intro", issues=self.issues(2), to_weigh=[self.finding("t.py", 9)])
         self.assertLess(text.index("2. `f.py:2` HIGH r: m2"), text.index("## Findings to weigh"))
@@ -6448,7 +6483,7 @@ class TestGate(unittest.TestCase):
             text = f.read()
         self.assertIn("- 4 findings on lines the change added", text)
         for name in names:
-            self.assertIn(f"`{name}:1` error ruff F401", text)
+            self.assertIn(f"`{orchestrator.one_line(name)}:1` error ruff F401", text)
 
     def test_a_file_name_that_is_not_utf8_is_judged(self):
         name = os.fsdecode(b"f\xe9.py")
@@ -6522,6 +6557,19 @@ class TestGate(unittest.TestCase):
         _, out, _ = self.gate("--coverage", self.coverage({4: (1, "1/2"), 5: 0, 2: 1}))
         # (1 covered condition + 1 covered line) / (2 conditions + 2 lines); line 2 is not new.
         self.assertIn("50.0% of 2 new lines to cover, counting their 2 branch outcomes; 1 lines are not covered.", out)
+
+    def test_coverage_names_a_file_it_cannot_measure_and_judges_without_it(self):
+        name = os.fsdecode(b"m\xff.py")
+        self.put(name, "".join(f"m{k} = {k}\n" for k in range(30)))
+        self.git("add", name)
+        self.add_lines(1)
+        status, _, _ = self.gate("--coverage", self.coverage({4: 1}), "--out", "quality.md")
+        # 30 uncovered lines would fail the gate; coverage.py has no entry for them, so only f.py's line counts.
+        self.assertEqual(status, 0)
+        with open(os.path.join(self.repo, "quality.md"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("100.0% of 1 new lines to cover; 0 lines are not covered.\n\nNot measured: `m\\xff.py`; "
+                      "coverage.py records no data for a file whose name is not UTF-8.", text)
 
     def test_an_unreadable_coverage_report_writes_nothing(self):
         self.add_lines(1)
