@@ -338,10 +338,11 @@ was done.
   Fixed (2026-10-26): `tests/gitrepo.py`'s `RepositoryTest` makes the repository in `setUp`, configures it, commits
   the class's `BASE_FILES` as "base", and gives `git`, `put`, `edit` and `commit`; `TestScanUnpublished`, `TestGate`,
   `TestWeakenedTests`, `TestFlakyTests`, `TestPassesAtBase`, `TestVagueNames`, `TestSurvivingMutants`,
-  `TestTooComplexFunctions`, `TestChangedPythonFiles` and `TestHostSnapshot` derive from it, and what each kept out
-  of its tree (stub tools, a bare origin, a rules file) is under the base's `outside`. Not closed: `TestHostGit`
-  keeps its own `setUp` and its `clone`'s `value` loop, since it makes two clones of a bare origin rather than one
-  repository; and single tests still make a repository of their own, such as `TestPassesAtBase`'s submodule.
+  `TestTooComplexFunctions`, `TestChangedPythonFiles` and `TestHostSnapshot` derive from it, and what their `setUp`s
+  kept out of the tree (stub tools, a bare origin, a rules file) is under the base's `outside`. `TestHostGit` keeps
+  a `setUp` of its own, since it makes two clones of a bare origin rather than one repository; its `clone` binds
+  `setting` now. Not closed: single tests still make a repository or a directory of their own, such as
+  `TestPassesAtBase`'s submodule.
 
 - **A submodule is empty in `passes-at-base`'s copy of the base.** `git archive` leaves a submodule's directory
   empty, so a changed test that imports from one fails to import at the base and gives nothing, though it might pass

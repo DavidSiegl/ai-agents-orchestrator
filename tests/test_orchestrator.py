@@ -1540,8 +1540,8 @@ class TestHostGit(unittest.TestCase):
     def clone(self, name):
         path = f"{self.dir}/{name}"
         self.sh("git", "clone", "--quiet", f"{self.dir}/origin.git", path)
-        for key, value in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
-            self.sh("git", "-C", path, "config", key, value)
+        for key, setting in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
+            self.sh("git", "-C", path, "config", key, setting)
         return path
 
     def commit(self, repo, name, text):
@@ -3735,7 +3735,6 @@ class TestScanUnpublished(RepositoryTest):
         self.host.git(self.outside, "init", "--quiet", "--bare", self.origin)
         self.git("remote", "add", "origin", self.origin)
         self.git("push", "--quiet", "origin", "main")
-        self.base = self.git("rev-parse", "HEAD").strip()
         path = os.path.join(self.bin, "gitleaks")
         with open(path, "w") as f:
             f.write(FAKE_GITLEAKS.replace("PYTHON", sys.executable))
@@ -7068,7 +7067,7 @@ class TestFlakyTests(RepositoryTest):
 
     def test_a_server_a_test_leaves_holding_the_output_does_not_hold_up_the_reruns(self):
         # Under -s a test's processes inherit pytest's own output; this one outlives every run, in a session of its own.
-        pids = os.path.join(self.repo, "..", f"{os.path.basename(self.repo)}-servers")
+        pids = os.path.join(self.outside, "servers")
 
         def started_servers():
             with contextlib.suppress(FileNotFoundError), open(pids) as f:
@@ -9392,13 +9391,13 @@ class TestTooComplexFunctions(RepositoryTest):
                          ["`big`: cognitive complexity 22, a new function; the limit is 15."])
 
     def test_a_file_renamed_from_any_name_is_compared_with_its_base(self):
-        self.commit_file("bin/tool", flat("helper", 20))
+        self.commit({"bin/tool": flat("helper", 20)}, "base")
         self.git("mv", "bin/tool", "bin/tool.py")
         self.edit("bin/tool.py", "x += 3\n", "x += 30\n")  # still 20
         self.assertEqual(self.found()[0], [])
 
     def test_a_function_moved_unchanged_out_of_a_deleted_python_script_keeps_its_base(self):
-        self.commit_file("bin/tool", "#!/usr/bin/env python3\n" + flat("helper", 20))
+        self.commit({"bin/tool": "#!/usr/bin/env python3\n" + flat("helper", 20)}, "base")
         self.git("rm", "--quiet", "bin/tool")
         self.put("calc.py", self.BASE + "\n\n" + flat("helper", 20))  # an edit, so git sees no rename
         self.assertEqual(self.found()[0], [])
@@ -9409,14 +9408,14 @@ class TestTooComplexFunctions(RepositoryTest):
         self.assertEqual(self.found()[0], [])
 
     def test_a_deleted_script_that_is_not_python_lends_no_base(self):
-        self.commit_file("bin/tool", "#!/bin/sh\n" + flat("helper", 20))
+        self.commit({"bin/tool": "#!/bin/sh\n" + flat("helper", 20)}, "base")
         self.git("rm", "--quiet", "bin/tool")
         self.put("calc.py", self.BASE + "\n\n" + flat("helper", 20))  # an edit, so git sees no rename
         self.assertEqual([f["message"] for f in self.found()[1]],
                          ["`helper`: cognitive complexity 20, a new function; the limit is 15."])
 
     def test_a_function_out_of_tests_is_judged_as_new_as_tests_were_never_held_to_the_limit(self):
-        self.commit_file("tests/helpers.py", flat("helper", 20) + "\n\n" + flat("other_helper", 20))
+        self.commit({"tests/helpers.py": flat("helper", 20) + "\n\n" + flat("other_helper", 20)}, "base")
         os.makedirs(os.path.join(self.repo, "lib"))
         self.git("mv", "tests/helpers.py", "lib/helpers.py")  # renamed, with both functions
         self.edit("lib/helpers.py", "'helper 3':\n        x += 3\n", "'helper 3':\n        x += 30\n")  # still 20
@@ -9429,7 +9428,7 @@ class TestTooComplexFunctions(RepositoryTest):
         self.assertEqual(self.found()[0], [])  # lib/helpers.py's base is lib/, now held to the limit
 
     def test_a_function_moved_unchanged_out_of_tests_is_judged_as_new(self):
-        self.commit_file("tests/helpers.py", "X = 0\n\n\n" + flat("helper", 20))
+        self.commit({"tests/helpers.py": "X = 0\n\n\n" + flat("helper", 20)}, "base")
         self.put("tests/helpers.py", "X = 0\n")
         self.put("lib.py", flat("helper", 20))
         self.git("add", "lib.py")
@@ -9477,7 +9476,7 @@ class TestTooComplexFunctions(RepositoryTest):
 
     def test_a_function_in_a_file_the_check_does_not_judge_keeps_its_own_base_from_a_moved_twin(self):
         big = flat("big", 20)
-        self.commit_file("tests/helpers.py", "X = 0\n\n\n" + big)
+        self.commit({"tests/helpers.py": "X = 0\n\n\n" + big}, "base")
         self.edit("tests/helpers.py", "X = 0\n", "X = 1\n")
         self.put("calc.py", self.BASE.replace("\n\n" + big, ""))
         self.put("lib.py", big)  # calc.py's big, moved unchanged
@@ -9520,7 +9519,7 @@ class TestTooComplexFunctions(RepositoryTest):
 
     def test_an_unchanged_copy_in_a_file_the_check_does_not_judge_takes_no_base_from_its_original(self):
         big = flat("big", 20)
-        self.commit_file("tests/helpers.py", "X = 0\n\n\n" + big)
+        self.commit({"tests/helpers.py": "X = 0\n\n\n" + big}, "base")
         self.edit("calc.py", "'big 3':\n        x += 3\n", "'big 3':\n        x += 30\n")  # edited in place: still 20
         self.edit("tests/helpers.py", "X = 0\n", "X = 1\n")  # the copy at the base, in a file edited elsewhere
         self.assertEqual(self.found()[0], [])
@@ -9555,7 +9554,7 @@ class TestTooComplexFunctions(RepositoryTest):
         # Two functions named _, as @singledispatch registrations are: the one scoring 20 moves where nothing is
         # judged, the other stays, and a copy of the first is added elsewhere.
         moved, stays = flat("_", 20).replace("'_ ", "'moved "), flat("_", 3).replace("'_ ", "'stays ")
-        self.commit_file("disp.py", moved + "\n\n" + stays)
+        self.commit({"disp.py": moved + "\n\n" + stays}, "base")
         self.put("disp.py", stays)
         self.put("tests/helpers.py", moved)
         self.put("lib.py", moved)
@@ -9629,23 +9628,18 @@ class TestTooComplexFunctions(RepositoryTest):
     # A function named _ that does nothing, as one @singledispatch registration or @overload stub can be.
     TRIVIAL = "def _(a):\n    return a\n\n\n"
 
-    def commit_file(self, name, text):
-        self.put(name, text)
-        self.git("add", name)
-        self.git("commit", "--quiet", "-m", name)
-
     def test_a_namesake_removed_above_a_function_leaves_it_compared_with_its_own_base(self):
-        self.commit_file("disp.py", self.TRIVIAL + flat("_", 20))
+        self.commit({"disp.py": self.TRIVIAL + flat("_", 20)}, "base")
         self.put("disp.py", flat("_", 20).replace("x += 3\n", "x += 30\n"))  # the trivial one gone; still 20
         self.assertEqual(self.found()[0], [])
 
     def test_a_namesake_added_above_a_function_leaves_it_compared_with_its_own_base(self):
-        self.commit_file("disp.py", flat("_", 20))
+        self.commit({"disp.py": flat("_", 20)}, "base")
         self.put("disp.py", self.TRIVIAL + flat("_", 20).replace("x += 3\n", "x += 30\n"))  # still 20
         self.assertEqual(self.found()[0], [])
 
     def test_a_rise_of_a_function_whose_name_others_share_is_found(self):
-        self.commit_file("disp.py", flat("_", 20))
+        self.commit({"disp.py": flat("_", 20)}, "base")
         self.put("disp.py", flat("_", 20).replace("        x += 19\n", "        x += 19\n        if x:\n            x -= 1\n"))
         self.assertEqual([f["message"] for f in self.found()[1]],
                          ["`_`: cognitive complexity 22, 20 at the base; the limit is 15."])
@@ -10097,13 +10091,7 @@ class TestHostSnapshot(RepositoryTest):
     """Host.snapshot on real git."""
 
     def test_snapshot_of_the_working_tree(self):
-        self.put("keep.py", "a\n")
-        self.put("mod.py", "1\n2\n")
-        self.put("del.py", "x\n")
-        self.put(".gitignore", "*.log\n")
-        self.git("add", "-A")
-        self.git("commit", "--quiet", "-m", "base")
-        base = self.host.git_head(self.repo)
+        base = self.commit({"keep.py": "a\n", "mod.py": "1\n2\n", "del.py": "x\n", ".gitignore": "*.log\n"}, "base")
         self.put("mod.py", "1\ntwo\n3\n")
         os.remove(f"{self.repo}/del.py")
         self.put("untracked.py", "new\n")

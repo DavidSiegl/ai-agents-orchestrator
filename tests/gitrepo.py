@@ -18,6 +18,7 @@ class RepositoryTest(unittest.TestCase):
     - outside: an empty directory that is not inside the repository, for what a test keeps out of the tree, such as
       stub tools, a remote or a rules file; removed with the repository.
     - host: the Host the helpers run git through, for tests that call its other methods on repo.
+    - base: the sha of the commit setUp made of BASE_FILES, or None when BASE_FILES is empty.
     """
 
     # The files of the base commit: each path, relative to the repository, to its text. Empty: setUp commits nothing,
@@ -33,8 +34,7 @@ class RepositoryTest(unittest.TestCase):
         self.host.git(tmp.name, "init", "--quiet", "-b", "main", self.repo)
         for key, setting in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
             self.git("config", key, setting)
-        if self.BASE_FILES:
-            self.commit(self.BASE_FILES, "base")
+        self.base = self.commit(self.BASE_FILES, "base") if self.BASE_FILES else None
 
     def git(self, *args):
         """The standard output of git args, run in the repository. Raises OrchestratorError when git fails."""
@@ -58,7 +58,8 @@ class RepositoryTest(unittest.TestCase):
 
     def commit(self, files, message):
         """Put files, a mapping of path to text as put takes them, then commit every change in the working tree,
-        those made before the call included, with message; returns the new commit's sha."""
+        those made before the call included, with message; returns the new commit's sha. Raises OrchestratorError
+        when git fails, as it does when there is nothing to commit."""
         for name, text in files.items():
             self.put(name, text)
         self.git("add", "-A")
