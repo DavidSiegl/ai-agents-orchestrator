@@ -4497,9 +4497,10 @@ def _run_in_session(argv: list[str], cwd: str, env: dict[str, str], *, timeout: 
     to exit. Once it has exited, every process left in its process group, such as a server it started, is killed
     too, and what was printed is read until no process holds the output open, for at most TOOL_KILL_WAIT seconds
     more: only one outside the group, in a session of its own, can still hold it, and what that prints later is
-    lost. So the call returns within timeout + grace + TOOL_KILL_WAIT seconds, the process reaped. The output is
-    decoded as _git_run's verbatim output is, so that paths in it keep their bytes; the exit status is -SIGKILL when
-    the kill is the last thing known of it. Raises OSError when argv cannot be started.
+    lost. So the call returns within timeout + grace + TOOL_KILL_WAIT seconds, the process reaped unless it could not
+    exit within them. The output is decoded as _git_run's verbatim output is, so that paths in it keep their bytes;
+    the exit status is -SIGKILL when the kill is the last thing known of it. Raises OSError when argv cannot be
+    started.
     """
     # The callers' fixed commands, over names their tools listed; no shell reads them.
     proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,  # noqa: S603
@@ -4531,10 +4532,10 @@ def _run_in_session(argv: list[str], cwd: str, env: dict[str, str], *, timeout: 
             end = time.monotonic() + TOOL_KILL_WAIT
             while pipes.get_map() and (left := end - time.monotonic()) > 0:
                 _read_ready(pipes, printed, left)
-            # Killed a moment ago, the process may not have been reaped yet; one that cannot be in this long, as in
-            # an uninterruptible sleep, is left to a later Popen to reap.
+            # Killed a moment ago, the process may not have been reaped yet; what is left of the read's time is its
+            # to exit in (a wait of 0 still reaps one that has), and one still there after it is left to a later Popen.
             with contextlib.suppress(subprocess.TimeoutExpired):
-                proc.wait(timeout=max(_TOOL_POLL, end - time.monotonic()))
+                proc.wait(timeout=max(0.0, end - time.monotonic()))
     finally:
         _kill_group(proc)
         for stream in streams:
