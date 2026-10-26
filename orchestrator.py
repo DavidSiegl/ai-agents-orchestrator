@@ -4569,7 +4569,8 @@ def _read_ready(pipes: selectors.BaseSelector, printed: dict[int, list[bytes]], 
 @contextlib.contextmanager
 def _not_ignored_in_children(sig: signal.Signals | None) -> Iterator[None]:
     """While open, a process this one starts gets sig with its default disposition, also when this process ignores
-    it, as a command a Jenkins sh step runs ignores SIGINT; afterwards this process treats sig as it did before. An
+    it, as a command a Jenkins sh step runs ignores SIGINT; afterwards this process treats sig as it did before. The
+    disposition is the process's, so a child another thread starts meanwhile, such as the GUI's ssh, gets it too. An
     ignored signal stays ignored across exec, and a Python started so never raises KeyboardInterrupt, so a soft stop
     by it would reach a tool that ignores it. Meanwhile sig is caught and dropped here, as ignoring it would. Only the
     main thread can set a handler, so elsewhere, and for sig None, nothing changes."""
@@ -4670,24 +4671,28 @@ def passes_at_base(change: GateChange, *, budget: float) -> list[dict]:
     them in, and one to docs alone none that a test could see.
 
     The tests run with pytest, in the gate's own interpreter, in the files git tracked at the base, as `git archive`
-    writes them (so a path the base's .gitattributes marks export-ignore is missing there, and a submodule is empty),
-    with every file of the tests the change touches, conftest.py and data included, taken from the working tree
-    instead, or removed where the change removed it. pytest first collects the changed test files there, then runs
-    those of the changed tests it collected. A test passes there when pytest passed each of its cases that it did not
-    skip, all its parameter sets included. One that fails or errors there tests the change, which is what the check
-    expects, and gives nothing; so does one that pytest does not collect there: a test whose file cannot be imported at
-    the base, or whose conftest.py raises ImportError there, whatever the test itself checks, and a test_* method of a
-    class pytest does not take for a test class. The base's code is what the copy's own configuration, such as
-    pytest's pythonpath, imports; a project installed into the gate's interpreter imports the working tree's instead,
-    and every test of it then passes at the base.
+    writes them (so a path the base's .gitattributes marks export-ignore is missing there), each submodule filled from
+    its own repository in the working tree at the commit the base records, or left empty, which a not-run finding names,
+    with every file of the tests the change touches, conftest.py and data included, taken from the working tree instead,
+    or removed where the change removed it. pytest first collects the changed test files there, then runs those of the
+    changed tests it collected. A test passes there when pytest passed each of its cases that it did not skip, all its
+    parameter sets included. One that fails or errors there tests the change, which is what the check expects, and gives
+    nothing; so does one that pytest does not collect there: a test whose file cannot be imported at the base, or that
+    lies under a conftest.py that fails to load there through a file the change edits, itself or one it imports,
+    whatever it raises and whatever the test itself checks, and a test_* method of a class pytest does not take for a
+    test class. The base's code is what the copy's import roots, its top and its src/, and its own configuration, such
+    as pytest's pythonpath, import, ahead of what is installed into the gate's interpreter, an editable install of the
+    project included. A run that still imports the project's code from the working tree, whether a changed test, a
+    conftest.py or a helper imports it, as from a package an editable install finds outside those roots, judges none
+    of its tests and is a not-run finding naming the package.
 
-    The collections and runs together, one of each for every configuration the changed tests fall under, may take
-    budget seconds; a stop there is a budget-reached finding saying when, and how many test cases the run had run,
-    and none of that configuration's outcomes is reported; the configurations after it are not run, each a not-run
-    finding saying so. A pytest that cannot start, stops before it collects, stops with a usage error other than a
-    conftest.py's ImportError, or writes no readable report, a changed test file that cannot be read or parsed, and a
-    copy that cannot be made are not-run findings saying so; a copy that cannot be removed afterwards is a finding of
-    its own.
+    The collections and runs together, one of each for every configuration the changed tests fall under, may take budget
+    seconds; a stop there is a budget-reached finding saying when, and how many test cases the run had run, and none of
+    that configuration's outcomes is reported; the configurations after it are not run, each a not-run finding saying
+    so. A pytest that cannot start, stops before it collects, fails to load a conftest.py through no file the change
+    edits, stops with another usage error, or writes no readable report, a changed test file that cannot be read or
+    parsed, and a copy that cannot be made are not-run findings saying so; a copy that cannot be removed afterwards is a
+    finding of its own.
     """
     if not _edits_python_source(change):
         return []
@@ -4716,15 +4721,73 @@ def _beside_tests(path: str) -> bool:
     return _python_test_file(path) or name == "conftest.py" or "tests" in dirs
 
 
+@dataclass(frozen=True)
+class _BaseCopy:
+    """The copy of the base that one passes_at_base call runs the changed tests in, and what each of its pytest runs
+    there shares, as _base_run_findings sets them up."""
+    change: GateChange
+    tree: str  # the copy's top, every group's top
+    env: dict[str, str]  # the variables each pytest run takes beside tool_env's
+    deadline: float  # the time.monotonic() time by which every collection and run must be done
+    budget: float  # the seconds the check had for all of them, from when the copy was made, as findings name it
+
+
+# The pytest plugin, a module of this name written beside the copy and put on the runs' path, by which a run at the
+# base tells where the modules it imported came from. At the end of the session it writes, as JSON to the file
+# --gate-imports-report names, each module in sys.modules whose __file__ lies under the directory --gate-imports-root
+# names, by its name, to that file's path from there. Under pytest-xdist each worker, which imports the tests where
+# the controller does not, writes its own, the file's name followed by "-" and the worker's id, as xdist gives the
+# worker its config.workerinput; not PYTEST_XDIST_WORKER, which a pytest the gate runs from inside a worker of its own
+# inherits. The file's directory is resolved, and the root, so that a link on the way to either changes nothing; the
+# file itself is not, so that a module that is a link is named by the link. A namespace package has no __file__, and
+# none is written.
+_BASE_IMPORTS_PLUGIN = "_octoflow_gate_base_imports"
+_BASE_IMPORTS_PLUGIN_SOURCE = """\
+import json
+import os
+import sys
+
+
+def pytest_addoption(parser):
+    parser.addoption("--gate-imports-root")
+    parser.addoption("--gate-imports-report")
+
+
+def pytest_sessionfinish(session):
+    root = os.path.realpath(session.config.getoption("gate_imports_root"))
+    found = {}
+    for name, module in list(sys.modules.items()):
+        try:
+            where = getattr(module, "__file__", None)
+        except Exception:
+            continue
+        if isinstance(where, str):
+            real = os.path.join(os.path.realpath(os.path.dirname(where)), os.path.basename(where))
+            if real.startswith(root + os.sep):
+                found[name] = os.path.relpath(real, root)
+    report = session.config.getoption("gate_imports_report")
+    worker = getattr(session.config, "workerinput", {}).get("workerid")
+    with open(f"{report}-{worker}" if worker else report, "w", encoding="utf-8") as f:
+        json.dump(found, f)
+"""
+
+
 def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str], int], budget: float) -> list[dict]:
     """passes_at_base's findings on tests, as _changed_python_tests gives them, collected and then run, within budget
-    seconds for all of it, in a copy of the base that it makes in tmp, an empty directory, beside the runs' reports
-    and their TMPDIR: once for each pytest configuration the changed test files take there (_pytest_groups), one
-    after another while the budget lasts."""
-    tree, scratch = os.path.join(tmp, "tree"), os.path.join(tmp, "tmp")
+    seconds for all of it, in a copy of the base that it makes in tmp, an empty directory, beside the runs' reports,
+    their TMPDIR and the plugin _BASE_IMPORTS_PLUGIN names: once for each pytest configuration the changed test files
+    take there (_pytest_groups), one after another while the budget lasts.
+
+    The runs import the base's code from the copy's import roots, its top and its src/ when it has one, which are put
+    on PYTHONPATH ahead of what was there: so they come before site-packages, and before what an editable install
+    puts there, which would import the working tree's code."""
+    tree, scratch, plugins = os.path.join(tmp, "tree"), os.path.join(tmp, "tmp"), os.path.join(tmp, "plugins")
     try:
-        _copy_base_with_tests(change, tree, os.path.join(tmp, "base.tar"))
+        empty = _copy_base_with_tests(change, tree, os.path.join(tmp, "base.tar"))
         os.mkdir(scratch)
+        os.mkdir(plugins)
+        with open(os.path.join(plugins, f"{_BASE_IMPORTS_PLUGIN}.py"), "x", encoding="utf-8") as f:
+            f.write(_BASE_IMPORTS_PLUGIN_SOURCE)
     except (OSError, tarfile.TarError, GateError) as e:
         return [_finding(None, None, "not-run", f"could not copy the base to run the changed tests in: {e}; the "
                                                 f"changed tests were not run there.")]
@@ -4733,13 +4796,21 @@ def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str]
     except OSError as e:
         return [_finding(None, None, "not-run", f"could not write an empty pytest configuration for the run at the "
                                                 f"base: {e}; the changed tests were not run there.")]
-    deadline = time.monotonic() + budget
+    src = os.path.join(tree, "src")
+    roots = [tree, *([src] if os.path.isdir(src) else []), plugins]
+    inherited = [os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else []
     # No bytecode: a test that imports through a tracked link out of the tree would write it there.
-    env = {"TMPDIR": scratch, "PYTHONDONTWRITEBYTECODE": "1"}
+    env = {"TMPDIR": scratch, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": os.pathsep.join([*roots, *inherited])}
+    base_copy = _BaseCopy(change, tree, env, time.monotonic() + budget, budget)
     out: list[dict] = []
+    if empty:
+        noun, pronoun = ("a submodule", "it") if len(empty) == 1 else ("submodules", "them")
+        named = "; ".join(f"`{path}`, {why}" for path, why in empty)
+        out.append(_finding(None, None, "not-run", f"the copy of the base leaves {noun} empty, so a changed test "
+                                                f"that imports from {pronoun}, if any does, was not judged: {named}."))
     for n, (group, label) in enumerate(zip(groups, _labels(groups), strict=True)):
-        report = os.path.join(tmp, f"base-{n}.xml")
-        found, stopped = _base_group_findings(group, group.own(tests), deadline, env, report, budget, label)
+        found, stopped = _base_group_findings(base_copy, group, group.own(tests), os.path.join(tmp, f"base-{n}"),
+                                              label)
         out += [group.in_tree(f) for f in found]
         if stopped:
             out += [_finding(None, None, "not-run", f"the run at the base used its {budget:g} seconds "
@@ -4749,101 +4820,187 @@ def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str]
     return out
 
 
-def _base_group_findings(group: _PytestGroup, tests: dict[tuple[str, str], int], deadline: float,
-                         env: dict[str, str], report: str, budget: float,
+def _base_group_findings(base_copy: _BaseCopy, group: _PytestGroup, tests: dict[tuple[str, str], int], reports: str,
                          label: str | None) -> tuple[list[dict], bool]:
     """_base_run_findings' findings on tests, keyed by their paths from group's directory, as pytest names them
-    there, collected and run at the base by group's configuration with env by deadline, a time.monotonic() time,
-    writing the run's report to report; their paths are from group's directory too. And whether the deadline, of
-    the check's budget seconds, stopped it, which leaves no time for another group. label names the group's tests in
-    a finding about all of them, as _PytestGroup.label does; None when they are all the change's tests."""
+    there, collected and run in base_copy by group's configuration, writing the run's reports to paths that start
+    with reports; their paths are from group's directory too. And whether base_copy's deadline stopped it, which
+    leaves no time for another group. label names the group's tests in a finding about all of them, as
+    _PytestGroup.label does; None when they are all the change's tests. When the run imported first-party code from
+    the working tree, as _imported_from_working_tree tells, no test is judged, and one not-run finding names it."""
     which = label or "the changed tests"
-    ids, stopped, problem = _collect_at_base(group.setup, tests, deadline, env)
+    ids, stopped, problem = _collect_at_base(base_copy, group.setup, tests)
     if stopped:
-        return [_base_run_budget_reached(budget, f"while it collected {which}")], True
+        return [_base_run_budget_reached(base_copy.budget, f"while it collected {which}")], True
     if problem:
         return [_finding(None, None, "not-run", f"{problem}; {which} were not run there.")], False
     if not ids:
         return [], False
-    left = deadline - time.monotonic()
+    left = base_copy.deadline - time.monotonic()
     if left <= 0:
-        return [_base_run_budget_reached(budget, f"once it had collected {which}, before it ran them")], True
+        return [_base_run_budget_reached(base_copy.budget, f"once it had collected {which}, before it ran them")], True
+    report, imports = f"{reports}.xml", f"{reports}-imports.json"
     proc, problem = _pytest(group.setup, "running the changed tests at the base",
-                            ["-p", "no:randomly", f"--junitxml={report}", *map(group.setup.argument, ids)],
-                            timeout=left, env=env)
+                            ["-p", "no:randomly", "-p", _BASE_IMPORTS_PLUGIN,
+                             f"--gate-imports-root={base_copy.change.root}", f"--gate-imports-report={imports}",
+                             f"--junitxml={report}", *map(group.setup.argument, ids)],
+                            timeout=left, env=base_copy.env)
     if isinstance(proc, _PytestStopped):
         ran = sum(len(m[1]) for m in re.finditer(r"^([.FEsxX]+) *(?:\[ *\d+%\])?$", proc.stdout, re.MULTILINE))
         of = f" of {label}" if label else ""
-        return [_base_run_budget_reached(budget, f"after {ran} of the {len(ids)} test cases{of} it was given, before "
-                                                 f"it reported them")], True
+        when = f"after {ran} of the {len(ids)} test cases{of} it was given, before it reported them"
+        return [_base_run_budget_reached(base_copy.budget, when)], True
     if problem or proc is None:
         return [_finding(None, None, "not-run", f"{problem}; {which} were not judged.")], False
     try:
         cases = junit_outcomes(report)
+        outside = _imported_from_working_tree(base_copy, imports)
     except GateError as e:
         return [_finding(None, None, "not-run", f"pytest, running the changed tests at the base, wrote no report the "
                                                 f"gate can read ({e}): {_said(proc)}")], False
-    # Each test's outcomes at the base, its skips left out.
+    if outside:
+        named = _series([f"`{name}` (`{path}`)" for name, path in outside], limit=5)
+        return [_finding(None, None, "not-run", f"{which} imported {named} from the working tree, not from the copy "
+                                                f"of the base, as from a project installed into the gate's "
+                                                f"interpreter, so they were not judged.")], False
+    return [_finding(path, tests[(path, name)], "passes-at-base",
+                     f"`{name}` passes without the change, so it does not test it.")
+            for path, name in _passed_tests(cases, ids)], False
+
+
+def _passed_tests(cases: list[tuple[str, str, str]], ids: list[str]) -> list[tuple[str, str]]:
+    """The tests, as (path, qualified name) and sorted, of which cases, a run's outcomes as junit_outcomes gives them,
+    passed every case of ids, the node ids the run was given, that it did not skip; a test whose cases were all
+    skipped is not one."""
     outcomes: dict[tuple[str, str], set[str]] = {}
     by_case = {_junit_case(i): i for i in ids}
     for case, outcome, _ in cases:
         if (i := by_case.get(case)) is not None and outcome != "skipped":
             path, names, _ = _node_parts(i)
             outcomes.setdefault((path, ".".join(names)), set()).add(outcome)
-    return [_finding(path, tests[(path, name)], "passes-at-base",
-                     f"`{name}` passes without the change, so it does not test it.")
-            for (path, name), seen in sorted(outcomes.items()) if seen == {"passed"}], False
+    return [test for test, seen in sorted(outcomes.items()) if seen == {"passed"}]
 
 
-def _collect_at_base(setup: _PytestSetup, tests: dict[tuple[str, str], int], deadline: float,
-                     env: dict[str, str]) -> tuple[list[str], bool, str | None]:
+def _imported_from_working_tree(base_copy: _BaseCopy, imports: str) -> list[tuple[str, str]]:
+    """The top-level modules under which a run at the base imported a module from the working tree's files of the
+    project rather than from the copy, whichever of the changed tests, their conftest.py files or their helpers
+    imported it, as the reports _BASE_IMPORTS_PLUGIN wrote at imports, and beside it for pytest-xdist's workers, tell
+    them: each by its name and the path, from the working tree's top, of the file of the first such module in name
+    order, itself or one below it, sorted. The project's files are those git tracks at the base, which the copy
+    holds, and those the change adds; others under the top, such as a virtual environment's, are not the project's.
+    Raises GateError when a report cannot be read, naming it."""
+    folder, stem = os.path.split(imports)
+    try:
+        workers = sorted(name for name in os.listdir(folder) if name.startswith(f"{stem}-"))
+    except OSError as e:
+        raise GateError(f"{folder}: {e}") from e
+    located: dict = {}
+    for path in [imports, *(os.path.join(folder, name) for name in workers)]:
+        try:
+            with open(path, encoding="utf-8") as f:
+                part = json.load(f)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise GateError(f"{path}: {e}") from e
+        if not isinstance(part, dict):
+            raise GateError(f"{path}: not a JSON object")
+        located.update(part)
+    added = {new for _, new in base_copy.change.files if new is not None}
+    out: dict[str, str] = {}
+    for name, path in sorted(located.items()):
+        if isinstance(path, str) and (os.path.lexists(os.path.join(base_copy.tree, path)) or path in added):
+            out.setdefault(name.partition(".")[0], path)
+    return sorted(out.items())
+
+
+def _collect_at_base(base_copy: _BaseCopy, setup: _PytestSetup,
+                     tests: dict[tuple[str, str], int]) -> tuple[list[str], bool, str | None]:
     """The node ids, one per parameter set, of those of tests, keyed by their paths from setup's root, that pytest
-    collects by setup in the copy of the base, with env, by deadline, a time.monotonic() time; whether the deadline
-    stopped it; and the problem, a clause, when it went wrong otherwise. A test file that cannot be imported at the
-    base, or a conftest.py whose import raises ImportError there, gives no ids for the tests it covers and no problem:
-    that is the expected outcome for a test of what the change adds. So does a test pytest does not collect, such as a
-    test_* method of a class not named Test*. A pytest that stops before it collects, as for a plugin that cannot be
-    imported, is a problem."""
+    collects by setup in base_copy, with its env, by its deadline; whether the deadline stopped it; and the problem, a
+    clause, when it went wrong otherwise.
+
+    A test file that cannot be imported at the base gives no ids for the tests it covers and no problem: that is the
+    expected outcome for a test of what the change adds. So does a test pytest does not collect, such as a test_*
+    method of a class not named Test*, and each test under a conftest.py that fails to load there, whatever it raises,
+    through a file the change edits: the conftest.py itself, a helper beside the tests that it imports, which the copy
+    holds as the working tree has it, or source the copy holds as the base has it. Without the change's edit of that
+    file, the conftest.py fails, so the failure is the change's. One that fails through no file the change edits is a
+    problem: the base itself fails there. So is a pytest that stops before it collects, as for a plugin that cannot be
+    imported."""
     files = sorted({path for path, _ in tests})
-    # Exit status 1: some file could not be collected, which --continue-on-collection-errors lets the others outlive;
-    # 4, a usage error, which a conftest.py that cannot be imported gives; 5: no test was collected.
-    proc, problem = _pytest(setup, "collecting the changed tests at the base",
-                            ["-p", "no:randomly", "--collect-only", "--continue-on-collection-errors",
-                             *map(setup.argument, files)],
-                            timeout=deadline - time.monotonic(), ok=(0, 1, 4, 5), env=env)
-    if isinstance(proc, _PytestStopped):
-        return [], True, None
-    if problem or proc is None:
-        return [], False, problem
-    # pytest exits 1 too when it stops before collecting, as for a plugin a conftest.py names that cannot be imported;
-    # then it prints a traceback and no summary of what it collected.
-    if proc.returncode == 1 and not re.search(r"^(?:no tests|\d+ tests?) collected\b", proc.stdout, re.MULTILINE):
-        return [], False, f"pytest stopped before it collected the changed tests at the base: {_said(proc)}"
-    if proc.returncode != 4:
-        ids, problem = _listed_tests(proc, "collecting the changed tests at the base", tests)
-        return ids, False, problem
-    if not _conftest_import_failed(proc):
-        return [], False, f"pytest, collecting the changed tests at the base, exited with status 4: {_said(proc)}"
-    if len(files) == 1:
-        return [], False, None
-    # pytest loads the conftest.py files of every path it is given before it collects any, so one that cannot be
-    # imported stops them all: each file is collected on its own, and only those under it give nothing.
-    collected: list[str] = []
-    for path in files:
-        found, stopped, problem = _collect_at_base(setup, {t: n for t, n in tests.items() if t[0] == path},
-                                                   deadline, env)
-        if stopped or problem:
-            return [], stopped, problem
-        collected += found
-    return collected, False, None
+    doing = "collecting the changed tests at the base"
+    # pytest loads the conftest.py files above every path it is given before it collects any, so one that fails stops
+    # them all: the files under it are left out, and the others collected again, until none fails. Each round leaves
+    # out at least the file that led pytest to the conftest.py.
+    while files:
+        # Exit status 1: some file could not be collected, which --continue-on-collection-errors lets the others
+        # outlive; 4, a usage error, which a conftest.py that fails to load gives; 5: no test was collected.
+        proc, problem = _pytest(setup, doing,
+                                ["-p", "no:randomly", "--collect-only", "--continue-on-collection-errors",
+                                 *map(setup.argument, files)],
+                                timeout=base_copy.deadline - time.monotonic(), ok=(0, 1, 4, 5), env=base_copy.env)
+        if isinstance(proc, _PytestStopped):
+            return [], True, None
+        if problem or proc is None:
+            return [], False, problem
+        # pytest exits 1 too when it stops before collecting, as for a plugin a conftest.py names that cannot be
+        # imported; then it prints a traceback and no summary of what it collected.
+        if proc.returncode == 1 and not re.search(r"^(?:no tests|\d+ tests?) collected\b", proc.stdout, re.MULTILINE):
+            return [], False, f"pytest stopped before it collected the changed tests at the base: {_said(proc)}"
+        if proc.returncode != 4:
+            ids, problem = _listed_tests(proc, doing, tests)
+            return ids, False, problem
+        files, problem = _outside_failed_conftest(base_copy, setup, proc, files)
+        if problem:
+            return [], False, problem
+    return [], False, None
 
 
-def _conftest_import_failed(proc: subprocess.CompletedProcess) -> bool:
-    """Whether proc, a pytest run that exited with status 4, stopped because a conftest.py raised ImportError (or
-    ModuleNotFoundError) as it loaded, as pytest 9 words that: not for any other exception a conftest.py raises."""
+def _outside_failed_conftest(base_copy: _BaseCopy, setup: _PytestSetup, proc: subprocess.CompletedProcess,
+                             files: list[str]) -> tuple[list[str], str | None]:
+    """Those of files, test files by their paths from setup's root, that are not under the conftest.py that stopped
+    proc, their collection by _collect_at_base that exited with status 4, when it failed through a file the change
+    edits (_failing_conftest); at least one is under it. Else [] and the problem, a clause: the conftest.py failed
+    through no file the change edits, so the base itself fails there, it lies above none of files, or proc names
+    none."""
+    doing = "collecting the changed tests at the base"
+    failed = _failing_conftest(proc, setup.top)
+    if failed is None:
+        return [], f"pytest, {doing}, exited with status 4: {_said(proc)}"
+    conftest, error, through = failed
+    if not through & base_copy.change.changed.keys():
+        return [], (f"pytest, {doing}, could not load `{conftest}`, which fails through no file the change edits, so "
+                    f"the base fails there: {error}")
+    # One at the top, whose directory is "", covers every file.
+    under = os.path.dirname(conftest)
+    left = [path for path in files if under and not setup.argument(path).startswith(f"{under}/")]
+    if left == files:
+        return [], f"pytest, {doing}, could not load `{conftest}`, above none of the changed tests: {error}"
+    return left, None
+
+
+def _failing_conftest(proc: subprocess.CompletedProcess, top: str) -> tuple[str, str, frozenset[str]] | None:
+    """The conftest.py that stopped proc, a pytest run in top that exited with status 4, as it loaded, whatever it
+    raised: as pytest 9 words that (print_conftest_import_error in its _pytest/config/__init__.py), "ImportError while
+    loading conftest '<path>'." for any exception, then the traceback, then the exception on lines marked "E". So, its
+    path; the exception, as the first "E" line, or the conftest line itself when there is none; and the files the
+    traceback passes through, the conftest.py among them. Paths are from top, each with its directory resolved, but
+    not the file itself: a conftest.py that is a link is named by the link. None when proc names no such file."""
     said = proc.stdout + proc.stderr
-    return ("ImportError while loading conftest" in said
-            and re.search(r"^E\s+(?:ImportError|ModuleNotFoundError)\b", said, re.MULTILINE) is not None)
+    found = re.search(r"^ImportError while loading conftest '(.*)'\.$", said, re.MULTILINE)
+    if found is None:
+        return None
+    raised = re.compile(r"^E\s+(\S.*)$", re.MULTILINE).search(said, found.end())
+    traceback = said[found.end():raised.start() if raised else len(said)]
+    conftest = _path_from(top, found[1])
+    through = {conftest, *(_path_from(top, m[1]) for m in re.finditer(r"^(\S.*?):\d+: in ", traceback, re.MULTILINE))}
+    return conftest, _clip(raised[1].strip() if raised else found[0]), frozenset(through)
+
+
+def _path_from(top: str, path: str) -> str:
+    """path, absolute or from top, as a repository path from top: its directory resolved, as top is, and its last
+    part kept as it is."""
+    folder = os.path.realpath(os.path.join(top, os.path.dirname(path)))
+    return os.path.relpath(os.path.join(folder, os.path.basename(path)), os.path.realpath(top)).replace(os.sep, "/")
 
 
 def _base_run_budget_reached(budget: float, when: str) -> dict:
@@ -4853,21 +5010,19 @@ def _base_run_budget_reached(budget: float, when: str) -> dict:
                                                   f"{when}, so none of them was judged.")
 
 
-def _copy_base_with_tests(change: GateChange, dest: str, archive: str) -> None:
+def _copy_base_with_tests(change: GateChange, dest: str, archive: str) -> list[tuple[str, str]]:
     """Write the files git tracked at change.base to dest, a directory it makes, through a tar file at archive, then
     replace each file of the change's that _beside_tests accepts with the working tree's: removed at its path at the
     base, and copied, a symbolic link as a link, to its path in the working tree. A symbolic link is written as it is,
     wherever it points, and no file is written or removed through one: a link on the way to a replaced file is
-    replaced by a directory, as the working tree has one there. A submodule is an empty directory, as git archive
-    leaves it.
-    Raises GateError when git cannot write the archive, tarfile.TarError when it cannot be unpacked, and
-    OSError when dest exists or a file cannot be written."""
-    _git(change.root, "archive", "--format=tar", f"--output={archive}", change.base, timeout=GATE_TOOL_TIMEOUT)
+    replaced by a directory, as the working tree has one there. A submodule holds the files of the commit the base
+    records for it, as _unpack_commit writes them.
+
+    Returns the submodules left empty, as _unpack_commit does. Raises GateError when git cannot list or write a
+    commit, tarfile.TarError when an archive cannot be unpacked, and OSError when dest exists or a file cannot be
+    written."""
     os.makedirs(dest)
-    with tarfile.open(archive) as tar:
-        # "tar", not "data": a tracked link out of the tree is the repository's own; both refuse a member whose path
-        # leads out of dest, through a link or otherwise.
-        tar.extractall(dest, filter="tar")
+    empty = _unpack_commit(change.root, change.base, dest, archive)
     # A path the base tracks has no link above it there.
     for old, _ in change.files:
         if old is not None and _beside_tests(old) and os.path.lexists(path := os.path.join(dest, old)):
@@ -4881,6 +5036,44 @@ def _copy_base_with_tests(change: GateChange, dest: str, archive: str) -> None:
             elif os.path.lexists(dst):
                 os.remove(dst)
             shutil.copy2(src, dst, follow_symlinks=False)
+    return empty
+
+
+def _unpack_commit(repo: str, commit: str, dest: str, archive: str, prefix: str = "") -> list[tuple[str, str]]:
+    """Write the files git tracked at commit in the repository whose working tree's top is repo to dest, an existing
+    directory, through a tar file at archive, which it overwrites; then fill each submodule's directory the same way,
+    from the submodule's own repository in repo's working tree, at the commit that commit records for it, its own
+    submodules too. A submodule that is not initialised there, or whose repository lacks that commit, is left an empty
+    directory, as git archive leaves it; one that git archive leaves out, as for export-ignore, stays missing.
+
+    Returns those, each by its path with prefix before it, and why, a clause such as "which is not initialised in the
+    working tree". Raises GateError when git cannot list or write a commit, and tarfile.TarError when an archive
+    cannot be unpacked."""
+    _git(repo, "archive", "--format=tar", f"--output={archive}", commit, timeout=GATE_TOOL_TIMEOUT)
+    with tarfile.open(archive) as tar:
+        # "tar", not "data": a tracked link out of the tree is the repository's own; both refuse a member whose path
+        # leads out of dest, through a link or otherwise.
+        tar.extractall(dest, filter="tar")
+    # Each entry is "<mode> <type> <object>\t<path>"; a submodule's mode is 160000 and its object the commit.
+    listing = _git(repo, "ls-tree", "-r", "-z", commit, timeout=GATE_TOOL_TIMEOUT, verbatim=True)
+    empty: list[tuple[str, str]] = []
+    for entry in listing.split("\0"):
+        meta, _, path = entry.partition("\t")
+        # A submodule the commit's .gitattributes marks export-ignore is missing from the archive, as other paths are.
+        if not meta.startswith("160000 ") or not os.path.isdir(os.path.join(dest, path)):
+            continue
+        recorded, name, sub = meta.split()[2], f"{prefix}{path}", os.path.join(repo, path)
+        # The submodule's directory is the top of a repository of its own only once it is initialised: before, git
+        # finds the superproject above it, and names the directory as a prefix within it.
+        own = _git_run(sub, "rev-parse", "--show-prefix", timeout=GATE_TOOL_TIMEOUT, verbatim=True)
+        if own.returncode != 0 or own.stdout.strip("\n"):
+            empty.append((name, "which is not initialised in the working tree"))
+        elif _git_run(sub, "cat-file", "-e", f"{recorded}^{{commit}}", timeout=GATE_TOOL_TIMEOUT).returncode != 0:
+            why = f"whose repository in the working tree does not have the base's commit {recorded[:12]}"
+            empty.append((name, why))
+        else:
+            empty += _unpack_commit(sub, recorded, os.path.join(dest, path), archive, f"{name}/")
+    return empty
 
 
 def _unlinked_path(dest: str, path: str) -> str:

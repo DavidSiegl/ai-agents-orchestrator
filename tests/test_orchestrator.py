@@ -19,6 +19,7 @@ import stat
 import struct
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import textwrap
 import threading
@@ -7733,6 +7734,113 @@ class TestPassesAtBase(unittest.TestCase):
         self.put("tests/test_sub.py", "from calc import sub\n\n\ndef test_sub():\n    assert sub(3, 1) == 2\n")
         self.assertEqual(self.found(), [])
 
+    def installed_editable(self, where, finder=False):
+        """Move calc.py to where/calc.py, a directory of the repository, with a pytest.ini that puts nothing on the
+        path, commit that as the base, and make the gate's interpreter a new virtual environment's Python into which
+        the project is installed editable, as setuptools and hatchling write an editable install: a .pth file there
+        puts the working tree's where on the path, or with finder, imports a module that appends to sys.meta_path a
+        finder of calc in the working tree's where. The environment sees this suite's packages, pytest among them,
+        through another .pth file. Making it takes the standard library alone, without pip, and no network: the
+        suite's own environment has neither pip nor setuptools to make a real editable install with."""
+        venv = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, venv)
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", venv],  # noqa: S603
+                       check=True, capture_output=True, timeout=120)
+        python = os.path.join(venv, "bin", "python")
+        site_dir = subprocess.run([python, "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],  # noqa: S603
+                                  check=True, capture_output=True, text=True, timeout=60).stdout.strip()
+        with open(os.path.join(site_dir, "suite.pth"), "w") as f:
+            f.write(sysconfig.get_path("purelib") + "\n")
+        calc = os.path.join(self.repo, where, "calc.py")
+        with open(os.path.join(site_dir, "__editable___calc_finder.py"), "w") as f:
+            f.write("import importlib.util\nimport sys\n\n\nclass Finder:\n    @classmethod\n"
+                    "    def find_spec(cls, name, path=None, target=None):\n"
+                    "        if name != 'calc':\n            return None\n"
+                    f"        return importlib.util.spec_from_file_location(name, {calc!r})\n"
+                    "\n\ndef install():\n    sys.meta_path.append(Finder)\n")
+        with open(os.path.join(site_dir, "__editable__.calc-0.pth"), "w") as f:
+            f.write("import __editable___calc_finder; __editable___calc_finder.install()\n" if finder
+                    else os.path.dirname(calc) + "\n")
+        os.makedirs(os.path.join(self.repo, where))
+        self.git("mv", "calc.py", f"{where}/calc.py")
+        self.put("pytest.ini", "[pytest]\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", f"{where} layout")
+        p = patch.object(orchestrator.sys, "executable", python)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def add_sub(self, where):
+        """Add sub to where/calc.py, and test_sub, which calc.sub at the base cannot pass, to tests/test_calc.py."""
+        self.put(f"{where}/calc.py", self.CALC + "\n\ndef sub(a, b):\n    return a - b\n")
+        self.put("tests/test_calc.py", "import calc\n\n" + self.TESTS
+                 + "\n\ndef test_sub():\n    assert calc.sub(3, 1) == 2\n")
+
+    def test_an_editable_install_of_a_src_layout_imports_the_base(self):
+        # The run at the base puts the copy's src/ on the path, ahead of the installed working tree's.
+        self.installed_editable("src")
+        self.add_sub("src")
+        self.assertEqual(self.found(), [])
+
+    def test_a_namespace_package_partly_in_the_working_tree_is_not_taken_for_one_imported_from_it(self):
+        # ns has no __init__.py, so its __path__ holds the copy's src/ns and, through the editable install, the
+        # working tree's; its module comes from the copy.
+        self.installed_editable("src")
+        self.put("src/ns/helper.py", "ONE = 1\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "namespace package")
+        self.add_sub("src")
+        self.put("tests/test_calc.py", "from ns import helper\n\n" + self.TESTS
+                 + "\n\ndef test_mul_one():\n    assert mul(helper.ONE, 1) == 1\n")
+        self.assertEqual([(f["rule"], f["message"].split("`")[1]) for f in self.found()],
+                         [("passes-at-base", "test_mul_one")])
+
+    def test_a_module_a_namespace_package_finds_in_the_working_tree_cannot_be_judged(self):
+        # The change adds ns/extra.py, which the copy lacks; ns's __path__ finds it in the working tree's src/ns.
+        self.installed_editable("src")
+        self.put("src/ns/helper.py", "ONE = 1\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "namespace package")
+        self.put("src/calc.py", self.CALC.replace("a - b", "a + b"))
+        self.put("src/ns/extra.py", "TWO = 2\n")
+        self.put("tests/test_calc.py", "from ns import extra\n\n" + self.TESTS
+                 + "\n\ndef test_mul_two():\n    assert mul(extra.TWO, 1) == 2\n")
+        self.assertEqual([(f["rule"], "`ns` (`src/ns/extra.py`)" in f["message"]) for f in self.found()],
+                         [("not-run", True)])
+
+    def test_a_package_only_a_conftest_imports_from_the_working_tree_cannot_be_judged(self):
+        # The changed test reaches calc only through a fixture of the conftest.py, which imports it from lib/.
+        self.installed_editable("lib")
+        self.put("tests/conftest.py", "import pytest\n\n\n@pytest.fixture\ndef calc_module():\n"
+                                      "    import calc\n    return calc\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "fixture")
+        self.put("lib/calc.py", self.CALC + "\n\ndef sub(a, b):\n    return a - b\n")
+        self.put("tests/test_sub.py", "def test_sub(calc_module):\n    assert calc_module.sub(3, 1) == 2\n")
+        self.assertEqual([(f["rule"], "`calc` (`lib/calc.py`)" in f["message"]) for f in self.found()],
+                         [("not-run", True)])
+
+    def test_an_editable_install_by_an_import_finder_imports_the_base(self):
+        # The finder comes after Python's own path search, which finds calc in the copy's src/ first.
+        self.installed_editable("src", finder=True)
+        self.add_sub("src")
+        self.assertEqual(self.found(), [])
+
+    def test_a_package_an_import_finder_takes_from_the_working_tree_cannot_be_judged(self):
+        self.installed_editable("lib", finder=True)
+        self.add_sub("lib")
+        self.assertEqual([(f["rule"], "`calc` (`lib/calc.py`)" in f["message"]) for f in self.found()],
+                         [("not-run", True)])
+
+    def test_a_package_imported_from_the_working_tree_cannot_be_judged(self):
+        # lib/ is no import root of the copy's, so calc comes from the working tree, through the editable install.
+        self.installed_editable("lib")
+        self.add_sub("lib")
+        self.assertEqual([(f["path"], f["line"], f["rule"], f["message"]) for f in self.found()], [(
+            None, None, "not-run", ("the changed tests imported `calc` (`lib/calc.py`) from the working tree, not "
+                                    "from the copy of the base, as from a project installed into the gate's "
+                                    "interpreter, so they were not judged."))])
+
     def test_a_change_to_the_tests_alone_is_not_run(self):
         self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_zero():\n    assert mul(0, 5) == 0\n")
         with patch.object(orchestrator, "_pytest") as pytest_run:
@@ -7808,14 +7916,181 @@ class TestPassesAtBase(unittest.TestCase):
         self.assertEqual([(f["path"], f["message"].split("`")[1]) for f in self.found()],
                          [("tests/test_calc.py", "test_mul_one")])
 
-    def test_a_conftest_broken_otherwise_is_a_finding(self):
+    def test_where_the_run_at_the_base_imported_from_is_read_from_its_reports(self):
+        tree = os.path.join(self.repo, "copy")
+        self.put("copy/lib/calc.py", "")
+        self.put("new/sub.py", "")
+        self.git("add", "-A")
+        change = orchestrator.GateChange.from_tree(self.repo, self.git("rev-parse", "HEAD").strip())
+        base_copy = orchestrator._BaseCopy(change, tree, {}, 0.0, 1.0)
+        reports = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, reports)
+        report = os.path.join(reports, "base-0-imports.json")
+
+        def write(path, text):
+            with open(path, "w") as f:
+                f.write(text)
+        # Tracked at the base, as the copy shows, or added by the change: the project's, named by its top-level
+        # module; a virtual environment's under the top is not. A pytest-xdist worker's report beside the
+        # controller's counts too.
+        write(report, '{"calc": "lib/calc.py", "new.sub": "new/sub.py", "pytest": ".venv/lib/pytest/__init__.py"}')
+        write(f"{report}-gw0", '{"w": "lib/calc.py"}')
+        self.assertEqual(orchestrator._imported_from_working_tree(base_copy, report),
+                         [("calc", "lib/calc.py"), ("new", "new/sub.py"), ("w", "lib/calc.py")])
+        # A report that cannot be read is named, the controller's or a worker's.
+        for bad in (report, f"{report}-gw0"):
+            for text in ("[]", "{"):
+                with self.subTest(bad=bad, text=text):
+                    write(report, "{}")
+                    write(f"{report}-gw0", "{}")
+                    write(bad, text)
+                    with self.assertRaisesRegex(orchestrator.GateError, f"^{re.escape(bad)}: "):
+                        orchestrator._imported_from_working_tree(base_copy, report)
+        os.remove(report)
+        with self.assertRaisesRegex(orchestrator.GateError, f"^{re.escape(report)}: "):
+            orchestrator._imported_from_working_tree(base_copy, report)
+
+    def test_the_imports_plugin_writes_a_worker_s_report_beside_the_controller_s(self):
+        plugin = ModuleType("plugin")
+        exec(orchestrator._BASE_IMPORTS_PLUGIN_SOURCE, plugin.__dict__)  # noqa: S102
+        reports = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, reports)
+        report = os.path.join(reports, "imports.json")
+        options = {"gate_imports_root": os.path.dirname(orchestrator.__file__), "gate_imports_report": report}
+        # A pytest the gate runs inside an xdist worker of its own inherits PYTEST_XDIST_WORKER, but is no worker.
+        with patch.dict(os.environ, {"PYTEST_XDIST_WORKER": "gw7"}):
+            for config in (SimpleNamespace(getoption=options.get),
+                           SimpleNamespace(getoption=options.get, workerinput={"workerid": "gw1"})):
+                plugin.pytest_sessionfinish(SimpleNamespace(config=config))
+        self.assertEqual(sorted(os.listdir(reports)), ["imports.json", "imports.json-gw1"])
+        with open(report) as f:
+            self.assertEqual(json.load(f)["orchestrator"], "orchestrator.py")
+
+    def test_a_usage_error_without_a_conftest_is_a_finding(self):
+        self.fix_add()
+        self.fake_pytest("echo 'ERROR: usage: no such option'; exit 4", "exit 0")
+        self.assertEqual([(f["rule"], f["message"]) for f in self.found()], [(
+            "not-run", ("pytest, collecting the changed tests at the base, exited with status 4: ERROR: usage: no such "
+                        "option; the changed tests were not run there."))])
+
+    def test_a_conftest_the_change_does_not_edit_failing_is_a_finding(self):
         self.put("calc.py", self.CALC.replace("a - b", "a + b"))
         self.put("tests/conftest.py", "raise RuntimeError('broken')\n")
         self.git("add", "tests/conftest.py")
         self.git("commit", "--quiet", "-m", "broken conftest")
         self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_one():\n    assert mul(1, 1) == 1\n")
-        self.assertEqual([(f["rule"], "exited with status 4" in f["message"]) for f in self.found()],
-                         [("not-run", True)])
+        self.assertEqual([(f["path"], f["rule"], f["message"]) for f in self.found()], [(
+            None, "not-run", ("pytest, collecting the changed tests at the base, could not load `tests/conftest.py`, "
+                              "which fails through no file the change edits, so the base fails there: RuntimeError: "
+                              "broken; the changed tests were not run there."))])
+
+    def test_a_conftest_failing_through_a_helper_the_change_edits_hides_only_the_tests_under_it(self):
+        # The conftest.py is the base's, but the helper it imports is the working tree's, which needs calc.TWO.
+        self.put("tests/b/conftest.py", "import helpers\n")
+        self.put("tests/b/helpers.py", "")
+        self.git("add", "tests/b")
+        self.git("commit", "--quiet", "-m", "helpers")
+        self.put("calc.py", self.CALC.replace("a - b", "a + b") + "\n\nTWO = 2\n")
+        self.put("tests/b/helpers.py", "import calc\n\nTWO = calc.TWO\n")
+        self.put("tests/b/test_two.py", "from calc import mul\n\n\ndef test_two():\n    assert mul(2, 1) == 2\n")
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_one():\n    assert mul(1, 1) == 1\n")
+        self.assertEqual([(f["path"], f["message"].split("`")[1]) for f in self.found()],
+                         [("tests/test_calc.py", "test_mul_one")])
+
+    def test_a_conftest_that_is_a_link_the_change_edits_is_named_by_the_link(self):
+        # Neither file the link may point at is the change's; the change points it at the one that needs calc.TWO.
+        self.put("shared/plain.py", "")
+        self.put("shared/two.py", "import calc\n\nTWO = calc.TWO\n")
+        os.makedirs(os.path.join(self.repo, "tests/b"))
+        os.symlink("../../shared/plain.py", os.path.join(self.repo, "tests/b/conftest.py"))
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "linked conftest")
+        self.put("calc.py", self.CALC.replace("a - b", "a + b") + "\n\nTWO = 2\n")
+        os.remove(os.path.join(self.repo, "tests/b/conftest.py"))
+        os.symlink("../../shared/two.py", os.path.join(self.repo, "tests/b/conftest.py"))
+        self.put("tests/b/test_two.py", "from calc import mul\n\n\ndef test_two():\n    assert mul(2, 1) == 2\n")
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_one():\n    assert mul(1, 1) == 1\n")
+        self.assertEqual([(f["path"], f["message"].split("`")[1]) for f in self.found()],
+                         [("tests/test_calc.py", "test_mul_one")])
+
+    def test_a_conftest_the_change_edits_failing_otherwise_hides_only_the_tests_under_it(self):
+        # At the base, calc has no TWO, so the conftest.py the change edits raises AttributeError there.
+        self.put("tests/b/conftest.py", "import calc\n")
+        self.git("add", "tests/b/conftest.py")
+        self.git("commit", "--quiet", "-m", "conftest")
+        self.put("calc.py", self.CALC.replace("a - b", "a + b") + "\n\nTWO = 2\n")
+        self.put("tests/b/conftest.py", "import calc\n\nTWO = calc.TWO\n")
+        self.put("tests/b/test_two.py", "from calc import mul\n\n\ndef test_two():\n    assert mul(2, 1) == 2\n")
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_one():\n    assert mul(1, 1) == 1\n")
+        self.assertEqual([(f["path"], f["message"].split("`")[1]) for f in self.found()],
+                         [("tests/test_calc.py", "test_mul_one")])
+
+    def test_a_failing_root_conftest_costs_one_collection(self):
+        self.put("calc.py", self.CALC.replace("a - b", "a + b") + "\n\nTWO = 2\n")
+        self.put("conftest.py", "import calc\n\nTWO = calc.TWO\n")
+        for name in ("a", "b", "c"):
+            self.put(f"tests/test_{name}.py", "from calc import mul\n\n\ndef test_one():\n    assert mul(1, 1) == 1\n")
+        with patch.object(orchestrator, "_pytest", wraps=orchestrator._pytest) as pytest_run:
+            self.assertEqual(self.found(), [])
+        self.assertLessEqual(pytest_run.call_count, 2)
+
+    def test_a_failing_conftest_above_none_of_the_changed_tests_is_a_finding(self):
+        # Real pytest fails only at a conftest.py above a file it was given; a fake one names another, which ends
+        # the collection rather than repeating it.
+        self.put("elsewhere/conftest.py", "")
+        self.fix_add()
+        self.fake_pytest("echo \"ImportError while loading conftest 'elsewhere/conftest.py'.\"; "
+                         "echo 'E   AttributeError: x'; exit 4", "exit 0")
+        self.assertEqual([(f["rule"], f["message"]) for f in self.found()], [(
+            "not-run", ("pytest, collecting the changed tests at the base, could not load `elsewhere/conftest.py`, "
+                        "above none of the changed tests: AttributeError: x; the changed tests were not run there."))])
+
+    def add_submodule(self):
+        """Commit, as the base, a submodule at vendor/lib whose helper.py defines ONE, on pytest's path; then fix add,
+        and add test_mul_again, which imports ONE from it and passes at the base."""
+        lib = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, lib)
+        self.host.git(lib, "init", "--quiet", "-b", "main")
+        with open(os.path.join(lib, "helper.py"), "w") as f:
+            f.write("ONE = 1\n")
+        self.host.git(lib, "add", "helper.py")
+        self.host.git(lib, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false",
+                      "commit", "--quiet", "-m", "lib")
+        self.git("-c", "protocol.file.allow=always", "submodule", "--quiet", "add", lib, "vendor/lib")
+        self.put("pytest.ini", "[pytest]\npythonpath = . vendor/lib\n")
+        self.git("add", "-A")
+        self.git("commit", "--quiet", "-m", "submodule")
+        self.fix_add("\n\ndef test_mul_again():\n    from helper import ONE\n    assert mul(ONE, ONE) == 1\n")
+
+    def test_a_test_importing_from_a_submodule_is_judged_at_the_base(self):
+        self.add_submodule()
+        self.assertEqual([(f["rule"], f["message"].split("`")[1]) for f in self.found()],
+                         [("passes-at-base", "test_mul_again")])
+
+    def test_a_submodule_not_initialised_is_one_finding(self):
+        self.add_submodule()
+        self.git("submodule", "--quiet", "deinit", "--force", "vendor/lib")
+        self.assertEqual([(f["path"], f["rule"], f["message"]) for f in self.found()], [(
+            None, "not-run", ("the copy of the base leaves a submodule empty, so a changed test that imports from "
+                              "it, if any does, was not judged: `vendor/lib`, which is not initialised in the working "
+                              "tree."))])
+
+    def test_a_submodule_marked_export_ignore_stays_out_of_the_copy(self):
+        self.add_submodule()
+        self.put(".gitattributes", "vendor/lib export-ignore\n")
+        self.git("add", ".gitattributes")
+        self.git("commit", "--quiet", "-m", "export-ignore")
+        self.assertEqual(self.found(), [])
+
+    def test_a_submodule_without_the_base_s_commit_is_one_finding(self):
+        self.add_submodule()
+        # The base records a commit that the submodule's repository in the working tree never had.
+        self.git("update-index", "--cacheinfo", f"160000,{'1' * 40},vendor/lib")
+        self.git("commit", "--quiet", "-m", "unknown submodule commit")
+        self.assertEqual([(f["path"], f["rule"], f["message"]) for f in self.found()], [(
+            None, "not-run", ("the copy of the base leaves a submodule empty, so a changed test that imports from "
+                              "it, if any does, was not judged: `vendor/lib`, whose repository in the working tree "
+                              "does not have the base's commit 111111111111."))])
 
     def test_nothing_is_written_through_a_link_the_change_replaces(self):
         outside = tempfile.mkdtemp()
