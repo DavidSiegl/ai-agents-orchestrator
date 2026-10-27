@@ -957,21 +957,24 @@ def _changed_line_coverage(report: str, root: str,
         if path is None:
             continue
         for line in cls.iterfind("lines/line"):
-            try:
-                number = int(line.get("number", ""))
-                covered = _cobertura_line_coverage(line) if number in changed[path] else None
-            except ValueError as e:
-                raise GateError(f"the coverage report {report} has a line it cannot read: {e}") from e
-            if covered is not None:
-                yield (path, number), *covered
+            if (entry := _changed_cobertura_line(report, line, changed[path])) is not None:
+                number, hit, taken, outcomes = entry
+                yield (path, number), hit, taken, outcomes
 
 
-def _cobertura_line_coverage(line: ElementTree.Element) -> tuple[bool, int, int]:
-    """(covered, covered branch outcomes, branch outcomes) of a Cobertura <line> element; 0 of 0 outcomes when it
-    has no branch data. Raises ValueError when its hits is not a whole number."""
-    m = re.search(r"\((\d+)/(\d+)\)", line.get("condition-coverage", "")) if line.get("branch") == "true" else None
-    taken, outcomes = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
-    return int(line.get("hits", "0")) > 0, taken, outcomes
+def _changed_cobertura_line(report: str, line: ElementTree.Element, added: set[int]) -> tuple[int, bool, int, int] | None:
+    """(number, covered, covered branch outcomes, branch outcomes) of a Cobertura <line> element of the report at
+    report, 0 of 0 outcomes when it has no branch data; None when its number is not in added, without reading the
+    rest. Raises GateError when its number, or for a line in added its hits, is not a whole number."""
+    try:
+        number = int(line.get("number", ""))
+        if number not in added:
+            return None
+        m = re.search(r"\((\d+)/(\d+)\)", line.get("condition-coverage", "")) if line.get("branch") == "true" else None
+        taken, outcomes = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+        return number, int(line.get("hits", "0")) > 0, taken, outcomes
+    except ValueError as e:
+        raise GateError(f"the coverage report {report} has a line it cannot read: {e}") from e
 
 
 def _coverage_sentence(c: NewCoverage, unmeasured: list[str]) -> str:
