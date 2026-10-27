@@ -155,30 +155,25 @@ pipeline {
             steps {
                 script {
                     def gate = 'gate.py'
-                    // The word the gate's program takes before its options: none for gate.py.
-                    def subcommand = ''
                     def rules = 'pyproject.toml'
                     def base
                     if (params.GIT_REF) {
                         // The snapshot's only parent is the run's base.
                         base = 'HEAD^'
                         // The gate and rules of the main commit Checkout named in the build's description, fetched
-                        // there. Cutover fallback, removed by ticket 03 of the gate split: a main from before gate.py
-                        // has its gate as orchestrator.py's gate subcommand, so that commit's orchestrator.py judges.
-                        def program = sh(returnStdout: true, script: '''
+                        // there. A main without gate.py, from before the gate split, cannot judge: this step fails, and
+                        // with it the build, writing no quality.md, rather than running some other program.
+                        sh '''
                             : "${JUDGED_MAIN:?is unset; run the whole build, not a restart from a later stage}"
+                            if ! git cat-file -e "$JUDGED_MAIN:gate.py" 2>/dev/null; then
+                                echo "main at $JUDGED_MAIN has no gate.py, so nothing can judge this snapshot" >&2
+                                exit 2
+                            fi
                             mkdir -p "$WORKSPACE_TMP/main"
                             git show "$JUDGED_MAIN:pyproject.toml" > "$WORKSPACE_TMP/main/pyproject.toml"
-                            if git cat-file -e "$JUDGED_MAIN:gate.py" 2>/dev/null; then
-                                program=gate.py
-                            else
-                                program=orchestrator.py
-                            fi
-                            git show "$JUDGED_MAIN:$program" > "$WORKSPACE_TMP/main/$program"
-                            printf '%s' "$program"
-                        ''').trim()
-                        gate = "${env.WORKSPACE_TMP}/main/${program}"
-                        subcommand = program == 'orchestrator.py' ? 'gate' : ''
+                            git show "$JUDGED_MAIN:gate.py" > "$WORKSPACE_TMP/main/gate.py"
+                        '''
+                        gate = "${env.WORKSPACE_TMP}/main/gate.py"
                         rules = "${env.WORKSPACE_TMP}/main/pyproject.toml"
                     } else if (env.CHANGE_TARGET) {
                         sh 'git fetch --quiet origin "+refs/heads/$CHANGE_TARGET:refs/remotes/origin/$CHANGE_TARGET"'
@@ -188,11 +183,9 @@ pipeline {
                     }
                     // The values reach the shell as environment variables, never as Groovy-built shell code.
                     def status
-                    withEnv(["GATE=${gate}", "GATE_SUBCOMMAND=${subcommand}", "GATE_RULES=${rules}",
-                             "GATE_BASE=${base}"]) {
+                    withEnv(["GATE=${gate}", "GATE_RULES=${rules}", "GATE_BASE=${base}"]) {
                         status = sh(returnStatus: true, script: '''
-                            uv run --frozen python "$GATE" ${GATE_SUBCOMMAND:+"$GATE_SUBCOMMAND"} \\
-                                --base "$GATE_BASE" --config "$GATE_RULES" \\
+                            uv run --frozen python "$GATE" --base "$GATE_BASE" --config "$GATE_RULES" \\
                                 --tests test-results.xml --coverage coverage.xml --out quality.md
                         ''')
                     }
