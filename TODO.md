@@ -88,7 +88,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 - **`TestGate.test_a_missing_tool_fails_naming_it` fails where shellcheck lives beside git.** `TestGate.setUp`
   (`tests/test_orchestrator.py`) puts git's own directory on `PATH` after the stubs, so on a machine with
   `/usr/bin/shellcheck` (agentbox, Debian's package) removing the stub still finds the real one and the gate passes.
-  Seen 2026-10-25 on `main` at `9448612`. Closes with `PATH` holding a directory with only a link to `git`.
+  Seen 2026-10-25 on `main` at `9448612`. On such a machine it also fails mutmut's stats run, which runs every test,
+  so `surviving-mutants` is `not-run` there, "failed to collect stats" (2026-10-27). Closes with `PATH` holding a
+  directory with only a link to `git`.
 - **unexpected-paths reads only the contract step's file.** `unexpected_paths` judges each path the change touches
   against `RunChange.spec`, the contract step's file, so a workflow whose contract is in business terms, such as
   `examples/workflows/product-team.toml`, whose requirements name no file and whose `design.md` lists the
@@ -240,16 +242,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
     `artifacts[relativePath]` in the result's `api/json` tree would halve the requests (F2).
   - No test covers a transient `CIError` between two reads, or a build that ends with a file other than the one read
     while it ran (F5).
-- **`test_invariants.py` and `test_docs.py` fail inside mutmut's copy.** Raised by cross-review 60 (2026-10-27), in
-  code PR #106 brought. Under mutmut, `SOURCE` is mutmut's mutated `orchestrator.py`, and `GATE_SOURCE` its
-  mutated `gate.py`, both in `source_paths`: each imports `mutmut`, and each
-  mutated function has `__mutmut_orig` and `__mutmut_N` copies, so the stdlib-only test fails for any change to a
-  function, and the unredirected-header test for a change to `CI._request`, `RunRequestHandler.do_OPTIONS` or
-  `_has_token`. `test_docs.py` reads `README.md` and resolves links into the whole repo, while `mutants/` holds only
-  `source_paths`, `also_copy` and mutmut's defaults. Either makes mutmut's clean run fail, so surviving-mutants is
-  `not-run`, besides the Hypothesis health check above. Closes with those tests reading the working tree's files, or
-  deselected under mutmut, or with README.md and the linked files in `also_copy`. Also: `test_invariants.py`'s
-  `AnyJenkins` and `Answer` copy `FakeCI` and `FakeResponse`, and `ROOT` is defined three times (F4).
+- **`test_invariants.py`'s `AnyJenkins` and `Answer` copy `FakeCI` and `FakeResponse`** of
+  `tests/test_orchestrator.py`. Raised by cross-review 60 (F4, 2026-10-27). Closes with one fake Jenkins the two files
+  share.
 - **`vague-names` does not split CamelCase.** `vague_names` matches a whole name or its last `_`-separated word,
   so `user_data` is found but a class `InfoManager` or `UserData` is not. Closes, if the run metrics show such names
   recur, with the last CamelCase word matched too.
@@ -385,6 +380,20 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   subdirectory.
 
 ## Fixed
+
+- **`test_invariants.py` and `test_docs.py` fail inside mutmut's copy.** Raised by cross-review 60 (2026-10-27), in
+  code PR #106 brought. mutmut runs the tests in `mutants/`, its copy of the repository, whose `orchestrator.py` and
+  `gate.py` hold every mutant beside each function and import `mutmut`, and which lacks `README.md`; so the stdlib-only
+  and unredirected-header tests read the mutated files, and `test_docs.py` failed reading `README.md`, which at
+  `da71e52` failed mutmut's stats run, "failed to collect stats", before the Hypothesis health check above was
+  reached. Past those, the clean run failed `test_no_test_sleeps_for_real`: pytest imports `conftest.py` afresh for
+  each run in one process, while `test_invariants.py`, imported once, kept the first run's `conftest.RealSleep`.
+  Fixed (2026-10-27, mutmut-hypothesis-health-check ticket 01): `tests/conftest.py`'s `REPO` is the repository's top
+  directory, the one above `mutants/` under mutmut, and the two files' `ROOT` is it, so they read the files as written
+  while running the mutated code, whose flags `test_docs.py` still checks; the sleep test takes `RealSleep` from
+  `sys.modules["conftest"]`, this run's. Not taken: deselecting the tests under mutmut, which would stop
+  `test_docs.py` killing mutants of the parsers' flags, nor `also_copy` of `README.md` and what the docs link to,
+  which would leave the source tests reading the mutated files.
 
 - **mutmut's clean test run fails on a hypothesis health check, so the gate mutation-tests nothing.** Under the
   gate's mutmut 3.8.0, each `@given` method of `tests/test_properties.py`, first

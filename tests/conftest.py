@@ -1,4 +1,5 @@
-"""Settings and guards every test file shares: Hypothesis's profiles, no network, and no real sleeping.
+"""Settings and guards every test file shares: Hypothesis's profiles, the repository's top directory, no network,
+and no real sleeping.
 
 The guards, each a fixture every test runs under, and each for this process only, not for a child process a test
 starts:
@@ -42,8 +43,17 @@ _connect_ex = socket.socket.connect_ex
 _create_connection = socket.create_connection
 _sleep = time.sleep
 
-# The code whose time.sleep calls the sleep guard refuses: the tests, and the orchestrator they test.
+# The top directory of the tree the tests run in, and import orchestrator.py and gate.py from: the repository, or
+# under mutmut its copy of it, mutants/ at the repository's top.
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+# The repository's top directory, whose files the tests read as text: the docs, and orchestrator.py and gate.py as
+# written. Under mutmut, which runs the tests in _ROOT = mutants/, that is the directory above, since mutmut's copy of
+# the code holds every mutant beside each function it mutates, and mutants/ lacks every file neither source_paths nor
+# also_copy names ([tool.mutmut] in pyproject.toml), README.md among them.
+REPO = _ROOT.parent if _ROOT.name == "mutants" else _ROOT
+
+# The code whose time.sleep calls the sleep guard refuses: the tests, and the orchestrator they test.
 _GUARDED_TESTS = _ROOT / "tests"
 _GUARDED_SOURCE = _ROOT / "orchestrator.py"
 
