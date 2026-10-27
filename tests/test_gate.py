@@ -832,14 +832,17 @@ class TestClippy(RepositoryTest):
 
     def test_an_added_allow_attribute_is_listed_as_a_suppression_in_a_rust_file_alone(self):
         self.put("crate/src/lib.rs", "#![cfg_attr(not(test), allow(clippy::all))]\n" + self.LIB
-                 + "#[allow(clippy::needless_return)]\npub fn two() -> i32 {\n    return 2;\n}\n")
+                 + "#[allow(clippy::needless_return)]\npub fn two() -> i32 {\n    return 2;\n}\n"
+                 + '#[cfg_attr(\n    not(test),\n    allow(clippy::needless_return)\n)]\npub fn three() {}\n'
+                 + '#[test] fn parses() { "1".parse::<i32>().expect("ok"); }\n')
         self.put("crate/notes.txt", "Write `#[allow(lint, reason = \"...\")]`.\n")
         self.git("add", "crate/notes.txt")
         status, out = self.gate()
         self.assertEqual(status, 0, out)
         self.assertTrue(out.endswith("## Suppressions added\n\n"
                                      "- `crate/src/lib.rs:1` `#![cfg_attr(not(test), allow(clippy::all))]`\n"
-                                     "- `crate/src/lib.rs:5` `#[allow(clippy::needless_return)]`\n"), out)
+                                     "- `crate/src/lib.rs:5` `#[allow(clippy::needless_return)]`\n"
+                                     "- `crate/src/lib.rs:11` `allow(clippy::needless_return)`\n"), out)
 
     def test_a_build_that_fails_without_a_compile_error_fails_naming_cargo_s_error(self):
         self.put("crate/build.rs", 'fn main() {\n    panic!("no");\n}\n')

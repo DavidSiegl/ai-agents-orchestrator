@@ -74,8 +74,8 @@ GATE_MIN_NEW_LINES = 20
 # Seconds each process a linter runs may take before the gate counts the linter as failed: its one run for most,
 # and for clippy each of the cargo commands Clippy says.
 GATE_TOOL_TIMEOUT = 600
-# Seconds a pytest or mutmut run the gate started is read for after it exited or was killed (_run_in_session), at
-# most: what a process outside its group, still holding its output, prints after that is lost.
+# Seconds a linter, pytest or mutmut run the gate started is read for after it exited or was killed
+# (_run_in_session), at most: what a process outside its group, still holding its output, prints after that is lost.
 TOOL_KILL_WAIT = 5
 # The flaky-tests check reruns the tests a change adds or edits once under each of these pytest-randomly seeds,
 # each pytest run, the collection before them included, within FLAKY_RUN_TIMEOUT seconds; so it adds at most
@@ -512,7 +512,9 @@ class Clippy(GateTool):
     pyproject.toml the gate is given holds none of clippy's. The gate caps every lint of the workspace's own crates
     at warn (rustc's --cap-lints), so that a lint at deny or forbid, which would fail its crate's build and stop
     cargo before the crates after it, is a finding like the rest: every finding is a warning, and the gate keeps
-    those on added lines. A build that still fails is a failed condition, naming the compiler's first error in a
+    those on added lines. The cap also lets an allow override a forbid, which rustc otherwise refuses (E0453), so
+    such an allow silences its lint here; it is listed under the suppressions added (TODO.md). A build that still
+    fails is a failed condition, naming the compiler's first error in a
     tracked file, wherever it is, else cargo's own: a change that deletes a function an old line calls breaks the
     build on no line it added.
 
@@ -657,10 +659,11 @@ class GateCheck:
 _FINDING_AT = re.compile(r"(?P<path>[^:]+):(?:(?P<line>\d+):(?:\d+:)?)? (?P<detail>.+)")
 
 # Comments that silence a linter or exempt lines from coverage, which the quality file lists for the Reviewer; and in
-# a Rust file, the attributes that silence a lint, also inside a cfg_attr, as in `#![cfg_attr(test, allow(...))]`.
+# a Rust file, the attributes that silence a lint: an allow or expect inside one attribute's brackets, also inside a
+# cfg_attr, as in `#![cfg_attr(test, allow(...))]`, or alone on a line, as rustfmt wraps a long cfg_attr's.
 _SUPPRESSION = re.compile(r"#.*\b(?:noqa|type:\s*ignore|shellcheck\s+disable|pragma:\s*no\s*(?:cover|branch|mutate))\b"
                           r"|<!--\s*pyml\s+disable")
-_RUST_SUPPRESSION = re.compile(r"#!?\[.*\b(?:allow|expect)\s*\(")
+_RUST_SUPPRESSION = re.compile(r"#!?\[[^\]]*\b(?:allow|expect)\s*\(|^\s*(?:allow|expect)\s*\(")
 
 
 @dataclass(frozen=True)
