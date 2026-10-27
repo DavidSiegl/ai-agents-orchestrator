@@ -32,9 +32,10 @@ class Normalizer:
     """Replaces what differs between runs of a scenario with placeholders that are the same in every run.
 
     Runs, their keys and git objects are numbered in the order they first appear in what `learn` is given, so a
-    record normalizes the same however its random ids came out: `<run:1>` and `<key:1>`, `<sha:3>`; so are the pids
-    under a "pid" key, such as a state.json's owner's, then those registered with `engine`, `<pid:2>`. Literal
-    strings registered with `literal`, such as the world's directory, become their placeholder.
+    record normalizes the same however its random ids came out: `<run:1>` and `<key:1>`, `<sha:3>`. A pid registered
+    with `pid` becomes `<pid:N>`, N being the number of the engine invocation it is a process of, and any other pid
+    under a "pid" key `<pid:?>`. Literal strings registered with `literal`, such as the world's directory, become their
+    placeholder.
     """
 
     def __init__(self):
@@ -43,17 +44,15 @@ class Normalizer:
         self._keys: dict[str, str] = {}
         self._shas: dict[str, str] = {}
         self._pids: dict[int, str] = {}
-        self._engines: list[int] = []  # the pids of the processes a world started, in order
 
     def literal(self, text: str, placeholder: str) -> None:
         """Write placeholder wherever text appears; a longer text registered is replaced before a shorter one."""
         self._literals.append((text, placeholder))
         self._literals.sort(key=lambda pair: -len(pair[0]))
 
-    def engine(self, pid: int) -> None:
-        """Take pid, of a process the world started, for a pid, wherever it appears as a number in JSON or as a word
-        in text, even where no "pid" key names it."""
-        self._engines.append(pid)
+    def pid(self, pid: int, n: int) -> None:
+        """Write `<pid:n>` for pid, a process of engine invocation n, as a number in JSON and as a word in text."""
+        self._pids[pid] = f"<pid:{n}>"
 
     def learn(self, record) -> None:
         """Number the runs and git objects in record, anything JSON-ready, in the order they appear in it, after
@@ -66,9 +65,6 @@ class Normalizer:
                 self._keys[m.group(1)] = f"<key:{n}>"
         for m in SHA.finditer(text):
             self._shas.setdefault(m.group(0), f"<sha:{len(self._shas) + 1}>")
-        # In a state.json's text inside the record, the key's quotes are escaped.
-        for pid in [int(m.group(1)) for m in re.finditer(r'\\?"pid\\?": (\d+)', text)] + self._engines:
-            self._pids.setdefault(pid, f"<pid:{len(self._pids) + 1}>")
 
     def text(self, s: str, timed: bool = False) -> str:
         """s with every placeholder written in; with timed, also each duration, for text that words the clock's

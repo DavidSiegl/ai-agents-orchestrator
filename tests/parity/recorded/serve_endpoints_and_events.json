@@ -71,7 +71,7 @@
       "retrying": null,
       "owner": {
        "host": "<host>",
-       "pid": "<pid:1>",
+       "pid": "<pid:2>",
        "started_at": "<time>"
       },
       "heartbeat_at": "<time>",
@@ -141,7 +141,7 @@
       "retrying": null,
       "owner": {
        "host": "<host>",
-       "pid": "<pid:1>",
+       "pid": "<pid:2>",
        "started_at": "<time>"
       },
       "heartbeat_at": "<time>",
@@ -234,7 +234,7 @@
       "retrying": null,
       "owner": {
        "host": "<host>",
-       "pid": "<pid:1>",
+       "pid": "<pid:2>",
        "started_at": "<time>"
       },
       "heartbeat_at": "<time>",
@@ -307,7 +307,7 @@
       "retrying": null,
       "owner": {
        "host": "<host>",
-       "pid": "<pid:1>",
+       "pid": "<pid:2>",
        "started_at": "<time>"
       },
       "heartbeat_at": "<time>",
@@ -412,7 +412,7 @@
       "retrying": null,
       "owner": {
        "host": "<host>",
-       "pid": "<pid:1>",
+       "pid": "<pid:2>",
        "started_at": "<time>"
       },
       "heartbeat_at": "<time>",
@@ -501,7 +501,7 @@
       "retrying": null,
       "owner": {
        "host": "<host>",
-       "pid": "<pid:1>",
+       "pid": "<pid:2>",
        "started_at": "<time>"
       },
       "heartbeat_at": "<time>",
@@ -628,7 +628,7 @@
       "retrying": null,
       "owner": {
        "host": "<host>",
-       "pid": "<pid:1>",
+       "pid": "<pid:2>",
        "started_at": "<time>"
       },
       "heartbeat_at": "<time>",
@@ -723,7 +723,7 @@
       "retrying": null,
       "owner": {
        "host": "<host>",
-       "pid": "<pid:1>",
+       "pid": "<pid:2>",
        "started_at": "<time>"
       },
       "heartbeat_at": "<time>",
@@ -832,7 +832,7 @@
       "retrying": null,
       "owner": {
        "host": "<host>",
-       "pid": "<pid:1>",
+       "pid": "<pid:2>",
        "started_at": "<time>"
       },
       "heartbeat_at": "<time>",
@@ -942,7 +942,7 @@
       "retrying": null,
       "owner": {
        "host": "<host>",
-       "pid": "<pid:1>",
+       "pid": "<pid:2>",
        "started_at": "<time>"
       },
       "heartbeat_at": "<time>",
@@ -1090,7 +1090,7 @@
       "retrying": null,
       "owner": {
        "host": "<host>",
-       "pid": "<pid:1>",
+       "pid": "<pid:2>",
        "started_at": "<time>"
       },
       "heartbeat_at": "<time>",
@@ -1206,7 +1206,7 @@
       "retrying": null,
       "owner": {
        "host": "<host>",
-       "pid": "<pid:1>",
+       "pid": "<pid:2>",
        "started_at": "<time>"
       },
       "heartbeat_at": "<time>",
@@ -1336,7 +1336,7 @@
       "retrying": null,
       "owner": {
        "host": "<host>",
-       "pid": "<pid:1>",
+       "pid": "<pid:2>",
        "started_at": "<time>"
       },
       "heartbeat_at": "<time>",
@@ -1467,7 +1467,7 @@
       "retrying": null,
       "owner": {
        "host": "<host>",
-       "pid": "<pid:1>",
+       "pid": "<pid:2>",
        "started_at": "<time>"
       },
       "heartbeat_at": "<time>",
@@ -1995,7 +1995,7 @@
        "role": "spec",
        "pane": "p1",
        "health": "running",
-       "health_reason": "pid <pid:1> on <host>, beat <duration> ago",
+       "health_reason": "pid <pid:2> on <host>, beat <duration> ago",
        "heartbeat_age": "<seconds>",
        "waiting": {
         "reason": "interview",
@@ -2059,7 +2059,7 @@
        "role": "build",
        "pane": "p2",
        "health": "running",
-       "health_reason": "pid <pid:1> on <host>, beat <duration> ago",
+       "health_reason": "pid <pid:2> on <host>, beat <duration> ago",
        "heartbeat_age": "<seconds>",
        "waiting": null,
        "verdict": null,
@@ -2140,7 +2140,7 @@
        "role": "review",
        "pane": "p3",
        "health": "running",
-       "health_reason": "pid <pid:1> on <host>, beat <duration> ago",
+       "health_reason": "pid <pid:2> on <host>, beat <duration> ago",
        "heartbeat_age": "<seconds>",
        "waiting": null,
        "verdict": null,

@@ -286,7 +286,9 @@ class World:
             process = subprocess.Popen(  # noqa: S603 - the engine under test, with the scenario's arguments
                 [*engine_command(), *args], cwd=cwd or self.project, env=self._env(n), stdin=subprocess.DEVNULL,
                 stdout=stdout, stderr=stderr, start_new_session=True)
-        self.normalizer.engine(process.pid)
+        self.normalizer.pid(process.pid, n)
+        with self.ledger.change() as state:
+            state.setdefault("engines", {})[str(n)] = process.pid
         inv = Invocation(n, list(args), process, out, output_recorded)
         self.invocations.append(inv)
         return inv
@@ -479,6 +481,9 @@ class World:
             who = event.pop("by")
             if "state" in event:
                 event["state"] = {"path": event["state"]["path"], "saved": json.loads(event["state"]["text"])}
+                # The fakes log a state only while its owner, if any, is a process of the invocation logging it.
+                if (owner := event["state"]["saved"].get("owner")) and who.isdigit():
+                    self.normalizer.pid(owner["pid"], int(who))
             by.setdefault(who, []).append(event)
         return {who: _collapsed(events) for who, events in by.items()}
 

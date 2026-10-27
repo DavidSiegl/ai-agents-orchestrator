@@ -32,6 +32,8 @@ import time
 PR_URL = "https://github.com/parity/project/pull/{}"
 # How often a fake waiting on a hold looks for its release, in seconds.
 HOLD_POLL_SECONDS = 0.05
+# How long a fake waits for World to record its invocation's process (engine_pids), in seconds.
+ENGINE_WAIT_SECONDS = 10
 # herdr's version as `herdr --version` prints it; doctor needs 0.9 or later.
 HERDR_VERSION = "herdr 0.9.4"
 # The harnesses an agent can run in, as herdr's --kind takes them: each has a current integration, and a CLI on
@@ -43,7 +45,8 @@ class Ledger:
     """A world's shared record, `WORLD/fakes/`: the fakes' state and the event log, each change under one lock.
 
     The state is one JSON object, which `change` hands its caller to read and modify. Its keys, each created by the
-    first writer that needs it: workspaces, panes and agents (herdr's), prs (gh's), triggered (the GIT_REF of each
+    first writer that needs it: engines (per invocation number, the pid of the process World started for it),
+    workspaces, panes and agents (herdr's), prs (gh's), triggered (the GIT_REF of each
     build the fake Jenkins was asked for, in order), consumed (per role, how many of its scripted actions have been
     taken), held (per hold name, the action waiting for it), reached and released (hold names), last_states (per
     state.json path, its text as last logged, heartbeat left out) and next (per kind of id, the next number).
@@ -126,25 +129,45 @@ def _changed_states(state: dict, project: str, engine_pids: set[int]) -> list[di
     return changed
 
 
-def ancestors() -> set[int]:
-    """The pids of this process's ancestors: the engine that started it is one of them, whether directly, through
-    sh or through the fake ssh."""
-    pids, pid = set(), os.getppid()
-    while pid > 1 and pid not in pids:
-        pids.add(pid)
+def engine_pids(ledger: Ledger) -> set[int]:
+    """The pids of this fake's engine invocation that are its ancestors: from the process World started for the
+    invocation (the ledger's "engines") down to this fake's parent, so the engine itself whether it runs this fake
+    directly, through sh or through the fake ssh, and whether or not its command is a wrapper. Empty outside an
+    invocation. World records the started process just after starting it, which is waited for, briefly."""
+    n = invocation()
+    deadline = time.monotonic() + ENGINE_WAIT_SECONDS
+    while True:
+        with ledger.change() as state:
+            root = state.get("engines", {}).get(n)
+        if root is not None or time.monotonic() > deadline:
+            break
+        time.sleep(HOLD_POLL_SECONDS)
+    chain = _ancestors()
+    return set(chain[:chain.index(root) + 1]) if root in chain else set()
+
+
+def _ancestors() -> list[int]:
+    """The pids of this process's ancestors, its parent first."""
+    chain, pid = [], os.getppid()
+    while pid > 1 and pid not in chain:
+        chain.append(pid)
         try:
             with open(f"/proc/{pid}/stat") as f:
                 # The command name, field 2, is in parentheses and may hold spaces; the parent is the second field
                 # after it.
                 pid = int(f.read().rsplit(")", 1)[1].split()[1])
         except (OSError, ValueError, IndexError):
-            out = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)],  # noqa: S603, S607 - ps on PATH, as sh finds it
-                                 capture_output=True, text=True, check=False)
-            try:
-                pid = int(out.stdout.strip())
-            except ValueError:
-                break
-    return pids
+            pid = _ps_parent(pid)
+    return chain
+
+
+def _ps_parent(pid: int) -> int:
+    """pid's parent, as ps says where there is no /proc."""
+    out = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)],  # noqa: S603, S607 - ps on PATH, as sh finds it
+                         capture_output=True, text=True, check=False)
+    if out.returncode != 0:
+        raise RuntimeError(f"ps -o ppid= -p {pid} failed: {out.stderr.strip()}")
+    return int(out.stdout.strip())
 
 
 def descendants(pid: int) -> set[int]:
@@ -152,6 +175,8 @@ def descendants(pid: int) -> set[int]:
     command is a wrapper that does not exec the engine."""
     out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="],  # noqa: S607 - ps on PATH, as sh finds it
                          capture_output=True, text=True, check=False)
+    if out.returncode != 0:
+        raise RuntimeError(f"ps -A -o pid=,ppid= failed: {out.stderr.strip()}")
     children: dict[int, list[int]] = {}
     for line in out.stdout.splitlines():
         child, parent = (int(n) for n in line.split())
@@ -184,8 +209,9 @@ class HerdrFailure(Exception):
 def herdr(ledger: Ledger, args: list[str]) -> int:
     """Answer one herdr command as herdr would, logging it; returns the exit status."""
     script = ledger.script()
+    pids = engine_pids(ledger)
     with ledger.change() as state:
-        ledger.log(state, {"herdr": args}, invocation(), ancestors())
+        ledger.log(state, {"herdr": args}, invocation(), pids)
         _perform_released(ledger, state)
         command = args
         if args[:1] == ["--machine"]:
@@ -386,8 +412,9 @@ def gh(ledger: Ledger, args: list[str]) -> int:
     `script["gh"]["create_hold"]`, when set, holds `pr create` until World.release names it: the fake waits, so
     that the engine can be stopped in the middle of publishing."""
     stdin = sys.stdin.read() if "--body-file" in args else None
+    pids = engine_pids(ledger)
     with ledger.change() as state:
-        ledger.log(state, {"gh": args, **({"stdin": stdin} if stdin is not None else {})}, invocation(), ancestors())
+        ledger.log(state, {"gh": args, **({"stdin": stdin} if stdin is not None else {})}, invocation(), pids)
         hold = ledger.script().get("gh", {}).get("create_hold") if args[:2] == ["pr", "create"] else None
         if hold:
             state.setdefault("reached", []).append(hold)
