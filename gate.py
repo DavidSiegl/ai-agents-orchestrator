@@ -640,7 +640,7 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
                               f"lines to cover.")
 
     head = _git(root, "rev-parse", "HEAD").strip()
-    intro = (f"`gate.py` judged the working tree at `{head}` against the base `{base_sha}`"
+    intro = (f"`orchestrator.py gate` judged the working tree at `{head}` against the base `{base_sha}`"
              + (f", by the rules in `{rules}`." if rules else "."))
     text = quality_report(GATE_ERROR if conditions else GATE_OK, intro, conditions=conditions, issues=issues,
                           to_weigh=to_weigh, elsewhere=elsewhere, tests=failing, coverage=coverage_sentence,

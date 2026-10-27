@@ -179,6 +179,12 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   own `git` mode has the same blind spot. Raised by the cross-review of `push-secret-scan` (F15, 2026-10-24). Closes
   with a decision in the spec whether binary content is in scope, and, if it is, a `--text` diff or a scan of the
   blobs themselves (`gitleaks dir` over the pushed files).
+- **The quality file's intro still says `orchestrator.py gate` judged the tree.** `judge_change` writes that intro,
+  though since the split the program is `gate.py`. Left as it was on purpose (2026-10-27): `judge_change` scores 24,
+  over the cognitive-complexity limit of 15, and the check pairs a function moved into a new file with its base only
+  by an unchanged body, so editing it in the pull request that moves it fails the gate as a new function over the
+  limit. Closes with the intro naming `gate.py`, in a later change, where `judge_change` pairs with its base in
+  `gate.py` by name and is no worse than 24.
 - **The gate's intro writes the `--rules` path as it is.** `judge_change`'s intro names the rules file without
   `one_line` (`gate.py`, `intro = ...` in `judge_change`), so a rules path holding a line breaker splits the
   quality file's third line, and `docs/quality-gate.md`'s "wherever it appears in a list item or a name" says more
@@ -385,7 +391,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   Jenkinsfile's Gate stage runs `gate.py`, a quality build the one at `$JUDGED_MAIN`, or that commit's
   `orchestrator.py gate` when it has none (Planned, "what is left"); `pyproject.toml`'s mypy files and mutmut
   `source_paths` and the Test stage's coverage name both files. Not closed: a quality build of a snapshot whose tree
-  predates `gate.py` is judged by main's rules, whose `[tool.mypy] files` name `gate.py` (Open issues).
+  predates `gate.py` is judged by main's rules, whose `[tool.mypy] files` name `gate.py`, and the quality file's
+  intro still names `orchestrator.py gate` (Open issues, both).
 
 - **`test-integrity` does not see an expected value held outside the assertion.** `expected-value-changed` compares
   each assertion's literals (`_changed_literals`), so editing a golden constant the assertion names, such as the
