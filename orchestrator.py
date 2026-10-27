@@ -418,7 +418,7 @@ The Reviewer backed findings with tests, and these do not pass against your chan
 Make each of them pass, without changing it; you may move one into the project as a regression test. \
 The orchestrator copies each proof's whole directory under the working tree's `""" + PROOF_COPIES_DIR + """/` and \
 runs the proof there, so that the working tree's test configuration applies; to run one yourself, copy its whole \
-directory there too, or move it into the project, rather than running it where it lies. If one is wrong, say so in \
+directory there too, or into the project, rather than running it where it lies. If one is wrong, say so in \
 your report instead."""
 
 # Appended to the verdict step's prompt, after the quality and locks notes, when proofs carried from an earlier round
