@@ -79,7 +79,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   engine. Narrowed by PR #162 (2026-10-27) for a quality round whose change leaves what the parity scenarios depend on
   alone (Jenkinsfile, Test stage): its build leaves them out. A change that bumps the version touches `pyproject.toml`
   and `uv.lock`, so its build still runs them, and so does the contract test's build of main whenever main's last
-  commit was a releasing merge, as build #59's was; Gate's mutmut time is gate-open-decisions ticket 06's. Closes when
+  commit was a releasing merge (build #59, before #162, ran them in any case); Gate's mutmut time is
+  gate-open-decisions ticket 06's. Closes when
   a quality build that runs the scenarios fits in `QUALITY_TIMEOUT`, shown by the contract test green against one, or
   with a larger `QUALITY_TIMEOUT` in the Rust engine.
 - **The contract test leaves its Jenkins build running when it fails.** `tests/contract/test_jenkins.py` triggers one
