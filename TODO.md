@@ -509,9 +509,10 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 - **The Jenkins agent lacked rustup's clippy component.** The gate runs clippy on every build that reaches Gate, since
   `ui/src-tauri/` is Rust, and `TestClippy` in `tests/test_gate.py` runs the real one. PR-111's first build showed the
   agent's toolchain (1.99.0) lacked rustup's `clippy` component: the gate was ERROR with "`clippy` is not installed"
-  and eight `TestClippy` tests failed. Fixed (2026-10-27, rust-engine ticket 02): the Install stage runs `rustup
-  component add clippy` (Jenkinsfile, "Install"); PR-111's second build downloaded the component, passed all 1348
-  tests and the gate was OK.
+  and eight `TestClippy` tests failed. Fixed (2026-10-27, rust-engine ticket 02): the Install stage ran `rustup
+  component add clippy`, and PR-111's second build downloaded the component, passed all 1348 tests and the gate was
+  OK. Since then the agent's rustup home is root's (`/usr/local/rustup`, PR-163's third build), so no build can add a
+  component; the agent image provides clippy, and the Install stage only checks for it (rust-engine ticket 03).
 
 - **`test_invariants.py` and `test_docs.py` fail inside mutmut's copy.** Raised by cross-review 60 (2026-10-27), in
   code PR #106 brought. mutmut runs the tests in `mutants/`, its copy of the repository, whose `orchestrator.py` and

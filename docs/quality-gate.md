@@ -64,9 +64,9 @@ does not compile is a failed condition naming the compiler's first error in a tr
 cargo's own: a change that deletes a function an old line calls breaks the build on no line it added. A linter that
 outlives its timeout is killed with every process it started, such as cargo's rustc.
 
-ruff, mypy and pymarkdownlnt are in uv's `dev` group, so `uv run` puts them on `PATH`; shellcheck, actionlint and cargo
-come from the Jenkins agent image, and clippy from the Install stage (see "What Jenkins needs"). `gate.py`, like the orchestrator, stays stdlib-only: it runs them as
-processes.
+ruff, mypy and pymarkdownlnt are in uv's `dev` group, so `uv run` puts them on `PATH`; shellcheck, actionlint, cargo
+and clippy come from the Jenkins agent image (see "What Jenkins needs"). `gate.py`, like the orchestrator, stays
+stdlib-only: it runs them as processes.
 
 After the linters come the checks `gate_checks` gives, which judge what the change did rather than how the tree
 reads. Each is a `GateCheck` that either fails the gate or only reports: a failing check's findings are issues,
