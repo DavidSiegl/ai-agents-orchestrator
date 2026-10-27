@@ -40,7 +40,24 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   file` (status 2) and the gate is ERROR on a failed condition the Builder cannot fix. mutmut's `source_paths`
   names it too, so surviving-mutants is `not-run` there. Checked by hand against such a tree (2026-10-27). Affects
   only runs started before the split merged that reach a quality round after it; closes by itself once none is
-  left, or with the gate passing mypy only the listed files the tree has.
+  left, or with the gate passing mypy only the listed files the tree has. Cross-review 61 (F1, 2026-10-27): "the
+  gate is ERROR on a failed condition the Builder cannot fix", against the spec's "a quality build is judged by
+  main's gate and main's rules".
+- **During the cutover fallback, mutmut cannot test a snapshot that has `gate.py`.** The fallback judges a snapshot
+  of this branch by a `$JUDGED_MAIN` from before the split, whose `[tool.mutmut] source_paths` is
+  `["orchestrator.py"]`; mutmut copies only `source_paths`, `tests/` and `also_copy` into `mutants/`, so the tests
+  that `import gate` fail there and surviving-mutants is `not-run`, and each changed `gate.py` function is
+  `not-mutated`. Findings to weigh, not failed conditions. Raised by cross-review 61 (F2, 2026-10-27) from mutmut's
+  copy rule and the gate's code, not from a run. Closes by itself once main has `gate.py` (ticket 03's start).
+- **`BUILD_CONFIG_FILES` does not list `gate.py`.** A pull request or main build runs its own tree's `gate.py`, so a
+  change that loosens the gate gets no "Build configuration" notice in its quality file; `orchestrator.py`, which
+  held the gate, was not listed either. Raised by cross-review 61 (F7, 2026-10-27). Closes with `gate.py` listed,
+  with a notice of its own wording (a quality build runs main's gate, not the edit).
+- **The quality file's format has two names for each part.** The engine's copies (`QUALITY_OK`,
+  `QUALITY_FAILED_CONDITIONS`, `QUALITY_FINDINGS_LIMIT`, `_numbered_finding`, `_check_finding`, `_shortened`) and
+  the gate's (`GATE_OK`, `FAILED_CONDITIONS`, `QUALITY_ISSUE_LIMIT`, `_numbered`, `_finding`, `_clip`) differ, so a
+  grep for one misses its twin. Most date from gate-split ticket 01. Raised by cross-review 61 (F9, 2026-10-27).
+  Closes with one name per part on both sides, a change to both programs.
 - **surviving-mutants takes only the top directory's pytest configuration.** Since `_pytest_groups`, flaky-tests and
   passes-at-base run each changed test under the configuration pytest finds for it below the copy's top, but
   `_pytest_config`, which surviving-mutants gives mutmut, still looks in the top directory alone, so a project whose
@@ -183,8 +200,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   though since the split the program is `gate.py`. Left as it was on purpose (2026-10-27): `judge_change` scores 24,
   over the cognitive-complexity limit of 15, and the check pairs a function moved into a new file with its base only
   by an unchanged body, so editing it in the pull request that moves it fails the gate as a new function over the
-  limit. Closes with the intro naming `gate.py`, in a later change, where `judge_change` pairs with its base in
-  `gate.py` by name and is no worse than 24.
+  limit. Cross-review 61 (F3, 2026-10-27): "a Builder or Reviewer following the quality file's own words to
+  reproduce the result is sent to a dead command". Closes with the intro naming `gate.py`, in a later change, where
+  `judge_change` pairs with its base in `gate.py` by name and is no worse than 24.
 - **The gate's intro writes the `--rules` path as it is.** `judge_change`'s intro names the rules file without
   `one_line` (`gate.py`, `intro = ...` in `judge_change`), so a rules path holding a line breaker splits the
   quality file's third line, and `docs/quality-gate.md`'s "wherever it appears in a list item or a name" says more

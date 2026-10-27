@@ -17,10 +17,9 @@ uv run pytest --cov=orchestrator --cov=gate --cov-branch --cov-report=xml --juni
 uv run python gate.py --base main --tests test-results.xml --coverage coverage.xml --out quality.md
 ```
 
-It exits 0 when the quality file's first line is `GATE: OK`, 1 for `GATE: ERROR`, and 2 (`EXIT_GATE_UNJUDGED`)
-when it could not judge the change, having written nothing. `gate.py` is a program of its own beside
-`orchestrator.py`, and the two share no code: the orchestrator imports nothing from it and reads only the file it
-writes ([the quality file as a contract](#the-quality-file-as-a-contract)).
+`gate.py` is a program of its own beside `orchestrator.py`, and the two share no code: the orchestrator imports
+nothing from it and reads only the file it writes ([the quality file as a
+contract](#the-quality-file-as-a-contract)).
 
 It runs five linters over the files git tracks, each over the files it reads, and keeps only the findings on
 lines the change adds, and the lineless ones on files it touches. Findings on older lines are counted, never
@@ -219,7 +218,7 @@ call the function:
 
 mutmut runs in the gate's own interpreter, on a copy of the files git tracks, so the working tree stays as it was; its
 state, `mutants/`, goes into the copy too. Its own selector, mutant names such as
-`orchestrator.x_judge_change__mutmut_*`, picks which mutants run only after mutmut has made a mutant of every function,
+`gate.x_judge_change__mutmut_*`, picks which mutants run only after mutmut has made a mutant of every function,
 which takes minutes for `orchestrator.py`. So in the copy, each function and class the change does not touch gets
 mutmut's `# pragma: no mutate block` at the end of its header, and mutmut skips it. The rules' `[tool.mutmut]` says
 what can be mutated (`source_paths`, `only_mutate`, `do_not_mutate`), which tests run
@@ -314,7 +313,8 @@ The gate is `GATE: ERROR` when any of these holds, and `GATE: OK` otherwise:
   lines the Cobertura report lists; a smaller change is not judged on coverage, since a few lines swing it too far.
 
 Exit status 0 means `GATE: OK`, 1 `GATE: ERROR`, and 2 that the gate could not judge (`REV` names no commit, not a
-git tree, no rules file, an unreadable report), in which case it writes nothing.
+git tree, no rules file, an unreadable report), in which case it writes nothing; 130 (`EXIT_INTERRUPTED`) means
+Ctrl-C stopped it, and it wrote nothing either.
 
 A change to a file whose contents are not UTF-8, such as a Latin-1 line or a binary file that git diffs as text,
 is judged like any other. The gate reads the diff, git's file lists and the linters' output as they were printed,

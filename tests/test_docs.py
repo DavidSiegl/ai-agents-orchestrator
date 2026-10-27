@@ -106,7 +106,9 @@ def invocations(path: pathlib.Path, commands):
             for m in re.finditer(r"\bgate\.py(\s+--.*)", text):
                 yield n, "gate.py", m.group(1)
             words = text.split()
-            if not fenced and len(words) > 1 and words[0] in commands and words[1].startswith("--"):
+            # gate.py is not a command after orchestrator.py; the search above has yielded it.
+            if not fenced and len(words) > 1 and words[0] in commands.keys() - {"gate.py"} \
+                    and words[1].startswith("--"):
                 yield n, words[0], text[len(words[0]):]
 
 
