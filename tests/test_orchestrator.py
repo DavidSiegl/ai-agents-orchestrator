@@ -33,6 +33,7 @@ from dataclasses import asdict, replace
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 from gitrepo import RepositoryTest
 
 import orchestrator
@@ -11732,6 +11733,7 @@ class TestProofs(unittest.TestCase):
         self.assertEqual(wf.run(), APPROVE)
         self.assertEqual([p["demonstrated"] for p in wf.state.proofs if p["round"] == 1], [True])
 
+    @pytest.mark.real_sleep
     def test_a_proof_that_runs_too_long_is_stopped_with_what_it_started(self):
         with patch.object(orchestrator, "PROOF_TIMEOUT", 1):
             wf, host, _ = self.run_proofs((CHANGES_REQUESTED, {}), (APPROVE, {}))
@@ -13063,6 +13065,7 @@ class TestSelfCommand(unittest.TestCase):
             self.assertEqual(orchestrator.self_command(), ["/opt/octoflow-linux-x86_64"])
 
 
+@pytest.mark.real_sleep
 class TestRunProcess(unittest.TestCase):
     """On real child processes."""
 
@@ -17058,6 +17061,7 @@ class ServeHost(FakeHost):
         return [orchestrator.RunFile(p, m) for m, p in sorted(files)]
 
 
+@pytest.mark.loopback
 class ServerTest(unittest.TestCase):
     """A RunServer on a free port, serving the projects connect gives, for as long as the test runs."""
 
@@ -17529,6 +17533,8 @@ class TestRunWatch(unittest.TestCase):
         self.assertEqual(self.watch.poll(), [])
 
 
+@pytest.mark.loopback
+@pytest.mark.real_sleep
 class TestServeCommand(unittest.TestCase):
     """orchestrator.py serve as a process of its own."""
 
