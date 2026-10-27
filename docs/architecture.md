@@ -307,6 +307,10 @@ run directory's files; and both repositories' refs, commits and working trees. `
 whose record differs from `recorded/<scenario>.json`, naming where; `PARITY_RECORD=1` writes the recordings
 instead, from the Python engine only.
 
+`tests/contract/` holds the contract tests, which check the fakes against the real thing: `test_jenkins.py` drives
+`CI` against the live quality job ([the calls](quality-gate.md#the-calls)). They are marked `contract`, which a run
+leaves out unless given `-m contract` (`tests/conftest.py`).
+
 ## Tooling
 
 - `pyproject.toml`: no runtime dependencies, Python 3.13+; pytest, pytest-cov and Hypothesis in the `dev` group, PyInstaller

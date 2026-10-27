@@ -6,6 +6,8 @@ starts:
 
 - No test may open a network connection. The orchestrator's network clients take an injected `urlopen` (`CI`,
   `PyPI`), so a test that reaches for the real network is a bug, and fails with `NetworkUsed`, naming the address.
+  The contract tests (tests/contract), which exist to talk to a live server, are the exception: see the contract
+  marker.
 - No test may wait in time.sleep. A Workflow takes its clocks as an argument (`Clocks`), and the tests give it
   `FakeClock`, time that passes only when the workflow sleeps; a real sleep makes the suite slow, and a test that
   depends on how long one takes flaky. The test code and orchestrator.py are guarded, the standard library is not:
@@ -74,6 +76,12 @@ def pytest_configure(config):
         "real_sleep: the test waits on something outside this process's control, a child process or a server "
         "thread, by polling it with time.sleep: what it tests is how the orchestrator behaves with real processes "
         "and real time, which FakeClock cannot stand in for. Keep such waits short and bounded by a deadline.")
+    config.addinivalue_line(
+        "markers",
+        "contract: the test talks to a live server elsewhere on the network, such as the real Jenkins, to check that "
+        "its answers have the shape the fakes give them (tests/contract). It may connect to any address. A run "
+        "deselects it unless asked, by pyproject.toml's addopts `-m \"not contract\"`: run it with `-m contract` "
+        "and the variables its module names, which it fails without.")
 
 
 def _is_loopback(address) -> bool:
@@ -90,7 +98,10 @@ def _is_loopback(address) -> bool:
 @pytest.fixture(autouse=True)
 def no_network(request, monkeypatch):
     """For the length of each test, make socket.socket.connect, connect_ex and socket.create_connection raise
-    NetworkUsed for any address but a Unix socket's or, in a test marked loopback, a loopback address."""
+    NetworkUsed for any address but a Unix socket's or, in a test marked loopback, a loopback address. A test marked
+    contract is not guarded."""
+    if request.node.get_closest_marker("contract") is not None:
+        return
     loopback = request.node.get_closest_marker("loopback") is not None
 
     def check(family, address):

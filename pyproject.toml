@@ -1,5 +1,7 @@
 [tool.pytest.ini_options]
 pythonpath = ["."]
+# The contract tests against a live server run only when asked for, with `-m contract` (the marker, tests/conftest.py).
+addopts = ["-m", "not contract"]
 
 [project]
 name = "octoflow"
