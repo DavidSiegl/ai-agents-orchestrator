@@ -133,8 +133,14 @@ commit. After a review that requests changes, `Workflow._judge_proofs` runs each
 working tree (`_run_proof`: exit status 1 is a failing proof, which demonstrates the finding its name's first number
 names; 0 passes and anything else errors, neither demonstrating), saves the outcomes in `RunState.proofs`, and
 appends `proofs_section` under `PROOFS_HEADING` to the review; a resume runs no proof of a round that has records,
-and appends the section only where the review lacks it. A proof runs under GNU `timeout` where there is one, which
-stops its whole process group. A demonstrated proof is run again in every later round until it passes:
+and appends the section only where the review lacks it. A proof runs from a copy inside the tree it judges,
+`<work_dir>/.orchestrator/proofs/<round that wrote it>/<file>`, with the working tree's top directory as its current
+directory, so a tool that looks upwards from the proof for its configuration, as pytest does for its rootdir,
+`conftest.py` files and `pythonpath`, finds the run's worktree rather than the checkout that holds the run directory.
+`.orchestrator/` there is ignored by a `.gitignore` of `*`, as the checkout's is, so no commit holds the copy, and
+`.orchestrator/proofs` is emptied before each proof and removed after it. The review and the notes still name the
+proof where the verdict step wrote it. A proof runs under GNU `timeout` where there is one, which stops its whole
+process group. A demonstrated proof is run again in every later round until it passes:
 `Workflow._rerun_proofs`, right before the verdict step's turn and so after the editing steps' turns and the quality
 loop, runs each carried proof (`_carried_proofs`: its last run failed, or a rerun found it erroring) from the proofs
 directory of the round that wrote it, and records the outcome in `RunState.proofs` with the round it ran in and, as

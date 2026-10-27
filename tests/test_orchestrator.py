@@ -7837,10 +7837,27 @@ class TestProofs(unittest.TestCase):
             os.makedirs(wf.state.proofs_dir(1))
             with open(f"{wf.state.proofs_dir(1)}/test_1.sh", "w") as f:
                 f.write(f"(sleep 3; echo leaked > {self.proj}/leaked) &\nsleep 30\n")
-            failed, said = wf._run_proof("sh {proofs}", f"{wf.state.proofs_dir(1)}/test_1.sh")
+            failed, said = wf._run_proof("sh {proofs}", 1, "test_1.sh")
         self.assertEqual((failed, said), (False, "it errors, running out of its 1 s"))
         time.sleep(4)
         self.assertFalse(os.path.exists(f"{self.proj}/leaked"))
+
+    def test_a_proof_runs_from_a_copy_in_the_checkout_which_goes_after_it(self):
+        wf, _, _ = self.run_proofs((CHANGES_REQUESTED, {}), (APPROVE, {}))
+        os.makedirs(wf.state.proofs_dir(1))
+        with open(f"{wf.state.proofs_dir(1)}/test_1.sh", "w") as f:
+            f.write('echo "$0"; touch "$(dirname "$0")/beside"; exit 1\n')
+        copies = f"{self.proj}/{orchestrator.PROOF_COPIES_DIR}"
+        self.assertEqual(wf._run_proof("sh {proofs}", 1, "test_1.sh"), (True, f"it fails:\n{copies}/1/test_1.sh"))
+        self.assertFalse(os.path.exists(copies))
+        self.assertEqual(os.listdir(wf.state.proofs_dir(1)), ["test_1.sh"])
+
+    def test_a_proof_whose_file_is_gone_did_not_run(self):
+        wf, _, _ = self.run_proofs((CHANGES_REQUESTED, {}), (APPROVE, {}))
+        failed, said = wf._run_proof("sh {proofs}", 1, "test_1.sh")
+        self.assertFalse(failed)
+        self.assertRegex(said, r"^it did not run: .*test_1\.sh")
+        self.assertFalse(os.path.exists(f"{self.proj}/{orchestrator.PROOF_COPIES_DIR}"))
 
     def test_proof_command_needs_a_verdict_step_and_names_the_proof_once(self):
         with self.assertRaisesRegex(ValueError, "proof_command runs the verdict step's proofs, and the workflow has no "
@@ -7877,6 +7894,67 @@ again = "Again, with tests in {proofs_dir}; write {review_path}."
         self.assertIn('proof_command = "sh {proofs}"', text)
         self.assertEqual(orchestrator.parse_workflow("quick", tomllib.loads(text), BUILT_IN_PROMPTS), self.pipeline)
         self.assertNotIn("proof_command", orchestrator.workflow_toml(QUICK))
+
+
+class TestProofInAWorktree(RepositoryTest):
+    """A --worktree run's proof, run by pytest on real git: the checkout and the run's worktree differ in the module
+    the proof imports, and the project's pytest configuration puts its rootdir on sys.path, so a proof that took the
+    checkout's configuration would import the checkout's module."""
+
+    BASE_FILES = {"pyproject.toml": '[tool.pytest.ini_options]\npythonpath = ["."]\n',
+                  ".gitignore": "__pycache__/\n", "limiter.py": 'RATE = "base"\n'}
+    BRANCH = "orchestrator/a1b2c3-rate"
+
+    def setUp(self):
+        super().setUp()
+        origin = os.path.join(self.outside, "origin.git")
+        self.git("clone", "--quiet", "--bare", self.repo, origin)
+        self.git("remote", "add", "origin", origin)
+        self.git("fetch", "--quiet", "origin")
+        self.worktree = os.path.join(self.repo, orchestrator.WORKTREES_DIR, "a1b2c3")
+        self.git("worktree", "add", "--quiet", "-b", self.BRANCH, self.worktree, "main")
+        with open(os.path.join(self.worktree, "limiter.py"), "w") as f:
+            f.write('RATE = "change"\n')
+        self.state = RunState("20260929-120000-a1b2c3", "add a rate limiter", self.repo, None, phase="review",
+                              round=1, workflow="quick", base=self.base, base_branch="main", branch=self.BRANCH,
+                              pull_request=True, worktree=self.worktree)
+        # sys.executable rather than python: the interpreter with pytest, whatever PATH finds first.
+        self.command = f"{shlex.quote(sys.executable)} -m pytest -q -p no:cacheprovider {{proofs}}"
+        pipeline = replace(QUICK, proof_command=self.command)
+        self.wf = Workflow(FakeHerdr(self.host, self.state, {}), self.host, self.state, notify=lambda t, b: None,
+                           pipeline=pipeline, clocks=orchestrator.Clocks(FakeClock().sleep, FakeClock(), FakeClock()))
+        # Ignores the checkout's .orchestrator directory and owns the run, as a run's start does.
+        self.wf._claim()
+
+    def write_proof(self, text):
+        os.makedirs(self.state.proofs_dir(1))
+        with open(f"{self.state.proofs_dir(1)}/test_1_rate.py", "w") as f:
+            f.write(text)
+
+    def test_a_proof_imports_the_worktrees_code_and_the_commit_holds_no_copy_of_it(self):
+        # Writes beside itself too, which only the copy's directory may hold.
+        self.write_proof("import os\n\nimport limiter\n\n\ndef test_rate():\n"
+                         "    open(os.path.join(os.path.dirname(__file__), 'beside.txt'), 'w').close()\n"
+                         "    print(limiter.__file__)\n    assert limiter.RATE == 'base'\n")
+        leftover = os.path.join(self.worktree, orchestrator.PROOF_COPIES_DIR, "1", "test_9_old.py")
+        os.makedirs(os.path.dirname(leftover))
+        open(leftover, "w").close()
+
+        failed, said = self.wf._run_proof(self.command, 1, "test_1_rate.py")
+
+        self.assertTrue(failed, said)
+        self.assertIn(f"\n{self.worktree}/limiter.py\n", said)
+        self.assertFalse(os.path.exists(os.path.join(self.worktree, orchestrator.PROOF_COPIES_DIR)))
+        self.assertEqual(self.host.read(os.path.join(self.worktree, ".orchestrator", ".gitignore")), "*\n")
+        self.assertEqual(sorted(os.listdir(self.state.proofs_dir(1))), ["test_1_rate.py"])
+        self.assertEqual(self.host.git(self.worktree, "status", "--porcelain"), " M limiter.py\n")
+
+        with patch.object(self.host, "refuse_leaks"), patch.object(self.host, "push_branch"), \
+                patch.object(self.host, "create_pr", return_value="https://github.com/o/r/pull/1"):
+            self.wf._publish()
+        committed = self.git("ls-tree", "-r", "--name-only", self.BRANCH).split()
+        self.assertEqual(committed, [".gitignore", "limiter.py", "pyproject.toml"])
+        self.assertEqual(self.git("show", f"{self.BRANCH}:limiter.py"), 'RATE = "change"\n')
 
 
 class TestSavedBeforeWorkflows(unittest.TestCase):

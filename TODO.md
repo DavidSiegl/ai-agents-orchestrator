@@ -156,12 +156,12 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 - **Proofs run after the last round's review too.** No Builder turn follows to read them; only the draft pull
   request's review shows them, and each may take `PROOF_TIMEOUT`. Kept: a demonstrated defect is what the human
   most needs to see in a draft. Raised by the same review.
-- **A proof in a worktree run finds the checkout's pytest configuration.** The run directory, and with it
-  `RunState.proofs_dir`, is under the project checkout, not the run's worktree, so a `proof_command` of
-  `python -m pytest {proofs}` takes its rootdir and `conftest.py` from the checkout while importing the code from the
-  worktree it runs in. Found while writing loop-guards ticket 05; not reproduced. Closes with `_run_proof` passing
-  the working tree as pytest's rootdir and conftest root, or the proofs copied into a scratch directory of the
-  worktree for their run.
+- **What a proof writes outside its own directory can enter the commit.** A proof runs in the working tree
+  (`Workflow._run_proof`), and only its copy's directory is removed after it, so a file it writes elsewhere, such as
+  the `__pycache__` of a module it imports in a project that does not ignore those, stays for `_publish`'s
+  `git add --all`. In-place runs always had this; since proof-runs ticket 01 a worktree run has it too, its proofs
+  importing the worktree's code. Raised there (2026-10-27). Closes with `_publish` committing only what the turns
+  changed, or with proofs running in a throwaway copy of the tree.
 - **`expected-value-changed` misses an inline literal's sign, type or structure.** `_changed_literals` pairs
   assertions by `_shape` and compares `_literals`, which drops types and operators: `assert f() == -5` becoming
   `== 5` changes the shape (no pair, no finding), and `== 1` becoming `== True` gives equal literal lists
@@ -394,6 +394,14 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Fixed
 
+- **A proof in a worktree run finds the checkout's pytest configuration.** The run directory, and with it
+  `RunState.proofs_dir`, is under the project checkout, not the run's worktree, so a `proof_command` of
+  `python -m pytest {proofs}` took its rootdir and `conftest.py` from the checkout. Found while writing loop-guards
+  ticket 05; reproduced on real git by proof-runs ticket 01: with the project's `pythonpath = ["."]`, the proof
+  imported the checkout's module, so it tested the base, not the change. Fixed (2026-10-27): `Workflow._run_proof`
+  copies the proof to `<work_dir>/.orchestrator/proofs/<round that wrote it>/<file>`, under a `.gitignore` of `*`
+  written as the checkout's is (`_ignore_orchestrator_dir`), runs the copy and removes it; an in-place run's copy
+  goes under the checkout's own `.orchestrator/`, so the two kinds of run do not differ.
 - **The quality gate lives inside `orchestrator.py`.** Reusing the gate for another Python project meant copying the
   whole orchestrator, and it can only run inside the judged project's environment anyway, since it starts pytest and
   mutmut with `sys.executable`, which in the binary is the binary. Decided 2026-10-24: the quality file is the one
