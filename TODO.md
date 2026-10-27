@@ -53,7 +53,10 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   (2026-10-27): scenarios as data files the harness interprets, which needed a language of their own for kills,
   takeovers and serve's stream; a cassette of the expected requests that the fakes answer in order, which breaks on
   every count of polls; and a stub gitleaks where none is installed, which would record what no engine run with gitleaks
-  does. ## Open issues
+  does.
+
+## Open issues
+
 - **The parity harness records `state.json` at each command the fakes get, not after each save.** Ticket
   rust-engine/01 asks for "`state.json` after each save"; the ledger reads it only when herdr, gh, Jenkins or PyPI
   gets a call, and leaves out a change to `heartbeat_at` alone (`tests/parity/fakes.py`, `_changed_states`). Raised

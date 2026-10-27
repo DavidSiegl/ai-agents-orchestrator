@@ -396,7 +396,7 @@ class World:
     def _make_certificate(self) -> None:
         """Make pypi.org's certificate for the PyPI server, self-signed, which the engine trusts by SSL_CERT_FILE.
         Raises RuntimeError, naming openssl, where it fails."""
-        # openssl as found on PATH just above.
+        # openssl as found on PATH by World.__init__'s check.
         proc = subprocess.run(  # noqa: S603
             ["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",  # noqa: S607
              "-nodes",
