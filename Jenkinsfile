@@ -200,9 +200,9 @@ pipeline {
 
         // The Linux binary and the desktop app around it, built on every pull request and main build, so a change
         // that breaks either fails before it is merged; Release attaches them. Not in a quality build (GIT_REF set):
-        // the orchestrator run that triggered it waits for the whole build, within QUALITY_TIMEOUT, for a quality
-        // file the Gate stage has already archived, and the change is packaged by its pull request's build before it
-        // merges. The macOS ones come from .github/workflows/macos-binary.yml, with the same scripts, since Jenkins
+        // packaging a snapshot is wasted work, since the orchestrator run that triggered it takes the Gate stage's
+        // quality.md without waiting for later stages, and the change is packaged by its pull request's build before
+        // it merges. The macOS ones come from .github/workflows/macos-binary.yml, with the same scripts, since Jenkins
         // has no macOS machine.
         stage('Package') {
             when { expression { return !params.GIT_REF } }
