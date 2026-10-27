@@ -221,16 +221,10 @@ was done.
     actionlint).
   Closes with those lines corrected, or the endpoint table replaced by a pointer to the docstring.
 - **Gaps in reading a running build's quality.md (PR #105).** Raised by cross-review 58 (2026-10-27):
-  - `_gate_or_end`'s poll takes two equal reads as the file even when they are empty or cut before the GATE line, so
-    a `quality.md` that `archiveArtifacts` leaves at 0 bytes for a poll interval stops the run with "does not start
-    with a GATE line" though its gate ran. Closes with a running build's read taken only once it has a GATE line,
-    and a test of an empty read (F1, should-fix).
   - Each poll of a running build also asks for `artifact/quality.md`, a 404 until Gate has run; asking for
     `artifacts[relativePath]` in the result's `api/json` tree would halve the requests (F2).
-  - In `_quality_report`, the local `ended` holds "was still running…" for a build that has not ended (F3);
-    `_finish_analysis` restates the Jenkinsfile's rule that no stage after Checkout fetches `GIT_REF` instead of
-    pointing at it (F4); no test covers a transient `CIError` between two reads, or a build that ends with a file
-    other than the one read while it ran (F5).
+  - No test covers a transient `CIError` between two reads, or a build that ends with a file other than the one read
+    while it ran (F5).
 - **`vague-names` does not split CamelCase.** `vague_names` matches a whole name or its last `_`-separated word,
   so `user_data` is found but a class `InfoManager` or `UserData` is not. Closes, if the run metrics show such names
   recur, with the last CamelCase word matched too.
@@ -365,6 +359,16 @@ was done.
   subdirectory.
 
 ## Fixed
+
+- **Two empty or cut reads of a running build's quality.md were taken as the file.** `_gate_or_end`'s poll took
+  two equal reads as whole, so a `quality.md` that `archiveArtifacts` left at 0 bytes, or cut inside its GATE line,
+  for a poll interval stopped the run with "does not start with a GATE line" though its gate ran. Raised by
+  cross-review 58 (F1, 2026-10-27), with F3 (the local `ended` in `_quality_report`) and F4 (`_finish_analysis`
+  restating the Jenkinsfile's rule).
+  Fixed (2026-10-27): two agreeing reads are taken only once `parse_gate` reads a GATE from them;
+  `TestQualityGate.test_two_reads_of_a_running_build_without_their_gate_line_are_not_its_quality_file` reads an
+  empty file and one cut inside the GATE line twice each before the whole one. The local is `how_it_stood`, and
+  `_finish_analysis` points at the Jenkinsfile's Checkout comment.
 
 - **A quality round waits for the whole build, not for its quality file.** `Workflow._analyse` polls the build's
   result until the build ends and only then reads `quality.md`, which the Gate stage archived before any later
