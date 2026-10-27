@@ -9,7 +9,7 @@ the files the repository tracks, keeping the findings on the lines the change ad
 gate_checks lists, such as weakened tests, flaky tests and surviving mutants. `python gate.py --help` gives each
 option. Exit status 0 when the quality file's first line is GATE: OK, 1 for GATE:
 ERROR, EXIT_GATE_UNJUDGED (2) when it could not judge the change, having written nothing; argparse's own 2 for
-bad arguments, likewise writing nothing.
+bad arguments, and EXIT_INTERRUPTED (130) for Ctrl-C, likewise writing nothing.
 
 The gate imports nothing but the standard library, so this one file is the whole program, to copy into another
 project or take from a commit with `git show REV:gate.py`. What it runs it takes from the project it judges: the
@@ -89,6 +89,8 @@ MUTMUT_REPORT_TIMEOUT = 60
 BASE_RUN_BUDGET = 120
 # The gate's exit status when it could not judge the change, and so wrote no quality file.
 EXIT_GATE_UNJUDGED = 2
+# Its exit status when Ctrl-C stopped it, before it wrote the quality file: 128 + SIGINT, as a shell reports it.
+EXIT_INTERRUPTED = 130
 
 
 class GateError(Exception):
@@ -2436,7 +2438,7 @@ def _unlinked_path(dest: str, path: str) -> str:
 # as tested.
 #
 # mutmut 3 (3.8.0 here) is bounded to the functions the change edits like this. Its own selector, `mutmut run` with
-# mutant names or globs such as `orchestrator.x_flaky_tests__mutmut_*`, only picks which mutants run: it first makes a
+# mutant names or globs such as `gate.x_flaky_tests__mutmut_*`, only picks which mutants run: it first makes a
 # mutant of every function in its source_paths, which for orchestrator.py takes minutes and makes a 25 MB module the
 # tests then crawl through. So mutmut runs on a copy of the tree, and in the copy every function and class that holds
 # no changed function gets `# pragma: no mutate block` at the end of the line its header ends on. mutmut skips such a
@@ -3926,11 +3928,17 @@ def write_quality_file(path: str, text: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     """Judge the change in the current directory with the command-line arguments argv, sys.argv[1:] by default, as
-    the module docstring says, and return the exit status: 0, 1 or EXIT_GATE_UNJUDGED as gate_command returns it.
-    Bad arguments and --help end the process, as parse_args says."""
+    the module docstring says, and return the exit status: 0, 1 or EXIT_GATE_UNJUDGED as gate_command returns it,
+    or EXIT_INTERRUPTED, saying so on standard error, when Ctrl-C stopped it. Bad arguments and --help end the
+    process, as parse_args says."""
     args = parse_args(argv)
-    return gate_command(args.base, args.config, args.coverage, args.tests, args.out, args.mutation_budget,
-                        args.base_run_budget)
+    try:
+        return gate_command(args.base, args.config, args.coverage, args.tests, args.out, args.mutation_budget,
+                            args.base_run_budget)
+    except KeyboardInterrupt:
+        # write_quality_file renames the whole file into place last, so out holds what it held before.
+        print("interrupted; no quality file was written", file=sys.stderr)
+        return EXIT_INTERRUPTED
 
 
 if __name__ == "__main__":

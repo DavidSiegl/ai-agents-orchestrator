@@ -681,6 +681,17 @@ class TestGate(RepositoryTest):
         self.assertEqual(status, gate.EXIT_GATE_UNJUDGED)
         self.assertIn("is not a file", err)
 
+    def test_ctrl_c_writes_nothing_and_exits_interrupted(self):
+        out = os.path.join(self.outside, "quality.md")
+        with open(out, "w") as f:
+            f.write("GATE: OK\n")
+        with patch.object(gate, "judge_change", side_effect=KeyboardInterrupt):
+            status, stdout, err = self.gate("--out", out)
+        self.assertEqual((status, stdout), (gate.EXIT_INTERRUPTED, ""))
+        self.assertIn("interrupted", err)
+        with open(out) as f:
+            self.assertEqual(f.read(), "GATE: OK\n")
+
 
 class TestTestIntegrityCheck(unittest.TestCase):
     def test_it_fails_the_gate_but_weighs_what_a_spec_can_ask_for(self):
