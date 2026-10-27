@@ -7830,6 +7830,55 @@ class TestProofs(unittest.TestCase):
         self.assertEqual(wf.run(), APPROVE)
         self.assertEqual([p["demonstrated"] for p in wf.state.proofs if p["round"] == 1], [True])
 
+    def test_a_carried_proof_runs_again_after_the_rounds_last_quality_round_and_before_the_review(self):
+        # Round 2's first quality round fails, so its last is the one after the Builder's fix.
+        fake = FakeCI()
+        fake.outcomes = [outcome(), outcome(**RED), outcome()]
+        events = []
+
+        def logged(event, turn):
+            def wrapped(prompt, state, host):
+                events.append((event, state.round))
+                return turn(prompt, state, host)
+            return wrapped
+
+        def review_with_proof(prompt, state, host):
+            os.makedirs(state.proofs_dir(1))
+            with open(f"{state.proofs_dir(1)}/test_1.sh", "w") as f:
+                f.write("exit 1\n")
+            return review_turn(1, CHANGES_REQUESTED)(prompt, state, host)
+        pipeline = replace(orchestrator.DEFAULT_WORKFLOW, proof_command="sh {proofs}")
+        state = RunState("20260929-120000-a1b2c3", "add a rate limiter", self.proj, None, phase="build",
+                         workflow=pipeline.name)
+        host = FakeHost()
+        host._run = subprocess.run
+        # git ignores the scratch project's .orchestrator, as FakeHost has it ignore /proj's, for the gate's
+        # clean-tree check.
+        changed_in = host._changed_in
+        host._changed_in = lambda cwd: {p for p in changed_in(cwd) if not p.startswith(f"{self.proj}/.orchestrator/")}
+        wf, *_ = gated({"build": [logged("build", build_turn(1)), logged("build", build_turn(2)),
+                                  logged("quality fix", fix_turn(2, 1))],
+                        "review": [logged("review", review_with_proof), logged("review", review_turn(2, APPROVE))]},
+                       fake=fake, host=host, state=state, pipeline=pipeline, pull_request=False)
+        judge_quality, run_proof = wf._judge_quality, wf._run_proof
+
+        def quality(n):
+            events.append(("quality round", n, wf.state.quality_round))
+            return judge_quality(n)
+
+        def proof(*args):
+            events.append(("proof", wf.state.round))
+            return run_proof(*args)
+        wf._judge_quality, wf._run_proof = quality, proof
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(events, [
+            ("build", 1), ("quality round", 1, 1), ("review", 1), ("proof", 1),
+            ("build", 2), ("quality round", 2, 1), ("quality fix", 2), ("quality round", 2, 2), ("proof", 2),
+            ("review", 2)])
+        self.assertEqual([(p["round"], p["written"], p["demonstrated"]) for p in wf.state.proofs],
+                         [(1, 1, True), (2, 1, True)])
+
     @pytest.mark.real_sleep
     def test_a_proof_that_runs_too_long_is_stopped_with_what_it_started(self):
         with patch.object(orchestrator, "PROOF_TIMEOUT", 1):

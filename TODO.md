@@ -142,10 +142,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   check reuses `Host.gitleaks_problem`, the run's pre-push check, which asks `gitleaks git --help` because a
   distribution's build may print no version number. So `doctor` shows no gitleaks version. Kept by choice
   (2026-10-24).
-- **No test shows the proof reruns come after the quality loop.** `Workflow._rerun_proofs` runs right before the
-  verdict step's turn, which follows the quality loop by construction, but every proof test uses `QUICK`, which has
-  no quality-gated step. Raised by the cross-review of the proof reruns (R1-F5, 2026-10-24): "no test would notice
-  the rerun moving before it". Closes with a proof test on a quality-gated workflow, through the CI fakes.
 - **A spec left `ready-for-human` by a conflict stays there when `refresh` clears the conflict before a drain does.**
   drain moves such a spec to `in-review` only when its own refresh clears the run's conflict (`refreshed_headers`);
   a run cleared by `orchestrator.py refresh` beforehand has no conflicts left, so drain cannot tell the spec held
@@ -394,6 +390,13 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Fixed
 
+- **No test shows the proof reruns come after the quality loop.** `Workflow._rerun_proofs` runs right before the
+  verdict step's turn, which follows the quality loop by construction, but every proof test used `QUICK`, which has
+  no quality-gated step. Raised by the cross-review of the proof reruns (R1-F5, 2026-10-24): "no test would notice
+  the rerun moving before it". Fixed (2026-10-27): `TestProofs`'s
+  `test_a_carried_proof_runs_again_after_the_rounds_last_quality_round_and_before_the_review` runs the default
+  workflow through the CI fakes, round 2's first quality round failing, and pins the order of the turns, quality
+  rounds and proof runs; it fails with the rerun moved before the gated step's turn.
 - **A proof in a worktree run finds the checkout's pytest configuration.** The run directory, and with it
   `RunState.proofs_dir`, is under the project checkout, not the run's worktree, so a `proof_command` of
   `python -m pytest {proofs}` took its rootdir and `conftest.py` from the checkout. Found while writing loop-guards
