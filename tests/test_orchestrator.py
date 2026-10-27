@@ -4430,21 +4430,28 @@ class TestQualityGate(unittest.TestCase):
             "parameters", "trigger", "queue", *["build", "quality"] * 3, "trigger"])
         self.assertEqual(fake.builds[41]["left"], polls - 3)
 
+    @staticmethod
+    def replace_quality_reads(fake, replies):
+        """Make fake answer its k-th read of an archived quality.md, from 1, with replies[k] where replies has one, and
+        with the file otherwise; returns the list each read's real text is appended to."""
+        reads, orig = [], fake.jenkins
+
+        def jenkins(method, path, query, form):
+            name, answer = orig(method, path, query, form)
+            if name == "quality" and not isinstance(answer, int):
+                reads.append(answer.body)
+                if len(reads) in replies:
+                    return name, FakeResponse(replies[len(reads)])
+            return name, answer
+        fake.jenkins = jenkins
+        return reads
+
     def test_a_quality_file_read_while_its_build_runs_is_taken_once_two_reads_agree(self):
         fake = FakeCI()
         fake.outcomes = [outcome(polls=5, after_gate=4)]
         wf, herdr, host, fake, _ = gated({
             "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, fake=fake)
-        whole, reads, orig = fake.outcomes[0]["quality"], [], fake.jenkins
-
-        def cut_short_once(method, path, query, form):
-            name, answer = orig(method, path, query, form)
-            if name == "quality" and not isinstance(answer, int):
-                reads.append(answer.body)
-                if len(reads) == 1:
-                    return name, FakeResponse(whole[:12])
-            return name, answer
-        fake.jenkins = cut_short_once
+        reads = self.replace_quality_reads(fake, {1: fake.outcomes[0]["quality"][:12]})
 
         self.assertEqual(wf.run(), APPROVE)
 
@@ -4454,6 +4461,34 @@ class TestQualityGate(unittest.TestCase):
             "## Issues on changed lines\n\nNone.\n"))
         self.assertEqual(len(reads), 3)
         self.assertEqual(fake.builds[41]["left"], 2)
+
+    def test_two_reads_of_a_running_build_without_their_gate_line_are_not_its_quality_file(self):
+        # archiveArtifacts can leave the file empty, or cut inside its GATE line, for longer than a poll interval.
+        for cut in ("", "GATE: O"):
+            with self.subTest(cut=cut):
+                fake = FakeCI()
+                fake.outcomes = [outcome(polls=6, after_gate=5)]
+                wf, herdr, host, fake, _ = gated({
+                    "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, fake=fake)
+                reads = self.replace_quality_reads(fake, {1: cut, 2: cut})
+
+                self.assertEqual(wf.run(), APPROVE)
+                self.assertTrue(host.files[wf.state.quality_path(1, 1)].startswith(
+                    "GATE: OK\n\nJenkins build #41 judged snapshot `snap1` (round 1, quality round 1 of 3) and was "
+                    "still running when its quality.md was read."))
+                self.assertEqual(len(reads), 4)
+
+    def test_two_reads_of_a_running_build_with_a_whole_line_but_no_gate_stop_the_round_at_once(self):
+        fake = FakeCI()
+        fake.outcomes = [outcome(polls=50, after_gate=49)]
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, fake=fake)
+        reads = self.replace_quality_reads(fake, {k: "Not a gate line\n" for k in range(1, 50)})
+
+        with self.assertRaisesRegex(OrchestratorError, "does not start with a GATE line"):
+            wf.run()
+        # Taken at the second read, not left to the build's end or the round's deadline.
+        self.assertEqual(len(reads), 2)
 
     def test_build_failed_before_the_gate_goes_back_to_the_builder(self):
         fake = FakeCI()

@@ -8826,7 +8826,8 @@ class Workflow:
 
     def _gate_or_end(self, ref: str, number: int):
         """A poll for _poll: (result, quality file) of build number, which ci records as the build of ref, once it
-        has ended, or (None, quality file) once it has archived one while it still runs; None until then.
+        has ended, or (None, quality file) once two reads of the file it archived while it still runs agree and hold
+        a whole non-blank line; None until then.
 
         Each call asks for the result (_build_result, and its errors) and then the file, two requests at most.
         """
@@ -8840,10 +8841,12 @@ class Workflow:
             if result is not None:
                 return result, quality
             # Jenkins serves an artifact while archiveArtifacts is still copying it into place, so one read of a
-            # running build's file may be cut short. Two reads that agree, at least a poll interval apart, are taken
-            # as whole: a heuristic, which a copy stalled that long and then resumed defeats (TODO.md). A build that
-            # has ended has finished archiving, so one read then is enough.
-            if quality is not None and quality == earlier:
+            # running build's file may be cut short. Two reads that agree, at least a poll interval apart, and hold a
+            # whole non-blank line, as the GATE line is, are taken as whole: so an empty copy or one cut inside its
+            # first line is not, while a whole first line that is no GATE line is, for _quality to report. A
+            # heuristic, which a copy stalled that long past its first line and then resumed defeats (TODO.md). A
+            # build that has ended has finished archiving, so one read then is enough.
+            if quality is not None and quality == earlier and any(line.strip() for line in quality.split("\n")[:-1]):
                 return None, quality
             earlier = quality
             return None
@@ -8922,9 +8925,9 @@ class Workflow:
         sha = s.ci["sha"]
         where = self._where(n, q)
         if quality is not None:
-            ended = "was still running when its quality.md was read" if result is None else f"ended {result}"
+            how_it_stood = "was still running when its quality.md was read" if result is None else f"ended {result}"
             return _under_gate_line(self._judged_by_orchestrator(quality, sha, deadline),
-                                    f"Jenkins build #{build} judged snapshot `{sha}` ({where}) and {ended}.")
+                                    f"Jenkins build #{build} judged snapshot `{sha}` ({where}) and {how_it_stood}.")
         tests = self._once(f"reading the test report of Jenkins build #{build}", deadline,
                            lambda: self._jenkins.failed_tests(build))
         console = "" if tests else self._once(f"reading the console of Jenkins build #{build}", deadline,
@@ -9008,8 +9011,8 @@ class Workflow:
         s = self.state
         if s.ci.get("ref") == ref:
             # Jenkins has checked the ref out by now, though the build may still run the stages after its Gate stage
-            # (_analyse): the Jenkinsfile's Checkout stage, its first, fetches the ref, and no later stage fetches it
-            # again. A leftover is only clutter, which the run's end tries again.
+            # (_analyse); the Jenkinsfile's Checkout comment says why that is enough. A leftover is only clutter,
+            # which the run's end tries again.
             delete_ci_ref(self.host, s.cwd, ref)
             s.ci = {}
         self._save()
