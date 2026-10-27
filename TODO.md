@@ -391,7 +391,7 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `["orchestrator.py"]`; mutmut copies only `source_paths`, `tests/` and `also_copy` into `mutants/`, so the tests
   that `import gate` fail there and surviving-mutants is `not-run`, and each changed `gate.py` function is
   `not-mutated`. Findings to weigh, not failed conditions. Raised by cross-review 61 (F2, 2026-10-27) from mutmut's
-  copy rule and the gate's code, not from a run. Closes by itself once main has `gate.py` (ticket 03's start).
+  copy rule and the gate's code, not from a run.
   Fixed (2026-10-27): the fallback is gone (gate-split/03): a quality build is judged by `$JUDGED_MAIN`'s
   `gate.py`, whose `source_paths` name `gate.py`, and a main without one fails the stage unjudged.
 
@@ -407,8 +407,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `_not_ignored_in_children`, for `RunProcess`, and `judged_in_quality` runs git through `Host` and counts `gate.py`
   among `JUDGING_FILES`. The gate's tests are in `tests/test_gate.py`; `test_invariants.py` holds `gate.py` to the
   standard library too, and `test_docs.py` checks the docs' names and `gate.py` flags against both files. The
-  Jenkinsfile's Gate stage runs `gate.py`, a quality build the one at `$JUDGED_MAIN`, or that commit's
-  `orchestrator.py gate` when it has none (Planned, "what is left"); `pyproject.toml`'s mypy files and mutmut
+  Jenkinsfile's Gate stage runs `gate.py`, a quality build the one at `$JUDGED_MAIN` (with a cutover fallback to that
+  commit's `orchestrator.py gate`, since removed by gate-split/03); `pyproject.toml`'s mypy files and mutmut
   `source_paths` and the Test stage's coverage name both files. Not closed: a quality build of a snapshot whose tree
   predates `gate.py` is judged by main's rules, whose `[tool.mypy] files` name `gate.py`, and the quality file's
   intro still names `orchestrator.py gate` (Open issues, both).

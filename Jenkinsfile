@@ -161,8 +161,8 @@ pipeline {
                         // The snapshot's only parent is the run's base.
                         base = 'HEAD^'
                         // The gate and rules of the main commit Checkout named in the build's description, fetched
-                        // there. A main without gate.py, from before the gate split, cannot judge: the stage fails as
-                        // an unjudged gate rather than running some other program.
+                        // there. A main without gate.py, from before the gate split, cannot judge: this step fails, and
+                        // with it the build, writing no quality.md, rather than running some other program.
                         sh '''
                             : "${JUDGED_MAIN:?is unset; run the whole build, not a restart from a later stage}"
                             if ! git cat-file -e "$JUDGED_MAIN:gate.py" 2>/dev/null; then
