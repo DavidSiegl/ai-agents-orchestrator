@@ -498,7 +498,7 @@ empty `GIT_REF`, before it accepts `buildWithParameters`.
 
 | Build | `--base` | Gate and rules |
 |---|---|---|
-| Quality build (`GIT_REF` set) | `HEAD^`: the snapshot's only parent is the run's base | `main`'s `gate.py` and `pyproject.toml`, from the `origin/main` commit its description names (below); for a commit from before `gate.py`, its `orchestrator.py gate` |
+| Quality build (`GIT_REF` set) | `HEAD^`: the snapshot's only parent is the run's base | `main`'s `gate.py` and `pyproject.toml`, from the `origin/main` commit its description names (below); a commit without `gate.py` fails the stage, unjudged |
 | Pull request (`CHANGE_TARGET` set) | the merge base with the target branch, fetched first | its own, `Jenkinsfile` included (below) |
 | `main` | the last successful build's commit, else `HEAD^1` | its own; none when judged at its pull request (below) |
 
