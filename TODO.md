@@ -49,9 +49,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   stream list them, sorted by name, since seconds of the clock decide that order; ssh's commands not at all, only what
   they did; doctor's lines without git's and Tk's, which are the host's. Two more are open issues below: the
   `state.json` saves between two commands, and serve's events between two checkpoints. The suite takes about 3 minutes
-  more with the harness, one engine run each scenario at 2 to 25 seconds (25 for serve's event stream); pull request
-  builds run them, quality builds do not (Jenkinsfile, Test stage), since they took quality build #59 past
-  `QUALITY_TIMEOUT` and the engine they judge is frozen. Decided against
+  more with the harness, one engine run each scenario at 2 to 25 seconds (25 for serve's event stream); when a quality
+  build runs them is the Jenkinsfile's Test stage's to say. Decided against
   (2026-10-27): scenarios as data files the harness interprets, which needed a language of their own for kills,
   takeovers and serve's stream; a cassette of the expected requests that the fakes answer in order, which breaks on
   every count of polls; and a stub gitleaks where none is installed, which would record what no engine run with gitleaks

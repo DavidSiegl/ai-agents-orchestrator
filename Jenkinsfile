@@ -118,12 +118,22 @@ pipeline {
             steps {
                 // A failing test does not stop the build here: the Gate stage judges it with everything else, so a
                 // quality build's report lists failing tests and findings together. Any other exit status means
-                // pytest itself could not run. A quality build (GIT_REF set) leaves out the parity scenarios
-                // (tests/parity), which judge only the frozen Python engine and took it past the orchestrator's
-                // QUALITY_TIMEOUT (quality build #59: 1299 s of 1200); every pull request build still runs them.
+                // pytest itself could not run.
+                //
+                // A quality build (GIT_REF set) leaves out the parity scenarios (tests/parity) when its change, against
+                // HEAD^, the run's base, touches nothing they judge: the engine, the harness and its recordings, the
+                // example workflows they run, and the Python environment. They took quality build #59 past the
+                // orchestrator's QUALITY_TIMEOUT (1299 s of 1200), and while orchestrator.py is frozen a quality
+                // round seldom touches those paths. A git diff that fails counts as a change, so they run. Pull
+                // request builds always run them. [tool.mutmut] in pyproject.toml leaves them out of mutmut's runs.
                 sh '''
+                    parity=''
+                    if [ -n "${GIT_REF:-}" ] && git diff --quiet HEAD^ HEAD -- orchestrator.py tests/parity examples \
+                            pyproject.toml uv.lock .python-version; then
+                        parity='--ignore=tests/parity'
+                    fi
                     status=0
-                    uv run pytest ${GIT_REF:+--ignore=tests/parity} --cov=orchestrator --cov=gate --cov-branch --cov-report=xml --junitxml=test-results.xml || status=$?
+                    uv run pytest $parity --cov=orchestrator --cov=gate --cov-branch --cov-report=xml --junitxml=test-results.xml || status=$?
                     [ "$status" -le 1 ] || exit "$status"
                 '''
             }
