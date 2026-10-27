@@ -102,15 +102,16 @@ pipeline {
                 // container is rebuilt without them.
                 //
                 // PR-163's first two builds failed here with "component download failed for llvm-tools: error opening
-                // file for download: cleaning up cached downloads: No such file or directory", which a missing
-                // downloads or tmp directory in rustup's home may cause: both are made first, and the home, rustup's
-                // version and their permissions are printed, so that a failure here shows what the agent has.
+                // file for download: cleaning up cached downloads: No such file or directory", with no other build of
+                // this repository running; the cause is not known. rustup's home is the agent's, shared by every
+                // build on the node, so the add runs under the node's cargo lock, as the cargo steps do, in case
+                // another job's rustup removed the file; and the home, rustup's version and the permissions of the
+                // directories it downloads into are printed first, so that a failure here shows what the agent has.
                 sh '''
                     home=$(rustup show home)
-                    mkdir -p "$home/downloads" "$home/tmp"
                     rustup --version
-                    ls -ld "$home" "$home/downloads" "$home/tmp"
-                    rustup component add clippy llvm-tools-preview
+                    ls -ld "$home" "$home/downloads" "$home/tmp" || true
+                    "$WORKSPACE/ci/cargo-lock.sh" ${GIT_REF:+--no-wait} rustup component add clippy llvm-tools-preview
                 '''
                 sh 'ci/install-tools.sh "$WORKSPACE/.tools/bin"'
                 script {
