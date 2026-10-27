@@ -79,12 +79,14 @@ change cannot weaken its tests unseen. Each of these is a finding:
   constant of its own file at the base and still name it, bare or as `module.NAME` (the module by its dotted name or a
   module-level import alias of it), and the constant's expression changed other than in layout, or it is no longer a
   constant, that is one finding per constant and test, at the test's first assertion naming it, naming the constant
-  and its line. A constant whose name the test also binds anywhere is not checked, and neither is a `module.NAME`
-  whose `module` the test binds. A constant is a module-level assignment of one name, bound nowhere else in the
-  module's scope, to an expression with no call in it. One the change adds, one imported from another module or
-  computed by a call, one reached through a local or a helper, an edit to another constant one is built from, and a
-  fixture's return value do not count. It is one to weigh, like `removed-test`, since the spec may ask for the new
-  value.
+  and its line. A constant whose name the test binds anywhere, even by a binding that does nothing (`global NAME`, a
+  comprehension target, a lambda parameter), is not checked, so such a line hides an edited constant; the Reviewer
+  sees it in the diff. Neither is a `module.NAME` whose `module` the test binds. Only a top-level import statement's
+  alias counts as the module; one imported under a module-level `if` or `try` does not. A constant is a module-level
+  assignment of one name, bound nowhere else in the module's scope, to an expression with no call in it. One the
+  change adds, one imported from another module or computed by a call, one reached through a local or a helper, an
+  edit to another constant one is built from, and a fixture's return value do not count. It is one to weigh, like
+  `removed-test`, since the spec may ask for the new value.
 
 It reads Python only; another language is a `WeakenedTestsDetector` beside the Python one in
 `WEAKENED_TESTS_DETECTORS`.

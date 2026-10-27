@@ -357,12 +357,16 @@ was done.
   reports `expected-value-changed` once per kept test and constant of the base whose assertions read it on both sides,
   bare or through the module's dotted name or a module-level import alias of it, when its expression changed other
   than in layout, or it is no longer such a constant. A name the test binds anywhere (`_names_bound_in`) is never read
-  as the module's, so shadowing needs no resolving. Not closed: a constant whose name the test also binds anywhere is
-  not checked; a constant imported from another module or computed by a call at the base; one built from other
-  constants, whose edits are not seen; one reached through a local (`expected = GOLDEN`) or a helper that asserts
-  rather than named in the test's assertions; a fixture's return value; an inline value moved into a new constant,
-  which requirement 4 leaves out; a constant changed by a module-level mutation (`GOLDEN["k"] = "b"`) or rebound
-  through `global` in a function; and the module reached through a relative import or an import inside the test.
+  as the module's, so shadowing needs no resolving. Not closed: a constant whose name the test binds anywhere, even by
+  a binding that does nothing (`global NAME`, a comprehension target, a lambda parameter), is not checked, so such a
+  line hides an edited constant (the Reviewer sees it in the diff); a constant imported from another module or
+  computed by a call at the base; one built from other constants, whose edits are not seen; one reached through a
+  local (`expected = GOLDEN`) or a helper that asserts rather than named in the test's assertions; a fixture's return
+  value; an inline value moved into a new constant, which requirement 4 leaves out; a constant changed by a
+  module-level mutation (`GOLDEN["k"] = "b"`) or rebound through `global` in a function; and the module reached
+  through a relative import, an import inside the test, or an alias imported under a module-level `if` or `try` (only
+  a top-level import statement's alias counts; review 54, F18).
+
 
 - **A base `.gitleaks.toml` that extends another file reads that file from outside the base.** `scan_unpublished`
   writes the base's `.gitleaks.toml` into the run directory and passes it with `--config`; an `[extend] path = ...`
