@@ -1403,6 +1403,18 @@ class TestWeakenedTests(RepositoryTest):
                                  ("tests/test_other.py", "tests/test_renamed.py")], key=str))
 
 
+class TestToolEnv(unittest.TestCase):
+    """tool_env, the environment of every process the gate starts."""
+
+    def test_leaves_out_what_would_change_what_a_rerun_test_does(self):
+        names = {"JENKINS_URL": "http://ci", "JENKINS_USER": "agents", "JENKINS_TOKEN": "secret", "UPDATE_GOLDEN": "1",
+                 "GIT_LITERAL_PATHSPECS": "1"}
+        with patch.dict("os.environ", {**names, "KEPT": "yes"}):
+            env = gate.tool_env()
+        self.assertEqual(env["KEPT"], "yes")
+        self.assertEqual([name for name in names if name in env], [])
+
+
 class TestRunInSession(unittest.TestCase):
     """_run_in_session, which runs the gate's pytest and mutmut, on shell commands."""
 

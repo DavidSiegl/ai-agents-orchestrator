@@ -460,6 +460,16 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Fixed
 
+- **A quality build left out the parity scenarios when only `tests/guard_errors.py` changed.** The Test stage's path
+  list named `tests/conftest.py`, whose guards the scenarios run under, but not `tests/guard_errors.py`, which holds
+  the errors those guards raise. Raised by cross-review 76 (F1, 2026-10-27), in code PR #162 brought. Fixed
+  (2026-10-27): the list names it.
+
+- **`tool_env` passed `UPDATE_GOLDEN` to the pytest and mutmut runs the gate starts.** Under `UPDATE_GOLDEN=1`
+  `assert_golden` rewrites its file instead of comparing, so the gate's flaky-tests reruns would rewrite
+  `tests/golden/*.txt` and pass a golden test that should fail. Raised by cross-review 76 (F2, 2026-10-27). Fixed
+  (2026-10-27): `tool_env` leaves it out, as it does the Jenkins credentials (`TestToolEnv`).
+
 - **No test shows the proof reruns come after the quality loop.** `Workflow._rerun_proofs` runs right before the
   verdict step's turn, which follows the quality loop by construction, but every proof test used `QUICK`, which has
   no quality-gated step. Raised by the cross-review of the proof reruns (R1-F5, 2026-10-24): "no test would notice
