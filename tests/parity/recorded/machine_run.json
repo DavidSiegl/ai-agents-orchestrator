@@ -1,0 +1,1478 @@
+{
+ "invocations": [
+  {
+   "args": [
+    "run",
+    "--machine",
+    "box",
+    "--cwd",
+    "<world>/project",
+    "--",
+    "Add a subtract function"
+   ],
+   "exit": 0,
+   "stdout": "APPROVE: https://github.com/parity/project/pull/1\n",
+   "stderr_facts": [
+    "1",
+    "<run:1>",
+    "APPROVE",
+    "build-1.md",
+    "https://github.com/parity/project/pull/1",
+    "orchestrator/add-a-subtract-function-<key:1>",
+    "p1",
+    "p1",
+    "p2",
+    "p3",
+    "review-1.md",
+    "w1"
+   ]
+  }
+ ],
+ "events": {
+  "1": [
+   {
+    "herdr": [
+     "machine",
+     "list",
+     "--json"
+    ]
+   },
+   {
+    "state": {
+     "path": "<world>/project/.orchestrator/runs/<run:1>/state.json",
+     "saved": {
+      "run_id": "<run:1>",
+      "task": "Add a subtract function",
+      "cwd": "<world>/project",
+      "machine": "box",
+      "phase": "spec",
+      "round": 0,
+      "workspace_id": "",
+      "root_pane": "",
+      "base": null,
+      "base_branch": null,
+      "branch": null,
+      "pr_url": null,
+      "verdict": null,
+      "conflicts": [],
+      "error": null,
+      "agents": {},
+      "max_rounds": 3,
+      "turn_timeout": 1800,
+      "permission_mode": null,
+      "models": {},
+      "agent_kinds": {
+       "spec": "claude",
+       "build": "claude",
+       "review": "claude"
+      },
+      "pull_request": true,
+      "prompted": null,
+      "retried": [],
+      "retrying": null,
+      "owner": {
+       "host": "<host>",
+       "pid": "<pid:1>",
+       "started_at": "<time>"
+      },
+      "heartbeat_at": "<time>",
+      "quality_job": null,
+      "quality_gate_disabled": false,
+      "max_quality_rounds": 3,
+      "quality_round": 0,
+      "ci": {},
+      "workflow": "default",
+      "workflow_definition": null,
+      "prompt_overrides": {},
+      "branch_cleanup": null,
+      "worktree": null,
+      "closed": null,
+      "turns": [],
+      "quality_rounds": [],
+      "blocked": null,
+      "locked": {},
+      "restored": [],
+      "proofs": []
+     }
+    }
+   },
+   {
+    "herdr": [
+     "--machine",
+     "box",
+     "workspace",
+     "create",
+     "--cwd",
+     "<world>/project",
+     "--label",
+     "<key:1> Add a subtract function",
+     "--no-focus"
+    ]
+   },
+   {
+    "state": {
+     "path": "<world>/project/.orchestrator/runs/<run:1>/state.json",
+     "saved": {
+      "run_id": "<run:1>",
+      "task": "Add a subtract function",
+      "cwd": "<world>/project",
+      "machine": "box",
+      "phase": "spec",
+      "round": 0,
+      "workspace_id": "w1",
+      "root_pane": "p1",
+      "base": null,
+      "base_branch": "main",
+      "branch": null,
+      "pr_url": null,
+      "verdict": null,
+      "conflicts": [],
+      "error": null,
+      "agents": {},
+      "max_rounds": 3,
+      "turn_timeout": 1800,
+      "permission_mode": null,
+      "models": {},
+      "agent_kinds": {
+       "spec": "claude",
+       "build": "claude",
+       "review": "claude"
+      },
+      "pull_request": true,
+      "prompted": null,
+      "retried": [],
+      "retrying": null,
+      "owner": {
+       "host": "<host>",
+       "pid": "<pid:1>",
+       "started_at": "<time>"
+      },
+      "heartbeat_at": "<time>",
+      "quality_job": null,
+      "quality_gate_disabled": false,
+      "max_quality_rounds": 3,
+      "quality_round": 0,
+      "ci": {},
+      "workflow": "default",
+      "workflow_definition": null,
+      "prompt_overrides": {},
+      "branch_cleanup": null,
+      "worktree": null,
+      "closed": null,
+      "turns": [],
+      "quality_rounds": [],
+      "blocked": null,
+      "locked": {},
+      "restored": [],
+      "proofs": []
+     }
+    }
+   },
+   {
+    "herdr": [
+     "--machine",
+     "box",
+     "pane",
+     "get",
+     "p1"
+    ]
+   },
+   {
+    "herdr": [
+     "--machine",
+     "box",
+     "pane",
+     "rename",
+     "p1",
+     "Spec Collector"
+    ]
+   },
+   {
+    "herdr": [
+     "--machine",
+     "box",
+     "agent",
+     "start",
+     "spec-<key:1>",
+     "--kind",
+     "claude",
+     "--pane",
+     "p1",
+     "--timeout",
+     "60000"
+    ]
+   },
+   {
+    "state": {
+     "path": "<world>/project/.orchestrator/runs/<run:1>/state.json",
+     "saved": {
+      "run_id": "<run:1>",
+      "task": "Add a subtract function",
+      "cwd": "<world>/project",
+      "machine": "box",
+      "phase": "spec",
+      "round": 0,
+      "workspace_id": "w1",
+      "root_pane": "p1",
+      "base": null,
+      "base_branch": "main",
+      "branch": null,
+      "pr_url": null,
+      "verdict": null,
+      "conflicts": [],
+      "error": null,
+      "agents": {
+       "spec": {
+        "name": "spec-<key:1>",
+        "pane": "p1",
+        "kind": "claude"
+       }
+      },
+      "max_rounds": 3,
+      "turn_timeout": 1800,
+      "permission_mode": null,
+      "models": {},
+      "agent_kinds": {
+       "spec": "claude",
+       "build": "claude",
+       "review": "claude"
+      },
+      "pull_request": true,
+      "prompted": null,
+      "retried": [],
+      "retrying": null,
+      "owner": {
+       "host": "<host>",
+       "pid": "<pid:1>",
+       "started_at": "<time>"
+      },
+      "heartbeat_at": "<time>",
+      "quality_job": null,
+      "quality_gate_disabled": false,
+      "max_quality_rounds": 3,
+      "quality_round": 0,
+      "ci": {},
+      "workflow": "default",
+      "workflow_definition": null,
+      "prompt_overrides": {},
+      "branch_cleanup": null,
+      "worktree": null,
+      "closed": null,
+      "turns": [],
+      "quality_rounds": [],
+      "blocked": null,
+      "locked": {},
+      "restored": [],
+      "proofs": []
+     }
+    }
+   },
+   {
+    "herdr": [
+     "--machine",
+     "box",
+     "agent",
+     "get",
+     "spec-<key:1>"
+    ]
+   },
+   {
+    "state": {
+     "path": "<world>/project/.orchestrator/runs/<run:1>/state.json",
+     "saved": {
+      "run_id": "<run:1>",
+      "task": "Add a subtract function",
+      "cwd": "<world>/project",
+      "machine": "box",
+      "phase": "spec",
+      "round": 0,
+      "workspace_id": "w1",
+      "root_pane": "p1",
+      "base": null,
+      "base_branch": "main",
+      "branch": null,
+      "pr_url": null,
+      "verdict": null,
+      "conflicts": [],
+      "error": null,
+      "agents": {
+       "spec": {
+        "name": "spec-<key:1>",
+        "pane": "p1",
+        "kind": "claude",
+        "session": "session-1"
+       }
+      },
+      "max_rounds": 3,
+      "turn_timeout": 1800,
+      "permission_mode": null,
+      "models": {},
+      "agent_kinds": {
+       "spec": "claude",
+       "build": "claude",
+       "review": "claude"
+      },
+      "pull_request": true,
+      "prompted": null,
+      "retried": [],
+      "retrying": null,
+      "owner": {
+       "host": "<host>",
+       "pid": "<pid:1>",
+       "started_at": "<time>"
+      },
+      "heartbeat_at": "<time>",
+      "quality_job": null,
+      "quality_gate_disabled": false,
+      "max_quality_rounds": 3,
+      "quality_round": 0,
+      "ci": {},
+      "workflow": "default",
+      "workflow_definition": null,
+      "prompt_overrides": {},
+      "branch_cleanup": null,
+      "worktree": null,
+      "closed": null,
+      "turns": [],
+      "quality_rounds": [],
+      "blocked": null,
+      "locked": {},
+      "restored": [],
+      "proofs": []
+     }
+    }
+   },
+   {
+    "herdr": [
+     "--machine",
+     "box",
+     "agent",
+     "focus",
+     "spec-<key:1>"
+    ]
+   },
+   {
+    "herdr": [
+     "notification",
+     "show",
+     "Spec Collector is waiting for you",
+     "--body",
+     "pane p1: Add a subtract function",
+     "--sound",
+     "request"
+    ]
+   },
+   {
+    "herdr": [
+     "--machine",
+     "box",
+     "agent",
+     "prompt",
+     "spec-<key:1>",
+     "You are the Spec Collector, the first of three roles (Spec Collector -> Builder -> Reviewer). Separate agent sessions play the Builder and the Reviewer; they will know only what you write down. A human is at this terminal and answers you directly.\n\nTask from the human:\nAdd a subtract function\n\nInterview the human until the requirements are unambiguous: the goal, what is in and out of scope, testable acceptance criteria, constraints, and how the result will be verified. Read the code in <world>/project first so your questions are grounded and you can cite the files the change touches. Ask a few questions at a time. Do not write or change any code.\n\nWhen the human approves the spec, write it in a single write to <world>/project/.orchestrator/runs/<run:1>/spec.md as Markdown. Its first line is a `# ` heading: a short imperative title for the change, under 70 characters; it becomes the commit subject and the pull request title. Then these `##` sections: Goal, Scope, Non-goals, Acceptance criteria (a numbered list, each one checkable), Relevant code (file:line), Verification. Writing that file hands the work to the Builder, so write it only after the human approves it."
+    ]
+   },
+   {
+    "state": {
+     "path": "<world>/project/.orchestrator/runs/<run:1>/state.json",
+     "saved": {
+      "run_id": "<run:1>",
+      "task": "Add a subtract function",
+      "cwd": "<world>/project",
+      "machine": "box",
+      "phase": "build",
+      "round": 1,
+      "workspace_id": "w1",
+      "root_pane": "p1",
+      "base": "<sha:1>",
+      "base_branch": "main",
+      "branch": "orchestrator/add-a-subtract-function-<key:1>",
+      "pr_url": null,
+      "verdict": null,
+      "conflicts": [],
+      "error": null,
+      "agents": {
+       "spec": {
+        "name": "spec-<key:1>",
+        "pane": "p1",
+        "kind": "claude",
+        "session": "session-1"
+       }
+      },
+      "max_rounds": 3,
+      "turn_timeout": 1800,
+      "permission_mode": null,
+      "models": {},
+      "agent_kinds": {
+       "spec": "claude",
+       "build": "claude",
+       "review": "claude"
+      },
+      "pull_request": true,
+      "prompted": "spec.md",
+      "retried": [],
+      "retrying": null,
+      "owner": {
+       "host": "<host>",
+       "pid": "<pid:1>",
+       "started_at": "<time>"
+      },
+      "heartbeat_at": "<time>",
+      "quality_job": null,
+      "quality_gate_disabled": false,
+      "max_quality_rounds": 3,
+      "quality_round": 0,
+      "ci": {},
+      "workflow": "default",
+      "workflow_definition": null,
+      "prompt_overrides": {},
+      "branch_cleanup": null,
+      "worktree": null,
+      "closed": null,
+      "turns": [
+       {
+        "step": "spec",
+        "role": "spec",
+        "round": 0,
+        "quality_round": 0,
+        "file": "spec.md",
+        "agent": "claude",
+        "model": null,
+        "session": "session-1",
+        "tokens": null,
+        "human_paced": true,
+        "started_at": "<time>",
+        "ended_at": "<time>",
+        "seconds": "<seconds>"
+       }
+      ],
+      "quality_rounds": [],
+      "blocked": null,
+      "locked": {},
+      "restored": [],
+      "proofs": []
+     }
+    }
+   },
+   {
+    "herdr": [
+     "--machine",
+     "box",
+     "pane",
+     "get",
+     "p1"
+    ]
+   },
+   {
+    "herdr": [
+     "--machine",
+     "box",
+     "pane",
+     "split",
+     "p1",
+     "--direction",
+     "right",
+     "--cwd",
+     "<world>/project",
+     "--no-focus"
+    ]
+   },
+   {
+    "herdr": [
+     "--machine",
+     "box",
+     "pane",
+     "rename",
+     "p2",
+     "Builder"
+    ]
+   },
+   {
+    "herdr": [
+     "--machine",
+     "box",
+     "agent",
+     "start",
+     "build-<key:1>",
+     "--kind",
+     "claude",
+     "--pane",
+     "p2",
+     "--timeout",
+     "60000"
+    ]
+   },
+   {
+    "state": {
+     "path": "<world>/project/.orchestrator/runs/<run:1>/state.json",
+     "saved": {
+      "run_id": "<run:1>",
+      "task": "Add a subtract function",
+      "cwd": "<world>/project",
+      "machine": "box",
+      "phase": "build",
+      "round": 1,
+      "workspace_id": "w1",
+      "root_pane": "p1",
+      "base": "<sha:1>",
+      "base_branch": "main",
+      "branch": "orchestrator/add-a-subtract-function-<key:1>",
+      "pr_url": null,
+      "verdict": null,
+      "conflicts": [],
+      "error": null,
+      "agents": {
+       "spec": {
+        "name": "spec-<key:1>",
+        "pane": "p1",
+        "kind": "claude",
+        "session": "session-1"
+       },
+       "build": {
+        "name": "build-<key:1>",
+        "pane": "p2",
+        "kind": "claude"
+       }
+      },
+      "max_rounds": 3,
+      "turn_timeout": 1800,
+      "permission_mode": null,
+      "models": {},
+      "agent_kinds": {
+       "spec": "claude",
+       "build": "claude",
+       "review": "claude"
+      },
+      "pull_request": true,
+      "prompted": "spec.md",
+      "retried": [],
+      "retrying": null,
+      "owner": {
+       "host": "<host>",
+       "pid": "<pid:1>",
+       "started_at": "<time>"
+      },
+      "heartbeat_at": "<time>",
+      "quality_job": null,
+      "quality_gate_disabled": false,
+      "max_quality_rounds": 3,
+      "quality_round": 0,
+      "ci": {},
+      "workflow": "default",
+      "workflow_definition": null,
+      "prompt_overrides": {},
+      "branch_cleanup": null,
+      "worktree": null,
+      "closed": null,
+      "turns": [
+       {
+        "step": "spec",
+        "role": "spec",
+        "round": 0,
+        "quality_round": 0,
+        "file": "spec.md",
+        "agent": "claude",
+        "model": null,
+        "session": "session-1",
+        "tokens": null,
+        "human_paced": true,
+        "started_at": "<time>",
+        "ended_at": "<time>",
+        "seconds": "<seconds>"
+       }
+      ],
+      "quality_rounds": [],
+      "blocked": null,
+      "locked": {},
+      "restored": [],
+      "proofs": []
+     }
+    }
+   },
+   {
+    "herdr": [
+     "--machine",
+     "box",
+     "agent",
+     "get",
+     "build-<key:1>"
+    ]
+   },
+   {
+    "state": {
+     "path": "<world>/project/.orchestrator/runs/<run:1>/state.json",
+     "saved": {
+      "run_id": "<run:1>",
+      "task": "Add a subtract function",
+      "cwd": "<world>/project",
+      "machine": "box",
+      "phase": "build",
+      "round": 1,
+      "workspace_id": "w1",
+      "root_pane": "p1",
+      "base": "<sha:1>",
+      "base_branch": "main",
+      "branch": "orchestrator/add-a-subtract-function-<key:1>",
+      "pr_url": null,
+      "verdict": null,
+      "conflicts": [],
+      "error": null,
+      "agents": {
+       "spec": {
+        "name": "spec-<key:1>",
+        "pane": "p1",
+        "kind": "claude",
+        "session": "session-1"
+       },
+       "build": {
+        "name": "build-<key:1>",
+        "pane": "p2",
+        "kind": "claude",
+        "session": "session-2"
+       }
+      },
+      "max_rounds": 3,
+      "turn_timeout": 1800,
+      "permission_mode": null,
+      "models": {},
+      "agent_kinds": {
+       "spec": "claude",
+       "build": "claude",
+       "review": "claude"
+      },
+      "pull_request": true,
+      "prompted": "spec.md",
+      "retried": [],
+      "retrying": null,
+      "owner": {
+       "host": "<host>",
+       "pid": "<pid:1>",
+       "started_at": "<time>"
+      },
+      "heartbeat_at": "<time>",
+      "quality_job": null,
+      "quality_gate_disabled": false,
+      "max_quality_rounds": 3,
+      "quality_round": 0,
+      "ci": {},
+      "workflow": "default",
+      "workflow_definition": null,
+      "prompt_overrides": {},
+      "branch_cleanup": null,
+      "worktree": null,
+      "closed": null,
+      "turns": [
+       {
+        "step": "spec",
+        "role": "spec",
+        "round": 0,
+        "quality_round": 0,
+        "file": "spec.md",
+        "agent": "claude",
+        "model": null,
+        "session": "session-1",
+        "tokens": null,
+        "human_paced": true,
+        "started_at": "<time>",
+        "ended_at": "<time>",
+        "seconds": "<seconds>"
+       }
+      ],
+      "quality_rounds": [],
+      "blocked": null,
+      "locked": {},
+      "restored": [],
+      "proofs": []
+     }
+    }
+   },
+   {
+    "herdr": [
+     "--machine",
+     "box",
+     "agent",
+     "prompt",
+     "build-<key:1>",
+     "You are the Builder, the second of three roles (Spec Collector -> Builder -> Reviewer). The spec in <world>/project/.orchestrator/runs/<run:1>/spec.md was agreed with the human by a separate session; it is your contract.\n\nImplement it in <world>/project, following the conventions of the surrounding code. Verify the change the way the spec's Verification section says, and run the tests. Do not commit, push or switch branches; leave the changes in the working tree for the Reviewer. If the spec is wrong or cannot be met, do not deviate silently: say so in your report.\n\nAs your last step, write a report to <world>/project/.orchestrator/runs/<run:1>/build-1.md in a single write; it hands the work to the Reviewer: the files you changed and why, how you verified the change (commands and a summary of their results), and any acceptance criterion you did not meet, with the reason.\n\nIf you cannot continue without a decision from the human, write the report with a first line `BLOCKED: <your question>` instead."
+    ]
+   },
+   {
+    "state": {
+     "path": "<world>/project/.orchestrator/runs/<run:1>/state.json",
+     "saved": {
+      "run_id": "<run:1>",
+      "task": "Add a subtract function",
+      "cwd": "<world>/project",
+      "machine": "box",
+      "phase": "review",
+      "round": 1,
+      "workspace_id": "w1",
+      "root_pane": "p1",
+      "base": "<sha:1>",
+      "base_branch": "main",
+      "branch": "orchestrator/add-a-subtract-function-<key:1>",
+      "pr_url": null,
+      "verdict": null,
+      "conflicts": [],
+      "error": null,
+      "agents": {
+       "spec": {
+        "name": "spec-<key:1>",
+        "pane": "p1",
+        "kind": "claude",
+        "session": "session-1"
+       },
+       "build": {
+        "name": "build-<key:1>",
+        "pane": "p2",
+        "kind": "claude",
+        "session": "session-2"
+       }
+      },
+      "max_rounds": 3,
+      "turn_timeout": 1800,
+      "permission_mode": null,
+      "models": {},
+      "agent_kinds": {
+       "spec": "claude",
+       "build": "claude",
+       "review": "claude"
+      },
+      "pull_request": true,
+      "prompted": "build-1.md",
+      "retried": [],
+      "retrying": null,
+      "owner": {
+       "host": "<host>",
+       "pid": "<pid:1>",
+       "started_at": "<time>"
+      },
+      "heartbeat_at": "<time>",
+      "quality_job": null,
+      "quality_gate_disabled": false,
+      "max_quality_rounds": 3,
+      "quality_round": 0,
+      "ci": {},
+      "workflow": "default",
+      "workflow_definition": null,
+      "prompt_overrides": {},
+      "branch_cleanup": null,
+      "worktree": null,
+      "closed": null,
+      "turns": [
+       {
+        "step": "spec",
+        "role": "spec",
+        "round": 0,
+        "quality_round": 0,
+        "file": "spec.md",
+        "agent": "claude",
+        "model": null,
+        "session": "session-1",
+        "tokens": null,
+        "human_paced": true,
+        "started_at": "<time>",
+        "ended_at": "<time>",
+        "seconds": "<seconds>"
+       },
+       {
+        "step": "build",
+        "role": "build",
+        "round": 1,
+        "quality_round": 0,
+        "file": "build-1.md",
+        "agent": "claude",
+        "model": null,
+        "session": "session-2",
+        "tokens": null,
+        "human_paced": false,
+        "started_at": "<time>",
+        "ended_at": "<time>",
+        "seconds": "<seconds>"
+       }
+      ],
+      "quality_rounds": [],
+      "blocked": null,
+      "locked": {},
+      "restored": [],
+      "proofs": []
+     }
+    }
+   },
+   {
+    "herdr": [
+     "--machine",
+     "box",
+     "pane",
+     "get",
+     "p2"
+    ]
+   },
+   {
+    "herdr": [
+     "--machine",
+     "box",
+     "pane",
+     "split",
+     "p2",
+     "--direction",
+     "down",
+     "--cwd",
+     "<world>/project",
+     "--no-focus"
+    ]
+   },
+   {
+    "herdr": [
+     "--machine",
+     "box",
+     "pane",
+     "rename",
+     "p3",
+     "Reviewer"
+    ]
+   },
+   {
+    "herdr": [
+     "--machine",
+     "box",
+     "agent",
+     "start",
+     "review-<key:1>",
+     "--kind",
+     "claude",
+     "--pane",
+     "p3",
+     "--timeout",
+     "60000"
+    ]
+   },
+   {
+    "state": {
+     "path": "<world>/project/.orchestrator/runs/<run:1>/state.json",
+     "saved": {
+      "run_id": "<run:1>",
+      "task": "Add a subtract function",
+      "cwd": "<world>/project",
+      "machine": "box",
+      "phase": "review",
+      "round": 1,
+      "workspace_id": "w1",
+      "root_pane": "p1",
+      "base": "<sha:1>",
+      "base_branch": "main",
+      "branch": "orchestrator/add-a-subtract-function-<key:1>",
+      "pr_url": null,
+      "verdict": null,
+      "conflicts": [],
+      "error": null,
+      "agents": {
+       "spec": {
+        "name": "spec-<key:1>",
+        "pane": "p1",
+        "kind": "claude",
+        "session": "session-1"
+       },
+       "build": {
+        "name": "build-<key:1>",
+        "pane": "p2",
+        "kind": "claude",
+        "session": "session-2"
+       },
+       "review": {
+        "name": "review-<key:1>",
+        "pane": "p3",
+        "kind": "claude"
+       }
+      },
+      "max_rounds": 3,
+      "turn_timeout": 1800,
+      "permission_mode": null,
+      "models": {},
+      "agent_kinds": {
+       "spec": "claude",
+       "build": "claude",
+       "review": "claude"
+      },
+      "pull_request": true,
+      "prompted": "build-1.md",
+      "retried": [],
+      "retrying": null,
+      "owner": {
+       "host": "<host>",
+       "pid": "<pid:1>",
+       "started_at": "<time>"
+      },
+      "heartbeat_at": "<time>",
+      "quality_job": null,
+      "quality_gate_disabled": false,
+      "max_quality_rounds": 3,
+      "quality_round": 0,
+      "ci": {},
+      "workflow": "default",
+      "workflow_definition": null,
+      "prompt_overrides": {},
+      "branch_cleanup": null,
+      "worktree": null,
+      "closed": null,
+      "turns": [
+       {
+        "step": "spec",
+        "role": "spec",
+        "round": 0,
+        "quality_round": 0,
+        "file": "spec.md",
+        "agent": "claude",
+        "model": null,
+        "session": "session-1",
+        "tokens": null,
+        "human_paced": true,
+        "started_at": "<time>",
+        "ended_at": "<time>",
+        "seconds": "<seconds>"
+       },
+       {
+        "step": "build",
+        "role": "build",
+        "round": 1,
+        "quality_round": 0,
+        "file": "build-1.md",
+        "agent": "claude",
+        "model": null,
+        "session": "session-2",
+        "tokens": null,
+        "human_paced": false,
+        "started_at": "<time>",
+        "ended_at": "<time>",
+        "seconds": "<seconds>"
+       }
+      ],
+      "quality_rounds": [],
+      "blocked": null,
+      "locked": {},
+      "restored": [],
+      "proofs": []
+     }
+    }
+   },
+   {
+    "herdr": [
+     "--machine",
+     "box",
+     "agent",
+     "get",
+     "review-<key:1>"
+    ]
+   },
+   {
+    "state": {
+     "path": "<world>/project/.orchestrator/runs/<run:1>/state.json",
+     "saved": {
+      "run_id": "<run:1>",
+      "task": "Add a subtract function",
+      "cwd": "<world>/project",
+      "machine": "box",
+      "phase": "review",
+      "round": 1,
+      "workspace_id": "w1",
+      "root_pane": "p1",
+      "base": "<sha:1>",
+      "base_branch": "main",
+      "branch": "orchestrator/add-a-subtract-function-<key:1>",
+      "pr_url": null,
+      "verdict": null,
+      "conflicts": [],
+      "error": null,
+      "agents": {
+       "spec": {
+        "name": "spec-<key:1>",
+        "pane": "p1",
+        "kind": "claude",
+        "session": "session-1"
+       },
+       "build": {
+        "name": "build-<key:1>",
+        "pane": "p2",
+        "kind": "claude",
+        "session": "session-2"
+       },
+       "review": {
+        "name": "review-<key:1>",
+        "pane": "p3",
+        "kind": "claude",
+        "session": "session-3"
+       }
+      },
+      "max_rounds": 3,
+      "turn_timeout": 1800,
+      "permission_mode": null,
+      "models": {},
+      "agent_kinds": {
+       "spec": "claude",
+       "build": "claude",
+       "review": "claude"
+      },
+      "pull_request": true,
+      "prompted": "build-1.md",
+      "retried": [],
+      "retrying": null,
+      "owner": {
+       "host": "<host>",
+       "pid": "<pid:1>",
+       "started_at": "<time>"
+      },
+      "heartbeat_at": "<time>",
+      "quality_job": null,
+      "quality_gate_disabled": false,
+      "max_quality_rounds": 3,
+      "quality_round": 0,
+      "ci": {},
+      "workflow": "default",
+      "workflow_definition": null,
+      "prompt_overrides": {},
+      "branch_cleanup": null,
+      "worktree": null,
+      "closed": null,
+      "turns": [
+       {
+        "step": "spec",
+        "role": "spec",
+        "round": 0,
+        "quality_round": 0,
+        "file": "spec.md",
+        "agent": "claude",
+        "model": null,
+        "session": "session-1",
+        "tokens": null,
+        "human_paced": true,
+        "started_at": "<time>",
+        "ended_at": "<time>",
+        "seconds": "<seconds>"
+       },
+       {
+        "step": "build",
+        "role": "build",
+        "round": 1,
+        "quality_round": 0,
+        "file": "build-1.md",
+        "agent": "claude",
+        "model": null,
+        "session": "session-2",
+        "tokens": null,
+        "human_paced": false,
+        "started_at": "<time>",
+        "ended_at": "<time>",
+        "seconds": "<seconds>"
+       }
+      ],
+      "quality_rounds": [],
+      "blocked": null,
+      "locked": {},
+      "restored": [],
+      "proofs": []
+     }
+    }
+   },
+   {
+    "herdr": [
+     "--machine",
+     "box",
+     "agent",
+     "prompt",
+     "review-<key:1>",
+     "You are the Reviewer, the last of three roles (Spec Collector -> Builder -> Reviewer). You did not write this change. Judge it only against the spec in <world>/project/.orchestrator/runs/<run:1>/spec.md and the code itself.\n\nThe change: `git diff <sha:1>` in <world>/project, plus the untracked files `git status --porcelain` lists\nThe Builder's report is in <world>/project/.orchestrator/runs/<run:1>/build-1.md. Treat its claims as unverified: check them, and run the verification yourself. Do not modify any file other than your review.\n\nAs your last step, write your review to <world>/project/.orchestrator/runs/<run:1>/review-1.md in a single write. Its first line must be exactly `VERDICT: APPROVE` or `VERDICT: CHANGES_REQUESTED`. Then list numbered findings, each with file:line, what is wrong, and which acceptance criterion it violates or what failure it causes. Request changes only for defects: an unmet acceptance criterion, a bug, a broken test. Style preferences are not defects."
+    ]
+   },
+   {
+    "state": {
+     "path": "<world>/project/.orchestrator/runs/<run:1>/state.json",
+     "saved": {
+      "run_id": "<run:1>",
+      "task": "Add a subtract function",
+      "cwd": "<world>/project",
+      "machine": "box",
+      "phase": "publish",
+      "round": 1,
+      "workspace_id": "w1",
+      "root_pane": "p1",
+      "base": "<sha:1>",
+      "base_branch": "main",
+      "branch": "orchestrator/add-a-subtract-function-<key:1>",
+      "pr_url": null,
+      "verdict": "APPROVE",
+      "conflicts": [],
+      "error": null,
+      "agents": {
+       "spec": {
+        "name": "spec-<key:1>",
+        "pane": "p1",
+        "kind": "claude",
+        "session": "session-1"
+       },
+       "build": {
+        "name": "build-<key:1>",
+        "pane": "p2",
+        "kind": "claude",
+        "session": "session-2"
+       },
+       "review": {
+        "name": "review-<key:1>",
+        "pane": "p3",
+        "kind": "claude",
+        "session": "session-3"
+       }
+      },
+      "max_rounds": 3,
+      "turn_timeout": 1800,
+      "permission_mode": null,
+      "models": {},
+      "agent_kinds": {
+       "spec": "claude",
+       "build": "claude",
+       "review": "claude"
+      },
+      "pull_request": true,
+      "prompted": "review-1.md",
+      "retried": [],
+      "retrying": null,
+      "owner": {
+       "host": "<host>",
+       "pid": "<pid:1>",
+       "started_at": "<time>"
+      },
+      "heartbeat_at": "<time>",
+      "quality_job": null,
+      "quality_gate_disabled": false,
+      "max_quality_rounds": 3,
+      "quality_round": 0,
+      "ci": {},
+      "workflow": "default",
+      "workflow_definition": null,
+      "prompt_overrides": {},
+      "branch_cleanup": null,
+      "worktree": null,
+      "closed": null,
+      "turns": [
+       {
+        "step": "spec",
+        "role": "spec",
+        "round": 0,
+        "quality_round": 0,
+        "file": "spec.md",
+        "agent": "claude",
+        "model": null,
+        "session": "session-1",
+        "tokens": null,
+        "human_paced": true,
+        "started_at": "<time>",
+        "ended_at": "<time>",
+        "seconds": "<seconds>"
+       },
+       {
+        "step": "build",
+        "role": "build",
+        "round": 1,
+        "quality_round": 0,
+        "file": "build-1.md",
+        "agent": "claude",
+        "model": null,
+        "session": "session-2",
+        "tokens": null,
+        "human_paced": false,
+        "started_at": "<time>",
+        "ended_at": "<time>",
+        "seconds": "<seconds>"
+       },
+       {
+        "step": "review",
+        "role": "review",
+        "round": 1,
+        "quality_round": 0,
+        "file": "review-1.md",
+        "agent": "claude",
+        "model": null,
+        "session": "session-3",
+        "tokens": null,
+        "human_paced": false,
+        "started_at": "<time>",
+        "ended_at": "<time>",
+        "seconds": "<seconds>"
+       }
+      ],
+      "quality_rounds": [],
+      "blocked": null,
+      "locked": {},
+      "restored": [],
+      "proofs": []
+     }
+    }
+   },
+   {
+    "gh": [
+     "pr",
+     "create",
+     "--base",
+     "main",
+     "--head",
+     "orchestrator/add-a-subtract-function-<key:1>",
+     "--title",
+     "Add a subtract function",
+     "--body-file",
+     "-"
+    ],
+    "stdin": "Opened by Octoflow AI run `<run:1>`. Reviewer verdict after 1 round: **APPROVE**.\n\n| Commit trailer | Value |\n| --- | --- |\n| Orchestrator-Run | `<run:1>` |\n| Orchestrator-Workflow | `default` |\n| Orchestrator-Role | `spec=claude/default` |\n| Orchestrator-Role | `build=claude/default` |\n| Orchestrator-Role | `review=claude/default` |\n\n<details open>\n<summary>Spec</summary>\n\n# Add a subtract function\n\nAdd `subtract(a, b)` to `src/calc.py`, returning a - b, with a test.\n\n</details>\n\n<details>\n<summary>Builder report (round 1)</summary>\n\nAdded subtract and its test (round 1). `pytest` passes.\n\n</details>\n\n<details>\n<summary>Review (round 1)</summary>\n\nVERDICT: APPROVE\n\nNone.\n\n</details>\n\n<details>\n<summary>Run timings</summary>\n\n| step | role | round | harness | model | start (UTC) | duration | file |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| spec (human-paced) | spec | 0 | claude | default | <time> | <duration> | spec.md |\n| build | build | 1 | claude | default | <time> | <duration> | build-1.md |\n| review | review | 1 | claude | default | <time> | <duration> | review-1.md |\n\n</details>\n"
+   },
+   {
+    "state": {
+     "path": "<world>/project/.orchestrator/runs/<run:1>/state.json",
+     "saved": {
+      "run_id": "<run:1>",
+      "task": "Add a subtract function",
+      "cwd": "<world>/project",
+      "machine": "box",
+      "phase": "done",
+      "round": 1,
+      "workspace_id": "w1",
+      "root_pane": "p1",
+      "base": "<sha:1>",
+      "base_branch": "main",
+      "branch": "orchestrator/add-a-subtract-function-<key:1>",
+      "pr_url": "https://github.com/parity/project/pull/1",
+      "verdict": "APPROVE",
+      "conflicts": [],
+      "error": null,
+      "agents": {
+       "spec": {
+        "name": "spec-<key:1>",
+        "pane": "p1",
+        "kind": "claude",
+        "session": "session-1"
+       },
+       "build": {
+        "name": "build-<key:1>",
+        "pane": "p2",
+        "kind": "claude",
+        "session": "session-2"
+       },
+       "review": {
+        "name": "review-<key:1>",
+        "pane": "p3",
+        "kind": "claude",
+        "session": "session-3"
+       }
+      },
+      "max_rounds": 3,
+      "turn_timeout": 1800,
+      "permission_mode": null,
+      "models": {},
+      "agent_kinds": {
+       "spec": "claude",
+       "build": "claude",
+       "review": "claude"
+      },
+      "pull_request": true,
+      "prompted": "review-1.md",
+      "retried": [],
+      "retrying": null,
+      "owner": null,
+      "heartbeat_at": "<time>",
+      "quality_job": null,
+      "quality_gate_disabled": false,
+      "max_quality_rounds": 3,
+      "quality_round": 0,
+      "ci": {},
+      "workflow": "default",
+      "workflow_definition": null,
+      "prompt_overrides": {},
+      "branch_cleanup": null,
+      "worktree": null,
+      "closed": null,
+      "turns": [
+       {
+        "step": "spec",
+        "role": "spec",
+        "round": 0,
+        "quality_round": 0,
+        "file": "spec.md",
+        "agent": "claude",
+        "model": null,
+        "session": "session-1",
+        "tokens": "unknown",
+        "human_paced": true,
+        "started_at": "<time>",
+        "ended_at": "<time>",
+        "seconds": "<seconds>"
+       },
+       {
+        "step": "build",
+        "role": "build",
+        "round": 1,
+        "quality_round": 0,
+        "file": "build-1.md",
+        "agent": "claude",
+        "model": null,
+        "session": "session-2",
+        "tokens": "unknown",
+        "human_paced": false,
+        "started_at": "<time>",
+        "ended_at": "<time>",
+        "seconds": "<seconds>"
+       },
+       {
+        "step": "review",
+        "role": "review",
+        "round": 1,
+        "quality_round": 0,
+        "file": "review-1.md",
+        "agent": "claude",
+        "model": null,
+        "session": "session-3",
+        "tokens": "unknown",
+        "human_paced": false,
+        "started_at": "<time>",
+        "ended_at": "<time>",
+        "seconds": "<seconds>"
+       }
+      ],
+      "quality_rounds": [],
+      "blocked": null,
+      "locked": {},
+      "restored": [],
+      "proofs": []
+     }
+    }
+   },
+   {
+    "herdr": [
+     "notification",
+     "show",
+     "Run finished: APPROVE",
+     "--body",
+     "https://github.com/parity/project/pull/1",
+     "--sound",
+     "request"
+    ]
+   },
+   {
+    "herdr": [
+     "--machine",
+     "box",
+     "workspace",
+     "close",
+     "w1"
+    ]
+   }
+  ]
+ },
+ "run_files": {
+  ".gitignore": "*\n",
+  "runs/<run:1>/build-1.md": "Added subtract and its test (round 1). `pytest` passes.\n",
+  "runs/<run:1>/gitleaksignore": "",
+  "runs/<run:1>/leaks-publish.json": "[]\n",
+  "runs/<run:1>/metrics.json": "{\"version\": 1, \"run_id\": \"<run:1>\", \"workflow\": \"default\", \"outcome\": \"APPROVE\", \"rounds\": 1, \"max_rounds\": 3, \"quality_gate\": false, \"max_quality_rounds\": null, \"pull_request\": \"https://github.com/parity/project/pull/1\", \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\", \"roles\": {\"spec\": {\"harness\": \"claude\", \"model\": null}, \"build\": {\"harness\": \"claude\", \"model\": null}, \"review\": {\"harness\": \"claude\", \"model\": null}}, \"turns\": [{\"step\": \"spec\", \"role\": \"spec\", \"harness\": \"claude\", \"model\": null, \"round\": 0, \"quality_round\": 0, \"human_paced\": true, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\", \"tokens\": \"unknown\"}, {\"step\": \"build\", \"role\": \"build\", \"harness\": \"claude\", \"model\": null, \"round\": 1, \"quality_round\": 0, \"human_paced\": false, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\", \"tokens\": \"unknown\"}, {\"step\": \"review\", \"role\": \"review\", \"harness\": \"claude\", \"model\": null, \"round\": 1, \"quality_round\": 0, \"human_paced\": false, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\", \"tokens\": \"unknown\"}], \"quality_rounds\": [], \"restored_locked_files\": 0}\n",
+  "runs/<run:1>/review-1.md": "VERDICT: APPROVE\n\nNone.\n",
+  "runs/<run:1>/spec.md": "# Add a subtract function\n\nAdd `subtract(a, b)` to `src/calc.py`, returning a - b, with a test.\n",
+  "runs/<run:1>/state.json": "{\"run_id\": \"<run:1>\", \"task\": \"Add a subtract function\", \"cwd\": \"<world>/project\", \"machine\": \"box\", \"phase\": \"done\", \"round\": 1, \"workspace_id\": \"w1\", \"root_pane\": \"p1\", \"base\": \"<sha:1>\", \"base_branch\": \"main\", \"branch\": \"orchestrator/add-a-subtract-function-<key:1>\", \"pr_url\": \"https://github.com/parity/project/pull/1\", \"verdict\": \"APPROVE\", \"conflicts\": [], \"error\": null, \"agents\": {\"spec\": {\"name\": \"spec-<key:1>\", \"pane\": \"p1\", \"kind\": \"claude\", \"session\": \"session-1\"}, \"build\": {\"name\": \"build-<key:1>\", \"pane\": \"p2\", \"kind\": \"claude\", \"session\": \"session-2\"}, \"review\": {\"name\": \"review-<key:1>\", \"pane\": \"p3\", \"kind\": \"claude\", \"session\": \"session-3\"}}, \"max_rounds\": 3, \"turn_timeout\": 1800, \"permission_mode\": null, \"models\": {}, \"agent_kinds\": {\"spec\": \"claude\", \"build\": \"claude\", \"review\": \"claude\"}, \"pull_request\": true, \"prompted\": \"review-1.md\", \"retried\": [], \"retrying\": null, \"owner\": null, \"heartbeat_at\": \"<time>\", \"quality_job\": null, \"quality_gate_disabled\": false, \"max_quality_rounds\": 3, \"quality_round\": 0, \"ci\": {}, \"workflow\": \"default\", \"workflow_definition\": null, \"prompt_overrides\": {}, \"branch_cleanup\": null, \"worktree\": null, \"closed\": null, \"turns\": [{\"step\": \"spec\", \"role\": \"spec\", \"round\": 0, \"quality_round\": 0, \"file\": \"spec.md\", \"agent\": \"claude\", \"model\": null, \"session\": \"session-1\", \"tokens\": \"unknown\", \"human_paced\": true, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\"}, {\"step\": \"build\", \"role\": \"build\", \"round\": 1, \"quality_round\": 0, \"file\": \"build-1.md\", \"agent\": \"claude\", \"model\": null, \"session\": \"session-2\", \"tokens\": \"unknown\", \"human_paced\": false, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\"}, {\"step\": \"review\", \"role\": \"review\", \"round\": 1, \"quality_round\": 0, \"file\": \"review-1.md\", \"agent\": \"claude\", \"model\": null, \"session\": \"session-3\", \"tokens\": \"unknown\", \"human_paced\": false, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\"}], \"quality_rounds\": [], \"blocked\": null, \"locked\": {}, \"restored\": [], \"proofs\": []}\n",
+  "runs/<run:1>/summary.md": "# Run <run:1>\n\n- **Workflow:** default\n- **Outcome:** APPROVE\n- **Pull request:** https://github.com/parity/project/pull/1\n- **Branch:** `orchestrator/add-a-subtract-function-<key:1>`\n- **Wall time:** <duration>, from the first turn's start to <time>\n\n## Task\n\nAdd a subtract function\n\n## Roles\n\n| role | harness | model |\n| --- | --- | --- |\n| Spec Collector (spec) | claude | default |\n| Builder (build) | claude | default |\n| Reviewer (review) | claude | default |\n\n## Turns\n\n| step | role | round | harness | model | start (UTC) | duration | file |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| spec (human-paced) | spec | 0 | claude | default | <time> | <duration> | spec.md |\n| build | build | 1 | claude | default | <time> | <duration> | build-1.md |\n| review | review | 1 | claude | default | <time> | <duration> | review-1.md |\n\n## Rounds\n\n- Round 1: review APPROVE\n",
+  "runs/<run:1>/gitleaks-rules/.gitleaks.toml": "[extend]\nuseDefault = true\n"
+ },
+ "repositories": {
+  "project": {
+   "head": "refs/heads/main",
+   "refs": {
+    "refs/heads/main": "<sha:1>",
+    "refs/heads/orchestrator/add-a-subtract-function-<key:1>": "<sha:2>",
+    "refs/remotes/origin/main": "<sha:1>",
+    "refs/remotes/origin/orchestrator/add-a-subtract-function-<key:1>": "<sha:2>"
+   },
+   "commits": [
+    {
+     "sha": "<sha:1>",
+     "parents": [],
+     "author": "Parity <parity@example.com>",
+     "message": "Start the parity project\n\n",
+     "changes": [
+      "A\tREADME.md",
+      "A\tpyproject.toml",
+      "A\tsrc/calc.py",
+      "A\ttests/test_calc.py"
+     ],
+     "files": {
+      "README.md": "# Parity project\n\nThe project a parity scenario changes.\n",
+      "pyproject.toml": "[project]\nname = \"parity-project\"\nversion = \"0.1.0\"\ndependencies = []\n",
+      "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n",
+      "tests/test_calc.py": "from calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+     }
+    },
+    {
+     "sha": "<sha:2>",
+     "parents": [
+      "<sha:1>"
+     ],
+     "author": "Parity <parity@example.com>",
+     "message": "Add a subtract function\n\nOrchestrator run <run:1>: APPROVE after 1 review round(s).\n\nOrchestrator-Run: <run:1>\nOrchestrator-Workflow: default\nOrchestrator-Role: spec=claude/default\nOrchestrator-Role: build=claude/default\nOrchestrator-Role: review=claude/default\n\n",
+     "changes": [
+      "M\tsrc/calc.py",
+      "M\ttests/test_calc.py"
+     ],
+     "files": {
+      "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n\n\ndef subtract(a, b):\n    \"\"\"a minus b.\"\"\"\n    return a - b\n",
+      "tests/test_calc.py": "from calc import add, subtract\n\n\ndef test_add():\n    assert add(1, 2) == 3\n\n\ndef test_subtract():\n    assert subtract(3, 2) == 1\n"
+     }
+    }
+   ],
+   "worktrees": [
+    {
+     "path": "<world>/project",
+     "branch": "refs/heads/main",
+     "status": [],
+     "changed": {}
+    }
+   ]
+  },
+  "origin": {
+   "head": "refs/heads/main",
+   "refs": {
+    "refs/heads/main": "<sha:1>",
+    "refs/heads/orchestrator/add-a-subtract-function-<key:1>": "<sha:2>"
+   },
+   "commits": [
+    {
+     "sha": "<sha:1>",
+     "parents": [],
+     "author": "Parity <parity@example.com>",
+     "message": "Start the parity project\n\n",
+     "changes": [
+      "A\tREADME.md",
+      "A\tpyproject.toml",
+      "A\tsrc/calc.py",
+      "A\ttests/test_calc.py"
+     ],
+     "files": {
+      "README.md": "# Parity project\n\nThe project a parity scenario changes.\n",
+      "pyproject.toml": "[project]\nname = \"parity-project\"\nversion = \"0.1.0\"\ndependencies = []\n",
+      "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n",
+      "tests/test_calc.py": "from calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+     }
+    },
+    {
+     "sha": "<sha:2>",
+     "parents": [
+      "<sha:1>"
+     ],
+     "author": "Parity <parity@example.com>",
+     "message": "Add a subtract function\n\nOrchestrator run <run:1>: APPROVE after 1 review round(s).\n\nOrchestrator-Run: <run:1>\nOrchestrator-Workflow: default\nOrchestrator-Role: spec=claude/default\nOrchestrator-Role: build=claude/default\nOrchestrator-Role: review=claude/default\n\n",
+     "changes": [
+      "M\tsrc/calc.py",
+      "M\ttests/test_calc.py"
+     ],
+     "files": {
+      "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n\n\ndef subtract(a, b):\n    \"\"\"a minus b.\"\"\"\n    return a - b\n",
+      "tests/test_calc.py": "from calc import add, subtract\n\n\ndef test_add():\n    assert add(1, 2) == 3\n\n\ndef test_subtract():\n    assert subtract(3, 2) == 1\n"
+     }
+    }
+   ]
+  }
+ },
+ "notes": {}
+}

@@ -1,0 +1,261 @@
+{
+ "invocations": [
+  {
+   "args": [
+    "doctor"
+   ],
+   "exit": 0
+  },
+  {
+   "args": [
+    "doctor",
+    "--cwd",
+    "<world>/project"
+   ],
+   "exit": 0
+  },
+  {
+   "args": [
+    "doctor",
+    "--machine",
+    "box",
+    "--cwd",
+    "<world>/project"
+   ],
+   "exit": 0
+  },
+  {
+   "args": [
+    "doctor",
+    "--machine",
+    "nowhere",
+    "--cwd",
+    "<world>/project"
+   ],
+   "exit": 1
+  }
+ ],
+ "events": {
+  "1": [
+   {
+    "herdr": [
+     "--version"
+    ]
+   },
+   {
+    "herdr": [
+     "integration",
+     "status"
+    ]
+   }
+  ],
+  "2": [
+   {
+    "herdr": [
+     "--version"
+    ]
+   },
+   {
+    "herdr": [
+     "integration",
+     "status"
+    ]
+   }
+  ],
+  "3": [
+   {
+    "herdr": [
+     "--version"
+    ]
+   },
+   {
+    "herdr": [
+     "machine",
+     "list",
+     "--json"
+    ]
+   },
+   {
+    "herdr": [
+     "--version"
+    ]
+   },
+   {
+    "herdr": [
+     "integration",
+     "status"
+    ]
+   }
+  ],
+  "4": [
+   {
+    "herdr": [
+     "--version"
+    ]
+   },
+   {
+    "herdr": [
+     "machine",
+     "list",
+     "--json"
+    ]
+   }
+  ]
+ },
+ "run_files": {},
+ "repositories": {
+  "project": {
+   "head": "refs/heads/main",
+   "refs": {
+    "refs/heads/main": "<sha:1>",
+    "refs/remotes/origin/main": "<sha:1>"
+   },
+   "commits": [
+    {
+     "sha": "<sha:1>",
+     "parents": [],
+     "author": "Parity <parity@example.com>",
+     "message": "Start the parity project\n\n",
+     "changes": [
+      "A\tREADME.md",
+      "A\tpyproject.toml",
+      "A\tsrc/calc.py",
+      "A\ttests/test_calc.py"
+     ],
+     "files": {
+      "README.md": "# Parity project\n\nThe project a parity scenario changes.\n",
+      "pyproject.toml": "[project]\nname = \"parity-project\"\nversion = \"0.1.0\"\ndependencies = []\n",
+      "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n",
+      "tests/test_calc.py": "from calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+     }
+    }
+   ],
+   "worktrees": [
+    {
+     "path": "<world>/project",
+     "branch": "refs/heads/main",
+     "status": [],
+     "changed": {}
+    }
+   ]
+  },
+  "origin": {
+   "head": "refs/heads/main",
+   "refs": {
+    "refs/heads/main": "<sha:1>"
+   },
+   "commits": [
+    {
+     "sha": "<sha:1>",
+     "parents": [],
+     "author": "Parity <parity@example.com>",
+     "message": "Start the parity project\n\n",
+     "changes": [
+      "A\tREADME.md",
+      "A\tpyproject.toml",
+      "A\tsrc/calc.py",
+      "A\ttests/test_calc.py"
+     ],
+     "files": {
+      "README.md": "# Parity project\n\nThe project a parity scenario changes.\n",
+      "pyproject.toml": "[project]\nname = \"parity-project\"\nversion = \"0.1.0\"\ndependencies = []\n",
+      "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n",
+      "tests/test_calc.py": "from calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+     }
+    }
+   ]
+  }
+ },
+ "notes": {
+  "lines": [
+   [
+    "ok      herdr: herdr 0.9.4",
+    "ok      reaching herdr: inside a herdr pane",
+    "ok      claude CLI: <world>/bin/claude",
+    "ok      claude integration: current (v10)",
+    "ok      codex CLI: <world>/bin/codex",
+    "ok      codex integration: current (v10)",
+    "ok      gemini CLI: <world>/bin/gemini",
+    "ok      gemini integration: current (v10)",
+    "ok      opencode CLI: <world>/bin/opencode",
+    "ok      opencode integration: current (v10)",
+    "ok      pi CLI: <world>/bin/pi",
+    "ok      pi integration: current (v10)",
+    "ok      gh: logged in",
+    "ok      gitleaks: `gitleaks git` runs"
+   ],
+   [
+    "ok      herdr: herdr 0.9.4",
+    "ok      reaching herdr: inside a herdr pane",
+    "ok      claude CLI: <world>/bin/claude",
+    "ok      claude integration: current (v10)",
+    "ok      codex CLI: <world>/bin/codex",
+    "ok      codex integration: current (v10)",
+    "ok      gemini CLI: <world>/bin/gemini",
+    "ok      gemini integration: current (v10)",
+    "ok      opencode CLI: <world>/bin/opencode",
+    "ok      opencode integration: current (v10)",
+    "ok      pi CLI: <world>/bin/pi",
+    "ok      pi integration: current (v10)",
+    "ok      gh: logged in",
+    "ok      gitleaks: `gitleaks git` runs",
+    "ok      git checkout: <world>/project",
+    "ok      origin: <world>/origin.git"
+   ],
+   [
+    "ok      herdr: herdr 0.9.4",
+    "ok      reaching herdr: herdr machine box, over SSH to parity@box",
+    "ok      herdr on box: herdr 0.9.4",
+    "ok      claude CLI: <world>/bin/claude",
+    "ok      claude integration: current (v10)",
+    "ok      codex CLI: <world>/bin/codex",
+    "ok      codex integration: current (v10)",
+    "ok      gemini CLI: <world>/bin/gemini",
+    "ok      gemini integration: current (v10)",
+    "ok      opencode CLI: <world>/bin/opencode",
+    "ok      opencode integration: current (v10)",
+    "ok      pi CLI: <world>/bin/pi",
+    "ok      pi integration: current (v10)",
+    "ok      gh: logged in",
+    "ok      gitleaks: `gitleaks git` runs",
+    "ok      git checkout: <world>/project",
+    "ok      origin: <world>/origin.git"
+   ],
+   [
+    "ok      herdr: herdr 0.9.4",
+    "missing reaching herdr: no saved herdr machine named nowhere",
+    "        fix: save herdr machine nowhere and enable it, with non-interactive SSH to its target",
+    "missing herdr on nowhere: skipped: needs reaching herdr",
+    "        fix: fix reaching herdr first",
+    "missing claude CLI: skipped: needs reaching herdr",
+    "        fix: fix reaching herdr first",
+    "missing claude integration: skipped: needs herdr on nowhere",
+    "        fix: fix herdr on nowhere first",
+    "warn    codex CLI: skipped: needs reaching herdr; needed only for a role that runs in codex",
+    "        fix: fix reaching herdr first",
+    "warn    codex integration: skipped: needs herdr on nowhere; needed only for a role that runs in codex",
+    "        fix: fix herdr on nowhere first",
+    "warn    gemini CLI: skipped: needs reaching herdr; needed only for a role that runs in gemini",
+    "        fix: fix reaching herdr first",
+    "warn    gemini integration: skipped: needs herdr on nowhere; needed only for a role that runs in gemini",
+    "        fix: fix herdr on nowhere first",
+    "warn    opencode CLI: skipped: needs reaching herdr; needed only for a role that runs in opencode",
+    "        fix: fix reaching herdr first",
+    "warn    opencode integration: skipped: needs herdr on nowhere; needed only for a role that runs in opencode",
+    "        fix: fix herdr on nowhere first",
+    "warn    pi CLI: skipped: needs reaching herdr; needed only for a role that runs in pi",
+    "        fix: fix reaching herdr first",
+    "warn    pi integration: skipped: needs herdr on nowhere; needed only for a role that runs in pi",
+    "        fix: fix herdr on nowhere first",
+    "missing gh: skipped: needs reaching herdr",
+    "        fix: fix reaching herdr first",
+    "missing gitleaks: skipped: needs reaching herdr",
+    "        fix: fix reaching herdr first",
+    "missing git checkout: skipped: needs git",
+    "        fix: fix git first",
+    "missing origin: skipped: needs git checkout",
+    "        fix: fix git checkout first"
+   ]
+  ]
+ }
+}

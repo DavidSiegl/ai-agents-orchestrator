@@ -31,6 +31,24 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   (`.scratch/gate-split/issues/03-drop-cutover-fallback.md`); then making the test-file patterns a setting, for the
   gate's use in other projects (`04-configurable-test-files.md`). The gate moves to its own repository only once a
   second project uses it. Decided 2026-10-24.
+- **The Rust engine's parity harness: what it does not record yet.** `tests/parity/` runs 41 scenarios against
+  `orchestrator.py` as a program and compares each with its recording (docs/architecture.md, Tests); the Rust
+  tickets replay them through `PARITY_ENGINE`. Not covered: a kill in the other workflows' own phases (product-team's
+  `design` and `tests`; the default's five are); a secret gitleaks finds, at a quality round or at publish, since the
+  stub gitleaks a host without one gets never finds any and the recordings must not depend on the host; the
+  harnesses other than claude and codex starting an agent (only their arguments differ); a session log's token
+  counts (every turn records `unknown`); `--timeout` and the stall notice, which take real minutes; and the GUI,
+  which the Rust engine drops. What a record holds by design, each a choice a Rust ticket may revisit: `state.json`
+  as it stood at each command herdr or gh got and each request Jenkins or PyPI got, not after every save, which only
+  the engine's own process sees; output a human reads (logs, errors, `show`, `list`, `prune`) as its facts
+  (`normalize.facts`), not its words; a run's files listed by modification time, as `/files` and the event stream
+  list them, sorted by name, since seconds of the clock decide that order; ssh's commands not at all, only what
+  they did; doctor's lines without git's and Tk's, which are the host's. The suite takes about 5 minutes more with
+  the harness, one engine run each scenario at 2 to 25 seconds (25 for serve's event stream). Decided against
+  (2026-10-27): scenarios as data files the harness interprets, which needed a language of their own for kills,
+  takeovers and serve's stream; a cassette of the expected requests that the fakes answer in order, which breaks on
+  every count of polls; and capturing every `state.json` save from inside the Python engine (an audit hook through
+  `sitecustomize`, or a `mv` on PATH that `Host.write` happens to call), which the Rust engine could not be held to.
 
 ## Open issues
 

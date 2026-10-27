@@ -292,6 +292,18 @@ running `after` callbacks on `tick`), and `TestRunProcess` runs real child proce
 `FakeHost` with run files. `TestServeEvents` runs one over real temporary directories, read with `urllib`.
 `TestRunWatch` covers the polling on its own, and `TestServeCommand` runs `serve` as a process of its own.
 
+`tests/parity/` is the parity harness, the oracle the Rust engine is judged by: it runs the engine as a program, with
+nothing of it imported. Each scenario in `scenarios.py` scripts a `World` (`world.py`): a git project on `main` with
+a bare `origin` beside it, the fake herdr, gh and ssh of `fakes.py` first on `PATH` (a stub gitleaks too where no
+real one is installed), and Jenkins, and PyPI behind an HTTPS proxy, served from the test process. It runs
+`orchestrator.py` there, or the program `PARITY_ENGINE` names, killing and resuming it where the scenario says,
+and the world records, normalized by `normalize.py` (times, run ids, pids, hashes, its own paths and ports): each
+invocation's exit status, the output programs read whole and other output only as its facts; the commands herdr
+and gh got and the requests Jenkins and PyPI got, in order, with `state.json` wherever it changed between them; the
+run directory's files; and both repositories' refs, commits and working trees. `test_parity.py` fails a scenario
+whose record differs from `recorded/<scenario>.json`, naming where; `PARITY_RECORD=1` writes the recordings
+instead, from the Python engine only.
+
 ## Tooling
 
 - `pyproject.toml`: no runtime dependencies, Python 3.13+; pytest, pytest-cov and Hypothesis in the `dev` group, PyInstaller
