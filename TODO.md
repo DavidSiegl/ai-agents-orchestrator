@@ -76,8 +76,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   so a run is not lost, but a quality round of this repository whose build takes as long fails once, and is
   judged only after a resume. Not changed here:
   the engine is frozen (Planned, "The Python engine is frozen"), so a larger `QUALITY_TIMEOUT` goes to the Rust
-  engine. Closes with that, or with a quality build that leaves the parity scenarios or the UI stage to the pull
-  request builds (Jenkinsfile, CI not frozen), and the contract test green again.
+  engine. Narrowed by PR #162 (2026-10-27): a quality build leaves the parity scenarios out unless its change touches
+  what they depend on (Jenkinsfile, Test stage); Gate's mutmut time is gate-open-decisions ticket 06's. Closes with the
+  contract test green again against a quality build that fits, or with a larger `QUALITY_TIMEOUT` in the Rust engine.
 - **The contract test leaves its Jenkins build running when it fails.** `tests/contract/test_jenkins.py` triggers one
   quality build and nothing stops it on a failure or a Ctrl-C, so the build holds an executor until it ends, up to
   the 22 minutes build #59 took. Raised by cross-review 73 (F11, 2026-10-27): "a Ctrl-C during the queue wait leaves
