@@ -4454,6 +4454,31 @@ class TestQualityGate(unittest.TestCase):
         self.assertEqual(len(reads), 3)
         self.assertEqual(fake.builds[41]["left"], 2)
 
+    def test_two_reads_of_a_running_build_without_their_gate_line_are_not_its_quality_file(self):
+        # archiveArtifacts can leave the file empty, or cut inside its GATE line, for longer than a poll interval.
+        for cut in ("", "GATE: O"):
+            with self.subTest(cut=cut):
+                fake = FakeCI()
+                fake.outcomes = [outcome(polls=6, after_gate=5)]
+                wf, herdr, host, fake, _ = gated({
+                    "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, fake=fake)
+                reads, orig = [], fake.jenkins
+
+                def cut_twice(method, path, query, form, cut=cut, reads=reads, orig=orig):
+                    name, answer = orig(method, path, query, form)
+                    if name == "quality" and not isinstance(answer, int):
+                        reads.append(answer.body)
+                        if len(reads) <= 2:
+                            return name, FakeResponse(cut)
+                    return name, answer
+                fake.jenkins = cut_twice
+
+                self.assertEqual(wf.run(), APPROVE)
+                self.assertTrue(host.files[wf.state.quality_path(1, 1)].startswith(
+                    "GATE: OK\n\nJenkins build #41 judged snapshot `snap1` (round 1, quality round 1 of 3) and was "
+                    "still running when its quality.md was read."))
+                self.assertEqual(len(reads), 4)
+
     def test_build_failed_before_the_gate_goes_back_to_the_builder(self):
         fake = FakeCI()
         console = "\n".join(f"line {i}" for i in range(100)) + f"\nJENKINS_TOKEN={JENKINS_TOKEN}\nSyntaxError: bad"
