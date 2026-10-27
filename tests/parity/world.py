@@ -588,7 +588,8 @@ class _JenkinsHandler(http.server.BaseHTTPRequestHandler):
 
     The retained builds keep their numbers; the triggered ones follow the highest of them, in the order they were
     triggered, from 1 where there are none. Queue item k is build k's. Each request is logged, with its form,
-    before it is answered."""
+    before it is answered. Its JSON answers have the fields and types of the live Jenkins's, as FakeCI's do
+    (tests/contract); the texts, such as a console, and how many cases a test report holds are each scenario's own."""
 
     server: http.server.ThreadingHTTPServer
 
@@ -611,7 +612,7 @@ class _JenkinsHandler(http.server.BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(url.query)
         prefix = "".join(f"/job/{part}" for part in JOB.split("/")) + "/"
         if url.path.startswith("/queue/item/"):
-            return self._json({"executable": {"number": int(url.path.split("/")[3])}})
+            return self._json({"cancelled": False, "executable": {"number": int(url.path.split("/")[3])}})
         if not url.path.startswith(prefix):
             return self._send(404, b"no such job")
         rest = url.path[len(prefix):]

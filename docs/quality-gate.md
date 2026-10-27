@@ -681,6 +681,10 @@ becomes `/job/` in its URL, so `AI-Agents-Orchestrator/py-ai-agents-orchestrator
   `<job>/<number>/testReport/api/json`, and (5) the last 60 lines of `<job>/<number>/consoleText` when no test
   failed.
 
+The tests answer these calls with `FakeCI`. `tests/contract/test_jenkins.py` makes them against the live quality job
+instead, with one build of `main`, and checks that each answer has the shape the fake gives it; it runs only when
+asked for, as its docstring says, and a field it finds shaped otherwise is fixed in the fake.
+
 **Once the Gate stage has archived `quality.md`**, live or resumed, the round takes it without waiting for the stages
 after Gate, which cannot change its verdict: on a build that has ended, at the first read; on one still running, once
 two reads at least a poll interval apart agree and hold a whole non-blank line, since Jenkins serves an artifact while

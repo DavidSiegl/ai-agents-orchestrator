@@ -322,6 +322,10 @@ and a fresh session's prompt put together, only the golden files hold, and only 
 other texts, its follow-up prompts, notes, commit messages and pull request bodies, have no golden files: the
 scenarios record them as sent, where one reaches them. TODO.md lists the texts neither reaches.
 
+`tests/contract/` holds the contract tests, which check the fakes against the real thing: `test_jenkins.py` drives
+`CI` against the live quality job ([the calls](quality-gate.md#the-calls)). They are marked `contract`, whose
+description in `tests/conftest.py` says when a run takes them.
+
 ## Tooling
 
 - `pyproject.toml`: no runtime dependencies, Python 3.13+; pytest, pytest-cov and Hypothesis in the `dev` group, PyInstaller
