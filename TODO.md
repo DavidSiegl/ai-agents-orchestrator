@@ -25,12 +25,10 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   machines and in CI. Decided against: one file on every platform, by embedding the orchestrator's bytes in the
   Rust executable and unpacking them at start (PyInstaller's onefile done twice), or by Python hosting the window,
   which [ui-options.md](docs/ui-options.md) chose against. Agreed 2026-10-24.
-- **The quality gate in a `gate.py` of its own: what is left.** The cut is made (Fixed, "The quality gate lives
-  inside `orchestrator.py`"). Left: removing the Jenkinsfile's cutover fallback, which runs main's
-  `orchestrator.py gate` while the main commit a quality build names has no `gate.py`, once main has it
-  (`.scratch/gate-split/issues/03-drop-cutover-fallback.md`); then making the test-file patterns a setting, for the
-  gate's use in other projects (`04-configurable-test-files.md`). The gate moves to its own repository only once a
-  second project uses it. Decided 2026-10-24.
+- **The quality gate in a `gate.py` of its own: what is left.** The cut is made (Fixed, "The quality gate lives inside
+  `orchestrator.py`"), and the Jenkinsfile's cutover fallback is gone. Left: making the test-file patterns a setting,
+  for the gate's use in other projects (`.scratch/gate-split/issues/04-configurable-test-files.md`). The gate moves to
+  its own repository only once a second project uses it. Decided 2026-10-24.
 - **The Python engine is frozen.** From the merge of the parity harness (`tests/parity/`) until the Rust engine
   replaces it in one release, nothing lands in `orchestrator.py`, fixes included: its recordings are the oracle
   each Rust ticket is judged by, and a change to the Python engine would move it. A bug found meanwhile goes into
@@ -82,12 +80,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   left, or with the gate passing mypy only the listed files the tree has. Cross-review 61 (F1, 2026-10-27): "the
   gate is ERROR on a failed condition the Builder cannot fix", against the spec's "a quality build is judged by
   main's gate and main's rules".
-- **During the cutover fallback, mutmut cannot test a snapshot that has `gate.py`.** The fallback judges a snapshot
-  of this branch by a `$JUDGED_MAIN` from before the split, whose `[tool.mutmut] source_paths` is
-  `["orchestrator.py"]`; mutmut copies only `source_paths`, `tests/` and `also_copy` into `mutants/`, so the tests
-  that `import gate` fail there and surviving-mutants is `not-run`, and each changed `gate.py` function is
-  `not-mutated`. Findings to weigh, not failed conditions. Raised by cross-review 61 (F2, 2026-10-27) from mutmut's
-  copy rule and the gate's code, not from a run. Closes by itself once main has `gate.py` (ticket 03's start).
 - **`BUILD_CONFIG_FILES` does not list `gate.py`.** A pull request or main build runs its own tree's `gate.py`, so a
   change that loosens the gate gets no "Build configuration" notice in its quality file; `orchestrator.py`, which
   held the gate, was not listed either. Raised by cross-review 61 (F7, 2026-10-27). Closes with `gate.py` listed,
@@ -127,7 +119,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 - **`TestGate.test_a_missing_tool_fails_naming_it` fails where shellcheck lives beside git.** `TestGate.setUp`
   (`tests/test_orchestrator.py`) puts git's own directory on `PATH` after the stubs, so on a machine with
   `/usr/bin/shellcheck` (agentbox, Debian's package) removing the stub still finds the real one and the gate passes.
-  Seen 2026-10-25 on `main` at `9448612`. Closes with `PATH` holding a directory with only a link to `git`.
+  Seen 2026-10-25 on `main` at `9448612`. On such a machine it also fails mutmut's stats run, which runs every test,
+  so `surviving-mutants` is `not-run` there, "failed to collect stats" (2026-10-27). Closes with `PATH` holding a
+  directory with only a link to `git`.
 - **unexpected-paths reads only the contract step's file.** `unexpected_paths` judges each path the change touches
   against `RunChange.spec`, the contract step's file, so a workflow whose contract is in business terms, such as
   `examples/workflows/product-team.toml`, whose requirements name no file and whose `design.md` lists the
@@ -161,17 +155,29 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 - **Is 3 GB the right memory limit for the agentbox0 Jenkins agent?** All builds on the node share its
   container's `mem_limit: 3g` (Homelab `jenkins/agentbox0.yaml`), which this repo cannot change. Since
   `ci/cargo-lock.sh`, two of this repository's builds compile Rust at once only when a quality build starts its
-  `cargo test` beside another build's cargo step, but everything else they run (pytest, mutmut, PyInstaller, npm)
-  still shares the 3 GB beside a locked rustc, as do other jobs' builds on the node. Open in
-  `.scratch/ci-cargo-memory/issues/02-agent-container-memory.md`; closes with the Homelab keeping or raising it.
-- **mutmut's clean test run fails on a hypothesis health check, so the gate mutation-tests nothing.** Under the
-  gate's mutmut 3.8.0, `TestChangedLines.test_names_each_changed_file_and_exactly_its_added_lines` in
-  `tests/test_properties.py` fails with `hypothesis.errors.FailedHealthCheck: ... was called from multiple
-  different executors`, mutmut exits 1 with "Failed to run clean test", and `surviving-mutants` reports `not-run`
-  for every change. Seen on Jenkins build #48 and reproduced locally at `a3b18b6` with a one-line edit to
-  `drain_end` (2026-10-25); a plain `uv run pytest` passes it. Cause not established. Closes with the test passing
-  under mutmut, e.g. by suppressing `HealthCheck.differing_executors` for it, or the gate's mutmut runs leaving
-  `tests/test_properties.py` out.
+  `cargo test` or `cargo check` beside another build's cargo step, or when the Gate stage's clippy, outside the lock,
+  checks the desktop shell's own crate, the one crate the UI stage's `cargo check` leaves it; but everything else they
+  run (pytest, mutmut, PyInstaller, npm) still shares the 3 GB beside a locked rustc, as do other jobs' builds on the
+  node. Open in `.scratch/ci-cargo-memory/issues/02-agent-container-memory.md`; closes with the Homelab keeping or
+  raising it.
+- **Under the gate's `--cap-lints warn`, an `#[allow]` overrides a workspace's `forbid`.** `Clippy._lint_workspace` in
+  `gate.py` caps every lint at warn so that a lint at deny cannot stop cargo before a compile error in a later crate
+  (cross-review 66, F1); rustc's cap also lowers `forbid`, so an added `#[allow(unsafe_code)]` under `unsafe_code =
+  "forbid"` no longer gives E0453 and its unsafe block is no finding: the gate is OK on a change the workspace's rules
+  make uncompilable, and only "Suppressions added" lists the allow, and not even that when the change adds the lint as
+  one line inside an existing wrapped `#[allow(\n    a,\n    b,\n)]`, since `_RUST_SUPPRESSION` reads one added line at
+  a time (F15). Nothing in this repository sets `forbid` (`ui/src-tauri/Cargo.toml` is all `warn`), and the UI stage's
+  uncapped `cargo test` and `cargo check` would still fail such a build of `ui/src-tauri`. Raised by cross-review 66
+  (F11, 2026-10-27): "The gate is OK on a change that the workspace's rules make uncompilable". Closes with a second,
+  uncapped clippy run whose rustc errors (codes `E` and four digits, such as E0453) are compile errors, or with the
+  forbidden lints read from the manifests and an added allow of one failing the gate.
+- **A quality build judges Rust by the snapshot's own clippy rules.** `Clippy` in `gate.py` chooses no lints (it caps
+  their levels at warn, `--cap-lints`), so clippy reads each workspace's `[lints]`, `clippy.toml`, `.cargo/config.toml`
+  rustflags and `rust-toolchain.toml` from the judged tree, where a change can loosen them; `--config` replaces only
+  `pyproject.toml`. The quality file lists such an edit under build configuration (`CLIPPY_CONFIG_NAMES`), so the
+  Reviewer sees it, but the gate does not prevent it. Found implementing rust-engine ticket 02 (2026-10-27). Closes with
+  the gate taking those files from the commit `--config`'s rules come from, or with the Reviewer's prompt naming the
+  listing as a finding to judge.
 - **herdr 0.9.1 lists no `gemini` integration.** `herdr integration status` on this host lists `antigravity-cli`
   (whose hook is under `~/.gemini/`) but no `gemini`, so `doctor` warns that it does not list gemini, and the
   README's `herdr integration install gemini` may name a kind herdr no longer has. Found by the doctor run
@@ -181,10 +187,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   check reuses `Host.gitleaks_problem`, the run's pre-push check, which asks `gitleaks git --help` because a
   distribution's build may print no version number. So `doctor` shows no gitleaks version. Kept by choice
   (2026-10-24).
-- **No test shows the proof reruns come after the quality loop.** `Workflow._rerun_proofs` runs right before the
-  verdict step's turn, which follows the quality loop by construction, but every proof test uses `QUICK`, which has
-  no quality-gated step. Raised by the cross-review of the proof reruns (R1-F5, 2026-10-24): "no test would notice
-  the rerun moving before it". Closes with a proof test on a quality-gated workflow, through the CI fakes.
 - **A spec left `ready-for-human` by a conflict stays there when `refresh` clears the conflict before a drain does.**
   drain moves such a spec to `in-review` only when its own refresh clears the run's conflict (`refreshed_headers`);
   a run cleared by `orchestrator.py refresh` beforehand has no conflicts left, so drain cannot tell the spec held
@@ -195,12 +197,19 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 - **Proofs run after the last round's review too.** No Builder turn follows to read them; only the draft pull
   request's review shows them, and each may take `PROOF_TIMEOUT`. Kept: a demonstrated defect is what the human
   most needs to see in a draft. Raised by the same review.
-- **A proof in a worktree run finds the checkout's pytest configuration.** The run directory, and with it
-  `RunState.proofs_dir`, is under the project checkout, not the run's worktree, so a `proof_command` of
-  `python -m pytest {proofs}` takes its rootdir and `conftest.py` from the checkout while importing the code from the
-  worktree it runs in. Found while writing loop-guards ticket 05; not reproduced. Closes with `_run_proof` passing
-  the working tree as pytest's rootdir and conftest root, or the proofs copied into a scratch directory of the
-  worktree for their run.
+- **What a proof writes outside its own directory can enter the commit.** A proof runs in the working tree
+  (`Workflow._run_proof`), and only its copy's directory is removed after it, so a file it writes elsewhere, such as
+  the `__pycache__` of a module it imports in a project that does not ignore those, stays for `_publish`'s
+  `git add --all`. In-place runs always had this; since proof-runs ticket 01 a worktree run has it too, its proofs
+  importing the worktree's code. Raised there (2026-10-27). Closes with `_publish` committing only what the turns
+  changed, or with proofs running in a throwaway copy of the tree.
+- **A proof the Builder moves into the project stays carried as erroring.** `PROOFS_NOTE` lets the Builder move a
+  proof into the project as a regression test; `Workflow._run_proof` then records it "it did not run: ... is gone",
+  which is not a pass, so `_carried_proofs` keeps carrying it. Raised by the cross-review of proof-runs (review 64,
+  F9, 2026-10-27): "is carried and told as a standing finding in every later round": the Builder hears it does not
+  pass, and the verdict step hears it "no longer fails but errors", even when the moved test passes in the project.
+  Predates that branch, where the same move gave pytest's exit status 4, an error carried the same way. Closes with
+  `_carried_proofs` treating a missing proof as moved and dropping it, and the notes saying so.
 - **`expected-value-changed` misses an inline literal's sign, type or structure.** `_changed_literals` pairs
   assertions by `_shape` and compares `_literals`, which drops types and operators: `assert f() == -5` becoming
   `== 5` changes the shape (no pair, no finding), and `== 1` becoming `== True` gives equal literal lists
@@ -287,16 +296,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
     `artifacts[relativePath]` in the result's `api/json` tree would halve the requests (F2).
   - No test covers a transient `CIError` between two reads, or a build that ends with a file other than the one read
     while it ran (F5).
-- **`test_invariants.py` and `test_docs.py` fail inside mutmut's copy.** Raised by cross-review 60 (2026-10-27), in
-  code PR #106 brought. Under mutmut, `SOURCE` is mutmut's mutated `orchestrator.py`, and `GATE_SOURCE` its
-  mutated `gate.py`, both in `source_paths`: each imports `mutmut`, and each
-  mutated function has `__mutmut_orig` and `__mutmut_N` copies, so the stdlib-only test fails for any change to a
-  function, and the unredirected-header test for a change to `CI._request`, `RunRequestHandler.do_OPTIONS` or
-  `_has_token`. `test_docs.py` reads `README.md` and resolves links into the whole repo, while `mutants/` holds only
-  `source_paths`, `also_copy` and mutmut's defaults. Either makes mutmut's clean run fail, so surviving-mutants is
-  `not-run`, besides the Hypothesis health check above. Closes with those tests reading the working tree's files, or
-  deselected under mutmut, or with README.md and the linked files in `also_copy`. Also: `test_invariants.py`'s
-  `AnyJenkins` and `Answer` copy `FakeCI` and `FakeResponse`, and `ROOT` is defined three times (F4).
+- **`test_invariants.py`'s `AnyJenkins` and `Answer` copy `FakeCI` and `FakeResponse`** of
+  `tests/test_orchestrator.py`. Raised by cross-review 60 (F4, 2026-10-27). Closes with one fake Jenkins the two files
+  share.
 - **`vague-names` does not split CamelCase.** `vague_names` matches a whole name or its last `_`-separated word,
   so `user_data` is found but a class `InfoManager` or `UserData` is not. Closes, if the run metrics show such names
   recur, with the last CamelCase word matched too.
@@ -433,6 +435,68 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Fixed
 
+- **No test shows the proof reruns come after the quality loop.** `Workflow._rerun_proofs` runs right before the
+  verdict step's turn, which follows the quality loop by construction, but every proof test used `QUICK`, which has
+  no quality-gated step. Raised by the cross-review of the proof reruns (R1-F5, 2026-10-24): "no test would notice
+  the rerun moving before it". Fixed (2026-10-27): `TestProofs`'s
+  `test_a_carried_proof_runs_again_after_the_rounds_last_quality_round_and_before_the_review` runs the default
+  workflow through the CI fakes, round 2's first quality round failing, and pins the order of the turns, quality
+  rounds and proof runs; it fails with the rerun moved before the gated step's turn.
+
+- **A proof in a worktree run finds the checkout's pytest configuration.** The run directory, and with it
+  `RunState.proofs_dir`, is under the project checkout, not the run's worktree, so a `proof_command` of
+  `python -m pytest {proofs}` took its rootdir and `conftest.py` from the checkout. Found while writing loop-guards
+  ticket 05; reproduced on real git by proof-runs ticket 01: with the project's `pythonpath = ["."]`, the proof
+  imported the checkout's module, so it tested the base, not the change. Fixed (2026-10-27): `Workflow._run_proof`
+  copies the proof's directory to `<work_dir>/.orchestrator/proofs/<round that wrote it>/`, under a `.gitignore` of
+  `*` written as the checkout's is (`_ignore_orchestrator_dir`), runs the proof's copy and removes it; an in-place
+  run's copy goes under the checkout's own `.orchestrator/`, so the two kinds of run do not differ.
+
+- **The Jenkins agent lacked rustup's clippy component.** The gate runs clippy on every build that reaches Gate, since
+  `ui/src-tauri/` is Rust, and `TestClippy` in `tests/test_gate.py` runs the real one. PR-111's first build showed the
+  agent's toolchain (1.99.0) lacked rustup's `clippy` component: the gate was ERROR with "`clippy` is not installed"
+  and eight `TestClippy` tests failed. Fixed (2026-10-27, rust-engine ticket 02): the Install stage runs `rustup
+  component add clippy` (Jenkinsfile, "Install"); PR-111's second build downloaded the component, passed all 1348
+  tests and the gate was OK.
+
+- **`test_invariants.py` and `test_docs.py` fail inside mutmut's copy.** Raised by cross-review 60 (2026-10-27), in
+  code PR #106 brought. mutmut runs the tests in `mutants/`, its copy of the repository, whose `orchestrator.py` and
+  `gate.py` hold every mutant beside each function and import `mutmut`, and which lacks `README.md`; so the stdlib-only
+  and unredirected-header tests read the mutated files, and `test_docs.py` failed reading `README.md`, which at
+  `da71e52` failed mutmut's stats run, "failed to collect stats", before the Hypothesis health check below was
+  reached. Past those, the clean run failed `test_no_test_sleeps_for_real`: pytest imports `conftest.py` afresh for
+  each run in one process, while `test_invariants.py`, imported once, kept the first run's `conftest.RealSleep`.
+  Fixed (2026-10-27, mutmut-hypothesis-health-check ticket 01): `tests/conftest.py`'s `REPO` is the repository's top
+  directory, the one above `mutants/` under mutmut, and the two files' `ROOT` is it, so they read the files unmutated
+  while running the mutated code, whose flags `test_docs.py` still checks; `NetworkUsed` and `RealSleep` moved to
+  `tests/guard_errors.py`, which pytest imports once, so the class a test catches is the one the guard raises. Not
+  taken: deselecting the tests under mutmut, which would stop `test_docs.py` killing mutants of the parsers' flags,
+  nor `also_copy` of `README.md` and what the docs link to, which would leave the source tests reading the mutated
+  files.
+
+- **mutmut's clean test run fails on a hypothesis health check, so the gate mutation-tests nothing.** Under the
+  gate's mutmut 3.8.0, each `@given` method of `tests/test_properties.py`, first
+  `TestChangedLines.test_names_each_changed_file_and_exactly_its_added_lines`, failed with
+  `hypothesis.errors.FailedHealthCheck: ... was called from multiple different executors`, mutmut exited 1 with
+  "Failed to run clean test", and `surviving-mutants` reported `not-run` for every change (Jenkins build #48).
+  Cause confirmed (2026-10-27): mutmut runs pytest in one process more than once (`pytest.main`, the stats run and
+  then the clean run), unittest makes a new `TestCase` for each, so the second run calls each `@given` method on
+  another `self`; two `pytest.main(["tests/test_properties.py"])` calls in one interpreter fail all twelve the
+  second time, the first passing. Fixed (2026-10-27, mutmut-hypothesis-health-check ticket 01): both Hypothesis
+  profiles in `tests/conftest.py` suppress `HealthCheck.differing_executors`, which guards against state kept on
+  `self` between examples; the `@given` methods keep none, reading `self` only to assert. The other health checks
+  stay on. Not taken: leaving `tests/test_properties.py` out of mutmut's runs, which would hide the parsers'
+  strongest tests from mutation testing.
+
+- **During the cutover fallback, mutmut cannot test a snapshot that has `gate.py`.** The fallback judges a snapshot
+  of this branch by a `$JUDGED_MAIN` from before the split, whose `[tool.mutmut] source_paths` is
+  `["orchestrator.py"]`; mutmut copies only `source_paths`, `tests/` and `also_copy` into `mutants/`, so the tests
+  that `import gate` fail there and surviving-mutants is `not-run`, and each changed `gate.py` function is
+  `not-mutated`. Findings to weigh, not failed conditions. Raised by cross-review 61 (F2, 2026-10-27) from mutmut's
+  copy rule and the gate's code, not from a run.
+  Fixed (2026-10-27): the fallback is gone (gate-split/03): a quality build is judged by `$JUDGED_MAIN`'s
+  `gate.py`, whose `source_paths` name `gate.py`, and a main without one fails the stage unjudged.
+
 - **The quality gate lives inside `orchestrator.py`.** Reusing the gate for another Python project meant copying the
   whole orchestrator, and it can only run inside the judged project's environment anyway, since it starts pytest and
   mutmut with `sys.executable`, which in the binary is the binary. Decided 2026-10-24: the quality file is the one
@@ -445,8 +509,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `_not_ignored_in_children`, for `RunProcess`, and `judged_in_quality` runs git through `Host` and counts `gate.py`
   among `JUDGING_FILES`. The gate's tests are in `tests/test_gate.py`; `test_invariants.py` holds `gate.py` to the
   standard library too, and `test_docs.py` checks the docs' names and `gate.py` flags against both files. The
-  Jenkinsfile's Gate stage runs `gate.py`, a quality build the one at `$JUDGED_MAIN`, or that commit's
-  `orchestrator.py gate` when it has none (Planned, "what is left"); `pyproject.toml`'s mypy files and mutmut
+  Jenkinsfile's Gate stage runs `gate.py`, a quality build the one at `$JUDGED_MAIN` (with a cutover fallback to that
+  commit's `orchestrator.py gate`, since removed by gate-split/03); `pyproject.toml`'s mypy files and mutmut
   `source_paths` and the Test stage's coverage name both files. Not closed: a quality build of a snapshot whose tree
   predates `gate.py` is judged by main's rules, whose `[tool.mypy] files` name `gate.py`, and the quality file's
   intro still names `orchestrator.py gate` (Open issues, both).

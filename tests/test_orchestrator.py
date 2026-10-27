@@ -7639,7 +7639,9 @@ class TestProofs(unittest.TestCase):
         state = wf.state
         review = host.files[state.review_path(1)]
         self.assertTrue(review.startswith("VERDICT: CHANGES_REQUESTED\n1. a bug\n"))
-        self.assertIn(f"## Proofs the orchestrator ran\n\nThe orchestrator ran each proof with `sh {{proofs}}` in {self.proj}.", review)
+        self.assertIn(f"## Proofs the orchestrator ran\n\nThe orchestrator ran each proof with `sh {{proofs}}` in "
+                      f"{self.proj}, from a copy of its directory under `{self.proj}/.orchestrator/proofs/`, removed "
+                      "after each run; a path to a proof in its output is the copy's.", review)
         self.assertIn("- `test_1_bug.sh` (finding 1): demonstrated, it fails.\n\n  ````\n  checking test_1_bug.sh\n"
                       "  ````", review)
         self.assertIn("- `test_2.sh` (finding 2): not demonstrated, it passes.", review)
@@ -7830,6 +7832,55 @@ class TestProofs(unittest.TestCase):
         self.assertEqual(wf.run(), APPROVE)
         self.assertEqual([p["demonstrated"] for p in wf.state.proofs if p["round"] == 1], [True])
 
+    def test_a_carried_proof_runs_again_after_the_rounds_last_quality_round_and_before_the_review(self):
+        # Round 2's first quality round fails, so its last is the one after the Builder's fix.
+        fake = FakeCI()
+        fake.outcomes = [outcome(), outcome(**RED), outcome()]
+        events = []
+
+        def logged(event, turn):
+            def wrapped(prompt, state, host):
+                events.append((event, state.round))
+                return turn(prompt, state, host)
+            return wrapped
+
+        def review_with_proof(prompt, state, host):
+            os.makedirs(state.proofs_dir(1))
+            with open(f"{state.proofs_dir(1)}/test_1.sh", "w") as f:
+                f.write("exit 1\n")
+            return review_turn(1, CHANGES_REQUESTED)(prompt, state, host)
+        pipeline = replace(orchestrator.DEFAULT_WORKFLOW, proof_command="sh {proofs}")
+        state = RunState("20260929-120000-a1b2c3", "add a rate limiter", self.proj, None, phase="build",
+                         workflow=pipeline.name)
+        host = FakeHost()
+        host._run = subprocess.run
+        # git ignores the scratch project's .orchestrator, as FakeHost has it ignore /proj's, for the gate's
+        # clean-tree check.
+        changed_in = host._changed_in
+        host._changed_in = lambda cwd: {p for p in changed_in(cwd) if not p.startswith(f"{self.proj}/.orchestrator/")}
+        wf, *_ = gated({"build": [logged("build", build_turn(1)), logged("build", build_turn(2)),
+                                  logged("quality fix", fix_turn(2, 1))],
+                        "review": [logged("review", review_with_proof), logged("review", review_turn(2, APPROVE))]},
+                       fake=fake, host=host, state=state, pipeline=pipeline, pull_request=False)
+        judge_quality, run_proof = wf._judge_quality, wf._run_proof
+
+        def quality(n):
+            events.append(("quality round", n, wf.state.quality_round))
+            return judge_quality(n)
+
+        def proof(*args):
+            events.append(("proof", wf.state.round))
+            return run_proof(*args)
+        wf._judge_quality, wf._run_proof = quality, proof
+
+        self.assertEqual(wf.run(), APPROVE)
+        self.assertEqual(events, [
+            ("build", 1), ("quality round", 1, 1), ("review", 1), ("proof", 1),
+            ("build", 2), ("quality round", 2, 1), ("quality fix", 2), ("quality round", 2, 2), ("proof", 2),
+            ("review", 2)])
+        self.assertEqual([(p["round"], p["written"], p["demonstrated"]) for p in wf.state.proofs],
+                         [(1, 1, True), (2, 1, True)])
+
     @pytest.mark.real_sleep
     def test_a_proof_that_runs_too_long_is_stopped_with_what_it_started(self):
         with patch.object(orchestrator, "PROOF_TIMEOUT", 1):
@@ -7837,10 +7888,40 @@ class TestProofs(unittest.TestCase):
             os.makedirs(wf.state.proofs_dir(1))
             with open(f"{wf.state.proofs_dir(1)}/test_1.sh", "w") as f:
                 f.write(f"(sleep 3; echo leaked > {self.proj}/leaked) &\nsleep 30\n")
-            failed, said = wf._run_proof("sh {proofs}", f"{wf.state.proofs_dir(1)}/test_1.sh")
+            failed, said = wf._run_proof("sh {proofs}", 1, "test_1.sh")
         self.assertEqual((failed, said), (False, "it errors, running out of its 1 s"))
         time.sleep(4)
         self.assertFalse(os.path.exists(f"{self.proj}/leaked"))
+
+    def test_a_proof_runs_from_a_copy_of_its_directory_in_the_checkout_which_goes_after_it(self):
+        wf, _, _ = self.run_proofs((CHANGES_REQUESTED, {}), (APPROVE, {}))
+        os.makedirs(wf.state.proofs_dir(1))
+        with open(f"{wf.state.proofs_dir(1)}/data.txt", "w") as f:
+            f.write("beside the proof\n")
+        # Reads the file beside it, and leaves a directory it cannot be removed from as it is.
+        with open(f"{wf.state.proofs_dir(1)}/test_1.sh", "w") as f:
+            f.write('here=$(dirname "$0"); echo "$0"; cat "$here/data.txt"; mkdir "$here/locked"; '
+                    'touch "$here/locked/f"; chmod 555 "$here/locked"; exit 1\n')
+        copies = f"{self.proj}/{orchestrator.PROOF_COPIES_DIR}"
+        self.assertEqual(wf._run_proof("sh {proofs}", 1, "test_1.sh"),
+                         (True, f"it fails:\n{copies}/1/test_1.sh\nbeside the proof"))
+        self.assertFalse(os.path.exists(copies))
+        self.assertEqual(sorted(os.listdir(wf.state.proofs_dir(1))), ["data.txt", "test_1.sh"])
+
+    def test_a_proof_whose_file_or_directory_is_gone_did_not_run(self):
+        wf, _, _ = self.run_proofs((CHANGES_REQUESTED, {}), (APPROVE, {}))
+        # The proof is gone from a directory that stays, as when the Builder moved it into the project; then the
+        # directory goes too. A command that exits 1 for a missing file would make either look demonstrated.
+        os.makedirs(wf.state.proofs_dir(1))
+        open(f"{wf.state.proofs_dir(1)}/test_2.sh", "w").close()
+        def did_not_run():
+            failed, said = wf._run_proof("test -f {proofs} || exit 1", 1, "test_1.sh")
+            self.assertFalse(failed)
+            self.assertRegex(said, r"^it did not run: .*proofs-1/test_1\.sh is gone")
+            self.assertFalse(os.path.exists(f"{self.proj}/{orchestrator.PROOF_COPIES_DIR}"))
+        did_not_run()
+        shutil.rmtree(wf.state.proofs_dir(1))
+        did_not_run()
 
     def test_proof_command_needs_a_verdict_step_and_names_the_proof_once(self):
         with self.assertRaisesRegex(ValueError, "proof_command runs the verdict step's proofs, and the workflow has no "
@@ -7877,6 +7958,67 @@ again = "Again, with tests in {proofs_dir}; write {review_path}."
         self.assertIn('proof_command = "sh {proofs}"', text)
         self.assertEqual(orchestrator.parse_workflow("quick", tomllib.loads(text), BUILT_IN_PROMPTS), self.pipeline)
         self.assertNotIn("proof_command", orchestrator.workflow_toml(QUICK))
+
+
+class TestProofInAWorktree(RepositoryTest):
+    """A --worktree run's proof, run by pytest on real git: the checkout and the run's worktree differ in the module
+    the proof imports, and the project's pytest configuration puts its rootdir on sys.path, so a proof that took the
+    checkout's configuration would import the checkout's module."""
+
+    BASE_FILES = {"pyproject.toml": '[tool.pytest.ini_options]\npythonpath = ["."]\n',
+                  ".gitignore": "__pycache__/\n", "limiter.py": 'RATE = "base"\n'}
+    BRANCH = "orchestrator/a1b2c3-rate"
+
+    def setUp(self):
+        super().setUp()
+        origin = os.path.join(self.outside, "origin.git")
+        self.git("clone", "--quiet", "--bare", self.repo, origin)
+        self.git("remote", "add", "origin", origin)
+        self.git("fetch", "--quiet", "origin")
+        self.worktree = os.path.join(self.repo, orchestrator.WORKTREES_DIR, "a1b2c3")
+        self.git("worktree", "add", "--quiet", "-b", self.BRANCH, self.worktree, "main")
+        with open(os.path.join(self.worktree, "limiter.py"), "w") as f:
+            f.write('RATE = "change"\n')
+        self.state = RunState("20260929-120000-a1b2c3", "add a rate limiter", self.repo, None, phase="review",
+                              round=1, workflow="quick", base=self.base, base_branch="main", branch=self.BRANCH,
+                              pull_request=True, worktree=self.worktree)
+        # sys.executable rather than python: the interpreter with pytest, whatever PATH finds first.
+        self.command = f"{shlex.quote(sys.executable)} -m pytest -q -p no:cacheprovider {{proofs}}"
+        pipeline = replace(QUICK, proof_command=self.command)
+        self.wf = Workflow(FakeHerdr(self.host, self.state, {}), self.host, self.state, notify=lambda t, b: None,
+                           pipeline=pipeline, clocks=orchestrator.Clocks(FakeClock().sleep, FakeClock(), FakeClock()))
+        # Ignores the checkout's .orchestrator directory and owns the run, as a run's start does.
+        self.wf._claim()
+
+    def write_proof(self, text):
+        os.makedirs(self.state.proofs_dir(1))
+        with open(f"{self.state.proofs_dir(1)}/test_1_rate.py", "w") as f:
+            f.write(text)
+
+    def test_a_proof_imports_the_worktrees_code_and_the_commit_holds_no_copy_of_it(self):
+        # Writes beside itself too, which only the copy's directory may hold.
+        self.write_proof("import os\n\nimport limiter\n\n\ndef test_rate():\n"
+                         "    open(os.path.join(os.path.dirname(__file__), 'beside.txt'), 'w').close()\n"
+                         "    print(limiter.__file__)\n    assert limiter.RATE == 'base'\n")
+        leftover = os.path.join(self.worktree, orchestrator.PROOF_COPIES_DIR, "1", "test_9_old.py")
+        os.makedirs(os.path.dirname(leftover))
+        open(leftover, "w").close()
+
+        failed, said = self.wf._run_proof(self.command, 1, "test_1_rate.py")
+
+        self.assertTrue(failed, said)
+        self.assertIn(f"\n{self.worktree}/limiter.py\n", said)
+        self.assertFalse(os.path.exists(os.path.join(self.worktree, orchestrator.PROOF_COPIES_DIR)))
+        self.assertEqual(self.host.read(os.path.join(self.worktree, ".orchestrator", ".gitignore")), "*\n")
+        self.assertEqual(sorted(os.listdir(self.state.proofs_dir(1))), ["test_1_rate.py"])
+        self.assertEqual(self.host.git(self.worktree, "status", "--porcelain"), " M limiter.py\n")
+
+        with patch.object(self.host, "refuse_leaks"), patch.object(self.host, "push_branch"), \
+                patch.object(self.host, "create_pr", return_value="https://github.com/o/r/pull/1"):
+            self.wf._publish()
+        committed = self.git("ls-tree", "-r", "--name-only", self.BRANCH).split()
+        self.assertEqual(committed, [".gitignore", "limiter.py", "pyproject.toml"])
+        self.assertEqual(self.git("show", f"{self.BRANCH}:limiter.py"), 'RATE = "change"\n')
 
 
 class TestSavedBeforeWorkflows(unittest.TestCase):

@@ -13,10 +13,12 @@ import unittest
 import urllib.parse
 from unittest.mock import patch
 
+import conftest
+
 import gate
 import orchestrator
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent
+ROOT = conftest.REPO
 README = ROOT / "README.md"
 DOCS = [README, *sorted((ROOT / "docs").glob("*.md"))]
 
@@ -25,7 +27,6 @@ FLAG = re.compile(r"(?<![\w-])--[a-z][a-z0-9-]*")
 # Commands and flags the docs give that the orchestrator does not have, by (document, command, flag); a flag of
 # None stands for the command itself.
 NOT_IN_THE_PARSER = {
-    ("quality-gate.md", "gate", None): "main's gate before gate.py, which the Jenkinsfile's cutover fallback runs",
     ("roadmap.md", "resume", "--workflow"): "a planned feature, K",
     ("ui-options.md", "list", "--watch"): "a step of a staged plan, not built",
     ("ui-options.md", "web", None): "the assessment's name for the command, built as serve",
@@ -48,6 +49,12 @@ OTHER_PROGRAMS_NAMES = {
     "CHANGE_TARGET": "an environment variable Jenkins sets",
     "OPTIONS": "an HTTP method",
     "NAME": "the README's placeholder for a prompt's name",
+}
+
+# Backticked names the docs give that read as Class.member but are file names, with whose files they are.
+FILE_NAMES = {
+    "Cargo.toml": "cargo's manifest",
+    "Cargo.lock": "cargo's lock file",
 }
 
 
@@ -241,8 +248,8 @@ class TestDocs(unittest.TestCase):
                             errors.append(f"{where}: neither orchestrator.py nor gate.py has a function or method "
                                           f"{code}")
                     # Class.member: a capitalized name with a lowercase letter, or an all-caps one that is a class
-                    # of orchestrator.py, such as CI; not CONSTANT.md, a prompt's file.
-                    elif (m := re.fullmatch(r"([A-Z]\w*)\.([a-z_]\w*)(\(\))?", code)) \
+                    # of orchestrator.py, such as CI; not CONSTANT.md, a prompt's file, nor one of FILE_NAMES.
+                    elif code not in FILE_NAMES and (m := re.fullmatch(r"([A-Z]\w*)\.([a-z_]\w*)(\(\))?", code)) \
                             and (m.group(1) in classes or re.search("[a-z]", m.group(1))) \
                             and f"{m.group(1)}.{m.group(2)}" not in members:
                         errors.append(f"{where}: neither orchestrator.py nor gate.py has {m.group(1)}.{m.group(2)}")
