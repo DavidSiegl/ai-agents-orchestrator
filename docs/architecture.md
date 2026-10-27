@@ -298,7 +298,7 @@ running `after` callbacks on `tick`), and `TestRunProcess` runs real child proce
 `tests/parity/` is the parity harness, the oracle the Rust engine is judged by: it runs the engine as a program, with
 nothing of it imported. Each scenario in `scenarios.py` scripts a `World` (`world.py`): a git project on `main` with
 a bare `origin` beside it, the fake herdr, gh and ssh of `fakes.py` first on `PATH` and the real gitleaks after them
-(every scenario is skipped where there is none), and Jenkins, and PyPI behind an HTTPS proxy, served from the test
+(every scenario fails where there is none, as where openssl cannot make the fake PyPI's certificate), and Jenkins, and PyPI behind an HTTPS proxy, served from the test
 process. It runs
 `orchestrator.py` there, or the program `PARITY_ENGINE` names, killing and resuming it where the scenario says,
 and the world records, normalized by `normalize.py` (times, run ids, pids, hashes, its own paths and ports): each

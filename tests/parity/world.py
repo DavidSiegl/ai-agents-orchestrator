@@ -22,7 +22,6 @@ import subprocess
 import sys
 import threading
 import time
-import unittest
 import urllib.parse
 from dataclasses import dataclass, field
 from typing import Self
@@ -104,7 +103,7 @@ class Invocation:
 class _Servers:
     """The world's HTTP servers, each on a free port of 127.0.0.1, serving from a thread of this process."""
     jenkins: http.server.ThreadingHTTPServer
-    pypi: http.server.ThreadingHTTPServer | None  # None where openssl cannot make its certificate
+    pypi: http.server.ThreadingHTTPServer
     threads: list[threading.Thread] = field(default_factory=list)
 
 
@@ -118,16 +117,16 @@ class World:
     """
 
     def __init__(self, root: str):
-        """root: an empty directory the world may fill, removed by its owner afterwards. Raises unittest.SkipTest,
-        which skips the scenario, where gitleaks is not on PATH."""
+        """root: an empty directory the world may fill, removed by its owner afterwards. Raises RuntimeError, which
+        fails the scenario, where gitleaks is not on PATH or openssl cannot make the fake PyPI's certificate."""
         self.root = os.path.realpath(root)
         self.project = os.path.join(self.root, "project")
         self.origin = os.path.join(self.root, "origin.git")
         self.config = os.path.join(self.root, "config", "ai-agents-orchestrator")
         if shutil.which("gitleaks") is None:
-            # The ticket's rule: the real gitleaks where it is installed, else the scenario is skipped. A stub that
-            # finds nothing would record what no engine run with gitleaks does.
-            raise unittest.SkipTest("gitleaks is not on PATH; the parity scenarios run the real one")
+            # A stub that finds nothing would record what no engine run with gitleaks does; a skip would let a machine
+            # without it pass the harness having checked nothing (the user's ruling, 2026-10-27).
+            raise RuntimeError("gitleaks is not on PATH; the parity scenarios run the real one")
         self.normalizer = Normalizer()
         self.normalizer.literal(self.root, "<world>")
         # This checkout, where the example workflows a scenario runs are.
@@ -152,9 +151,8 @@ class World:
             if inv.process.poll() is None:
                 inv.kill()
         for server in (self._servers.jenkins, self._servers.pypi):
-            if server is not None:
-                server.shutdown()
-                server.server_close()
+            server.shutdown()
+            server.server_close()
 
     # -- Scripting the world ------------------------------------------------
 
@@ -182,10 +180,7 @@ class World:
         self._write_script()
 
     def pypi_project(self, name: str, answer: dict) -> None:
-        """Make PyPI answer GET /pypi/<name>/json with answer, its JSON API's document; any other name is a 404.
-        Skips the scenario where openssl could not make the PyPI server's certificate, so there is no server."""
-        if self._servers.pypi is None:
-            raise unittest.SkipTest("openssl could not make a certificate for the fake PyPI")
+        """Make PyPI answer GET /pypi/<name>/json with answer, its JSON API's document; any other name is a 404."""
         self._script["pypi"][name] = answer
         self._write_script()
 
@@ -332,13 +327,8 @@ class World:
         env.update({"HERDR_ENV": "1", "PARITY_INVOCATION": str(n),
                     "JENKINS_URL": self._url(self._servers.jenkins), "JENKINS_USER": JENKINS_USER,
                     "JENKINS_TOKEN": JENKINS_TOKEN, "no_proxy": "127.0.0.1,localhost"})
-        if self._servers.pypi is not None:
-            env["https_proxy"] = self._url(self._servers.pypi)
-            env["SSL_CERT_FILE"] = os.path.join(self.root, "pypi-cert.pem")
-        else:
-            # The discard port, where nothing listens: without the PyPI server, a lookup fails here rather than
-            # reach the real pypi.org.
-            env["https_proxy"] = "http://127.0.0.1:9"
+        env["https_proxy"] = self._url(self._servers.pypi)
+        env["SSL_CERT_FILE"] = os.path.join(self.root, "pypi-cert.pem")
         return env
 
     # -- Making the world -------------------------------------------------------
@@ -380,29 +370,27 @@ class World:
         self.git(self.project, "push", "--quiet", "--set-upstream", "origin", "main")
 
     def _serve(self) -> _Servers:
+        # The certificate first, so that a missing openssl leaves no server bound.
+        self._make_certificate()
         jenkins = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _JenkinsHandler)
         jenkins.world = self
-        pypi = None
-        if self._make_certificate():
-            pypi = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _ProxyHandler)
-            pypi.world = self
-            pypi.tls = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-            pypi.tls.load_cert_chain(os.path.join(self.root, "pypi-cert.pem"),
-                                     os.path.join(self.root, "pypi-key.pem"))
+        pypi = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _ProxyHandler)
+        pypi.world = self
+        pypi.tls = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        pypi.tls.load_cert_chain(os.path.join(self.root, "pypi-cert.pem"), os.path.join(self.root, "pypi-key.pem"))
         servers = _Servers(jenkins, pypi)
         for server in (jenkins, pypi):
-            if server is not None:
-                thread = threading.Thread(target=server.serve_forever, daemon=True)
-                thread.start()
-                servers.threads.append(thread)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            servers.threads.append(thread)
         self.normalizer.literal(self._url(jenkins), "<jenkins>")
         return servers
 
-    def _make_certificate(self) -> bool:
-        """Make pypi.org's certificate for the PyPI server, self-signed, which the engine trusts by SSL_CERT_FILE;
-        False where openssl cannot."""
+    def _make_certificate(self) -> None:
+        """Make pypi.org's certificate for the PyPI server, self-signed, which the engine trusts by SSL_CERT_FILE.
+        Raises RuntimeError, naming openssl, where it is not on PATH or fails."""
         if shutil.which("openssl") is None:
-            return False
+            raise RuntimeError("openssl is not on PATH; the parity scenarios make the fake PyPI's certificate with it")
         # openssl as found on PATH just above.
         proc = subprocess.run(  # noqa: S603
             ["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",  # noqa: S607
@@ -410,7 +398,9 @@ class World:
              "-keyout", os.path.join(self.root, "pypi-key.pem"), "-out", os.path.join(self.root, "pypi-cert.pem"),
              "-days", "30", "-subj", "/CN=pypi.org", "-addext", "subjectAltName=DNS:pypi.org"],
             capture_output=True, check=False)
-        return proc.returncode == 0
+        if proc.returncode != 0:
+            raise RuntimeError(f"openssl could not make the fake PyPI's certificate, exit status {proc.returncode}: "
+                               f"{proc.stderr.decode(errors='replace').strip()}")
 
     @staticmethod
     def _url(server: http.server.HTTPServer) -> str:
@@ -547,15 +537,15 @@ class World:
                 continue
             if tree:
                 path = tree["worktree"]
-                status = self.git(path, "status", "--porcelain", "--untracked-files=all").splitlines()
+                porcelain = self.git(path, "status", "--porcelain", "--untracked-files=all").splitlines()
                 changed = {}
-                for entry in status:
+                for entry in porcelain:
                     name = entry[3:]
                     full = os.path.join(path, name)
                     if os.path.isfile(full) and not name.startswith(".orchestrator/"):
                         with open(full, errors="replace") as f:
                             changed[name] = f.read()
-                out.append({"path": path, "branch": tree.get("branch", "detached"), "status": status,
+                out.append({"path": path, "branch": tree.get("branch", "detached"), "status": porcelain,
                             "changed": changed})
                 tree = {}
         return out

@@ -40,9 +40,10 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   tickets replay them through `PARITY_ENGINE`. Not covered: a secret gitleaks finds, at a quality round or at
   publish; the harnesses other than claude and codex starting an agent (only their arguments differ); a session
   log's token counts (every turn records `unknown`); `--timeout` and the stall notice, which take real minutes; and
-  the GUI, which the Rust engine drops. Where gitleaks is not on PATH every scenario is skipped, and where openssl
-  cannot make the fake PyPI's certificate the one that asks PyPI is. What a record holds by design, each a choice a
-  Rust ticket may revisit: output a human reads (logs, errors, `show`, `list`, `prune`) as its facts
+  the GUI, which the Rust engine drops. Where gitleaks is not on PATH, or openssl cannot make the fake PyPI's
+  certificate, every scenario fails naming it: a skip would pass a machine that checked nothing, and the gate's
+  test-integrity check fails an added skip (the user's ruling, 2026-10-27). What a record holds by design, each a
+  choice a Rust ticket may revisit: output a human reads (logs, errors, `show`, `list`, `prune`) as its facts
   (`normalize.facts`), not its words; a run's files listed by modification time, as `/files` and the event stream
   list them, sorted by name, since seconds of the clock decide that order; ssh's commands not at all, only what
   they did; doctor's lines without git's and Tk's, which are the host's. Two more are open issues below: the

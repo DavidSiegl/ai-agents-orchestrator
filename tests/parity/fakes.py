@@ -12,7 +12,7 @@ from the scenario's script, `WORLD/script.json`, which `World` in world.py write
 - ssh runs its command locally with sh, so that `--machine` reaches this machine's files through the engine's
   remote code.
 
-gitleaks is the real one: World skips its scenario where none is installed.
+gitleaks is the real one: World fails its scenario where none is installed.
 
 Every herdr and gh command, and each state.json a command finds changed, goes into the ledger, `WORLD/fakes/`:
 the fakes' own state (`state.json`) and the event log (`events.jsonl`), each read and written under one lock
