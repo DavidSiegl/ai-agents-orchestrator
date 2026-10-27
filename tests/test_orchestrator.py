@@ -7640,8 +7640,8 @@ class TestProofs(unittest.TestCase):
         review = host.files[state.review_path(1)]
         self.assertTrue(review.startswith("VERDICT: CHANGES_REQUESTED\n1. a bug\n"))
         self.assertIn(f"## Proofs the orchestrator ran\n\nThe orchestrator ran each proof with `sh {{proofs}}` in "
-                      f"{self.proj}, from a copy of its directory under `{self.proj}/.orchestrator/proofs/`, which its "
-                      "output names and which is removed after each run.", review)
+                      f"{self.proj}, from a copy of its directory under `{self.proj}/.orchestrator/proofs/`, removed "
+                      "after each run; a path to a proof in its output is the copy's.", review)
         self.assertIn("- `test_1_bug.sh` (finding 1): demonstrated, it fails.\n\n  ````\n  checking test_1_bug.sh\n"
                       "  ````", review)
         self.assertIn("- `test_2.sh` (finding 2): not demonstrated, it passes.", review)
@@ -7908,12 +7908,20 @@ class TestProofs(unittest.TestCase):
         self.assertFalse(os.path.exists(copies))
         self.assertEqual(sorted(os.listdir(wf.state.proofs_dir(1))), ["data.txt", "test_1.sh"])
 
-    def test_a_proof_whose_directory_is_gone_did_not_run(self):
+    def test_a_proof_whose_file_or_directory_is_gone_did_not_run(self):
         wf, _, _ = self.run_proofs((CHANGES_REQUESTED, {}), (APPROVE, {}))
-        failed, said = wf._run_proof("sh {proofs}", 1, "test_1.sh")
-        self.assertFalse(failed)
-        self.assertRegex(said, r"^it did not run: .*proofs-1")
-        self.assertFalse(os.path.exists(f"{self.proj}/{orchestrator.PROOF_COPIES_DIR}"))
+        # The proof is gone from a directory that stays, as when the Builder moved it into the project; then the
+        # directory goes too. A command that exits 1 for a missing file would make either look demonstrated.
+        os.makedirs(wf.state.proofs_dir(1))
+        open(f"{wf.state.proofs_dir(1)}/test_2.sh", "w").close()
+        def did_not_run():
+            failed, said = wf._run_proof("test -f {proofs} || exit 1", 1, "test_1.sh")
+            self.assertFalse(failed)
+            self.assertRegex(said, r"^it did not run: .*proofs-1/test_1\.sh is gone")
+            self.assertFalse(os.path.exists(f"{self.proj}/{orchestrator.PROOF_COPIES_DIR}"))
+        did_not_run()
+        shutil.rmtree(wf.state.proofs_dir(1))
+        did_not_run()
 
     def test_proof_command_needs_a_verdict_step_and_names_the_proof_once(self):
         with self.assertRaisesRegex(ValueError, "proof_command runs the verdict step's proofs, and the workflow has no "

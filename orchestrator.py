@@ -425,8 +425,8 @@ where it lies. If one is wrong, say so in your report instead."""
 # per proof, as proofs_section writes them.
 CARRIED_PROOFS_NOTE = """\
 Proofs that failed against the change in an earlier round were run again against this round's change, with \
-`{command}` in {cwd}, each from a copy of its directory under `{cwd}/""" + PROOF_COPIES_DIR + """/`, which \
-their output names and which is removed after each run:
+`{command}` in {cwd}, each from a copy of its directory under `{cwd}/""" + PROOF_COPIES_DIR + """/`, removed \
+after each run; a path to a proof in their output is the copy's:
 
 {proofs}
 
@@ -4020,9 +4020,10 @@ PROOFS_HEADING = "## Proofs the orchestrator ran"
 # Seconds one proof may run, and how many lines of its output the review quotes.
 PROOF_TIMEOUT = 300
 PROOF_TAIL_LINES = 10
-# A shell script that removes the directory "$1" names and everything under it, if it exists. Write permission is
-# given back first: a proof may leave a directory it made read-only, as a test of a permission error does.
-REMOVE_TREE_SCRIPT = '{ [ ! -e "$1" ] || chmod -R u+rwX -- "$1"; } && rm -rf -- "$1"'
+# A shell script that removes the directory "$1" names and everything under it, if it exists, failing as rm does.
+# Write permission is given back first, as far as chmod can: a proof may leave a directory it made read-only, as a
+# test of a permission error does.
+REMOVE_TREE_SCRIPT = '{ [ ! -e "$1" ] || chmod -R u+rwX -- "$1" 2>/dev/null; }; rm -rf -- "$1"'
 
 
 def _proof_finding(file: str) -> int | None:
@@ -4059,9 +4060,9 @@ def proofs_section(command: str, cwd: str, review: str, proofs: list[dict]) -> s
     whether it demonstrates its finding, and the review's numbered findings left without one, which stand as
     unproven."""
     out = [PROOFS_HEADING, "", (f"The orchestrator ran each proof with `{command}` in {cwd}, from a copy of its "
-                                f"directory under `{cwd}/{PROOF_COPIES_DIR}/`, which its output names and which is "
-                                "removed after each run. A proof that fails demonstrates its finding; one that "
-                                "passes or errors does not.")]
+                                f"directory under `{cwd}/{PROOF_COPIES_DIR}/`, removed after each run; a path to a "
+                                "proof in its output is the copy's. A proof that fails demonstrates its finding; one "
+                                "that passes or errors does not.")]
     for p in proofs:
         file, failed, said = p["file"], p["demonstrated"], p["said"]
         number = p["finding"]
@@ -4712,9 +4713,11 @@ class Workflow:
                   'eval "$2"')
         try:
             self._ignore_orchestrator_dir(s.work_dir)
-            # Emptied first: an orchestrator stopped during a proof leaves its copy behind.
-            self.host.check(["sh", "-c", f'{REMOVE_TREE_SCRIPT} && mkdir -p -- "$2" && cp -R -- "$3/." "$2"',
-                             "_", copies, copy, s.proofs_dir(written)])
+            # Emptied first: an orchestrator stopped during a proof leaves its copy behind. A proof file that is gone
+            # from its directory, as one the Builder moved into the project is, is not run on a missing path.
+            prepare = ('[ -f "$3/$4" ] || { echo "$3/$4 is gone" >&2; exit 1; }; '
+                       f'{REMOVE_TREE_SCRIPT} && mkdir -p -- "$2" && cp -R -- "$3/." "$2"')
+            self.host.check(["sh", "-c", prepare, "_", copies, copy, s.proofs_dir(written), file])
             proc = self.host.run(["sh", "-c", script, "_", s.work_dir, cmd, str(PROOF_TIMEOUT)],
                                  timeout=PROOF_TIMEOUT + 30, verbatim=True)
         except OrchestratorError as e:
