@@ -125,14 +125,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `cargo test` beside another build's cargo step, but everything else they run (pytest, mutmut, PyInstaller, npm)
   still shares the 3 GB beside a locked rustc, as do other jobs' builds on the node. Open in
   `.scratch/ci-cargo-memory/issues/02-agent-container-memory.md`; closes with the Homelab keeping or raising it.
-- **mutmut's clean test run fails on a hypothesis health check, so the gate mutation-tests nothing.** Under the
-  gate's mutmut 3.8.0, `TestChangedLines.test_names_each_changed_file_and_exactly_its_added_lines` in
-  `tests/test_properties.py` fails with `hypothesis.errors.FailedHealthCheck: ... was called from multiple
-  different executors`, mutmut exits 1 with "Failed to run clean test", and `surviving-mutants` reports `not-run`
-  for every change. Seen on Jenkins build #48 and reproduced locally at `a3b18b6` with a one-line edit to
-  `drain_end` (2026-10-25); a plain `uv run pytest` passes it. Cause not established. Closes with the test passing
-  under mutmut, e.g. by suppressing `HealthCheck.differing_executors` for it, or the gate's mutmut runs leaving
-  `tests/test_properties.py` out.
 - **herdr 0.9.1 lists no `gemini` integration.** `herdr integration status` on this host lists `antigravity-cli`
   (whose hook is under `~/.gemini/`) but no `gemini`, so `doctor` warns that it does not list gemini, and the
   README's `herdr integration install gemini` may name a kind herdr no longer has. Found by the doctor run
@@ -393,6 +385,20 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   subdirectory.
 
 ## Fixed
+
+- **mutmut's clean test run fails on a hypothesis health check, so the gate mutation-tests nothing.** Under the
+  gate's mutmut 3.8.0, each `@given` method of `tests/test_properties.py`, first
+  `TestChangedLines.test_names_each_changed_file_and_exactly_its_added_lines`, failed with
+  `hypothesis.errors.FailedHealthCheck: ... was called from multiple different executors`, mutmut exited 1 with
+  "Failed to run clean test", and `surviving-mutants` reported `not-run` for every change (Jenkins build #48).
+  Cause confirmed (2026-10-27): mutmut runs pytest in one process more than once (`pytest.main`, the stats run and
+  then the clean run), unittest makes a new `TestCase` for each, so the second run calls each `@given` method on
+  another `self`; two `pytest.main(["tests/test_properties.py"])` calls in one interpreter fail all twelve the
+  second time, the first passing. Fixed (2026-10-27, mutmut-hypothesis-health-check ticket 01): both Hypothesis
+  profiles in `tests/conftest.py` suppress `HealthCheck.differing_executors`, which guards against state kept on
+  `self` between examples; the `@given` methods keep none, reading `self` only to assert. The other health checks
+  stay on. Not taken: leaving `tests/test_properties.py` out of mutmut's runs, which would hide the parsers'
+  strongest tests from mutation testing.
 
 - **The quality gate lives inside `orchestrator.py`.** Reusing the gate for another Python project meant copying the
   whole orchestrator, and it can only run inside the judged project's environment anyway, since it starts pytest and

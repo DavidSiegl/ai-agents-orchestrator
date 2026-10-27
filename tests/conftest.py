@@ -20,15 +20,20 @@ import sys
 import time
 
 import pytest
-from hypothesis import settings
+from hypothesis import HealthCheck, settings
 
 import orchestrator
 
 # How many examples each property test tries. `default` keeps a local `uv run pytest` fast; the Jenkinsfile's Test
 # stage sets HYPOTHESIS_PROFILE=ci for ten times as many. No deadline: the tests that run git or sh for each example
 # take tens of milliseconds an example, and their speed is not what they test.
-settings.register_profile("default", max_examples=25, deadline=None)
-settings.register_profile("ci", max_examples=250, deadline=None)
+# differing_executors is off because the gate's mutmut runs the tests more than once in one process, and unittest
+# makes a new TestCase for each run, so the second calls each @given method on another self. The check guards against
+# state kept on self from one example to the next, and the @given methods of tests/test_properties.py keep none: they
+# read self only to assert.
+_UNCHECKED = [HealthCheck.differing_executors]
+settings.register_profile("default", max_examples=25, deadline=None, suppress_health_check=_UNCHECKED)
+settings.register_profile("ci", max_examples=250, deadline=None, suppress_health_check=_UNCHECKED)
 settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "default"))
 
 # The real calls, taken before any test can replace them, which a guarded call hands on to when it is allowed.
