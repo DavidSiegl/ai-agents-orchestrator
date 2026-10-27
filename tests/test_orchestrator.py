@@ -7639,7 +7639,9 @@ class TestProofs(unittest.TestCase):
         state = wf.state
         review = host.files[state.review_path(1)]
         self.assertTrue(review.startswith("VERDICT: CHANGES_REQUESTED\n1. a bug\n"))
-        self.assertIn(f"## Proofs the orchestrator ran\n\nThe orchestrator ran each proof with `sh {{proofs}}` in {self.proj}.", review)
+        self.assertIn(f"## Proofs the orchestrator ran\n\nThe orchestrator ran each proof with `sh {{proofs}}` in "
+                      f"{self.proj}, from a copy of its directory under `{self.proj}/.orchestrator/proofs/`, which its "
+                      "output names and which is removed after each run.", review)
         self.assertIn("- `test_1_bug.sh` (finding 1): demonstrated, it fails.\n\n  ````\n  checking test_1_bug.sh\n"
                       "  ````", review)
         self.assertIn("- `test_2.sh` (finding 2): not demonstrated, it passes.", review)
@@ -7891,21 +7893,26 @@ class TestProofs(unittest.TestCase):
         time.sleep(4)
         self.assertFalse(os.path.exists(f"{self.proj}/leaked"))
 
-    def test_a_proof_runs_from_a_copy_in_the_checkout_which_goes_after_it(self):
+    def test_a_proof_runs_from_a_copy_of_its_directory_in_the_checkout_which_goes_after_it(self):
         wf, _, _ = self.run_proofs((CHANGES_REQUESTED, {}), (APPROVE, {}))
         os.makedirs(wf.state.proofs_dir(1))
+        with open(f"{wf.state.proofs_dir(1)}/data.txt", "w") as f:
+            f.write("beside the proof\n")
+        # Reads the file beside it, and leaves a directory it cannot be removed from as it is.
         with open(f"{wf.state.proofs_dir(1)}/test_1.sh", "w") as f:
-            f.write('echo "$0"; touch "$(dirname "$0")/beside"; exit 1\n')
+            f.write('here=$(dirname "$0"); echo "$0"; cat "$here/data.txt"; mkdir "$here/locked"; '
+                    'touch "$here/locked/f"; chmod 555 "$here/locked"; exit 1\n')
         copies = f"{self.proj}/{orchestrator.PROOF_COPIES_DIR}"
-        self.assertEqual(wf._run_proof("sh {proofs}", 1, "test_1.sh"), (True, f"it fails:\n{copies}/1/test_1.sh"))
+        self.assertEqual(wf._run_proof("sh {proofs}", 1, "test_1.sh"),
+                         (True, f"it fails:\n{copies}/1/test_1.sh\nbeside the proof"))
         self.assertFalse(os.path.exists(copies))
-        self.assertEqual(os.listdir(wf.state.proofs_dir(1)), ["test_1.sh"])
+        self.assertEqual(sorted(os.listdir(wf.state.proofs_dir(1))), ["data.txt", "test_1.sh"])
 
-    def test_a_proof_whose_file_is_gone_did_not_run(self):
+    def test_a_proof_whose_directory_is_gone_did_not_run(self):
         wf, _, _ = self.run_proofs((CHANGES_REQUESTED, {}), (APPROVE, {}))
         failed, said = wf._run_proof("sh {proofs}", 1, "test_1.sh")
         self.assertFalse(failed)
-        self.assertRegex(said, r"^it did not run: .*test_1\.sh")
+        self.assertRegex(said, r"^it did not run: .*proofs-1")
         self.assertFalse(os.path.exists(f"{self.proj}/{orchestrator.PROOF_COPIES_DIR}"))
 
     def test_proof_command_needs_a_verdict_step_and_names_the_proof_once(self):

@@ -416,14 +416,17 @@ the round's earlier quality files are {quality_paths}, and the Builder's reports
 PROOFS_NOTE = """\
 The Reviewer backed findings with tests, and these do not pass against your change: {proofs}. \
 Make each of them pass, without changing it; you may move one into the project as a regression test. \
-If one is wrong, say so in your report instead."""
+The orchestrator runs each from a copy of its directory under the working tree's `""" + PROOF_COPIES_DIR + """/`, \
+so that the working tree's test configuration applies; to run one yourself, copy it there or into the project, not \
+where it lies. If one is wrong, say so in your report instead."""
 
 # Appended to the verdict step's prompt, after the quality and locks notes, when proofs carried from an earlier round
 # (Workflow._carried_proofs) were run again against the round's change (Workflow._rerun_proofs); proofs is a list item
 # per proof, as proofs_section writes them.
 CARRIED_PROOFS_NOTE = """\
 Proofs that failed against the change in an earlier round were run again against this round's change, with \
-`{command}` in {cwd}:
+`{command}` in {cwd}, each from a copy of its directory under `{cwd}/""" + PROOF_COPIES_DIR + """/`, which \
+their output names and which is removed after each run:
 
 {proofs}
 
@@ -4017,6 +4020,9 @@ PROOFS_HEADING = "## Proofs the orchestrator ran"
 # Seconds one proof may run, and how many lines of its output the review quotes.
 PROOF_TIMEOUT = 300
 PROOF_TAIL_LINES = 10
+# A shell script that removes the directory "$1" names and everything under it, if it exists. Write permission is
+# given back first: a proof may leave a directory it made read-only, as a test of a permission error does.
+REMOVE_TREE_SCRIPT = '{ [ ! -e "$1" ] || chmod -R u+rwX -- "$1"; } && rm -rf -- "$1"'
 
 
 def _proof_finding(file: str) -> int | None:
@@ -4052,8 +4058,10 @@ def proofs_section(command: str, cwd: str, review: str, proofs: list[dict]) -> s
     """The section _judge_proofs appends to a review: for each of proofs, the round's records in RunState.proofs,
     whether it demonstrates its finding, and the review's numbered findings left without one, which stand as
     unproven."""
-    out = [PROOFS_HEADING, "", (f"The orchestrator ran each proof with `{command}` in {cwd}. A proof that fails "
-                                "demonstrates its finding; one that passes or errors does not.")]
+    out = [PROOFS_HEADING, "", (f"The orchestrator ran each proof with `{command}` in {cwd}, from a copy of its "
+                                f"directory under `{cwd}/{PROOF_COPIES_DIR}/`, which its output names and which is "
+                                "removed after each run. A proof that fails demonstrates its finding; one that "
+                                "passes or errors does not.")]
     for p in proofs:
         file, failed, said = p["file"], p["demonstrated"], p["said"]
         number = p["finding"]
@@ -4686,17 +4694,18 @@ class Workflow:
         """Whether the proof file that round written's verdict step wrote fails against the working tree, as command's
         exit status 1 says, and what it printed last: its output's end, how else it exited, or why it could not run.
 
-        command, a proof_command, gets the path of a copy of the proof under the working tree's PROOF_COPIES_DIR, in
-        a directory named by written, and runs in the working tree's top directory. A tool that looks upwards from
-        the proof for its configuration, as pytest does for its rootdir, conftest.py files and pythonpath, so finds
-        the tree being judged rather than the checkout, where the run directory lies. The working tree's
+        The proof runs from a copy of proofs_dir(written), with the files beside it, at
+        <work_dir>/PROOF_COPIES_DIR/<written>: command gets the copy's path, and runs in the working tree's top
+        directory. A tool that looks upwards from the proof for its configuration, as pytest does for its rootdir,
+        conftest.py files and pythonpath, so meets the working tree's before any of the checkout's, which holds the
+        run directory and encloses a run's worktree. The proof's output names the copy. The working tree's
         .orchestrator directory is made ignored first, so no commit holds the copy; PROOF_COPIES_DIR is emptied
-        before the proof runs and removed after, so what the proof writes beside itself goes with it.
+        before the copy is made and removed after the proof, so what a proof writes beside itself goes with it.
         """
         s = self.state
         copies = f"{s.work_dir}/{PROOF_COPIES_DIR}"
-        copy = f"{copies}/{written}/{file}"
-        cmd = command.format(proofs=shlex.quote(copy))
+        copy = f"{copies}/{written}"
+        cmd = command.format(proofs=shlex.quote(f"{copy}/{file}"))
         # GNU timeout runs the proof in a process group of its own and kills all of it, so nothing a proof started
         # goes on writing to the tree; where there is none, Host.run's limit stops only the shell.
         script = ('cd -- "$1" || exit 125; command -v timeout >/dev/null 2>&1 && exec timeout -k 10 "$3" sh -c "$2"; '
@@ -4704,8 +4713,8 @@ class Workflow:
         try:
             self._ignore_orchestrator_dir(s.work_dir)
             # Emptied first: an orchestrator stopped during a proof leaves its copy behind.
-            self.host.check(["sh", "-c", 'rm -rf -- "$1" && mkdir -p -- "$(dirname -- "$3")" && cp -- "$2" "$3"',
-                             "_", copies, f"{s.proofs_dir(written)}/{file}", copy])
+            self.host.check(["sh", "-c", f'{REMOVE_TREE_SCRIPT} && mkdir -p -- "$2" && cp -R -- "$3/." "$2"',
+                             "_", copies, copy, s.proofs_dir(written)])
             proc = self.host.run(["sh", "-c", script, "_", s.work_dir, cmd, str(PROOF_TIMEOUT)],
                                  timeout=PROOF_TIMEOUT + 30, verbatim=True)
         except OrchestratorError as e:
@@ -4721,7 +4730,7 @@ class Workflow:
         """Remove the directory copies and everything under it; a failure is only logged, since the next proof's run
         empties it again and git ignores it meanwhile."""
         try:
-            self.host.check(["rm", "-rf", "--", copies])
+            self.host.check(["sh", "-c", REMOVE_TREE_SCRIPT, "_", copies])
         except OrchestratorError as e:
             log(f"could not remove the proof copies in {copies}: {e}")
 

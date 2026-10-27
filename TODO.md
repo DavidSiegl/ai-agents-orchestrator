@@ -402,9 +402,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `python -m pytest {proofs}` took its rootdir and `conftest.py` from the checkout. Found while writing loop-guards
   ticket 05; reproduced on real git by proof-runs ticket 01: with the project's `pythonpath = ["."]`, the proof
   imported the checkout's module, so it tested the base, not the change. Fixed (2026-10-27): `Workflow._run_proof`
-  copies the proof to `<work_dir>/.orchestrator/proofs/<round that wrote it>/<file>`, under a `.gitignore` of `*`
-  written as the checkout's is (`_ignore_orchestrator_dir`), runs the copy and removes it; an in-place run's copy
-  goes under the checkout's own `.orchestrator/`, so the two kinds of run do not differ.
+  copies the proof's directory to `<work_dir>/.orchestrator/proofs/<round that wrote it>/`, under a `.gitignore` of
+  `*` written as the checkout's is (`_ignore_orchestrator_dir`), runs the proof's copy and removes it; an in-place
+  run's copy goes under the checkout's own `.orchestrator/`, so the two kinds of run do not differ.
 - **The quality gate lives inside `orchestrator.py`.** Reusing the gate for another Python project meant copying the
   whole orchestrator, and it can only run inside the judged project's environment anyway, since it starts pytest and
   mutmut with `sys.executable`, which in the binary is the binary. Decided 2026-10-24: the quality file is the one
