@@ -1,7 +1,7 @@
 """
 The quality gate: judge the change a git working tree makes since a commit, and write the quality file.
 
-    python gate.py --base REV [--config PYPROJECT] [--tests JUNIT] [--coverage XML] [--out FILE]
+    python gate.py --base REV [--config PYPROJECT] [--tests JUNIT]... [--coverage XML]... [--out FILE]
                    [--mutation-budget SECONDS] [--base-run-budget SECONDS]
 
 It judges the working tree of the git repository that holds the current directory: the linters (GATE_TOOLS) over
@@ -49,7 +49,7 @@ import threading
 import time
 import tokenize
 import tomllib
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 from xml.etree import ElementTree
@@ -683,7 +683,7 @@ class NewCoverage:
 
 
 def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: str | None = None,
-                 coverage: str | None = None, tests: str | None = None) -> str:
+                 coverage: Sequence[str] = (), tests: Sequence[str] = ()) -> str:
     """The quality file for the change from base to the working tree of the git repository at cwd.
 
     Runs each GATE_TOOLS linter whose files the repository tracks over those files, with the rules of the pyproject.toml
@@ -692,15 +692,16 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
     lists what it finds, as an issue or as a finding to weigh as GateCheck.judged says. The gate is ERROR when there is
     such a linter finding or a check's finding judged an error, when a linter is missing, fails or prints nothing
     readable, when a file a linter reads and the change adds lines to holds a line end that git does not count, as
-    stray_line_ends finds, when
-    tests, a JUnit report of the tree's tests such as pytest's --junitxml, has a failing test, or when coverage, a
-    Cobertura report of the tree such as pytest-cov's coverage.xml, puts new code below GATE_MIN_COVERAGE percent on
-    GATE_MIN_NEW_LINES or more new lines to cover; else OK. Suppressions the change added are listed, not counted
-    against it. Paths are absolute or relative to the process's working directory. A file name that is not UTF-8 appears
-    in the quality file with each byte it cannot decode as `\\xNN`.
+    stray_line_ends finds, when one of tests, JUnit reports of the tree's tests such as pytest's --junitxml and
+    cargo-nextest's, has a failing test, or when coverage, Cobertura reports of the tree such as pytest-cov's
+    coverage.xml and cargo-llvm-cov's, merged as new_coverage says, puts new code below GATE_MIN_COVERAGE percent on
+    GATE_MIN_NEW_LINES or more new lines to cover; else OK. With no tests, or no coverage, the quality file has no
+    section on them. Suppressions the change added are listed, not counted against it. Paths are absolute or relative
+    to the process's working directory. A file name that is not UTF-8 appears in the quality file with each byte it
+    cannot decode as `\\xNN`.
 
     Raises GateError when it cannot judge: cwd is not in a git work tree, base names no commit, there
-    is no rules file, the test or coverage report cannot be read, or git prints what it cannot decode outside
+    is no rules file, a test or coverage report cannot be read, or git prints what it cannot decode outside
     the paths and diffs it reads verbatim, such as a work tree whose own path is not UTF-8.
     """
     proc = _git_run(cwd, "rev-parse", "--show-toplevel")
@@ -749,13 +750,13 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
 
     failing: list[tuple[str, str]] | None = None
     if tests:
-        failing = failing_tests(os.path.abspath(tests))
+        failing = [failed for report in tests for failed in failing_tests(os.path.abspath(report))]
         if failing:
             conditions.append(f"{len(failing)} tests fail; each is listed below.")
 
     covered, coverage_sentence = None, None
     if coverage:
-        covered = new_coverage(os.path.abspath(coverage), root, changed)
+        covered = new_coverage([os.path.abspath(report) for report in coverage], root, changed)
         coverage_sentence = _coverage_sentence(covered, _unmeasured_files(changed))
         if covered.lines >= GATE_MIN_NEW_LINES and covered.percent() < GATE_MIN_COVERAGE:
             conditions.append(f"Coverage of new code is {_floor_tenth(covered.percent())}%; the gate wants at "
@@ -915,12 +916,32 @@ def junit_outcomes(report: str) -> list[tuple[str, str, str]]:
     return out
 
 
-def new_coverage(report: str, root: str, changed: dict[str, set[int]]) -> NewCoverage:
-    """Coverage of the changed lines, from a Cobertura report such as pytest-cov's coverage.xml.
+def new_coverage(reports: Iterable[str], root: str, changed: dict[str, set[int]]) -> NewCoverage:
+    """Coverage of the changed lines, from Cobertura reports such as pytest-cov's coverage.xml and cargo-llvm-cov's
+    --cobertura output, merged by path and line: a line is coverable when any report lists it, and covered when any
+    report covers it; its branch outcomes are the most any report counts, and the most any report covers.
 
-    The report's paths are relative to its <source> directories; a changed line it does not list is not
-    coverable, like a comment. Raises GateError when the report cannot be read or parsed.
+    Each report's paths are relative to its <source> directories, a relative source to the current directory, or to
+    root when it lists none; an absolute path stands as it is. So cargo-llvm-cov's report, whose source is its Cargo
+    workspace's directory, maps to the repository's paths as long as the tree is where the report was written. A
+    changed line no report lists is not coverable, like a comment. Raises GateError when a report cannot be read or
+    parsed.
     """
+    merged: dict[tuple[str, int], tuple[bool, int, int]] = {}  # (path, line): (covered, covered outcomes, outcomes)
+    for report in reports:
+        for at, hit, taken, outcomes in _changed_line_coverage(report, root, changed):
+            was_hit, was_taken, was_outcomes = merged.get(at, (False, 0, 0))
+            merged[at] = (was_hit or hit, max(was_taken, taken), max(was_outcomes, outcomes))
+    return NewCoverage(lines=len(merged), covered_lines=sum(hit for hit, _, _ in merged.values()),
+                       conditions=sum(outcomes for _, _, outcomes in merged.values()),
+                       covered_conditions=sum(taken for _, taken, _ in merged.values()))
+
+
+def _changed_line_coverage(report: str, root: str,
+                           changed: dict[str, set[int]]) -> Iterator[tuple[tuple[str, int], bool, int, int]]:
+    """((path, line), covered, covered branch outcomes, branch outcomes) for each entry of the Cobertura report at
+    report on a changed line, as new_coverage reads it; a line with no branch data has 0 of 0 outcomes. Raises
+    GateError when the report cannot be read or parsed."""
     try:
         # The report comes from the build's own test run, and the expat Python 3.13 bundles refuses the entity
         # expansion attacks S314 is about (https://docs.python.org/3/library/xml.html#xml-vulnerabilities).
@@ -929,7 +950,6 @@ def new_coverage(report: str, root: str, changed: dict[str, set[int]]) -> NewCov
         raise GateError(f"cannot read the coverage report {report}: {e}") from e
     sources = [s.text.strip() for s in tree.iterfind("sources/source") if s.text and s.text.strip()] or [root]
     real_root = os.path.realpath(root)
-    lines = covered_lines = conditions = covered_conditions = 0
     for cls in tree.iterfind(".//class"):
         candidates = (os.path.relpath(os.path.realpath(os.path.join(source, cls.get("filename", ""))), real_root)
                       for source in sources)
@@ -938,17 +958,17 @@ def new_coverage(report: str, root: str, changed: dict[str, set[int]]) -> NewCov
             continue
         for line in cls.iterfind("lines/line"):
             try:
-                if int(line.get("number", "")) not in changed[path]:
+                n = int(line.get("number", ""))
+                if n not in changed[path]:
                     continue
-                lines += 1
-                covered_lines += int(line.get("hits", "0")) > 0
+                hit = int(line.get("hits", "0")) > 0
                 if line.get("branch") == "true" and (m := re.search(r"\((\d+)/(\d+)\)",
                                                                      line.get("condition-coverage", ""))):
-                    covered_conditions += int(m.group(1))
-                    conditions += int(m.group(2))
+                    yield (path, n), hit, int(m.group(1)), int(m.group(2))
+                else:
+                    yield (path, n), hit, 0, 0
             except ValueError as e:
                 raise GateError(f"the coverage report {report} has a line it cannot read: {e}") from e
-    return NewCoverage(lines, covered_lines, conditions, covered_conditions)
 
 
 def _coverage_sentence(c: NewCoverage, unmeasured: list[str]) -> str:
@@ -4008,7 +4028,7 @@ def _check_condition(name: str, n: int) -> str:
     return f"{n} findings of the `{name}` check; each is listed below."
 
 
-def gate_command(base: str, rules: str | None, coverage: str | None, tests: str | None, out: str | None,
+def gate_command(base: str, rules: str | None, coverage: Sequence[str], tests: Sequence[str], out: str | None,
                  mutation_budget: float, base_run_budget: float) -> int:
     """Write the quality file judge_change gives for the current directory, with gate_checks's checks, to out or
     standard output.
@@ -4061,12 +4081,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--base", required=True, metavar="REV", help="the commit the change is measured from")
     parser.add_argument("--config", metavar="PYPROJECT",
                         help="take the linters' rules from this pyproject.toml instead of the tree's own")
-    parser.add_argument("--coverage", metavar="XML",
-                        help="a Cobertura coverage report of the tree, such as pytest-cov's coverage.xml; without "
-                             "it, coverage is not judged")
-    parser.add_argument("--tests", metavar="XML",
-                        help="a JUnit report of the tree's tests, such as pytest's --junitxml; without it, tests are "
-                             "not judged")
+    parser.add_argument("--coverage", metavar="XML", action="append", default=[],
+                        help="a Cobertura coverage report of the tree, such as pytest-cov's coverage.xml or "
+                             "cargo-llvm-cov's --cobertura output; given more than once, the reports are merged by "
+                             "path and line, a line covered when any report covers it; without it, coverage is not "
+                             "judged")
+    parser.add_argument("--tests", metavar="XML", action="append", default=[],
+                        help="a JUnit report of the tree's tests, such as pytest's --junitxml or cargo-nextest's; "
+                             "given more than once, a failing test in any of them counts; without it, tests are not "
+                             "judged")
     parser.add_argument("--out", metavar="FILE", help="write the quality file here instead of to standard output")
     parser.add_argument("--mutation-budget", type=seconds_arg, default=MUTATION_BUDGET, metavar="SECONDS",
                         help=f"stop mutmut, which mutation-tests the functions the change edits, after this long, "
