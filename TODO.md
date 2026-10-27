@@ -273,8 +273,9 @@ was done.
   running build's `quality.md` each poll and takes it when two reads at least `CI_POLL_SECONDS` apart are equal,
   because Jenkins serves an artifact while `archiveArtifacts` is still copying it. Raised by the cross-review of
   `quality-round-early-read` (F1, 2026-10-27): "Equal reads show only that the copy made no progress between them,
-  not that it finished." A copy stalled that long and then resumed hands the round a cut file: `_quality` refuses
-  one cut inside its GATE line, and a later cut shortens the Builder's findings and `quality_rounds`' fingerprints.
+  not that it finished." Two such reads are taken only once they hold a whole non-blank line (review 58, F1), so a
+  copy stalled that long past its first line and then resumed still hands the round a cut file, which shortens the
+  Builder's findings and `quality_rounds`' fingerprints.
   Before 2026-10-27 the file was read only once the build ended; a copy that failed partway, ending the build, was
   taken cut then too, and still is. Closes with a fixed last line that `orchestrator.py gate` writes and the round
   checks before taking the file (older gates, which the quality build of another project may run, write none), or
@@ -365,7 +366,8 @@ was done.
   for a poll interval stopped the run with "does not start with a GATE line" though its gate ran. Raised by
   cross-review 58 (F1, 2026-10-27), with F3 (the local `ended` in `_quality_report`) and F4 (`_finish_analysis`
   restating the Jenkinsfile's rule).
-  Fixed (2026-10-27): two agreeing reads are taken only once `parse_gate` reads a GATE from them;
+  Fixed (2026-10-27): two agreeing reads are taken only once they hold a whole non-blank line, as the GATE line is,
+  so a whole first line that is no GATE line is still taken and reported at once (review 59, F1);
   `TestQualityGate.test_two_reads_of_a_running_build_without_their_gate_line_are_not_its_quality_file` reads an
   empty file and one cut inside the GATE line twice each before the whole one. The local is `how_it_stood`, and
   `_finish_analysis` points at the Jenkinsfile's Checkout comment.
