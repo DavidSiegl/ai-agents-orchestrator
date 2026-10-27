@@ -8935,8 +8935,13 @@ class Workflow:
         self._finish_analysis(ref)
         return gate
 
-    def _analyse(self, ref: str, deadline: float, base: str, commit) -> tuple[int, str, str | None]:
-        """Have Jenkins judge a commit; returns (build, its result, the quality file it archived).
+    def _analyse(self, ref: str, deadline: float, base: str, commit) -> tuple[int, str | None, str | None]:
+        """Have Jenkins judge a commit; returns (build, its result, the quality file it archived), as soon as the
+        build has archived its quality file or has ended, whichever comes first.
+
+        The result is None when the build was still running the stages after its Gate stage: they cannot change the
+        verdict, which the quality file already holds, so the round does not wait for them. It is never None
+        without a quality file.
 
         commit() makes the commit, whose only parent is base, which is pushed to the branch ref once gitleaks, by base's
         rules, finds no secret in it or in the commits below it that origin lacks; on a secret, nothing is pushed or
@@ -8970,15 +8975,42 @@ class Workflow:
         if "build" not in s.ci:
             self._start_build(ref, deadline, adopt=not fresh)
         number = s.ci["build"]
-        result = self._poll(f"waiting for Jenkins build #{number} of {ref}", deadline,
-                            lambda: self._build_result(ref, number))
-        quality = self._once(f"reading quality.md of Jenkins build #{number}", deadline,
-                             lambda: self._jenkins.quality_file(number))
+        result, quality = self._poll(f"waiting for Jenkins build #{number} of {ref} to archive quality.md or end",
+                                     deadline, self._gate_or_end(ref, number))
         if quality is None and result == "ABORTED":
             self._cut_back(number)
             raise OrchestratorError(f"Jenkins build #{number} of {ref} was aborted before the quality gate ran, so "
                                     f"nothing judged the change; resume to build it again")
         return number, result, quality
+
+    def _gate_or_end(self, ref: str, number: int):
+        """A poll for _poll: (result, quality file) of build number, which ci records as the build of ref, once it
+        has ended, or (None, quality file) once two reads of the file it archived while it still runs agree and hold
+        a whole non-blank line; None until then.
+
+        Each call asks for the result (_build_result, and its errors) and then the file, two requests at most.
+        """
+        # The last read of the file while the build ran; None before one found it.
+        earlier: str | None = None
+
+        def poll() -> tuple[str | None, str | None] | None:
+            nonlocal earlier
+            result = self._build_result(ref, number)
+            quality = self._jenkins.quality_file(number)
+            if result is not None:
+                return result, quality
+            # Jenkins serves an artifact while archiveArtifacts is still copying it into place, so one read of a
+            # running build's file may be cut short. Two reads that agree, at least a poll interval apart, and hold a
+            # whole non-blank line, as the GATE line is, are taken as whole: so an empty copy or one cut inside its
+            # first line is not, while a whole first line that is no GATE line is, for _quality to report. A
+            # heuristic, which a copy stalled that long past its first line and then resumed defeats (TODO.md). A
+            # build that has ended has finished archiving, so one read then is enough.
+            if quality is not None and quality == earlier and any(line.strip() for line in quality.split("\n")[:-1]):
+                return None, quality
+            earlier = quality
+            return None
+
+        return poll
 
     def _start_build(self, ref: str, deadline: float, adopt: bool) -> None:
         """Record in ci the build of ref: one triggered now, or with adopt one an earlier orchestrator triggered."""
@@ -9041,16 +9073,20 @@ class Workflow:
         skip = [*ci.get("rejected", []), *([rejected] if rejected is not None else [])]
         self.state.ci = {"ref": ci["ref"], "sha": ci["sha"], **({"rejected": skip} if skip else {})}
 
-    def _quality_report(self, n: int, q: int, build: int, result: str, quality: str | None,
+    def _quality_report(self, n: int, q: int, build: int, result: str | None, quality: str | None,
                         deadline: float) -> str:
         """The quality file of the round: the build's own, naming the build under its GATE line; or, for a build
-        that ended before its Gate stage, a BUILD_FAILED one with the failing tests or the console's end."""
+        that ended before its Gate stage, a BUILD_FAILED one with the failing tests or the console's end.
+
+        result and quality are as _analyse returns them: result None for a build still running after its Gate stage.
+        """
         s = self.state
         sha = s.ci["sha"]
         where = self._where(n, q)
         if quality is not None:
+            how_it_stood = "was still running when its quality.md was read" if result is None else f"ended {result}"
             return _under_gate_line(self._judged_by_orchestrator(quality, sha, deadline),
-                                    f"Jenkins build #{build} judged snapshot `{sha}` ({where}) and ended {result}.")
+                                    f"Jenkins build #{build} judged snapshot `{sha}` ({where}) and {how_it_stood}.")
         tests = self._once(f"reading the test report of Jenkins build #{build}", deadline,
                            lambda: self._jenkins.failed_tests(build))
         console = "" if tests else self._once(f"reading the console of Jenkins build #{build}", deadline,
@@ -9133,7 +9169,9 @@ class Workflow:
     def _finish_analysis(self, ref: str) -> None:
         s = self.state
         if s.ci.get("ref") == ref:
-            # Jenkins has checked the ref out by now; a leftover is only clutter, which the run's end tries again.
+            # Jenkins has checked the ref out by now, though the build may still run the stages after its Gate stage
+            # (_analyse); the Jenkinsfile's Checkout comment says why that is enough. A leftover is only clutter,
+            # which the run's end tries again.
             delete_ci_ref(self.host, s.cwd, ref)
             s.ci = {}
         self._save()

@@ -200,6 +200,13 @@ was done.
   Twenty runs here under the load of a parallel suite, with SIGINT ignored, all passed. A rerun that hangs gives a
   `not-rerun` warning, not a wrong verdict. Closes when the run that waits is caught, e.g. with each pytest run's
   wall time and exit in the test's failure message, and its cause fixed.
+- **`tests/test_docs.py` gets the parser by patching `argparse.ArgumentParser.parse_args`.** `parse_args` builds
+  its parser inline and returns only the parsed arguments, so `cli_commands` calls it with `parse_args` patched
+  class-wide to hand the parser back, and reads argparse's private `_actions` and `_SubParsersAction`. Raised by
+  cross-review 56 (F8, 2026-10-27): "Breaks if `parse_args` switches to `parse_known_args` or parses twice". It
+  fails loudly then (`parse_args parsed without its parser's parse_args`). Closes with an
+  `orchestrator.build_parser()` that `parse_args` calls and the test reads, an orchestrator.py change and so a
+  version bump.
 - **README and docs left over from the README rewrite (PR #90).** Raised by cross-review 50 (2026-10-26), in what
   PR #90 brought, not in code:
   - The Jenkins job path still uses the old folder name, as
@@ -214,6 +221,11 @@ was done.
     `--machine`/`--cwd`; the `gate` example no longer names the tools it needs (ruff, mypy, pymarkdown, shellcheck,
     actionlint).
   Closes with those lines corrected, or the endpoint table replaced by a pointer to the docstring.
+- **Gaps in reading a running build's quality.md (PR #105).** Raised by cross-review 58 (2026-10-27):
+  - Each poll of a running build also asks for `artifact/quality.md`, a 404 until Gate has run; asking for
+    `artifacts[relativePath]` in the result's `api/json` tree would halve the requests (F2).
+  - No test covers a transient `CIError` between two reads, or a build that ends with a file other than the one read
+    while it ran (F5).
 - **`vague-names` does not split CamelCase.** `vague_names` matches a whole name or its last `_`-separated word,
   so `user_data` is found but a class `InfoManager` or `UserData` is not. Closes, if the run metrics show such names
   recur, with the last CamelCase word matched too.
@@ -258,13 +270,17 @@ was done.
   build past `QUALITY_TIMEOUT` beside the mutation budget, so the user kept 30 s (2026-10-24). `not-rerun` is a finding
   to weigh, never a wrong verdict. Closes with one time budget the reruns and mutmut share, or lighter tests for the
   gate's own checks.
-- **A quality round waits for the whole build, not for its quality file.** `Workflow._analyse` polls the build's
-  result until the build ends and only then reads `quality.md`, which the Gate stage archived before any later
-  stage ran. So every stage after Gate counts against `QUALITY_TIMEOUT`; the Package stage was taken out of quality
-  builds for that (2026-10-24), and a stage added after Gate slows the rounds again. Raised by the cross-review of
-  `skip-package-in-quality-builds` (2026-10-24): "`_analyse` waits for the whole build instead of stopping once
-  `quality.md` is archived". Closes with the round reading `quality.md` once the Gate stage has archived it, or
-  with a rule in the Jenkinsfile that nothing after Gate runs in a quality build.
+- **A running build's quality.md is taken as whole once two reads agree.** `Workflow._gate_or_end` reads a still
+  running build's `quality.md` each poll and takes it when two reads at least `CI_POLL_SECONDS` apart are equal,
+  because Jenkins serves an artifact while `archiveArtifacts` is still copying it. Raised by the cross-review of
+  `quality-round-early-read` (F1, 2026-10-27): "Equal reads show only that the copy made no progress between them,
+  not that it finished." Two such reads are taken only once they hold a whole non-blank line (review 58, F1), so a
+  copy stalled that long past its first line and then resumed still hands the round a cut file, which shortens the
+  Builder's findings and `quality_rounds`' fingerprints.
+  Before 2026-10-27 the file was read only once the build ended; a copy that failed partway, ending the build, was
+  taken cut then too, and still is. Closes with a fixed last line that `orchestrator.py gate` writes and the round
+  checks before taking the file (older gates, which the quality build of another project may run, write none), or
+  with asking Jenkins whether the Gate stage has completed.
 - **The mutation budget leaves most of a large change's mutants untried.** `MUTATION_BUDGET` is 600 s. Measured on
   Jenkins on 2026-10-24: on PR #50 (surviving-mutants' change) mutmut tried 756 of 3079 mutants and the Gate stage took
   683 s, the build about 850 s; on PR #51, 677 of 801 in a 638 s Gate stage. That fits `QUALITY_TIMEOUT` (1200 s) with
@@ -366,6 +382,33 @@ was done.
   module-level mutation (`GOLDEN["k"] = "b"`) or rebound through `global` in a function; and the module reached
   through a relative import, an import inside the test, or an alias imported under a module-level `if` or `try` (only
   a top-level import statement's alias counts as the module).
+
+- **Two empty or cut reads of a running build's quality.md were taken as the file.** `_gate_or_end`'s poll took
+  two equal reads as whole, so a `quality.md` that `archiveArtifacts` left at 0 bytes, or cut inside its GATE line,
+  for a poll interval stopped the run with "does not start with a GATE line" though its gate ran. Raised by
+  cross-review 58 (F1, 2026-10-27), with F3 (the local `ended` in `_quality_report`) and F4 (`_finish_analysis`
+  restating the Jenkinsfile's rule).
+  Fixed (2026-10-27): two agreeing reads are taken only once they hold a whole non-blank line, as the GATE line is,
+  so a whole first line that is no GATE line is still taken and reported at once (review 59, F1);
+  `TestQualityGate.test_two_reads_of_a_running_build_without_their_gate_line_are_not_its_quality_file` reads an
+  empty file and one cut inside the GATE line twice each before the whole one. The local is `how_it_stood`, and
+  `_finish_analysis` points at the Jenkinsfile's Checkout comment.
+
+- **A quality round waits for the whole build, not for its quality file.** `Workflow._analyse` polls the build's
+  result until the build ends and only then reads `quality.md`, which the Gate stage archived before any later
+  stage ran. So every stage after Gate counts against `QUALITY_TIMEOUT`; the Package stage was taken out of quality
+  builds for that (2026-10-24), and a stage added after Gate slows the rounds again. Raised by the cross-review of
+  `skip-package-in-quality-builds` (2026-10-24): "`_analyse` waits for the whole build instead of stopping once
+  `quality.md` is archived". Closes with the round reading `quality.md` once the Gate stage has archived it, or
+  with a rule in the Jenkinsfile that nothing after Gate runs in a quality build.
+  Fixed (2026-10-27): `Workflow._analyse` polls `_gate_or_end`, which asks each interval for the build's result and
+  then its `quality.md`, and stops at whichever settles the round first. A running build's file is taken once two
+  reads agree, since Jenkins serves an artifact while it is still being copied (a heuristic; see the open issue "A
+  running build's quality.md is taken as whole once two reads agree"); `_quality_report` then says the
+  build "was still running" instead of naming a result. A build that ends without a quality file is handled as
+  before. `_finish_analysis` deletes the round's branch while the build may still run, safe for this Jenkinsfile,
+  which fetches it only in Checkout; a pipeline that fetches `GIT_REF` after Gate would fail. Package stays out of
+  quality builds as wasted work. Not yet observed against the real Jenkins.
 
 - **A base `.gitleaks.toml` that extends another file reads that file from outside the base.** `scan_unpublished`
   writes the base's `.gitleaks.toml` into the run directory and passes it with `--config`; an `[extend] path = ...`

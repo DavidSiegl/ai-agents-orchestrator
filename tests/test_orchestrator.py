@@ -33,6 +33,7 @@ from dataclasses import asdict, replace
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 from gitrepo import RepositoryTest
 
 import orchestrator
@@ -3527,13 +3528,14 @@ class FakeResponse:
 
 
 def outcome(gate="OK", *, archived=True, result=None, findings=(), tests=(), test_report=True, console="", polls=2,
-            description=None):
+            after_gate=0, description=None):
     """What one Jenkins build does.
 
     gate: the GATE of the quality.md its Gate stage archives; archived=False for a build that ended before that
     stage. result defaults to what the Jenkinsfile ends with. findings: the numbered lines of quality.md.
     tests: (className, name, errorDetails) of each failing test in Jenkins's test report. polls: how many polls
-    still see it building. description: the build's description, None when it has none.
+    still see it building; after_gate: how many of those, besides the last, see quality.md archived, 0 for a file
+    that appears only on the last. description: the build's description, None when it has none.
     """
     if result is None:
         result = ("SUCCESS" if gate == "OK" else "UNSTABLE") if archived else "FAILURE"
@@ -3543,7 +3545,7 @@ def outcome(gate="OK", *, archived=True, result=None, findings=(), tests=(), tes
         quality = (f"GATE: {gate}\n\n`orchestrator.py gate` judged the working tree.\n\n"
                    f"## Issues on changed lines\n\n{numbered}\n")
     return dict(result=result, quality=quality, tests=list(tests), test_report=test_report, console=console,
-                polls=polls, description=description)
+                polls=polls, after_gate=after_gate, description=description)
 
 
 RED = dict(gate="ERROR", findings=["`limiter.py:3` error ruff F401: `os` imported but unused"])
@@ -3643,7 +3645,9 @@ class FakeCI:
                 return "build", {"building": True, "result": None}
             return "build", {"building": False, "result": build["result"]}
         if what == "artifact/quality.md":
-            return "quality", 404 if build["quality"] is None else FakeResponse(build["quality"])
+            if build["quality"] is None or build["left"] > build["after_gate"]:
+                return "quality", 404
+            return "quality", FakeResponse(build["quality"])
         if what == "testReport/api/json":
             if not build["test_report"]:
                 return "tests", 404
@@ -4190,7 +4194,7 @@ class TestQualityGate(unittest.TestCase):
 
         self.assertEqual(wf.run(), APPROVE)
 
-        self.assertEqual(collapsed(fake.names), ["parameters", "trigger", "queue", "build", "quality"])
+        self.assertEqual(collapsed(fake.names), ["parameters", "trigger", "queue", *["build", "quality"] * 3])
         triggers = [form for method, url, form in fake.requests if url.endswith("/buildWithParameters")]
         self.assertEqual(triggers, [{"GIT_REF": REF_1_1}])
         self.assertIn(("push", "--quiet", "--force", "origin", f"snap1:refs/heads/{REF_1_1}"), host.git_calls)
@@ -4405,6 +4409,87 @@ class TestQualityGate(unittest.TestCase):
         gaps = [b - a for a, b in itertools.pairwise(beats)]
         self.assertLessEqual(max(gaps), HEARTBEAT_SECONDS + orchestrator.CI_POLL_SECONDS)
 
+    def test_a_build_running_on_after_its_gate_ends_the_round_with_its_quality_file(self):
+        # quality.md archived on the second poll, and the build running long past the round's deadline after it.
+        polls = 2 * orchestrator.QUALITY_TIMEOUT // orchestrator.CI_POLL_SECONDS
+        fake = FakeCI()
+        fake.outcomes = [outcome(**RED, polls=polls, after_gate=polls - 2), outcome()]
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "build": [build_turn(1), fix_turn(1, 1)], "review": [review_turn(1, APPROVE)]},
+            fake=fake)
+
+        self.assertEqual(wf.run(), APPROVE)
+
+        quality = host.files[wf.state.quality_path(1, 1)]
+        self.assertTrue(quality.startswith(
+            "GATE: ERROR\n\nJenkins build #41 judged snapshot `snap1` (round 1, quality round 1 of 3) and was still "
+            "running when its quality.md was read.\n"), quality)
+        self.assertIn("1. `limiter.py:3` error ruff F401: `os` imported but unused\n", quality)
+        # The result and the file once per poll, the file taken on the second read that agrees, then round 2.
+        self.assertEqual(collapsed(fake.names)[:10], [
+            "parameters", "trigger", "queue", *["build", "quality"] * 3, "trigger"])
+        self.assertEqual(fake.builds[41]["left"], polls - 3)
+
+    @staticmethod
+    def replace_quality_reads(fake, replies):
+        """Make fake answer its k-th read of an archived quality.md, from 1, with replies[k] where replies has one, and
+        with the file otherwise; returns the list each read's real text is appended to."""
+        reads, orig = [], fake.jenkins
+
+        def jenkins(method, path, query, form):
+            name, answer = orig(method, path, query, form)
+            if name == "quality" and not isinstance(answer, int):
+                reads.append(answer.body)
+                if len(reads) in replies:
+                    return name, FakeResponse(replies[len(reads)])
+            return name, answer
+        fake.jenkins = jenkins
+        return reads
+
+    def test_a_quality_file_read_while_its_build_runs_is_taken_once_two_reads_agree(self):
+        fake = FakeCI()
+        fake.outcomes = [outcome(polls=5, after_gate=4)]
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, fake=fake)
+        reads = self.replace_quality_reads(fake, {1: fake.outcomes[0]["quality"][:12]})
+
+        self.assertEqual(wf.run(), APPROVE)
+
+        self.assertEqual(host.files[wf.state.quality_path(1, 1)], (
+            "GATE: OK\n\nJenkins build #41 judged snapshot `snap1` (round 1, quality round 1 of 3) and was still "
+            "running when its quality.md was read.\n\n`orchestrator.py gate` judged the working tree.\n\n"
+            "## Issues on changed lines\n\nNone.\n"))
+        self.assertEqual(len(reads), 3)
+        self.assertEqual(fake.builds[41]["left"], 2)
+
+    def test_two_reads_of_a_running_build_without_their_gate_line_are_not_its_quality_file(self):
+        # archiveArtifacts can leave the file empty, or cut inside its GATE line, for longer than a poll interval.
+        for cut in ("", "GATE: O"):
+            with self.subTest(cut=cut):
+                fake = FakeCI()
+                fake.outcomes = [outcome(polls=6, after_gate=5)]
+                wf, herdr, host, fake, _ = gated({
+                    "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, fake=fake)
+                reads = self.replace_quality_reads(fake, {1: cut, 2: cut})
+
+                self.assertEqual(wf.run(), APPROVE)
+                self.assertTrue(host.files[wf.state.quality_path(1, 1)].startswith(
+                    "GATE: OK\n\nJenkins build #41 judged snapshot `snap1` (round 1, quality round 1 of 3) and was "
+                    "still running when its quality.md was read."))
+                self.assertEqual(len(reads), 4)
+
+    def test_two_reads_of_a_running_build_with_a_whole_line_but_no_gate_stop_the_round_at_once(self):
+        fake = FakeCI()
+        fake.outcomes = [outcome(polls=50, after_gate=49)]
+        wf, herdr, host, fake, _ = gated({
+            "spec": [spec_turn], "build": [build_turn(1)], "review": [review_turn(1, APPROVE)]}, fake=fake)
+        reads = self.replace_quality_reads(fake, {k: "Not a gate line\n" for k in range(1, 50)})
+
+        with self.assertRaisesRegex(OrchestratorError, "does not start with a GATE line"):
+            wf.run()
+        # Taken at the second read, not left to the build's end or the round's deadline.
+        self.assertEqual(len(reads), 2)
+
     def test_build_failed_before_the_gate_goes_back_to_the_builder(self):
         fake = FakeCI()
         console = "\n".join(f"line {i}" for i in range(100)) + f"\nJENKINS_TOKEN={JENKINS_TOKEN}\nSyntaxError: bad"
@@ -4491,8 +4576,8 @@ class TestQualityGate(unittest.TestCase):
         fake.fail[("GET", f"{JOB_PATH}41/artifact/quality.md")] = 403
         wf, herdr, host, fake, _ = gated({"spec": [spec_turn], "build": [build_turn(1)]}, fake=fake)
 
-        with self.assertRaisesRegex(OrchestratorError, "quality gate: reading quality.md of Jenkins build #41: "
-                                    r"GET .*/41/artifact/quality.md: HTTP 403"):
+        with self.assertRaisesRegex(OrchestratorError, "quality gate: waiting for Jenkins build #41 of "
+                                    rf"{REF_1_1} to archive quality.md or end: GET .*/41/artifact/quality.md: HTTP 403"):
             wf.run()
         self.assertLess(wf.clock.now, 200)
         self.assertEqual(json.loads(host.files[f"{wf.state.dir}/state.json"])["ci"]["build"], 41)
@@ -4619,8 +4704,21 @@ class TestQualityResume(unittest.TestCase):
         self.assertEqual(wf.run(), APPROVE)
         self.assertFalse(host.snapshots)
         self.assertFalse([c for c in host.git_calls if c[:3] == ("push", "--quiet", "--force")])
-        self.assertEqual(collapsed(fake.names), ["build", "quality"])
+        self.assertEqual(collapsed(fake.names), ["build", "quality"] * 3)
         self.assertIn("`snap9`", host.files[state.quality_path(1, 1)])
+
+    def test_resume_with_the_quality_file_archived_and_the_build_running_takes_the_file(self):
+        fake = FakeCI()
+        polls = 2 * orchestrator.QUALITY_TIMEOUT // orchestrator.CI_POLL_SECONDS
+        n = fake.add_build(REF_1_1, outcome(polls=polls, after_gate=polls))
+        state = quality_state(ci={"ref": REF_1_1, "sha": "snap9", "queue_url": f"{JENKINS}/queue/item/1/", "build": n})
+        wf, herdr, host, _ = resume_gated(state, {"review": [review_turn(1, APPROVE)]}, fake)
+
+        self.assertEqual(wf.run(), APPROVE)
+
+        self.assertEqual(fake.names, ["build", "quality", "build", "quality"])
+        self.assertIn(f"Jenkins build #{n} judged snapshot `snap9` (round 1, quality round 1 of 3) and was still "
+                      f"running when its quality.md was read.\n", host.files[state.quality_path(1, 1)])
 
     def test_resume_of_a_state_saved_with_sonarqube(self):
         fake = FakeCI()
@@ -4893,7 +4991,7 @@ class TestQualityGateOnResume(unittest.TestCase):
         wf, herdr, host, fake, _ = gated({"spec": [spec_turn], "build": [build_turn(1)],
                                           "review": [review_turn(1, APPROVE)]}, fake=fake, state=state)
         self.assertEqual(wf.run(), APPROVE)
-        self.assertEqual(collapsed(fake.names), ["parameters", "trigger", "queue", "build", "quality"])
+        self.assertEqual(collapsed(fake.names), ["parameters", "trigger", "queue", *["build", "quality"] * 3])
 
         # And its preflight, before the interview.
         fake = FakeCI()
@@ -11876,6 +11974,7 @@ class TestProofs(unittest.TestCase):
         self.assertEqual(wf.run(), APPROVE)
         self.assertEqual([p["demonstrated"] for p in wf.state.proofs if p["round"] == 1], [True])
 
+    @pytest.mark.real_sleep
     def test_a_proof_that_runs_too_long_is_stopped_with_what_it_started(self):
         with patch.object(orchestrator, "PROOF_TIMEOUT", 1):
             wf, host, _ = self.run_proofs((CHANGES_REQUESTED, {}), (APPROVE, {}))
@@ -13207,6 +13306,7 @@ class TestSelfCommand(unittest.TestCase):
             self.assertEqual(orchestrator.self_command(), ["/opt/octoflow-linux-x86_64"])
 
 
+@pytest.mark.real_sleep
 class TestRunProcess(unittest.TestCase):
     """On real child processes."""
 
@@ -17202,6 +17302,7 @@ class ServeHost(FakeHost):
         return [orchestrator.RunFile(p, m) for m, p in sorted(files)]
 
 
+@pytest.mark.loopback
 class ServerTest(unittest.TestCase):
     """A RunServer on a free port, serving the projects connect gives, for as long as the test runs."""
 
@@ -17673,6 +17774,8 @@ class TestRunWatch(unittest.TestCase):
         self.assertEqual(self.watch.poll(), [])
 
 
+@pytest.mark.loopback
+@pytest.mark.real_sleep
 class TestServeCommand(unittest.TestCase):
     """orchestrator.py serve as a process of its own."""
 
