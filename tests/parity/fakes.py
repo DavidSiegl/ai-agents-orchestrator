@@ -1,7 +1,7 @@
 """The programs a parity world puts on the engine's PATH in place of herdr, gh and ssh, and its shared ledger.
 
-Run as `python fakes.py WORLD PROGRAM ARGS...`, where WORLD is the world's directory and PROGRAM is herdr, gh, ssh
-or gitleaks; the world's bin directory holds a shim of each name that runs this. Each plays its part of the world
+Run as `python fakes.py WORLD PROGRAM ARGS...`, where WORLD is the world's directory and PROGRAM is herdr, gh or
+ssh; the world's bin directory holds a shim of each name that runs this. Each plays its part of the world
 from the scenario's script, `WORLD/script.json`, which `World` in world.py writes:
 
 - herdr keeps workspaces, panes and agents, and plays each role's agent from `script["agents"][role]`, one action
@@ -11,8 +11,8 @@ from the scenario's script, `WORLD/script.json`, which `World` in world.py write
   opened, which `World.set_pr` changes between invocations; a head commit is read from the origin repository.
 - ssh runs its command locally with sh, so that `--machine` reaches this machine's files through the engine's
   remote code.
-- gitleaks, put on PATH only where no real gitleaks is installed, answers `git --help` and writes an empty report,
-  as the real one does for a scan that finds nothing.
+
+gitleaks is the real one: World skips its scenario where none is installed.
 
 Every herdr and gh command, and each state.json a command finds changed, goes into the ledger, `WORLD/fakes/`:
 the fakes' own state (`state.json`) and the event log (`events.jsonl`), each read and written under one lock
@@ -28,7 +28,7 @@ import subprocess
 import sys
 import time
 
-# The ids herdr's answers carry, in herdr's JSON shape; the engine reads only these keys.
+# The URL of pull request {} as gh prints it once it has opened it.
 PR_URL = "https://github.com/parity/project/pull/{}"
 # How often a fake waiting on a hold looks for its release, in seconds.
 HOLD_POLL_SECONDS = 0.05
@@ -43,10 +43,10 @@ class Ledger:
     """A world's shared record, `WORLD/fakes/`: the fakes' state and the event log, each change under one lock.
 
     The state is one JSON object, which `change` hands its caller to read and modify. Its keys, each created by the
-    first writer that needs it: workspaces, panes and agents (herdr's), prs (gh's), consumed (per role, how many
-    of its scripted actions have been taken), held (per hold name, the action waiting for it), reached and released
-    (hold names), last_states (per state.json path, its text as last logged, heartbeat left out) and next (per kind
-    of id, the next number).
+    first writer that needs it: workspaces, panes and agents (herdr's), prs (gh's), triggered (the GIT_REF of each
+    build the fake Jenkins was asked for, in order), consumed (per role, how many of its scripted actions have been
+    taken), held (per hold name, the action waiting for it), reached and released (hold names), last_states (per
+    state.json path, its text as last logged, heartbeat left out) and next (per kind of id, the next number).
     """
 
     def __init__(self, world: str):
@@ -145,6 +145,24 @@ def ancestors() -> set[int]:
             except ValueError:
                 break
     return pids
+
+
+def descendants(pid: int) -> set[int]:
+    """pid and the pids of every process below it: the engine a world started, and whatever it runs as, when its
+    command is a wrapper that does not exec the engine."""
+    out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="],  # noqa: S607 - ps on PATH, as sh finds it
+                         capture_output=True, text=True, check=False)
+    children: dict[int, list[int]] = {}
+    for line in out.stdout.splitlines():
+        child, parent = (int(n) for n in line.split())
+        children.setdefault(parent, []).append(child)
+    found, todo = set(), [pid]
+    while todo:
+        p = todo.pop()
+        if p not in found:
+            found.add(p)
+            todo += children.get(p, [])
+    return found
 
 
 def invocation() -> str:
@@ -367,15 +385,15 @@ def gh(ledger: Ledger, args: list[str]) -> int:
 
     `script["gh"]["create_hold"]`, when set, holds `pr create` until World.release names it: the fake waits, so
     that the engine can be stopped in the middle of publishing."""
-    if args[:2] == ["auth", "status"]:
-        print("github.com\n  Logged in to github.com account parity")
-        return 0
     stdin = sys.stdin.read() if "--body-file" in args else None
     with ledger.change() as state:
         ledger.log(state, {"gh": args, **({"stdin": stdin} if stdin is not None else {})}, invocation(), ancestors())
         hold = ledger.script().get("gh", {}).get("create_hold") if args[:2] == ["pr", "create"] else None
         if hold:
             state.setdefault("reached", []).append(hold)
+    if args[:2] == ["auth", "status"]:
+        print("github.com\n  Logged in to github.com account parity")
+        return 0
     while hold:
         with ledger.change() as state:
             if hold in state.get("released", []):
@@ -415,26 +433,17 @@ def _origin_commit(origin: str, branch: str) -> str:
     return out.stdout.strip() or "0" * 40
 
 
-# -- ssh and gitleaks ---------------------------------------------------------
+# -- ssh ------------------------------------------------------------------------
 
 
 def ssh(args: list[str]) -> int:
-    """Run ssh's command, the argument after its options and target, with sh on this machine; its exit status."""
+    """Run ssh's command, the arguments after its options and target joined by spaces as ssh joins them, with sh
+    on this machine; its exit status."""
     i = 0
     while args[i].startswith("-"):
         i += 2 if args[i] in ("-o", "-p", "-i", "-l", "-F") else 1
     # The command the engine sent, run as sshd's login shell would run it.
-    return subprocess.run(["sh", "-c", args[i + 1]], check=False).returncode  # noqa: S603, S607
-
-
-def gitleaks(args: list[str]) -> int:
-    """`gitleaks git --help`, and a scan that finds nothing, writing the empty report a real one writes."""
-    if "--help" in args:
-        print("Usage: gitleaks git [flags] [repo]")
-        return 0
-    with open(_flag(args, "--report-path"), "w") as f:
-        f.write("[]\n")
-    return 0
+    return subprocess.run(["sh", "-c", " ".join(args[i + 1:])], check=False).returncode  # noqa: S603, S607
 
 
 def main(argv: list[str]) -> int:
@@ -446,8 +455,6 @@ def main(argv: list[str]) -> int:
         return gh(ledger, args)
     if program == "ssh":
         return ssh(args)
-    if program == "gitleaks":
-        return gitleaks(args)
     print(f"fakes.py: no fake {program}", file=sys.stderr)
     return 2
 

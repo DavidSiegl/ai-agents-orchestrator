@@ -47,6 +47,12 @@
      "integration",
      "status"
     ]
+   },
+   {
+    "gh": [
+     "auth",
+     "status"
+    ]
    }
   ],
   "2": [
@@ -58,6 +64,12 @@
    {
     "herdr": [
      "integration",
+     "status"
+    ]
+   },
+   {
+    "gh": [
+     "auth",
      "status"
     ]
    }
@@ -83,6 +95,12 @@
    {
     "herdr": [
      "integration",
+     "status"
+    ]
+   },
+   {
+    "gh": [
+     "auth",
      "status"
     ]
    }

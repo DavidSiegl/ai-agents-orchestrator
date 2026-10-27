@@ -22,6 +22,7 @@ import subprocess
 import sys
 import threading
 import time
+import unittest
 import urllib.parse
 from dataclasses import dataclass, field
 from typing import Self
@@ -117,13 +118,20 @@ class World:
     """
 
     def __init__(self, root: str):
-        """root: an empty directory the world may fill, removed by its owner afterwards."""
+        """root: an empty directory the world may fill, removed by its owner afterwards. Raises unittest.SkipTest,
+        which skips the scenario, where gitleaks is not on PATH."""
         self.root = os.path.realpath(root)
         self.project = os.path.join(self.root, "project")
         self.origin = os.path.join(self.root, "origin.git")
         self.config = os.path.join(self.root, "config", "ai-agents-orchestrator")
+        if shutil.which("gitleaks") is None:
+            # The ticket's rule: the real gitleaks where it is installed, else the scenario is skipped. A stub that
+            # finds nothing would record what no engine run with gitleaks does.
+            raise unittest.SkipTest("gitleaks is not on PATH; the parity scenarios run the real one")
         self.normalizer = Normalizer()
         self.normalizer.literal(self.root, "<world>")
+        # This checkout, where the example workflows a scenario runs are.
+        self.normalizer.literal(ROOT, "<checkout>")
         self.invocations: list[Invocation] = []
         self.notes: dict[str, object] = {}
         self._script = {"project": self.project, "origin": self.origin, "agents": {}, "machines": [], "gh": {},
@@ -174,7 +182,10 @@ class World:
         self._write_script()
 
     def pypi_project(self, name: str, answer: dict) -> None:
-        """Make PyPI answer GET /pypi/<name>/json with answer, its JSON API's document; any other name is a 404."""
+        """Make PyPI answer GET /pypi/<name>/json with answer, its JSON API's document; any other name is a 404.
+        Skips the scenario where openssl could not make the PyPI server's certificate, so there is no server."""
+        if self._servers.pypi is None:
+            raise unittest.SkipTest("openssl could not make a certificate for the fake PyPI")
         self._script["pypi"][name] = answer
         self._write_script()
 
@@ -275,7 +286,7 @@ class World:
             process = subprocess.Popen(  # noqa: S603 - the engine under test, with the scenario's arguments
                 [*engine_command(), *args], cwd=cwd or self.project, env=self._env(n), stdin=subprocess.DEVNULL,
                 stdout=stdout, stderr=stderr, start_new_session=True)
-        self.normalizer.pid(process.pid, n)
+        self.normalizer.engine(process.pid)
         inv = Invocation(n, list(args), process, out, output_recorded)
         self.invocations.append(inv)
         return inv
@@ -322,6 +333,10 @@ class World:
         if self._servers.pypi is not None:
             env["https_proxy"] = self._url(self._servers.pypi)
             env["SSL_CERT_FILE"] = os.path.join(self.root, "pypi-cert.pem")
+        else:
+            # The discard port, where nothing listens: without the PyPI server, a lookup fails here rather than
+            # reach the real pypi.org.
+            env["https_proxy"] = "http://127.0.0.1:9"
         return env
 
     # -- Making the world -------------------------------------------------------
@@ -333,10 +348,8 @@ class World:
         os.replace(path + ".tmp", path)
 
     def _make_bin(self) -> None:
-        """Shims of the fakes in bin/, gitleaks too where no real one is on PATH, and the harnesses' CLIs."""
+        """Shims of the fakes in bin/, and the harnesses' CLIs."""
         programs = ["herdr", "gh", "ssh"]
-        if shutil.which("gitleaks") is None:
-            programs.append("gitleaks")
         shims = {program: (f"exec {shlex.quote(sys.executable)} -I -S "
                            f"{shlex.quote(os.path.join(os.path.dirname(__file__), 'fakes.py'))} "
                            f"{shlex.quote(self.root)} {program} \"$@\"") for program in programs}
@@ -406,7 +419,7 @@ class World:
         """Log a request one of the world's servers received, by the latest invocation, the one whose requests
         these are in every scenario."""
         n = len(self.invocations)
-        pids = {self.invocations[-1].process.pid} if self.invocations else set()
+        pids = fakes.descendants(self.invocations[-1].process.pid) if self.invocations else set()
         with self.ledger.change() as state:
             self.ledger.log(state, event, str(n), pids)
 
@@ -573,8 +586,9 @@ def _collapsed(events: list) -> list:
 class _JenkinsHandler(http.server.BaseHTTPRequestHandler):
     """Jenkins's REST API for the job JOB, as the engine's CI class uses it, from the world's scripted builds.
 
-    A build number is its position among the triggered builds, from 1, after the retained ones; queue item k is
-    build k's. Each request is logged, with its form, before it is answered."""
+    The retained builds keep their numbers; the triggered ones follow the highest of them, in the order they were
+    triggered, from 1 where there are none. Queue item k is build k's. Each request is logged, with its form,
+    before it is answered."""
 
     server: http.server.ThreadingHTTPServer
 
@@ -604,8 +618,8 @@ class _JenkinsHandler(http.server.BaseHTTPRequestHandler):
         with world.ledger.change() as state:
             builds = self._builds(world, state)
             if rest == "buildWithParameters" and method == "POST":
-                n = len(builds) + 1
                 state.setdefault("triggered", []).append(form["GIT_REF"][0])
+                n = max(self._builds(world, state))
                 host, port = self.server.server_address[:2]
                 return self._send(201, b"", {"Location": f"http://{host}:{port}/queue/item/{n}/"})
             if rest == "api/json":

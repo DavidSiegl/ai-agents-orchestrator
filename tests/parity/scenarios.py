@@ -379,6 +379,31 @@ def kill_in_publish(w: World) -> None:
     killed_and_resumed(w, "publish", "run", "--", "Add a subtract function")
 
 
+def product_team_killed(w: World, hold: str) -> None:
+    """examples/workflows/product-team.toml killed in step hold, design or tests, and resumed."""
+    w.agent("spec", spec_written())
+    w.agent("design", writes("design.md", "# Design\n\nAdd subtract beside add in src/calc.py.\n",
+                             hold="design" if hold == "design" else None))
+    w.agent("tests", writes("tests.md", "Acceptance test: tests/test_calc.py::test_subtract.\n",
+                            edit={"tests/test_calc.py": TESTS_LOCKED}, hold="tests" if hold == "tests" else None))
+    w.agent("build", built(1, edit={"src/calc.py": CALC_WITH_SUBTRACT}))
+    w.agent("review", reviewed(1))
+    killed_and_resumed(w, hold, "run", "--workflow-file", f"{EXAMPLES}/product-team.toml", "--",
+                       "Add a subtract function")
+
+
+@scenario
+def kill_in_design(w: World) -> None:
+    """The product team's run killed while the Architect works, before the run has a branch."""
+    product_team_killed(w, "design")
+
+
+@scenario
+def kill_in_tests(w: World) -> None:
+    """The product team's run killed while the QA Engineer writes the locked tests, its first editing step."""
+    product_team_killed(w, "tests")
+
+
 @scenario
 def resume_after_agent_exit(w: World) -> None:
     """The Builder exits without its report and the run fails; resume restarts it in its saved session, which it
@@ -588,15 +613,18 @@ def serve_request(url: str, token: str | None, path: str, method: str = "GET", *
 
 def last_by_run(events: list[tuple[str, dict]]) -> dict:
     """Of events, the last record and the last files of each run, and the last problem: what a client that folds
-    the stream, as the desktop app does, holds after them. Files are sorted by name, as serve_request sorts them."""
+    the stream, as the desktop app does, holds after them. Files are sorted by name, as serve_request sorts them.
+    An event of any other kind is kept whole, in order, under "other"."""
     out: dict = {"records": {}, "files": {}}
     for kind, payload in events:
         if kind == "record":
             out["records"][payload["run"]] = payload["record"]
         elif kind == "files":
             out["files"][payload["run"]] = sorted(payload["files"], key=lambda f: f["name"])
-        else:
+        elif kind == "problem":
             out["problem"] = payload["error"]
+        else:
+            out.setdefault("other", []).append([kind, payload])
     return out
 
 

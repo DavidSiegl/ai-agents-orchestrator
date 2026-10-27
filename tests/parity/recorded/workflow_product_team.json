@@ -4,7 +4,7 @@
    "args": [
     "run",
     "--workflow-file",
-    "/home/agent/GitHub/octoflow-ai-wt-rust-parity-harness/examples/workflows/product-team.toml",
+    "<checkout>/examples/workflows/product-team.toml",
     "--",
     "Add a subtract function"
    ],

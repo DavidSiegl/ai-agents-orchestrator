@@ -58,6 +58,8 @@ def test_scenario(name, tmp_path):
         got = world.record()
     path = os.path.join(RECORDED, f"{name}.json")
     if os.environ.get("PARITY_RECORD") == "1":
+        if os.environ.get("PARITY_ENGINE"):
+            pytest.fail("PARITY_RECORD records the oracle, the Python engine; unset PARITY_ENGINE to record")
         os.makedirs(RECORDED, exist_ok=True)
         with open(path, "w") as f:
             json.dump(got, f, indent=1, ensure_ascii=False)
