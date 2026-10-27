@@ -578,17 +578,22 @@ becomes `/job/` in its URL, so `AI-Agents-Orchestrator/py-ai-agents-orchestrator
   repository, and a `--no-pr` run also needs a clean tree and an `origin`.
 - **Per quality round**: (1) POST `<job>/buildWithParameters` with `GIT_REF`, the queue item in `Location`; (2)
   poll `<JENKINS_URL>/queue/item/<id>/api/json` for `executable.number`; (3) poll
-  `<job>/<number>/api/json?tree=building,result`; (4) `<job>/<number>/artifact/quality.md`. Only for a build
-  without one: (5) `<job>/<number>/testReport/api/json`, and (6) the last 60 lines of
-  `<job>/<number>/consoleText` when no test failed.
+  `<job>/<number>/api/json?tree=building,result` and then `<job>/<number>/artifact/quality.md`, two requests each
+  interval, until the build has archived `quality.md` or has ended. Only for a build without one: (4)
+  `<job>/<number>/testReport/api/json`, and (5) the last 60 lines of `<job>/<number>/consoleText` when no test
+  failed.
 
-**Once a build ends**, live or resumed: with `quality.md`, whatever the result, that file is the round's, with
-[the orchestrator's checks](#the-orchestrators-checks) added and a line under its `GATE:` line naming the build,
-the snapshot and the round. Without it and ABORTED, or cancelled in
-the queue, nothing judged the change: the run fails with `ci` cut back to `ref` and `sha`, and the Builder gets no
-fix turn. Without it otherwise: `GATE: BUILD_FAILED`, with the failing tests or the console's end, and a fix turn.
-A build cut back that way is recorded in `ci.rejected`, so a resume builds the snapshot again instead of adopting
-that build.
+**Once the Gate stage has archived `quality.md`**, live or resumed, the round takes it without waiting for the stages
+after Gate, which cannot change its verdict: on a build that has ended, at the first read; on one still running, once
+two reads at least a poll interval apart agree, since Jenkins serves an artifact while it is still being copied into
+place; a copy that stalls that long and then resumes would defeat this. Whatever the build's result, that file is the
+round's, with [the orchestrator's checks](#the-orchestrators-checks) added and a line under its `GATE:` line naming the
+build, the snapshot and the round, and saying that the build ended with its result or was still running. The round then
+deletes its branch, which the build checked out in its first stage; a pipeline that fetches `GIT_REF` again after Gate
+finds it gone. **Without `quality.md`**, from a build that ended ABORTED or one cancelled in the queue, nothing judged
+the change, so the run fails with `ci` cut back to `ref` and `sha`, and the Builder gets no fix turn. Without it
+otherwise: `GATE: BUILD_FAILED`, with the failing tests or the console's end, and a fix turn. A build cut back that way
+is recorded in `ci.rejected`, so a resume builds the snapshot again instead of adopting that build.
 
 **When Jenkins fails**, rather than the change: a request that got no answer, or a 5xx, is retried every
 `CI_POLL_SECONDS = 10` until `QUALITY_TIMEOUT = 1200` seconds after the round started; the run then fails, naming
