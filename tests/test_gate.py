@@ -564,8 +564,8 @@ class TestGate(RepositoryTest):
 
     def test_a_line_two_coverage_reports_list_counts_once_and_is_covered_if_either_covers_it(self):
         self.add_lines(2)
-        os.rename(self.coverage({4: 0, 5: (0, "0/2")}), os.path.join(self.repo, "first.xml"))
-        second = self.coverage({4: 1, 5: (1, "1/2")})
+        os.rename(self.coverage({4: 1, 5: (1, "1/2")}), os.path.join(self.repo, "first.xml"))
+        second = self.coverage({4: 0, 5: (0, "0/2")})
         _, out, _ = self.gate("--coverage", "first.xml", "--coverage", second)
         # (2 covered lines + 1 covered outcome) / (2 lines + 2 outcomes).
         self.assertIn("75.0% of 2 new lines to cover, counting their 2 branch outcomes; 0 lines are not covered.", out)
@@ -594,15 +594,16 @@ class TestGate(RepositoryTest):
 
     def test_a_failing_test_in_any_of_several_test_reports_fails_the_gate(self):
         self.add_lines(1)
-        os.rename(os.path.join(self.repo, self.junit()), os.path.join(self.repo, "python.xml"))
+        python = self.junit(("test_limit", "AssertionError: 3 != 2"))
         # cargo-nextest's report names a test's binary as its classname.
         self.put("rust.xml", '<?xml version="1.0"?><testsuites name="nextest-run"><testsuite name="octoflow-ui">'
                              '<testcase name="tests::serves" classname="octoflow-ui"><failure message="panicked">'
                              'trace</failure></testcase></testsuite></testsuites>')
-        status, out, _ = self.gate("--tests", "python.xml", "--tests", "rust.xml")
+        status, out, _ = self.gate("--tests", "rust.xml", "--tests", python)
         self.assertEqual(status, 1)
-        self.assertIn("- 1 tests fail; each is listed below.\n", out)
-        self.assertIn("## Failing tests\n\n- `octoflow-ui.tests::serves`: panicked\n", out)
+        self.assertIn("- 2 tests fail; each is listed below.\n", out)
+        self.assertIn("## Failing tests\n\n- `octoflow-ui.tests::serves`: panicked\n"
+                      "- `tests.T.test_limit`: AssertionError: 3 != 2\n", out)
 
     def test_passing_tests_are_said_to_pass(self):
         self.add_lines(1)

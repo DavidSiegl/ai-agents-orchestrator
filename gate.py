@@ -958,17 +958,20 @@ def _changed_line_coverage(report: str, root: str,
             continue
         for line in cls.iterfind("lines/line"):
             try:
-                n = int(line.get("number", ""))
-                if n not in changed[path]:
-                    continue
-                hit = int(line.get("hits", "0")) > 0
-                if line.get("branch") == "true" and (m := re.search(r"\((\d+)/(\d+)\)",
-                                                                     line.get("condition-coverage", ""))):
-                    yield (path, n), hit, int(m.group(1)), int(m.group(2))
-                else:
-                    yield (path, n), hit, 0, 0
+                n, hit, taken, outcomes = _cobertura_line(line)
             except ValueError as e:
                 raise GateError(f"the coverage report {report} has a line it cannot read: {e}") from e
+            if n in changed[path]:
+                yield (path, n), hit, taken, outcomes
+
+
+def _cobertura_line(line: ElementTree.Element) -> tuple[int, bool, int, int]:
+    """(number, covered, covered branch outcomes, branch outcomes) of a Cobertura <line> element; 0 of 0 outcomes
+    when it has no branch data. Raises ValueError when its number or hits is not a whole number."""
+    hit = int(line.get("hits", "0")) > 0
+    if line.get("branch") == "true" and (m := re.search(r"\((\d+)/(\d+)\)", line.get("condition-coverage", ""))):
+        return int(line.get("number", "")), hit, int(m.group(1)), int(m.group(2))
+    return int(line.get("number", "")), hit, 0, 0
 
 
 def _coverage_sentence(c: NewCoverage, unmeasured: list[str]) -> str:
