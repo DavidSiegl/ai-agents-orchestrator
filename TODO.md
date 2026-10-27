@@ -66,6 +66,16 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Open issues
 
+- **A quality build leaves out the parity scenarios when only `tests/guard_errors.py` changed.** The Test stage's
+  path list (Jenkinsfile) names `tests/conftest.py`, whose guards the scenarios run under, but not
+  `tests/guard_errors.py`, which holds the errors those guards raise; so a quality round that changes only it can go
+  green while the pull request build fails, against docs/quality-gate.md's `judged-in-quality` paragraph. Raised by
+  cross-review 76 (F1, 2026-10-27), in code PR #162 brought. Closes with `tests/guard_errors.py` in the list.
+- **`tool_env` passes `UPDATE_GOLDEN` to the pytest and mutmut runs the gate starts.** With `UPDATE_GOLDEN=1` in a
+  developer's environment, `assert_golden` rewrites `tests/golden/*.txt` instead of comparing, so the gate's
+  flaky-tests reruns rewrite them in the working tree and pass a golden test that should fail. Jenkins never sets it.
+  Raised by cross-review 76 (F2, 2026-10-27), from PR #161's golden files and `gate.py`'s `tool_env`. Closes with
+  `tool_env` leaving `UPDATE_GOLDEN` out, as it does the Jenkins credentials.
 - **A Rust test's own lines count toward the coverage of new code.** cargo-llvm-cov's report lists the lines of a
   `#[cfg(test)]` module as it lists the code's (docs/quality-gate.md, "Rust tests and coverage"), and a passing
   test runs them all, so a change that adds a Rust function and a test of it is judged on both: 15 untested lines

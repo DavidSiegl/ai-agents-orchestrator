@@ -962,13 +962,15 @@ def _changed_line_coverage(report: str, root: str,
                 yield (path, number), hit, taken, outcomes
 
 
-def _changed_cobertura_line(report: str, line: ElementTree.Element, added: set[int]) -> tuple[int, bool, int, int] | None:
+def _changed_cobertura_line(report: str, line: ElementTree.Element,
+                            changed: set[int]) -> tuple[int, bool, int, int] | None:
     """(number, covered, covered branch outcomes, branch outcomes) of a Cobertura <line> element of the report at
-    report, 0 of 0 outcomes when it has no branch data; None when its number is not in added, without reading the
-    rest. Raises GateError when its number, or for a line in added its hits, is not a whole number."""
+    report, 0 of 0 outcomes when it has no branch data; None when its number is not in changed, the file's added
+    lines, without reading the rest. Raises GateError when its number, or for a line in changed its hits, is not a
+    whole number."""
     try:
         number = int(line.get("number", ""))
-        if number not in added:
+        if number not in changed:
             return None
         m = re.search(r"\((\d+)/(\d+)\)", line.get("condition-coverage", "")) if line.get("branch") == "true" else None
         taken, outcomes = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
