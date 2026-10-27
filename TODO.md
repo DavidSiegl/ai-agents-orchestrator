@@ -119,10 +119,11 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   run (pytest, mutmut, PyInstaller, npm) still shares the 3 GB beside a locked rustc, as do other jobs' builds on the
   node. Open in `.scratch/ci-cargo-memory/issues/02-agent-container-memory.md`; closes with the Homelab keeping or
   raising it.
-- **Unverified: the Jenkins agent has clippy.** The gate runs clippy on every build that reaches Gate, since
-  `ui/src-tauri/` is Rust, and `TestClippy` in `tests/test_gate.py` runs the real one; the agent's Rust is not
-  Debian's (docs/quality-gate.md, "What Jenkins needs"), and whether its toolchain holds rustup's `clippy` component is
-  not known from this repository. Without it the gate is ERROR with "`clippy` is not installed" and those tests fail.
+- **Unverified: the Install stage's `rustup component add clippy` works on agentbox0.** The gate runs clippy on every
+  build that reaches Gate, since `ui/src-tauri/` is Rust, and `TestClippy` in `tests/test_gate.py` runs the real one.
+  PR-111's first build showed the agent's toolchain (1.99.0) lacked rustup's `clippy` component: the gate was ERROR
+  with "`clippy` is not installed" and eight `TestClippy` tests failed. The Install stage now adds the component
+  (Jenkinsfile, "Install"); whether the agent's user may write to its rustup home is not known from this repository.
   Closes with a pull request build on agentbox0 whose console shows clippy ran (rust-engine ticket 02, 2026-10-27).
 - **Under the gate's `--cap-lints warn`, an `#[allow]` overrides a workspace's `forbid`.** `Clippy._lint_workspace` in
   `gate.py` caps every lint at warn so that a lint at deny cannot stop cargo before a compile error in a later crate

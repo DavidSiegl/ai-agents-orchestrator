@@ -93,6 +93,10 @@ pipeline {
         stage('Install') {
             steps {
                 sh 'uv sync --frozen'
+                // The Test stage's TestClippy and the Gate stage's gate.py run the real clippy, which the agent's
+                // rustup toolchain lacked (PR-111's first build). Adding it is a local no-op once it is there, and
+                // brings it back when the agent's container is rebuilt without it.
+                sh 'rustup component add clippy'
                 script {
                     // The version a release on main is tagged with.
                     env.PROJECT_VERSION = sh(returnStdout: true, script: '''

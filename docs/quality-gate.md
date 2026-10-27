@@ -472,8 +472,9 @@ request](#a-build-of-main-judged-at-its-pull-request)).
   does not enforce that - a pushed branch's `Jenkinsfile` can ask for any label - so the restriction sits on
   the nodes, with the Job Restrictions plugin.
 - **`uv`, `git`, `shellcheck`, `actionlint` and clippy on the agent**: the Install stage runs `uv sync --frozen`,
-  and `uv` brings the Python of `.python-version`; clippy is rustup's `clippy` component of the Rust below. The gate
-  fails a build that lacks a linter, and the tests that run the real clippy fail without it.
+  and `uv` brings the Python of `.python-version`; clippy is rustup's `clippy` component of the Rust below, which
+  the Install stage adds with `rustup component add clippy`, so the Rust must come from rustup. The gate fails a
+  build that lacks a linter, and the tests that run the real clippy fail without it.
 - **Node 20.19 or later and npm, Rust 1.90 or later, and Tauri 2's system packages on the agent**, for the UI stage's
   checks of the desktop app and the Package stage's `tauri build` of it. Debian 13's `nodejs` and `npm` packages do for
   the frontend (`ui/.npmrc` makes their npm 9.2 resolve the tree), but its Rust 1.85 is older than the shell's locked
