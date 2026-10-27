@@ -9,8 +9,7 @@ starts:
   `FakeClock`, time that passes only when the workflow sleeps; a real sleep makes the suite slow, and a test that
   depends on how long one takes flaky. The test code and orchestrator.py are guarded, the standard library is not:
   subprocess sleeps while it waits for a child with a timeout, which is how the orchestrator runs its processes.
-  Nor is the sleep of a `Clocks()` built with its defaults, which took the real time.sleep when orchestrator.py
-  was imported.
+  The sleep of a `Clocks()` built with its defaults, which a Workflow given no clocks uses, is guarded too.
 """
 
 import ipaddress
@@ -22,6 +21,8 @@ import time
 
 import pytest
 from hypothesis import settings
+
+import orchestrator
 
 # How many examples each property test tries. `default` keeps a local `uv run pytest` fast; the Jenkinsfile's Test
 # stage sets HYPOTHESIS_PROFILE=ci for ten times as many. No deadline: the tests that run git or sh for each example
@@ -112,8 +113,9 @@ def no_network(request, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def no_real_sleep(request, monkeypatch):
-    """For the length of each test not marked real_sleep, make time.sleep raise RealSleep when called from a test
-    file or orchestrator.py; called from anywhere else, such as the standard library, it sleeps."""
+    """For the length of each test not marked real_sleep, make time.sleep, and the sleep of a Clocks built with its
+    defaults, raise RealSleep when called from a test file or orchestrator.py; called from anywhere else, such as
+    the standard library, it sleeps."""
     if request.node.get_closest_marker("real_sleep") is not None:
         return
 
@@ -125,3 +127,7 @@ def no_real_sleep(request, monkeypatch):
         _sleep(seconds)
 
     monkeypatch.setattr(time, "sleep", sleep)
+    # Clocks took the real time.sleep as its default when orchestrator.py was imported, out of reach of the patch.
+    defaults = orchestrator.Clocks.__init__.__defaults__
+    monkeypatch.setattr(orchestrator.Clocks.__init__, "__defaults__",
+                        tuple(sleep if default is _sleep else default for default in defaults))

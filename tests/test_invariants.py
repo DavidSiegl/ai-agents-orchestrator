@@ -7,6 +7,7 @@ import ast
 import io
 import json
 import pathlib
+import re
 import sys
 import time
 import tomllib
@@ -35,30 +36,32 @@ def imported_modules(tree: ast.AST) -> set[str]:
     return names
 
 
-def authorization_setters(tree: ast.AST) -> list[tuple[str, str]]:
-    """(qualified name of the enclosing function, call or "dict") for each place in tree that sets a request header
-    named Authorization, in any case: an add_header, add_unredirected_header or putheader call naming it first, or
-    a dict literal with it as a key, such as Request's headers."""
-    setters = []
+def authorization_uses(tree: ast.AST) -> list[tuple[str, str]]:
+    """(qualified name of the enclosing function, how it is used) for each place in tree that could set an
+    Authorization header: the string "Authorization", in any case, as the argument of a call (by the called
+    method's name, such as "add_unredirected_header" or "get") or anywhere else ("literal", which a constant
+    holding the name or a dict key is); a keyword argument of that name ("keyword"); and any name of urllib's
+    authentication handlers and password managers ("auth handler")."""
+    uses = []
 
-    def visit(node, scope):
+    def visit(node, scope, call):
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
             scope = f"{scope}.{node.name}" if scope else node.name
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr in ("add_header", "add_unredirected_header", "putheader")
-                and node.args and _is_authorization(node.args[0])):
-            setters.append((scope, node.func.attr))
-        if isinstance(node, ast.Dict) and any(k is not None and _is_authorization(k) for k in node.keys):
-            setters.append((scope, "dict"))
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.lower() == "authorization":
+            uses.append((scope, call or "literal"))
+        elif isinstance(node, ast.keyword) and (node.arg or "").lower() == "authorization":
+            uses.append((scope, "keyword"))
+        elif re.search(r"AuthHandler|PasswordMgr", getattr(node, "id", "") or getattr(node, "attr", "")):
+            uses.append((scope, "auth handler"))
         for child in ast.iter_child_nodes(node):
-            visit(child, scope)
+            # A call is the use only of its own arguments; what is nested deeper in them is judged on its own.
+            arg_of = None
+            if isinstance(node, ast.Call) and child in node.args:
+                arg_of = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+            visit(child, scope, arg_of)
 
-    visit(tree, "")
-    return setters
-
-
-def _is_authorization(node: ast.AST) -> bool:
-    return isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.lower() == "authorization"
+    visit(tree, "", None)
+    return uses
 
 
 class AnyJenkins:
@@ -119,8 +122,10 @@ class TestInvariants(unittest.TestCase):
     def test_credentials_travel_only_in_an_unredirected_header(self):
         rule = ("the token travels only in the Authorization header, never in a URL, and only to the server asked "
                 "(docs/quality-gate.md, Credentials and permissions)")
-        self.assertEqual(authorization_setters(ast.parse(SOURCE.read_text())),
-                         [("CI._request", "add_unredirected_header")], rule)
+        # The serve command's two uses read the header of a request it was sent, and allow it in a preflight.
+        self.assertEqual(authorization_uses(ast.parse(SOURCE.read_text())),
+                         [("CI._request", "add_unredirected_header"), ("RunRequestHandler.do_OPTIONS", "send_header"),
+                          ("RunRequestHandler._has_token", "get")], rule)
         self.assertEqual(set(CI_CALLS), {name for name in vars(CI) if not name.startswith("_")},
                          "CI_CALLS calls each public member of CI once")
         jenkins = AnyJenkins()
@@ -138,6 +143,7 @@ class TestInvariants(unittest.TestCase):
                 self.assertNotIn("Authorization", req.headers, rule)
 
     def test_no_test_sleeps_for_real(self):
-        with self.assertRaises(conftest.RealSleep, msg="tests run on FakeClock, time that passes only when the "
-                                                       "workflow sleeps (docs/architecture.md, Tests)"):
-            time.sleep(0)
+        rule = "tests run on FakeClock, time that passes only when the workflow sleeps (docs/architecture.md, Tests)"
+        for sleep in (time.sleep, orchestrator.Clocks().sleep):
+            with self.subTest(sleep=sleep), self.assertRaises(conftest.RealSleep, msg=rule):
+                sleep(0)
