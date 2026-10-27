@@ -47,6 +47,12 @@ OTHER_PROGRAMS_NAMES = {
     "NAME": "the README's placeholder for a prompt's name",
 }
 
+# Backticked names the docs give that read as Class.member but are file names, with whose files they are.
+FILE_NAMES = {
+    "Cargo.toml": "cargo's manifest",
+    "Cargo.lock": "cargo's lock file",
+}
+
 
 def built_parser(parse_args, argv) -> argparse.ArgumentParser:
     """The parser parse_args builds to parse argv, caught before it parses."""
@@ -238,8 +244,8 @@ class TestDocs(unittest.TestCase):
                             errors.append(f"{where}: neither orchestrator.py nor gate.py has a function or method "
                                           f"{code}")
                     # Class.member: a capitalized name with a lowercase letter, or an all-caps one that is a class
-                    # of orchestrator.py, such as CI; not CONSTANT.md, a prompt's file.
-                    elif (m := re.fullmatch(r"([A-Z]\w*)\.([a-z_]\w*)(\(\))?", code)) \
+                    # of orchestrator.py, such as CI; not CONSTANT.md, a prompt's file, nor one of FILE_NAMES.
+                    elif code not in FILE_NAMES and (m := re.fullmatch(r"([A-Z]\w*)\.([a-z_]\w*)(\(\))?", code)) \
                             and (m.group(1) in classes or re.search("[a-z]", m.group(1))) \
                             and f"{m.group(1)}.{m.group(2)}" not in members:
                         errors.append(f"{where}: neither orchestrator.py nor gate.py has {m.group(1)}.{m.group(2)}")

@@ -114,9 +114,35 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 - **Is 3 GB the right memory limit for the agentbox0 Jenkins agent?** All builds on the node share its
   container's `mem_limit: 3g` (Homelab `jenkins/agentbox0.yaml`), which this repo cannot change. Since
   `ci/cargo-lock.sh`, two of this repository's builds compile Rust at once only when a quality build starts its
-  `cargo test` beside another build's cargo step, but everything else they run (pytest, mutmut, PyInstaller, npm)
-  still shares the 3 GB beside a locked rustc, as do other jobs' builds on the node. Open in
-  `.scratch/ci-cargo-memory/issues/02-agent-container-memory.md`; closes with the Homelab keeping or raising it.
+  `cargo test` or `cargo check` beside another build's cargo step, or when the Gate stage's clippy, outside the lock,
+  checks the desktop shell's own crate, the one crate the UI stage's `cargo check` leaves it; but everything else they
+  run (pytest, mutmut, PyInstaller, npm) still shares the 3 GB beside a locked rustc, as do other jobs' builds on the
+  node. Open in `.scratch/ci-cargo-memory/issues/02-agent-container-memory.md`; closes with the Homelab keeping or
+  raising it.
+- **Unverified: the Install stage's `rustup component add clippy` works on agentbox0.** The gate runs clippy on every
+  build that reaches Gate, since `ui/src-tauri/` is Rust, and `TestClippy` in `tests/test_gate.py` runs the real one.
+  PR-111's first build showed the agent's toolchain (1.99.0) lacked rustup's `clippy` component: the gate was ERROR
+  with "`clippy` is not installed" and eight `TestClippy` tests failed. The Install stage now adds the component
+  (Jenkinsfile, "Install"); whether the agent's user may write to its rustup home is not known from this repository.
+  Closes with a pull request build on agentbox0 whose console shows clippy ran (rust-engine ticket 02, 2026-10-27).
+- **Under the gate's `--cap-lints warn`, an `#[allow]` overrides a workspace's `forbid`.** `Clippy._lint_workspace` in
+  `gate.py` caps every lint at warn so that a lint at deny cannot stop cargo before a compile error in a later crate
+  (cross-review 66, F1); rustc's cap also lowers `forbid`, so an added `#[allow(unsafe_code)]` under `unsafe_code =
+  "forbid"` no longer gives E0453 and its unsafe block is no finding: the gate is OK on a change the workspace's rules
+  make uncompilable, and only "Suppressions added" lists the allow, and not even that when the change adds the lint as
+  one line inside an existing wrapped `#[allow(\n    a,\n    b,\n)]`, since `_RUST_SUPPRESSION` reads one added line at
+  a time (F15). Nothing in this repository sets `forbid` (`ui/src-tauri/Cargo.toml` is all `warn`), and the UI stage's
+  uncapped `cargo test` and `cargo check` would still fail such a build of `ui/src-tauri`. Raised by cross-review 66
+  (F11, 2026-10-27): "The gate is OK on a change that the workspace's rules make uncompilable". Closes with a second,
+  uncapped clippy run whose rustc errors (codes `E` and four digits, such as E0453) are compile errors, or with the
+  forbidden lints read from the manifests and an added allow of one failing the gate.
+- **A quality build judges Rust by the snapshot's own clippy rules.** `Clippy` in `gate.py` chooses no lints (it caps
+  their levels at warn, `--cap-lints`), so clippy reads each workspace's `[lints]`, `clippy.toml`, `.cargo/config.toml`
+  rustflags and `rust-toolchain.toml` from the judged tree, where a change can loosen them; `--config` replaces only
+  `pyproject.toml`. The quality file lists such an edit under build configuration (`CLIPPY_CONFIG_NAMES`), so the
+  Reviewer sees it, but the gate does not prevent it. Found implementing rust-engine ticket 02 (2026-10-27). Closes with
+  the gate taking those files from the commit `--config`'s rules come from, or with the Reviewer's prompt naming the
+  listing as a finding to judge.
 - **mutmut's clean test run fails on a hypothesis health check, so the gate mutation-tests nothing.** Under the
   gate's mutmut 3.8.0, `TestChangedLines.test_names_each_changed_file_and_exactly_its_added_lines` in
   `tests/test_properties.py` fails with `hypothesis.errors.FailedHealthCheck: ... was called from multiple
