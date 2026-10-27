@@ -49,7 +49,8 @@ the versions the change commits and never rewrites the file. Which lints are on 
 ruff's rules are the project's; the gate caps each at warn, so that a lint at `deny` or `forbid`, which would fail its
 crate's build and stop cargo before the crates after it, is a finding like the rest. The cap also lets an
 `#[allow(...)]` override a `forbid`, which rustc otherwise refuses, so such an allow silences its lint for the gate;
-it is listed under the suppressions added (`TODO.md` has the rest). `ui/src-tauri/Cargo.toml` sets its lints to `warn`
+it is listed under the suppressions added only where its added line holds the allow itself, not a lint added inside an
+existing wrapped `#[allow(` list (`TODO.md` has the rest). `ui/src-tauri/Cargo.toml` sets its lints to `warn`
 all the same, since rustc's `unsafe_code` at `deny` would stop `cargo test`. Its table adds to clippy's
 defaults the lints `main` passed when it was set, so that clippy found nothing on old lines. A workspace that still
 does not compile is a failed condition naming the compiler's first error in a tracked file, wherever it is, else

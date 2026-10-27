@@ -132,16 +132,17 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   Debian's (docs/quality-gate.md, "What Jenkins needs"), and whether its toolchain holds rustup's `clippy` component is
   not known from this repository. Without it the gate is ERROR with "`clippy` is not installed" and those tests fail.
   Closes with a pull request build on agentbox0 whose console shows clippy ran (rust-engine ticket 02, 2026-10-27).
-- **Under the gate's `--cap-lints warn`, an `#[allow]` overrides a workspace's `forbid`.** `Clippy._lint_workspace`
-  in `gate.py` caps every lint at warn so that a lint at deny cannot stop cargo before a compile error in a later crate
-  (cross-review 66, F1); rustc's cap also lowers `forbid`, so an added `#[allow(unsafe_code)]` under
-  `unsafe_code = "forbid"` no longer gives E0453 and its unsafe block is no finding: the gate is OK on a change the
-  workspace's rules make uncompilable, and only "Suppressions added" lists the allow. Nothing in this repository sets
-  `forbid` (`ui/src-tauri/Cargo.toml` is all `warn`), and the UI stage's uncapped `cargo test` and `cargo check` would
-  still fail such a build of `ui/src-tauri`. Raised by cross-review 66 (F11, 2026-10-27): "The gate is OK on a change
-  that the workspace's rules make uncompilable". Closes with a second, uncapped clippy run whose rustc errors (codes
-  `E` and four digits, such as E0453) are compile errors, or with the forbidden lints read from the manifests and an
-  added allow of one failing the gate.
+- **Under the gate's `--cap-lints warn`, an `#[allow]` overrides a workspace's `forbid`.** `Clippy._lint_workspace` in
+  `gate.py` caps every lint at warn so that a lint at deny cannot stop cargo before a compile error in a later crate
+  (cross-review 66, F1); rustc's cap also lowers `forbid`, so an added `#[allow(unsafe_code)]` under `unsafe_code =
+  "forbid"` no longer gives E0453 and its unsafe block is no finding: the gate is OK on a change the workspace's rules
+  make uncompilable, and only "Suppressions added" lists the allow, and not even that when the change adds the lint as
+  one line inside an existing wrapped `#[allow(\n    a,\n    b,\n)]`, since `_RUST_SUPPRESSION` reads one added line at
+  a time (F15). Nothing in this repository sets `forbid` (`ui/src-tauri/Cargo.toml` is all `warn`), and the UI stage's
+  uncapped `cargo test` and `cargo check` would still fail such a build of `ui/src-tauri`. Raised by cross-review 66
+  (F11, 2026-10-27): "The gate is OK on a change that the workspace's rules make uncompilable". Closes with a second,
+  uncapped clippy run whose rustc errors (codes `E` and four digits, such as E0453) are compile errors, or with the
+  forbidden lints read from the manifests and an added allow of one failing the gate.
 - **A quality build judges Rust by the snapshot's own clippy rules.** `Clippy` in `gate.py` chooses no lints (it caps
   their levels at warn, `--cap-lints`), so clippy reads each workspace's `[lints]`, `clippy.toml`, `.cargo/config.toml`
   rustflags and `rust-toolchain.toml` from the judged tree, where a change can loosen them; `--config` replaces only
