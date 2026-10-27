@@ -220,6 +220,17 @@ was done.
     `--machine`/`--cwd`; the `gate` example no longer names the tools it needs (ruff, mypy, pymarkdown, shellcheck,
     actionlint).
   Closes with those lines corrected, or the endpoint table replaced by a pointer to the docstring.
+- **Gaps in reading a running build's quality.md (PR #105).** Raised by cross-review 58 (2026-10-27):
+  - `_gate_or_end`'s poll takes two equal reads as the file even when they are empty or cut before the GATE line, so
+    a `quality.md` that `archiveArtifacts` leaves at 0 bytes for a poll interval stops the run with "does not start
+    with a GATE line" though its gate ran. Closes with a running build's read taken only once it has a GATE line,
+    and a test of an empty read (F1, should-fix).
+  - Each poll of a running build also asks for `artifact/quality.md`, a 404 until Gate has run; asking for
+    `artifacts[relativePath]` in the result's `api/json` tree would halve the requests (F2).
+  - In `_quality_report`, the local `ended` holds "was still running…" for a build that has not ended (F3);
+    `_finish_analysis` restates the Jenkinsfile's rule that no stage after Checkout fetches `GIT_REF` instead of
+    pointing at it (F4); no test covers a transient `CIError` between two reads, or a build that ends with a file
+    other than the one read while it ran (F5).
 - **`vague-names` does not split CamelCase.** `vague_names` matches a whole name or its last `_`-separated word,
   so `user_data` is found but a class `InfoManager` or `UserData` is not. Closes, if the run metrics show such names
   recur, with the last CamelCase word matched too.
