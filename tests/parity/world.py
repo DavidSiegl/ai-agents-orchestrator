@@ -118,15 +118,17 @@ class World:
 
     def __init__(self, root: str):
         """root: an empty directory the world may fill, removed by its owner afterwards. Raises RuntimeError, which
-        fails the scenario, where gitleaks is not on PATH or openssl cannot make the fake PyPI's certificate."""
+        fails the scenario, where gitleaks or openssl is not on PATH or openssl cannot make the fake PyPI's
+        certificate."""
         self.root = os.path.realpath(root)
         self.project = os.path.join(self.root, "project")
         self.origin = os.path.join(self.root, "origin.git")
         self.config = os.path.join(self.root, "config", "ai-agents-orchestrator")
-        if shutil.which("gitleaks") is None:
-            # A stub that finds nothing would record what no engine run with gitleaks does; a skip would let a machine
-            # without it pass the harness having checked nothing (the user's ruling, 2026-10-27).
-            raise RuntimeError("gitleaks is not on PATH; the parity scenarios run the real one")
+        # gitleaks is the real one, which the engine runs; openssl makes the fake PyPI's certificate. Why a missing one
+        # fails the scenario rather than skipping it: TODO.md, "The Rust engine's parity harness".
+        for tool in ("gitleaks", "openssl"):
+            if shutil.which(tool) is None:
+                raise RuntimeError(f"{tool} is not on PATH; the parity scenarios need it")
         self.normalizer = Normalizer()
         self.normalizer.literal(self.root, "<world>")
         # This checkout, where the example workflows a scenario runs are.
@@ -370,14 +372,19 @@ class World:
         self.git(self.project, "push", "--quiet", "--set-upstream", "origin", "main")
 
     def _serve(self) -> _Servers:
-        # The certificate first, so that a missing openssl leaves no server bound.
         self._make_certificate()
+        tls = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        tls.load_cert_chain(os.path.join(self.root, "pypi-cert.pem"), os.path.join(self.root, "pypi-key.pem"))
         jenkins = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _JenkinsHandler)
         jenkins.world = self
-        pypi = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _ProxyHandler)
+        try:
+            pypi = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _ProxyHandler)
+        except OSError:
+            # __exit__ never runs for a world __init__ failed to make.
+            jenkins.server_close()
+            raise
         pypi.world = self
-        pypi.tls = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-        pypi.tls.load_cert_chain(os.path.join(self.root, "pypi-cert.pem"), os.path.join(self.root, "pypi-key.pem"))
+        pypi.tls = tls
         servers = _Servers(jenkins, pypi)
         for server in (jenkins, pypi):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -388,9 +395,7 @@ class World:
 
     def _make_certificate(self) -> None:
         """Make pypi.org's certificate for the PyPI server, self-signed, which the engine trusts by SSL_CERT_FILE.
-        Raises RuntimeError, naming openssl, where it is not on PATH or fails."""
-        if shutil.which("openssl") is None:
-            raise RuntimeError("openssl is not on PATH; the parity scenarios make the fake PyPI's certificate with it")
+        Raises RuntimeError, naming openssl, where it fails."""
         # openssl as found on PATH just above.
         proc = subprocess.run(  # noqa: S603
             ["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",  # noqa: S607

@@ -36,26 +36,24 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   frozen. The note at the top of `orchestrator.py` says so too. Decided 2026-10-24 (the Rust engine's spec,
   Decisions).
 - **The Rust engine's parity harness: what it does not record yet.** `tests/parity/` runs 43 scenarios against
-  `orchestrator.py` as a program and compares each with its recording (docs/architecture.md, Tests); the Rust
-  tickets replay them through `PARITY_ENGINE`. Not covered: a secret gitleaks finds, at a quality round or at
-  publish; the harnesses other than claude and codex starting an agent (only their arguments differ); a session
-  log's token counts (every turn records `unknown`); `--timeout` and the stall notice, which take real minutes; and
-  the GUI, which the Rust engine drops. Where gitleaks is not on PATH, or openssl cannot make the fake PyPI's
-  certificate, every scenario fails naming it: a skip would pass a machine that checked nothing, and the gate's
-  test-integrity check fails an added skip (the user's ruling, 2026-10-27). What a record holds by design, each a
-  choice a Rust ticket may revisit: output a human reads (logs, errors, `show`, `list`, `prune`) as its facts
-  (`normalize.facts`), not its words; a run's files listed by modification time, as `/files` and the event stream
-  list them, sorted by name, since seconds of the clock decide that order; ssh's commands not at all, only what
+  `orchestrator.py` as a program and compares each with its recording (docs/architecture.md, Tests); the Rust tickets
+  replay them through `PARITY_ENGINE`. Not covered: a secret gitleaks finds, at a quality round or at publish; the
+  harnesses other than claude and codex starting an agent (only their arguments differ); a session log's token counts
+  (every turn records `unknown`); `--timeout` and the stall notice, which take real minutes; and the GUI, which the Rust
+  engine drops. Where gitleaks is not on PATH, or openssl cannot make the fake PyPI's certificate, every scenario fails
+  naming it: a skip would pass a machine that checked nothing, and the gate's test-integrity check fails an added skip
+  (the user's ruling, 2026-10-27); Jenkins's Install stage downloads the pinned gitleaks (`ci/install-gitleaks.sh`), and
+  mutmut's runs leave `tests/parity` out (`[tool.mutmut]`), which would take most of the mutation budget. What a record
+  holds by design, each a choice a Rust ticket may revisit: output a human reads (logs, errors, `show`, `list`, `prune`)
+  as its facts (`normalize.facts`), not its words; a run's files listed by modification time, as `/files` and the event
+  stream list them, sorted by name, since seconds of the clock decide that order; ssh's commands not at all, only what
   they did; doctor's lines without git's and Tk's, which are the host's. Two more are open issues below: the
-  `state.json` saves between two commands, and serve's events between two checkpoints. The suite takes about 3
-  minutes more with the harness, one engine run each scenario at 2 to 25 seconds (25 for serve's event stream).
-  Decided against (2026-10-27): scenarios as data files the harness interprets, which needed a language of their
-  own for kills, takeovers and serve's stream; a cassette of the expected requests that the fakes answer in order,
-  which breaks on every count of polls; and a stub gitleaks where none is installed, which would record what no
-  engine run with gitleaks does.
-
-## Open issues
-
+  `state.json` saves between two commands, and serve's events between two checkpoints. The suite takes about 3 minutes
+  more with the harness, one engine run each scenario at 2 to 25 seconds (25 for serve's event stream). Decided against
+  (2026-10-27): scenarios as data files the harness interprets, which needed a language of their own for kills,
+  takeovers and serve's stream; a cassette of the expected requests that the fakes answer in order, which breaks on
+  every count of polls; and a stub gitleaks where none is installed, which would record what no engine run with gitleaks
+  does. ## Open issues
 - **The parity harness records `state.json` at each command the fakes get, not after each save.** Ticket
   rust-engine/01 asks for "`state.json` after each save"; the ledger reads it only when herdr, gh, Jenkins or PyPI
   gets a call, and leaves out a change to `heartbeat_at` alone (`tests/parity/fakes.py`, `_changed_states`). Raised
@@ -369,7 +367,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   survived". Closes with the shared time budget above, or mutants chosen by the changed lines rather than whole
   functions. Worse since mutmut's runs pass the suite (mutmut-hypothesis-health-check, PR #112): on PR #113 (2026-10-27)
   mutmut was stopped at 600 s after trying 0 of 253 mutants, so its stats and clean runs of the now 1348-test suite
-  took the whole budget, and surviving-mutants judges nothing on Jenkins.
+  took the whole budget, and surviving-mutants judges nothing on Jenkins; the parity scenarios, left out of mutmut's
+  runs, add nothing to that.
 - **`parse_args` still yields many survivors after `do_not_mutate_patterns = ['\bhelp=']`.** Its `description=` texts
   and flag names are mutated, and few tests check them word for word: 105 of 305 mutants survived on this branch's
   change. Reported per function, so it is one finding. Closes with a decision to add `'\bdescription='` to the

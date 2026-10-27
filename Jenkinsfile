@@ -22,6 +22,8 @@ pipeline {
         // For the UI, Gate and Package stages: crates are fetched into the workspace, which cleanWs empties, so no
         // build compiles sources an earlier build left behind.
         CARGO_HOME     = "${env.WORKSPACE}/.cargo-home"
+        // Tools the Install stage downloads into the workspace (ci/install-gitleaks.sh), first on PATH for every stage.
+        PATH           = "${env.WORKSPACE}/.tools/bin:${env.PATH}"
         // The dev profile, which cargo test's test profile and clippy's checks inherit, without debug info. Debug
         // info for the GTK and Tauri crates took enough memory that rustc was OOM-killed with two builds on
         // agentbox0. ci/cargo-lock.sh now keeps two builds' cargo steps apart, except a quality build's, which never
@@ -97,6 +99,7 @@ pipeline {
                 // rustup toolchain lacked (PR-111's first build). Adding it is a local no-op once it is there, and
                 // brings it back when the agent's container is rebuilt without it.
                 sh 'rustup component add clippy'
+                sh 'ci/install-gitleaks.sh "$WORKSPACE/.tools/bin"'
                 script {
                     // The version a release on main is tagged with.
                     env.PROJECT_VERSION = sh(returnStdout: true, script: '''
