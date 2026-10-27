@@ -3557,7 +3557,8 @@ class FakeCI:
     - `fail`: {(method, path): status} for requests answered with an HTTP error.
     - `job_gone`: the job was deleted; `forgotten`: Jenkins forgot its queue items.
 
-    Every request is recorded as (method, url, form) in `requests`, and by a short name in `names`.
+    Every request is recorded as (method, url, form) in `requests`, and by a short name in `names`. Its answers
+    have the shape of the live Jenkins's, which tests/contract/test_jenkins.py checks.
     """
 
     def __init__(self):
@@ -3614,7 +3615,7 @@ class FakeCI:
             if waiting["left"]:
                 waiting["left"] -= 1
                 return "queue", {"why": "Waiting for next available executor"}
-            return "queue", {"executable": {"number": waiting["number"]}}
+            return "queue", {"cancelled": False, "executable": {"number": waiting["number"]}}
         if not path.startswith(JOB_PATH) or self.job_gone:
             return f"{method} {path}", 404
         rest = path[len(JOB_PATH):]
@@ -3649,7 +3650,8 @@ class FakeCI:
             if not build["test_report"]:
                 return "tests", 404
             cases = [{"className": c, "name": t, "status": "FAILED", "errorDetails": e} for c, t, e in build["tests"]]
-            return "tests", {"suites": [{"cases": [*cases, {"className": "t", "name": "ok", "status": "PASSED"}]}]}
+            passed = {"className": "t", "name": "ok", "status": "PASSED", "errorDetails": None}
+            return "tests", {"suites": [{"cases": [*cases, passed]}]}
         if what == "consoleText":
             return "console", FakeResponse(build["console"])
         return f"{method} {path}", 404
