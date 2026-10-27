@@ -51,6 +51,7 @@ OTHER_PROGRAMS_NAMES = {
 # Backticked names the docs give that read as Class.member but are file names, with whose files they are.
 FILE_NAMES = {
     "Cargo.toml": "cargo's manifest",
+    "Cargo.lock": "cargo's lock file",
 }
 
 

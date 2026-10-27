@@ -25,9 +25,12 @@ pipeline {
         // The dev profile, which cargo test's test profile and clippy's checks inherit, without debug info. Debug
         // info for the GTK and Tauri crates took enough memory that rustc was OOM-killed with two builds on
         // agentbox0. ci/cargo-lock.sh now keeps two builds' cargo steps apart, except a quality build's, which never
-        // waits for the lock; building without debug info keeps each build's own peak lower. A failing test still
-        // prints its panic's file:line, which comes from core::panic::Location, not from debug info. Set for the
-        // whole build, not the UI stage alone, so that the Gate stage's clippy finds the UI stage's checks fresh.
+        // waits for the lock, and the Gate stage's clippy, which gate.py runs outside it; building without debug info
+        // keeps each build's own peak lower. A failing test still prints its panic's file:line, which comes from
+        // core::panic::Location, not from debug info. Set for the whole build, not the UI stage alone, so that the
+        // Gate stage's clippy finds the dependencies the UI stage's cargo check checked fresh, and checks only the
+        // shell's own crate outside the lock; a difference between the two stages' cargo environments, such as a
+        // RUSTFLAGS one of them sets, would have it check them all again there.
         CARGO_PROFILE_DEV_DEBUG = '0'
         // The GitHub login Jenkins posts pull request statuses as, its GitHub App's "<slug>[bot]", which the agents
         // cannot post as. Empty: no build of main trusts a pull request build, and each judges itself.

@@ -299,7 +299,7 @@ FAILING_TESTS = "## Failing tests"
 def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (), issues=(), to_weigh=(),
                    elsewhere: int = 0, tests: list[tuple[str, str]] | None = None,
                    coverage: str | None = None, suppressions: list[tuple[str, int, str]] | tuple = (),
-                   edited=(), rules_from: str | None = None, mutmut_state=()) -> str:
+                   edited=(), rules_from: str | None = None, mutmut_state=(), clippy_config=()) -> str:
     """The quality file: the gate, GATE_OK or GATE_ERROR, on its first line, then what the Builder has to answer.
 
     conditions are the failed ones, each a sentence. issues, the findings that fail the gate, and to_weigh,
@@ -310,9 +310,10 @@ def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (),
     (name, detail) of the failing tests of the test report the gate was given, None for no tests section, as when
     it was given none. coverage is the sentence about coverage of new code, None for no such section.
     suppressions are the (path, line, text) of lint suppressions the change added. edited are the
-    BUILD_CONFIG_FILES and clippy's configuration files the change edits, as edited_config gives them; rules_from
-    names the file the gate took its rules from when that was not the edited pyproject.toml. mutmut_state are the
-    files the change adds or edits under mutmut's state, as mutmut_state_files gives them.
+    BUILD_CONFIG_FILES the change edits; rules_from names the file the gate took its rules from when that was not the
+    edited pyproject.toml. mutmut_state are the files the change adds or edits under mutmut's state, as
+    mutmut_state_files gives them. clippy_config are the files the change edits that clippy takes its rules or its
+    toolchain from, as clippy_config_files gives them.
     """
     out = [f"GATE: {gate}", "", intro]
     if conditions:
@@ -327,8 +328,8 @@ def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (),
     if suppressions:
         out += ["", "## Suppressions added", "",
                 *(one_line(f"- `{path}:{line}` `{text}`") for path, line, text in suppressions)]
-    if edited or mutmut_state:
-        out += _config_section(edited, rules_from, mutmut_state)
+    if edited or mutmut_state or clippy_config:
+        out += _config_section(edited, rules_from, mutmut_state, clippy_config)
     return "\n".join(out) + "\n"
 
 
@@ -403,7 +404,7 @@ def _tests_section(tests: list[tuple[str, str]]) -> list[str]:
     return out
 
 
-def _config_section(edited, rules_from: str | None, mutmut_state) -> list[str]:
+def _config_section(edited, rules_from: str | None, mutmut_state, clippy_config) -> list[str]:
     out = ["", "## Build configuration", ""]
     if "Jenkinsfile" in edited:
         out.append("- The change edits `Jenkinsfile`. The quality job reads it from `main`, "
@@ -415,8 +416,8 @@ def _config_section(edited, rules_from: str | None, mutmut_state) -> list[str]:
                    "the edited rules.")
     if "uv.lock" in edited:
         out.append("- The change edits `uv.lock`, which pins the versions of the linters the gate ran.")
-    if clippy := [f for f in edited if f not in BUILD_CONFIG_FILES]:
-        named = _series([f"`{f}`" for f in clippy], limit=5)
+    if clippy_config:
+        named = _series([f"`{f}`" for f in clippy_config], limit=5)
         out.append(f"- The change edits {named}, which clippy takes its rules or its toolchain from; it judged the "
                    f"change by the edited ones.")
     if mutmut_state:
@@ -429,16 +430,24 @@ def _config_section(edited, rules_from: str | None, mutmut_state) -> list[str]:
 
 
 def edited_config(diff: str, changed: dict[str, set[int]]) -> list[str]:
-    """The BUILD_CONFIG_FILES the diff changes, deletes or renames away, in that order, then the files clippy takes
-    its rules from (CLIPPY_CONFIG_NAMES) that it does so to, in path order."""
-    touched = set(changed) | set(re.findall(r"^(?:--- a/|rename from )(.+?)\t?$", diff, re.MULTILINE))
-    return [f for f in BUILD_CONFIG_FILES if f in touched] + sorted(f for f in touched if _clippy_config(f))
+    """The BUILD_CONFIG_FILES the diff changes, deletes or renames away."""
+    touched = _touched_paths(diff, changed)
+    return [f for f in BUILD_CONFIG_FILES if f in touched]
 
 
-def _clippy_config(path: str) -> bool:
-    name = os.path.basename(path)
-    return name in CLIPPY_CONFIG_NAMES or (name in CARGO_CONFIG_NAMES
-                                           and os.path.basename(os.path.dirname(path)) == ".cargo")
+def clippy_config_files(diff: str, changed: dict[str, set[int]]) -> list[str]:
+    """The files clippy takes its rules or its toolchain from, by CLIPPY_CONFIG_NAMES and CARGO_CONFIG_NAMES, that
+    the diff changes, deletes or renames away, in path order."""
+    def configures_clippy(path: str) -> bool:
+        name = os.path.basename(path)
+        return name in CLIPPY_CONFIG_NAMES or (name in CARGO_CONFIG_NAMES
+                                               and os.path.basename(os.path.dirname(path)) == ".cargo")
+    return sorted(f for f in _touched_paths(diff, changed) if configures_clippy(f))
+
+
+def _touched_paths(diff: str, changed: dict[str, set[int]]) -> set[str]:
+    """The paths diff, of changed as changed_lines gives it, changes, deletes or renames away."""
+    return set(changed) | set(re.findall(r"^(?:--- a/|rename from )(.+?)\t?$", diff, re.MULTILINE))
 
 
 def mutmut_state_files(changed: dict[str, set[int]]) -> list[str]:
@@ -499,16 +508,19 @@ class Clippy(GateTool):
     """cargo clippy over every Cargo workspace that a manifest the repository tracks belongs to, all its targets
     checked, tests and examples included.
 
-    Its rules are each workspace's own, the [lints] tables of its manifests and its clippy.toml: the gate passes it no
-    lint flags, and the pyproject.toml it is given holds none of clippy's. A finding's severity is the level the
-    workspace gives its lint, and the gate keeps either level on added lines; but at "deny" a finding fails its
-    crate's build and cargo checks no further crates, so a workspace that wants all its findings sets "warn". A
-    workspace that does not compile is a failed condition naming the compiler's first error, wherever it is, since its
-    lints cannot be read: a change that deletes a function an old line calls breaks the build on no line it added.
+    Which lints are on is each workspace's own choice, the [lints] tables of its manifests and its clippy.toml: the
+    pyproject.toml the gate is given holds none of clippy's. The gate caps every lint of the workspace's own crates
+    at warn (rustc's --cap-lints), so that a lint at deny or forbid, which would fail its crate's build and stop
+    cargo before the crates after it, is a finding like the rest: every finding is a warning, and the gate keeps
+    those on added lines. A build that still fails is a failed condition, naming the compiler's first error in a
+    tracked file, wherever it is, else cargo's own: a change that deletes a function an old line calls breaks the
+    build on no line it added.
 
     The cargo commands it runs, each within GATE_TOOL_TIMEOUT: `cargo clippy --version`, whose failure is clippy
     missing; `cargo locate-project` for each tracked Cargo.toml; and `cargo clippy` in each workspace, which builds
-    what it needs to (target/ in the workspace) and may fetch crates its Cargo.lock names.
+    what it needs to (target/ in the workspace) and may fetch the crates it uses. That last runs with --locked when
+    git tracks the workspace's Cargo.lock, so that it judges the versions the change commits and never rewrites the
+    file; without one, cargo writes an untracked Cargo.lock beside the manifest.
     """
 
     def run(self, root: str, rules: str, files: list[str], tracked: set[str]) -> tuple[list[dict], list[str]]:
@@ -532,27 +544,25 @@ class Clippy(GateTool):
     def _lint_workspace(self, root: str, manifest: str, tracked: set[str]) -> tuple[list[dict], str | None]:
         """The lints clippy finds in the workspace whose root manifest is manifest, relative to root, and the failed
         condition, None when it compiled and clippy ran as it should."""
-        proc = _tool_process(self.name, ["cargo", "clippy", "--workspace", "--all-targets", "--message-format=json"],
-                             os.path.join(root, os.path.dirname(manifest)))
+        workspace = os.path.dirname(manifest)
+        locked = ["--locked"] if os.path.join(workspace, "Cargo.lock") in tracked else []
+        proc = _tool_process(self.name, ["cargo", "clippy", "--workspace", "--all-targets", "--message-format=json",
+                                         *locked, "--", "--cap-lints", "warn"], os.path.join(root, workspace))
         if isinstance(proc, str):
             return [], proc
-        lints: list[dict] = []
-        compile_errors: list[dict] = []
         lossy = _lossy_names(tracked)
-        for line in proc.stdout.split("\n"):
-            diagnostic = _rustc_diagnostic(line, os.path.dirname(manifest), root, tracked, lossy)
-            if diagnostic is not None:
-                (compile_errors if diagnostic[1] else lints).append(diagnostic[0])
-        if compile_errors:
-            first = compile_errors[0]
+        found = [f for f in (_rustc_diagnostic(line, workspace, root, tracked, lossy)
+                             for line in proc.stdout.split("\n")) if f is not None]
+        # Capped at warn, a lint never fails the build, so each error is the compiler's.
+        lints = [f for f in found if f["severity"] != "error"]
+        if proc.returncode == 0:
+            return lints, None
+        if errors := [f for f in found if f["severity"] == "error"]:
             return lints, (f"`{self.name}` could not compile the workspace of `{manifest}`: "
-                           f"`{first['path']}:{first['line']}` {' '.join(['error', *first['rule'].split()[1:]])}: "
-                           f"{first['message']}")
-        # A lint at "deny" stops the build as a compile error does; with neither, cargo itself failed.
-        if proc.returncode != 0 and not any(f["severity"] == "error" for f in lints):
-            said = next((s.strip() for s in proc.stderr.split("\n") if s.startswith("error")), _said(proc))
-            return lints, f"`{self.name}` failed with exit status {proc.returncode} in `{manifest}`: {said[:200]}"
-        return lints, None
+                           f"`{errors[0]['path']}:{errors[0]['line']}` error {errors[0]['rule']}: "
+                           f"{errors[0]['message']}")
+        said = next((s.strip() for s in proc.stderr.split("\n") if s.startswith("error")), _said(proc))
+        return lints, f"`{self.name}` failed with exit status {proc.returncode} in `{manifest}`: {said[:200]}"
 
 
 GATE_TOOLS = (
@@ -646,10 +656,11 @@ class GateCheck:
 # A finding's location, before the tool's own part; lineless when the tool names only the file.
 _FINDING_AT = re.compile(r"(?P<path>[^:]+):(?:(?P<line>\d+):(?:\d+:)?)? (?P<detail>.+)")
 
-# Comments that silence a linter or exempt lines from coverage, and Rust's attributes that silence a lint, which the
-# quality file lists for the Reviewer.
+# Comments that silence a linter or exempt lines from coverage, which the quality file lists for the Reviewer; and in
+# a Rust file, the attributes that silence a lint, also inside a cfg_attr, as in `#![cfg_attr(test, allow(...))]`.
 _SUPPRESSION = re.compile(r"#.*\b(?:noqa|type:\s*ignore|shellcheck\s+disable|pragma:\s*no\s*(?:cover|branch|mutate))\b"
-                          r"|<!--\s*pyml\s+disable|#!?\[\s*(?:allow|expect)\s*\(")
+                          r"|<!--\s*pyml\s+disable")
+_RUST_SUPPRESSION = re.compile(r"#!?\[.*\b(?:allow|expect)\s*\(")
 
 
 @dataclass(frozen=True)
@@ -753,6 +764,7 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
     text = quality_report(GATE_ERROR if conditions else GATE_OK, intro, conditions=conditions, issues=issues,
                           to_weigh=to_weigh, elsewhere=elsewhere, tests=failing, coverage=coverage_sentence,
                           suppressions=added_suppressions(root, changed), edited=edited_config(diff, changed),
+                          clippy_config=clippy_config_files(diff, changed),
                           mutmut_state=mutmut_state_files(changed),
                           rules_from=f"`{rules}`" if rules else None)
     # Paths and linter output come verbatim, so a name that is not UTF-8 holds lone surrogates, which no file or
@@ -761,22 +773,21 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
 
 
 def _tool_process(name: str, argv: list[str], cwd: str) -> subprocess.CompletedProcess | str:
-    """argv run in cwd for the linter name, with tool_env, within GATE_TOOL_TIMEOUT seconds: the finished process,
-    whatever its exit status, its output decoded as _git_run's verbatim output is, so the paths it prints match git's
-    and keep their line ends; or, when it could not be started or did not finish, the failed condition, a sentence
-    naming the linter."""
+    """argv run in cwd for the linter name, with tool_env, as _run_in_session runs it, within GATE_TOOL_TIMEOUT
+    seconds: the finished process, whatever its exit status, its output decoded so that the paths it prints match
+    git's and keep their line ends; or, when it could not be started or did not finish, the failed condition, a
+    sentence naming the linter. A linter stopped at the timeout is killed with every process it started, such as
+    the rustc processes of cargo clippy."""
     try:
-        # The command is a fixed tool's, and the files are git's list of tracked ones; no shell reads either.
-        proc = subprocess.run(argv, cwd=cwd, capture_output=True, timeout=GATE_TOOL_TIMEOUT,  # noqa: S603
-                              env=tool_env(), check=False)
+        proc, stopped = _run_in_session(argv, cwd, tool_env(), timeout=GATE_TOOL_TIMEOUT)
     except FileNotFoundError:
         program = "it" if argv[0] == name else f"`{argv[0]}`"
         return f"`{name}` is not installed: {program} is not on PATH."
-    except subprocess.TimeoutExpired:
-        return f"`{name}` did not finish within {GATE_TOOL_TIMEOUT} seconds."
     except OSError as e:
         return f"`{name}` could not be started: {e}."
-    return subprocess.CompletedProcess(proc.args, proc.returncode, os.fsdecode(proc.stdout), os.fsdecode(proc.stderr))
+    if stopped:
+        return f"`{name}` did not finish within {GATE_TOOL_TIMEOUT} seconds."
+    return proc
 
 
 def _cargo_workspaces(root: str, tracked: set[str]) -> tuple[list[str], list[str]]:
@@ -796,15 +807,11 @@ def _cargo_workspaces(root: str, tracked: set[str]) -> tuple[list[str], list[str
     return sorted(roots), problems
 
 
-# The codes of rustc's own errors, which a lint's code never is; a syntax error has no code at all.
-_RUSTC_ERROR_CODE = re.compile(r"E\d{4}")
-
-
 def _rustc_diagnostic(line: str, workspace: str, root: str, tracked: set[str],
-                      lossy: dict[str, str | None]) -> tuple[dict, bool] | None:
-    """The finding in line, one line of `cargo --message-format=json`'s output, with whether it is a compile error
-    rather than a lint; None for any other line, such as a note, a summary with no place in the code, or a finding in
-    a file git does not track.
+                      lossy: dict[str, str | None]) -> dict | None:
+    """The finding in line, one line of `cargo --message-format=json`'s output, at the compiler's level, "error" or
+    "warning", and with the lint's name or the error's code as its rule; None for any other line, such as a note, a
+    summary with no place in the code, or a finding in a file git does not track.
 
     workspace is the workspace's directory relative to root, which the paths cargo prints are relative to; tracked
     and lossy as tool_findings uses them. A finding inside a macro's definition is placed where the macro was used,
@@ -822,9 +829,8 @@ def _rustc_diagnostic(line: str, workspace: str, root: str, tracked: set[str],
         if span is None:
             return None
         code = (message.get("code") or {}).get("code")
-        return ({"path": path, "line": span["line_start"], "severity": message["level"],
-                 "rule": f"clippy {code}" if code else "clippy", "message": message["message"]},
-                message["level"] == "error" and (code is None or _RUSTC_ERROR_CODE.fullmatch(code) is not None))
+        return {"path": path, "line": span["line_start"], "severity": message["level"],
+                "rule": f"clippy {code}" if code else "clippy", "message": message["message"]}
     # Anything that is not a record of the shape https://doc.rust-lang.org/cargo/reference/external-tools.html
     # gives, such as a line a build script printed, holds no finding.
     except (json.JSONDecodeError, AttributeError, KeyError, TypeError):
@@ -981,8 +987,10 @@ def added_suppressions(root: str, changed: dict[str, set[int]]) -> list[tuple[st
     Raises GateError when a file the change adds lines to cannot be read."""
     out = []
     for path, added, lines in _files_with_added_lines(root, changed):
-        for n, line in enumerate(lines, 1):
-            if n in added and _SUPPRESSION.search(text := line.decode("utf-8", "replace")):
+        silencing = (_SUPPRESSION, _RUST_SUPPRESSION) if path.endswith(".rs") else (_SUPPRESSION,)
+        for n in sorted(a for a in added if a <= len(lines)):
+            text = lines[n - 1].decode("utf-8", "replace")
+            if any(p.search(text) for p in silencing):
                 out.append((path, n, text.strip()[:160]))
     return out
 
@@ -4038,11 +4046,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     status 2 and 0."""
     parser = argparse.ArgumentParser(prog="gate.py")
     parser.description = (
-        f"Run ruff, mypy, pymarkdown, shellcheck and actionlint over the files the repository tracks and write the "
-        f"quality file: GATE: OK or GATE: ERROR on its first line, then the failed conditions, the findings on lines "
-        f"added since --base and the checks' errors, the findings to weigh, failing tests, coverage of new code, "
-        f"suppressions added and edited build configuration. Any finding on an added line or a check's error "
-        f"fails the gate, and so do a linter that is missing or fails, a failing test, and coverage below "
+        f"Run ruff, mypy, pymarkdown, shellcheck, actionlint and clippy over the files the repository tracks and "
+        f"write the quality file: GATE: OK or GATE: ERROR on its first line, then the failed conditions, the findings "
+        f"on lines added since --base and the checks' errors, the findings to weigh, failing tests, coverage of new "
+        f"code, suppressions added and edited build configuration. Any finding on an added line or a check's error "
+        f"fails the gate, and so do a linter that is missing or fails, a Cargo workspace that does not compile, a "
+        f"failing test, and coverage below "
         f"{GATE_MIN_COVERAGE:g}% on {GATE_MIN_NEW_LINES} or more new lines to cover. Exit status 0 for OK, 1 for "
         f"ERROR, {EXIT_GATE_UNJUDGED} when it could not judge, writing no quality file.")
     parser.add_argument("--base", required=True, metavar="REV", help="the commit the change is measured from")

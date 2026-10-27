@@ -43,13 +43,16 @@ selected. `D105` and `D107` are not, since they fire on nearly all of `main`: it
 `__init__`s, each documented by its class's docstring. Which rule to mechanize next is a question for the run
 metrics: the findings that recur.
 
-clippy runs as `cargo clippy --workspace --all-targets --message-format=json` in each workspace, its tests and
-examples included, with no lint flags of the gate's own, so a workspace's rules are its own, as ruff's are. A
-finding's severity is the level the workspace gives the lint; the gate keeps either level on added lines, so
-`ui/src-tauri/Cargo.toml` sets each of its lints to `warn`, since at `deny` one finding stops clippy, and `cargo test`,
-at that crate. Its table adds to clippy's defaults the lints `main` passed when it was set, so that clippy found
-nothing on old lines. A workspace that does not compile is a failed condition naming the compiler's first error,
-wherever it is: a change that deletes a function an old line calls breaks the build on no line it added.
+clippy runs as `cargo clippy --workspace --all-targets --message-format=json -- --cap-lints warn` in each workspace,
+its tests and examples included, and with `--locked` where git tracks the workspace's `Cargo.lock`, so that it judges
+the versions the change commits and never rewrites the file. Which lints are on is the workspace's own choice, as
+ruff's rules are the project's; the gate caps each at warn, so that a lint at `deny` or `forbid`, which would fail its
+crate's build and stop cargo before the crates after it, is a finding like the rest. `ui/src-tauri/Cargo.toml` sets
+its lints to `warn` all the same, since at `deny` one finding would stop `cargo test`. Its table adds to clippy's
+defaults the lints `main` passed when it was set, so that clippy found nothing on old lines. A workspace that still
+does not compile is a failed condition naming the compiler's first error in a tracked file, wherever it is, else
+cargo's own: a change that deletes a function an old line calls breaks the build on no line it added. A linter that
+outlives its timeout is killed with every process it started, such as cargo's rustc.
 
 ruff, mypy and pymarkdownlnt are in uv's `dev` group, so `uv run` puts them on `PATH`; shellcheck, actionlint and clippy
 (with cargo) come from the Jenkins agent image. `gate.py`, like the orchestrator, stays stdlib-only: it runs them as
