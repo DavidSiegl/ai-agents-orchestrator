@@ -8831,19 +8831,21 @@ class Workflow:
         Each call asks for the result (_build_result, and its errors) and then the file, two requests at most.
         """
         # The last read of the file while the build ran; None before one found it.
-        earlier: list[str | None] = [None]
+        earlier: str | None = None
 
         def poll() -> tuple[str | None, str | None] | None:
+            nonlocal earlier
             result = self._build_result(ref, number)
             quality = self._jenkins.quality_file(number)
             if result is not None:
                 return result, quality
             # Jenkins serves an artifact while archiveArtifacts is still copying it into place, so one read of a
-            # running build's file may be cut short; two that agree, a poll interval apart, are taken as whole. A
-            # build that has ended has finished archiving, so one read then is enough.
-            if quality is not None and quality == earlier[0]:
+            # running build's file may be cut short. Two reads that agree, at least a poll interval apart, are taken
+            # as whole: a heuristic, which a copy stalled that long and then resumed defeats (TODO.md). A build that
+            # has ended has finished archiving, so one read then is enough.
+            if quality is not None and quality == earlier:
                 return None, quality
-            earlier[0] = quality
+            earlier = quality
             return None
 
         return poll

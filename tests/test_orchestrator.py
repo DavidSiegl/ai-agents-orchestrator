@@ -3533,8 +3533,8 @@ def outcome(gate="OK", *, archived=True, result=None, findings=(), tests=(), tes
     gate: the GATE of the quality.md its Gate stage archives; archived=False for a build that ended before that
     stage. result defaults to what the Jenkinsfile ends with. findings: the numbered lines of quality.md.
     tests: (className, name, errorDetails) of each failing test in Jenkins's test report. polls: how many polls
-    still see it building; after_gate: how many of those, at the end, see quality.md archived, 0 for a file that
-    appears only on the last. description: the build's description, None when it has none.
+    still see it building; after_gate: how many of those, besides the last, see quality.md archived, 0 for a file
+    that appears only on the last. description: the build's description, None when it has none.
     """
     if result is None:
         result = ("SUCCESS" if gate == "OK" else "UNSTABLE") if archived else "FAILURE"
@@ -4409,7 +4409,7 @@ class TestQualityGate(unittest.TestCase):
         self.assertLessEqual(max(gaps), HEARTBEAT_SECONDS + orchestrator.CI_POLL_SECONDS)
 
     def test_a_build_running_on_after_its_gate_ends_the_round_with_its_quality_file(self):
-        # quality.md archived on the third poll, and the build running long past the round's deadline after it.
+        # quality.md archived on the second poll, and the build running long past the round's deadline after it.
         polls = 2 * orchestrator.QUALITY_TIMEOUT // orchestrator.CI_POLL_SECONDS
         fake = FakeCI()
         fake.outcomes = [outcome(**RED, polls=polls, after_gate=polls - 2), outcome()]

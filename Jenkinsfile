@@ -33,7 +33,8 @@ pipeline {
         // apart. tree is the snapshot's tree, parent its only parent, the run's base, and main the origin/main
         // commit whose orchestrator.py and pyproject.toml the Gate stage judges with. `orchestrator.py
         // judged-in-quality` parses it, by JUDGED_DESCRIPTION. A build restarted from a later stage records none, so
-        // nothing trusts it.
+        // nothing trusts it. No later stage may fetch GIT_REF: the orchestrator deletes that branch once the Gate
+        // stage has archived quality.md, while the build may still run (docs/quality-gate.md, "The calls").
         stage('Checkout') {
             steps {
                 script {
@@ -200,10 +201,10 @@ pipeline {
 
         // The Linux binary and the desktop app around it, built on every pull request and main build, so a change
         // that breaks either fails before it is merged; Release attaches them. Not in a quality build (GIT_REF set):
-        // packaging a snapshot is wasted work, since the orchestrator run that triggered it takes the Gate stage's
-        // quality.md without waiting for later stages, and the change is packaged by its pull request's build before
-        // it merges. The macOS ones come from .github/workflows/macos-binary.yml, with the same scripts, since Jenkins
-        // has no macOS machine.
+        // nothing uses a snapshot's package, since the change is packaged by its pull request's build before it
+        // merges, and the orchestrator run that triggered the build has taken the Gate stage's quality.md by then.
+        // The macOS ones come from .github/workflows/macos-binary.yml, with the same scripts, since Jenkins has no
+        // macOS machine.
         stage('Package') {
             when { expression { return !params.GIT_REF } }
             steps {

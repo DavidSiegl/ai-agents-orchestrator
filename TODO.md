@@ -257,6 +257,16 @@ was done.
   build past `QUALITY_TIMEOUT` beside the mutation budget, so the user kept 30 s (2026-10-24). `not-rerun` is a finding
   to weigh, never a wrong verdict. Closes with one time budget the reruns and mutmut share, or lighter tests for the
   gate's own checks.
+- **A running build's quality.md is taken as whole once two reads agree.** `Workflow._gate_or_end` reads a still
+  running build's `quality.md` each poll and takes it when two reads at least `CI_POLL_SECONDS` apart are equal,
+  because Jenkins serves an artifact while `archiveArtifacts` is still copying it. Raised by the cross-review of
+  `quality-round-early-read` (F1, 2026-10-27): "Equal reads show only that the copy made no progress between them,
+  not that it finished." A copy stalled that long and then resumed hands the round a cut file: `_quality` refuses
+  one cut inside its GATE line, and a later cut shortens the Builder's findings and `quality_rounds`' fingerprints.
+  Before 2026-10-27 the file was read only once the build ended; a copy that failed partway, ending the build, was
+  taken cut then too, and still is. Closes with a fixed last line that `orchestrator.py gate` writes and the round
+  checks before taking the file (older gates, which the quality build of another project may run, write none), or
+  with asking Jenkins whether the Gate stage has completed.
 - **The mutation budget leaves most of a large change's mutants untried.** `MUTATION_BUDGET` is 600 s. Measured on
   Jenkins on 2026-10-24: on PR #50 (surviving-mutants' change) mutmut tried 756 of 3079 mutants and the Gate stage took
   683 s, the build about 850 s; on PR #51, 677 of 801 in a 638 s Gate stage. That fits `QUALITY_TIMEOUT` (1200 s) with
@@ -347,7 +357,8 @@ was done.
   with a rule in the Jenkinsfile that nothing after Gate runs in a quality build.
   Fixed (2026-10-27): `Workflow._analyse` polls `_gate_or_end`, which asks each interval for the build's result and
   then its `quality.md`, and stops at whichever settles the round first. A running build's file is taken once two
-  reads agree, since Jenkins serves an artifact while it is still being copied; `_quality_report` then says the
+  reads agree, since Jenkins serves an artifact while it is still being copied (a heuristic; see the open issue "A
+  running build's quality.md is taken as whole once two reads agree"); `_quality_report` then says the
   build "was still running" instead of naming a result. A build that ends without a quality file is handled as
   before. `_finish_analysis` deletes the round's branch while the build may still run, safe for this Jenkinsfile,
   which fetches it only in Checkout; a pipeline that fetches `GIT_REF` after Gate would fail. Package stays out of
