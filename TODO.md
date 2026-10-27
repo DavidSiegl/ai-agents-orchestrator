@@ -147,11 +147,6 @@ was done.
   worktree it runs in. Found while writing loop-guards ticket 05; not reproduced. Closes with `_run_proof` passing
   the working tree as pytest's rootdir and conftest root, or the proofs copied into a scratch directory of the
   worktree for their run.
-- **`test-integrity` does not see an expected value held outside the assertion.** `expected-value-changed` compares
-  each assertion's literals (`_changed_literals`), so editing a golden constant the assertion names, such as the
-  tests' `GOLDEN_PR_BODY` or `GOLDEN_SUMMARY`, changes what is expected without a finding, while the same edit inside
-  the assertion is one. Found while adding the provenance trailers to the pull request body (loop-guards ticket 03).
-  Closes with the assertions' names resolved to module-level constants the change edits.
 - **A run that never reaches `done` keeps its local refs.** A locking step's commit stays under
   `refs/orchestrator/<key>/locked/` (`RunState.lock_ref`) until the run ends `done` (`Workflow._clean_up_locks`);
   `close` and `prune` do not delete them, so a failed run's locked snapshots are never collected by `git gc`. Closes
@@ -344,6 +339,18 @@ was done.
   subdirectory.
 
 ## Fixed
+
+- **`test-integrity` does not see an expected value held outside the assertion.** `expected-value-changed` compares
+  each assertion's literals (`_changed_literals`), so editing a golden constant the assertion names, such as the
+  tests' `GOLDEN_PR_BODY` or `GOLDEN_SUMMARY`, changes what is expected without a finding, while the same edit inside
+  the assertion is one. Found while adding the provenance trailers to the pull request body (loop-guards ticket 03).
+  Closes with the assertions' names resolved to module-level constants the change edits.
+  Fixed (2026-10-27): `python_weakened_tests` reads each test file's constants at the base and now
+  (`_python_constants`: a module-level `Assign` or `AnnAssign` of one name bound nowhere else at module level, its
+  value holding no call) and, when the code changed, reports `expected-value-changed` once per kept test and
+  constant whose assertions name it on both sides, bare or as `module.NAME`, and whose literals changed
+  (`_changed_constants`). Not closed: a constant imported from another module, one computed by a call, one built from
+  other constants (only its own literals count), and a fixture's return value.
 
 - **A base `.gitleaks.toml` that extends another file reads that file from outside the base.** `scan_unpublished`
   writes the base's `.gitleaks.toml` into the run directory and passes it with `--config`; an `[extend] path = ...`

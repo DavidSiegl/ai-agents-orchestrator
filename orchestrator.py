@@ -3975,10 +3975,13 @@ _SKIP_NAMES = frozenset({"skip", "skipIf", "skipUnless", "skipif", "skipTest", "
 def python_weakened_tests(files: list[ChangedTestFile], code_changed: bool) -> list[dict]:
     """WeakenedTestsDetector.find for Python: tests removed (renamed or moved ones match their old selves by
     body), skips and swallowed errors on added lines, fewer assertions in a test, and, when code_changed, an
-    assertion whose literals changed while the rest of it stayed."""
+    assertion whose literals changed while the rest of it stayed, or a kept test whose assertions name one of its
+    file's constants, as _python_constants gives them, whose literals changed."""
     out: list[dict] = []
     before: list[_PythonTest] = []
     after: list[_PythonTest] = []
+    # Each parsed file's constants, by its index in files: at the base, and in the working tree.
+    constants: dict[int, tuple[dict[str, _PythonConstant], dict[str, _PythonConstant]]] = {}
     for k, f in enumerate(files):
         new_tree = _parse_python(f.after)
         if new_tree is None:
@@ -3986,8 +3989,10 @@ def python_weakened_tests(files: list[ChangedTestFile], code_changed: bool) -> l
                                 "does not parse as Python, so its tests were not checked.", severity="error"))
             continue
         # A base that does not parse has no tests to lose.
-        before += _python_tests(k, _parse_python(f.before) or ast.Module(body=[], type_ignores=[]))
+        base_tree = _parse_python(f.before) or ast.Module(body=[], type_ignores=[])
+        before += _python_tests(k, base_tree)
         after += _python_tests(k, new_tree)
+        constants[k] = (_python_constants(base_tree, f.old_path), _python_constants(new_tree, f.new_path))
         out += _python_added_weakenings(f.new_path, new_tree, f.added) if f.new_path else []
     out += _python_removed_tests(files, before, after)
     at_base = {t.key(): t for t in before}
@@ -4004,6 +4009,10 @@ def python_weakened_tests(files: list[ChangedTestFile], code_changed: bool) -> l
                              f"`{t.name}`: `{_code(a)}` became `{_code(b)}`, "
                              f"in a change that also edits the code under test.", severity="error")
                     for a, b in _changed_literals(was, now)]
+            out += [_finding(path, line, "expected-value-changed",
+                             f"`{name}` (line {defined}), which `{t.name}` asserts against, changed, "
+                             f"in a change that also edits the code under test.", severity="error")
+                    for name, defined, line in _changed_constants(at_base[t.key()].node, t.node, *constants[t.file])]
     return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
 
 
@@ -4203,6 +4212,88 @@ def _changed_literals(was: list[ast.Assert | ast.Call],
                                      autojunk=False).get_matching_blocks()
     return [(was[i + d], now[j + d]) for i, j, n in blocks for d in range(n)
             if _literals(was[i + d]) != _literals(now[j + d])]
+
+
+@dataclass(frozen=True)
+class _PythonConstant:
+    """A module-level constant of a test file, as _python_constants reads it from one side of a ChangedTestFile."""
+    name: str  # NAME, as the module binds it
+    line: int  # the line its assignment starts on
+    expression: ast.expr  # what the assignment binds to it
+
+
+def _python_constants(tree: ast.Module, path: str | None) -> dict[str, _PythonConstant]:
+    """The constants of tree, the test module at path (None: no file, and so no module.NAME spelling), by each way its
+    tests can name one: NAME, and module.NAME, module being the file's name without .py. A constant is a module-level
+    Assign or AnnAssign of an expression to one name, that expression holding no call, which no other module-level
+    statement binds. Out of scope: a constant imported from another module or computed by a call, whose value the
+    module does not spell out, and a fixture's return value."""
+    bound = _module_bindings(tree)
+    module = os.path.splitext(os.path.basename(path))[0] if path else None
+    out: dict[str, _PythonConstant] = {}
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+            target, expression = stmt.targets[0], stmt.value
+        elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+            target, expression = stmt.target, stmt.value
+        else:
+            continue
+        if (isinstance(target, ast.Name) and bound[target.id] == 1
+                and not any(isinstance(n, ast.Call) for n in ast.walk(expression))):
+            constant = _PythonConstant(target.id, stmt.lineno, expression)
+            out[target.id] = constant
+            if module:
+                out[f"{module}.{target.id}"] = constant
+    return out
+
+
+def _module_bindings(tree: ast.Module) -> collections.Counter[str]:
+    """How many of tree's module-level statements bind each name, counting those in their nested if, try, for or with
+    blocks, by assignment, import, def or class. A name bound in a comprehension or a lambda there counts as well,
+    though Python binds it in a scope of its own."""
+    out: collections.Counter[str] = collections.Counter()
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out[stmt.name] += 1
+            continue
+        for n in ast.walk(stmt):
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+                out[n.id] += 1
+            elif isinstance(n, ast.alias):
+                out[(n.asname or n.name).split(".")[0]] += 1
+    return out
+
+
+def _changed_constants(was: ast.AST, now: ast.AST, base: dict[str, _PythonConstant],
+                       current: dict[str, _PythonConstant]) -> list[tuple[str, int, int]]:
+    """For a test at the base (was) and now, and its file's constants on each side as _python_constants gives them:
+    (name, the line its assignment starts on now, the line of now's first assertion naming it) for each constant that
+    the assertions of both sides name and whose value's literals, as _literals takes them, differ between the sides;
+    one per constant, however many assertions name it."""
+    at_base = _asserted_constants(was, base)
+    return [(name, current[name].line, line) for name, line in _asserted_constants(now, current).items()
+            if name in at_base and _literals(base[name].expression) != _literals(current[name].expression)]
+
+
+def _asserted_constants(test: ast.AST, constants: dict[str, _PythonConstant]) -> dict[str, int]:
+    """The name of each of constants, keyed as _python_constants keys them, that test's assertions name, to the line of
+    the first assertion that does. A bare name the test binds itself, as a parameter or a local, is its own, not the
+    constant."""
+    own = {n.id for n in ast.walk(test) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    own |= {a.arg for n in ast.walk(test) if isinstance(n, ast.arguments)
+            for a in [*n.posonlyargs, *n.args, *n.kwonlyargs, n.vararg, n.kwarg] if a}
+    out: dict[str, int] = {}
+    for assertion in _python_assertions(test):
+        for n in ast.walk(assertion):
+            if isinstance(n, ast.Name) and n.id not in own:
+                spelled = n.id
+            elif isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name):
+                spelled = f"{n.value.id}.{n.attr}"
+            else:
+                continue
+            if spelled in constants:
+                out.setdefault(constants[spelled].name, assertion.lineno)
+    return out
 
 
 def _shape(node: ast.AST) -> str:
