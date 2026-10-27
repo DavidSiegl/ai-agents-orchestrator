@@ -121,12 +121,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   run (pytest, mutmut, PyInstaller, npm) still shares the 3 GB beside a locked rustc, as do other jobs' builds on the
   node. Open in `.scratch/ci-cargo-memory/issues/02-agent-container-memory.md`; closes with the Homelab keeping or
   raising it.
-- **Unverified: the Install stage's `rustup component add clippy` works on agentbox0.** The gate runs clippy on every
-  build that reaches Gate, since `ui/src-tauri/` is Rust, and `TestClippy` in `tests/test_gate.py` runs the real one.
-  PR-111's first build showed the agent's toolchain (1.99.0) lacked rustup's `clippy` component: the gate was ERROR
-  with "`clippy` is not installed" and eight `TestClippy` tests failed. The Install stage now adds the component
-  (Jenkinsfile, "Install"); whether the agent's user may write to its rustup home is not known from this repository.
-  Closes with a pull request build on agentbox0 whose console shows clippy ran (rust-engine ticket 02, 2026-10-27).
 - **Under the gate's `--cap-lints warn`, an `#[allow]` overrides a workspace's `forbid`.** `Clippy._lint_workspace` in
   `gate.py` caps every lint at warn so that a lint at deny cannot stop cargo before a compile error in a later crate
   (cross-review 66, F1); rustc's cap also lowers `forbid`, so an added `#[allow(unsafe_code)]` under `unsafe_code =
@@ -398,6 +392,13 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   subdirectory.
 
 ## Fixed
+
+- **Unverified: the Jenkins agent has clippy.** The gate runs clippy on every build that reaches Gate, since
+  `ui/src-tauri/` is Rust, and `TestClippy` in `tests/test_gate.py` runs the real one. PR-111's first build showed the
+  agent's toolchain (1.99.0) lacked rustup's `clippy` component: the gate was ERROR with "`clippy` is not installed"
+  and eight `TestClippy` tests failed. Fixed (2026-10-27, rust-engine ticket 02): the Install stage runs `rustup
+  component add clippy` (Jenkinsfile, "Install"); PR-111's second build downloaded the component, passed all 1348
+  tests and the gate was OK.
 
 - **`test_invariants.py` and `test_docs.py` fail inside mutmut's copy.** Raised by cross-review 60 (2026-10-27), in
   code PR #106 brought. mutmut runs the tests in `mutants/`, its copy of the repository, whose `orchestrator.py` and
