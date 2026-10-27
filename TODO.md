@@ -171,6 +171,11 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   (F11, 2026-10-27): "The gate is OK on a change that the workspace's rules make uncompilable". Closes with a second,
   uncapped clippy run whose rustc errors (codes `E` and four digits, such as E0453) are compile errors, or with the
   forbidden lints read from the manifests and an added allow of one failing the gate.
+- **A cargo config under the build's `CARGO_HOME` is not listed as build configuration.** `clippy_config_files` in
+  `gate.py` lists cargo's config only under a `.cargo` directory, but the Jenkinsfile sets `CARGO_HOME` to
+  `$WORKSPACE/.cargo-home`, so a change that tracks `.cargo-home/config.toml` could change clippy's lint levels or
+  rustflags without the quality file listing it. Raised by cross-review 70 (round 1, not recorded, 2026-10-27).
+  Closes with `CARGO_HOME`'s config files listed too, or `.cargo-home/` refused in a change.
 - **A quality build judges Rust by the snapshot's own clippy rules.** `Clippy` in `gate.py` chooses no lints (it caps
   their levels at warn, `--cap-lints`), so clippy reads each workspace's `[lints]`, `clippy.toml`, `.cargo/config.toml`
   rustflags and `rust-toolchain.toml` from the judged tree, where a change can loosen them; `--config` replaces only
@@ -361,7 +366,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   about 860 s behind the others). Those were pull request builds; a quality build has skipped the Package stage
   since 2026-10-24, so it has more to spare than that. The user kept 600 s (2026-10-24): a stopped run says `budget-reached`, never "none
   survived". Closes with the shared time budget above, or mutants chosen by the changed lines rather than whole
-  functions.
+  functions. Worse since mutmut's runs pass the suite (mutmut-hypothesis-health-check, PR #112): on PR #113 (2026-10-27)
+  mutmut was stopped at 600 s after trying 0 of 253 mutants, so its stats and clean runs of the now 1348-test suite
+  took the whole budget, and surviving-mutants judges nothing on Jenkins.
 - **`parse_args` still yields many survivors after `do_not_mutate_patterns = ['\bhelp=']`.** Its `description=` texts
   and flag names are mutated, and few tests check them word for word: 105 of 305 mutants survived on this branch's
   change. Reported per function, so it is one finding. Closes with a decision to add `'\bdescription='` to the
