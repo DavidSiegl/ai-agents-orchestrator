@@ -31,6 +31,12 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   (`.scratch/gate-split/issues/03-drop-cutover-fallback.md`); then making the test-file patterns a setting, for the
   gate's use in other projects (`04-configurable-test-files.md`). The gate moves to its own repository only once a
   second project uses it. Decided 2026-10-24.
+- **The Python engine is frozen.** From the merge of the parity harness (`tests/parity/`) until the Rust engine
+  replaces it in one release, nothing lands in `orchestrator.py`, fixes included: its recordings are the oracle
+  each Rust ticket is judged by, and a change to the Python engine would move it. A bug found meanwhile goes into
+  `Open issues` here and is fixed on the `rust-engine` branch. `gate.py`, the docs, the tests and CI are not
+  frozen. The note at the top of `orchestrator.py` says so too. Decided 2026-10-24 (the Rust engine's spec,
+  Decisions).
 - **The Rust engine's parity harness: what it does not record yet.** `tests/parity/` runs 43 scenarios against
   `orchestrator.py` as a program and compares each with its recording (docs/architecture.md, Tests); the Rust
   tickets replay them through `PARITY_ENGINE`. Not covered: a secret gitleaks finds, at a quality round or at
