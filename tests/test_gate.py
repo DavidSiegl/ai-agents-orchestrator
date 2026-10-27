@@ -531,13 +531,14 @@ class TestGate(RepositoryTest):
         self.assertIn("100.0% of 1 new lines to cover; 0 lines are not covered.\n\nNot measured: `m\\xff.py`; "
                       "coverage.py records no data for a file whose name is not UTF-8.", text)
 
-    def rust_coverage(self, lines):
+    def rust_coverage(self, lines, filename="src/lib.rs"):
         """A Cobertura report of ui/src-tauri/src/lib.rs as cargo-llvm-cov writes it, run in that Cargo workspace:
-        its path relative to the workspace, which is the report's source. lines maps a line number to its hits."""
+        filename relative to the workspace, which is the report's source, or absolute. lines maps a line number to
+        its hits."""
         rows = "".join(f'<line branch="false" hits="{h}" number="{n}"/>' for n, h in lines.items())
         self.put("coverage-rust.xml",
                  f'<?xml version="1.0" ?><coverage><sources><source>{self.repo}/ui/src-tauri</source></sources>'
-                 f'<packages><package name="src"><classes><class filename="src/lib.rs" name="src.lib.rs"><lines>'
+                 f'<packages><package name="src"><classes><class filename="{filename}" name="src.lib.rs"><lines>'
                  f'{rows}</lines></class></classes></package></packages></coverage>')
         return os.path.join(self.repo, "coverage-rust.xml")
 
@@ -562,6 +563,12 @@ class TestGate(RepositoryTest):
         self.assertIn("- Coverage of new code is 60.0%; the gate wants at least 80%", out)
         self.assertIn("60.0% of 20 new lines to cover; 8 lines are not covered.", out)
 
+    def test_an_absolute_path_in_a_coverage_report_stands_as_it_is(self):
+        self.add_rust_lines(2)
+        rust = self.rust_coverage({1: 1, 2: 0}, filename=os.path.join(self.repo, "ui/src-tauri/src/lib.rs"))
+        _, out, _ = self.gate("--coverage", rust)
+        self.assertIn("50.0% of 2 new lines to cover; 1 lines are not covered.", out)
+
     def test_a_line_two_coverage_reports_list_counts_once_and_is_covered_if_either_covers_it(self):
         self.add_lines(2)
         os.rename(self.coverage({4: 1, 5: (1, "1/2")}), os.path.join(self.repo, "first.xml"))
@@ -569,6 +576,14 @@ class TestGate(RepositoryTest):
         _, out, _ = self.gate("--coverage", "first.xml", "--coverage", second)
         # (2 covered lines + 1 covered outcome) / (2 lines + 2 outcomes).
         self.assertIn("75.0% of 2 new lines to cover, counting their 2 branch outcomes; 0 lines are not covered.", out)
+
+    def test_a_coverage_entry_it_cannot_read_on_a_line_the_change_did_not_add_is_skipped(self):
+        self.add_lines(1)
+        status, out, _ = self.gate("--coverage", self.coverage({2: "1.0", 4: 1}))
+        self.assertEqual(status, 0)
+        self.assertIn("100.0% of 1 new lines to cover; 0 lines are not covered.", out)
+        _, _, err = self.gate("--coverage", self.coverage({4: "1.0"}))
+        self.assertIn("has a line it cannot read", err)
 
     def test_an_unreadable_coverage_report_writes_nothing(self):
         self.add_lines(1)

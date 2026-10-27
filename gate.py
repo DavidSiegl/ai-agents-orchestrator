@@ -49,7 +49,7 @@ import threading
 import time
 import tokenize
 import tomllib
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 from xml.etree import ElementTree
@@ -671,7 +671,7 @@ _RUST_SUPPRESSION = re.compile(r"#!?\[[^\]]*\b(?:allow|expect)\s*\(|^\s*(?:allow
 class NewCoverage:
     """Coverage of the lines a change added: of those lines, how many are coverable and covered, and of the
     branch outcomes on them, how many are taken."""
-    lines: int  # added lines the coverage report can cover
+    lines: int  # added lines any of the coverage reports can cover
     covered_lines: int
     conditions: int  # branch outcomes on those lines
     covered_conditions: int
@@ -683,7 +683,7 @@ class NewCoverage:
 
 
 def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: str | None = None,
-                 coverage: Sequence[str] = (), tests: Sequence[str] = ()) -> str:
+                 coverage: list[str] | tuple[str, ...] = (), tests: list[str] | tuple[str, ...] = ()) -> str:
     """The quality file for the change from base to the working tree of the git repository at cwd.
 
     Runs each GATE_TOOLS linter whose files the repository tracks over those files, with the rules of the pyproject.toml
@@ -958,20 +958,20 @@ def _changed_line_coverage(report: str, root: str,
             continue
         for line in cls.iterfind("lines/line"):
             try:
-                n, hit, taken, outcomes = _cobertura_line(line)
+                number = int(line.get("number", ""))
+                covered = _cobertura_line_coverage(line) if number in changed[path] else None
             except ValueError as e:
                 raise GateError(f"the coverage report {report} has a line it cannot read: {e}") from e
-            if n in changed[path]:
-                yield (path, n), hit, taken, outcomes
+            if covered is not None:
+                yield (path, number), *covered
 
 
-def _cobertura_line(line: ElementTree.Element) -> tuple[int, bool, int, int]:
-    """(number, covered, covered branch outcomes, branch outcomes) of a Cobertura <line> element; 0 of 0 outcomes
-    when it has no branch data. Raises ValueError when its number or hits is not a whole number."""
-    hit = int(line.get("hits", "0")) > 0
-    if line.get("branch") == "true" and (m := re.search(r"\((\d+)/(\d+)\)", line.get("condition-coverage", ""))):
-        return int(line.get("number", "")), hit, int(m.group(1)), int(m.group(2))
-    return int(line.get("number", "")), hit, 0, 0
+def _cobertura_line_coverage(line: ElementTree.Element) -> tuple[bool, int, int]:
+    """(covered, covered branch outcomes, branch outcomes) of a Cobertura <line> element; 0 of 0 outcomes when it
+    has no branch data. Raises ValueError when its hits is not a whole number."""
+    m = re.search(r"\((\d+)/(\d+)\)", line.get("condition-coverage", "")) if line.get("branch") == "true" else None
+    taken, outcomes = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+    return int(line.get("hits", "0")) > 0, taken, outcomes
 
 
 def _coverage_sentence(c: NewCoverage, unmeasured: list[str]) -> str:
@@ -4031,7 +4031,7 @@ def _check_condition(name: str, n: int) -> str:
     return f"{n} findings of the `{name}` check; each is listed below."
 
 
-def gate_command(base: str, rules: str | None, coverage: Sequence[str], tests: Sequence[str], out: str | None,
+def gate_command(base: str, rules: str | None, coverage: list[str], tests: list[str], out: str | None,
                  mutation_budget: float, base_run_budget: float) -> int:
     """Write the quality file judge_change gives for the current directory, with gate_checks's checks, to out or
     standard output.
