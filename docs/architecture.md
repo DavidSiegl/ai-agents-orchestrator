@@ -309,13 +309,17 @@ instead, from the Python engine only.
 
 Golden files hold generated text to a reviewed copy of it under `tests/golden/`: `assert_golden` (`tests/golden.py`)
 fails with a unified diff naming the file when the text differs, and `UPDATE_GOLDEN=1 uv run pytest` rewrites the
-files instead. A change to that text is reviewed as the diff of its golden files. They cover `gate.py`'s quality file,
-which the Builder and the Reviewer read and which stays Python after the Rust engine: `TestQualityReport` holds
-`quality_report` to one file per gate word and per way a section can read, and `TestGate` the whole file the gate
-writes for a passing and for a failing change. The engine's own text, its prompts, notes, commit messages and pull
-request bodies, has no golden files: the parity scenarios already record each as sent, every example workflow's
-included, and a reworded prompt fails them, naming the first line that differs. TODO.md lists the texts no scenario
-reaches yet.
+files instead. A change to that text is reviewed as the diff of its golden files. They hold two texts. `gate.py`'s
+quality file, which the Builder and the Reviewer read and which no parity scenario writes, since their Jenkins serves
+hand-written ones: `TestQualityReport` holds `quality_report` to a file per gate word and per way it words a section,
+and `TestGate` the whole file the gate writes for a passing and a failing change, `judge_change`'s intro, conditions
+and coverage sentence included. And the engine's prompts: `TestWorkflowPromptsGolden` holds each step's prompts in
+the built-in workflow and each example workflow, as `Workflow` renders them, to a file per workflow, round 1 and,
+for the steps the review loops over, round 2 as the running session and a fresh one hear it. The parity scenarios
+record round 1 of each workflow as sent, so a reworded prompt fails both; round 2 of the examples and a fresh
+session's notes only the golden files hold, and only for the Python engine. The engine's other texts, its follow-up
+prompts, notes, commit messages and pull request bodies, have no golden files: the scenarios record them as sent.
+TODO.md lists the texts neither reaches.
 
 ## Tooling
 

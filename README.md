@@ -453,7 +453,7 @@ uv run pytest --cov=orchestrator --cov=gate --cov-branch --cov-report=xml && \
 ```
 
 `tests/test_properties.py` holds property-based tests: 25 inputs per test by default, 250 with
-`HYPOTHESIS_PROFILE=ci`, as Jenkins runs them. A change to the quality file's wording fails a test against its
-golden file in `tests/golden/`; `UPDATE_GOLDEN=1 uv run pytest tests/test_gate.py` rewrites them, and the change is
-reviewed as their diff (see [Tests](docs/architecture.md#tests)). `packaging/build-binary.sh` builds and smoke-tests the binary for
-the machine it runs on; see [Tooling](docs/architecture.md#tooling).
+`HYPOTHESIS_PROFILE=ci`, as Jenkins runs them. A change to a prompt's or the quality file's wording fails a test
+against its golden file in `tests/golden/`; `UPDATE_GOLDEN=1 uv run pytest` rewrites them, and the change is
+reviewed as their diff (see [Tests](docs/architecture.md#tests)). `packaging/build-binary.sh` builds and
+smoke-tests the binary for the machine it runs on; see [Tooling](docs/architecture.md#tooling).
