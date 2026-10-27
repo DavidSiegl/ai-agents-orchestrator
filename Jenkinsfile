@@ -95,25 +95,20 @@ pipeline {
         stage('Install') {
             steps {
                 sh 'uv sync --frozen'
-                // The Test stage's TestClippy and the Gate stage's gate.py run the real clippy, which the agent's
-                // rustup toolchain lacked (PR-111's first build), and the Test stage's cargo-llvm-cov reads its
-                // coverage data with llvm-tools-preview's llvm-profdata and llvm-cov, which must be the toolchain's
-                // own LLVM. Adding them is a local no-op once they are there, and brings them back when the agent's
-                // container is rebuilt without them.
-                //
-                // PR-163's first two builds failed here with "component download failed for llvm-tools: error opening
-                // file for download: cleaning up cached downloads: No such file or directory", with no other build of
-                // this repository running; the cause is not known, and nothing here is known to fix it. The home,
-                // rustup's version and the permissions of the directories it downloads into are printed first, so
-                // that a failure here shows what the agent has. rustup's home is the agent's, so the add runs under
-                // the node's cargo lock, as the cargo steps do: that keeps two of this repository's builds from adding
-                // a component at once (a quality build's --no-wait aside), but not a rustup in another repository's
-                // job, which does not take the lock.
+                // The Test stage's TestClippy and the Gate stage's gate.py run the real clippy, and the Test stage's
+                // cargo-llvm-cov reads its coverage data with llvm-tools' llvm-profdata and llvm-cov, which must be the
+                // toolchain's own LLVM. Both are rustup components the agent image provides: its rustup home,
+                // /usr/local/rustup, is root's, so a build cannot add to it (PR-163's builds 1-3 failed adding
+                // llvm-tools-preview: "component download failed ... No such file or directory"). This step names a
+                // missing one here rather than letting a later stage fail on it.
                 sh '''
-                    home=$(rustup show home)
-                    rustup --version
-                    ls -ld "$home" "$home/downloads" "$home/tmp" || true
-                    "$WORKSPACE/ci/cargo-lock.sh" ${GIT_REF:+--no-wait} rustup component add clippy llvm-tools-preview
+                    installed=$(rustup component list --installed)
+                    for component in clippy llvm-tools; do
+                        printf '%s\\n' "$installed" | grep -q "^$component-" || {
+                            echo "rustup's $component component is not on the agent; its image must add it" >&2
+                            exit 1
+                        }
+                    done
                 '''
                 sh 'ci/install-tools.sh "$WORKSPACE/.tools/bin"'
                 script {

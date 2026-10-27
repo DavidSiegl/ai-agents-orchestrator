@@ -6,8 +6,7 @@
 # - gitleaks, which the parity scenarios (tests/parity) run for real, failing where there is none. Its version is the
 #   one the parity recordings were made with.
 # - cargo-llvm-cov and cargo-nextest, with which the Test stage runs the Rust tests and measures their coverage
-#   (docs/quality-gate.md). cargo-llvm-cov also needs rustup's llvm-tools-preview component, which the Install stage
-#   adds itself.
+#   (docs/quality-gate.md). cargo-llvm-cov also needs rustup's llvm-tools component, which the agent image provides.
 #
 # Each is pinned to the sha256 of its linux x86_64 archive as its release publishes it: gitleaks's in
 # gitleaks_<version>_checksums.txt, cargo-nextest's in the .sha256 file beside the archive, and cargo-llvm-cov's as the

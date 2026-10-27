@@ -418,8 +418,8 @@ cargo llvm-cov nextest --locked --workspace --ignore-run-fail --profile ci --con
 - **Doctests** do not run: cargo-nextest has none, and cargo-llvm-cov runs them only on a nightly toolchain
   (`TODO.md`).
 - **Where the tools come from**: `ci/install-tools.sh` downloads cargo-llvm-cov and cargo-nextest, each pinned by
-  version and the sha256 of its release's archive, and the Install stage adds `llvm-tools-preview` with rustup, as
-  it adds clippy (see [What Jenkins needs](#what-jenkins-needs)).
+  version and the sha256 of its release's archive; rustup's `llvm-tools` component comes with the agent image, as
+  clippy does (see [What Jenkins needs](#what-jenkins-needs)).
 
 ### Whose rules judge a change
 
@@ -516,14 +516,14 @@ request](#a-build-of-main-judged-at-its-pull-request)).
   does not enforce that - a pushed branch's `Jenkinsfile` can ask for any label - so the restriction sits on
   the nodes, with the Job Restrictions plugin.
 - **`uv`, `git`, `shellcheck`, `actionlint` and clippy on the agent**: the Install stage runs `uv sync --frozen`,
-  and `uv` brings the Python of `.python-version`; clippy is rustup's `clippy` component of the Rust below, which
-  the Install stage adds with `rustup component add clippy`, so the Rust must come from rustup. The gate fails a
-  build that lacks a linter, and the tests that run the real clippy fail without it.
+  and `uv` brings the Python of `.python-version`; clippy and llvm-tools (which cargo-llvm-cov reads its coverage
+  data with) are rustup components of the Rust below, which the agent image must add: its rustup home is root's, so
+  a build cannot, and the Install stage fails naming a missing one. The gate fails a build that lacks a linter, and
+  the tests that run the real clippy fail without it.
 - **`curl`, `sha256sum`, `tar` and `openssl` on the agent**: the Install stage downloads, with `ci/install-tools.sh`,
   pinned releases of the gitleaks the parity scenarios (`tests/parity`) run and of cargo-llvm-cov and cargo-nextest,
   for the [Rust tests and coverage](#rust-tests-and-coverage), into the workspace's `.tools/bin`, which the Jenkinsfile
-  puts first on `PATH`; it adds rustup's `llvm-tools-preview` component, which cargo-llvm-cov reads its data with,
-  as it adds clippy. The scenarios make the fake PyPI's certificate with openssl. Without gitleaks or openssl the
+  puts first on `PATH`. The scenarios make the fake PyPI's certificate with openssl. Without gitleaks or openssl the
   scenarios fail, naming it.
 - **Node 20.19 or later and npm, Rust 1.90 or later, and Tauri 2's system packages on the agent**, for the Test stage's
   Rust tests, the UI stage's checks of the desktop app and the Package stage's `tauri build` of it. Debian 13's `nodejs`
