@@ -25,7 +25,6 @@ FLAG = re.compile(r"(?<![\w-])--[a-z][a-z0-9-]*")
 # Commands and flags the docs give that the orchestrator does not have, by (document, command, flag); a flag of
 # None stands for the command itself.
 NOT_IN_THE_PARSER = {
-    ("quality-gate.md", "gate", None): "main's gate before gate.py, which the Jenkinsfile's cutover fallback runs",
     ("roadmap.md", "resume", "--workflow"): "a planned feature, K",
     ("ui-options.md", "list", "--watch"): "a step of a staged plan, not built",
     ("ui-options.md", "web", None): "the assessment's name for the command, built as serve",
