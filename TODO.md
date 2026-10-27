@@ -147,11 +147,12 @@ was done.
   worktree it runs in. Found while writing loop-guards ticket 05; not reproduced. Closes with `_run_proof` passing
   the working tree as pytest's rootdir and conftest root, or the proofs copied into a scratch directory of the
   worktree for their run.
-- **`test-integrity` does not see an expected value held outside the assertion.** `expected-value-changed` compares
-  each assertion's literals (`_changed_literals`), so editing a golden constant the assertion names, such as the
-  tests' `GOLDEN_PR_BODY` or `GOLDEN_SUMMARY`, changes what is expected without a finding, while the same edit inside
-  the assertion is one. Found while adding the provenance trailers to the pull request body (loop-guards ticket 03).
-  Closes with the assertions' names resolved to module-level constants the change edits.
+- **`expected-value-changed` misses an inline literal's sign, type or structure.** `_changed_literals` pairs
+  assertions by `_shape` and compares `_literals`, which drops types and operators: `assert f() == -5` becoming
+  `== 5` changes the shape (no pair, no finding), and `== 1` becoming `== True` gives equal literal lists
+  (`[1] == [True]`). Raised by the cross-review of `test-integrity-constants` (F4, 2026-10-27): "`_literals`
+  equality misses sign, type and structure changes"; the constant path compares `_tree_fingerprint`s instead.
+  Closes with the inline path comparing typed literals and pairing a unary minus with its operand.
 - **A run that never reaches `done` keeps its local refs.** A locking step's commit stays under
   `refs/orchestrator/<key>/locked/` (`RunState.lock_ref`) until the run ends `done` (`Workflow._clean_up_locks`);
   `close` and `prune` do not delete them, so a failed run's locked snapshots are never collected by `git gc`. Closes
@@ -225,6 +226,15 @@ was done.
     `artifacts[relativePath]` in the result's `api/json` tree would halve the requests (F2).
   - No test covers a transient `CIError` between two reads, or a build that ends with a file other than the one read
     while it ran (F5).
+- **`test_invariants.py` and `test_docs.py` fail inside mutmut's copy.** Raised by cross-review 60 (2026-10-27), in
+  code PR #106 brought. Under mutmut, `SOURCE` is mutmut's mutated `orchestrator.py`: it imports `mutmut`, and each
+  mutated function has `__mutmut_orig` and `__mutmut_N` copies, so the stdlib-only test fails for any change to a
+  function, and the unredirected-header test for a change to `CI._request`, `RunRequestHandler.do_OPTIONS` or
+  `_has_token`. `test_docs.py` reads `README.md` and resolves links into the whole repo, while `mutants/` holds only
+  `source_paths`, `also_copy` and mutmut's defaults. Either makes mutmut's clean run fail, so surviving-mutants is
+  `not-run`, besides the Hypothesis health check above. Closes with those tests reading the working tree's files, or
+  deselected under mutmut, or with README.md and the linked files in `also_copy`. Also: `test_invariants.py`'s
+  `AnyJenkins` and `Answer` copy `FakeCI` and `FakeResponse`, and `ROOT` is defined three times (F4).
 - **`vague-names` does not split CamelCase.** `vague_names` matches a whole name or its last `_`-separated word,
   so `user_data` is found but a class `InfoManager` or `UserData` is not. Closes, if the run metrics show such names
   recur, with the last CamelCase word matched too.
@@ -360,6 +370,27 @@ was done.
   subdirectory.
 
 ## Fixed
+
+- **`test-integrity` does not see an expected value held outside the assertion.** `expected-value-changed` compares
+  each assertion's literals (`_changed_literals`), so editing a golden constant the assertion names, such as the
+  tests' `GOLDEN_PR_BODY` or `GOLDEN_SUMMARY`, changes what is expected without a finding, while the same edit inside
+  the assertion is one. Found while adding the provenance trailers to the pull request body (loop-guards ticket 03).
+  Closes with the assertions' names resolved to module-level constants the change edits.
+  Fixed (2026-10-27): when the code changed, `python_weakened_tests` reads each test file's constants at the base and
+  now (`_PythonConstants`: a name one module-level `Assign` or `AnnAssign` binds to an expression with no call, bound
+  nowhere else in the module's scope, as `_scope_bindings` counts with `_BINDING_NAME`), and `_changed_constants`
+  reports `expected-value-changed` once per kept test and constant of the base whose assertions read it on both sides,
+  bare or through the module's dotted name or a module-level import alias of it, when its expression changed other
+  than in layout, or it is no longer such a constant. A name the test binds anywhere (`_names_bound_in`) is never read
+  as the module's, so shadowing needs no resolving. Not closed: a constant whose name the test binds anywhere, even by
+  a binding that does nothing (`global NAME`, a comprehension target, a lambda parameter), is not checked, so such a
+  line hides an edited constant (the Reviewer sees it in the diff); a constant imported from another module or
+  computed by a call at the base; one built from other constants, whose edits are not seen; one reached through a
+  local (`expected = GOLDEN`) or a helper that asserts rather than named in the test's assertions; a fixture's return
+  value; an inline value moved into a new constant, which requirement 4 leaves out; a constant changed by a
+  module-level mutation (`GOLDEN["k"] = "b"`) or rebound through `global` in a function; and the module reached
+  through a relative import, an import inside the test, or an alias imported under a module-level `if` or `try` (only
+  a top-level import statement's alias counts as the module).
 
 - **Two empty or cut reads of a running build's quality.md were taken as the file.** `_gate_or_end`'s poll took
   two equal reads as whole, so a `quality.md` that `archiveArtifacts` left at 0 bytes, or cut inside its GATE line,

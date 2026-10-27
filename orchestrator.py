@@ -3975,10 +3975,13 @@ _SKIP_NAMES = frozenset({"skip", "skipIf", "skipUnless", "skipif", "skipTest", "
 def python_weakened_tests(files: list[ChangedTestFile], code_changed: bool) -> list[dict]:
     """WeakenedTestsDetector.find for Python: tests removed (renamed or moved ones match their old selves by
     body), skips and swallowed errors on added lines, fewer assertions in a test, and, when code_changed, an
-    assertion whose literals changed while the rest of it stayed."""
+    assertion whose literals changed while the rest of it stayed, or a constant of its file, as _PythonConstants
+    reads them, that a kept test's assertions name and the change edited, as _changed_constants says."""
     out: list[dict] = []
     before: list[_PythonTest] = []
     after: list[_PythonTest] = []
+    # Each parsed file's syntax trees, by its index in files: at the base, and in the working tree.
+    trees: dict[int, tuple[ast.Module, ast.Module]] = {}
     for k, f in enumerate(files):
         new_tree = _parse_python(f.after)
         if new_tree is None:
@@ -3986,10 +3989,15 @@ def python_weakened_tests(files: list[ChangedTestFile], code_changed: bool) -> l
                                 "does not parse as Python, so its tests were not checked.", severity="error"))
             continue
         # A base that does not parse has no tests to lose.
-        before += _python_tests(k, _parse_python(f.before) or ast.Module(body=[], type_ignores=[]))
+        base_tree = _parse_python(f.before) or ast.Module(body=[], type_ignores=[])
+        before += _python_tests(k, base_tree)
         after += _python_tests(k, new_tree)
+        trees[k] = base_tree, new_tree
         out += _python_added_weakenings(f.new_path, new_tree, f.added) if f.new_path else []
     out += _python_removed_tests(files, before, after)
+    # A file's constants at the base and now, read when a test of it is first compared.
+    constants = functools.cache(lambda k: (_PythonConstants.of(trees[k][0], files[k].old_path),
+                                           _PythonConstants.of(trees[k][1], files[k].new_path)))
     at_base = {t.key(): t for t in before}
     for t in after:
         if isinstance(t.node, ast.ClassDef) or t.key() not in at_base:
@@ -4004,6 +4012,7 @@ def python_weakened_tests(files: list[ChangedTestFile], code_changed: bool) -> l
                              f"`{t.name}`: `{_code(a)}` became `{_code(b)}`, "
                              f"in a change that also edits the code under test.", severity="error")
                     for a, b in _changed_literals(was, now)]
+            out += _changed_constants(path, t.name, (at_base[t.key()].node, was), (t.node, now), *constants(t.file))
     return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
 
 
@@ -4203,6 +4212,156 @@ def _changed_literals(was: list[ast.Assert | ast.Call],
                                      autojunk=False).get_matching_blocks()
     return [(was[i + d], now[j + d]) for i, j, n in blocks for d in range(n)
             if _literals(was[i + d]) != _literals(now[j + d])]
+
+
+@dataclass(frozen=True)
+class _PythonConstant:
+    """A module-level constant of a test file, as _PythonConstants reads it from one side of a ChangedTestFile."""
+    line: int  # the line its assignment starts on
+    fingerprint: str  # the expression assigned to it, as _tree_fingerprint writes it
+
+
+@dataclass(frozen=True)
+class _PythonConstants:
+    """The module-level constants of one side of a test file, and the dotted names its tests can reach it by.
+
+    A constant is a name that one module-level Assign or AnnAssign binds to an expression holding no call, and that
+    nothing else in the module's own scope binds, as _scope_bindings counts. A test reads one only where it binds
+    the name nowhere, as asserted says: shadowing is not resolved. Out of scope: a constant imported from another
+    module or computed by a call, whose value the file does not spell out; one built from other constants, whose
+    edits it does not see; one reached through a local or a helper rather than named in an assertion; one whose name
+    the test also binds; and a fixture's return value."""
+    by_name: dict[str, _PythonConstant]
+    # The dotted names a test can reach the module itself by, to name a constant as module.NAME: the module's dotted
+    # name and each suffix of it that ends at the file's own name, and the name a top-level import statement of one
+    # binds when nothing else in the module binds it.
+    module: frozenset[str]
+
+    @classmethod
+    def of(cls, tree: ast.Module, path: str | None) -> "_PythonConstants":
+        """The constants of tree, the test module at path, its dotted name taken from path; a path of None, a side
+        the change has no file on, leaves only the bare names to reach them by."""
+        bindings = _scope_bindings(tree.body)
+        by_name: dict[str, _PythonConstant] = {}
+        for stmt in tree.body:
+            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+                target, expression = stmt.targets[0], stmt.value
+            elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+                target, expression = stmt.target, stmt.value
+            else:
+                continue
+            if (isinstance(target, ast.Name) and bindings[target.id] == 1
+                    and not any(isinstance(n, ast.Call) for n in ast.walk(expression))):
+                by_name[target.id] = _PythonConstant(stmt.lineno, _tree_fingerprint(expression))
+        return cls(by_name, _module_spellings(tree, path, bindings))
+
+    def asserted(self, test: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
+                 assertions: list[ast.Assert | ast.Call]) -> dict[str, int]:
+        """Each name that assertions, test's as _python_assertions gives them, read as the module's, bare or as
+        module.NAME, to the line of the first that does, whether or not it is one of the constants. A name test binds
+        anywhere, as _names_bound_in says, is never the module's, bare or as module.NAME's first part."""
+        own = _names_bound_in(test)
+        out: dict[str, int] = {}
+        for assertion in assertions:
+            for n in ast.walk(assertion):
+                if isinstance(n, ast.Name) and n.id not in own:
+                    out.setdefault(n.id, assertion.lineno)
+                elif isinstance(n, ast.Attribute):
+                    root, dotted = _dotted_name(n.value) or (None, "")
+                    if root is not None and root.id not in own and dotted in self.module:
+                        out.setdefault(n.attr, assertion.lineno)
+        return out
+
+
+def _module_spellings(tree: ast.Module, path: str | None, bindings: collections.Counter[str]) -> frozenset[str]:
+    """The dotted names a test of tree, the module at path, can reach the module itself by, as
+    _PythonConstants.module holds them, given bindings, the module scope's as _scope_bindings counts them; none for a
+    path of None."""
+    parts = os.path.splitext(path)[0].split("/") if path else []
+    spellings = {".".join(parts[i:]) for i in range(len(parts))}
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Import):
+            spellings |= {a.asname for a in stmt.names if a.asname and a.name in spellings}
+        elif isinstance(stmt, ast.ImportFrom) and stmt.module and not stmt.level:
+            spellings |= {a.asname or a.name for a in stmt.names if f"{stmt.module}.{a.name}" in spellings}
+    return frozenset(n for n in spellings if "." in n or bindings[n] <= 1)
+
+
+def _changed_constants(path: str | None, name: str,
+                       was: tuple[ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef, list[ast.Assert | ast.Call]],
+                       now: tuple[ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef, list[ast.Assert | ast.Call]],
+                       base: _PythonConstants, current: _PythonConstants) -> list[dict]:
+    """The expected-value-changed findings, as GateCheck.find returns them, on the test called name that the change
+    kept in the file at path, for the constants its assertions name. was and now are the test at the base and in
+    the working tree, each as its def and its assertions as _python_assertions gives them; base and current are its
+    file's constants on the two sides. One finding per constant of the base that the assertions
+    of both sides name and that is now either no constant or one whose expression differs, other than in layout or
+    comments; it is at the first assertion now naming it."""
+    at_base = base.asserted(*was)
+    out = []
+    for constant, line in current.asserted(*now).items():
+        if constant not in at_base or constant not in base.by_name:
+            continue
+        defined = current.by_name.get(constant)
+        if defined is None:
+            where = f"line {base.by_name[constant].line} at the base"
+            what = "is no longer a constant of the file that this check can read"
+        elif defined.fingerprint != base.by_name[constant].fingerprint:
+            where, what = f"line {defined.line}", "changed"
+        else:
+            continue
+        out.append(_finding(path, line, "expected-value-changed",
+                            f"`{constant}` ({where}), which `{name}` names in its assertions, {what}, "
+                            f"in a change that also edits the code under test.", severity="error"))
+    return out
+
+
+# The nodes that open a scope of their own inside a module or a function.
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp,
+           ast.GeneratorExp)
+
+
+def _scope_bindings(nodes: Iterable[ast.AST]) -> collections.Counter[str]:
+    """How many times the scope whose code is nodes, a module's or a function's statements and parameters, binds each
+    name, a binding being what _BINDING_NAME says. A def's or class's name counts, but what it binds inside does not,
+    nor what a lambda or a comprehension binds, a := in a comprehension included, though Python binds that in the
+    enclosing scope; an attribute assigned to binds no name."""
+    out: collections.Counter[str] = collections.Counter()
+    stack = list(nodes)
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, ast.Attribute):
+            name = _BINDING_NAME.get(type(node), lambda node: None)(node)
+            if name:
+                out[name] += 1
+        if not isinstance(node, _SCOPES):
+            stack.extend(ast.iter_child_nodes(node))
+    return out
+
+
+def _dotted_name(node: ast.AST) -> tuple[ast.Name, str] | None:
+    """When node is a Name or a chain of attributes on one, that Name and node as a dotted name, such as a.b.c; else
+    None."""
+    attrs = []
+    while isinstance(node, ast.Attribute):
+        attrs.append(node.attr)
+        node = node.value
+    return (node, ".".join([node.id, *reversed(attrs)])) if isinstance(node, ast.Name) else None
+
+
+def _names_bound_in(node: ast.AST) -> set[str]:
+    """Every name node binds anywhere inside it, whatever the scope: by assignment of any kind, as a parameter of it
+    or of a def or lambda in it, by import, as a for, with, except, comprehension or match target, by def or class,
+    or by naming it in global, nonlocal or del. An attribute assigned to binds no name."""
+    out: set[str] = set()
+    for n in ast.walk(node):
+        if isinstance(n, (ast.Global, ast.Nonlocal)):
+            out.update(n.names)
+        elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Del):
+            out.add(n.id)
+        elif not isinstance(n, ast.Attribute) and (name := _BINDING_NAME.get(type(n), lambda n: None)(n)):
+            out.add(name)
+    return out
 
 
 def _shape(node: ast.AST) -> str:

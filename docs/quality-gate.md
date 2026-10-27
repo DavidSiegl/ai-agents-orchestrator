@@ -75,7 +75,18 @@ change cannot weaken its tests unseen. Each of these is a finding:
 - `swallowed-error`: a bare `except:`, or an `except Exception:` that does nothing, on an added line;
 - `expected-value-changed`: an assertion whose literals changed while the rest of it stayed, in a change that also
   edits code outside the tests: the "update the expected value to match the output" move. The finding names the
-  assertion before and after. It is one to weigh, like `removed-test`, since the spec may ask for the new value.
+  assertion before and after. An expected value held in a constant counts too: when a kept test's assertions name a
+  constant of its own file at the base and still name it, bare or as `module.NAME` (the module by its dotted name or a
+  module-level import alias of it), and the constant's expression changed other than in layout, or it is no longer a
+  constant, that is one finding per constant and test, at the test's first assertion naming it, naming the constant
+  and its line. A constant whose name the test binds anywhere, even by a binding that does nothing (`global NAME`, a
+  comprehension target, a lambda parameter), is not checked, so such a line hides an edited constant; the Reviewer
+  sees it in the diff. Neither is a `module.NAME` whose `module` the test binds. Only a top-level import statement's
+  alias counts as the module; one imported under a module-level `if` or `try` does not. A constant is a module-level
+  assignment of one name, bound nowhere else in the module's scope, to an expression with no call in it. One the
+  change adds, one imported from another module or computed by a call, one reached through a local or a helper, an
+  edit to another constant one is built from, and a fixture's return value do not count. It is one to weigh, like
+  `removed-test`, since the spec may ask for the new value.
 
 It reads Python only; another language is a `WeakenedTestsDetector` beside the Python one in
 `WEAKENED_TESTS_DETECTORS`.
@@ -585,8 +596,9 @@ becomes `/job/` in its URL, so `AI-Agents-Orchestrator/py-ai-agents-orchestrator
 
 **Once the Gate stage has archived `quality.md`**, live or resumed, the round takes it without waiting for the stages
 after Gate, which cannot change its verdict: on a build that has ended, at the first read; on one still running, once
-two reads at least a poll interval apart agree, since Jenkins serves an artifact while it is still being copied into
-place; a copy that stalls that long and then resumes would defeat this. Whatever the build's result, that file is the
+two reads at least a poll interval apart agree and hold a whole non-blank line, since Jenkins serves an artifact while
+it is still being copied into place; a copy that stalls that long past its first line and then resumes would defeat
+this. Whatever the build's result, that file is the
 round's, with [the orchestrator's checks](#the-orchestrators-checks) added and a line under its `GATE:` line naming the
 build, the snapshot and the round, and saying that the build ended with its result or was still running. The round then
 deletes its branch, which the build checked out in its first stage; a pipeline that fetches `GIT_REF` again after Gate
