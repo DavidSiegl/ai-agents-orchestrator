@@ -837,10 +837,9 @@ q ≥ 1, where the Builder is answering quality round q. `resume` also takes `--
 description (above) names `HEAD`'s tree, the merge base of `HEAD` and `origin/BRANCH` as its parent, and a `main`
 commit at which `Jenkinsfile`, `gate.py`, `orchestrator.py`, `pyproject.toml`, `uv.lock` and `.python-version` are
 as in `HEAD` and at that merge base. Such a build ran the parity scenarios (`tests/parity`) only if the change
-touched what they judge (the Jenkinsfile's Test stage), where a pull request build always runs them; with the engine,
-`pyproject.toml`, `uv.lock` and `.python-version` the same, only the harness, its recordings and `examples/` can
-make the two differ, and those make the quality build run them too. Otherwise, and on any error, such as Jenkins unreachable, an HTTP error or a
-commit it cannot fetch, it exits 1 with one line on standard error naming the condition the closest build fails, or
+touched what they depend on, where a pull request build always runs them; every path that could make the two differ
+makes the quality build run them too (the Jenkinsfile's Test stage lists them). Otherwise, and on any error, such as
+Jenkins unreachable, an HTTP error or a commit it cannot fetch, it exits 1 with one line on standard error naming the condition the closest build fails, or
 what stopped it asking. It needs the same `JENKINS_*` credentials as `--quality-gate`. No build calls it yet.
 
 ### Turning the gate on or off on resume
