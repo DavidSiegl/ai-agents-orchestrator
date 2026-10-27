@@ -5,6 +5,8 @@ Each failure names the document and line that is wrong, as `file:line: what`.
 
 import argparse
 import ast
+import functools
+import os
 import pathlib
 import re
 import unittest
@@ -45,6 +47,7 @@ OTHER_PROGRAMS_NAMES = {
 }
 
 
+@functools.cache
 def cli_commands() -> dict[str, set[str]]:
     """Each command of the parser main builds, by name, with the long flags it takes; hidden ones left out."""
     class Built(Exception):
@@ -81,7 +84,10 @@ def invocations(path: pathlib.Path, commands):
     being run: in a code span or a fenced line, after `orchestrator.py`, or opening a code span, as in `run --spec`.
     Shell comments, and what follows a pipe, `&&` or `;`, are left out."""
     for n, line, fenced in prose_lines(path):
-        texts = [line] if fenced and not line.lstrip().startswith("#") else re.findall(r"`([^`]+)`", line)
+        if fenced:
+            texts = [] if line.lstrip().startswith("#") else [line]
+        else:
+            texts = re.findall(r"`([^`]+)`", line)
         for text in (re.split(r"\||&&|;|\s#", t)[0] for t in texts):
             for m in re.finditer(r"orchestrator\.py\s+([a-z][a-z-]*)(.*)", text):
                 yield n, m.group(1), m.group(2)
@@ -129,6 +135,7 @@ def orchestrator_names() -> tuple[set[str], set[str], set[str]]:
     return set(defined(tree.body)), members, strings
 
 
+@functools.cache
 def github_anchors(path: pathlib.Path) -> set[str]:
     """The #anchors GitHub gives the headings of a markdown file: lowercased, punctuation dropped, spaces as
     hyphens, and -1, -2, ... after a repeated one."""
@@ -169,8 +176,12 @@ class TestDocs(unittest.TestCase):
         for n, flags, description in rows:
             # A description that opens with commands, as in "`run` and `drain`:" or "`run` only:", names the
             # commands that take the flag; "only" says no other one does.
-            m = re.match(r"((?:`[a-z-]+`(?:, | and )?)+)( only)?:", description)
+            m = re.match(r"((?:`[a-z-]+`(?:,? and |,? or |, |/)?)+)( only)?:", description)
             scope = set(re.findall(r"`([a-z-]+)`", m.group(1))) if m else set()
+            opening = re.match(r"`([a-z-]+)`", description)
+            if not m and opening and opening.group(1) in commands:
+                errors.append(f"README.md:{n}: the row opens with the command {opening.group(1)}, but not as a "
+                              f"list of commands and a colon, which this test reads")
             for flag in flags:
                 taking = {name for name, defined in commands.items() if flag in defined}
                 if not taking:
@@ -184,7 +195,8 @@ class TestDocs(unittest.TestCase):
         self.assertNoErrors(errors)
 
     def test_each_flag_is_documented(self):
-        # In the README or, for a command the README's table leaves out, such as gate, in docs/.
+        # In the README or, for a command the README's table leaves out, such as gate, in docs/. A flag counts as
+        # named wherever its name appears, said of any command or program.
         text = "\n".join(doc.read_text() for doc in DOCS)
         documented = set(FLAG.findall(text))
         missing = {f"{name} {flag}" for name, defined in cli_commands().items() for flag in defined - {"--help"}
@@ -193,6 +205,8 @@ class TestDocs(unittest.TestCase):
 
     def test_the_names_the_docs_give_exist_in_the_orchestrator(self):
         names, members, strings = orchestrator_names()
+        known = names | strings
+        classes = {member.partition(".")[0] for member in members}
         methods = {member.partition(".")[2] for member in members}
         errors = []
         for doc in DOCS:
@@ -201,13 +215,15 @@ class TestDocs(unittest.TestCase):
                 for code in re.findall(r"`([^`]+)`", line):
                     # A linter's rule code, such as C901 or BLE001, is not a name.
                     if re.fullmatch(r"[A-Z][A-Z0-9_]+", code) and not re.fullmatch(r"[A-Z]+[0-9]+", code):
-                        if code not in names | strings and code not in OTHER_PROGRAMS_NAMES:
+                        if code not in known and code not in OTHER_PROGRAMS_NAMES:
                             errors.append(f"{where}: orchestrator.py has no {code}")
                     elif m := re.fullmatch(r"(\w+)\(\)", code):
                         if m.group(1) not in names | methods:
                             errors.append(f"{where}: orchestrator.py has no function or method {code}")
-                    # Class.member, not CONSTANT.md, a prompt's file.
-                    elif (m := re.fullmatch(r"([A-Z]\w*[a-z]\w*)\.([a-z_]\w*)(\(\))?", code)) \
+                    # Class.member: a capitalized name with a lowercase letter, or an all-caps one that is a class
+                    # of orchestrator.py, such as CI; not CONSTANT.md, a prompt's file.
+                    elif (m := re.fullmatch(r"([A-Z]\w*)\.([a-z_]\w*)(\(\))?", code)) \
+                            and (m.group(1) in classes or re.search("[a-z]", m.group(1))) \
                             and f"{m.group(1)}.{m.group(2)}" not in members:
                         errors.append(f"{where}: orchestrator.py has no {m.group(1)}.{m.group(2)}")
         self.assertNoErrors(errors)
@@ -223,10 +239,13 @@ class TestDocs(unittest.TestCase):
                     if re.match(r"[a-z][a-z0-9+.-]*:", target):  # a URL, such as https: or mailto:
                         continue
                     path, _, anchor = target.partition("#")
-                    dest = (doc.parent / urllib.parse.unquote(path)).resolve() if path else doc
+                    # GitHub takes a path that starts with / from the repository's root.
+                    base = ROOT if path.startswith("/") else doc.parent
+                    dest = (base / urllib.parse.unquote(path.lstrip("/"))).resolve() if path else doc
                     where = f"{doc.relative_to(ROOT)}:{n}"
                     if not dest.exists():
                         errors.append(f"{where}: {target} names no file")
-                    elif anchor and (dest.suffix != ".md" or anchor not in github_anchors(dest)):
-                        errors.append(f"{where}: {target} names no heading of {dest.relative_to(ROOT)}")
+                    # The anchor of a file other than markdown, such as #L10 of a source file, names a line.
+                    elif anchor and dest.suffix == ".md" and anchor not in github_anchors(dest):
+                        errors.append(f"{where}: {target} names no heading of {os.path.relpath(dest, ROOT)}")
         self.assertNoErrors(errors)
