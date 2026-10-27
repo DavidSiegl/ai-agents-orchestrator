@@ -199,6 +199,13 @@ was done.
   Twenty runs here under the load of a parallel suite, with SIGINT ignored, all passed. A rerun that hangs gives a
   `not-rerun` warning, not a wrong verdict. Closes when the run that waits is caught, e.g. with each pytest run's
   wall time and exit in the test's failure message, and its cause fixed.
+- **`tests/test_docs.py` gets the parser by patching `argparse.ArgumentParser.parse_args`.** `parse_args` builds
+  its parser inline and returns only the parsed arguments, so `cli_commands` calls it with `parse_args` patched
+  class-wide to hand the parser back, and reads argparse's private `_actions` and `_SubParsersAction`. Raised by
+  cross-review 56 (F8, 2026-10-27): "Breaks if `parse_args` switches to `parse_known_args` or parses twice". It
+  fails loudly then (`parse_args parsed without its parser's parse_args`). Closes with an
+  `orchestrator.build_parser()` that `parse_args` calls and the test reads, an orchestrator.py change and so a
+  version bump.
 - **README and docs left over from the README rewrite (PR #90).** Raised by cross-review 50 (2026-10-26), in what
   PR #90 brought, not in code:
   - The Jenkins job path still uses the old folder name, as
