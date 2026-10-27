@@ -1,19 +1,26 @@
 # Quality gate
 
-How Jenkins judges this repository with `orchestrator.py gate`, and how `orchestrator.py run --quality-gate` uses
-it: the [gate](#the-gate) itself, the [Jenkins setup](#jenkins-setup), the
+How Jenkins judges this repository with `gate.py`, and how `orchestrator.py run --quality-gate` uses
+it: the [gate](#the-gate) itself, [running it in another project](#running-the-gate-in-another-project), the
+[quality file as a contract](#the-quality-file-as-a-contract) between the gate and the orchestrator, the
+[Jenkins setup](#jenkins-setup), the
 [credentials and permissions](#credentials-and-permissions) the orchestrator needs, the
 [orchestrator loop](#orchestrator-loop), and the [orchestrator's own checks](#the-orchestrators-checks), which
 need the run's spec.
 
 ## The gate
 
-`orchestrator.py gate --base REV` judges the change from `REV` to the working tree and writes the quality file:
+`gate.py --base REV` judges the change from `REV` to the working tree and writes the quality file:
 
 ```bash
-uv run pytest --cov=orchestrator --cov-branch --cov-report=xml --junitxml=test-results.xml
-uv run python orchestrator.py gate --base main --tests test-results.xml --coverage coverage.xml --out quality.md
+uv run pytest --cov=orchestrator --cov=gate --cov-branch --cov-report=xml --junitxml=test-results.xml
+uv run python gate.py --base main --tests test-results.xml --coverage coverage.xml --out quality.md
 ```
+
+It exits 0 when the quality file's first line is `GATE: OK`, 1 for `GATE: ERROR`, and 2 (`EXIT_GATE_UNJUDGED`)
+when it could not judge the change, having written nothing. `gate.py` is a program of its own beside
+`orchestrator.py`, and the two share no code: the orchestrator imports nothing from it and reads only the file it
+writes ([the quality file as a contract](#the-quality-file-as-a-contract)).
 
 It runs five linters over the files git tracks, each over the files it reads, and keeps only the findings on
 lines the change adds, and the lineless ones on files it touches. Findings on older lines are counted, never
@@ -22,7 +29,7 @@ listed and never held against the change, so the gate judges the change rather t
 | Linter | Files | Rules |
 |---|---|---|
 | ruff | `*.py` | `[tool.ruff.lint]` in `pyproject.toml` |
-| mypy | `[tool.mypy] files`, `orchestrator.py` | `[tool.mypy]` |
+| mypy | `[tool.mypy] files`, here `orchestrator.py` and `gate.py` | `[tool.mypy]` |
 | pymarkdown | `*.md` | `[tool.pymarkdown]` |
 | shellcheck | `*.sh` | its defaults |
 | actionlint | `.github/workflows/*.yml` | its defaults |
@@ -37,7 +44,7 @@ selected. `D105` and `D107` are not, since they fire on nearly all of `main`: it
 metrics: the findings that recur.
 
 ruff, mypy and pymarkdownlnt are in uv's `dev` group, so `uv run` puts them on `PATH`; shellcheck and actionlint
-come from the Jenkins agent image. The orchestrator itself stays stdlib-only: the gate runs them as processes.
+come from the Jenkins agent image. `gate.py`, like the orchestrator, stays stdlib-only: it runs them as processes.
 
 After the linters come the checks `gate_checks` gives, which judge what the change did rather than how the tree
 reads. Each is a `GateCheck` that either fails the gate or only reports: a failing check's findings are issues,
@@ -102,7 +109,7 @@ sequence of like boolean operators and recursion, and one more for each level of
 Recursion is a function that calls itself, or one on a cycle of calls through other functions of its module, each of
 which then scores the point. Calls are followed by name, as Python's scopes resolve them, so a call to a parameter
 or a local of the same name is not one to the module's function; not through an alias, nor into another module. The
-comment above `COGNITIVE_COMPLEXITY_LIMIT` in `orchestrator.py` says how each Python construct maps to the paper's
+comment above `COGNITIVE_COMPLEXITY_LIMIT` in `gate.py` says how each Python construct maps to the paper's
 rules. Each of these is a finding:
 
 - `over-limit`: a function over 15, at its `def` line, when it is new or the change raised its score, as
@@ -320,7 +327,7 @@ ends a line at is still the failed condition above. A test file that `test-integ
 A file whose name is not UTF-8 is read the same way, and the quality file writes each byte it cannot decode as
 `\xNN`. By the same convention it writes a character that ends a line in some reader, such as `\r`, `\x85` or
 U+2028, as `\x0d`, `\x85` or `\u2028`, wherever it appears in a list item or a name, so that each item stays on
-its line and reads the same in every round; `one_line` in `orchestrator.py` is where that convention lives. Not
+its line and reads the same in every round; `one_line` in `gate.py` is where that convention lives. Not
 every tool can read such a name:
 
 - ruff prints it with U+FFFD for each such byte, which the gate matches to the tracked file, so ruff's findings
@@ -354,7 +361,7 @@ first, at most 50 in all, then a count:
 ### Whose rules judge a change
 
 Every linter gets its rules from one `pyproject.toml`: the tree's own, or the one `--config` names. A quality
-build passes `main`'s, and runs `main`'s `orchestrator.py`, so a change cannot loosen the rules it is judged by.
+build passes `main`'s, and runs `main`'s `gate.py`, so a change cannot loosen the rules it is judged by.
 shellcheck and actionlint have no table there; they run on their defaults, with `--norc` and an empty config file
 so that a `.shellcheckrc` or `.github/actionlint.yaml` added to the tree cannot loosen them either. What a
 snapshot still controls is visible in its quality file: tool versions through `uv.lock` (noted under build
@@ -371,17 +378,68 @@ a change that adds or edits files there is listed under build configuration.
 The rule sets were tuned until `main` gave a short list of real findings: ruff's defaults plus bugbear,
 simplifications, pyupgrade, bandit, cyclomatic complexity (`C90`, `max-complexity = 15`; nesting is the
 `cognitive-complexity` check's) and pylint's errors and warnings, with the fake tokens, paths and fixtures of `tests/`
-exempt; mypy at its default strictness on `orchestrator.py`; pymarkdown without the line-length and inline-HTML rules.
-Only lines a change adds count, so what `main` already has does not block.
+exempt; mypy at its default strictness on `orchestrator.py` and `gate.py`; pymarkdown without the line-length and
+inline-HTML rules. Only lines a change adds count, so what `main` already has does not block.
+
+## Running the gate in another project
+
+`gate.py` is one file and imports only the standard library, so another Python project runs it as this one does:
+take the file from a commit of this repository (`git show main:gate.py > gate.py`) and run it in the project's
+working tree, with the project's own Python:
+
+```bash
+uv run pytest --cov=<package> --cov-branch --cov-report=xml --junitxml=test-results.xml
+uv run python path/to/gate.py --base main --tests test-results.xml --coverage coverage.xml --out quality.md
+```
+
+It takes what it runs from that project, so the project's dev dependencies hold them: ruff, mypy and pymarkdownlnt
+from `PATH`, which `uv run` points at the project's environment, and pytest, pytest-randomly and mutmut through the
+Python that runs `gate.py`, for the flaky-tests, passes-at-base and surviving-mutants checks. shellcheck and
+actionlint come from the machine, and only for a project that tracks shell scripts or GitHub workflows. A linter
+that is missing is a failed condition naming it; a check that cannot run is one of its own findings. The rules come
+from the project's `pyproject.toml`, or the one `--config` names, as [whose rules judge a
+change](#whose-rules-judge-a-change) says. Which files the test-integrity check takes for tests is fixed for now:
+`tests/**`, `test_*.py` and `*_test.py`.
+
+## The quality file as a contract
+
+The gate writes the quality file and the orchestrator reads it back: from Jenkins after each quality round, to
+decide whether the gate passed, to compare one round's failures with the last (`gate_failures`, and
+`GateFailures.repeats` for a stuck loop), and to amend it with its own checks (`judge_run`). Neither imports the
+other. Each keeps its own copy of the parts below, the gate's in `gate.py` and the orchestrator's beside
+`parse_gate` in `orchestrator.py`, and `TestQualityFileContract` checks that what `quality_report` writes, over
+every section it can write, the orchestrator reads as written, and still does after `judge_run`'s amendments. A
+change to one of these parts changes both copies.
+
+- **The gate line.** The first non-blank line is `GATE: OK` or `GATE: ERROR`; the reader tolerates Markdown
+  emphasis around it. Only the orchestrator writes `GATE: BUILD_FAILED`, for a build that ended before its Gate
+  stage, and `GATE: LEAK`, for a snapshot it did not push.
+- **Sections.** Each starts with a level-2 heading, a line that starts with `##` and a space, and runs to the next.
+- **Failed conditions.** Under `## Failed conditions`, one bullet per condition, as the file words it.
+- **Numbered findings.** Issues and findings to weigh, numbered as one list over the whole file, at most
+  `QUALITY_ISSUE_LIMIT` (50), the rest counted. Each is a line `N.`, then where, then its severity, its rule, a
+  colon and its message; where is the path and line in backticks, as `` `a.py:3` ``, the path and
+  `(the whole file)` in backticks for a finding on no line, or `The change as a whole:` for one on no file. The
+  rule's first word names the check, or the linter, that raised it.
+- **Findings to weigh.** In a section, the line `These do not fail the gate. Fix each, or say in your report why
+  it should stand.` (`TO_WEIGH_NOTE`) comes before its findings to weigh; the numbered findings above it fail the
+  gate.
+- **Failing tests.** Under `## Failing tests`, one bullet per test, `` - `name`: detail ``.
+- **One line per item.** A character that ends a line in some reader, such as `\r` or U+2028, is written as an
+  escape, `\x0d` or `\u2028`, in every list item and name (`one_line`), so each item is read back as the one line
+  it was written as.
+
+Everything else in the file, such as the intro, coverage, suppressions and build configuration, is for the Builder
+and the Reviewer to read; the orchestrator passes it on as it is.
 
 ## Jenkins setup
 
-One `Jenkinsfile` serves two jobs. Every build installs, tests with branch coverage of `orchestrator`, checks the
-desktop app, runs the gate and archives `quality.md`; a pull request or `main` build then builds the Linux binary
-and desktop app, which a quality build skips (the `Jenkinsfile`'s Package stage says why), and a build of `main`
-that gets that far also releases. A build of `main` whose tree a pull request build already judged skips the
-tests, the desktop app's checks and the gate (see
-[A build of main judged at its pull request](#a-build-of-main-judged-at-its-pull-request)).
+One `Jenkinsfile` serves two jobs. Every build installs, tests with branch coverage of `orchestrator` and `gate`,
+checks the desktop app, runs the gate and archives `quality.md`; a pull request or `main` build then builds the
+Linux binary and desktop app, which a quality build skips (the `Jenkinsfile`'s Package stage says why), and a build
+of `main` that gets that far also releases. A build of `main` whose tree a pull request build already judged skips
+the tests, the desktop app's checks and the gate (see [A build of main judged at its pull
+request](#a-build-of-main-judged-at-its-pull-request)).
 
 ### What Jenkins needs
 
@@ -440,7 +498,7 @@ empty `GIT_REF`, before it accepts `buildWithParameters`.
 
 | Build | `--base` | Gate and rules |
 |---|---|---|
-| Quality build (`GIT_REF` set) | `HEAD^`: the snapshot's only parent is the run's base | `main`'s `orchestrator.py` and `pyproject.toml`, from the `origin/main` commit its description names (below) |
+| Quality build (`GIT_REF` set) | `HEAD^`: the snapshot's only parent is the run's base | `main`'s `gate.py` and `pyproject.toml`, from the `origin/main` commit its description names (below); for a commit from before `gate.py`, its `orchestrator.py gate` |
 | Pull request (`CHANGE_TARGET` set) | the merge base with the target branch, fetched first | its own, `Jenkinsfile` included (below) |
 | `main` | the last successful build's commit, else `HEAD^1` | its own; none when judged at its pull request (below) |
 
@@ -748,10 +806,10 @@ q ≥ 1, where the Builder is answering quality round q. `resume` also takes `--
 `judged-in-quality --quality-gate JOB --target BRANCH` exits 0 when a quality build of `JOB` already judged
 `HEAD` as a pull request's build into `BRANCH` would: among the builds Jenkins keeps, it ended SUCCESS, and its
 description (above) names `HEAD`'s tree, the merge base of `HEAD` and `origin/BRANCH` as its parent, and a `main`
-commit at which `Jenkinsfile`, `orchestrator.py`, `pyproject.toml`, `uv.lock` and `.python-version` are as in
-`HEAD` and at that merge base. Otherwise, and on any error, such as Jenkins unreachable, an HTTP error or a
-commit it cannot fetch, it exits 1 with one line on standard error naming the condition the closest build fails,
-or what stopped it asking. It needs the same `JENKINS_*` credentials as `--quality-gate`. No build calls it yet.
+commit at which `Jenkinsfile`, `gate.py`, `orchestrator.py`, `pyproject.toml`, `uv.lock` and `.python-version` are
+as in `HEAD` and at that merge base. Otherwise, and on any error, such as Jenkins unreachable, an HTTP error or a
+commit it cannot fetch, it exits 1 with one line on standard error naming the condition the closest build fails, or
+what stopped it asking. It needs the same `JENKINS_*` credentials as `--quality-gate`. No build calls it yet.
 
 ### Turning the gate on or off on resume
 

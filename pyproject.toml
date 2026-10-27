@@ -25,9 +25,9 @@ dev = [
     "ruff>=0.17.2",
 ]
 
-# The rules `orchestrator.py gate` judges a change by. In a quality build the gate reads them from main's copy of
-# this file (--config), so a change cannot loosen the rules it is judged by. Only findings on lines a change adds
-# count, so the findings already on main do not block.
+# The rules `gate.py` judges a change by. In a quality build the gate reads them from main's copy of this file
+# (--config), so a change cannot loosen the rules it is judged by. Only findings on lines a change adds count, so the
+# findings already on main do not block.
 
 [tool.ruff.lint]
 # The defaults, plus bugbear, simplifications, pyupgrade, bandit's security checks, complexity and pylint's errors
@@ -51,14 +51,14 @@ max-complexity = 15
 "tests/**" = ["S101", "S105", "S106", "S108", "RUF059", "RUF012", "C408", "C901", "D1"]
 
 [tool.mypy]
-# The tests are untyped by design; the orchestrator is the typed surface.
-files = ["orchestrator.py"]
+# The tests are untyped by design; the orchestrator and the gate are the typed surface.
+files = ["orchestrator.py", "gate.py"]
 
 [tool.mutmut]
-# What `orchestrator.py gate`'s surviving-mutants check runs mutmut by, on a copy of the tree in which only the functions
-# a change edits can be mutated (docs/quality-gate.md). The tests read examples/ and docs/ beside the code; mutmut runs
-# them in a directory of its own, which holds only what is listed here.
-source_paths = ["orchestrator.py"]
+# What `gate.py`'s surviving-mutants check runs mutmut by, on a copy of the tree in which only the functions a change
+# edits can be mutated (docs/quality-gate.md). The tests read examples/ and docs/ beside the code; mutmut runs them in
+# a directory of its own, which holds only what is listed here.
+source_paths = ["orchestrator.py", "gate.py"]
 pytest_add_cli_args_test_selection = ["tests/"]
 also_copy = ["examples/", "docs/"]
 # argparse's help texts, which no test reads word for word. mutmut matches each pattern against each source line and

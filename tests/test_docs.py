@@ -13,6 +13,7 @@ import unittest
 import urllib.parse
 from unittest.mock import patch
 
+import gate
 import orchestrator
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -24,12 +25,13 @@ FLAG = re.compile(r"(?<![\w-])--[a-z][a-z0-9-]*")
 # Commands and flags the docs give that the orchestrator does not have, by (document, command, flag); a flag of
 # None stands for the command itself.
 NOT_IN_THE_PARSER = {
+    ("quality-gate.md", "gate", None): "main's gate before gate.py, which the Jenkinsfile's cutover fallback runs",
     ("roadmap.md", "resume", "--workflow"): "a planned feature, K",
     ("ui-options.md", "list", "--watch"): "a step of a staged plan, not built",
     ("ui-options.md", "web", None): "the assessment's name for the command, built as serve",
 }
 
-# Backticked ALL_CAPS names the docs give that are not orchestrator.py's, with where they come from.
+# Backticked ALL_CAPS names the docs give that are neither orchestrator.py's nor gate.py's, with where they come from.
 OTHER_PROGRAMS_NAMES = {
     "PATH": "an environment variable",
     "PWD": "an environment variable",
@@ -47,9 +49,8 @@ OTHER_PROGRAMS_NAMES = {
 }
 
 
-@functools.cache
-def cli_commands() -> dict[str, set[str]]:
-    """Each command of the parser main builds, by name, with the long flags it takes; hidden ones left out."""
+def built_parser(parse_args, argv) -> argparse.ArgumentParser:
+    """The parser parse_args builds to parse argv, caught before it parses."""
     class Built(Exception):
         pass
 
@@ -58,15 +59,25 @@ def cli_commands() -> dict[str, set[str]]:
 
     with patch.object(argparse.ArgumentParser, "parse_args", autospec=True, side_effect=stop):
         try:
-            orchestrator.parse_args(["list"])
+            parse_args(argv)
         except Built as e:
-            parser = e.args[0]
-        else:
-            raise AssertionError("parse_args parsed without its parser's parse_args")
+            return e.args[0]
+    raise AssertionError(f"{parse_args.__module__}.parse_args parsed without its parser's parse_args")
+
+
+def long_flags(parser: argparse.ArgumentParser) -> set[str]:
+    """The long flags parser takes; hidden ones left out."""
+    return {o for a in parser._actions if a.help != argparse.SUPPRESS for o in a.option_strings if o.startswith("--")}
+
+
+@functools.cache
+def cli_commands() -> dict[str, set[str]]:
+    """Each command of the parser main builds, by name, with the long flags it takes, and gate.py's, a program of
+    its own, as the command "gate.py"."""
+    parser = built_parser(orchestrator.parse_args, ["list"])
     (commands,) = [a.choices for a in parser._actions if isinstance(a, argparse._SubParsersAction)]
-    return {name: {o for a in sub._actions if a.help != argparse.SUPPRESS for o in a.option_strings
-                   if o.startswith("--")}
-            for name, sub in commands.items()}
+    return {**{name: long_flags(sub) for name, sub in commands.items()},
+            "gate.py": long_flags(built_parser(gate.parse_args, ["--base", "main"]))}
 
 
 def prose_lines(path: pathlib.Path):
@@ -81,8 +92,9 @@ def prose_lines(path: pathlib.Path):
 
 def invocations(path: pathlib.Path, commands):
     """(line number, command, the text of its arguments) for each command of the orchestrator's that path shows
-    being run: in a code span or a fenced line, after `orchestrator.py`, or opening a code span, as in `run --spec`.
-    Shell comments, and what follows a pipe, `&&` or `;`, are left out."""
+    being run: in a code span or a fenced line, after `orchestrator.py`, or opening a code span, as in `run --spec`;
+    and gate.py, as the command "gate.py", wherever it is followed by a flag. Shell comments, and what follows a
+    pipe, `&&` or `;`, are left out."""
     for n, line, fenced in prose_lines(path):
         if fenced:
             texts = [] if line.lstrip().startswith("#") else [line]
@@ -91,6 +103,8 @@ def invocations(path: pathlib.Path, commands):
         for text in (re.split(r"\||&&|;|\s#", t)[0] for t in texts):
             for m in re.finditer(r"orchestrator\.py\s+([a-z][a-z-]*)(.*)", text):
                 yield n, m.group(1), m.group(2)
+            for m in re.finditer(r"\bgate\.py(\s+--.*)", text):
+                yield n, "gate.py", m.group(1)
             words = text.split()
             if not fenced and len(words) > 1 and words[0] in commands and words[1].startswith("--"):
                 yield n, words[0], text[len(words[0]):]
@@ -111,10 +125,11 @@ def flag_table(path: pathlib.Path):
     return rows
 
 
-def orchestrator_names() -> tuple[set[str], set[str], set[str]]:
-    """The names orchestrator.py defines: at module level; as Class.member, an attribute self is given included;
-    and every string constant, which is how it names an environment variable or a Jenkins parameter."""
-    tree = ast.parse((ROOT / "orchestrator.py").read_text())
+def source_names() -> tuple[set[str], set[str], set[str]]:
+    """The names orchestrator.py and gate.py define: at module level; as Class.member, an attribute self is given
+    included; and every string constant, which is how they name an environment variable or a Jenkins parameter."""
+    tree = ast.Module(body=[node for source in ("orchestrator.py", "gate.py")
+                            for node in ast.parse((ROOT / source).read_text()).body], type_ignores=[])
 
     def defined(body):
         for node in body:
@@ -195,7 +210,7 @@ class TestDocs(unittest.TestCase):
         self.assertNoErrors(errors)
 
     def test_each_flag_is_documented(self):
-        # In the README or, for a command the README's table leaves out, such as gate, in docs/. A flag counts as
+        # In the README or, for a command the README's table leaves out, such as gate.py, in docs/. A flag counts as
         # named wherever its name appears, said of any command or program.
         text = "\n".join(doc.read_text() for doc in DOCS)
         documented = set(FLAG.findall(text))
@@ -204,7 +219,7 @@ class TestDocs(unittest.TestCase):
         self.assertEqual(missing, set(), "flags that neither README.md nor docs/*.md name")
 
     def test_the_names_the_docs_give_exist_in_the_orchestrator(self):
-        names, members, strings = orchestrator_names()
+        names, members, strings = source_names()
         known = names | strings
         classes = {member.partition(".")[0] for member in members}
         methods = {member.partition(".")[2] for member in members}
@@ -216,16 +231,17 @@ class TestDocs(unittest.TestCase):
                     # A linter's rule code, such as C901 or BLE001, is not a name.
                     if re.fullmatch(r"[A-Z][A-Z0-9_]+", code) and not re.fullmatch(r"[A-Z]+[0-9]+", code):
                         if code not in known and code not in OTHER_PROGRAMS_NAMES:
-                            errors.append(f"{where}: orchestrator.py has no {code}")
+                            errors.append(f"{where}: neither orchestrator.py nor gate.py has {code}")
                     elif m := re.fullmatch(r"(\w+)\(\)", code):
                         if m.group(1) not in names | methods:
-                            errors.append(f"{where}: orchestrator.py has no function or method {code}")
+                            errors.append(f"{where}: neither orchestrator.py nor gate.py has a function or method "
+                                          f"{code}")
                     # Class.member: a capitalized name with a lowercase letter, or an all-caps one that is a class
                     # of orchestrator.py, such as CI; not CONSTANT.md, a prompt's file.
                     elif (m := re.fullmatch(r"([A-Z]\w*)\.([a-z_]\w*)(\(\))?", code)) \
                             and (m.group(1) in classes or re.search("[a-z]", m.group(1))) \
                             and f"{m.group(1)}.{m.group(2)}" not in members:
-                        errors.append(f"{where}: orchestrator.py has no {m.group(1)}.{m.group(2)}")
+                        errors.append(f"{where}: neither orchestrator.py nor gate.py has {m.group(1)}.{m.group(2)}")
         self.assertNoErrors(errors)
 
     def test_each_relative_link_resolves_to_a_file_and_its_anchor_to_a_heading(self):
