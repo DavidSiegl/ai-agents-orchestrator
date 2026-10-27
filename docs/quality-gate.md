@@ -21,7 +21,7 @@ uv run python gate.py --base main --tests test-results.xml --coverage coverage.x
 nothing from it and reads only the file it writes ([the quality file as a
 contract](#the-quality-file-as-a-contract)).
 
-It runs five linters over the files git tracks, each over the files it reads, and keeps only the findings on
+It runs six linters over the files git tracks, each over the files it reads, and keeps only the findings on
 lines the change adds, and the lineless ones on files it touches. Findings on older lines are counted, never
 listed and never held against the change, so the gate judges the change rather than the codebase.
 
@@ -32,6 +32,7 @@ listed and never held against the change, so the gate judges the change rather t
 | pymarkdown | `*.md` | `[tool.pymarkdown]` |
 | shellcheck | `*.sh` | its defaults |
 | actionlint | `.github/workflows/*.yml` | its defaults |
+| clippy | `*.rs`, in each Cargo workspace, here `ui/src-tauri/` | the workspace's `[lints]` and `clippy.toml` |
 
 ruff's rules include the coding rules the agents are given as prose that a linter can apply, so that every harness
 gets them, every time: a docstring on every public module, class, method and function (`D100`-`D104`, `D106`,
@@ -42,8 +43,23 @@ selected. `D105` and `D107` are not, since they fire on nearly all of `main`: it
 `__init__`s, each documented by its class's docstring. Which rule to mechanize next is a question for the run
 metrics: the findings that recur.
 
-ruff, mypy and pymarkdownlnt are in uv's `dev` group, so `uv run` puts them on `PATH`; shellcheck and actionlint
-come from the Jenkins agent image. `gate.py`, like the orchestrator, stays stdlib-only: it runs them as processes.
+clippy runs as `cargo clippy --workspace --all-targets --message-format=json -- --cap-lints warn` in each workspace,
+its tests and examples included, and with `--locked` where git tracks the workspace's `Cargo.lock`, so that it judges
+the versions the change commits and never rewrites the file. Which lints are on is the workspace's own choice, as
+ruff's rules are the project's; the gate caps each at warn, so that a lint at `deny` or `forbid`, which would fail its
+crate's build and stop cargo before the crates after it, is a finding like the rest. The cap also lets an
+`#[allow(...)]` override a `forbid`, which rustc otherwise refuses, so such an allow silences its lint for the gate;
+it is listed under the suppressions added only where its added line holds the allow itself, not a lint added inside an
+existing wrapped `#[allow(` list (`TODO.md` has the rest). `ui/src-tauri/Cargo.toml` sets its lints to `warn`
+all the same, since rustc's `unsafe_code` at `deny` would stop `cargo test`. Its table adds to clippy's
+defaults the lints `main` passed when it was set, so that clippy found nothing on old lines. A workspace that still
+does not compile is a failed condition naming the compiler's first error in a tracked file, wherever it is, else
+cargo's own: a change that deletes a function an old line calls breaks the build on no line it added. A linter that
+outlives its timeout is killed with every process it started, such as cargo's rustc.
+
+ruff, mypy and pymarkdownlnt are in uv's `dev` group, so `uv run` puts them on `PATH`; shellcheck, actionlint and clippy
+(with cargo) come from the Jenkins agent image. `gate.py`, like the orchestrator, stays stdlib-only: it runs them as
+processes.
 
 After the linters come the checks `gate_checks` gives, which judge what the change did rather than how the tree
 reads. Each is a `GateCheck` that either fails the gate or only reports: a failing check's findings are issues,
@@ -298,15 +314,16 @@ or parsed is a `not-read` finding.
 The gate is `GATE: ERROR` when any of these holds, and `GATE: OK` otherwise:
 
 - a finding on a line the change adds, or a finding of a failing check that it does not weigh;
-- a linter that is missing, fails, or exits "found something" with nothing the gate can read. A gate that cannot
-  run a check never reports it as passed;
+- a linter that is missing, fails, or exits "found something" with nothing the gate can read, or a Cargo workspace
+  that clippy cannot compile. A gate that cannot run a check never reports it as passed;
 - a file a linter reads, by the pathspecs in the table above, with a character that linter ends a line at and git does
-  not, on any line up to the last one the change adds to it, whichever commit put it there. For every linter that is a
-  carriage return not followed by a newline; actionlint also ends a line at NEL (U+0085), U+2028 and U+2029, though YAML
-  1.2 does not (see the comment on its `GateTool.line_ends`). Each linter declares its own set. ruff, mypy, pymarkdown
-  and actionlint number every later line of the file past git's, and shellcheck stops reading there. Either way the gate
-  cannot judge their findings below it. The condition names the file, the first such line and the character. A file no
-  linter reads, such as a text file with old Mac line ends, is not held to this;
+  not, on any line up to the last one the change adds to it, whichever commit put it there. For every linter but clippy
+  that is a carriage return not followed by a newline; actionlint also ends a line at NEL (U+0085), U+2028 and U+2029,
+  though YAML 1.2 does not (see the comment on its `GateTool.line_ends`). rustc numbers lines at a newline alone, so
+  clippy's set is empty. Each linter declares its own set. ruff, mypy, pymarkdown and actionlint number every later line
+  of the file past git's, and shellcheck stops reading there. Either way the gate cannot judge their findings below it.
+  The condition names the file, the first such line and the character. A file no linter reads, such as a text file with
+  old Mac line ends, is not held to this;
 - with `--tests`, a failing test in that JUnit report;
 - with `--coverage`, coverage of new code below 80%, once the change has 20 or more new lines to cover. Coverage
   of new code is (covered branch outcomes + covered lines) / (branch outcomes + coverable lines), over the added
@@ -349,24 +366,27 @@ lines, then the failing checks' that they do not weigh), the findings to weigh, 
 the change adds, and the build configuration it edits. Issues and findings to weigh are numbered as one list, issues
 first, at most 50 in all, then a count:
 
-- **Suppressions added** (`# noqa`, `# type: ignore`, `# shellcheck disable`, `<!-- pyml disable`,
-  `# pragma: no cover`, `# pragma: no mutate`) are listed, not failed, so the Reviewer weighs each one. A
-  `# pragma: no cover` is listed because it takes lines out of the coverage condition, and a `# pragma: no mutate`
+- **Suppressions added** (`# noqa`, `# type: ignore`, `# shellcheck disable`, `<!-- pyml disable`, `# pragma: no cover`,
+  `# pragma: no mutate`, and Rust's `#[allow(` and `#[expect(`) are listed, not failed, so the Reviewer weighs each one.
+  A `# pragma: no cover` is listed because it takes lines out of the coverage condition, and a `# pragma: no mutate`
   because it takes them out of the surviving-mutants check.
-- **Build configuration**: an edit to `Jenkinsfile`, `pyproject.toml` or `uv.lock` is noted, since each can
-  change how the change was judged, and so is each file the change adds or edits under `mutants/`, where mutmut keeps
-  its state: the checks leave them out, as [the gate](#the-gate) says, and the surviving-mutants check runs mutmut
-  without them, though the linters read them as they read any tracked file.
+- **Build configuration**: an edit to `Jenkinsfile`, `pyproject.toml` or `uv.lock` is noted, since each can change how
+  the change was judged, as is one to a file anywhere in the tree that clippy takes its rules or its toolchain from
+  (`Cargo.toml`, `clippy.toml`, `rust-toolchain.toml`, `.cargo/config.toml`; `CLIPPY_CONFIG_NAMES` in `gate.py`), and so
+  is each file the change adds or edits under `mutants/`, where mutmut keeps its state: the checks leave them out, as
+  [the gate](#the-gate) says, and the surviving-mutants check runs mutmut without them, though the linters read them as
+  they read any tracked file.
 
 ### Whose rules judge a change
 
-Every linter gets its rules from one `pyproject.toml`: the tree's own, or the one `--config` names. A quality
-build passes `main`'s, and runs `main`'s `gate.py`, so a change cannot loosen the rules it is judged by.
+Every linter but clippy gets its rules from one `pyproject.toml`: the tree's own, or the one `--config` names. A
+quality build passes `main`'s, and runs `main`'s `gate.py`, so a change cannot loosen the rules it is judged by.
 shellcheck and actionlint have no table there; they run on their defaults, with `--norc` and an empty config file
 so that a `.shellcheckrc` or `.github/actionlint.yaml` added to the tree cannot loosen them either. What a
 snapshot still controls is visible in its quality file: tool versions through `uv.lock` (noted under build
-configuration), and inline suppressions (listed). shellcheck and actionlint versions live in the agent image,
-outside this repository.
+configuration), clippy's rules, which are the tree's own `Cargo.toml` and `clippy.toml` whatever `--config` names
+(noted there too), and inline suppressions (listed). shellcheck and actionlint versions live in the agent image,
+outside this repository, as does clippy's, unless a `rust-toolchain.toml` (noted) names one.
 
 The surviving-mutants check takes `[tool.mutmut]` from the same file, so a change cannot tell mutmut to leave its code
 alone. In the copy mutmut runs on, that table replaces the tree's own, and only that table: the rest of the tree's
@@ -392,11 +412,12 @@ uv run pytest --cov=<package> --cov-branch --cov-report=xml --junitxml=test-resu
 uv run python path/to/gate.py --base main --tests test-results.xml --coverage coverage.xml --out quality.md
 ```
 
-It takes what it runs from that project, so the project's dev dependencies hold them: ruff, mypy and pymarkdownlnt
-from `PATH`, which `uv run` points at the project's environment, and pytest, pytest-randomly and mutmut through the
-Python that runs `gate.py`, for the flaky-tests, passes-at-base and surviving-mutants checks. shellcheck and
-actionlint come from the machine, and only for a project that tracks shell scripts or GitHub workflows. A linter
-that is missing is a failed condition naming it; a check that cannot run is one of its own findings. The rules come
+It takes what it runs from that project, so the project's dev dependencies hold them: ruff, mypy and pymarkdownlnt from
+`PATH`, which `uv run` points at the project's environment, and pytest, pytest-randomly and mutmut through the Python
+that runs `gate.py`, for the flaky-tests, passes-at-base and surviving-mutants checks. shellcheck, actionlint and clippy
+come from the machine, and only for a project that tracks shell scripts, GitHub workflows or Rust files. A linter that
+is missing is a failed condition naming it, and for clippy that is a `cargo clippy --version` that fails, as it does
+where rustup's `clippy` component is not installed; a check that cannot run is one of its own findings. The rules come
 from the project's `pyproject.toml`, or the one `--config` names, as [whose rules judge a
 change](#whose-rules-judge-a-change) says. Which files the test-integrity check takes for tests is fixed for now:
 `tests/**`, `test_*.py` and `*_test.py`.
@@ -450,16 +471,20 @@ request](#a-build-of-main-judged-at-its-pull-request)).
   restricted to this folder's jobs, while the agents that deploy accept no job from this folder. A label alone
   does not enforce that - a pushed branch's `Jenkinsfile` can ask for any label - so the restriction sits on
   the nodes, with the Job Restrictions plugin.
-- **`uv`, `git`, `shellcheck` and `actionlint` on the agent**: the Install stage runs `uv sync --frozen`, and `uv`
-  brings the Python of `.python-version`; the gate fails a build that lacks a linter.
-- **Node 20.19 or later and npm, Rust 1.90 or later, and Tauri 2's system packages on the agent**, for the UI
-  stage's checks of the desktop app and the Package stage's `tauri build` of it. Debian 13's `nodejs` and `npm`
-  packages do for the frontend (`ui/.npmrc` makes their npm 9.2 resolve the tree), but its Rust 1.85 is older than
-  the shell's locked Tauri crates need; the packages are `libwebkit2gtk-4.1-dev`, `build-essential`, `pkg-config`,
-  `libxdo-dev`, `libssl-dev` and `file` ([Tauri's prerequisites](https://v2.tauri.app/start/prerequisites/)). A
-  clean `cargo test` takes about 100 s on 2 CPUs; `CARGO_HOME` is kept in the workspace, so nothing is cached
-  between builds. Package bundles the `.deb` with `dpkg-deb`, and the `.AppImage` with `linuxdeploy`, which
-  `tauri build` downloads from GitHub each build.
+- **`uv`, `git`, `shellcheck`, `actionlint` and clippy on the agent**: the Install stage runs `uv sync --frozen`,
+  and `uv` brings the Python of `.python-version`; clippy is rustup's `clippy` component of the Rust below, which
+  the Install stage adds with `rustup component add clippy`, so the Rust must come from rustup. The gate fails a
+  build that lacks a linter, and the tests that run the real clippy fail without it.
+- **Node 20.19 or later and npm, Rust 1.90 or later, and Tauri 2's system packages on the agent**, for the UI stage's
+  checks of the desktop app and the Package stage's `tauri build` of it. Debian 13's `nodejs` and `npm` packages do for
+  the frontend (`ui/.npmrc` makes their npm 9.2 resolve the tree), but its Rust 1.85 is older than the shell's locked
+  Tauri crates need; the packages are `libwebkit2gtk-4.1-dev`, `build-essential`, `pkg-config`, `libxdo-dev`,
+  `libssl-dev` and `file` ([Tauri's prerequisites](https://v2.tauri.app/start/prerequisites/)). A clean `cargo test`
+  takes about 100 s on 2 CPUs; `CARGO_HOME` is kept in the workspace, so nothing is cached between builds. The UI stage
+  then runs `cargo check` under the same lock, since cargo test's build of the dependencies is not the check clippy
+  needs: with them checked, the Gate stage's clippy checks only the shell, in about 2 s, against 77 s for a clean one on
+  the development host's 6 CPUs. Package bundles the `.deb` with `dpkg-deb`, and the `.AppImage` with `linuxdeploy`,
+  which `tauri build` downloads from GitHub each build.
 - **`gh` on the agent, and a GitHub token** for the Release stage: a Secret text credential with the ID
   `GitHub-Agents`, holding a token with *Contents: read and write* on this repository. It is the agents' own
   `gh` token, so when that is rotated the credential must be too, or every build of `main` fails at Release.
@@ -498,7 +523,7 @@ empty `GIT_REF`, before it accepts `buildWithParameters`.
 
 | Build | `--base` | Gate and rules |
 |---|---|---|
-| Quality build (`GIT_REF` set) | `HEAD^`: the snapshot's only parent is the run's base | `main`'s `gate.py` and `pyproject.toml`, from the `origin/main` commit its description names (below); for a commit from before `gate.py`, its `orchestrator.py gate` |
+| Quality build (`GIT_REF` set) | `HEAD^`: the snapshot's only parent is the run's base | `main`'s `gate.py` and `pyproject.toml`, from the `origin/main` commit its description names (below); a commit without `gate.py` fails the stage, unjudged |
 | Pull request (`CHANGE_TARGET` set) | the merge base with the target branch, fetched first | its own, `Jenkinsfile` included (below) |
 | `main` | the last successful build's commit, else `HEAD^1` | its own; none when judged at its pull request (below) |
 
