@@ -158,6 +158,13 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `git add --all`. In-place runs always had this; since proof-runs ticket 01 a worktree run has it too, its proofs
   importing the worktree's code. Raised there (2026-10-27). Closes with `_publish` committing only what the turns
   changed, or with proofs running in a throwaway copy of the tree.
+- **A proof the Builder moves into the project stays carried as erroring.** `PROOFS_NOTE` lets the Builder move a
+  proof into the project as a regression test; `Workflow._run_proof` then records it "it did not run: ... is gone",
+  which is not a pass, so `_carried_proofs` keeps carrying it. Raised by the cross-review of proof-runs (review 64,
+  F9, 2026-10-27): "is carried and told as a standing finding in every later round": the Builder hears it does not
+  pass, and the verdict step hears it "no longer fails but errors", even when the moved test passes in the project.
+  Predates that branch, where the same move gave pytest's exit status 4, an error carried the same way. Closes with
+  `_carried_proofs` treating a missing proof as moved and dropping it, and the notes saying so.
 - **`expected-value-changed` misses an inline literal's sign, type or structure.** `_changed_literals` pairs
   assertions by `_shape` and compares `_literals`, which drops types and operators: `assert f() == -5` becoming
   `== 5` changes the shape (no pair, no finding), and `== 1` becoming `== True` gives equal literal lists
