@@ -1,13 +1,24 @@
-"""Settings and guards every test file shares: Hypothesis's profiles, and no network.
+"""Settings and guards every test file shares: Hypothesis's profiles, no network, and no real sleeping.
 
-The guard: no test may open a network connection. The orchestrator's network clients take an injected `urlopen`
-(`CI`, `PyPI`), so a test that reaches for the real network is a bug, and fails with `NetworkUsed`, naming the
-address. Only this process's sockets are guarded; a child process the test starts is not.
+The guards, each a fixture every test runs under, and each for this process only, not for a child process a test
+starts:
+
+- No test may open a network connection. The orchestrator's network clients take an injected `urlopen` (`CI`,
+  `PyPI`), so a test that reaches for the real network is a bug, and fails with `NetworkUsed`, naming the address.
+- No test may wait in time.sleep. A Workflow takes its clocks as an argument (`Clocks`), and the tests give it
+  `FakeClock`, time that passes only when the workflow sleeps; a real sleep makes the suite slow, and a test that
+  depends on how long one takes flaky. The test code and orchestrator.py are guarded, the standard library is not:
+  subprocess sleeps while it waits for a child with a timeout, which is how the orchestrator runs its processes.
+  Nor is the sleep of a `Clocks()` built with its defaults, which took the real time.sleep when orchestrator.py
+  was imported.
 """
 
 import ipaddress
 import os
+import pathlib
 import socket
+import sys
+import time
 
 import pytest
 from hypothesis import settings
@@ -23,16 +34,27 @@ settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "default"))
 _connect = socket.socket.connect
 _connect_ex = socket.socket.connect_ex
 _create_connection = socket.create_connection
+_sleep = time.sleep
+
+# The code whose time.sleep calls the sleep guard refuses: the tests, and the orchestrator they test.
+_ROOT = pathlib.Path(__file__).resolve().parent.parent
+_GUARDED_TESTS = _ROOT / "tests"
+_GUARDED_SOURCE = _ROOT / "orchestrator.py"
 
 
 def pytest_configure(config):
-    """Register the marker that lets a test past the network guard."""
+    """Register the markers that let a test past a guard."""
     config.addinivalue_line(
         "markers",
         "loopback: the test talks to a server it started itself on a loopback address, such as a RunServer or "
         "`orchestrator.py serve`, whose HTTP over real sockets is what it tests. Connections to any other address "
         "still fail. Loopback is not allowed to every test: the Jenkins and SonarQube a developer runs on this "
         "machine listen there too.")
+    config.addinivalue_line(
+        "markers",
+        "real_sleep: the test waits on something outside this process's control, a child process or a server "
+        "thread, by polling it with time.sleep: what it tests is how the orchestrator behaves with real processes "
+        "and real time, which FakeClock cannot stand in for. Keep such waits short and bounded by a deadline.")
 
 
 class NetworkUsed(RuntimeError):
@@ -41,6 +63,10 @@ class NetworkUsed(RuntimeError):
     Not an OSError, so that code under test which takes an OSError for an unreachable server, such as
     `CI._request`, cannot turn it into an ordinary failure and let the test pass.
     """
+
+
+class RealSleep(RuntimeError):
+    """A test, or the orchestrator code it runs, called time.sleep without the real_sleep marker."""
 
 
 def _is_loopback(address) -> bool:
@@ -82,3 +108,20 @@ def no_network(request, monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", connect)
     monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
     monkeypatch.setattr(socket, "create_connection", create_connection)
+
+
+@pytest.fixture(autouse=True)
+def no_real_sleep(request, monkeypatch):
+    """For the length of each test not marked real_sleep, make time.sleep raise RealSleep when called from a test
+    file or orchestrator.py; called from anywhere else, such as the standard library, it sleeps."""
+    if request.node.get_closest_marker("real_sleep") is not None:
+        return
+
+    def sleep(seconds):
+        caller = pathlib.Path(sys._getframe(1).f_code.co_filename).resolve()
+        if caller == _GUARDED_SOURCE or caller.is_relative_to(_GUARDED_TESTS):
+            raise RealSleep(f"time.sleep({seconds!r}) in {caller.name}: tests run on FakeClock; a test that must wait "
+                            f"on a real process is marked real_sleep (tests/conftest.py)")
+        _sleep(seconds)
+
+    monkeypatch.setattr(time, "sleep", sleep)
