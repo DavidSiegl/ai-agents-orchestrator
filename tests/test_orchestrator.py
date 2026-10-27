@@ -6747,13 +6747,14 @@ class TestChildEnvironment(unittest.TestCase):
         self.assertFalse([k for k in orchestrator.CI_ENV if f"{k}=" in out])
         self.assertFalse(leaks(out))
 
-    @patch.dict("os.environ", {**ENV, **{k: "1" for k in orchestrator.GIT_PATHSPEC_ENV}})
-    def test_the_gate_s_processes_get_no_credentials_and_no_pathspec_switches(self):
-        # tool_env is the gate's own copy of child_env, which the gate cannot use; both leave out the same names.
+    @patch.dict("os.environ", {**ENV, **{k: "1" for k in orchestrator.GIT_PATHSPEC_ENV}, "UPDATE_GOLDEN": "1"})
+    def test_the_gate_s_processes_get_no_credentials_no_pathspec_switches_and_no_update_golden(self):
+        # tool_env leaves out what child_env does, which the gate cannot import, and UPDATE_GOLDEN too, which only the
+        # gate's reruns of the tests must not inherit.
         env = gate.tool_env()
         self.assert_scrubbed(env)
         self.assertFalse(set(orchestrator.GIT_PATHSPEC_ENV) & set(env))
-        self.assertEqual(env, orchestrator.child_env())
+        self.assertEqual(env, {k: v for k, v in orchestrator.child_env().items() if k != "UPDATE_GOLDEN"})
 
 
 class TestQualityCLI(unittest.TestCase):
