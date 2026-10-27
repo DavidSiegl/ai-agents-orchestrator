@@ -219,8 +219,10 @@ pipeline {
                     // The values reach the shell as environment variables, never as Groovy-built shell code.
                     def status
                     // Each report of the Rust's before the Python's: a main whose gate.py takes --tests and --coverage
-                    // once keeps the last of each, so that a quality build of a snapshot that carries this Jenkinsfile
-                    // is judged on its Python, as before, until main's gate.py takes them more than once.
+                    // once, as main's did before the commit that brought this order, keeps the last of each. A quality
+                    // build judged by such a main, of a snapshot that carries this Jenkinsfile, is then judged on its
+                    // Python as before, but not on its Rust tests, which only the junit step's UNSTABLE shows, nor on
+                    // the Rust's coverage; that window closes when main's gate.py takes both more than once.
                     withEnv(["GATE=${gate}", "GATE_RULES=${rules}", "GATE_BASE=${base}"]) {
                         status = sh(returnStatus: true, script: '''
                             uv run --frozen python "$GATE" --base "$GATE_BASE" --config "$GATE_RULES" \\
