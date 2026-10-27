@@ -468,7 +468,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 - **`tool_env` passed `UPDATE_GOLDEN` to the pytest and mutmut runs the gate starts.** Under `UPDATE_GOLDEN=1`
   `assert_golden` rewrites its file instead of comparing, so the gate's flaky-tests reruns would rewrite
   `tests/golden/*.txt` and pass a golden test that should fail. Raised by cross-review 76 (F2, 2026-10-27). Fixed
-  (2026-10-27): `tool_env` leaves it out, as it does the Jenkins credentials (`TestToolEnv`).
+  (2026-10-27): `tool_env` leaves it out, as it does the Jenkins credentials (`TestChildEnvironment`, which also checks it
+  under `UPDATE_GOLDEN=1`).
 
 - **No test shows the proof reruns come after the quality loop.** `Workflow._rerun_proofs` runs right before the
   verdict step's turn, which follows the quality loop by construction, but every proof test used `QUICK`, which has
