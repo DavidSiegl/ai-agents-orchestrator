@@ -19,12 +19,12 @@ pipeline {
     environment {
         UV_NO_PROGRESS = '1'
         COVERAGE_FILE  = '.coverage'
-        // For the UI, Gate and Package stages: crates are fetched into the workspace, which cleanWs empties, so no
-        // build compiles sources an earlier build left behind.
+        // For the Test, UI, Gate and Package stages: crates are fetched into the workspace, which cleanWs empties, so
+        // no build compiles sources an earlier build left behind.
         CARGO_HOME     = "${env.WORKSPACE}/.cargo-home"
-        // Tools the Install stage downloads into the workspace (ci/install-gitleaks.sh), first on PATH for every stage.
+        // Tools the Install stage downloads into the workspace (ci/install-tools.sh), first on PATH for every stage.
         PATH           = "${env.WORKSPACE}/.tools/bin:${env.PATH}"
-        // The dev profile, which cargo test's test profile and clippy's checks inherit, without debug info. Debug
+        // The dev profile, which the Test stage's test build and clippy's checks inherit, without debug info. Debug
         // info for the GTK and Tauri crates took enough memory that rustc was OOM-killed with two builds on
         // agentbox0. ci/cargo-lock.sh now keeps two builds' cargo steps apart, except a quality build's, which never
         // waits for the lock, and the Gate stage's clippy, which gate.py runs outside it; building without debug info
@@ -96,10 +96,12 @@ pipeline {
             steps {
                 sh 'uv sync --frozen'
                 // The Test stage's TestClippy and the Gate stage's gate.py run the real clippy, which the agent's
-                // rustup toolchain lacked (PR-111's first build). Adding it is a local no-op once it is there, and
-                // brings it back when the agent's container is rebuilt without it.
-                sh 'rustup component add clippy'
-                sh 'ci/install-gitleaks.sh "$WORKSPACE/.tools/bin"'
+                // rustup toolchain lacked (PR-111's first build), and the Test stage's cargo-llvm-cov reads its
+                // coverage data with llvm-tools-preview's llvm-profdata and llvm-cov, which must be the toolchain's
+                // own LLVM. Adding them is a local no-op once they are there, and brings them back when the agent's
+                // container is rebuilt without them.
+                sh 'rustup component add clippy llvm-tools-preview'
+                sh 'ci/install-tools.sh "$WORKSPACE/.tools/bin"'
                 script {
                     // The version a release on main is tagged with.
                     env.PROJECT_VERSION = sh(returnStdout: true, script: '''
@@ -124,18 +126,29 @@ pipeline {
                     uv run pytest --cov=orchestrator --cov=gate --cov-branch --cov-report=xml --junitxml=test-results.xml || status=$?
                     [ "$status" -le 1 ] || exit "$status"
                 '''
+                // The Rust tests, with line coverage, for the Gate stage likewise: --ignore-run-fail writes the report
+                // whatever tests fail and exits 0 for them, so a non-zero status is a build that did not compile or
+                // a tool that could not run. ci/nextest.toml has the ci profile write the JUnit report the Gate
+                // stage reads. The lock as in the UI stage, which says why a quality build may skip it.
+                dir('ui/src-tauri') {
+                    sh '''
+                        "$WORKSPACE/ci/cargo-lock.sh" ${GIT_REF:+--no-wait} cargo llvm-cov nextest --locked --workspace \\
+                            --ignore-run-fail --profile ci --config-file "$WORKSPACE/ci/nextest.toml" \\
+                            --cobertura --output-path "$WORKSPACE/coverage-rust.xml"
+                    '''
+                }
             }
             post {
                 always {
-                    junit 'test-results.xml'
+                    junit 'test-results.xml, ui/src-tauri/target/nextest/ci/junit.xml'
                 }
             }
         }
 
-        // The desktop app: its frontend's types, lint and Vitest tests, and its Tauri shell's cargo tests. The gate
-        // runs no tests but the Python, so this stage stops the build instead, before Gate: a quality round then
-        // reports BUILD_FAILED with the console's end, where a failure after Gate would hide under quality.md's
-        // passing GATE line.
+        // The desktop app's frontend: its types, lint and Vitest tests; its Tauri shell's tests run in the Test
+        // stage. The gate judges no tests but those the Test stage reports, so this stage stops the build instead,
+        // before Gate: a quality round then reports BUILD_FAILED with the console's end, where a failure after Gate
+        // would hide under quality.md's passing GATE line.
         stage('UI') {
             when { expression { return env.JUDGED_AT_PR != 'true' } }
             steps {
@@ -148,11 +161,11 @@ pipeline {
                     '''
                 }
                 dir('ui/src-tauri') {
-                    // A quality build (GIT_REF set) runs within the orchestrator's QUALITY_TIMEOUT, which a wait
-                    // behind another build's Package stage would exceed, so it takes the lock only when it is free.
-                    sh '"$WORKSPACE/ci/cargo-lock.sh" ${GIT_REF:+--no-wait} cargo test --locked'
-                    // The Gate stage's clippy checks the shell's dependencies as cargo check does, not as cargo test
-                    // builds them: checked here, under the lock, they leave clippy only the shell itself to check.
+                    // The Gate stage's clippy checks the shell's dependencies as cargo check does, not as the Test
+                    // stage's cargo-llvm-cov builds them, instrumented and in a target directory of its own: checked
+                    // here, under the lock, they leave clippy only the shell itself to check. A quality build
+                    // (GIT_REF set) runs within the orchestrator's QUALITY_TIMEOUT, which a wait behind another
+                    // build's Package stage would exceed, so it takes the lock only when it is free.
                     sh '"$WORKSPACE/ci/cargo-lock.sh" ${GIT_REF:+--no-wait} cargo check --locked --all-targets'
                 }
             }
@@ -199,7 +212,8 @@ pipeline {
                     withEnv(["GATE=${gate}", "GATE_RULES=${rules}", "GATE_BASE=${base}"]) {
                         status = sh(returnStatus: true, script: '''
                             uv run --frozen python "$GATE" --base "$GATE_BASE" --config "$GATE_RULES" \\
-                                --tests test-results.xml --coverage coverage.xml --out quality.md
+                                --tests test-results.xml --tests ui/src-tauri/target/nextest/ci/junit.xml \\
+                                --coverage coverage.xml --coverage coverage-rust.xml --out quality.md
                         ''')
                     }
                     if (status == 1 && params.GIT_REF) {
