@@ -8,6 +8,7 @@ instead.
 
 import difflib
 import os
+import re
 
 # Where the golden files are, one <name>.txt per name given to assert_golden.
 GOLDEN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "golden")
@@ -33,10 +34,15 @@ def assert_golden(name: str, text: str) -> None:
         raise AssertionError(f"no golden file {path}; write it with UPDATE_GOLDEN=1 and review it") from None
     if text == want:
         return
-    rel = os.path.relpath(path)
     # A last line without its line end gets diff's marker, so that it does not run into the next line of the diff.
     diff = "".join(line if line.endswith("\n") else f"{line}\n\\ No newline at end of file\n"
-                   for line in difflib.unified_diff(want.splitlines(keepends=True), text.splitlines(keepends=True),
-                                                    fromfile=rel, tofile=f"{rel} (as written now)"))
-    raise AssertionError(f"{rel} differs from the text written now; if the change is meant, rewrite it with "
+                   for line in difflib.unified_diff(_lines(want), _lines(text),
+                                                    fromfile=path, tofile=f"{path} (as written now)"))
+    raise AssertionError(f"{path} differs from the text written now; if the change is meant, rewrite it with "
                          f"UPDATE_GOLDEN=1 and review its diff:\n{diff}")
+
+
+def _lines(text: str) -> list[str]:
+    """text's lines, each with its "\\n", the last without one if text does not end in one. Only "\\n" ends a line,
+    as in the file on disk; str.splitlines would split at "\\r" or U+2028 too, which a quality file can hold."""
+    return re.findall(r"[^\n]*\n|[^\n]+\Z", text)

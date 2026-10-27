@@ -37,7 +37,7 @@ class TestAssertGolden(unittest.TestCase):
         with self.assertRaises(AssertionError) as raised:
             assert_golden("g", "the gate\nfailed")
         message = str(raised.exception)
-        self.assertIn("g.txt differs from the text written now", message)
+        self.assertIn(f"{os.path.join(self.dir, 'g.txt')} differs from the text written now", message)
         self.assertIn("UPDATE_GOLDEN=1", message)
         self.assertIn(" the gate\n-passed\n+failed\n\\ No newline at end of file\n", message)
         self.assertEqual(self.read("g"), "the gate\npassed\n")
@@ -48,6 +48,15 @@ class TestAssertGolden(unittest.TestCase):
         del os.environ["UPDATE_GOLDEN"]
         with self.assertRaises(AssertionError):
             assert_golden("g", "a\r\n")
+
+    def test_the_diff_ends_a_line_only_at_a_newline(self):
+        os.environ["UPDATE_GOLDEN"] = "1"
+        assert_golden("g", "a\rb c\n")
+        del os.environ["UPDATE_GOLDEN"]
+        with self.assertRaises(AssertionError) as raised:
+            assert_golden("g", "a\rb d\n")
+        self.assertIn("\n-a\rb c\n+a\rb d\n", str(raised.exception))
+        self.assertNotIn("No newline", str(raised.exception))
 
     def test_a_missing_file_fails_naming_it(self):
         with self.assertRaises(AssertionError) as raised:
