@@ -308,8 +308,8 @@ whose record differs from `recorded/<scenario>.json`, naming where; `PARITY_RECO
 instead, from the Python engine only.
 
 `tests/contract/` holds the contract tests, which check the fakes against the real thing: `test_jenkins.py` drives
-`CI` against the live quality job ([the calls](quality-gate.md#the-calls)). They are marked `contract`, which a run
-leaves out unless given `-m contract` (`tests/conftest.py`).
+`CI` against the live quality job ([the calls](quality-gate.md#the-calls)). They are marked `contract`, whose
+description in `tests/conftest.py` says when a run takes them.
 
 ## Tooling
 

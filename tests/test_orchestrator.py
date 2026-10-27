@@ -3557,8 +3557,9 @@ class FakeCI:
     - `fail`: {(method, path): status} for requests answered with an HTTP error.
     - `job_gone`: the job was deleted; `forgotten`: Jenkins forgot its queue items.
 
-    Every request is recorded as (method, url, form) in `requests`, and by a short name in `names`. Its answers
-    have the shape of the live Jenkins's, which tests/contract/test_jenkins.py checks.
+    Every request is recorded as (method, url, form) in `requests`, and by a short name in `names`. Its JSON answers
+    have the fields and types of the live Jenkins's, which tests/contract/test_jenkins.py checks; the texts, such as a
+    console, and how many cases a test report holds are each test's own.
     """
 
     def __init__(self):

@@ -60,7 +60,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 - **A quality build now takes longer than `QUALITY_TIMEOUT`.** The contract test's one live run (live-checks/01,
   2026-10-27) triggered build #59 of `Octoflow-AI/py-octoflow-ai-quality` with `GIT_REF=main` (`f4628cc`): it ended
   SUCCESS after 1299 s, of which Test took 888 s, UI 229 s and Gate 172 s, so `tests/contract/test_jenkins.py` failed
-  at its 1200 s cap, as a quality round of the engine would: `_poll` gives up at `QUALITY_TIMEOUT` (1200 s,
+  at what was then its 1200 s cap (it now waits for the build to end, checks every answer, and fails last on the time
+  the quality file took), as a quality round of the engine would: `_poll` gives up at `QUALITY_TIMEOUT` (1200 s,
   `orchestrator.py`) from the round's start, and Gate had not begun by then. The suite grew by the parity scenarios
   (`tests/parity`), and PR-160's Test stage took 645 s. A resume gets a fresh timeout and adopts the running build,
   so a run is not lost, but a quality round of this repository whose build takes as long fails once, and is
@@ -68,6 +69,12 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   the engine is frozen (Planned, "The Python engine is frozen"), so a larger `QUALITY_TIMEOUT` goes to the Rust
   engine. Closes with that, or with a quality build that leaves the parity scenarios or the UI stage to the pull
   request builds (Jenkinsfile, CI not frozen), and the contract test green again.
+- **The contract test leaves its Jenkins build running when it fails.** `tests/contract/test_jenkins.py` triggers one
+  quality build and nothing stops it on a failure or a Ctrl-C, so the build holds an executor until it ends, up to
+  the 22 minutes build #59 took. Raised by cross-review 73 (F11, 2026-10-27): "a Ctrl-C during the queue wait leaves
+  the full ~22-minute build running." The orchestrator does not abort a build either, so `CI` has no call for it.
+  Closes with a POST to `<job>/<number>/stop` (or the queue item's cancel) in the test's cleanup, once the `agents`
+  user is known to hold Jenkins's Cancel permission on the job.
 - **The parity harness records `state.json` at each command the fakes get, not after each save.** Ticket
   rust-engine/01 asks for "`state.json` after each save"; the ledger reads it only when herdr, gh, Jenkins or PyPI
   gets a call, and leaves out a change to `heartbeat_at` alone (`tests/parity/fakes.py`, `_changed_states`). Raised

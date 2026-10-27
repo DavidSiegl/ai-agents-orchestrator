@@ -588,7 +588,8 @@ class _JenkinsHandler(http.server.BaseHTTPRequestHandler):
 
     The retained builds keep their numbers; the triggered ones follow the highest of them, in the order they were
     triggered, from 1 where there are none. Queue item k is build k's. Each request is logged, with its form,
-    before it is answered. The answers have the shape of the live Jenkins's, as FakeCI's do (tests/contract)."""
+    before it is answered. Its JSON answers have the fields and types of the live Jenkins's, as FakeCI's do
+    (tests/contract); the texts, such as a console, and how many cases a test report holds are each scenario's own."""
 
     server: http.server.ThreadingHTTPServer
 
