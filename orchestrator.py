@@ -59,6 +59,7 @@ import socket
 import stat
 import string
 import subprocess
+import symtable
 import sys
 import tarfile
 import tempfile
@@ -3996,8 +3997,8 @@ def python_weakened_tests(files: list[ChangedTestFile], code_changed: bool) -> l
         out += _python_added_weakenings(f.new_path, new_tree, f.added) if f.new_path else []
     out += _python_removed_tests(files, before, after)
     # A file's constants at the base and now, read when a test of it is first compared.
-    constants = functools.cache(lambda k: (_PythonConstants.of(trees[k][0], files[k].old_path),
-                                           _PythonConstants.of(trees[k][1], files[k].new_path)))
+    constants = functools.cache(lambda k: (_PythonConstants.of(trees[k][0], files[k].before, files[k].old_path),
+                                           _PythonConstants.of(trees[k][1], files[k].after, files[k].new_path)))
     at_base = {t.key(): t for t in before}
     for t in after:
         if isinstance(t.node, ast.ClassDef) or t.key() not in at_base:
@@ -4012,7 +4013,7 @@ def python_weakened_tests(files: list[ChangedTestFile], code_changed: bool) -> l
                              f"`{t.name}`: `{_code(a)}` became `{_code(b)}`, "
                              f"in a change that also edits the code under test.", severity="error")
                     for a, b in _changed_literals(was, now)]
-            out += _changed_constants(path, t.name, (at_base[t.key()].node, was), (t.node, now), *constants(t.file))
+            out += _changed_constants(path, t.name, was, now, *constants(t.file))
     return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
 
 
@@ -4223,22 +4224,31 @@ class _PythonConstant:
 
 @dataclass(frozen=True)
 class _PythonConstants:
-    """The module-level constants of one side of a test file, and the names its tests can reach them by.
+    """The module-level constants of one side of a test file, and which of its Name nodes reach them.
 
     A constant is a name that one module-level Assign or AnnAssign binds to an expression holding no call, and that
-    nothing else in the module's own scope binds, as _scope_bindings counts. Out of scope: a constant imported from
-    another module or computed by a call, whose value the file does not spell out; one built from other constants,
-    whose edits it does not see; one reached through a local or a helper rather than named in an assertion; and a
-    fixture's return value."""
+    nothing else in the module's own scope binds, as _scope_bindings counts. Which name a read reaches is Python's
+    scope rules, as symtable gives them; a module that symtable refuses, as it does some code ast.parse accepts, has
+    no constants. Out of scope: a constant imported from another module or computed by a call, whose value the file
+    does not spell out; one built from other constants, whose edits it does not see; one reached through a local or
+    a helper rather than named in an assertion; and a fixture's return value."""
     by_name: dict[str, _PythonConstant]
-    # The dotted names a test can reach the module itself by, to name a constant as module.NAME: the module's dotted
-    # name and each suffix of it that ends at the file's own name, and the alias a module-level import gives one.
+    # The module's own dotted names, to name a constant as module.NAME: its dotted name and each suffix of it that
+    # ends at the file's own name.
     module: frozenset[str]
+    # The Name nodes of the tree that read one of the module's own names, an import's excluded, as _resolve_reads says.
+    reads: frozenset[ast.Name]
+    # Each Name node of the tree that reads a name an import binds, to the dotted name of the module bound to it.
+    imported: dict[ast.Name, str]
 
     @classmethod
-    def of(cls, tree: ast.Module, path: str | None) -> "_PythonConstants":
-        """The constants of tree, the test module at path, its dotted name taken from path; a path of None, a side
-        the change has no file on, leaves only the bare names to reach them by."""
+    def of(cls, tree: ast.Module, text: str, path: str | None) -> "_PythonConstants":
+        """The constants of tree, the test module at path parsed from text, its dotted name taken from path; a path
+        of None, a side the change has no file on, leaves only the bare names to reach them by."""
+        try:
+            reads, imported = _resolve_reads(tree, text)
+        except (SyntaxError, ValueError, RecursionError, MemoryError):
+            return cls({}, frozenset(), frozenset(), {})
         bindings = _scope_bindings(tree.body)
         by_name: dict[str, _PythonConstant] = {}
         for stmt in tree.body:
@@ -4251,53 +4261,45 @@ class _PythonConstants:
             if (isinstance(target, ast.Name) and bindings[target.id] == 1
                     and not any(isinstance(n, ast.Call) for n in ast.walk(expression))):
                 by_name[target.id] = _PythonConstant(stmt.lineno, _tree_fingerprint(expression))
-        return cls(by_name, _module_spellings(tree, path))
+        parts = os.path.splitext(path)[0].split("/") if path else []
+        return cls(by_name, frozenset(".".join(parts[i:]) for i in range(len(parts))), frozenset(reads), imported)
 
-    def asserted(self, test: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
-                 assertions: list[ast.Assert | ast.Call]) -> dict[str, int]:
-        """Each name that assertions, test's as _python_assertions gives them, name as the module's, bare or as
-        module.NAME, to the line of the first that does, whether or not it is one of the constants. A name that test,
-        or a def, lambda or comprehension inside it, binds where the assertion reads it, as a parameter or a local,
-        is not the module's, and neither is an attribute of it."""
-        free = _module_reads(test)
+    def asserted(self, assertions: list[ast.Assert | ast.Call]) -> dict[str, int]:
+        """Each of the module's own names that assertions, a test's as _python_assertions gives them from this
+        side's tree, read, bare or as module.NAME, to the line of the first that does, whether or not it is one of
+        the constants."""
         out: dict[str, int] = {}
         for assertion in assertions:
             for n in ast.walk(assertion):
-                if isinstance(n, ast.Name) and id(n) in free:
+                if isinstance(n, ast.Name) and n in self.reads:
                     out.setdefault(n.id, assertion.lineno)
-                elif isinstance(n, ast.Attribute):
-                    root, dotted = _dotted_name(n.value) or (None, "")
-                    if id(root) in free and dotted in self.module:
-                        out.setdefault(n.attr, assertion.lineno)
+                elif isinstance(n, ast.Attribute) and self._is_module(n.value):
+                    out.setdefault(n.attr, assertion.lineno)
         return out
 
-
-def _module_spellings(tree: ast.Module, path: str | None) -> frozenset[str]:
-    """The dotted names a test of tree, the module at path, can reach the module itself by, as
-    _PythonConstants.module holds them; none for a path of None."""
-    parts = os.path.splitext(path)[0].split("/") if path else []
-    spellings = {".".join(parts[i:]) for i in range(len(parts))}
-    for stmt in tree.body:
-        if isinstance(stmt, ast.Import):
-            spellings |= {a.asname for a in stmt.names if a.asname and a.name in spellings}
-        elif isinstance(stmt, ast.ImportFrom) and stmt.module and not stmt.level:
-            spellings |= {a.asname or a.name for a in stmt.names if f"{stmt.module}.{a.name}" in spellings}
-    return frozenset(spellings)
+    def _is_module(self, node: ast.expr) -> bool:
+        """Whether node, read in this side's tree, is the module itself: a name or a chain of attributes on one, the
+        name an import's of a module or package, or the module's own, such that the whole names one of module."""
+        dotted = _dotted_name(node)
+        if dotted is None:
+            return False
+        root, name = dotted
+        prefix = self.imported.get(root) or (root.id if root in self.reads else None)
+        return prefix is not None and prefix + name[len(root.id):] in self.module
 
 
-def _changed_constants(path: str | None, name: str,
-                       was: tuple[ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef, list[ast.Assert | ast.Call]],
-                       now: tuple[ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef, list[ast.Assert | ast.Call]],
-                       base: _PythonConstants, current: _PythonConstants) -> list[dict]:
+def _changed_constants(path: str | None, name: str, was: list[ast.Assert | ast.Call],
+                       now: list[ast.Assert | ast.Call], base: _PythonConstants,
+                       current: _PythonConstants) -> list[dict]:
     """The expected-value-changed findings, as GateCheck.find returns them, on the test called name that the change
-    kept in the file at path, for the constants its assertions name. was and now are the test at the base and in
-    the working tree, each as its def and its assertions as _python_assertions gives them; base and current are its
-    file's constants on the two sides. One finding per constant of the base that the assertions of both sides name
-    and that is now either no constant or one whose expression differs, other than in layout or comments; it is at
-    the first assertion now naming it."""
-    at_base = base.asserted(*was)
+    kept in the file at path, for the constants its assertions name. was and now are the test's assertions at the
+    base and in the working tree, as _python_assertions gives them; base and current are its file's constants on
+    the two sides, from the trees those assertions are of. One finding per constant of the base that the assertions
+    of both sides name and that is now either no constant or one whose expression differs, other than in layout or
+    comments; it is at the first assertion now naming it."""
+    at_base = base.asserted(was)
     out = []
-    for constant, line in current.asserted(*now).items():
+    for constant, line in current.asserted(now).items():
         if constant not in at_base or constant not in base.by_name:
             continue
         defined = current.by_name.get(constant)
@@ -4347,21 +4349,138 @@ def _dotted_name(node: ast.AST) -> tuple[ast.Name, str] | None:
     return (node, ".".join([node.id, *reversed(attrs)])) if isinstance(node, ast.Name) else None
 
 
-def _module_reads(scope: ast.AST) -> set[int]:
-    """The id()s of the Name nodes inside scope, a def or a class, that read a name neither it nor any def, lambda or
-    comprehension between it and the read binds, as _scope_bindings counts, and so read the enclosing module's. A
-    nested def's defaults and decorators, and a comprehension's first iterable, are taken to be inside it, though
-    Python evaluates them outside."""
-    out = set()
-    stack = [(scope, frozenset[str]())]
+def _resolve_reads(tree: ast.Module, text: str) -> tuple[set[ast.Name], dict[ast.Name, str]]:
+    """Where each Name node of tree, parsed from text, that reads a name gets it, by Python's scope rules as symtable
+    gives them: the set of those that read one of the module's own names, and for each that reads a name an import
+    binds instead, in the module or in the scope that holds the name, the dotted name of the module or package bound
+    to it. A read of a local or a parameter is in neither, and so is one inside a def, lambda, class or generator
+    that symtable has no scope for. Raises SyntaxError, ValueError, RecursionError
+    or MemoryError when symtable refuses text, as _parse_python's parse can."""
+    reads: set[ast.Name] = set()
+    imported: dict[ast.Name, str] = {}
+    module = _SymbolScope(symtable.symtable(text, "<test>", "exec"), tree.body)
+    # Each node to visit with the scopes that hold it, the module's first. Children are pushed reversed, so nodes
+    # are visited in source order, the order symtable lists a scope's children in.
+    stack: list[tuple[ast.AST, tuple[_SymbolScope, ...]]] = [(c, (module,)) for c in reversed(tree.body)]
     while stack:
-        node, bound = stack.pop()
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id not in bound:
-            out.add(id(node))
-        if node is scope or isinstance(node, _SCOPES):
-            bound = bound | set(_scope_bindings(ast.iter_child_nodes(node)))
-        stack.extend((child, bound) for child in ast.iter_child_nodes(node))
-    return out
+        node, scopes = stack.pop()
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            prefix, global_ = scopes[-1].resolve(node.id, scopes)
+            if prefix:
+                imported[node] = prefix
+            elif global_:
+                reads.add(node)
+        stack += reversed(_scoped_children(node, scopes))
+    return reads, imported
+
+
+class _SymbolScope:
+    """One scope of a module as _resolve_reads walks it: its symtable table, the imports it binds, and which of its
+    child tables the walk has yet to match to a node."""
+
+    def __init__(self, table: symtable.SymbolTable, body: list[ast.stmt]):
+        self.table = table
+        # Each name the scope binds only by imports, all of one module or package, to that one's dotted name.
+        self.imports = _scope_imports(body)
+        # The child tables not yet matched, in the order symtable lists them, which is source order.
+        self.unmatched = list(table.get_children())
+
+    def resolve(self, name: str, scopes: tuple["_SymbolScope", ...]) -> tuple[str | None, bool]:
+        """For a read of name in this scope, the innermost of scopes, the module's first: the dotted name of the
+        module an import binds to it, if one does, and whether it is the module's own name."""
+        try:
+            symbol = self.table.lookup(name)
+        except KeyError:  # a read symtable puts in a scope of its own, such as an annotation's
+            return None, False
+        if symbol.is_global():
+            return scopes[0].imports.get(name), True
+        if symbol.is_free():
+            # The nearest enclosing function that holds it; class bodies do not enclose their methods.
+            holder = next((s for s in reversed(scopes[:-1]) if s.table.get_type() != symtable.SymbolTableType.CLASS
+                           and s.holds(name)), None)
+            return (holder.imports.get(name) if holder else None), False
+        return self.imports.get(name), False
+
+    def holds(self, name: str) -> bool:
+        """Whether this scope binds name itself."""
+        try:
+            return self.table.lookup(name).is_local()
+        except KeyError:
+            return False
+
+    def enter(self, node: ast.stmt | ast.expr, name: str) -> tuple["_SymbolScope", ...]:
+        """The scopes node opens in this one, outermost first, their tables no longer unmatched: the one symtable
+        names name on node's line, and for a def or class with type parameters the function's or class's own inside
+        that one (PEP 695). Empty when symtable has no such table, as for a comprehension it inlines (PEP 709)."""
+        for i, table in enumerate(self.unmatched):
+            if table.get_name() == name and table.get_lineno() == node.lineno:
+                del self.unmatched[i]
+                if table.get_type() == symtable.SymbolTableType.TYPE_PARAMETERS:
+                    around = _SymbolScope(table, [])
+                    inner = around.enter(node, name)
+                    return (around, *inner) if inner else ()
+                return (_SymbolScope(table, node.body if isinstance(node, _BODIED) else []),)
+        return ()
+
+
+# The scope nodes whose body is a list of statements, and so can hold imports.
+_BODIED = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+def _scoped_children(node: ast.AST, scopes: tuple[_SymbolScope, ...]) -> list[tuple[ast.AST, tuple[_SymbolScope, ...]]]:
+    """node's children, each with the scopes that hold it as _resolve_reads takes them, in source order. Where node
+    opens a scope, its decorators, defaults, bases and a comprehension's first iterable stay in the enclosing scope,
+    where Python evaluates them; the rest, but annotations, are in node's. A def, lambda, class or generator that
+    symtable has no scope for gives no children."""
+    outer: list[ast.AST]
+    inner: list[ast.AST]
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        outer = [*getattr(node, "decorator_list", []), *node.args.defaults, *filter(None, node.args.kw_defaults)]
+        inner = [*node.body] if isinstance(node.body, list) else [node.body]
+        name = "lambda" if isinstance(node, ast.Lambda) else node.name
+    elif isinstance(node, ast.ClassDef):
+        outer, inner, name = [*node.decorator_list, *node.bases, *node.keywords], [*node.body], node.name
+    elif isinstance(node, (ast.GeneratorExp, ast.ListComp, ast.SetComp, ast.DictComp)):
+        first, *rest = node.generators
+        elements = [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
+        outer, inner = [first.iter], [first.target, *first.ifs, *rest, *elements]
+        name = {ast.GeneratorExp: "genexpr", ast.ListComp: "listcomp", ast.SetComp: "setcomp",
+                ast.DictComp: "dictcomp"}[type(node)]
+    else:
+        return [(child, scopes) for child in ast.iter_child_nodes(node)]
+    opened = scopes[-1].enter(node, name)
+    if not opened and not isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp)):
+        return []
+    held = (*scopes, *opened)
+    return [*((child, scopes) for child in outer), *((child, held) for child in inner)]
+
+
+def _scope_imports(body: list[ast.stmt]) -> dict[str, str]:
+    """Each name the scope whose statements are body binds only by imports, at its own level and not in a nested
+    scope, all of one module or package, to that one's dotted name, as _import_bindings pairs them."""
+    bindings = _scope_bindings(body)
+    targets: dict[str, set[str]] = collections.defaultdict(set)
+    counts: collections.Counter[str] = collections.Counter()
+    stack: list[ast.AST] = list(body)
+    while stack:
+        node = stack.pop()
+        for bound, dotted in _import_bindings(node):
+            targets[bound].add(dotted)
+            counts[bound] += 1
+        if not isinstance(node, _SCOPES):
+            stack.extend(ast.iter_child_nodes(node))
+    return {bound: next(iter(t)) for bound, t in targets.items() if len(t) == 1 and counts[bound] == bindings[bound]}
+
+
+def _import_bindings(node: ast.AST) -> list[tuple[str, str]]:
+    """(name, dotted name of the module or package bound to it) for each name node binds when it is an import:
+    `import a.b` binds a to a, `import a.b as x` x to a.b, and `from a import b as x` x to a.b. A relative import,
+    `from a import *` and any other node give none."""
+    if isinstance(node, ast.Import):
+        return [(a.asname, a.name) if a.asname else (a.name.partition(".")[0],) * 2 for a in node.names]
+    if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+        return [(a.asname or a.name, f"{node.module}.{a.name}") for a in node.names if a.name != "*"]
+    return []
 
 
 def _shape(node: ast.AST) -> str:

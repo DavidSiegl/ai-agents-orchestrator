@@ -7064,7 +7064,7 @@ class TestWeakenedTests(RepositoryTest):
             "\n"                                                  # 11
             "    def test_again(self):\n"                         # 12
             '        self.assertEqual(add("a", ""), GOLDEN)\n'    # 13
-            '        self.assertNotEqual(add("", ""), GOLDEN)\n'  # 14
+            '        self.assertNotEqual(add("", "").upper(), GOLDEN)\n'  # 14
         ))
         self.edit("calc.py", "return a + b", "return b + a")
         self.edit("tests/test_golden.py", 'GOLDEN = "a"', 'GOLDEN = "b"')
@@ -7124,6 +7124,7 @@ class TestWeakenedTests(RepositoryTest):
     def test_a_name_an_inner_scope_of_the_test_binds_is_not_the_constant(self):
         for inner in ["        def check(GOLDEN):\n            assert add('', 'a') == GOLDEN\n\n        check('a')\n",
                       "        assert all(GOLDEN for GOLDEN in ['a'])\n",
+                      "        assert [GOLDEN for GOLDEN in ['a']]\n",
                       "        assert (lambda GOLDEN: GOLDEN)('a')\n"]:
             with self.subTest(inner=inner):
                 self.setUp()
@@ -7141,6 +7142,57 @@ class TestWeakenedTests(RepositoryTest):
                     ", GOLDEN)", f", {spelled}.GOLDEN)" if spelled != "tests" else ", tests.test_golden.GOLDEN)")
                 where, _ = self.found_after_golden_edit('GOLDEN = "a"', 'GOLDEN = "b"', tests)
                 self.assertEqual(where, [])
+
+    def test_a_read_python_resolves_to_the_module_is_the_constant_whatever_scope_it_is_in(self):
+        # A class body does not enclose its methods; a default and a comprehension's first iterable are evaluated
+        # outside the lambda or comprehension they belong to; `global` makes the name the module's.
+        for inner in [("        class F:\n            GOLDEN = 1\n\n            def m(self):\n"
+                       '                assert add("", "a") == GOLDEN\n\n        F().m()\n'),
+                      '        assert (lambda GOLDEN=GOLDEN: add("", "a") == GOLDEN)()\n',
+                      "        assert all(GOLDEN for GOLDEN in [GOLDEN])\n",
+                      '        global GOLDEN\n        assert add("", "a") == GOLDEN\n']:
+            with self.subTest(inner=inner):
+                self.setUp()
+                where, _ = self.found_after_golden_edit('GOLDEN = "a"', 'GOLDEN = "b"', self.GOLDEN_TESTS.replace(
+                    '        self.assertEqual(add("", "a"), GOLDEN)\n', inner))
+                self.assertEqual([rule for _, _, rule in where], ["expected-value-changed"])
+
+    def test_the_module_imported_inside_the_test_is_the_module(self):
+        for imported, spelled in [("import tests.test_golden", "tests.test_golden"),
+                                  ("from tests import test_golden", "test_golden"),
+                                  ("import tests.test_golden as tg", "tg")]:
+            with self.subTest(imported=imported):
+                self.setUp()
+                where, _ = self.found_after_golden_edit('GOLDEN = "a"', 'GOLDEN = "b"', self.GOLDEN_TESTS.replace(
+                    '        self.assertEqual(add("", "a"), GOLDEN)\n',
+                    f'        {imported}\n        self.assertEqual(add("", "a"), {spelled}.GOLDEN)\n'))
+                self.assertEqual(where, [("tests/test_golden.py", 11, "expected-value-changed")])
+
+    def test_an_unchanged_constant_with_a_code_change_is_not_found(self):
+        where, _ = self.found_after_golden_edit("from calc import add\n", "from calc import add  # the code\n")
+        self.assertEqual(where, [])
+
+    def test_a_test_with_type_parameters_reads_the_module_s_constant(self):
+        where, _ = self.found_after_golden_edit('GOLDEN = "a"', 'GOLDEN = "b"', self.GOLDEN_TESTS.replace(
+            "    def test_add(self):", "    def test_add[T](self):"))
+        self.assertEqual(where, [("tests/test_golden.py", 10, "expected-value-changed")])
+
+    def test_a_test_file_symtable_refuses_has_no_constants(self):
+        # ast.parse accepts a parameter declared global; symtable, as the compiler, refuses it.
+        where, _ = self.found_after_golden_edit('GOLDEN = "a"', 'GOLDEN = "b"',
+                                                self.GOLDEN_TESTS + "\n\ndef helper(x):\n    global x\n")
+        self.assertEqual(where, [])
+
+    def test_the_module_an_enclosing_def_imports_is_the_module(self):
+        where, _ = self.found_after_golden_edit('GOLDEN = "a"', 'GOLDEN = "b"', self.GOLDEN_TESTS.replace(
+            '        self.assertEqual(add("", "a"), GOLDEN)\n',
+            "        import tests.test_golden as tg\n"                 # 10
+            "\n"                                                       # 11
+            "        def check():\n"                                   # 12
+            '            assert add("", "a") == tg.GOLDEN\n'           # 13
+            "\n"                                                       # 14
+            "        check()\n"))                                      # 15
+        self.assertEqual(where, [("tests/test_golden.py", 13, "expected-value-changed")])
 
     def commit_mutmut_state(self):
         """Commit what mutmut leaves in mutants/ after a run: its copy of the code and of the tests beside it."""

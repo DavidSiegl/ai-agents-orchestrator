@@ -147,6 +147,12 @@ was done.
   worktree it runs in. Found while writing loop-guards ticket 05; not reproduced. Closes with `_run_proof` passing
   the working tree as pytest's rootdir and conftest root, or the proofs copied into a scratch directory of the
   worktree for their run.
+- **Cognitive complexity resolves a call's name with scope rules of its own.** `_callees` reads a function through
+  `_Scope` (`orchestrator.py`), a hand-written model of Python's name resolution, while test-integrity's
+  `_resolve_reads` takes the same rules from the standard library's `symtable`. Two models of one language rule can
+  disagree, and each Python release's scope changes (PEP 709's inlined comprehensions, PEP 695's annotation scopes)
+  must be followed by hand in one of them. Found while moving `test-integrity-constants` onto `symtable` (review 54,
+  F13). Closes with `_callees` resolving names through `symtable`, or with a reason recorded here why it cannot.
 - **`expected-value-changed` misses an inline literal's sign, type or structure.** `_changed_literals` pairs
   assertions by `_shape` and compares `_literals`, which drops types and operators: `assert f() == -5` becoming
   `== 5` changes the shape (no pair, no finding), and `== 1` becoming `== True` gives equal literal lists
@@ -355,13 +361,15 @@ was done.
   and now (`_PythonConstants`: a name one module-level `Assign` or `AnnAssign` binds to an expression with no call,
   bound nowhere else in the module's scope, as `_scope_bindings` counts with `_BINDING_NAME`), and
   `_changed_constants` reports `expected-value-changed` once per kept test and constant of the base whose assertions
-  name it on both sides, bare or through the module's dotted name or an import alias of it, when its expression
-  changed other than in layout, or it is no longer such a constant. Not closed: a constant imported from another
+  read it on both sides, bare or through the module's dotted name or a name an import of it binds, when its
+  expression changed other than in layout, or it is no longer such a constant. Which name a read reaches is Python's
+  scope rules as `symtable` gives them (`_resolve_reads`). Not closed: a constant imported from another
   module or computed by a call at the base; one built from other constants, whose edits are not seen; one reached
   through a local (`expected = GOLDEN`) or a helper that asserts rather than named in the test's assertions; a
   fixture's return value; an inline value moved into a new constant, which requirement 4 leaves out; a constant
-  changed by a module-level mutation (`GOLDEN["k"] = "b"`) or rebound through `global` in a function; and the
-  module reached through an alias that an import inside an `if`, a `try` or the test, or a relative import, gives it.
+  changed by a module-level mutation (`GOLDEN["k"] = "b"`) or rebound through `global` in a function; the module
+  reached through a relative import; and a test file that `symtable` refuses though it parses, which has no
+  constants.
 
 - **A base `.gitleaks.toml` that extends another file reads that file from outside the base.** `scan_unpublished`
   writes the base's `.gitleaks.toml` into the run directory and passes it with `--config`; an `[extend] path = ...`
