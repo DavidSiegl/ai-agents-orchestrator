@@ -19,9 +19,16 @@ pipeline {
     environment {
         UV_NO_PROGRESS = '1'
         COVERAGE_FILE  = '.coverage'
-        // For the UI and Package stages: crates are fetched into the workspace, which cleanWs empties, so no build
-        // compiles sources an earlier build left behind.
+        // For the UI, Gate and Package stages: crates are fetched into the workspace, which cleanWs empties, so no
+        // build compiles sources an earlier build left behind.
         CARGO_HOME     = "${env.WORKSPACE}/.cargo-home"
+        // The dev profile, which cargo test's test profile and clippy's checks inherit, without debug info. Debug
+        // info for the GTK and Tauri crates took enough memory that rustc was OOM-killed with two builds on
+        // agentbox0. ci/cargo-lock.sh now keeps two builds' cargo steps apart, except a quality build's, which never
+        // waits for the lock; building without debug info keeps each build's own peak lower. A failing test still
+        // prints its panic's file:line, which comes from core::panic::Location, not from debug info. Set for the
+        // whole build, not the UI stage alone, so that the Gate stage's clippy finds the UI stage's checks fresh.
+        CARGO_PROFILE_DEV_DEBUG = '0'
         // The GitHub login Jenkins posts pull request statuses as, its GitHub App's "<slug>[bot]", which the agents
         // cannot post as. Empty: no build of main trusts a pull request build, and each judges itself.
         PR_STATUS_CREATOR = 'davidsiegl-jenkins[bot]'
@@ -116,19 +123,11 @@ pipeline {
         }
 
         // The desktop app: its frontend's types, lint and Vitest tests, and its Tauri shell's cargo tests. The gate
-        // judges only the Python, so this stage stops the build instead, before Gate: a quality round then reports
-        // BUILD_FAILED with the console's end, where a failure after Gate would hide under quality.md's passing GATE
-        // line.
+        // runs no tests but the Python, so this stage stops the build instead, before Gate: a quality round then
+        // reports BUILD_FAILED with the console's end, where a failure after Gate would hide under quality.md's
+        // passing GATE line.
         stage('UI') {
             when { expression { return env.JUDGED_AT_PR != 'true' } }
-            environment {
-                // cargo test's test profile inherits dev. Debug info for the GTK and Tauri crates took enough memory
-                // that rustc was OOM-killed with two builds on agentbox0. ci/cargo-lock.sh now keeps two builds'
-                // cargo steps apart, except a quality build's, which never waits for the lock; building without debug
-                // info keeps each build's own peak lower. A failing test still prints its panic's file:line, which
-                // comes from core::panic::Location, not from debug info.
-                CARGO_PROFILE_DEV_DEBUG = '0'
-            }
             steps {
                 dir('ui') {
                     sh '''
@@ -142,14 +141,18 @@ pipeline {
                     // A quality build (GIT_REF set) runs within the orchestrator's QUALITY_TIMEOUT, which a wait
                     // behind another build's Package stage would exceed, so it takes the lock only when it is free.
                     sh '"$WORKSPACE/ci/cargo-lock.sh" ${GIT_REF:+--no-wait} cargo test --locked'
+                    // The Gate stage's clippy checks the shell's dependencies as cargo check does, not as cargo test
+                    // builds them: checked here, under the lock, they leave clippy only the shell itself to check.
+                    sh '"$WORKSPACE/ci/cargo-lock.sh" ${GIT_REF:+--no-wait} cargo check --locked --all-targets'
                 }
             }
         }
 
-        // gate.py (docs/quality-gate.md): ruff, mypy, pymarkdown, shellcheck and actionlint, the tests and coverage of
-        // new code, judged on the lines the change adds. A quality build judges its snapshot by main's gate and main's
-        // rules, so a change cannot loosen how it is itself judged, and goes UNSTABLE on a red gate; a pull request or
-        // main fails. A gate that could not judge fails any build.
+        // gate.py (docs/quality-gate.md): ruff, mypy, pymarkdown, shellcheck, actionlint and clippy, the tests and
+        // coverage of new code, judged on the lines the change adds. A quality build judges its snapshot by main's gate
+        // and main's rules, so a change cannot loosen how it is itself judged, but for clippy's, which are the tree's
+        // own Cargo.toml (TODO.md); it goes UNSTABLE on a red gate, and a pull request or main fails. A gate that could
+        // not judge fails any build.
         stage('Gate') {
             when { expression { return env.JUDGED_AT_PR != 'true' } }
             steps {

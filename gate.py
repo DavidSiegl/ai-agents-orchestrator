@@ -56,6 +56,11 @@ from xml.etree import ElementTree
 
 # Files a change may edit that alter how Jenkins and the gate judge it.
 BUILD_CONFIG_FILES = ("Jenkinsfile", "pyproject.toml", "uv.lock")
+# The names of the files, anywhere in the tree, that clippy takes its rules or its toolchain from, which the change
+# judged supplies whatever --config says: a manifest's [lints], clippy's configuration, the toolchain that brings
+# clippy, and, under a `.cargo` directory, cargo's configuration, whose rustflags can set lint levels.
+CLIPPY_CONFIG_NAMES = ("Cargo.toml", "clippy.toml", ".clippy.toml", "rust-toolchain", "rust-toolchain.toml")
+CARGO_CONFIG_NAMES = ("config", "config.toml")
 # The most findings the quality file lists, issues and findings to weigh numbered as one list, and the most failing
 # tests; the rest are counted.
 QUALITY_ISSUE_LIMIT = 50
@@ -66,7 +71,8 @@ GATE_ERROR = "ERROR"
 # new lines to cover; a smaller change is not judged on coverage.
 GATE_MIN_COVERAGE = 80.0
 GATE_MIN_NEW_LINES = 20
-# Seconds one linter may take before the gate counts it as failed.
+# Seconds each process a linter runs may take before the gate counts the linter as failed: its one run for most,
+# and for clippy each of the cargo commands Clippy says.
 GATE_TOOL_TIMEOUT = 600
 # Seconds a pytest or mutmut run the gate started is read for after it exited or was killed (_run_in_session), at
 # most: what a process outside its group, still holding its output, prints after that is lost.
@@ -304,9 +310,9 @@ def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (),
     (name, detail) of the failing tests of the test report the gate was given, None for no tests section, as when
     it was given none. coverage is the sentence about coverage of new code, None for no such section.
     suppressions are the (path, line, text) of lint suppressions the change added. edited are the
-    BUILD_CONFIG_FILES the change edits; rules_from names the file the gate took its rules from when that was not
-    the edited pyproject.toml. mutmut_state are the files the change adds or edits under mutmut's state, as
-    mutmut_state_files gives them.
+    BUILD_CONFIG_FILES and clippy's configuration files the change edits, as edited_config gives them; rules_from
+    names the file the gate took its rules from when that was not the edited pyproject.toml. mutmut_state are the
+    files the change adds or edits under mutmut's state, as mutmut_state_files gives them.
     """
     out = [f"GATE: {gate}", "", intro]
     if conditions:
@@ -409,6 +415,10 @@ def _config_section(edited, rules_from: str | None, mutmut_state) -> list[str]:
                    "the edited rules.")
     if "uv.lock" in edited:
         out.append("- The change edits `uv.lock`, which pins the versions of the linters the gate ran.")
+    if clippy := [f for f in edited if f not in BUILD_CONFIG_FILES]:
+        named = _series([f"`{f}`" for f in clippy], limit=5)
+        out.append(f"- The change edits {named}, which clippy takes its rules or its toolchain from; it judged the "
+                   f"change by the edited ones.")
     if mutmut_state:
         named = _series([f"`{one_line(f)}`" for f in mutmut_state], limit=5)
         out.append(f"- The change adds or edits {named} under "
@@ -419,9 +429,16 @@ def _config_section(edited, rules_from: str | None, mutmut_state) -> list[str]:
 
 
 def edited_config(diff: str, changed: dict[str, set[int]]) -> list[str]:
-    """The BUILD_CONFIG_FILES the diff changes, deletes or renames away."""
-    return [f for f in BUILD_CONFIG_FILES
-            if f in changed or re.search(rf"^(--- a/|rename from ){re.escape(f)}\t?$", diff, re.MULTILINE)]
+    """The BUILD_CONFIG_FILES the diff changes, deletes or renames away, in that order, then the files clippy takes
+    its rules from (CLIPPY_CONFIG_NAMES) that it does so to, in path order."""
+    touched = set(changed) | set(re.findall(r"^(?:--- a/|rename from )(.+?)\t?$", diff, re.MULTILINE))
+    return [f for f in BUILD_CONFIG_FILES if f in touched] + sorted(f for f in touched if _clippy_config(f))
+
+
+def _clippy_config(path: str) -> bool:
+    name = os.path.basename(path)
+    return name in CLIPPY_CONFIG_NAMES or (name in CARGO_CONFIG_NAMES
+                                           and os.path.basename(os.path.dirname(path)) == ".cargo")
 
 
 def mutmut_state_files(changed: dict[str, set[int]]) -> list[str]:
@@ -432,50 +449,139 @@ def mutmut_state_files(changed: dict[str, set[int]]) -> list[str]:
 
 @dataclass(frozen=True)
 class GateTool:
-    """A linter the gate runs, and how it reads what the linter prints.
-
-    Each prints a finding a line as `path:line[:col]: detail`, with detail matching the tool's pattern: groups
-    rule and message, and severity where the tool grades its findings.
-    """
+    """A linter the gate runs: which tracked files it reads, and, in a subclass's run, how it runs over them and
+    reads its findings."""
     name: str
     # git pathspecs of the tracked files it reads; the gate does not run a tool that none of them match.
     pathspecs: tuple[str, ...]
-    # The command line, given the pyproject.toml whose rules decide and the tracked files the pathspecs match.
-    command: Callable[[str, list[str]], list[str]]
-    detail: re.Pattern
     # The characters besides "\n" at which the tool ends a line of a file it reads and git does not; a "\r" counts
     # only where no "\n" follows it. Below one, the tool's line numbers are not git's, or it stops reading, so the
     # gate refuses a change below one (stray_line_ends).
     line_ends: tuple[str, ...]
+
+    def run(self, root: str, rules: str, files: list[str], tracked: set[str]) -> tuple[list[dict], list[str]]:
+        """The linter's findings over files, the tracked files its pathspecs match, in the repository whose top level
+        is root, and the failed conditions it caused, each a sentence, none when it ran as it should.
+
+        rules is the pyproject.toml whose rules decide, tracked every file git tracks, as _git_run's verbatim output
+        names them. The findings are {path, line, severity, rule, message} as tool_findings gives them, wherever they
+        are; the gate keeps those on added lines. A tool that is missing, fails or times out is a condition, never an
+        exception."""
+        raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class TextTool(GateTool):
+    """A linter that prints a finding a line as `path:line[:col]: detail`, with detail matching its pattern: groups
+    rule and message, and severity where the tool grades its findings."""
+    # The command line, given the pyproject.toml whose rules decide and the tracked files the pathspecs match.
+    command: Callable[[str, list[str]], list[str]] = field(kw_only=True)
+    detail: re.Pattern = field(kw_only=True)
     # Exit status 0 means it found nothing, this one that it found something, any other that it failed.
-    findings_status: int = 1
+    findings_status: int = field(default=1, kw_only=True)
+
+    def run(self, root: str, rules: str, files: list[str], tracked: set[str]) -> tuple[list[dict], list[str]]:
+        """As GateTool.run says, by one run of command in root."""
+        proc = _tool_process(self.name, self.command(rules, files), root)
+        if isinstance(proc, str):
+            return [], [proc]
+        found = tool_findings(self, proc.stdout, root, tracked)
+        if proc.returncode == 0 or (proc.returncode == self.findings_status and found):
+            return found, []
+        said = next((line.strip() for line in (proc.stderr + proc.stdout).split("\n") if line.strip()), "")
+        if proc.returncode == self.findings_status:
+            return [], [f"`{self.name}` reported findings, but none the gate could read: {said[:200]}"]
+        return [], [f"`{self.name}` failed with exit status {proc.returncode}: {said[:200]}"]
+
+
+@dataclass(frozen=True)
+class Clippy(GateTool):
+    """cargo clippy over every Cargo workspace that a manifest the repository tracks belongs to, all its targets
+    checked, tests and examples included.
+
+    Its rules are each workspace's own, the [lints] tables of its manifests and its clippy.toml: the gate passes it no
+    lint flags, and the pyproject.toml it is given holds none of clippy's. A finding's severity is the level the
+    workspace gives its lint, and the gate keeps either level on added lines; but at "deny" a finding fails its
+    crate's build and cargo checks no further crates, so a workspace that wants all its findings sets "warn". A
+    workspace that does not compile is a failed condition naming the compiler's first error, wherever it is, since its
+    lints cannot be read: a change that deletes a function an old line calls breaks the build on no line it added.
+
+    The cargo commands it runs, each within GATE_TOOL_TIMEOUT: `cargo clippy --version`, whose failure is clippy
+    missing; `cargo locate-project` for each tracked Cargo.toml; and `cargo clippy` in each workspace, which builds
+    what it needs to (target/ in the workspace) and may fetch crates its Cargo.lock names.
+    """
+
+    def run(self, root: str, rules: str, files: list[str], tracked: set[str]) -> tuple[list[dict], list[str]]:
+        """As GateTool.run says; files and rules play no part, since clippy reads crates by their manifests."""
+        proc = _tool_process(self.name, ["cargo", "clippy", "--version"], root)
+        if isinstance(proc, str):
+            return [], [proc]
+        if proc.returncode != 0:
+            return [], [(f"`{self.name}` is not installed: `cargo clippy --version` failed with exit status "
+                         f"{proc.returncode}: {_said(proc)}")]
+        manifests, problems = _cargo_workspaces(root, tracked)
+        found: list[dict] = []
+        for manifest in manifests:
+            lints, problem = self._lint_workspace(root, manifest, tracked)
+            found += lints
+            if problem:
+                problems.append(problem)
+        # --all-targets checks a library twice, as itself and as its tests, and clippy reports a lint for each.
+        return [dict(t) for t in dict.fromkeys(tuple(f.items()) for f in found)], problems
+
+    def _lint_workspace(self, root: str, manifest: str, tracked: set[str]) -> tuple[list[dict], str | None]:
+        """The lints clippy finds in the workspace whose root manifest is manifest, relative to root, and the failed
+        condition, None when it compiled and clippy ran as it should."""
+        proc = _tool_process(self.name, ["cargo", "clippy", "--workspace", "--all-targets", "--message-format=json"],
+                             os.path.join(root, os.path.dirname(manifest)))
+        if isinstance(proc, str):
+            return [], proc
+        lints: list[dict] = []
+        compile_errors: list[dict] = []
+        lossy = _lossy_names(tracked)
+        for line in proc.stdout.split("\n"):
+            diagnostic = _rustc_diagnostic(line, os.path.dirname(manifest), root, tracked, lossy)
+            if diagnostic is not None:
+                (compile_errors if diagnostic[1] else lints).append(diagnostic[0])
+        if compile_errors:
+            first = compile_errors[0]
+            return lints, (f"`{self.name}` could not compile the workspace of `{manifest}`: "
+                           f"`{first['path']}:{first['line']}` {' '.join(['error', *first['rule'].split()[1:]])}: "
+                           f"{first['message']}")
+        # A lint at "deny" stops the build as a compile error does; with neither, cargo itself failed.
+        if proc.returncode != 0 and not any(f["severity"] == "error" for f in lints):
+            said = next((s.strip() for s in proc.stderr.split("\n") if s.startswith("error")), _said(proc))
+            return lints, f"`{self.name}` failed with exit status {proc.returncode} in `{manifest}`: {said[:200]}"
+        return lints, None
 
 
 GATE_TOOLS = (
-    GateTool("ruff", ("*.py",),
-             lambda rules, files: ["ruff", "check", "--config", rules, "--output-format", "concise", "--no-cache",
-                                   *files],
-             re.compile(r"(?P<rule>[\w-]+):? (?:\[\*\] )?(?P<message>.+)"), ("\r",)),
+    TextTool("ruff", ("*.py",), ("\r",),
+             command=lambda rules, files: ["ruff", "check", "--config", rules, "--output-format", "concise",
+                                           "--no-cache", *files],
+             detail=re.compile(r"(?P<rule>[\w-]+):? (?:\[\*\] )?(?P<message>.+)")),
     # Which files mypy checks is one of its rules, [tool.mypy] files. A note elaborates an error; it is not one.
-    GateTool("mypy", ("*.py",),
-             lambda rules, files: ["mypy", "--config-file", rules, "--show-column-numbers", "--no-error-summary",
-                                   "--cache-dir", os.devnull],
-             re.compile(r"(?P<severity>error): (?P<message>.+?)(?:  \[(?P<rule>[\w-]+)\])?"), ("\r",)),
-    GateTool("pymarkdown", ("*.md",),
-             lambda rules, files: ["pymarkdown", "--config", rules, "--strict-config", "scan", *files],
-             re.compile(r"(?P<rule>MD\d+): (?P<message>.+)"), ("\r",)),
+    TextTool("mypy", ("*.py",), ("\r",),
+             command=lambda rules, files: ["mypy", "--config-file", rules, "--show-column-numbers",
+                                           "--no-error-summary", "--cache-dir", os.devnull],
+             detail=re.compile(r"(?P<severity>error): (?P<message>.+?)(?:  \[(?P<rule>[\w-]+)\])?")),
+    TextTool("pymarkdown", ("*.md",), ("\r",),
+             command=lambda rules, files: ["pymarkdown", "--config", rules, "--strict-config", "scan", *files],
+             detail=re.compile(r"(?P<rule>MD\d+): (?P<message>.+)")),
     # shellcheck and actionlint have no table in pyproject.toml, so they run on their defaults: --norc and an empty
     # config file keep a .shellcheckrc or .github/actionlint.yaml, which a change could add, from loosening them.
-    GateTool("shellcheck", ("*.sh",),
-             lambda rules, files: ["shellcheck", "--norc", "-f", "gcc", *files],
-             re.compile(r"(?P<severity>error|warning|note): (?P<message>.+) \[(?P<rule>SC\d+)\]"), ("\r",)),
-    GateTool("actionlint", (".github/workflows/*.yml", ".github/workflows/*.yaml"),
-             lambda rules, files: ["actionlint", "-config-file", os.devnull, *files],
-             re.compile(r"(?P<message>.+) \[(?P<rule>[\w-]+)\]"),
-             # Its YAML parser, ported from libyaml, also ends a line at NEL, U+2028 and U+2029, although YAML 1.2
-             # does not (https://yaml.org/spec/1.2.2/#54-line-break-characters). Observed with actionlint 1.7.12
-             # (go.yaml.in/yaml/v4 v4.0.0-rc.3); the tests stub actionlint, so recheck this on an upgrade.
-             ("\r", "\x85", "\u2028", "\u2029")),
+    TextTool("shellcheck", ("*.sh",), ("\r",),
+             command=lambda rules, files: ["shellcheck", "--norc", "-f", "gcc", *files],
+             detail=re.compile(r"(?P<severity>error|warning|note): (?P<message>.+) \[(?P<rule>SC\d+)\]")),
+    # Its YAML parser, ported from libyaml, also ends a line at NEL, U+2028 and U+2029, although YAML 1.2 does not
+    # (https://yaml.org/spec/1.2.2/#54-line-break-characters). Observed with actionlint 1.7.12 (go.yaml.in/yaml/v4
+    # v4.0.0-rc.3); the tests stub actionlint, so recheck this on an upgrade.
+    TextTool("actionlint", (".github/workflows/*.yml", ".github/workflows/*.yaml"), ("\r", "\x85", "\u2028", "\u2029"),
+             command=lambda rules, files: ["actionlint", "-config-file", os.devnull, *files],
+             detail=re.compile(r"(?P<message>.+) \[(?P<rule>[\w-]+)\]")),
+    # rustc numbers lines at "\n" alone, though Rust counts a lone "\r", NEL, U+2028 and U+2029 as whitespace:
+    # observed with clippy 0.1.99 (rustc 1.99.1), whose finding below a line holding all four was on git's line.
+    Clippy("clippy", ("*.rs",), ()),
 )
 
 
@@ -540,9 +646,10 @@ class GateCheck:
 # A finding's location, before the tool's own part; lineless when the tool names only the file.
 _FINDING_AT = re.compile(r"(?P<path>[^:]+):(?:(?P<line>\d+):(?:\d+:)?)? (?P<detail>.+)")
 
-# Comments that silence a linter or exempt lines from coverage, which the quality file lists for the Reviewer.
+# Comments that silence a linter or exempt lines from coverage, and Rust's attributes that silence a lint, which the
+# quality file lists for the Reviewer.
 _SUPPRESSION = re.compile(r"#.*\b(?:noqa|type:\s*ignore|shellcheck\s+disable|pragma:\s*no\s*(?:cover|branch|mutate))\b"
-                          r"|<!--\s*pyml\s+disable")
+                          r"|<!--\s*pyml\s+disable|#!?\[\s*(?:allow|expect)\s*\(")
 
 
 @dataclass(frozen=True)
@@ -603,10 +710,9 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
                  if f]
         reads.append((tool, files))
         if files:
-            found, problem = _run_gate_tool(tool, root, rules_path, files, tracked)
+            found, problems = tool.run(root, rules_path, files, tracked)
             findings += found
-            if problem:
-                conditions.append(problem)
+            conditions += problems
     issues = on_changed_lines(findings, changed)
     elsewhere = len(findings) - len(issues)
     if issues:
@@ -654,31 +760,85 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
     return text.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
 
 
-def _run_gate_tool(tool: GateTool, root: str, rules: str, files: list[str],
-                   tracked: set[str]) -> tuple[list[dict], str | None]:
-    """The tool's findings over files, and the failed condition it caused, None when it ran as it should."""
+def _tool_process(name: str, argv: list[str], cwd: str) -> subprocess.CompletedProcess | str:
+    """argv run in cwd for the linter name, with tool_env, within GATE_TOOL_TIMEOUT seconds: the finished process,
+    whatever its exit status, its output decoded as _git_run's verbatim output is, so the paths it prints match git's
+    and keep their line ends; or, when it could not be started or did not finish, the failed condition, a sentence
+    naming the linter."""
     try:
         # The command is a fixed tool's, and the files are git's list of tracked ones; no shell reads either.
-        proc = subprocess.run(tool.command(rules, files), cwd=root, capture_output=True,  # noqa: S603
-                              timeout=GATE_TOOL_TIMEOUT, env=tool_env(), check=False)
+        proc = subprocess.run(argv, cwd=cwd, capture_output=True, timeout=GATE_TOOL_TIMEOUT,  # noqa: S603
+                              env=tool_env(), check=False)
     except FileNotFoundError:
-        return [], f"`{tool.name}` is not installed: it is not on PATH."
+        program = "it" if argv[0] == name else f"`{argv[0]}`"
+        return f"`{name}` is not installed: {program} is not on PATH."
     except subprocess.TimeoutExpired:
-        return [], f"`{tool.name}` did not finish within {GATE_TOOL_TIMEOUT} seconds."
+        return f"`{name}` did not finish within {GATE_TOOL_TIMEOUT} seconds."
     except OSError as e:
-        return [], f"`{tool.name}` could not be started: {e}."
-    # Decoded as _git_run's verbatim output is, so the paths it prints match git's and keep their line ends.
-    stdout, stderr = os.fsdecode(proc.stdout), os.fsdecode(proc.stderr)
-    found = tool_findings(tool, stdout, root, tracked)
-    if proc.returncode == 0 or (proc.returncode == tool.findings_status and found):
-        return found, None
-    said = next((line.strip() for line in (stderr + stdout).split("\n") if line.strip()), "")
-    if proc.returncode == tool.findings_status:
-        return [], f"`{tool.name}` reported findings, but none the gate could read: {said[:200]}"
-    return [], f"`{tool.name}` failed with exit status {proc.returncode}: {said[:200]}"
+        return f"`{name}` could not be started: {e}."
+    return subprocess.CompletedProcess(proc.args, proc.returncode, os.fsdecode(proc.stdout), os.fsdecode(proc.stderr))
 
 
-def tool_findings(tool: GateTool, output: str, root: str, tracked: set[str]) -> list[dict]:
+def _cargo_workspaces(root: str, tracked: set[str]) -> tuple[list[str], list[str]]:
+    """The root manifest of each Cargo workspace that a tracked Cargo.toml belongs to, relative to root, the
+    repository's top level, in path order; and a failed condition, naming clippy, for each manifest whose workspace
+    cargo cannot tell."""
+    roots, problems = set(), []
+    for manifest in sorted(f for f in tracked if os.path.basename(f) == "Cargo.toml"):
+        proc = _tool_process("clippy", ["cargo", "locate-project", "--workspace", "--message-format", "plain",
+                                        "--manifest-path", manifest], root)
+        if isinstance(proc, str):
+            problems.append(proc)
+        elif proc.returncode != 0:
+            problems.append(f"`clippy` could not find the workspace of `{manifest}`: {_said(proc)}")
+        else:
+            roots.add(os.path.relpath(proc.stdout.strip(), root))
+    return sorted(roots), problems
+
+
+# The codes of rustc's own errors, which a lint's code never is; a syntax error has no code at all.
+_RUSTC_ERROR_CODE = re.compile(r"E\d{4}")
+
+
+def _rustc_diagnostic(line: str, workspace: str, root: str, tracked: set[str],
+                      lossy: dict[str, str | None]) -> tuple[dict, bool] | None:
+    """The finding in line, one line of `cargo --message-format=json`'s output, with whether it is a compile error
+    rather than a lint; None for any other line, such as a note, a summary with no place in the code, or a finding in
+    a file git does not track.
+
+    workspace is the workspace's directory relative to root, which the paths cargo prints are relative to; tracked
+    and lossy as tool_findings uses them. A finding inside a macro's definition is placed where the macro was used,
+    at the first expansion that is in a tracked file."""
+    try:
+        record = json.loads(line)
+        message = record["message"] if record.get("reason") == "compiler-message" else None
+        if message is None or message["level"] not in ("error", "warning"):
+            return None
+        span = next((s for s in message["spans"] if s["is_primary"]), None)
+        path = None
+        while span is not None and (path := _tracked_name(os.path.join(workspace, span["file_name"]), root, tracked,
+                                                          lossy)) is None:
+            span = (span.get("expansion") or {}).get("span")
+        if span is None:
+            return None
+        code = (message.get("code") or {}).get("code")
+        return ({"path": path, "line": span["line_start"], "severity": message["level"],
+                 "rule": f"clippy {code}" if code else "clippy", "message": message["message"]},
+                message["level"] == "error" and (code is None or _RUSTC_ERROR_CODE.fullmatch(code) is not None))
+    # Anything that is not a record of the shape https://doc.rust-lang.org/cargo/reference/external-tools.html
+    # gives, such as a line a build script printed, holds no finding.
+    except (json.JSONDecodeError, AttributeError, KeyError, TypeError):
+        return None
+
+
+def _tracked_name(shown: str, root: str, tracked: set[str], lossy: dict[str, str | None]) -> str | None:
+    """The tracked file that shown, a path a tool printed, absolute or relative to root, names; None when it names
+    none. lossy is _lossy_names(tracked), for a tool that prints a name that is not UTF-8 lossily."""
+    relative = os.path.relpath(os.path.join(root, shown), root)
+    return relative if relative in tracked else lossy.get(relative)
+
+
+def tool_findings(tool: TextTool, output: str, root: str, tracked: set[str]) -> list[dict]:
     """The findings in what the tool printed, as the {path, line, severity, rule, message} the quality file lists.
 
     A line that is not a finding on a tracked file, such as a summary, is skipped. Paths become relative to root,
@@ -695,8 +855,7 @@ def tool_findings(tool: GateTool, output: str, root: str, tracked: set[str]) -> 
         at = _FINDING_AT.fullmatch(text.strip(" \t\r"))
         if not at:
             continue
-        shown = os.path.relpath(os.path.join(root, at["path"]), root)
-        path = shown if shown in tracked else lossy.get(shown)
+        path = _tracked_name(at["path"], root, tracked, lossy)
         detail = tool.detail.fullmatch(at["detail"])
         if path is None or not detail:
             continue
