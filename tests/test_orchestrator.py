@@ -33,6 +33,7 @@ from dataclasses import asdict, replace
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 from gitrepo import RepositoryTest
 
 import orchestrator
@@ -16996,6 +16997,7 @@ class ServeHost(FakeHost):
         return [orchestrator.RunFile(p, m) for m, p in sorted(files)]
 
 
+@pytest.mark.loopback
 class ServerTest(unittest.TestCase):
     """A RunServer on a free port, serving the projects connect gives, for as long as the test runs."""
 
@@ -17467,6 +17469,7 @@ class TestRunWatch(unittest.TestCase):
         self.assertEqual(self.watch.poll(), [])
 
 
+@pytest.mark.loopback
 class TestServeCommand(unittest.TestCase):
     """orchestrator.py serve as a process of its own."""
 
