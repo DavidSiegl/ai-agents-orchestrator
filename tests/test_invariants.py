@@ -20,6 +20,7 @@ from orchestrator import CI
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "orchestrator.py"
+GATE_SOURCE = ROOT / "gate.py"
 
 TOKEN = "tok-3f9a1c"
 JENKINS = "http://jenkins.example:8080"
@@ -109,9 +110,14 @@ CI_CALLS = {
 
 class TestInvariants(unittest.TestCase):
     def test_the_orchestrator_imports_only_the_standard_library(self):
-        others = imported_modules(ast.parse(SOURCE.read_text())) - set(sys.stdlib_module_names)
-        self.assertEqual(others, set(), "orchestrator.py is stdlib-only, so that it runs on a system python3 without "
-                                        "uv (pyproject.toml, [project]; docs/ui-options.md, C1)")
+        # So neither imports the other either: they meet only in the quality file (docs/quality-gate.md).
+        why = {SOURCE: "so that it runs on a system python3 without uv (pyproject.toml, [project]; "
+                       "docs/ui-options.md, C1)",
+               GATE_SOURCE: "so that the one file is the gate, for another project to run (docs/quality-gate.md)"}
+        for source, reason in why.items():
+            with self.subTest(source.name):
+                others = imported_modules(ast.parse(source.read_text())) - set(sys.stdlib_module_names)
+                self.assertEqual(others, set(), f"{source.name} is stdlib-only, {reason}")
 
     def test_the_project_has_no_runtime_dependencies(self):
         with open(ROOT / "pyproject.toml", "rb") as f:
@@ -126,6 +132,7 @@ class TestInvariants(unittest.TestCase):
         self.assertEqual(authorization_uses(ast.parse(SOURCE.read_text())),
                          [("CI._request", "add_unredirected_header"), ("RunRequestHandler.do_OPTIONS", "send_header"),
                           ("RunRequestHandler._has_token", "get")], rule)
+        self.assertEqual(authorization_uses(ast.parse(GATE_SOURCE.read_text())), [], rule)
         self.assertEqual(set(CI_CALLS), {name for name in vars(CI) if not name.startswith("_")},
                          "CI_CALLS calls each public member of CI once")
         jenkins = AnyJenkins()

@@ -31,10 +31,10 @@ pipeline {
         // A quality build (GIT_REF set) records what it judges as its build description, before Install runs any
         // code of the change: exactly `judged tree=<sha> parent=<sha> main=<sha>`, full lowercase shas, one space
         // apart. tree is the snapshot's tree, parent its only parent, the run's base, and main the origin/main
-        // commit whose orchestrator.py and pyproject.toml the Gate stage judges with. `orchestrator.py
-        // judged-in-quality` parses it, by JUDGED_DESCRIPTION. A build restarted from a later stage records none, so
-        // nothing trusts it. No later stage may fetch GIT_REF: the orchestrator deletes that branch once the Gate
-        // stage has archived quality.md, while the build may still run (docs/quality-gate.md, "The calls").
+        // commit whose gate and rules the Gate stage judges with. `orchestrator.py judged-in-quality` parses it, by
+        // JUDGED_DESCRIPTION. A build restarted from a later stage records none, so nothing trusts it. No later stage
+        // may fetch GIT_REF: the orchestrator deletes that branch once the Gate stage has archived quality.md, while
+        // the build may still run (docs/quality-gate.md, "The calls").
         stage('Checkout') {
             steps {
                 script {
@@ -104,7 +104,7 @@ pipeline {
                 // pytest itself could not run.
                 sh '''
                     status=0
-                    uv run pytest --cov=orchestrator --cov-branch --cov-report=xml --junitxml=test-results.xml || status=$?
+                    uv run pytest --cov=orchestrator --cov=gate --cov-branch --cov-report=xml --junitxml=test-results.xml || status=$?
                     [ "$status" -le 1 ] || exit "$status"
                 '''
             }
@@ -146,28 +146,39 @@ pipeline {
             }
         }
 
-        // orchestrator.py gate (docs/quality-gate.md): ruff, mypy, pymarkdown, shellcheck and actionlint, the tests and
-        // coverage of new code, judged on the lines the change adds. A quality build judges its snapshot by main's
-        // gate and main's rules, so a change cannot loosen how it is itself judged, and goes UNSTABLE on a red gate;
-        // a pull request or main fails. A gate that could not judge fails any build.
+        // gate.py (docs/quality-gate.md): ruff, mypy, pymarkdown, shellcheck and actionlint, the tests and coverage of
+        // new code, judged on the lines the change adds. A quality build judges its snapshot by main's gate and main's
+        // rules, so a change cannot loosen how it is itself judged, and goes UNSTABLE on a red gate; a pull request or
+        // main fails. A gate that could not judge fails any build.
         stage('Gate') {
             when { expression { return env.JUDGED_AT_PR != 'true' } }
             steps {
                 script {
-                    def gate = 'orchestrator.py'
+                    def gate = 'gate.py'
+                    // The word the gate's program takes before its options: none for gate.py.
+                    def subcommand = ''
                     def rules = 'pyproject.toml'
                     def base
                     if (params.GIT_REF) {
                         // The snapshot's only parent is the run's base.
                         base = 'HEAD^'
-                        // The main commit Checkout named in the build's description, fetched there.
-                        sh '''
+                        // The gate and rules of the main commit Checkout named in the build's description, fetched
+                        // there. Cutover fallback, removed by ticket 03 of the gate split: a main from before gate.py
+                        // has its gate as orchestrator.py's gate subcommand, so that commit's orchestrator.py judges.
+                        def program = sh(returnStdout: true, script: '''
                             : "${JUDGED_MAIN:?is unset; run the whole build, not a restart from a later stage}"
                             mkdir -p "$WORKSPACE_TMP/main"
-                            git show "$JUDGED_MAIN:orchestrator.py" > "$WORKSPACE_TMP/main/orchestrator.py"
                             git show "$JUDGED_MAIN:pyproject.toml" > "$WORKSPACE_TMP/main/pyproject.toml"
-                        '''
-                        gate = "${env.WORKSPACE_TMP}/main/orchestrator.py"
+                            if git cat-file -e "$JUDGED_MAIN:gate.py" 2>/dev/null; then
+                                program=gate.py
+                            else
+                                program=orchestrator.py
+                            fi
+                            git show "$JUDGED_MAIN:$program" > "$WORKSPACE_TMP/main/$program"
+                            printf '%s' "$program"
+                        ''').trim()
+                        gate = "${env.WORKSPACE_TMP}/main/${program}"
+                        subcommand = program == 'orchestrator.py' ? 'gate' : ''
                         rules = "${env.WORKSPACE_TMP}/main/pyproject.toml"
                     } else if (env.CHANGE_TARGET) {
                         sh 'git fetch --quiet origin "+refs/heads/$CHANGE_TARGET:refs/remotes/origin/$CHANGE_TARGET"'
@@ -177,9 +188,11 @@ pipeline {
                     }
                     // The values reach the shell as environment variables, never as Groovy-built shell code.
                     def status
-                    withEnv(["GATE=${gate}", "GATE_RULES=${rules}", "GATE_BASE=${base}"]) {
+                    withEnv(["GATE=${gate}", "GATE_SUBCOMMAND=${subcommand}", "GATE_RULES=${rules}",
+                             "GATE_BASE=${base}"]) {
                         status = sh(returnStatus: true, script: '''
-                            uv run --frozen python "$GATE" gate --base "$GATE_BASE" --config "$GATE_RULES" \\
+                            uv run --frozen python "$GATE" ${GATE_SUBCOMMAND:+"$GATE_SUBCOMMAND"} \\
+                                --base "$GATE_BASE" --config "$GATE_RULES" \\
                                 --tests test-results.xml --coverage coverage.xml --out quality.md
                         ''')
                     }

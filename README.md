@@ -219,7 +219,7 @@ python orchestrator.py prune --dry-run
 python orchestrator.py metrics | jq -s 'map(.rounds) | add / length'
 
 # Judge the change since a commit as the quality gate does; exit status 0 for GATE: OK, 1 for GATE: ERROR
-uv run python orchestrator.py gate --base main --coverage coverage.xml --out quality.md
+uv run python gate.py --base main --coverage coverage.xml --out quality.md
 ```
 
 `--machine` and `--cwd` work the same way for every command, and `doctor` checks a project only when given
@@ -448,7 +448,8 @@ place, with exactly the placeholders of the text it replaces.
 
 ```bash
 uv run pytest
-uv run pytest --cov=orchestrator --cov-branch --cov-report=xml && uv run python orchestrator.py gate --base main --coverage coverage.xml
+uv run pytest --cov=orchestrator --cov=gate --cov-branch --cov-report=xml && \
+    uv run python gate.py --base main --coverage coverage.xml
 ```
 
 `tests/test_properties.py` holds property-based tests: 25 inputs per test by default, 250 with

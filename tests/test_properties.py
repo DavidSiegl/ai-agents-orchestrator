@@ -15,11 +15,10 @@ from unittest.mock import patch
 from hypothesis import example, given
 from hypothesis import strategies as st
 
+from gate import GATE_ERROR, GATE_OK, _unquote, changed_lines, quality_report
 from orchestrator import (
     APPROVE,
     CHANGES_REQUESTED,
-    GATE_ERROR,
-    GATE_OK,
     QUALITY_BUILD_FAILED,
     QUALITY_ERROR,
     QUALITY_LEAK,
@@ -28,14 +27,11 @@ from orchestrator import (
     OrchestratorError,
     _failed_by,
     _patch_unquote,
-    _unquote,
     added_lines,
     build_failed_report,
-    changed_lines,
     ci_credentials,
     parse_gate,
     parse_verdict,
-    quality_report,
 )
 
 # git without the user's or the system's configuration, either of which could change what a diff looks like.

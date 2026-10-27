@@ -1,7 +1,7 @@
 # TODO
 
-What is known to be open in `orchestrator.py`, and why. An entry leaves `Open issues` only for `Fixed`, with what
-was done.
+What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry leaves `Open issues` only for
+`Fixed`, with what was done.
 
 ## Planned
 
@@ -25,24 +25,39 @@ was done.
   machines and in CI. Decided against: one file on every platform, by embedding the orchestrator's bytes in the
   Rust executable and unpacking them at start (PyInstaller's onefile done twice), or by Python hosting the window,
   which [ui-options.md](docs/ui-options.md) chose against. Agreed 2026-10-24.
-- **The quality gate in a `gate.py` of its own.** The gate is reusable for other Python projects, but lives inside
-  `orchestrator.py`; and it can only run inside the judged project's environment anyway, since it starts pytest
-  and mutmut with `sys.executable`, which in the binary is the binary. Decided 2026-10-24: the quality file is the
-  one interface: the engine reads and amends it (`parse_gate`, `gate_failures`, `judge_run`) and imports nothing
-  from the gate; each side keeps its own copy of the pieces of the format it needs, the gate's the home, and
-  `TestQualityFileContract` checks they agree. The engine writes a BUILD_FAILED file itself, minimally
-  (`build_failed_report`: status line, intro, failing tests or the console's end, no build-configuration or
-  mutmut-state listing). `gate.py` is one stdlib-only file beside `orchestrator.py`, so a quality build can still
-  take main's with `git show origin/main:gate.py`; it is the whole program, `python gate.py --base REV ...`, with
-  no subcommand, and the orchestrator loses `gate`. During the cutover, while main has no `gate.py`, the
-  Jenkinsfile falls back to main's `orchestrator.py gate`. The gate moves to its own repository only once a second
-  project uses it. The seam is drawn: the gate's block in `orchestrator.py` (from "Everything from here to the line
-  that ends the gate's block" to that line) uses nothing outside it, and nothing outside uses it but the `gate`
-  subcommand (`add_gate_arguments`, `gate_command`). Left: the cut itself, with its tests, CI and docs, then the
-  fallback's removal, then making the test-file patterns a setting for other projects.
+- **The quality gate in a `gate.py` of its own: what is left.** The cut is made (Fixed, "The quality gate lives
+  inside `orchestrator.py`"). Left: removing the Jenkinsfile's cutover fallback, which runs main's
+  `orchestrator.py gate` while the main commit a quality build names has no `gate.py`, once main has it
+  (`.scratch/gate-split/issues/03-drop-cutover-fallback.md`); then making the test-file patterns a setting, for the
+  gate's use in other projects (`04-configurable-test-files.md`). The gate moves to its own repository only once a
+  second project uses it. Decided 2026-10-24.
 
 ## Open issues
 
+- **A quality build of a snapshot from before `gate.py` fails mypy.** A quality build judges by main's rules
+  (`--config`), and since the split main's `[tool.mypy] files` names `gate.py`, which mypy reads relative to the
+  judged tree; a run whose base predates the split has no `gate.py`, so mypy stops with `gate.py: error: Cannot read
+  file` (status 2) and the gate is ERROR on a failed condition the Builder cannot fix. mutmut's `source_paths`
+  names it too, so surviving-mutants is `not-run` there. Checked by hand against such a tree (2026-10-27). Affects
+  only runs started before the split merged that reach a quality round after it; closes by itself once none is
+  left, or with the gate passing mypy only the listed files the tree has. Cross-review 61 (F1, 2026-10-27): "the
+  gate is ERROR on a failed condition the Builder cannot fix", against the spec's "a quality build is judged by
+  main's gate and main's rules".
+- **During the cutover fallback, mutmut cannot test a snapshot that has `gate.py`.** The fallback judges a snapshot
+  of this branch by a `$JUDGED_MAIN` from before the split, whose `[tool.mutmut] source_paths` is
+  `["orchestrator.py"]`; mutmut copies only `source_paths`, `tests/` and `also_copy` into `mutants/`, so the tests
+  that `import gate` fail there and surviving-mutants is `not-run`, and each changed `gate.py` function is
+  `not-mutated`. Findings to weigh, not failed conditions. Raised by cross-review 61 (F2, 2026-10-27) from mutmut's
+  copy rule and the gate's code, not from a run. Closes by itself once main has `gate.py` (ticket 03's start).
+- **`BUILD_CONFIG_FILES` does not list `gate.py`.** A pull request or main build runs its own tree's `gate.py`, so a
+  change that loosens the gate gets no "Build configuration" notice in its quality file; `orchestrator.py`, which
+  held the gate, was not listed either. Raised by cross-review 61 (F7, 2026-10-27). Closes with `gate.py` listed,
+  with a notice of its own wording (a quality build runs main's gate, not the edit).
+- **The quality file's format has two names for each part.** The engine's copies (`QUALITY_OK`,
+  `QUALITY_FAILED_CONDITIONS`, `QUALITY_FINDINGS_LIMIT`, `_numbered_finding`, `_check_finding`, `_shortened`) and
+  the gate's (`GATE_OK`, `FAILED_CONDITIONS`, `QUALITY_ISSUE_LIMIT`, `_numbered`, `_finding`, `_clip`) differ, so a
+  grep for one misses its twin. Most date from gate-split ticket 01. Raised by cross-review 61 (F9, 2026-10-27).
+  Closes with one name per part on both sides, a change to both programs.
 - **surviving-mutants takes only the top directory's pytest configuration.** Since `_pytest_groups`, flaky-tests and
   passes-at-base run each changed test under the configuration pytest finds for it below the copy's top, but
   `_pytest_config`, which surviving-mutants gives mutmut, still looks in the top directory alone, so a project whose
@@ -181,8 +196,15 @@ was done.
   own `git` mode has the same blind spot. Raised by the cross-review of `push-secret-scan` (F15, 2026-10-24). Closes
   with a decision in the spec whether binary content is in scope, and, if it is, a `--text` diff or a scan of the
   blobs themselves (`gitleaks dir` over the pushed files).
+- **The quality file's intro still says `orchestrator.py gate` judged the tree.** `judge_change` writes that intro,
+  though since the split the program is `gate.py`. Left as it was on purpose (2026-10-27): `judge_change` scores 24,
+  over the cognitive-complexity limit of 15, and the check pairs a function moved into a new file with its base only
+  by an unchanged body, so editing it in the pull request that moves it fails the gate as a new function over the
+  limit. Cross-review 61 (F3, 2026-10-27): "a Builder or Reviewer following the quality file's own words to
+  reproduce the result is sent to a dead command". Closes with the intro naming `gate.py`, in a later change, where
+  `judge_change` pairs with its base in `gate.py` by name and is no worse than 24.
 - **The gate's intro writes the `--rules` path as it is.** `judge_change`'s intro names the rules file without
-  `one_line` (`orchestrator.py`, `intro = ...` in `judge_change`), so a rules path holding a line breaker splits the
+  `one_line` (`gate.py`, `intro = ...` in `judge_change`), so a rules path holding a line breaker splits the
   quality file's third line, and `docs/quality-gate.md`'s "wherever it appears in a list item or a name" says more
   than holds for it. `gate_failures` does not read the intro, so no round is misjudged. Raised by cross-review 38
   (round 3, 2026-10-26). Closes with the intro written through `one_line`, or with each quality-file writer escaping
@@ -204,9 +226,9 @@ was done.
   its parser inline and returns only the parsed arguments, so `cli_commands` calls it with `parse_args` patched
   class-wide to hand the parser back, and reads argparse's private `_actions` and `_SubParsersAction`. Raised by
   cross-review 56 (F8, 2026-10-27): "Breaks if `parse_args` switches to `parse_known_args` or parses twice". It
-  fails loudly then (`parse_args parsed without its parser's parse_args`). Closes with an
-  `orchestrator.build_parser()` that `parse_args` calls and the test reads, an orchestrator.py change and so a
-  version bump.
+  fails loudly then (`parse_args parsed without its parser's parse_args`); `built_parser` reads `gate.parse_args`'s
+  the same way. Closes with an `orchestrator.build_parser()` and a `gate.build_parser()` that each `parse_args` calls
+  and the test reads, a change to both programs and so a version bump.
 - **README and docs left over from the README rewrite (PR #90).** Raised by cross-review 50 (2026-10-26), in what
   PR #90 brought, not in code:
   - The Jenkins job path still uses the old folder name, as
@@ -215,10 +237,10 @@ was done.
     The Planned rename entry above still lists the folder as not renamed.
   - docs/architecture.md's endpoint table gives `/files?run=ID` as a list of `{"name", "mtime"}`, while
     `RunRequestHandler`'s docstring, which the table names as the authority, gives `{"run", "files"}`.
-  - The README's `gate` example says exit 0 for OK and 1 for ERROR, but not 2, unjudged, when no quality file is
+  - The README's `gate.py` example says exit 0 for OK and 1 for ERROR, but not 2, unjudged, when no quality file is
     written.
   - Smaller: a short line mid-paragraph in the rename entry above; the README no longer says which commands take only
-    `--machine`/`--cwd`; the `gate` example no longer names the tools it needs (ruff, mypy, pymarkdown, shellcheck,
+    `--machine`/`--cwd`; the `gate.py` example no longer names the tools it needs (ruff, mypy, pymarkdown, shellcheck,
     actionlint).
   Closes with those lines corrected, or the endpoint table replaced by a pointer to the docstring.
 - **Gaps in reading a running build's quality.md (PR #105).** Raised by cross-review 58 (2026-10-27):
@@ -227,7 +249,8 @@ was done.
   - No test covers a transient `CIError` between two reads, or a build that ends with a file other than the one read
     while it ran (F5).
 - **`test_invariants.py` and `test_docs.py` fail inside mutmut's copy.** Raised by cross-review 60 (2026-10-27), in
-  code PR #106 brought. Under mutmut, `SOURCE` is mutmut's mutated `orchestrator.py`: it imports `mutmut`, and each
+  code PR #106 brought. Under mutmut, `SOURCE` is mutmut's mutated `orchestrator.py`, and `GATE_SOURCE` its
+  mutated `gate.py`, both in `source_paths`: each imports `mutmut`, and each
   mutated function has `__mutmut_orig` and `__mutmut_N` copies, so the stdlib-only test fails for any change to a
   function, and the unredirected-header test for a change to `CI._request`, `RunRequestHandler.do_OPTIONS` or
   `_has_token`. `test_docs.py` reads `README.md` and resolves links into the whole repo, while `mutants/` holds only
@@ -287,7 +310,7 @@ was done.
   copy stalled that long past its first line and then resumed still hands the round a cut file, which shortens the
   Builder's findings and `quality_rounds`' fingerprints.
   Before 2026-10-27 the file was read only once the build ended; a copy that failed partway, ending the build, was
-  taken cut then too, and still is. Closes with a fixed last line that `orchestrator.py gate` writes and the round
+  taken cut then too, and still is. Closes with a fixed last line that `gate.py` writes and the round
   checks before taking the file (older gates, which the quality build of another project may run, write none), or
   with asking Jenkins whether the Gate stage has completed.
 - **The mutation budget leaves most of a large change's mutants untried.** `MUTATION_BUDGET` is 600 s. Measured on
@@ -324,7 +347,7 @@ was done.
   report lists. Whether the linters should read them, leave them out, or the gate refuse them is open. Closes with that
   decision.
 - **mutmut reads a symlinked `.py` file in the surviving-mutants copy.** `_copy_tracked` copies a tracked symlink
-  as a link (`orchestrator.py`), `_mark_for_mutmut` leaves links unmarked, and mutmut 3.8.0's `walk_all_files` lists
+  as a link (`gate.py`), `_mark_for_mutmut` leaves links unmarked, and mutmut 3.8.0's `walk_all_files` lists
   a symlink to a file and `create_mutants_for_file` opens it. So once any changed function starts mutmut, a change
   adding `x.py -> calc.py` has every function of `calc.py` mutated a second time, as `x.py`, spending the budget on
   mutants no finding reports; and `x.py -> /dev/zero` or a FIFO reads without end or blocks until the budget runs
@@ -332,7 +355,7 @@ was done.
   `gate-python-files` (R2-F1, 2026-10-26); rests on mutmut's source, not on a run. Closes with the copy or
   `_mark_for_mutmut` keeping links out of mutmut's walk, without breaking a tracked link the tests import through,
   and a test that also edits a real function.
-- **passes-at-base misses a deleted Python script with no `.py`.** `_edits_python_source` (`orchestrator.py`)
+- **passes-at-base misses a deleted Python script with no `.py`.** `_edits_python_source` (`gate.py`)
   counts a deleted file as Python source only by its `.py`, so a change that only deletes a `#!` python script
   outside the tests edits no Python source for it. Found while fixing the cognitive-complexity check's same gap
   (2026-10-25). Closes with that branch asking `_was_python_source`, which the complexity check now uses.
@@ -370,6 +393,24 @@ was done.
   subdirectory.
 
 ## Fixed
+
+- **The quality gate lives inside `orchestrator.py`.** Reusing the gate for another Python project meant copying the
+  whole orchestrator, and it can only run inside the judged project's environment anyway, since it starts pytest and
+  mutmut with `sys.executable`, which in the binary is the binary. Decided 2026-10-24: the quality file is the one
+  interface between the two. Fixed (2026-10-27, gate-split ticket 02): the gate's block moved verbatim into
+  `gate.py`, one stdlib-only file beside `orchestrator.py`, whose `main` is the whole program, `python gate.py --base
+  REV ...` with the options and exit statuses of the old `gate` subcommand, which `orchestrator.py` no longer has.
+  The orchestrator imports nothing from it: it keeps its own copies of the format's pieces it needs (`parse_gate`,
+  `gate_failures`, `one_line`, the `QUALITY_*` words), `docs/quality-gate.md`'s "The quality file as a contract"
+  describes them, and `TestQualityFileContract` checks the two agree; it also keeps its own
+  `_not_ignored_in_children`, for `RunProcess`, and `judged_in_quality` runs git through `Host` and counts `gate.py`
+  among `JUDGING_FILES`. The gate's tests are in `tests/test_gate.py`; `test_invariants.py` holds `gate.py` to the
+  standard library too, and `test_docs.py` checks the docs' names and `gate.py` flags against both files. The
+  Jenkinsfile's Gate stage runs `gate.py`, a quality build the one at `$JUDGED_MAIN`, or that commit's
+  `orchestrator.py gate` when it has none (Planned, "what is left"); `pyproject.toml`'s mypy files and mutmut
+  `source_paths` and the Test stage's coverage name both files. Not closed: a quality build of a snapshot whose tree
+  predates `gate.py` is judged by main's rules, whose `[tool.mypy] files` name `gate.py`, and the quality file's
+  intro still names `orchestrator.py gate` (Open issues, both).
 
 - **`test-integrity` does not see an expected value held outside the assertion.** `expected-value-changed` compares
   each assertion's literals (`_changed_literals`), so editing a golden constant the assertion names, such as the

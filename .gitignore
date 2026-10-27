@@ -13,7 +13,7 @@ wheels/
 CLAUDE.md
 TESTING.md
 
-# What `uv run pytest --cov ...` and `orchestrator.py gate --out` write
+# What `uv run pytest --cov ...` and `gate.py --out` write
 .coverage
 coverage.xml
 quality.md

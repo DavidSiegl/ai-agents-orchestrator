@@ -18,11 +18,22 @@ One standard-library module, in these sections:
 | `Herdr` | A thin wrapper around the `herdr` CLI, one method per command, forwarding `--machine` when one is given. `start_agent` takes the harness as herdr's `--kind`. |
 | `Host` | The project's filesystem and git checkout, run locally or over `ssh -o BatchMode=yes`. `write` is atomic; `run_states` ages each `state.json` by the host's clock; `fast_forward`, `merge_upstream` and `abort_merge` keep the branch up to date with `origin`. For the quality gate, `snapshot` commits the working tree through a temporary index without moving a ref, `push_ref`, `delete_remote_branch` and `remote_branches` handle the throwaway branches, and `change_diff` is the `git diff -U0` that `added_lines` parses. For `prune`, `pull_request` reads a pull request's state, head commit and closing time with `gh` (`gh_run` runs gh in the project directory, and `GhUnusable` means gh is missing or logged out), `remote_branch_commit` and `delete_remote_branch_at` read and delete `origin`'s branch under a lease, `delete_tracking_ref` drops `origin/<branch>`, `branch_commit`, `has_commit`, `is_ancestor`, `commits_beyond` and `delete_branch` decide on and delete the local branch, and `checked_out_branches` parses `git worktree list --porcelain`. For `run --worktree`, `add_worktree` checks a commit out on a detached HEAD in a new worktree, `is_worktree` tells whether a path is one of the repository's worktrees and still there (by its physical path, as git lists it), and `remove_worktree` removes one without `--force`. `write` with `keep_mtime` keeps a `state.json`'s age. |
 | `CI` | Jenkins's quality job over HTTP, from the orchestrator's machine, one method per call, over an injected `urlopen`. The credentials come from the environment or `ci.env` and go only into the `Authorization` header; `mask` replaces the token in text from Jenkins. `CIError` carries the HTTP status, and `transient` says whether a retry may help. |
-| `RunState` and helpers | `RunState` is `state.json`; it saves `permission_mode` as given and each role's harness in `agent_kinds`, and `from_dict` reads a 0.3.0 state's `agent_args` as its permission mode. `worktree` is a `--worktree` run's worktree, set from the start (`None` in place, as for a state saved before it); `work_dir` is that, or else `cwd`, and is where the agents work and every git step of the run runs, while `cwd` stays the project, which holds the run directory (`dir`) and `.orchestrator/.gitignore`. The pure helpers are `parse_verdict`, `spec_title`, `branch_name`, `pr_body` (with `verdict_line`; `commit_note` for the commit message), and for the quality file `added_lines`, `build_failed_report`, `leak_report`, `parse_gate` and `gate_failures`; `changed_lines`, `edited_config` and `quality_report` are the gate's. |
+| `RunState` and helpers | `RunState` is `state.json`; it saves `permission_mode` as given and each role's harness in `agent_kinds`, and `from_dict` reads a 0.3.0 state's `agent_args` as its permission mode. `worktree` is a `--worktree` run's worktree, set from the start (`None` in place, as for a state saved before it); `work_dir` is that, or else `cwd`, and is where the agents work and every git step of the run runs, while `cwd` stays the project, which holds the run directory (`dir`) and `.orchestrator/.gitignore`. The pure helpers are `parse_verdict`, `spec_title`, `branch_name`, `pr_body` (with `verdict_line`; `commit_note` for the commit message), and for the quality file `added_lines`, `build_failed_report`, `leak_report`, `parse_gate` and `gate_failures`; `changed_lines`, `edited_config` and `quality_report` are `gate.py`'s. |
 | `Workflow` | Drives one run through its `pipeline`. Its collaborators (`herdr`, `host`, `ci`, `notify`, and `clocks`, a `Clocks` of `sleep`, `monotonic` and `wall`) are arguments, which is what lets the tests use fakes. |
-| CLI | `parse_args` (which turns no arguments into `gui` when `gui_by_default` finds a display), `offered_workflows`, `role_models` (with `role_model_arg`), `role_agents` (with `role_agent_arg`), `print_workflows` (with `print_prompt_overrides`, the prompt files a new run would take), `workflow_arg`, `run_health`, `print_runs` (with `run_rows`, `run_outcome` and `run_round`, which format the `run_record` of each run that `list --json` prints, and `fill_pr_states`, which adds `--pr-state`'s pull request states to those records), `find_run`, `resumable_state`, `prune_branches` (with `is_prune_candidate`, `prune_run`, `pull_request_pending`, `prune_remote`, `prune_local` and `record_in_state`, returning a `PrunedRun` per run), which `prune` prints with `print_pruned` and `run` calls first through `sweep_branches`, which logs `sweep_summary`, `close_run` (with `close_run_workspace`, `discard_run_worktree`, `discard_run_branch` and `record_in_state`), and `main` with `herdrless_command` (`workflows`, `gui`, `serve`, `gate`, `judged-in-quality` and `doctor`, which need no herdr pane; `judged_in_quality_command` asks `judged_in_quality` whether a build of the quality job, from `CI.retained_builds`, already judged `HEAD`; `doctor_command` prints with `report_checks` the `Check` of each requirement that `check_setup` makes, through `Host` and `Herdr` and so on `--machine` too, a failed one never stopping the rest), `runs_command` (`list`, `show`, `prune` and `close`), `workflows_command`, `connect`, `new_state` (with `flagged_workflow`, also `drain`'s), `resumed_state` and `finish`. |
+| CLI | `parse_args` (which turns no arguments into `gui` when `gui_by_default` finds a display), `offered_workflows`, `role_models` (with `role_model_arg`), `role_agents` (with `role_agent_arg`), `print_workflows` (with `print_prompt_overrides`, the prompt files a new run would take), `workflow_arg`, `run_health`, `print_runs` (with `run_rows`, `run_outcome` and `run_round`, which format the `run_record` of each run that `list --json` prints, and `fill_pr_states`, which adds `--pr-state`'s pull request states to those records), `find_run`, `resumable_state`, `prune_branches` (with `is_prune_candidate`, `prune_run`, `pull_request_pending`, `prune_remote`, `prune_local` and `record_in_state`, returning a `PrunedRun` per run), which `prune` prints with `print_pruned` and `run` calls first through `sweep_branches`, which logs `sweep_summary`, `close_run` (with `close_run_workspace`, `discard_run_worktree`, `discard_run_branch` and `record_in_state`), and `main` with `herdrless_command` (`workflows`, `gui`, `serve`, `judged-in-quality` and `doctor`, which need no herdr pane; `judged_in_quality_command` asks `judged_in_quality` whether a build of the quality job, from `CI.retained_builds`, already judged `HEAD`; `doctor_command` prints with `report_checks` the `Check` of each requirement that `check_setup` makes, through `Host` and `Herdr` and so on `--machine` too, a failed one never stopping the rest), `runs_command` (`list`, `show`, `prune` and `close`), `workflows_command`, `connect`, `new_state` (with `flagged_workflow`, also `drain`'s), `resumed_state` and `finish`. |
 | GUI | `gui_command` and `RunWindow`, a tkinter window over the CLI; see [GUI](#gui). |
 | serve | `serve_command`, `RunServer` with `RunRequestHandler`, `ProjectRuns` and `RunWatch`: a project's runs, read-only over HTTP, for the desktop app in `ui/`; see [serve](#serve). |
+
+## `gate.py`
+
+The quality gate, a standard-library program of its own: `python gate.py --base REV` judges the change in the
+working tree it runs in and writes the quality file ([quality gate](quality-gate.md)). The orchestrator never
+imports it; Jenkins runs it, and the orchestrator reads the file it writes, with its own copy of the parts of the
+format it needs ([the quality file as a contract](quality-gate.md#the-quality-file-as-a-contract)). In order:
+the tunables (`QUALITY_ISSUE_LIMIT`, `GATE_MIN_COVERAGE`, `MUTATION_BUDGET`, ...); its own git helpers (`_git`,
+`_git_run`) and `GateError`; `quality_report`, which writes the file; the linters (`GATE_TOOLS`), `GateChange`,
+`GateCheck` and `judge_change`, which runs them; the checks `gate_checks` lists, from `weakened_tests` to
+`vague_names`; and `gate_command`, `parse_args` and `main`.
 
 ## The phase machine
 
@@ -179,7 +190,8 @@ sets `RunServer.stopping`, which ends every event stream, shuts the server down 
 before the line is printed, because `shutdown` waits for `serve_forever` to stop, so it must have started. A line
 that cannot be printed (the reader of stdout is gone) returns `EXIT_ERROR`, with stdout pointed at `/dev/null` so
 the flush at exit cannot fail again. Like `gui` and
-`gate`, `main` runs it through `herdrless_command`, before `connect`, so it needs no herdr pane. Everything it serves is read-only.
+`doctor`, `main` runs it through `herdrless_command`, before `connect`, so it needs no herdr pane. Everything it
+serves is read-only.
 
 - **Projects.** Each request names its project by `cwd` and an optional `machine`, as the window's fields do.
   `RunServer.project` connects each pair once through `project_host`, which `project_runs` also uses: the
@@ -258,6 +270,11 @@ layout), with no Python of its own.
 
 ## Tests
 
+`tests/test_gate.py` covers `gate.py`: each check on a real git repository in a temporary directory, the quality
+file `quality_report` writes, and `TestGate`, the program itself, with stub linters on `PATH`. Tests that read
+what the gate writes with the orchestrator's reader, such as `TestQualityFileContract`, import both modules and stay
+in `tests/test_orchestrator.py`, as do `tests/test_properties.py`'s, which hold both modules' copies to one oracle.
+
 `tests/test_orchestrator.py` runs `Workflow` on in-memory fakes: `FakeHost` (filesystem and git, played one git
 command at a time so `Host`'s own git steps run on it, with origin scripted by its attributes), `FakeHerdr`
 (scripted roles, one callable per turn), `FakeCI` (Jenkins behind `urlopen`, each triggered build
@@ -294,12 +311,12 @@ running `after` callbacks on `tick`), and `TestRunProcess` runs real child proce
   `workflows` lists `default`, and `gui --smoke-test` where there is a display. On Linux it builds with the
   system `python3` (`python3-tk` installed) in `build/binary-venv`, not uv's Python, whose Tk lacks Xft and so
   draws every font in one fixed bitmap size; it refuses a Tk without libXft.
-- `Jenkinsfile`: `uv sync --frozen`, `uv run pytest` with branch coverage of `orchestrator`, a UI stage that runs
-  `ui/`'s `npm ci`, `typecheck`, `lint` and `test` and `ui/src-tauri/`'s `cargo test --locked`, failing the build
-  before the gate, a Gate stage that
-  runs `orchestrator.py gate` and archives `quality.md` (see [quality gate](quality-gate.md)), and a Package stage
-  that runs `packaging/build-binary.sh` and `packaging/build-desktop.sh` on every build but a quality build
-  (`GIT_REF` set). On `main` a Release stage publishes a new `pyproject.toml` version as a GitHub release, with
+- `Jenkinsfile`: `uv sync --frozen`, `uv run pytest` with branch coverage of `orchestrator` and `gate`, a UI stage
+  that runs `ui/`'s `npm ci`, `typecheck`, `lint` and `test` and `ui/src-tauri/`'s `cargo test --locked`, failing
+  the build before the gate, a Gate stage that runs `gate.py` and archives `quality.md` (see
+  [quality gate](quality-gate.md)), and a Package stage that runs `packaging/build-binary.sh` and
+  `packaging/build-desktop.sh` on every build but a quality build (`GIT_REF` set).
+  On `main` a Release stage publishes a new `pyproject.toml` version as a GitHub release, with
   `orchestrator.py` attached as the zipapp
   `octoflow.pyz`, the Linux binary and the Linux desktop app, each with its `.sha256`, in one
   `gh release create`. Its parameter `GIT_REF` builds
