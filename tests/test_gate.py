@@ -210,8 +210,9 @@ class TestQualityReport(unittest.TestCase):
                       "any tracked file.\n", text)
         self.assertNotIn("The change edits", text)
 
-    # The whole file, for each gate word and each way a section can read, held to its golden file (tests/golden.py):
-    # the tests above pin what the orchestrator reads back, these the words the Builder and the Reviewer read.
+    # The whole file, for each gate word and each way quality_report words a section, held to its golden file
+    # (tests/golden.py), so that a change to its wording fails here and is reviewed as the golden file's diff. The
+    # intro, the conditions and the coverage sentence are judge_change's: TestGate's golden files pin those.
 
     def test_an_ok_file_with_nothing_to_answer_is_golden(self):
         assert_golden("quality_report_ok", quality_report("OK", "The intro."))
@@ -230,9 +231,16 @@ class TestQualityReport(unittest.TestCase):
             issues=self.issues(2), to_weigh=[self.finding("t.py", 9)], elsewhere=3,
             tests=[("t.T.test_x", "AssertionError: 3 != 2\ntraceback"), ("t.T.test_y", "")],
             coverage="50.0% of 20 new lines to cover; 10 lines are not covered.",
-            suppressions=[("f.py", 3, "x = 1  # noqa: F401")], edited=["Jenkinsfile", "pyproject.toml", "uv.lock"],
-            clippy_config=["clippy.toml", "ui/Cargo.toml"], mutmut_state=["mutants/calc.py"])
+            suppressions=[("f.py", 3, "x = 1  # noqa: F401"), ("g\rh.py", 1, "# noqa")],
+            edited=["Jenkinsfile", "pyproject.toml", "uv.lock"],
+            clippy_config=[f"c{k}/Cargo.toml" for k in range(7)], mutmut_state=["mutants/calc.py"])
         assert_golden("quality_report_error", text)
+
+    def test_an_error_file_whose_findings_to_weigh_are_cut_is_golden(self):
+        text = quality_report("ERROR", "The intro.", issues=self.issues(gate.QUALITY_ISSUE_LIMIT - 1),
+                              to_weigh=[self.finding("t.py", n) for n in range(1, 4)],
+                              clippy_config=["clippy.toml", "ui/Cargo.toml"])
+        assert_golden("quality_report_error_to_weigh_cut", text)
 
     def test_an_error_file_over_the_limit_is_golden(self):
         limit = gate.QUALITY_ISSUE_LIMIT
@@ -277,12 +285,12 @@ class TestGate(RepositoryTest):
         with open(os.path.join(self.stubs, f"{tool}.argv")) as f:
             return f.read().splitlines()
 
-    def gate(self, *args):
-        """The exit status, standard output and standard error of `gate.py --base HEAD ARGS` in the
+    def gate(self, *args, base="HEAD"):
+        """The exit status, standard output and standard error of `gate.py --base BASE ARGS` in the
         repo."""
         out, err = io.StringIO(), io.StringIO()
         with contextlib.chdir(self.repo), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            status = gate.main(["--base", "HEAD", *args])
+            status = gate.main(["--base", base, *args])
         return status, out.getvalue(), err.getvalue()
 
     def add_lines(self, n, start=4):
@@ -740,24 +748,33 @@ class TestGate(RepositoryTest):
         with open(out) as f:
             self.assertEqual(f.read(), "GATE: OK\n")
 
-    # The whole quality file the gate writes, held to its golden file (tests/golden.py), so that the sentences
-    # judge_change words its conditions in are pinned too, not only quality_report's layout (TestQualityReport).
+    # The whole quality file the gate writes, held to its golden file (tests/golden.py), so that judge_change's
+    # sentences are pinned too: the intro, the conditions these changes meet (linter findings, a failing check,
+    # failing tests, coverage) and the coverage section. TestQualityReport's golden files pin the rest of the layout.
 
-    def golden_run(self, *args):
-        """gate's standard output for ARGS, the base commit's sha written as <base>, with test-integrity as the only
-        check: the other checks run pytest or mutmut, whose words are the host's."""
+    def golden_run(self, *args, base="HEAD"):
+        """gate's standard output for ARGS against base, with the base commit's sha written as <base> and HEAD's as
+        <head>, and test-integrity as the only check: the other checks run pytest or mutmut, whose words are the
+        host's."""
         self.checks(*(c for c in gate.gate_checks() if c.name == "test-integrity"))
-        _, out, _ = self.gate(*args)
-        return out.replace(self.git("rev-parse", "HEAD").strip(), "<base>")
+        shas = {self.git("rev-parse", base).strip(): "<base>", self.git("rev-parse", "HEAD").strip(): "<head>"}
+        _, out, _ = self.gate(*args, base=base)
+        for sha, name in shas.items():
+            out = out.replace(sha, name)
+        return out
 
     def test_the_file_of_a_passing_change_is_golden(self):
+        name = os.fsdecode(b"m\xff.py")
+        self.put(name, "m = 1\n")
+        self.git("add", name)
         self.add_lines(1)
         out = self.golden_run("--tests", self.junit(), "--coverage", self.coverage({4: 1}))
         assert_golden("gate_ok", out)
 
     def test_the_file_of_a_failing_change_is_golden(self):
-        self.commit({"tests/test_f.py": "def test_one():\n    assert 1\n\n\ndef test_two():\n    assert 2\n",
-                     "uv.lock": "version = 1\n"}, "tests")
+        base = self.commit({"tests/test_f.py": "def test_one():\n    assert 1\n\n\ndef test_two():\n    assert 2\n",
+                            "uv.lock": "version = 1\n"}, "tests")
+        self.commit({"README.md": "Read me.\n"}, "head")
         self.put("tests/test_f.py", "import pytest\n\n\n@pytest.mark.skip\ndef test_one():\n    assert 1\n")
         self.put("uv.lock", "version = 2\n")
         self.add_lines(19)
@@ -766,7 +783,7 @@ class TestGate(RepositoryTest):
         self.says("ruff", "f.py:2:1: F401 `os` imported but unused\n"
                           "f.py:4:7: B023 Function definition does not bind loop variable `x`\nFound 2 errors.\n")
         out = self.golden_run("--tests", self.junit(("test_limit", "AssertionError: 3 != 2")),
-                              "--coverage", self.coverage({n: int(n < 14) for n in range(1, 24)}))
+                              "--coverage", self.coverage({n: int(n < 14) for n in range(1, 24)}), base=base)
         assert_golden("gate_error", out)
 
 

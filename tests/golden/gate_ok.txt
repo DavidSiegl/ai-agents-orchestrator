@@ -1,6 +1,6 @@
 GATE: OK
 
-`orchestrator.py gate` judged the working tree at `<base>` against the base `<base>`.
+`orchestrator.py gate` judged the working tree at `<head>` against the base `<head>`.
 
 ## Issues on changed lines
 
@@ -13,3 +13,5 @@ None.
 ## Coverage on new code
 
 100.0% of 1 new lines to cover; 0 lines are not covered.
+
+Not measured: `m\xff.py`; coverage.py records no data for a file whose name is not UTF-8.
