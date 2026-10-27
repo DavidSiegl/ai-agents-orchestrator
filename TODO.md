@@ -393,7 +393,7 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Fixed
 
-- **Unverified: the Jenkins agent has clippy.** The gate runs clippy on every build that reaches Gate, since
+- **The Jenkins agent lacked rustup's clippy component.** The gate runs clippy on every build that reaches Gate, since
   `ui/src-tauri/` is Rust, and `TestClippy` in `tests/test_gate.py` runs the real one. PR-111's first build showed the
   agent's toolchain (1.99.0) lacked rustup's `clippy` component: the gate was ERROR with "`clippy` is not installed"
   and eight `TestClippy` tests failed. Fixed (2026-10-27, rust-engine ticket 02): the Install stage runs `rustup
