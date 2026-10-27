@@ -100,7 +100,18 @@ pipeline {
                 // coverage data with llvm-tools-preview's llvm-profdata and llvm-cov, which must be the toolchain's
                 // own LLVM. Adding them is a local no-op once they are there, and brings them back when the agent's
                 // container is rebuilt without them.
-                sh 'rustup component add clippy llvm-tools-preview'
+                //
+                // PR-163's first two builds failed here with "component download failed for llvm-tools: error opening
+                // file for download: cleaning up cached downloads: No such file or directory", which a missing
+                // downloads or tmp directory in rustup's home may cause: both are made first, and the home, rustup's
+                // version and their permissions are printed, so that a failure here shows what the agent has.
+                sh '''
+                    home=$(rustup show home)
+                    mkdir -p "$home/downloads" "$home/tmp"
+                    rustup --version
+                    ls -ld "$home" "$home/downloads" "$home/tmp"
+                    rustup component add clippy llvm-tools-preview
+                '''
                 sh 'ci/install-tools.sh "$WORKSPACE/.tools/bin"'
                 script {
                     // The version a release on main is tagged with.
