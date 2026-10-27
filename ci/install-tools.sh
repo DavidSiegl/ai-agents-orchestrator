@@ -21,9 +21,9 @@ dir=$1
 archive=$(mktemp)
 trap 'rm -f "$archive"' EXIT
 
-# install NAME VERSION URL SHA256: download the .tar.gz at URL, check it against SHA256, and extract the executable
+# fetch_tool NAME VERSION URL SHA256: download the .tar.gz at URL, check it against SHA256, and extract the executable
 # NAME from its top level into $dir.
-install() {
+fetch_tool() {
     curl -fsSL -o "$archive" "$3"
     echo "$4  $archive" | sha256sum -c --quiet - || {
         echo "install-tools.sh: the $1 $2 archive does not match its pinned sha256" >&2
@@ -35,19 +35,19 @@ install() {
 mkdir -p "$dir"
 
 version=8.30.1
-install gitleaks "$version" \
+fetch_tool gitleaks "$version" \
     "https://github.com/gitleaks/gitleaks/releases/download/v$version/gitleaks_${version}_linux_x64.tar.gz" \
     551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
 "$dir/gitleaks" version
 
 version=0.9.1
 release=https://github.com/taiki-e/cargo-llvm-cov/releases/download/v$version
-install cargo-llvm-cov "$version" "$release/cargo-llvm-cov-x86_64-unknown-linux-musl.tar.gz" \
+fetch_tool cargo-llvm-cov "$version" "$release/cargo-llvm-cov-x86_64-unknown-linux-musl.tar.gz" \
     3fca950394a3c49457657c158b1619cec8dfd2647ae5b48746734c0ab969a522
 "$dir/cargo-llvm-cov" llvm-cov --version
 
 version=0.9.148
 release=https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$version
-install cargo-nextest "$version" "$release/cargo-nextest-$version-x86_64-unknown-linux-musl.tar.gz" \
+fetch_tool cargo-nextest "$version" "$release/cargo-nextest-$version-x86_64-unknown-linux-musl.tar.gz" \
     bf92cb81450872d960ffa13857a83084d557ec0cdc141663d263bb23ef756f97
 "$dir/cargo-nextest" nextest --version

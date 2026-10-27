@@ -64,6 +64,13 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   Found while adding Rust coverage (rust-engine ticket 03, 2026-10-27). Closes with test modules left out of the
   report, by `#[coverage(off)]` once it is stable or by the tests moving to files that `--ignore-filename-regex`
   can leave out, or with `gate.py` skipping the lines a `#[cfg(test)]` item spans.
+- **No build runs the Rust doctests.** cargo-nextest does not run doctests, and since the Test stage's `cargo llvm-cov
+  nextest` replaced the UI stage's `cargo test`, nothing does: `octoflow_ui_lib` is an `rlib` among its crate types
+  (`ui/src-tauri/Cargo.toml`), so `cargo test` ran them. The crate has no doc example today. Raised by cross-review 72
+  (F3, 2026-10-27): "a doc example added later that fails to compile or asserts wrongly passes CI unnoticed".
+  Decided against for now: a `cargo test --doc` beside it, which builds the dependencies a third time, uninstrumented,
+  under the agent's 3 GB, for no example. Closes with `cargo test --doc --locked` in the Test stage once a doc example
+  lands, or with cargo-llvm-cov's `--doctests` once it runs on a stable toolchain.
 - **Jenkins runs the Rust tests of `ui/src-tauri` alone.** The Test stage runs `cargo llvm-cov nextest` in that
   directory, while `gate.py`'s clippy lints every Cargo workspace git tracks; a crate in another workspace, such as
   the Rust engine's top-level one (rust-engine spec, Lane), has its lines judged by clippy but its tests never run,
@@ -167,14 +174,13 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   reached their cargo steps 15 s apart, the lock free each time, so the wait and its message were seen only on the
   development host. Raised by cross-review 25 (F3). Closes with two builds whose cargo steps overlap on agentbox0,
   one saying that it waits for the lock and both passing.
-- **Is 3 GB the right memory limit for the agentbox0 Jenkins agent?** All builds on the node share its
-  container's `mem_limit: 3g` (Homelab `jenkins/agentbox0.yaml`), which this repo cannot change. Since
-  `ci/cargo-lock.sh`, two of this repository's builds compile Rust at once only when a quality build starts its
-  `cargo test` or `cargo check` beside another build's cargo step, or when the Gate stage's clippy, outside the lock,
-  checks the desktop shell's own crate, the one crate the UI stage's `cargo check` leaves it; but everything else they
-  run (pytest, mutmut, PyInstaller, npm) still shares the 3 GB beside a locked rustc, as do other jobs' builds on the
-  node. Open in `.scratch/ci-cargo-memory/issues/02-agent-container-memory.md`; closes with the Homelab keeping or
-  raising it.
+- **Is 3 GB the right memory limit for the agentbox0 Jenkins agent?** All builds on the node share its container's
+  `mem_limit: 3g` (Homelab `jenkins/agentbox0.yaml`), which this repo cannot change. Since `ci/cargo-lock.sh`, two of
+  this repository's builds compile Rust at once only when a quality build starts its `cargo llvm-cov nextest` or
+  `cargo check` beside another build's cargo step, or when the Gate stage's clippy, outside the lock, checks the desktop
+  shell's own crate, the one crate the UI stage's `cargo check` leaves it; but everything else they run (pytest, mutmut,
+  PyInstaller, npm) still shares the 3 GB beside a locked rustc, as do other jobs' builds on the node. Open in
+  `.scratch/ci-cargo-memory/issues/02-agent-container-memory.md`; closes with the Homelab keeping or raising it.
 - **Under the gate's `--cap-lints warn`, an `#[allow]` overrides a workspace's `forbid`.** `Clippy._lint_workspace` in
   `gate.py` caps every lint at warn so that a lint at deny cannot stop cargo before a compile error in a later crate
   (cross-review 66, F1); rustc's cap also lowers `forbid`, so an added `#[allow(unsafe_code)]` under `unsafe_code =

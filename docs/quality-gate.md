@@ -411,9 +411,12 @@ cargo llvm-cov nextest --locked --workspace --ignore-run-fail --profile ci --con
   tree the gate judges; an absolute path stands as it is.
 - **Failing tests** do not stop the build, as pytest's do not: `--ignore-run-fail` runs every test and writes the
   report whatever fails, and the `ci` profile of `ci/nextest.toml` writes their JUnit report to
-  `target/nextest/ci/junit.xml` in the workspace, which the Gate stage passes as a second `--tests`. A workspace that
-  does not compile stops the build there. `--config-file` replaces the workspace's own `.config/nextest.toml`, so a
+  `target/nextest/ci/junit.xml` in the workspace, which the Gate stage passes as another `--tests`. A workspace that
+  does not compile stops the build there, and so does a run that leaves no JUnit report, since `--ignore-run-fail`
+  also passes a nextest that ran no test. `--config-file` replaces the workspace's own `.config/nextest.toml`, so a
   change cannot configure how its tests run in Jenkins.
+- **Doctests** do not run: cargo-nextest has none, and cargo-llvm-cov runs them only on a nightly toolchain
+  (`TODO.md`).
 - **Where the tools come from**: `ci/install-tools.sh` downloads cargo-llvm-cov and cargo-nextest, each pinned by
   version and the sha256 of its release's archive, and the Install stage adds `llvm-tools-preview` with rustup, as
   it adds clippy (see [What Jenkins needs](#what-jenkins-needs)).

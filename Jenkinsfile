@@ -126,15 +126,24 @@ pipeline {
                     uv run pytest --cov=orchestrator --cov=gate --cov-branch --cov-report=xml --junitxml=test-results.xml || status=$?
                     [ "$status" -le 1 ] || exit "$status"
                 '''
-                // The Rust tests, with line coverage, for the Gate stage likewise: --ignore-run-fail writes the report
-                // whatever tests fail and exits 0 for them, so a non-zero status is a build that did not compile or
-                // a tool that could not run. ci/nextest.toml has the ci profile write the JUnit report the Gate
-                // stage reads. The lock as in the UI stage, which says why a quality build may skip it.
+                // The Rust tests, with line coverage, for the Gate stage likewise: --ignore-run-fail writes the
+                // coverage report whatever tests fail and exits 0 for them, so a non-zero status is a build that did
+                // not compile or a tool that could not run. ci/nextest.toml has the ci profile write the JUnit report
+                // the Gate stage reads. Once the tests are built, --ignore-run-fail turns any failure of nextest's run
+                // into a warning (run_nextest in cargo-llvm-cov 0.9.1's src/main.rs), also one that runs no test,
+                // such as a test binary that cannot list its tests; so the JUnit report is removed first and must be
+                // there after. The lock as in the UI stage, which says why a quality build may skip it.
                 dir('ui/src-tauri') {
                     sh '''
+                        junit=target/nextest/ci/junit.xml
+                        rm -f "$junit"
                         "$WORKSPACE/ci/cargo-lock.sh" ${GIT_REF:+--no-wait} cargo llvm-cov nextest --locked --workspace \\
                             --ignore-run-fail --profile ci --config-file "$WORKSPACE/ci/nextest.toml" \\
                             --cobertura --output-path "$WORKSPACE/coverage-rust.xml"
+                        if [ ! -f "$junit" ]; then
+                            echo "cargo-nextest wrote no $junit, so the Rust tests did not run" >&2
+                            exit 1
+                        fi
                     '''
                 }
             }
@@ -209,11 +218,14 @@ pipeline {
                     }
                     // The values reach the shell as environment variables, never as Groovy-built shell code.
                     def status
+                    // Each report of the Rust's before the Python's: a main whose gate.py takes --tests and --coverage
+                    // once keeps the last of each, so that a quality build of a snapshot that carries this Jenkinsfile
+                    // is judged on its Python, as before, until main's gate.py takes them more than once.
                     withEnv(["GATE=${gate}", "GATE_RULES=${rules}", "GATE_BASE=${base}"]) {
                         status = sh(returnStatus: true, script: '''
                             uv run --frozen python "$GATE" --base "$GATE_BASE" --config "$GATE_RULES" \\
-                                --tests test-results.xml --tests ui/src-tauri/target/nextest/ci/junit.xml \\
-                                --coverage coverage.xml --coverage coverage-rust.xml --out quality.md
+                                --tests ui/src-tauri/target/nextest/ci/junit.xml --tests test-results.xml \\
+                                --coverage coverage-rust.xml --coverage coverage.xml --out quality.md
                         ''')
                     }
                     if (status == 1 && params.GIT_REF) {
