@@ -70,6 +70,8 @@ from typing import Any, NamedTuple
 RUNS_DIR = ".orchestrator/runs"
 # Where run --worktree puts each run's worktree, named by the run's key.
 WORKTREES_DIR = ".orchestrator/worktrees"
+# Where, in a run's working tree, a proof is copied to for its run (Workflow._run_proof), under the round that wrote it.
+PROOF_COPIES_DIR = ".orchestrator/proofs"
 DEFAULT_TURN_TIMEOUT = 1800
 DEFAULT_MAX_ROUNDS = 3
 AGENT_START_TIMEOUT_MS = 60_000
@@ -414,14 +416,18 @@ the round's earlier quality files are {quality_paths}, and the Builder's reports
 PROOFS_NOTE = """\
 The Reviewer backed findings with tests, and these do not pass against your change: {proofs}. \
 Make each of them pass, without changing it; you may move one into the project as a regression test. \
-If one is wrong, say so in your report instead."""
+The orchestrator copies each proof's whole directory under the working tree's `""" + PROOF_COPIES_DIR + """/` and \
+runs the proof there, so that the working tree's test configuration applies; to run one yourself, copy its whole \
+directory there too, or into the project, rather than running it where it lies. If one is wrong, say so in \
+your report instead."""
 
 # Appended to the verdict step's prompt, after the quality and locks notes, when proofs carried from an earlier round
 # (Workflow._carried_proofs) were run again against the round's change (Workflow._rerun_proofs); proofs is a list item
 # per proof, as proofs_section writes them.
 CARRIED_PROOFS_NOTE = """\
 Proofs that failed against the change in an earlier round were run again against this round's change, with \
-`{command}` in {cwd}:
+`{command}` in {cwd}, each from a copy of its directory under `{cwd}/""" + PROOF_COPIES_DIR + """/`, removed \
+after each run; a path to a proof in their output is the copy's:
 
 {proofs}
 
@@ -659,9 +665,10 @@ class Pipeline:
     # run's base to the snapshot, so it holds every editing step's work, not only the gated step's.
     max_files: int = DEFAULT_MAX_FILES
     max_lines: int = DEFAULT_MAX_LINES
-    # A shell command, with {proofs} for one proof file's path, that runs a proof in the working tree and exits 1 when
-    # the proof fails, as pytest does. With it, each proof the verdict step writes in proofs_dir with a review that
-    # requests changes is run, and the review gains the outcomes (Workflow._judge_proofs). None runs none.
+    # A shell command, with {proofs} for the path of a copy of one proof file inside the working tree
+    # (Workflow._run_proof), that runs the proof in the working tree and exits 1 when the proof fails, as pytest does.
+    # With it, each proof the verdict step writes in proofs_dir with a review that requests changes is run, and the
+    # review gains the outcomes (Workflow._judge_proofs). None runs none.
     proof_command: str | None = None
 
     def __post_init__(self):
@@ -4014,6 +4021,10 @@ PROOFS_HEADING = "## Proofs the orchestrator ran"
 # Seconds one proof may run, and how many lines of its output the review quotes.
 PROOF_TIMEOUT = 300
 PROOF_TAIL_LINES = 10
+# A shell script that removes the directory "$1" names and everything under it, if it exists, failing as rm does.
+# Write permission is given back first, as far as chmod can: a proof may leave a directory it made read-only, as a
+# test of a permission error does.
+REMOVE_TREE_SCRIPT = '{ [ ! -e "$1" ] || chmod -R u+rwX -- "$1" 2>/dev/null; }; rm -rf -- "$1"'
 
 
 def _proof_finding(file: str) -> int | None:
@@ -4049,8 +4060,10 @@ def proofs_section(command: str, cwd: str, review: str, proofs: list[dict]) -> s
     """The section _judge_proofs appends to a review: for each of proofs, the round's records in RunState.proofs,
     whether it demonstrates its finding, and the review's numbered findings left without one, which stand as
     unproven."""
-    out = [PROOFS_HEADING, "", (f"The orchestrator ran each proof with `{command}` in {cwd}. A proof that fails "
-                                "demonstrates its finding; one that passes or errors does not.")]
+    out = [PROOFS_HEADING, "", (f"The orchestrator ran each proof with `{command}` in {cwd}, from a copy of its "
+                                f"directory under `{cwd}/{PROOF_COPIES_DIR}/`, removed after each run; a path to a "
+                                "proof in its output is the copy's. A proof that fails demonstrates its finding; one "
+                                "that passes or errors does not.")]
     for p in proofs:
         file, failed, said = p["file"], p["demonstrated"], p["said"]
         number = p["finding"]
@@ -4300,17 +4313,21 @@ class Workflow:
 
     def _claim(self) -> None:
         s = self.state
-        ignore = f"{s.cwd}/.orchestrator/.gitignore"
-        if self.host.read(ignore) is None:
-            # Keeps run files out of `git status`, so the Reviewer sees only the Builder's changes
-            # and the commit holds nothing else.
-            self.host.write(ignore, "*\n")
+        self._ignore_orchestrator_dir(s.cwd)
         if self.spec:
             self._seed_spec()
         s.error = None
         s.owner = self.me
         # Not _save: the caller has already decided that any earlier owner is gone.
         self._write_state()
+
+    def _ignore_orchestrator_dir(self, tree: str) -> None:
+        """Make git ignore everything under the .orchestrator directory of the working tree at tree, by a .gitignore
+        of `*` there, unless it has a .gitignore already. Keeps run files and proof copies out of `git status`, so
+        the Reviewer sees only the Builder's changes and the commit holds nothing else."""
+        ignore = f"{tree}/.orchestrator/.gitignore"
+        if self.host.read(ignore) is None:
+            self.host.write(ignore, "*\n")
 
     def _seed_spec(self) -> None:
         """Write the spec given with run --spec as the contract step's file.
@@ -4607,7 +4624,7 @@ class Workflow:
         records = [p for p in s.proofs if p["round"] == n and proof_written(p) == n]
         if not records:
             for f in sorted(os.path.basename(f.path) for f in self.host.run_files(s.proofs_dir(n))):
-                failed, said = self._run_proof(command, f"{s.proofs_dir(n)}/{f}")
+                failed, said = self._run_proof(command, n, f)
                 records.append({"round": n, "written": n, "file": f, "finding": _proof_finding(f),
                                 "demonstrated": failed, "said": said})
             if not records:
@@ -4629,7 +4646,7 @@ class Workflow:
             return
         records = []
         for p in self._carried_proofs(n):
-            failed, said = self._run_proof(command, self._proof_path(p))
+            failed, said = self._run_proof(command, proof_written(p), p["file"])
             records.append({"round": n, "written": proof_written(p), "file": p["file"], "finding": p["finding"],
                             "demonstrated": failed, "said": said})
         if not records:
@@ -4675,23 +4692,51 @@ class Workflow:
             items.append("\n".join([f"- `{self._proof_path(p)}`: {how}{said}.", *output]))
         return "\n\n" + self.prompts.CARRIED_PROOFS_NOTE.format(command=command, cwd=s.work_dir, proofs="\n\n".join(items))
 
-    def _run_proof(self, command: str, path: str) -> tuple[bool, str]:
-        """Whether the proof at path fails against the working tree, as proof_command's exit status 1 says, and what it
-        printed last: its output's end, how else it exited, or why it could not run."""
-        cmd = command.format(proofs=shlex.quote(path))
+    def _run_proof(self, command: str, written: int, file: str) -> tuple[bool, str]:
+        """Whether the proof file that round written's verdict step wrote fails against the working tree, as command's
+        exit status 1 says, and what it printed last: its output's end, how else it exited, or why it could not run.
+
+        The proof runs from a copy of proofs_dir(written), with the files beside it, at
+        <work_dir>/PROOF_COPIES_DIR/<written>: command gets the copy's path, and runs in the working tree's top
+        directory. A tool that looks upwards from the proof for its configuration, as pytest does for its rootdir,
+        conftest.py files and pythonpath, so meets the working tree's before any of the checkout's, which holds the
+        run directory and encloses a run's worktree. The proof's output names the copy. The working tree's
+        .orchestrator directory is made ignored first, so no commit holds the copy; PROOF_COPIES_DIR is emptied
+        before the copy is made and removed after the proof, so what a proof writes beside itself goes with it.
+        """
+        s = self.state
+        copies = f"{s.work_dir}/{PROOF_COPIES_DIR}"
+        copy = f"{copies}/{written}"
+        cmd = command.format(proofs=shlex.quote(f"{copy}/{file}"))
         # GNU timeout runs the proof in a process group of its own and kills all of it, so nothing a proof started
         # goes on writing to the tree; where there is none, Host.run's limit stops only the shell.
         script = ('cd -- "$1" || exit 125; command -v timeout >/dev/null 2>&1 && exec timeout -k 10 "$3" sh -c "$2"; '
                   'eval "$2"')
         try:
-            proc = self.host.run(["sh", "-c", script, "_", self.state.work_dir, cmd, str(PROOF_TIMEOUT)],
+            self._ignore_orchestrator_dir(s.work_dir)
+            # Emptied first: an orchestrator stopped during a proof leaves its copy behind. A proof file that is gone
+            # from its directory, as one the Builder moved into the project is, is not run on a missing path.
+            prepare = ('[ -f "$3/$4" ] || { echo "$3/$4 is gone" >&2; exit 1; }; '
+                       f'{REMOVE_TREE_SCRIPT} && mkdir -p -- "$2" && cp -R -- "$3/." "$2"')
+            self.host.check(["sh", "-c", prepare, "_", copies, copy, s.proofs_dir(written), file])
+            proc = self.host.run(["sh", "-c", script, "_", s.work_dir, cmd, str(PROOF_TIMEOUT)],
                                  timeout=PROOF_TIMEOUT + 30, verbatim=True)
         except OrchestratorError as e:
             return False, f"it did not run: {e}"
+        finally:
+            self._remove_proof_copies(copies)
         tail = "\n".join((proc.stdout + proc.stderr).rstrip().split("\n")[-PROOF_TAIL_LINES:])
         how = {0: "it passes", 1: "it fails", 124: f"it errors, running out of its {PROOF_TIMEOUT} s"}.get(
             proc.returncode, f"it errors, with exit status {proc.returncode}")
         return proc.returncode == 1, f"{how}:\n{tail}" if tail else how
+
+    def _remove_proof_copies(self, copies: str) -> None:
+        """Remove the directory copies and everything under it; a failure is only logged, since the next proof's run
+        empties it again and git ignores it meanwhile."""
+        try:
+            self.host.check(["sh", "-c", REMOVE_TREE_SCRIPT, "_", copies])
+        except OrchestratorError as e:
+            log(f"could not remove the proof copies in {copies}: {e}")
 
     def _proofs_note(self, step: Step, n: int) -> str:
         """What the step hears in round n of the proofs carried into it (_carried_proofs); "" when it is not the step

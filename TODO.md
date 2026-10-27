@@ -148,10 +148,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   check reuses `Host.gitleaks_problem`, the run's pre-push check, which asks `gitleaks git --help` because a
   distribution's build may print no version number. So `doctor` shows no gitleaks version. Kept by choice
   (2026-10-24).
-- **No test shows the proof reruns come after the quality loop.** `Workflow._rerun_proofs` runs right before the
-  verdict step's turn, which follows the quality loop by construction, but every proof test uses `QUICK`, which has
-  no quality-gated step. Raised by the cross-review of the proof reruns (R1-F5, 2026-10-24): "no test would notice
-  the rerun moving before it". Closes with a proof test on a quality-gated workflow, through the CI fakes.
 - **A spec left `ready-for-human` by a conflict stays there when `refresh` clears the conflict before a drain does.**
   drain moves such a spec to `in-review` only when its own refresh clears the run's conflict (`refreshed_headers`);
   a run cleared by `orchestrator.py refresh` beforehand has no conflicts left, so drain cannot tell the spec held
@@ -162,12 +158,19 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 - **Proofs run after the last round's review too.** No Builder turn follows to read them; only the draft pull
   request's review shows them, and each may take `PROOF_TIMEOUT`. Kept: a demonstrated defect is what the human
   most needs to see in a draft. Raised by the same review.
-- **A proof in a worktree run finds the checkout's pytest configuration.** The run directory, and with it
-  `RunState.proofs_dir`, is under the project checkout, not the run's worktree, so a `proof_command` of
-  `python -m pytest {proofs}` takes its rootdir and `conftest.py` from the checkout while importing the code from the
-  worktree it runs in. Found while writing loop-guards ticket 05; not reproduced. Closes with `_run_proof` passing
-  the working tree as pytest's rootdir and conftest root, or the proofs copied into a scratch directory of the
-  worktree for their run.
+- **What a proof writes outside its own directory can enter the commit.** A proof runs in the working tree
+  (`Workflow._run_proof`), and only its copy's directory is removed after it, so a file it writes elsewhere, such as
+  the `__pycache__` of a module it imports in a project that does not ignore those, stays for `_publish`'s
+  `git add --all`. In-place runs always had this; since proof-runs ticket 01 a worktree run has it too, its proofs
+  importing the worktree's code. Raised there (2026-10-27). Closes with `_publish` committing only what the turns
+  changed, or with proofs running in a throwaway copy of the tree.
+- **A proof the Builder moves into the project stays carried as erroring.** `PROOFS_NOTE` lets the Builder move a
+  proof into the project as a regression test; `Workflow._run_proof` then records it "it did not run: ... is gone",
+  which is not a pass, so `_carried_proofs` keeps carrying it. Raised by the cross-review of proof-runs (review 64,
+  F9, 2026-10-27): "is carried and told as a standing finding in every later round": the Builder hears it does not
+  pass, and the verdict step hears it "no longer fails but errors", even when the moved test passes in the project.
+  Predates that branch, where the same move gave pytest's exit status 4, an error carried the same way. Closes with
+  `_carried_proofs` treating a missing proof as moved and dropping it, and the notes saying so.
 - **`expected-value-changed` misses an inline literal's sign, type or structure.** `_changed_literals` pairs
   assertions by `_shape` and compares `_literals`, which drops types and operators: `assert f() == -5` becoming
   `== 5` changes the shape (no pair, no finding), and `== 1` becoming `== True` gives equal literal lists
@@ -392,6 +395,23 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   subdirectory.
 
 ## Fixed
+
+- **No test shows the proof reruns come after the quality loop.** `Workflow._rerun_proofs` runs right before the
+  verdict step's turn, which follows the quality loop by construction, but every proof test used `QUICK`, which has
+  no quality-gated step. Raised by the cross-review of the proof reruns (R1-F5, 2026-10-24): "no test would notice
+  the rerun moving before it". Fixed (2026-10-27): `TestProofs`'s
+  `test_a_carried_proof_runs_again_after_the_rounds_last_quality_round_and_before_the_review` runs the default
+  workflow through the CI fakes, round 2's first quality round failing, and pins the order of the turns, quality
+  rounds and proof runs; it fails with the rerun moved before the gated step's turn.
+
+- **A proof in a worktree run finds the checkout's pytest configuration.** The run directory, and with it
+  `RunState.proofs_dir`, is under the project checkout, not the run's worktree, so a `proof_command` of
+  `python -m pytest {proofs}` took its rootdir and `conftest.py` from the checkout. Found while writing loop-guards
+  ticket 05; reproduced on real git by proof-runs ticket 01: with the project's `pythonpath = ["."]`, the proof
+  imported the checkout's module, so it tested the base, not the change. Fixed (2026-10-27): `Workflow._run_proof`
+  copies the proof's directory to `<work_dir>/.orchestrator/proofs/<round that wrote it>/`, under a `.gitignore` of
+  `*` written as the checkout's is (`_ignore_orchestrator_dir`), runs the proof's copy and removes it; an in-place
+  run's copy goes under the checkout's own `.orchestrator/`, so the two kinds of run do not differ.
 
 - **The Jenkins agent lacked rustup's clippy component.** The gate runs clippy on every build that reaches Gate, since
   `ui/src-tauri/` is Rust, and `TestClippy` in `tests/test_gate.py` runs the real one. PR-111's first build showed the
