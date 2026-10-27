@@ -19,9 +19,19 @@ pipeline {
     environment {
         UV_NO_PROGRESS = '1'
         COVERAGE_FILE  = '.coverage'
-        // For the UI and Package stages: crates are fetched into the workspace, which cleanWs empties, so no build
-        // compiles sources an earlier build left behind.
+        // For the UI, Gate and Package stages: crates are fetched into the workspace, which cleanWs empties, so no
+        // build compiles sources an earlier build left behind.
         CARGO_HOME     = "${env.WORKSPACE}/.cargo-home"
+        // The dev profile, which cargo test's test profile and clippy's checks inherit, without debug info. Debug
+        // info for the GTK and Tauri crates took enough memory that rustc was OOM-killed with two builds on
+        // agentbox0. ci/cargo-lock.sh now keeps two builds' cargo steps apart, except a quality build's, which never
+        // waits for the lock, and the Gate stage's clippy, which gate.py runs outside it; building without debug info
+        // keeps each build's own peak lower. A failing test still prints its panic's file:line, which comes from
+        // core::panic::Location, not from debug info. Set for the whole build, not the UI stage alone, so that the
+        // Gate stage's clippy finds the dependencies the UI stage's cargo check checked fresh, and checks only the
+        // shell's own crate outside the lock; a difference between the two stages' cargo environments, such as a
+        // RUSTFLAGS one of them sets, would have it check them all again there.
+        CARGO_PROFILE_DEV_DEBUG = '0'
         // The GitHub login Jenkins posts pull request statuses as, its GitHub App's "<slug>[bot]", which the agents
         // cannot post as. Empty: no build of main trusts a pull request build, and each judges itself.
         PR_STATUS_CREATOR = 'davidsiegl-jenkins[bot]'
@@ -83,6 +93,10 @@ pipeline {
         stage('Install') {
             steps {
                 sh 'uv sync --frozen'
+                // The Test stage's TestClippy and the Gate stage's gate.py run the real clippy, which the agent's
+                // rustup toolchain lacked (PR-111's first build). Adding it is a local no-op once it is there, and
+                // brings it back when the agent's container is rebuilt without it.
+                sh 'rustup component add clippy'
                 script {
                     // The version a release on main is tagged with.
                     env.PROJECT_VERSION = sh(returnStdout: true, script: '''
@@ -116,19 +130,11 @@ pipeline {
         }
 
         // The desktop app: its frontend's types, lint and Vitest tests, and its Tauri shell's cargo tests. The gate
-        // judges only the Python, so this stage stops the build instead, before Gate: a quality round then reports
-        // BUILD_FAILED with the console's end, where a failure after Gate would hide under quality.md's passing GATE
-        // line.
+        // runs no tests but the Python, so this stage stops the build instead, before Gate: a quality round then
+        // reports BUILD_FAILED with the console's end, where a failure after Gate would hide under quality.md's
+        // passing GATE line.
         stage('UI') {
             when { expression { return env.JUDGED_AT_PR != 'true' } }
-            environment {
-                // cargo test's test profile inherits dev. Debug info for the GTK and Tauri crates took enough memory
-                // that rustc was OOM-killed with two builds on agentbox0. ci/cargo-lock.sh now keeps two builds'
-                // cargo steps apart, except a quality build's, which never waits for the lock; building without debug
-                // info keeps each build's own peak lower. A failing test still prints its panic's file:line, which
-                // comes from core::panic::Location, not from debug info.
-                CARGO_PROFILE_DEV_DEBUG = '0'
-            }
             steps {
                 dir('ui') {
                     sh '''
@@ -142,43 +148,42 @@ pipeline {
                     // A quality build (GIT_REF set) runs within the orchestrator's QUALITY_TIMEOUT, which a wait
                     // behind another build's Package stage would exceed, so it takes the lock only when it is free.
                     sh '"$WORKSPACE/ci/cargo-lock.sh" ${GIT_REF:+--no-wait} cargo test --locked'
+                    // The Gate stage's clippy checks the shell's dependencies as cargo check does, not as cargo test
+                    // builds them: checked here, under the lock, they leave clippy only the shell itself to check.
+                    sh '"$WORKSPACE/ci/cargo-lock.sh" ${GIT_REF:+--no-wait} cargo check --locked --all-targets'
                 }
             }
         }
 
-        // gate.py (docs/quality-gate.md): ruff, mypy, pymarkdown, shellcheck and actionlint, the tests and coverage of
-        // new code, judged on the lines the change adds. A quality build judges its snapshot by main's gate and main's
-        // rules, so a change cannot loosen how it is itself judged, and goes UNSTABLE on a red gate; a pull request or
-        // main fails. A gate that could not judge fails any build.
+        // gate.py (docs/quality-gate.md): ruff, mypy, pymarkdown, shellcheck, actionlint and clippy, the tests and
+        // coverage of new code, judged on the lines the change adds. A quality build judges its snapshot by main's gate
+        // and main's rules, so a change cannot loosen how it is itself judged, but for clippy's, which are the tree's
+        // own Cargo.toml (TODO.md); it goes UNSTABLE on a red gate, and a pull request or main fails. A gate that could
+        // not judge fails any build.
         stage('Gate') {
             when { expression { return env.JUDGED_AT_PR != 'true' } }
             steps {
                 script {
                     def gate = 'gate.py'
-                    // The word the gate's program takes before its options: none for gate.py.
-                    def subcommand = ''
                     def rules = 'pyproject.toml'
                     def base
                     if (params.GIT_REF) {
                         // The snapshot's only parent is the run's base.
                         base = 'HEAD^'
                         // The gate and rules of the main commit Checkout named in the build's description, fetched
-                        // there. Cutover fallback, removed by ticket 03 of the gate split: a main from before gate.py
-                        // has its gate as orchestrator.py's gate subcommand, so that commit's orchestrator.py judges.
-                        def program = sh(returnStdout: true, script: '''
+                        // there. A main without gate.py, from before the gate split, cannot judge: this step fails, and
+                        // with it the build, writing no quality.md, rather than running some other program.
+                        sh '''
                             : "${JUDGED_MAIN:?is unset; run the whole build, not a restart from a later stage}"
+                            if ! git cat-file -e "$JUDGED_MAIN:gate.py" 2>/dev/null; then
+                                echo "main at $JUDGED_MAIN has no gate.py, so nothing can judge this snapshot" >&2
+                                exit 2
+                            fi
                             mkdir -p "$WORKSPACE_TMP/main"
                             git show "$JUDGED_MAIN:pyproject.toml" > "$WORKSPACE_TMP/main/pyproject.toml"
-                            if git cat-file -e "$JUDGED_MAIN:gate.py" 2>/dev/null; then
-                                program=gate.py
-                            else
-                                program=orchestrator.py
-                            fi
-                            git show "$JUDGED_MAIN:$program" > "$WORKSPACE_TMP/main/$program"
-                            printf '%s' "$program"
-                        ''').trim()
-                        gate = "${env.WORKSPACE_TMP}/main/${program}"
-                        subcommand = program == 'orchestrator.py' ? 'gate' : ''
+                            git show "$JUDGED_MAIN:gate.py" > "$WORKSPACE_TMP/main/gate.py"
+                        '''
+                        gate = "${env.WORKSPACE_TMP}/main/gate.py"
                         rules = "${env.WORKSPACE_TMP}/main/pyproject.toml"
                     } else if (env.CHANGE_TARGET) {
                         sh 'git fetch --quiet origin "+refs/heads/$CHANGE_TARGET:refs/remotes/origin/$CHANGE_TARGET"'
@@ -188,11 +193,9 @@ pipeline {
                     }
                     // The values reach the shell as environment variables, never as Groovy-built shell code.
                     def status
-                    withEnv(["GATE=${gate}", "GATE_SUBCOMMAND=${subcommand}", "GATE_RULES=${rules}",
-                             "GATE_BASE=${base}"]) {
+                    withEnv(["GATE=${gate}", "GATE_RULES=${rules}", "GATE_BASE=${base}"]) {
                         status = sh(returnStatus: true, script: '''
-                            uv run --frozen python "$GATE" ${GATE_SUBCOMMAND:+"$GATE_SUBCOMMAND"} \\
-                                --base "$GATE_BASE" --config "$GATE_RULES" \\
+                            uv run --frozen python "$GATE" --base "$GATE_BASE" --config "$GATE_RULES" \\
                                 --tests test-results.xml --coverage coverage.xml --out quality.md
                         ''')
                     }

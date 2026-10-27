@@ -1,4 +1,5 @@
-"""Settings and guards every test file shares: Hypothesis's profiles, no network, and no real sleeping.
+"""Settings and guards every test file shares: Hypothesis's profiles, the repository's top directory, no network,
+and no real sleeping.
 
 The guards, each a fixture every test runs under, and each for this process only, not for a child process a test
 starts:
@@ -20,15 +21,21 @@ import sys
 import time
 
 import pytest
-from hypothesis import settings
+from guard_errors import NetworkUsed, RealSleep
+from hypothesis import HealthCheck, settings
 
 import orchestrator
 
 # How many examples each property test tries. `default` keeps a local `uv run pytest` fast; the Jenkinsfile's Test
 # stage sets HYPOTHESIS_PROFILE=ci for ten times as many. No deadline: the tests that run git or sh for each example
 # take tens of milliseconds an example, and their speed is not what they test.
-settings.register_profile("default", max_examples=25, deadline=None)
-settings.register_profile("ci", max_examples=250, deadline=None)
+# differing_executors is off because the gate's mutmut runs the tests more than once in one process, and unittest
+# makes a new TestCase for each run, so the second calls each @given method on another self. The check guards against
+# state kept on self from one example to the next, and the @given methods of tests/test_properties.py keep none: they
+# read self only to assert.
+_UNCHECKED = [HealthCheck.differing_executors]
+settings.register_profile("default", max_examples=25, deadline=None, suppress_health_check=_UNCHECKED)
+settings.register_profile("ci", max_examples=250, deadline=None, suppress_health_check=_UNCHECKED)
 settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "default"))
 
 # The real calls, taken before any test can replace them, which a guarded call hands on to when it is allowed.
@@ -37,8 +44,19 @@ _connect_ex = socket.socket.connect_ex
 _create_connection = socket.create_connection
 _sleep = time.sleep
 
-# The code whose time.sleep calls the sleep guard refuses: the tests, and the orchestrator they test.
+# The top directory of the tree the tests run in, and import orchestrator.py and gate.py from: the repository, or
+# under mutmut its copy of it, mutants/ at the repository's top (mutmut's fixed name; gate.py's _MUTMUT_STATE).
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+# The repository's top directory, whose files the tests read as text: the docs, and orchestrator.py and gate.py
+# unmutated. Under mutmut, which runs the tests in _ROOT = mutants/, that is the directory above, the one mutmut copied
+# this file from: mutmut's copy of the code holds every mutant beside each function it mutates, and mutants/ holds only
+# what [tool.mutmut]'s source_paths and also_copy (pyproject.toml) and mutmut's own defaults (tests/, pyproject.toml,
+# the lock files) name, so not README.md. A checkout that is itself named mutants has no tests/conftest.py above it.
+_IN_MUTMUT_COPY = _ROOT.name == "mutants" and (_ROOT.parent / "tests" / "conftest.py").is_file()
+REPO = _ROOT.parent if _IN_MUTMUT_COPY else _ROOT
+
+# The code whose time.sleep calls the sleep guard refuses: the tests, and the orchestrator they test.
 _GUARDED_TESTS = _ROOT / "tests"
 _GUARDED_SOURCE = _ROOT / "orchestrator.py"
 
@@ -56,18 +74,6 @@ def pytest_configure(config):
         "real_sleep: the test waits on something outside this process's control, a child process or a server "
         "thread, by polling it with time.sleep: what it tests is how the orchestrator behaves with real processes "
         "and real time, which FakeClock cannot stand in for. Keep such waits short and bounded by a deadline.")
-
-
-class NetworkUsed(RuntimeError):
-    """A test opened a network connection the guard does not allow.
-
-    Not an OSError, so that code under test which takes an OSError for an unreachable server, such as
-    `CI._request`, cannot turn it into an ordinary failure and let the test pass.
-    """
-
-
-class RealSleep(RuntimeError):
-    """A test, or the orchestrator code it runs, called time.sleep without the real_sleep marker."""
 
 
 def _is_loopback(address) -> bool:

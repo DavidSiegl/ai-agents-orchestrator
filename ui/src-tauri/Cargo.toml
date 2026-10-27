@@ -16,3 +16,15 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# clippy's rules for this crate, by which gate.py judges a change to its Rust (docs/quality-gate.md): clippy's
+# defaults, and these, which main passed when they were set. Each at warn, since gate.py caps every level at warn
+# anyway; and rustc's unsafe_code at deny would stop cargo test at this crate.
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+# A suppression says why it stands: `#[allow(lint, reason = "...")]`.
+allow_attributes_without_reason = "warn"
+dbg_macro = "warn"
+todo = "warn"

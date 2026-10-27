@@ -88,6 +88,17 @@ class TestChangedLines(unittest.TestCase):
         self.assertEqual(gate.edited_config(diff, changed_lines(diff)), ["Jenkinsfile", "uv.lock"])
         self.assertEqual(gate.edited_config("", {}), [])
 
+    def test_clippy_config_edits_anywhere_in_the_tree(self):
+        diff = ("diff --git a/ui/Cargo.toml b/ui/Cargo.toml\n--- a/ui/Cargo.toml\n+++ b/ui/Cargo.toml\n@@ -1 +1 @@\n"
+                "-a\n+b\ndiff --git a/ui/.cargo/config.toml b/ui/.cargo/config.toml\ndeleted file mode 100644\n"
+                "--- a/ui/.cargo/config.toml\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n"
+                "diff --git a/clippy.toml b/clippy.toml\nnew file mode 100644\n--- /dev/null\n+++ b/clippy.toml\n"
+                "@@ -0,0 +1 @@\n+y\ndiff --git a/docs/config.toml b/docs/config.toml\n--- a/docs/config.toml\n"
+                "+++ b/docs/config.toml\n@@ -1 +1 @@\n-a\n+b\n")
+        self.assertEqual(gate.clippy_config_files(diff, changed_lines(diff)),
+                         ["clippy.toml", "ui/.cargo/config.toml", "ui/Cargo.toml"])
+        self.assertEqual(gate.edited_config(diff, changed_lines(diff)), [])
+
 
 class TestQualityReport(unittest.TestCase):
     def issues(self, n):
@@ -183,6 +194,11 @@ class TestQualityReport(unittest.TestCase):
         self.assertIn("The change edits `uv.lock`, which pins the versions of the linters the gate ran.", text)
         text = quality_report("OK", "i", edited=["pyproject.toml"], rules_from="`main`'s `pyproject.toml`")
         self.assertIn("The gate took its rules from `main`'s `pyproject.toml`, so the edit did not change", text)
+
+    def test_clippy_config_edits_are_named_together(self):
+        text = quality_report("OK", "i", edited=["uv.lock"], clippy_config=["clippy.toml", "ui/Cargo.toml"])
+        self.assertIn("- The change edits `clippy.toml` and `ui/Cargo.toml`, which clippy takes its rules or its "
+                      "toolchain from; it judged the change by the edited ones.\n", text)
 
     def test_files_under_mutmut_s_state_are_named_apart_from_build_config(self):
         text = quality_report("OK", "i", mutmut_state=["mutants/calc.py", "mutants/calc.py.meta"])
@@ -691,6 +707,159 @@ class TestGate(RepositoryTest):
         self.assertIn("interrupted", err)
         with open(out) as f:
             self.assertEqual(f.read(), "GATE: OK\n")
+
+
+class TestClippy(RepositoryTest):
+    """`gate.py` with the real cargo clippy, over a crate of no dependencies in a subdirectory of the repository, as
+    `ui/src-tauri/` is in this one. cargo runs offline, so it never reaches for the registry."""
+
+    LIB = "pub fn one() -> i32 {\n    1\n}\n"
+    BASE_FILES = {"pyproject.toml": "[tool.ruff]\n",
+                  "crate/Cargo.toml": '[package]\nname = "tiny"\nversion = "0.1.0"\nedition = "2021"\n',
+                  "crate/src/lib.rs": LIB}
+
+    def setUp(self):
+        super().setUp()
+        env = patch.dict(os.environ, {"CARGO_NET_OFFLINE": "true"})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def gate(self):
+        """The exit status and standard output of `gate.py --base HEAD` in the repository."""
+        out = io.StringIO()
+        with contextlib.chdir(self.repo), contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            status = gate.main(["--base", "HEAD"])
+        return status, out.getvalue()
+
+    def stub_cargo(self, script):
+        """Put a cargo that runs the sh script on PATH, ahead of the real one."""
+        bin_dir = os.path.join(self.outside, "bin")
+        os.mkdir(bin_dir)
+        with open(os.path.join(bin_dir, "cargo"), "w") as f:
+            f.write(f"#!/bin/sh\n{script}\n")
+        os.chmod(os.path.join(bin_dir, "cargo"), 0o700)
+        env = patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_a_lint_on_an_added_line_is_an_issue_listed_once(self):
+        # --all-targets checks the library twice, as itself and as its tests, and clippy reports the lint for each.
+        self.put("crate/src/lib.rs", self.LIB + "pub fn two() -> i32 {\n    return 2;\n}\n")
+        status, out = self.gate()
+        self.assertEqual(status, 1, out)
+        self.assertIn("- 1 findings on lines the change added; each is listed below.\n", out)
+        self.assertIn("1. `crate/src/lib.rs:5` warning clippy clippy::needless_return: unneeded `return` "
+                      "statement\n", out)
+        self.assertEqual(out.count("needless_return"), 1)
+
+    def test_a_lint_on_an_old_line_counts_as_elsewhere(self):
+        two = "pub fn two() -> i32 {\n    return 2;\n}\n"
+        self.commit({"crate/src/lib.rs": two}, "a lint")
+        self.put("crate/src/lib.rs", two + self.LIB)
+        status, out = self.gate()
+        self.assertEqual(status, 0, out)
+        self.assertIn("1 other open issues in the project", out)
+
+    def test_a_compile_error_on_an_old_line_fails_the_gate_naming_the_first_error(self):
+        two = "pub fn two() -> i32 {\n    one() + 1\n}\n"
+        self.commit({"crate/src/lib.rs": self.LIB + two}, "a caller")
+        self.put("crate/src/lib.rs", two)
+        status, out = self.gate()
+        self.assertEqual(status, 1, out)
+        self.assertIn("- `clippy` could not compile the workspace of `crate/Cargo.toml`: `crate/src/lib.rs:2` error "
+                      "clippy E0425: cannot find function `one` in this scope\n", out)
+        self.assertIn("## Issues on changed lines\n\nNone.\n", out)
+
+    def test_a_lint_at_deny_in_one_crate_hides_neither_a_compile_error_in_the_next_nor_its_own_lints(self):
+        # b uses a, so cargo checks a first; a lint at deny there would fail a's build and leave b unchecked.
+        self.commit({"crate/Cargo.toml": '[workspace]\nmembers = ["a", "b"]\nresolver = "2"\n',
+                     "crate/a/Cargo.toml": '[package]\nname = "a"\nversion = "0.1.0"\nedition = "2021"\n\n'
+                                           '[lints.clippy]\nneedless_return = "deny"\n',
+                     "crate/a/src/lib.rs": "pub fn two() -> i32 {\n    return 2;\n}\n",
+                     "crate/b/Cargo.toml": '[package]\nname = "b"\nversion = "0.1.0"\nedition = "2021"\n\n'
+                                           '[dependencies]\na = { path = "../a" }\n',
+                     "crate/b/src/lib.rs": "pub fn three() -> i32 {\n    a::two() + 1\n}\n"}, "a workspace")
+        self.git("rm", "--quiet", "crate/src/lib.rs")
+        self.put("crate/b/src/lib.rs", "pub fn three() -> i32 {\n    a::two() + one\n}\n")
+        status, out = self.gate()
+        self.assertEqual(status, 1, out)
+        self.assertIn("- `clippy` could not compile the workspace of `crate/Cargo.toml`: `crate/b/src/lib.rs:2` error "
+                      "clippy E0425: cannot find value `one` in this scope\n", out)
+        self.assertIn("1 other open issues in the project", out)
+
+    def test_a_tracked_cargo_lock_is_held_to_not_rewritten(self):
+        lock = '# This file is automatically @generated by Cargo.\nversion = 4\n\n[[package]]\nname = "tiny"\n' \
+               'version = "0.1.0"\n'
+        self.commit({"crate/Cargo.lock": lock}, "a lock")
+        self.edit("crate/Cargo.toml", 'version = "0.1.0"', 'version = "0.2.0"')
+        status, out = self.gate()
+        self.assertEqual(status, 1, out)
+        self.assertIn("- `clippy` failed with exit status 101 in `crate/Cargo.toml`: error: cannot update the lock "
+                      "file", out)
+        with open(os.path.join(self.repo, "crate/Cargo.lock")) as f:
+            self.assertEqual(f.read(), lock)
+
+    def test_a_cargo_past_the_timeout_is_killed_with_the_processes_it_started(self):
+        child = os.path.join(self.outside, "child")
+        self.stub_cargo(f'case "$1 $2" in\n'
+                        f'"clippy --version") exit 0 ;;\n'
+                        f'"locate-project "*) echo "$PWD/crate/Cargo.toml" ;;\n'
+                        f'*) sleep 60 & echo $! > "{child}"; wait ;;\n'
+                        f'esac')
+        with patch.object(gate, "GATE_TOOL_TIMEOUT", 1):
+            status, out = self.gate()
+        self.assertEqual(status, 1, out)
+        self.assertIn("- `clippy` did not finish within 1 seconds.\n", out)
+        with open(child) as f:
+            pid = f.read().strip()
+        # Killed, the sleep is gone, or a zombie until this container's init reaps it.
+        with contextlib.suppress(FileNotFoundError), open(f"/proc/{pid}/stat") as f:
+            self.assertEqual(f.read().rpartition(")")[2].split()[0], "Z")
+
+    def test_a_repository_without_rust_files_runs_no_cargo(self):
+        self.git("rm", "--quiet", "crate/src/lib.rs")
+        self.stub_cargo(f'echo ran > "{self.outside}/cargo-ran"; exit 1')
+        status, out = self.gate()
+        self.assertEqual(status, 0, out)
+        self.assertFalse(os.path.exists(os.path.join(self.outside, "cargo-ran")))
+
+    def test_a_cargo_without_clippy_fails_naming_it(self):
+        self.stub_cargo('echo "error: no such command: \\`clippy\\`" >&2; exit 101')
+        status, out = self.gate()
+        self.assertEqual(status, 1, out)
+        self.assertIn("- `clippy` is not installed: `cargo clippy --version` failed with exit status 101: error: no "
+                      "such command: `clippy`\n", out)
+
+    def test_an_added_allow_attribute_is_listed_as_a_suppression_in_a_rust_file_alone(self):
+        self.put("crate/src/lib.rs", "#![cfg_attr(not(test), allow(clippy::all))]\n" + self.LIB
+                 + "#[allow(clippy::needless_return)]\npub fn two() -> i32 {\n    return 2;\n}\n"
+                 + '#[cfg_attr(\n    not(test),\n    allow(clippy::needless_return)\n)]\npub fn three() {}\n'
+                 + '#[test] fn parses() { "1".parse::<i32>().expect("ok"); }\n')
+        self.put("crate/notes.txt", "Write `#[allow(lint, reason = \"...\")]`.\n")
+        self.git("add", "crate/notes.txt")
+        status, out = self.gate()
+        self.assertEqual(status, 0, out)
+        self.assertTrue(out.endswith("## Suppressions added\n\n"
+                                     "- `crate/src/lib.rs:1` `#![cfg_attr(not(test), allow(clippy::all))]`\n"
+                                     "- `crate/src/lib.rs:5` `#[allow(clippy::needless_return)]`\n"
+                                     "- `crate/src/lib.rs:11` `allow(clippy::needless_return)`\n"), out)
+
+    def test_a_build_that_fails_without_a_compile_error_fails_naming_cargo_s_error(self):
+        self.put("crate/build.rs", 'fn main() {\n    panic!("no");\n}\n')
+        self.git("add", "crate/build.rs")
+        status, out = self.gate()
+        self.assertEqual(status, 1, out)
+        self.assertIn("- `clippy` failed with exit status 101 in `crate/Cargo.toml`: error: failed to run custom build "
+                      "command for `tiny v0.1.0", out)
+
+    def test_a_manifest_cargo_cannot_read_fails_naming_it_and_the_rest_are_linted(self):
+        self.put("broken/Cargo.toml", "[package\n")
+        self.git("add", "broken/Cargo.toml")
+        self.put("crate/src/lib.rs", self.LIB + "pub fn two() -> i32 {\n    return 2;\n}\n")
+        status, out = self.gate()
+        self.assertEqual(status, 1, out)
+        self.assertIn("- `clippy` could not find the workspace of `broken/Cargo.toml`: error: ", out)
+        self.assertIn("`crate/src/lib.rs:5` warning clippy clippy::needless_return", out)
 
 
 class TestTestIntegrityCheck(unittest.TestCase):
@@ -4188,3 +4357,25 @@ class TestToolFindings(unittest.TestCase):
 
     def test_untracked_paths_are_skipped(self):
         self.assertEqual(self.read("ruff", "build/x.py:1:1: F401 unused\n"), [])
+
+    def test_clippy_places_a_finding_in_a_macro_s_definition_where_the_macro_was_used(self):
+        def span(file_name, line, expansion=None):
+            return {"file_name": file_name, "line_start": line, "is_primary": True,
+                    "expansion": expansion and {"span": expansion}}
+        registry = "/home/u/.cargo/registry/src/index/serde-1.0.0/src/lib.rs"
+        record = {"reason": "compiler-message",
+                  "message": {"level": "warning", "code": {"code": "clippy::needless_return"},
+                              "message": "unneeded `return` statement",
+                              "spans": [span(registry, 90, span("src/main.rs", 3))]}}
+        self.assertEqual(gate._rustc_diagnostic(json.dumps(record), "ui", "/repo", {"ui/src/main.rs"}, {}),
+                         {"path": "ui/src/main.rs", "line": 3, "severity": "warning",
+                          "rule": "clippy clippy::needless_return", "message": "unneeded `return` statement"})
+        record["message"]["spans"] = [span(registry, 90)]
+        self.assertIsNone(gate._rustc_diagnostic(json.dumps(record), "ui", "/repo", {"ui/src/main.rs"}, {}))
+
+    def test_clippy_s_other_output_holds_no_finding(self):
+        for line in ("", "not json", "[1]", '{"reason": "build-finished", "success": false}',
+                     json.dumps({"reason": "compiler-message", "message": {
+                         "level": "error", "code": None, "spans": [], "message": "aborting due to 1 previous error"}})):
+            with self.subTest(line=line):
+                self.assertIsNone(gate._rustc_diagnostic(line, "ui", "/repo", {"ui/src/main.rs"}, {}))
