@@ -4233,8 +4233,8 @@ class _PythonConstants:
     the test also binds; and a fixture's return value."""
     by_name: dict[str, _PythonConstant]
     # The dotted names a test can reach the module itself by, to name a constant as module.NAME: the module's dotted
-    # name and each suffix of it that ends at the file's own name, and the name a module-level import of one binds
-    # when nothing else in the module binds it.
+    # name and each suffix of it that ends at the file's own name, and the name a top-level import statement of one
+    # binds when nothing else in the module binds it.
     module: frozenset[str]
 
     @classmethod

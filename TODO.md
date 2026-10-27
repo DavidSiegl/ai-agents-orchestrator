@@ -365,8 +365,7 @@ was done.
   value; an inline value moved into a new constant, which requirement 4 leaves out; a constant changed by a
   module-level mutation (`GOLDEN["k"] = "b"`) or rebound through `global` in a function; and the module reached
   through a relative import, an import inside the test, or an alias imported under a module-level `if` or `try` (only
-  a top-level import statement's alias counts; review 54, F18).
-
+  a top-level import statement's alias counts as the module).
 
 - **A base `.gitleaks.toml` that extends another file reads that file from outside the base.** `scan_unpublished`
   writes the base's `.gitleaks.toml` into the run directory and passes it with `--config`; an `[extend] path = ...`
