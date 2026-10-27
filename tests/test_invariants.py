@@ -13,6 +13,7 @@ import tomllib
 import unittest
 
 import conftest
+from guard_errors import RealSleep
 
 import orchestrator
 from orchestrator import CI
@@ -150,10 +151,6 @@ class TestInvariants(unittest.TestCase):
 
     def test_no_test_sleeps_for_real(self):
         rule = "tests run on FakeClock, time that passes only when the workflow sleeps (docs/architecture.md, Tests)"
-        # The RealSleep of the conftest.py this run's guard comes from. pytest imports conftest.py afresh for each run
-        # in one process (PytestPluginManager._importconftest drops the old one from sys.modules), and mutmut makes
-        # several runs, while this module, imported once, keeps the first run's `conftest` and its RealSleep.
-        real_sleep = sys.modules["conftest"].RealSleep
         for sleep in (time.sleep, orchestrator.Clocks().sleep):
-            with self.subTest(sleep=sleep), self.assertRaises(real_sleep, msg=rule):
+            with self.subTest(sleep=sleep), self.assertRaises(RealSleep, msg=rule):
                 sleep(0)

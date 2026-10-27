@@ -385,15 +385,16 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   code PR #106 brought. mutmut runs the tests in `mutants/`, its copy of the repository, whose `orchestrator.py` and
   `gate.py` hold every mutant beside each function and import `mutmut`, and which lacks `README.md`; so the stdlib-only
   and unredirected-header tests read the mutated files, and `test_docs.py` failed reading `README.md`, which at
-  `da71e52` failed mutmut's stats run, "failed to collect stats", before the Hypothesis health check above was
+  `da71e52` failed mutmut's stats run, "failed to collect stats", before the Hypothesis health check below was
   reached. Past those, the clean run failed `test_no_test_sleeps_for_real`: pytest imports `conftest.py` afresh for
   each run in one process, while `test_invariants.py`, imported once, kept the first run's `conftest.RealSleep`.
   Fixed (2026-10-27, mutmut-hypothesis-health-check ticket 01): `tests/conftest.py`'s `REPO` is the repository's top
-  directory, the one above `mutants/` under mutmut, and the two files' `ROOT` is it, so they read the files as written
-  while running the mutated code, whose flags `test_docs.py` still checks; the sleep test takes `RealSleep` from
-  `sys.modules["conftest"]`, this run's. Not taken: deselecting the tests under mutmut, which would stop
-  `test_docs.py` killing mutants of the parsers' flags, nor `also_copy` of `README.md` and what the docs link to,
-  which would leave the source tests reading the mutated files.
+  directory, the one above `mutants/` under mutmut, and the two files' `ROOT` is it, so they read the files unmutated
+  while running the mutated code, whose flags `test_docs.py` still checks; `NetworkUsed` and `RealSleep` moved to
+  `tests/guard_errors.py`, which pytest imports once, so the class a test catches is the one the guard raises. Not
+  taken: deselecting the tests under mutmut, which would stop `test_docs.py` killing mutants of the parsers' flags,
+  nor `also_copy` of `README.md` and what the docs link to, which would leave the source tests reading the mutated
+  files.
 
 - **mutmut's clean test run fails on a hypothesis health check, so the gate mutation-tests nothing.** Under the
   gate's mutmut 3.8.0, each `@given` method of `tests/test_properties.py`, first
