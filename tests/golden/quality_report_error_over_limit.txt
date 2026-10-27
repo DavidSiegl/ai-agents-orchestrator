@@ -1,0 +1,116 @@
+GATE: ERROR
+
+The intro.
+
+## Issues on changed lines
+
+1. `f.py:1` HIGH r: m1
+2. `f.py:2` HIGH r: m2
+3. `f.py:3` HIGH r: m3
+4. `f.py:4` HIGH r: m4
+5. `f.py:5` HIGH r: m5
+6. `f.py:6` HIGH r: m6
+7. `f.py:7` HIGH r: m7
+8. `f.py:8` HIGH r: m8
+9. `f.py:9` HIGH r: m9
+10. `f.py:10` HIGH r: m10
+11. `f.py:11` HIGH r: m11
+12. `f.py:12` HIGH r: m12
+13. `f.py:13` HIGH r: m13
+14. `f.py:14` HIGH r: m14
+15. `f.py:15` HIGH r: m15
+16. `f.py:16` HIGH r: m16
+17. `f.py:17` HIGH r: m17
+18. `f.py:18` HIGH r: m18
+19. `f.py:19` HIGH r: m19
+20. `f.py:20` HIGH r: m20
+21. `f.py:21` HIGH r: m21
+22. `f.py:22` HIGH r: m22
+23. `f.py:23` HIGH r: m23
+24. `f.py:24` HIGH r: m24
+25. `f.py:25` HIGH r: m25
+26. `f.py:26` HIGH r: m26
+27. `f.py:27` HIGH r: m27
+28. `f.py:28` HIGH r: m28
+29. `f.py:29` HIGH r: m29
+30. `f.py:30` HIGH r: m30
+31. `f.py:31` HIGH r: m31
+32. `f.py:32` HIGH r: m32
+33. `f.py:33` HIGH r: m33
+34. `f.py:34` HIGH r: m34
+35. `f.py:35` HIGH r: m35
+36. `f.py:36` HIGH r: m36
+37. `f.py:37` HIGH r: m37
+38. `f.py:38` HIGH r: m38
+39. `f.py:39` HIGH r: m39
+40. `f.py:40` HIGH r: m40
+41. `f.py:41` HIGH r: m41
+42. `f.py:42` HIGH r: m42
+43. `f.py:43` HIGH r: m43
+44. `f.py:44` HIGH r: m44
+45. `f.py:45` HIGH r: m45
+46. `f.py:46` HIGH r: m46
+47. `f.py:47` HIGH r: m47
+48. `f.py:48` HIGH r: m48
+49. `f.py:49` HIGH r: m49
+50. `f.py:50` HIGH r: m50
+
+2 more issues on changed lines are not listed; fix the ones above first.
+
+## Findings to weigh
+
+2 findings to weigh are not listed; answer the issues above first.
+
+## Failing tests
+
+- `t.T.test_0`: failed
+- `t.T.test_1`: failed
+- `t.T.test_2`: failed
+- `t.T.test_3`: failed
+- `t.T.test_4`: failed
+- `t.T.test_5`: failed
+- `t.T.test_6`: failed
+- `t.T.test_7`: failed
+- `t.T.test_8`: failed
+- `t.T.test_9`: failed
+- `t.T.test_10`: failed
+- `t.T.test_11`: failed
+- `t.T.test_12`: failed
+- `t.T.test_13`: failed
+- `t.T.test_14`: failed
+- `t.T.test_15`: failed
+- `t.T.test_16`: failed
+- `t.T.test_17`: failed
+- `t.T.test_18`: failed
+- `t.T.test_19`: failed
+- `t.T.test_20`: failed
+- `t.T.test_21`: failed
+- `t.T.test_22`: failed
+- `t.T.test_23`: failed
+- `t.T.test_24`: failed
+- `t.T.test_25`: failed
+- `t.T.test_26`: failed
+- `t.T.test_27`: failed
+- `t.T.test_28`: failed
+- `t.T.test_29`: failed
+- `t.T.test_30`: failed
+- `t.T.test_31`: failed
+- `t.T.test_32`: failed
+- `t.T.test_33`: failed
+- `t.T.test_34`: failed
+- `t.T.test_35`: failed
+- `t.T.test_36`: failed
+- `t.T.test_37`: failed
+- `t.T.test_38`: failed
+- `t.T.test_39`: failed
+- `t.T.test_40`: failed
+- `t.T.test_41`: failed
+- `t.T.test_42`: failed
+- `t.T.test_43`: failed
+- `t.T.test_44`: failed
+- `t.T.test_45`: failed
+- `t.T.test_46`: failed
+- `t.T.test_47`: failed
+- `t.T.test_48`: failed
+- `t.T.test_49`: failed
+- and 1 more.

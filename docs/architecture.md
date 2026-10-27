@@ -307,6 +307,21 @@ run directory's files; and both repositories' refs, commits and working trees. `
 whose record differs from `recorded/<scenario>.json`, naming where; `PARITY_RECORD=1` writes the recordings
 instead, from the Python engine only.
 
+Golden files hold generated text to a reviewed copy of it under `tests/golden/`: `assert_golden` (`tests/golden.py`)
+fails with a unified diff naming the file when the text differs, and `UPDATE_GOLDEN=1 uv run pytest` rewrites the
+files instead. A change to that text is reviewed as the diff of its golden files. They hold two texts. `gate.py`'s
+quality file, which the Builder and the Reviewer read and which no parity scenario writes, since their Jenkins serves
+hand-written ones: `TestQualityReport` holds `quality_report` to a file per gate word and per way it words a section,
+and `TestGate` the whole file the gate writes for a passing and a failing change, `judge_change`'s intro, conditions
+and coverage sentence included. And the engine's prompts: `TestWorkflowPromptsGolden` holds each step's prompts in
+the built-in workflow and each example workflow, as `Workflow` renders them, to a file per workflow, round 1 and,
+for the steps the review loops over, round 2 as the running session and a fresh one hear it. The parity scenarios
+record round 1 of each workflow as sent, so a reworded prompt fails both. Of round 2 of the examples and of a fresh
+session's prompts, the recordings hold only the templates, in `state.json`; the text as sent, placeholders filled in
+and a fresh session's prompt put together, only the golden files hold, and only for the Python engine. The engine's
+other texts, its follow-up prompts, notes, commit messages and pull request bodies, have no golden files: the
+scenarios record them as sent, where one reaches them. TODO.md lists the texts neither reaches.
+
 ## Tooling
 
 - `pyproject.toml`: no runtime dependencies, Python 3.13+; pytest, pytest-cov and Hypothesis in the `dev` group, PyInstaller
@@ -326,7 +341,8 @@ instead, from the Python engine only.
   `workflows` lists `default`, and `gui --smoke-test` where there is a display. On Linux it builds with the
   system `python3` (`python3-tk` installed) in `build/binary-venv`, not uv's Python, whose Tk lacks Xft and so
   draws every font in one fixed bitmap size; it refuses a Tk without libXft.
-- `Jenkinsfile`: `uv sync --frozen`, `uv run pytest` with branch coverage of `orchestrator` and `gate` and
+- `Jenkinsfile`: `uv sync --frozen`, `uv run pytest` with branch coverage of `orchestrator` and `gate` (without
+  `tests/parity` in a quality build whose change touches nothing the scenarios judge; the Test stage lists what) and
   `ui/src-tauri/`'s tests with line coverage (`cargo llvm-cov nextest`), a UI stage that runs `ui/`'s `npm ci`,
   `typecheck`, `lint` and `test`, failing the build before the gate, a Gate stage that runs `gate.py` and archives
   `quality.md` (see [quality gate](quality-gate.md)), and a Package stage that runs `packaging/build-binary.sh` and

@@ -32,6 +32,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from gitrepo import RepositoryTest
+from golden import assert_golden
 
 import gate
 import orchestrator
@@ -8151,6 +8152,38 @@ class TestWorkflowCLI(unittest.TestCase):
 
 
 EXAMPLES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples", "workflows")
+
+
+class TestWorkflowPromptsGolden(unittest.TestCase):
+    """Each step's prompts in the built-in workflow and in each file of examples/workflows/, as Workflow renders them
+    for a new run on the fakes, held to a golden file per workflow (tests/golden.py): round 1, and for the steps the
+    verdict step loops back over, round 2 as the running session and as a fresh one hears it. The parity scenarios
+    record round 1 of each workflow as sent; round 2 of the examples and a fresh session's prompts as sent, no scenario
+    reaches (docs/architecture.md, Tests)."""
+
+    def rendered(self, pipeline):
+        wf, _, _, _ = make_workflow({}, pipeline=pipeline)
+        wf.state.base = "abc123"
+        ids = [step.id for step in pipeline.steps]
+        verdict = pipeline.verdict_step
+        looped = pipeline.steps[ids.index(verdict.loop_to):ids.index(verdict.id) + 1] if verdict else ()
+        parts = []
+        for step in pipeline.steps:
+            text, _ = wf._prompts(step, 1)
+            parts.append(f"## {step.id}, round 1\n\n{text}")
+        for step in looped:
+            text, fresh = wf._prompts(step, 2)
+            parts += [f"## {step.id}, round 2\n\n{text}", f"## {step.id}, round 2, a fresh session\n\n{fresh}"]
+        return "\n\n".join(parts) + "\n"
+
+    def test_the_built_in_workflow(self):
+        assert_golden("prompts_default", self.rendered(orchestrator.DEFAULT_WORKFLOW))
+
+    def test_each_example_workflow(self):
+        for name in sorted(os.listdir(EXAMPLES)):
+            with self.subTest(name):
+                pipeline = orchestrator.load_workflow_file(os.path.join(EXAMPLES, name), BUILT_IN_PROMPTS)
+                assert_golden(f"prompts_{name.removesuffix('.toml')}", self.rendered(pipeline))
 
 
 class TestWorkflowFiles(unittest.TestCase):
