@@ -28,6 +28,7 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 from gitrepo import RepositoryTest
+from golden import assert_golden
 
 import gate
 from gate import changed_lines, quality_report
@@ -208,6 +209,37 @@ class TestQualityReport(unittest.TestCase):
                       "and the surviving-mutants check runs mutmut without them. The linters read them as they read "
                       "any tracked file.\n", text)
         self.assertNotIn("The change edits", text)
+
+    # The whole file, for each gate word and each way a section can read, held to its golden file (tests/golden.py):
+    # the tests above pin what the orchestrator reads back, these the words the Builder and the Reviewer read.
+
+    def test_an_ok_file_with_nothing_to_answer_is_golden(self):
+        assert_golden("quality_report_ok", quality_report("OK", "The intro."))
+
+    def test_an_ok_file_with_findings_to_weigh_is_golden(self):
+        text = quality_report("OK", "The intro.", tests=[], coverage="85.0% of 20 new lines to cover; 3 lines are "
+                              "not covered.", to_weigh=[self.finding("t.py", 3), self.finding("t.py", None),
+                                                        self.finding(None, None, "mutants budget")],
+                              edited=["pyproject.toml"], rules_from="`main`'s `pyproject.toml`")
+        assert_golden("quality_report_ok_to_weigh", text)
+
+    def test_an_error_file_with_every_section_is_golden(self):
+        text = quality_report(
+            "ERROR", "The intro.",
+            conditions=["2 findings on lines the change added; each is listed below.", "`ruff` is not installed."],
+            issues=self.issues(2), to_weigh=[self.finding("t.py", 9)], elsewhere=3,
+            tests=[("t.T.test_x", "AssertionError: 3 != 2\ntraceback"), ("t.T.test_y", "")],
+            coverage="50.0% of 20 new lines to cover; 10 lines are not covered.",
+            suppressions=[("f.py", 3, "x = 1  # noqa: F401")], edited=["Jenkinsfile", "pyproject.toml", "uv.lock"],
+            clippy_config=["clippy.toml", "ui/Cargo.toml"], mutmut_state=["mutants/calc.py"])
+        assert_golden("quality_report_error", text)
+
+    def test_an_error_file_over_the_limit_is_golden(self):
+        limit = gate.QUALITY_ISSUE_LIMIT
+        text = quality_report("ERROR", "The intro.", issues=self.issues(limit + 2),
+                              to_weigh=[self.finding("t.py", 1), self.finding("t.py", 2)],
+                              tests=[(f"t.T.test_{k}", "") for k in range(limit + 1)])
+        assert_golden("quality_report_error_over_limit", text)
 
 
 class TestGate(RepositoryTest):
@@ -707,6 +739,35 @@ class TestGate(RepositoryTest):
         self.assertIn("interrupted", err)
         with open(out) as f:
             self.assertEqual(f.read(), "GATE: OK\n")
+
+    # The whole quality file the gate writes, held to its golden file (tests/golden.py), so that the sentences
+    # judge_change words its conditions in are pinned too, not only quality_report's layout (TestQualityReport).
+
+    def golden_run(self, *args):
+        """gate's standard output for ARGS, the base commit's sha written as <base>, with test-integrity as the only
+        check: the other checks run pytest or mutmut, whose words are the host's."""
+        self.checks(*(c for c in gate.gate_checks() if c.name == "test-integrity"))
+        _, out, _ = self.gate(*args)
+        return out.replace(self.git("rev-parse", "HEAD").strip(), "<base>")
+
+    def test_the_file_of_a_passing_change_is_golden(self):
+        self.add_lines(1)
+        out = self.golden_run("--tests", self.junit(), "--coverage", self.coverage({4: 1}))
+        assert_golden("gate_ok", out)
+
+    def test_the_file_of_a_failing_change_is_golden(self):
+        self.commit({"tests/test_f.py": "def test_one():\n    assert 1\n\n\ndef test_two():\n    assert 2\n",
+                     "uv.lock": "version = 1\n"}, "tests")
+        self.put("tests/test_f.py", "import pytest\n\n\n@pytest.mark.skip\ndef test_one():\n    assert 1\n")
+        self.put("uv.lock", "version = 2\n")
+        self.add_lines(19)
+        with open(os.path.join(self.repo, "f.py"), "a") as f:
+            f.write("import os  # noqa: F401\n")
+        self.says("ruff", "f.py:2:1: F401 `os` imported but unused\n"
+                          "f.py:4:7: B023 Function definition does not bind loop variable `x`\nFound 2 errors.\n")
+        out = self.golden_run("--tests", self.junit(("test_limit", "AssertionError: 3 != 2")),
+                              "--coverage", self.coverage({n: int(n < 14) for n in range(1, 24)}))
+        assert_golden("gate_error", out)
 
 
 class TestClippy(RepositoryTest):

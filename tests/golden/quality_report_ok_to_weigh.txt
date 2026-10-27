@@ -1,0 +1,27 @@
+GATE: OK
+
+The intro.
+
+## Issues on changed lines
+
+None.
+
+## Findings to weigh
+
+These do not fail the gate. Fix each, or say in your report why it should stand.
+
+1. `t.py:3` warning flaky test_x: m
+2. `t.py (the whole file)` warning flaky test_x: m
+3. The change as a whole: warning mutants budget: m
+
+## Failing tests
+
+None.
+
+## Coverage on new code
+
+85.0% of 20 new lines to cover; 3 lines are not covered.
+
+## Build configuration
+
+- The change edits `pyproject.toml`. The gate took its rules from `main`'s `pyproject.toml`, so the edit did not change how the change was judged.

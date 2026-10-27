@@ -307,6 +307,16 @@ run directory's files; and both repositories' refs, commits and working trees. `
 whose record differs from `recorded/<scenario>.json`, naming where; `PARITY_RECORD=1` writes the recordings
 instead, from the Python engine only.
 
+Golden files hold generated text to a reviewed copy of it under `tests/golden/`: `assert_golden` (`tests/golden.py`)
+fails with a unified diff naming the file when the text differs, and `UPDATE_GOLDEN=1 uv run pytest` rewrites the
+files instead. A change to that text is reviewed as the diff of its golden files. They cover `gate.py`'s quality file,
+which the Builder and the Reviewer read and which stays Python after the Rust engine: `TestQualityReport` holds
+`quality_report` to one file per gate word and per way a section can read, and `TestGate` the whole file the gate
+writes for a passing and for a failing change. The engine's own text, its prompts, notes, commit messages and pull
+request bodies, has no golden files: the parity scenarios already record each as sent, every example workflow's
+included, and a reworded prompt fails them, naming the first line that differs. TODO.md lists the texts no scenario
+reaches yet.
+
 ## Tooling
 
 - `pyproject.toml`: no runtime dependencies, Python 3.13+; pytest, pytest-cov and Hypothesis in the `dev` group, PyInstaller

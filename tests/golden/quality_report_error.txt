@@ -1,0 +1,42 @@
+GATE: ERROR
+
+The intro.
+
+## Failed conditions
+
+- 2 findings on lines the change added; each is listed below.
+- `ruff` is not installed.
+
+## Issues on changed lines
+
+1. `f.py:1` HIGH r: m1
+2. `f.py:2` HIGH r: m2
+
+3 other open issues in the project are not on lines this change added, so they are not listed.
+
+## Findings to weigh
+
+These do not fail the gate. Fix each, or say in your report why it should stand.
+
+3. `t.py:9` warning flaky test_x: m
+
+## Failing tests
+
+- `t.T.test_x`: AssertionError: 3 != 2
+- `t.T.test_y`: failed
+
+## Coverage on new code
+
+50.0% of 20 new lines to cover; 10 lines are not covered.
+
+## Suppressions added
+
+- `f.py:3` `x = 1  # noqa: F401`
+
+## Build configuration
+
+- The change edits `Jenkinsfile`. The quality job reads it from `main`, so this analysis ran without the edit.
+- The change edits `pyproject.toml`, which holds the gate's rules; the change was judged by the edited rules.
+- The change edits `uv.lock`, which pins the versions of the linters the gate ran.
+- The change edits `clippy.toml` and `ui/Cargo.toml`, which clippy takes its rules or its toolchain from; it judged the change by the edited ones.
+- The change adds or edits `mutants/calc.py` under `mutants/`, where mutmut keeps its state. The gate's checks leave them out: none selects a test or a function in them or counts them as a change to the code, and the surviving-mutants check runs mutmut without them. The linters read them as they read any tracked file.
