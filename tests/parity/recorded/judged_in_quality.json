@@ -1,0 +1,141 @@
+{
+ "invocations": [
+  {
+   "args": [
+    "judged-in-quality",
+    "--quality-gate",
+    "parity/quality",
+    "--target",
+    "main"
+   ],
+   "exit": 1,
+   "stdout_facts": [],
+   "stderr_facts": [
+    "5",
+    "<sha:1>",
+    "<sha:2>",
+    "HEAD"
+   ]
+  },
+  {
+   "args": [
+    "judged-in-quality",
+    "--quality-gate",
+    "parity/quality",
+    "--target",
+    "main"
+   ],
+   "exit": 0,
+   "stdout_facts": [
+    "6",
+    "HEAD",
+    "parity/quality"
+   ],
+   "stderr_facts": []
+  },
+  {
+   "args": [
+    "judged-in-quality",
+    "--quality-gate",
+    "parity/quality",
+    "--target",
+    "no..branch"
+   ],
+   "exit": 1,
+   "stdout_facts": [],
+   "stderr_facts": []
+  }
+ ],
+ "events": {
+  "1": [
+   {
+    "jenkins": "GET /job/parity/job/quality/api/json?tree=builds%5Bnumber%2Cresult%2Cdescription%5D%7B0%2C100%7D"
+   }
+  ],
+  "2": [
+   {
+    "jenkins": "GET /job/parity/job/quality/api/json?tree=builds%5Bnumber%2Cresult%2Cdescription%5D%7B0%2C100%7D"
+   }
+  ]
+ },
+ "run_files": {},
+ "repositories": {
+  "project": {
+   "head": "refs/heads/feature",
+   "refs": {
+    "refs/heads/feature": "<sha:3>",
+    "refs/heads/main": "<sha:4>",
+    "refs/remotes/origin/main": "<sha:4>"
+   },
+   "commits": [
+    {
+     "sha": "<sha:3>",
+     "parents": [
+      "<sha:4>"
+     ],
+     "author": "Parity <parity@example.com>",
+     "message": "Add subtract\n\n",
+     "changes": [
+      "M\tsrc/calc.py"
+     ],
+     "files": {
+      "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n\n\ndef subtract(a, b):\n    \"\"\"a minus b.\"\"\"\n    return a - b\n"
+     }
+    },
+    {
+     "sha": "<sha:4>",
+     "parents": [],
+     "author": "Parity <parity@example.com>",
+     "message": "Start the parity project\n\n",
+     "changes": [
+      "A\tREADME.md",
+      "A\tpyproject.toml",
+      "A\tsrc/calc.py",
+      "A\ttests/test_calc.py"
+     ],
+     "files": {
+      "README.md": "# Parity project\n\nThe project a parity scenario changes.\n",
+      "pyproject.toml": "[project]\nname = \"parity-project\"\nversion = \"0.1.0\"\ndependencies = []\n",
+      "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n",
+      "tests/test_calc.py": "from calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+     }
+    }
+   ],
+   "worktrees": [
+    {
+     "path": "<world>/project",
+     "branch": "refs/heads/feature",
+     "status": [],
+     "changed": {}
+    }
+   ]
+  },
+  "origin": {
+   "head": "refs/heads/main",
+   "refs": {
+    "refs/heads/main": "<sha:4>"
+   },
+   "commits": [
+    {
+     "sha": "<sha:4>",
+     "parents": [],
+     "author": "Parity <parity@example.com>",
+     "message": "Start the parity project\n\n",
+     "changes": [
+      "A\tREADME.md",
+      "A\tpyproject.toml",
+      "A\tsrc/calc.py",
+      "A\ttests/test_calc.py"
+     ],
+     "files": {
+      "README.md": "# Parity project\n\nThe project a parity scenario changes.\n",
+      "pyproject.toml": "[project]\nname = \"parity-project\"\nversion = \"0.1.0\"\ndependencies = []\n",
+      "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n",
+      "tests/test_calc.py": "from calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+     }
+    }
+   ]
+  }
+ },
+ "notes": {}
+}

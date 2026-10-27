@@ -29,8 +29,49 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `orchestrator.py`"), and the Jenkinsfile's cutover fallback is gone. Left: making the test-file patterns a setting,
   for the gate's use in other projects (`.scratch/gate-split/issues/04-configurable-test-files.md`). The gate moves to
   its own repository only once a second project uses it. Decided 2026-10-24.
+- **The Python engine is frozen.** From the merge of the parity harness (`tests/parity/`) until the Rust engine
+  replaces it in one release, nothing lands in `orchestrator.py`, fixes included: its recordings are the oracle
+  each Rust ticket is judged by, and a change to the Python engine would move it. A bug found meanwhile goes into
+  `Open issues` here and is fixed on the `rust-engine` branch. `gate.py`, the docs, the tests and CI are not
+  frozen. The note at the top of `orchestrator.py` says so too. Decided 2026-10-24 (the Rust engine's spec,
+  Decisions).
+- **The Rust engine's parity harness: what it does not record yet.** `tests/parity/` runs 43 scenarios against
+  `orchestrator.py` as a program and compares each with its recording (docs/architecture.md, Tests); the Rust tickets
+  replay them through `PARITY_ENGINE`. Not covered: a secret gitleaks finds, at a quality round or at publish; the
+  harnesses other than claude and codex starting an agent (only their arguments differ); a session log's token counts
+  (every turn records `unknown`); `--timeout` and the stall notice, which take real minutes; and the GUI, which the Rust
+  engine drops. Where gitleaks is not on PATH, or openssl cannot make the fake PyPI's certificate, every scenario fails
+  naming it: a skip would pass a machine that checked nothing, and the gate's test-integrity check fails an added skip
+  (the user's ruling, 2026-10-27); Jenkins's Install stage downloads the pinned gitleaks (`ci/install-gitleaks.sh`), and
+  mutmut's runs leave `tests/parity` out (`[tool.mutmut]`), which would take most of the mutation budget. What a record
+  holds by design, each a choice a Rust ticket may revisit: output a human reads (logs, errors, `show`, `list`, `prune`)
+  as its facts (`normalize.facts`), not its words; a run's files listed by modification time, as `/files` and the event
+  stream list them, sorted by name, since seconds of the clock decide that order; ssh's commands not at all, only what
+  they did; doctor's lines without git's and Tk's, which are the host's. Two more are open issues below: the
+  `state.json` saves between two commands, and serve's events between two checkpoints. The suite takes about 3 minutes
+  more with the harness, one engine run each scenario at 2 to 25 seconds (25 for serve's event stream). Decided against
+  (2026-10-27): scenarios as data files the harness interprets, which needed a language of their own for kills,
+  takeovers and serve's stream; a cassette of the expected requests that the fakes answer in order, which breaks on
+  every count of polls; and a stub gitleaks where none is installed, which would record what no engine run with gitleaks
+  does.
 
 ## Open issues
+
+- **The parity harness records `state.json` at each command the fakes get, not after each save.** Ticket
+  rust-engine/01 asks for "`state.json` after each save"; the ledger reads it only when herdr, gh, Jenkins or PyPI
+  gets a call, and leaves out a change to `heartbeat_at` alone (`tests/parity/fakes.py`, `_changed_states`). Raised
+  by cross-review 65 (F2, 2026-10-27): "a Rust engine that skips or reorders saves between two of those calls, or
+  writes a wrong intermediate state that a later save overwrites, still passes." Only the engine's own process sees
+  every save: for the Python engine an audit hook through `sitecustomize`, or a `mv` on PATH that `Host.write` calls,
+  would catch them, and the Rust engine could be held to neither. Closes with the user's ruling on the ticket's
+  wording, or a way to see each write of `state.json` from outside the process (inotify has no stdlib binding).
+- **The parity harness compares serve's event stream at checkpoints, not event by event.** `serve_endpoints_and_events`
+  keeps, at each point where the run waits on an agent and once it is done, the last `record` and `files` event of
+  each run (`tests/parity/scenarios.py`, `last_by_run`). Raised by cross-review 65 (F10, 2026-10-27), against the
+  spec's "serve's JSON and SSE events" byte for byte: "missing, repeated or reordered intermediate events pass." How
+  many events a step sends depends on where serve's one-second poll falls among the run's saves, so the stream
+  between two checkpoints differs from run to run. Closes with a serve whose poll the harness can step, which would
+  be a hook in the engine, or the user's ruling that the folded stream is the contract, as the desktop app reads it.
 
 - **A quality build of a snapshot from before `gate.py` fails mypy.** A quality build judges by main's rules
   (`--config`), and since the split main's `[tool.mypy] files` names `gate.py`, which mypy reads relative to the
@@ -132,6 +173,11 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   (F11, 2026-10-27): "The gate is OK on a change that the workspace's rules make uncompilable". Closes with a second,
   uncapped clippy run whose rustc errors (codes `E` and four digits, such as E0453) are compile errors, or with the
   forbidden lints read from the manifests and an added allow of one failing the gate.
+- **A cargo config under the build's `CARGO_HOME` is not listed as build configuration.** `clippy_config_files` in
+  `gate.py` lists cargo's config only under a `.cargo` directory, but the Jenkinsfile sets `CARGO_HOME` to
+  `$WORKSPACE/.cargo-home`, so a change that tracks `.cargo-home/config.toml` could change clippy's lint levels or
+  rustflags without the quality file listing it. Raised by cross-review 70 (round 1, not recorded, 2026-10-27).
+  Closes with `CARGO_HOME`'s config files listed too, or `.cargo-home/` refused in a change.
 - **A quality build judges Rust by the snapshot's own clippy rules.** `Clippy` in `gate.py` chooses no lints (it caps
   their levels at warn, `--cap-lints`), so clippy reads each workspace's `[lints]`, `clippy.toml`, `.cargo/config.toml`
   rustflags and `rust-toolchain.toml` from the judged tree, where a change can loosen them; `--config` replaces only
@@ -322,7 +368,10 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   about 860 s behind the others). Those were pull request builds; a quality build has skipped the Package stage
   since 2026-10-24, so it has more to spare than that. The user kept 600 s (2026-10-24): a stopped run says `budget-reached`, never "none
   survived". Closes with the shared time budget above, or mutants chosen by the changed lines rather than whole
-  functions.
+  functions. Worse since mutmut's runs pass the suite (mutmut-hypothesis-health-check, PR #112): on PR #113 (2026-10-27)
+  mutmut was stopped at 600 s after trying 0 of 253 mutants, so its stats and clean runs of the now 1348-test suite
+  took the whole budget, and surviving-mutants judges nothing on Jenkins; the parity scenarios, left out of mutmut's
+  runs, add nothing to that.
 - **`parse_args` still yields many survivors after `do_not_mutate_patterns = ['\bhelp=']`.** Its `description=` texts
   and flag names are mutated, and few tests check them word for word: 105 of 305 mutants survived on this branch's
   change. Reported per function, so it is one finding. Closes with a decision to add `'\bdescription='` to the

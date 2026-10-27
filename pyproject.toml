@@ -60,6 +60,9 @@ files = ["orchestrator.py", "gate.py"]
 # a directory of its own, which holds only what is listed here.
 source_paths = ["orchestrator.py", "gate.py"]
 pytest_add_cli_args_test_selection = ["tests/"]
+# Without the parity scenarios (tests/parity), which run the engine as a program, about 190 s a run: mutmut's stats
+# and clean runs of them alone would take most of gate.py's mutation budget before it tries a mutant (TODO.md).
+pytest_add_cli_args = ["--ignore=tests/parity"]
 also_copy = ["examples/", "docs/"]
 # argparse's help texts, which no test reads word for word. mutmut matches each pattern against each source line and
 # skips every expression that starts on a matching line, with what it holds, the following lines of a help text too.

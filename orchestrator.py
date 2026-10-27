@@ -1,3 +1,7 @@
+# FROZEN from the merge of the parity harness (tests/parity/) until the Rust engine replaces this file: nothing lands
+# here, fixes included. A bug found meanwhile goes into TODO.md and is fixed on the rust-engine branch, so that the
+# recordings in tests/parity/recorded/ stay the oracle the Rust engine is judged by. gate.py, the docs, the tests and
+# CI are not frozen. TODO.md, "The Python engine is frozen", says why.
 """
 Role-based handoff orchestrator for coding agents in herdr:
 

@@ -475,6 +475,10 @@ request](#a-build-of-main-judged-at-its-pull-request)).
   and `uv` brings the Python of `.python-version`; clippy is rustup's `clippy` component of the Rust below, which
   the Install stage adds with `rustup component add clippy`, so the Rust must come from rustup. The gate fails a
   build that lacks a linter, and the tests that run the real clippy fail without it.
+- **`curl`, `sha256sum`, `tar` and `openssl` on the agent**, for the parity scenarios (`tests/parity`): the Install
+  stage downloads the pinned gitleaks they run with `ci/install-gitleaks.sh`, into the workspace's `.tools/bin`, which
+  the Jenkinsfile puts first on `PATH`, and the scenarios make the fake PyPI's certificate with openssl. Without
+  either tool the scenarios fail, naming it.
 - **Node 20.19 or later and npm, Rust 1.90 or later, and Tauri 2's system packages on the agent**, for the UI stage's
   checks of the desktop app and the Package stage's `tauri build` of it. Debian 13's `nodejs` and `npm` packages do for
   the frontend (`ui/.npmrc` makes their npm 9.2 resolve the tree), but its Rust 1.85 is older than the shell's locked
