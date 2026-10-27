@@ -13,10 +13,12 @@ import unittest
 import urllib.parse
 from unittest.mock import patch
 
+import conftest
+
 import gate
 import orchestrator
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent
+ROOT = conftest.REPO
 README = ROOT / "README.md"
 DOCS = [README, *sorted((ROOT / "docs").glob("*.md"))]
 

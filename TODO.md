@@ -80,7 +80,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 - **`TestGate.test_a_missing_tool_fails_naming_it` fails where shellcheck lives beside git.** `TestGate.setUp`
   (`tests/test_orchestrator.py`) puts git's own directory on `PATH` after the stubs, so on a machine with
   `/usr/bin/shellcheck` (agentbox, Debian's package) removing the stub still finds the real one and the gate passes.
-  Seen 2026-10-25 on `main` at `9448612`. Closes with `PATH` holding a directory with only a link to `git`.
+  Seen 2026-10-25 on `main` at `9448612`. On such a machine it also fails mutmut's stats run, which runs every test,
+  so `surviving-mutants` is `not-run` there, "failed to collect stats" (2026-10-27). Closes with `PATH` holding a
+  directory with only a link to `git`.
 - **unexpected-paths reads only the contract step's file.** `unexpected_paths` judges each path the change touches
   against `RunChange.spec`, the contract step's file, so a workflow whose contract is in business terms, such as
   `examples/workflows/product-team.toml`, whose requirements name no file and whose `design.md` lists the
@@ -119,12 +121,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   run (pytest, mutmut, PyInstaller, npm) still shares the 3 GB beside a locked rustc, as do other jobs' builds on the
   node. Open in `.scratch/ci-cargo-memory/issues/02-agent-container-memory.md`; closes with the Homelab keeping or
   raising it.
-- **Unverified: the Install stage's `rustup component add clippy` works on agentbox0.** The gate runs clippy on every
-  build that reaches Gate, since `ui/src-tauri/` is Rust, and `TestClippy` in `tests/test_gate.py` runs the real one.
-  PR-111's first build showed the agent's toolchain (1.99.0) lacked rustup's `clippy` component: the gate was ERROR
-  with "`clippy` is not installed" and eight `TestClippy` tests failed. The Install stage now adds the component
-  (Jenkinsfile, "Install"); whether the agent's user may write to its rustup home is not known from this repository.
-  Closes with a pull request build on agentbox0 whose console shows clippy ran (rust-engine ticket 02, 2026-10-27).
 - **Under the gate's `--cap-lints warn`, an `#[allow]` overrides a workspace's `forbid`.** `Clippy._lint_workspace` in
   `gate.py` caps every lint at warn so that a lint at deny cannot stop cargo before a compile error in a later crate
   (cross-review 66, F1); rustc's cap also lowers `forbid`, so an added `#[allow(unsafe_code)]` under `unsafe_code =
@@ -143,14 +139,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   Reviewer sees it, but the gate does not prevent it. Found implementing rust-engine ticket 02 (2026-10-27). Closes with
   the gate taking those files from the commit `--config`'s rules come from, or with the Reviewer's prompt naming the
   listing as a finding to judge.
-- **mutmut's clean test run fails on a hypothesis health check, so the gate mutation-tests nothing.** Under the
-  gate's mutmut 3.8.0, `TestChangedLines.test_names_each_changed_file_and_exactly_its_added_lines` in
-  `tests/test_properties.py` fails with `hypothesis.errors.FailedHealthCheck: ... was called from multiple
-  different executors`, mutmut exits 1 with "Failed to run clean test", and `surviving-mutants` reports `not-run`
-  for every change. Seen on Jenkins build #48 and reproduced locally at `a3b18b6` with a one-line edit to
-  `drain_end` (2026-10-25); a plain `uv run pytest` passes it. Cause not established. Closes with the test passing
-  under mutmut, e.g. by suppressing `HealthCheck.differing_executors` for it, or the gate's mutmut runs leaving
-  `tests/test_properties.py` out.
 - **herdr 0.9.1 lists no `gemini` integration.** `herdr integration status` on this host lists `antigravity-cli`
   (whose hook is under `~/.gemini/`) but no `gemini`, so `doctor` warns that it does not list gemini, and the
   README's `herdr integration install gemini` may name a kind herdr no longer has. Found by the doctor run
@@ -266,16 +254,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
     `artifacts[relativePath]` in the result's `api/json` tree would halve the requests (F2).
   - No test covers a transient `CIError` between two reads, or a build that ends with a file other than the one read
     while it ran (F5).
-- **`test_invariants.py` and `test_docs.py` fail inside mutmut's copy.** Raised by cross-review 60 (2026-10-27), in
-  code PR #106 brought. Under mutmut, `SOURCE` is mutmut's mutated `orchestrator.py`, and `GATE_SOURCE` its
-  mutated `gate.py`, both in `source_paths`: each imports `mutmut`, and each
-  mutated function has `__mutmut_orig` and `__mutmut_N` copies, so the stdlib-only test fails for any change to a
-  function, and the unredirected-header test for a change to `CI._request`, `RunRequestHandler.do_OPTIONS` or
-  `_has_token`. `test_docs.py` reads `README.md` and resolves links into the whole repo, while `mutants/` holds only
-  `source_paths`, `also_copy` and mutmut's defaults. Either makes mutmut's clean run fail, so surviving-mutants is
-  `not-run`, besides the Hypothesis health check above. Closes with those tests reading the working tree's files, or
-  deselected under mutmut, or with README.md and the linked files in `also_copy`. Also: `test_invariants.py`'s
-  `AnyJenkins` and `Answer` copy `FakeCI` and `FakeResponse`, and `ROOT` is defined three times (F4).
+- **`test_invariants.py`'s `AnyJenkins` and `Answer` copy `FakeCI` and `FakeResponse`** of
+  `tests/test_orchestrator.py`. Raised by cross-review 60 (F4, 2026-10-27). Closes with one fake Jenkins the two files
+  share.
 - **`vague-names` does not split CamelCase.** `vague_names` matches a whole name or its last `_`-separated word,
   so `user_data` is found but a class `InfoManager` or `UserData` is not. Closes, if the run metrics show such names
   recur, with the last CamelCase word matched too.
@@ -411,6 +392,42 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   subdirectory.
 
 ## Fixed
+
+- **The Jenkins agent lacked rustup's clippy component.** The gate runs clippy on every build that reaches Gate, since
+  `ui/src-tauri/` is Rust, and `TestClippy` in `tests/test_gate.py` runs the real one. PR-111's first build showed the
+  agent's toolchain (1.99.0) lacked rustup's `clippy` component: the gate was ERROR with "`clippy` is not installed"
+  and eight `TestClippy` tests failed. Fixed (2026-10-27, rust-engine ticket 02): the Install stage runs `rustup
+  component add clippy` (Jenkinsfile, "Install"); PR-111's second build downloaded the component, passed all 1348
+  tests and the gate was OK.
+
+- **`test_invariants.py` and `test_docs.py` fail inside mutmut's copy.** Raised by cross-review 60 (2026-10-27), in
+  code PR #106 brought. mutmut runs the tests in `mutants/`, its copy of the repository, whose `orchestrator.py` and
+  `gate.py` hold every mutant beside each function and import `mutmut`, and which lacks `README.md`; so the stdlib-only
+  and unredirected-header tests read the mutated files, and `test_docs.py` failed reading `README.md`, which at
+  `da71e52` failed mutmut's stats run, "failed to collect stats", before the Hypothesis health check below was
+  reached. Past those, the clean run failed `test_no_test_sleeps_for_real`: pytest imports `conftest.py` afresh for
+  each run in one process, while `test_invariants.py`, imported once, kept the first run's `conftest.RealSleep`.
+  Fixed (2026-10-27, mutmut-hypothesis-health-check ticket 01): `tests/conftest.py`'s `REPO` is the repository's top
+  directory, the one above `mutants/` under mutmut, and the two files' `ROOT` is it, so they read the files unmutated
+  while running the mutated code, whose flags `test_docs.py` still checks; `NetworkUsed` and `RealSleep` moved to
+  `tests/guard_errors.py`, which pytest imports once, so the class a test catches is the one the guard raises. Not
+  taken: deselecting the tests under mutmut, which would stop `test_docs.py` killing mutants of the parsers' flags,
+  nor `also_copy` of `README.md` and what the docs link to, which would leave the source tests reading the mutated
+  files.
+
+- **mutmut's clean test run fails on a hypothesis health check, so the gate mutation-tests nothing.** Under the
+  gate's mutmut 3.8.0, each `@given` method of `tests/test_properties.py`, first
+  `TestChangedLines.test_names_each_changed_file_and_exactly_its_added_lines`, failed with
+  `hypothesis.errors.FailedHealthCheck: ... was called from multiple different executors`, mutmut exited 1 with
+  "Failed to run clean test", and `surviving-mutants` reported `not-run` for every change (Jenkins build #48).
+  Cause confirmed (2026-10-27): mutmut runs pytest in one process more than once (`pytest.main`, the stats run and
+  then the clean run), unittest makes a new `TestCase` for each, so the second run calls each `@given` method on
+  another `self`; two `pytest.main(["tests/test_properties.py"])` calls in one interpreter fail all twelve the
+  second time, the first passing. Fixed (2026-10-27, mutmut-hypothesis-health-check ticket 01): both Hypothesis
+  profiles in `tests/conftest.py` suppress `HealthCheck.differing_executors`, which guards against state kept on
+  `self` between examples; the `@given` methods keep none, reading `self` only to assert. The other health checks
+  stay on. Not taken: leaving `tests/test_properties.py` out of mutmut's runs, which would hide the parsers'
+  strongest tests from mutation testing.
 
 - **During the cutover fallback, mutmut cannot test a snapshot that has `gate.py`.** The fallback judges a snapshot
   of this branch by a `$JUDGED_MAIN` from before the split, whose `[tool.mutmut] source_paths` is
