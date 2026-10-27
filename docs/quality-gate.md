@@ -596,8 +596,9 @@ becomes `/job/` in its URL, so `AI-Agents-Orchestrator/py-ai-agents-orchestrator
 
 **Once the Gate stage has archived `quality.md`**, live or resumed, the round takes it without waiting for the stages
 after Gate, which cannot change its verdict: on a build that has ended, at the first read; on one still running, once
-two reads at least a poll interval apart agree, since Jenkins serves an artifact while it is still being copied into
-place; a copy that stalls that long and then resumes would defeat this. Whatever the build's result, that file is the
+two reads at least a poll interval apart agree and hold a whole non-blank line, since Jenkins serves an artifact while
+it is still being copied into place; a copy that stalls that long past its first line and then resumes would defeat
+this. Whatever the build's result, that file is the
 round's, with [the orchestrator's checks](#the-orchestrators-checks) added and a line under its `GATE:` line naming the
 build, the snapshot and the round, and saying that the build ended with its result or was still running. The round then
 deletes its branch, which the build checked out in its first stage; a pipeline that fetches `GIT_REF` again after Gate

@@ -226,6 +226,15 @@ was done.
     `artifacts[relativePath]` in the result's `api/json` tree would halve the requests (F2).
   - No test covers a transient `CIError` between two reads, or a build that ends with a file other than the one read
     while it ran (F5).
+- **`test_invariants.py` and `test_docs.py` fail inside mutmut's copy.** Raised by cross-review 60 (2026-10-27), in
+  code PR #106 brought. Under mutmut, `SOURCE` is mutmut's mutated `orchestrator.py`: it imports `mutmut`, and each
+  mutated function has `__mutmut_orig` and `__mutmut_N` copies, so the stdlib-only test fails for any change to a
+  function, and the unredirected-header test for a change to `CI._request`, `RunRequestHandler.do_OPTIONS` or
+  `_has_token`. `test_docs.py` reads `README.md` and resolves links into the whole repo, while `mutants/` holds only
+  `source_paths`, `also_copy` and mutmut's defaults. Either makes mutmut's clean run fail, so surviving-mutants is
+  `not-run`, besides the Hypothesis health check above. Closes with those tests reading the working tree's files, or
+  deselected under mutmut, or with README.md and the linked files in `also_copy`. Also: `test_invariants.py`'s
+  `AnyJenkins` and `Answer` copy `FakeCI` and `FakeResponse`, and `ROOT` is defined three times (F4).
 - **`vague-names` does not split CamelCase.** `vague_names` matches a whole name or its last `_`-separated word,
   so `user_data` is found but a class `InfoManager` or `UserData` is not. Closes, if the run metrics show such names
   recur, with the last CamelCase word matched too.
