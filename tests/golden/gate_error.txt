@@ -1,0 +1,39 @@
+GATE: ERROR
+
+`orchestrator.py gate` judged the working tree at `<head>` against the base `<base>`.
+
+## Failed conditions
+
+- 1 findings on lines the change added; each is listed below.
+- 1 findings of the `test-integrity` check; each is listed below.
+- 1 tests fail; each is listed below.
+- Coverage of new code is 50.0%; the gate wants at least 80% once a change has 20 or more new lines to cover.
+
+## Issues on changed lines
+
+1. `f.py:4` error ruff B023: Function definition does not bind loop variable `x`
+2. `tests/test_f.py:4` error test-integrity skip: `pytest.mark.skip` added: it skips a test or expects it to fail.
+
+1 other open issues in the project are not on lines this change added, so they are not listed.
+
+## Findings to weigh
+
+These do not fail the gate. Fix each, or say in your report why it should stand.
+
+3. `tests/test_f.py:5` warning test-integrity removed-test: `test_two` is gone; this was line 5 at the base.
+
+## Failing tests
+
+- `tests.T.test_limit`: AssertionError: 3 != 2
+
+## Coverage on new code
+
+50.0% of 20 new lines to cover; 10 lines are not covered.
+
+## Suppressions added
+
+- `f.py:23` `import os  # noqa: F401`
+
+## Build configuration
+
+- The change edits `uv.lock`, which pins the versions of the linters the gate ran.
