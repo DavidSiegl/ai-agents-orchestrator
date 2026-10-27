@@ -103,10 +103,12 @@ pipeline {
                 //
                 // PR-163's first two builds failed here with "component download failed for llvm-tools: error opening
                 // file for download: cleaning up cached downloads: No such file or directory", with no other build of
-                // this repository running; the cause is not known. rustup's home is the agent's, shared by every
-                // build on the node, so the add runs under the node's cargo lock, as the cargo steps do, in case
-                // another job's rustup removed the file; and the home, rustup's version and the permissions of the
-                // directories it downloads into are printed first, so that a failure here shows what the agent has.
+                // this repository running; the cause is not known, and nothing here is known to fix it. The home,
+                // rustup's version and the permissions of the directories it downloads into are printed first, so
+                // that a failure here shows what the agent has. rustup's home is the agent's, so the add runs under
+                // the node's cargo lock, as the cargo steps do: that keeps two of this repository's builds from adding
+                // a component at once (a quality build's --no-wait aside), but not a rustup in another repository's
+                // job, which does not take the lock.
                 sh '''
                     home=$(rustup show home)
                     rustup --version
