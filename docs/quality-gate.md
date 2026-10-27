@@ -77,12 +77,13 @@ change cannot weaken its tests unseen. Each of these is a finding:
   edits code outside the tests: the "update the expected value to match the output" move. The finding names the
   assertion before and after. An expected value held in a constant counts too: when a kept test's assertions name a
   constant of its own file at the base and still name it, bare or as `module.NAME` (the module by its dotted name or
-  an import alias of it), and the constant's expression changed other than in layout, or it is no longer a constant,
-  that is one finding per constant and test, at the test's first assertion naming it, naming the constant and its
-  line. A constant is a module-level assignment of one name, bound nowhere else in the module's scope, to an
-  expression with no call in it. One the change adds, one imported from another module or computed by a call, one
-  reached through a local or a helper, an edit to another constant one is built from, and a fixture's return value
-  do not count. It is one to weigh, like `removed-test`, since the spec may ask for the new value.
+  the alias a module-level import gives it), and the constant's expression changed other than in layout, or it is
+  no longer a constant, that is one finding per constant and test, at the test's first assertion naming it, naming
+  the constant and its line. A name the test binds itself, in its body or a def, lambda or comprehension inside it, is
+  not the module's. A constant is a module-level assignment of one name, bound nowhere else in the module's scope, to
+  an expression with no call in it. One the change adds, one imported from another module or computed by a call, one
+  reached through a local or a helper, an edit to another constant one is built from, and a fixture's return value do
+  not count. It is one to weigh, like `removed-test`, since the spec may ask for the new value.
 
 It reads Python only; another language is a `WeakenedTestsDetector` beside the Python one in
 `WEAKENED_TESTS_DETECTORS`.

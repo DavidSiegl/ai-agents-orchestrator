@@ -4256,16 +4256,19 @@ class _PythonConstants:
     def asserted(self, test: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
                  assertions: list[ast.Assert | ast.Call]) -> dict[str, int]:
         """Each name that assertions, test's as _python_assertions gives them, name as the module's, bare or as
-        module.NAME, to the line of the first that does, whether or not it is one of the constants. A bare name test
-        binds itself, as a parameter or in its body, is its own, not the module's."""
-        own = _scope_bindings(ast.iter_child_nodes(test))
+        module.NAME, to the line of the first that does, whether or not it is one of the constants. A name that test,
+        or a def, lambda or comprehension inside it, binds where the assertion reads it, as a parameter or a local,
+        is not the module's, and neither is an attribute of it."""
+        free = _module_reads(test)
         out: dict[str, int] = {}
         for assertion in assertions:
             for n in ast.walk(assertion):
-                if isinstance(n, ast.Name) and not own[n.id]:
+                if isinstance(n, ast.Name) and id(n) in free:
                     out.setdefault(n.id, assertion.lineno)
-                elif isinstance(n, ast.Attribute) and _dotted_name(n.value) in self.module:
-                    out.setdefault(n.attr, assertion.lineno)
+                elif isinstance(n, ast.Attribute):
+                    root, dotted = _dotted_name(n.value) or (None, "")
+                    if id(root) in free and dotted in self.module:
+                        out.setdefault(n.attr, assertion.lineno)
         return out
 
 
@@ -4299,22 +4302,28 @@ def _changed_constants(path: str | None, name: str,
             continue
         defined = current.by_name.get(constant)
         if defined is None:
-            what = (f"line {base.by_name[constant].line} at the base, which `{name}` names in its assertions, is no "
-                    f"longer a constant of the file that this check can read")
+            where = f"line {base.by_name[constant].line} at the base"
+            what = "is no longer a constant of the file that this check can read"
         elif defined.fingerprint != base.by_name[constant].fingerprint:
-            what = f"line {defined.line}, which `{name}` names in its assertions, changed"
+            where, what = f"line {defined.line}", "changed"
         else:
             continue
         out.append(_finding(path, line, "expected-value-changed",
-                            f"`{constant}` ({what}), in a change that also edits the code under test.",
-                            severity="error"))
+                            f"`{constant}` ({where}), which `{name}` names in its assertions, {what}, "
+                            f"in a change that also edits the code under test.", severity="error"))
     return out
+
+
+# The nodes that open a scope of their own inside a module or a function.
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp,
+           ast.GeneratorExp)
 
 
 def _scope_bindings(nodes: Iterable[ast.AST]) -> collections.Counter[str]:
     """How many times the scope whose code is nodes, a module's or a function's statements and parameters, binds each
     name, a binding being what _BINDING_NAME says. A def's or class's name counts, but what it binds inside does not,
-    nor what a lambda or a comprehension binds; an attribute assigned to binds no name."""
+    nor what a lambda or a comprehension binds, a := in a comprehension included, though Python binds that in the
+    enclosing scope; an attribute assigned to binds no name."""
     out: collections.Counter[str] = collections.Counter()
     stack = list(nodes)
     while stack:
@@ -4323,19 +4332,36 @@ def _scope_bindings(nodes: Iterable[ast.AST]) -> collections.Counter[str]:
             name = _BINDING_NAME.get(type(node), lambda node: None)(node)
             if name:
                 out[name] += 1
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda, ast.ListComp,
-                                 ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+        if not isinstance(node, _SCOPES):
             stack.extend(ast.iter_child_nodes(node))
     return out
 
 
-def _dotted_name(node: ast.AST) -> str | None:
-    """node as a dotted name, such as a.b.c, when it is a Name or a chain of attributes on one; else None."""
+def _dotted_name(node: ast.AST) -> tuple[ast.Name, str] | None:
+    """When node is a Name or a chain of attributes on one, that Name and node as a dotted name, such as a.b.c; else
+    None."""
     attrs = []
     while isinstance(node, ast.Attribute):
         attrs.append(node.attr)
         node = node.value
-    return ".".join([node.id, *reversed(attrs)]) if isinstance(node, ast.Name) else None
+    return (node, ".".join([node.id, *reversed(attrs)])) if isinstance(node, ast.Name) else None
+
+
+def _module_reads(scope: ast.AST) -> set[int]:
+    """The id()s of the Name nodes inside scope, a def or a class, that read a name neither it nor any def, lambda or
+    comprehension between it and the read binds, as _scope_bindings counts, and so read the enclosing module's. A
+    nested def's defaults and decorators, and a comprehension's first iterable, are taken to be inside it, though
+    Python evaluates them outside."""
+    out = set()
+    stack = [(scope, frozenset[str]())]
+    while stack:
+        node, bound = stack.pop()
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id not in bound:
+            out.add(id(node))
+        if node is scope or isinstance(node, _SCOPES):
+            bound = bound | set(_scope_bindings(ast.iter_child_nodes(node)))
+        stack.extend((child, bound) for child in ast.iter_child_nodes(node))
+    return out
 
 
 def _shape(node: ast.AST) -> str:

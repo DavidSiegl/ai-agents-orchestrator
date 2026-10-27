@@ -359,7 +359,9 @@ was done.
   changed other than in layout, or it is no longer such a constant. Not closed: a constant imported from another
   module or computed by a call at the base; one built from other constants, whose edits are not seen; one reached
   through a local (`expected = GOLDEN`) or a helper that asserts rather than named in the test's assertions; a
-  fixture's return value; and an inline value moved into a new constant, which requirement 4 leaves out.
+  fixture's return value; an inline value moved into a new constant, which requirement 4 leaves out; a constant
+  changed by a module-level mutation (`GOLDEN["k"] = "b"`) or rebound through `global` in a function; and the
+  module reached through an alias that an import inside an `if`, a `try` or the test, or a relative import, gives it.
 
 - **A base `.gitleaks.toml` that extends another file reads that file from outside the base.** `scan_unpublished`
   writes the base's `.gitleaks.toml` into the run directory and passes it with `--config`; an `[extend] path = ...`
