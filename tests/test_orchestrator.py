@@ -8158,7 +8158,7 @@ class TestWorkflowPromptsGolden(unittest.TestCase):
     """Each step's prompts in the built-in workflow and in each file of examples/workflows/, as Workflow renders them
     for a new run on the fakes, held to a golden file per workflow (tests/golden.py): round 1, and for the steps the
     verdict step loops back over, round 2 as the running session and as a fresh one hears it. The parity scenarios
-    record round 1 of each workflow as sent; round 2 of the examples, and a fresh session's notes, no scenario
+    record round 1 of each workflow as sent; round 2 of the examples and a fresh session's prompts as sent, no scenario
     reaches (docs/architecture.md, Tests)."""
 
     def rendered(self, pipeline):

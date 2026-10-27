@@ -754,8 +754,8 @@ class TestGate(RepositoryTest):
 
     def golden_run(self, *args, base="HEAD"):
         """gate's standard output for ARGS against base, with the base commit's sha written as <base> and HEAD's as
-        <head>, and test-integrity as the only check: the other checks run pytest or mutmut, whose words are the
-        host's."""
+        <head>, <head> where they are one, and test-integrity as the only check: the other checks run pytest or
+        mutmut, whose words are the host's."""
         self.checks(*(c for c in gate.gate_checks() if c.name == "test-integrity"))
         shas = {self.git("rev-parse", base).strip(): "<base>", self.git("rev-parse", "HEAD").strip(): "<head>"}
         _, out, _ = self.gate(*args, base=base)

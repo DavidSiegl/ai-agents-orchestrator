@@ -316,10 +316,11 @@ and `TestGate` the whole file the gate writes for a passing and a failing change
 and coverage sentence included. And the engine's prompts: `TestWorkflowPromptsGolden` holds each step's prompts in
 the built-in workflow and each example workflow, as `Workflow` renders them, to a file per workflow, round 1 and,
 for the steps the review loops over, round 2 as the running session and a fresh one hear it. The parity scenarios
-record round 1 of each workflow as sent, so a reworded prompt fails both; round 2 of the examples and a fresh
-session's notes only the golden files hold, and only for the Python engine. The engine's other texts, its follow-up
-prompts, notes, commit messages and pull request bodies, have no golden files: the scenarios record them as sent.
-TODO.md lists the texts neither reaches.
+record round 1 of each workflow as sent, so a reworded prompt fails both. Of round 2 of the examples and of a fresh
+session's prompts, the recordings hold only the templates, in `state.json`; the text as sent, placeholders filled in
+and a fresh session's prompt put together, only the golden files hold, and only for the Python engine. The engine's
+other texts, its follow-up prompts, notes, commit messages and pull request bodies, have no golden files: the
+scenarios record them as sent, where one reaches them. TODO.md lists the texts neither reaches.
 
 ## Tooling
 

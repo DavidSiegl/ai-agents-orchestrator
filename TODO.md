@@ -40,27 +40,28 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   replay them through `PARITY_ENGINE`. Not covered: a secret gitleaks finds, at a quality round or at publish; the
   harnesses other than claude and codex starting an agent (only their arguments differ); a session log's token counts
   (every turn records `unknown`); `--timeout` and the stall notice, which take real minutes; the GUI, which the Rust
-  engine drops; round 2 of the example workflows and a fresh session's notes, which only golden files hold
-  (`TestWorkflowPromptsGolden`, docs/architecture.md, Tests), for the Python engine; and texts the engine sends or
-  writes that neither a scenario nor a golden file reaches: `CONTINUE_PROMPT`, `QUALITY_OFF_NOTE`, the pull request body
-  of a run that ends `FINISHED` and of one whose gate was turned off after its last analysis, and a body section cut at
-  `PR_SECTION_LIMIT`. Each closes with a scenario recorded from the Python engine (found by orchestrator-test-methods/06
-  and its review 74, 2026-10-27, against the recordings). Where gitleaks is not on PATH, or openssl cannot make the fake
-  PyPI's certificate, every scenario fails naming it: a skip would pass a machine that checked nothing, and the gate's
-  test-integrity check fails an added skip (the user's ruling, 2026-10-27); Jenkins's Install stage downloads the pinned
-  gitleaks (`ci/install-gitleaks.sh`), and mutmut's runs leave `tests/parity` out (`[tool.mutmut]`), which would take
-  most of the mutation budget. What a record holds by design, each a choice a Rust ticket may revisit: output a human
-  reads (logs, errors, `show`, `list`, `prune`) as its facts (`normalize.facts`), not its words; a run's files listed by
-  modification time, as `/files` and the event stream list them, sorted by name, since seconds of the clock decide that
-  order; ssh's commands not at all, only what they did; doctor's lines without git's and Tk's, which are the host's. Two
-  more are open issues below: the `state.json` saves between two commands, and serve's events between two checkpoints.
-  The suite takes about 3 minutes more with the harness, one engine run each scenario at 2 to 25 seconds (25 for serve's
-  event stream). Decided against (2026-10-27): scenarios as data files the harness interprets, which needed a language
-  of their own for kills, takeovers and serve's stream; a cassette of the expected requests that the fakes answer in
-  order, which breaks on every count of polls; and a stub gitleaks where none is installed, which would record what no
-  engine run with gitleaks does. Decided against too (2026-10-27, orchestrator-test-methods/06): golden files of the
-  engine's follow-up prompts, notes, commit messages and pull request bodies, which the recordings already hold as sent
-  and which would test only the frozen Python engine, not the Rust one.
+  engine drops; round 2 of the example workflows and a fresh session's prompts as sent, whose templates only the
+  recorded `state.json` holds and whose text only golden files hold (`TestWorkflowPromptsGolden`, docs/architecture.md,
+  Tests), for the Python engine; and texts the engine sends or writes that neither a scenario nor a golden file reaches:
+  `CONTINUE_PROMPT`, `QUALITY_OFF_NOTE`, the pull request body of a run that ends `FINISHED` and of one whose gate was
+  turned off after its last analysis, and a body section cut at `PR_SECTION_LIMIT`. Each closes with a scenario recorded
+  from the Python engine (found by orchestrator-test-methods/06 and its review 74, 2026-10-27, against the recordings).
+  Where gitleaks is not on PATH, or openssl cannot make the fake PyPI's certificate, every scenario fails naming it: a
+  skip would pass a machine that checked nothing, and the gate's test-integrity check fails an added skip (the user's
+  ruling, 2026-10-27); Jenkins's Install stage downloads the pinned gitleaks (`ci/install-gitleaks.sh`), and mutmut's
+  runs leave `tests/parity` out (`[tool.mutmut]`), which would take most of the mutation budget. What a record holds by
+  design, each a choice a Rust ticket may revisit: output a human reads (logs, errors, `show`, `list`, `prune`) as its
+  facts (`normalize.facts`), not its words; a run's files listed by modification time, as `/files` and the event stream
+  list them, sorted by name, since seconds of the clock decide that order; ssh's commands not at all, only what they
+  did; doctor's lines without git's and Tk's, which are the host's. Two more are open issues below: the `state.json`
+  saves between two commands, and serve's events between two checkpoints. The suite takes about 3 minutes more with the
+  harness, one engine run each scenario at 2 to 25 seconds (25 for serve's event stream). Decided against (2026-10-27):
+  scenarios as data files the harness interprets, which needed a language of their own for kills, takeovers and serve's
+  stream; a cassette of the expected requests that the fakes answer in order, which breaks on every count of polls; and
+  a stub gitleaks where none is installed, which would record what no engine run with gitleaks does. Decided against too
+  (2026-10-27, orchestrator-test-methods/06): golden files of the engine's follow-up prompts, notes, commit messages and
+  pull request bodies, which the recordings hold as sent where a scenario reaches them, and which would test only the
+  frozen Python engine, not the Rust one.
 
 ## Open issues
 
