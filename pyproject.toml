@@ -3,7 +3,7 @@ pythonpath = ["."]
 
 [project]
 name = "octoflow"
-version = "0.39.1"
+version = "0.40.0"
 description = "Octoflow AI: coding agents in relay, spec to build to review, each role judged by another, in herdr"
 readme = "README.md"
 # The orchestrator is stdlib-only, so it runs with a system python3 3.13+ without uv.
