@@ -7013,7 +7013,8 @@ class TestWeakenedTests(RepositoryTest):
         self.edit("tests/test_golden.py", 'GOLDEN = "a"', 'GOLDEN = "b"')
         where, found = self.found()
         self.assertEqual(where, [("tests/test_golden.py", 10, "expected-value-changed")])
-        self.assertIn("`GOLDEN` (line 5), which `TestGolden.test_add` asserts against, changed", found[0]["message"])
+        self.assertIn("`GOLDEN` (line 5, which `TestGolden.test_add` names in its assertions, changed)",
+                      found[0]["message"])
 
     def test_an_edited_constant_named_through_the_test_module_is_an_expected_value_changed(self):
         self.commit_golden(self.GOLDEN_TESTS.replace(", GOLDEN)", ", test_golden.GOLDEN)"))
@@ -7021,7 +7022,7 @@ class TestWeakenedTests(RepositoryTest):
         self.edit("tests/test_golden.py", 'GOLDEN = "a"', 'GOLDEN = "b"')
         where, found = self.found()
         self.assertEqual(where, [("tests/test_golden.py", 10, "expected-value-changed")])
-        self.assertIn("`GOLDEN` (line 5)", found[0]["message"])
+        self.assertIn("`GOLDEN` (line 5,", found[0]["message"])
 
     def test_an_edited_annotated_constant_is_an_expected_value_changed(self):
         self.commit_golden(self.GOLDEN_TESTS.replace('GOLDEN = "a"', 'GOLDEN: str = "a"'))
@@ -7070,7 +7071,55 @@ class TestWeakenedTests(RepositoryTest):
         where, found = self.found()
         self.assertEqual(where, [("tests/test_golden.py", 10, "expected-value-changed"),
                                  ("tests/test_golden.py", 13, "expected-value-changed")])
-        self.assertIn("`TestGolden.test_again` asserts against", found[1]["message"])
+        self.assertIn("`TestGolden.test_again` names in its assertions", found[1]["message"])
+
+    def found_after_golden_edit(self, old, new, tests=GOLDEN_TESTS):
+        """found()'s answer once tests is committed as tests/test_golden.py and the change then edits the code and
+        replaces old with new in that file."""
+        self.commit_golden(tests)
+        self.edit("calc.py", "return a + b", "return b + a")
+        self.edit("tests/test_golden.py", old, new)
+        return self.found()
+
+    def test_a_constant_bound_again_is_an_expected_value_changed(self):
+        where, found = self.found_after_golden_edit('GOLDEN = "a"\n', 'GOLDEN = "a"\nGOLDEN = "b"\n')
+        self.assertEqual(where, [("tests/test_golden.py", 11, "expected-value-changed")])
+        self.assertIn("`GOLDEN` (line 5 at the base, which `TestGolden.test_add` names in its assertions, is no "
+                      "longer a constant", found[0]["message"])
+
+    def test_a_constant_now_computed_by_a_call_is_an_expected_value_changed(self):
+        where, _ = self.found_after_golden_edit('GOLDEN = "a"', 'GOLDEN = str("b")')
+        self.assertEqual(where, [("tests/test_golden.py", 10, "expected-value-changed")])
+
+    def test_a_function_s_local_of_the_constant_s_name_leaves_it_a_constant(self):
+        where, _ = self.found_after_golden_edit('GOLDEN = "a"', 'GOLDEN = "b"', self.GOLDEN_TESTS + (
+            "\n\ntry:\n    import json\nexcept ImportError:\n    def helper():\n        GOLDEN = 1\n"))
+        self.assertEqual(where, [("tests/test_golden.py", 10, "expected-value-changed")])
+
+    def test_an_except_s_name_in_the_test_is_not_the_constant(self):
+        where, _ = self.found_after_golden_edit('GOLDEN = "a"', 'GOLDEN = "b"', self.GOLDEN_TESTS.replace(
+            '        self.assertEqual(add("", "a"), GOLDEN)\n',
+            "        try:\n            add(None, 1)\n        except TypeError as GOLDEN:\n"
+            '            self.assertIn("x", str(GOLDEN))\n'))
+        self.assertEqual(where, [])
+
+    def test_a_constant_s_sign_or_type_changed_is_an_expected_value_changed(self):
+        for old, new in [("-5", "5"), ("1", "True"), ('("a",)', '"a"')]:
+            with self.subTest(old=old, new=new):
+                self.setUp()
+                where, _ = self.found_after_golden_edit(f"GOLDEN = {old}\n", f"GOLDEN = {new}\n",
+                                                        self.GOLDEN_TESTS.replace('GOLDEN = "a"', f"GOLDEN = {old}"))
+                self.assertEqual(where, [("tests/test_golden.py", 10, "expected-value-changed")])
+
+    def test_a_constant_named_through_the_module_s_package_or_an_alias_is_an_expected_value_changed(self):
+        for spelled, imported in [("tests.test_golden", "\n"), ("tg", "import tests.test_golden as tg\n"),
+                                  ("tg", "from tests import test_golden as tg\n")]:
+            with self.subTest(spelled=spelled, imported=imported):
+                self.setUp()
+                tests = self.GOLDEN_TESTS.replace(", GOLDEN)", f", {spelled}.GOLDEN)").replace(
+                    "from calc import add\n\n", "from calc import add\n" + imported)
+                where, _ = self.found_after_golden_edit('GOLDEN = "a"', 'GOLDEN = "b"', tests)
+                self.assertEqual(where, [("tests/test_golden.py", 10, "expected-value-changed")])
 
     def commit_mutmut_state(self):
         """Commit what mutmut leaves in mutants/ after a run: its copy of the code and of the tests beside it."""

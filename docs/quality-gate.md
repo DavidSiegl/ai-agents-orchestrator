@@ -75,12 +75,14 @@ change cannot weaken its tests unseen. Each of these is a finding:
 - `swallowed-error`: a bare `except:`, or an `except Exception:` that does nothing, on an added line;
 - `expected-value-changed`: an assertion whose literals changed while the rest of it stayed, in a change that also
   edits code outside the tests: the "update the expected value to match the output" move. The finding names the
-  assertion before and after. An expected value held in a constant counts too: a kept test whose assertions name a
-  constant of its own file, bare or as `module.NAME`, whose literals changed is one finding per constant and test,
-  at the test's first assertion naming it, which names the constant and its line. A constant is a module-level
-  assignment of one name, bound nowhere else at module level, to a value with no call in it; one the change adds,
-  one imported from another module, one computed by a call and a fixture's return value do not count. It is one to
-  weigh, like `removed-test`, since the spec may ask for the new value.
+  assertion before and after. An expected value held in a constant counts too: when a kept test's assertions name a
+  constant of its own file at the base and still name it, bare or as `module.NAME` (the module by its dotted name or
+  an import alias of it), and the constant's expression changed other than in layout, or it is no longer a constant,
+  that is one finding per constant and test, at the test's first assertion naming it, naming the constant and its
+  line. A constant is a module-level assignment of one name, bound nowhere else in the module's scope, to an
+  expression with no call in it. One the change adds, one imported from another module or computed by a call, one
+  reached through a local or a helper, an edit to another constant one is built from, and a fixture's return value
+  do not count. It is one to weigh, like `removed-test`, since the spec may ask for the new value.
 
 It reads Python only; another language is a `WeakenedTestsDetector` beside the Python one in
 `WEAKENED_TESTS_DETECTORS`.

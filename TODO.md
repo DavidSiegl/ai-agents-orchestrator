@@ -147,6 +147,12 @@ was done.
   worktree it runs in. Found while writing loop-guards ticket 05; not reproduced. Closes with `_run_proof` passing
   the working tree as pytest's rootdir and conftest root, or the proofs copied into a scratch directory of the
   worktree for their run.
+- **`expected-value-changed` misses an inline literal's sign, type or structure.** `_changed_literals` pairs
+  assertions by `_shape` and compares `_literals`, which drops types and operators: `assert f() == -5` becoming
+  `== 5` changes the shape (no pair, no finding), and `== 1` becoming `== True` gives equal literal lists
+  (`[1] == [True]`). Raised by the cross-review of `test-integrity-constants` (F4, 2026-10-27): "`_literals`
+  equality misses sign, type and structure changes"; the constant path compares `_tree_fingerprint`s instead.
+  Closes with the inline path comparing typed literals and pairing a unary minus with its operand.
 - **A run that never reaches `done` keeps its local refs.** A locking step's commit stays under
   `refs/orchestrator/<key>/locked/` (`RunState.lock_ref`) until the run ends `done` (`Workflow._clean_up_locks`);
   `close` and `prune` do not delete them, so a failed run's locked snapshots are never collected by `git gc`. Closes
@@ -345,12 +351,15 @@ was done.
   tests' `GOLDEN_PR_BODY` or `GOLDEN_SUMMARY`, changes what is expected without a finding, while the same edit inside
   the assertion is one. Found while adding the provenance trailers to the pull request body (loop-guards ticket 03).
   Closes with the assertions' names resolved to module-level constants the change edits.
-  Fixed (2026-10-27): `python_weakened_tests` reads each test file's constants at the base and now
-  (`_python_constants`: a module-level `Assign` or `AnnAssign` of one name bound nowhere else at module level, its
-  value holding no call) and, when the code changed, reports `expected-value-changed` once per kept test and
-  constant whose assertions name it on both sides, bare or as `module.NAME`, and whose literals changed
-  (`_changed_constants`). Not closed: a constant imported from another module, one computed by a call, one built from
-  other constants (only its own literals count), and a fixture's return value.
+  Fixed (2026-10-27): when the code changed, `python_weakened_tests` reads each test file's constants at the base
+  and now (`_PythonConstants`: a name one module-level `Assign` or `AnnAssign` binds to an expression with no call,
+  bound nowhere else in the module's scope, as `_scope_bindings` counts with `_BINDING_NAME`), and
+  `_changed_constants` reports `expected-value-changed` once per kept test and constant of the base whose assertions
+  name it on both sides, bare or through the module's dotted name or an import alias of it, when its expression
+  changed other than in layout, or it is no longer such a constant. Not closed: a constant imported from another
+  module or computed by a call at the base; one built from other constants, whose edits are not seen; one reached
+  through a local (`expected = GOLDEN`) or a helper that asserts rather than named in the test's assertions; a
+  fixture's return value; and an inline value moved into a new constant, which requirement 4 leaves out.
 
 - **A base `.gitleaks.toml` that extends another file reads that file from outside the base.** `scan_unpublished`
   writes the base's `.gitleaks.toml` into the run directory and passes it with `--config`; an `[extend] path = ...`
