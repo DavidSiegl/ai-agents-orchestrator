@@ -1420,6 +1420,17 @@ class TestWeakenedTests(RepositoryTest):
                                               "means the output to become.")
         self.assertIn("deleted", found[0]["message"])
 
+    def test_a_golden_file_rewritten_with_a_python_script_it_pins_is_an_expected_value_changed(self):
+        self.commit({"tests/golden/tool.txt": "3\n", "bin/tool": "#!/usr/bin/env python3\nprint(3)\n",
+                     "bin/old": "#!/usr/bin/env python3\nprint(1)\n"}, "a script and its golden file")
+        for edit in (lambda: self.edit("bin/tool", "print(3)", "print(4)"),
+                     lambda: self.git("rm", "--quiet", "bin/old")):
+            with self.subTest(edit=edit):
+                self.git("reset", "--quiet", "--hard")
+                edit()
+                self.edit("tests/golden/tool.txt", "3\n", "4\n")
+                self.assertEqual(self.found()[0], [("tests/golden/tool.txt", None, "expected-value-changed")])
+
     def test_a_golden_file_changed_without_the_code_is_no_finding(self):
         self.commit({"tests/golden/sum.txt": "3\n"}, "golden file")
         self.edit("tests/golden/sum.txt", "3\n", "4\n")

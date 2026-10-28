@@ -105,6 +105,13 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   between two checkpoints differs from run to run. Closes with a serve whose poll the harness can step, which would
   be a hook in the engine, or the user's ruling that the folded stream is the contract, as the desktop app reads it.
 
+- **`test-integrity` knows golden files only by this repository's layout.** `_golden_file` (`gate.py`) takes a
+  golden file to be one under a `golden` directory inside a `tests` directory, as `tests/golden.py` keeps them, so
+  another project's expected output under another name, such as `__snapshots__/`, rewritten alongside the code it
+  pins gets no `expected-value-changed` finding. Left by the fix of "`test-integrity` did not see a golden file's
+  change" (Fixed, 2026-10-28). Closes with the golden directory a setting, beside the test-file patterns of
+  `.scratch/gate-split/issues/04-configurable-test-files.md`, which does not name it yet.
+
 - **A quality build of a snapshot from before `gate.py` fails mypy.** A quality build judges by main's rules
   (`--config`), and since the split main's `[tool.mypy] files` names `gate.py`, which mypy reads relative to the
   judged tree; a run whose base predates the split has no `gate.py`, so mypy stops with `gate.py: error: Cannot read
@@ -456,10 +463,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   pins got no `expected-value-changed` finding. Found while adding the golden files (orchestrator-test-methods/06,
   2026-10-27). Fixed (2026-10-28): `weakened_tests` adds `_changed_golden_files`, one weighed
   `expected-value-changed` finding on the whole file for each golden file the change edits or deletes when it also
-  edits code outside the tests (`_edits_code`); an added golden file, or one renamed unedited, is none. Not closed: a
-  golden file is one under a `golden` directory inside a `tests` directory (`_golden_file`), this repository's layout;
-  another project's expected output under another name, such as `__snapshots__/`, is not recognised until that
-  directory is a setting (gate-split/04, the test-file patterns).
+  edits code outside the tests (`_edits_code`; a `#!` python script counts as Python there, on either side, as the
+  Python detector's `is_source` says); an added golden file, or one renamed unedited, is none. What stays open, other
+  projects' golden files, is "`test-integrity` knows golden files only by this repository's layout" in Open issues.
 
 - **A `# noqa` inside a string, or in a file no linter reads it in, was listed under "Suppressions added".**
   `added_suppressions` matched one pattern, `_SUPPRESSION`, against every added line of every file, so `"add # noqa"`

@@ -1121,9 +1121,10 @@ class ChangedTestFile:
 class WeakenedTestsDetector:
     """How the test-integrity check reads one language's tests."""
     language: str
-    # Whether a repository path is one of the language's test files, and whether it is the language's at all.
+    # Whether a repository path is one of the language's test files; and whether a path of the change, on either of
+    # its sides, holds the language's source at all.
     is_test: Callable[[str], bool]
-    is_source: Callable[[str], bool]
+    is_source: Callable[[GateChange, str], bool]
     # The findings on every one of the language's test files the change touched, as GateCheck.find returns them,
     # given whether the change also edits the language's code outside its tests.
     find: Callable[[list[ChangedTestFile], bool], list[dict]]
@@ -1154,7 +1155,7 @@ def weakened_tests(change: GateChange) -> list[dict]:
 
 def _edits_code(change: GateChange, detector: WeakenedTestsDetector) -> bool:
     """Whether the change edits, adds, deletes or renames a file of detector's language outside its tests."""
-    return any(detector.is_source(p) and not detector.is_test(p) for pair in change.files for p in pair if p)
+    return any(not detector.is_test(p) and detector.is_source(change, p) for pair in change.files for p in pair if p)
 
 
 def _changed_golden_files(change: GateChange) -> list[dict]:
@@ -1162,13 +1163,12 @@ def _changed_golden_files(change: GateChange) -> list[dict]:
     or deletes, when it also edits the code of a WEAKENED_TESTS_DETECTORS language outside its tests: such a file is an
     expected value outside any assertion, which `UPDATE_GOLDEN=1` rewrites to whatever the code now writes. A golden
     file the change adds, or renames without editing, has no old value to lose."""
-    if not any(_edits_code(change, detector) for detector in WEAKENED_TESTS_DETECTORS):
+    golden = [(old, new) for old, new in change.files if old is not None and _golden_file(old)]
+    if not golden or not any(_edits_code(change, detector) for detector in WEAKENED_TESTS_DETECTORS):
         return []
     removals = _removal_points(change.diff)
     out = []
-    for old, new in change.files:
-        if old is None or not _golden_file(old):
-            continue
+    for old, new in golden:
         if new is None:
             out.append(_finding(old, None, "expected-value-changed",
                                 "a golden file, the expected output of a test, deleted in a change that also edits "
@@ -1710,7 +1710,10 @@ def _clip(text: str, n: int = 160) -> str:
 
 
 WEAKENED_TESTS_DETECTORS = (
-    WeakenedTestsDetector("python", is_test=_python_test_file, is_source=lambda path: path.endswith(".py"),
+    # A #! python script counts as Python, as for every check (_parsed_changed_files), on whichever side it is.
+    WeakenedTestsDetector("python", is_test=_python_test_file,
+                          is_source=lambda change, path: (_is_python_source(change, path)
+                                                          or _was_python_source(change, path)),
                           find=python_weakened_tests),
 )
 
