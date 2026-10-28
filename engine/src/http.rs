@@ -111,7 +111,8 @@ impl HttpClient {
         HttpClient::with_env(&|name| std::env::var(name).ok())
     }
 
-    /// The client of the environment env gives each variable of, by name.
+    /// The client of the environment env gives each variable of, by name. Where env sets neither `SSL_CERT_FILE` nor
+    /// `SSL_CERT_DIR`, openssl-probe still takes the process's own where they name a path that exists (root_certs).
     pub fn with_env(env: &dyn Fn(&str) -> Option<String>) -> HttpClient {
         HttpClient { proxies: Proxies::from_env(env), roots: root_certs(env) }
     }
