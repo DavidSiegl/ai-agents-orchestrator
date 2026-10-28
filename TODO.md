@@ -522,10 +522,10 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   (`_turn`: it "runs once the agent is ready"), so a resume while the interview is under way repeats both, once per
   resume. Raised by cross-review 81 (F1, 2026-10-28) against ticket orchestrator-test-methods/05, which allows only
   documented idempotent repeats: "Neither is idempotent: the cited comment … says each orchestrator does it again,
-  which is the repeat the ticket asks the test to fail on." Arguably what a human whose orchestrator restarted wants;
-  `tests/test_crash_resume.py`'s `expected` pins it as up to one repeat per resume. Closes with the user's ruling that
-  it is wanted, or an engine that announces a turn only where none did (for example, only when `prompted` is not the
-  turn's file).
+  which is the repeat the ticket asks the test to fail on." The user ruled it a bug (2026-10-28), not wanted;
+  `tests/test_crash_resume.py`'s `expected` pins it as up to one repeat per resume while orchestrator.py is frozen.
+  Closes with an engine that announces a turn only where none did (for example, only when `prompted` is not the turn's
+  file), the Rust engine's, and the pin removed.
 
 ## Fixed
 
