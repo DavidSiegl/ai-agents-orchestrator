@@ -112,7 +112,7 @@ def tool_env() -> dict[str, str]:
 
     So a test the change brings, which the flaky-tests check reruns or mutmut runs, never inherits the tokens when the
     gate runs where they are set. A golden test (tests/golden.py) under UPDATE_GOLDEN=1 rewrites its file instead of
-    comparing with it, so a rerun would change the working tree and pass a test that should fail. And the gate's
+    comparing with it, so in the copy a rerun or mutmut runs in it could not fail. And the gate's
     pathspecs are written in git's default syntax, which each switch breaks without an error: under
     GIT_LITERAL_PATHSPECS the linters' globs and GateChange.from_tree's exclude match nothing, under
     GIT_NOGLOB_PATHSPECS the globs match nothing, under GIT_GLOB_PATHSPECS "*.py" matches only the top level's files,
