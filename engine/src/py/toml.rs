@@ -29,7 +29,7 @@ pub fn syntax_error(text: &str, e: &::toml::de::Error) -> String {
 }
 
 /// The name of the Python type tomllib reads value as.
-pub fn type_name(value: &Value) -> &'static str {
+pub fn python_type(value: &Value) -> &'static str {
     match value {
         Value::String(_) => "str",
         Value::Integer(_) => "int",
@@ -63,26 +63,68 @@ pub fn truthy(value: &Value) -> bool {
 pub fn hashable(value: &Value) -> Result<(), String> {
     match value {
         Value::Array(_) | Value::Table(_) => {
-            let name = type_name(value);
+            let name = python_type(value);
             Err(format!("cannot use '{name}' as a dict key (unhashable type: '{name}')"))
         }
         _ => Ok(()),
     }
 }
 
-/// Whether what tomllib reads a and b as are the same dict key, as Python's == compares them: a number equals another
-/// of the same value, a boolean being 0 or 1, and anything else only one of its own kind and value.
+/// Whether what tomllib reads a and b as are the same dict key, as Python's == compares them: numbers by their exact
+/// value, a boolean being 0 or 1; datetimes with an offset by the instant they name, and other datetimes, dates and
+/// times field by field, never one of another kind; anything else only one of its own kind and value.
 pub fn same_key(a: &Value, b: &Value) -> bool {
-    let number = |v: &Value| match v {
-        Value::Integer(n) => Some(*n as f64),
-        Value::Float(x) => Some(*x),
-        Value::Boolean(b) => Some(f64::from(u8::from(*b))),
-        _ => None,
-    };
-    match (number(a), number(b)) {
-        (Some(x), Some(y)) => x == y,
-        _ => a == b,
+    match (a, b) {
+        (Value::Float(x), Value::Float(y)) => x == y,
+        (Value::Float(x), other) | (other, Value::Float(x)) => integer(other).is_some_and(|n| float_is(*x, n)),
+        (Value::Datetime(x), Value::Datetime(y)) => match (instant(x), instant(y)) {
+            (Some(x), Some(y)) => x == y,
+            _ => fields(x) == fields(y),
+        },
+        _ => match (integer(a), integer(b)) {
+            (Some(m), Some(n)) => m == n,
+            _ => a == b,
+        },
     }
+}
+
+/// The int Python reads value as: an integer's, or a boolean's 0 or 1; None for anything else.
+fn integer(value: &Value) -> Option<i64> {
+    match value {
+        Value::Integer(n) => Some(*n),
+        Value::Boolean(b) => Some(i64::from(*b)),
+        _ => None,
+    }
+}
+
+/// Whether the float x is exactly the integer n, as Python compares a float with an int.
+fn float_is(x: f64, n: i64) -> bool {
+    x.fract() == 0.0 && x >= -(2f64.powi(63)) && x < 2f64.powi(63) && x as i64 == n
+}
+
+/// A datetime's fields as Python compares them, a missing second or fraction being 0.
+fn fields(d: &Datetime) -> impl PartialEq {
+    let time = d.time.map(|t| (t.hour, t.minute, t.second.unwrap_or(0), t.nanosecond.unwrap_or(0)));
+    (d.date, time, d.offset)
+}
+
+/// The instant an offset datetime names, as (seconds since 0001-01-01 in UTC, nanoseconds); None for one without an
+/// offset, a date or a time.
+fn instant(d: &Datetime) -> Option<(i64, u32)> {
+    let (date, time, offset) = (d.date?, d.time?, d.offset?);
+    let minutes = match offset {
+        Offset::Z => 0,
+        Offset::Custom { minutes } => i64::from(minutes),
+    };
+    let (y, m) = (i64::from(date.year), i64::from(date.month));
+    // Days from a fixed epoch by Howard Hinnant's days_from_civil, enough to order and compare two instants.
+    let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+    let days =
+        365 * y + y.div_euclid(4) - y.div_euclid(100) + y.div_euclid(400) + (153 * m + 2) / 5 + i64::from(date.day);
+    let seconds =
+        days * 86_400 + i64::from(time.hour) * 3600 + i64::from(time.minute) * 60 + i64::from(time.second.unwrap_or(0))
+            - minutes * 60;
+    Some((seconds, time.nanosecond.unwrap_or(0)))
 }
 
 /// value as Python's str() writes it: a string as it is, a datetime, date or time in ISO 8601 with a blank between
@@ -148,7 +190,7 @@ fn to_json(value: &Value) -> Result<Json, String> {
         Value::Integer(n) => Json::Int((*n).into()),
         Value::Float(x) => Json::Float(*x),
         Value::Boolean(b) => Json::Bool(*b),
-        Value::Datetime(_) => return Err(format!("Object of type {} is not JSON serializable", type_name(value))),
+        Value::Datetime(_) => return Err(format!("Object of type {} is not JSON serializable", python_type(value))),
         Value::Array(items) => Json::Array(items.iter().map(to_json).collect::<Result<_, _>>()?),
         Value::Table(table) => {
             Json::Object(table.iter().map(|(k, v)| Ok((k.clone(), to_json(v)?))).collect::<Result<_, String>>()?)

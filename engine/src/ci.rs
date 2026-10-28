@@ -120,9 +120,18 @@ impl Jenkins {
     /// lacks taken from config's ci.env, as ci_credentials reads them. Errors: ci_credentials's, for a ci.env it
     /// cannot read or refuses.
     pub fn from_env(job: &str, config: &ConfigDir) -> Result<Jenkins, OrchestratorError> {
+        Jenkins::with_env(job, config, &|name| std::env::var(name).ok())
+    }
+
+    /// The job named job, as from_env makes it, in the environment env gives each variable of, by name.
+    pub fn with_env(
+        job: &str,
+        config: &ConfigDir,
+        env: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Jenkins, OrchestratorError> {
         let path = config.ci_env_path();
-        let credentials = ci_credentials(&|name| std::env::var(name).ok(), &path)?;
-        Ok(Jenkins::new(job, &credentials, &path, Arc::new(HttpClient::from_env())))
+        let credentials = ci_credentials(env, &path)?;
+        Ok(Jenkins::new(job, &credentials, &path, Arc::new(HttpClient::with_env(env))))
     }
 
     /// The job's full name, as given.

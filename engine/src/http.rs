@@ -117,7 +117,7 @@ impl HttpClient {
 
     fn agent(&self, request: &Request) -> Result<Agent, HttpError> {
         let proxy = match self.proxies.for_url(&request.url) {
-            // Neither the proxy's URL nor ureq's words for it, which may quote it: it can hold a password.
+            // Not the proxy's URL, which can hold a password.
             Some(url) => Some(Proxy::new(url).map_err(|_| {
                 HttpError::NoAnswer(
                     "the proxy that http_proxy or https_proxy names is not a URL ureq can use".to_string(),
@@ -268,11 +268,12 @@ impl Proxies {
 }
 
 /// The certificates TLS trusts, as OpenSSL's default paths give them to Python's default context: those of the file
-/// `SSL_CERT_FILE` names, else of the first of SYSTEM_BUNDLES that exists, and those of every file in the directories
-/// `SSL_CERT_DIR` names, separated by colons, else in SYSTEM_CERT_DIR. When neither variable is set and the system
-/// has none of them, Mozilla's roots, as certifi gives a Python without system certificates. A file that cannot be
-/// read, and an item of it that is not a certificate, adds none: OpenSSL ignores them too, and a variable naming
-/// nothing usable then trusts none, as it does in Python.
+/// `SSL_CERT_FILE` names, else of the first of SYSTEM_BUNDLES that exists, and those of the files named by their
+/// subject's hash (`<8 hex digits>.<n>`, as c_rehash links them) in the directories `SSL_CERT_DIR` names, separated
+/// by colons, else in SYSTEM_CERT_DIR. A file that cannot be read, and an item of it that is not a certificate, adds
+/// none: OpenSSL ignores them too, and a variable naming nothing usable then trusts none, as it does in Python. When
+/// neither variable is set and the system has no certificate there, Mozilla's roots, where the Python engine, which
+/// does not use certifi, trusts none.
 fn root_certs(env: &dyn Fn(&str) -> Option<String>) -> RootCerts {
     const SYSTEM_BUNDLES: [&str; 4] = [
         "/etc/ssl/certs/ca-certificates.crt",
@@ -291,7 +292,7 @@ fn root_certs(env: &dyn Fn(&str) -> Option<String>) -> RootCerts {
     for dir in dirs.as_deref().unwrap_or(SYSTEM_CERT_DIR).split(':') {
         let Ok(entries) = std::fs::read_dir(dir) else { continue };
         for entry in entries.flatten() {
-            if entry.path().is_file() {
+            if is_hash_name(&entry.file_name().to_string_lossy()) && entry.path().is_file() {
                 pem.extend(std::fs::read(entry.path()).unwrap_or_default());
                 pem.push(b'\n');
             }
@@ -307,6 +308,16 @@ fn root_certs(env: &dyn Fn(&str) -> Option<String>) -> RootCerts {
         return RootCerts::WebPki;
     }
     RootCerts::Specific(Arc::new(certs))
+}
+
+/// Whether name is one OpenSSL looks a certificate up by in a directory: the subject's hash, 8 lowercase hex digits,
+/// a dot and a number.
+fn is_hash_name(name: &str) -> bool {
+    let Some((hash, n)) = name.split_once('.') else { return false };
+    hash.len() == 8
+        && hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && !n.is_empty()
+        && n.bytes().all(|b| b.is_ascii_digit())
 }
 
 #[cfg(test)]

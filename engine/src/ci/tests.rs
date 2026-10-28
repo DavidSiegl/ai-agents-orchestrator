@@ -259,7 +259,7 @@ fn credentials_travel_only_in_the_authorization_header() {
         .lines()
         .filter_map(|l| l.strip_prefix("    pub fn "))
         .map(|l| &l[..l.find(['(', '<']).unwrap()])
-        .filter(|n| !["new", "from_env"].contains(n))
+        .filter(|n| !["new", "from_env", "with_env"].contains(n))
         .collect();
     assert_eq!(
         public,
@@ -539,14 +539,15 @@ fn ci_reads_the_file_but_no_child_process_sees_it() {
     let token = "file-token-7e1c";
     let dir = crate::test_support::TempDir::new();
     let config = ConfigDir::at(&dir.path());
-    std::fs::write(
-        config.ci_env_path(),
-        format!("JENKINS_URL={JENKINS}/\nJENKINS_USER=agents\nJENKINS_TOKEN={token}\n"),
-    )
-    .unwrap();
+    let file = format!("JENKINS_URL={JENKINS}/\nJENKINS_USER=agents\nJENKINS_TOKEN={token}\n");
+    std::fs::write(config.ci_env_path(), file).unwrap();
     std::fs::set_permissions(config.ci_env_path(), std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
-    let jenkins = Jenkins::from_env(JOB, &config).unwrap();
+    // An environment without CI_ENV, so that every credential comes from the file.
+    let environment = |name: &str| (!CI_ENV.contains(&name)).then(|| std::env::var(name).ok()).flatten();
+    let jenkins = Jenkins::with_env(JOB, &config, &environment).unwrap();
     jenkins.check_credentials().unwrap();
+    assert_eq!(jenkins.job_url(), format!("{JENKINS}{JOB_PATH}"));
+    assert_eq!(jenkins.mask(token), "****");
     // The file's values stay in Jenkins: none reaches the process's environment, nor a child's.
     assert!(CI_ENV.iter().all(|k| std::env::var(k).ok().as_deref() != Some(token)));
     let env = ProcessHost::local().check(&["env"], None, 60).unwrap();

@@ -11,7 +11,7 @@ use super::{CheckFindings, Finding, RunChange};
 use crate::error::OrchestratorError;
 use crate::py::json::Map;
 use crate::py::text::{is_space, utf8_error};
-use crate::py::toml::{hashable, json_dumps, loads, repr, same_key, str as py_str, truthy, type_name};
+use crate::py::toml::{hashable, json_dumps, loads, python_type, repr, same_key, str as py_str, truthy};
 use crate::pypi::{PyPI, PyPIProject};
 
 /// A new dependency whose first release is fewer days old than this is flagged: few have used it yet, and a name
@@ -170,7 +170,7 @@ fn pyproject_dependencies(pyproject: &Table) -> Result<Sources, String> {
     let own = match project.get("name").filter(|name| truthy(name)) {
         None => String::new(),
         Some(Value::String(name)) => package_key(name),
-        Some(other) => return Err(format!("expected string or bytes-like object, got '{}'", type_name(other))),
+        Some(other) => return Err(format!("expected string or bytes-like object, got '{}'", python_type(other))),
     };
     let mut out = Map::new();
     for (place, requirements) in requirement_lists(project, pyproject)? {

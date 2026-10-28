@@ -280,7 +280,9 @@ fn tls_trusts_what_openssl_s_default_paths_give() {
     std::fs::write(&file, format!("{CERT}garbage\n")).unwrap();
     std::fs::create_dir(&certs_dir).unwrap();
     std::fs::create_dir(&empty).unwrap();
-    std::fs::write(format!("{certs_dir}/a.0"), CERT).unwrap();
+    std::fs::write(format!("{certs_dir}/5ed36f99.0"), CERT).unwrap();
+    // Not a name OpenSSL looks a certificate up by.
+    std::fs::write(format!("{certs_dir}/retired-ca.pem"), CERT).unwrap();
     std::fs::create_dir(format!("{certs_dir}/sub")).unwrap();
     let count = |vars: &[(&str, &str)]| match root_certs(&env(vars)) {
         RootCerts::Specific(certs) => Some(certs.len()),
@@ -291,16 +293,12 @@ fn tls_trusts_what_openssl_s_default_paths_give() {
     // A file that is not there adds nothing, and the directory still counts, as in OpenSSL.
     assert_eq!(count(&[("SSL_CERT_FILE", &dir.join("missing")), ("SSL_CERT_DIR", &certs_dir)]), Some(1));
     assert_eq!(count(&[("SSL_CERT_FILE", &dir.join("missing")), ("SSL_CERT_DIR", &empty)]), Some(0));
-    // Without either variable, this machine's own: a system bundle or certificate directory, else Mozilla's roots.
-    let system = [
-        "/etc/ssl/certs/ca-certificates.crt",
-        "/etc/pki/tls/certs/ca-bundle.crt",
-        "/etc/ssl/ca-bundle.pem",
-        "/etc/ssl/cert.pem",
-        "/etc/ssl/certs",
-    ];
-    let has_system = system.iter().any(|path| std::path::Path::new(path).exists());
-    assert_eq!(count(&[]).is_some_and(|n| n > 0), has_system);
+    // Without either variable, this machine's own, or Mozilla's roots when it has none: never an empty store.
+    assert_ne!(count(&[]), Some(0));
+    assert!(is_hash_name("5ed36f99.0") && is_hash_name("0a1b2c3d.12"));
+    for name in ["5ed36f99", "5ED36F99.0", "5ed36f9.0", "5ed36f99.", "5ed36f99.x", "ca-certificates.crt"] {
+        assert!(!is_hash_name(name), "{name}");
+    }
 }
 
 #[test]

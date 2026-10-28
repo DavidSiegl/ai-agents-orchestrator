@@ -119,8 +119,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   of the Python engine pins it: ureq reaches an http URL through a proxy with CONNECT, as it does an https one, where
   urllib sends the request itself to the proxy, so a proxy that allows CONNECT only to port 443, as squid does by
   default, refuses a plain-http Jenkins that `http_proxy` sends through it; TLS trusts the certificates OpenSSL's
-  default paths would give (`SSL_CERT_FILE` or a system bundle, and `SSL_CERT_DIR` or `/etc/ssl/certs`, in
-  `root_certs`), else Mozilla's roots, where a Python on macOS may use the keychain; and the timeout bounds the connect
+  default paths would give (`SSL_CERT_FILE` or a system bundle, and the hash-named files of `SSL_CERT_DIR` or
+  `/etc/ssl/certs`, in `root_certs`), but Mozilla's roots on a machine with none of them, where the Python engine,
+  without certifi, trusts none, and a Python on macOS may use the keychain; and the timeout bounds the connect
   and each read and write, as urllib's does, but not name resolution. In what it reads (`engine/src/ci.rs`,
   `engine/src/pypi.rs`, `engine/src/py/toml.rs`): an answer of Jenkins's of another shape than a queue item, a build's
   result, a list of builds or a test report is a `CIError` that may pass, where the Python engine fails with an
