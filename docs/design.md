@@ -129,6 +129,85 @@ A turn's session is the agent's when its prompt went out; a turn whose agent end
 restart, has `"unknown"` tokens, since part of its work is in a log that is not its session's. The answer that an
 agent gives after writing its handoff file, if any, counts for no turn.
 
+## Evals
+
+The unit tests and the parity scenarios check what the engine does, never how well the agents do with it: a prompt
+or workflow change can make runs worse without failing a test. `evals/` is a small set of tasks that real agents do
+end to end, each judged by an acceptance test they never see, so that such a change comes with numbers.
+
+**When to run it.** By hand, from a herdr pane, before a release that changes a prompt, a workflow (the built-in
+one or `examples/workflows/`) or how a harness is started or its session read; and on the branch of such a change,
+once on its base and once on the branch, so that its pull request carries both. Never on a schedule or in CI: every
+trial is a real run, which spends tokens and needs a herdr pane.
+
+```sh
+# Every task once, with the default workflow and harness
+uv run python evals/run.py
+# Three runs of two tasks, with run's flags after --
+uv run python evals/run.py --tasks feature,bugfix --repeat 3 -- --workflow quick --model sonnet
+# The Rust engine, or any other program that takes run's and close's arguments
+EVAL_ENGINE=target/release/octoflow uv run python evals/run.py --tasks docs
+```
+
+For each task and repeat, the runner clones the task's bundle into a directory of its own, runs the engine there
+as `run --no-pr --spec`, with a copy of the task's text as the spec, then runs the hidden test on what the run left
+and closes the run's workspace with `close`. The arguments after `--` go to `run` unchanged; the runner refuses
+the flags it sets itself and those that would put the change elsewhere. A workflow whose first step writes the
+spec, such as `default` or `product-team`, starts at the step after it, so no interview waits for an answer.
+`evals/run.py`'s docstring gives its flags, the shape of a task and its exit status.
+
+The tasks, each a toy Python package with its own unittest tests, of a different shape:
+
+| Task | Asks for | Its hidden test checks |
+|---|---|---|
+| `feature` | a function and a command-line flag | their behaviour, usage errors included, and that a test names the function |
+| `bugfix` | a fix, given a reproducer | durations of several units, what is still rejected, and a regression test |
+| `refactor` | one home for duplicated rounding and formatting | output unchanged against the starting code, and the rounding written once |
+| `docs` | a README usage section and docstrings | each command shown, and the code unchanged but for docstrings |
+| `no-dependency` | an aligned table, without a dependency | the table, and no dependency declared or imported |
+
+Every hidden test also runs the package's own tests. The hidden tests are out of the agents' sight, not out of their
+reach: the clone, its origin and the spec are copies in a temporary directory, but an agent free to search the
+machine could find this checkout.
+
+**What the numbers mean.** The runner prints a row per task and one for all of them, and appends a JSON line per
+trial to `evals/results/<date>-<config>.jsonl`, where config is `--config` or the arguments after `--` (`default`
+for none). Commit that file with the change it measures.
+
+- `passed`: how many trials the hidden test accepted. This is the number that matters; the others explain it.
+- `rounds`: review rounds, from `metrics.json` ([Run metrics](#run-metrics)); 1 is approved at the first review.
+- `quality rounds`: quality builds over the run, 0 without `--quality-gate`. The toy repositories have no quality
+  job, and their origin is a bundle no snapshot can be pushed to, so the column stays 0 for the tasks as they are.
+- `wall time`: the engine's run, as the runner measured it.
+- `tokens`: the four counts of [Token usage](#token-usage) summed, over every agent turn of a run, and only for a run
+  whose every agent turn's tokens are known; cache reads make up most of a Claude Code run's.
+
+A mean is over the trials that know the value, `?` when none does, and `(k/n)` says it is over k of the row's n. A
+run that failed or was interrupted has no `metrics.json`, so it adds to `passed` and `wall time` only. Five tasks
+and a few repeats are a small sample: one trial more or less passed is noise, a shift across tasks and repeats is
+not. Compare results of the same tasks only; a line's `commit`, this checkout's HEAD, says which.
+
+A result line holds `version` (1), `date`, `config`, `run_args`, `engine` (`EVAL_ENGINE`, or `orchestrator.py`),
+`commit`, `task`, `repeat`, `passed`, `engine_exit` (the exit status of the engine's run), `seconds`,
+`hidden_test_output` (the last lines of its output, ending with the checks that did not pass), `run_id`, and from
+`metrics.json`, `null` without one: `outcome`, `rounds`, `quality_rounds`, and `tokens`, the four counts summed,
+`null` also when a turn's are unknown. Evals of one configuration on one day share a file, told apart by `commit`,
+which ends in `-dirty` when a tracked file differed from it. `jq` sums a file up by commit and task:
+
+```sh
+jq -c -s 'group_by([.commit, .task]) | map({commit: .[0].commit[:12], task: .[0].task,
+                                             passed: (map(select(.passed)) | length), runs: length})' \
+    evals/results/2026-10-28-default.jsonl
+```
+
+**Changing a task.** A toy repository is source in `evals/make_bundles.py`; `uv run python evals/make_bundles.py`
+rebuilds the bundles, and its `--check` fails when one is not of the source. `tests/test_evals.py` runs that check,
+and runs each hidden test on its task's starting point, which it must reject, and on a solution of it, which it must
+accept. A task changed since a result line was written makes that line incomparable with newer ones.
+
+The runner is a script of its own that runs the engine as a program, not a command of `orchestrator.py`: the Python
+engine is frozen until the Rust engine replaces it (TODO.md), and a program-level runner judges either engine.
+
 ## Provenance trailers
 
 The commit a run publishes ends with git trailers that say what made it, after the line that names the run
