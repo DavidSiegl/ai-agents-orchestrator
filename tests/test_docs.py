@@ -44,6 +44,7 @@ OTHER_PROGRAMS_NAMES = {
     "ORCHESTRATOR_PY": "the desktop app's environment variable, ui/src-tauri/src/lib.rs",
     "PARITY_ENGINE": "the parity harness's environment variable, tests/parity/world.py",
     "PARITY_RECORD": "the parity harness's environment variable, tests/parity/test_parity.py",
+    "EVAL_ENGINE": "the eval runner's environment variable, evals/run.py",
     "UPDATE_GOLDEN": "the golden-file helper's environment variable, tests/golden.py",
     "BUNDLED_NAME": "the desktop app's constant, ui/src-tauri/src/lib.rs",
     "PR_STATUS_CREATOR": "the Jenkinsfile's",

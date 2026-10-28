@@ -28,9 +28,9 @@ alone.
 nothing from it and reads only the file it writes ([the quality file as a
 contract](#the-quality-file-as-a-contract)).
 
-It runs six linters over the files git tracks, each over the files it reads, and keeps only the findings on
-lines the change adds, and the lineless ones on files it touches. Findings on older lines are counted, never
-listed and never held against the change, so the gate judges the change rather than the codebase.
+It runs six linters over the files git tracks outside `mutants/` (below), each over the files it reads, and keeps
+only the findings on lines the change adds, and the lineless ones on files it touches. Findings on older lines are
+counted, never listed and never held against the change, so the gate judges the change rather than the codebase.
 
 | Linter | Files | Rules |
 |---|---|---|
@@ -76,9 +76,12 @@ Builder answers and the Reviewer judges without the gate failing. A failing chec
 not only on added lines, and names the check that raised it. A check that cannot run says so as one of its
 findings, so a failing check that cannot run fails the gate.
 
-Every check sees the change without what the tree tracks under `mutants/`, mutmut's state (`GateChange.from_tree`):
-none selects a test, a function or a changed line there, or counts an edit there as a change to the code, and a file
-moved out of it counts as added. The linters and the build configuration listing see those files as any other.
+The gate reads the change without what the tree tracks under `mutants/`, mutmut's state (`GateChange.from_tree`),
+and every part of it reads that one change: no linter finding, suppression, line end or coverage counts there, no
+check selects a test, a function or a changed line there, or counts an edit there as a change to the code, and a file
+moved out of it counts as added. A change that adds or edits files there, or moves files into it, fails the gate with
+one condition naming them, since a committed `mutants/` is always mutmut's scratch state committed by accident.
+Deleting such files is no fault.
 
 | Check | Fails? | Finds |
 |---|---|---|
@@ -103,7 +106,8 @@ change cannot weaken its tests unseen. Each of these is a finding:
   the base. It is one to weigh, like `removed-test`: a test the spec reshapes may need fewer;
 - `swallowed-error`: a bare `except:`, or an `except Exception:` that does nothing, on an added line;
 - `expected-value-changed`: an assertion whose literals changed while the rest of it stayed, in a change that also
-  edits code outside the tests: the "update the expected value to match the output" move. The finding names the
+  edits code outside the tests, which is Python source as **Passes at base** below counts it, on either side of the
+  change: the "update the expected value to match the output" move. The finding names the
   assertion before and after. An expected value held in a constant counts too: when a kept test's assertions name a
   constant of its own file at the base and still name it, bare or as `module.NAME` (the module by its dotted name or a
   module-level import alias of it), and the constant's expression changed other than in layout, or it is no longer a
@@ -115,19 +119,23 @@ change cannot weaken its tests unseen. Each of these is a finding:
   assignment of one name, bound nowhere else in the module's scope, to an expression with no call in it. One the
   change adds, one imported from another module or computed by a call, one reached through a local or a helper, an
   edit to another constant one is built from, and a fixture's return value do not count. It is one to weigh, like
-  `removed-test`, since the spec may ask for the new value.
+  `removed-test`, since the spec may ask for the new value. A golden file, under a `golden` directory inside a
+  `tests` directory as `tests/golden.py` keeps them, is an expected value too, one that `UPDATE_GOLDEN=1` rewrites
+  to whatever the code now writes: a change that edits or deletes one and also edits code outside the tests gets
+  one such finding per file, on the whole file, also to weigh. A golden file added, or renamed unedited, is none.
 
-It reads Python only; another language is a `WeakenedTestsDetector` beside the Python one in
+It reads Python only, but for golden files; another language is a `WeakenedTestsDetector` beside the Python one in
 `WEAKENED_TESTS_DETECTORS`.
 
 **Cognitive complexity** scores the functions the change edits, so that a change cannot pile branches into the
 function it is editing rather than split it. A function counts when the change adds a line to it, decorators
-included, in a `.py` file outside `tests/`, which is exempt as it is from ruff's `C901`: any function that no other
-function holds, a method of a nested class and a function under a module-level `if` or `try` included. A function
-nested in another is part of that one. Files are read as Python reads them, by their byte order mark or coding
-cookie. Its score is G. Ann Campbell's [cognitive complexity](https://www.sonarsource.com/docs/CognitiveComplexity.pdf),
-which SonarQube's rule S3776 measured: a point for each `if`, `elif`, `else`, ternary, loop, `except`, `match`,
-sequence of like boolean operators and recursion, and one more for each level of nesting on those that nest.
+included, in a Python file, a `.py` file or a script whose `#!` line names python, outside `tests/`, which is exempt
+as it is from ruff's `C901`: any function that no other function holds, a method of a nested class and a function
+under a module-level `if` or `try` included. A function nested in another is part of that one. Files are read as
+Python reads them, by their byte order mark or coding cookie. Its score is G. Ann Campbell's
+[cognitive complexity](https://www.sonarsource.com/docs/CognitiveComplexity.pdf), which SonarQube's rule S3776
+measured: a point for each `if`, `elif`, `else`, ternary, loop, `except`, `match`, sequence of like boolean operators
+and recursion, and one more for each level of nesting on those that nest.
 Recursion is a function that calls itself, or one on a cycle of calls through other functions of its module, each of
 which then scores the point. Calls are followed by name, as Python's scopes resolve them, so a call to a parameter
 or a local of the same name is not one to the module's function; not through an alias, nor into another module. The
@@ -146,7 +154,7 @@ rules. Each of these is a finding:
     move: two functions that call each other from two modules score no recursion, and moved into one they each
     score its point. Of a function moved unchanged and a
     copy of it, the one that kept the name takes it, and a function moved unchanged into a file the check does not
-    judge, such as one under `tests/` or a script with no `.py` whose `#!` line names python, takes its own before
+    judge, such as one under `tests/`, takes its own before
     any copy can, whatever the copy's name. A function takes the base of a function in another file only when that
     one's body is gone from it, so an unchanged copy takes nothing from an original still in its place, under its
     name or another; an original edited in place is gone by its body, which is the cost below;
@@ -227,7 +235,8 @@ call the function:
   with their files, the changed functions in modules mutmut had not reached when it was stopped: it saves a module's
   mutants, none or more, in `mutants/<path>.meta` once it has made them all, and theirs had none;
 - `not-mutated`: a changed function mutmut does not mutate, at its `def`, with the reason: its file is outside
-  `[tool.mutmut]`'s `source_paths`, or left out by `only_mutate` or `do_not_mutate`; it is decorated, other than with
+  `[tool.mutmut]`'s `source_paths`, a script with no `.py`, which mutmut never reads, or left out by `only_mutate` or
+  `do_not_mutate`; it is decorated, other than with
   `@staticmethod` or `@classmethod` alone; or it is `__new__`, `__getattribute__` or `__setattr__`. And a function
   mutmut was given but made no mutant of, with the cause where the gate can tell it, a `# pragma: no mutate block` on
   the line its header ends on, the one form of mutmut's pragmas the gate recognises and names as the cause, or
@@ -293,20 +302,22 @@ few it takes to copy the tree. With the flaky-tests check's three minutes, passe
 quality build stays inside the orchestrator's `QUALITY_TIMEOUT` of 1200 seconds when Jenkins starts it without a wait
 in the queue.
 
-This repository's table keeps mutmut off argparse's help texts, which no test reads word for word:
-`do_not_mutate_patterns = ['\bhelp=']`. mutmut matches each pattern against each source line and skips every expression
-that starts on a matching line, with all it holds, so a help text's later lines are skipped too, and so is a whole
-`add_argument(...)` call that starts on its `help=` line. A change to a help text alone makes no mutant.
+This repository's table keeps mutmut off argparse's help and description texts, which no test reads word for word:
+`do_not_mutate_patterns = ['\bhelp=', '\bdescription=']`. mutmut matches each pattern against each source line and
+skips every expression that starts on a matching line, with all it holds, so a text's later lines are skipped too, and
+so is a whole `add_argument(...)` or `add_parser(...)` call that starts on its `help=` or `description=` line. A change
+to such a text alone makes no mutant. Flag names that start a line of their own are still mutated.
 
 **Passes at base** runs the tests the change adds or edits, picked as flaky-tests picks them, against the base's code,
 since a test that passes without the change cannot be what shows the change works: coverage counts the lines it runs,
 surviving-mutants sees only the functions the change edits, and test integrity only tests getting weaker. For a bug
-fix, a test that fails at the base is the proof the bug was reproduced. The check runs only when the change edits
-Python source outside the tests: a `.py` file, or a script whose `#!` names python, that is not a test file (as for
-test integrity), a `conftest.py` or under a `tests` directory. A change to the tests alone, or to the tests and the
-docs, has no "without the change" a test could see. The base is the files git tracked at `--base`, as `git archive`
-writes them, with every one of the change's files that belong with the tests (those three kinds) taken from the
-working tree, or removed where the change removed it, so the changed tests keep their fixtures and data. A submodule
+fix, a test that fails at the base is the proof the bug was reproduced. The check runs only when the change edits,
+adds or deletes Python source outside the tests: a `.py` file, or a script whose `#!` names python in the working
+tree or at the base, that is not a test file (as for test integrity), a `conftest.py` or under a `tests` directory.
+A change to the tests alone, or to the tests and the docs, has no "without the change" a test could see. The base
+is the files git tracked at `--base`, as `git archive` writes them, with every one of the change's files that belong
+with the tests (those three kinds) taken from the working tree, or removed where the change removed it, so the
+changed tests keep their fixtures and data. A submodule
 holds the files of the commit the base records for it, from its own repository in the working tree; one that is not
 initialised there, or lacks that commit, is left empty, and a `not-run` finding names it. pytest, in the gate's
 interpreter, with the configurations flaky-tests' reruns get, found the same way in the base, once for each, and the
@@ -340,7 +351,8 @@ changed test, a `conftest.py` or a helper, is one `not-run` finding naming the p
 
 **Vague names** lists the names a change binds that tell a reader nothing about what they hold: `data`, `info`,
 `value`, `status`, `handle` and `manager` (`VAGUE_NAME_WORDS`), or a name ending in one after an underscore, such as
-`raw_info`, in any case. A name counts where a line the change adds binds it: an assignment to a name or to an
+`raw_info`, in any case. A name counts where a line the change adds to a Python file, a `.py` file or a script whose
+`#!` line names python, binds it: an assignment to a name or to an
 attribute of `self` or `cls`, a parameter, a `def` or `class`, a `for` or comprehension target, a `with`'s or an
 `except`'s `as`, an import, a `match` pattern's capture, or a type parameter. Each is a `vague-name` finding once per
 file, at its first such line; a binding on a line the change did not add is never reported, though an added line
@@ -411,13 +423,16 @@ first, at most 50 in all, then a count:
 - **Suppressions added** (`# noqa`, `# type: ignore`, `# shellcheck disable`, `<!-- pyml disable`, `# pragma: no cover`,
   `# pragma: no mutate`, and Rust's `#[allow(` and `#[expect(`) are listed, not failed, so the Reviewer weighs each one.
   A `# pragma: no cover` is listed because it takes lines out of the coverage condition, and a `# pragma: no mutate`
-  because it takes them out of the surviving-mutants check.
+  because it takes them out of the surviving-mutants check. Each counts only in the syntax of the files that what it
+  silences reads: in a Python file (a `.py` file or a `#!` python script), only within a comment, so the same words in
+  a string or a docstring are not one; `# shellcheck disable` in a `.sh` file or a workflow under
+  `.github/workflows/`; in Markdown, a `<!-- pyml disable` pragma that is a line of its own, from its first column,
+  as pymarkdown reads one; the attributes in Rust. Any other file has none.
 - **Build configuration**: an edit to `Jenkinsfile`, `pyproject.toml` or `uv.lock` is noted, since each can change how
   the change was judged, as is one to a file anywhere in the tree that clippy takes its rules or its toolchain from
-  (`Cargo.toml`, `clippy.toml`, `rust-toolchain.toml`, `.cargo/config.toml`; `CLIPPY_CONFIG_NAMES` in `gate.py`), and so
-  is each file the change adds or edits under `mutants/`, where mutmut keeps its state: the checks leave them out, as
-  [the gate](#the-gate) says, and the surviving-mutants check runs mutmut without them, though the linters read them as
-  they read any tracked file.
+  (`Cargo.toml`, `clippy.toml`, `rust-toolchain.toml`, `.cargo/config.toml`; `CLIPPY_CONFIG_NAMES` in `gate.py`),
+  and cargo's `config.toml` in the `CARGO_HOME` clippy runs with when that lies inside the tree, as the Jenkinsfile's
+  `.cargo-home` does.
 
 ### Rust tests and coverage
 
@@ -468,7 +483,7 @@ alone. In the copy mutmut runs on, that table replaces the tree's own, and only 
 `pyproject.toml`, such as `[tool.pytest.ini_options]`, is how its tests run, which a change may need to alter. Without
 `--config`, the tree's table judges it, as the linters' do. What the tree holds under `mutants/`, mutmut's own state
 and cache of results, is left out of that copy, so mutmut starts afresh and a change cannot mark its mutants killed;
-a change that adds or edits files there is listed under build configuration.
+a change that adds or edits files there fails the gate, as [the gate](#the-gate) says.
 
 The rule sets were tuned until `main` gave a short list of real findings: ruff's defaults plus bugbear,
 simplifications, pyupgrade, bandit, cyclomatic complexity (`C90`, `max-complexity = 15`; nesting is the

@@ -83,6 +83,22 @@ class TestChangedLines(unittest.TestCase):
                         f"+x = 1{sep}diff --git a/g.py b/g.py{sep}@@ -5,0 +6,2 @@\n+y\n+z\n")
                 self.assertEqual(changed_lines(diff), {"f.py": {4, 5, 6}})
 
+    def test_cargo_s_config_in_a_cargo_home_inside_the_tree_is_clippy_config(self):
+        diff = "".join(f"diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n@@ -1 +1 @@\n-a\n+b\n"
+                       for p in (".cargo-home/config.toml", ".cargo-home/registry/config.toml", "other/config"))
+        changed = changed_lines(diff)
+        self.assertEqual(gate.clippy_config_files(diff, changed, ".cargo-home"), [".cargo-home/config.toml"])
+        self.assertEqual(gate.clippy_config_files(diff, changed, "other"), ["other/config"])
+        self.assertEqual(gate.clippy_config_files(diff, changed), [])
+        root = tempfile.mkdtemp()
+        self.addCleanup(os.rmdir, root)
+        for home, inside in [(os.path.join(root, ".cargo-home"), ".cargo-home"), (root, ""),
+                             (os.path.dirname(root), None), (None, None)]:
+            with self.subTest(home=home), patch.dict(os.environ, {"CARGO_HOME": home} if home else {}, clear=False):
+                if home is None:
+                    os.environ.pop("CARGO_HOME", None)
+                self.assertEqual(gate._cargo_home_in(root), inside)
+
     def test_build_config_edits(self):
         diff = ("diff --git a/Jenkinsfile b/Jenkinsfile\n--- a/Jenkinsfile\n+++ b/Jenkinsfile\n@@ -1 +1 @@\n-a\n+b\n"
                 "diff --git a/uv.lock b/uv.lock\ndeleted file mode 100644\n"
@@ -202,15 +218,6 @@ class TestQualityReport(unittest.TestCase):
         self.assertIn("- The change edits `clippy.toml` and `ui/Cargo.toml`, which clippy takes its rules or its "
                       "toolchain from; it judged the change by the edited ones.\n", text)
 
-    def test_files_under_mutmut_s_state_are_named_apart_from_build_config(self):
-        text = quality_report("OK", "i", mutmut_state=["mutants/calc.py", "mutants/calc.py.meta"])
-        self.assertIn("## Build configuration\n\n- The change adds or edits `mutants/calc.py` and "
-                      "`mutants/calc.py.meta` under `mutants/`, where mutmut keeps its state. The gate's checks leave "
-                      "them out: none selects a test or a function in them or counts them as a change to the code, "
-                      "and the surviving-mutants check runs mutmut without them. The linters read them as they read "
-                      "any tracked file.\n", text)
-        self.assertNotIn("The change edits", text)
-
     # The whole file, for each gate word and each way quality_report words a section, held to its golden file
     # (tests/golden.py), so that a change to its wording fails here and is reviewed as the golden file's diff. The
     # intro, the conditions and the coverage sentence are judge_change's: TestGate's golden files pin those.
@@ -234,7 +241,7 @@ class TestQualityReport(unittest.TestCase):
             coverage="50.0% of 20 new lines to cover; 10 lines are not covered.",
             suppressions=[("f.py", 3, "x = 1  # noqa: F401"), ("g\rh.py", 1, "# noqa")],
             edited=["Jenkinsfile", "pyproject.toml", "uv.lock"],
-            clippy_config=[f"c{k}/Cargo.toml" for k in range(7)], mutmut_state=["mutants/calc.py"])
+            clippy_config=[f"c{k}/Cargo.toml" for k in range(7)])
         assert_golden("quality_report_error", text)
 
     def test_an_error_file_whose_findings_to_weigh_are_cut_is_golden(self):
@@ -683,6 +690,65 @@ class TestGate(RepositoryTest):
         self.assertIn("## Suppressions added\n\n- `f.py:4` `import os  # noqa: F401`\n"
                       "- `run.sh:1` `# shellcheck disable=SC2086`\n", out)
 
+    def test_files_committed_under_mutmut_s_state_fail_the_gate_and_nothing_else_reads_them(self):
+        self.commit({"mutants/old.py": "old = 1\n", "mutants/gone.py": "gone = 1\n"}, "mutmut's state, committed")
+        self.put("mutants/calc.py", "import os  # noqa: F401\nx = 1\rimport sys\n")
+        self.git("add", "mutants/calc.py")
+        self.edit("mutants/old.py", "old = 1\n", "old = 2\n")
+        self.git("rm", "--quiet", "mutants/gone.py")  # deleting what an earlier commit left there is no fault
+        self.add_lines(1)
+        self.says("ruff", "mutants/calc.py:1:8: F401 `os` imported but unused\nmutants/old.py:1:1: E1 x\n")
+        seen = []
+        self.checks(gate.GateCheck("integrity", fails=True, find=lambda change: seen.append(change) or []))
+        coverage = os.path.join(self.repo, "coverage.xml")
+        with open(coverage, "w") as f:
+            f.write('<coverage><sources><source>.</source></sources><packages><package><classes>'
+                    '<class filename="mutants/calc.py"><lines>'
+                    + "".join(f'<line number="{n}" hits="0"/>' for n in range(1, 4))
+                    + "</lines></class></classes></package></packages></coverage>")
+        status, out, _ = self.gate("--coverage", "coverage.xml")
+        self.assertEqual(status, 1)
+        self.assertIn("## Failed conditions\n\n- The change adds or edits `mutants/calc.py` and `mutants/old.py` "
+                      "under `mutants/`, where mutmut keeps its scratch state, which is never part of a change; the "
+                      "gate judged none of them. Remove them from the change.\n\n## Issues", out)
+        self.assertNotIn("Suppressions added", out)
+        self.assertIn("## Coverage on new code\n\nNo new lines to cover.\n", out)
+        self.assertFalse(any(a.startswith("mutants/") for a in self.argv("ruff")), self.argv("ruff"))
+        [change] = seen
+        self.assertEqual((change.changed, change.mutmut_state), ({"f.py": {4}}, ("mutants/calc.py", "mutants/old.py")))
+
+    def test_only_a_comment_in_the_file_s_own_syntax_is_listed_as_a_suppression(self):
+        with open(os.path.join(self.repo, "f.py"), "a") as f:
+            f.write('hint = "add # noqa: F401"\ndoc = """\n# type: ignore\n"""\nimport os  # noqa: F401\n')
+        files = {
+            "bin/tool": "#!/usr/bin/env python3\nprint('# noqa')  # pragma: no cover\n",
+            "README.md": "Write `# noqa` to silence ruff, `<!-- pyml disable md013 -->` pymarkdown.\n"
+                         "<!-- pyml disable-next-line md013 -->\n  <!-- pyml disable md013 -->\n",
+            "run.sh": "echo '# noqa'\n# shellcheck disable=SC2086\n",
+            ".github/workflows/w.yml": "on: push  # noqa\njobs:\n  j:\n    steps:\n      - run: |\n"
+                                       "          # shellcheck disable=SC2086\n",
+            "notes.txt": "# noqa and # pragma: no cover, as text\n",
+        }
+        for path, text in files.items():
+            self.put(path, text)
+        self.git("add", *files)
+        status, out, _ = self.gate()
+        self.assertEqual(status, 0, out)
+        self.assertTrue(out.endswith(
+            "## Suppressions added\n\n"
+            "- `.github/workflows/w.yml:6` `# shellcheck disable=SC2086`\n"
+            "- `README.md:2` `<!-- pyml disable-next-line md013 -->`\n"
+            "- `bin/tool:2` `print('# noqa')  # pragma: no cover`\n"
+            "- `f.py:8` `import os  # noqa: F401`\n"
+            "- `run.sh:2` `# shellcheck disable=SC2086`\n"), out)
+
+    def test_a_suppression_in_python_that_does_not_tokenize_is_listed_by_its_line(self):
+        with open(os.path.join(self.repo, "f.py"), "a") as f:
+            f.write('import os  # noqa: F401\ns = """unterminated # noqa\n')
+        out = self.gate()[1]
+        self.assertTrue(out.endswith("## Suppressions added\n\n- `f.py:4` `import os  # noqa: F401`\n"
+                                     '- `f.py:5` `s = """unterminated # noqa`\n'), out)
+
     def checks(self, *checks):
         """Run the gate with checks in place of gate_checks's."""
         p = patch.object(gate, "gate_checks", lambda mutation_budget, base_run_budget, test_contexts: checks)
@@ -944,6 +1010,14 @@ class TestClippy(RepositoryTest):
         self.assertIn("- `clippy` could not compile the workspace of `crate/Cargo.toml`: `crate/b/src/lib.rs:2` error "
                       "clippy E0425: cannot find value `one` in this scope\n", out)
         self.assertIn("1 other open issues in the project", out)
+
+    def test_a_crate_under_mutmut_s_state_is_not_linted(self):
+        self.commit({"mutants/broken/Cargo.toml": '[package]\nname = "broken"\nversion = "0.1.0"\nedition = "2021"\n',
+                     "mutants/broken/src/lib.rs": "pub fn f() -> i32 {\n    nope\n}\n"}, "mutmut's state, committed")
+        self.put("crate/src/lib.rs", self.LIB + "pub fn two() -> i32 {\n    2\n}\n")
+        status, out = self.gate()
+        self.assertEqual(status, 0, out)
+        self.assertNotIn("mutants/", out)
 
     def test_a_tracked_cargo_lock_is_held_to_not_rewritten(self):
         lock = '# This file is automatically @generated by Cargo.\nversion = 4\n\n[[package]]\nname = "tiny"\n' \
@@ -1408,6 +1482,47 @@ class TestWeakenedTests(RepositoryTest):
         where, _ = self.found_after_golden_edit('GOLDEN = "a"', 'GOLDEN = "b"', self.GOLDEN_TESTS.replace(
             "    def test_add(self):", "    def test_add[T](self):"))
         self.assertEqual(where, [("tests/test_golden.py", 10, "expected-value-changed")])
+
+    def test_a_golden_file_rewritten_with_the_code_it_pins_is_an_expected_value_changed(self):
+        self.commit({"tests/golden/sum.txt": "3\n", "tests/golden/old.txt": "1\n", "tests/golden/moved.txt": "2\n",
+                     "docs/golden/notes.txt": "a\n"}, "golden files")
+        self.edit("calc.py", "return a + b", "return b + a")
+        self.edit("tests/golden/sum.txt", "3\n", "4\n")
+        self.git("rm", "--quiet", "tests/golden/old.txt")
+        self.git("mv", "tests/golden/moved.txt", "tests/golden/kept.txt")  # its expected value unchanged
+        self.put("tests/golden/new.txt", "5\n")  # a new expected value, not a changed one
+        self.edit("docs/golden/notes.txt", "a\n", "b\n")  # no test reads it
+        self.git("add", "tests/golden/new.txt")
+        where, found = self.found()
+        self.assertEqual(where, [("tests/golden/old.txt", None, "expected-value-changed"),
+                                 ("tests/golden/sum.txt", None, "expected-value-changed")])
+        self.assertEqual(found[1]["message"], "a golden file, the expected output of a test, changed in a change that "
+                                              "also edits the code under test; check that its diff is what the change "
+                                              "means the output to become.")
+        self.assertIn("deleted", found[0]["message"])
+
+    def test_a_golden_file_rewritten_with_a_python_script_it_pins_is_an_expected_value_changed(self):
+        self.commit({"tests/golden/tool.txt": "3\n", "bin/tool": "#!/usr/bin/env python3\nprint(3)\n",
+                     "bin/old": "#!/usr/bin/env python3\nprint(1)\n"}, "a script and its golden file")
+        for edit in (lambda: self.edit("bin/tool", "print(3)", "print(4)"),
+                     lambda: self.git("rm", "--quiet", "bin/old")):
+            with self.subTest(edit=edit):
+                self.git("reset", "--quiet", "--hard")
+                edit()
+                self.edit("tests/golden/tool.txt", "3\n", "4\n")
+                self.assertEqual(self.found()[0], [("tests/golden/tool.txt", None, "expected-value-changed")])
+
+    def test_a_golden_file_changed_with_a_python_script_beside_the_tests_is_no_finding(self):
+        self.commit({"tests/golden/x.txt": "3\n", "tests/bin/fake": "#!/usr/bin/env python3\nprint(3)\n"}, "fake")
+        self.edit("tests/bin/fake", "print(3)", "print(4)")
+        self.edit("tests/golden/x.txt", "3\n", "4\n")
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_golden_file_changed_without_the_code_is_no_finding(self):
+        self.commit({"tests/golden/sum.txt": "3\n"}, "golden file")
+        self.edit("tests/golden/sum.txt", "3\n", "4\n")
+        self.edit("tests/test_other.py", "assert 1", "assert 2")
+        self.assertEqual(self.found()[0], [])
 
     def commit_mutmut_state(self):
         """Commit what mutmut leaves in mutants/ after a run: its copy of the code and of the tests beside it."""
@@ -2094,6 +2209,19 @@ class TestPassesAtBase(RepositoryTest):
         self.put("tests/test_calc.py", self.TESTS.replace("import mul", "import add, mul")
                  + "\n\ndef test_add():\n    assert add(2, 2) == 4\n" + tests)
 
+    def test_a_python_script_edited_or_deleted_outside_the_tests_is_python_source(self):
+        script = "#!/usr/bin/env python3\nprint(1)\n"
+        self.commit({"bin/tool": script, "bin/old": script, "tests/bin/fake": script}, "scripts")
+        base = self.git("rev-parse", "HEAD").strip()
+        for name, edit in [("edited", lambda: self.edit("bin/tool", "print(1)", "print(2)")),
+                           ("deleted", lambda: self.git("rm", "--quiet", "bin/old")),
+                           ("beside the tests", lambda: self.edit("tests/bin/fake", "print(1)", "print(2)"))]:
+            with self.subTest(name):
+                self.git("reset", "--quiet", "--hard")
+                edit()
+                self.assertEqual(gate._edits_python_source(gate.GateChange.from_tree(self.repo, base)),
+                                 name != "beside the tests")
+
     def test_no_room_for_the_run_at_the_base_is_a_finding(self):
         self.fix_add()
         with patch.object(gate.tempfile, "mkdtemp", side_effect=OSError(28, "No space left on device")):
@@ -2732,8 +2860,14 @@ class TestSurvivingMutants(RepositoryTest):
         "def describe(parser):\n"       # 25
         "    parser.add_argument('--count', help='how many'\n"   # 26
         "                                     ' to make')\n"    # 27
+        "\n"                            # 28
+        "\n"                            # 29
+        "def describe_tool(make):\n"    # 30
+        "    return make(description='what the'\n"  # 31
+        "                ' tool does')\n"           # 32
     )
-    # The repository's own [tool.mutmut] do_not_mutate_patterns, which keep mutmut off argparse's help texts.
+    # The repository's own [tool.mutmut] do_not_mutate_patterns, which keep mutmut off argparse's help and description
+    # texts.
     with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pyproject.toml"), "rb") as f:
         PATTERNS = tomllib.load(f)["tool"]["mutmut"].get("do_not_mutate_patterns", [])
     # Each test calls one function; only test_checked looks at what it returns.
@@ -3130,9 +3264,9 @@ class TestSurvivingMutants(RepositoryTest):
         self.git("add", "mutants/calc.py.meta")
         found = self.found()
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 5, "survived")])
-        diff = self.host.change_diff(self.repo, self.git("rev-parse", "HEAD").strip())
-        self.assertEqual(gate.edited_config(diff, changed_lines(diff)), [])
-        self.assertEqual(gate.mutmut_state_files(changed_lines(diff)), ["mutants/calc.py.meta"])
+        change = gate.GateChange.from_tree(self.repo, self.git("rev-parse", "HEAD").strip())
+        self.assertEqual(gate.edited_config(change.diff, change.changed), [])
+        self.assertEqual(change.mutmut_state, ("mutants/calc.py.meta",))
 
     def test_a_function_under_mutmut_s_state_is_not_selected(self):
         self.put("mutants/calc.py", "def x_checked__mutmut_1(a, b):\n    return a - b\n")
@@ -3278,6 +3412,13 @@ class TestSurvivingMutants(RepositoryTest):
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 25, "not-mutated")])
         self.assertEqual(found[0]["message"], "`describe` was not mutation-tested: mutmut made no mutant of it; the "
                                               "rules' do_not_mutate_patterns match each statement in it.")
+
+    def test_a_change_to_a_parser_s_description_alone_makes_no_mutant(self):
+        self.put("calc.py", self.BASE.replace(" tool does", " tool is for"))
+        made, found = self.found_and_made()
+        self.assertEqual(made, [])
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 30, "not-mutated")])
+        self.assertIn("the rules' do_not_mutate_patterns match each statement in it", found[0]["message"])
 
     def test_a_function_a_mutmut_pragma_opts_out_is_said_so_and_its_pragma_listed(self):
         text = self.BASE.replace("def unchecked(a, b):", "def unchecked(a, b):  # pragma: no mutate block")
@@ -4191,6 +4332,14 @@ class TestTooComplexFunctions(RepositoryTest):
         self.assertEqual([f["message"] for f in self.found()[1]],
                          ["`copied`: cognitive complexity 20, a new function; the limit is 15."])
 
+    def test_a_function_over_the_limit_written_in_a_python_script_with_no_py_is_found(self):
+        self.put("bin/tool", "#!/usr/bin/env python3\n" + flat("fresh", 16))
+        self.put("bin/run", "#!/bin/sh\n" + flat("shell", 16))  # not Python, so not judged
+        self.git("add", "bin/tool", "bin/run")
+        where, found = self.found()
+        self.assertEqual(where, [("bin/tool", 2, "over-limit")])
+        self.assertEqual(found[0]["message"], "`fresh`: cognitive complexity 16, a new function; the limit is 15.")
+
     def test_a_function_s_text_moved_into_a_file_that_is_not_python_leaves_its_base_to_its_copy(self):
         big = flat("big", 20)
         for name, first in [("notes.txt", "# python, kept for reference\n"), ("bin/run", "#!/bin/sh\n")]:
@@ -4582,6 +4731,16 @@ class TestChangedPythonFiles(RepositoryTest):
         reasons = {f["message"].partition(", so ")[0] for f in found}
         self.assertEqual(len(reasons), 1, reasons)
         self.assertTrue(reasons.pop().startswith("could not be read ("))
+
+    def test_a_python_script_with_no_py_is_read_as_python_and_said_not_mutated(self):
+        self.put("bin/tool", "#!/usr/bin/env python3\ndef load(path):\n    data = path\n    return data\n")
+        self.git("add", "bin/tool")
+        change = self.change()
+        found = gate.surviving_mutants(change, budget=60)
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("bin/tool", 2, "not-mutated")])
+        self.assertIn("mutmut mutates only files named *.py", found[0]["message"])
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in gate.vague_names(change)],
+                         [("bin/tool", 3, "vague-name")])
 
     # Decorators that ast.unparse cannot write: a sum too deep for its recursion, and an int, as hexadecimal, of
     # more than sys.get_int_max_str_digits() decimal digits, which it writes in decimal.
