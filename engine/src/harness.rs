@@ -6,6 +6,8 @@
 //! What Python keeps in four tables by harness (PERMISSION_ARGS, RESUME_ARGS, ADD_DIR_ARGS and SESSION_LOGS) is one
 //! row per harness here, in [`HARNESSES`], so that adding a harness is adding a row.
 
+use std::collections::HashSet;
+
 use crate::constants::AGENT_KINDS;
 use crate::error::OrchestratorError;
 use crate::py::json::{Json, Map};
@@ -186,12 +188,13 @@ impl Harness {
     /// The token usage this harness's session log, as its SessionLog finds it, records for each answer of the model,
     /// oldest first; none for a harness without a session log. log is the file as it is on disk, each line read as
     /// json.loads reads it but for a lone surrogate (Json::parse_lossy), as which os.fsdecode reads a byte that is not
-    /// UTF-8 too. A line that is not a record of an answer, or whose counts are not all integers, is skipped. Claude Code writes one line per content block of an answer, each with
-    /// the answer's usage, so each answer counts once, at its first line that names its usage and time.
+    /// UTF-8 too. A line that is not a record of an answer, or whose counts are not all integers, is skipped. Claude
+    /// Code writes one line per content block of an answer, each with the answer's usage, so each answer counts once,
+    /// at its first line that names its usage and time.
     pub fn session_usage(&self, log: &[u8]) -> Vec<Usage> {
         let Some(SessionLog { format, .. }) = self.session_log else { return vec![] };
         // The ids of the Claude Code answers counted so far.
-        let mut seen: Vec<MessageId> = vec![];
+        let mut seen = HashSet::new();
         let mut out = vec![];
         for line in log.split(|b| *b == b'\n') {
             let Some(usage) = answer_usage(format, &String::from_utf8_lossy(line), &mut seen) else { continue };
@@ -210,12 +213,17 @@ pub struct Usage {
     pub tokens: Tokens,
 }
 
-/// Token counts, by kind, as metrics.json writes them.
+/// Token counts, by kind, as metrics.json writes them. A count is whatever integer the log holds, as Python sums it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Tokens {
+    /// Input tokens not read from the cache: Claude Code's input_tokens, pi's input.
     pub input: i128,
+    /// Output tokens: Claude Code's output_tokens, pi's output.
     pub output: i128,
+    /// Input tokens read from the cache: Claude Code's cache_read_input_tokens, pi's cacheRead; 0 when not logged.
     pub cache_read: i128,
+    /// Input tokens written to the cache: Claude Code's cache_creation_input_tokens, pi's cacheWrite; 0 when not
+    /// logged.
     pub cache_write: i128,
 }
 
@@ -243,12 +251,14 @@ impl Tokens {
 
 /// A Claude Code message id as Python's set of them tells ids apart: a number equal to another is the same id, true
 /// being 1 and false 0, and a missing id the same as null.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum MessageId {
     None,
     Str(String),
+    /// A whole number, whether it was written as an int, a float or a bool.
     Int(i128),
-    Float(f64),
+    /// The bits of any other float; one JSON reads is never NaN, and -0.0 is Int(0).
+    Float(u64),
 }
 
 impl MessageId {
@@ -260,7 +270,7 @@ impl MessageId {
             Some(Json::Bool(b)) => MessageId::Int(i128::from(*b)),
             Some(Json::Int(n)) => MessageId::Int(*n),
             Some(Json::Float(x)) if x.fract() == 0.0 && x.abs() < 1e38 => MessageId::Int(*x as i128),
-            Some(Json::Float(x)) => MessageId::Float(*x),
+            Some(Json::Float(x)) => MessageId::Float(x.to_bits()),
             Some(Json::Array(_) | Json::Object(_)) => return None,
         })
     }
@@ -269,7 +279,7 @@ impl MessageId {
 /// The usage one line of a session log in format records, as session_usage reads it: None for a line that is not a
 /// record of an answer, as Python's loop skips it. seen holds the ids of the Claude Code answers counted so far, and
 /// gains this line's, as Python's set does, before its counts are read.
-fn answer_usage(format: LogFormat, line: &str, seen: &mut Vec<MessageId>) -> Option<Usage> {
+fn answer_usage(format: LogFormat, line: &str, seen: &mut HashSet<MessageId>) -> Option<Usage> {
     // Each step in the order Python's takes it: a step that fails skips the line, and the steps before it have had
     // their effect on seen.
     let entry = Json::parse_lossy(line).ok()?;
@@ -282,11 +292,9 @@ fn answer_usage(format: LogFormat, line: &str, seen: &mut Vec<MessageId>) -> Opt
             if entry.get("type").and_then(Json::as_str) != Some("assistant") {
                 return None;
             }
-            let id = MessageId::of(message.get("id"))?;
-            if seen.contains(&id) {
+            if !seen.insert(MessageId::of(message.get("id"))?) {
                 return None;
             }
-            seen.push(id);
             ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]
         }
         LogFormat::Pi => {

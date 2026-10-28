@@ -197,6 +197,9 @@ fn a_herdr_that_cannot_be_run_or_read_names_the_command() {
     let denied = || Err(ProcessError::Start(std::io::ErrorKind::PermissionDenied.into()));
     let herdr = ProcessHerdr::with_runner(None, move |_, _| denied());
     assert!(herdr.focus("x").unwrap_err().to_string().starts_with("herdr agent focus x: "));
+    // A prompt's text stays out of the error, as out of Python's OSError.
+    let e = herdr.prompt("spec-x", "a long prompt").unwrap_err().to_string();
+    assert!(e.starts_with("herdr agent prompt spec-x: ") && !e.contains("long"), "{e}");
     let herdr = ProcessHerdr::with_runner(None, |_, _| Err(ProcessError::Io(std::io::ErrorKind::BrokenPipe.into())));
     assert_eq!(herdr.focus("x").unwrap_err().code(), None);
     let herdr = ProcessHerdr::with_runner(None, |_, _| Ok((0, b"\xff".to_vec(), vec![])));
@@ -488,6 +491,16 @@ fn fakeherdr_plays_each_role_s_turns_as_python_s_does() {
     let e = herdr.wait("review-a1b2c3", Some(1000), &["working"]).unwrap_err();
     assert_eq!(e.code(), Some("agent_not_found"));
 
+    // Once the run's state.json is saved, a turn sees the state as the Workflow saved it, as Python's turns share it.
+    let mut saved = run.clone();
+    saved.worktree = Some("/proj/.orchestrator/worktrees/a1b2c3".to_string());
+    host.write(&format!("{}/state.json", run.dir()), &saved.to_text(), false).unwrap();
+    let worktree: Turn = Box::new(|_, run, _| run.worktree.clone().unwrap_or_default());
+    herdr.state().script.insert("review".to_string(), [worktree].into());
+    assert_eq!(herdr.start_agent("review-b", "w1:p4", "claude", &[]), Ok(true));
+    herdr.prompt("review-b", "review").unwrap();
+    assert_eq!(herdr.status("review-b"), Ok(Some("/proj/.orchestrator/worktrees/a1b2c3".to_string())));
+
     herdr.focus("build-a1b2c3").unwrap();
     herdr.close_workspace("w1").unwrap();
     assert!(!herdr.workspace_exists("w1").unwrap());
@@ -504,14 +517,16 @@ fn fakeherdr_plays_each_role_s_turns_as_python_s_does() {
         prompt("build-a1b2c3"),
         prompt("build-a1b2c3"),
         start("review-a1b2c3", "w1:p3", argv(&["--session", "s-gone"])),
+        start("review-b", "w1:p4", vec![]),
+        prompt("review-b"),
         Call::Focus { name: "build-a1b2c3".into() },
         Call::Close { workspace: "w1".into() },
     ]);
-    assert_eq!(s.kinds.iter().map(|(_, k)| k.as_str()).collect::<Vec<_>>(), ["claude", "codex", "pi"]);
+    assert_eq!(s.kinds.iter().map(|(_, k)| k.as_str()).collect::<Vec<_>>(), ["claude", "codex", "pi", "claude"]);
     assert_eq!(s.sessions.get("spec-a1b2c3").map(String::as_str), Some("session-4"));
     assert_eq!(s.waits, [vec!["done".to_string()]]);
     assert_eq!(s.deliveries.len(), 3);
-    assert_eq!(s.prompts.len(), 3);
+    assert_eq!(s.prompts.len(), 4);
     assert_eq!(s.cwds, [("workspace".to_string(), "/proj".to_string()), ("split".to_string(), "/proj".to_string())]);
     assert_eq!(s.panes, 2);
     assert!(s.script.values().all(|turns| turns.is_empty()));

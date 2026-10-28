@@ -8,6 +8,7 @@ use std::rc::Rc;
 use super::{Agent, Direction, Herdr, HerdrError};
 use crate::harness::{harness, Resume};
 use crate::host::fake::FakeHost;
+use crate::host::Host;
 use crate::state::RunState;
 
 /// One turn of a role's agent: given the prompt it was sent, the run's state and the host, it may write files, as an
@@ -19,6 +20,7 @@ pub(crate) type Turn = Box<dyn FnMut(&str, &RunState, &FakeHost) -> String>;
 pub(crate) struct FakeHerdr {
     /// The machine the turns write to.
     host: Rc<FakeHost>,
+    /// What it holds and records (FakeHerdrState), behind a RefCell as the trait's methods take &self.
     state: RefCell<FakeHerdrState>,
 }
 
@@ -36,7 +38,9 @@ pub(crate) enum Call {
 
 /// What a FakeHerdr holds and records. Each field is what Python's FakeHerdr has of that name.
 pub(crate) struct FakeHerdrState {
-    /// The run's state as each turn is given it: the test's, not the Workflow's own.
+    /// The run's state as a turn is given it while the host holds no state.json of the run: then the test's. Once it
+    /// holds one, a turn is given that, the Workflow's own as it saved it, as Python's turns share its state: it saves
+    /// the state before each prompt (the prompted marker), so a turn sees what the run has set, its worktree included.
     pub run: RunState,
     /// By role, its agent's turns still to play, in order.
     pub script: HashMap<String, VecDeque<Turn>>,
@@ -178,6 +182,8 @@ impl Herdr for FakeHerdr {
             let turn = turns.pop_front().unwrap_or_else(|| panic!("{name} was prompted after its last turn"));
             (turn, s.run.clone())
         };
+        let saved = self.host.read(&format!("{}/state.json", run.dir())).expect("the fake host reads its files");
+        let run = saved.map_or(run, |text| RunState::from_text(&text).expect("the run's state.json reads"));
         // Played with the fake's state released, so that a turn may script the fake itself.
         let status = turn(text, &run, &self.host);
         self.state().statuses.insert(name.to_string(), status);

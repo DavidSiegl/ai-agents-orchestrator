@@ -87,8 +87,10 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   file a human edited, or a case no test of the Python engine pins (rust-engine ticket 04, 2026-10-28): `state.json`
   with `NaN`, `Infinity` or an integer beyond 64 bits is refused, as serde_json reads it (`engine/src/py/json.rs`),
   where Python reads it; a time without an offset is taken as UTC, where Python's `fromisoformat` takes it as local
-  time (every other time is read as CPython's `fromisoformat` reads it, `crate::py::datetime`, since ticket 06), and a
-  turn whose start is not a time is left out of `summary.md` and `metrics.json`, where the Python engine
+  time (every other time is read as CPython 3.14's `fromisoformat` reads it, `crate::py::datetime`, since ticket 06;
+  3.13, which a system `python3` may be and `packaging/build-binary.sh` builds the Linux binary with, refuses hour 24,
+  which 3.14 reads as the next day's midnight, and reads `T12.5`, `T12:00.5` and `T12:00:00.Z`, which 3.14 refuses
+  (cross-review 92, F4); no harness or run writes either), and a turn whose start is not a time is left out of `summary.md` and `metrics.json`, where the Python engine
   fails (`epoch_seconds` and `turn_starts` in `engine/src/summary.rs`); a `state.json` field of another type than the
   Python engine writes is refused naming the run, where Python keeps it, and one it does not know is kept, where Python
   drops it, as the spec asks (`RunState::from_saved`). And from the machine the agents run on (rust-engine ticket 05,
@@ -114,15 +116,33 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `_run_tool`'s 'not on PATH' check will need either string matching or an interface change"). Closes with ticket 09
   porting the three cases, and either an error of `exec`'s own for a command not found or the doctor asking
   `command -v` first, as `_on_path` already does.
-- **A Ctrl-C at the terminal does not reach the command the Rust engine's `Host` is running.** `ProcessHost` starts
-  each command in a process group of its own, so that a timeout kills the command with whatever it started
-  (`run_process` in `engine/src/host/process.rs`, rust-engine ticket 05, 2026-10-28); the terminal sends SIGINT to
-  its foreground group only, which holds the engine and no longer the git, gh, gitleaks or ssh it waits on. In the
-  Python engine every child is in the foreground group and gets the SIGINT too. Until the Rust engine handles
+- **Harness tests left for rust-engine tickets 08 and 09.** Ticket 06 ported `launch_args`, `session_usage` and
+  `turn_tokens` (`engine/src/harness/tests.rs`, `engine/src/summary/tests.rs`), but the Python cases that drive them
+  through `Workflow`, `parse_args`, `new_state` or `resumable_state` wait for those (cross-review 92, F1: "As merged,
+  the ticket's verification is unmet and nothing tracks the gap"). For ticket 08, which ports `Workflow`: all of
+  `TestHarnesses`; of `TestHarnessFlags`, `test_role_agent_starts_that_role_in_its_harness`,
+  `test_resume_with_a_new_harness_relaunches_in_it`, `test_a_030_state_resumes_on_claude` and the Workflow half of
+  `test_run_dir_granted_in_worktree_runs_only`; of `TestRunMetrics`, `test_tokens_come_from_the_session_the_turn_ran_in`
+  and `test_a_turn_that_changed_sessions_has_unknown_tokens` (`Workflow._count_tokens`). For ticket 09, which ports
+  the CLI: `test_precedence`, `test_flags_reach_the_workflow`, `test_role_agent_for_a_role_the_workflow_lacks`,
+  `test_unknown_kinds_are_argparse_errors` and `test_resume_keeps_or_overrides_the_saved_harnesses`. Ported already:
+  `test_launch_args_leave_the_permission_table_alone`, the `launch_args` half of
+  `test_run_dir_granted_in_worktree_runs_only`, `test_turn_tokens_needs_a_known_window_and_a_harness_it_reads` (ticket
+  06) and `test_a_030_state_without_a_permission_mode` and `test_unreadable_agent_args` (ticket 04,
+  `engine/src/state/tests.rs` and states.json). Closes with tickets 08 and 09 porting each case named here.
+- **A Ctrl-C at the terminal does not reach the command the Rust engine's `Host` or herdr is running.** `ProcessHost`
+  starts each command in a process group of its own, so that a timeout kills the command with whatever it started
+  (`run_process` in `engine/src/host/process.rs`, rust-engine ticket 05, 2026-10-28), and `ProcessHerdr` runs the
+  herdr CLI the same way (`engine/src/herdr.rs`, ticket 06, where a timeout kills herdr's group, not herdr alone as
+  Python's `subprocess.run` does); the terminal sends SIGINT to its foreground group only, which holds the engine and
+  no longer the git, gh, gitleaks, ssh or herdr it waits on. In the Python engine every child is in the foreground
+  group and gets the SIGINT too, the desktop app's Stop (`killpg` with SIGINT) included. Until the Rust engine handles
   SIGINT, which nothing does before ticket 08/09, it dies at once and leaves the command running to its end or its
-  timeout (300 s for a push or a scan). Closes with the interrupt handling of rust-engine ticket 08/09 killing the
-  running command's group (its pid is its group's id) before it releases the run, and a test that interrupts a run
-  waiting on a command.
+  timeout (300 s for a push or a scan, and none for `herdr agent wait` without `--timeout`, which `Herdr::wait` with
+  no time gives: cross-review 92, F2, "a Ctrl-C ... during an unbounded `wait(name, None, …)` won't reach `herdr
+  agent wait`"). Closes with the interrupt handling of rust-engine ticket 08/09 killing the running command's group
+  (its pid is its group's id; for herdr, that also ends the engine's wait for its output) before it releases the run,
+  and a test that interrupts a run waiting on a command and one waiting on herdr.
 - **The contract test leaves its Jenkins build running when it fails.** `tests/contract/test_jenkins.py` triggers one
   quality build and nothing stops it on a failure or a Ctrl-C, so the build holds an executor until it ends, up to
   the 22 minutes build #59 took. Raised by cross-review 73 (F11, 2026-10-27): "a Ctrl-C during the queue wait leaves

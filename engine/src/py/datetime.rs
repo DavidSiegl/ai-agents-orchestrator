@@ -3,8 +3,10 @@
 
 use super::text::repr;
 
-/// The seconds since the epoch of the time iso names, as `datetime.fromisoformat(iso).timestamp()` gives them: every
-/// form CPython's fromisoformat reads (a date as YYYY-MM-DD, YYYYMMDD or an ISO week date, then any one character and
+/// The seconds since the epoch of the time iso names, as `datetime.fromisoformat(iso).timestamp()` gives them in
+/// CPython 3.14, which .python-version pins for the repository's tests and harness.json's answers; 3.13 reads a few
+/// malformed times otherwise (TODO.md, "The Rust engine reads some input no run writes otherwise"). Every form
+/// 3.14's fromisoformat reads (a date as YYYY-MM-DD, YYYYMMDD or an ISO week date, then any one character and
 /// a time of hours, minutes and seconds with or without colons, a fraction of a second after `.` or `,` of which the
 /// first six digits count, hour 24 as the next day's midnight, and Z or an offset of hours, minutes, seconds and a
 /// fraction), with its quirks. A time without an offset is taken as UTC, where Python takes it as the machine's local

@@ -11,9 +11,8 @@ no log or turn here has one."""
 
 import json
 import os
-import random
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 import orchestrator as o  # found through the path above
@@ -32,19 +31,22 @@ EPOCH = 1_791_000_000
 
 def at(seconds: float, suffix: str = "Z") -> str:
     """The time EPOCH + seconds as a session log writes it, with suffix for its offset."""
-    return datetime.fromtimestamp(EPOCH + seconds, timezone.utc).isoformat(timespec="milliseconds") \
+    return datetime.fromtimestamp(EPOCH + seconds, UTC).isoformat(timespec="milliseconds") \
         .replace("+00:00", suffix)
 
 
 def line(**entry) -> str:
+    """A session log's line holding entry."""
     return json.dumps(entry)
 
 
 def claude(seconds, message_id, usage, kind="assistant", **extra) -> str:
+    """A Claude Code session log's line of kind, at EPOCH + seconds, of the message message_id with usage and extra."""
     return line(type=kind, timestamp=at(seconds), message={"id": message_id, "usage": usage, **extra})
 
 
 def tokens(i, o_, read=None, write=None) -> dict:
+    """Claude Code's usage of i input and o_ output tokens, and of read and write cache tokens where given."""
     usage = {"input_tokens": i, "output_tokens": o_}
     if read is not None:
         usage["cache_read_input_tokens"] = read
@@ -54,6 +56,7 @@ def tokens(i, o_, read=None, write=None) -> dict:
 
 
 def pi(seconds, usage, role="assistant", suffix="Z") -> str:
+    """A pi session log's line of a message of role with usage, at EPOCH + seconds with suffix for its offset."""
     return line(type="message", timestamp=at(seconds, suffix), message={"role": role, "usage": usage})
 
 
@@ -183,14 +186,21 @@ def fuzzed_times(n: int) -> list[str]:
     time."""
     pieces = ["2026", "10", "28", "-", "W", "43", "3", "T", " ", "12", ":", "00", "5", ".", ",", "123456789",
               "Z", "+", "01", "24", "60", "0", "é", ""]
-    rng = random.Random(6)
+    seed = 6
+
+    def below(k: int) -> int:
+        """A number below k from a fixed sequence (a 64-bit LCG's high bits), the same on every run."""
+        nonlocal seed
+        seed = (seed * 6364136223846793005 + 1442695040888963407) % 2**64
+        return (seed >> 33) % k
+
     valid = [iso for iso in TIMES if "ok" in timestamp(iso)]
     out = []
     for _ in range(n):
-        iso = rng.choice(valid)
-        for _ in range(rng.randint(1, 3)):
-            at, piece = rng.randint(0, len(iso)), rng.choice(pieces)
-            iso = iso[:at] + piece + iso[at + rng.randint(0, 1):]
+        iso = valid[below(len(valid))]
+        for _ in range(1 + below(3)):
+            at, piece = below(len(iso) + 1), pieces[below(len(pieces))]
+            iso = iso[:at] + piece + iso[at + below(2):]
         out.append(iso)
     return out
 
@@ -199,12 +209,13 @@ def timestamp(iso: str) -> dict:
     """{"ok": the time fromisoformat reads, as timestamp() gives it}, or {"error": what it raises}."""
     try:
         read = datetime.fromisoformat(iso)
-        return {"ok": (read if read.tzinfo else read.replace(tzinfo=timezone.utc)).timestamp()}
+        return {"ok": (read if read.tzinfo else read.replace(tzinfo=UTC)).timestamp()}
     except ValueError as e:
         return {"error": str(e)}
 
 
 def usage(kind: str, log: bytes) -> list:
+    """session_usage of the log, the bytes of a session log of the harness kind, as JSON holds it."""
     return [[when, tokens] for when, tokens in o.session_usage(kind, os.fsdecode(log))]
 
 

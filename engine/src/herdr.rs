@@ -268,24 +268,24 @@ impl ProcessHerdr {
     /// prints what is not UTF-8.
     fn exec(&self, args: &[&str], limit: Option<Duration>) -> Result<String, HerdrError> {
         let argv: Vec<String> = std::iter::once("herdr").chain(args.iter().copied()).map(String::from).collect();
-        let failed = |why: String| HerdrError::Failed(OrchestratorError(why));
+        // The command as an error names it: its first three words, as Python's timeout names it, never a prompt's
+        // text, which can be long and goes to the log and state.json with the error.
+        let command = args[..args.len().min(3)].join(" ");
+        let failed = |why: String| HerdrError::Failed(OrchestratorError(format!("herdr {command}: {why}")));
         let (status, stdout, stderr) = match (self.run)(&argv, limit) {
             Ok(ran) => ran,
             Err(ProcessError::Start(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(failed("herdr is not on PATH".to_string()))
+                return Err(HerdrError::Failed(OrchestratorError::new("herdr is not on PATH")))
             }
-            Err(ProcessError::Start(e) | ProcessError::Io(e)) => {
-                return Err(failed(format!("herdr {}: {}", args.join(" "), crate::error::os_error(&e, None))))
-            }
+            Err(ProcessError::Start(e) | ProcessError::Io(e)) => return Err(failed(crate::error::os_error(&e, None))),
             Err(ProcessError::Timeout) => {
-                let command = args[..args.len().min(3)].join(" ");
                 return Err(HerdrError::new("timeout", format!("herdr {command} did not return")));
             }
         };
         let decode = |bytes: Vec<u8>| {
             String::from_utf8(bytes)
                 .map(|text| universal_newlines(&text))
-                .map_err(|e| failed(format!("herdr {}: printed what is not UTF-8: {}", args.join(" "), e.utf8_error())))
+                .map_err(|e| failed(format!("printed what is not UTF-8: {}", e.utf8_error())))
         };
         let (stdout, stderr) = (decode(stdout)?, decode(stderr)?);
         if status != 0 {
@@ -293,14 +293,14 @@ impl ProcessHerdr {
         }
         Ok(stdout)
     }
+}
 
-    /// Whether the thing args gets exists: false when herdr answers missing_code.
-    fn exists(&self, missing_code: &str, args: &[&str]) -> Result<bool, HerdrError> {
-        match self.call(args) {
-            Ok(_) => Ok(true),
-            Err(e) if e.code() == Some(missing_code) => Ok(false),
-            Err(e) => Err(e),
-        }
+/// answer's value, or None when herdr answered with the error code: for a command whose one error is an answer.
+fn unless_code<T>(code: &str, answer: Result<T, HerdrError>) -> Result<Option<T>, HerdrError> {
+    match answer {
+        Ok(value) => Ok(Some(value)),
+        Err(e) if e.code() == Some(code) => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
@@ -359,11 +359,8 @@ impl Herdr for ProcessHerdr {
             argv.push("--");
             argv.extend(args.iter().map(String::as_str));
         }
-        match self.call_within(&argv, Some(Duration::from_millis(AGENT_START_TIMEOUT_MS + WAIT_MARGIN_MS))) {
-            Ok(_) => Ok(true),
-            Err(e) if e.code() == Some("agent_not_ready") => Ok(false),
-            Err(e) => Err(e),
-        }
+        let limit = Duration::from_millis(AGENT_START_TIMEOUT_MS + WAIT_MARGIN_MS);
+        Ok(unless_code("agent_not_ready", self.call_within(&argv, Some(limit)))?.is_some())
     }
 
     fn prompt(&self, name: &str, text: &str) -> Result<(), HerdrError> {
@@ -384,11 +381,7 @@ impl Herdr for ProcessHerdr {
     }
 
     fn agent(&self, name: &str) -> Result<Option<Agent>, HerdrError> {
-        let r = match self.call(&["agent", "get", name]) {
-            Ok(r) => r,
-            Err(e) if e.code() == Some("agent_not_found") => return Ok(None),
-            Err(e) => return Err(e),
-        };
+        let Some(r) = unless_code("agent_not_found", self.call(&["agent", "get", name]))? else { return Ok(None) };
         let status = field(&r, "agent get", &["agent", "agent_status"])?;
         let session = r.get("agent").and_then(|a| a.get("agent_session")).and_then(|s| s.get("value"));
         let session = session.and_then(Json::as_str).filter(|s| !s.is_empty()).map(String::from);
@@ -396,11 +389,11 @@ impl Herdr for ProcessHerdr {
     }
 
     fn workspace_exists(&self, workspace: &str) -> Result<bool, HerdrError> {
-        self.exists("workspace_not_found", &["workspace", "get", workspace])
+        Ok(unless_code("workspace_not_found", self.call(&["workspace", "get", workspace]))?.is_some())
     }
 
     fn pane_exists(&self, pane: &str) -> Result<bool, HerdrError> {
-        self.exists("pane_not_found", &["pane", "get", pane])
+        Ok(unless_code("pane_not_found", self.call(&["pane", "get", pane]))?.is_some())
     }
 
     fn focus(&self, name: &str) -> Result<(), HerdrError> {
