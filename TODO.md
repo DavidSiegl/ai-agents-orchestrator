@@ -83,6 +83,19 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   gate-open-decisions ticket 06's. Closes when
   a quality build that runs the scenarios fits in `QUALITY_TIMEOUT`, shown by the contract test green against one, or
   with a larger `QUALITY_TIMEOUT` in the Rust engine.
+- **The Rust engine reads some input no run writes otherwise than the Python engine.** Each is a difference only
+  for a file a human edited, or a case no test of the Python engine pins (rust-engine ticket 04, 2026-10-28): a
+  workflow file's tables are read with their keys sorted (`engine/src/workflow_file.rs`), since the toml crate keeps
+  them in a `BTreeMap` without its `preserve_order` feature, so a table with two problems may be refused naming the
+  other one first; `state.json` with `NaN`, `Infinity` or an integer beyond 64 bits is refused, as serde_json reads
+  it (`engine/src/py/json.rs`), where Python reads it; a time without an offset is taken as UTC, where Python's
+  `fromisoformat` takes it as local time, and a turn whose start is not a time is left out of `summary.md` and
+  `metrics.json`, where the Python engine fails (`epoch_seconds` and `turn_starts` in `engine/src/summary.rs`); a
+  `state.json` field of another type than the Python engine writes is refused naming the run, where Python keeps
+  it, and one it does not know is kept, where Python drops it, as the spec asks (`RunState::from_saved`). Closes,
+  for the TOML order, with toml's `preserve_order` (its `indexmap` is in `Cargo.lock` through Tauri already, but a
+  crate beyond the spec's list is the user's decision); the others are decided against unless a run is found that
+  writes such input.
 - **The contract test leaves its Jenkins build running when it fails.** `tests/contract/test_jenkins.py` triggers one
   quality build and nothing stops it on a failure or a Ctrl-C, so the build holds an executor until it ends, up to
   the 22 minutes build #59 took. Raised by cross-review 73 (F11, 2026-10-27): "a Ctrl-C during the queue wait leaves
@@ -95,7 +108,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   beside a 10-line test read as 40%, not 0%. coverage.py's report of the Python has only `orchestrator` and `gate`.
   Found while adding Rust coverage (rust-engine ticket 03, 2026-10-27). Closes with test modules left out of the
   report, by `#[coverage(off)]` once it is stable or by the tests moving to files that `--ignore-filename-regex`
-  can leave out, or with `gate.py` skipping the lines a `#[cfg(test)]` item spans.
+  can leave out, or with `gate.py` skipping the lines a `#[cfg(test)]` item spans. The Rust engine's tests are in
+  such files already (`engine/src/**/tests.rs`, `engine/src/prompt_parity.rs`, `engine/src/test_support.rs`); the
+  desktop shell's are a `#[cfg(test)]` module in `ui/src-tauri/src/lib.rs`.
 - **No build runs the Rust doctests.** cargo-nextest does not run doctests, and since the Test stage's `cargo llvm-cov
   nextest` replaced the UI stage's `cargo test`, nothing does: `octoflow_ui_lib` is an `rlib` among its crate types
   (`ui/src-tauri/Cargo.toml`), so `cargo test` ran them. The crate has no doc example today. Raised by cross-review 72
