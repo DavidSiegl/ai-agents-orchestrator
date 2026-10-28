@@ -273,57 +273,31 @@ fn a_resolver_error_has_its_number_when_its_text_gives_it() {
 // A self-signed certificate for pypi.org, as the parity harness makes one.
 const CERT: &str = include_str!("../../tests/data/pypi-cert.pem");
 
-#[test]
-fn tls_trusts_what_openssl_s_default_paths_give() {
-    let dir = crate::test_support::TempDir::new();
-    let (file, certs_dir, empty) = (dir.join("cert.pem"), dir.join("certs"), dir.join("empty"));
-    std::fs::write(&file, format!("{CERT}garbage\n")).unwrap();
-    std::fs::create_dir(&certs_dir).unwrap();
-    std::fs::create_dir(&empty).unwrap();
-    std::fs::write(format!("{certs_dir}/5ed36f99.0"), CERT).unwrap();
-    // Not a name OpenSSL looks a certificate up by.
-    std::fs::write(format!("{certs_dir}/retired-ca.pem"), CERT).unwrap();
-    std::fs::create_dir(format!("{certs_dir}/sub")).unwrap();
-    let count = |vars: &[(&str, &str)]| match root_certs(&env(vars)) {
+/// How many certificates roots trusts; None for Mozilla's.
+fn count(roots: RootCerts) -> Option<usize> {
+    match roots {
         RootCerts::Specific(certs) => Some(certs.len()),
         _ => None,
-    };
-    assert_eq!(count(&[("SSL_CERT_FILE", &file), ("SSL_CERT_DIR", &empty)]), Some(1));
-    assert_eq!(count(&[("SSL_CERT_FILE", &file), ("SSL_CERT_DIR", &format!("{certs_dir}:{empty}:/nowhere"))]), Some(2));
-    // A file that is not there adds nothing, and the directory still counts, as in OpenSSL.
-    assert_eq!(count(&[("SSL_CERT_FILE", &dir.join("missing")), ("SSL_CERT_DIR", &certs_dir)]), Some(1));
-    assert_eq!(count(&[("SSL_CERT_FILE", &dir.join("missing")), ("SSL_CERT_DIR", &empty)]), Some(0));
-    // Without either variable: the system's bundle where it has one, else never an empty store.
-    let system = count(&[]);
-    if SYSTEM_BUNDLES.iter().any(|path| std::fs::read(path).is_ok()) {
-        assert!(system.is_some_and(|n| n > 0), "{system:?}");
-    } else {
-        assert_ne!(system, Some(0));
     }
 }
 
 #[test]
-fn a_certificate_directory_gives_only_what_openssl_would_open() {
+fn tls_trusts_ssl_cert_file_else_the_systems_bundle_else_mozillas_roots() {
     let dir = crate::test_support::TempDir::new();
-    let names = [
-        "5ed36f99.0", "5ed36f99.1", "5ed36f99.3", // .3 after the gap at .2
-        "aaaa1111.1", // no .0
-        "bbbb2222.0", "bbbb2222.00", "bbbb2222.01", // not as %d writes them
-        "CCCC3333.0", "cccc333.0", "retired-ca.pem",
-    ];
-    for name in names {
-        std::fs::write(dir.join(name), CERT).unwrap();
-    }
-    std::fs::create_dir(dir.join("dddd4444.0")).unwrap();
-    let mut found: Vec<String> =
-        hash_named_files(&dir.path()).iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
-    found.sort();
-    assert_eq!(found, ["5ed36f99.0", "5ed36f99.1", "bbbb2222.0"]);
-    assert!(hash_named_files(&dir.join("missing")).is_empty());
-    assert_eq!(hash_name("0a1b2c3d.12"), Some(("0a1b2c3d", 12)));
-    for name in ["5ed36f99", "5ED36F99.0", "5ed36f9.0", "5ed36f99.", "5ed36f99.x", "5ed36f99.01"] {
-        assert_eq!(hash_name(name), None, "{name}");
-    }
+    let (file, missing) = (dir.join("cert.pem"), dir.join("missing"));
+    std::fs::write(&file, format!("{CERT}garbage\n")).unwrap();
+    let bundles = [missing.as_str(), file.as_str()];
+    // SSL_CERT_FILE, whatever the system has; one that cannot be read trusts none.
+    assert_eq!(count(trusted(Some(&file), &[missing.as_str()])), Some(1));
+    assert_eq!(count(trusted(Some(&missing), &bundles)), Some(0));
+    // The first bundle that can be read.
+    assert_eq!(count(trusted(None, &bundles)), Some(1));
+    // Mozilla's roots.
+    assert_eq!(count(trusted(None, &[missing.as_str()])), None);
+    // This machine: SSL_CERT_FILE from the environment given, else its own bundle where it has one.
+    assert_eq!(count(root_certs(&env(&[("SSL_CERT_FILE", &file)]))), Some(1));
+    let system = count(root_certs(&env(&[("SSL_CERT_FILE", "")])));
+    assert_eq!(system.is_some(), SYSTEM_BUNDLES.iter().any(|path| std::fs::read(path).is_ok()), "{system:?}");
 }
 
 #[test]

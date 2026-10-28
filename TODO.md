@@ -115,28 +115,27 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   running command's group (its pid is its group's id) before it releases the run, and a test that interrupts a run
   waiting on a command.
 - **The Rust engine talks to Jenkins and PyPI otherwise than urllib in a few cases.** Its transport is ureq
-  (`HttpClient`, `engine/src/http.rs`, rust-engine ticket 07, 2026-10-28), which differs from `urlopen` where no test
-  of the Python engine pins it: ureq reaches an http URL through a proxy with CONNECT, as it does an https one, where
+  (`HttpClient`, `engine/src/http.rs`, rust-engine ticket 07, 2026-10-28), which differs from `urlopen` where no test of
+  the Python engine pins it: ureq reaches an http URL through a proxy with CONNECT, as it does an https one, where
   urllib sends the request itself to the proxy, so a proxy that allows CONNECT only to port 443, as squid does by
-  default, refuses a plain-http Jenkins that `http_proxy` sends through it; TLS trusts the certificates OpenSSL's
-  default paths would give (`SSL_CERT_FILE` or a system bundle, and the hash-named files of `SSL_CERT_DIR` or
-  `/etc/ssl/certs` that OpenSSL would open, in `root_certs`, without checking that a file's certificate has the
-  subject its hash names, as OpenSSL does), but Mozilla's roots on a machine with none of them, where the Python engine,
-  without certifi, trusts none, and a Python on macOS may use the keychain; and the timeout bounds the connect
-  and each read and write, as urllib's does, but not name resolution. In what it reads (`engine/src/ci.rs`,
-  `engine/src/pypi.rs`, `engine/src/py/toml.rs`): an answer of Jenkins's of another shape than a queue item, a build's
-  result, a list of builds or a test report is a `CIError` that may pass, where the Python engine fails with an
-  `AttributeError`, and a queue item's `executable.number` that is not an integer is one too, where Python keeps it;
-  a manifest is read as TOML 1.1, which tomllib before Python 3.15 refuses in part, and why one is not TOML is the
-  toml crate's words with tomllib's `(at line L, column C)`. Closes, for the proxy, with a transport that sends an
+  default, refuses a plain-http Jenkins that `http_proxy` sends through it; TLS trusts the certificates of
+  `SSL_CERT_FILE`, else of the first system bundle that can be read, else Mozilla's roots (`root_certs`), and reads no
+  hashed directory (`SSL_CERT_DIR`, `/etc/ssl/certs`), which OpenSSL reads too, so a setup that has only a hashed
+  directory and no bundle trusts Mozilla's roots instead, where the Python engine, without certifi, trusts what that
+  directory holds (the user's ruling, 2026-10-28, cross-review 93, F21); a Python on macOS may use the keychain; and the
+  timeout bounds the connect and each read and write, as urllib's does, but not name resolution. In what it reads
+  (`engine/src/ci.rs`, `engine/src/pypi.rs`, `engine/src/py/toml.rs`): an answer of Jenkins's of another shape than a
+  queue item, a build's result, a list of builds or a test report is a `CIError` that may pass, where the Python engine
+  fails with an `AttributeError`, and a queue item's `executable.number` that is not an integer is one too, where Python
+  keeps it; a manifest is read as TOML 1.1, which tomllib before Python 3.15 refuses in part, and why one is not TOML is
+  the toml crate's words with tomllib's `(at line L, column C)`. Closes, for the proxy, with a transport that sends an
   http request through a proxy as urllib does, or with `no_proxy` naming Jenkins; the rest decided against unless a
   setup is found that needs it. Decided against (2026-10-28, ticket 07, design-it-twice): `CI` and `PyPI` as traits of
-  their own with in-memory fakes. The engine's tests would then word every URL and error twice, in the code and in
-  the fake, and ticket 08's Workflow tests, which read the requests Jenkins got (`FakeCI.names`, `requests`, `auth`),
-  would port only by re-deriving them; with the seam at `Http`, as Python's at `urlopen`, `FakeJenkins` and
-  `FakePyPI` play the servers and every line of `Jenkins` and `PyPI` runs in those tests. The spec's Lane still
-  names `CI` and `PyPI` among the traits; amending it is the user's (cross-review 93, F1), and issue 08 says which
-  seam it is given.
+  their own with in-memory fakes. The engine's tests would then word every URL and error twice, in the code and in the
+  fake, and ticket 08's Workflow tests, which read the requests Jenkins got (`FakeCI.names`, `requests`, `auth`), would
+  port only by re-deriving them; with the seam at `Http`, as Python's at `urlopen`, `FakeJenkins` and `FakePyPI` play
+  the servers and every line of `Jenkins` and `PyPI` runs in those tests. The spec's Lane still names `CI` and `PyPI`
+  among the traits; amending it is the user's (cross-review 93, F1), and issue 08 says which seam it is given.
 - **Checks and Jenkins calls whose tests need the Workflow or the CLI, left for rust-engine tickets 08 and 09.**
   Ticket 07 ported `TestOrchestratorChecks` on `judge_run` of the build's quality file, not through a quality round:
   `test_a_build_that_failed_before_the_gate_is_not_checked`, `test_without_the_quality_gate_none_of_this_runs`, the
