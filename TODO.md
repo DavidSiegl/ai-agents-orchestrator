@@ -444,12 +444,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   counts a deleted file as Python source only by its `.py`, so a change that only deletes a `#!` python script
   outside the tests edits no Python source for it. Found while fixing the cognitive-complexity check's same gap
   (2026-10-25). Closes with that branch asking `_was_python_source`, which the complexity check now uses.
-- **A Python script with no `.py` is never judged by the cognitive-complexity check.** `_judged_files` judges only
-  paths ending in `.py`, while the pairing reads a script whose `#!` line names python as Python
-  (`_is_python_source`), so a function moved unchanged into `bin/tool` keeps its base, but one the change grows
-  there, or writes new over the limit, is not a finding. `docs/quality-gate.md` says "a `.py` file". Raised by the
-  spec-conformance pass of review round 6 of ticket 06; ticket 06's "the Python functions the change touches" can be
-  read either way. Closes with `_judged_files` taking `_is_python_source`, or a decision that `.py` is the scope.
 - **A body moved into a file hides a function with that body moved out of it, which is then judged as new.** The
   cognitive-complexity check takes a base function as gone from its file when the file now holds its body fewer times
   than the base did (`_BasePool._gone`), without asking where the working tree's copies came from. So when `calc.py`'s
@@ -478,6 +472,16 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   subdirectory.
 
 ## Fixed
+
+- **A Python script with no `.py` was never judged by the cognitive-complexity check.** `_judged_files` judged only
+  paths ending in `.py`, while the pairing read a script whose `#!` line names python as Python, so a function the
+  change grew in `bin/tool`, or wrote new there over the limit, was not a finding. Fixed (2026-10-28, the user's
+  decision in `.scratch/gate-open-decisions/issues/05-complexity-scope.md`): `_parsed_changed_files` takes
+  `_is_python_source` as its test, so cognitive-complexity, vague-names, surviving-mutants and flaky-tests all read
+  such a script as Python, at the cost of reading the first line of each changed file with no `.py`; flaky-tests
+  still picks only `_python_test_file`s, which end in `.py`, and surviving-mutants says such a script's changed
+  functions are `not-mutated`, since mutmut 3.8.0 reads only `*.py` (`_outside_mutmut`). `docs/quality-gate.md` says
+  "a Python file" where it said "a `.py` file".
 
 - **`parse_args` still yielded many survivors after `do_not_mutate_patterns = ['\bhelp=']`.** Its `description=`
   texts were mutated, and few tests check them word for word: 105 of 305 mutants survived on one change. Fixed

@@ -2940,12 +2940,15 @@ def _mutmut_table(rules: str) -> tuple[dict, str | None]:
 
 def _outside_mutmut(path: str, table: dict) -> str | None:
     """Why mutmut, set up by table, a [tool.mutmut] with source_paths, mutates nothing in the file at path, relative to
-    the tree's top; None when it may. As mutmut 3.8.0 decides it, by walking source_paths, then Config.should_mutate's
-    only_mutate and do_not_mutate globs."""
+    the tree's top; None when it may. As mutmut 3.8.0 decides it, by walking source_paths for files named *.py
+    (walk_source_files), so never a #! python script without the name, then Config.should_mutate's only_mutate and
+    do_not_mutate globs."""
     sources: list[str] = table.get("source_paths") or table.get("paths_to_mutate") or []
     roots = [os.path.normpath(p) for p in sources]
     if not any(r == "." or path == r or path.startswith(f"{r}/") for r in roots):
         return f"it is outside [tool.mutmut] source_paths ({', '.join(sources)})"
+    if not path.endswith(".py"):
+        return "mutmut mutates only files named *.py"
     only = table.get("only_mutate", [])
     if only and not any(fnmatch.fnmatch(path, g) for g in only):
         return f"[tool.mutmut] only_mutate ({', '.join(only)}) leaves it out"
@@ -3386,8 +3389,8 @@ def _base_scores(change: GateChange,
     in its file's base. A function of judged takes no base under _COMPLEXITY_EXEMPT, since the tests were never held
     to the limit; and a base that cannot be read or parsed has no functions.
 
-    The functions of every other changed Python file, which the check does not judge, such as one under
-    _COMPLEXITY_EXEMPT or a script whose name has no .py (_is_python_source), pair by body too, from any base, and in
+    The functions of every other changed Python file (_is_python_source), which the check does not judge, such as one
+    under _COMPLEXITY_EXEMPT or one the change adds no line to, pair by body too, from any base, and in
     each step before the judged ones, so that one moved unchanged into such a file is still itself and lends its base
     to no copy, whatever the copy's name.
 
@@ -3471,8 +3474,9 @@ class _BasePool:
 
 
 def _judged_files(change: GateChange) -> tuple[list[dict], dict[str, tuple[list[_ScoredFunction], set[int]]]]:
-    """A finding for each Python file outside _COMPLEXITY_EXEMPT that the change adds lines to and that cannot be read
-    or parsed; and, by path, the scored functions of each of the others, with the lines the change adds to it."""
+    """A finding for each Python file outside _COMPLEXITY_EXEMPT that the change adds lines to, as
+    _parsed_changed_files gives them, and that cannot be read or parsed; and, by path, the scored functions of each of
+    the others, with the lines the change adds to it."""
     out: list[dict] = []
     judged: dict[str, tuple[list[_ScoredFunction], set[int]]] = {}
     for changed in _parsed_changed_files(change, lambda path, added, removed: bool(added)
@@ -3487,7 +3491,8 @@ def _judged_files(change: GateChange) -> tuple[list[dict], dict[str, tuple[list[
 
 @dataclass(frozen=True)
 class _ChangedPythonFile:
-    """A .py file of the change, as the working tree holds it and _parse_working_file reads it."""
+    """A Python source file of the change, as _is_python_source tells one, as the working tree holds it and
+    _parse_working_file reads it."""
     path: str
     added: set[int]  # the lines the change adds to it, from 1
     removed: set[int]  # the points it only removes lines at, as _removal_points gives them; empty when there are none
@@ -3498,15 +3503,16 @@ class _ChangedPythonFile:
 
 def _parsed_changed_files(change: GateChange, wanted: Callable[[str, set[int], set[int]], bool]
                           = lambda path, added, removed: bool(added)) -> Iterator[_ChangedPythonFile]:
-    """Each .py file the change touches that wanted(path, added, removed) accepts, by default each it adds lines to,
-    read and parsed; the arguments are what the _ChangedPythonFile fields of those names hold. Only a regular file of
-    the working tree is read: a symlink, a submodule, a FIFO or a device is left out whatever wanted says
-    (_is_link_or_special). A file the change deletes is not among them, as changed_lines says, nor is one under
-    mutmut's state, as GateChange.from_tree says."""
+    """Each Python source file the change touches, a .py file or a script whose #! line names python
+    (_is_python_source), that wanted(path, added, removed) accepts, by default each it adds lines to, read and parsed;
+    the arguments are what the _ChangedPythonFile fields of those names hold. Only a regular file of the working tree
+    is read: a symlink, a submodule, a FIFO or a device is left out whatever wanted says (_is_link_or_special). A file
+    the change deletes is not among them, as changed_lines says, nor is one under mutmut's state, as
+    GateChange.from_tree says."""
     removals = _removal_points(change.diff)
     for path, added in change.changed.items():
         removed = removals.get(path, set())
-        if path.endswith(".py") and wanted(path, added, removed) and not _is_link_or_special(change, path):
+        if wanted(path, added, removed) and _is_python_source(change, path):
             yield _ChangedPythonFile(path, added, removed, *_parse_working_file(change, path))
 
 

@@ -3982,6 +3982,14 @@ class TestTooComplexFunctions(RepositoryTest):
         self.assertEqual([f["message"] for f in self.found()[1]],
                          ["`copied`: cognitive complexity 20, a new function; the limit is 15."])
 
+    def test_a_function_over_the_limit_written_in_a_python_script_with_no_py_is_found(self):
+        self.put("bin/tool", "#!/usr/bin/env python3\n" + flat("fresh", 16))
+        self.put("bin/run", "#!/bin/sh\n" + flat("shell", 16))  # not Python, so not judged
+        self.git("add", "bin/tool", "bin/run")
+        where, found = self.found()
+        self.assertEqual(where, [("bin/tool", 2, "over-limit")])
+        self.assertEqual(found[0]["message"], "`fresh`: cognitive complexity 16, a new function; the limit is 15.")
+
     def test_a_function_s_text_moved_into_a_file_that_is_not_python_leaves_its_base_to_its_copy(self):
         big = flat("big", 20)
         for name, first in [("notes.txt", "# python, kept for reference\n"), ("bin/run", "#!/bin/sh\n")]:
@@ -4373,6 +4381,16 @@ class TestChangedPythonFiles(RepositoryTest):
         reasons = {f["message"].partition(", so ")[0] for f in found}
         self.assertEqual(len(reasons), 1, reasons)
         self.assertTrue(reasons.pop().startswith("could not be read ("))
+
+    def test_a_python_script_with_no_py_is_read_as_python_and_said_not_mutated(self):
+        self.put("bin/tool", "#!/usr/bin/env python3\ndef load(path):\n    data = path\n    return data\n")
+        self.git("add", "bin/tool")
+        change = self.change()
+        found = gate.surviving_mutants(change, budget=60)
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("bin/tool", 2, "not-mutated")])
+        self.assertIn("mutmut mutates only files named *.py", found[0]["message"])
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in gate.vague_names(change)],
+                         [("bin/tool", 3, "vague-name")])
 
     # Decorators that ast.unparse cannot write: a sum too deep for its recursion, and an int, as hexadecimal, of
     # more than sys.get_int_max_str_digits() decimal digits, which it writes in decimal.

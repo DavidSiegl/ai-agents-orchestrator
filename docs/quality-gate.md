@@ -115,10 +115,10 @@ It reads Python only; another language is a `WeakenedTestsDetector` beside the P
 
 **Cognitive complexity** scores the functions the change edits, so that a change cannot pile branches into the
 function it is editing rather than split it. A function counts when the change adds a line to it, decorators
-included, in a `.py` file outside `tests/`, which is exempt as it is from ruff's `C901`: any function that no other
-function holds, a method of a nested class and a function under a module-level `if` or `try` included. A function
-nested in another is part of that one. Files are read as Python reads them, by their byte order mark or coding
-cookie. Its score is G. Ann Campbell's [cognitive complexity](https://www.sonarsource.com/docs/CognitiveComplexity.pdf),
+included, in a Python file, a `.py` file or a script whose `#!` line names python, outside `tests/`, which is exempt
+as it is from ruff's `C901`: any function that no other function holds, a method of a nested class and a function
+under a module-level `if` or `try` included. A function nested in another is part of that one. Files are read as
+Python reads them, by their byte order mark or coding cookie. Its score is G. Ann Campbell's [cognitive complexity](https://www.sonarsource.com/docs/CognitiveComplexity.pdf),
 which SonarQube's rule S3776 measured: a point for each `if`, `elif`, `else`, ternary, loop, `except`, `match`,
 sequence of like boolean operators and recursion, and one more for each level of nesting on those that nest.
 Recursion is a function that calls itself, or one on a cycle of calls through other functions of its module, each of
@@ -139,7 +139,7 @@ rules. Each of these is a finding:
     move: two functions that call each other from two modules score no recursion, and moved into one they each
     score its point. Of a function moved unchanged and a
     copy of it, the one that kept the name takes it, and a function moved unchanged into a file the check does not
-    judge, such as one under `tests/` or a script with no `.py` whose `#!` line names python, takes its own before
+    judge, such as one under `tests/`, takes its own before
     any copy can, whatever the copy's name. A function takes the base of a function in another file only when that
     one's body is gone from it, so an unchanged copy takes nothing from an original still in its place, under its
     name or another; an original edited in place is gone by its body, which is the cost below;
@@ -218,7 +218,8 @@ call the function:
   with their files, the changed functions in modules mutmut had not reached when it was stopped: it saves a module's
   mutants, none or more, in `mutants/<path>.meta` once it has made them all, and theirs had none;
 - `not-mutated`: a changed function mutmut does not mutate, at its `def`, with the reason: its file is outside
-  `[tool.mutmut]`'s `source_paths`, or left out by `only_mutate` or `do_not_mutate`; it is decorated, other than with
+  `[tool.mutmut]`'s `source_paths`, a script with no `.py`, which mutmut never reads, or left out by `only_mutate` or
+  `do_not_mutate`; it is decorated, other than with
   `@staticmethod` or `@classmethod` alone; or it is `__new__`, `__getattribute__` or `__setattr__`. And a function
   mutmut was given but made no mutant of, with the cause where the gate can tell it, a `# pragma: no mutate block` on
   the line its header ends on, the one form of mutmut's pragmas the gate recognises and names as the cause, or
@@ -303,7 +304,8 @@ changed test, a `conftest.py` or a helper, is one `not-run` finding naming the p
 
 **Vague names** lists the names a change binds that tell a reader nothing about what they hold: `data`, `info`,
 `value`, `status`, `handle` and `manager` (`VAGUE_NAME_WORDS`), or a name ending in one after an underscore, such as
-`raw_info`, in any case. A name counts where a line the change adds binds it: an assignment to a name or to an
+`raw_info`, in any case. A name counts where a line the change adds to a Python file, a `.py` file or a script whose
+`#!` line names python, binds it: an assignment to a name or to an
 attribute of `self` or `cls`, a parameter, a `def` or `class`, a `for` or comprehension target, a `with`'s or an
 `except`'s `as`, an import, a `match` pattern's capture, or a type parameter. Each is a `vague-name` finding once per
 file, at its first such line; a binding on a line the change did not add is never reported, though an added line
