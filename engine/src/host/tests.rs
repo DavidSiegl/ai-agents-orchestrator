@@ -1344,7 +1344,9 @@ fn host_s_constants_are_the_python_engine_s() {
     assert_eq!(int("SSH_ALIVE_COUNT"), i128::from(process::SSH_ALIVE_COUNT));
     let logs = constants.get("SESSION_LOGS").and_then(Json::as_object).unwrap();
     let ours: Vec<(&str, &str)> = logs.iter().map(|(k, v)| (k, v.as_str().unwrap())).collect();
-    assert_eq!(ours, SESSION_LOGS);
+    let harnesses: Vec<(&str, &str)> =
+        crate::harness::HARNESSES.iter().filter_map(|h| h.session_log.map(|log| (h.kind, log.glob))).collect();
+    assert_eq!(ours, harnesses);
 }
 
 #[test]

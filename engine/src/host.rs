@@ -8,6 +8,7 @@
 
 use crate::constants::{NETWORK_TIMEOUT, REMOTE, RUNS_DIR};
 use crate::error::OrchestratorError;
+use crate::harness::{harness, SessionLog};
 use crate::py::json::{Json, Map};
 use crate::py::text::{repr, shlex_join, strip};
 
@@ -31,11 +32,6 @@ pub const GH_UNUSABLE_STATUS: [i32; 2] = [4, 127];
 /// Runs a command in a directory: gh, which finds the repository from its working directory and has no -C, and
 /// gitleaks, which reads an `[extend] path` from its working directory.
 pub const IN_DIR: &str = "cd -- \"$1\" && shift && exec \"$@\"";
-/// Where each harness that records the tokens of a session on disk keeps that record, as a glob relative to the home
-/// directory of the machine the agents run on, `{session}` standing for the session id herdr reports. A harness that
-/// is not here records none the engine reads, and its turns' tokens are "unknown" (docs/design.md, Token usage).
-pub const SESSION_LOGS: [(&str, &str); 2] =
-    [("claude", ".claude/projects/*/{session}.jsonl"), ("pi", ".pi/agent/sessions/*/*_{session}.jsonl")];
 /// The name of a run directory's file that the engine's metrics command reads (crate::summary::run_metrics).
 const METRICS_FILE: &str = "metrics.json";
 
@@ -818,10 +814,11 @@ pub trait Host {
         Ok(runs)
     }
 
-    /// The log in which the harness kind keeps a session's token usage (SESSION_LOGS), found in the home directory
-    /// here, as it is on disk; None for a harness without one, a session id that is not a plain name, or no such file.
+    /// The log in which the harness kind keeps a session's token usage (crate::harness::SessionLog), found in the
+    /// home directory here, as it is on disk; None for a harness without one, a session id that is not a plain name,
+    /// or no such file.
     fn session_log(&self, kind: &str, session: &str) -> Result<Option<Vec<u8>>, OrchestratorError> {
-        let Some((_, pattern)) = SESSION_LOGS.iter().find(|(k, _)| *k == kind) else {
+        let Some(SessionLog { glob: pattern, .. }) = harness(kind).ok().and_then(|h| h.session_log) else {
             return Ok(None);
         };
         if session.is_empty() || !session.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {

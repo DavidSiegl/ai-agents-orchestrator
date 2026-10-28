@@ -2,6 +2,7 @@
 //! itself, metrics.json for the metrics command, and the times and durations they are written in.
 
 use crate::constants::DEFAULT_AGENT;
+use crate::harness::{Tokens, Usage};
 use crate::pipeline::Pipeline;
 use crate::py::datetime::{civil_from_days, fromisoformat_timestamp};
 use crate::py::json::{Json, Map};
@@ -201,6 +202,25 @@ pub fn run_summary(state: &RunState, pipeline: &Pipeline, rounds: &[String], now
         lines.extend(rounds.iter().map(|line| format!("- {line}")));
     }
     lines.join("\n") + "\n"
+}
+
+/// The turn's "tokens", as state.json and metrics.json hold them: the tokens of the answers its agent gave from the
+/// turn's start to the second its handoff file was written, summed, from usage, Harness::session_usage of the session
+/// it ran in throughout; "unknown" when there is no such usage, or the turn's session or either end is not known, or
+/// not a time.
+pub fn turn_tokens(turn: &Map<Json>, usage: Option<&[Usage]>) -> Json {
+    let unknown = || Json::from("unknown");
+    let known = |key: &str| turn.get(key).is_some_and(Json::truthy);
+    let Some(usage) = usage.filter(|_| known("session") && known("started_at") && known("ended_at")) else {
+        return unknown();
+    };
+    let time = |key: &str| turn.get(key).and_then(Json::as_str).and_then(|at| epoch_seconds(at).ok());
+    let (Some(start), Some(end)) = (time("started_at"), time("ended_at")) else { return unknown() };
+    // The answers within [start, end + 1), compared as Python compares an int with a float.
+    let (start, end) = (start as f64, (end + 1) as f64);
+    let total =
+        usage.iter().filter(|u| start <= u.when && u.when < end).fold(Tokens::default(), |sum, u| sum.plus(u.tokens));
+    total.to_json()
 }
 
 /// metrics.json of a run that is done, at now, in seconds since the epoch: one object of the run's outcome, its

@@ -43,14 +43,15 @@ prompt and run state as the Python engine does. So far it holds, by module:
 
 | Module | What it holds, by its Python name |
 |---|---|
-| `py` | What the port needs of Python itself: `text` (str's `splitlines`, `strip`, `os.path.splitext`, `repr`, `difflib.get_close_matches`, with Python's character classes in `unicode_tables`, which `engine/tools/unicode_tables.py` writes), `format` (`str.format`'s language, filling and failing as Python does), `json` (`Json`, a value whose objects keep their order, and `Map`, written as `json.dumps` writes it) and `datetime` (`fromisoformat_timestamp`, the time CPython's C `fromisoformat` reads, quirks included). |
+| `py` | What the port needs of Python itself: `text` (str's `splitlines`, `strip`, `os.path.splitext`, `repr`, `difflib.get_close_matches`, with Python's character classes in `unicode_tables`, which `engine/tools/unicode_tables.py` writes), `format` (`str.format`'s language, filling and failing as Python does), `json` (`Json`, a value whose objects keep their order, and `Map`, written as `json.dumps` writes it; `parse_lossy` reads a lone surrogate as U+FFFD) and `datetime` (`fromisoformat_timestamp`, the time CPython's C `fromisoformat` reads, quirks included). |
 | `constants`, `error`, `env` | The constants, `OrchestratorError`, `child_env`, `ci_credentials` and `parse_env_file`; `ConfigDir` is `config_dir` and where its files are. |
 | `prompts` | The built-in prompts, `Prompts` (by `Prompt`), `load_prompts`, `prompt_problem` and `saved_prompts`. |
 | `pipeline`, `workflow_file` | `Step`, `Pipeline` with all its checks, `default_workflow`, `find_workflow`, `is_built_in`; `parse_workflow`, `load_workflow_file`, `workflow_files`, `named_workflow`, `workflow_definition`, `workflow_toml`, `run_pipeline` and `saved_pipeline`. |
 | `state` | `RunState`, with the fields of a `state.json` it does not know kept, after its own. |
 | `handoff`, `quality` | `parse_verdict` and `parse_blocked`; the quality-file reader, `parse_gate`, `gate_failures`, `finding_fingerprint`, and the engine's own quality files, `leak_report` and `build_failed_report`. |
 | `host`, `patch` | `Host`, a trait whose every operation is a provided method built on running one command (`exec`), so a fake overrides only what it plays: `ProcessHost`, the machine reached by real processes, here or over `ssh -o BatchMode=yes` with `ssh_sharing_options`' shared connection, each command in a process group of its own, its output read to the end on threads of their own, and the whole group killed with SIGKILL when it runs out of time; the secret scan (`scan_unpublished`, finding `quality`'s `Leak`s, `LeaksFound`); `ChangedFile`, `RunFile`, the pull request views with `GhError::Unusable` for `GhUnusable`, and `PushError::Leaks` for `LeaksFound`. Output kept verbatim is bytes, and a path git prints is refused when it is not UTF-8. `FakeHost` (`host/fake.rs`, tests only) is the Python tests' `FakeHost`, git played one command at a time through `git_run`. `added_lines` reads `change_diff`'s diffs. |
-| `pull_request`, `summary`, `proofs` | `spec_title`, `branch_name`, `verdict_line`, `commit_note`, `provenance`, `pr_body` and `without_conflict_warning`; `run_summary`, `run_metrics`, `turns_table`, `turn_lines`, `format_duration`, `format_age`, `iso_utc` and `epoch_seconds`; `proofs_section`. |
+| `harness` | The agent harnesses: `HARNESSES`, one row per harness of what Python keeps in `PERMISSION_ARGS`, `RESUME_ARGS`, `ADD_DIR_ARGS` and `SESSION_LOGS`, found by `harness(kind)`, each `Harness` giving its `permission_args`, `launch_args` and, from its `SessionLog`, `session_usage`; `AgentSettings`. |
+| `pull_request`, `summary`, `proofs` | `spec_title`, `branch_name`, `verdict_line`, `commit_note`, `provenance`, `pr_body` and `without_conflict_warning`; `run_summary`, `run_metrics`, `turns_table`, `turn_lines`, `turn_tokens`, `format_duration`, `format_age`, `iso_utc` and `epoch_seconds`; `proofs_section`. |
 
 Its tests are each module's `<module>/tests.rs`, the Python tests of those parts ported case for case, and checks
 against the Python engine as the oracle: `engine/tests/oracle/` holds what the Python engine gives for the
@@ -61,7 +62,9 @@ engine's definition, every recorded run's commit note, trailers, pull request bo
 `metrics.json` come out as the Python engine wrote them, and every prompt the scenarios recorded is made of the
 engine's templates (`prompt_parity.rs`). `host/tests.rs` and `host/scan/tests.rs` run `Host` on real git in
 temporary repositories, with gh, gitleaks and ssh played by scripts on the `Host`'s `PATH`, which `ProcessHost`
-takes from the environment it is given rather than the process's.
+takes from the environment it is given rather than the process's. `harness/tests.rs` replays the Python engine's
+launch arguments for every harness, permission mode, model, session and directory, and its token counts of sample
+session logs.
 
 ## The phase machine
 

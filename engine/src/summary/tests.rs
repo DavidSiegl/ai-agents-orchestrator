@@ -1,6 +1,6 @@
 use super::*;
 use crate::pipeline::DEFAULT_WORKFLOW;
-use crate::test_support::helper_cases;
+use crate::test_support::{helper_cases, oracle, unhex};
 use crate::workflow_file::saved_pipeline;
 
 #[test]
@@ -174,4 +174,27 @@ fn turns_with_unknown_starts_and_ends_and_quality_rounds() {
     assert_eq!(metrics.get("seconds"), Some(&Json::from(100)));
     let turns = metrics.get("turns").and_then(Json::as_array).unwrap();
     assert_eq!(turns[0].get("tokens"), Some(&Json::Null));
+}
+
+#[test]
+fn turn_tokens_sums_the_answers_within_the_turn_as_the_python_engine_does() {
+    // TestRunMetrics.test_turn_tokens_needs_a_known_window_and_a_harness_it_reads, and more turns, over each Claude
+    // Code log of harness.json and over no log.
+    let recorded = oracle("harness.json");
+    let logs: Vec<Vec<Usage>> = recorded.get("session_usage").and_then(Json::as_array).unwrap().iter()
+        .map(|case| case.as_array().unwrap())
+        .filter(|case| case[0].as_str() == Some("claude"))
+        .map(|case| crate::harness::harness("claude").unwrap().session_usage(&unhex(case[2].as_str().unwrap())))
+        .collect();
+    let cases = recorded.get("turn_tokens").and_then(Json::as_array).unwrap();
+    assert!(cases.len() >= 16);
+    for case in cases {
+        let [turn, expected] = &case.as_array().unwrap()[..] else { panic!("{case:?}") };
+        let turn = turn.as_object().unwrap();
+        let expected = expected.as_array().unwrap();
+        assert_eq!(expected.len(), logs.len() + 1);
+        for (usage, expected) in logs.iter().map(|u| Some(&u[..])).chain([None]).zip(expected) {
+            assert_eq!(&turn_tokens(turn, usage), expected, "{}", case.dumps());
+        }
+    }
 }

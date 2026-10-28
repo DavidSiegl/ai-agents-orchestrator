@@ -86,6 +86,11 @@ impl Drop for TempDir {
 /// The repository's examples/workflows/.
 pub const EXAMPLES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../examples/workflows");
 
+/// The bytes a string of hex digits stands for, as an oracle file writes bytes that are not UTF-8.
+pub fn unhex(hex: &str) -> Vec<u8> {
+    (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex digits")).collect()
+}
+
 /// An oracle file of engine/tests/oracle/, which its generator there wrote from the Python engine, parsed.
 pub fn oracle(file: &str) -> crate::py::json::Json {
     let text = match file {
