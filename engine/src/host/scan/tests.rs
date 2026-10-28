@@ -302,7 +302,7 @@ fn an_added_gitleaks_allow_is_a_leak() {
     let s = Scan::new();
     let allowed = s.repo.commit(&[("c.py", "x = 1\ny = 2  # gitleaks:allow\n")], "allow");
     let leaks = s.leaks(&allowed);
-    let found: Vec<(&str, &str, i64, &str)> =
+    let found: Vec<(&str, &str, u64, &str)> =
         leaks.iter().map(|l| (l.rule.as_str(), l.file.as_str(), l.line, l.commit.as_str())).collect();
     assert_eq!(found, [("gitleaks-allow", "c.py", 2, allowed.as_str())]);
     assert_eq!(leaks[0].fingerprint, format!("{allowed}:c.py:gitleaks-allow:2"));
@@ -315,7 +315,7 @@ fn an_added_gitleaks_allow_is_a_leak() {
 fn an_added_line_that_looks_like_a_header_is_still_read() {
     let s = Scan::new();
     let commit = s.repo.commit(&[("notes.md", "a\n++ token # gitleaks:allow\n")], "header-like");
-    let leaks: Vec<(String, i64)> = s.leaks(&commit).into_iter().map(|l| (l.file, l.line)).collect();
+    let leaks: Vec<(String, u64)> = s.leaks(&commit).into_iter().map(|l| (l.file, l.line)).collect();
     assert_eq!(leaks, [("notes.md".to_string(), 2)]);
 }
 
@@ -363,7 +363,7 @@ fn the_change_s_gitattributes_do_not_hide_an_allow() {
     let s = Scan::new();
     let commit =
         s.repo.commit(&[(".gitattributes", "notes.md -diff\n"), ("notes.md", "x # gitleaks:allow\n")], "hidden");
-    let leaks: Vec<(String, i64)> = s.leaks(&commit).into_iter().map(|l| (l.file, l.line)).collect();
+    let leaks: Vec<(String, u64)> = s.leaks(&commit).into_iter().map(|l| (l.file, l.line)).collect();
     assert_eq!(leaks, [("notes.md".to_string(), 1)]);
 }
 
@@ -376,7 +376,7 @@ fn committed_gitattributes_do_not_hide_an_allow_whatever_git_s_config() {
         s.repo.commit(&[(".gitattributes", "notes.md -diff\n"), ("notes.md", "x # gitleaks:allow\n")], "hidden");
     let host = Scan::host(&s.bin, &[("GIT_ATTR_SOURCE", &commit)]);
     let Err(PushError::Leaks(found)) = s.push_with(&host, &commit) else { panic!("no leak found") };
-    let leaks: Vec<(String, i64)> = found.leaks.into_iter().map(|l| (l.file, l.line)).collect();
+    let leaks: Vec<(String, u64)> = found.leaks.into_iter().map(|l| (l.file, l.line)).collect();
     assert_eq!(leaks, [("notes.md".to_string(), 1)]);
     // gitleaks gets the same git environment, which brings back no tree's attributes.
     let seen = s.seen("env");
@@ -405,7 +405,7 @@ fn a_nul_inside_a_line_does_not_end_the_commit_s_patch() {
     // git still diffs as text a file whose first 8000 bytes hold no NUL.
     let text = format!("{}\na\0b\ny = 2  # gitleaks:allow\n", "x".repeat(9000));
     let commit = s.repo.commit(&[("n.txt", &text)], "nul");
-    let leaks: Vec<(String, i64)> = s.leaks(&commit).into_iter().map(|l| (l.file, l.line)).collect();
+    let leaks: Vec<(String, u64)> = s.leaks(&commit).into_iter().map(|l| (l.file, l.line)).collect();
     assert_eq!(leaks, [("n.txt".to_string(), 3)]);
 }
 
@@ -443,7 +443,7 @@ fn a_gitleaks_that_cannot_judge_blocks_the_push() {
     // A finding's line may come as a number of another kind.
     let found = "{\"RuleID\": \"r\", \"File\": \"f\", \"Commit\": \"c\", \"Fingerprint\": \"p\", \"StartLine\": ";
     s.mode(&format!("report:[{found}\"7\"}}, {found}8.0}}]"));
-    let lines: Vec<i64> = s.leaks(&commit).into_iter().map(|l| l.line).collect();
+    let lines: Vec<u64> = s.leaks(&commit).into_iter().map(|l| l.line).collect();
     assert_eq!(lines, [7, 8]);
 }
 

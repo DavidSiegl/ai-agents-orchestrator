@@ -5,7 +5,8 @@ use std::cell::{RefCell, RefMut};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
-use super::{ChangedFile, Completed, Exec, Host, Leak};
+use super::{ChangedFile, Completed, Exec, Host};
+use crate::quality::Leak;
 use crate::constants::WORKTREES_DIR;
 use crate::error::OrchestratorError;
 use crate::host::tests::FAKE_TOKEN;

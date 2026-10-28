@@ -15,7 +15,9 @@ mod process;
 mod scan;
 
 pub use process::ProcessHost;
-pub use scan::{Leak, LeaksFound};
+pub use scan::LeaksFound;
+
+use crate::quality::Leak;
 
 #[cfg(test)]
 pub(crate) mod fake;
@@ -44,7 +46,10 @@ pub struct Exec {
     pub command: String,
     /// Its exit status, or minus the number of the signal that ended it, as Python's returncode.
     pub status: i32,
+    /// What the command wrote to its standard output; over SSH, the remote command's, which ssh passes on.
     pub stdout: Vec<u8>,
+    /// What it wrote to its standard error; over SSH, the remote command's and ssh's own, such as why it could not
+    /// connect.
     pub stderr: Vec<u8>,
 }
 
@@ -54,8 +59,9 @@ pub struct Exec {
 pub struct Completed<T = String> {
     /// The exit status, or minus the number of the signal that ended it, as Python's returncode.
     pub status: i32,
+    /// What it wrote to its standard output, as Exec::stdout says.
     pub stdout: T,
-    /// For a verbatim run, decoded with each byte that is not UTF-8 replaced, as it is only ever shown.
+    /// What it wrote to its standard error, as Exec::stderr says. For a verbatim run, decoded with each byte that is not UTF-8 replaced, as it is only ever shown.
     pub stderr: String,
 }
 
@@ -104,9 +110,11 @@ pub struct PullRequest {
 pub struct PullRequestMerge {
     /// OPEN, CLOSED or MERGED.
     pub state: String,
+    /// Whether it is a draft, which cannot be merged until it is marked ready.
     pub is_draft: bool,
     /// MERGEABLE, CONFLICTING, or UNKNOWN while GitHub has not computed it.
     pub mergeable: String,
+    /// Its description, as Markdown.
     pub body: String,
 }
 
@@ -709,17 +717,20 @@ pub trait Host {
     /// when gh is missing or logged out, GhError::Failed when it fails otherwise or prints what is not that.
     fn pull_request(&self, cwd: &str, url: &str) -> Result<PullRequest, GhError> {
         let (pr, out) = pr_view(self, cwd, url, "state,headRefOid,closedAt")?;
-        let field = |key: &str| pr.get(key).ok_or_else(|| repr(key));
+        // Each field read and judged in turn, as the Python engine's check reads them, so that the first one wrong is
+        // the one an error names.
         let parsed = (|| {
-            let (state, head, closed) = (field("state")?, field("headRefOid")?, field("closedAt")?);
-            let head = head.as_str().ok_or("expected string or bytes-like object, got another type")?;
-            let valid =
-                state.as_str().is_some() && is_commit_id(head) && (closed.is_null() || closed.as_str().is_some());
-            Ok::<_, String>(valid.then(|| PullRequest {
-                state: state.as_str().unwrap_or_default().to_string(),
-                head_ref_oid: head.to_string(),
-                closed_at: closed.as_str().map(String::from),
-            }))
+            let Some(state) = subscript(&pr, "state")?.as_str() else { return Ok(None) };
+            let head = subscript(&pr, "headRefOid")?;
+            let Some(head) = head.as_str() else {
+                return Err(format!("expected string or bytes-like object, got '{}'", py_type(head)));
+            };
+            let closed = subscript(&pr, "closedAt")?;
+            if !is_commit_id(head) || !(closed.is_null() || closed.as_str().is_some()) {
+                return Ok(None);
+            }
+            let closed_at = closed.as_str().map(String::from);
+            Ok(Some(PullRequest { state: state.to_string(), head_ref_oid: head.to_string(), closed_at }))
         })();
         pr_fields(url, &out, parsed)
     }
@@ -728,20 +739,17 @@ pub trait Host {
     /// them. Errors: as pull_request's.
     fn pull_request_merge(&self, cwd: &str, url: &str) -> Result<PullRequestMerge, GhError> {
         let (pr, out) = pr_view(self, cwd, url, "state,isDraft,mergeable,body")?;
-        let field = |key: &str| pr.get(key).ok_or_else(|| repr(key));
+        // As pull_request reads its fields.
         let parsed = (|| {
-            let (state, draft, mergeable, body) =
-                (field("state")?, field("isDraft")?, field("mergeable")?, field("body")?);
-            let mergeable = mergeable.as_str().filter(|m| ["MERGEABLE", "CONFLICTING", "UNKNOWN"].contains(m));
-            Ok::<_, String>(match (state.as_str(), draft.as_bool(), mergeable, body.as_str()) {
-                (Some(state), Some(is_draft), Some(mergeable), Some(body)) => Some(PullRequestMerge {
-                    state: state.to_string(),
-                    is_draft,
-                    mergeable: mergeable.to_string(),
-                    body: body.to_string(),
-                }),
-                _ => None,
-            })
+            let Some(state) = subscript(&pr, "state")?.as_str() else { return Ok(None) };
+            let Some(is_draft) = subscript(&pr, "isDraft")?.as_bool() else { return Ok(None) };
+            let mergeable = subscript(&pr, "mergeable")?.as_str();
+            let Some(mergeable) = mergeable.filter(|m| ["MERGEABLE", "CONFLICTING", "UNKNOWN"].contains(m)) else {
+                return Ok(None);
+            };
+            let Some(body) = subscript(&pr, "body")?.as_str() else { return Ok(None) };
+            let (state, mergeable, body) = (state.to_string(), mergeable.to_string(), body.to_string());
+            Ok(Some(PullRequestMerge { state, is_draft, mergeable, body }))
         })();
         pr_fields(url, &out, parsed)
     }
@@ -799,7 +807,8 @@ pub trait Host {
             }
             let (age, text) = line.split_once(' ').unwrap_or((line, ""));
             let corrupt = |e: String| OrchestratorError(format!("corrupt run state under {cwd}/{RUNS_DIR}: {e}"));
-            let age: i64 = python_int(age).ok_or_else(|| corrupt(format!("invalid literal for int(): {}", repr(age))))?;
+            let not_int = || corrupt(format!("invalid literal for int() with base 10: {}", repr(age)));
+            let age: i64 = python_int(age).ok_or_else(not_int)?;
             runs.push((age.max(0).unsigned_abs(), Json::parse(text).map_err(corrupt)?));
         }
         Ok(runs)
@@ -1006,6 +1015,30 @@ fn pr_fields<T>(url: &str, out: &str, parsed: Result<Option<T>, String>) -> Resu
             "gh pr view {url} printed {printed}, not a pull request's state"
         )))),
         Err(why) => Err(GhError::Failed(OrchestratorError(format!("gh pr view {url} printed {printed}: {why}")))),
+    }
+}
+
+/// value[key], as Python's subscript reads a JSON value: an object's entry. Errors, as Python's KeyError and TypeError
+/// say them: an object without key, or a value of another type.
+fn subscript<'a>(value: &'a Json, key: &str) -> Result<&'a Json, String> {
+    match value {
+        Json::Object(map) => map.get(key).ok_or_else(|| repr(key)),
+        Json::Array(_) => Err("list indices must be integers or slices, not str".to_string()),
+        Json::Str(_) => Err("string indices must be integers, not 'str'".to_string()),
+        other => Err(format!("'{}' object is not subscriptable", py_type(other))),
+    }
+}
+
+/// The name of the Python type json.loads reads value as.
+fn py_type(value: &Json) -> &'static str {
+    match value {
+        Json::Null => "NoneType",
+        Json::Bool(_) => "bool",
+        Json::Int(_) => "int",
+        Json::Float(_) => "float",
+        Json::Str(_) => "str",
+        Json::Array(_) => "list",
+        Json::Object(_) => "dict",
     }
 }
 

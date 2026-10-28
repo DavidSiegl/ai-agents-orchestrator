@@ -738,13 +738,23 @@ fn pull_request_unexpected_output() {
         }
         format!("{{{}}}", fields.iter().map(|(k, v)| format!("\"{k}\": {v}")).collect::<Vec<_>>().join(", "))
     };
-    for out in ["not json".to_string(), "[]".to_string(), "{\"state\": \"MERGED\"}".to_string(),
-        open("headRefOid", "\"main\""), open("headRefOid", "7"), open("closedAt", "5"), open("state", "1")]
-    {
+    for (out, why) in [
+        ("not json".to_string(), ": "),
+        ("[]".to_string(), ": list indices must be integers or slices, not str"),
+        ("\"x\"".to_string(), ": string indices must be integers, not 'str'"),
+        ("null".to_string(), ": 'NoneType' object is not subscriptable"),
+        ("{\"state\": \"MERGED\"}".to_string(), ": 'headRefOid'"),
+        ("{\"state\": 5}".to_string(), ", not a pull request's state"),
+        (open("headRefOid", "\"main\""), ", not a pull request's state"),
+        (open("headRefOid", "7"), ": expected string or bytes-like object, got 'int'"),
+        (open("closedAt", "5"), ", not a pull request's state"),
+        (open("state", "1"), ", not a pull request's state"),
+    ] {
         let (host, _bin) = gh_host(&out, "", 0);
         let e = host.pull_request("/", URL).unwrap_err();
         let GhError::Failed(e) = e else { panic!("{out}: {e:?}") };
-        assert!(e.0.starts_with(&format!("gh pr view {URL} printed ")), "{out}: {e}");
+        let printed = format!("gh pr view {URL} printed {}", crate::py::text::repr(&out));
+        assert!(e.0.starts_with(&format!("{printed}{why}")), "{out}: {e}");
     }
 }
 

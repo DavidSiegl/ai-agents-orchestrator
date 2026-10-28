@@ -96,6 +96,15 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   as `os.fsdecode` does, and a base's gitleaks rules file that is not UTF-8 fails the scan closed, where the Python
   engine crashes writing it (`engine/src/host.rs`, `utf8_path`; `engine/src/host/scan.rs`, `base_rules_file`).
   Decided against unless a run is found that writes such input.
+- **Host tests and a Host need of the CLI's, left for rust-engine ticket 09.** `TestHostGit`'s `test_prune_on_real_git`
+  and `test_close_on_real_git` and `TestHostPullRequest.test_closed_without_a_time` (`tests/test_orchestrator.py`)
+  drive `prune_branches`, `close_run` and `pull_request_pending`, which the Rust engine has not ported, so ticket 05
+  ported every other `TestHost*` case and not these (cross-review 89, F2, 2026-10-28: "these cases would quietly never
+  be ported"). And `Host::exec` words a command that cannot be started as a message only, so the doctor's `_run_tool`,
+  which tells a tool missing from PATH by its FileNotFoundError, cannot tell it so (cross-review 89, F9: "porting
+  `_run_tool`'s 'not on PATH' check will need either string matching or an interface change"). Closes with ticket 09
+  porting the three cases, and either an error of `exec`'s own for a command not found or the doctor asking
+  `command -v` first, as `_on_path` already does.
 - **A Ctrl-C at the terminal does not reach the command the Rust engine's `Host` is running.** `ProcessHost` starts
   each command in a process group of its own, so that a timeout kills the command with whatever it started
   (`run_process` in `engine/src/host/process.rs`, rust-engine ticket 05, 2026-10-28); the terminal sends SIGINT to

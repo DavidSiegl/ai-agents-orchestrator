@@ -8,30 +8,7 @@ use crate::constants::{GITLEAKS_ALLOW, GITLEAKS_EXTEND_DEPTH, GITLEAKS_TIMEOUT, 
 use crate::error::OrchestratorError;
 use crate::py::json::Json;
 use crate::py::text::{repr, strip};
-
-/// A secret gitleaks found in a commit a push would publish, or a `gitleaks:allow` comment the push would add. It holds
-/// where the secret is, never the secret: nothing built from a Leak can carry it into a log, a prompt, a pull request
-/// or state.json.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Leak {
-    /// gitleaks' RuleID, or "gitleaks-allow" for the comment.
-    pub rule: String,
-    /// The path in that commit.
-    pub file: String,
-    /// Its line there, from 1.
-    pub line: i64,
-    /// The full sha of the commit that adds it.
-    pub commit: String,
-    /// gitleaks' Fingerprint, commit:file:rule:line, which a .gitleaksignore at the base can list.
-    pub fingerprint: String,
-}
-
-impl fmt::Display for Leak {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let short: String = self.commit.chars().take(12).collect();
-        write!(f, "`{}:{}` {} in {short} (fingerprint `{}`)", self.file, self.line, self.rule, self.fingerprint)
-    }
-}
+use crate::quality::Leak;
 
 /// A push refused because what it would publish holds secrets, as Host::refuse_leaks finds them.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -135,9 +112,9 @@ fn findings(text: &str) -> Result<Option<Vec<Leak>>, String> {
             // In the order the Python engine reads them, so that the first field missing is the one named.
             let (rule, file) = (string("RuleID")?, string("File")?);
             let line = match field("StartLine")? {
-                Json::Int(n) => i64::try_from(*n).ok(),
-                Json::Float(x) if x.is_finite() => Some(x.trunc() as i64),
-                Json::Str(s) => super::python_int(s),
+                Json::Int(n) => u64::try_from(*n).ok(),
+                Json::Float(x) if x.is_finite() && *x >= 0.0 => Some(x.trunc() as u64),
+                Json::Str(s) => super::python_int(s).and_then(|n| u64::try_from(n).ok()),
                 _ => None,
             };
             let line = line.ok_or("StartLine is no line number")?;
@@ -178,7 +155,7 @@ fn allow_comments<H: Host + ?Sized>(
                     leaks.push(Leak {
                         rule: "gitleaks-allow".into(),
                         file: path.to_string(),
-                        line: i64::try_from(*line).unwrap_or(i64::MAX),
+                        line: *line,
                         commit: commit.to_string(),
                         fingerprint: format!("{commit}:{path}:gitleaks-allow:{line}"),
                     });
