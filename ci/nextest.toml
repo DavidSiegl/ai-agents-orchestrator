@@ -1,0 +1,7 @@
+# cargo-nextest's configuration for Jenkins's Test stage, which passes it with --config-file in place of a workspace's
+# own .config/nextest.toml, so that a change cannot configure how its own tests are run there. The Test stage runs
+# `cargo llvm-cov nextest --profile ci`, which runs every test whatever fails (cargo-llvm-cov passes --no-fail-fast),
+# and this profile writes their JUnit report to target/nextest/ci/junit.xml in the workspace, which the Jenkinsfile's
+# junit step and gate.py's --tests read (https://nexte.st/docs/machine-readable/junit/).
+[profile.ci.junit]
+path = "junit.xml"

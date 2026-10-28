@@ -14,8 +14,15 @@ need the run's spec.
 
 ```bash
 uv run pytest --cov=orchestrator --cov=gate --cov-branch --cov-report=xml --junitxml=test-results.xml
-uv run python gate.py --base main --tests test-results.xml --coverage coverage.xml --out quality.md
+(cd ui/src-tauri && cargo llvm-cov nextest --workspace --ignore-run-fail --profile ci \
+    --config-file ../../ci/nextest.toml --cobertura --output-path ../../coverage-rust.xml)
+uv run python gate.py --base main --tests test-results.xml --tests ui/src-tauri/target/nextest/ci/junit.xml \
+    --coverage coverage.xml --coverage coverage-rust.xml --out quality.md
 ```
+
+The `cargo llvm-cov` command runs the Rust tests and measures their coverage, which takes [cargo-llvm-cov and
+cargo-nextest](#rust-tests-and-coverage); without them, leave out the Rust reports and the gate judges the Python's
+alone.
 
 `gate.py` is a program of its own beside `orchestrator.py`, and the two share no code: the orchestrator imports
 nothing from it and reads only the file it writes ([the quality file as a
@@ -57,9 +64,9 @@ does not compile is a failed condition naming the compiler's first error in a tr
 cargo's own: a change that deletes a function an old line calls breaks the build on no line it added. A linter that
 outlives its timeout is killed with every process it started, such as cargo's rustc.
 
-ruff, mypy and pymarkdownlnt are in uv's `dev` group, so `uv run` puts them on `PATH`; shellcheck, actionlint and cargo
-come from the Jenkins agent image, and clippy from the Install stage (see "What Jenkins needs"). `gate.py`, like the orchestrator, stays stdlib-only: it runs them as
-processes.
+ruff, mypy and pymarkdownlnt are in uv's `dev` group, so `uv run` puts them on `PATH`; shellcheck, actionlint, cargo
+and clippy come from the Jenkins agent image (see "What Jenkins needs"). `gate.py`, like the orchestrator, stays
+stdlib-only: it runs them as processes.
 
 After the linters come the checks `gate_checks` gives, which judge what the change did rather than how the tree
 reads. Each is a `GateCheck` that either fails the gate or only reports: a failing check's findings are issues,
@@ -324,10 +331,14 @@ The gate is `GATE: ERROR` when any of these holds, and `GATE: OK` otherwise:
   of the file past git's, and shellcheck stops reading there. Either way the gate cannot judge their findings below it.
   The condition names the file, the first such line and the character. A file no linter reads, such as a text file with
   old Mac line ends, is not held to this;
-- with `--tests`, a failing test in that JUnit report;
+- with `--tests`, a failing test in that JUnit report, or in any of them, since `--tests` may be given more than
+  once;
 - with `--coverage`, coverage of new code below 80%, once the change has 20 or more new lines to cover. Coverage
   of new code is (covered branch outcomes + covered lines) / (branch outcomes + coverable lines), over the added
   lines the Cobertura report lists; a smaller change is not judged on coverage, since a few lines swing it too far.
+  Given more than once, as Jenkins gives the Python's and the Rust's, the reports are merged by path and line: a
+  line is coverable when any report lists it and covered when any report covers it, and its branch outcomes are
+  the most any report counts and covers. Each report's paths are taken relative to its `<source>` directories.
 
 Exit status 0 means `GATE: OK`, 1 `GATE: ERROR`, and 2 that the gate could not judge (`REV` names no commit, not a
 git tree, no rules file, an unreadable report), in which case it writes nothing; 130 (`EXIT_INTERRUPTED`) means
@@ -376,6 +387,39 @@ first, at most 50 in all, then a count:
   is each file the change adds or edits under `mutants/`, where mutmut keeps its state: the checks leave them out, as
   [the gate](#the-gate) says, and the surviving-mutants check runs mutmut without them, though the linters read them as
   they read any tracked file.
+
+### Rust tests and coverage
+
+The Rust tests run with [cargo-nextest](https://nexte.st/), under
+[cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov), which builds them with rustc's `-C instrument-coverage`
+and turns what they ran into a Cobertura report with the toolchain's own `llvm-profdata` and `llvm-cov`, from rustup's
+`llvm-tools-preview` component. Jenkins's Test stage runs them in the one Cargo workspace it knows, `ui/src-tauri/`
+(`TODO.md`):
+
+```bash
+cargo llvm-cov nextest --locked --workspace --ignore-run-fail --profile ci --config-file "$WORKSPACE/ci/nextest.toml" \
+    --cobertura --output-path "$WORKSPACE/coverage-rust.xml"
+```
+
+- **What it measures** is lines, not branches: branch coverage of Rust needs a nightly compiler. Each line of the
+  workspace's own crates that the compiler maps to code counts, the dependencies' do not. That includes the lines of
+  a `#[cfg(test)]` module, which coverage.py's `--cov=orchestrator --cov=gate` leaves out of the Python's: the tests'
+  own lines count as covered when they run, so they raise a change's coverage that adds both a function and its tests
+  (`TODO.md`).
+- **Paths.** cargo-llvm-cov names each file relative to the workspace's directory, which it gives as the report's
+  `<source>`, so the gate reads `src/lib.rs` as `ui/src-tauri/src/lib.rs`, as long as the report was written in the
+  tree the gate judges; an absolute path stands as it is.
+- **Failing tests** do not stop the build, as pytest's do not: `--ignore-run-fail` runs every test and writes the
+  report whatever fails, and the `ci` profile of `ci/nextest.toml` writes their JUnit report to
+  `target/nextest/ci/junit.xml` in the workspace, which the Gate stage passes as another `--tests`. A workspace that
+  does not compile stops the build there, and so does a run that leaves no JUnit report, since `--ignore-run-fail`
+  also passes a nextest that ran no test. `--config-file` replaces the workspace's own `.config/nextest.toml`, so a
+  change cannot configure how its tests run in Jenkins.
+- **Doctests** do not run: cargo-nextest has none, and cargo-llvm-cov runs them only on a nightly toolchain
+  (`TODO.md`).
+- **Where the tools come from**: `ci/install-tools.sh` downloads cargo-llvm-cov and cargo-nextest, each pinned by
+  version and the sha256 of its release's archive; rustup's `llvm-tools` component comes with the agent image, as
+  clippy does (see [What Jenkins needs](#what-jenkins-needs)).
 
 ### Whose rules judge a change
 
@@ -455,11 +499,11 @@ and the Reviewer to read; the orchestrator passes it on as it is.
 
 ## Jenkins setup
 
-One `Jenkinsfile` serves two jobs. Every build installs, tests with branch coverage of `orchestrator` and `gate`,
-checks the desktop app, runs the gate and archives `quality.md`; a pull request or `main` build then builds the
-Linux binary and desktop app, which a quality build skips (the `Jenkinsfile`'s Package stage says why), and a build
-of `main` that gets that far also releases. A build of `main` whose tree a pull request build already judged skips
-the tests, the desktop app's checks and the gate (see [A build of main judged at its pull
+One `Jenkinsfile` serves two jobs. Every build installs, tests with branch coverage of `orchestrator` and `gate` and
+line coverage of the Rust, checks the desktop app's frontend, runs the gate and archives `quality.md`; a pull request or
+`main` build then builds the Linux binary and desktop app, which a quality build skips (the `Jenkinsfile`'s Package
+stage says why), and a build of `main` that gets that far also releases. A build of `main` whose tree a pull request
+build already judged skips the tests, the desktop app's checks and the gate (see [A build of main judged at its pull
 request](#a-build-of-main-judged-at-its-pull-request)).
 
 ### What Jenkins needs
@@ -472,20 +516,23 @@ request](#a-build-of-main-judged-at-its-pull-request)).
   does not enforce that - a pushed branch's `Jenkinsfile` can ask for any label - so the restriction sits on
   the nodes, with the Job Restrictions plugin.
 - **`uv`, `git`, `shellcheck`, `actionlint` and clippy on the agent**: the Install stage runs `uv sync --frozen`,
-  and `uv` brings the Python of `.python-version`; clippy is rustup's `clippy` component of the Rust below, which
-  the Install stage adds with `rustup component add clippy`, so the Rust must come from rustup. The gate fails a
-  build that lacks a linter, and the tests that run the real clippy fail without it.
-- **`curl`, `sha256sum`, `tar` and `openssl` on the agent**, for the parity scenarios (`tests/parity`): the Install
-  stage downloads the pinned gitleaks they run with `ci/install-gitleaks.sh`, into the workspace's `.tools/bin`, which
-  the Jenkinsfile puts first on `PATH`, and the scenarios make the fake PyPI's certificate with openssl. Without
-  either tool the scenarios fail, naming it.
-- **Node 20.19 or later and npm, Rust 1.90 or later, and Tauri 2's system packages on the agent**, for the UI stage's
-  checks of the desktop app and the Package stage's `tauri build` of it. Debian 13's `nodejs` and `npm` packages do for
-  the frontend (`ui/.npmrc` makes their npm 9.2 resolve the tree), but its Rust 1.85 is older than the shell's locked
-  Tauri crates need; the packages are `libwebkit2gtk-4.1-dev`, `build-essential`, `pkg-config`, `libxdo-dev`,
-  `libssl-dev` and `file` ([Tauri's prerequisites](https://v2.tauri.app/start/prerequisites/)). A clean `cargo test`
-  takes about 100 s on 2 CPUs; `CARGO_HOME` is kept in the workspace, so nothing is cached between builds. The UI stage
-  then runs `cargo check` under the same lock, since cargo test's build of the dependencies is not the check clippy
+  and `uv` brings the Python of `.python-version`; clippy and llvm-tools (which cargo-llvm-cov reads its coverage
+  data with) are rustup components of the Rust below, which the agent image must add: its rustup home is root's, so
+  a build cannot, and the Install stage fails naming a missing one. The gate fails a build that lacks a linter, and
+  the tests that run the real clippy fail without it.
+- **`curl`, `sha256sum`, `tar` and `openssl` on the agent**: the Install stage downloads, with `ci/install-tools.sh`,
+  pinned releases of the gitleaks the parity scenarios (`tests/parity`) run and of cargo-llvm-cov and cargo-nextest,
+  for the [Rust tests and coverage](#rust-tests-and-coverage), into the workspace's `.tools/bin`, which the Jenkinsfile
+  puts first on `PATH`. The scenarios make the fake PyPI's certificate with openssl. Without gitleaks or openssl the
+  scenarios fail, naming it.
+- **Node 20.19 or later and npm, Rust 1.90 or later, and Tauri 2's system packages on the agent**, for the Test stage's
+  Rust tests, the UI stage's checks of the desktop app and the Package stage's `tauri build` of it. Debian 13's `nodejs`
+  and `npm` packages do for the frontend (`ui/.npmrc` makes their npm 9.2 resolve the tree), but its Rust 1.85 is older
+  than the shell's locked Tauri crates need; the packages are `libwebkit2gtk-4.1-dev`, `build-essential`, `pkg-config`,
+  `libxdo-dev`, `libssl-dev` and `file` ([Tauri's prerequisites](https://v2.tauri.app/start/prerequisites/)). A clean
+  `cargo test` took about 100 s on 2 CPUs, and the Test stage's instrumented run of the same tests about 100 s on 3 of
+  the development host's CPUs; `CARGO_HOME` is kept in the workspace, so nothing is cached between builds. The UI stage
+  runs `cargo check` under the same lock, since the Test stage's build of the dependencies is not the check clippy
   needs: with them checked, the Gate stage's clippy checks only the shell, in about 2 s, against 77 s for a clean one on
   the development host's 6 CPUs. Package bundles the `.deb` with `dpkg-deb`, and the `.AppImage` with `linuxdeploy`,
   which `tauri build` downloads from GitHub each build.

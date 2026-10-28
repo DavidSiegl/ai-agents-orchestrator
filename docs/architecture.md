@@ -343,7 +343,7 @@ description in `tests/conftest.py` says when a run takes them.
   in the `build` group.
 - `ui/package.json`: the desktop app's npm scripts, `dev`, `build`, `test`, `typecheck`, `lint` and `tauri`. Its
   `.npmrc` sets `legacy-peer-deps`, because npm 9.2 as Debian ships it cannot resolve Vitest's optional peers.
-  Jenkins runs the frontend's `typecheck`, `lint` and `test`, and the shell's `cargo test`.
+  Jenkins runs the frontend's `typecheck`, `lint` and `test`, and the shell's tests under cargo-llvm-cov.
 - `packaging/build-desktop.sh`: builds the desktop app with `tauri build`, the binary `build-binary.sh` built
   copied in as its `externalBin` sidecar and `pyproject.toml`'s version, through a release config the script
   writes and merges over `tauri.conf.json`, which bundles nothing. It writes
@@ -357,16 +357,14 @@ description in `tests/conftest.py` says when a run takes them.
   system `python3` (`python3-tk` installed) in `build/binary-venv`, not uv's Python, whose Tk lacks Xft and so
   draws every font in one fixed bitmap size; it refuses a Tk without libXft.
 - `Jenkinsfile`: `uv sync --frozen`, `uv run pytest` with branch coverage of `orchestrator` and `gate` (without
-  `tests/parity` in a quality build whose change touches nothing the scenarios judge; the Test stage lists what), a
-  UI stage that runs `ui/`'s `npm ci`, `typecheck`, `lint` and `test` and `ui/src-tauri/`'s `cargo test --locked`, failing
-  the build before the gate, a Gate stage that runs `gate.py` and archives `quality.md` (see
-  [quality gate](quality-gate.md)), and a Package stage that runs `packaging/build-binary.sh` and
-  `packaging/build-desktop.sh` on every build but a quality build (`GIT_REF` set).
-  On `main` a Release stage publishes a new `pyproject.toml` version as a GitHub release, with
-  `orchestrator.py` attached as the zipapp
-  `octoflow.pyz`, the Linux binary and the Linux desktop app, each with its `.sha256`, in one
-  `gh release create`. Its parameter `GIT_REF` builds
-  another branch; such a build never releases.
+  `tests/parity` in a quality build whose change touches nothing the scenarios judge; the Test stage lists what) and
+  `ui/src-tauri/`'s tests with line coverage (`cargo llvm-cov nextest`), a UI stage that runs `ui/`'s `npm ci`,
+  `typecheck`, `lint` and `test`, failing the build before the gate, a Gate stage that runs `gate.py` and archives
+  `quality.md` (see [quality gate](quality-gate.md)), and a Package stage that runs `packaging/build-binary.sh` and
+  `packaging/build-desktop.sh` on every build but a quality build (`GIT_REF` set). On `main` a Release stage publishes a
+  new `pyproject.toml` version as a GitHub release, with `orchestrator.py` attached as the zipapp `octoflow.pyz`, the
+  Linux binary and the Linux desktop app, each with its `.sha256`, in one `gh release create`. Its parameter `GIT_REF`
+  builds another branch; such a build never releases.
 - `.github/workflows/automerge.yml`: keeps auto-merge on for a pull request into `main` from a branch of this
   repository, so it merges with a merge commit once Jenkins' required check passes; its header lists the pull
   requests it leaves to a human.
