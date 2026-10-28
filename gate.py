@@ -4050,8 +4050,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """The gate's command-line arguments argv, sys.argv[1:] by default, parsed: one attribute per option, as
     gate_command's parameters name them. Bad arguments and --help end the process through argparse's SystemExit,
     status 2 and 0."""
-    parser = argparse.ArgumentParser(prog="gate.py")
-    parser.description = (
+    parser = argparse.ArgumentParser(prog="gate.py", description=(
         f"Run ruff, mypy, pymarkdown, shellcheck, actionlint and clippy over the files the repository tracks and "
         f"write the quality file: GATE: OK or GATE: ERROR on its first line, then the failed conditions, the findings "
         f"on lines added since --base and the checks' errors, the findings to weigh, failing tests, coverage of new "
@@ -4059,7 +4058,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         f"fails the gate, and so do a linter that is missing or fails, a Cargo workspace that does not compile, a "
         f"failing test, and coverage below "
         f"{GATE_MIN_COVERAGE:g}% on {GATE_MIN_NEW_LINES} or more new lines to cover. Exit status 0 for OK, 1 for "
-        f"ERROR, {EXIT_GATE_UNJUDGED} when it could not judge, writing no quality file.")
+        f"ERROR, {EXIT_GATE_UNJUDGED} when it could not judge, writing no quality file."))
     parser.add_argument("--base", required=True, metavar="REV", help="the commit the change is measured from")
     parser.add_argument("--config", metavar="PYPROJECT",
                         help="take the linters' rules from this pyproject.toml instead of the tree's own")

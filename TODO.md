@@ -410,10 +410,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   mutmut was stopped at 600 s after trying 0 of 253 mutants, so its stats and clean runs of the now 1348-test suite
   took the whole budget, and surviving-mutants judges nothing on Jenkins; the parity scenarios, left out of mutmut's
   runs, add nothing to that.
-- **`parse_args` still yields many survivors after `do_not_mutate_patterns = ['\bhelp=']`.** Its `description=` texts
-  and flag names are mutated, and few tests check them word for word: 105 of 305 mutants survived on this branch's
-  change. Reported per function, so it is one finding. Closes with a decision to add `'\bdescription='` to the
-  pattern, or to leave it.
 - **Mutation-testing the code that runs mutmut leaves processes behind.** When mutmut stops a mutant at its own
   timeout it kills the worker, and a real mutmut that `TestSurvivingMutants` started in its own session lives on as
   an orphan group of one process per CPU. It only happens when a change edits that code. Jenkins' process-tree
@@ -482,6 +478,15 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   subdirectory.
 
 ## Fixed
+
+- **`parse_args` still yielded many survivors after `do_not_mutate_patterns = ['\bhelp=']`.** Its `description=`
+  texts were mutated, and few tests check them word for word: 105 of 305 mutants survived on one change. Fixed
+  (2026-10-28, the user's decision in `.scratch/gate-open-decisions/issues/02-description-pattern.md`):
+  `pyproject.toml`'s `[tool.mutmut]` adds `'\bdescription='`, with a comment saying why, and `gate.py`'s `parse_args`
+  passes its description to `ArgumentParser` as `description=` rather than setting `parser.description`, which the
+  pattern would not match. Flag names stay mutated where they start a line of their own. Not closed: the pattern
+  matches any `description=` keyword, so the statement holding `Pipeline(..., description=description)` in
+  `orchestrator.py`'s `parse_workflow` is not mutated either.
 
 - **A quality build left out the parity scenarios when only `tests/guard_errors.py` changed.** The Test stage's path
   list named `tests/conftest.py`, whose guards the scenarios run under, but not `tests/guard_errors.py`, which holds

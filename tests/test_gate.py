@@ -2652,8 +2652,14 @@ class TestSurvivingMutants(RepositoryTest):
         "def describe(parser):\n"       # 25
         "    parser.add_argument('--count', help='how many'\n"   # 26
         "                                     ' to make')\n"    # 27
+        "\n"                            # 28
+        "\n"                            # 29
+        "def describe_tool(make):\n"    # 30
+        "    return make(description='what the'\n"  # 31
+        "                ' tool does')\n"           # 32
     )
-    # The repository's own [tool.mutmut] do_not_mutate_patterns, which keep mutmut off argparse's help texts.
+    # The repository's own [tool.mutmut] do_not_mutate_patterns, which keep mutmut off argparse's help and description
+    # texts.
     with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pyproject.toml"), "rb") as f:
         PATTERNS = tomllib.load(f)["tool"]["mutmut"].get("do_not_mutate_patterns", [])
     # Each test calls one function; only test_checked looks at what it returns.
@@ -3195,6 +3201,13 @@ class TestSurvivingMutants(RepositoryTest):
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 25, "not-mutated")])
         self.assertEqual(found[0]["message"], "`describe` was not mutation-tested: mutmut made no mutant of it; the "
                                               "rules' do_not_mutate_patterns match each statement in it.")
+
+    def test_a_change_to_a_parser_s_description_alone_makes_no_mutant(self):
+        self.put("calc.py", self.BASE.replace(" tool does", " tool is for"))
+        made, found = self.found_and_made()
+        self.assertEqual(made, [])
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 30, "not-mutated")])
+        self.assertIn("the rules' do_not_mutate_patterns match each statement in it", found[0]["message"])
 
     def test_a_function_a_mutmut_pragma_opts_out_is_said_so_and_its_pragma_listed(self):
         text = self.BASE.replace("def unchecked(a, b):", "def unchecked(a, b):  # pragma: no mutate block")

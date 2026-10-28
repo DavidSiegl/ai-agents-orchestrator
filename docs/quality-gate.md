@@ -255,10 +255,11 @@ seconds, and the few it takes to copy the tree. With the flaky-tests check's thr
 the test run, a quality build stays inside the orchestrator's `QUALITY_TIMEOUT` of 1200 seconds when Jenkins starts
 it without a wait in the queue.
 
-This repository's table keeps mutmut off argparse's help texts, which no test reads word for word:
-`do_not_mutate_patterns = ['\bhelp=']`. mutmut matches each pattern against each source line and skips every expression
-that starts on a matching line, with all it holds, so a help text's later lines are skipped too, and so is a whole
-`add_argument(...)` call that starts on its `help=` line. A change to a help text alone makes no mutant.
+This repository's table keeps mutmut off argparse's help and description texts, which no test reads word for word:
+`do_not_mutate_patterns = ['\bhelp=', '\bdescription=']`. mutmut matches each pattern against each source line and
+skips every expression that starts on a matching line, with all it holds, so a text's later lines are skipped too, and
+so is a whole `add_argument(...)` or `add_parser(...)` call that starts on its `help=` or `description=` line. A change
+to such a text alone makes no mutant. Flag names that start a line of their own are still mutated.
 
 **Passes at base** runs the tests the change adds or edits, picked as flaky-tests picks them, against the base's code,
 since a test that passes without the change cannot be what shows the change works: coverage counts the lines it runs,
