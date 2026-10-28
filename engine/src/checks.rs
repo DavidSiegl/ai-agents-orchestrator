@@ -11,7 +11,9 @@ use crate::host::ChangedFile;
 use crate::pipeline::Pipeline;
 use crate::py::text::{basename, decimal_value, strip};
 use crate::pypi::PyPI;
-use crate::quality::{one_line, QUALITY_ERROR, QUALITY_FAILED_CONDITIONS, QUALITY_FINDINGS_LIMIT, QUALITY_OK, QUALITY_TO_WEIGH_NOTE};
+use crate::quality::{
+    one_line, QUALITY_ERROR, QUALITY_FAILED_CONDITIONS, QUALITY_FINDINGS_LIMIT, QUALITY_OK, QUALITY_TO_WEIGH_NOTE,
+};
 
 pub mod dependencies;
 
@@ -128,7 +130,10 @@ pub fn orchestrator_checks<'a>(pipeline: &Pipeline, pypi: &'a PyPI) -> Vec<Orche
     let (max_files, max_lines) = (pipeline.max_files(), pipeline.max_lines());
     vec![
         OrchestratorCheck { name: "new-dependencies", find: Box::new(move |change| new_dependencies(change, pypi)) },
-        OrchestratorCheck { name: "diff-budget", find: Box::new(move |change| Ok(diff_budget(change, max_files, max_lines))) },
+        OrchestratorCheck {
+            name: "diff-budget",
+            find: Box::new(move |change| Ok(diff_budget(change, max_files, max_lines))),
+        },
         OrchestratorCheck { name: "unexpected-paths", find: Box::new(|change| Ok(unexpected_paths(change))) },
     ]
 }
@@ -144,7 +149,11 @@ pub fn judge_run(quality: &str, checks: &[OrchestratorCheck], change: &RunChange
     for check in checks {
         let found = (check.find)(change)?;
         if !found.issues.is_empty() {
-            conditions.push(format!("{} findings of the `{}` check; each is listed below.", found.issues.len(), check.name));
+            conditions.push(format!(
+                "{} findings of the `{}` check; each is listed below.",
+                found.issues.len(),
+                check.name
+            ));
         }
         issues.extend(found.issues.into_iter().map(|f| named(check.name, f)));
         to_weigh.extend(found.to_weigh.into_iter().map(|f| named(check.name, f)));
@@ -170,7 +179,8 @@ fn last_number(quality: &str) -> u128 {
         .filter_map(|line| {
             let digits: Vec<u32> = line.chars().map_while(decimal_value).collect();
             let rest = line.chars().skip(digits.len()).take(2).collect::<String>();
-            (!digits.is_empty() && rest == ". ").then(|| digits.iter().fold(0u128, |n, &d| n.saturating_mul(10).saturating_add(u128::from(d))))
+            (!digits.is_empty() && rest == ". ")
+                .then(|| digits.iter().fold(0u128, |n, &d| n.saturating_mul(10).saturating_add(u128::from(d))))
         })
         .max()
         .unwrap_or(0)
@@ -196,7 +206,10 @@ fn failed_by(quality: &str, conditions: &[String]) -> String {
         }
         None => {
             let first = (at + 1..lines.len()).find(|&i| lines[i].starts_with("## ")).unwrap_or(lines.len());
-            let section = [QUALITY_FAILED_CONDITIONS.to_string(), String::new()].into_iter().chain(bullets).chain([String::new()]);
+            let section = [QUALITY_FAILED_CONDITIONS.to_string(), String::new()]
+                .into_iter()
+                .chain(bullets)
+                .chain([String::new()]);
             lines.splice(first..first, section);
         }
     }
@@ -250,7 +263,10 @@ pub fn diff_budget(change: &RunChange, max_files: i64, max_lines: i64) -> CheckF
     }
     if i128::from(added + removed) > i128::from(max_lines) {
         let whose = if over.is_empty() { "the workflow's" } else { "its" };
-        over.push(format!("{} lines ({added} added, {removed} removed), over {whose} max_lines of {max_lines}", added + removed));
+        over.push(format!(
+            "{} lines ({added} added, {removed} removed), over {whose} max_lines of {max_lines}",
+            added + removed
+        ));
     }
     if over.is_empty() {
         return CheckFindings::default();
@@ -267,7 +283,9 @@ pub fn unexpected_paths(change: &RunChange) -> CheckFindings {
     let to_weigh = paths
         .into_iter()
         .filter(|path| !change.spec.contains(path) && !change.spec.contains(basename(path)))
-        .map(|path| Finding::warning(Some(path), None, "", "the spec mentions neither this path nor its file name.".to_string()))
+        .map(|path| {
+            Finding::warning(Some(path), None, "", "the spec mentions neither this path nor its file name.".to_string())
+        })
         .collect();
     CheckFindings { issues: Vec::new(), to_weigh }
 }

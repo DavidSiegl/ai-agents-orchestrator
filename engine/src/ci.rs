@@ -147,7 +147,11 @@ impl Jenkins {
 
     /// text with each of CI_TOKENS that is set replaced by `****`.
     pub fn mask(&self, text: &str) -> String {
-        CI_TOKENS.iter().map(|name| self.credential(name)).filter(|token| !token.is_empty()).fold(text.to_string(), |text, token| text.replace(token, "****"))
+        CI_TOKENS
+            .iter()
+            .map(|name| self.credential(name))
+            .filter(|token| !token.is_empty())
+            .fold(text.to_string(), |text, token| text.replace(token, "****"))
     }
 
     /// Nothing when each of CI_ENV is set; an error naming those that are not, and where to set them, otherwise.
@@ -167,7 +171,8 @@ impl Jenkins {
     /// or has no such job, or the job lacks one of JOB_PARAMETERS. Asks Jenkins once.
     pub fn preflight(&self) -> Result<(), OrchestratorError> {
         self.check_credentials()?;
-        let url = format!("{}api/json?{}", self.job_url(), urlencode(&[("tree", "property[parameterDefinitions[name]]")]));
+        let url =
+            format!("{}api/json?{}", self.job_url(), urlencode(&[("tree", "property[parameterDefinitions[name]]")]));
         let job = self.get_json(&url).map_err(|e| match e {
             CIError::Request { status: Some(404), .. } => {
                 OrchestratorError(format!("there is no Jenkins job {} at JENKINS_URL: {e}", self.job))
@@ -187,7 +192,8 @@ impl Jenkins {
             return Ok(());
         }
         Err(OrchestratorError(format!(
-            "Jenkins job {} lacks the parameters {}; build it once by hand with empty parameters, so Jenkins learns them \
+            "Jenkins job {} lacks the parameters {}; build it once by hand with empty parameters, so Jenkins learns \
+                them \
              from the Jenkinsfile",
             self.job,
             missing.join(", ")
@@ -199,15 +205,17 @@ impl Jenkins {
     /// as it failed.
     pub fn trigger(&self, git_ref: &str) -> Result<String, CIError> {
         let url = format!("{}buildWithParameters", self.job_url());
-        let answer = self.request(Method::Post, &url, Some(urlencode(&[("GIT_REF", git_ref)]))).map_err(|e| match e {
-            CIError::Request { status: Some(404), .. } => {
-                CIError::Refused(OrchestratorError(format!("Jenkins job {} is gone: {e}", self.job)))
-            }
-            e => e,
-        })?;
-        let item = answer.header("Location").and_then(queue_item_number).ok_or_else(|| {
-            CIError::Refused(OrchestratorError(format!("POST {url} named no queue item")))
-        })?;
+        let answer =
+            self.request(Method::Post, &url, Some(urlencode(&[("GIT_REF", git_ref)]))).map_err(|e| match e {
+                CIError::Request { status: Some(404), .. } => {
+                    CIError::Refused(OrchestratorError(format!("Jenkins job {} is gone: {e}", self.job)))
+                }
+                e => e,
+            })?;
+        let item = answer
+            .header("Location")
+            .and_then(queue_item_number)
+            .ok_or_else(|| CIError::Refused(OrchestratorError(format!("POST {url} named no queue item"))))?;
         // Rebuilt from JENKINS_URL: behind a proxy, Location may name a host only Jenkins itself can reach.
         Ok(format!("{}/queue/item/{item}/", self.base()))
     }
@@ -233,7 +241,11 @@ impl Jenkins {
     /// The newest of the job's last 20 builds whose GIT_REF is git_ref, leaving out the numbers in skip; None when
     /// none is.
     pub fn find_build(&self, git_ref: &str, skip: &[i64]) -> Result<Option<i64>, CIError> {
-        let url = format!("{}api/json?{}", self.job_url(), urlencode(&[("tree", "builds[number,actions[parameters[name,value]]]{0,20}")]));
+        let url = format!(
+            "{}api/json?{}",
+            self.job_url(),
+            urlencode(&[("tree", "builds[number,actions[parameters[name,value]]]{0,20}")])
+        );
         let job = self.get_json(&url)?;
         for build in items(job.get("builds")) {
             let Some(build) = build.as_object() else { return Err(self.not_shaped("GET", &url, "the job's builds")) };
@@ -261,9 +273,16 @@ impl Jenkins {
     /// The job's builds that Jenkins still keeps, newest first, the newest 100 at most. Errors: refused before
     /// asking when credentials are missing; a failed request, or an answer that is not a list of builds.
     pub fn retained_builds(&self) -> Result<Vec<QualityBuild>, CIError> {
-        let url = format!("{}api/json?{}", self.job_url(), urlencode(&[("tree", "builds[number,result,description]{0,100}")]));
+        let url = format!(
+            "{}api/json?{}",
+            self.job_url(),
+            urlencode(&[("tree", "builds[number,result,description]{0,100}")])
+        );
         let job = self.get_json(&url)?;
-        let builds = job.get("builds").and_then(Json::as_array).ok_or_else(|| self.not_shaped("GET", &url, "the job's builds"))?;
+        let builds = job
+            .get("builds")
+            .and_then(Json::as_array)
+            .ok_or_else(|| self.not_shaped("GET", &url, "the job's builds"))?;
         builds
             .iter()
             .map(|build| {
@@ -301,7 +320,8 @@ impl Jenkins {
     /// (test, error) of each failing test of the build: its class name and name joined by a dot, and its error, ""
     /// for none; None when the build has no test report.
     pub fn failed_tests(&self, number: i64) -> Result<Option<Vec<(String, String)>>, CIError> {
-        let url = self.build_url(number, "testReport/api/json", Some("suites[cases[className,name,status,errorDetails]]"));
+        let url =
+            self.build_url(number, "testReport/api/json", Some("suites[cases[className,name,status,errorDetails]]"));
         let report = match self.get_json(&url) {
             Ok(report) => report,
             Err(e) if e.status() == Some(404) => return Ok(None),
@@ -361,11 +381,17 @@ impl Jenkins {
     /// The JSON object Jenkins answers a GET of url with. Errors: request's, and an answer that is not a JSON object.
     fn get_json(&self, url: &str) -> Result<Json, CIError> {
         let answer = self.request(Method::Get, url, None)?;
-        let not_json = |why: String| CIError::Request { message: self.mask(&format!("GET {url}: the answer is not JSON: {why}")), status: None };
+        let not_json = |why: String| CIError::Request {
+            message: self.mask(&format!("GET {url}: the answer is not JSON: {why}")),
+            status: None,
+        };
         let text = std::str::from_utf8(&answer.body).map_err(|e| not_json(utf8_error(&answer.body, &e)))?;
         let value = Json::parse(text).map_err(not_json)?;
         if value.as_object().is_none() {
-            return Err(CIError::Request { message: self.mask(&format!("GET {url}: the answer is not a JSON object")), status: None });
+            return Err(CIError::Request {
+                message: self.mask(&format!("GET {url}: the answer is not a JSON object")),
+                status: None,
+            });
         }
         Ok(value)
     }

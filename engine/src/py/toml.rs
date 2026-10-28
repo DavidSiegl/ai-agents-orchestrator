@@ -89,7 +89,10 @@ pub fn repr(value: &Value) -> String {
         Value::Datetime(d) => datetime_repr(d),
         Value::Array(items) => format!("[{}]", items.iter().map(repr).collect::<Vec<_>>().join(", ")),
         Value::Table(table) => {
-            format!("{{{}}}", table.iter().map(|(k, v)| format!("{}: {}", str_repr(k), repr(v))).collect::<Vec<_>>().join(", "))
+            format!(
+                "{{{}}}",
+                table.iter().map(|(k, v)| format!("{}: {}", str_repr(k), repr(v))).collect::<Vec<_>>().join(", ")
+            )
         }
     }
 }
@@ -107,7 +110,9 @@ fn to_json(value: &Value) -> Result<Json, String> {
         Value::Boolean(b) => Json::Bool(*b),
         Value::Datetime(_) => return Err(format!("Object of type {} is not JSON serializable", type_name(value))),
         Value::Array(items) => Json::Array(items.iter().map(to_json).collect::<Result<_, _>>()?),
-        Value::Table(table) => Json::Object(table.iter().map(|(k, v)| Ok((k.clone(), to_json(v)?))).collect::<Result<_, String>>()?),
+        Value::Table(table) => {
+            Json::Object(table.iter().map(|(k, v)| Ok((k.clone(), to_json(v)?))).collect::<Result<_, String>>()?)
+        }
     })
 }
 

@@ -10,7 +10,11 @@ pub fn quote(s: &str) -> String {
 /// The pairs as a query string or a form body: each name and value quoted as [`quote`] quotes, but a blank written as
 /// `+`, joined by `=` and `&` in the order given, as urllib.parse.urlencode writes a dict.
 pub fn urlencode(pairs: &[(&str, &str)]) -> String {
-    pairs.iter().map(|(name, value)| format!("{}={}", escaped(name, true), escaped(value, true))).collect::<Vec<_>>().join("&")
+    pairs
+        .iter()
+        .map(|(name, value)| format!("{}={}", escaped(name, true), escaped(value, true)))
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 fn escaped(s: &str, plus_for_blank: bool) -> String {

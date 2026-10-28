@@ -251,10 +251,14 @@ impl Proxies {
             Some((name, port)) if port.bytes().all(|b| b.is_ascii_digit()) => name,
             _ => host.as_str(),
         };
-        bypass.split(',').map(|name| name.trim().trim_start_matches('.').to_lowercase()).filter(|name| !name.is_empty()).any(|name| {
-            let domain = format!(".{name}");
-            host_only == name || host == name || host_only.ends_with(&domain) || host.ends_with(&domain)
-        })
+        bypass
+            .split(',')
+            .map(|name| name.trim().trim_start_matches('.').to_lowercase())
+            .filter(|name| !name.is_empty())
+            .any(|name| {
+                let domain = format!(".{name}");
+                host_only == name || host == name || host_only.ends_with(&domain) || host.ends_with(&domain)
+            })
     }
 }
 

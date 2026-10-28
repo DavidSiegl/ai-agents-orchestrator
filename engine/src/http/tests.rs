@@ -182,8 +182,11 @@ fn env<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 
 
 #[test]
 fn the_proxy_is_the_schemes_and_the_lower_case_variable_wins() {
-    let proxies = Proxies::from_env(&env(&[("HTTPS_PROXY", "http://upper:1"), ("https_proxy", "http://lower:2"),
-                                          ("HTTP_PROXY", "http://plain:3")]));
+    let proxies = Proxies::from_env(&env(&[
+        ("HTTPS_PROXY", "http://upper:1"),
+        ("https_proxy", "http://lower:2"),
+        ("HTTP_PROXY", "http://plain:3"),
+    ]));
     assert_eq!(proxies.for_url("https://pypi.org/pypi/x/json"), Some("http://lower:2"));
     assert_eq!(proxies.for_url("http://jenkins:8080/job/"), Some("http://plain:3"));
     assert_eq!(proxies.for_url("ftp://x/"), None);
@@ -197,10 +200,13 @@ fn the_proxy_is_the_schemes_and_the_lower_case_variable_wins() {
 
 #[test]
 fn no_proxy_names_hosts_and_their_domains() {
-    let proxies = Proxies::from_env(&env(&[("http_proxy", "http://p:1"),
-                                          ("no_proxy", " .Example.com, localhost:8080 ,,127.0.0.1")]));
-    for url in ["http://example.com/", "http://ci.EXAMPLE.com:8084/job", "http://localhost:8080/",
-                "http://user@127.0.0.1:9/"] {
+    let proxies = Proxies::from_env(&env(&[
+        ("http_proxy", "http://p:1"),
+        ("no_proxy", " .Example.com, localhost:8080 ,,127.0.0.1"),
+    ]));
+    for url in
+        ["http://example.com/", "http://ci.EXAMPLE.com:8084/job", "http://localhost:8080/", "http://user@127.0.0.1:9/"]
+    {
         assert_eq!(proxies.for_url(url), None, "{url}");
     }
     for url in ["http://notexample.com/", "http://localhost:9090/", "http://127.0.0.2/"] {
@@ -240,16 +246,22 @@ fn a_request_goes_through_the_proxy_its_scheme_names() {
     let client = HttpClient::with_env(&env(&[("http_proxy", &url)]));
     let answer = client.send(&get("http://jenkins.invalid/job/x/api/json")).unwrap();
     assert_eq!(answer.body, b"from the proxy");
-    assert_eq!(tunnel.join().unwrap(), ("CONNECT jenkins.invalid:80 HTTP/1.1".to_string(),
-                                        "GET /job/x/api/json HTTP/1.1".to_string()));
+    assert_eq!(
+        tunnel.join().unwrap(),
+        ("CONNECT jenkins.invalid:80 HTTP/1.1".to_string(), "GET /job/x/api/json HTTP/1.1".to_string())
+    );
 
     let broken = HttpClient::with_env(&env(&[("http_proxy", "http://[::1")]));
-    assert!(matches!(broken.send(&get("http://jenkins.invalid/")), Err(HttpError::NoAnswer(m)) if m.starts_with("the proxy ")));
+    let answer = broken.send(&get("http://jenkins.invalid/"));
+    assert!(matches!(answer, Err(HttpError::NoAnswer(m)) if m.starts_with("the proxy ")));
 }
 
 #[test]
 fn a_resolver_error_has_its_number_when_its_text_gives_it() {
-    assert_eq!(resolver_error("Temporary failure in name resolution"), "[Errno -3] Temporary failure in name resolution");
+    assert_eq!(
+        resolver_error("Temporary failure in name resolution"),
+        "[Errno -3] Temporary failure in name resolution"
+    );
     assert_eq!(resolver_error("No address associated with hostname"), "[Errno -5] No address associated with hostname");
     assert_eq!(resolver_error("something else"), "something else");
 }

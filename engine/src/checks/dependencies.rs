@@ -60,7 +60,9 @@ impl PackageSource {
             SourceKind::Workspace => "a member of the project's workspace, not from PyPI".to_string(),
             SourceKind::Index => format!("from the index {place}, not checked against PyPI"),
             SourceKind::Unknown => {
-                format!("from the uv source {place}, which this check does not know, so where it comes from is not checked")
+                format!(
+                    "from the uv source {place}, which this check does not know, so where it comes from is not checked"
+                )
             }
             SourceKind::Path => format!("from the path {place}, not from PyPI"),
             SourceKind::Git => format!("from the repository {place}, not from PyPI"),
@@ -133,10 +135,13 @@ pub fn python_dependencies(read: &ReadFile) -> Result<Dependencies, Orchestrator
     }
     match toml_manifest(read, "pyproject.toml")?.and_then(|pyproject| pyproject_dependencies(&pyproject)) {
         Ok(direct) => {
-            found.direct = direct.into_iter().map(|(key, source)| {
-                let source = source.or_else(|| found.locked.get(&key).cloned().flatten());
-                (key, source)
-            }).collect();
+            found.direct = direct
+                .into_iter()
+                .map(|(key, source)| {
+                    let source = source.or_else(|| found.locked.get(&key).cloned().flatten());
+                    (key, source)
+                })
+                .collect();
         }
         Err(why) => found.unreadable.insert("pyproject.toml", why),
     }
@@ -158,7 +163,10 @@ fn pyproject_dependencies(pyproject: &Table) -> Result<Sources, String> {
     let project = toml_table(pyproject, "project")?;
     let uv = toml_table(toml_table(pyproject, "tool")?, "uv")?;
     let sources = uv_sources(uv)?;
-    let default = uv_indexes(uv)?.into_iter().find(|i| i.get("default") == Some(&Value::Boolean(true))).and_then(|i| index_source(i.get("url")));
+    let default = uv_indexes(uv)?
+        .into_iter()
+        .find(|i| i.get("default") == Some(&Value::Boolean(true)))
+        .and_then(|i| index_source(i.get("url")));
     let own = match project.get("name").filter(|name| truthy(name)) {
         None => String::new(),
         Some(Value::String(name)) => package_key(name),
@@ -185,8 +193,14 @@ fn pyproject_dependencies(pyproject: &Table) -> Result<Sources, String> {
 fn requirement_lists<'a>(project: &'a Table, pyproject: &'a Table) -> Result<Vec<(String, &'a Value)>, String> {
     const EMPTY: &Value = &Value::Array(Vec::new());
     let mut out = vec![("[project] dependencies".to_string(), project.get("dependencies").unwrap_or(EMPTY))];
-    out.extend(toml_table(project, "optional-dependencies")?.iter().map(|(k, v)| (format!("[project.optional-dependencies] {k}"), v)));
-    out.extend(toml_table(pyproject, "dependency-groups")?.iter().map(|(k, v)| (format!("[dependency-groups] {k}"), v)));
+    out.extend(
+        toml_table(project, "optional-dependencies")?
+            .iter()
+            .map(|(k, v)| (format!("[project.optional-dependencies] {k}"), v)),
+    );
+    out.extend(
+        toml_table(pyproject, "dependency-groups")?.iter().map(|(k, v)| (format!("[dependency-groups] {k}"), v)),
+    );
     Ok(out)
 }
 
@@ -194,7 +208,10 @@ fn requirement_lists<'a>(project: &'a Table, pyproject: &'a Table) -> Result<Vec
 fn uv_indexes(uv: &Table) -> Result<Vec<&Table>, String> {
     match uv.get("index") {
         None => Ok(Vec::new()),
-        Some(Value::Array(items)) => items.iter().map(|i| i.as_table().ok_or(())).collect::<Result<_, _>>()
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|i| i.as_table().ok_or(()))
+            .collect::<Result<_, _>>()
             .map_err(|()| "[[tool.uv.index]] is not a list of tables".to_string()),
         Some(_) => Err("[[tool.uv.index]] is not a list of tables".to_string()),
     }
@@ -204,7 +221,8 @@ fn uv_indexes(uv: &Table) -> Result<Vec<&Table>, String> {
 /// package with several sources, each for some platforms, the first.
 fn uv_sources(uv: &Table) -> Result<Sources, String> {
     // Each index's URL by its name, a later index of a name taking its place, as a dict of them does.
-    let indexes: Vec<(Option<&Value>, Option<&Value>)> = uv_indexes(uv)?.into_iter().map(|i| (i.get("name"), i.get("url"))).collect();
+    let indexes: Vec<(Option<&Value>, Option<&Value>)> =
+        uv_indexes(uv)?.into_iter().map(|i| (i.get("name"), i.get("url"))).collect();
     let mut out = Map::new();
     for (name, entry) in toml_table(uv, "sources")? {
         let first = match entry {
@@ -223,7 +241,12 @@ fn uv_source(entry: &Table, indexes: &[(Option<&Value>, Option<&Value>)]) -> Res
         return Ok(Some(PackageSource::new(SourceKind::Workspace, "")));
     }
     if let Some(index) = entry.get("index") {
-        let url = indexes.iter().rev().find(|(name, _)| *name == Some(index)).and_then(|(_, url)| *url).filter(|url| truthy(url));
+        let url = indexes
+            .iter()
+            .rev()
+            .find(|(name, _)| *name == Some(index))
+            .and_then(|(_, url)| *url)
+            .filter(|url| truthy(url));
         return Ok(index_source(Some(url.unwrap_or(index))));
     }
     for (key, kind) in [("path", SourceKind::Path), ("git", SourceKind::Git), ("url", SourceKind::Url)] {
@@ -237,7 +260,8 @@ fn uv_source(entry: &Table, indexes: &[(Option<&Value>, Option<&Value>)]) -> Res
 /// The PackageSource of a source table of a shape this reader does not know, written as an inline table; why not, for
 /// one json.dumps cannot write.
 fn unknown_source(table: &Table) -> Result<PackageSource, String> {
-    let entries = table.iter().map(|(k, v)| Ok(format!("{k} = {}", json_dumps(v)?))).collect::<Result<Vec<_>, String>>()?;
+    let entries =
+        table.iter().map(|(k, v)| Ok(format!("{k} = {}", json_dumps(v)?))).collect::<Result<Vec<_>, String>>()?;
     Ok(PackageSource::new(SourceKind::Unknown, format!("{{ {} }}", entries.join(", "))))
 }
 
@@ -251,12 +275,18 @@ fn index_source(url: Option<&Value>) -> Option<PackageSource> {
 fn uv_lock_packages(lock: &Table) -> Result<Sources, String> {
     let packages: Vec<(String, &Table)> = match lock.get("package") {
         None => Vec::new(),
-        Some(Value::Array(items)) => items.iter().map(locked_package).collect::<Option<_>>().ok_or("[[package]] is not a list of tables with a name")?,
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(locked_package)
+            .collect::<Option<_>>()
+            .ok_or("[[package]] is not a list of tables with a name")?,
         Some(_) => return Err("[[package]] is not a list of tables with a name".to_string()),
     };
     let mut out = Map::new();
     // editable and virtual: the project itself and its workspace members.
-    for (name, source) in packages.into_iter().filter(|(_, s)| !s.contains_key("editable") && !s.contains_key("virtual")) {
+    for (name, source) in
+        packages.into_iter().filter(|(_, s)| !s.contains_key("editable") && !s.contains_key("virtual"))
+    {
         out.insert(package_key(&name), lock_source(source)?);
     }
     Ok(out)
@@ -279,7 +309,12 @@ fn lock_source(source: &Table) -> Result<Option<PackageSource>, String> {
     if let Some(registry) = source.get("registry") {
         return Ok(index_source(Some(registry)));
     }
-    for (key, kind) in [("path", SourceKind::Path), ("directory", SourceKind::Path), ("git", SourceKind::Git), ("url", SourceKind::Url)] {
+    for (key, kind) in [
+        ("path", SourceKind::Path),
+        ("directory", SourceKind::Path),
+        ("git", SourceKind::Git),
+        ("url", SourceKind::Url),
+    ] {
         if let Some(place) = source.get(key) {
             return Ok(Some(PackageSource::new(kind, py_str(place))));
         }
@@ -381,7 +416,11 @@ pub fn new_dependencies(change: &RunChange, pypi: &PyPI) -> Result<CheckFindings
         }
     }
     for (path, described) in pulled_in.iter() {
-        let message = format!("{} new packages that the change's dependencies pull in: {}.", described.len(), described.join(", "));
+        let message = format!(
+            "{} new packages that the change's dependencies pull in: {}.",
+            described.len(),
+            described.join(", ")
+        );
         found.to_weigh.push(Finding::warning(Some(path), None, "pulled-in", message));
     }
     let mut unasked: Vec<&str> = Vec::new();
@@ -405,16 +444,23 @@ pub fn new_dependencies(change: &RunChange, pypi: &PyPI) -> Result<CheckFindings
 /// Whether new_dependencies's finding on package p fails the gate, and the finding; None for a package of a lock
 /// file that comes from elsewhere than PyPI or that PyPI knows, which is described with the others the lock file
 /// adds, or one that PyPI was not asked about, which is unchecked.
-fn package_finding(p: &NewPackage, named: &BTreeSet<String>, known: &Map<Option<PyPIProject>>, now: f64) -> Option<(bool, Finding)> {
+fn package_finding(
+    p: &NewPackage,
+    named: &BTreeSet<String>,
+    known: &Map<Option<PyPIProject>>,
+    now: f64,
+) -> Option<(bool, Finding)> {
     let member = p.source.as_ref().is_some_and(|s| s.kind == SourceKind::Workspace);
     let in_spec = named.contains(&p.key);
     if p.direct && !in_spec && !member {
-        let message = format!("`{}` is a new dependency that the spec does not name{}.", p.key, whence(p, known, now, "; "));
+        let message =
+            format!("`{}` is a new dependency that the spec does not name{}.", p.key, whence(p, known, now, "; "));
         return Some((true, Finding::error(Some(p.path), p.line, "not-in-spec", message)));
     }
     if matches!(known.get(&p.key), Some(None)) {
         let message = format!(
-            "PyPI does not know `{}`: the name may be mistyped, or name a package that does not exist yet, which anyone \
+            "PyPI does not know `{}`: the name may be mistyped, or name a package that does not exist yet, which \
+                anyone \
              could register (slopsquatting).",
             p.key
         );
@@ -483,7 +529,8 @@ fn new_packages(change: &RunChange) -> Result<(Vec<NewPackage>, CheckFindings), 
             found.to_weigh.push(unreadable(path, why, "at the base", false));
         }
         if after.unreadable.is_empty() && before.unreadable.is_empty() {
-            let text = new_text(ecosystem.manifest)?.map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+            let text =
+                new_text(ecosystem.manifest)?.map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
             let empty = BTreeSet::new();
             let added = change.changed.get(ecosystem.manifest).unwrap_or(&empty);
             let line_naming = |key: &str| line_naming(&text, added, key);
@@ -511,7 +558,13 @@ fn compare_dependencies(
         .direct
         .iter()
         .filter(|(key, _)| !before.direct.contains_key(key))
-        .map(|(key, source)| NewPackage { key: key.to_string(), path: ecosystem.manifest, line: line_naming(key), direct: true, source: source.clone() })
+        .map(|(key, source)| NewPackage {
+            key: key.to_string(),
+            path: ecosystem.manifest,
+            line: line_naming(key),
+            direct: true,
+            source: source.clone(),
+        })
         .collect();
     new.extend(lock_only.iter().filter(|(key, _)| !before.locked.contains_key(key)).map(|(key, source)| NewPackage {
         key: key.to_string(),
@@ -521,13 +574,21 @@ fn compare_dependencies(
         source: source.clone(),
     }));
     let mut moved = Vec::new();
-    let sides =
-        [(ecosystem.manifest, &before.direct, &after.direct, true), (ecosystem.lock_file, &before.locked, &lock_only, false)];
+    let sides = [
+        (ecosystem.manifest, &before.direct, &after.direct, true),
+        (ecosystem.lock_file, &before.locked, &lock_only, false),
+    ];
     for (path, was, now, has_lines) in sides {
         for (key, source) in now.iter() {
             if let Some(old) = was.get(key).filter(|old| *old != source) {
-                let message = format!("`{key}`: at the base, {}; in the change, {}.", source_text(old), source_text(source));
-                moved.push(Finding::warning(Some(path), if has_lines { line_naming(key) } else { None }, "source-changed", message));
+                let message =
+                    format!("`{key}`: at the base, {}; in the change, {}.", source_text(old), source_text(source));
+                moved.push(Finding::warning(
+                    Some(path),
+                    if has_lines { line_naming(key) } else { None },
+                    "source-changed",
+                    message,
+                ));
             }
         }
     }
@@ -540,7 +601,11 @@ fn source_text(source: &Option<PackageSource>) -> String {
 
 fn unreadable(path: &str, why: &str, place: &str, fails: bool) -> Finding {
     let message = format!("`{path}` cannot be read {place}: {why}; the change's new dependencies were not checked.");
-    if fails { Finding::error(Some(path), None, "unreadable", message) } else { Finding::warning(Some(path), None, "unreadable", message) }
+    if fails {
+        Finding::error(Some(path), None, "unreadable", message)
+    } else {
+        Finding::warning(Some(path), None, "unreadable", message)
+    }
 }
 
 /// The first of the added lines of text, by number from 1, that names the package key, as spec_names reads a name:
@@ -595,7 +660,11 @@ fn match_parts(text: &str, parts: &[&str]) -> Option<usize> {
 /// What pypi knows of each package from PyPI, by key, None for one it does not know; and why the rest were not asked:
 /// in_time() said no before a request, or pypi gave no usable answer to one, which leaves that one and every later
 /// one out.
-fn ask_pypi(packages: &[NewPackage], pypi: &PyPI, in_time: &dyn Fn() -> bool) -> (Map<Option<PyPIProject>>, Option<String>) {
+fn ask_pypi(
+    packages: &[NewPackage],
+    pypi: &PyPI,
+    in_time: &dyn Fn() -> bool,
+) -> (Map<Option<PyPIProject>>, Option<String>) {
     let mut known = Map::new();
     for p in packages.iter().filter(|p| p.source.is_none()) {
         if known.contains_key(&p.key) {
@@ -621,7 +690,10 @@ fn whence(p: &NewPackage, known: &Map<Option<PyPIProject>>, now: f64, lead: &str
         None => String::new(),
         Some(None) => format!("{lead}PyPI does not know it either"),
         Some(Some(project)) => {
-            let since = project.first_release.as_ref().map_or_else(|| "with no release files".to_string(), |u| format!("since {}", u.date));
+            let since = project
+                .first_release
+                .as_ref()
+                .map_or_else(|| "with no release files".to_string(), |u| format!("since {}", u.date));
             let latest = project.latest_release.as_ref().map_or_else(String::new, |u| format!(" of {}", u.date));
             let young = if young(project, now) {
                 format!("; it is younger than {YOUNG_PACKAGE_DAYS} days, so few have used it yet")

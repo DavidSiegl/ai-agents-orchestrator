@@ -3,7 +3,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use super::fake::{credentials, jenkins_on, parse_qsl, split_url, FakeJenkins, Outcome, JENKINS, JENKINS_TOKEN, JOB, JOB_PATH};
+use super::fake::{
+    credentials, jenkins_on, parse_qsl, split_url, FakeJenkins, Outcome, JENKINS, JENKINS_TOKEN, JOB, JOB_PATH,
+};
 use super::*;
 use crate::http::tests::{direct, Answer, LocalServer};
 use crate::http::Response;
@@ -34,7 +36,10 @@ fn parameters() -> String {
 #[test]
 fn job_url_maps_folders() {
     let http: Arc<dyn Http> = FakeJenkins::new();
-    assert_eq!(Jenkins::new(JOB, &credentials(), CI_ENV_PATH, Arc::clone(&http)).job_url(), format!("{JENKINS}{JOB_PATH}"));
+    assert_eq!(
+        Jenkins::new(JOB, &credentials(), CI_ENV_PATH, Arc::clone(&http)).job_url(),
+        format!("{JENKINS}{JOB_PATH}")
+    );
     assert_eq!(Jenkins::new("a b", &credentials(), CI_ENV_PATH, http).job_url(), format!("{JENKINS}/job/a%20b/"));
 }
 
@@ -81,7 +86,8 @@ fn network_errors_are_transient_and_masked() {
 
 #[test]
 fn trigger_returns_the_queue_item() {
-    let (server, jenkins) = scripted(vec![Answer::new(201, "").with_header("Location", "http://internal:8080/queue/item/77/")]);
+    let (server, jenkins) =
+        scripted(vec![Answer::new(201, "").with_header("Location", "http://internal:8080/queue/item/77/")]);
     assert_eq!(jenkins.trigger(REF_1_1).unwrap(), format!("{}/queue/item/77/", server.url));
     let seen = &server.seen()[0];
     assert_eq!((seen.method.as_str(), seen.url.clone()), ("POST", format!("{JOB_PATH}buildWithParameters")));
@@ -93,7 +99,10 @@ fn trigger_on_a_deleted_job_is_not_retried() {
     let (server, jenkins) = scripted(vec![Answer::new(404, "<html>")]);
     let e = jenkins.trigger(REF_1_1).unwrap_err();
     assert!(matches!(e, CIError::Refused(_)));
-    assert_eq!(e.to_string(), format!("Jenkins job {JOB} is gone: POST {}{JOB_PATH}buildWithParameters: HTTP 404", server.url));
+    assert_eq!(
+        e.to_string(),
+        format!("Jenkins job {JOB} is gone: POST {}{JOB_PATH}buildWithParameters: HTTP 404", server.url)
+    );
 }
 
 #[test]
@@ -102,7 +111,12 @@ fn missing_credentials_are_named_before_any_request() {
     let env: Map<String> = [("JENKINS_URL", JENKINS.to_string())].into_iter().collect();
     let jenkins = Jenkins::new(JOB, &env, CI_ENV_PATH, Arc::clone(&fake) as Arc<dyn Http>);
     let e = jenkins.build_result(1).unwrap_err();
-    assert_eq!(e.to_string(), format!("the quality gate needs JENKINS_USER, JENKINS_TOKEN in the orchestrator's environment or in {CI_ENV_PATH}"));
+    assert_eq!(
+        e.to_string(),
+        format!(
+            "the quality gate needs JENKINS_USER, JENKINS_TOKEN in the orchestrator's environment or in {CI_ENV_PATH}"
+        )
+    );
     assert!(!e.transient());
     assert_eq!(jenkins.preflight().unwrap_err().to_string(), e.to_string());
     assert!(fake.state().requests.is_empty());
@@ -127,7 +141,12 @@ fn missing_artifact_and_test_report() {
 
 #[test]
 fn malformed_answers() {
-    let (_server, jenkins) = scripted(vec![Answer::new(200, "<html>proxy error</html>"), Answer::new(200, "[1]"), Answer::new(200, b"\xff".to_vec()), Answer::new(200, "")]);
+    let (_server, jenkins) = scripted(vec![
+        Answer::new(200, "<html>proxy error</html>"),
+        Answer::new(200, "[1]"),
+        Answer::new(200, b"\xff".to_vec()),
+        Answer::new(200, ""),
+    ]);
     for _ in 0..3 {
         let e = jenkins.build_result(1).unwrap_err();
         assert!(e.to_string().contains(": the answer is not"), "{e}");
@@ -141,8 +160,16 @@ fn malformed_answers() {
 #[test]
 fn not_json_says_why() {
     let (_server, jenkins) = scripted(vec![Answer::new(200, b"{\"a\": \xff}".to_vec()), Answer::new(200, "[1]")]);
-    assert!(jenkins.build_result(1).unwrap_err().to_string().ends_with(": the answer is not JSON: 'utf-8' codec can't decode byte 0xff in position 6: invalid start byte"));
-    assert!(jenkins.build_result(1).unwrap_err().to_string().ends_with("?tree=building%2Cresult: the answer is not a JSON object"));
+    assert!(jenkins
+        .build_result(1)
+        .unwrap_err()
+        .to_string()
+        .ends_with(": the answer is not JSON: 'utf-8' codec can't decode byte 0xff in position 6: invalid start byte"));
+    assert!(jenkins
+        .build_result(1)
+        .unwrap_err()
+        .to_string()
+        .ends_with("?tree=building%2Cresult: the answer is not a JSON object"));
 }
 
 #[test]
@@ -165,10 +192,15 @@ impl Http for AnyJenkins {
         self.requests.lock().unwrap().push(request.clone());
         let parameters: Vec<String> = JOB_PARAMETERS.iter().map(|p| format!("{{\"name\": \"{p}\"}}")).collect();
         let body = format!(
-            "{{\"property\": [{{\"parameterDefinitions\": [{}]}}], \"builds\": [], \"building\": false, \"result\": \"SUCCESS\", \"suites\": []}}",
+            "{{\"property\": [{{\"parameterDefinitions\": [{}]}}], \"builds\": [], \"building\": false, \"result\": \
+                \"SUCCESS\", \"suites\": []}}",
             parameters.join(", ")
         );
-        Ok(Response { status: 200, headers: vec![("Location".to_string(), "http://jenkins.example:8080/queue/item/7/".to_string())], body: body.into_bytes() })
+        Ok(Response {
+            status: 200,
+            headers: vec![("Location".to_string(), "http://jenkins.example:8080/queue/item/7/".to_string())],
+            body: body.into_bytes(),
+        })
     }
 }
 
@@ -178,19 +210,41 @@ type Call = fn(&Jenkins);
 /// One call of each public method of Jenkins but its constructors, by name: a method added without a line here fails
 /// the credentials test, so that its requests are checked too.
 const CALLS: &[(&str, Call)] = &[
-    ("job", |j| { let _ = j.job(); }),
-    ("job_url", |j| { let _ = j.job_url(); }),
-    ("mask", |j| { let _ = j.mask("a tok-3f9a1c"); }),
+    ("job", |j| {
+        let _ = j.job();
+    }),
+    ("job_url", |j| {
+        let _ = j.job_url();
+    }),
+    ("mask", |j| {
+        let _ = j.mask("a tok-3f9a1c");
+    }),
     ("check_credentials", |j| j.check_credentials().unwrap()),
     ("preflight", |j| j.preflight().unwrap()),
-    ("trigger", |j| { let _ = j.trigger(REF_1_1).unwrap(); }),
-    ("queue_item", |j| { let _ = j.queue_item("http://jenkins.example:8080/queue/item/7/").unwrap(); }),
-    ("find_build", |j| { let _ = j.find_build(REF_1_1, &[]).unwrap(); }),
-    ("retained_builds", |j| { let _ = j.retained_builds().unwrap(); }),
-    ("build_result", |j| { let _ = j.build_result(41).unwrap(); }),
-    ("quality_file", |j| { let _ = j.quality_file(41).unwrap(); }),
-    ("failed_tests", |j| { let _ = j.failed_tests(41).unwrap(); }),
-    ("console_tail", |j| { let _ = j.console_tail(41).unwrap(); }),
+    ("trigger", |j| {
+        let _ = j.trigger(REF_1_1).unwrap();
+    }),
+    ("queue_item", |j| {
+        let _ = j.queue_item("http://jenkins.example:8080/queue/item/7/").unwrap();
+    }),
+    ("find_build", |j| {
+        let _ = j.find_build(REF_1_1, &[]).unwrap();
+    }),
+    ("retained_builds", |j| {
+        let _ = j.retained_builds().unwrap();
+    }),
+    ("build_result", |j| {
+        let _ = j.build_result(41).unwrap();
+    }),
+    ("quality_file", |j| {
+        let _ = j.quality_file(41).unwrap();
+    }),
+    ("failed_tests", |j| {
+        let _ = j.failed_tests(41).unwrap();
+    }),
+    ("console_tail", |j| {
+        let _ = j.console_tail(41).unwrap();
+    }),
 ];
 
 #[test]
@@ -201,8 +255,17 @@ fn credentials_travel_only_in_the_authorization_header() {
     let source = include_str!("../ci.rs");
     let body = &source[source.find("impl Jenkins {").unwrap()..];
     let body = &body[..body.find("\n}\n").unwrap()];
-    let public: Vec<&str> = body.lines().filter_map(|l| l.strip_prefix("    pub fn ")).map(|l| &l[..l.find(['(', '<']).unwrap()]).filter(|n| !["new", "from_env"].contains(n)).collect();
-    assert_eq!(public, CALLS.iter().map(|(n, _)| *n).collect::<Vec<_>>(), "CALLS calls each public method of Jenkins once");
+    let public: Vec<&str> = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("    pub fn "))
+        .map(|l| &l[..l.find(['(', '<']).unwrap()])
+        .filter(|n| !["new", "from_env"].contains(n))
+        .collect();
+    assert_eq!(
+        public,
+        CALLS.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+        "CALLS calls each public method of Jenkins once"
+    );
 
     // The one place that sets an Authorization header, among the engine's sources.
     let src = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
@@ -216,7 +279,11 @@ fn credentials_travel_only_in_the_authorization_header() {
                 dirs.push(path);
             } else if name.ends_with(".rs") && name != "tests.rs" && name != "fake.rs" {
                 let text = std::fs::read_to_string(&path).unwrap();
-                setters.extend(text.lines().filter(|l| l.contains("\"Authorization\"") && !l.trim_start().starts_with("//")).map(|l| format!("{name}: {}", l.trim())));
+                setters.extend(
+                    text.lines()
+                        .filter(|l| l.contains("\"Authorization\"") && !l.trim_start().starts_with("//"))
+                        .map(|l| format!("{name}: {}", l.trim())),
+                );
             }
         }
     }
@@ -224,10 +291,11 @@ fn credentials_travel_only_in_the_authorization_header() {
 
     let token = "tok-3f9a1c";
     let any = Arc::new(AnyJenkins { requests: Mutex::new(Vec::new()) });
-    let env: Map<String> = [("JENKINS_URL", "http://jenkins.example:8080"), ("JENKINS_USER", "agents"), ("JENKINS_TOKEN", token)]
-        .into_iter()
-        .map(|(k, v)| (k, v.to_string()))
-        .collect();
+    let env: Map<String> =
+        [("JENKINS_URL", "http://jenkins.example:8080"), ("JENKINS_USER", "agents"), ("JENKINS_TOKEN", token)]
+            .into_iter()
+            .map(|(k, v)| (k, v.to_string()))
+            .collect();
     let jenkins = Jenkins::new("Folder/quality", &env, CI_ENV_PATH, Arc::clone(&any) as Arc<dyn Http>);
     for (_, call) in CALLS {
         call(&jenkins);
@@ -267,17 +335,42 @@ fn a_quality_round_s_calls_read_the_fakes_answers() {
     assert_eq!(jenkins.queue_item(&queue_url).unwrap(), QueueItem { cancelled: false, build: Some(41) });
     assert_eq!(jenkins.find_build(REF_1_1, &[]).unwrap(), Some(41));
     assert_eq!(jenkins.find_build(REF_1_1, &[41]).unwrap(), None);
-    assert_eq!(jenkins.retained_builds().unwrap(), [QualityBuild { number: 41, result: None, description: Some("judged".to_string()) }]);
+    assert_eq!(
+        jenkins.retained_builds().unwrap(),
+        [QualityBuild { number: 41, result: None, description: Some("judged".to_string()) }]
+    );
     assert_eq!(jenkins.quality_file(41).unwrap(), None);
     assert_eq!(jenkins.build_result(41).unwrap(), None);
     assert_eq!(jenkins.build_result(41).unwrap(), None);
     assert_eq!(jenkins.build_result(41).unwrap().as_deref(), Some("UNSTABLE"));
     assert!(jenkins.quality_file(41).unwrap().unwrap().starts_with("GATE: ERROR\n"));
-    assert_eq!(jenkins.failed_tests(41).unwrap().unwrap(), [("tests.T.test_x".to_string(), "AssertionError: 1 != 2".to_string())]);
+    assert_eq!(
+        jenkins.failed_tests(41).unwrap().unwrap(),
+        [("tests.T.test_x".to_string(), "AssertionError: 1 != 2".to_string())]
+    );
     assert_eq!(jenkins.console_tail(41).unwrap(), "Started\nFinished: UNSTABLE");
     assert_eq!(jenkins.retained_builds().unwrap()[0].result.as_deref(), Some("UNSTABLE"));
     let state = fake.state();
-    assert_eq!(state.names, ["parameters", "trigger", "queue", "queue", "find", "find", "builds", "quality", "build", "build", "build", "quality", "tests", "console", "builds"]);
+    assert_eq!(
+        state.names,
+        [
+            "parameters",
+            "trigger",
+            "queue",
+            "queue",
+            "find",
+            "find",
+            "builds",
+            "quality",
+            "build",
+            "build",
+            "build",
+            "quality",
+            "tests",
+            "console",
+            "builds"
+        ]
+    );
     assert_eq!(state.triggered(), [REF_1_1]);
     assert_eq!(state.requests[1].form, [("GIT_REF", REF_1_1.to_string())].into_iter().collect());
     assert!(state.auth.iter().all(|a| a.as_deref() == Some("Basic YWdlbnRzOmplbmtpbnMtc2VjcmV0LXRva2Vu")));
@@ -302,13 +395,30 @@ fn the_fake_plays_a_gone_job_forgotten_queue_failures_and_builds_without_a_repor
     fake.state().forgotten = true;
     assert_eq!(jenkins.queue_item(&queue_url).unwrap_err().status(), Some(404));
     fake.state().parameters.clear();
-    assert!(jenkins.preflight().unwrap_err().to_string().starts_with(&format!("Jenkins job {JOB} lacks the parameters GIT_REF; build it once by hand")));
+    assert!(jenkins
+        .preflight()
+        .unwrap_err()
+        .to_string()
+        .starts_with(&format!("Jenkins job {JOB} lacks the parameters GIT_REF; build it once by hand")));
     fake.state().job_gone = true;
-    assert_eq!(jenkins.preflight().unwrap_err().to_string(), format!("there is no Jenkins job {JOB} at JENKINS_URL: GET {JENKINS}{JOB_PATH}api/json?tree=property%5BparameterDefinitions%5Bname%5D%5D: HTTP 404"));
+    assert_eq!(
+        jenkins.preflight().unwrap_err().to_string(),
+        format!(
+            "there is no Jenkins job {JOB} at JENKINS_URL: \
+        GET {JENKINS}{JOB_PATH}api/json?tree=property%5BparameterDefinitions%5Bname%5D%5D: HTTP 404"
+        )
+    );
     assert!(jenkins.trigger("t").unwrap_err().to_string().starts_with(&format!("Jenkins job {JOB} is gone: POST ")));
-    assert_eq!(fake.state().names.last().map(String::as_str), Some(format!("POST {JOB_PATH}buildWithParameters").as_str()));
+    assert_eq!(
+        fake.state().names.last().map(String::as_str),
+        Some(format!("POST {JOB_PATH}buildWithParameters").as_str())
+    );
     fake.state().down = true;
-    assert!(jenkins.preflight().unwrap_err().to_string().starts_with("Jenkins at JENKINS_URL failed the preflight: GET "));
+    assert!(jenkins
+        .preflight()
+        .unwrap_err()
+        .to_string()
+        .starts_with("Jenkins at JENKINS_URL failed the preflight: GET "));
     assert_eq!(split_url("https://h/p?q=1"), ("/p".to_string(), "q=1".to_string()));
 }
 
@@ -331,20 +441,47 @@ fn answers_of_another_shape_are_errors_that_may_pass() {
     };
     shape(answering(r#"{"executable": [1]}"#).queue_item("q/").unwrap_err(), "a queue item");
     shape(answering(r#"{"executable": {"number": "5"}}"#).queue_item("q/").unwrap_err(), "a queue item");
-    shape(answering(r#"{"executable": {"number": 18446744073709551615}}"#).queue_item("q/").unwrap_err(), "a queue item");
-    assert_eq!(answering(r#"{"cancelled": true, "executable": {}}"#).queue_item("q/").unwrap(), QueueItem { cancelled: true, build: None });
+    shape(
+        answering(r#"{"executable": {"number": 18446744073709551615}}"#).queue_item("q/").unwrap_err(),
+        "a queue item",
+    );
+    assert_eq!(
+        answering(r#"{"cancelled": true, "executable": {}}"#).queue_item("q/").unwrap(),
+        QueueItem { cancelled: true, build: None }
+    );
     shape(answering(r#"{"builds": [1]}"#).find_build("r", &[]).unwrap_err(), "the job's builds");
-    shape(answering(r#"{"builds": [{"actions": [{"parameters": [1]}]}]}"#).find_build("r", &[]).unwrap_err(), "the job's builds");
-    assert_eq!(answering(r#"{"builds": [{"number": 3, "actions": [7, {"parameters": [{"name": "GIT_REF", "value": "r"}]}]}]}"#).find_build("r", &[]).unwrap(), Some(3));
-    for builds in [r#"{"builds": {}}"#, r#"{"builds": [{"number": true}]}"#, r#"{"builds": [{"number": 1, "result": 2}]}"#, r#"{"builds": [{"number": 1, "description": []}]}"#] {
+    shape(
+        answering(r#"{"builds": [{"actions": [{"parameters": [1]}]}]}"#).find_build("r", &[]).unwrap_err(),
+        "the job's builds",
+    );
+    assert_eq!(
+        answering(
+            r#"{"builds": [{"number": 3, "actions": [7, {"parameters": [{"name": "GIT_REF", "value": "r"}]}]}]}"#
+        )
+        .find_build("r", &[])
+        .unwrap(),
+        Some(3)
+    );
+    for builds in [
+        r#"{"builds": {}}"#,
+        r#"{"builds": [{"number": true}]}"#,
+        r#"{"builds": [{"number": 1, "result": 2}]}"#,
+        r#"{"builds": [{"number": 1, "description": []}]}"#,
+    ] {
         shape(answering(builds).retained_builds().unwrap_err(), "the job's builds");
     }
     shape(answering(r#"{"building": false, "result": 1}"#).build_result(1).unwrap_err(), "the build's result");
     assert_eq!(answering(r#"{"building": 1}"#).build_result(1).unwrap(), None);
     shape(answering(r#"{"suites": [1]}"#).failed_tests(1).unwrap_err(), "a test report");
     shape(answering(r#"{"suites": [{"cases": [null]}]}"#).failed_tests(1).unwrap_err(), "a test report");
-    let odd = r#"{"suites": [{"cases": [{"status": "REGRESSION", "className": null, "name": 3, "errorDetails": ["x"]}, {"status": "FAILED", "name": "t", "className": "c", "errorDetails": ""}]}, {}]}"#;
-    assert_eq!(answering(odd).failed_tests(1).unwrap().unwrap(), [("None.3".to_string(), "['x']".to_string()), ("c.t".to_string(), String::new())]);
+    let odd = concat!(
+        r#"{"suites": [{"cases": [{"status": "REGRESSION", "className": null, "name": 3, "errorDetails": ["x"]}, "#,
+        r#"{"status": "FAILED", "name": "t", "className": "c", "errorDetails": ""}]}, {}]}"#
+    );
+    assert_eq!(
+        answering(odd).failed_tests(1).unwrap().unwrap(),
+        [("None.3".to_string(), "['x']".to_string()), ("c.t".to_string(), String::new())]
+    );
 }
 
 #[test]
@@ -383,7 +520,14 @@ fn from_env_reads_the_ci_env_beside_the_environment() {
     let all_set = CI_ENV.iter().all(|k| std::env::var(k).is_ok_and(|v| !v.is_empty()));
     match Jenkins::from_env(JOB, &config) {
         Ok(jenkins) => assert!(all_set && jenkins.job() == JOB),
-        Err(e) => assert!(!all_set && e.to_string().ends_with(&format!("holds tokens but others may read it; run: chmod 600 {}", config.ci_env_path())), "{e}"),
+        Err(e) => assert!(
+            !all_set
+                && e.to_string().ends_with(&format!(
+                    "holds tokens but others may read it; run: chmod 600 {}",
+                    config.ci_env_path()
+                )),
+            "{e}"
+        ),
     }
     std::fs::set_permissions(config.ci_env_path(), std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
     assert_eq!(Jenkins::from_env(JOB, &config).unwrap().job(), JOB);

@@ -20,14 +20,23 @@ pub(crate) const JOB_PATH: &str = "/job/AI-Agents-Orchestrator/job/py-ai-agents-
 
 /// CI_ENV of the tests: JENKINS, the user agents and JENKINS_TOKEN.
 pub(crate) fn credentials() -> Map<String> {
-    [("JENKINS_URL", format!("{JENKINS}/")), ("JENKINS_USER", "agents".to_string()), ("JENKINS_TOKEN", JENKINS_TOKEN.to_string())]
-        .into_iter()
-        .collect()
+    [
+        ("JENKINS_URL", format!("{JENKINS}/")),
+        ("JENKINS_USER", "agents".to_string()),
+        ("JENKINS_TOKEN", JENKINS_TOKEN.to_string()),
+    ]
+    .into_iter()
+    .collect()
 }
 
 /// JOB on fake, with credentials(): Python's ci_for.
 pub(crate) fn jenkins_on(fake: &Arc<FakeJenkins>) -> Jenkins {
-    Jenkins::new(JOB, &credentials(), "/home/u/.config/ai-agents-orchestrator/ci.env", Arc::clone(fake) as Arc<dyn Http>)
+    Jenkins::new(
+        JOB,
+        &credentials(),
+        "/home/u/.config/ai-agents-orchestrator/ci.env",
+        Arc::clone(fake) as Arc<dyn Http>,
+    )
 }
 
 /// What one build does: Python's outcome().
@@ -59,7 +68,8 @@ impl Outcome {
         Outcome {
             result: if gate == "OK" { "SUCCESS" } else { "UNSTABLE" }.to_string(),
             quality: Some(format!(
-                "GATE: {gate}\n\n`orchestrator.py gate` judged the working tree.\n\n## Issues on changed lines\n\n{numbered}\n"
+                "GATE: {gate}\n\n`orchestrator.py gate` judged the working tree.\n\n## Issues on changed \
+                    lines\n\n{numbered}\n"
             )),
             tests: Vec::new(),
             test_report: true,
@@ -182,7 +192,13 @@ impl FakeJenkinsState {
         self.builds.values().map(|b| b.git_ref.clone()).collect()
     }
 
-    fn answer(&mut self, method: &'static str, path: &str, query: &Map<String>, form: &Map<String>) -> (String, Answer) {
+    fn answer(
+        &mut self,
+        method: &'static str,
+        path: &str,
+        query: &Map<String>,
+        form: &Map<String>,
+    ) -> (String, Answer) {
         let json = |name: &str, value: Json| (name.to_string(), Answer::Body(value.dumps(), None));
         let unknown = (format!("{method} {path}"), Answer::Status(404));
         if let Some(item) = path.strip_prefix("/queue/item/") {
@@ -194,25 +210,44 @@ impl FakeJenkinsState {
                 waiting.left -= 1;
                 return json("queue", object(&[("why", "Waiting for next available executor".into())]));
             }
-            return json("queue", object(&[("cancelled", false.into()), ("executable", object(&[("number", waiting.number.into())]))]));
+            return json(
+                "queue",
+                object(&[("cancelled", false.into()), ("executable", object(&[("number", waiting.number.into())]))]),
+            );
         }
         let Some(rest) = path.strip_prefix(JOB_PATH).filter(|_| !self.job_gone) else { return unknown };
         let tree = query.get("tree").map_or("", String::as_str);
         if rest == "api/json" && tree.contains("property") {
             let definitions = self.parameters.iter().map(|p| object(&[("name", p.as_str().into())])).collect();
-            return json("parameters", object(&[("property", Json::Array(vec![object(&[]), object(&[("parameterDefinitions", Json::Array(definitions))])]))]));
+            return json(
+                "parameters",
+                object(&[(
+                    "property",
+                    Json::Array(vec![object(&[]), object(&[("parameterDefinitions", Json::Array(definitions))])]),
+                )]),
+            );
         }
         if rest == "api/json" && tree.contains("description") {
             let builds = self.builds.iter().rev().map(|(&n, b)| {
                 let result = if b.left > 0 { Json::Null } else { b.outcome.result.as_str().into() };
-                object(&[("number", n.into()), ("result", result), ("description", b.outcome.description.clone().into())])
+                object(&[
+                    ("number", n.into()),
+                    ("result", result),
+                    ("description", b.outcome.description.clone().into()),
+                ])
             });
             return json("builds", object(&[("builds", Json::Array(builds.collect()))]));
         }
         if rest == "api/json" {
             let builds = self.builds.iter().rev().take(20).map(|(&n, b)| {
                 let parameter = object(&[("name", "GIT_REF".into()), ("value", b.git_ref.as_str().into())]);
-                object(&[("number", n.into()), ("actions", Json::Array(vec![object(&[]), object(&[("parameters", Json::Array(vec![parameter]))])]))])
+                object(&[
+                    ("number", n.into()),
+                    (
+                        "actions",
+                        Json::Array(vec![object(&[]), object(&[("parameters", Json::Array(vec![parameter]))])]),
+                    ),
+                ])
             });
             return json("find", object(&[("builds", Json::Array(builds.collect()))]));
         }
@@ -220,7 +255,10 @@ impl FakeJenkinsState {
             let outcome = self.outcomes.pop_front().unwrap_or_else(|| Outcome::gate("OK", &[]));
             let n = self.add_build(form.get("GIT_REF").map_or("", String::as_str), outcome);
             self.queue.insert(900 + n, Waiting { left: 1, number: n });
-            return ("trigger".to_string(), Answer::Body(String::new(), Some(format!("{JENKINS}/queue/item/{}/", 900 + n))));
+            return (
+                "trigger".to_string(),
+                Answer::Body(String::new(), Some(format!("{JENKINS}/queue/item/{}/", 900 + n))),
+            );
         }
         let (n, what) = rest.split_once('/').unwrap_or((rest, ""));
         let Some(build) = n.parse::<i64>().ok().and_then(|n| self.builds.get_mut(&n)) else { return unknown };
@@ -229,17 +267,36 @@ impl FakeJenkinsState {
                 build.left -= 1;
                 json("build", object(&[("building", true.into()), ("result", Json::Null)]))
             }
-            "api/json" => json("build", object(&[("building", false.into()), ("result", build.outcome.result.as_str().into())])),
+            "api/json" => {
+                json("build", object(&[("building", false.into()), ("result", build.outcome.result.as_str().into())]))
+            }
             "artifact/quality.md" => match &build.outcome.quality {
-                Some(quality) if build.left <= build.outcome.after_gate => ("quality".to_string(), Answer::Body(quality.clone(), None)),
+                Some(quality) if build.left <= build.outcome.after_gate => {
+                    ("quality".to_string(), Answer::Body(quality.clone(), None))
+                }
                 _ => ("quality".to_string(), Answer::Status(404)),
             },
             "testReport/api/json" if !build.outcome.test_report => ("tests".to_string(), Answer::Status(404)),
             "testReport/api/json" => {
-                let mut cases: Vec<Json> = build.outcome.tests.iter().map(|(c, t, e)| {
-                    object(&[("className", c.as_str().into()), ("name", t.as_str().into()), ("status", "FAILED".into()), ("errorDetails", e.as_str().into())])
-                }).collect();
-                cases.push(object(&[("className", "t".into()), ("name", "ok".into()), ("status", "PASSED".into()), ("errorDetails", Json::Null)]));
+                let mut cases: Vec<Json> = build
+                    .outcome
+                    .tests
+                    .iter()
+                    .map(|(c, t, e)| {
+                        object(&[
+                            ("className", c.as_str().into()),
+                            ("name", t.as_str().into()),
+                            ("status", "FAILED".into()),
+                            ("errorDetails", e.as_str().into()),
+                        ])
+                    })
+                    .collect();
+                cases.push(object(&[
+                    ("className", "t".into()),
+                    ("name", "ok".into()),
+                    ("status", "PASSED".into()),
+                    ("errorDetails", Json::Null),
+                ]));
                 json("tests", object(&[("suites", Json::Array(vec![object(&[("cases", Json::Array(cases))])]))]))
             }
             "consoleText" => ("console".to_string(), Answer::Body(build.outcome.console.clone(), None)),
@@ -270,9 +327,11 @@ impl Http for FakeJenkins {
         state.names.push(name);
         match answer {
             Answer::Status(status) => Err(HttpError::Status(status)),
-            Answer::Body(body, location) => {
-                Ok(Response { status: 200, headers: location.map(|l| ("Location".to_string(), l)).into_iter().collect(), body: body.into_bytes() })
-            }
+            Answer::Body(body, location) => Ok(Response {
+                status: 200,
+                headers: location.map(|l| ("Location".to_string(), l)).into_iter().collect(),
+                body: body.into_bytes(),
+            }),
         }
     }
 }
@@ -311,5 +370,10 @@ pub(crate) fn parse_qsl(query: &str) -> Map<String> {
         }
         String::from_utf8_lossy(&out).into_owned()
     };
-    query.split('&').filter_map(|pair| pair.split_once('=')).filter(|(_, v)| !v.is_empty()).map(|(k, v)| (decode(k), decode(v))).collect()
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(k, v)| (decode(k), decode(v)))
+        .collect()
 }

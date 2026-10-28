@@ -25,17 +25,22 @@ pub(crate) struct ProjectJson {
 
 impl Default for ProjectJson {
     fn default() -> Self {
-        ProjectJson { first: "2015-01-03", latest: "2024-06-22", version: "3.13.0", license: Some("MIT"), expression: None, classifiers: Vec::new() }
+        ProjectJson {
+            first: "2015-01-03",
+            latest: "2024-06-22",
+            version: "3.13.0",
+            license: Some("MIT"),
+            expression: None,
+            classifiers: Vec::new(),
+        }
     }
 }
 
 impl ProjectJson {
     pub fn json(&self) -> Json {
         let files = |day: &str| {
-            Json::parse(&format!(
-                r#"[{{"upload_time_iso_8601": "{day}T10:00:00.123456Z"}}, {{"upload_time_iso_8601": "{day}T11:00:00Z"}}]"#
-            ))
-            .unwrap()
+            let file = |time: &str| format!(r#"{{"upload_time_iso_8601": "{day}T{time}"}}"#);
+            Json::parse(&format!("[{}, {}]", file("10:00:00.123456Z"), file("11:00:00Z"))).unwrap()
         };
         let info: Map<Json> = [
             ("version", Json::from(self.version)),
@@ -45,8 +50,15 @@ impl ProjectJson {
         ]
         .into_iter()
         .collect();
-        let releases: Map<Json> = [("0.1", files(self.first)), ("0.2", Json::Array(Vec::new())), (self.version, files(self.latest))].into_iter().collect();
-        Json::Object([("info", Json::Object(info)), ("releases", Json::Object(releases)), ("urls", files(self.latest))].into_iter().collect())
+        let releases: Map<Json> =
+            [("0.1", files(self.first)), ("0.2", Json::Array(Vec::new())), (self.version, files(self.latest))]
+                .into_iter()
+                .collect();
+        Json::Object(
+            [("info", Json::Object(info)), ("releases", Json::Object(releases)), ("urls", files(self.latest))]
+                .into_iter()
+                .collect(),
+        )
     }
 }
 
