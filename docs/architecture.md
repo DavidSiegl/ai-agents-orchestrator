@@ -67,10 +67,10 @@ temporary repositories, with gh, gitleaks and ssh played by scripts on the `Host
 takes from the environment it is given rather than the process's. `harness/tests.rs` replays the Python engine's
 launch arguments for every harness, permission mode, model, session and directory, and its token counts of sample
 session logs; `herdr/tests.rs` replays every herdr command the parity scenarios recorded through `ProcessHerdr`, and
-checks each recorded agent start against the launch arguments of the run's state as last saved before it. `checks/tests.rs` runs
-`judge_run` on every quality file a parity recording holds, from the build's quality.md its scenario's Jenkins
-served, and gives the recorded file (`engine/tests/oracle/checks.py` rebuilds each input and checks it on the Python
-engine first).
+checks each recorded agent start against the launch arguments of the run's state as last saved before it.
+`checks/tests.rs` runs `judge_run` on every quality file a parity recording holds, from the build's quality.md its
+scenario's Jenkins served, and gives the recorded file (`engine/tests/oracle/checks.py` rebuilds each input and checks
+it on the Python engine first).
 
 ## The phase machine
 

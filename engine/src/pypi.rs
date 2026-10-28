@@ -6,10 +6,10 @@ use std::sync::Arc;
 
 use crate::constants::PYPI_TIMEOUT;
 use crate::http::{Http, HttpClient, HttpError, Method, Request};
+use crate::py::datetime::IsoTime;
 use crate::py::json::Json;
 use crate::py::text::{shortened, splitlines, strip, utf8_error};
 use crate::py::url::quote;
-use crate::summary::epoch_seconds;
 
 #[cfg(test)]
 pub(crate) mod fake;
@@ -142,12 +142,8 @@ fn first_upload(files: &[&Json]) -> Result<Option<Upload>, String> {
 
 /// The upload at the ISO 8601 time iso, as datetime.fromisoformat reads it.
 fn upload_of(iso: &str) -> Result<Upload, String> {
-    let seconds = epoch_seconds(iso)?;
-    // epoch_seconds leaves out the fraction of a second, which orders two files uploaded in one second.
-    let clock = iso.get(10..).unwrap_or("");
-    let fraction = clock.split_once('.').map_or("", |(_, f)| f.split(['Z', '+', '-']).next().unwrap_or(""));
-    let fraction: f64 = if fraction.is_empty() { 0.0 } else { format!("0.{fraction}").parse().unwrap_or(0.0) };
-    Ok(Upload { at: seconds as f64 + fraction, date: iso[..10].to_string() })
+    let time = IsoTime::parse(iso)?;
+    Ok(Upload { at: time.timestamp(), date: time.date() })
 }
 
 /// The project's license, as PyPIProject::license says.

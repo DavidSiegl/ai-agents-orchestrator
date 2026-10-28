@@ -143,6 +143,25 @@ fn the_earliest_upload_wins_by_its_fraction_of_a_second_and_its_offset() {
 }
 
 #[test]
+fn an_upload_time_reads_in_every_form_fromisoformat_reads() {
+    // Python 3.14's fromisoformat(time).timestamp() and f"{...:%Y-%m-%d}" of each.
+    let cases = [
+        ("2026W441\u{20ac}12:00Z", 1_793_016_000.0, "2026-10-26"),
+        ("20261028T120000Z", 1_793_188_800.0, "2026-10-28"),
+        ("2026-10-28T24:00:00Z", 1_793_232_000.0, "2026-10-29"),
+        ("2026-10-28T23:00:00-02:00", 1_793_235_600.0, "2026-10-28"),
+        ("0001-01-01T00:00Z", -62_135_596_800.0, "0001-01-01"),
+    ];
+    for (time, at, date) in cases {
+        assert_eq!(upload_of(time), Ok(Upload { at, date: date.to_string() }), "{time}");
+    }
+    assert_eq!(upload_of("20261003").map(|u| u.date), Ok("2026-10-03".to_string()));
+    let text = r#"{"info": {"version": "1"}, "urls": [{"upload_time_iso_8601": "2026-10-28T12:00:00,7Z"},
+        {"upload_time_iso_8601": "2026-10-28T12:00:00,5Z"}]}"#;
+    assert_eq!(project(body(text)).unwrap().unwrap().latest_release.unwrap().at, 1_793_188_800.5);
+}
+
+#[test]
 fn a_name_is_quoted_into_its_url() {
     let fake = FakePyPI::with(&[]);
     PyPI::new(fake.clone()).project("a b").unwrap();
