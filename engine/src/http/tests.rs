@@ -305,17 +305,51 @@ fn tls_trusts_the_certificates_ssl_cert_file_and_ssl_cert_dir_name() {
     assert_eq!(roots(&[("SSL_CERT_DIR", &more)]), Some(0));
 }
 
+/// Set in the environment of the test binary that a_variable_set_empty_is_unset starts, so that
+/// the_system_store_in_this_process checks the store of that process; unset, that test checks nothing.
+const SYSTEM_STORE_CHILD: &str = "OCTOFLOW_TEST_SYSTEM_STORE";
+
+#[test]
+fn the_system_store_in_this_process() {
+    if std::env::var_os(SYSTEM_STORE_CHILD).is_none() {
+        return;
+    }
+    let system = count(HttpClient::from_env().roots);
+    let probed = openssl_probe::probe();
+    assert!(probed.cert_file.is_some() || !probed.cert_dir.is_empty(), "this machine has no system store");
+    assert!(system.is_some_and(|n| n > 0), "the system store was not used: {system:?}");
+}
+
+#[test]
+fn a_variable_set_empty_is_unset() {
+    // The process's own environment, as the engine has it: an empty SSL_CERT_FILE and SSL_CERT_DIR, which shells and CI
+    // wrappers export to unset them, leave the system's store, not Mozilla's roots nor none.
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "http::tests::the_system_store_in_this_process", "--nocapture"])
+        .env(SYSTEM_STORE_CHILD, "1")
+        .env("SSL_CERT_FILE", "")
+        .env("SSL_CERT_DIR", "")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&child.stdout);
+    assert!(child.status.success() && stdout.contains("1 passed"), "{stdout}");
+}
+
 #[test]
 fn without_either_variable_tls_trusts_this_machine_s_certificates() {
-    let found = rustls_native_certs::load_native_certs().certs;
+    let system = openssl_probe::probe();
+    let mut found = rustls_native_certs::load_certs_from_paths(system.cert_file.as_deref(), None).certs;
+    for dir in &system.cert_dir {
+        found.extend(rustls_native_certs::load_certs_from_paths(None, Some(dir)).certs);
+    }
     let mut native: Vec<&[u8]> = found.iter().map(|der| der.as_ref()).collect();
     native.sort_unstable();
     native.dedup();
-    let system = count(root_certs(&env(&[("SSL_CERT_FILE", ""), ("SSL_CERT_DIR", "")])));
+    let roots = count(root_certs(&env(&[])));
     // Mozilla's roots only on a machine without certificates of its own.
-    assert_eq!(system, (!native.is_empty()).then_some(native.len()));
+    assert_eq!(roots, (!native.is_empty()).then_some(native.len()));
     if std::fs::read("/etc/ssl/certs/ca-certificates.crt").is_ok() {
-        assert!(system.is_some_and(|n| n > 0), "Debian's bundle was not read: {system:?}");
+        assert!(roots.is_some_and(|n| n > 0), "Debian's bundle was not read: {roots:?}");
     }
 }
 

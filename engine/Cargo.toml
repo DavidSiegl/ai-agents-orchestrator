@@ -13,12 +13,16 @@ serde = "1"
 # float_roundtrip: a float reads as the nearest f64, as Python reads it, so that state.json writes back as it was.
 serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.10"
-# Jenkins and PyPI, over HTTP or HTTPS (http.rs): blocking, and with rustls and its own root certificates rather than
-# the system's TLS library; gzip and the other extras are left out, since neither server is asked for them.
+# Jenkins and PyPI, over HTTP or HTTPS (http.rs): blocking, and with rustls rather than the system's TLS library, given
+# the certificates it trusts (root_certs; ureq's own Mozilla roots only as the fallback there); gzip and the other
+# extras are left out, since neither server is asked for them.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 # The certificates TLS trusts, found as OpenSSL finds them for Python: SSL_CERT_FILE and SSL_CERT_DIR, else the
 # system's bundle and certificate directory (http.rs, root_certs). Approved by the user for ticket 07, 2026-10-28.
 rustls-native-certs = "0.8.5"
+# Where the system keeps its certificates, when the environment names none (http.rs, root_certs). 0.2.1 in Cargo.lock:
+# 0.2.2 is from 2026-10-26, under two weeks old. Approved by the user for ticket 07, 2026-10-28.
+openssl-probe = "0.2.1"
 # preserve_order: a table's keys come in the file's order, as tomllib gives them, so a table with two problems is
 # refused naming the first, as the Python engine refuses it.
 toml = { version = "1", default-features = false, features = ["parse", "preserve_order", "serde", "std"] }

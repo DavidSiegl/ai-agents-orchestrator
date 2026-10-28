@@ -2124,6 +2124,7 @@ name = "octoflow-engine"
 version = "0.1.0"
 dependencies = [
  "nix",
+ "openssl-probe",
  "rustls-native-certs",
  "serde",
  "serde_json",
@@ -2151,9 +2152,9 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "openssl-probe"
-version = "0.2.2"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e036b411754132fd6b74e94b74e9a13c5cf606fa93d1885c35860d3060820b1"
+checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "option-ext"

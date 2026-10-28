@@ -5,7 +5,7 @@
 //! `FakePyPI`, answers in memory, so that everything above the transport (each URL the engine builds, each answer it
 //! reads, each error it words) runs in the tests as it runs for real.
 
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -98,7 +98,7 @@ pub trait Http: Send + Sync {
 
 /// The network, reached as urllib reaches it: through the proxy that the environment's `http_proxy` or
 /// `https_proxy` names for the URL's scheme, unless `no_proxy` names its host, and over TLS trusting the certificates
-/// rustls-native-certs finds as OpenSSL finds them (root_certs).
+/// of the places the environment names, else of the system's, as OpenSSL finds them (root_certs).
 #[derive(Clone)]
 pub struct HttpClient {
     proxies: Proxies,
@@ -268,30 +268,32 @@ impl Proxies {
     }
 }
 
-/// The certificates TLS trusts, found by rustls-native-certs as OpenSSL finds them for Python's default context: when
-/// env sets `SSL_CERT_FILE` or `SSL_CERT_DIR` (directories separated by colons), those of that file and of every file
-/// in those directories, and none from the system; else the system's, from its bundle and certificate directory as
-/// openssl-probe finds them (rustls-native-certs then reads the variables from the process's own environment, which
-/// is env in the engine). A file that cannot be read, and an item that is not a certificate, adds none, as in
-/// OpenSSL, so a variable naming nothing usable trusts none. Mozilla's roots only when neither variable is set and the
-/// system has no certificate, where Python would trust none and fail every https request. TODO.md says where this
-/// trusts otherwise than Python.
+/// The certificates TLS trusts, from the places env names as OpenSSL takes them for Python's default context: when
+/// `SSL_CERT_FILE` or `SSL_CERT_DIR` (directories separated by colons) is set and not empty, that file's and those of
+/// every file in those directories, and none from the system; else the system's bundle and certificate directories,
+/// where openssl-probe finds them. rustls-native-certs reads each; a file that cannot be read, and an item that is not
+/// a certificate, adds none, as in OpenSSL, so a variable naming nothing usable trusts none. Mozilla's roots only when
+/// neither variable is set and the system has no certificate, where Python would trust none and fail every https
+/// request. TODO.md says where this trusts otherwise than Python.
 fn root_certs(env: &dyn Fn(&str) -> Option<String>) -> RootCerts {
-    let file = env("SSL_CERT_FILE").filter(|path| !path.is_empty());
+    let file = env("SSL_CERT_FILE").filter(|path| !path.is_empty()).map(PathBuf::from);
     let dirs = env("SSL_CERT_DIR").unwrap_or_default();
-    let dirs: Vec<&str> = dirs.split(':').filter(|dir| !dir.is_empty()).collect();
+    let dirs: Vec<PathBuf> = std::env::split_paths(&dirs).filter(|dir| !dir.as_os_str().is_empty()).collect();
     let configured = file.is_some() || !dirs.is_empty();
+    let (file, dirs) = if configured {
+        (file, dirs)
+    } else {
+        // probe() takes the process's own SSL_CERT_FILE and SSL_CERT_DIR too, where they name a path that exists; the
+        // engine's env is the process's, where neither does when this branch runs.
+        let system = openssl_probe::probe();
+        (system.cert_file, system.cert_dir)
+    };
     // The errors name each file that could not be read; OpenSSL passes over such a file without a word, and so does
     // this, for a store that may still hold the certificate that matters.
-    let certs = if configured {
-        let mut certs = rustls_native_certs::load_certs_from_paths(file.as_deref().map(Path::new), None).certs;
-        for dir in dirs {
-            certs.extend(rustls_native_certs::load_certs_from_paths(None, Some(Path::new(dir))).certs);
-        }
-        certs
-    } else {
-        rustls_native_certs::load_native_certs().certs
-    };
+    let mut certs = rustls_native_certs::load_certs_from_paths(file.as_deref(), None).certs;
+    for dir in &dirs {
+        certs.extend(rustls_native_certs::load_certs_from_paths(None, Some(dir)).certs);
+    }
     // Each certificate once, though a file and a directory, or a bundle and its links, hold it twice.
     let mut ders: Vec<&[u8]> = certs.iter().map(|der| der.as_ref()).collect();
     ders.sort_unstable();
