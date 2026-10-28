@@ -49,6 +49,7 @@ prompt and run state as the Python engine does. So far it holds, by module:
 | `pipeline`, `workflow_file` | `Step`, `Pipeline` with all its checks, `default_workflow`, `find_workflow`, `is_built_in`; `parse_workflow`, `load_workflow_file`, `workflow_files`, `named_workflow`, `workflow_definition`, `workflow_toml`, `run_pipeline` and `saved_pipeline`. |
 | `state` | `RunState`, with the fields of a `state.json` it does not know kept, after its own. |
 | `handoff`, `quality` | `parse_verdict` and `parse_blocked`; the quality-file reader, `parse_gate`, `gate_failures`, `finding_fingerprint`, and the engine's own quality files, `leak_report` and `build_failed_report`. |
+| `host`, `patch` | `Host`, a trait whose every operation is a provided method built on running one command (`exec`), so a fake overrides only what it plays: `ProcessHost`, the machine reached by real processes, here or over `ssh -o BatchMode=yes` with `ssh_sharing_options`' shared connection, each command in a process group of its own, its output read to the end on threads of their own, and the whole group killed with SIGKILL when it runs out of time; the secret scan (`scan_unpublished`, finding `quality`'s `Leak`s, `LeaksFound`); `ChangedFile`, `RunFile`, the pull request views with `GhError::Unusable` for `GhUnusable`, and `PushError::Leaks` for `LeaksFound`. Output kept verbatim is bytes, and a path git prints is refused when it is not UTF-8. `FakeHost` (`host/fake.rs`, tests only) is the Python tests' `FakeHost`, git played one command at a time through `git_run`. `added_lines` reads `change_diff`'s diffs. |
 | `pull_request`, `summary`, `proofs` | `spec_title`, `branch_name`, `verdict_line`, `commit_note`, `provenance`, `pr_body` and `without_conflict_warning`; `run_summary`, `run_metrics`, `turns_table`, `turn_lines`, `format_duration`, `format_age`, `iso_utc` and `epoch_seconds`; `proofs_section`. |
 
 Its tests are each module's `<module>/tests.rs`, the Python tests of those parts ported case for case, and checks
@@ -58,7 +59,9 @@ current), and the parity recordings (`tests/parity/recorded/`) are read as they 
 reads into `RunState` and writes back byte for byte, every workflow the repository defines parses to the Python
 engine's definition, every recorded run's commit note, trailers, pull request body, `summary.md` and
 `metrics.json` come out as the Python engine wrote them, and every prompt the scenarios recorded is made of the
-engine's templates (`prompt_parity.rs`).
+engine's templates (`prompt_parity.rs`). `host/tests.rs` and `host/scan/tests.rs` run `Host` on real git in
+temporary repositories, with gh, gitleaks and ssh played by scripts on the `Host`'s `PATH`, which `ProcessHost`
+takes from the environment it is given rather than the process's.
 
 ## The phase machine
 

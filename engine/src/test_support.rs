@@ -64,6 +64,11 @@ impl TempDir {
         TempDir(dir)
     }
 
+    /// The directory's path, as a str.
+    pub fn path(&self) -> String {
+        self.0.to_str().expect("a UTF-8 path").to_string()
+    }
+
     /// The path of name in the directory, as a str.
     pub fn join(&self, name: &str) -> String {
         self.0.join(name).to_str().expect("a UTF-8 path").to_string()
@@ -89,6 +94,7 @@ pub fn oracle(file: &str) -> crate::py::json::Json {
         "states.json" => include_str!("../tests/oracle/states.json"),
         "quality.json" => include_str!("../tests/oracle/quality.json"),
         "helpers.json" => include_str!("../tests/oracle/helpers.json"),
+        "host.json" => include_str!("../tests/oracle/host.json"),
         _ => panic!("no oracle file {file}"),
     };
     crate::py::json::Json::parse(text).unwrap_or_else(|e| panic!("{file}: {e}"))

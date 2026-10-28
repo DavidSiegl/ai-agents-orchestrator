@@ -93,3 +93,11 @@ fn title_capitalises_each_run_of_letters() {
     assert_eq!(basename("a/b/c.toml"), "c.toml");
     assert_eq!(basename("c"), "c");
 }
+
+#[test]
+fn shlex_join_quotes_as_python_does() {
+    for case in oracle("shlex_join") {
+        let case = case.as_array().unwrap();
+        assert_eq!(shlex_join(&strings(&case[0])), s(&case[1]), "{:?}", case[0]);
+    }
+}

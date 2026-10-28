@@ -1,5 +1,6 @@
 """Write engine/tests/oracle/python.json: what Python 3.14, the engine's Python, gives for the str methods, format
-strings, difflib matches and json.dumps that engine/src/py ports, for cases the Rust tests replay against the port.
+strings, difflib matches, shlex.join and json.dumps that engine/src/py ports, for cases the Rust tests replay against
+the port.
 
 Run `uv run python engine/tests/oracle/python.py` after changing a case; tests/test_rust_oracle.py fails while the
 file is not what this writes."""
@@ -7,6 +8,7 @@ file is not what this writes."""
 import difflib
 import json
 import os
+import shlex
 import string
 
 OUT = os.path.join(os.path.dirname(__file__), "python.json")
@@ -35,6 +37,8 @@ TEMPLATES = ["{a!x}", "{a!}", "{a!r", "{a!rx}", "{a!r}", "{a!a}", "{a!s:>6}", "{
              "{0}{}", "{a:\x01}", "{a:é}", "{a:\x7f}", "{a:,\x7f}", "{a! }", "{a!é}", "{a!\x01}", "{a!\x7f}", "{a!~}",
              "{q} }", "{a}{q}{", "{q:{}}", "{a{b}}", "plain", "", "x{a}y{b}z", "{a[0][0]}", "{a[0].x}",
              "{a:{b}{c}}", "{a:}", "{a!}}", "{a:}}}", "{a}}", "{e!r}", "{e!a}", "{a:0>4}", "{a:00}", "{a:<05}"]
+SHELL_WORDS = ["a@b%c+d=e:f,g.h/i-j_k", "~", "*", "!", "-", "\u0661", "a b"]
+ARGV = ["sh", "-c", 'cd -- "$1" && pwd', "_", "/my proj", "it's"]
 VALUES = {"a": "hey", "b": "3", "c": "x", "e": "it's é\u200b\n"}
 JSON_VALUES = [None, True, False, 0, -7, 2**63, -2**63, 1.0, -0.0, 0.5, 1e16, 1e15, 1.5e-5, 0.0001, 123.456, 1e300,
                2.5e-300, 1 / 3, "", "a\"b\\c", "\n\r\t\b\f\x00\x1f\x7f", "é😀\u2028", [], {}, [1, [2, {}]],
@@ -65,6 +69,8 @@ def build() -> dict:
                         for keys in KEY_SETS.values() for word in WORDS],
         "format": [[t, outcome(lambda t=t: t.format(**VALUES))] for t in TEMPLATES],
         "parse": [[t, outcome(lambda t=t: chunks(t))] for t in TEMPLATES],
+        "shlex_join": [[[s], shlex.join([s])] for s in [*STRINGS, *WORDS, *PATHS, *SHELL_WORDS]]
+        + [[ARGV, shlex.join(ARGV)]],
         "json": [[json.dumps(v, ensure_ascii=False), json.dumps(v)] for v in JSON_VALUES],
         "values": VALUES,
     }
