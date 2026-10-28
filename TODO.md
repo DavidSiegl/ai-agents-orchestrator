@@ -48,7 +48,7 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   from the Python engine (found by orchestrator-test-methods/06 and its review 74, 2026-10-27, against the recordings).
   Where gitleaks is not on PATH, or openssl cannot make the fake PyPI's certificate, every scenario fails naming it: a
   skip would pass a machine that checked nothing, and the gate's test-integrity check fails an added skip (the user's
-  ruling, 2026-10-27); Jenkins's Install stage downloads the pinned gitleaks (`ci/install-gitleaks.sh`), and mutmut's
+  ruling, 2026-10-27); Jenkins's Install stage downloads the pinned gitleaks (`ci/install-tools.sh`), and mutmut's
   runs leave `tests/parity` out (`[tool.mutmut]`), which would take most of the mutation budget. What a record holds by
   design, each a choice a Rust ticket may revisit: output a human reads (logs, errors, `show`, `list`, `prune`) as its
   facts (`normalize.facts`), not its words; a run's files listed by modification time, as `/files` and the event stream
@@ -64,7 +64,21 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   bodies, which the recordings hold as sent where a scenario reaches them, and which would test only the frozen Python
   engine, not the Rust one.
 
+- **The eval set: what it does not cover.** `evals/run.py` (live-checks/04, docs/design.md, Evals) runs the engine as
+  a program, `run --no-pr --spec`, rather than being the `orchestrator.py eval` command the ticket named, since the
+  Python engine is frozen (above); `EVAL_ENGINE` points it at the Rust engine. Whether the Rust engine gets an `eval`
+  command of its own is open. Not covered: the quality gate, since the toy repositories have no quality job and their
+  origin is a bundle no snapshot can be pushed to, so `quality rounds` stays 0; a `--worktree` or `--machine` run,
+  which the runner refuses; and an interview, which `--spec` skips. Decided 2026-10-28. The verification run it
+  still lacks is under Open issues.
+
 ## Open issues
+
+- **No agent has run an eval task yet.** live-checks/04's verification asks for one real `evals/run.py --tasks <one>
+  --repeat 1` from a herdr pane (it starts real agents, so it was left to the user), with its row in the pull
+  request's description and its result line committed under `evals/results/`. Cross-review 80 (F9, 2026-10-28):
+  "Finding 1 is the kind of defect only a real run's output (or a test built from one) shows": a task text or a
+  hidden test that misjudges real work shows only then. Closed by that run, and by fixing what its output shows.
 
 - **A quality build now takes longer than `QUALITY_TIMEOUT`.** The contract test's one live run (live-checks/01,
   2026-10-27) triggered build #59 of `Octoflow-AI/py-octoflow-ai-quality` with `GIT_REF=main` (`f4628cc`): it ended
@@ -89,6 +103,26 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   the full ~22-minute build running." The orchestrator does not abort a build either, so `CI` has no call for it.
   Closes with a POST to `<job>/<number>/stop` (or the queue item's cancel) in the test's cleanup, once the `agents`
   user is known to hold Jenkins's Cancel permission on the job.
+- **A Rust test's own lines count toward the coverage of new code.** cargo-llvm-cov's report lists the lines of a
+  `#[cfg(test)]` module as it lists the code's (docs/quality-gate.md, "Rust tests and coverage"), and a passing
+  test runs them all, so a change that adds a Rust function and a test of it is judged on both: 15 untested lines
+  beside a 10-line test read as 40%, not 0%. coverage.py's report of the Python has only `orchestrator` and `gate`.
+  Found while adding Rust coverage (rust-engine ticket 03, 2026-10-27). Closes with test modules left out of the
+  report, by `#[coverage(off)]` once it is stable or by the tests moving to files that `--ignore-filename-regex`
+  can leave out, or with `gate.py` skipping the lines a `#[cfg(test)]` item spans.
+- **No build runs the Rust doctests.** cargo-nextest does not run doctests, and since the Test stage's `cargo llvm-cov
+  nextest` replaced the UI stage's `cargo test`, nothing does: `octoflow_ui_lib` is an `rlib` among its crate types
+  (`ui/src-tauri/Cargo.toml`), so `cargo test` ran them. The crate has no doc example today. Raised by cross-review 72
+  (F3, 2026-10-27): "a doc example added later that fails to compile or asserts wrongly passes CI unnoticed".
+  Decided against for now: a `cargo test --doc` beside it, which builds the dependencies a third time, uninstrumented,
+  under the agent's 3 GB, for no example. Closes with `cargo test --doc --locked` in the Test stage once a doc example
+  lands, or with cargo-llvm-cov's `--doctests` once it runs on a stable toolchain.
+- **Jenkins runs the Rust tests of `ui/src-tauri` alone.** The Test stage runs `cargo llvm-cov nextest` in that
+  directory, while `gate.py`'s clippy lints every Cargo workspace git tracks; a crate in another workspace, such as
+  the Rust engine's top-level one (rust-engine spec, Lane), has its lines judged by clippy but its tests never run,
+  and its added lines count as nothing to cover. Found while adding Rust coverage (rust-engine ticket 03, 2026-10-27).
+  Closes when the top-level workspace takes `ui/src-tauri` in as a member and the Test stage runs there, or with
+  the Test stage running each workspace and passing each report to the gate.
 - **The parity harness records `state.json` at each command the fakes get, not after each save.** Ticket
   rust-engine/01 asks for "`state.json` after each save"; the ledger reads it only when herdr, gh, Jenkins or PyPI
   gets a call, and leaves out a change to `heartbeat_at` alone (`tests/parity/fakes.py`, `_changed_states`). Raised
@@ -193,25 +227,24 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   reached their cargo steps 15 s apart, the lock free each time, so the wait and its message were seen only on the
   development host. Raised by cross-review 25 (F3). Closes with two builds whose cargo steps overlap on agentbox0,
   one saying that it waits for the lock and both passing.
-- **Is 3 GB the right memory limit for the agentbox0 Jenkins agent?** All builds on the node share its
-  container's `mem_limit: 3g` (Homelab `jenkins/agentbox0.yaml`), which this repo cannot change. Since
-  `ci/cargo-lock.sh`, two of this repository's builds compile Rust at once only when a quality build starts its
-  `cargo test` or `cargo check` beside another build's cargo step, or when the Gate stage's clippy, outside the lock,
-  checks the desktop shell's own crate, the one crate the UI stage's `cargo check` leaves it; but everything else they
-  run (pytest, mutmut, PyInstaller, npm) still shares the 3 GB beside a locked rustc, as do other jobs' builds on the
-  node. Open in `.scratch/ci-cargo-memory/issues/02-agent-container-memory.md`; closes with the Homelab keeping or
-  raising it.
+- **Is 3 GB the right memory limit for the agentbox0 Jenkins agent?** All builds on the node share its container's
+  `mem_limit: 3g` (Homelab `jenkins/agentbox0.yaml`), which this repo cannot change. Since `ci/cargo-lock.sh`, two of
+  this repository's builds compile Rust at once only when a quality build starts its `cargo llvm-cov nextest` or
+  `cargo check` beside another build's cargo step, or when the Gate stage's clippy, outside the lock, checks the desktop
+  shell's own crate, the one crate the UI stage's `cargo check` leaves it; but everything else they run (pytest, mutmut,
+  PyInstaller, npm) still shares the 3 GB beside a locked rustc, as do other jobs' builds on the node. Open in
+  `.scratch/ci-cargo-memory/issues/02-agent-container-memory.md`; closes with the Homelab keeping or raising it.
 - **Under the gate's `--cap-lints warn`, an `#[allow]` overrides a workspace's `forbid`.** `Clippy._lint_workspace` in
   `gate.py` caps every lint at warn so that a lint at deny cannot stop cargo before a compile error in a later crate
   (cross-review 66, F1); rustc's cap also lowers `forbid`, so an added `#[allow(unsafe_code)]` under `unsafe_code =
   "forbid"` no longer gives E0453 and its unsafe block is no finding: the gate is OK on a change the workspace's rules
   make uncompilable, and only "Suppressions added" lists the allow, and not even that when the change adds the lint as
   one line inside an existing wrapped `#[allow(\n    a,\n    b,\n)]`, since `_RUST_SUPPRESSION` reads one added line at
-  a time (F15). Nothing in this repository sets `forbid` (`ui/src-tauri/Cargo.toml` is all `warn`), and the UI stage's
-  uncapped `cargo test` and `cargo check` would still fail such a build of `ui/src-tauri`. Raised by cross-review 66
-  (F11, 2026-10-27): "The gate is OK on a change that the workspace's rules make uncompilable". Closes with a second,
-  uncapped clippy run whose rustc errors (codes `E` and four digits, such as E0453) are compile errors, or with the
-  forbidden lints read from the manifests and an added allow of one failing the gate.
+  a time (F15). Nothing in this repository sets `forbid` (`ui/src-tauri/Cargo.toml` is all `warn`), and the Test stage's
+  uncapped `cargo llvm-cov nextest` and the UI stage's `cargo check` would still fail such a build of `ui/src-tauri`.
+  Raised by cross-review 66 (F11, 2026-10-27): "The gate is OK on a change that the workspace's rules make
+  uncompilable". Closes with a second, uncapped clippy run whose rustc errors (codes `E` and four digits, such as E0453)
+  are compile errors, or with the forbidden lints read from the manifests and an added allow of one failing the gate.
 - **A quality build judges Rust by the snapshot's own clippy rules.** `Clippy` in `gate.py` chooses no lints (it caps
   their levels at warn, `--cap-lints`), so clippy reads each workspace's `[lints]`, `clippy.toml`, `.cargo/config.toml`
   rustflags and `rust-toolchain.toml` from the judged tree, where a change can loosen them; `--config` replaces only
@@ -451,6 +484,33 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   it there with `--no-relative`; of `Host._paths_between` it said: "has the same exposure, but it is outside this
   range". Closes with `--no-relative` on both calls and a test that sets `diff.relative` and locks from a
   subdirectory.
+- **A run that dies right after it saved phase `done` never finishes ending.** `Workflow.run` saves `phase = DONE`,
+  counts the turns' tokens, saves again with `owner` cleared, and only then writes `summary.md` and `metrics.json`,
+  notifies the human that the run finished and closes the workspace. A crash after either of those two saves leaves
+  a run that `resume` finds done: `Workflow.run` returns the verdict at once, so neither file is ever written, the
+  human is never told, the herdr workspace stays open, and after the first save `owner` stays set and the turns have
+  no token counts. Found by orchestrator-test-methods/05 (`tests/test_crash_resume.py`, 2026-10-28), whose `expected`
+  pins this behaviour. Not fixed here: the engine is frozen (Planned, "The Python engine is frozen"). Closes in the Rust
+  engine with a resume of a `done` run that finishes whatever of that ending is missing (each step can tell: the files
+  exist, `owner` is cleared, the tokens are counted). The test drives the Python engine in-process, so its pin goes
+  with that engine.
+- **A crash between an agent's start and its session being saved costs that turn its session.** `Workflow._start`
+  saves the agent's record, then asks herdr for it and `_note_session` saves the session. A resume after the first
+  save finds the agent alive (`_agent` returns `ALIVE`) and prompts it without asking herdr, so the turn's record
+  (`_turn_record`) starts with no session; `_note_session` saves it while the turn runs, but `_end_turn` keeps
+  `session` only when it matches the one at the start, so the turn ends with none, and `_count_tokens` cannot count its
+  tokens. Found by orchestrator-test-methods/05 (2026-10-28), whose `expected` pins it. Not fixed here: the engine is
+  frozen. Closes in the Rust engine with `_agent` noting the session of an agent it finds alive; the pin goes with
+  the Python engine, as above.
+- **A resumed interview tells the human again that it waits for them.** `Workflow._step_turn`'s `announce` focuses
+  the human-paced agent's pane and notifies "<label> is waiting for you" in every orchestrator that takes the turn
+  (`_turn`: it "runs once the agent is ready"), so a resume while the interview is under way repeats both, once per
+  resume. Raised by cross-review 81 (F1, 2026-10-28) against ticket orchestrator-test-methods/05, which allows only
+  documented idempotent repeats: "Neither is idempotent: the cited comment … says each orchestrator does it again,
+  which is the repeat the ticket asks the test to fail on." The user ruled it a bug (2026-10-28), not wanted;
+  `tests/test_crash_resume.py`'s `expected` pins it as up to one repeat per resume while orchestrator.py is frozen.
+  Closes with an engine that announces a turn only where none did (for example, only when `prompted` is not the turn's
+  file), the Rust engine's, and the pin removed.
 
 ## Fixed
 
@@ -552,9 +612,10 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 - **The Jenkins agent lacked rustup's clippy component.** The gate runs clippy on every build that reaches Gate, since
   `ui/src-tauri/` is Rust, and `TestClippy` in `tests/test_gate.py` runs the real one. PR-111's first build showed the
   agent's toolchain (1.99.0) lacked rustup's `clippy` component: the gate was ERROR with "`clippy` is not installed"
-  and eight `TestClippy` tests failed. Fixed (2026-10-27, rust-engine ticket 02): the Install stage runs `rustup
-  component add clippy` (Jenkinsfile, "Install"); PR-111's second build downloaded the component, passed all 1348
-  tests and the gate was OK.
+  and eight `TestClippy` tests failed. Fixed (2026-10-27, rust-engine ticket 02): the Install stage ran `rustup
+  component add clippy`, and PR-111's second build downloaded the component, passed all 1348 tests and the gate was
+  OK. Since then the agent's rustup home is root's (`/usr/local/rustup`, PR-163's third build), so no build can add a
+  component; the agent image provides clippy, and the Install stage only checks for it (rust-engine ticket 03).
 
 - **`test_invariants.py` and `test_docs.py` fail inside mutmut's copy.** Raised by cross-review 60 (2026-10-27), in
   code PR #106 brought. mutmut runs the tests in `mutants/`, its copy of the repository, whose `orchestrator.py` and

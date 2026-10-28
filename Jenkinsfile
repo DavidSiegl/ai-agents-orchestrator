@@ -19,12 +19,12 @@ pipeline {
     environment {
         UV_NO_PROGRESS = '1'
         COVERAGE_FILE  = '.coverage'
-        // For the UI, Gate and Package stages: crates are fetched into the workspace, which cleanWs empties, so no
-        // build compiles sources an earlier build left behind.
+        // For the Test, UI, Gate and Package stages: crates are fetched into the workspace, which cleanWs empties, so
+        // no build compiles sources an earlier build left behind.
         CARGO_HOME     = "${env.WORKSPACE}/.cargo-home"
-        // Tools the Install stage downloads into the workspace (ci/install-gitleaks.sh), first on PATH for every stage.
+        // Tools the Install stage downloads into the workspace (ci/install-tools.sh), first on PATH for every stage.
         PATH           = "${env.WORKSPACE}/.tools/bin:${env.PATH}"
-        // The dev profile, which cargo test's test profile and clippy's checks inherit, without debug info. Debug
+        // The dev profile, which the Test stage's test build and clippy's checks inherit, without debug info. Debug
         // info for the GTK and Tauri crates took enough memory that rustc was OOM-killed with two builds on
         // agentbox0. ci/cargo-lock.sh now keeps two builds' cargo steps apart, except a quality build's, which never
         // waits for the lock, and the Gate stage's clippy, which gate.py runs outside it; building without debug info
@@ -95,11 +95,22 @@ pipeline {
         stage('Install') {
             steps {
                 sh 'uv sync --frozen'
-                // The Test stage's TestClippy and the Gate stage's gate.py run the real clippy, which the agent's
-                // rustup toolchain lacked (PR-111's first build). Adding it is a local no-op once it is there, and
-                // brings it back when the agent's container is rebuilt without it.
-                sh 'rustup component add clippy'
-                sh 'ci/install-gitleaks.sh "$WORKSPACE/.tools/bin"'
+                // The Test stage's TestClippy and the Gate stage's gate.py run the real clippy, and the Test stage's
+                // cargo-llvm-cov reads its coverage data with llvm-tools' llvm-profdata and llvm-cov, which must be the
+                // toolchain's own LLVM. Both are rustup components the agent image provides: its rustup home,
+                // /usr/local/rustup, is root's, so a build cannot add to it (PR-163's builds 1-3 failed adding
+                // llvm-tools-preview: "component download failed ... No such file or directory"). This step names a
+                // missing one here rather than letting a later stage fail on it.
+                sh '''
+                    installed=$(rustup component list --installed)
+                    for component in clippy llvm-tools; do
+                        printf '%s\\n' "$installed" | grep -q "^$component-" || {
+                            echo "rustup's $component component is not on the agent; its image must add it" >&2
+                            exit 1
+                        }
+                    done
+                '''
+                sh 'ci/install-tools.sh "$WORKSPACE/.tools/bin"'
                 script {
                     // The version a release on main is tagged with.
                     env.PROJECT_VERSION = sh(returnStdout: true, script: '''
@@ -139,18 +150,38 @@ pipeline {
                     uv run pytest $parity --cov=orchestrator --cov=gate --cov-branch --cov-report=xml --junitxml=test-results.xml || status=$?
                     [ "$status" -le 1 ] || exit "$status"
                 '''
+                // The Rust tests, with line coverage, for the Gate stage likewise: --ignore-run-fail writes the
+                // coverage report whatever tests fail and exits 0 for them, so a non-zero status is a build that did
+                // not compile or a tool that could not run. ci/nextest.toml has the ci profile write the JUnit report
+                // the Gate stage reads. Once the tests are built, --ignore-run-fail turns any failure of nextest's run
+                // into a warning (run_nextest in cargo-llvm-cov 0.9.1's src/main.rs), also one that runs no test,
+                // such as a test binary that cannot list its tests; so the JUnit report is removed first and must be
+                // there after. The lock as in the UI stage, which says why a quality build may skip it.
+                dir('ui/src-tauri') {
+                    sh '''
+                        junit=target/nextest/ci/junit.xml
+                        rm -f "$junit"
+                        "$WORKSPACE/ci/cargo-lock.sh" ${GIT_REF:+--no-wait} cargo llvm-cov nextest --locked --workspace \\
+                            --ignore-run-fail --profile ci --config-file "$WORKSPACE/ci/nextest.toml" \\
+                            --cobertura --output-path "$WORKSPACE/coverage-rust.xml"
+                        if [ ! -f "$junit" ]; then
+                            echo "cargo-nextest wrote no $junit, so the Rust tests did not run" >&2
+                            exit 1
+                        fi
+                    '''
+                }
             }
             post {
                 always {
-                    junit 'test-results.xml'
+                    junit 'test-results.xml, ui/src-tauri/target/nextest/ci/junit.xml'
                 }
             }
         }
 
-        // The desktop app: its frontend's types, lint and Vitest tests, and its Tauri shell's cargo tests. The gate
-        // runs no tests but the Python, so this stage stops the build instead, before Gate: a quality round then
-        // reports BUILD_FAILED with the console's end, where a failure after Gate would hide under quality.md's
-        // passing GATE line.
+        // The desktop app's frontend: its types, lint and Vitest tests; its Tauri shell's tests run in the Test
+        // stage. The gate judges no tests but those the Test stage reports, so this stage stops the build instead,
+        // before Gate: a quality round then reports BUILD_FAILED with the console's end, where a failure after Gate
+        // would hide under quality.md's passing GATE line.
         stage('UI') {
             when { expression { return env.JUDGED_AT_PR != 'true' } }
             steps {
@@ -163,11 +194,11 @@ pipeline {
                     '''
                 }
                 dir('ui/src-tauri') {
-                    // A quality build (GIT_REF set) runs within the orchestrator's QUALITY_TIMEOUT, which a wait
-                    // behind another build's Package stage would exceed, so it takes the lock only when it is free.
-                    sh '"$WORKSPACE/ci/cargo-lock.sh" ${GIT_REF:+--no-wait} cargo test --locked'
-                    // The Gate stage's clippy checks the shell's dependencies as cargo check does, not as cargo test
-                    // builds them: checked here, under the lock, they leave clippy only the shell itself to check.
+                    // The Gate stage's clippy checks the shell's dependencies as cargo check does, not as the Test
+                    // stage's cargo-llvm-cov builds them, instrumented and in a target directory of its own: checked
+                    // here, under the lock, they leave clippy only the shell itself to check. A quality build
+                    // (GIT_REF set) runs within the orchestrator's QUALITY_TIMEOUT, which a wait behind another
+                    // build's Package stage would exceed, so it takes the lock only when it is free.
                     sh '"$WORKSPACE/ci/cargo-lock.sh" ${GIT_REF:+--no-wait} cargo check --locked --all-targets'
                 }
             }
@@ -211,10 +242,16 @@ pipeline {
                     }
                     // The values reach the shell as environment variables, never as Groovy-built shell code.
                     def status
+                    // Each report of the Rust's before the Python's: a main whose gate.py takes --tests and --coverage
+                    // once, as main's did before the commit that brought this order, keeps the last of each. A quality
+                    // build judged by such a main, of a snapshot that carries this Jenkinsfile, is then judged on its
+                    // Python as before, but not on its Rust tests, which only the junit step's UNSTABLE shows, nor on
+                    // the Rust's coverage; that window closes when main's gate.py takes both more than once.
                     withEnv(["GATE=${gate}", "GATE_RULES=${rules}", "GATE_BASE=${base}"]) {
                         status = sh(returnStatus: true, script: '''
                             uv run --frozen python "$GATE" --base "$GATE_BASE" --config "$GATE_RULES" \\
-                                --tests test-results.xml --coverage coverage.xml --out quality.md
+                                --tests ui/src-tauri/target/nextest/ci/junit.xml --tests test-results.xml \\
+                                --coverage coverage-rust.xml --coverage coverage.xml --out quality.md
                         ''')
                     }
                     if (status == 1 && params.GIT_REF) {

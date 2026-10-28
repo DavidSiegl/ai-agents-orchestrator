@@ -578,6 +578,60 @@ class TestGate(RepositoryTest):
         self.assertIn("100.0% of 1 new lines to cover; 0 lines are not covered.\n\nNot measured: `m\\xff.py`; "
                       "coverage.py records no data for a file whose name is not UTF-8.", text)
 
+    def rust_coverage(self, lines, filename="src/lib.rs"):
+        """A Cobertura report of ui/src-tauri/src/lib.rs as cargo-llvm-cov writes it, run in that Cargo workspace:
+        filename relative to the workspace, which is the report's source, or absolute. lines maps a line number to
+        its hits."""
+        rows = "".join(f'<line branch="false" hits="{h}" number="{n}"/>' for n, h in lines.items())
+        self.put("coverage-rust.xml",
+                 f'<?xml version="1.0" ?><coverage><sources><source>{self.repo}/ui/src-tauri</source></sources>'
+                 f'<packages><package name="src"><classes><class filename="{filename}" name="src.lib.rs"><lines>'
+                 f'{rows}</lines></class></classes></package></packages></coverage>')
+        return os.path.join(self.repo, "coverage-rust.xml")
+
+    def add_rust_lines(self, n):
+        """Add a tracked ui/src-tauri/src/lib.rs of n lines, which clippy, a stub here, finds nothing in: with no
+        Cargo.toml tracked there is no workspace to lint."""
+        self.stub("cargo")
+        self.put("ui/src-tauri/src/lib.rs", "".join(f"pub const C{k}: u8 = {k};\n" for k in range(1, n + 1)))
+        self.git("add", "ui/src-tauri/src/lib.rs")
+
+    def test_coverage_reports_given_twice_are_merged_and_an_uncovered_rust_line_counts(self):
+        self.add_lines(10)
+        self.add_rust_lines(10)
+        python = self.coverage({n: 1 for n in range(4, 14)})
+        rust = self.rust_coverage({n: int(n <= 2) for n in range(1, 11)})
+        status, out, _ = self.gate("--coverage", python)
+        self.assertEqual(status, 0)
+        self.assertIn("100.0% of 10 new lines to cover; 0 lines are not covered.", out)
+        status, out, _ = self.gate("--coverage", python, "--coverage", rust)
+        self.assertEqual(status, 1)
+        # (10 Python lines + 2 Rust lines covered) / 20 new lines.
+        self.assertIn("- Coverage of new code is 60.0%; the gate wants at least 80%", out)
+        self.assertIn("60.0% of 20 new lines to cover; 8 lines are not covered.", out)
+
+    def test_an_absolute_path_in_a_coverage_report_stands_as_it_is(self):
+        self.add_rust_lines(2)
+        rust = self.rust_coverage({1: 1, 2: 0}, filename=os.path.join(self.repo, "ui/src-tauri/src/lib.rs"))
+        _, out, _ = self.gate("--coverage", rust)
+        self.assertIn("50.0% of 2 new lines to cover; 1 lines are not covered.", out)
+
+    def test_a_line_two_coverage_reports_list_counts_once_and_is_covered_if_either_covers_it(self):
+        self.add_lines(2)
+        os.rename(self.coverage({4: 1, 5: (1, "1/2")}), os.path.join(self.repo, "first.xml"))
+        second = self.coverage({4: 0, 5: (0, "0/2")})
+        _, out, _ = self.gate("--coverage", "first.xml", "--coverage", second)
+        # (2 covered lines + 1 covered outcome) / (2 lines + 2 outcomes).
+        self.assertIn("75.0% of 2 new lines to cover, counting their 2 branch outcomes; 0 lines are not covered.", out)
+
+    def test_a_coverage_entry_it_cannot_read_on_a_line_the_change_did_not_add_is_skipped(self):
+        self.add_lines(1)
+        status, out, _ = self.gate("--coverage", self.coverage({2: "1.0", 4: 1}))
+        self.assertEqual(status, 0)
+        self.assertIn("100.0% of 1 new lines to cover; 0 lines are not covered.", out)
+        _, _, err = self.gate("--coverage", self.coverage({4: "1.0"}))
+        self.assertIn("has a line it cannot read", err)
+
     def test_an_unreadable_coverage_report_writes_nothing(self):
         self.add_lines(1)
         self.put("coverage.xml", "<coverage")
@@ -599,6 +653,19 @@ class TestGate(RepositoryTest):
         self.assertEqual(status, 1)
         self.assertIn("- 1 tests fail; each is listed below.\n", out)
         self.assertIn("## Failing tests\n\n- `tests.T.test_limit`: AssertionError: 3 != 2\n", out)
+
+    def test_a_failing_test_in_any_of_several_test_reports_fails_the_gate(self):
+        self.add_lines(1)
+        python = self.junit(("test_limit", "AssertionError: 3 != 2"))
+        # cargo-nextest's report names a test's binary as its classname.
+        self.put("rust.xml", '<?xml version="1.0"?><testsuites name="nextest-run"><testsuite name="octoflow-ui">'
+                             '<testcase name="tests::serves" classname="octoflow-ui"><failure message="panicked">'
+                             'trace</failure></testcase></testsuite></testsuites>')
+        status, out, _ = self.gate("--tests", "rust.xml", "--tests", python)
+        self.assertEqual(status, 1)
+        self.assertIn("- 2 tests fail; each is listed below.\n", out)
+        self.assertIn("## Failing tests\n\n- `octoflow-ui.tests::serves`: panicked\n"
+                      "- `tests.T.test_limit`: AssertionError: 3 != 2\n", out)
 
     def test_passing_tests_are_said_to_pass(self):
         self.add_lines(1)
