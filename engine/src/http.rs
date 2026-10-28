@@ -120,7 +120,7 @@ impl HttpClient {
             // Not the proxy's URL, which can hold a password.
             Some(url) => Some(Proxy::new(url).map_err(|_| {
                 HttpError::NoAnswer(
-                    "the proxy that http_proxy or https_proxy names is not a URL ureq can use".to_string(),
+                    "the proxy the environment names for this URL is not a URL ureq can use".to_string(),
                 )
             })?),
             None => None,
@@ -267,21 +267,24 @@ impl Proxies {
     }
 }
 
+/// The bundles of the systems' certificate authorities, where OpenSSL's builds for Debian, Fedora, openSUSE and
+/// macOS or Alpine find them; the first that exists is the system's.
+const SYSTEM_BUNDLES: [&str; 4] = [
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/ca-bundle.pem",
+    "/etc/ssl/cert.pem",
+];
+/// The directory of the system's certificates, each linked under its subject's hash.
+const SYSTEM_CERT_DIR: &str = "/etc/ssl/certs";
+
 /// The certificates TLS trusts, as OpenSSL's default paths give them to Python's default context: those of the file
-/// `SSL_CERT_FILE` names, else of the first of SYSTEM_BUNDLES that exists, and those of the files named by their
-/// subject's hash (`<8 hex digits>.<n>`, as c_rehash links them) in the directories `SSL_CERT_DIR` names, separated
-/// by colons, else in SYSTEM_CERT_DIR. A file that cannot be read, and an item of it that is not a certificate, adds
-/// none: OpenSSL ignores them too, and a variable naming nothing usable then trusts none, as it does in Python. When
-/// neither variable is set and the system has no certificate there, Mozilla's roots, where the Python engine, which
-/// does not use certifi, trusts none.
+/// `SSL_CERT_FILE` names, else of the first of SYSTEM_BUNDLES that exists, and those of each directory `SSL_CERT_DIR`
+/// names, separated by colons, else of SYSTEM_CERT_DIR, as hash_named_files picks them. A file that cannot be read,
+/// and an item of it that is not a certificate, adds none: OpenSSL ignores them too, and a variable naming nothing
+/// usable then trusts none, as it does in Python. When neither variable is set and the system has no certificate
+/// there, Mozilla's roots, where the Python engine, which does not use certifi, trusts none.
 fn root_certs(env: &dyn Fn(&str) -> Option<String>) -> RootCerts {
-    const SYSTEM_BUNDLES: [&str; 4] = [
-        "/etc/ssl/certs/ca-certificates.crt",
-        "/etc/pki/tls/certs/ca-bundle.crt",
-        "/etc/ssl/ca-bundle.pem",
-        "/etc/ssl/cert.pem",
-    ];
-    const SYSTEM_CERT_DIR: &str = "/etc/ssl/certs";
     let file = env("SSL_CERT_FILE").filter(|path| !path.is_empty());
     let dirs = env("SSL_CERT_DIR").filter(|dirs| !dirs.is_empty());
     let configured = file.is_some() || dirs.is_some();
@@ -290,12 +293,9 @@ fn root_certs(env: &dyn Fn(&str) -> Option<String>) -> RootCerts {
         None => SYSTEM_BUNDLES.iter().find_map(|path| std::fs::read(path).ok()).unwrap_or_default(),
     };
     for dir in dirs.as_deref().unwrap_or(SYSTEM_CERT_DIR).split(':') {
-        let Ok(entries) = std::fs::read_dir(dir) else { continue };
-        for entry in entries.flatten() {
-            if is_hash_name(&entry.file_name().to_string_lossy()) && entry.path().is_file() {
-                pem.extend(std::fs::read(entry.path()).unwrap_or_default());
-                pem.push(b'\n');
-            }
+        for path in hash_named_files(dir) {
+            pem.extend(std::fs::read(path).unwrap_or_default());
+            pem.push(b'\n');
         }
     }
     let certs: Vec<_> = parse_pem(&pem)
@@ -310,14 +310,39 @@ fn root_certs(env: &dyn Fn(&str) -> Option<String>) -> RootCerts {
     RootCerts::Specific(Arc::new(certs))
 }
 
-/// Whether name is one OpenSSL looks a certificate up by in a directory: the subject's hash, 8 lowercase hex digits,
-/// a dot and a number.
-fn is_hash_name(name: &str) -> bool {
-    let Some((hash, n)) = name.split_once('.') else { return false };
-    hash.len() == 8
-        && hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        && !n.is_empty()
-        && n.bytes().all(|b| b.is_ascii_digit())
+/// The files of dir that OpenSSL's directory lookup can open: `<hash>.<k>`, the hash 8 lowercase hex digits and k
+/// written as `%d` writes it, for k from 0 up to the first that is missing, as it opens them looking for an issuer
+/// whose subject has that hash. Whether a file's certificate has the subject its hash names is not checked: OpenSSL
+/// would not take one that has not, and this trusts it. None for a directory that cannot be read.
+fn hash_named_files(dir: &str) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut indexes: std::collections::BTreeMap<String, std::collections::BTreeSet<u32>> = Default::default();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some((hash, k)) = hash_name(&name) {
+            if entry.path().is_file() {
+                indexes.entry(hash.to_string()).or_default().insert(k);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    for (hash, ks) in indexes {
+        let opened = (0..).take_while(|k| ks.contains(k));
+        files.extend(opened.map(|k| std::path::Path::new(dir).join(format!("{hash}.{k}"))));
+    }
+    files
+}
+
+/// The hash and the index of a name OpenSSL could look a certificate up by, `<8 lowercase hex digits>.<k>`, k without
+/// a leading zero; None for any other name.
+fn hash_name(name: &str) -> Option<(&str, u32)> {
+    let (hash, k) = name.split_once('.')?;
+    let hex = hash.len() == 8 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    let canonical = !k.is_empty() && k.bytes().all(|b| b.is_ascii_digit()) && (k == "0" || !k.starts_with('0'));
+    if !(hex && canonical) {
+        return None;
+    }
+    Some((hash, k.parse().ok()?))
 }
 
 #[cfg(test)]

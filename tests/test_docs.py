@@ -41,7 +41,6 @@ OTHER_PROGRAMS_NAMES = {
     "LD_LIBRARY_PATH": "the dynamic loader's environment variable",
     "PYTEST_ADDOPTS": "pytest's environment variable",
     "CARGO_HOME": "cargo's environment variable",
-    "SSL_CERT_FILE": "OpenSSL's environment variable, which the Rust engine's HttpClient reads too",
     "ORCHESTRATOR_PY": "the desktop app's environment variable, ui/src-tauri/src/lib.rs",
     "PARITY_ENGINE": "the parity harness's environment variable, tests/parity/world.py",
     "PARITY_RECORD": "the parity harness's environment variable, tests/parity/test_parity.py",

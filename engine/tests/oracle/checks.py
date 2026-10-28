@@ -208,11 +208,12 @@ MANIFESTS = [
     ('[tool.uv.sources]\nf = { at = 1979-05-27T07:32:00Z }\n', None),
     ('[project]\ndependencies = ["a"]\n[tool.uv.sources]\na = { index = ["x"] }\n', None),
     ('[[tool.uv.index]]\nname = ["x"]\n[tool.uv.sources]\na = { path = "p" }\n', None),
-    (('[project]\ndependencies = ["a", "b", "c"]\n[[tool.uv.index]]\nname = 1979-05-27T07:32:00Z\n'
+    (('[project]\ndependencies = ["a", "b", "c", "d", "e"]\n[[tool.uv.index]]\nname = 1979-05-27T07:32:00Z\n'
       'url = "https://t/simple"\n[[tool.uv.index]]\nname = 9007199254740993\nurl = "https://n/simple"\n'
       '[[tool.uv.index]]\nname = 1979-05-27T07:32:00\nurl = "https://l/simple"\n'
       '[tool.uv.sources]\na = { index = 1979-05-27T00:32:00-07:00 }\nb = { index = 9007199254740992.0 }\n'
-      'c = { index = 1979-05-27T07:32:00.000 }\n'), None),
+      'c = { index = 1979-05-27T07:32:00.000 }\nd = { index = 1979-05-27T07:32:00.0000001 }\n'
+      'e = { index = 1979-05-27T14:32:00.0000009+07:00 }\n'), None),
     (('[project]\ndependencies = ["a", "b"]\n[[tool.uv.index]]\nname = 1\nurl = "https://one/simple"\n'
      '[tool.uv.sources]\na = { index = true }\nb = { index = 1.0 }\n'), None),
     ('[project]\nname = "p"\ndependencies = ["a"]\n[tool.uv.sources]\na = { mirror = { x = 1 } }\n', None),

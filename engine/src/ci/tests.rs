@@ -259,7 +259,7 @@ fn credentials_travel_only_in_the_authorization_header() {
         .lines()
         .filter_map(|l| l.strip_prefix("    pub fn "))
         .map(|l| &l[..l.find(['(', '<']).unwrap()])
-        .filter(|n| !["new", "from_env", "with_env"].contains(n))
+        .filter(|n| !["new", "from_env"].contains(n))
         .collect();
     assert_eq!(
         public,

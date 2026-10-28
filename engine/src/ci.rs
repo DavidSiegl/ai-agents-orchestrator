@@ -124,7 +124,7 @@ impl Jenkins {
     }
 
     /// The job named job, as from_env makes it, in the environment env gives each variable of, by name.
-    pub fn with_env(
+    pub(crate) fn with_env(
         job: &str,
         config: &ConfigDir,
         env: &dyn Fn(&str) -> Option<String>,

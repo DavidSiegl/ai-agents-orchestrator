@@ -293,11 +293,36 @@ fn tls_trusts_what_openssl_s_default_paths_give() {
     // A file that is not there adds nothing, and the directory still counts, as in OpenSSL.
     assert_eq!(count(&[("SSL_CERT_FILE", &dir.join("missing")), ("SSL_CERT_DIR", &certs_dir)]), Some(1));
     assert_eq!(count(&[("SSL_CERT_FILE", &dir.join("missing")), ("SSL_CERT_DIR", &empty)]), Some(0));
-    // Without either variable, this machine's own, or Mozilla's roots when it has none: never an empty store.
-    assert_ne!(count(&[]), Some(0));
-    assert!(is_hash_name("5ed36f99.0") && is_hash_name("0a1b2c3d.12"));
-    for name in ["5ed36f99", "5ED36F99.0", "5ed36f9.0", "5ed36f99.", "5ed36f99.x", "ca-certificates.crt"] {
-        assert!(!is_hash_name(name), "{name}");
+    // Without either variable: the system's bundle where it has one, else never an empty store.
+    let system = count(&[]);
+    if SYSTEM_BUNDLES.iter().any(|path| std::fs::read(path).is_ok()) {
+        assert!(system.is_some_and(|n| n > 0), "{system:?}");
+    } else {
+        assert_ne!(system, Some(0));
+    }
+}
+
+#[test]
+fn a_certificate_directory_gives_only_what_openssl_would_open() {
+    let dir = crate::test_support::TempDir::new();
+    let names = [
+        "5ed36f99.0", "5ed36f99.1", "5ed36f99.3", // .3 after the gap at .2
+        "aaaa1111.1", // no .0
+        "bbbb2222.0", "bbbb2222.00", "bbbb2222.01", // not as %d writes them
+        "CCCC3333.0", "cccc333.0", "retired-ca.pem",
+    ];
+    for name in names {
+        std::fs::write(dir.join(name), CERT).unwrap();
+    }
+    std::fs::create_dir(dir.join("dddd4444.0")).unwrap();
+    let mut found: Vec<String> =
+        hash_named_files(&dir.path()).iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+    found.sort();
+    assert_eq!(found, ["5ed36f99.0", "5ed36f99.1", "bbbb2222.0"]);
+    assert!(hash_named_files(&dir.join("missing")).is_empty());
+    assert_eq!(hash_name("0a1b2c3d.12"), Some(("0a1b2c3d", 12)));
+    for name in ["5ed36f99", "5ED36F99.0", "5ed36f9.0", "5ed36f99.", "5ed36f99.x", "5ed36f99.01"] {
+        assert_eq!(hash_name(name), None, "{name}");
     }
 }
 

@@ -102,29 +102,24 @@ fn float_is(x: f64, n: i64) -> bool {
     x.fract() == 0.0 && x >= -(2f64.powi(63)) && x < 2f64.powi(63) && x as i64 == n
 }
 
-/// A datetime's fields as Python compares them, a missing second or fraction being 0.
+/// A datetime's fields as Python compares them, a missing second or fraction being 0, and the fraction cut to the
+/// microsecond, as tomllib keeps it.
 fn fields(d: &Datetime) -> impl PartialEq {
-    let time = d.time.map(|t| (t.hour, t.minute, t.second.unwrap_or(0), t.nanosecond.unwrap_or(0)));
+    let time = d.time.map(|t| (t.hour, t.minute, t.second.unwrap_or(0), t.nanosecond.unwrap_or(0) / 1000));
     (d.date, time, d.offset)
 }
 
-/// The instant an offset datetime names, as (seconds since 0001-01-01 in UTC, nanoseconds); None for one without an
-/// offset, a date or a time.
+/// The instant an offset datetime names, as (seconds since 1970-01-01 in UTC, microseconds: the fraction cut as
+/// tomllib cuts it); None for one without an offset, a date or a time.
 fn instant(d: &Datetime) -> Option<(i64, u32)> {
     let (date, time, offset) = (d.date?, d.time?, d.offset?);
     let minutes = match offset {
         Offset::Z => 0,
         Offset::Custom { minutes } => i64::from(minutes),
     };
-    let (y, m) = (i64::from(date.year), i64::from(date.month));
-    // Days from a fixed epoch by Howard Hinnant's days_from_civil, enough to order and compare two instants.
-    let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
-    let days =
-        365 * y + y.div_euclid(4) - y.div_euclid(100) + y.div_euclid(400) + (153 * m + 2) / 5 + i64::from(date.day);
-    let seconds =
-        days * 86_400 + i64::from(time.hour) * 3600 + i64::from(time.minute) * 60 + i64::from(time.second.unwrap_or(0))
-            - minutes * 60;
-    Some((seconds, time.nanosecond.unwrap_or(0)))
+    let days = crate::summary::days_from_civil(i64::from(date.year), i64::from(date.month), i64::from(date.day));
+    let clock = i64::from(time.hour) * 3600 + i64::from(time.minute) * 60 + i64::from(time.second.unwrap_or(0));
+    Some((days * 86_400 + clock - minutes * 60, time.nanosecond.unwrap_or(0) / 1000))
 }
 
 /// value as Python's str() writes it: a string as it is, a datetime, date or time in ISO 8601 with a blank between
