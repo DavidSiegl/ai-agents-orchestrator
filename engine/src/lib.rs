@@ -7,9 +7,12 @@ pub mod env;
 pub mod error;
 pub mod handoff;
 pub mod pipeline;
+pub mod proofs;
 pub mod prompts;
+pub mod pull_request;
 pub mod quality;
 pub mod state;
+pub mod summary;
 pub mod workflow_file;
 
 #[cfg(test)]

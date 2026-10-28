@@ -88,6 +88,7 @@ pub fn oracle(file: &str) -> crate::py::json::Json {
         "workflows.json" => include_str!("../tests/oracle/workflows.json"),
         "states.json" => include_str!("../tests/oracle/states.json"),
         "quality.json" => include_str!("../tests/oracle/quality.json"),
+        "helpers.json" => include_str!("../tests/oracle/helpers.json"),
         _ => panic!("no oracle file {file}"),
     };
     crate::py::json::Json::parse(text).unwrap_or_else(|e| panic!("{file}: {e}"))
@@ -193,4 +194,87 @@ pub fn recordings() -> Vec<(String, crate::py::json::Json)> {
             (name, recording)
         })
         .collect()
+}
+
+/// A run of helpers.json's cases with the inputs engine/tests/oracle/helpers.py gives its helpers, read from its
+/// recording as that script reads them, and the outputs it recorded.
+pub struct HelperCase {
+    /// The case: its recording, run directory and conflicts, and the Python engine's outputs by helper.
+    pub expected: crate::py::json::Json,
+    pub saved: Map<crate::py::json::Json>,
+    pub state: crate::state::RunState,
+    pub spec: String,
+    pub report: String,
+    pub review: String,
+    pub evidence: crate::pull_request::GateEvidence,
+    pub now: i64,
+}
+
+/// helpers.json's cases, their inputs read from the recordings.
+pub fn helper_cases() -> Vec<HelperCase> {
+    use crate::py::json::Json;
+    let oracle = oracle("helpers.json");
+    let epoch = oracle.get("epoch").and_then(Json::as_int).unwrap() as i64;
+    let now = oracle.get("now").and_then(Json::as_int).unwrap() as i64;
+    let recordings = recordings();
+    let mut out = Vec::new();
+    for case in oracle.get("cases").and_then(Json::as_array).unwrap() {
+        let field = |key: &str| case.get(key).and_then(Json::as_str).unwrap().to_string();
+        let (recording, run_dir) = (field("recording"), field("run_dir"));
+        let name = recording.strip_suffix(".json").unwrap();
+        let files = recordings.iter().find(|(n, _)| n == name).unwrap().1.get("run_files").unwrap().as_object().unwrap().clone();
+        let file = |name: &str| files.get(&format!("{run_dir}{name}")).and_then(Json::as_str).map(String::from);
+        // helpers.py's denormalized: each "<time>" a minute after the one before, each "<seconds>" a count.
+        let mut text = String::new();
+        let (mut times, mut counts) = (0, 5);
+        let state_text = file("state.json").unwrap();
+        let mut rest = state_text.as_str();
+        while let Some(at) = rest.find('"') {
+            text.push_str(&rest[..at]);
+            rest = &rest[at..];
+            if let Some(after) = rest.strip_prefix("\"<time>\"") {
+                text.push_str(&Json::from(crate::summary::iso_utc(epoch + 60 * times)).dumps());
+                times += 1;
+                rest = after;
+            } else if let Some(after) = rest.strip_prefix("\"<seconds>\"") {
+                text.push_str(&counts.to_string());
+                counts += 7;
+                rest = after;
+            } else {
+                text.push('"');
+                rest = &rest[1..];
+            }
+        }
+        text.push_str(rest);
+        let Json::Object(mut saved) = Json::parse(&text).unwrap() else { panic!("a state") };
+        let conflicts = case.get("conflicts").and_then(Json::as_array).unwrap();
+        if !conflicts.is_empty() {
+            saved.insert("conflicts", Json::Array(conflicts.clone()));
+        }
+        let state = crate::state::RunState::from_saved(&saved).unwrap();
+        // helpers.py's last: the last of the run directory's files whose name matches, by name.
+        let last = |matches: &dyn Fn(&str) -> bool| {
+            let mut names: Vec<&str> = files.keys().filter_map(|n| n.strip_prefix(run_dir.as_str())).filter(|n| matches(n)).collect();
+            names.sort();
+            names.last().map(|n| (n.to_string(), file(n).unwrap()))
+        };
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        let body = |n: &str, prefix: &str| n.strip_prefix(prefix).and_then(|n| n.strip_suffix(".md")).map(String::from);
+        let spec = last(&|n| n == "spec.md").map(|(_, t)| t).filter(|t| !t.is_empty()).unwrap_or(state.task.clone());
+        let is_report = |n: &str| body(n, "build-").is_some_and(|b| match b.split_once("-q") {
+            Some((round, q)) => digits(round) && digits(q),
+            None => digits(&b),
+        });
+        let report = last(&is_report).map_or(String::new(), |(_, t)| t);
+        let review = last(&|n| body(n, "review-").is_some_and(|b| digits(&b))).map_or(String::new(), |(_, t)| t);
+        let is_quality = |n: &str| body(n, "quality-").is_some_and(|b| b.split_once('-').is_some_and(|(r, q)| digits(r) && digits(q)));
+        let quality = last(&is_quality).map(|(n, text)| {
+            let b = body(&n, "quality-").unwrap();
+            let (round, q) = b.split_once('-').unwrap();
+            crate::pull_request::QualityFile { round: round.parse().unwrap(), quality_round: q.parse().unwrap(), text }
+        });
+        let evidence = crate::pull_request::GateEvidence { last: quality, unjudged: state.quality_gate_disabled };
+        out.push(HelperCase { expected: case.clone(), saved, state, spec, report, review, evidence, now });
+    }
+    out
 }
