@@ -64,6 +64,11 @@ impl TempDir {
         TempDir(dir)
     }
 
+    /// The directory's path, as a str.
+    pub fn path(&self) -> String {
+        self.0.to_str().expect("a UTF-8 path").to_string()
+    }
+
     /// The path of name in the directory, as a str.
     pub fn join(&self, name: &str) -> String {
         self.0.join(name).to_str().expect("a UTF-8 path").to_string()

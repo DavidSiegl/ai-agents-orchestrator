@@ -90,7 +90,21 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   time, and a turn whose start is not a time is left out of `summary.md` and `metrics.json`, where the Python engine
   fails (`epoch_seconds` and `turn_starts` in `engine/src/summary.rs`); a `state.json` field of another type than the
   Python engine writes is refused naming the run, where Python keeps it, and one it does not know is kept, where Python
-  drops it, as the spec asks (`RunState::from_saved`). Decided against unless a run is found that writes such input.
+  drops it, as the spec asks (`RunState::from_saved`). And from the machine the agents run on (rust-engine ticket 05,
+  2026-10-28): a path git prints that is not UTF-8 is refused, naming it, by `Host::lock`, `locked_changes`,
+  `restore`, `changed_line_counts` and `crate::patch::added_lines` (so by the secret scan too), where Python reads it
+  as `os.fsdecode` does, and a base's gitleaks rules file that is not UTF-8 fails the scan closed, where the Python
+  engine crashes writing it (`engine/src/host.rs`, `utf8_path`; `engine/src/host/scan.rs`, `base_rules_file`).
+  Decided against unless a run is found that writes such input.
+- **A Ctrl-C at the terminal does not reach the command the Rust engine's `Host` is running.** `ProcessHost` starts
+  each command in a process group of its own, so that a timeout kills the command with whatever it started
+  (`run_process` in `engine/src/host/process.rs`, rust-engine ticket 05, 2026-10-28); the terminal sends SIGINT to
+  its foreground group only, which holds the engine and no longer the git, gh, gitleaks or ssh it waits on. In the
+  Python engine every child is in the foreground group and gets the SIGINT too. Until the Rust engine handles
+  SIGINT, which nothing does before ticket 08/09, it dies at once and leaves the command running to its end or its
+  timeout (300 s for a push or a scan). Closes with the interrupt handling of rust-engine ticket 08/09 killing the
+  running command's group (its pid is its group's id) before it releases the run, and a test that interrupts a run
+  waiting on a command.
 - **The contract test leaves its Jenkins build running when it fails.** `tests/contract/test_jenkins.py` triggers one
   quality build and nothing stops it on a failure or a Ctrl-C, so the build holds an executor until it ends, up to
   the 22 minutes build #59 took. Raised by cross-review 73 (F11, 2026-10-27): "a Ctrl-C during the queue wait leaves

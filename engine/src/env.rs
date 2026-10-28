@@ -24,7 +24,7 @@ pub fn child_env() -> Vec<(OsString, OsString)> {
 }
 
 /// vars without the variables child_env withholds, in their order.
-fn without_withheld(vars: impl Iterator<Item = (OsString, OsString)>) -> Vec<(OsString, OsString)> {
+pub(crate) fn without_withheld(vars: impl Iterator<Item = (OsString, OsString)>) -> Vec<(OsString, OsString)> {
     vars.filter(|(k, _)| !CI_ENV.iter().chain(&GIT_PATHSPEC_ENV).any(|w| k == w)).collect()
 }
 
