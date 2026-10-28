@@ -87,6 +87,7 @@ pub fn oracle(file: &str) -> crate::py::json::Json {
         "texts.json" => include_str!("../tests/oracle/texts.json"),
         "workflows.json" => include_str!("../tests/oracle/workflows.json"),
         "states.json" => include_str!("../tests/oracle/states.json"),
+        "quality.json" => include_str!("../tests/oracle/quality.json"),
         _ => panic!("no oracle file {file}"),
     };
     crate::py::json::Json::parse(text).unwrap_or_else(|e| panic!("{file}: {e}"))
