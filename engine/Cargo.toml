@@ -10,7 +10,9 @@ serde = "1"
 # float_roundtrip: a float reads as the nearest f64, as Python reads it, so that state.json writes back as it was.
 serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.10"
-toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }
+# preserve_order: a table's keys come in the file's order, as tomllib gives them, so a table with two problems is
+# refused naming the first, as the Python engine refuses it.
+toml = { version = "1", default-features = false, features = ["parse", "preserve_order", "serde", "std"] }
 
 [lints]
 workspace = true

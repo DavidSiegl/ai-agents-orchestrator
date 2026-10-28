@@ -21,10 +21,6 @@
 //! key, or else after the key itself. The panes are laid out in the order the steps first use the roles.
 //! workflow_definition writes the canonical form, which such a file may also be: every role with its label, and every
 //! step with its fields.
-//!
-//! The toml crate gives a table's keys sorted, where Python's tomllib gives them in the file's order, so a file with
-//! two problems in one table may be refused naming the other one first. A definition saved in state.json keeps its
-//! order.
 
 use crate::constants::{BUDGET_KEYS, DEFAULT_MAX_FILES, DEFAULT_MAX_LINES};
 use crate::env::ConfigDir;

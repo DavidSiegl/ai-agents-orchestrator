@@ -83,19 +83,14 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   gate-open-decisions ticket 06's. Closes when
   a quality build that runs the scenarios fits in `QUALITY_TIMEOUT`, shown by the contract test green against one, or
   with a larger `QUALITY_TIMEOUT` in the Rust engine.
-- **The Rust engine reads some input no run writes otherwise than the Python engine.** Each is a difference only
-  for a file a human edited, or a case no test of the Python engine pins (rust-engine ticket 04, 2026-10-28): a
-  workflow file's tables are read with their keys sorted (`engine/src/workflow_file.rs`), since the toml crate keeps
-  them in a `BTreeMap` without its `preserve_order` feature, so a table with two problems may be refused naming the
-  other one first; `state.json` with `NaN`, `Infinity` or an integer beyond 64 bits is refused, as serde_json reads
-  it (`engine/src/py/json.rs`), where Python reads it; a time without an offset is taken as UTC, where Python's
-  `fromisoformat` takes it as local time, and a turn whose start is not a time is left out of `summary.md` and
-  `metrics.json`, where the Python engine fails (`epoch_seconds` and `turn_starts` in `engine/src/summary.rs`); a
-  `state.json` field of another type than the Python engine writes is refused naming the run, where Python keeps
-  it, and one it does not know is kept, where Python drops it, as the spec asks (`RunState::from_saved`). Closes,
-  for the TOML order, with toml's `preserve_order` (its `indexmap` is in `Cargo.lock` through Tauri already, but a
-  crate beyond the spec's list is the user's decision); the others are decided against unless a run is found that
-  writes such input.
+- **The Rust engine reads some input no run writes otherwise than the Python engine.** Each is a difference only for a
+  file a human edited, or a case no test of the Python engine pins (rust-engine ticket 04, 2026-10-28): `state.json`
+  with `NaN`, `Infinity` or an integer beyond 64 bits is refused, as serde_json reads it (`engine/src/py/json.rs`),
+  where Python reads it; a time without an offset is taken as UTC, where Python's `fromisoformat` takes it as local
+  time, and a turn whose start is not a time is left out of `summary.md` and `metrics.json`, where the Python engine
+  fails (`epoch_seconds` and `turn_starts` in `engine/src/summary.rs`); a `state.json` field of another type than the
+  Python engine writes is refused naming the run, where Python keeps it, and one it does not know is kept, where Python
+  drops it, as the spec asks (`RunState::from_saved`). Decided against unless a run is found that writes such input.
 - **The contract test leaves its Jenkins build running when it fails.** `tests/contract/test_jenkins.py` triggers one
   quality build and nothing stops it on a failure or a Ctrl-C, so the build holds an executor until it ends, up to
   the 22 minutes build #59 took. Raised by cross-review 73 (F11, 2026-10-27): "a Ctrl-C during the queue wait leaves
@@ -512,6 +507,11 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Fixed
 
+- **The Rust engine read a workflow file's tables with their keys sorted.** The toml crate keeps a table in a
+  `BTreeMap` without its `preserve_order` feature, so a table with two problems could be refused naming the other one
+  first, where tomllib gives the file's order. Raised in rust-engine ticket 04 (2026-10-28). Fixed (2026-10-28, the
+  user allowed `indexmap`): toml's `preserve_order` (`engine/Cargo.toml`), held by
+  `a_table_with_two_problems_names_the_first_in_the_file_as_python_does` (`engine/src/workflow_file/tests.rs`).
 - **Jenkins ran the Rust tests of `ui/src-tauri` alone.** The Test stage ran `cargo llvm-cov nextest` in that
   directory, while `gate.py`'s clippy lints every Cargo workspace git tracks; a crate in another workspace, such as
   the Rust engine's, would have had its lines judged by clippy but its tests never run, and its added lines counted as

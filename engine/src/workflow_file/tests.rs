@@ -248,6 +248,20 @@ fn invalid_files_name_the_problem() {
 }
 
 #[test]
+fn a_table_with_two_problems_names_the_first_in_the_file_as_python_does() {
+    let config = Config::new();
+    let step = "id = \"build\"\nfile = \"b-{n}.md\"\nprompt = \"{path}\"\nedits = true\n";
+    for (message, text) in [
+        ("step 1 (build): unknown key zzz; it takes again,", format!("[[steps]]\n{step}zzz = 1\naaa = 2\n")),
+        ("role zz: give a label, or a table with label, model and agent", format!("[roles]\nzz = 3\naa = 4\n[[steps]]\n{step}")),
+    ] {
+        let path = config.file("bad", &text);
+        let e = load_workflow_file(&path, &built_in()).unwrap_err();
+        assert!(e.0.contains(message), "{message}: {e}");
+    }
+}
+
+#[test]
 fn a_saved_definition_that_cannot_be_filled_in_or_is_corrupt_is_refused() {
     let Json::Object(mut definition) = workflow_definition(&quick()) else { panic!("an object") };
     let Some(Json::Array(steps)) = definition.get_mut("steps") else { panic!("steps") };

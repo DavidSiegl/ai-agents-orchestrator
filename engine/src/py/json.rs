@@ -1,7 +1,7 @@
 //! JSON as orchestrator.py reads and writes it: a value whose objects keep their keys in the order they came, as a
 //! Python dict does, read by json.loads and written by json.dumps with its defaults, so that state.json and
-//! metrics.json come out byte for byte as the Python engine wrote them. TOML read into a Json keeps the order the
-//! toml crate gives, which is its keys sorted.
+//! metrics.json come out byte for byte as the Python engine wrote them. TOML read into a Json keeps its keys in the
+//! file's order, as the toml crate gives them with preserve_order.
 
 use std::fmt;
 
