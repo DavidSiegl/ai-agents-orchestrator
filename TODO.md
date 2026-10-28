@@ -74,6 +74,17 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Open issues
 
+- **The eval set's code has review 88's findings open.** Raised by cross-review 88 (2026-10-28) in code PR #167
+  brought, recorded here rather than fixed in an unrelated branch: the docs task's hidden test sees only ``` fences
+  in column 0 (`evals/tasks/docs/hidden_test.py:64`, F1) and its `usage()` closes a fence on any fence line, not the
+  matching one (`:35`, F2); `evals/run.py`'s `_run_metrics` trusts the shape of a metrics.json it could parse (F3);
+  `evals/make_bundles.py`'s git inherits `GIT_DIR`, `GIT_INDEX_FILE` and `GIT_WORK_TREE` (F4); `evals/acceptance.py`'s
+  summary takes every unittest error for a test case (F5); and `evals/run.py:167` drops a failed removal of the clone
+  (F6). Closes with each fixed in a pull request of the eval set's.
+- **The Gate stage's comment on report order describes a window that has closed.** The Jenkinsfile passes the Rust
+  reports before the Python's for a main whose `gate.py` took `--tests` and `--coverage` once; main's takes them
+  repeatedly since #163, so the order and its comment can go. Raised by cross-review 88 (F9, 2026-10-28).
+
 - **No agent has run an eval task yet.** live-checks/04's verification asks for one real `evals/run.py --tasks <one>
   --repeat 1` from a herdr pane (it starts real agents, so it was left to the user), with its row in the pull
   request's description and its result line committed under `evals/results/`. Cross-review 80 (F9, 2026-10-28):
@@ -587,8 +598,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   (2026-10-27): the list names it.
 
 - **`tool_env` passed `UPDATE_GOLDEN` to the pytest and mutmut runs the gate starts.** Under `UPDATE_GOLDEN=1`
-  `assert_golden` rewrites its file instead of comparing, so the gate's flaky-tests reruns would rewrite
-  `tests/golden/*.txt` and pass a golden test that should fail. Raised by cross-review 76 (F2, 2026-10-27). Fixed
+  `assert_golden` rewrites its file instead of comparing, so a golden test the gate runs could not fail (why:
+  `tool_env`'s docstring). Raised by cross-review 76 (F2, 2026-10-27). Fixed
   (2026-10-27): `tool_env` leaves it out, as it does the Jenkins credentials (`TestChildEnvironment`, which also checks it
   under `UPDATE_GOLDEN=1`).
 

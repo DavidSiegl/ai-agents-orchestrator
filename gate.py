@@ -112,7 +112,8 @@ def tool_env() -> dict[str, str]:
 
     So a test the change brings, which the flaky-tests check reruns or mutmut runs, never inherits the tokens when the
     gate runs where they are set. A golden test (tests/golden.py) under UPDATE_GOLDEN=1 rewrites its file instead of
-    comparing with it, so in the copy a rerun or mutmut runs in it could not fail. And the gate's
+    comparing with it: a golden test the flaky-tests reruns, the passes-at-base run or mutmut run, each in a copy of
+    the tree, could then not fail. And the gate's
     pathspecs are written in git's default syntax, which each switch breaks without an error: under
     GIT_LITERAL_PATHSPECS the linters' globs and GateChange.from_tree's exclude match nothing, under
     GIT_NOGLOB_PATHSPECS the globs match nothing, under GIT_GLOB_PATHSPECS "*.py" matches only the top level's files,
@@ -310,7 +311,7 @@ def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (),
     for one about the whole file and path None for one about the whole change. Both are listed in the order
     given and numbered as one list, issues first, at most QUALITY_ISSUE_LIMIT in all; the rest are counted.
     elsewhere counts the linter findings left out for not being on lines the change added. tests are the
-    (name, detail) of the failing tests of the test report the gate was given, None for no tests section, as when
+    (name, detail) of the failing tests of every test report the gate was given, None for no tests section, as when
     it was given none. coverage is the sentence about coverage of new code, None for no such section.
     suppressions are the (path, line, text) of lint suppressions the change added. edited are the
     BUILD_CONFIG_FILES the change edits; rules_from names the file the gate took its rules from when that was not the
