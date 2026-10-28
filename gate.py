@@ -474,13 +474,14 @@ class GateTool:
     line_ends: tuple[str, ...]
 
     def run(self, root: str, rules: str, files: list[str], tracked: set[str]) -> tuple[list[dict], list[str]]:
-        """The linter's findings over files, the tracked files its pathspecs match, in the repository whose top level
-        is root, and the failed conditions it caused, each a sentence, none when it ran as it should.
+        """The linter's findings over files, the tracked files its pathspecs match outside mutmut's state
+        (_linted_files), in the repository whose top level is root, and the failed conditions it caused, each a
+        sentence, none when it ran as it should.
 
         rules is the pyproject.toml whose rules decide, tracked every file git tracks, as _git_run's verbatim output
-        names them. The findings are {path, line, severity, rule, message} as tool_findings gives them, wherever they
-        are; the gate keeps those on added lines. A tool that is missing, fails or times out is a condition, never an
-        exception."""
+        names them, by which the findings' paths are read. The findings are {path, line, severity, rule, message} as
+        tool_findings gives them, wherever they are; the gate keeps those on added lines. A tool that is missing,
+        fails or times out is a condition, never an exception."""
         raise NotImplementedError
 
 
@@ -510,7 +511,7 @@ class TextTool(GateTool):
 
 @dataclass(frozen=True)
 class Clippy(GateTool):
-    """cargo clippy over every Cargo workspace that a manifest the repository tracks belongs to, all its targets
+    """cargo clippy over every Cargo workspace that a manifest among the files it is given belongs to, all its targets
     checked, tests and examples included.
 
     Which lints are on is each workspace's own choice, the [lints] tables of its manifests and its clippy.toml: the
@@ -532,14 +533,17 @@ class Clippy(GateTool):
     """
 
     def run(self, root: str, rules: str, files: list[str], tracked: set[str]) -> tuple[list[dict], list[str]]:
-        """As GateTool.run says; files and rules play no part, since clippy reads crates by their manifests."""
+        """As GateTool.run says; of files only the manifests play a part, by which clippy reads crates, and rules
+        plays none. Without a Rust source among files there is nothing to lint, and cargo does not run."""
+        if not any(f.endswith(".rs") for f in files):
+            return [], []
         proc = _tool_process(self.name, ["cargo", "clippy", "--version"], root)
         if isinstance(proc, str):
             return [], [proc]
         if proc.returncode != 0:
             return [], [(f"`{self.name}` is not installed: `cargo clippy --version` failed with exit status "
                          f"{proc.returncode}: {_said(proc)}")]
-        manifests, problems = _cargo_workspaces(root, tracked)
+        manifests, problems = _cargo_workspaces(root, files)
         found: list[dict] = []
         for manifest in manifests:
             lints, problem = self._lint_workspace(root, manifest, tracked)
@@ -599,7 +603,8 @@ GATE_TOOLS = (
              detail=re.compile(r"(?P<message>.+) \[(?P<rule>[\w-]+)\]")),
     # rustc numbers lines at "\n" alone, though Rust counts a lone "\r", NEL, U+2028 and U+2029 as whitespace:
     # observed with clippy 0.1.99 (rustc 1.99.1), whose finding below a line holding all four was on git's line.
-    Clippy("clippy", ("*.rs",), ()),
+    # Its manifests are among its files only to say which workspaces it lints (Clippy.run).
+    Clippy("clippy", ("*.rs", "*Cargo.toml"), ()),
 )
 
 
@@ -733,18 +738,10 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
     change = GateChange.from_tree(root, base_sha, rules_path)
     changed = change.changed
     tracked = {f for f in _git(root, "ls-files", "-z", verbatim=True).split("\0") if f}
-    conditions, findings = [], []
-    if change.mutmut_state:
-        named = _series([f"`{path}`" for path in change.mutmut_state], limit=5)
-        conditions.append(f"The change adds or edits {named} under `{_MUTMUT_STATE}/`, where mutmut keeps its "
-                          f"scratch state, which is never part of a change; the gate judged none of them. Remove them "
-                          f"from the change.")
+    conditions, findings = _mutmut_state_condition(change), []
     reads: list[tuple[GateTool, list[str]]] = []  # each linter, with the tracked files it reads
     for tool in GATE_TOOLS:
-        # Filtered here rather than by _OUTSIDE_MUTMUT_STATE: beside an exclude, git 2.47 lists nothing for
-        # actionlint's two globs, `.github/workflows/*.yml` and `*.yaml`.
-        files = [f for f in _git(root, "ls-files", "-z", "--", *tool.pathspecs, verbatim=True).split("\0")
-                 if f and not _in_mutmut_state(f)]
+        files = _linted_files(root, tool)
         reads.append((tool, files))
         if files:
             found, problems = tool.run(root, rules_path, files, tracked)
@@ -796,6 +793,25 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
     return text.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
 
 
+def _linted_files(root: str, tool: GateTool) -> list[str]:
+    """The files tool reads in the repository whose top level is root: those git tracks that its pathspecs match,
+    but none under mutmut's state, as _git_run's verbatim output names them. Raises GateError as _git does."""
+    # Filtered here rather than by _OUTSIDE_MUTMUT_STATE: beside an exclude, git 2.47 lists nothing for actionlint's
+    # two globs, `.github/workflows/*.yml` and `*.yaml`.
+    return [f for f in _git(root, "ls-files", "-z", "--", *tool.pathspecs, verbatim=True).split("\0")
+            if f and f != _MUTMUT_STATE and not f.startswith(f"{_MUTMUT_STATE}/")]
+
+
+def _mutmut_state_condition(change: GateChange) -> list[str]:
+    """The failed condition, as a list of one, naming the files change commits under mutmut's state
+    (GateChange.mutmut_state); none when it commits none."""
+    if not change.mutmut_state:
+        return []
+    named = _series([f"`{path}`" for path in change.mutmut_state], limit=5)
+    return [(f"The change adds or edits {named} under `{_MUTMUT_STATE}/`, where mutmut keeps its scratch state, "
+             f"which is never part of a change; the gate judged none of them. Remove them from the change.")]
+
+
 def _tool_process(name: str, argv: list[str], cwd: str) -> subprocess.CompletedProcess | str:
     """argv run in cwd for the linter name, with tool_env, as _run_in_session runs it, within GATE_TOOL_TIMEOUT
     seconds: the finished process, whatever its exit status, its output decoded so that the paths it prints match
@@ -814,12 +830,12 @@ def _tool_process(name: str, argv: list[str], cwd: str) -> subprocess.CompletedP
     return proc
 
 
-def _cargo_workspaces(root: str, tracked: set[str]) -> tuple[list[str], list[str]]:
-    """The root manifest of each Cargo workspace that a tracked Cargo.toml belongs to, relative to root, the
-    repository's top level, in path order; and a failed condition, naming clippy, for each manifest whose workspace
-    cargo cannot tell."""
+def _cargo_workspaces(root: str, files: Iterable[str]) -> tuple[list[str], list[str]]:
+    """The root manifest of each Cargo workspace that a Cargo.toml among files, paths relative to root, the
+    repository's top level, belongs to, relative to root, in path order; and a failed condition, naming clippy, for
+    each manifest whose workspace cargo cannot tell."""
     roots, problems = set(), []
-    for manifest in sorted(f for f in tracked if os.path.basename(f) == "Cargo.toml"):
+    for manifest in sorted(f for f in files if os.path.basename(f) == "Cargo.toml"):
         proc = _tool_process("clippy", ["cargo", "locate-project", "--workspace", "--message-format", "plain",
                                         "--manifest-path", manifest], root)
         if isinstance(proc, str):
@@ -2703,11 +2719,6 @@ _MUTMUT_STATE = "mutants"
 # The git pathspec of every path outside _MUTMUT_STATE, and the one of the paths inside it.
 _OUTSIDE_MUTMUT_STATE = f":(top,exclude,literal){_MUTMUT_STATE}"
 _INSIDE_MUTMUT_STATE = f":(top,literal){_MUTMUT_STATE}"
-
-
-def _in_mutmut_state(path: str) -> bool:
-    """Whether path, relative to the tree's top, is _MUTMUT_STATE or under it, as _INSIDE_MUTMUT_STATE matches it."""
-    return path == _MUTMUT_STATE or path.startswith(f"{_MUTMUT_STATE}/")
 
 # How `mutmut results` words a mutant it did not try against a test: one the budget stopped it before, and one of a
 # function no test calls.

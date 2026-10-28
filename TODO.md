@@ -484,12 +484,12 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   own, unfiltered changed lines, which also fed the suppressions list, the stray-line-end refusal and the coverage
   condition, so a change committing `mutants/calc.py` had its lines there linted. Fixed (2026-10-28, the user's
   decision in `.scratch/gate-open-decisions/issues/04-committed-mutants-dir.md`: refuse): `judge_change` reads only
-  `GateChange.from_tree`'s change, whose `changed` and `diff` every reader shares, and passes the linters no file
-  under `mutants/` (`_in_mutmut_state`); a change that adds, edits or moves in files there fails with one
-  condition naming them (`GateChange.mutmut_state`), which replaces their listing under build configuration
-  (`mutmut_state_files` is gone). Deleting such files passes. Not closed: mypy reads the files `[tool.mypy] files`
-  names, not the gate's list, so rules naming a directory above `mutants/` still have mypy read them; their findings
-  count nowhere, since no line there is a changed one.
+  `GateChange.from_tree`'s change, whose `changed` and `diff` every reader shares, and `_linted_files` gives no
+  linter a file under `mutants/`, nor clippy a manifest there to find a workspace by; a change that adds, edits or
+  moves in files there fails with one condition naming them (`GateChange.mutmut_state`, `_mutmut_state_condition`),
+  which replaces their listing under build configuration (`mutmut_state_files` is gone). Deleting such files passes.
+  Not closed: mypy reads the files `[tool.mypy] files` names, not the gate's list, so rules naming a directory above
+  `mutants/` still have mypy read them; their findings count nowhere, since no line there is a changed one.
 
 - **A Python script with no `.py` was never judged by the cognitive-complexity check.** `_judged_files` judged only
   paths ending in `.py`, while the pairing read a script whose `#!` line names python as Python, so a function the
