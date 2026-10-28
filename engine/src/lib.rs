@@ -16,4 +16,6 @@ pub mod summary;
 pub mod workflow_file;
 
 #[cfg(test)]
+mod prompt_parity;
+#[cfg(test)]
 mod test_support;
