@@ -29,3 +29,6 @@ pub fn strerror(e: &std::io::Error) -> String {
         _ => text,
     }
 }
+
+#[cfg(test)]
+mod tests;
