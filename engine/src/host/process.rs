@@ -36,9 +36,9 @@ const SSH_DIR_PREFIX: &str = "octoflow-ssh-";
 ///
 /// Clones, and the hosts over_ssh makes, share their SSH control directory, which the last of them to be dropped
 /// removes.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ProcessHost {
-    /// The SSH target its commands run on; None for this machine.
+    /// The SSH target its commands run on; None for this machine. Never empty.
     ssh_target: Option<String>,
     /// The environment every command it starts gets, the engine's own as child_env gives it
     /// (crate::env::child_env): without the CI credentials and git's pathspec switches.
@@ -64,9 +64,10 @@ impl ProcessHost {
         }
     }
 
-    /// A Host that runs its commands on ssh_target over SSH, starting them as this one does.
+    /// A Host that runs its commands on ssh_target over SSH, starting them as this one does; on this machine when
+    /// ssh_target is empty, as Python's Host takes an empty target.
     pub fn over_ssh(&self, ssh_target: &str) -> ProcessHost {
-        ProcessHost { ssh_target: Some(ssh_target.to_string()), ..self.clone() }
+        ProcessHost { ssh_target: (!ssh_target.is_empty()).then(|| ssh_target.to_string()), ..self.clone() }
     }
 
     /// The value of the variable name in the environment the commands get; None when it is unset or not UTF-8.
@@ -112,6 +113,13 @@ impl ProcessHost {
     }
 }
 
+/// Where the host runs its commands, and nothing of their environment, whose values may be tokens of the user's.
+impl std::fmt::Debug for ProcessHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProcessHost").field("ssh_target", &self.ssh_target).finish_non_exhaustive()
+    }
+}
+
 impl Host for ProcessHost {
     fn ssh_target(&self) -> Option<&str> {
         self.ssh_target.as_deref()
@@ -119,13 +127,7 @@ impl Host for ProcessHost {
 
     fn exec(&self, argv: &[&str], stdin: Option<&[u8]>, timeout: u64) -> Result<Exec, OrchestratorError> {
         let argv: Vec<String> = match &self.ssh_target {
-            // BatchMode fails fast instead of hanging on a password prompt nobody can see.
-            Some(target) => ["ssh", "-o", "BatchMode=yes"]
-                .map(String::from)
-                .into_iter()
-                .chain(self.ssh_sharing_options())
-                .chain([target.clone(), shlex_join(argv)])
-                .collect(),
+            Some(target) => ssh_argv(target, self.ssh_sharing_options(), argv),
             None => argv.iter().map(|a| a.to_string()).collect(),
         };
         let command = shlex_join(&argv);
@@ -138,6 +140,13 @@ impl Host for ProcessHost {
             Err(ProcessError::Timeout) => Err(OrchestratorError(format!("{command}: {}", timed_out(&argv, timeout)))),
         }
     }
+}
+
+/// The ssh command that runs argv on target, sharing a connection as options say (ssh_sharing_options).
+fn ssh_argv(target: &str, options: Vec<String>, argv: &[&str]) -> Vec<String> {
+    // BatchMode fails fast instead of hanging on a password prompt nobody can see.
+    let batch = ["ssh", "-o", "BatchMode=yes"].map(String::from);
+    batch.into_iter().chain(options).chain([target.to_string(), shlex_join(argv)]).collect()
 }
 
 /// What Python's subprocess.TimeoutExpired says of argv, run with a timeout of seconds.
@@ -180,20 +189,24 @@ fn run_process(
         .spawn()
         .map_err(ProcessError::Start)?;
     // Input and output each on a thread of their own, so that a command that writes much before it reads all its
-    // input, or fills one pipe while the other is read, never waits on the engine.
-    let writer = match (child.stdin.take(), stdin) {
-        (Some(mut pipe), Some(data)) => {
-            let data = data.to_vec();
-            Some(thread::spawn(move || match pipe.write_all(&data) {
+    // input, or fills one pipe while the other is read, never waits on the engine, and the engine waits on none of
+    // them past the deadline.
+    let (sender, received) = mpsc::channel();
+    let mut pending = 2;
+    if let (Some(mut pipe), Some(data)) = (child.stdin.take(), stdin) {
+        let (sender, data) = (sender.clone(), data.to_vec());
+        pending += 1;
+        thread::spawn(move || {
+            let written = match pipe.write_all(&data) {
                 // A command that stops reading its input is judged by its status and output, as Python's
                 // communicate judges it.
                 Err(e) if e.kind() == ErrorKind::BrokenPipe => Ok(()),
                 done => done,
-            }))
-        }
-        _ => None,
-    };
-    let (sender, received) = mpsc::channel();
+            };
+            // The receiver is gone only once the command has failed, and then nothing waits for its input.
+            let _ = sender.send(Piped::Input(written));
+        });
+    }
     let stdout: Box<dyn Read + Send> = Box::new(child.stdout.take().expect("stdout is piped"));
     let stderr: Box<dyn Read + Send> = Box::new(child.stderr.take().expect("stderr is piped"));
     for (n, mut pipe) in [stdout, stderr].into_iter().enumerate() {
@@ -201,37 +214,46 @@ fn run_process(
         thread::spawn(move || {
             let mut out = vec![];
             let read = pipe.read_to_end(&mut out).map(|_| out);
-            // The receiver is gone only once the command timed out, and then nothing reads what was printed.
-            let _ = sender.send((n, read));
+            // As for the input's.
+            let _ = sender.send(Piped::Output(n, read));
         });
     }
     drop(sender);
-    let mut outputs: [Option<Vec<u8>>; 2] = [None, None];
-    for _ in 0..2 {
-        let Ok((n, read)) = received.recv_timeout(deadline.saturating_duration_since(Instant::now())) else {
-            return Err(kill_group(&mut child));
+    let mut outputs: [Vec<u8>; 2] = [vec![], vec![]];
+    for _ in 0..pending {
+        let piped = match received.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(piped) => piped,
+            Err(_) => return Err(abandon(&mut child, ProcessError::Timeout)),
         };
-        outputs[n] = Some(read.map_err(ProcessError::Io)?);
+        match piped {
+            Piped::Output(n, Ok(out)) => outputs[n] = out,
+            Piped::Output(_, Err(e)) | Piped::Input(Err(e)) => return Err(abandon(&mut child, ProcessError::Io(e))),
+            Piped::Input(Ok(())) => {}
+        }
     }
     let status = loop {
-        if let Some(status) = child.try_wait().map_err(ProcessError::Io)? {
-            break status;
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => return Err(abandon(&mut child, ProcessError::Timeout)),
+            Ok(None) => thread::sleep(Duration::from_millis(5)),
+            Err(e) => return Err(abandon(&mut child, ProcessError::Io(e))),
         }
-        if Instant::now() >= deadline {
-            return Err(kill_group(&mut child));
-        }
-        thread::sleep(Duration::from_millis(5));
     };
-    if let Some(writer) = writer {
-        writer.join().expect("the input's thread does not panic").map_err(ProcessError::Io)?;
-    }
     let code = status.code().or_else(|| status.signal().map(|signal| -signal)).unwrap_or(-1);
-    let [stdout, stderr] = outputs.map(Option::unwrap_or_default);
+    let [stdout, stderr] = outputs;
     Ok((code, stdout, stderr))
 }
 
-/// Kill child's process group, child included, and reap child: what a command that ran out of time gets.
-fn kill_group(child: &mut Child) -> ProcessError {
+/// What one of a command's pipes ended with: its input written (Input), or one of its outputs read to the end, by
+/// number, 0 for stdout and 1 for stderr (Output).
+enum Piped {
+    Input(std::io::Result<()>),
+    Output(usize, std::io::Result<Vec<u8>>),
+}
+
+/// Kill child's process group, child included, and reap child, for a command that failed with why: why, or the error
+/// that stopped the kill.
+fn abandon(child: &mut Child, why: ProcessError) -> ProcessError {
     let group = Pid::from_raw(i32::try_from(child.id()).expect("a pid fits an i32"));
     // ESRCH: every process of the group has exited. EPERM: macOS refuses a group of zombies.
     match killpg(group, Signal::SIGKILL) {
@@ -239,7 +261,7 @@ fn kill_group(child: &mut Child) -> ProcessError {
         Err(e) => return ProcessError::Io(e.into()),
     }
     match child.wait() {
-        Ok(_) => ProcessError::Timeout,
+        Ok(_) => why,
         Err(e) => ProcessError::Io(e),
     }
 }

@@ -507,6 +507,19 @@ fn a_command_that_runs_out_of_time_is_killed_with_its_process_group() {
 }
 
 #[test]
+fn a_child_that_holds_the_input_open_unread_ends_the_command_at_its_time() {
+    let host = ProcessHost::local();
+    let input = "x".repeat(1 << 20);
+    let started = std::time::Instant::now();
+    // The command exits at once, but the subshell it leaves keeps its input open without reading it (given it
+    // through fd 3, as sh gives a background job /dev/null as its input).
+    let script = "exec 3<&0; (exec <&3 >/dev/null 2>&1 3<&-; sleep 30) & exit 0";
+    let e = host.run(&["sh", "-c", script], Some(&input), 1).unwrap_err();
+    assert!(e.0.ends_with("timed out after 1 seconds"), "{e}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}
+
+#[test]
 fn a_child_that_holds_the_output_open_ends_the_command_at_its_time() {
     let host = ProcessHost::local();
     let started = std::time::Instant::now();

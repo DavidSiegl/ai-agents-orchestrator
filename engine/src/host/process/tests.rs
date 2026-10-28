@@ -32,10 +32,25 @@ fn names_differ_from_call_to_call() {
 }
 
 #[test]
+fn without_a_usable_control_path_a_command_runs_on_a_connection_of_its_own() {
+    // OpenSSH 10 fails a command whose ControlPath it cannot bind rather than connect without sharing, so then no
+    // option is passed (TestHost's case of the same name).
+    assert_eq!(ssh_argv("remote-host", vec![], &["true"]), ["ssh", "-o", "BatchMode=yes", "remote-host", "true"]);
+    let options = vec!["-o".to_string(), "ControlMaster=auto".to_string()];
+    let argv = ssh_argv("remote-host", options, &["sh", "-c", "a b"]);
+    assert_eq!(argv, ["ssh", "-o", "BatchMode=yes", "-o", "ControlMaster=auto", "remote-host", "sh -c 'a b'"]);
+}
+
+#[test]
 fn a_host_over_ssh_says_where() {
     let host = ProcessHost::local();
     assert_eq!(host.ssh_target(), None);
     assert_eq!(host.over_ssh("me@box").ssh_target(), Some("me@box"));
+    // An empty target is this machine, as Python's Host takes it.
+    assert_eq!(host.over_ssh("").ssh_target(), None);
+    let secret = ProcessHost::in_environment([("GH_TOKEN".into(), "token-value".into())].into_iter());
+    let shown = format!("{:?}", secret.over_ssh("box"));
+    assert!(shown.contains("box") && !shown.contains("token-value"), "{shown}");
     let vars = [("A".into(), "1".into()), ("A".into(), "2".into())];
     assert_eq!(ProcessHost::in_environment(vars.into_iter()).var("A").as_deref(), Some("2"));
 }
