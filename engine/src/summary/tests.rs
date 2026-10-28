@@ -43,7 +43,20 @@ fn times_are_written_and_read_as_python_does() {
     assert_eq!(epoch_seconds("2026-10-03 04:00"), Ok(1_791_000_000));
     assert_eq!(epoch_seconds("2026-10-03"), Ok(1_790_985_600));
     assert_eq!(epoch_seconds("2026-10-03T04:00:00-0130"), Ok(1_791_005_400));
-    for bad in ["<time>", "garbled", "2026-13-01", "2026-02-30T00:00:00", "2026-10-03T24:00:00", "2026-10-03X04:00", "2026-1-030", "2026-10-03T04:00:00+2:00"] {
+    // Midnight as hour 24, and any one character between the date and the time, as fromisoformat reads them.
+    assert_eq!(epoch_seconds("2026-10-03T24:00:00"), Ok(1_791_072_000));
+    assert_eq!(epoch_seconds("2026-10-03X04:00"), Ok(1_791_000_000));
+    // int() of a time before the epoch with a fraction rounds toward it.
+    assert_eq!(epoch_seconds("1969-12-31T23:59:59.5Z"), Ok(0));
+    for bad in [
+        "<time>",
+        "garbled",
+        "2026-13-01",
+        "2026-02-30T00:00:00",
+        "2026-10-03T24:00:01",
+        "2026-1-030",
+        "2026-10-03T04:00:00+2:00",
+    ] {
         assert!(epoch_seconds(bad).is_err(), "{bad}");
     }
 }

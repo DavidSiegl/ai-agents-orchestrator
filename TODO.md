@@ -87,7 +87,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   file a human edited, or a case no test of the Python engine pins (rust-engine ticket 04, 2026-10-28): `state.json`
   with `NaN`, `Infinity` or an integer beyond 64 bits is refused, as serde_json reads it (`engine/src/py/json.rs`),
   where Python reads it; a time without an offset is taken as UTC, where Python's `fromisoformat` takes it as local
-  time, and a turn whose start is not a time is left out of `summary.md` and `metrics.json`, where the Python engine
+  time (every other time is read as CPython's `fromisoformat` reads it, `crate::py::datetime`, since ticket 06), and a
+  turn whose start is not a time is left out of `summary.md` and `metrics.json`, where the Python engine
   fails (`epoch_seconds` and `turn_starts` in `engine/src/summary.rs`); a `state.json` field of another type than the
   Python engine writes is refused naming the run, where Python keeps it, and one it does not know is kept, where Python
   drops it, as the spec asks (`RunState::from_saved`). And from the machine the agents run on (rust-engine ticket 05,
