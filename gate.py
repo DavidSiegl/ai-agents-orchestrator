@@ -58,7 +58,8 @@ from xml.etree import ElementTree
 BUILD_CONFIG_FILES = ("Jenkinsfile", "pyproject.toml", "uv.lock")
 # The names of the files, anywhere in the tree, that clippy takes its rules or its toolchain from, which the change
 # judged supplies whatever --config says: a manifest's [lints], clippy's configuration, the toolchain that brings
-# clippy, and, under a `.cargo` directory, cargo's configuration, whose rustflags can set lint levels.
+# clippy, and, under a `.cargo` directory or in the CARGO_HOME clippy runs with (_cargo_home_in), cargo's
+# configuration, whose rustflags can set lint levels.
 CLIPPY_CONFIG_NAMES = ("Cargo.toml", "clippy.toml", ".clippy.toml", "rust-toolchain", "rust-toolchain.toml")
 CARGO_CONFIG_NAMES = ("config", "config.toml")
 # The most findings the quality file lists, issues and findings to weigh numbered as one list, and the most failing
@@ -430,14 +431,29 @@ def edited_config(diff: str, changed: dict[str, set[int]]) -> list[str]:
     return [f for f in BUILD_CONFIG_FILES if f in touched]
 
 
-def clippy_config_files(diff: str, changed: dict[str, set[int]]) -> list[str]:
+def clippy_config_files(diff: str, changed: dict[str, set[int]], cargo_home: str | None = None) -> list[str]:
     """The files clippy takes its rules or its toolchain from, by CLIPPY_CONFIG_NAMES and CARGO_CONFIG_NAMES, that
-    the diff changes, deletes or renames away, in path order."""
+    the diff changes, deletes or renames away, in path order. cargo_home is the directory, relative to the tree's top
+    and "" for the top itself, of the CARGO_HOME clippy runs with, as _cargo_home_in gives it; None when that is
+    outside the tree, so that no file of the tree is cargo's configuration there."""
     def configures_clippy(path: str) -> bool:
-        name = os.path.basename(path)
+        name, where = os.path.basename(path), os.path.dirname(path)
         return name in CLIPPY_CONFIG_NAMES or (name in CARGO_CONFIG_NAMES
-                                               and os.path.basename(os.path.dirname(path)) == ".cargo")
+                                               and (os.path.basename(where) == ".cargo" or where == cargo_home))
     return sorted(f for f in _touched_paths(diff, changed) if configures_clippy(f))
+
+
+def _cargo_home_in(root: str) -> str | None:
+    """The CARGO_HOME of tool_env, the environment clippy runs with, relative to root, the tree's top, "" when it is
+    root itself; None when it is unset or outside root. A relative CARGO_HOME is taken from root, though cargo takes
+    it from each workspace it runs in."""
+    home = tool_env().get("CARGO_HOME")
+    if not home:
+        return None
+    where = os.path.relpath(os.path.realpath(os.path.join(root, home)), os.path.realpath(root))
+    if where == os.pardir or where.startswith(os.pardir + os.sep):
+        return None
+    return "" if where == os.curdir else where
 
 
 def _touched_paths(diff: str, changed: dict[str, set[int]]) -> set[str]:
@@ -769,7 +785,7 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
     text = quality_report(GATE_ERROR if conditions else GATE_OK, intro, conditions=conditions, issues=issues,
                           to_weigh=to_weigh, elsewhere=elsewhere, tests=failing, coverage=coverage_sentence,
                           suppressions=added_suppressions(root, changed), edited=edited_config(change.diff, changed),
-                          clippy_config=clippy_config_files(change.diff, changed),
+                          clippy_config=clippy_config_files(change.diff, changed, _cargo_home_in(root)),
                           rules_from=f"`{rules}`" if rules else None)
     # Paths and linter output come verbatim, so a name that is not UTF-8 holds lone surrogates, which no file or
     # terminal can take: give their bytes back, then write each byte that is not UTF-8 as \xNN.

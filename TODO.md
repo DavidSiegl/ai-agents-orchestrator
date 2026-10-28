@@ -211,11 +211,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   (F11, 2026-10-27): "The gate is OK on a change that the workspace's rules make uncompilable". Closes with a second,
   uncapped clippy run whose rustc errors (codes `E` and four digits, such as E0453) are compile errors, or with the
   forbidden lints read from the manifests and an added allow of one failing the gate.
-- **A cargo config under the build's `CARGO_HOME` is not listed as build configuration.** `clippy_config_files` in
-  `gate.py` lists cargo's config only under a `.cargo` directory, but the Jenkinsfile sets `CARGO_HOME` to
-  `$WORKSPACE/.cargo-home`, so a change that tracks `.cargo-home/config.toml` could change clippy's lint levels or
-  rustflags without the quality file listing it. Raised by cross-review 70 (round 1, not recorded, 2026-10-27).
-  Closes with `CARGO_HOME`'s config files listed too, or `.cargo-home/` refused in a change.
 - **A quality build judges Rust by the snapshot's own clippy rules.** `Clippy` in `gate.py` chooses no lints (it caps
   their levels at warn, `--cap-lints`), so clippy reads each workspace's `[lints]`, `clippy.toml`, `.cargo/config.toml`
   rustflags and `rust-toolchain.toml` from the judged tree, where a change can loosen them; `--config` replaces only
@@ -461,6 +456,14 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   subdirectory.
 
 ## Fixed
+
+- **A cargo config under the build's `CARGO_HOME` was not listed as build configuration.** `clippy_config_files`
+  listed cargo's config only under a `.cargo` directory, but the Jenkinsfile sets `CARGO_HOME` to
+  `$WORKSPACE/.cargo-home`, so a change tracking `.cargo-home/config.toml` could change clippy's lint levels or
+  rustflags unlisted. Raised by cross-review 70 (round 1, not recorded, 2026-10-27). Fixed (2026-10-28):
+  `clippy_config_files` also lists `config` and `config.toml` directly in the `CARGO_HOME` of the environment clippy
+  runs with (`tool_env`), when `_cargo_home_in` finds it inside the tree. Listed, not refused, as `.cargo/config.toml`
+  is (see "A quality build judges Rust by the snapshot's own clippy rules" in Open issues).
 
 - **Committed mutmut output was read as the change's own code by the linters.** The checks left `mutants/` out
   (`GateChange.from_tree`), but `judge_change` ran the linters over every tracked file and kept their findings on its

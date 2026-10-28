@@ -82,6 +82,22 @@ class TestChangedLines(unittest.TestCase):
                         f"+x = 1{sep}diff --git a/g.py b/g.py{sep}@@ -5,0 +6,2 @@\n+y\n+z\n")
                 self.assertEqual(changed_lines(diff), {"f.py": {4, 5, 6}})
 
+    def test_cargo_s_config_in_a_cargo_home_inside_the_tree_is_clippy_config(self):
+        diff = "".join(f"diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n@@ -1 +1 @@\n-a\n+b\n"
+                       for p in (".cargo-home/config.toml", ".cargo-home/registry/config.toml", "other/config"))
+        changed = changed_lines(diff)
+        self.assertEqual(gate.clippy_config_files(diff, changed, ".cargo-home"), [".cargo-home/config.toml"])
+        self.assertEqual(gate.clippy_config_files(diff, changed, "other"), ["other/config"])
+        self.assertEqual(gate.clippy_config_files(diff, changed), [])
+        root = tempfile.mkdtemp()
+        self.addCleanup(os.rmdir, root)
+        for home, inside in [(os.path.join(root, ".cargo-home"), ".cargo-home"), (root, ""),
+                             (os.path.dirname(root), None), (None, None)]:
+            with self.subTest(home=home), patch.dict(os.environ, {"CARGO_HOME": home} if home else {}, clear=False):
+                if home is None:
+                    os.environ.pop("CARGO_HOME", None)
+                self.assertEqual(gate._cargo_home_in(root), inside)
+
     def test_build_config_edits(self):
         diff = ("diff --git a/Jenkinsfile b/Jenkinsfile\n--- a/Jenkinsfile\n+++ b/Jenkinsfile\n@@ -1 +1 @@\n-a\n+b\n"
                 "diff --git a/uv.lock b/uv.lock\ndeleted file mode 100644\n"

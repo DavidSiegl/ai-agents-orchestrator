@@ -378,7 +378,9 @@ first, at most 50 in all, then a count:
   because it takes them out of the surviving-mutants check.
 - **Build configuration**: an edit to `Jenkinsfile`, `pyproject.toml` or `uv.lock` is noted, since each can change how
   the change was judged, as is one to a file anywhere in the tree that clippy takes its rules or its toolchain from
-  (`Cargo.toml`, `clippy.toml`, `rust-toolchain.toml`, `.cargo/config.toml`; `CLIPPY_CONFIG_NAMES` in `gate.py`).
+  (`Cargo.toml`, `clippy.toml`, `rust-toolchain.toml`, `.cargo/config.toml`; `CLIPPY_CONFIG_NAMES` in `gate.py`),
+  and cargo's `config.toml` in the `CARGO_HOME` clippy runs with when that lies inside the tree, as the Jenkinsfile's
+  `.cargo-home` does.
 
 ### Whose rules judge a change
 
