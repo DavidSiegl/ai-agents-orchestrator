@@ -264,8 +264,8 @@ tests call each function, to check that they pass, and once more with `-x` until
 function. Run over this repository's whole suite, those runs alone took longer than the budget on Jenkins. With
 `--test-contexts COVERAGE`, the gate narrows `[tool.mutmut]`'s selection first: to the tests that the coverage.py data
 file `COVERAGE` records running a line of a mutated function's body, by their pytest node ids, less those an
-`--ignore` or `--ignore-glob` of `pytest_add_cli_args` or of the selection leaves out, since pytest runs a node id it is
-given even there.
+`--ignore` or `--ignore-glob` of `pytest_add_cli_args` or of the selection leaves out below the selection path they lie
+in, as pytest does when it collects that path; it runs a node id it is given whatever those options say.
 The Jenkinsfile's Test stage writes the file, `.coverage`, with `--cov-context=test`, and the Gate stage passes it.
 mutmut then runs those tests three times. For PR #113's change, 253 mutants of 7 `orchestrator.py` functions, that is
 312 tests of 1351, and mutmut took 77 seconds instead of 709 on the build host, with the same verdicts, mutant by

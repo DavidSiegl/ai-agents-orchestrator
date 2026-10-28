@@ -3450,6 +3450,14 @@ class TestSurvivingMutants(RepositoryTest):
             ({"pytest_add_cli_args": ["--ignore-glob=*/parity", "--ignore-glob=other"]},
              ["tests/test_calc.py::TestX::test_y", "tests/test_calc.py::test_checked[1]",
               "tests/test_calcs.py::test_z"]),
+            # pytest collects what the selection names, and what lies above it, whatever --ignore and --ignore-glob
+            # say; they leave out only what it finds below.
+            ({"pytest_add_cli_args_test_selection": ["tests/parity", "tests/test_calcs.py"],
+              "pytest_add_cli_args": ["--ignore-glob=*/parity", "--ignore=tests/test_calcs.py", "--ignore=tests"]},
+             ["tests/parity/test_p.py::test_p", "tests/test_calcs.py::test_z"]),
+            ({"pytest_add_cli_args_test_selection": ["tests/parity/test_p.py::test_p"],
+              "pytest_add_cli_args": ["--ignore-glob=tests/parity/*.py"]},
+             ["tests/parity/test_p.py::test_p"]),
             # mutmut's default, no selection, runs every test pytest finds.
             ({}, ["other/test_o.py::test_o", "tests/parity/test_p.py::test_p", "tests/test_calc.py::TestX::test_y",
                   "tests/test_calc.py::test_checked[1]", "tests/test_calcs.py::test_z"]),

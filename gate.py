@@ -2797,8 +2797,8 @@ def _tests_reaching(root: str, functions: list[_ChangedFunction], table: dict,
                     f"gate cannot apply to the tests the file records")
     paths = [a for a in selection if a not in options]
     reaching, why = _recorded_tests(root, functions, os.path.abspath(test_contexts))
-    return sorted(i for i in reaching if any(_in_node(i, p) for p in paths or ["."])
-                  and not any(_in_node(i, p) for p in ignored) and not _globbed(i, globs)), why
+    return sorted(i for i in reaching if any(_in_node(i, p) and not _left_out_below(i, p, ignored, globs)
+                                             for p in paths or ["."])), why
 
 
 def _recorded_tests(root: str, functions: list[_ChangedFunction], data_file: str) -> tuple[set[str], str | None]:
@@ -2853,12 +2853,18 @@ def _ignored_paths(args: list[str]) -> tuple[list[str], list[str], set[str]]:
     return found["--ignore"], found["--ignore-glob"], options
 
 
-def _globbed(node_id: str, globs: list[str]) -> bool:
-    """Whether one of globs, patterns of pytest's --ignore-glob relative to the rootdir, leaves out the test node_id,
-    as pytest leaves out what it would collect: its file, or a directory above the file, matching a pattern whole."""
+def _left_out_below(node_id: str, entry: str, ignored: list[str], globs: list[str]) -> bool:
+    """Whether pytest, given entry, a selection path the test node_id lies in, leaves the test out as it collects
+    what lies below entry: its file, or a directory between entry and the file, is one of ignored, paths of --ignore,
+    or matches one of globs, patterns of --ignore-glob, whole; all relative to the rootdir. entry itself, and what lies
+    above it, pytest collects whatever those options say, as it does a file or node id named on its command line."""
     path = _node_parts(node_id)[0]
-    above = itertools.accumulate(path.split("/")[:-1], lambda a, b: f"{a}/{b}")
-    return any(fnmatch.fnmatchcase(p, os.path.normpath(g)) for p in [path, *above] for g in globs)
+    parts = path.split("/")
+    top = os.path.normpath(entry.split("::")[0])
+    below = [p for p in itertools.accumulate(parts, lambda a, b: f"{a}/{b}")
+             if top == "." or p.startswith(f"{top}/")]
+    return any(p == os.path.normpath(i) for p in below for i in ignored) or any(
+        fnmatch.fnmatchcase(p, os.path.normpath(g)) for p in below for g in globs)
 
 
 def _in_node(node_id: str, path: str) -> bool:
