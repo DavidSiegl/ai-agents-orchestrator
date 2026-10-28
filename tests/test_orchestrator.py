@@ -3558,7 +3558,9 @@ class FakeCI:
     - `fail`: {(method, path): status} for requests answered with an HTTP error.
     - `job_gone`: the job was deleted; `forgotten`: Jenkins forgot its queue items.
 
-    Every request is recorded as (method, url, form) in `requests`, and by a short name in `names`.
+    Every request is recorded as (method, url, form) in `requests`, and by a short name in `names`. Its JSON answers
+    have the fields and types of the live Jenkins's, which tests/contract/test_jenkins.py checks; the texts, such as a
+    console, and how many cases a test report holds are each test's own.
     """
 
     def __init__(self):
@@ -3615,7 +3617,7 @@ class FakeCI:
             if waiting["left"]:
                 waiting["left"] -= 1
                 return "queue", {"why": "Waiting for next available executor"}
-            return "queue", {"executable": {"number": waiting["number"]}}
+            return "queue", {"cancelled": False, "executable": {"number": waiting["number"]}}
         if not path.startswith(JOB_PATH) or self.job_gone:
             return f"{method} {path}", 404
         rest = path[len(JOB_PATH):]
@@ -3650,7 +3652,8 @@ class FakeCI:
             if not build["test_report"]:
                 return "tests", 404
             cases = [{"className": c, "name": t, "status": "FAILED", "errorDetails": e} for c, t, e in build["tests"]]
-            return "tests", {"suites": [{"cases": [*cases, {"className": "t", "name": "ok", "status": "PASSED"}]}]}
+            passed = {"className": "t", "name": "ok", "status": "PASSED", "errorDetails": None}
+            return "tests", {"suites": [{"cases": [*cases, passed]}]}
         if what == "consoleText":
             return "console", FakeResponse(build["console"])
         return f"{method} {path}", 404
@@ -6747,13 +6750,14 @@ class TestChildEnvironment(unittest.TestCase):
         self.assertFalse([k for k in orchestrator.CI_ENV if f"{k}=" in out])
         self.assertFalse(leaks(out))
 
-    @patch.dict("os.environ", {**ENV, **{k: "1" for k in orchestrator.GIT_PATHSPEC_ENV}})
-    def test_the_gate_s_processes_get_no_credentials_and_no_pathspec_switches(self):
-        # tool_env is the gate's own copy of child_env, which the gate cannot use; both leave out the same names.
+    @patch.dict("os.environ", {**ENV, **{k: "1" for k in orchestrator.GIT_PATHSPEC_ENV}, "UPDATE_GOLDEN": "1"})
+    def test_the_gate_s_processes_get_no_credentials_no_pathspec_switches_and_no_update_golden(self):
+        # tool_env leaves out what child_env does, which the gate cannot import, and UPDATE_GOLDEN too, which only the
+        # gate's reruns of the tests must not inherit.
         env = gate.tool_env()
         self.assert_scrubbed(env)
         self.assertFalse(set(orchestrator.GIT_PATHSPEC_ENV) & set(env))
-        self.assertEqual(env, orchestrator.child_env())
+        self.assertEqual(env, {k: v for k, v in orchestrator.child_env().items() if k != "UPDATE_GOLDEN"})
 
 
 class TestQualityCLI(unittest.TestCase):

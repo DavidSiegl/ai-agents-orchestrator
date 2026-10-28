@@ -66,16 +66,29 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Open issues
 
-- **A quality build leaves out the parity scenarios when only `tests/guard_errors.py` changed.** The Test stage's
-  path list (Jenkinsfile) names `tests/conftest.py`, whose guards the scenarios run under, but not
-  `tests/guard_errors.py`, which holds the errors those guards raise; so a quality round that changes only it can go
-  green while the pull request build fails, against docs/quality-gate.md's `judged-in-quality` paragraph. Raised by
-  cross-review 76 (F1, 2026-10-27), in code PR #162 brought. Closes with `tests/guard_errors.py` in the list.
-- **`tool_env` passes `UPDATE_GOLDEN` to the pytest and mutmut runs the gate starts.** With `UPDATE_GOLDEN=1` in a
-  developer's environment, `assert_golden` rewrites `tests/golden/*.txt` instead of comparing, so the gate's
-  flaky-tests reruns rewrite them in the working tree and pass a golden test that should fail. Jenkins never sets it.
-  Raised by cross-review 76 (F2, 2026-10-27), from PR #161's golden files and `gate.py`'s `tool_env`. Closes with
-  `tool_env` leaving `UPDATE_GOLDEN` out, as it does the Jenkins credentials.
+- **A quality build now takes longer than `QUALITY_TIMEOUT`.** The contract test's one live run (live-checks/01,
+  2026-10-27) triggered build #59 of `Octoflow-AI/py-octoflow-ai-quality` with `GIT_REF=main` (`f4628cc`): it ended
+  SUCCESS after 1299 s, of which Test took 888 s, UI 229 s and Gate 172 s, so `tests/contract/test_jenkins.py` failed
+  at what was then its 1200 s cap (it now waits for the build to end, checks every answer, and fails last on the time
+  the quality file took), as a quality round of the engine would: `_poll` gives up at `QUALITY_TIMEOUT` (1200 s,
+  `orchestrator.py`) from the round's start, and Gate had not begun by then. The suite grew by the parity scenarios
+  (`tests/parity`), and PR-160's Test stage took 645 s. A resume gets a fresh timeout and adopts the running build,
+  so a run is not lost, but a quality round of this repository whose build takes as long fails once, and is
+  judged only after a resume. Not changed here:
+  the engine is frozen (Planned, "The Python engine is frozen"), so a larger `QUALITY_TIMEOUT` goes to the Rust
+  engine. Narrowed by PR #162 (2026-10-27) for a quality round whose change leaves what the parity scenarios depend on
+  alone (Jenkinsfile, Test stage): its build leaves them out. A change that bumps the version touches `pyproject.toml`
+  and `uv.lock`, so its build still runs them, and so does the contract test's build of main whenever main's last
+  commit was a releasing merge (build #59, before #162, ran them in any case); Gate's mutmut time is
+  gate-open-decisions ticket 06's. Closes when
+  a quality build that runs the scenarios fits in `QUALITY_TIMEOUT`, shown by the contract test green against one, or
+  with a larger `QUALITY_TIMEOUT` in the Rust engine.
+- **The contract test leaves its Jenkins build running when it fails.** `tests/contract/test_jenkins.py` triggers one
+  quality build and nothing stops it on a failure or a Ctrl-C, so the build holds an executor until it ends, up to
+  the 22 minutes build #59 took. Raised by cross-review 73 (F11, 2026-10-27): "a Ctrl-C during the queue wait leaves
+  the full ~22-minute build running." The orchestrator does not abort a build either, so `CI` has no call for it.
+  Closes with a POST to `<job>/<number>/stop` (or the queue item's cancel) in the test's cleanup, once the `agents`
+  user is known to hold Jenkins's Cancel permission on the job.
 - **A Rust test's own lines count toward the coverage of new code.** cargo-llvm-cov's report lists the lines of a
   `#[cfg(test)]` module as it lists the code's (docs/quality-gate.md, "Rust tests and coverage"), and a passing
   test runs them all, so a change that adds a Rust function and a test of it is judged on both: 15 untested lines
@@ -488,6 +501,17 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   subdirectory.
 
 ## Fixed
+
+- **A quality build left out the parity scenarios when only `tests/guard_errors.py` changed.** The Test stage's path
+  list named `tests/conftest.py`, whose guards the scenarios run under, but not `tests/guard_errors.py`, which holds
+  the errors those guards raise. Raised by cross-review 76 (F1, 2026-10-27), in code PR #162 brought. Fixed
+  (2026-10-27): the list names it.
+
+- **`tool_env` passed `UPDATE_GOLDEN` to the pytest and mutmut runs the gate starts.** Under `UPDATE_GOLDEN=1`
+  `assert_golden` rewrites its file instead of comparing, so the gate's flaky-tests reruns would rewrite
+  `tests/golden/*.txt` and pass a golden test that should fail. Raised by cross-review 76 (F2, 2026-10-27). Fixed
+  (2026-10-27): `tool_env` leaves it out, as it does the Jenkins credentials (`TestChildEnvironment`, which also checks it
+  under `UPDATE_GOLDEN=1`).
 
 - **No test shows the proof reruns come after the quality loop.** `Workflow._rerun_proofs` runs right before the
   verdict step's turn, which follows the quality loop by construction, but every proof test used `QUICK`, which has
