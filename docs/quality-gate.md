@@ -21,9 +21,9 @@ uv run python gate.py --base main --tests test-results.xml --coverage coverage.x
 nothing from it and reads only the file it writes ([the quality file as a
 contract](#the-quality-file-as-a-contract)).
 
-It runs six linters over the files git tracks outside `mutants/` (below), each over the files it reads, and keeps only the findings on
-lines the change adds, and the lineless ones on files it touches. Findings on older lines are counted, never
-listed and never held against the change, so the gate judges the change rather than the codebase.
+It runs six linters over the files git tracks outside `mutants/` (below), each over the files it reads, and keeps
+only the findings on lines the change adds, and the lineless ones on files it touches. Findings on older lines are
+counted, never listed and never held against the change, so the gate judges the change rather than the codebase.
 
 | Linter | Files | Rules |
 |---|---|---|
@@ -126,8 +126,9 @@ included, in a Python file, a `.py` file or a script whose `#!` line names pytho
 as it is from ruff's `C901`: any function that no other function holds, a method of a nested class and a function
 under a module-level `if` or `try` included. A function nested in another is part of that one. Files are read as
 Python reads them, by their byte order mark or coding cookie. Its score is G. Ann Campbell's
-[cognitive complexity](https://www.sonarsource.com/docs/CognitiveComplexity.pdf), which SonarQube's rule S3776 measured: a point for each `if`, `elif`, `else`, ternary, loop, `except`, `match`,
-sequence of like boolean operators and recursion, and one more for each level of nesting on those that nest.
+[cognitive complexity](https://www.sonarsource.com/docs/CognitiveComplexity.pdf), which SonarQube's rule S3776
+measured: a point for each `if`, `elif`, `else`, ternary, loop, `except`, `match`, sequence of like boolean operators
+and recursion, and one more for each level of nesting on those that nest.
 Recursion is a function that calls itself, or one on a cycle of calls through other functions of its module, each of
 which then scores the point. Calls are followed by name, as Python's scopes resolve them, so a call to a parameter
 or a local of the same name is not one to the module's function; not through an alias, nor into another module. The
@@ -274,10 +275,11 @@ since a test that passes without the change cannot be what shows the change work
 surviving-mutants sees only the functions the change edits, and test integrity only tests getting weaker. For a bug
 fix, a test that fails at the base is the proof the bug was reproduced. The check runs only when the change edits,
 adds or deletes Python source outside the tests: a `.py` file, or a script whose `#!` names python in the working
-tree or at the base, that is not a test file (as for test integrity), a `conftest.py` or under a `tests` directory. A change to the tests alone, or to the tests and the
-docs, has no "without the change" a test could see. The base is the files git tracked at `--base`, as `git archive`
-writes them, with every one of the change's files that belong with the tests (those three kinds) taken from the
-working tree, or removed where the change removed it, so the changed tests keep their fixtures and data. A submodule
+tree or at the base, that is not a test file (as for test integrity), a `conftest.py` or under a `tests` directory.
+A change to the tests alone, or to the tests and the docs, has no "without the change" a test could see. The base
+is the files git tracked at `--base`, as `git archive` writes them, with every one of the change's files that belong
+with the tests (those three kinds) taken from the working tree, or removed where the change removed it, so the
+changed tests keep their fixtures and data. A submodule
 holds the files of the commit the base records for it, from its own repository in the working tree; one that is not
 initialised there, or lacks that commit, is left empty, and a `not-run` finding names it. pytest, in the gate's
 interpreter, with the configurations flaky-tests' reruns get, found the same way in the base, once for each, and the

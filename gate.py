@@ -2328,9 +2328,9 @@ def _edits_python_source(change: GateChange) -> bool:
 
 
 def _beside_tests(path: str) -> bool:
-    """Whether a repository path belongs with the tests rather than with the code they test, as passes_at_base reads
-    it: a Python test file (_python_test_file), a conftest.py, or any file under a tests directory, such as a fixture's
-    data."""
+    """Whether a repository path belongs with the tests rather than with the code they test, as passes_at_base and
+    test-integrity read it (_python_code): a Python test file (_python_test_file), a conftest.py, or any file under a
+    tests directory, such as a fixture's data."""
     *dirs, name = path.split("/")
     return _python_test_file(path) or name == "conftest.py" or "tests" in dirs
 
