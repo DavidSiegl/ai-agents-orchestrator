@@ -104,8 +104,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   engine. Narrowed by PR #162 (2026-10-27) for a quality round whose change leaves what the parity scenarios depend on
   alone (Jenkinsfile, Test stage): its build leaves them out. A change that bumps the version touches `pyproject.toml`
   and `uv.lock`, so its build still runs them, and so does the contract test's build of main whenever main's last
-  commit was a releasing merge (build #59, before #162, ran them in any case); Gate's mutmut time is
-  gate-open-decisions ticket 06's. Closes when
+  commit was a releasing merge (build #59, before #162, ran them in any case); Gate's mutmut time is narrowed by
+  `gate.py --test-contexts` (gate-open-decisions ticket 06), which costs the Test stage about 7 % more. Closes when
   a quality build that runs the scenarios fits in `QUALITY_TIMEOUT`, shown by the contract test green against one, or
   with a larger `QUALITY_TIMEOUT` in the Rust engine.
 - **The contract test leaves its Jenkins build running when it fails.** `tests/contract/test_jenkins.py` triggers one
@@ -443,13 +443,23 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   Jenkins on 2026-10-24: on PR #50 (surviving-mutants' change) mutmut tried 756 of 3079 mutants and the Gate stage took
   683 s, the build about 850 s; on PR #51, 677 of 801 in a 638 s Gate stage. That fits `QUALITY_TIMEOUT` (1200 s) with
   about 350 s to spare, but not after a wait in Jenkins' queue, which counts against a quality round (PR #52 waited
-  about 860 s behind the others). Those were pull request builds; a quality build has skipped the Package stage
-  since 2026-10-24, so it has more to spare than that. The user kept 600 s (2026-10-24): a stopped run says `budget-reached`, never "none
-  survived". Closes with the shared time budget above, or mutants chosen by the changed lines rather than whole
-  functions. Worse since mutmut's runs pass the suite (mutmut-hypothesis-health-check, PR #112): on PR #113 (2026-10-27)
-  mutmut was stopped at 600 s after trying 0 of 253 mutants, so its stats and clean runs of the now 1348-test suite
-  took the whole budget, and surviving-mutants judges nothing on Jenkins; the parity scenarios, left out of mutmut's
-  runs, add nothing to that.
+  about 860 s behind the others). Those were pull request builds; a quality build has skipped the Package stage since
+  2026-10-24, so it has more to spare than that. The user kept 600 s (2026-10-24): a stopped run says `budget-reached`,
+  never "none survived". Closes with the shared time budget above, or mutants chosen by the changed lines rather than
+  whole functions. On PR #113 (2026-10-27) mutmut was stopped at 600 s after trying 0 of 253 mutants: its three runs of
+  the whole suite before the first mutant took the budget. Narrowed (2026-10-28, gate-open-decisions ticket 06): the
+  Jenkinsfile's Test stage records a coverage context per test, and `gate.py --test-contexts` has mutmut run only the
+  tests that reach the changed functions and its selection collects (`_recorded_tests`, `_narrowed_table`); replayed
+  locally, PR #113's change took mutmut 77 s instead of 709 s, with the same verdicts. Still open: a change to a
+  function nearly every test reaches, such as `tool_env`, still costs about the whole suite three times, and a large
+  change still has more mutants than the budget tries. Not yet shown on Jenkins: the first pull request build with the
+  flag.
+- **`--test-contexts` collects mutmut's selection in a fuller copy than mutmut runs it in.** `_narrowed_table` runs
+  `pytest --collect-only` in the gate's copy of the tree, which holds every tracked file; mutmut's own `mutants/` holds
+  only `source_paths`, `also_copy`, `tests/`, `test/` and a few top-level files. A selection that reaches outside those,
+  such as none in a project with tests under `other/`, can name a recorded test there that mutmut's pytest cannot find,
+  and mutmut's run fails as `not-run`. This repository's selection is `tests/`, so it is not affected. Closes with the
+  collection run in a copy laid out as mutmut lays out `mutants/`, or by mutmut itself.
 - **Mutation-testing the code that runs mutmut leaves processes behind.** When mutmut stops a mutant at its own
   timeout it kills the worker, and a real mutmut that `TestSurvivingMutants` started in its own session lives on as
   an orphan group of one process per CPU. It only happens when a change edits that code. Jenkins' process-tree

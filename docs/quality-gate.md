@@ -227,7 +227,9 @@ call the function:
 
 - `survived`: a function with mutants no test failed on, at its `def`: how many of its mutants survived out of how many
   were tried, and what the first three change, each as a line before and after. No test checks what those lines do;
-- `untested`: a changed function that no test calls, at its `def`, with how many mutants it has;
+- `untested`: a changed function that no test calls, at its `def`, with how many mutants it has; under
+  `--test-contexts`, when no test of the selection reaches any changed function, each is one without that number, and
+  mutmut is not started;
 - `budget-reached`: mutmut ran out of time, as "budget reached after N of M mutants", N counting the mutants it tried
   against a test, as the `survived` counts do. What the N showed is listed; the others may survive too. It also names,
   with their files, the changed functions in modules mutmut had not reached when it was stopped: it saves a module's
@@ -246,7 +248,9 @@ call the function:
 - `not-run`: mutmut could not start, failed, as it does when a test fails, or left results the gate could not read; the
   rules name no `source_paths`, or give a key the gate reads or writes a value of another shape; the directory to copy
   the tree into could not be made; or a changed file could not be read or parsed;
-- `not-removed`: the copy mutmut ran in could not be removed afterwards, named so that it can be; the findings stand.
+- `not-removed`: the copy mutmut ran in could not be removed afterwards, named so that it can be; the findings stand;
+- `not-narrowed`: `--test-contexts` was given, but its file could not tell which tests reach the changed functions, so
+  mutmut was given its whole test selection, with the reason (see below). The other findings stand.
 
 mutmut runs in the gate's own interpreter, on a copy of the files git tracks, so the working tree stays as it was; its
 state, `mutants/`, goes into the copy too. Its own selector, mutant names such as
@@ -264,12 +268,39 @@ reruns look in a directory: the project's own, which `also_copy` puts in `mutant
 `pytest.ini` or `conftest.py` from above the copy. In a repository without mutmut, a change to a function gets a
 `not-run` finding.
 
+**Which tests mutmut runs.** Before it tries a mutant, mutmut runs its whole test selection three times: to find which
+tests call each function, to check that they pass, and once more with `-x` until the first test that calls a mutated
+function. Run over this repository's whole suite, those runs alone took longer than the budget on Jenkins. With
+`--test-contexts COVERAGE`, the gate narrows `[tool.mutmut]`'s selection first, to the tests that both:
+
+- the coverage.py data file `COVERAGE` records running a line of a mutated function's body, by their pytest node ids;
+- pytest collects in the copy, run with `--collect-only` and the selection and `pytest_add_cli_args` that mutmut's own
+  runs get, so pytest itself applies their paths, `--ignore`, `--deselect` and the rest.
+
+The Jenkinsfile's Test stage writes the file, `.coverage`, with `--cov-context=test`, and the Gate stage passes it.
+mutmut then runs those tests three times. For PR #113's change, 253 mutants of 7 `orchestrator.py` functions, that is
+312 tests of 1351, and mutmut took 77 seconds instead of 709 on the build host, with the same verdicts, mutant by
+mutant. The cost grows with the tests that reach the change, not with the suite: a change to a function nearly every
+test calls still costs about as much as before. The collection runs in the gate's copy of the tree, which holds every
+tracked file, where mutmut's own copy holds `source_paths`, `also_copy` and `tests/`; a selection that reaches
+outside those is collected wider than mutmut runs it.
+
+The file must hold the run's contexts as pytest-cov writes them (`<node id>|run`, `|setup`, `|teardown`), recorded by
+coverage's C tracer: `[tool.coverage.run] core = "ctrace"` in `pyproject.toml`. Under Python 3.14, coverage's default
+core, `sys.monitoring`, records each line for only the first few tests to run it, so mutmut would miss tests that kill
+its mutants and report them as survivors. Any of these makes a `not-narrowed` finding, and mutmut runs the whole
+selection: the file cannot be read, holds no test's context, or does not measure a changed function's file; no line in
+it is recorded for at least a tenth of the tests it records, as that core writes it; or pytest's collection of the
+selection fails or does not finish. Without `--test-contexts`, as in a local run, mutmut runs the whole selection.
+Tests that reach a function only in a subprocess count neither in mutmut's own record nor in the file.
+
 `--mutation-budget SECONDS`, 600 by default, bounds mutmut's run. Stopping it takes at most 15 seconds more: SIGINT,
 10 seconds to exit, a kill of its process group, and 5 seconds to read what it printed. Listing its results and showing
-the survivors then take at most 60 seconds, each call's stop included. So the check takes at most the budget and 75
-seconds, and the few it takes to copy the tree. With the flaky-tests check's three minutes, passes-at-base's two and
-the test run, a quality build stays inside the orchestrator's `QUALITY_TIMEOUT` of 1200 seconds when Jenkins starts
-it without a wait in the queue.
+the survivors then take at most 60 seconds, each call's stop included. Before mutmut starts, reading `--test-contexts`
+takes at most 35, and collecting the selection 35 more. So the check takes at most the budget and 145 seconds, and the
+few it takes to copy the tree. With the flaky-tests check's three minutes, passes-at-base's two and the test run, a
+quality build stays inside the orchestrator's `QUALITY_TIMEOUT` of 1200 seconds when Jenkins starts it without a wait
+in the queue.
 
 This repository's table keeps mutmut off argparse's help and description texts, which no test reads word for word:
 `do_not_mutate_patterns = ['\bhelp=', '\bdescription=']`. mutmut matches each pattern against each source line and

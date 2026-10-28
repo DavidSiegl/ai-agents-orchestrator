@@ -27,6 +27,7 @@ import unittest
 from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
+from coverage import CoverageData
 from gitrepo import RepositoryTest
 from golden import assert_golden
 
@@ -750,7 +751,7 @@ class TestGate(RepositoryTest):
 
     def checks(self, *checks):
         """Run the gate with checks in place of gate_checks's."""
-        p = patch.object(gate, "gate_checks", lambda mutation_budget, base_run_budget: checks)
+        p = patch.object(gate, "gate_checks", lambda mutation_budget, base_run_budget, test_contexts: checks)
         p.start()
         self.addCleanup(p.stop)
 
@@ -829,7 +830,7 @@ class TestGate(RepositoryTest):
     def test_mutation_budget_bounds_the_surviving_mutants_check(self):
         budgets = []
 
-        def find(change, budget):
+        def find(change, budget, test_contexts):
             budgets.append(budget)
             return []
         self.add_lines(1)
@@ -839,6 +840,18 @@ class TestGate(RepositoryTest):
         self.assertEqual(budgets, [gate.MUTATION_BUDGET, 45])
         with self.assertRaises(SystemExit), patch("sys.stderr"):
             self.gate("--mutation-budget", "0")
+
+    def test_test_contexts_names_the_data_file_the_surviving_mutants_check_narrows_mutmut_s_tests_by(self):
+        files = []
+
+        def find(change, budget, test_contexts):
+            files.append(test_contexts)
+            return []
+        self.add_lines(1)
+        with patch.object(gate, "surviving_mutants", find):
+            self.gate()
+            self.gate("--test-contexts", ".coverage")
+        self.assertEqual(files, [None, ".coverage"])
 
     def test_the_checks_are_told_whose_rules_judge_the_change(self):
         seen = []
@@ -2879,9 +2892,10 @@ class TestSurvivingMutants(RepositoryTest):
         self.bin = os.path.join(self.outside, "bin")
         os.mkdir(self.bin)
 
-    def found(self, budget=60, rules=None):
+    def found(self, budget=60, rules=None, test_contexts=None):
         base = self.git("rev-parse", "HEAD").strip()
-        return gate.surviving_mutants(gate.GateChange.from_tree(self.repo, base, rules), budget=budget)
+        return gate.surviving_mutants(gate.GateChange.from_tree(self.repo, base, rules), budget=budget,
+                                      test_contexts=test_contexts)
 
     def rules(self, table):
         """A rules file outside the tree, as `gate --config` names one, with table as its [tool.mutmut]."""
@@ -3118,7 +3132,9 @@ class TestSurvivingMutants(RepositoryTest):
     def test_a_mutmut_table_of_the_wrong_shape_is_a_finding_and_leaves_nothing_behind(self):
         self.change_the_functions()
         tables = [("only_mutate", "only_mutate = 5"), ("only_mutate", 'only_mutate = "calc.py"'),
-                  ("do_not_mutate", "do_not_mutate = [1]"), ("when", "when = 1979-05-27")]
+                  ("do_not_mutate", "do_not_mutate = [1]"), ("when", "when = 1979-05-27"),
+                  ("tests_dir", 'tests_dir = "tests/"'),
+                  ("pytest_add_cli_args_test_selection", "pytest_add_cli_args_test_selection = [1]")]
         for key, line in tables:
             with self.subTest(line=line):
                 tmp = tempfile.mkdtemp(dir=self.bin)
@@ -3514,7 +3530,146 @@ class TestSurvivingMutants(RepositoryTest):
             [check] = [c for c in gate.gate_checks(42) if c.name == "surviving-mutants"]
             check.find("change")
         self.assertFalse(check.fails)
-        find.assert_called_once_with("change", budget=42)
+        find.assert_called_once_with("change", budget=42, test_contexts=None)
+
+    def contexts(self, lines_by_test, path="calc.py", name="test"):
+        """A new coverage.py data file outside the tree, name.coverage, as `pytest --cov-context=test` writes one,
+        recording each test of lines_by_test, a node id, running its lines of the file at path; its path."""
+        data_file = os.path.join(self.bin, f"{name}.coverage")
+        recording = CoverageData(basename=data_file)
+        for node_id, lines in lines_by_test.items():
+            recording.set_context(f"{node_id}|run")
+            recording.add_lines({os.path.realpath(os.path.join(self.repo, path)): lines})
+        recording.write()
+        return data_file
+
+    def selections(self):
+        """The test selection of each [tool.mutmut] the check writes for mutmut in its copy, as a list it fills in;
+        mutmut runs as it would."""
+        selections, use = [], gate._use_mutmut_table
+
+        def use_table(tree_copy, table):
+            selections.append(table.get("pytest_add_cli_args_test_selection"))
+            return use(tree_copy, table)
+        p = patch.object(gate, "_use_mutmut_table", use_table)
+        p.start()
+        self.addCleanup(p.stop)
+        return selections
+
+    def test_mutmut_runs_only_the_tests_the_contexts_record_reaching_the_changed_functions(self):
+        self.change_the_functions("checked", "unchecked")
+        selections = self.selections()
+        # A parity test reaches checked too, but the rules leave tests/parity out, as this repository's do; and the
+        # tree has none, so pytest collects it from no selection.
+        data_file = self.contexts({"tests/test_calc.py::test_checked": [1, 2],
+                                   "tests/test_calc.py::test_unchecked": [5, 6],
+                                   "tests/test_calc.py::test_untouched": [9, 10],
+                                   "tests/parity/test_p.py::test_p": [2]})
+        rules = self.rules({"source_paths": ["calc.py"], "pytest_add_cli_args_test_selection": ["tests/"],
+                            "pytest_add_cli_args": ["--ignore=tests/parity"]})
+        found = self.found(rules=rules, test_contexts=data_file)
+        self.assertEqual(selections, [["tests/test_calc.py::test_checked", "tests/test_calc.py::test_unchecked"]])
+        # The same verdicts as with the whole selection: unchecked's test never looks at what it returns.
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 5, "survived")])
+
+    # Test files beside tests/test_calc.py, for pytest to collect by a selection: each holds one test, named for it.
+    MORE_TESTS = {"tests/test_calcs.py": "test_z", "tests/parity/test_p.py": "test_p", "tests/slow/test_w.py": "test_w",
+                  "other/test_o.py": "test_o"}
+
+    def test_mutmut_is_given_the_recorded_tests_pytest_collects_by_its_selection_and_options(self):
+        for path, name in self.MORE_TESTS.items():
+            self.put(path, f"def {name}():\n    pass\n")
+        recorded = {"tests/test_calc.py::test_checked", *(f"{p}::{n}" for p, n in self.MORE_TESTS.items())}
+        setup = gate._PytestSetup(self.repo, gate._pytest_config(self.repo, self.bin), self.repo)
+        selection, args = "pytest_add_cli_args_test_selection", "pytest_add_cli_args"
+        # What pytest 9 collects, by its own rules, of each selection with each of mutmut's options.
+        cases = [
+            ({selection: ["tests/"], args: ["--ignore=tests/parity"]},
+             ["tests/slow/test_w.py::test_w", "tests/test_calc.py::test_checked", "tests/test_calcs.py::test_z"]),
+            # A selection entry inside another is dropped before pytest collects; the outer one's walk applies
+            # the glob below it.
+            ({selection: ["tests", "tests/slow"], args: ["--ignore-glob=*/slow"]},
+             ["tests/parity/test_p.py::test_p", "tests/test_calc.py::test_checked", "tests/test_calcs.py::test_z"]),
+            # What the selection names pytest collects whatever --ignore and --ignore-glob say.
+            ({selection: ["tests/slow"], args: ["--ignore-glob=*/slow"]}, ["tests/slow/test_w.py::test_w"]),
+            ({selection: ["tests/test_calc.py::test_checked", "tests/test_calcs.py"],
+              args: ["--ignore=tests/test_calcs.py", "--ignore=tests"]},
+             ["tests/test_calc.py::test_checked", "tests/test_calcs.py::test_z"]),
+            ({selection: ["tests/"], args: ["--deselect=tests/test_calcs.py::test_z", "--ignore-glob=*/p*"]},
+             ["tests/slow/test_w.py::test_w", "tests/test_calc.py::test_checked"]),
+            # No selection: every test pytest finds; tests_dir, mutmut's old name for it, joins the selection.
+            ({}, sorted(recorded)),
+            ({"tests_dir": ["other/"]}, ["other/test_o.py::test_o"]),
+        ]
+        for table, tests in cases:
+            with self.subTest(table=table):
+                narrowed, found = gate._narrowed_table(setup, table, recorded)
+                self.assertEqual((narrowed[selection], found), (tests, []))
+                # The rest of the table stays, but for tests_dir, now in the selection.
+                self.assertEqual({k: v for k, v in narrowed.items() if k != selection},
+                                 {k: v for k, v in table.items() if k not in (selection, "tests_dir")})
+        with self.subTest("none of the recorded tests collected"):
+            self.assertEqual(gate._narrowed_table(setup, {selection: ["other/"]}, {"tests/test_calcs.py::test_z"}),
+                             ({}, []))
+        with self.subTest("a collection that fails"):
+            table = {selection: ["tests/missing.py"]}
+            narrowed, found = gate._narrowed_table(setup, table, recorded)
+            self.assertEqual(narrowed, table)
+            self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-narrowed")])
+            self.assertIn("collecting [tool.mutmut]'s test selection, exited with status 4", found[0]["message"])
+
+    def test_the_tree_s_own_modules_do_not_stand_in_for_the_reader_s(self):
+        data_file = self.contexts({"tests/test_calc.py::test_checked": [2]})
+        for module in ("json.py", "coverage.py"):
+            self.put(module, "raise SystemExit('the tree's own module ran')\n")
+        [checked] = [f for f in gate._python_units("calc.py", self.BASE, ast.parse(self.BASE)) if f.name == "checked"]
+        self.assertEqual(gate._recorded_tests(self.repo, [checked], data_file),
+                         ({"tests/test_calc.py::test_checked"}, None))
+
+    def test_a_reader_output_of_the_wrong_shape_is_a_reason_not_a_crash(self):
+        [checked] = [f for f in gate._python_units("calc.py", self.BASE, ast.parse(self.BASE)) if f.name == "checked"]
+        for reached in ("[]", "[[1]]", "[3]", "{}"):
+            printed = f'{{"tests": 1, "busiest": 1, "reached": {reached}}}'
+            with self.subTest(reached=reached), patch.object(
+                    gate, "_run_in_session", return_value=(subprocess.CompletedProcess([], 0, printed, ""), False)):
+                tests, why = gate._recorded_tests(self.repo, [checked], "test.coverage")
+                self.assertEqual(tests, set())
+                self.assertIn("printed what the gate cannot read", why)
+
+    def test_without_test_contexts_mutmut_runs_the_whole_selection(self):
+        self.change_the_functions("checked")
+        selections = self.selections()
+        self.assertEqual(self.found(), [])
+        self.assertEqual(selections, [["tests/"]])
+
+    def test_functions_no_recorded_test_reaches_are_untested_without_mutmut(self):
+        self.change_the_functions("checked", "orphan")
+        selections = self.selections()
+        data_file = self.contexts({"tests/test_calc.py::test_untouched": [10]})
+        found = self.found(test_contexts=data_file)
+        self.assertEqual(selections, [])
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found],
+                         [("calc.py", 1, "untested"), ("calc.py", 13, "untested")])
+        self.assertIn("no test of [tool.mutmut]'s selection runs `checked`", found[0]["message"])
+
+    def test_contexts_that_cannot_tell_the_tests_leave_mutmut_the_whole_selection_and_say_why(self):
+        under_recorded = {f"tests/test_calc.py::test_{i}": [2 if i == 0 else 30 + i] for i in range(11)}
+        cases = {
+            # Eleven tests, none of the file's lines recorded for more than one: as the sys.monitoring core writes it.
+            "records 11 tests but none of its lines for more than 1": self.contexts(under_recorded, name="under"),
+            "did not measure `calc.py`": self.contexts({"tests/test_calc.py::test_checked": [2]}, path="other.py",
+                                                       name="other"),
+            "no such file": os.path.join(self.bin, "missing.coverage"),
+        }
+        self.change_the_functions("checked")
+        selections = self.selections()
+        for why, data_file in cases.items():
+            with self.subTest(why):
+                selections.clear()
+                found = self.found(test_contexts=data_file)
+                self.assertEqual(selections, [["tests/"]])
+                self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-narrowed")])
+                self.assertIn(why, found[0]["message"])
 
 
 # The seven functions S3776 flagged, as orchestrator.py had them before 84e87e7 split them.
