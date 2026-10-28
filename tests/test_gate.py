@@ -2998,7 +2998,9 @@ class TestSurvivingMutants(RepositoryTest):
     def test_a_mutmut_table_of_the_wrong_shape_is_a_finding_and_leaves_nothing_behind(self):
         self.change_the_functions()
         tables = [("only_mutate", "only_mutate = 5"), ("only_mutate", 'only_mutate = "calc.py"'),
-                  ("do_not_mutate", "do_not_mutate = [1]"), ("when", "when = 1979-05-27")]
+                  ("do_not_mutate", "do_not_mutate = [1]"), ("when", "when = 1979-05-27"),
+                  ("tests_dir", 'tests_dir = "tests/"'),
+                  ("pytest_add_cli_args_test_selection", "pytest_add_cli_args_test_selection = [1]")]
         for key, line in tables:
             with self.subTest(line=line):
                 tmp = tempfile.mkdtemp(dir=self.bin)
@@ -3441,6 +3443,9 @@ class TestSurvivingMutants(RepositoryTest):
             ({"pytest_add_cli_args_test_selection": ["tests/", "--ignore", "tests/parity"],
               "pytest_add_cli_args": ["--ignore=tests/test_calcs.py"]},
              ["tests/test_calc.py::TestX::test_y", "tests/test_calc.py::test_checked[1]"]),
+            ({"pytest_add_cli_args_test_selection": ["tests/", "--ignore-glob=tests/par*"],
+              "pytest_add_cli_args": ["--ignore-glob", "./tests/*s.py"]},
+             ["tests/test_calc.py::TestX::test_y", "tests/test_calc.py::test_checked[1]"]),
             # mutmut's default, no selection, runs every test pytest finds.
             ({}, ["other/test_o.py::test_o", "tests/parity/test_p.py::test_p", "tests/test_calc.py::TestX::test_y",
                   "tests/test_calc.py::test_checked[1]", "tests/test_calcs.py::test_z"]),
@@ -3452,6 +3457,24 @@ class TestSurvivingMutants(RepositoryTest):
                                           data_file)
         self.assertEqual(tests, [])
         self.assertIn("holds `-m`, which the gate cannot apply", why)
+
+    def test_the_tree_s_own_modules_do_not_stand_in_for_the_reader_s(self):
+        data_file = self.contexts({"tests/test_calc.py::test_checked": [2]})
+        for module in ("json.py", "coverage.py"):
+            self.put(module, "raise SystemExit('the tree's own module ran')\n")
+        [checked] = [f for f in gate._python_units("calc.py", self.BASE, ast.parse(self.BASE)) if f.name == "checked"]
+        self.assertEqual(gate._tests_reaching(self.repo, [checked], {}, data_file),
+                         (["tests/test_calc.py::test_checked"], None))
+
+    def test_a_reader_output_of_the_wrong_shape_is_a_reason_not_a_crash(self):
+        [checked] = [f for f in gate._python_units("calc.py", self.BASE, ast.parse(self.BASE)) if f.name == "checked"]
+        for reached in ("[]", "[[1]]", "[3]", "{}"):
+            printed = f'{{"tests": 1, "busiest": 1, "reached": {reached}}}'
+            with self.subTest(reached=reached), patch.object(
+                    gate, "_run_in_session", return_value=(subprocess.CompletedProcess([], 0, printed, ""), False)):
+                tests, why = gate._tests_reaching(self.repo, [checked], {}, "test.coverage")
+                self.assertEqual(tests, [])
+                self.assertIn("printed what the gate cannot read", why)
 
     def test_without_test_contexts_mutmut_runs_the_whole_selection(self):
         self.change_the_functions("checked")

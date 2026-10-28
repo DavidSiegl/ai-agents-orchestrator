@@ -241,7 +241,7 @@ call the function:
   the tree into could not be made; or a changed file could not be read or parsed;
 - `not-removed`: the copy mutmut ran in could not be removed afterwards, named so that it can be; the findings stand;
 - `not-narrowed`: `--test-contexts` was given, but its file could not tell which tests reach the changed functions, so
-  mutmut ran its whole test selection, with the reason (see below). The other findings stand.
+  mutmut was given its whole test selection, with the reason (see below). The other findings stand.
 
 mutmut runs in the gate's own interpreter, on a copy of the files git tracks, so the working tree stays as it was; its
 state, `mutants/`, goes into the copy too. Its own selector, mutant names such as
@@ -263,8 +263,9 @@ reruns look in a directory: the project's own, which `also_copy` puts in `mutant
 tests call each function, to check that they pass, and once more with `-x` until the first test that calls a mutated
 function. Run over this repository's whole suite, those runs alone took longer than the budget on Jenkins. With
 `--test-contexts COVERAGE`, the gate narrows `[tool.mutmut]`'s selection first: to the tests that the coverage.py data
-file `COVERAGE` records running a line of a mutated function's body, by their pytest node ids, less those under a path
-an `--ignore` of `pytest_add_cli_args` or of the selection names, since pytest runs a node id it is given even there.
+file `COVERAGE` records running a line of a mutated function's body, by their pytest node ids, less those an
+`--ignore` or `--ignore-glob` of `pytest_add_cli_args` or of the selection leaves out, since pytest runs a node id it is
+given even there.
 The Jenkinsfile's Test stage writes the file, `.coverage`, with `--cov-context=test`, and the Gate stage passes it.
 mutmut then runs those tests three times. For PR #113's change, 253 mutants of 7 `orchestrator.py` functions, that is
 312 tests of 1351, and mutmut took 77 seconds instead of 709 on the build host, with the same verdicts, mutant by
@@ -275,16 +276,16 @@ The file must hold the run's contexts as pytest-cov writes them (`<node id>|run`
 coverage's C tracer: `[tool.coverage.run] core = "ctrace"` in `pyproject.toml`. Under Python 3.14, coverage's default
 core, `sys.monitoring`, records each line for only the first few tests to run it, so mutmut would miss tests that kill
 its mutants and report them as survivors. Any of these makes a `not-narrowed` finding, and mutmut runs the whole
-selection: the file cannot be read, holds no test's context, or does not measure a changed function's file; no line
-in it is recorded for at least a tenth of the tests it records, as that core writes it; or the selection holds an
-option other than `--ignore`, which the gate cannot apply to node ids. Without `--test-contexts`, as in a local run,
-mutmut runs the whole selection. Tests that reach a function only in a subprocess count neither in mutmut's own
-record nor in the file.
+selection: the file cannot be read, holds no test's context, or does not measure a changed function's file; no line in
+it is recorded for at least a tenth of the tests it records, as that core writes it; or the selection holds an option
+other than `--ignore` and `--ignore-glob`, which the gate cannot apply to node ids. Without `--test-contexts`, as in a
+local run, mutmut runs the whole selection. Tests that reach a function only in a subprocess count neither in mutmut's
+own record nor in the file.
 
 `--mutation-budget SECONDS`, 600 by default, bounds mutmut's run. Stopping it takes at most 15 seconds more: SIGINT,
 10 seconds to exit, a kill of its process group, and 5 seconds to read what it printed. Listing its results and showing
 the survivors then take at most 60 seconds, each call's stop included, and reading `--test-contexts` before mutmut
-starts at most 30. So the check takes at most the budget and 105 seconds, and the few it takes to copy the tree. With
+starts at most 35. So the check takes at most the budget and 110 seconds, and the few it takes to copy the tree. With
 the flaky-tests check's three minutes, passes-at-base's two and the test run, a quality build stays inside the
 orchestrator's `QUALITY_TIMEOUT` of 1200 seconds when Jenkins starts it without a wait in the queue.
 

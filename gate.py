@@ -86,10 +86,10 @@ FLAKY_RUN_TIMEOUT = 30
 # stops it: SIGINT, MUTMUT_STOP_GRACE seconds to exit, a kill, and TOOL_KILL_WAIT seconds to read what it printed.
 # Listing its results and showing what a few survivors of each function change, about a third of a second each, then
 # get MUTMUT_REPORT_TIMEOUT seconds in all, each call's stop included. Before mutmut starts, reading which tests reach
-# the changed functions from `gate.py --test-contexts` gets TEST_CONTEXTS_TIMEOUT seconds; about one for this
-# repository's 24 MB file. So the check adds at most the budget and 105 seconds to the gate, and copying the tree a few
-# more: with the flaky-tests check's 180, passes-at-base's BASE_RUN_BUDGET and the test run, about 1020 of a quality
-# round's QUALITY_TIMEOUT, leaving the rest to the queue and the install.
+# the changed functions from `gate.py --test-contexts` gets TEST_CONTEXTS_TIMEOUT seconds and TOOL_KILL_WAIT; about one
+# for this repository's 24 MB file. So the check adds at most the budget and 110 seconds to the gate, and copying the
+# tree a few more: with the flaky-tests check's 180, passes-at-base's BASE_RUN_BUDGET and the test run, about 1025 of a
+# quality round's QUALITY_TIMEOUT, leaving the rest to the queue and the install.
 MUTATION_BUDGET = 600
 MUTMUT_STOP_GRACE = 10
 MUTMUT_REPORT_TIMEOUT = 60
@@ -2692,9 +2692,9 @@ def surviving_mutants(change: GateChange, *, budget: float, test_contexts: str |
     test_contexts, when given, is the path of a coverage.py data file of the tree's test run with a context per test,
     as `pytest --cov-context=test` writes it, relative to the current directory. mutmut then runs only the tests of
     the selection that the file records running a line of a mutated function's body, which spares it two runs of the
-    whole selection before its first mutant (_tests_reaching says which tests, and what makes the file unfit). With
-    none, no mutmut starts, and each mutated function is an untested finding. A file unfit to tell them is a
-    not-narrowed finding saying why, and mutmut runs the whole selection.
+    whole selection before its first mutant (_tests_reaching says which tests, and what makes the file unfit). When
+    the file records no such test, no mutmut starts, and each mutated function is an untested finding. A file unfit
+    to tell them is a not-narrowed finding saying why, and mutmut runs the whole selection.
     """
     functions, out = _changed_python_functions(change)
     if functions:
@@ -2723,9 +2723,9 @@ def _mutation_test(change: GateChange, functions: list[_ChangedFunction], budget
     if test_contexts:
         tests, why = _tests_reaching(change.root, mutated, table, test_contexts)
         if why:
-            out.append(_finding(None, None, "not-narrowed", f"mutmut ran its whole test selection, not only the tests "
-                                                            f"`--test-contexts` records reaching the changed functions: "
-                                                            f"{why}."))
+            out.append(_finding(None, None, "not-narrowed", f"mutmut was given its whole test selection, not only the "
+                                                            f"tests `--test-contexts` records reaching the changed "
+                                                            f"functions: {why}."))
         elif not tests:
             return out + [_finding(f.path, f.line, "untested", f"no test of [tool.mutmut]'s selection runs `{f.name}`, "
                                                                f"as `--test-contexts` records them, so mutmut was not "
@@ -2751,13 +2751,13 @@ import json, os, sys
 from coverage import CoverageData
 if not os.path.isfile(sys.argv[1]):
     sys.exit(f"no such file: {sys.argv[1]}")
-data = CoverageData(basename=sys.argv[1])
-data.read()
+recorded = CoverageData(basename=sys.argv[1])
+recorded.read()
 by_path = {}
-for measured in data.measured_files():
+for measured in recorded.measured_files():
     by_path[os.path.realpath(measured)] = {
         line: {c.rpartition("|")[0] for c in contexts if c.rpartition("|")[2] in ("setup", "run", "teardown")}
-        for line, contexts in data.contexts_by_lineno(measured).items()}
+        for line, contexts in recorded.contexts_by_lineno(measured).items()}
 by_line = [tests for lines in by_path.values() for tests in lines.values()]
 reached = []
 for path, first, last in json.loads(sys.argv[2]):
@@ -2781,17 +2781,17 @@ _UNDER_RECORDED_SHARE = 10
 def _tests_reaching(root: str, functions: list[_ChangedFunction], table: dict,
                     test_contexts: str) -> tuple[list[str], str | None]:
     """The pytest node ids, sorted, of the tests of table's selection, a [tool.mutmut]'s
-    pytest_add_cli_args_test_selection less what its --ignore options leave out, that test_contexts, the path of a
-    coverage.py data file with a context per test, records running a line of the body of any of functions, those in
-    root's working tree; a one-line function's own line counts as its body. Or [] and why the file cannot tell them, a
-    clause: coverage.py cannot read it, it holds no test's context, it records too few tests on each line
-    (_UNDER_RECORDED_SHARE), or it did not measure the file of one of functions.
+    pytest_add_cli_args_test_selection less what its and pytest_add_cli_args's --ignore and --ignore-glob options
+    leave out, that test_contexts, the path of a coverage.py data file with a context per test, records running a line
+    of the body of any of functions, those in root's working tree; a one-line function's own line counts as its body.
+    Or [] and why the file cannot tell them, a clause: coverage.py cannot read it, it holds no test's context, it
+    records too few tests on each line (_UNDER_RECORDED_SHARE), or it did not measure the file of one of functions.
 
     The node ids are as pytest names the tests from the rootdir of the run that wrote the file, which must be root, as
     mutmut runs them in its copy of root. The selection's other options cannot be applied to node ids, so a selection
     holding one is a why too."""
     selection = [*table.get("pytest_add_cli_args_test_selection", []), *table.get("tests_dir", [])]
-    ignored, options = _ignored_paths([*table.get("pytest_add_cli_args", []), *selection])
+    ignored, globs, options = _ignored_paths([*table.get("pytest_add_cli_args", []), *selection])
     if unapplied := [a for a in selection if a.startswith("-") and a not in options]:
         return [], (f"[tool.mutmut] pytest_add_cli_args_test_selection holds `{one_line(unapplied[0])}`, which the "
                     f"gate cannot apply to the tests the file records")
@@ -2799,7 +2799,8 @@ def _tests_reaching(root: str, functions: list[_ChangedFunction], table: dict,
     spans = [[os.path.realpath(os.path.join(root, f.path)), f.line + 1 if f.last > f.line else f.line, f.last]
              for f in functions]
     data_file = os.path.abspath(test_contexts)
-    argv = [sys.executable, "-c", _TEST_CONTEXTS_PROGRAM, data_file, json.dumps(spans)]
+    # -I: the program runs in root, whose own modules, such as a json.py, must not stand in for the ones it imports.
+    argv = [sys.executable, "-I", "-c", _TEST_CONTEXTS_PROGRAM, data_file, json.dumps(spans)]
     try:
         proc, stopped = _run_in_session(argv, root, tool_env(), timeout=TEST_CONTEXTS_TIMEOUT)
     except OSError as e:
@@ -2811,6 +2812,9 @@ def _tests_reaching(root: str, functions: list[_ChangedFunction], table: dict,
     try:
         found = json.loads(proc.stdout)
         recorded, busiest, reached = int(found["tests"]), int(found["busiest"]), list(found["reached"])
+        if len(reached) != len(functions) or not all(
+                tests is None or isinstance(tests, list) and all(isinstance(i, str) for i in tests) for tests in reached):
+            raise ValueError("not a list of node ids or null for each changed function")
     except (ValueError, TypeError, KeyError) as e:
         return [], f"reading `{one_line(data_file)}` printed what the gate cannot read: {e}"
     if not recorded:
@@ -2822,21 +2826,25 @@ def _tests_reaching(root: str, functions: list[_ChangedFunction], table: dict,
     if unmeasured := [f for f, tests in zip(functions, reached, strict=True) if tests is None]:
         return [], f"`{one_line(data_file)}` did not measure `{one_line(unmeasured[0].path)}`"
     return sorted({i for tests in reached for i in tests
-                   if any(_in_node(i, p) for p in paths or ["."]) and not any(_in_node(i, p) for p in ignored)}), None
+                   if any(_in_node(i, p) for p in paths or ["."]) and not any(_in_node(i, p) for p in ignored)
+                   and not any(fnmatch.fnmatchcase(_node_parts(i)[0], os.path.normpath(g)) for g in globs)}), None
 
 
-def _ignored_paths(args: list[str]) -> tuple[list[str], set[str]]:
-    """The paths args, pytest's command-line arguments, give its --ignore options, as `--ignore=PATH` or `--ignore`
-    and PATH; and the arguments those options are made of."""
-    paths, options = [], set()
+def _ignored_paths(args: list[str]) -> tuple[list[str], list[str], set[str]]:
+    """What args, pytest's command-line arguments, leave out of its collection: the paths of its --ignore options and
+    the patterns of its --ignore-glob options, each given as `--OPTION=VALUE` or as `--OPTION` and VALUE; and the
+    arguments those options are made of. pytest applies neither to a node id it is given."""
+    found: dict[str, list[str]] = {"--ignore": [], "--ignore-glob": []}
+    options = set()
     for i, a in enumerate(args):
-        if a.startswith("--ignore="):
-            paths.append(a.removeprefix("--ignore="))
+        name, eq, value = a.partition("=")
+        if name in found and eq:
+            found[name].append(value)
             options.add(a)
-        elif a == "--ignore" and i + 1 < len(args):
-            paths.append(args[i + 1])
+        elif a in found and i + 1 < len(args):
+            found[a].append(args[i + 1])
             options |= {a, args[i + 1]}
-    return paths, options
+    return found["--ignore"], found["--ignore-glob"], options
 
 
 def _in_node(node_id: str, path: str) -> bool:
@@ -3081,8 +3089,8 @@ def _changed_python_functions(change: GateChange) -> tuple[list[_ChangedFunction
 def _mutmut_table(rules: str) -> tuple[dict, str | None]:
     """The [tool.mutmut] table of the pyproject.toml at rules, {} when it has none; or {} and the problem, a clause,
     when it cannot be read, names no source_paths, without which what mutmut mutates cannot be told, or holds an
-    only_mutate, do_not_mutate, do_not_mutate_patterns, also_copy or pytest_add_cli_args that is not a list of
-    strings."""
+    only_mutate, do_not_mutate, do_not_mutate_patterns, also_copy, pytest_add_cli_args,
+    pytest_add_cli_args_test_selection or tests_dir that is not a list of strings."""
     try:
         with open(rules, "rb") as f:
             table = tomllib.load(f).get("tool", {}).get("mutmut", {})
@@ -3093,7 +3101,8 @@ def _mutmut_table(rules: str) -> tuple[dict, str | None]:
         return {}, (f"[tool.mutmut] in {rules} names no source_paths as a list of paths, so what mutmut mutates is "
                     f"unknown")
     # The other keys the gate reads or adds to.
-    for key in ("only_mutate", "do_not_mutate", "do_not_mutate_patterns", "also_copy", "pytest_add_cli_args"):
+    for key in ("only_mutate", "do_not_mutate", "do_not_mutate_patterns", "also_copy", "pytest_add_cli_args",
+                "pytest_add_cli_args_test_selection", "tests_dir"):
         setting = table.get(key, [])
         if not isinstance(setting, list) or not all(isinstance(p, str) for p in setting):
             return {}, f"[tool.mutmut] {key} in {rules} is not a list of strings"
