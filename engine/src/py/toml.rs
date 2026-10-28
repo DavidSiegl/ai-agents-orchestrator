@@ -117,7 +117,7 @@ fn instant(d: &Datetime) -> Option<(i64, u32)> {
         Offset::Z => 0,
         Offset::Custom { minutes } => i64::from(minutes),
     };
-    let days = crate::summary::days_from_civil(i64::from(date.year), i64::from(date.month), i64::from(date.day));
+    let days = crate::py::datetime::days_from_civil(i64::from(date.year), i64::from(date.month), i64::from(date.day));
     let clock = i64::from(time.hour) * 3600 + i64::from(time.minute) * 60 + i64::from(time.second.unwrap_or(0));
     Some((days * 86_400 + clock - minutes * 60, time.nanosecond.unwrap_or(0) / 1000))
 }

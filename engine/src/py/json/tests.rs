@@ -64,3 +64,19 @@ fn python_str_is_str_of_what_json_loads_read() {
     assert_eq!(Json::from("plain").python_str(), "plain");
     assert_eq!(Json::Float(f64::INFINITY).python_str(), "inf");
 }
+
+#[test]
+fn a_lone_surrogate_reads_as_the_replacement_character() {
+    let read = |text: &str| Json::parse_lossy(text).map(|j| j.as_str().map(String::from));
+    // Halves without their pair, high or low, at the end or before another character.
+    assert_eq!(read(r#""cut \ud83d""#), Ok(Some("cut \u{fffd}".to_string())));
+    assert_eq!(read(r#""\udc00\ud800x""#), Ok(Some("\u{fffd}\u{fffd}x".to_string())));
+    assert_eq!(read(r#""\ud83dA""#), Ok(Some("\u{fffd}A".to_string())));
+    // A pair, an escaped backslash before u, and an escape outside any string are left as they are.
+    assert_eq!(read(r#""😀""#), Ok(Some("😀".to_string())));
+    assert_eq!(read(r#""\\ud800""#), Ok(Some("\\ud800".to_string())));
+    assert!(read(r#"\ud800"#).is_err());
+    // Strict parse refuses what parse_lossy reads, and both read text without escapes alike.
+    assert!(Json::parse(r#""\ud800""#).is_err());
+    assert_eq!(Json::parse_lossy(r#"{"a": [1, "é"]}"#), Json::parse(r#"{"a": [1, "é"]}"#));
+}

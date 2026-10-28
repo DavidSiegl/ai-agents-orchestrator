@@ -124,6 +124,14 @@ impl Json {
         }
     }
 
+    /// The value text holds, as parse reads it, but with each lone surrogate a string holds, an escape from \\ud800 to
+    /// \\udfff that is not half of a pair, read as U+FFFD, where json.loads keeps it and serde_json refuses the text.
+    /// So text that JSON.stringify wrote from a string cut in the middle of a pair, as a session log can hold, reads as
+    /// Python reads it, but for the characters the surrogates stood for.
+    pub fn parse_lossy(text: &str) -> Result<Json, String> {
+        Json::parse(&without_lone_surrogates(text))
+    }
+
     /// The value as json.dumps(value) writes it: ", " and ": " between items and keys, every character outside
     /// printable ASCII escaped, and a float as Python's repr writes it.
     pub fn dumps(&self) -> String {
@@ -349,6 +357,45 @@ fn write_chars(s: &str, ascii_only: bool, out: &mut String) {
         }
     }
     out.push('"');
+}
+
+/// JSON text with each lone surrogate escape in its strings (\\ud800 to \\udfff, not half of a high-low pair) made
+/// \\ufffd. Text that is not JSON is left so, for the parser to refuse.
+fn without_lone_surrogates(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains("\\u") {
+        return text.into();
+    }
+    // The code unit of the \\uXXXX escape at byte i of text, if one is there.
+    let escape = |i: usize| -> Option<u32> {
+        let hex = text.get(i..i + 6)?.strip_prefix("\\u")?;
+        hex.bytes().all(|b| b.is_ascii_hexdigit()).then(|| u32::from_str_radix(hex, 16).ok())?
+    };
+    let bytes = text.as_bytes();
+    let (mut out, mut copied, mut i, mut in_string) = (String::new(), 0, 0, false);
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                in_string = !in_string;
+                i += 1;
+            }
+            b'\\' if in_string => match escape(i) {
+                Some(0xD800..=0xDBFF) if matches!(escape(i + 6), Some(0xDC00..=0xDFFF)) => i += 12,
+                Some(0xD800..=0xDFFF) => {
+                    out.push_str(&text[copied..i]);
+                    out.push_str("\\ufffd");
+                    i += 6;
+                    copied = i;
+                }
+                _ => i += 2,
+            },
+            _ => i += 1,
+        }
+    }
+    if copied == 0 {
+        return text.into();
+    }
+    out.push_str(&text[copied..]);
+    out.into()
 }
 
 /// The first integer literal of JSON text, outside its strings, that neither i64 nor u64 holds; None for none.

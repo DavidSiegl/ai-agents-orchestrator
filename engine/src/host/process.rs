@@ -131,7 +131,7 @@ impl Host for ProcessHost {
             None => argv.iter().map(|a| a.to_string()).collect(),
         };
         let command = shlex_join(&argv);
-        match run_process(&argv, stdin, Duration::from_secs(timeout), &self.env) {
+        match run_process(&argv, stdin, Some(Duration::from_secs(timeout)), &self.env) {
             Ok((status, stdout, stderr)) => Ok(Exec { command, status, stdout, stderr }),
             Err(ProcessError::Start(e)) => {
                 Err(OrchestratorError(format!("{command}: {}", os_error(&e, Some(&argv[0])))))
@@ -157,7 +157,7 @@ fn timed_out(argv: &[String], seconds: u64) -> String {
 
 /// Why run_process gave no output.
 #[derive(Debug)]
-enum ProcessError {
+pub(crate) enum ProcessError {
     /// The command could not be started.
     Start(std::io::Error),
     /// Its input could not be written, its output read, or its exit waited for.
@@ -167,17 +167,18 @@ enum ProcessError {
 }
 
 /// argv's exit status, as Python's returncode gives it, and its standard output and error, once it has exited and
-/// closed both: run with exactly env as its environment, stdin as its standard input (none when None), in a process
-/// group of its own, so that when it has not finished within timeout, it and every process it started that stayed in
-/// its group are killed (SIGKILL). A process that left the group, as a daemon does, is not; if it holds the output
-/// open, the threads reading it end when it closes it.
-fn run_process(
+/// closed both: run with exactly env as its environment, argv[0] found on its PATH, stdin as its standard input (none
+/// when None), in a process group of its own, so that when it has not finished within timeout, it and every process it
+/// started that stayed in its group are killed (SIGKILL); a timeout of None lets it run as long as it takes. A process
+/// that left the group, as a daemon does, is not killed; if it holds the output open, the threads reading it end when
+/// it closes it.
+pub(crate) fn run_process(
     argv: &[String],
     stdin: Option<&[u8]>,
-    timeout: Duration,
+    timeout: Option<Duration>,
     env: &[(OsString, OsString)],
 ) -> Result<(i32, Vec<u8>, Vec<u8>), ProcessError> {
-    let deadline = Instant::now() + timeout;
+    let deadline = timeout.map(|timeout| Instant::now() + timeout);
     let mut child = Command::new(&argv[0])
         .args(&argv[1..])
         .env_clear()
@@ -221,10 +222,12 @@ fn run_process(
     drop(sender);
     let mut outputs: [Vec<u8>; 2] = [vec![], vec![]];
     for _ in 0..pending {
-        let piped = match received.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(piped) => piped,
-            Err(_) => return Err(abandon(&mut child, ProcessError::Timeout)),
+        let piped = match deadline {
+            Some(deadline) => received.recv_timeout(deadline.saturating_duration_since(Instant::now())).ok(),
+            None => received.recv().ok(),
         };
+        // Every sender is gone only once each pipe's thread has sent, so a None is the deadline passing.
+        let Some(piped) = piped else { return Err(abandon(&mut child, ProcessError::Timeout)) };
         match piped {
             Piped::Output(n, Ok(out)) => outputs[n] = out,
             Piped::Output(_, Err(e)) | Piped::Input(Err(e)) => return Err(abandon(&mut child, ProcessError::Io(e))),
@@ -234,7 +237,9 @@ fn run_process(
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() >= deadline => return Err(abandon(&mut child, ProcessError::Timeout)),
+            Ok(None) if deadline.is_some_and(|deadline| Instant::now() >= deadline) => {
+                return Err(abandon(&mut child, ProcessError::Timeout))
+            }
             Ok(None) => thread::sleep(Duration::from_millis(5)),
             Err(e) => return Err(abandon(&mut child, ProcessError::Io(e))),
         }

@@ -1,7 +1,8 @@
 //! What the port needs of Python's own semantics, so that the engine reads and writes text as orchestrator.py did:
-//! str's methods and character classes (text), format strings (format), JSON (json), TOML's values (toml) and the
-//! parts of a URL (url).
+//! str's methods and character classes (text), format strings (format), JSON (json), TOML's values (toml), the
+//! parts of a URL (url) and ISO 8601 times (datetime).
 
+pub mod datetime;
 pub mod format;
 pub mod json;
 pub mod text;

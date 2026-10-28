@@ -57,6 +57,14 @@ pub fn lstrip(s: &str) -> &str {
     s.trim_start_matches(is_space)
 }
 
+/// text with each "\r\n" and each lone "\r" made "\n", as Python's text mode reads a process's output.
+pub fn universal_newlines(text: &str) -> String {
+    if !text.contains('\r') {
+        return text.to_string();
+    }
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 /// The characters that end a line for str.splitlines, besides "\r\n", which ends one as a pair.
 pub const LINE_BREAKS: [char; 10] = ['\n', '\r', '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\u{85}', '\u{2028}', '\u{2029}'];
 

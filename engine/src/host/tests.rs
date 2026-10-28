@@ -543,7 +543,7 @@ fn a_command_ended_by_a_signal_has_its_negative_number() {
 // -- TestChildEnvironment --------------------------------------------------------------------------------------------
 
 /// The engine's environment with the CI credentials, git's pathspec switches and KEEP_ME set.
-fn with_credentials() -> Vec<(&'static str, &'static str)> {
+pub(crate) fn with_credentials() -> Vec<(&'static str, &'static str)> {
     let mut set: Vec<(&str, &str)> = vec![
         ("JENKINS_URL", "https://jenkins.example/"),
         ("JENKINS_USER", "agents"),
@@ -555,7 +555,7 @@ fn with_credentials() -> Vec<(&'static str, &'static str)> {
 }
 
 /// Panics unless env, the output of `env`, keeps KEEP_ME and holds none of the credentials or switches.
-fn assert_scrubbed(env: &str) {
+pub(crate) fn assert_scrubbed(env: &str) {
     assert!(env.lines().any(|l| l == "KEEP_ME=1"), "{env}");
     for k in crate::constants::CI_ENV.iter().chain(&crate::constants::GIT_PATHSPEC_ENV) {
         assert!(!env.lines().any(|l| l.starts_with(&format!("{k}="))), "{k} reached the process");
@@ -1344,7 +1344,9 @@ fn host_s_constants_are_the_python_engine_s() {
     assert_eq!(int("SSH_ALIVE_COUNT"), i128::from(process::SSH_ALIVE_COUNT));
     let logs = constants.get("SESSION_LOGS").and_then(Json::as_object).unwrap();
     let ours: Vec<(&str, &str)> = logs.iter().map(|(k, v)| (k, v.as_str().unwrap())).collect();
-    assert_eq!(ours, SESSION_LOGS);
+    let harnesses: Vec<(&str, &str)> =
+        crate::harness::HARNESSES.iter().filter_map(|h| h.session_log.map(|log| (h.kind, log.glob))).collect();
+    assert_eq!(ours, harnesses);
 }
 
 #[test]
