@@ -32,9 +32,9 @@ pub const QUALITY_TO_WEIGH_NOTE: &str = "These do not fail the gate. Fix each, o
 pub const QUALITY_FINDINGS_LIMIT: usize = 50;
 
 /// text as a quality file writes it within one of its lines, such as one item of a list: each character that ends a
-/// line in some reader (str.splitlines's LINE_BREAKS) written as an escape, as gate.py's _LINE_BREAK_ESCAPES writes it,
-/// so a list item the engine adds reads back as the one line the gate's would, `\x` and two hex digits up to U+00FF, `\u` and four beyond, anything
-/// else as it is.
+/// line in some reader (str.splitlines's LINE_BREAKS) written as an escape, `\x` and two hex digits up to U+00FF, `\u`
+/// and four beyond, as gate.py's _LINE_BREAK_ESCAPES writes it, so a list item the engine adds reads back as the one
+/// line the gate's would; anything else as it is.
 pub fn one_line(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {

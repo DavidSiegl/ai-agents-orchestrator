@@ -115,16 +115,19 @@ pub fn ci_credentials(environ: &dyn Fn(&str) -> Option<String>, path: &str) -> R
     if found.len() == CI_ENV.len() {
         return Ok(found);
     }
-    let unreadable = |e: &std::io::Error| OrchestratorError(format!("could not read {path}: {}", os_error(e, path)));
+    // Opening names the file in its error, as Python's open does; a look at the open file or a read of it does not.
+    let unreadable = |e: &std::io::Error, named: bool| {
+        OrchestratorError(format!("could not read {path}: {}", os_error(e, named.then_some(path))))
+    };
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(found),
-        Err(e) => return Err(unreadable(&e)),
+        Err(e) => return Err(unreadable(&e, true)),
     };
-    let metadata = file.metadata().map_err(|e| unreadable(&e))?;
+    let metadata = file.metadata().map_err(|e| unreadable(&e, false))?;
     if metadata.is_dir() {
         // Python's open refuses a directory, before any look at its mode.
-        return Err(unreadable(&std::io::Error::from_raw_os_error(21)));
+        return Err(unreadable(&std::io::Error::from_raw_os_error(21), true));
     }
     let mode = metadata.permissions().mode();
     if mode & 0o077 != 0 {
@@ -133,7 +136,7 @@ pub fn ci_credentials(environ: &dyn Fn(&str) -> Option<String>, path: &str) -> R
         )));
     }
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(|e| unreadable(&e))?;
+    file.read_to_end(&mut bytes).map_err(|e| unreadable(&e, false))?;
     let text = String::from_utf8(bytes).map_err(|e| {
         OrchestratorError(format!("could not read {path}: {}", utf8_error(e.as_bytes(), &e.utf8_error())))
     })?;

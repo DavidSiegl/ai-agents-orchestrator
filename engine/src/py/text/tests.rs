@@ -62,6 +62,9 @@ fn utf8_errors_are_worded_as_pythons() {
         (b"ab\xe2(", "'utf-8' codec can't decode byte 0xe2 in position 2: invalid continuation byte"),
         (b"\xc0\xaf", "'utf-8' codec can't decode byte 0xc0 in position 0: invalid start byte"),
         (b"ab\xe2", "'utf-8' codec can't decode byte 0xe2 in position 2: unexpected end of data"),
+        (b"\xe2\x82(", "'utf-8' codec can't decode bytes in position 0-1: invalid continuation byte"),
+        (b"x\xf0\x9f\x98(", "'utf-8' codec can't decode bytes in position 1-3: invalid continuation byte"),
+        (b"\xe0\x80", "'utf-8' codec can't decode byte 0xe0 in position 0: invalid continuation byte"),
     ] {
         assert_eq!(utf8_error(bytes, &std::str::from_utf8(bytes).unwrap_err()), said);
     }

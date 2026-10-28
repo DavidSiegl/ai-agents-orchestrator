@@ -120,8 +120,9 @@ pub struct RunState {
     pub unknown: Map<Json>,
 }
 
-/// The fields of RunState, in state.json's order: those to_json writes and Fields::read reads, which the tests hold
-/// to this list.
+/// The keys of state.json this engine knows, which from_saved keeps out of unknown: every field to_json writes, in its
+/// order, then agent_args, which it only reads. A state/tests.rs test holds to_json's keys to this list; that every
+/// recorded state writes back as it was holds Fields::read to it.
 const FIELDS: [&str; 45] = [
     "run_id",
     "task",

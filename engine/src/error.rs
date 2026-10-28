@@ -20,12 +20,14 @@ impl fmt::Display for OrchestratorError {
 
 impl std::error::Error for OrchestratorError {}
 
-/// An I/O error on path as Python's OSError writes itself: `[Errno 2] No such file or directory: '<path>'`, the path
-/// as repr quotes it; an error that is not the system's as Rust words it.
-pub fn os_error(e: &std::io::Error, path: &str) -> String {
-    match e.raw_os_error() {
-        Some(errno) => format!("[Errno {errno}] {}: {}", strerror(e), crate::py::text::repr(path)),
-        None => e.to_string(),
+/// An I/O error as Python's OSError writes itself: `[Errno 2] No such file or directory`, then `: '<path>'`, the path
+/// as repr quotes it, for an error that names one, as opening a file's does and reading an open one's does not; an
+/// error that is not the system's as Rust words it.
+pub fn os_error(e: &std::io::Error, path: Option<&str>) -> String {
+    match (e.raw_os_error(), path) {
+        (Some(errno), Some(path)) => format!("[Errno {errno}] {}: {}", strerror(e), crate::py::text::repr(path)),
+        (Some(errno), None) => format!("[Errno {errno}] {}", strerror(e)),
+        (None, _) => e.to_string(),
     }
 }
 

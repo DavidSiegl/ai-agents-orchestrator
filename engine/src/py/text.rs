@@ -123,16 +123,21 @@ pub fn title_ascii(s: &str) -> String {
 }
 
 /// What Python's UnicodeDecodeError says of bytes that are not UTF-8, as e found them: `'utf-8' codec can't decode
-/// byte 0xff in position 2: invalid start byte`, or the bytes' positions for an incomplete sequence at the end.
+/// byte 0xff in position 2: invalid start byte`, or, for a sequence of more than one byte that ends too soon,
+/// `bytes in position 0-1`: the longest start of a sequence, as Python and Rust both take it.
 pub fn utf8_error(bytes: &[u8], e: &std::str::Utf8Error) -> String {
     let at = e.valid_up_to();
-    let byte = || format!("byte 0x{:02x} in position {at}", bytes[at]);
-    let (what, reason) = match e.error_len() {
-        None if bytes.len() - at > 1 => (format!("bytes in position {at}-{}", bytes.len() - 1), "unexpected end of data"),
-        None => (byte(), "unexpected end of data"),
+    let len = e.error_len().unwrap_or(bytes.len() - at);
+    let what = if len > 1 {
+        format!("bytes in position {at}-{}", at + len - 1)
+    } else {
+        format!("byte 0x{:02x} in position {at}", bytes[at])
+    };
+    let reason = match e.error_len() {
+        None => "unexpected end of data",
         // A byte that may start a sequence, followed by one that cannot go on with it.
-        Some(_) if (0xc2..=0xf4).contains(&bytes[at]) => (byte(), "invalid continuation byte"),
-        Some(_) => (byte(), "invalid start byte"),
+        Some(_) if (0xc2..=0xf4).contains(&bytes[at]) => "invalid continuation byte",
+        Some(_) => "invalid start byte",
     };
     format!("'utf-8' codec can't decode {what}: {reason}")
 }
