@@ -104,12 +104,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   many events a step sends depends on where serve's one-second poll falls among the run's saves, so the stream
   between two checkpoints differs from run to run. Closes with a serve whose poll the harness can step, which would
   be a hook in the engine, or the user's ruling that the folded stream is the contract, as the desktop app reads it.
-- **`test-integrity` does not see a golden file's change.** A golden file under `tests/golden/` (`tests/golden.py`)
-  is an expected value outside any assertion, as a text file the check does not parse, so a change that rewrites one
-  with `UPDATE_GOLDEN=1` alongside the code it pins gets no `expected-value-changed` finding; the Reviewer sees the
-  rewrite only in the diff. Found while adding the golden files (orchestrator-test-methods/06, 2026-10-27). Closes
-  with the check reporting a changed file under a project's golden directory, which would need that directory to be
-  a setting for projects other than this one (gate-split/04, the test-file patterns).
 
 - **A quality build of a snapshot from before `gate.py` fails mypy.** A quality build judges by main's rules
   (`--config`), and since the split main's `[tool.mypy] files` names `gate.py`, which mypy reads relative to the
@@ -456,6 +450,16 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   subdirectory.
 
 ## Fixed
+
+- **`test-integrity` did not see a golden file's change.** A golden file under `tests/golden/` (`tests/golden.py`) is
+  an expected value outside any assertion, so a change that rewrote one with `UPDATE_GOLDEN=1` alongside the code it
+  pins got no `expected-value-changed` finding. Found while adding the golden files (orchestrator-test-methods/06,
+  2026-10-27). Fixed (2026-10-28): `weakened_tests` adds `_changed_golden_files`, one weighed
+  `expected-value-changed` finding on the whole file for each golden file the change edits or deletes when it also
+  edits code outside the tests (`_edits_code`); an added golden file, or one renamed unedited, is none. Not closed: a
+  golden file is one under a `golden` directory inside a `tests` directory (`_golden_file`), this repository's layout;
+  another project's expected output under another name, such as `__snapshots__/`, is not recognised until that
+  directory is a setting (gate-split/04, the test-file patterns).
 
 - **A `# noqa` inside a string, or in a file no linter reads it in, was listed under "Suppressions added".**
   `added_suppressions` matched one pattern, `_SUPPRESSION`, against every added line of every file, so `"add # noqa"`

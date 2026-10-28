@@ -1116,8 +1116,9 @@ class WeakenedTestsDetector:
 def weakened_tests(change: GateChange) -> list[dict]:
     """The test-integrity check's find: in each WEAKENED_TESTS_DETECTORS language, the tests the change removed,
     skipped, stripped of assertions or wrapped in a swallowed error, and the expected values it changed together
-    with the code under test. The change leaves out mutmut's state, as GateChange.from_tree says."""
-    out: list[dict] = []
+    with the code under test; and, in any language, the golden files it changed so (_changed_golden_files). The change
+    leaves out mutmut's state, as GateChange.from_tree says."""
+    out: list[dict] = _changed_golden_files(change)
     for detector in WEAKENED_TESTS_DETECTORS:
         files, unreadable = [], []
         for old, new in change.files:
@@ -1131,10 +1132,45 @@ def weakened_tests(change: GateChange) -> list[dict]:
             except (GateError, OSError, UnicodeDecodeError) as e:
                 unreadable.append(_finding(new or old, None, "unreadable",
                                            f"could not be read, so its tests were not checked: {e}", severity="error"))
-        code_changed = any(detector.is_source(p) and not detector.is_test(p)
-                           for pair in change.files for p in pair if p)
-        out += unreadable + (detector.find(files, code_changed) if files else [])
+        out += unreadable + (detector.find(files, _edits_code(change, detector)) if files else [])
     return out
+
+
+def _edits_code(change: GateChange, detector: WeakenedTestsDetector) -> bool:
+    """Whether the change edits, adds, deletes or renames a file of detector's language outside its tests."""
+    return any(detector.is_source(p) and not detector.is_test(p) for pair in change.files for p in pair if p)
+
+
+def _changed_golden_files(change: GateChange) -> list[dict]:
+    """An expected-value-changed finding, on the whole file, for each golden file (_golden_file) that the change edits
+    or deletes, when it also edits the code of a WEAKENED_TESTS_DETECTORS language outside its tests: such a file is an
+    expected value outside any assertion, which `UPDATE_GOLDEN=1` rewrites to whatever the code now writes. A golden
+    file the change adds, or renames without editing, has no old value to lose."""
+    if not any(_edits_code(change, detector) for detector in WEAKENED_TESTS_DETECTORS):
+        return []
+    removals = _removal_points(change.diff)
+    out = []
+    for old, new in change.files:
+        if old is None or not _golden_file(old):
+            continue
+        if new is None:
+            out.append(_finding(old, None, "expected-value-changed",
+                                "a golden file, the expected output of a test, deleted in a change that also edits "
+                                "the code under test; check that no test still needs it.", severity="error"))
+        elif change.changed.get(new) or removals.get(new):
+            out.append(_finding(new, None, "expected-value-changed",
+                                "a golden file, the expected output of a test, changed in a change that also edits "
+                                "the code under test; check that its diff is what the change means the output to "
+                                "become.", severity="error"))
+    return sorted(out, key=lambda f: f["path"])
+
+
+def _golden_file(path: str) -> bool:
+    """Whether a repository path is a golden file, as this repository keeps them (tests/golden.py): under a directory
+    named golden inside a tests directory. A project that keeps its expected output under another name, such as
+    __snapshots__, is not read so."""
+    *dirs, _ = path.split("/")
+    return "golden" in dirs and "tests" in dirs[:dirs.index("golden")]
 
 
 def _read_text(path: str) -> str:

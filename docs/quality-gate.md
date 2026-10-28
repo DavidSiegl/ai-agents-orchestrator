@@ -111,9 +111,12 @@ change cannot weaken its tests unseen. Each of these is a finding:
   assignment of one name, bound nowhere else in the module's scope, to an expression with no call in it. One the
   change adds, one imported from another module or computed by a call, one reached through a local or a helper, an
   edit to another constant one is built from, and a fixture's return value do not count. It is one to weigh, like
-  `removed-test`, since the spec may ask for the new value.
+  `removed-test`, since the spec may ask for the new value. A golden file, under a `golden` directory inside a
+  `tests` directory as `tests/golden.py` keeps them, is an expected value too, one that `UPDATE_GOLDEN=1` rewrites
+  to whatever the code now writes: a change that edits or deletes one and also edits code outside the tests gets
+  one such finding per file, on the whole file, also to weigh. A golden file added, or renamed unedited, is none.
 
-It reads Python only; another language is a `WeakenedTestsDetector` beside the Python one in
+It reads Python only, but for golden files; another language is a `WeakenedTestsDetector` beside the Python one in
 `WEAKENED_TESTS_DETECTORS`.
 
 **Cognitive complexity** scores the functions the change edits, so that a change cannot pile branches into the
@@ -121,8 +124,8 @@ function it is editing rather than split it. A function counts when the change a
 included, in a Python file, a `.py` file or a script whose `#!` line names python, outside `tests/`, which is exempt
 as it is from ruff's `C901`: any function that no other function holds, a method of a nested class and a function
 under a module-level `if` or `try` included. A function nested in another is part of that one. Files are read as
-Python reads them, by their byte order mark or coding cookie. Its score is G. Ann Campbell's [cognitive complexity](https://www.sonarsource.com/docs/CognitiveComplexity.pdf),
-which SonarQube's rule S3776 measured: a point for each `if`, `elif`, `else`, ternary, loop, `except`, `match`,
+Python reads them, by their byte order mark or coding cookie. Its score is G. Ann Campbell's
+[cognitive complexity](https://www.sonarsource.com/docs/CognitiveComplexity.pdf), which SonarQube's rule S3776 measured: a point for each `if`, `elif`, `else`, ternary, loop, `except`, `match`,
 sequence of like boolean operators and recursion, and one more for each level of nesting on those that nest.
 Recursion is a function that calls itself, or one on a cycle of calls through other functions of its module, each of
 which then scores the point. Calls are followed by name, as Python's scopes resolve them, so a call to a parameter

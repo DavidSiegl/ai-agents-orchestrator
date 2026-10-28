@@ -1394,6 +1394,30 @@ class TestWeakenedTests(RepositoryTest):
             "    def test_add(self):", "    def test_add[T](self):"))
         self.assertEqual(where, [("tests/test_golden.py", 10, "expected-value-changed")])
 
+    def test_a_golden_file_rewritten_with_the_code_it_pins_is_an_expected_value_changed(self):
+        self.commit({"tests/golden/sum.txt": "3\n", "tests/golden/old.txt": "1\n", "tests/golden/moved.txt": "2\n",
+                     "docs/golden/notes.txt": "a\n"}, "golden files")
+        self.edit("calc.py", "return a + b", "return b + a")
+        self.edit("tests/golden/sum.txt", "3\n", "4\n")
+        self.git("rm", "--quiet", "tests/golden/old.txt")
+        self.git("mv", "tests/golden/moved.txt", "tests/golden/kept.txt")  # its expected value unchanged
+        self.put("tests/golden/new.txt", "5\n")  # a new expected value, not a changed one
+        self.edit("docs/golden/notes.txt", "a\n", "b\n")  # no test reads it
+        self.git("add", "tests/golden/new.txt")
+        where, found = self.found()
+        self.assertEqual(where, [("tests/golden/old.txt", None, "expected-value-changed"),
+                                 ("tests/golden/sum.txt", None, "expected-value-changed")])
+        self.assertEqual(found[1]["message"], "a golden file, the expected output of a test, changed in a change that "
+                                              "also edits the code under test; check that its diff is what the change "
+                                              "means the output to become.")
+        self.assertIn("deleted", found[0]["message"])
+
+    def test_a_golden_file_changed_without_the_code_is_no_finding(self):
+        self.commit({"tests/golden/sum.txt": "3\n"}, "golden file")
+        self.edit("tests/golden/sum.txt", "3\n", "4\n")
+        self.edit("tests/test_other.py", "assert 1", "assert 2")
+        self.assertEqual(self.found()[0], [])
+
     def commit_mutmut_state(self):
         """Commit what mutmut leaves in mutants/ after a run: its copy of the code and of the tests beside it."""
         for name, text in self.BASE_FILES.items():
