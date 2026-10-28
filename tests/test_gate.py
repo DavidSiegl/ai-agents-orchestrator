@@ -649,6 +649,37 @@ class TestGate(RepositoryTest):
         [change] = seen
         self.assertEqual((change.changed, change.mutmut_state), ({"f.py": {4}}, ("mutants/calc.py", "mutants/old.py")))
 
+    def test_only_a_comment_in_the_file_s_own_syntax_is_listed_as_a_suppression(self):
+        with open(os.path.join(self.repo, "f.py"), "a") as f:
+            f.write('hint = "add # noqa: F401"\ndoc = """\n# type: ignore\n"""\nimport os  # noqa: F401\n')
+        files = {
+            "bin/tool": "#!/usr/bin/env python3\nprint('# noqa')  # pragma: no cover\n",
+            "README.md": "Write `# noqa` to silence ruff.\n<!-- pyml disable-next-line md013 -->\n",
+            "run.sh": "echo '# noqa'\n# shellcheck disable=SC2086\n",
+            ".github/workflows/w.yml": "on: push  # noqa\njobs:\n  j:\n    steps:\n      - run: |\n"
+                                       "          # shellcheck disable=SC2086\n",
+            "notes.txt": "# noqa and # pragma: no cover, as text\n",
+        }
+        for path, text in files.items():
+            self.put(path, text)
+        self.git("add", *files)
+        status, out, _ = self.gate()
+        self.assertEqual(status, 0, out)
+        self.assertTrue(out.endswith(
+            "## Suppressions added\n\n"
+            "- `.github/workflows/w.yml:6` `# shellcheck disable=SC2086`\n"
+            "- `README.md:2` `<!-- pyml disable-next-line md013 -->`\n"
+            "- `bin/tool:2` `print('# noqa')  # pragma: no cover`\n"
+            "- `f.py:8` `import os  # noqa: F401`\n"
+            "- `run.sh:2` `# shellcheck disable=SC2086`\n"), out)
+
+    def test_a_suppression_in_python_that_does_not_tokenize_is_listed_by_its_line(self):
+        with open(os.path.join(self.repo, "f.py"), "a") as f:
+            f.write('import os  # noqa: F401\ns = """unterminated # noqa\n')
+        out = self.gate()[1]
+        self.assertTrue(out.endswith("## Suppressions added\n\n- `f.py:4` `import os  # noqa: F401`\n"
+                                     '- `f.py:5` `s = """unterminated # noqa`\n'), out)
+
     def checks(self, *checks):
         """Run the gate with checks in place of gate_checks's."""
         p = patch.object(gate, "gate_checks", lambda mutation_budget, base_run_budget: checks)

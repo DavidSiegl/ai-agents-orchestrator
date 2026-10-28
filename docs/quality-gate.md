@@ -375,7 +375,10 @@ first, at most 50 in all, then a count:
 - **Suppressions added** (`# noqa`, `# type: ignore`, `# shellcheck disable`, `<!-- pyml disable`, `# pragma: no cover`,
   `# pragma: no mutate`, and Rust's `#[allow(` and `#[expect(`) are listed, not failed, so the Reviewer weighs each one.
   A `# pragma: no cover` is listed because it takes lines out of the coverage condition, and a `# pragma: no mutate`
-  because it takes them out of the surviving-mutants check.
+  because it takes them out of the surviving-mutants check. Each counts only in the syntax of the files that what it
+  silences reads: in a Python file (a `.py` file or a `#!` python script), only within a comment, so the same words in
+  a string or a docstring are not one; `# shellcheck disable` in a `.sh` file or a workflow under
+  `.github/workflows/`; `<!-- pyml disable` in Markdown; the attributes in Rust. Any other file has none.
 - **Build configuration**: an edit to `Jenkinsfile`, `pyproject.toml` or `uv.lock` is noted, since each can change how
   the change was judged, as is one to a file anywhere in the tree that clippy takes its rules or its toolchain from
   (`Cargo.toml`, `clippy.toml`, `rust-toolchain.toml`, `.cargo/config.toml`; `CLIPPY_CONFIG_NAMES` in `gate.py`),

@@ -668,11 +668,15 @@ class GateCheck:
 # A finding's location, before the tool's own part; lineless when the tool names only the file.
 _FINDING_AT = re.compile(r"(?P<path>[^:]+):(?:(?P<line>\d+):(?:\d+:)?)? (?P<detail>.+)")
 
-# Comments that silence a linter or exempt lines from coverage, which the quality file lists for the Reviewer; and in
-# a Rust file, the attributes that silence a lint: an allow or expect inside one attribute's brackets, also inside a
-# cfg_attr, as in `#![cfg_attr(test, allow(...))]`, or alone on a line, as rustfmt wraps a long cfg_attr's.
-_SUPPRESSION = re.compile(r"#.*\b(?:noqa|type:\s*ignore|shellcheck\s+disable|pragma:\s*no\s*(?:cover|branch|mutate))\b"
-                          r"|<!--\s*pyml\s+disable")
+# What silences a linter or exempts lines from coverage or mutation, which the quality file lists for the Reviewer, in
+# each kind of file that something the gate runs reads it in (_suppressing_lines): in Python, a comment for ruff,
+# mypy, coverage.py or mutmut, matched against its comments alone; in a shell script, and in a workflow, whose run
+# scripts actionlint has shellcheck read, a comment for shellcheck; in Markdown, pymarkdown's HTML comment; and in Rust,
+# an attribute: an allow or expect inside one attribute's brackets, also inside a cfg_attr, as in
+# `#![cfg_attr(test, allow(...))]`, or alone on a line, as rustfmt wraps a long cfg_attr's.
+_PYTHON_SUPPRESSION = re.compile(r"#.*\b(?:noqa|type:\s*ignore|pragma:\s*no\s*(?:cover|branch|mutate))\b")
+_SHELL_SUPPRESSION = re.compile(r"#.*\bshellcheck\s+disable\b")
+_MARKDOWN_SUPPRESSION = re.compile(r"<!--\s*pyml\s+disable")
 _RUST_SUPPRESSION = re.compile(r"#!?\[[^\]]*\b(?:allow|expect)\s*\(|^\s*(?:allow|expect)\s*\(")
 
 
@@ -1003,16 +1007,39 @@ def _floor_tenth(percent: float) -> str:
 
 
 def added_suppressions(root: str, changed: dict[str, set[int]]) -> list[tuple[str, int, str]]:
-    """The (path, line, text) of each added line, in the working tree at root, that silences a linter or coverage.
-    Raises GateError when a file the change adds lines to cannot be read."""
+    """The (path, line, text) of each added line, in the working tree at root, that silences a linter, coverage or
+    mutmut, as _suppressing_lines finds them: in its file's own syntax, and in a Python file only by a comment, not by
+    the same words in a string. Raises GateError when a file the change adds lines to cannot be read."""
     out = []
     for path, added, lines in _files_with_added_lines(root, changed):
-        silencing = (_SUPPRESSION, _RUST_SUPPRESSION) if path.endswith(".rs") else (_SUPPRESSION,)
-        for n in sorted(a for a in added if a <= len(lines)):
-            text = lines[n - 1].decode("utf-8", "replace")
-            if any(p.search(text) for p in silencing):
-                out.append((path, n, text.strip()[:160]))
+        for n in sorted(added & _suppressing_lines(path, lines)):
+            out.append((path, n, lines[n - 1].decode("utf-8", "replace").strip()[:160]))
     return out
+
+
+def _suppressing_lines(path: str, lines: list[bytes]) -> set[int]:
+    """The numbers, from 1, of the lines that silence something the gate runs in the file at path, whose lines, as
+    _files_with_added_lines splits them, are lines: by the suppressions above for its kind of file, a Python file as
+    _holds_python tells one; none in a file of any other kind, in which nothing the gate runs reads a suppression.
+
+    A Python file's lines are those holding a comment that _PYTHON_SUPPRESSION matches; when the file does not
+    tokenize, each line that the pattern matches, so that a suppression in a file ruff reports as broken is still
+    listed."""
+    if _holds_python(path, lambda: lines[0][:_FIRST_LINE_BYTES]):
+        try:
+            tokens = tokenize.tokenize(io.BytesIO(b"\n".join(lines)).readline)
+            return {t.start[0] for t in tokens if t.type == tokenize.COMMENT and _PYTHON_SUPPRESSION.search(t.string)}
+        except (tokenize.TokenError, SyntaxError, UnicodeDecodeError, LookupError):
+            pattern = _PYTHON_SUPPRESSION
+    elif path.endswith(".sh") or (path.startswith(".github/workflows/") and path.endswith((".yml", ".yaml"))):
+        pattern = _SHELL_SUPPRESSION
+    elif path.endswith(".md"):
+        pattern = _MARKDOWN_SUPPRESSION
+    elif path.endswith(".rs"):
+        pattern = _RUST_SUPPRESSION
+    else:
+        return set()
+    return {n for n, line in enumerate(lines, 1) if pattern.search(line.decode("utf-8", "replace"))}
 
 
 def stray_line_ends(root: str, changed: dict[str, set[int]],

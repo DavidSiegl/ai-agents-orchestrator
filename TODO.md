@@ -457,6 +457,16 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Fixed
 
+- **A `# noqa` inside a string, or in a file no linter reads it in, was listed under "Suppressions added".**
+  `added_suppressions` matched one pattern, `_SUPPRESSION`, against every added line of every file, so `"add # noqa"`
+  in a Python string or docstring, `# noqa` quoted in Markdown or a YAML comment, and `# pragma: no cover` in a text
+  file were listed for the Reviewer as suppressions. Found by the user (2026-10-28). Fixed (2026-10-28):
+  `_suppressing_lines` chooses the pattern by the kind of file: in a Python file (`_holds_python`) only a `COMMENT`
+  token that `_PYTHON_SUPPRESSION` matches counts, falling back to every matching line when the file does not
+  tokenize; `_SHELL_SUPPRESSION` in a `.sh` file or a workflow; `_MARKDOWN_SUPPRESSION` in Markdown;
+  `_RUST_SUPPRESSION` alone in Rust; nothing in any other file. Not closed: in a shell script or Markdown the pattern
+  still reads the line's text, so the words inside a shell string or a Markdown code block still count.
+
 - **A cargo config under the build's `CARGO_HOME` was not listed as build configuration.** `clippy_config_files`
   listed cargo's config only under a `.cargo` directory, but the Jenkinsfile sets `CARGO_HOME` to
   `$WORKSPACE/.cargo-home`, so a change tracking `.cargo-home/config.toml` could change clippy's lint levels or
