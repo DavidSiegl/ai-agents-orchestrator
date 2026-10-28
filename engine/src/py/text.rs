@@ -185,6 +185,22 @@ fn quoted(s: &str, ascii_only: bool) -> String {
     out
 }
 
+/// argv as one line of sh, each word quoted as shlex.quote quotes it, as shlex.join writes it: a word of nothing but
+/// ASCII letters, digits and `_@%+=:,./-` as it is, any other in single quotes, a quote inside as `'"'"'`.
+pub fn shlex_join<S: AsRef<str>>(argv: &[S]) -> String {
+    argv.iter().map(|word| shlex_quote(word.as_ref())).collect::<Vec<_>>().join(" ")
+}
+
+fn shlex_quote(word: &str) -> String {
+    if word.is_empty() {
+        return "''".to_string();
+    }
+    if word.chars().all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c)) {
+        return word.to_string();
+    }
+    format!("'{}'", word.replace('\'', "'\"'\"'"))
+}
+
 /// The one of possibilities closest to word, as difflib.get_close_matches(word, possibilities, n=1) picks it: the
 /// highest SequenceMatcher ratio of at least 0.6, the greater string on a tie; None when none comes that close.
 pub fn close_match<'a, I>(word: &str, possibilities: I) -> Option<&'a str>
