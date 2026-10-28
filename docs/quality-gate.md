@@ -99,7 +99,8 @@ change cannot weaken its tests unseen. Each of these is a finding:
   the base. It is one to weigh, like `removed-test`: a test the spec reshapes may need fewer;
 - `swallowed-error`: a bare `except:`, or an `except Exception:` that does nothing, on an added line;
 - `expected-value-changed`: an assertion whose literals changed while the rest of it stayed, in a change that also
-  edits code outside the tests: the "update the expected value to match the output" move. The finding names the
+  edits code outside the tests, which is Python source as **Passes at base** below counts it, on either side of the
+  change: the "update the expected value to match the output" move. The finding names the
   assertion before and after. An expected value held in a constant counts too: when a kept test's assertions name a
   constant of its own file at the base and still name it, bare or as `module.NAME` (the module by its dotted name or a
   module-level import alias of it), and the constant's expression changed other than in layout, or it is no longer a
@@ -271,9 +272,9 @@ to such a text alone makes no mutant. Flag names that start a line of their own 
 **Passes at base** runs the tests the change adds or edits, picked as flaky-tests picks them, against the base's code,
 since a test that passes without the change cannot be what shows the change works: coverage counts the lines it runs,
 surviving-mutants sees only the functions the change edits, and test integrity only tests getting weaker. For a bug
-fix, a test that fails at the base is the proof the bug was reproduced. The check runs only when the change edits
-Python source outside the tests: a `.py` file, or a script whose `#!` names python, that is not a test file (as for
-test integrity), a `conftest.py` or under a `tests` directory. A change to the tests alone, or to the tests and the
+fix, a test that fails at the base is the proof the bug was reproduced. The check runs only when the change edits,
+adds or deletes Python source outside the tests: a `.py` file, or a script whose `#!` names python in the working
+tree or at the base, that is not a test file (as for test integrity), a `conftest.py` or under a `tests` directory. A change to the tests alone, or to the tests and the
 docs, has no "without the change" a test could see. The base is the files git tracked at `--base`, as `git archive`
 writes them, with every one of the change's files that belong with the tests (those three kinds) taken from the
 working tree, or removed where the change removed it, so the changed tests keep their fixtures and data. A submodule

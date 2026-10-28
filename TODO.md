@@ -425,10 +425,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `gate-python-files` (R2-F1, 2026-10-26); rests on mutmut's source, not on a run. Closes with the copy or
   `_mark_for_mutmut` keeping links out of mutmut's walk, without breaking a tracked link the tests import through,
   and a test that also edits a real function.
-- **passes-at-base misses a deleted Python script with no `.py`.** `_edits_python_source` (`gate.py`)
-  counts a deleted file as Python source only by its `.py`, so a change that only deletes a `#!` python script
-  outside the tests edits no Python source for it. Found while fixing the cognitive-complexity check's same gap
-  (2026-10-25). Closes with that branch asking `_was_python_source`, which the complexity check now uses.
 - **A body moved into a file hides a function with that body moved out of it, which is then judged as new.** The
   cognitive-complexity check takes a base function as gone from its file when the file now holds its body fewer times
   than the base did (`_BasePool._gone`), without asking where the working tree's copies came from. So when `calc.py`'s
@@ -458,14 +454,22 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Fixed
 
+- **passes-at-base missed a deleted Python script with no `.py`.** `_edits_python_source` counted a deleted file as
+  Python source only by its `.py`, so a change that only deleted a `#!` python script outside the tests edited no
+  Python source for it. Found while fixing the cognitive-complexity check's same gap (2026-10-25). Fixed
+  (2026-10-28, with cross-review 79's F5): `_edits_python_source` asks `_python_code` of each side of each changed
+  path, which takes `_was_python_source` at the base, and test-integrity's Python detector uses the same function as
+  its `is_code`, so the two checks give one answer to "does the change edit Python code outside the tests".
+
 - **`test-integrity` did not see a golden file's change.** A golden file under `tests/golden/` (`tests/golden.py`) is
   an expected value outside any assertion, so a change that rewrote one with `UPDATE_GOLDEN=1` alongside the code it
   pins got no `expected-value-changed` finding. Found while adding the golden files (orchestrator-test-methods/06,
   2026-10-27). Fixed (2026-10-28): `weakened_tests` adds `_changed_golden_files`, one weighed
   `expected-value-changed` finding on the whole file for each golden file the change edits or deletes when it also
-  edits code outside the tests (`_edits_code`; a `#!` python script counts as Python there, on either side, as the
-  Python detector's `is_source` says); an added golden file, or one renamed unedited, is none. What stays open, other
-  projects' golden files, is "`test-integrity` knows golden files only by this repository's layout" in Open issues.
+  edits Python code outside the tests (`_edits_code`, by `_python_code`, which passes-at-base shares: a `#!` python
+  script counts, on either side, and nothing `_beside_tests` sets with the tests does); an added golden file, or one
+  renamed unedited, is none. What stays open, other projects' golden files, is "`test-integrity` knows golden files
+  only by this repository's layout" in Open issues.
 
 - **A `# noqa` inside a string, or in a file no linter reads it in, was listed under "Suppressions added".**
   `added_suppressions` matched one pattern, `_SUPPRESSION`, against every added line of every file, so `"add # noqa"`
@@ -475,8 +479,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   token that `_PYTHON_SUPPRESSION` matches counts, falling back to every matching line when the file does not
   tokenize; `_SHELL_SUPPRESSION` in a `.sh` file or a workflow; `_MARKDOWN_SUPPRESSION`, a pymarkdown pragma that is
   a whole line from its first column, in Markdown; `_RUST_SUPPRESSION` alone in Rust; nothing in any other file. Not
-  closed: in a shell script the pattern still reads the line's text, so the words inside a shell string still count,
-  and so does a pragma-shaped line inside a Markdown code block.
+  closed: in a shell script the pattern still reads the line's text, so the words inside a shell string still count.
+  A pragma line inside a Markdown code block is listed, rightly: pymarkdownlnt 0.9.41 honours it there too.
 
 - **A cargo config under the build's `CARGO_HOME` was not listed as build configuration.** `clippy_config_files`
   listed cargo's config only under a `.cargo` directory, but the Jenkinsfile sets `CARGO_HOME` to

@@ -526,10 +526,10 @@ class Clippy(GateTool):
     build on no line it added.
 
     The cargo commands it runs, each within GATE_TOOL_TIMEOUT: `cargo clippy --version`, whose failure is clippy
-    missing; `cargo locate-project` for each tracked Cargo.toml; and `cargo clippy` in each workspace, which builds
-    what it needs to (target/ in the workspace) and may fetch the crates it uses. That last runs with --locked when
-    git tracks the workspace's Cargo.lock, so that it judges the versions the change commits and never rewrites the
-    file; without one, cargo writes an untracked Cargo.lock beside the manifest.
+    missing; `cargo locate-project` for each Cargo.toml among the files it is given; and `cargo clippy` in each
+    workspace, which builds what it needs to (target/ in the workspace) and may fetch the crates it uses. That last
+    runs with --locked when git tracks the workspace's Cargo.lock, so that it judges the versions the change commits
+    and never rewrites the file; without one, cargo writes an untracked Cargo.lock beside the manifest.
     """
 
     def run(self, root: str, rules: str, files: list[str], tracked: set[str]) -> tuple[list[dict], list[str]]:
@@ -1123,9 +1123,9 @@ class WeakenedTestsDetector:
     """How the test-integrity check reads one language's tests."""
     language: str
     # Whether a repository path is one of the language's test files; and whether a path of the change, on either of
-    # its sides, holds the language's source at all.
+    # its sides, holds the language's code outside its tests, the code its tests test.
     is_test: Callable[[str], bool]
-    is_source: Callable[[GateChange, str], bool]
+    is_code: Callable[[GateChange, str], bool]
     # The findings on every one of the language's test files the change touched, as GateCheck.find returns them,
     # given whether the change also edits the language's code outside its tests.
     find: Callable[[list[ChangedTestFile], bool], list[dict]]
@@ -1155,8 +1155,8 @@ def weakened_tests(change: GateChange) -> list[dict]:
 
 
 def _edits_code(change: GateChange, detector: WeakenedTestsDetector) -> bool:
-    """Whether the change edits, adds, deletes or renames a file of detector's language outside its tests."""
-    return any(not detector.is_test(p) and detector.is_source(change, p) for pair in change.files for p in pair if p)
+    """Whether the change edits, adds, deletes or renames code of detector's language outside its tests."""
+    return any(detector.is_code(change, p) for pair in change.files for p in pair if p)
 
 
 def _changed_golden_files(change: GateChange) -> list[dict]:
@@ -1226,6 +1226,13 @@ def _python_test_file(path: str) -> bool:
     """pytest's and unittest's usual places: under a tests directory, test_*.py or *_test.py."""
     *dirs, name = path.split("/")
     return name.endswith(".py") and ("tests" in dirs or name.startswith("test_") or name.endswith("_test.py"))
+
+
+def _python_code(change: GateChange, path: str) -> bool:
+    """Whether path, on either side of change, holds Python code outside the tests: Python source, as
+    _is_python_source tells it in the working tree or _was_python_source at the base, that _beside_tests does not set
+    with the tests."""
+    return not _beside_tests(path) and (_is_python_source(change, path) or _was_python_source(change, path))
 
 
 def _body_fingerprint(definition: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> str:
@@ -1711,11 +1718,7 @@ def _clip(text: str, n: int = 160) -> str:
 
 
 WEAKENED_TESTS_DETECTORS = (
-    # A #! python script counts as Python, as for every check (_parsed_changed_files), on whichever side it is.
-    WeakenedTestsDetector("python", is_test=_python_test_file,
-                          is_source=lambda change, path: (_is_python_source(change, path)
-                                                          or _was_python_source(change, path)),
-                          find=python_weakened_tests),
+    WeakenedTestsDetector("python", is_test=_python_test_file, is_code=_python_code, find=python_weakened_tests),
 )
 
 
@@ -2320,11 +2323,8 @@ def passes_at_base(change: GateChange, *, budget: float) -> list[dict]:
 
 
 def _edits_python_source(change: GateChange) -> bool:
-    """Whether the change edits Python source outside the tests, as _beside_tests tells them: a file it leaves in the
-    working tree that _is_python_source accepts, or a .py file it deletes."""
-    return any((new is not None and not _beside_tests(new) and _is_python_source(change, new))
-               or (new is None and old is not None and old.endswith(".py") and not _beside_tests(old))
-               for old, new in change.files)
+    """Whether the change edits, adds, deletes or renames Python code outside the tests, as _python_code tells it."""
+    return any(_python_code(change, p) for pair in change.files for p in pair if p)
 
 
 def _beside_tests(path: str) -> bool:

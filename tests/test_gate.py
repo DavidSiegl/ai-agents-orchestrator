@@ -1432,6 +1432,12 @@ class TestWeakenedTests(RepositoryTest):
                 self.edit("tests/golden/tool.txt", "3\n", "4\n")
                 self.assertEqual(self.found()[0], [("tests/golden/tool.txt", None, "expected-value-changed")])
 
+    def test_a_golden_file_changed_with_a_python_script_beside_the_tests_is_no_finding(self):
+        self.commit({"tests/golden/x.txt": "3\n", "tests/bin/fake": "#!/usr/bin/env python3\nprint(3)\n"}, "fake")
+        self.edit("tests/bin/fake", "print(3)", "print(4)")
+        self.edit("tests/golden/x.txt", "3\n", "4\n")
+        self.assertEqual(self.found()[0], [])
+
     def test_a_golden_file_changed_without_the_code_is_no_finding(self):
         self.commit({"tests/golden/sum.txt": "3\n"}, "golden file")
         self.edit("tests/golden/sum.txt", "3\n", "4\n")
@@ -2122,6 +2128,19 @@ class TestPassesAtBase(RepositoryTest):
         self.put("calc.py", self.CALC.replace("a - b", "a + b"))
         self.put("tests/test_calc.py", self.TESTS.replace("import mul", "import add, mul")
                  + "\n\ndef test_add():\n    assert add(2, 2) == 4\n" + tests)
+
+    def test_a_python_script_edited_or_deleted_outside_the_tests_is_python_source(self):
+        script = "#!/usr/bin/env python3\nprint(1)\n"
+        self.commit({"bin/tool": script, "bin/old": script, "tests/bin/fake": script}, "scripts")
+        base = self.git("rev-parse", "HEAD").strip()
+        for name, edit in [("edited", lambda: self.edit("bin/tool", "print(1)", "print(2)")),
+                           ("deleted", lambda: self.git("rm", "--quiet", "bin/old")),
+                           ("beside the tests", lambda: self.edit("tests/bin/fake", "print(1)", "print(2)"))]:
+            with self.subTest(name):
+                self.git("reset", "--quiet", "--hard")
+                edit()
+                self.assertEqual(gate._edits_python_source(gate.GateChange.from_tree(self.repo, base)),
+                                 name != "beside the tests")
 
     def test_no_room_for_the_run_at_the_base_is_a_finding(self):
         self.fix_add()
