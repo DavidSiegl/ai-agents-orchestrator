@@ -499,6 +499,33 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   it there with `--no-relative`; of `Host._paths_between` it said: "has the same exposure, but it is outside this
   range". Closes with `--no-relative` on both calls and a test that sets `diff.relative` and locks from a
   subdirectory.
+- **A run that dies right after it saved phase `done` never finishes ending.** `Workflow.run` saves `phase = DONE`,
+  counts the turns' tokens, saves again with `owner` cleared, and only then writes `summary.md` and `metrics.json`,
+  notifies the human that the run finished and closes the workspace. A crash after either of those two saves leaves
+  a run that `resume` finds done: `Workflow.run` returns the verdict at once, so neither file is ever written, the
+  human is never told, the herdr workspace stays open, and after the first save `owner` stays set and the turns have
+  no token counts. Found by orchestrator-test-methods/05 (`tests/test_crash_resume.py`, 2026-10-28), whose `expected`
+  pins this behaviour. Not fixed here: the engine is frozen (Planned, "The Python engine is frozen"). Closes in the Rust
+  engine with a resume of a `done` run that finishes whatever of that ending is missing (each step can tell: the files
+  exist, `owner` is cleared, the tokens are counted). The test drives the Python engine in-process, so its pin goes
+  with that engine.
+- **A crash between an agent's start and its session being saved costs that turn its session.** `Workflow._start`
+  saves the agent's record, then asks herdr for it and `_note_session` saves the session. A resume after the first
+  save finds the agent alive (`_agent` returns `ALIVE`) and prompts it without asking herdr, so the turn's record
+  (`_turn_record`) starts with no session; `_note_session` saves it while the turn runs, but `_end_turn` keeps
+  `session` only when it matches the one at the start, so the turn ends with none, and `_count_tokens` cannot count its
+  tokens. Found by orchestrator-test-methods/05 (2026-10-28), whose `expected` pins it. Not fixed here: the engine is
+  frozen. Closes in the Rust engine with `_agent` noting the session of an agent it finds alive; the pin goes with
+  the Python engine, as above.
+- **A resumed interview tells the human again that it waits for them.** `Workflow._step_turn`'s `announce` focuses
+  the human-paced agent's pane and notifies "<label> is waiting for you" in every orchestrator that takes the turn
+  (`_turn`: it "runs once the agent is ready"), so a resume while the interview is under way repeats both, once per
+  resume. Raised by cross-review 81 (F1, 2026-10-28) against ticket orchestrator-test-methods/05, which allows only
+  documented idempotent repeats: "Neither is idempotent: the cited comment … says each orchestrator does it again,
+  which is the repeat the ticket asks the test to fail on." The user ruled it a bug (2026-10-28), not wanted;
+  `tests/test_crash_resume.py`'s `expected` pins it as up to one repeat per resume while orchestrator.py is frozen.
+  Closes with an engine that announces a turn only where none did (for example, only when `prompted` is not the turn's
+  file), the Rust engine's, and the pin removed.
 
 ## Fixed
 
