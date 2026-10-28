@@ -253,15 +253,18 @@ pipeline {
                     // once, as main's did before the commit that brought this order, keeps the last of each. A quality
                     // build judged by such a main, of a snapshot that carries this Jenkinsfile, is then judged on its
                     // Python as before, but not on its Rust tests, which only the junit step's UNSTABLE shows, nor on
-                    // the Rust's coverage; that window closes when main's gate.py takes both more than once. A quality
-                    // build's main has --test-contexts whenever its snapshot's Jenkinsfile passes it, the snapshot
-                    // being of a branch from that main or an older one.
+                    // the Rust's coverage; that window closes when main's gate.py takes both more than once. Likewise
+                    // --test-contexts goes only to a gate.py that defines it, so a quality build judged by a main from
+                    // before it has mutmut run its whole selection rather than the gate fail on an unknown option.
                     withEnv(["GATE=${gate}", "GATE_RULES=${rules}", "GATE_BASE=${base}"]) {
                         status = sh(returnStatus: true, script: '''
+                            set --
+                            if grep -q -- '"--test-contexts"' "$GATE"; then
+                                set -- --test-contexts "$COVERAGE_FILE"
+                            fi
                             uv run --frozen python "$GATE" --base "$GATE_BASE" --config "$GATE_RULES" \\
                                 --tests ui/src-tauri/target/nextest/ci/junit.xml --tests test-results.xml \\
-                                --coverage coverage-rust.xml --coverage coverage.xml --test-contexts "$COVERAGE_FILE" \
-                                --out quality.md
+                                --coverage coverage-rust.xml --coverage coverage.xml "$@" --out quality.md
                         ''')
                     }
                     if (status == 1 && params.GIT_REF) {
