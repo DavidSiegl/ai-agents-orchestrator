@@ -676,12 +676,13 @@ _FINDING_AT = re.compile(r"(?P<path>[^:]+):(?:(?P<line>\d+):(?:\d+:)?)? (?P<deta
 # What silences a linter or exempts lines from coverage or mutation, which the quality file lists for the Reviewer, in
 # each kind of file that something the gate runs reads it in (_suppressing_lines): in Python, a comment for ruff,
 # mypy, coverage.py or mutmut, matched against its comments alone; in a shell script, and in a workflow, whose run
-# scripts actionlint has shellcheck read, a comment for shellcheck; in Markdown, pymarkdown's HTML comment; and in Rust,
-# an attribute: an allow or expect inside one attribute's brackets, also inside a cfg_attr, as in
+# scripts actionlint has shellcheck read, a comment for shellcheck; in Markdown, a line that is pymarkdown's pragma,
+# an HTML comment from the line's first column to its end (pymarkdownlnt 0.9.41's PragmaToken.look_for_pragmas);
+# and in Rust, an attribute: an allow or expect inside one attribute's brackets, also inside a cfg_attr, as in
 # `#![cfg_attr(test, allow(...))]`, or alone on a line, as rustfmt wraps a long cfg_attr's.
 _PYTHON_SUPPRESSION = re.compile(r"#.*\b(?:noqa|type:\s*ignore|pragma:\s*no\s*(?:cover|branch|mutate))\b")
 _SHELL_SUPPRESSION = re.compile(r"#.*\bshellcheck\s+disable\b")
-_MARKDOWN_SUPPRESSION = re.compile(r"<!--\s*pyml\s+disable")
+_MARKDOWN_SUPPRESSION = re.compile(r"^<!---?\s*pyml\s+disable.*-->\s*$", re.IGNORECASE)
 _RUST_SUPPRESSION = re.compile(r"#!?\[[^\]]*\b(?:allow|expect)\s*\(|^\s*(?:allow|expect)\s*\(")
 
 

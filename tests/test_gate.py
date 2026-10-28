@@ -654,7 +654,8 @@ class TestGate(RepositoryTest):
             f.write('hint = "add # noqa: F401"\ndoc = """\n# type: ignore\n"""\nimport os  # noqa: F401\n')
         files = {
             "bin/tool": "#!/usr/bin/env python3\nprint('# noqa')  # pragma: no cover\n",
-            "README.md": "Write `# noqa` to silence ruff.\n<!-- pyml disable-next-line md013 -->\n",
+            "README.md": "Write `# noqa` to silence ruff, `<!-- pyml disable md013 -->` pymarkdown.\n"
+                         "<!-- pyml disable-next-line md013 -->\n  <!-- pyml disable md013 -->\n",
             "run.sh": "echo '# noqa'\n# shellcheck disable=SC2086\n",
             ".github/workflows/w.yml": "on: push  # noqa\njobs:\n  j:\n    steps:\n      - run: |\n"
                                        "          # shellcheck disable=SC2086\n",

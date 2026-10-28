@@ -473,9 +473,10 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   file were listed for the Reviewer as suppressions. Found by the user (2026-10-28). Fixed (2026-10-28):
   `_suppressing_lines` chooses the pattern by the kind of file: in a Python file (`_holds_python`) only a `COMMENT`
   token that `_PYTHON_SUPPRESSION` matches counts, falling back to every matching line when the file does not
-  tokenize; `_SHELL_SUPPRESSION` in a `.sh` file or a workflow; `_MARKDOWN_SUPPRESSION` in Markdown;
-  `_RUST_SUPPRESSION` alone in Rust; nothing in any other file. Not closed: in a shell script or Markdown the pattern
-  still reads the line's text, so the words inside a shell string or a Markdown code block still count.
+  tokenize; `_SHELL_SUPPRESSION` in a `.sh` file or a workflow; `_MARKDOWN_SUPPRESSION`, a pymarkdown pragma that is
+  a whole line from its first column, in Markdown; `_RUST_SUPPRESSION` alone in Rust; nothing in any other file. Not
+  closed: in a shell script the pattern still reads the line's text, so the words inside a shell string still count,
+  and so does a pragma-shaped line inside a Markdown code block.
 
 - **A cargo config under the build's `CARGO_HOME` was not listed as build configuration.** `clippy_config_files`
   listed cargo's config only under a `.cargo` directory, but the Jenkinsfile sets `CARGO_HOME` to
