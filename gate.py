@@ -2,7 +2,7 @@
 The quality gate: judge the change a git working tree makes since a commit, and write the quality file.
 
     python gate.py --base REV [--config PYPROJECT] [--tests JUNIT]... [--coverage XML]... [--out FILE]
-                   [--mutation-budget SECONDS] [--base-run-budget SECONDS]
+                   [--mutation-budget SECONDS] [--base-run-budget SECONDS] [--test-contexts COVERAGE]
 
 It judges the working tree of the git repository that holds the current directory: the linters (GATE_TOOLS) over
 the files the repository tracks, keeping the findings on the lines the change adds since --base, and the checks
@@ -85,12 +85,15 @@ FLAKY_RUN_TIMEOUT = 30
 # The surviving-mutants check lets mutmut run for `gate.py --mutation-budget` seconds, MUTATION_BUDGET by default, then
 # stops it: SIGINT, MUTMUT_STOP_GRACE seconds to exit, a kill, and TOOL_KILL_WAIT seconds to read what it printed.
 # Listing its results and showing what a few survivors of each function change, about a third of a second each, then
-# get MUTMUT_REPORT_TIMEOUT seconds in all, each call's stop included. So mutmut adds at most the budget and 75 seconds
-# to the gate, and copying the tree a few more: with the flaky-tests check's 180, passes-at-base's BASE_RUN_BUDGET and
-# the test run, about 990 of a quality round's QUALITY_TIMEOUT, leaving the rest to the queue and the install.
+# get MUTMUT_REPORT_TIMEOUT seconds in all, each call's stop included. Before mutmut starts, reading which tests reach
+# the changed functions from `gate.py --test-contexts` gets TEST_CONTEXTS_TIMEOUT seconds; about one for this
+# repository's 24 MB file. So the check adds at most the budget and 105 seconds to the gate, and copying the tree a few
+# more: with the flaky-tests check's 180, passes-at-base's BASE_RUN_BUDGET and the test run, about 1020 of a quality
+# round's QUALITY_TIMEOUT, leaving the rest to the queue and the install.
 MUTATION_BUDGET = 600
 MUTMUT_STOP_GRACE = 10
 MUTMUT_REPORT_TIMEOUT = 60
+TEST_CONTEXTS_TIMEOUT = 30
 # The passes-at-base check runs the changed tests at the base for `gate.py --base-run-budget` seconds, this by default.
 BASE_RUN_BUDGET = 120
 # The gate's exit status when it could not judge the change, and so wrote no quality file.
@@ -2666,7 +2669,7 @@ _MUTMUT_NO_TESTS = re.compile(r"^Stopping early, because we could not find any t
 _SURVIVOR_EXAMPLES = 3
 
 
-def surviving_mutants(change: GateChange, *, budget: float) -> list[dict]:
+def surviving_mutants(change: GateChange, *, budget: float, test_contexts: str | None = None) -> list[dict]:
     """The surviving-mutants check's find: mutation-tests with mutmut each top-level function and method the change adds
     a line to in a Python file outside the tests. Reports at its def each such function that has mutants the tests did
     not notice, with how many of its mutants they were and what the first _SURVIVOR_EXAMPLES change, as a line before
@@ -2685,16 +2688,25 @@ def surviving_mutants(change: GateChange, *, budget: float) -> list[dict]:
     budget seconds; a run stopped there is a finding that says how many of the mutants it tried, beside what those
     showed. A mutmut that cannot start, fails, or whose results cannot be listed is a finding saying so, and so are
     rules that name no source_paths and a changed file that cannot be read or parsed.
+
+    test_contexts, when given, is the path of a coverage.py data file of the tree's test run with a context per test,
+    as `pytest --cov-context=test` writes it, relative to the current directory. mutmut then runs only the tests of
+    the selection that the file records running a line of a mutated function's body, which spares it two runs of the
+    whole selection before its first mutant (_tests_reaching says which tests, and what makes the file unfit). With
+    none, no mutmut starts, and each mutated function is an untested finding. A file unfit to tell them is a
+    not-narrowed finding saying why, and mutmut runs the whole selection.
     """
     functions, out = _changed_python_functions(change)
     if functions:
-        out += _mutation_test(change, functions, budget)
+        out += _mutation_test(change, functions, budget, test_contexts)
     return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
 
 
-def _mutation_test(change: GateChange, functions: list[_ChangedFunction], budget: float) -> list[dict]:
+def _mutation_test(change: GateChange, functions: list[_ChangedFunction], budget: float,
+                   test_contexts: str | None) -> list[dict]:
     """surviving_mutants's findings on functions, the change's changed functions: those mutmut does not mutate, then
-    what a run of mutmut, by the rules' [tool.mutmut], of budget seconds found of the others."""
+    what a run of mutmut, by the rules' [tool.mutmut], of budget seconds found of the others, its tests narrowed by
+    test_contexts as surviving_mutants says."""
     rules = change.rules or os.path.join(change.root, "pyproject.toml")
     table, problem = _mutmut_table(rules)
     if problem:
@@ -2708,8 +2720,130 @@ def _mutation_test(change: GateChange, functions: list[_ChangedFunction], budget
             mutated.append(f)
     if not mutated:
         return out
+    if test_contexts:
+        tests, why = _tests_reaching(change.root, mutated, table, test_contexts)
+        if why:
+            out.append(_finding(None, None, "not-narrowed", f"mutmut ran its whole test selection, not only the tests "
+                                                            f"`--test-contexts` records reaching the changed functions: "
+                                                            f"{why}."))
+        elif not tests:
+            return out + [_finding(f.path, f.line, "untested", f"no test of [tool.mutmut]'s selection runs `{f.name}`, "
+                                                               f"as `--test-contexts` records them, so mutmut was not "
+                                                               f"started.") for f in mutated]
+        else:
+            # mutmut appends tests_dir, a deprecated alias, to the selection.
+            table = {**{k: v for k, v in table.items() if k != "tests_dir"},
+                     "pytest_add_cli_args_test_selection": tests}
     return out + _in_scratch_directory("not-run", "to run mutmut on a copy of the tree in",
                                        lambda tmp: _mutmut_on_copy(change.root, tmp, mutated, table, budget))
+
+
+# The program _tests_reaching runs in the gate's own interpreter, as the gate runs mutmut, so that it reads a
+# coverage.py data file through coverage's API rather than its SQLite schema. argv[1] is the data file, argv[2] JSON
+# [[path, first, last], ...], each path real and absolute. It prints JSON {"tests": n, "busiest": m, "reached": [...]}:
+# n the tests the file records a context of, m the most of them it records running any one line, and for each span the
+# sorted pytest node ids of the tests it records running a line from first to last, both included, or null when the
+# file did not measure the span's path. A test's contexts are pytest-cov's `<node id>|setup`, `|run` and `|teardown`;
+# a measured path relative in the file is taken from the current directory. A missing file, and any error of coverage's,
+# exit with status 1 and say so on standard error.
+_TEST_CONTEXTS_PROGRAM = """\
+import json, os, sys
+from coverage import CoverageData
+if not os.path.isfile(sys.argv[1]):
+    sys.exit(f"no such file: {sys.argv[1]}")
+data = CoverageData(basename=sys.argv[1])
+data.read()
+by_path = {}
+for measured in data.measured_files():
+    by_path[os.path.realpath(measured)] = {
+        line: {c.rpartition("|")[0] for c in contexts if c.rpartition("|")[2] in ("setup", "run", "teardown")}
+        for line, contexts in data.contexts_by_lineno(measured).items()}
+by_line = [tests for lines in by_path.values() for tests in lines.values()]
+reached = []
+for path, first, last in json.loads(sys.argv[2]):
+    lines = by_path.get(path)
+    reached.append(None if lines is None else
+                   sorted(set().union(*(tests for line, tests in lines.items() if first <= line <= last))))
+print(json.dumps({"tests": len(set().union(*by_line)), "busiest": max(map(len, by_line), default=0),
+                  "reached": reached}))
+"""
+
+# A data file in which no line is recorded for at least one in this many of the tests it records is taken for one a
+# coverage core wrote that records a line only for the first few tests to run it. Under Python 3.14, coverage 7.14's
+# default core, sys.monitoring, does that under `--cov-context=test` without a warning: this repository's suite, with
+# 1351 tests that reach the measured code, had none of its lines recorded for more than 5 tests, where the ctrace core
+# records 977 on its busiest. Tests left out that way could kill mutants that are then reported as survivors. Fewer
+# tests recorded than ran is no sign of it: 20 of the 1371 tests of mutmut's selection here reach no measured line under
+# either core. A file recording fewer than this many tests is never taken for an under-recorded one.
+_UNDER_RECORDED_SHARE = 10
+
+
+def _tests_reaching(root: str, functions: list[_ChangedFunction], table: dict,
+                    test_contexts: str) -> tuple[list[str], str | None]:
+    """The pytest node ids, sorted, of the tests of table's selection, a [tool.mutmut]'s
+    pytest_add_cli_args_test_selection less what its --ignore options leave out, that test_contexts, the path of a
+    coverage.py data file with a context per test, records running a line of the body of any of functions, those in
+    root's working tree; a one-line function's own line counts as its body. Or [] and why the file cannot tell them, a
+    clause: coverage.py cannot read it, it holds no test's context, it records too few tests on each line
+    (_UNDER_RECORDED_SHARE), or it did not measure the file of one of functions.
+
+    The node ids are as pytest names the tests from the rootdir of the run that wrote the file, which must be root, as
+    mutmut runs them in its copy of root. The selection's other options cannot be applied to node ids, so a selection
+    holding one is a why too."""
+    selection = [*table.get("pytest_add_cli_args_test_selection", []), *table.get("tests_dir", [])]
+    ignored, options = _ignored_paths([*table.get("pytest_add_cli_args", []), *selection])
+    if unapplied := [a for a in selection if a.startswith("-") and a not in options]:
+        return [], (f"[tool.mutmut] pytest_add_cli_args_test_selection holds `{one_line(unapplied[0])}`, which the "
+                    f"gate cannot apply to the tests the file records")
+    paths = [a for a in selection if a not in options]
+    spans = [[os.path.realpath(os.path.join(root, f.path)), f.line + 1 if f.last > f.line else f.line, f.last]
+             for f in functions]
+    data_file = os.path.abspath(test_contexts)
+    argv = [sys.executable, "-c", _TEST_CONTEXTS_PROGRAM, data_file, json.dumps(spans)]
+    try:
+        proc, stopped = _run_in_session(argv, root, tool_env(), timeout=TEST_CONTEXTS_TIMEOUT)
+    except OSError as e:
+        return [], f"coverage.py could not be started to read `{one_line(data_file)}`: {e}"
+    if stopped:
+        return [], f"reading `{one_line(data_file)}` took longer than {TEST_CONTEXTS_TIMEOUT} seconds"
+    if proc.returncode != 0:
+        return [], f"coverage.py could not read `{one_line(data_file)}`: {_said(proc)}"
+    try:
+        found = json.loads(proc.stdout)
+        recorded, busiest, reached = int(found["tests"]), int(found["busiest"]), list(found["reached"])
+    except (ValueError, TypeError, KeyError) as e:
+        return [], f"reading `{one_line(data_file)}` printed what the gate cannot read: {e}"
+    if not recorded:
+        return [], f"`{one_line(data_file)}` records no test's context, as `pytest --cov-context=test` writes them"
+    if busiest * _UNDER_RECORDED_SHARE < recorded:
+        return [], (f"`{one_line(data_file)}` records {recorded} tests but none of its lines for more than {busiest}, "
+                    f"as a coverage core that records each line for its first tests alone writes it; pin the ctrace "
+                    f"core, with `[tool.coverage.run] core = \"ctrace\"`")
+    if unmeasured := [f for f, tests in zip(functions, reached, strict=True) if tests is None]:
+        return [], f"`{one_line(data_file)}` did not measure `{one_line(unmeasured[0].path)}`"
+    return sorted({i for tests in reached for i in tests
+                   if any(_in_node(i, p) for p in paths or ["."]) and not any(_in_node(i, p) for p in ignored)}), None
+
+
+def _ignored_paths(args: list[str]) -> tuple[list[str], set[str]]:
+    """The paths args, pytest's command-line arguments, give its --ignore options, as `--ignore=PATH` or `--ignore`
+    and PATH; and the arguments those options are made of."""
+    paths, options = [], set()
+    for i, a in enumerate(args):
+        if a.startswith("--ignore="):
+            paths.append(a.removeprefix("--ignore="))
+            options.add(a)
+        elif a == "--ignore" and i + 1 < len(args):
+            paths.append(args[i + 1])
+            options |= {a, args[i + 1]}
+    return paths, options
+
+
+def _in_node(node_id: str, path: str) -> bool:
+    """Whether the test node_id is path's or one inside it, path a directory, a file or a node id as pytest takes it
+    on its command line, relative to the rootdir; "." is every test."""
+    path = os.path.normpath(path)
+    return path == "." or node_id == path or node_id.startswith((f"{path}/", f"{path}::", f"{path}["))
 
 
 def _mutmut_on_copy(root: str, tmp: str, functions: list[_ChangedFunction], table: dict, budget: float) -> list[dict]:
@@ -4016,10 +4150,11 @@ def _fixed_by_override(tree: ast.Module) -> set[int]:
     return fixed
 
 
-def gate_checks(mutation_budget: float = MUTATION_BUDGET,
-                base_run_budget: float = BASE_RUN_BUDGET) -> tuple[GateCheck, ...]:
+def gate_checks(mutation_budget: float = MUTATION_BUDGET, base_run_budget: float = BASE_RUN_BUDGET,
+                test_contexts: str | None = None) -> tuple[GateCheck, ...]:
     """The checks judge_change runs after the linters, in this order, the surviving-mutants check letting mutmut run
-    for mutation_budget seconds and the passes-at-base check letting pytest run for base_run_budget."""
+    for mutation_budget seconds, on the tests test_contexts says as surviving_mutants takes it, and the passes-at-base
+    check letting pytest run for base_run_budget."""
     return (
         # Removing, reshaping or re-expecting a test is what a spec can ask for; skipping one or swallowing its error
         # only hides a failure.
@@ -4027,7 +4162,8 @@ def gate_checks(mutation_budget: float = MUTATION_BUDGET,
                   weighed=frozenset({"removed-test", "fewer-assertions", "expected-value-changed"})),
         GateCheck("cognitive-complexity", fails=True, find=too_complex_functions),
         GateCheck("flaky-tests", fails=False, find=flaky_tests),
-        GateCheck("surviving-mutants", fails=False, find=functools.partial(surviving_mutants, budget=mutation_budget)),
+        GateCheck("surviving-mutants", fails=False, find=functools.partial(surviving_mutants, budget=mutation_budget,
+                                                                          test_contexts=test_contexts)),
         GateCheck("passes-at-base", fails=False, find=functools.partial(passes_at_base, budget=base_run_budget)),
         GateCheck("vague-names", fails=False, find=vague_names),
     )
@@ -4039,7 +4175,7 @@ def _check_condition(name: str, n: int) -> str:
 
 
 def gate_command(base: str, rules: str | None, coverage: list[str], tests: list[str], out: str | None,
-                 mutation_budget: float, base_run_budget: float) -> int:
+                 mutation_budget: float, base_run_budget: float, test_contexts: str | None = None) -> int:
     """Write the quality file judge_change gives for the current directory, with gate_checks's checks, to out or
     standard output.
 
@@ -4047,8 +4183,8 @@ def gate_command(base: str, rules: str | None, coverage: list[str], tests: list[
     could not be judged or out could not be written.
     """
     try:
-        text = judge_change(os.getcwd(), base, gate_checks(mutation_budget, base_run_budget), rules=rules,
-                            coverage=coverage, tests=tests)
+        text = judge_change(os.getcwd(), base, gate_checks(mutation_budget, base_run_budget, test_contexts),
+                            rules=rules, coverage=coverage, tests=tests)
         if out:
             write_quality_file(out, text)
     except GateError as e:
@@ -4107,6 +4243,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--base-run-budget", type=seconds_arg, default=BASE_RUN_BUDGET, metavar="SECONDS",
                         help=f"stop the run of the changed tests against the base's code, which finds tests that "
                              f"pass without the change, after this long; default {BASE_RUN_BUDGET}")
+    parser.add_argument("--test-contexts", metavar="COVERAGE",
+                        help="a coverage.py data file of the tree's test run with a context per test, as pytest-cov's "
+                             "--cov-context=test writes it under coverage's ctrace core; mutmut then runs only the "
+                             "tests it records reaching the functions the change edits. Without it, mutmut runs "
+                             "[tool.mutmut]'s whole test selection")
     return parser.parse_args(argv)
 
 
@@ -4139,7 +4280,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         return gate_command(args.base, args.config, args.coverage, args.tests, args.out, args.mutation_budget,
-                            args.base_run_budget)
+                            args.base_run_budget, args.test_contexts)
     except KeyboardInterrupt:
         # write_quality_file renames the whole file into place last, so out holds what it held before.
         print("interrupted; no quality file was written", file=sys.stderr)
