@@ -3611,6 +3611,10 @@ class TestSurvivingMutants(RepositoryTest):
         with self.subTest("none of the recorded tests collected"):
             self.assertEqual(gate._narrowed_table(setup, {selection: ["other/"]}, {"tests/test_calcs.py::test_z"}),
                              ({}, []))
+        with self.subTest("a selection that holds no test at all"):
+            # pytest exits 5 for a collection that finds nothing: no test reaches the change, not a failure.
+            self.put("empty/notes.txt", "no tests here\n")
+            self.assertEqual(gate._narrowed_table(setup, {selection: ["empty/"]}, recorded), ({}, []))
         with self.subTest("a collection that fails"):
             table = {selection: ["tests/missing.py"]}
             narrowed, found = gate._narrowed_table(setup, table, recorded)
