@@ -259,7 +259,8 @@ impl RunState {
         Ok(state)
     }
 
-    /// The state as state.json holds it: every field in FIELDS's order, then the unknown ones.
+    /// The state as state.json holds it: every field FIELDS lists but agent_args, which is only read, in FIELDS's order,
+    /// then the unknown ones.
     pub fn to_json(&self) -> Json {
         let text = |s: &str| Json::from(s);
         let opt = |s: &Option<String>| Json::from(s.clone());
