@@ -13,9 +13,10 @@ wheels/
 CLAUDE.md
 TESTING.md
 
-# What `uv run pytest --cov ...` and `gate.py --out` write
+# What `uv run pytest --cov ...`, `cargo llvm-cov ... --output-path coverage-rust.xml` and `gate.py --out` write
 .coverage
 coverage.xml
+coverage-rust.xml
 quality.md
 
 # The desktop app's dependencies and build output, the schemas `tauri build` generates, and the orchestrator

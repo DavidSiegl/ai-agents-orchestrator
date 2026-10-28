@@ -307,6 +307,17 @@ run directory's files; and both repositories' refs, commits and working trees. `
 whose record differs from `recorded/<scenario>.json`, naming where; `PARITY_RECORD=1` writes the recordings
 instead, from the Python engine only.
 
+`tests/test_crash_resume.py` crashes the Python engine in-process, on the fakes of `tests/test_orchestrator.py`, right
+after a write of `state.json` (`_claim`'s or `_save`'s), resumes it through `resumed_state` as `resume --force` does,
+and checks that the run ends as an uninterrupted one: the same files, the same `state.json` less its heartbeat and
+owner, and each effect on the world (prompts, herdr's workspace and agents, git's commits, pushes and branches, pull
+requests, Jenkins triggers, notifications) once, but for the repeats `idempotent` names with where the code allows them
+and the known gaps `expected` pins (TODO.md, Open issues). Its agents answer after 90 seconds of `FakeClock`, so each
+turn has a heartbeat save to crash after. `TestCrashAfterEveryWrite` crashes once after each write of five scenarios;
+`TestCrashesAndResumes`, a Hypothesis state machine, crashes as often as it draws, during a resume too. Where the parity
+harness kills the engine as a program at one point per phase, at any moment and on real git, this one crashes after
+every write of `state.json` but only there, and never sees `Host` drive git, gh or herdr.
+
 Golden files hold generated text to a reviewed copy of it under `tests/golden/`: `assert_golden` (`tests/golden.py`)
 fails with a unified diff naming the file when the text differs, and `UPDATE_GOLDEN=1 uv run pytest` rewrites the
 files instead. A change to that text is reviewed as the diff of its golden files. They hold two texts. `gate.py`'s
@@ -337,7 +348,7 @@ description in `tests/conftest.py` says when a run takes them.
   in the `build` group.
 - `ui/package.json`: the desktop app's npm scripts, `dev`, `build`, `test`, `typecheck`, `lint` and `tauri`. Its
   `.npmrc` sets `legacy-peer-deps`, because npm 9.2 as Debian ships it cannot resolve Vitest's optional peers.
-  Jenkins runs the frontend's `typecheck`, `lint` and `test`, and the shell's `cargo test`.
+  Jenkins runs the frontend's `typecheck`, `lint` and `test`, and the shell's tests under cargo-llvm-cov.
 - `packaging/build-desktop.sh`: builds the desktop app with `tauri build`, the binary `build-binary.sh` built
   copied in as its `externalBin` sidecar and `pyproject.toml`'s version, through a release config the script
   writes and merges over `tauri.conf.json`, which bundles nothing. It writes
@@ -351,16 +362,14 @@ description in `tests/conftest.py` says when a run takes them.
   system `python3` (`python3-tk` installed) in `build/binary-venv`, not uv's Python, whose Tk lacks Xft and so
   draws every font in one fixed bitmap size; it refuses a Tk without libXft.
 - `Jenkinsfile`: `uv sync --frozen`, `uv run pytest` with branch coverage of `orchestrator` and `gate` (without
-  `tests/parity` in a quality build whose change touches nothing the scenarios judge; the Test stage lists what), a
-  UI stage that runs `ui/`'s `npm ci`, `typecheck`, `lint` and `test` and `ui/src-tauri/`'s `cargo test --locked`, failing
-  the build before the gate, a Gate stage that runs `gate.py` and archives `quality.md` (see
-  [quality gate](quality-gate.md)), and a Package stage that runs `packaging/build-binary.sh` and
-  `packaging/build-desktop.sh` on every build but a quality build (`GIT_REF` set).
-  On `main` a Release stage publishes a new `pyproject.toml` version as a GitHub release, with
-  `orchestrator.py` attached as the zipapp
-  `octoflow.pyz`, the Linux binary and the Linux desktop app, each with its `.sha256`, in one
-  `gh release create`. Its parameter `GIT_REF` builds
-  another branch; such a build never releases.
+  `tests/parity` in a quality build whose change touches nothing the scenarios judge; the Test stage lists what) and
+  `ui/src-tauri/`'s tests with line coverage (`cargo llvm-cov nextest`), a UI stage that runs `ui/`'s `npm ci`,
+  `typecheck`, `lint` and `test`, failing the build before the gate, a Gate stage that runs `gate.py` and archives
+  `quality.md` (see [quality gate](quality-gate.md)), and a Package stage that runs `packaging/build-binary.sh` and
+  `packaging/build-desktop.sh` on every build but a quality build (`GIT_REF` set). On `main` a Release stage publishes a
+  new `pyproject.toml` version as a GitHub release, with `orchestrator.py` attached as the zipapp `octoflow.pyz`, the
+  Linux binary and the Linux desktop app, each with its `.sha256`, in one `gh release create`. Its parameter `GIT_REF`
+  builds another branch; such a build never releases.
 - `.github/workflows/automerge.yml`: keeps auto-merge on for a pull request into `main` from a branch of this
   repository, so it merges with a merge commit once Jenkins' required check passes; its header lists the pull
   requests it leaves to a human.
