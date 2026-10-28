@@ -268,7 +268,7 @@ layout), with no Python of its own.
   raw HTML skipped, and fetches it again whenever its mtime changes.
 - **Tests.** Vitest with React Testing Library in jsdom: `App.test.tsx` replays `test/recorded-stream.json`
   through `test/fakes.ts`'s `FakeEventSource`, with `fetch` stubbed. The recording is the events a real
-  `serve` sent over a scripted run. `runs.test.ts` covers the pure helpers. `cargo test` in `src-tauri/` starts
+  `serve` sent over a scripted run. `runs.test.ts` covers the pure helpers. `cargo test -p octoflow-ui` starts
   and stops a real sidecar.
 
 ## Tests
@@ -333,6 +333,9 @@ description in `tests/conftest.py` says when a run takes them.
 - `ui/package.json`: the desktop app's npm scripts, `dev`, `build`, `test`, `typecheck`, `lint` and `tauri`. Its
   `.npmrc` sets `legacy-peer-deps`, because npm 9.2 as Debian ships it cannot resolve Vitest's optional peers.
   Jenkins runs the frontend's `typecheck`, `lint` and `test`, and the shell's tests under cargo-llvm-cov.
+- `Cargo.toml`: the Cargo workspace, whose members are the Rust engine (`engine/`, the library `octoflow-engine`) and
+  the desktop shell (`ui/src-tauri/`), with one `Cargo.lock`, the lints every member takes (`[workspace.lints]`), and
+  `rust-toolchain.toml`, the toolchain and components the Jenkins agent's image has.
 - `packaging/build-desktop.sh`: builds the desktop app with `tauri build`, the binary `build-binary.sh` built
   copied in as its `externalBin` sidecar and `pyproject.toml`'s version, through a release config the script
   writes and merges over `tauri.conf.json`, which bundles nothing. It writes
@@ -347,7 +350,7 @@ description in `tests/conftest.py` says when a run takes them.
   draws every font in one fixed bitmap size; it refuses a Tk without libXft.
 - `Jenkinsfile`: `uv sync --frozen`, `uv run pytest` with branch coverage of `orchestrator` and `gate` (without
   `tests/parity` in a quality build whose change touches nothing the scenarios judge; the Test stage lists what) and
-  `ui/src-tauri/`'s tests with line coverage (`cargo llvm-cov nextest`), a UI stage that runs `ui/`'s `npm ci`,
+  the Cargo workspace's tests with line coverage (`cargo llvm-cov nextest`), a UI stage that runs `ui/`'s `npm ci`,
   `typecheck`, `lint` and `test`, failing the build before the gate, a Gate stage that runs `gate.py` and archives
   `quality.md` (see [quality gate](quality-gate.md)), and a Package stage that runs `packaging/build-binary.sh` and
   `packaging/build-desktop.sh` on every build but a quality build (`GIT_REF` set). On `main` a Release stage publishes a

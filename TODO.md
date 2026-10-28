@@ -103,12 +103,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   Decided against for now: a `cargo test --doc` beside it, which builds the dependencies a third time, uninstrumented,
   under the agent's 3 GB, for no example. Closes with `cargo test --doc --locked` in the Test stage once a doc example
   lands, or with cargo-llvm-cov's `--doctests` once it runs on a stable toolchain.
-- **Jenkins runs the Rust tests of `ui/src-tauri` alone.** The Test stage runs `cargo llvm-cov nextest` in that
-  directory, while `gate.py`'s clippy lints every Cargo workspace git tracks; a crate in another workspace, such as
-  the Rust engine's top-level one (rust-engine spec, Lane), has its lines judged by clippy but its tests never run,
-  and its added lines count as nothing to cover. Found while adding Rust coverage (rust-engine ticket 03, 2026-10-27).
-  Closes when the top-level workspace takes `ui/src-tauri` in as a member and the Test stage runs there, or with
-  the Test stage running each workspace and passing each report to the gate.
 - **The parity harness records `state.json` at each command the fakes get, not after each save.** Ticket
   rust-engine/01 asks for "`state.json` after each save"; the ledger reads it only when herdr, gh, Jenkins or PyPI
   gets a call, and leaves out a change to `heartbeat_at` alone (`tests/parity/fakes.py`, `_changed_states`). Raised
@@ -225,8 +219,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   "forbid"` no longer gives E0453 and its unsafe block is no finding: the gate is OK on a change the workspace's rules
   make uncompilable, and only "Suppressions added" lists the allow, and not even that when the change adds the lint as
   one line inside an existing wrapped `#[allow(\n    a,\n    b,\n)]`, since `_RUST_SUPPRESSION` reads one added line at
-  a time (F15). Nothing in this repository sets `forbid` (`ui/src-tauri/Cargo.toml` is all `warn`), and the Test stage's
-  uncapped `cargo llvm-cov nextest` and the UI stage's `cargo check` would still fail such a build of `ui/src-tauri`.
+  a time (F15). Nothing in this repository sets `forbid` (the top-level `Cargo.toml`'s `[workspace.lints]` are all
+  `warn`), and the Test stage's uncapped `cargo llvm-cov nextest` and the UI stage's `cargo check` would still fail
+  such a build of the workspace.
   Raised by cross-review 66 (F11, 2026-10-27): "The gate is OK on a change that the workspace's rules make
   uncompilable". Closes with a second, uncapped clippy run whose rustc errors (codes `E` and four digits, such as E0453)
   are compile errors, or with the forbidden lints read from the manifests and an added allow of one failing the gate.
@@ -501,6 +496,15 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   subdirectory.
 
 ## Fixed
+
+- **Jenkins ran the Rust tests of `ui/src-tauri` alone.** The Test stage ran `cargo llvm-cov nextest` in that
+  directory, while `gate.py`'s clippy lints every Cargo workspace git tracks; a crate in another workspace, such as
+  the Rust engine's, would have had its lines judged by clippy but its tests never run, and its added lines counted as
+  nothing to cover. Found while adding Rust coverage (rust-engine ticket 03, 2026-10-27). Fixed (2026-10-28,
+  rust-engine ticket 04): the top-level `Cargo.toml` is the one workspace, with `engine/` and `ui/src-tauri/` as
+  members, one `Cargo.lock`, `[workspace.lints]` and `rust-toolchain.toml`; the Test stage runs `cargo llvm-cov
+  nextest --workspace` and the UI stage `cargo check --workspace` at the top, and the Gate stage reads
+  `target/nextest/ci/junit.xml` there.
 
 - **A quality build left out the parity scenarios when only `tests/guard_errors.py` changed.** The Test stage's path
   list named `tests/conftest.py`, whose guards the scenarios run under, but not `tests/guard_errors.py`, which holds

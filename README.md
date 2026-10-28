@@ -159,9 +159,9 @@ sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev
 cd ui
 npm ci
 npm run tauri dev     # the window, rebuilt as you edit
-npm run tauri build   # an optimized build, src-tauri/target/release/octoflow-ui
+npm run tauri build   # an optimized build, ../target/release/octoflow-ui
 npm test              # the frontend's tests; npm run typecheck and npm run lint check it too
-(cd src-tauri && cargo test)   # the shell's, which start and stop a real serve
+cargo test -p octoflow-ui     # the shell's, which start and stop a real serve
 ```
 
 The app starts `orchestrator.py serve` beside it and stops it when its window closes; set `ORCHESTRATOR_PY` to

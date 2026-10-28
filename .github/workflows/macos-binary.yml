@@ -19,6 +19,9 @@ on:
     paths:
       - packaging/**
       - ui/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
       - pyproject.toml
       - uv.lock
       - .python-version

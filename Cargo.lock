@@ -2073,6 +2073,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "octoflow-engine"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "toml 1.1.8+spec-1.1.0",
+]
+
+[[package]]
 name = "octoflow-ui"
 version = "0.1.0"
 dependencies = [
