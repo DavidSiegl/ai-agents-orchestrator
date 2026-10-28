@@ -1,1 +1,11 @@
-//! The orchestrator engine.
+//! The orchestrator's engine: the Rust port of orchestrator.py (the rust-engine spec), which reads and writes every
+//! file, prompt and run state as the Python engine does.
+
+pub mod py;
+pub mod constants;
+pub mod env;
+pub mod error;
+pub mod prompts;
+
+#[cfg(test)]
+mod test_support;
