@@ -3393,11 +3393,11 @@ class TestSurvivingMutants(RepositoryTest):
         """A new coverage.py data file outside the tree, name.coverage, as `pytest --cov-context=test` writes one,
         recording each test of lines_by_test, a node id, running its lines of the file at path; its path."""
         data_file = os.path.join(self.bin, f"{name}.coverage")
-        data = CoverageData(basename=data_file)
+        recording = CoverageData(basename=data_file)
         for node_id, lines in lines_by_test.items():
-            data.set_context(f"{node_id}|run")
-            data.add_lines({os.path.realpath(os.path.join(self.repo, path)): lines})
-        data.write()
+            recording.set_context(f"{node_id}|run")
+            recording.add_lines({os.path.realpath(os.path.join(self.repo, path)): lines})
+        recording.write()
         return data_file
 
     def selections(self):
@@ -3427,6 +3427,31 @@ class TestSurvivingMutants(RepositoryTest):
         self.assertEqual(selections, [["tests/test_calc.py::test_checked", "tests/test_calc.py::test_unchecked"]])
         # The same verdicts as with the whole selection: unchecked's test never looks at what it returns.
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 5, "survived")])
+
+    def test_the_recorded_tests_are_kept_within_the_selection_s_paths_and_out_of_its_ignored_ones(self):
+        data_file = self.contexts({"tests/test_calc.py::test_checked[1]": [2], "tests/test_calc.py::TestX::test_y": [2],
+                                   "tests/test_calcs.py::test_z": [2], "tests/parity/test_p.py::test_p": [2],
+                                   "other/test_o.py::test_o": [2]})
+        [checked] = [f for f in gate._python_units("calc.py", self.BASE, ast.parse(self.BASE)) if f.name == "checked"]
+        cases = [
+            ({"pytest_add_cli_args_test_selection": ["./tests/test_calc.py"]},
+             ["tests/test_calc.py::TestX::test_y", "tests/test_calc.py::test_checked[1]"]),
+            ({"pytest_add_cli_args_test_selection": ["tests/test_calc.py::test_checked"]},
+             ["tests/test_calc.py::test_checked[1]"]),
+            ({"pytest_add_cli_args_test_selection": ["tests/", "--ignore", "tests/parity"],
+              "pytest_add_cli_args": ["--ignore=tests/test_calcs.py"]},
+             ["tests/test_calc.py::TestX::test_y", "tests/test_calc.py::test_checked[1]"]),
+            # mutmut's default, no selection, runs every test pytest finds.
+            ({}, ["other/test_o.py::test_o", "tests/parity/test_p.py::test_p", "tests/test_calc.py::TestX::test_y",
+                  "tests/test_calc.py::test_checked[1]", "tests/test_calcs.py::test_z"]),
+        ]
+        for table, tests in cases:
+            with self.subTest(table=table):
+                self.assertEqual(gate._tests_reaching(self.repo, [checked], table, data_file), (tests, None))
+        tests, why = gate._tests_reaching(self.repo, [checked], {"pytest_add_cli_args_test_selection": ["-m", "fast"]},
+                                          data_file)
+        self.assertEqual(tests, [])
+        self.assertIn("holds `-m`, which the gate cannot apply", why)
 
     def test_without_test_contexts_mutmut_runs_the_whole_selection(self):
         self.change_the_functions("checked")
