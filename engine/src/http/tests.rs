@@ -273,6 +273,9 @@ fn a_resolver_error_has_its_number_when_its_text_gives_it() {
 // A self-signed certificate for pypi.org, as the parity harness makes one.
 const CERT: &str = include_str!("../../tests/data/pypi-cert.pem");
 
+// A second, for a store that holds two.
+const OTHER_CERT: &str = include_str!("../../tests/data/other-cert.pem");
+
 /// How many certificates roots trusts; None for Mozilla's.
 fn count(roots: RootCerts) -> Option<usize> {
     match roots {
@@ -282,22 +285,38 @@ fn count(roots: RootCerts) -> Option<usize> {
 }
 
 #[test]
-fn tls_trusts_ssl_cert_file_else_the_systems_bundle_else_mozillas_roots() {
+fn tls_trusts_the_certificates_ssl_cert_file_and_ssl_cert_dir_name() {
     let dir = crate::test_support::TempDir::new();
-    let (file, missing) = (dir.join("cert.pem"), dir.join("missing"));
+    let (file, missing, certs, more) = (dir.join("cert.pem"), dir.join("missing"), dir.join("certs"), dir.join("more"));
     std::fs::write(&file, format!("{CERT}garbage\n")).unwrap();
-    let bundles = [missing.as_str(), file.as_str()];
-    // SSL_CERT_FILE, whatever the system has; one that cannot be read trusts none.
-    assert_eq!(count(trusted(Some(&file), &[missing.as_str()])), Some(1));
-    assert_eq!(count(trusted(Some(&missing), &bundles)), Some(0));
-    // The first bundle that can be read.
-    assert_eq!(count(trusted(None, &bundles)), Some(1));
-    // Mozilla's roots.
-    assert_eq!(count(trusted(None, &[missing.as_str()])), None);
-    // This machine: SSL_CERT_FILE from the environment given, else its own bundle where it has one.
-    assert_eq!(count(root_certs(&env(&[("SSL_CERT_FILE", &file)]))), Some(1));
-    let system = count(root_certs(&env(&[("SSL_CERT_FILE", "")])));
-    assert_eq!(system.is_some(), SYSTEM_BUNDLES.iter().any(|path| std::fs::read(path).is_ok()), "{system:?}");
+    std::fs::create_dir(&certs).unwrap();
+    std::fs::create_dir(&more).unwrap();
+    // Any name, as rustls-native-certs reads every file of a directory; a file of no certificate adds none.
+    std::fs::write(format!("{certs}/jenkins-ca.pem"), OTHER_CERT).unwrap();
+    std::fs::write(format!("{certs}/5ed36f99.0"), CERT).unwrap();
+    std::fs::write(format!("{more}/notes.txt"), "not a certificate\n").unwrap();
+    let roots = |vars: &[(&str, &str)]| count(root_certs(&env(vars)));
+    assert_eq!(roots(&[("SSL_CERT_FILE", &file)]), Some(1));
+    assert_eq!(roots(&[("SSL_CERT_DIR", &format!("{certs}:{more}:/nowhere"))]), Some(2));
+    // The same certificate from the file and a directory counts once.
+    assert_eq!(roots(&[("SSL_CERT_FILE", &file), ("SSL_CERT_DIR", &certs)]), Some(2));
+    // A variable that names nothing usable trusts none: not the system's, nor Mozilla's.
+    assert_eq!(roots(&[("SSL_CERT_FILE", &missing)]), Some(0));
+    assert_eq!(roots(&[("SSL_CERT_DIR", &more)]), Some(0));
+}
+
+#[test]
+fn without_either_variable_tls_trusts_this_machine_s_certificates() {
+    let found = rustls_native_certs::load_native_certs().certs;
+    let mut native: Vec<&[u8]> = found.iter().map(|der| der.as_ref()).collect();
+    native.sort_unstable();
+    native.dedup();
+    let system = count(root_certs(&env(&[("SSL_CERT_FILE", ""), ("SSL_CERT_DIR", "")])));
+    // Mozilla's roots only on a machine without certificates of its own.
+    assert_eq!(system, (!native.is_empty()).then_some(native.len()));
+    if std::fs::read("/etc/ssl/certs/ca-certificates.crt").is_ok() {
+        assert!(system.is_some_and(|n| n > 0), "Debian's bundle was not read: {system:?}");
+    }
 }
 
 #[test]

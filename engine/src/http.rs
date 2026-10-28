@@ -5,11 +5,12 @@
 //! `FakePyPI`, answers in memory, so that everything above the transport (each URL the engine builds, each answer it
 //! reads, each error it words) runs in the tests as it runs for real.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use ureq::config::RedirectAuthHeaders;
-use ureq::tls::{parse_pem, PemItem, RootCerts, TlsConfig};
+use ureq::tls::{Certificate, RootCerts, TlsConfig};
 use ureq::{Agent, Proxy};
 
 use crate::error::os_error;
@@ -97,7 +98,7 @@ pub trait Http: Send + Sync {
 
 /// The network, reached as urllib reaches it: through the proxy that the environment's `http_proxy` or
 /// `https_proxy` names for the URL's scheme, unless `no_proxy` names its host, and over TLS trusting the certificates
-/// of `SSL_CERT_FILE`, else of the system's bundle, else Mozilla's roots (root_certs).
+/// rustls-native-certs finds as OpenSSL finds them (root_certs).
 #[derive(Clone)]
 pub struct HttpClient {
     proxies: Proxies,
@@ -267,40 +268,38 @@ impl Proxies {
     }
 }
 
-/// The bundles of the systems' certificate authorities, where OpenSSL's builds for Debian, Fedora, openSUSE and
-/// macOS or Alpine find them; the first that can be read is the system's.
-const SYSTEM_BUNDLES: [&str; 4] = [
-    "/etc/ssl/certs/ca-certificates.crt",
-    "/etc/pki/tls/certs/ca-bundle.crt",
-    "/etc/ssl/ca-bundle.pem",
-    "/etc/ssl/cert.pem",
-];
-
-/// The certificates TLS trusts: those of the file `SSL_CERT_FILE` names, as OpenSSL and so Python take it; else those
-/// of the first of SYSTEM_BUNDLES that can be read; else Mozilla's roots. A hashed directory, `SSL_CERT_DIR` or
-/// `/etc/ssl/certs`, which OpenSSL also reads, is not read (TODO.md).
+/// The certificates TLS trusts, found by rustls-native-certs as OpenSSL finds them for Python's default context: when
+/// env sets `SSL_CERT_FILE` or `SSL_CERT_DIR` (directories separated by colons), those of that file and of every file
+/// in those directories, and none from the system; else the system's, from its bundle and certificate directory as
+/// openssl-probe finds them (rustls-native-certs then reads the variables from the process's own environment, which
+/// is env in the engine). A file that cannot be read, and an item that is not a certificate, adds none, as in
+/// OpenSSL, so a variable naming nothing usable trusts none. Mozilla's roots only when neither variable is set and the
+/// system has no certificate, where Python would trust none and fail every https request. TODO.md says where this
+/// trusts otherwise than Python.
 fn root_certs(env: &dyn Fn(&str) -> Option<String>) -> RootCerts {
-    trusted(env("SSL_CERT_FILE").filter(|path| !path.is_empty()).as_deref(), &SYSTEM_BUNDLES)
-}
-
-/// root_certs given the file `SSL_CERT_FILE` names, None for none, and the system's bundles. The certificates of
-/// file, none when it cannot be read, as OpenSSL then has none from it and Python trusts none; else those of the
-/// first of bundles that can be read; else Mozilla's roots. An item of a file that is not a certificate adds none.
-fn trusted(file: Option<&str>, bundles: &[&str]) -> RootCerts {
-    let pem = match file {
-        Some(path) => std::fs::read(path).unwrap_or_default(),
-        None => match bundles.iter().find_map(|path| std::fs::read(path).ok()) {
-            Some(pem) => pem,
-            None => return RootCerts::WebPki,
-        },
+    let file = env("SSL_CERT_FILE").filter(|path| !path.is_empty());
+    let dirs = env("SSL_CERT_DIR").unwrap_or_default();
+    let dirs: Vec<&str> = dirs.split(':').filter(|dir| !dir.is_empty()).collect();
+    let configured = file.is_some() || !dirs.is_empty();
+    // The errors name each file that could not be read; OpenSSL passes over such a file without a word, and so does
+    // this, for a store that may still hold the certificate that matters.
+    let certs = if configured {
+        let mut certs = rustls_native_certs::load_certs_from_paths(file.as_deref().map(Path::new), None).certs;
+        for dir in dirs {
+            certs.extend(rustls_native_certs::load_certs_from_paths(None, Some(Path::new(dir))).certs);
+        }
+        certs
+    } else {
+        rustls_native_certs::load_native_certs().certs
     };
-    let certs: Vec<_> = parse_pem(&pem)
-        .filter_map(|item| match item {
-            Ok(PemItem::Certificate(cert)) => Some(cert),
-            _ => None,
-        })
-        .collect();
-    RootCerts::Specific(Arc::new(certs))
+    // Each certificate once, though a file and a directory, or a bundle and its links, hold it twice.
+    let mut ders: Vec<&[u8]> = certs.iter().map(|der| der.as_ref()).collect();
+    ders.sort_unstable();
+    ders.dedup();
+    if ders.is_empty() && !configured {
+        return RootCerts::WebPki;
+    }
+    RootCerts::Specific(Arc::new(ders.into_iter().map(|der| Certificate::from_der(der).to_owned()).collect()))
 }
 
 #[cfg(test)]

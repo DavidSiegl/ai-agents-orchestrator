@@ -16,6 +16,9 @@ sha2 = "0.10"
 # Jenkins and PyPI, over HTTP or HTTPS (http.rs): blocking, and with rustls and its own root certificates rather than
 # the system's TLS library; gzip and the other extras are left out, since neither server is asked for them.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+# The certificates TLS trusts, found as OpenSSL finds them for Python: SSL_CERT_FILE and SSL_CERT_DIR, else the
+# system's bundle and certificate directory (http.rs, root_certs). Approved by the user for ticket 07, 2026-10-28.
+rustls-native-certs = "0.8.5"
 # preserve_order: a table's keys come in the file's order, as tomllib gives them, so a table with two problems is
 # refused naming the first, as the Python engine refuses it.
 toml = { version = "1", default-features = false, features = ["parse", "preserve_order", "serde", "std"] }
