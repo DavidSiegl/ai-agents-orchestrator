@@ -308,14 +308,15 @@ whose record differs from `recorded/<scenario>.json`, naming where; `PARITY_RECO
 instead, from the Python engine only.
 
 `tests/test_crash_resume.py` crashes the Python engine in-process, on the fakes of `tests/test_orchestrator.py`, right
-after a save of `state.json`, resumes it through `resumed_state` as `resume --force` does, and checks that the run ends
-as an uninterrupted one: the same files, the same `state.json` less its heartbeat and owner, and each effect on the
-world (prompts, herdr's workspace and agents, git's commits, pushes and branches, pull requests, Jenkins triggers,
-notifications) once, but for the repeats `repeatable` names with where the code allows them. Its agents answer after
-90 seconds of `FakeClock`, so each turn has a heartbeat save to crash after. `TestCrashAfterEverySave` crashes once
-after each save of five scenarios; `TestCrashesAndResumes`, a Hypothesis state machine, crashes as often as it draws,
-during a resume too. Where the parity harness kills the engine as a program at one point per phase, at any moment and
-on real git, this one crashes after every save but only after a save, and never sees `Host` drive git, gh or herdr.
+after a write of `state.json` (`_claim`'s or `_save`'s), resumes it through `resumed_state` as `resume --force` does,
+and checks that the run ends as an uninterrupted one: the same files, the same `state.json` less its heartbeat and
+owner, and each effect on the world (prompts, herdr's workspace and agents, git's commits, pushes and branches, pull
+requests, Jenkins triggers, notifications) once, but for the repeats `idempotent` names with where the code allows them
+and the known gaps `expected` pins (TODO.md, Open issues). Its agents answer after 90 seconds of `FakeClock`, so each
+turn has a heartbeat save to crash after. `TestCrashAfterEveryWrite` crashes once after each write of five scenarios;
+`TestCrashesAndResumes`, a Hypothesis state machine, crashes as often as it draws, during a resume too. Where the parity
+harness kills the engine as a program at one point per phase, at any moment and on real git, this one crashes after
+every write of `state.json` but only there, and never sees `Host` drive git, gh or herdr.
 
 Golden files hold generated text to a reviewed copy of it under `tests/golden/`: `assert_golden` (`tests/golden.py`)
 fails with a unified diff naming the file when the text differs, and `UPDATE_GOLDEN=1 uv run pytest` rewrites the

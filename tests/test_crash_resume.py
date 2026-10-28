@@ -1,25 +1,25 @@
-"""Crash the orchestrator right after a save of state.json, resume the run as `resume --force` does, and check that it
+"""Crash the orchestrator right after a write of state.json, resume the run as `resume --force` does, and check that it
 ends as an uninterrupted run does: the same files, the same state.json less its heartbeat and owner, and each side
 effect on the world once.
 
-A crash is `Crash`, raised by `Workflow._save` right after it wrote state.json. It derives from BaseException, so no
-`except` clause in `Workflow.run` sees it and nothing is released or saved: as with SIGKILL, the run is left as that
-save left it. The resume is `resumed_state`, which main calls for `resume --force`, and a new `Workflow` on the same
-fakes, which play the world that outlives the orchestrator: the project (FakeHost), herdr and its agents
-(FakeHerdr), Jenkins (FakeCI) and time (FakeClock).
+A crash is `Killed`, raised by the world's host right after it wrote state.json, whether `Workflow._save` or
+`Workflow._claim` wrote it. It derives from BaseException, so no `except` clause in `Workflow.run` sees it and nothing
+is released or saved: as with SIGKILL, the run is left as that write left it. The resume is `resumed_state`, which main
+calls for `resume --force`, and a new `Workflow` on the same fakes, which play the world that outlives the orchestrator:
+the project (FakeHost), herdr and its agents (FakeHerdr), Jenkins (FakeCI) and time (FakeClock).
 
-`TestCrashAfterEverySave` crashes once, after save k for every k of each scenario. `CrashesAndResumes` crashes at
+`TestCrashAfterEveryWrite` crashes once, after write k for every k of each scenario. `CrashesAndResumes` crashes at
 points Hypothesis draws, as often as it draws them, a resume included.
 
 What the parity harness (tests/parity) covers instead: it kills the engine as a program, with SIGKILL at any moment, so
-also between two saves, on real git; but only at the points where a scenario holds it, one per phase. This harness
-crashes after every save but only after a save, and only on the fakes, so a bug in how Host drives git, gh or herdr is
-not its to find (docs/architecture.md, Tests).
+also between two writes, on real git; but only at the points where a scenario holds it, one per phase. This harness
+crashes after every write of state.json but only there, and only on the fakes, so a bug in how Host drives git, gh or
+herdr is not its to find (docs/architecture.md, Tests).
 """
 
 import json
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from hypothesis import settings
 from hypothesis import strategies as st
@@ -32,6 +32,7 @@ from test_orchestrator import (
     FakeClock,
     FakeHerdr,
     FakeHost,
+    Killed,
     ci_for,
     outcome,
 )
@@ -43,6 +44,7 @@ from orchestrator import (
     CHANGES_REQUESTED,
     CI_REF_PREFIX,
     DONE,
+    HEARTBEAT_SECONDS,
     METRICS_FILE,
     SUMMARY_FILE,
     AgentSettings,
@@ -50,11 +52,6 @@ from orchestrator import (
     RunState,
     Workflow,
 )
-
-
-class Crash(BaseException):
-    """The orchestrator's process died: like SIGKILL, no except clause in Workflow.run sees it."""
-
 
 RUN_ID = "20260929-120000-a1b2c3"
 RUN_KEY = RUN_ID.rsplit("-", 1)[1]
@@ -80,7 +77,7 @@ class Scenario:
     workflow_file: str | None = None
 
 
-SCENARIOS = (
+SCENARIOS = {s.name: s for s in (
     Scenario("approved"),
     Scenario("changes_then_approved", verdicts=(CHANGES_REQUESTED, APPROVE)),
     Scenario("gate_fails_then_passes", gate=(RED, {})),
@@ -88,12 +85,29 @@ SCENARIOS = (
     # locked, as tdd's were.
     Scenario("product_team", workflow_file=f"{EXAMPLES}/product-team.toml"),
     Scenario("no_pr", pull_request=False),
-)
+)}
+
+
+class CrashingHost(FakeHost):
+    """FakeHost on which the orchestrator dies (Killed) right after the write of state.json numbered crash_at, counting
+    from the first; None never. state_writes counts the writes of state.json so far."""
+
+    def __init__(self):
+        super().__init__()
+        self.crash_at: int | None = None
+        self.state_writes = 0
+
+    def write(self, path, text, keep_mtime=False):
+        super().write(path, text, keep_mtime)
+        if path == STATE_PATH:
+            self.state_writes += 1
+            if self.state_writes == self.crash_at:
+                raise Killed("state.json written")
 
 
 class SessionHerdr(FakeHerdr):
     """FakeHerdr with a fresh agent's session named after the agent rather than counted from herdr's calls, so that
-    a call a resume repeats, which may be allowed (repeatable), does not rename every later session."""
+    a call a resume repeats does not rename every later session."""
 
     def start_agent(self, name, pane, kind, agent_args):
         fresh = orchestrator.RESUME_ARGS[kind] not in agent_args
@@ -115,27 +129,29 @@ class EveryPrompt:
 
 
 @dataclass
-class Outcome:
+class Aftermath:
     """What a run leaves behind. files: every file FakeHost holds, state.json aside. state: state.json, less
     heartbeat_at and owner, which only say which orchestrator wrote it when. effects: by kind, each effect on the
-    world in order (World.effects)."""
+    world in order (World.effects). announce_repeats: how many times the interview's announce may come again, a known
+    gap (`expected`); 0 for a run that must announce it once."""
     files: dict[str, str]
     state: dict
     effects: dict[str, list]
+    announce_repeats: int = field(default=0)
 
 
 class World:
     """One scenario's run and the world it runs in, which a crash leaves as it was: the fakes, and agents that keep
     working while no orchestrator runs.
 
-    crashes holds the state.json each crash left, in order; saves counts every save of every orchestrator so far;
-    finished is true once an orchestrator ran the run to its end.
+    crashes holds the state.json each crash left, in order; finished is true once an orchestrator ran the run to its
+    end.
     """
 
     def __init__(self, scenario: Scenario):
         self.scenario = scenario
         self.clock = FakeClock()
-        self.host = FakeHost()
+        self.host = CrashingHost()
         self.host.clock = self.clock
         self.jenkins = FakeCI()
         self.jenkins.outcomes = [outcome(**o) for o in scenario.gate or ()]
@@ -151,16 +167,21 @@ class World:
         self._work = []
         self.clock.hooks.append(self._agents_work)
         self.crashes = []
-        self.saves = 0
         # Whether an orchestrator has run it already, so that the next one resumes it.
         self.started = False
         self.finished = False
 
+    @property
+    def state_writes(self) -> int:
+        """How many times every orchestrator so far wrote state.json."""
+        return self.host.state_writes
+
     def run(self, crash_after: int | None = None) -> bool:
         """Start the run, or once started resume it as `resume --force` does, and return whether it finished; with
-        crash_after, it crashes right after that many saves, unless it finishes first.
+        crash_after, it crashes right after that many writes of state.json, unless it finishes first.
 
-        Raises AssertionError when the run fails, and OrchestratorError when resume refuses it.
+        Raises OrchestratorError when the run fails or resume refuses it, and AssertionError when the run ends with
+        another verdict than the scenario's last.
         """
         if self.started:
             args = orchestrator.parse_args(["resume", "--force", RUN_KEY])
@@ -178,33 +199,26 @@ class World:
             pull_request=state.pull_request, ci=ci_for(self.jenkins) if state.quality_job else None,
             max_quality_rounds=state.max_quality_rounds, pipeline=pipeline,
             clocks=Clocks(self.clock.sleep, self.clock, self.clock))
-        save, saves = workflow._save, 0
-
-        def save_then_crash():
-            nonlocal saves
-            save()
-            saves += 1
-            self.saves += 1
-            if saves == crash_after:
-                self.crashes.append(self._saved_state())
-                raise Crash
-        workflow._save = save_then_crash
+        self.host.crash_at = None if crash_after is None else self.host.state_writes + crash_after
         try:
             verdict = workflow.run()
-        except Crash:
+        except Killed:
+            self.crashes.append(self._saved_state())
             return False
+        finally:
+            self.host.crash_at = None
         if verdict != self.scenario.verdicts[-1]:
             raise AssertionError(f"the run ended {verdict}, not {self.scenario.verdicts[-1]}")
         self.finished = True
         return True
 
-    def outcome(self) -> Outcome:
+    def aftermath(self) -> Aftermath:
         """What the run has left behind so far."""
         files = dict(self.host.files)
         del files[STATE_PATH]
         state = self._saved_state()
         del state["heartbeat_at"], state["owner"]
-        return Outcome(files, state, self.effects())
+        return Aftermath(files, state, self.effects())
 
     def effects(self) -> dict[str, list]:
         """Each effect the run had on the world so far, by kind, in order. Reads and checks are not effects: what
@@ -256,23 +270,29 @@ class World:
             self.herdr.statuses[agent] = "done"
 
 
-def repeatable(kind: str, effect) -> bool:
-    """Whether the effect may happen again right after itself, because the code documents it as idempotent or as
-    done by every orchestrator that gets there. Any other repeat is a failure."""
+def idempotent(kind: str, effect) -> bool:
+    """Whether the code documents the effect as harmless to repeat, so that it may happen again right after itself;
+    any other repeat is a failure, or a known gap that `expected` names."""
     match kind, effect:
         # The snapshot's push to its quality branch: "--force replaces what a failed attempt left"
-        # (docs/quality-gate.md, Snapshotting the uncommitted tree).
+        # (docs/quality-gate.md, Snapshotting the uncommitted tree). The ticket names it; no crash after a write of
+        # state.json repeats it, since the save that records the push follows it at once.
         case "git", (_, ("push", "--quiet", "--force", "origin", refspec)) if f":refs/heads/{CI_REF_PREFIX}" in refspec:
             return True
         # _check_repo fast-forwards the base branch at each start in round 0 (docs/architecture.md, The phase machine).
         case "git", (_, ("merge", "--ff-only", *_)):
             return True
-        # A snapshot moves no ref (docs/quality-gate.md, Snapshotting the uncommitted tree). A lock's snapshot, and the
-        # restore of locked files: "a resume before the run moves on does it again, harmlessly" (Workflow._hold_locks).
-        case "snapshot" | "restore", _:
+        # A snapshot moves no ref (docs/quality-gate.md, Snapshotting the uncommitted tree); a lock's snapshot, "a
+        # resume before the run moves on does it again, harmlessly" (Workflow._hold_locks).
+        case "snapshot", _:
             return True
-        # announce(how) "runs once the agent is ready" (Workflow._turn), in each orchestrator that takes the turn: a
-        # resumed interview tells the human again that the Spec Collector waits, and focuses its pane.
+    return False
+
+
+def announces(kind: str, effect) -> bool:
+    """Whether the effect is part of the announce of a human-paced turn (Workflow._step_turn): focusing the agent's
+    pane, and telling the human it waits for them."""
+    match kind, effect:
         case "herdr", ("focus", _):
             return True
         case "notification", (title, _) if title.endswith(" is waiting for you"):
@@ -280,22 +300,28 @@ def repeatable(kind: str, effect) -> bool:
     return False
 
 
-def collapsed(effects: dict[str, list]) -> dict[str, list]:
-    """effects without each repeatable effect that only repeats the one before it."""
-    return {kind: [e for i, e in enumerate(es) if not (i and e == es[i - 1] and repeatable(kind, e))]
-            for kind, es in effects.items()}
+def without_repeats(effects: dict[str, list], may_repeat) -> tuple[dict[str, list], int]:
+    """effects without each effect that may_repeat(kind, effect) and that only repeats the one before it, and the
+    most such repeats dropped of any one kind."""
+    kept, most = {}, 0
+    for kind, es in effects.items():
+        kept[kind] = [e for i, e in enumerate(es) if not (i and e == es[i - 1] and may_repeat(kind, e))]
+        most = max(most, len(es) - len(kept[kind]))
+    return kept, most
 
 
-def expected(uninterrupted: Outcome, crashes: list[dict]) -> Outcome:
-    """The outcome of a run that crashed where each of crashes, the state.json each left, says, as the Python engine
-    ends it: uninterrupted's, but for two known gaps (TODO.md, Open issues), each pinned here so that a fix fails the
-    test and removes it.
+def expected(uninterrupted: Aftermath, crashes: list[dict]) -> Aftermath:
+    """What a run that crashed where each of crashes, the state.json each left, says leaves behind in the Python
+    engine: uninterrupted's, but for three known gaps (TODO.md, Open issues), each pinned here.
 
     - A crash after `Workflow.run` saved phase done: a resume finds the run done and returns at once, so summary.md
       and metrics.json are never written, the human is never told the run finished, the workspace stays open, and
       the turns keep the tokens counted before the crash.
     - A crash after an agent's start was saved and before its session was: a resume finds the agent alive and
-      prompts it without asking herdr for its session, so the record of the agent's next turn has none.
+      prompts it without asking herdr for its session, so the record of the agent's next turn has none. SessionHerdr
+      reports a session as soon as an agent starts, so an agent record without one is always that crash.
+    - Each orchestrator that takes the interview's turn announces it again (Workflow._step_turn): the human is told
+      once more that the interview waits, and its pane is focused, up to once per resume.
     """
     files, state = dict(uninterrupted.files), json.loads(json.dumps(uninterrupted.state))
     effects = {kind: list(es) for kind, es in uninterrupted.effects.items()}
@@ -312,93 +338,109 @@ def expected(uninterrupted: Outcome, crashes: list[dict]) -> Outcome:
             if "session" not in agent:
                 turn = next(t for t in state["turns"] if t["role"] == role and t["file"] not in ended)
                 turn["session"] = None
-    return Outcome(files, state, effects)
+    return Aftermath(files, state, effects, announce_repeats=len(crashes))
 
 
-_uninterrupted: dict[str, tuple[Outcome, int]] = {}
+def ends_as_problems(got: Aftermath, want: Aftermath) -> list[str]:
+    """What differs between got and want, as a line each; [] when nothing does. Repeats `idempotent` allows are no
+    difference, nor up to want.announce_repeats repeats of the announce."""
+    problems = []
+    if got.files != want.files:
+        problems.append(f"the files differ: {sorted(set(got.files.items()) ^ set(want.files.items()))}")
+    if got.state != want.state:
+        problems.append("state.json differs: " + ", ".join(k for k in want.state if got.state.get(k) != want.state[k]))
+    got_effects, _ = without_repeats(got.effects, idempotent)
+    want_effects, _ = without_repeats(want.effects, idempotent)
+    got_effects, repeats = without_repeats(got_effects, announces)
+    if repeats > want.announce_repeats:
+        problems.append(f"the announce came {repeats} more times, at most {want.announce_repeats} expected")
+    for kind in want_effects:
+        if got_effects[kind] != want_effects[kind]:
+            problems.append(f"the {kind} effects differ: {got_effects[kind]} != {want_effects[kind]}")
+    return problems
 
 
-def uninterrupted(scenario: Scenario) -> tuple[Outcome, int]:
-    """The scenario's outcome when nothing crashes, and how many saves it takes."""
+# By scenario name, its aftermath when nothing crashes and how many writes of state.json that takes. Shared by every
+# test and Hypothesis example, so no caller may change what it holds: `expected` copies before it edits.
+_uninterrupted: dict[str, tuple[Aftermath, int]] = {}
+
+
+def uninterrupted(scenario: Scenario) -> tuple[Aftermath, int]:
+    """The scenario's aftermath when nothing crashes, and how many writes of state.json it takes."""
     if scenario.name not in _uninterrupted:
         world = World(scenario)
         world.run()
-        _uninterrupted[scenario.name] = (world.outcome(), world.saves)
+        _uninterrupted[scenario.name] = (world.aftermath(), world.state_writes)
     return _uninterrupted[scenario.name]
 
 
-def assert_ends_as(world: World, want: Outcome) -> None:
-    """Raise AssertionError, naming what differs, unless world's run ended with want's files and state, and with its
-    effects but for the repeats `repeatable` allows."""
-    got = world.outcome()
-    assert got.files == want.files, "the files differ"
-    assert got.state == want.state, "state.json differs"
-    got_effects, want_effects = collapsed(got.effects), collapsed(want.effects)
-    for kind in want_effects:
-        assert got_effects[kind] == want_effects[kind], f"the {kind} effects differ"
+class TestCrashAfterEveryWrite(unittest.TestCase):
+    """For each scenario and each k: crash after write k of state.json, resume once, and end as `expected` says."""
 
-
-class TestCrashAfterEverySave(unittest.TestCase):
-    """For each scenario and each k: crash after save k, resume once, and end as the uninterrupted run does."""
-
-    def crash_after_every_save(self, scenario: Scenario) -> None:
-        reference, saves = uninterrupted(scenario)
-        for k in range(1, saves + 1):
+    def crash_after_every_write(self, name: str) -> None:
+        scenario = SCENARIOS[name]
+        reference, writes = uninterrupted(scenario)
+        for k in range(1, writes + 1):
             with self.subTest(k=k):
                 world = World(scenario)
                 self.assertFalse(world.run(crash_after=k))
                 self.assertTrue(world.run())
-                assert_ends_as(world, expected(reference, world.crashes))
+                self.assertEqual(ends_as_problems(world.aftermath(), expected(reference, world.crashes)), [])
 
     def test_approved_in_round_1(self):
-        self.crash_after_every_save(SCENARIOS[0])
+        self.crash_after_every_write("approved")
 
     def test_changes_requested_then_approved(self):
-        self.crash_after_every_save(SCENARIOS[1])
+        self.crash_after_every_write("changes_then_approved")
 
     def test_quality_gate_fails_then_passes(self):
-        self.crash_after_every_save(SCENARIOS[2])
+        self.crash_after_every_write("gate_fails_then_passes")
 
     def test_product_team_with_locked_tests(self):
-        self.crash_after_every_save(SCENARIOS[3])
+        self.crash_after_every_write("product_team")
 
     def test_no_pull_request(self):
-        self.crash_after_every_save(SCENARIOS[4])
+        self.crash_after_every_write("no_pr")
 
-    def test_every_scenario_saves_more_than_its_turns(self):
-        # A heartbeat during each agent's turn is what lets a crash land while an agent works.
-        for scenario in SCENARIOS:
-            reference, saves = uninterrupted(scenario)
-            self.assertGreater(saves, 2 * len(reference.state["turns"]), scenario.name)
+    def test_agents_work_past_a_heartbeat(self):
+        # A heartbeat save during each agent's turn is what lets a crash land while an agent works.
+        self.assertGreater(TURN_SECONDS, HEARTBEAT_SECONDS)
+
+    def test_a_repeated_prompt_is_a_difference(self):
+        reference, _ = uninterrupted(SCENARIOS["approved"])
+        again = Aftermath(reference.files, reference.state,
+                          {**reference.effects, "prompt": [*reference.effects["prompt"], reference.effects["prompt"][-1]]})
+        self.assertEqual(len(ends_as_problems(again, expected(reference, []))), 1)
 
 
 class CrashesAndResumes(RuleBasedStateMachine):
-    """A run crashed after a drawn number of saves, resumed, and crashed again as often as drawn, a crash during a
-    resume included; at the end resumed until it finishes.
+    """A run crashed after a drawn number of writes of state.json, resumed, and crashed again as often as drawn, a
+    crash during a resume included; at the end resumed until it finishes.
 
     After each step, the effects so far are a beginning of the uninterrupted run's; at the end, the run ended as
     `expected` says.
     """
 
-    @initialize(scenario=st.sampled_from(SCENARIOS))
-    def start(self, scenario):
-        self.world = World(scenario)
-        self.reference, _ = uninterrupted(scenario)
+    @initialize(name=st.sampled_from(sorted(SCENARIOS)))
+    def start(self, name):
+        self.world = World(SCENARIOS[name])
+        self.reference, _ = uninterrupted(SCENARIOS[name])
 
-    # Half the most saves a scenario takes, or less: TestCrashAfterEverySave covers one crash at each save already, so
-    # the draws favour a run crashed several times. A run that finishes stays finished: Hypothesis needs a rule it can
-    # always take.
-    @rule(k=st.integers(min_value=1, max_value=20))
+    # Half the most writes a scenario takes, or less: TestCrashAfterEveryWrite covers one crash after each write
+    # already, so the draws favour a run crashed several times. A run that finishes stays finished: Hypothesis needs a
+    # rule it can always take.
+    @rule(k=st.integers(min_value=1, max_value=24))
     def crash_after(self, k):
         if not self.world.finished:
             self.world.run(crash_after=k)
 
     @invariant()
-    def no_effect_repeated(self):
-        got = collapsed(self.world.effects())
-        want = collapsed(expected(self.reference, self.world.crashes).effects)
-        for kind, effects in got.items():
-            assert effects == want[kind][:len(effects)], (kind, effects, want[kind])
+    def effects_so_far_begin_the_expected(self):
+        want = expected(self.reference, self.world.crashes)
+        got_effects, _ = without_repeats(without_repeats(self.world.effects(), idempotent)[0], announces)
+        want_effects, _ = without_repeats(without_repeats(want.effects, idempotent)[0], announces)
+        for kind, effects in got_effects.items():
+            assert effects == want_effects[kind][:len(effects)], (kind, effects, want_effects[kind])
 
     def teardown(self):
         world = getattr(self, "world", None)
@@ -406,7 +448,8 @@ class CrashesAndResumes(RuleBasedStateMachine):
             return
         while not world.finished:
             world.run()
-        assert_ends_as(world, expected(self.reference, world.crashes))
+        problems = ends_as_problems(world.aftermath(), expected(self.reference, world.crashes))
+        assert not problems, problems
 
 
 TestCrashesAndResumes = CrashesAndResumes.TestCase

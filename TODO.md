@@ -498,6 +498,15 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   tokens. Found by orchestrator-test-methods/05 (2026-10-28), whose `expected` pins it. Not fixed here: the engine is
   frozen. Closes in the Rust engine with `_agent` noting the session of an agent it finds alive; the pin goes with
   the Python engine, as above.
+- **A resumed interview tells the human again that it waits for them.** `Workflow._step_turn`'s `announce` focuses
+  the human-paced agent's pane and notifies "<label> is waiting for you" in every orchestrator that takes the turn
+  (`_turn`: it "runs once the agent is ready"), so a resume while the interview is under way repeats both, once per
+  resume. Raised by cross-review 81 (F1, 2026-10-28) against ticket orchestrator-test-methods/05, which allows only
+  documented idempotent repeats: "Neither is idempotent: the cited comment … says each orchestrator does it again,
+  which is the repeat the ticket asks the test to fail on." Arguably what a human whose orchestrator restarted wants;
+  `tests/test_crash_resume.py`'s `expected` pins it as up to one repeat per resume. Closes with the user's ruling that
+  it is wanted, or an engine that announces a turn only where none did (for example, only when `prompted` is not the
+  turn's file).
 
 ## Fixed
 
