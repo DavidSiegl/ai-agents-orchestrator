@@ -71,6 +71,13 @@ also_copy = ["examples/", "docs/"]
 # skips every expression that starts on a matching line, with what it holds, the following lines of a help text too.
 do_not_mutate_patterns = ['\bhelp=']
 
+[tool.coverage.run]
+# The C tracer, which the Jenkinsfile's Test stage records a context per test with (--cov-context=test), for gate.py
+# --test-contexts to pick the tests mutmut runs. Under Python 3.14, coverage's default core, sys.monitoring, records
+# each line for only the first few tests to run it, without a warning: 8 of the 312 tests that reach PR #113's
+# functions. mutmut would then leave out tests that kill its mutants, and report them as survivors.
+core = "ctrace"
+
 [tool.pymarkdown]
 # The docs wrap at 120, by eye. README.md opens with its logo in HTML, which also keeps a heading off its first line.
 plugins.md013.enabled = false
