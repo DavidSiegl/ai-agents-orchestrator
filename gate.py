@@ -2796,19 +2796,27 @@ def _tests_reaching(root: str, functions: list[_ChangedFunction], table: dict,
         return [], (f"[tool.mutmut] pytest_add_cli_args_test_selection holds `{one_line(unapplied[0])}`, which the "
                     f"gate cannot apply to the tests the file records")
     paths = [a for a in selection if a not in options]
+    reaching, why = _recorded_tests(root, functions, os.path.abspath(test_contexts))
+    return sorted(i for i in reaching if any(_in_node(i, p) for p in paths or ["."])
+                  and not any(_in_node(i, p) for p in ignored) and not _globbed(i, globs)), why
+
+
+def _recorded_tests(root: str, functions: list[_ChangedFunction], data_file: str) -> tuple[set[str], str | None]:
+    """The pytest node ids of the tests that data_file, the absolute path of a coverage.py data file with a context
+    per test, records running a line of the body of any of functions, as _tests_reaching takes them. Or an empty set
+    and why the file cannot tell them, a clause, as _tests_reaching says."""
     spans = [[os.path.realpath(os.path.join(root, f.path)), f.line + 1 if f.last > f.line else f.line, f.last]
              for f in functions]
-    data_file = os.path.abspath(test_contexts)
     # -I: the program runs in root, whose own modules, such as a json.py, must not stand in for the ones it imports.
     argv = [sys.executable, "-I", "-c", _TEST_CONTEXTS_PROGRAM, data_file, json.dumps(spans)]
     try:
         proc, stopped = _run_in_session(argv, root, tool_env(), timeout=TEST_CONTEXTS_TIMEOUT)
     except OSError as e:
-        return [], f"coverage.py could not be started to read `{one_line(data_file)}`: {e}"
+        return set(), f"coverage.py could not be started to read `{one_line(data_file)}`: {e}"
     if stopped:
-        return [], f"reading `{one_line(data_file)}` took longer than {TEST_CONTEXTS_TIMEOUT} seconds"
+        return set(), f"reading `{one_line(data_file)}` took longer than {TEST_CONTEXTS_TIMEOUT} seconds"
     if proc.returncode != 0:
-        return [], f"coverage.py could not read `{one_line(data_file)}`: {_said(proc)}"
+        return set(), f"coverage.py could not read `{one_line(data_file)}`: {_said(proc)}"
     try:
         found = json.loads(proc.stdout)
         recorded, busiest, reached = int(found["tests"]), int(found["busiest"]), list(found["reached"])
@@ -2816,18 +2824,16 @@ def _tests_reaching(root: str, functions: list[_ChangedFunction], table: dict,
                 tests is None or isinstance(tests, list) and all(isinstance(i, str) for i in tests) for tests in reached):
             raise ValueError("not a list of node ids or null for each changed function")
     except (ValueError, TypeError, KeyError) as e:
-        return [], f"reading `{one_line(data_file)}` printed what the gate cannot read: {e}"
+        return set(), f"reading `{one_line(data_file)}` printed what the gate cannot read: {e}"
     if not recorded:
-        return [], f"`{one_line(data_file)}` records no test's context, as `pytest --cov-context=test` writes them"
+        return set(), f"`{one_line(data_file)}` records no test's context, as `pytest --cov-context=test` writes them"
     if busiest * _UNDER_RECORDED_SHARE < recorded:
-        return [], (f"`{one_line(data_file)}` records {recorded} tests but none of its lines for more than {busiest}, "
+        return set(), (f"`{one_line(data_file)}` records {recorded} tests but none of its lines for more than {busiest}, "
                     f"as a coverage core that records each line for its first tests alone writes it; pin the ctrace "
                     f"core, with `[tool.coverage.run] core = \"ctrace\"`")
     if unmeasured := [f for f, tests in zip(functions, reached, strict=True) if tests is None]:
-        return [], f"`{one_line(data_file)}` did not measure `{one_line(unmeasured[0].path)}`"
-    return sorted({i for tests in reached for i in tests
-                   if any(_in_node(i, p) for p in paths or ["."]) and not any(_in_node(i, p) for p in ignored)
-                   and not _globbed(i, globs)}), None
+        return set(), f"`{one_line(data_file)}` did not measure `{one_line(unmeasured[0].path)}`"
+    return {i for tests in reached for i in tests}, None
 
 
 def _ignored_paths(args: list[str]) -> tuple[list[str], list[str], set[str]]:
@@ -2837,9 +2843,9 @@ def _ignored_paths(args: list[str]) -> tuple[list[str], list[str], set[str]]:
     found: dict[str, list[str]] = {"--ignore": [], "--ignore-glob": []}
     options = set()
     for i, a in enumerate(args):
-        name, eq, value = a.partition("=")
+        name, eq, operand = a.partition("=")
         if name in found and eq:
-            found[name].append(value)
+            found[name].append(operand)
             options.add(a)
         elif a in found and i + 1 < len(args):
             found[a].append(args[i + 1])
