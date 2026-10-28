@@ -112,6 +112,14 @@ fn json_of_another_shape_is_worded_as_python_s_error() {
             "'NoneType' object has no attribute 'startswith'",
         ),
     ];
+    let licensed = |classifiers: &str| format!(r#"{{"info": {{"version": "1", "classifiers": {classifiers}}}}}"#);
+    assert_eq!(project(body(&licensed(r#""License :: MIT""#))).unwrap().unwrap().license, None);
+    assert_eq!(
+        project(body(&licensed(r#"{"License :: OSI :: BSD": 1}"#))).unwrap().unwrap().license.as_deref(),
+        Some("BSD")
+    );
+    let late = project(body(&licensed(r#"["License :: MIT", 5]"#))).unwrap_err().to_string();
+    assert!(late.ends_with("'int' object has no attribute 'startswith'"), "{late}");
     for (text, why) in cases {
         let e = project(body(&text)).unwrap_err().to_string();
         assert!(

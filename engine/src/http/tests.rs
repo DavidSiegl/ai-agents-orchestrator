@@ -170,8 +170,9 @@ fn no_answer_is_worded_as_urllib_words_it() {
     let request = Request { timeout: 1, ..get(&format!("http://{}/", silent.local_addr().unwrap())) };
     assert_eq!(direct().send(&request), Err(HttpError::NoAnswer("timed out".to_string())));
 
-    let unknown = get("http://unknown-host.invalid/");
-    assert_eq!(direct().send(&unknown), Err(HttpError::NoAnswer("[Errno -2] Name or service not known".to_string())));
+    // getaddrinfo's own error: EAI_NONAME, or EAI_AGAIN on a machine that has no resolver to ask.
+    let unknown = direct().send(&get("http://unknown-host.invalid/"));
+    assert!(matches!(&unknown, Err(HttpError::NoAnswer(why)) if why.starts_with("[Errno -")), "{unknown:?}");
     let bad = get("nonsense");
     assert!(matches!(direct().send(&bad), Err(HttpError::NoAnswer(_))));
 }
@@ -251,9 +252,12 @@ fn a_request_goes_through_the_proxy_its_scheme_names() {
         ("CONNECT jenkins.invalid:80 HTTP/1.1".to_string(), "GET /job/x/api/json HTTP/1.1".to_string())
     );
 
-    let broken = HttpClient::with_env(&env(&[("http_proxy", "http://[::1")]));
+    let broken = HttpClient::with_env(&env(&[("http_proxy", "http://alice:s3cret@[::1")]));
     let answer = broken.send(&get("http://jenkins.invalid/"));
-    assert!(matches!(answer, Err(HttpError::NoAnswer(m)) if m.starts_with("the proxy ")));
+    assert!(
+        matches!(&answer, Err(HttpError::NoAnswer(m)) if m.starts_with("the proxy ") && !m.contains("s3cret")),
+        "{answer:?}"
+    );
 }
 
 #[test]
@@ -270,17 +274,33 @@ fn a_resolver_error_has_its_number_when_its_text_gives_it() {
 const CERT: &str = include_str!("../../tests/data/pypi-cert.pem");
 
 #[test]
-fn tls_trusts_ssl_cert_file_else_the_systems_bundle() {
+fn tls_trusts_what_openssl_s_default_paths_give() {
     let dir = crate::test_support::TempDir::new();
-    let path = dir.join("cert.pem");
-    std::fs::write(&path, format!("{CERT}garbage\n")).unwrap();
-    let RootCerts::Specific(certs) = root_certs(&env(&[("SSL_CERT_FILE", &path)])) else { panic!("no specific roots") };
-    assert_eq!(certs.len(), 1);
-    let RootCerts::Specific(none) = root_certs(&env(&[("SSL_CERT_FILE", &dir.join("missing"))])) else { panic!() };
-    assert!(none.is_empty());
-    let system = root_certs(&env(&[]));
-    let has_bundle = std::path::Path::new("/etc/ssl/certs/ca-certificates.crt").exists();
-    assert_eq!(matches!(system, RootCerts::Specific(_)), has_bundle);
+    let (file, certs_dir, empty) = (dir.join("cert.pem"), dir.join("certs"), dir.join("empty"));
+    std::fs::write(&file, format!("{CERT}garbage\n")).unwrap();
+    std::fs::create_dir(&certs_dir).unwrap();
+    std::fs::create_dir(&empty).unwrap();
+    std::fs::write(format!("{certs_dir}/a.0"), CERT).unwrap();
+    std::fs::create_dir(format!("{certs_dir}/sub")).unwrap();
+    let count = |vars: &[(&str, &str)]| match root_certs(&env(vars)) {
+        RootCerts::Specific(certs) => Some(certs.len()),
+        _ => None,
+    };
+    assert_eq!(count(&[("SSL_CERT_FILE", &file), ("SSL_CERT_DIR", &empty)]), Some(1));
+    assert_eq!(count(&[("SSL_CERT_FILE", &file), ("SSL_CERT_DIR", &format!("{certs_dir}:{empty}:/nowhere"))]), Some(2));
+    // A file that is not there adds nothing, and the directory still counts, as in OpenSSL.
+    assert_eq!(count(&[("SSL_CERT_FILE", &dir.join("missing")), ("SSL_CERT_DIR", &certs_dir)]), Some(1));
+    assert_eq!(count(&[("SSL_CERT_FILE", &dir.join("missing")), ("SSL_CERT_DIR", &empty)]), Some(0));
+    // Without either variable, this machine's own: a system bundle or certificate directory, else Mozilla's roots.
+    let system = [
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+        "/etc/ssl/ca-bundle.pem",
+        "/etc/ssl/cert.pem",
+        "/etc/ssl/certs",
+    ];
+    let has_system = system.iter().any(|path| std::path::Path::new(path).exists());
+    assert_eq!(count(&[]).is_some_and(|n| n > 0), has_system);
 }
 
 #[test]

@@ -532,3 +532,23 @@ fn from_env_reads_the_ci_env_beside_the_environment() {
     std::fs::set_permissions(config.ci_env_path(), std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
     assert_eq!(Jenkins::from_env(JOB, &config).unwrap().job(), JOB);
 }
+
+#[test]
+fn ci_reads_the_file_but_no_child_process_sees_it() {
+    use crate::host::{Host, ProcessHost};
+    let token = "file-token-7e1c";
+    let dir = crate::test_support::TempDir::new();
+    let config = ConfigDir::at(&dir.path());
+    std::fs::write(
+        config.ci_env_path(),
+        format!("JENKINS_URL={JENKINS}/\nJENKINS_USER=agents\nJENKINS_TOKEN={token}\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(config.ci_env_path(), std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    let jenkins = Jenkins::from_env(JOB, &config).unwrap();
+    jenkins.check_credentials().unwrap();
+    // The file's values stay in Jenkins: none reaches the process's environment, nor a child's.
+    assert!(CI_ENV.iter().all(|k| std::env::var(k).ok().as_deref() != Some(token)));
+    let env = ProcessHost::local().check(&["env"], None, 60).unwrap();
+    assert!(!env.contains(token), "a child saw the token");
+}

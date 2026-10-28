@@ -203,6 +203,10 @@ MANIFESTS = [
      'f = { mirror = 1.5, n = [true, "é", -0.0, inf] }\ng = { workspace = true }\n'
      'h = { index = 3 }\n', None),
     ('[tool.uv.sources]\nf = { at = 1979-05-27T07:32:00Z }\n', None),
+    ('[project]\ndependencies = ["a"]\n[tool.uv.sources]\na = { index = ["x"] }\n', None),
+    ('[[tool.uv.index]]\nname = ["x"]\n[tool.uv.sources]\na = { path = "p" }\n', None),
+    ('[project]\ndependencies = ["a", "b"]\n[[tool.uv.index]]\nname = 1\nurl = "https://one/simple"\n'
+     '[tool.uv.sources]\na = { index = true }\nb = { index = 1.0 }\n', None),
     ('[project]\nname = "p"\ndependencies = ["a"]\n[tool.uv.sources]\na = { mirror = { x = 1 } }\n', None),
     ('[project]\nname = "p"\ndependencies = ["a"]\n[[tool.uv.index]]\nurl = "https://m/simple"\ndefault = true\n',
      'version = 1\n[[package]]\nname = "a"\nsource = { registry = "https://pypi.org/simple" }\n'

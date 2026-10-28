@@ -1177,6 +1177,52 @@
    ]
   },
   {
+   "pyproject": "[project]\ndependencies = [\"a\"]\n[tool.uv.sources]\na = { index = [\"x\"] }\n",
+   "lock": null,
+   "direct": [],
+   "locked": [],
+   "unreadable": [
+    [
+     "pyproject.toml",
+     "cannot use 'list' as a dict key (unhashable type: 'list')"
+    ]
+   ]
+  },
+  {
+   "pyproject": "[[tool.uv.index]]\nname = [\"x\"]\n[tool.uv.sources]\na = { path = \"p\" }\n",
+   "lock": null,
+   "direct": [],
+   "locked": [],
+   "unreadable": [
+    [
+     "pyproject.toml",
+     "cannot use 'list' as a dict key (unhashable type: 'list')"
+    ]
+   ]
+  },
+  {
+   "pyproject": "[project]\ndependencies = [\"a\", \"b\"]\n[[tool.uv.index]]\nname = 1\nurl = \"https://one/simple\"\n[tool.uv.sources]\na = { index = true }\nb = { index = 1.0 }\n",
+   "lock": null,
+   "direct": [
+    [
+     "a",
+     [
+      "index",
+      "https://one/simple"
+     ]
+    ],
+    [
+     "b",
+     [
+      "index",
+      "https://one/simple"
+     ]
+    ]
+   ],
+   "locked": [],
+   "unreadable": []
+  },
+  {
    "pyproject": "[project]\nname = \"p\"\ndependencies = [\"a\"]\n[tool.uv.sources]\na = { mirror = { x = 1 } }\n",
    "lock": null,
    "direct": [

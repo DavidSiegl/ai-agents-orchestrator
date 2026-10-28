@@ -181,8 +181,8 @@ impl Jenkins {
             CIError::Refused(e) => e,
         })?;
         let mut defined = Vec::new();
-        for property in items(job.get("property")).iter().filter_map(Json::as_object) {
-            for definition in items(property.get("parameterDefinitions")) {
+        for property in listed(job.get("property")).iter().filter_map(Json::as_object) {
+            for definition in listed(property.get("parameterDefinitions")) {
                 defined.push(definition.get("name").cloned());
             }
         }
@@ -193,8 +193,7 @@ impl Jenkins {
         }
         Err(OrchestratorError(format!(
             "Jenkins job {} lacks the parameters {}; build it once by hand with empty parameters, so Jenkins learns \
-                them \
-             from the Jenkinsfile",
+             them from the Jenkinsfile",
             self.job,
             missing.join(", ")
         )))
@@ -247,11 +246,11 @@ impl Jenkins {
             urlencode(&[("tree", "builds[number,actions[parameters[name,value]]]{0,20}")])
         );
         let job = self.get_json(&url)?;
-        for build in items(job.get("builds")) {
+        for build in listed(job.get("builds")) {
             let Some(build) = build.as_object() else { return Err(self.not_shaped("GET", &url, "the job's builds")) };
             let mut built = None;
-            for action in items(build.get("actions")).iter().filter_map(Json::as_object) {
-                for parameter in items(action.get("parameters")) {
+            for action in listed(build.get("actions")).iter().filter_map(Json::as_object) {
+                for parameter in listed(action.get("parameters")) {
                     let Some(parameter) = parameter.as_object() else {
                         return Err(self.not_shaped("GET", &url, "the job's builds"));
                     };
@@ -328,9 +327,9 @@ impl Jenkins {
             Err(e) => return Err(e),
         };
         let mut failed = Vec::new();
-        for suite in items(report.get("suites")) {
+        for suite in listed(report.get("suites")) {
             let Some(suite) = suite.as_object() else { return Err(self.not_shaped("GET", &url, "a test report")) };
-            for case in items(suite.get("cases")) {
+            for case in listed(suite.get("cases")) {
                 let Some(case) = case.as_object() else { return Err(self.not_shaped("GET", &url, "a test report")) };
                 let field = |name: &str| case.get(name).cloned().unwrap_or(Json::Null);
                 if matches!(case.get("status").and_then(Json::as_str), Some("FAILED" | "REGRESSION")) {
@@ -404,7 +403,7 @@ impl Jenkins {
 
 /// The items of a JSON list, as `value or []` iterates them: none for a missing or false value, the list's for a list.
 /// Any other true value has none either, where Python would fail on it.
-fn items(value: Option<&Json>) -> &[Json] {
+fn listed(value: Option<&Json>) -> &[Json] {
     value.and_then(Json::as_array).map_or(&[], Vec::as_slice)
 }
 

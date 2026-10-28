@@ -11,7 +11,7 @@ use super::{CheckFindings, Finding, RunChange};
 use crate::error::OrchestratorError;
 use crate::py::json::Map;
 use crate::py::text::{is_space, utf8_error};
-use crate::py::toml::{json_dumps, loads, repr, str as py_str, type_name};
+use crate::py::toml::{hashable, json_dumps, loads, repr, same_key, str as py_str, truthy, type_name};
 use crate::pypi::{PyPI, PyPIProject};
 
 /// A new dependency whose first release is fewer days old than this is flagged: few have used it yet, and a name
@@ -223,6 +223,9 @@ fn uv_sources(uv: &Table) -> Result<Sources, String> {
     // Each index's URL by its name, a later index of a name taking its place, as a dict of them does.
     let indexes: Vec<(Option<&Value>, Option<&Value>)> =
         uv_indexes(uv)?.into_iter().map(|i| (i.get("name"), i.get("url"))).collect();
+    for name in indexes.iter().filter_map(|(name, _)| *name) {
+        hashable(name)?;
+    }
     let mut out = Map::new();
     for (name, entry) in toml_table(uv, "sources")? {
         let first = match entry {
@@ -241,10 +244,11 @@ fn uv_source(entry: &Table, indexes: &[(Option<&Value>, Option<&Value>)]) -> Res
         return Ok(Some(PackageSource::new(SourceKind::Workspace, "")));
     }
     if let Some(index) = entry.get("index") {
+        hashable(index)?;
         let url = indexes
             .iter()
             .rev()
-            .find(|(name, _)| *name == Some(index))
+            .find(|(name, _)| name.is_some_and(|name| same_key(name, index)))
             .and_then(|(_, url)| *url)
             .filter(|url| truthy(url));
         return Ok(index_source(Some(url.unwrap_or(index))));
@@ -334,19 +338,6 @@ fn toml_table<'a>(parent: &'a Table, key: &str) -> Result<&'a Table, String> {
 fn empty_table() -> &'static Table {
     static EMPTY: std::sync::OnceLock<Table> = std::sync::OnceLock::new();
     EMPTY.get_or_init(Table::new)
-}
-
-/// Whether Python takes the value as true.
-fn truthy(value: &Value) -> bool {
-    match value {
-        Value::String(s) => !s.is_empty(),
-        Value::Integer(n) => *n != 0,
-        Value::Float(x) => *x != 0.0,
-        Value::Boolean(b) => *b,
-        Value::Datetime(_) => true,
-        Value::Array(items) => !items.is_empty(),
-        Value::Table(table) => !table.is_empty(),
-    }
 }
 
 /// (package_key, direct URL or None) of a PEP 508 requirement, `name[extras] @ url ; marker` or a version after the
@@ -460,8 +451,7 @@ fn package_finding(
     if matches!(known.get(&p.key), Some(None)) {
         let message = format!(
             "PyPI does not know `{}`: the name may be mistyped, or name a package that does not exist yet, which \
-                anyone \
-             could register (slopsquatting).",
+             anyone could register (slopsquatting).",
             p.key
         );
         return Some((true, Finding::error(Some(p.path), p.line, "not-on-pypi", message)));

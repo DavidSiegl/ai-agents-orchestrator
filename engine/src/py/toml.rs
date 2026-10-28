@@ -45,6 +45,46 @@ pub fn type_name(value: &Value) -> &'static str {
     }
 }
 
+/// Whether Python takes what tomllib reads value as for true: not 0, 0.0, false, nor an empty string, list or table.
+pub fn truthy(value: &Value) -> bool {
+    match value {
+        Value::String(s) => !s.is_empty(),
+        Value::Integer(n) => *n != 0,
+        Value::Float(x) => *x != 0.0,
+        Value::Boolean(b) => *b,
+        Value::Datetime(_) => true,
+        Value::Array(items) => !items.is_empty(),
+        Value::Table(table) => !table.is_empty(),
+    }
+}
+
+/// Nothing when what tomllib reads value as can be a dict's key; Python's TypeError's message when it cannot: a list
+/// or a table.
+pub fn hashable(value: &Value) -> Result<(), String> {
+    match value {
+        Value::Array(_) | Value::Table(_) => {
+            let name = type_name(value);
+            Err(format!("cannot use '{name}' as a dict key (unhashable type: '{name}')"))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Whether what tomllib reads a and b as are the same dict key, as Python's == compares them: a number equals another
+/// of the same value, a boolean being 0 or 1, and anything else only one of its own kind and value.
+pub fn same_key(a: &Value, b: &Value) -> bool {
+    let number = |v: &Value| match v {
+        Value::Integer(n) => Some(*n as f64),
+        Value::Float(x) => Some(*x),
+        Value::Boolean(b) => Some(f64::from(u8::from(*b))),
+        _ => None,
+    };
+    match (number(a), number(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => a == b,
+    }
+}
+
 /// value as Python's str() writes it: a string as it is, a datetime, date or time in ISO 8601 with a blank between
 /// the date and the time (`1979-05-27 07:32:00+00:00`), anything else as repr.
 pub fn str(value: &Value) -> String {

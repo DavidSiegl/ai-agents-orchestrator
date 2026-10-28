@@ -104,22 +104,22 @@ fn project_of(body: &[u8]) -> Result<PyPIProject, String> {
         None => {}
         Some(Json::Object(releases)) => {
             for release in releases.values() {
-                files.extend(items(release)?);
+                files.extend(iterated(release)?);
             }
         }
-        Some(other) => return Err(format!("'{}' object has no attribute 'values'", type_name(other))),
+        Some(other) => return Err(format!("'{}' object has no attribute 'values'", other.python_type())),
     }
     let first = first_upload(&files)?;
-    let latest = first_upload(&answer.get("urls").map_or(Ok(Vec::new()), items)?)?;
+    let latest = first_upload(&answer.get("urls").map_or(Ok(Vec::new()), iterated)?)?;
     Ok(PyPIProject { first_release: first, version, latest_release: latest, license: license(info)? })
 }
 
 /// The items of `value or []`; an error for a true value that is not a list.
-fn items(value: &Json) -> Result<Vec<&Json>, String> {
+fn iterated(value: &Json) -> Result<Vec<&Json>, String> {
     match value {
         Json::Array(items) => Ok(items.iter().collect()),
         other if !other.truthy() => Ok(Vec::new()),
-        other => Err(format!("'{}' object is not iterable", type_name(other))),
+        other => Err(format!("'{}' object is not iterable", other.python_type())),
     }
 }
 
@@ -129,7 +129,7 @@ fn first_upload(files: &[&Json]) -> Result<Option<Upload>, String> {
     for file in files {
         let time = match file {
             Json::Object(file) => file.get("upload_time_iso_8601").ok_or("'upload_time_iso_8601'")?,
-            other => return Err(format!("'{}' object is not subscriptable", type_name(other))),
+            other => return Err(format!("'{}' object is not subscriptable", other.python_type())),
         };
         let Json::Str(time) = time else { return Err("fromisoformat: argument must be str".to_string()) };
         let upload = upload_of(time)?;
@@ -155,7 +155,7 @@ fn license(info: &Json) -> Result<Option<String>, String> {
     let text = |key: &str| -> Result<String, String> {
         match info.get(key) {
             Some(Json::Str(s)) => Ok(strip(s).to_string()),
-            Some(value) if value.truthy() => Err(format!("'{}' object has no attribute 'strip'", type_name(value))),
+            Some(value) if value.truthy() => Err(format!("'{}' object has no attribute 'strip'", value.python_type())),
             _ => Ok(String::new()),
         }
     };
@@ -167,29 +167,23 @@ fn license(info: &Json) -> Result<Option<String>, String> {
     if !field.is_empty() {
         return Ok(Some(shortened(splitlines(&field)[0], 80)));
     }
-    let classifiers = info.get("classifiers").map_or(Ok(Vec::new()), items)?;
-    for classifier in classifiers {
+    // Iterated as `info.get("classifiers") or []` iterates it: a string by its characters, an object by its keys.
+    let classifiers: Vec<Json> = match info.get("classifiers") {
+        Some(Json::Str(text)) => text.chars().map(|c| Json::Str(c.to_string())).collect(),
+        Some(Json::Object(map)) => map.keys().map(Json::from).collect(),
+        Some(value) => iterated(value)?.into_iter().cloned().collect(),
+        None => Vec::new(),
+    };
+    let mut licenses = Vec::new();
+    for classifier in &classifiers {
         let Json::Str(classifier) = classifier else {
-            return Err(format!("'{}' object has no attribute 'startswith'", type_name(classifier)));
+            return Err(format!("'{}' object has no attribute 'startswith'", classifier.python_type()));
         };
         if classifier.starts_with("License :: ") {
-            return Ok(classifier.rsplit_once(" :: ").map(|(_, last)| last.to_string()));
+            licenses.push(classifier);
         }
     }
-    Ok(None)
-}
-
-/// The name of the Python type json.loads reads value as.
-fn type_name(value: &Json) -> &'static str {
-    match value {
-        Json::Null => "NoneType",
-        Json::Bool(_) => "bool",
-        Json::Int(_) => "int",
-        Json::Float(_) => "float",
-        Json::Str(_) => "str",
-        Json::Array(_) => "list",
-        Json::Object(_) => "dict",
-    }
+    Ok(licenses.first().and_then(|c| c.rsplit_once(" :: ")).map(|(_, last)| last.to_string()))
 }
 
 #[cfg(test)]

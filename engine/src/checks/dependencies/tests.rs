@@ -80,9 +80,8 @@ fn a_package_the_lock_alone_adds_is_pulled_in() {
     assert_eq!(
         found.to_weigh[1].message,
         "3 new packages that the change's dependencies pull in: `deprecated` (on PyPI since 2016-11-01, latest 1.2.18 \
-            of \
-         2026-10-20, license MIT License), `packaging` (on PyPI since 2015-01-03, latest 3.13.0 of 2024-06-22, license \
-         Apache-2.0 OR BSD-2-Clause), `vendored` (from the path vendor/x, not from PyPI)."
+         of 2026-10-20, license MIT License), `packaging` (on PyPI since 2015-01-03, latest 3.13.0 of 2024-06-22, \
+         license Apache-2.0 OR BSD-2-Clause), `vendored` (from the path vendor/x, not from PyPI)."
     );
     assert_eq!(pypi.state().asked, ["limits", "deprecated", "packaging"]);
 }

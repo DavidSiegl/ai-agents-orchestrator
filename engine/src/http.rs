@@ -97,7 +97,7 @@ pub trait Http: Send + Sync {
 
 /// The network, reached as urllib reaches it: through the proxy that the environment's `http_proxy` or
 /// `https_proxy` names for the URL's scheme, unless `no_proxy` names its host, and over TLS trusting the certificates
-/// of `SSL_CERT_FILE`, else the system's bundle, else Mozilla's (webpki-roots).
+/// OpenSSL's default paths give Python (root_certs).
 #[derive(Clone)]
 pub struct HttpClient {
     proxies: Proxies,
@@ -117,7 +117,12 @@ impl HttpClient {
 
     fn agent(&self, request: &Request) -> Result<Agent, HttpError> {
         let proxy = match self.proxies.for_url(&request.url) {
-            Some(url) => Some(Proxy::new(url).map_err(|e| HttpError::NoAnswer(format!("the proxy {url}: {e}")))?),
+            // Neither the proxy's URL nor ureq's words for it, which may quote it: it can hold a password.
+            Some(url) => Some(Proxy::new(url).map_err(|_| {
+                HttpError::NoAnswer(
+                    "the proxy that http_proxy or https_proxy names is not a URL ureq can use".to_string(),
+                )
+            })?),
             None => None,
         };
         let timeout = Some(Duration::from_secs(request.timeout));
@@ -262,9 +267,12 @@ impl Proxies {
     }
 }
 
-/// The certificates TLS trusts, as Python's default context finds them: the file `SSL_CERT_FILE` names, whatever it
-/// holds, so that a file without certificates trusts none; else the first system bundle that exists; else
-/// Mozilla's roots. A certificate the file holds that does not parse is left out.
+/// The certificates TLS trusts, as OpenSSL's default paths give them to Python's default context: those of the file
+/// `SSL_CERT_FILE` names, else of the first of SYSTEM_BUNDLES that exists, and those of every file in the directories
+/// `SSL_CERT_DIR` names, separated by colons, else in SYSTEM_CERT_DIR. When neither variable is set and the system
+/// has none of them, Mozilla's roots, as certifi gives a Python without system certificates. A file that cannot be
+/// read, and an item of it that is not a certificate, adds none: OpenSSL ignores them too, and a variable naming
+/// nothing usable then trusts none, as it does in Python.
 fn root_certs(env: &dyn Fn(&str) -> Option<String>) -> RootCerts {
     const SYSTEM_BUNDLES: [&str; 4] = [
         "/etc/ssl/certs/ca-certificates.crt",
@@ -272,19 +280,32 @@ fn root_certs(env: &dyn Fn(&str) -> Option<String>) -> RootCerts {
         "/etc/ssl/ca-bundle.pem",
         "/etc/ssl/cert.pem",
     ];
-    let pem = match env("SSL_CERT_FILE").filter(|path| !path.is_empty()) {
+    const SYSTEM_CERT_DIR: &str = "/etc/ssl/certs";
+    let file = env("SSL_CERT_FILE").filter(|path| !path.is_empty());
+    let dirs = env("SSL_CERT_DIR").filter(|dirs| !dirs.is_empty());
+    let configured = file.is_some() || dirs.is_some();
+    let mut pem = match &file {
         Some(path) => std::fs::read(path).unwrap_or_default(),
-        None => match SYSTEM_BUNDLES.iter().find_map(|path| std::fs::read(path).ok()) {
-            Some(pem) => pem,
-            None => return RootCerts::WebPki,
-        },
+        None => SYSTEM_BUNDLES.iter().find_map(|path| std::fs::read(path).ok()).unwrap_or_default(),
     };
+    for dir in dirs.as_deref().unwrap_or(SYSTEM_CERT_DIR).split(':') {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            if entry.path().is_file() {
+                pem.extend(std::fs::read(entry.path()).unwrap_or_default());
+                pem.push(b'\n');
+            }
+        }
+    }
     let certs: Vec<_> = parse_pem(&pem)
         .filter_map(|item| match item {
             Ok(PemItem::Certificate(cert)) => Some(cert),
             _ => None,
         })
         .collect();
+    if certs.is_empty() && !configured {
+        return RootCerts::WebPki;
+    }
     RootCerts::Specific(Arc::new(certs))
 }
 

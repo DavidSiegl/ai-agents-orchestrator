@@ -118,9 +118,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   (`HttpClient`, `engine/src/http.rs`, rust-engine ticket 07, 2026-10-28), which differs from `urlopen` where no test
   of the Python engine pins it: ureq reaches an http URL through a proxy with CONNECT, as it does an https one, where
   urllib sends the request itself to the proxy, so a proxy that allows CONNECT only to port 443, as squid does by
-  default, refuses a plain-http Jenkins that `http_proxy` sends through it; TLS trusts the certificates of
-  `SSL_CERT_FILE`, else the first system bundle file of four (`root_certs`), else Mozilla's roots, where Python asks
-  OpenSSL, which also reads `SSL_CERT_DIR` and, on macOS, may use the keychain; and the timeout bounds the connect
+  default, refuses a plain-http Jenkins that `http_proxy` sends through it; TLS trusts the certificates OpenSSL's
+  default paths would give (`SSL_CERT_FILE` or a system bundle, and `SSL_CERT_DIR` or `/etc/ssl/certs`, in
+  `root_certs`), else Mozilla's roots, where a Python on macOS may use the keychain; and the timeout bounds the connect
   and each read and write, as urllib's does, but not name resolution. In what it reads (`engine/src/ci.rs`,
   `engine/src/pypi.rs`, `engine/src/py/toml.rs`): an answer of Jenkins's of another shape than a queue item, a build's
   result, a list of builds or a test report is a `CIError` that may pass, where the Python engine fails with an
@@ -132,7 +132,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   their own with in-memory fakes. The engine's tests would then word every URL and error twice, in the code and in
   the fake, and ticket 08's Workflow tests, which read the requests Jenkins got (`FakeCI.names`, `requests`, `auth`),
   would port only by re-deriving them; with the seam at `Http`, as Python's at `urlopen`, `FakeJenkins` and
-  `FakePyPI` play the servers and every line of `Jenkins` and `PyPI` runs in those tests.
+  `FakePyPI` play the servers and every line of `Jenkins` and `PyPI` runs in those tests. The spec's Lane still
+  names `CI` and `PyPI` among the traits; amending it is the user's (cross-review 93, F1), and issue 08 says which
+  seam it is given.
 - **Checks and Jenkins calls whose tests need the Workflow or the CLI, left for rust-engine tickets 08 and 09.**
   Ticket 07 ported `TestOrchestratorChecks` on `judge_run` of the build's quality file, not through a quality round:
   `test_a_build_that_failed_before_the_gate_is_not_checked`, `test_without_the_quality_gate_none_of_this_runs`, the
@@ -140,8 +142,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   round's `in_time` (`_judged_by_orchestrator`, `_in_time`) are the Workflow's, and FakePyPI's clock and `events`
   with them (`engine/src/pypi/fake.rs` has neither). `judged_in_quality`, `_build_trust`, `_judging_changes`,
   `JUDGING_FILES` and `JUDGED_DESCRIPTION`, with `TestJudgedInQuality`, are the `judged-in-quality` command's; the
-  Rust `Jenkins::retained_builds` they read is ported. Closes with ticket 08 porting those cases through its
-  quality round on `FakeJenkins` and `FakePyPI`, and ticket 09 porting the command and its tests.
+  Rust `Jenkins::retained_builds` they read is ported. Issues 08 and 09 name them (2026-10-28). Closes with ticket 08
+  porting those cases through its quality round on `FakeJenkins` and `FakePyPI`, and ticket 09 porting the command and
+  its tests.
 - **The contract test leaves its Jenkins build running when it fails.** `tests/contract/test_jenkins.py` triggers one
   quality build and nothing stops it on a failure or a Ctrl-C, so the build holds an executor until it ends, up to
   the 22 minutes build #59 took. Raised by cross-review 73 (F11, 2026-10-27): "a Ctrl-C during the queue wait leaves

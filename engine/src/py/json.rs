@@ -254,6 +254,19 @@ impl Json {
         self.as_object().and_then(|map| map.get(key))
     }
 
+    /// The name of the Python type json.loads reads the value as: NoneType, bool, int, float, str, list or dict.
+    pub fn python_type(&self) -> &'static str {
+        match self {
+            Json::Null => "NoneType",
+            Json::Bool(_) => "bool",
+            Json::Int(_) => "int",
+            Json::Float(_) => "float",
+            Json::Str(_) => "str",
+            Json::Array(_) => "list",
+            Json::Object(_) => "dict",
+        }
+    }
+
     /// Whether Python takes the value as true: not null, false, 0, 0.0, or an empty string, list or object.
     pub fn truthy(&self) -> bool {
         match self {
