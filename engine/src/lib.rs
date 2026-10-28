@@ -7,6 +7,7 @@ pub mod env;
 pub mod error;
 pub mod pipeline;
 pub mod prompts;
+pub mod state;
 pub mod workflow_file;
 
 #[cfg(test)]

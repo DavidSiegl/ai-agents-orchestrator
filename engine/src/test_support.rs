@@ -86,6 +86,7 @@ pub fn oracle(file: &str) -> crate::py::json::Json {
     let text = match file {
         "texts.json" => include_str!("../tests/oracle/texts.json"),
         "workflows.json" => include_str!("../tests/oracle/workflows.json"),
+        "states.json" => include_str!("../tests/oracle/states.json"),
         _ => panic!("no oracle file {file}"),
     };
     crate::py::json::Json::parse(text).unwrap_or_else(|e| panic!("{file}: {e}"))
@@ -174,4 +175,21 @@ pub fn replaced(p: &Pipeline, change: impl FnOnce(&mut PipelineSettings)) -> Res
     let mut settings = p.settings().clone();
     change(&mut settings);
     Pipeline::with(p.name(), p.roles().clone(), p.steps().to_vec(), settings)
+}
+
+/// Each recording of the parity harness, tests/parity/recorded/<scenario>.json, by scenario, in name order.
+pub fn recordings() -> Vec<(String, crate::py::json::Json)> {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/parity/recorded");
+    let mut paths: Vec<_> = std::fs::read_dir(dir).expect("the recordings").map(|e| e.expect("an entry").path()).collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .map(|p| {
+            let text = std::fs::read_to_string(&p).expect("a recording");
+            let name = p.file_stem().and_then(|s| s.to_str()).expect("a name").to_string();
+            let recording = crate::py::json::Json::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+            (name, recording)
+        })
+        .collect()
 }
