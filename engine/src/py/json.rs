@@ -164,6 +164,51 @@ impl Json {
         }
     }
 
+    /// The value as Python's str() writes what json.loads read: a string as it is, anything else as repr writes it,
+    /// such as `None`, `True`, `2.5`, `[1, 'a']` or `{'k': None}`.
+    pub fn python_str(&self) -> String {
+        match self {
+            Json::Str(s) => s.clone(),
+            other => {
+                let mut out = String::new();
+                other.write_repr(&mut out);
+                out
+            }
+        }
+    }
+
+    fn write_repr(&self, out: &mut String) {
+        match self {
+            Json::Null => out.push_str("None"),
+            Json::Bool(b) => out.push_str(if *b { "True" } else { "False" }),
+            Json::Int(n) => out.push_str(&n.to_string()),
+            Json::Float(x) => out.push_str(&float_text(*x).replace("Infinity", "inf").replace("NaN", "nan")),
+            Json::Str(s) => out.push_str(&super::text::repr(s)),
+            Json::Array(items) => {
+                out.push('[');
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    item.write_repr(out);
+                }
+                out.push(']');
+            }
+            Json::Object(map) => {
+                out.push('{');
+                for (i, (k, v)) in map.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(&super::text::repr(k));
+                    out.push_str(": ");
+                    v.write_repr(out);
+                }
+                out.push('}');
+            }
+        }
+    }
+
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Json::Str(s) => Some(s),

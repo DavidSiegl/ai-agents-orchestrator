@@ -56,3 +56,11 @@ fn text_that_is_not_json_is_refused() {
     assert!(Json::parse("[1] x").is_err());
     assert!(Json::parse("NaN").is_err());
 }
+
+#[test]
+fn python_str_is_str_of_what_json_loads_read() {
+    let value = Json::parse(r#"[null, true, false, 1, 2.5, 1e300, "it's", {"k": [], "q\"": "a"}]"#).unwrap();
+    assert_eq!(value.python_str(), r#"[None, True, False, 1, 2.5, 1e+300, "it's", {'k': [], 'q"': 'a'}]"#);
+    assert_eq!(Json::from("plain").python_str(), "plain");
+    assert_eq!(Json::Float(f64::INFINITY).python_str(), "inf");
+}

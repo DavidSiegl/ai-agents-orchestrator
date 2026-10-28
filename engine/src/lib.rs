@@ -2,6 +2,7 @@
 //! file, prompt and run state as the Python engine does.
 
 pub mod py;
+pub mod ci;
 pub mod constants;
 pub mod env;
 pub mod error;

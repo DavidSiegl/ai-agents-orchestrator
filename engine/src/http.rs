@@ -285,4 +285,4 @@ fn root_certs(env: &dyn Fn(&str) -> Option<String>) -> RootCerts {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
