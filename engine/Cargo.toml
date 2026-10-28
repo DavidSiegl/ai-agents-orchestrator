@@ -13,9 +13,16 @@ serde = "1"
 # float_roundtrip: a float reads as the nearest f64, as Python reads it, so that state.json writes back as it was.
 serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.10"
+# Jenkins and PyPI, over HTTP or HTTPS (http.rs): blocking, and with rustls and its own root certificates rather than
+# the system's TLS library; gzip and the other extras are left out, since neither server is asked for them.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 # preserve_order: a table's keys come in the file's order, as tomllib gives them, so a table with two problems is
 # refused naming the first, as the Python engine refuses it.
 toml = { version = "1", default-features = false, features = ["parse", "preserve_order", "serde", "std"] }
+
+[dev-dependencies]
+# The local HTTP server the tests of http.rs and ci.rs answer requests from.
+tiny_http = "0.12"
 
 [lints]
 workspace = true

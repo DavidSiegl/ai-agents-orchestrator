@@ -279,5 +279,15 @@ fn longest_match(a: &[char], b: &[char], alo: usize, ahi: usize, blo: usize, bhi
     (besti, bestj, bestsize)
 }
 
+/// text, or its first n - 1 characters and an ellipsis when it is longer than n characters.
+pub fn shortened(text: &str, n: usize) -> String {
+    if text.chars().count() <= n {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(n - 1).collect();
+    out.push('…');
+    out
+}
+
 #[cfg(test)]
 mod tests;

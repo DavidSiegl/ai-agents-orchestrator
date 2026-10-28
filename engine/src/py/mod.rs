@@ -1,9 +1,10 @@
 //! What the port needs of Python's own semantics, so that the engine reads and writes text as orchestrator.py did:
-//! str's methods and character classes (text), format strings (format) and JSON (json).
+//! str's methods and character classes (text), format strings (format), JSON (json) and the parts of a URL (url).
 
 pub mod format;
 pub mod json;
 pub mod text;
+pub mod url;
 mod unicode_tables;
 
 /// What engine/tests/oracle/python.py recorded from Python under key, which the tests of this module replay.
