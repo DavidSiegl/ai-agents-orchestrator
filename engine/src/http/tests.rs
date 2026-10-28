@@ -319,10 +319,12 @@ fn system_store() -> Option<usize> {
     (!ders.is_empty()).then_some(ders.len())
 }
 
-// Run only by a_variable_set_empty_is_unset, in a process whose own environment it sets.
 #[test]
 #[ignore = "run by a_variable_set_empty_is_unset in an environment of its own"]
 fn the_system_store_in_this_process() {
+    for name in ["SSL_CERT_FILE", "SSL_CERT_DIR"] {
+        assert_eq!(std::env::var(name).as_deref(), Ok(""), "{name} is not set empty in this process");
+    }
     assert_eq!(count(HttpClient::from_env().roots), system_store(), "the system's store was not what was trusted");
 }
 
