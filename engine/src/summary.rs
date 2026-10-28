@@ -2,7 +2,9 @@
 //! itself, metrics.json for the metrics command, and the times and durations they are written in.
 
 use crate::constants::DEFAULT_AGENT;
+use crate::harness::{Tokens, Usage};
 use crate::pipeline::Pipeline;
+use crate::py::datetime::{civil_from_days, fromisoformat_timestamp};
 use crate::py::json::{Json, Map};
 use crate::py::text::{rstrip, strip};
 use crate::state::RunState;
@@ -18,93 +20,11 @@ pub fn iso_utc(seconds: i64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}+00:00", secs / 3600, secs % 3600 / 60, secs % 60)
 }
 
-/// The seconds since the epoch of an ISO 8601 time, as int(datetime.fromisoformat(iso).timestamp()) gives them for
-/// the times the engine writes: a date, then T or a blank and a time of hours, minutes and seconds, a fraction of a
-/// second, and Z or an offset ±HH:MM. A time without an offset is taken as UTC, where Python would take it as the
-/// machine's local time. Errors: text in any other form.
+/// The seconds since the epoch of an ISO 8601 time, as int(datetime.fromisoformat(iso).timestamp()) gives them, a time
+/// without an offset taken as UTC (crate::py::datetime::fromisoformat_timestamp). Errors: iso is not a time
+/// fromisoformat reads.
 pub fn epoch_seconds(iso: &str) -> Result<i64, String> {
-    let invalid = || format!("Invalid isoformat string: {iso:?}");
-    let number = |s: &str| -> Option<i64> { (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse().ok())? };
-    let (date, rest) = (iso.get(..10).ok_or_else(invalid)?, iso.get(10..).unwrap_or(""));
-    let parts: Vec<&str> = date.split('-').collect();
-    let [year, month, day] = parts[..] else { return Err(invalid()) };
-    if (year.len(), month.len(), day.len()) != (4, 2, 2) {
-        return Err(invalid());
-    }
-    let (year, month, day) = (number(year).ok_or_else(invalid)?, number(month).ok_or_else(invalid)?, number(day).ok_or_else(invalid)?);
-    if year < 1 || !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
-        return Err(invalid());
-    }
-    let mut seconds = days_from_civil(year, month, day) * 86_400;
-    if rest.is_empty() {
-        return Ok(seconds);
-    }
-    let time = rest.strip_prefix(['T', ' ']).ok_or_else(invalid)?;
-    let (clock, offset) = match time.find(['Z', '+', '-']) {
-        Some(at) => time.split_at(at),
-        None => (time, ""),
-    };
-    let (clock, fraction) = clock.split_once('.').unwrap_or((clock, ""));
-    if !fraction.is_empty() && number(fraction).is_none() {
-        return Err(invalid());
-    }
-    let fields: Vec<i64> = clock.split(':').map(|f| (f.len() == 2).then(|| number(f)).flatten()).collect::<Option<_>>().ok_or_else(invalid)?;
-    let [h, m, s] = match fields[..] {
-        [h] => [h, 0, 0],
-        [h, m] => [h, m, 0],
-        [h, m, s] => [h, m, s],
-        _ => return Err(invalid()),
-    };
-    if h > 23 || m > 59 || s > 59 {
-        return Err(invalid());
-    }
-    seconds += h * 3600 + m * 60 + s;
-    let shift = match offset {
-        "" | "Z" => 0,
-        _ => {
-            let (sign, hm) = offset.split_at(1);
-            let (oh, om) = hm.split_once(':').unwrap_or((hm.get(..2).unwrap_or(hm), hm.get(2..).unwrap_or("")));
-            let (oh, om) = (number(oh).filter(|_| oh.len() == 2).ok_or_else(invalid)?, number(om).filter(|_| om.len() == 2).ok_or_else(invalid)?);
-            if oh > 23 || om > 59 {
-                return Err(invalid());
-            }
-            let minutes = oh * 60 + om;
-            if sign == "+" { minutes * 60 } else { -minutes * 60 }
-        }
-    };
-    Ok(seconds - shift)
-}
-
-fn days_in_month(year: i64, month: i64) -> i64 {
-    match month {
-        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
-        2 => 28,
-        4 | 6 | 9 | 11 => 30,
-        _ => 31,
-    }
-}
-
-/// Days since 1970-01-01 of a date of the proleptic Gregorian calendar (Howard Hinnant's days_from_civil).
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
-/// The date of a day since 1970-01-01 (Howard Hinnant's civil_from_days).
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    (yoe + era * 400 + i64::from(month <= 2), month, day)
+    fromisoformat_timestamp(iso).map(|seconds| seconds.trunc() as i64)
 }
 
 /// A duration as summary.md and the tables write it: 42s, 3m 07s, 2h 05m.
@@ -282,6 +202,25 @@ pub fn run_summary(state: &RunState, pipeline: &Pipeline, rounds: &[String], now
         lines.extend(rounds.iter().map(|line| format!("- {line}")));
     }
     lines.join("\n") + "\n"
+}
+
+/// The turn's "tokens", as state.json and metrics.json hold them: the tokens of the answers its agent gave from the
+/// turn's start to the second its handoff file was written, summed, from usage, Harness::session_usage of the session
+/// it ran in throughout; "unknown" when there is no such usage, or the turn's session or either end is not known, or
+/// not a time.
+pub fn turn_tokens(turn: &Map<Json>, usage: Option<&[Usage]>) -> Json {
+    let unknown = || Json::from("unknown");
+    let known = |key: &str| turn.get(key).is_some_and(Json::truthy);
+    let Some(usage) = usage.filter(|_| known("session") && known("started_at") && known("ended_at")) else {
+        return unknown();
+    };
+    let time = |key: &str| turn.get(key).and_then(Json::as_str).and_then(|at| epoch_seconds(at).ok());
+    let (Some(start), Some(end)) = (time("started_at"), time("ended_at")) else { return unknown() };
+    // The answers within [start, end + 1), compared as Python compares an int with a float.
+    let (start, end) = (start as f64, (end + 1) as f64);
+    let total =
+        usage.iter().filter(|u| start <= u.when && u.when < end).fold(Tokens::default(), |sum, u| sum.plus(u.tokens));
+    total.to_json()
 }
 
 /// metrics.json of a run that is done, at now, in seconds since the epoch: one object of the run's outcome, its
