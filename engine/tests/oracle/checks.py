@@ -15,16 +15,16 @@ import glob
 import io
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import tomllib
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 sys.path[:0] = [ROOT, os.path.join(ROOT, "tests"), os.path.join(ROOT, "tests", "parity")]
-import orchestrator as o  # found through the path above
 import scenarios  # found through the path above
 import test_orchestrator as t  # found through the path above
+
+import orchestrator as o  # found through the path above
 
 OUT = os.path.join(os.path.dirname(__file__), "checks.json")
 # The time every change is judged at: 2026-10-23, TestOrchestratorChecks' TODAY.
@@ -32,6 +32,7 @@ NOW = t.TODAY
 
 
 def finding(path, line, rule, message="m", severity="error") -> dict:
+    """A finding of a check, as gate.py's _finding makes one."""
     return {"path": path, "line": line, "severity": severity, "rule": rule, "message": message}
 
 
@@ -41,7 +42,8 @@ def judge_run_cases() -> list[dict]:
     f = finding
     contract = t.TestQualityFileContract()
     cases = [
-        (t.quality_report("ERROR", "intro", conditions=["Coverage of new code is 50%."], issues=[f("a.py", 5, "ruff F401")],
+        (t.quality_report("ERROR", "intro", conditions=["Coverage of new code is 50%."],
+                          issues=[f("a.py", 5, "ruff F401")],
                           to_weigh=[f("t.py", 5, "flaky-tests mixed-results")], tests=[]),
          [("new-dependencies", [f("pyproject.toml", 5, "not-in-spec")], []), ("diff-budget", [], [f(None, None, "")])]),
         (t.quality_report("OK", "intro", tests=[]),
@@ -80,9 +82,11 @@ class ServedOnly:
         self.pypi: dict[str, dict] = {}
 
     def jenkins_build(self, result="SUCCESS", quality="GATE: OK\n", **kw):
+        """Keep the quality.md the build archives."""
         self.qualities.append(quality)
 
     def pypi_project(self, name, answer):
+        """Keep what PyPI answers for name."""
         self.pypi[name] = answer
 
     def __getattr__(self, name):
@@ -108,8 +112,8 @@ def commit_files(repository: dict) -> dict[str, dict[str, str]]:
             c = commits[sha]
             tree = dict(files(c["parents"][0])) if c["parents"] else {}
             for change in c["changes"]:
-                status, *paths = change.split("\t")
-                if status.startswith(("D", "R")):
+                kind, *paths = change.split("\t")
+                if kind.startswith(("D", "R")):
                     tree.pop(paths[0], None)
             tree.update(c["files"])
             out[sha] = tree
@@ -120,27 +124,23 @@ def commit_files(repository: dict) -> dict[str, dict[str, str]]:
     return out
 
 
-def git(cwd: str, *args: str) -> str:
-    return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout
-
-
 def diffed(base: dict[str, str], new: dict[str, str]) -> tuple[str, list[list]]:
     """The Python engine's change_diff, as text, and changed_line_counts of base's files becoming new's, on real
     git."""
+    host = o.Host()
     with tempfile.TemporaryDirectory() as tmp:
-        git(tmp, "init", "-q")
+        host.git(tmp, "init", "-q")
         shas = []
         for tree in (base, new):
-            for path in git(tmp, "ls-files").splitlines():
+            for path in host.git(tmp, "ls-files").splitlines():
                 os.remove(os.path.join(tmp, path))
             for path, text in tree.items():
                 os.makedirs(os.path.dirname(os.path.join(tmp, path)) or tmp, exist_ok=True)
                 with open(os.path.join(tmp, path), "w", encoding="utf-8", newline="") as f:
                     f.write(text)
-            git(tmp, "add", "-A")
-            git(tmp, "-c", "user.name=o", "-c", "user.email=o@x", "commit", "-q", "--allow-empty", "-m", "c")
-            shas.append(git(tmp, "rev-parse", "HEAD").strip())
-        host = o.Host()
+            host.git(tmp, "add", "-A")
+            host.git(tmp, "-c", "user.name=o", "-c", "user.email=o@x", "commit", "-q", "--allow-empty", "-m", "c")
+            shas.append(host.git(tmp, "rev-parse", "HEAD").strip())
         diff = os.fsdecode(host.change_diff(tmp, shas[0], shas[1]))
         counts = [[f.base_path, f.path, f.added, f.removed] for f in host.changed_line_counts(tmp, shas[0], shas[1])]
     return diff, counts
@@ -168,7 +168,8 @@ def recorded_cases() -> list[dict]:
             at = next(i for i, x in enumerate(lines) if x.strip())
             line = lines[at + 2]
             judged = "\n".join([*lines[:at + 1], *lines[at + 3:]])
-            assert o._under_gate_line(judged, line) == text, file
+            if o._under_gate_line(judged, line) != text:
+                raise RuntimeError(f"{name} {file}: the line under its GATE line is not the build's")
             number = int(line.split("#", 1)[1].split(" ", 1)[0])
             quality = world.qualities[number - 1]
             branch = recording["repositories"]["project"]["refs"][f"refs/heads/{state['branch']}"]
@@ -176,12 +177,14 @@ def recorded_cases() -> list[dict]:
             diff, counts = diffed(base_files, new_files)
             pipeline = o.saved_pipeline(state)
             pypi = t.FakePyPI(**world.pypi)
+            trees = {"base": base_files, "new": new_files}
             change = o.RunChange(spec, "base", "new", {p: set(ls) for p, ls in o.added_lines(diff).items()},
                                  [o.ChangedFile(*c) for c in counts],
-                                 lambda commit, p: {"base": base_files, "new": new_files}[commit].get(p), NOW,
-                                 lambda: True)
+                                 lambda commit, p, trees=trees: trees[commit].get(p), NOW, lambda: True)
             result = o.judge_run(quality, o.orchestrator_checks(pipeline, o.PyPI(urlopen=pypi)), change)
-            assert result == judged, f"{name} {file}: judge_run does not give the recorded file:\n{result}\n---\n{judged}"
+            if result != judged:
+                raise RuntimeError(f"{name} {file}: judge_run does not give the recorded file:\n{result}\n---\n"
+                                   f"{judged}")
             out.append({"from": f"{name} {file}", "quality": quality, "spec": spec, "base_files": base_files,
                         "new_files": new_files, "diff": diff, "counts": counts, "max_files": pipeline.max_files,
                         "max_lines": pipeline.max_lines, "pypi": world.pypi, "out": judged})
@@ -192,32 +195,33 @@ def recorded_cases() -> list[dict]:
 MANIFESTS = [
     (t.pyproject_with("limits>=3", "Foo.Bar[extra] >=1; python_version>'3'", "baz @ https://example.com/baz.whl"),
      None),
-    ('[project]\nname = "My_Proj"\ndependencies = ["x"]\n[project.optional-dependencies]\nall = ["my-proj[a]"]\n'
-     '[dependency-groups]\ndev = ["pytest", {include-group = "lint"}]\nlint = ["ruff==0.5"]\n', None),
-    ('[project]\nname = "p"\ndependencies = ["a", "b", "c", "d", "e", "f", "g", "h"]\n'
+    (('[project]\nname = "My_Proj"\ndependencies = ["x"]\n[project.optional-dependencies]\nall = ["my-proj[a]"]\n'
+     '[dependency-groups]\ndev = ["pytest", {include-group = "lint"}]\nlint = ["ruff==0.5"]\n'), None),
+    (('[project]\nname = "p"\ndependencies = ["a", "b", "c", "d", "e", "f", "g", "h"]\n'
      '[[tool.uv.index]]\nname = "corp"\nurl = "https://corp.example/simple/"\n'
      '[[tool.uv.index]]\nname = "pypi"\nurl = "https://pypi.org/simple/"\n'
      '[[tool.uv.index]]\nname = 3\n'
      '[tool.uv.sources]\na = { index = "corp" }\nb = { index = "pypi" }\nc = { index = "nameless" }\n'
      'd = [{ git = "https://g/d", marker = "x" }, { path = "y" }]\ne = { path = 5 }\n'
      'f = { mirror = 1.5, n = [true, "é", -0.0, inf] }\ng = { workspace = true }\n'
-     'h = { index = 3 }\n', None),
+     'h = { index = 3 }\n'), None),
     ('[tool.uv.sources]\nf = { at = 1979-05-27T07:32:00Z }\n', None),
     ('[project]\ndependencies = ["a"]\n[tool.uv.sources]\na = { index = ["x"] }\n', None),
     ('[[tool.uv.index]]\nname = ["x"]\n[tool.uv.sources]\na = { path = "p" }\n', None),
-    ('[project]\ndependencies = ["a", "b"]\n[[tool.uv.index]]\nname = 1\nurl = "https://one/simple"\n'
-     '[tool.uv.sources]\na = { index = true }\nb = { index = 1.0 }\n', None),
+    (('[project]\ndependencies = ["a", "b"]\n[[tool.uv.index]]\nname = 1\nurl = "https://one/simple"\n'
+     '[tool.uv.sources]\na = { index = true }\nb = { index = 1.0 }\n'), None),
     ('[project]\nname = "p"\ndependencies = ["a"]\n[tool.uv.sources]\na = { mirror = { x = 1 } }\n', None),
     ('[project]\nname = "p"\ndependencies = ["a"]\n[[tool.uv.index]]\nurl = "https://m/simple"\ndefault = true\n',
-     'version = 1\n[[package]]\nname = "a"\nsource = { registry = "https://pypi.org/simple" }\n'
+     ('version = 1\n[[package]]\nname = "a"\nsource = { registry = "https://pypi.org/simple" }\n'
      '[[package]]\nname = "B_c"\nsource = { git = "https://g/b?rev=1#abc" }\n'
      '[[package]]\nname = "d"\nsource = { directory = "../d" }\n'
      '[[package]]\nname = "p"\nsource = { editable = "." }\n'
      '[[package]]\nname = "w"\nsource = { virtual = "w" }\n'
      '[[package]]\nname = "u"\nsource = { url = "https://u/u.whl" }\n'
      '[[package]]\nname = "o"\nsource = { other = 1979-05-27 }\n'
-     '[[package]]\nname = "nosource"\n'),
-    ('[project]\nname = "p"\ndependencies = ["a"]\n', 'version = 1\n[[package]]\nname = "a"\nsource = { x = 07:32:00 }\n'),
+     '[[package]]\nname = "nosource"\n')),
+    ('[project]\nname = "p"\ndependencies = ["a"]\n',
+     'version = 1\n[[package]]\nname = "a"\nsource = { x = 07:32:00 }\n'),
     ("[project\n", "[[package\n"),
     ('[project]\ndependencies = "x"\n', '[[package]]\nversion = 1\n'),
     ('[project]\ndependencies = ["=x"]\n', 'package = 5\n'),
@@ -243,6 +247,7 @@ MANIFESTS = [
 
 
 def source(s: "o.PackageSource | None"):
+    """A PackageSource as [kind, where]; None for PyPI."""
     return None if s is None else [s.kind, s.where]
 
 
@@ -251,7 +256,7 @@ def dependency_cases() -> list[dict]:
     out = []
     for pyproject, lock in MANIFESTS:
         files = {"pyproject.toml": pyproject, "uv.lock": lock}
-        deps = o.python_dependencies(lambda p: files.get(p))
+        deps = o.python_dependencies(files.get)
         out.append({"pyproject": pyproject, "lock": lock,
                     "direct": [[k, source(s)] for k, s in deps.direct.items()],
                     "locked": [[k, source(s)] for k, s in deps.locked.items()],
@@ -272,22 +277,26 @@ LINE_NAMING = [
     ('x = ["a_"]\ny = ["a_b"]', [1, 2], "a"),
     ('é = "ab"', [1], "ab"),
 ]
-TOML_VALUES = ['"text"', "'it\"s'", "\"it's\"", '"tab\\t\\u00e9"', "5", "-0", "2.5", "1e300", "inf", "-inf", "nan", "-0.0",
+TOML_VALUES = ['"text"', "'it\"s'", "\"it's\"", '"tab\\t\\u00e9"', "5", "-0", "2.5", "1e300", "inf", "-inf", "nan",
+               "-0.0",
                "true", "false", "[1, 'a', [true]]", "[]", "{ k = 1, 'q\"' = \"a\" }", "{}",
                "1979-05-27T07:32:00Z", "1979-05-27T07:32:00.999999+01:30", "1979-05-27T07:32:05-07:00",
                "1979-05-27T00:00:00", "1979-05-27T07:32:00.5", "1979-05-27", "07:32:00", "07:32:05.25", "00:00:00"]
 
 
-def toml_value(literal: str) -> dict:
-    value = tomllib.loads(f"v = {literal}")["v"]
+def python_texts(literal: str) -> dict:
+    """What Python writes of the value of the TOML literal, as tomllib reads it: its type's name, str, repr and
+    json.dumps, or json.dumps's error."""
+    parsed = tomllib.loads(f"v = {literal}")["v"]
     try:
-        dumped = json.dumps(value)
+        dumped: str | dict[str, str] = json.dumps(parsed)
     except TypeError as e:
         dumped = {"error": str(e)}
-    return {"literal": literal, "type": type(value).__name__, "str": str(value), "repr": repr(value), "json": dumped}
+    return {"literal": literal, "type": type(parsed).__name__, "str": str(parsed), "repr": repr(parsed), "json": dumped}
 
 
 def requirement(text: str):
+    """_requirement of text, as [key, url], or its error."""
     try:
         return list(o._requirement(text))
     except ValueError as e:
@@ -304,7 +313,7 @@ def build() -> dict:
         "package_keys": [[n, o.package_key(n)] for n in ["Foo.Bar", "a-_.b", "ÉTÉ_x", "ΣΑΣ", "x--"]],
         "spec_names": [[s, sorted(o.spec_names(s))] for s in SPECS],
         "line_naming": [[text, lines, key, o._line_naming(text, set(lines), key)] for text, lines, key in LINE_NAMING],
-        "toml_values": [toml_value(v) for v in TOML_VALUES],
+        "toml_values": [python_texts(v) for v in TOML_VALUES],
     }
 
 
