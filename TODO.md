@@ -79,8 +79,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   engine. Narrowed by PR #162 (2026-10-27) for a quality round whose change leaves what the parity scenarios depend on
   alone (Jenkinsfile, Test stage): its build leaves them out. A change that bumps the version touches `pyproject.toml`
   and `uv.lock`, so its build still runs them, and so does the contract test's build of main whenever main's last
-  commit was a releasing merge (build #59, before #162, ran them in any case); Gate's mutmut time is
-  gate-open-decisions ticket 06's. Closes when
+  commit was a releasing merge (build #59, before #162, ran them in any case); Gate's mutmut time is narrowed by
+  `gate.py --test-contexts` (gate-open-decisions ticket 06), which costs the Test stage about 7 % more. Closes when
   a quality build that runs the scenarios fits in `QUALITY_TIMEOUT`, shown by the contract test green against one, or
   with a larger `QUALITY_TIMEOUT` in the Rust engine.
 - **The contract test leaves its Jenkins build running when it fails.** `tests/contract/test_jenkins.py` triggers one
@@ -425,10 +425,13 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   about 860 s behind the others). Those were pull request builds; a quality build has skipped the Package stage
   since 2026-10-24, so it has more to spare than that. The user kept 600 s (2026-10-24): a stopped run says `budget-reached`, never "none
   survived". Closes with the shared time budget above, or mutants chosen by the changed lines rather than whole
-  functions. Worse since mutmut's runs pass the suite (mutmut-hypothesis-health-check, PR #112): on PR #113 (2026-10-27)
-  mutmut was stopped at 600 s after trying 0 of 253 mutants, so its stats and clean runs of the now 1348-test suite
-  took the whole budget, and surviving-mutants judges nothing on Jenkins; the parity scenarios, left out of mutmut's
-  runs, add nothing to that.
+  functions. On PR #113 (2026-10-27) mutmut was stopped at 600 s after trying 0 of 253 mutants: its three runs of the
+  whole suite before the first mutant took the budget. Narrowed (2026-10-28, gate-open-decisions ticket 06): the
+  Jenkinsfile's Test stage records a coverage context per test, and `gate.py --test-contexts` has mutmut run only the
+  tests that reach the changed functions (`_tests_reaching`); replayed locally, PR #113's change took mutmut 77 s
+  instead of 709 s, with the same verdicts. Still open: a change to a function nearly every test reaches, such as
+  `tool_env`, still costs about the whole suite three times, and a large change still has more mutants than the
+  budget tries. Not yet shown on Jenkins: the first pull request build with the flag.
 - **`parse_args` still yields many survivors after `do_not_mutate_patterns = ['\bhelp=']`.** Its `description=` texts
   and flag names are mutated, and few tests check them word for word: 105 of 305 mutants survived on this branch's
   change. Reported per function, so it is one finding. Closes with a decision to add `'\bdescription='` to the

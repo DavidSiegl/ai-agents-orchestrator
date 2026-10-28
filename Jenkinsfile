@@ -139,6 +139,12 @@ pipeline {
                 // orchestrator.py is frozen a quality round seldom touches those paths. A git diff that fails counts as
                 // a change, so they run. Pull request builds always run them. [tool.mutmut] in pyproject.toml leaves
                 // them out of mutmut's runs.
+                //
+                // --cov-context=test records which tests run each line, in COVERAGE_FILE, for the Gate stage's
+                // --test-contexts: mutmut then runs only the tests that reach the changed functions. It takes about 7 %
+                // longer, under the ctrace core pyproject.toml pins. COVERAGE_FILE stays relative, in the workspace:
+                // set to an absolute path, under TMPDIR or elsewhere, the file vanished during a run and over 2300
+                // tests errored.
                 sh '''
                     parity=''
                     if [ -n "${GIT_REF:-}" ] && git diff --quiet HEAD^ HEAD -- orchestrator.py tests/parity \
@@ -147,7 +153,8 @@ pipeline {
                         parity='--ignore=tests/parity'
                     fi
                     status=0
-                    uv run pytest $parity --cov=orchestrator --cov=gate --cov-branch --cov-report=xml --junitxml=test-results.xml || status=$?
+                    uv run pytest $parity --cov=orchestrator --cov=gate --cov-branch --cov-context=test --cov-report=xml \\
+                        --junitxml=test-results.xml || status=$?
                     [ "$status" -le 1 ] || exit "$status"
                 '''
                 // The Rust tests, with line coverage, for the Gate stage likewise: --ignore-run-fail writes the
@@ -246,12 +253,15 @@ pipeline {
                     // once, as main's did before the commit that brought this order, keeps the last of each. A quality
                     // build judged by such a main, of a snapshot that carries this Jenkinsfile, is then judged on its
                     // Python as before, but not on its Rust tests, which only the junit step's UNSTABLE shows, nor on
-                    // the Rust's coverage; that window closes when main's gate.py takes both more than once.
+                    // the Rust's coverage; that window closes when main's gate.py takes both more than once. A quality
+                    // build's main has --test-contexts whenever its snapshot's Jenkinsfile passes it, the snapshot
+                    // being of a branch from that main or an older one.
                     withEnv(["GATE=${gate}", "GATE_RULES=${rules}", "GATE_BASE=${base}"]) {
                         status = sh(returnStatus: true, script: '''
                             uv run --frozen python "$GATE" --base "$GATE_BASE" --config "$GATE_RULES" \\
                                 --tests ui/src-tauri/target/nextest/ci/junit.xml --tests test-results.xml \\
-                                --coverage coverage-rust.xml --coverage coverage.xml --out quality.md
+                                --coverage coverage-rust.xml --coverage coverage.xml --test-contexts "$COVERAGE_FILE" \
+                                --out quality.md
                         ''')
                     }
                     if (status == 1 && params.GIT_REF) {
