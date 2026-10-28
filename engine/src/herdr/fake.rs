@@ -38,9 +38,11 @@ pub(crate) enum Call {
 
 /// What a FakeHerdr holds and records. Each field is what Python's FakeHerdr has of that name.
 pub(crate) struct FakeHerdrState {
-    /// The run's state as a turn is given it while the host holds no state.json of the run: then the test's. Once it
-    /// holds one, a turn is given that, the Workflow's own as it saved it, as Python's turns share its state: it saves
-    /// the state before each prompt (the prompted marker), so a turn sees what the run has set, its worktree included.
+    /// The run's state as a turn is given it while the host holds no state.json of the run: the test's. Once it holds
+    /// one, a turn is given that: the Workflow's state as the run last saved it (its claim, and each phase and step),
+    /// its worktree included, but behind the live state by whatever changed since, as Python's Workflow saves a turn's
+    /// prompted marker only after the prompt. Python's turns share the live state, and may change it; a port of a test
+    /// whose turn needs either needs the Workflow's own state handed to the fake (ticket 08).
     pub run: RunState,
     /// By role, its agent's turns still to play, in order.
     pub script: HashMap<String, VecDeque<Turn>>,
