@@ -85,7 +85,7 @@ class Trial:
     task: str
     repeat: int  # which run of the task in this eval, from 1
     passed: bool  # whether the hidden test accepted what the run left in the clone
-    exit_status: int  # the engine's run's
+    engine_exit: int  # the exit status of the engine's run
     seconds: float  # wall time of the engine's run, measured by the runner
     hidden_test_output: str  # the last HIDDEN_TEST_TAIL_LINES lines of the hidden test's output
     run_id: str | None = None  # None when the engine made no run directory
@@ -143,10 +143,10 @@ def run_trial(task: Task, repeat: int, engine: list[str], run_args: list[str], k
     try:
         spec = _isolated_inputs(task, work, repo)
         started = time.monotonic()
-        exit_status = _run_engine([*engine, "run", "--no-pr", "--spec", spec, "--cwd", repo, *run_args])
+        engine_exit = _run_engine([*engine, "run", "--no-pr", "--spec", spec, "--cwd", repo, *run_args])
         seconds = round(time.monotonic() - started, 1)
         passed, output = _run_hidden_test(task, repo, work)
-        trial = Trial(task.name, repeat, passed, exit_status, seconds, output)
+        trial = Trial(task.name, repeat, passed, engine_exit, seconds, output)
         _read_metrics(trial, repo)
         if trial.run_id:
             _close(engine, trial.run_id, repo)
@@ -356,7 +356,7 @@ def main(argv: list[str] | None = None) -> int:
     run = Eval(datetime.date.today().isoformat(), args.config or config_name(args.run_args), args.run_args,
                os.environ.get("EVAL_ENGINE") or "orchestrator.py", _head_commit())
     trials: list[Trial] = []
-    status = 0
+    exit_code = 0
     try:
         tasks = load_tasks(args.tasks.split(",") if args.tasks else None)
         for task in tasks:
@@ -366,13 +366,13 @@ def main(argv: list[str] | None = None) -> int:
                 append_records(run.results_path, [run.record(trial)])
     except (EvalError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
-        status = 1
+        exit_code = 1
     except KeyboardInterrupt:
-        status = EXIT_INTERRUPTED
+        exit_code = EXIT_INTERRUPTED
     if trials:
         print(table(trials), end="")
         print(f"results appended to {os.path.relpath(run.results_path)}")
-    return status
+    return exit_code
 
 if __name__ == "__main__":
     sys.exit(main())

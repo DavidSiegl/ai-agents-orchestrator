@@ -60,7 +60,7 @@ class Docs(Acceptance):
         self.assertIn("--file", section)
         self.assertIn("store.json", section)
 
-    def check_usage_gives_the_exit_status(self):
+    def check_usage_says_a_missing_key_exits_1(self):
         """The usage says a missing key exits with status 1."""
         self.assertRegex(self.usage(), r"(?is)(exit|status)[^.]*\b1\b")
 

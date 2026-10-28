@@ -292,7 +292,7 @@ class TestTrial(FakeEngineTest):
     def test_metrics_fill_the_trial(self):
         self.plan(files=SOLUTIONS["bugfix"], metrics=metrics(quality_rounds=2))
         trial = self.trial("bugfix", repeat=3)
-        self.assertEqual((trial.task, trial.repeat, trial.passed, trial.exit_status), ("bugfix", 3, True, 0))
+        self.assertEqual((trial.task, trial.repeat, trial.passed, trial.engine_exit), ("bugfix", 3, True, 0))
         self.assertEqual((trial.run_id, trial.outcome, trial.rounds, trial.quality_rounds),
                          ("20261028-120000-abc123", "APPROVE", 2, 2))
         self.assertEqual(trial.tokens, {"input": 11, "output": 6, "cache_read": 100, "cache_write": 1})
@@ -306,7 +306,7 @@ class TestTrial(FakeEngineTest):
     def test_a_run_that_failed_without_metrics_is_still_judged(self):
         self.plan(files=SOLUTIONS["feature"], exit=1, metrics=None)
         trial = self.trial()
-        self.assertEqual((trial.passed, trial.exit_status, trial.run_id, trial.outcome, trial.rounds, trial.tokens),
+        self.assertEqual((trial.passed, trial.engine_exit, trial.run_id, trial.outcome, trial.rounds, trial.tokens),
                          (True, 1, "20261028-120000-abc123", None, None, None))
 
     def test_a_run_that_made_no_run_directory_is_not_closed(self):
@@ -348,7 +348,7 @@ class TestLoadTasks(unittest.TestCase):
 
 
 def trial(task="feature", passed=True, seconds=60.0, **fields) -> evals.Trial:
-    return evals.Trial(task=task, repeat=1, passed=passed, exit_status=0, seconds=seconds, hidden_test_output="OK", **fields)
+    return evals.Trial(task=task, repeat=1, passed=passed, engine_exit=0, seconds=seconds, hidden_test_output="OK", **fields)
 
 
 class TestTable(unittest.TestCase):

@@ -188,10 +188,11 @@ and a few repeats are a small sample: one trial more or less passed is noise, a 
 not. Compare results of the same tasks only; a line's `commit`, this checkout's HEAD, says which.
 
 A result line holds `version` (1), `date`, `config`, `run_args`, `engine` (`EVAL_ENGINE`, or `orchestrator.py`),
-`commit`, `task`, `repeat`, `passed`, `exit_status` (the engine's run's), `seconds`, `hidden_test_output` (the last
-lines of its output, ending with the checks that did not pass), `run_id`, and from `metrics.json`, `null` without
-one: `outcome`, `rounds`, `quality_rounds`, and `tokens`, the four counts summed, `null` also when a turn's are
-unknown. `jq` sums a file up by task; run it on the file before a change and the one after to compare:
+`commit`, `task`, `repeat`, `passed`, `engine_exit` (the exit status of the engine's run), `seconds`,
+`hidden_test_output` (the last lines of its output, ending with the checks that did not pass), `run_id`, and from
+`metrics.json`, `null` without one: `outcome`, `rounds`, `quality_rounds`, and `tokens`, the four counts summed,
+`null` also when a turn's are unknown. `jq` sums a file up by task; run it on the file before a change and the one
+after to compare:
 
 ```sh
 jq -s 'group_by(.task) | map({task: .[0].task, passed: (map(select(.passed)) | length), runs: length})' \
