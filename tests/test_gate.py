@@ -201,15 +201,6 @@ class TestQualityReport(unittest.TestCase):
         self.assertIn("- The change edits `clippy.toml` and `ui/Cargo.toml`, which clippy takes its rules or its "
                       "toolchain from; it judged the change by the edited ones.\n", text)
 
-    def test_files_under_mutmut_s_state_are_named_apart_from_build_config(self):
-        text = quality_report("OK", "i", mutmut_state=["mutants/calc.py", "mutants/calc.py.meta"])
-        self.assertIn("## Build configuration\n\n- The change adds or edits `mutants/calc.py` and "
-                      "`mutants/calc.py.meta` under `mutants/`, where mutmut keeps its state. The gate's checks leave "
-                      "them out: none selects a test or a function in them or counts them as a change to the code, "
-                      "and the surviving-mutants check runs mutmut without them. The linters read them as they read "
-                      "any tracked file.\n", text)
-        self.assertNotIn("The change edits", text)
-
     # The whole file, for each gate word and each way quality_report words a section, held to its golden file
     # (tests/golden.py), so that a change to its wording fails here and is reviewed as the golden file's diff. The
     # intro, the conditions and the coverage sentence are judge_change's: TestGate's golden files pin those.
@@ -233,7 +224,7 @@ class TestQualityReport(unittest.TestCase):
             coverage="50.0% of 20 new lines to cover; 10 lines are not covered.",
             suppressions=[("f.py", 3, "x = 1  # noqa: F401"), ("g\rh.py", 1, "# noqa")],
             edited=["Jenkinsfile", "pyproject.toml", "uv.lock"],
-            clippy_config=[f"c{k}/Cargo.toml" for k in range(7)], mutmut_state=["mutants/calc.py"])
+            clippy_config=[f"c{k}/Cargo.toml" for k in range(7)])
         assert_golden("quality_report_error", text)
 
     def test_an_error_file_whose_findings_to_weigh_are_cut_is_golden(self):
@@ -614,6 +605,33 @@ class TestGate(RepositoryTest):
         self.assertEqual(status, 0)
         self.assertIn("## Suppressions added\n\n- `f.py:4` `import os  # noqa: F401`\n"
                       "- `run.sh:1` `# shellcheck disable=SC2086`\n", out)
+
+    def test_files_committed_under_mutmut_s_state_fail_the_gate_and_nothing_else_reads_them(self):
+        self.commit({"mutants/old.py": "old = 1\n", "mutants/gone.py": "gone = 1\n"}, "mutmut's state, committed")
+        self.put("mutants/calc.py", "import os  # noqa: F401\nx = 1\rimport sys\n")
+        self.git("add", "mutants/calc.py")
+        self.edit("mutants/old.py", "old = 1\n", "old = 2\n")
+        self.git("rm", "--quiet", "mutants/gone.py")  # deleting what an earlier commit left there is no fault
+        self.add_lines(1)
+        self.says("ruff", "mutants/calc.py:1:8: F401 `os` imported but unused\nmutants/old.py:1:1: E1 x\n")
+        seen = []
+        self.checks(gate.GateCheck("integrity", fails=True, find=lambda change: seen.append(change) or []))
+        coverage = os.path.join(self.repo, "coverage.xml")
+        with open(coverage, "w") as f:
+            f.write('<coverage><sources><source>.</source></sources><packages><package><classes>'
+                    '<class filename="mutants/calc.py"><lines>'
+                    + "".join(f'<line number="{n}" hits="0"/>' for n in range(1, 4))
+                    + "</lines></class></classes></package></packages></coverage>")
+        status, out, _ = self.gate("--coverage", "coverage.xml")
+        self.assertEqual(status, 1)
+        self.assertIn("## Failed conditions\n\n- The change adds or edits `mutants/calc.py` and `mutants/old.py` "
+                      "under `mutants/`, where mutmut keeps its scratch state, which is never part of a change; the "
+                      "gate judged none of them. Remove them from the change.\n\n## Issues", out)
+        self.assertNotIn("Suppressions added", out)
+        self.assertIn("## Coverage on new code\n\nNo new lines to cover.\n", out)
+        self.assertFalse(any(a.startswith("mutants/") for a in self.argv("ruff")), self.argv("ruff"))
+        [change] = seen
+        self.assertEqual((change.changed, change.mutmut_state), ({"f.py": {4}}, ("mutants/calc.py", "mutants/old.py")))
 
     def checks(self, *checks):
         """Run the gate with checks in place of gate_checks's."""
@@ -3053,9 +3071,9 @@ class TestSurvivingMutants(RepositoryTest):
         self.git("add", "mutants/calc.py.meta")
         found = self.found()
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 5, "survived")])
-        diff = self.host.change_diff(self.repo, self.git("rev-parse", "HEAD").strip())
-        self.assertEqual(gate.edited_config(diff, changed_lines(diff)), [])
-        self.assertEqual(gate.mutmut_state_files(changed_lines(diff)), ["mutants/calc.py.meta"])
+        change = gate.GateChange.from_tree(self.repo, self.git("rev-parse", "HEAD").strip())
+        self.assertEqual(gate.edited_config(change.diff, change.changed), [])
+        self.assertEqual(change.mutmut_state, ("mutants/calc.py.meta",))
 
     def test_a_function_under_mutmut_s_state_is_not_selected(self):
         self.put("mutants/calc.py", "def x_checked__mutmut_1(a, b):\n    return a - b\n")

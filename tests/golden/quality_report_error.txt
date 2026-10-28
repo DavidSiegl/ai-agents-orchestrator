@@ -40,4 +40,3 @@ These do not fail the gate. Fix each, or say in your report why it should stand.
 - The change edits `pyproject.toml`, which holds the gate's rules; the change was judged by the edited rules.
 - The change edits `uv.lock`, which pins the versions of the linters the gate ran.
 - The change edits `c0/Cargo.toml`, `c1/Cargo.toml`, `c2/Cargo.toml`, `c3/Cargo.toml`, `c4/Cargo.toml` and 2 more, which clippy takes its rules or its toolchain from; it judged the change by the edited ones.
-- The change adds or edits `mutants/calc.py` under `mutants/`, where mutmut keeps its state. The gate's checks leave them out: none selects a test or a function in them or counts them as a change to the code, and the surviving-mutants check runs mutmut without them. The linters read them as they read any tracked file.

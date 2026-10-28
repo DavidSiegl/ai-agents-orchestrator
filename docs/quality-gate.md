@@ -21,7 +21,7 @@ uv run python gate.py --base main --tests test-results.xml --coverage coverage.x
 nothing from it and reads only the file it writes ([the quality file as a
 contract](#the-quality-file-as-a-contract)).
 
-It runs six linters over the files git tracks, each over the files it reads, and keeps only the findings on
+It runs six linters over the files git tracks outside `mutants/` (below), each over the files it reads, and keeps only the findings on
 lines the change adds, and the lineless ones on files it touches. Findings on older lines are counted, never
 listed and never held against the change, so the gate judges the change rather than the codebase.
 
@@ -69,9 +69,12 @@ Builder answers and the Reviewer judges without the gate failing. A failing chec
 not only on added lines, and names the check that raised it. A check that cannot run says so as one of its
 findings, so a failing check that cannot run fails the gate.
 
-Every check sees the change without what the tree tracks under `mutants/`, mutmut's state (`GateChange.from_tree`):
-none selects a test, a function or a changed line there, or counts an edit there as a change to the code, and a file
-moved out of it counts as added. The linters and the build configuration listing see those files as any other.
+The gate reads the change without what the tree tracks under `mutants/`, mutmut's state (`GateChange.from_tree`),
+and every part of it reads that one change: no linter finding, suppression, line end or coverage counts there, no
+check selects a test, a function or a changed line there, or counts an edit there as a change to the code, and a file
+moved out of it counts as added. A change that adds or edits files there, or moves files into it, fails the gate with
+one condition naming them, since a committed `mutants/` is always mutmut's scratch state committed by accident.
+Deleting such files is no fault.
 
 | Check | Fails? | Finds |
 |---|---|---|
@@ -375,10 +378,7 @@ first, at most 50 in all, then a count:
   because it takes them out of the surviving-mutants check.
 - **Build configuration**: an edit to `Jenkinsfile`, `pyproject.toml` or `uv.lock` is noted, since each can change how
   the change was judged, as is one to a file anywhere in the tree that clippy takes its rules or its toolchain from
-  (`Cargo.toml`, `clippy.toml`, `rust-toolchain.toml`, `.cargo/config.toml`; `CLIPPY_CONFIG_NAMES` in `gate.py`), and so
-  is each file the change adds or edits under `mutants/`, where mutmut keeps its state: the checks leave them out, as
-  [the gate](#the-gate) says, and the surviving-mutants check runs mutmut without them, though the linters read them as
-  they read any tracked file.
+  (`Cargo.toml`, `clippy.toml`, `rust-toolchain.toml`, `.cargo/config.toml`; `CLIPPY_CONFIG_NAMES` in `gate.py`).
 
 ### Whose rules judge a change
 
@@ -396,7 +396,7 @@ alone. In the copy mutmut runs on, that table replaces the tree's own, and only 
 `pyproject.toml`, such as `[tool.pytest.ini_options]`, is how its tests run, which a change may need to alter. Without
 `--config`, the tree's table judges it, as the linters' do. What the tree holds under `mutants/`, mutmut's own state
 and cache of results, is left out of that copy, so mutmut starts afresh and a change cannot mark its mutants killed;
-a change that adds or edits files there is listed under build configuration.
+a change that adds or edits files there fails the gate, as [the gate](#the-gate) says.
 
 The rule sets were tuned until `main` gave a short list of real findings: ruff's defaults plus bugbear,
 simplifications, pyupgrade, bandit, cyclomatic complexity (`C90`, `max-complexity = 15`; nesting is the

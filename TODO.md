@@ -420,17 +420,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   (`_edits_test`). Kept as the ticket states it. Closes with a decision to pass `_edits_test`-like counting to
   `_changed_python_functions`. The cognitive-complexity check has a walker of its own (`_scored_functions`), so it
   is not affected.
-- **Committed mutmut output is read as the change's own code by the linters.** The checks leave `mutants/` out, by the
-  user's decision of 2026-10-24 (review round 9, F33): `GateChange.from_tree` diffs the tree without it, so no check
-  (test-integrity, flaky-tests, surviving-mutants, cognitive-complexity) selects a test, a function or a changed line
-  there or counts an edit there as a change to the code, and the build configuration listing still names such files.
-  That filter does not reach the linters: `judge_change` runs them over every tracked file their pathspecs match and
-  keeps their findings on its own, unfiltered `changed_lines`, so a change that commits `mutants/calc.py`, mutmut's
-  mutated copy with its trampolines, has its added lines there linted, and their findings can fail the gate. The same
-  unfiltered lines feed the suppressions list, the stray-line-end refusal and the coverage condition; coverage counts
-  such files only when the project's coverage measures them, since `new_coverage` reads only the files the Cobertura
-  report lists. Whether the linters should read them, leave them out, or the gate refuse them is open. Closes with that
-  decision.
 - **mutmut reads a symlinked `.py` file in the surviving-mutants copy.** `_copy_tracked` copies a tracked symlink
   as a link (`gate.py`), `_mark_for_mutmut` leaves links unmarked, and mutmut 3.8.0's `walk_all_files` lists
   a symlink to a file and `create_mutants_for_file` opens it. So once any changed function starts mutmut, a change
@@ -472,6 +461,18 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   subdirectory.
 
 ## Fixed
+
+- **Committed mutmut output was read as the change's own code by the linters.** The checks left `mutants/` out
+  (`GateChange.from_tree`), but `judge_change` ran the linters over every tracked file and kept their findings on its
+  own, unfiltered changed lines, which also fed the suppressions list, the stray-line-end refusal and the coverage
+  condition, so a change committing `mutants/calc.py` had its lines there linted. Fixed (2026-10-28, the user's
+  decision in `.scratch/gate-open-decisions/issues/04-committed-mutants-dir.md`: refuse): `judge_change` reads only
+  `GateChange.from_tree`'s change, whose `changed` and `diff` every reader shares, and passes the linters no file
+  under `mutants/` (`_in_mutmut_state`); a change that adds, edits or moves in files there fails with one
+  condition naming them (`GateChange.mutmut_state`), which replaces their listing under build configuration
+  (`mutmut_state_files` is gone). Deleting such files passes. Not closed: mypy reads the files `[tool.mypy] files`
+  names, not the gate's list, so rules naming a directory above `mutants/` still have mypy read them; their findings
+  count nowhere, since no line there is a changed one.
 
 - **A Python script with no `.py` was never judged by the cognitive-complexity check.** `_judged_files` judged only
   paths ending in `.py`, while the pairing read a script whose `#!` line names python as Python, so a function the
