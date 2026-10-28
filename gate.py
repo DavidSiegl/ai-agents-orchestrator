@@ -85,15 +85,17 @@ FLAKY_RUN_TIMEOUT = 30
 # The surviving-mutants check lets mutmut run for `gate.py --mutation-budget` seconds, MUTATION_BUDGET by default, then
 # stops it: SIGINT, MUTMUT_STOP_GRACE seconds to exit, a kill, and TOOL_KILL_WAIT seconds to read what it printed.
 # Listing its results and showing what a few survivors of each function change, about a third of a second each, then
-# get MUTMUT_REPORT_TIMEOUT seconds in all, each call's stop included. Before mutmut starts, reading which tests reach
-# the changed functions from `gate.py --test-contexts` gets TEST_CONTEXTS_TIMEOUT seconds and TOOL_KILL_WAIT; about one
-# for this repository's 24 MB file. So the check adds at most the budget and 110 seconds to the gate, and copying the
-# tree a few more: with the flaky-tests check's 180, passes-at-base's BASE_RUN_BUDGET and the test run, about 1025 of a
+# get MUTMUT_REPORT_TIMEOUT seconds in all, each call's stop included. Before mutmut starts, under `gate.py
+# --test-contexts`, reading which tests reach the changed functions gets TEST_CONTEXTS_TIMEOUT seconds, about one for
+# this repository's 24 MB file, and pytest's collection of mutmut's test selection TEST_COLLECTION_TIMEOUT, about
+# three here; each and TOOL_KILL_WAIT. So the check adds at most the budget and 145 seconds to the gate, and copying the
+# tree a few more: with the flaky-tests check's 180, passes-at-base's BASE_RUN_BUDGET and the test run, about 1060 of a
 # quality round's QUALITY_TIMEOUT, leaving the rest to the queue and the install.
 MUTATION_BUDGET = 600
 MUTMUT_STOP_GRACE = 10
 MUTMUT_REPORT_TIMEOUT = 60
 TEST_CONTEXTS_TIMEOUT = 30
+TEST_COLLECTION_TIMEOUT = 30
 # The passes-at-base check runs the changed tests at the base for `gate.py --base-run-budget` seconds, this by default.
 BASE_RUN_BUDGET = 120
 # The gate's exit status when it could not judge the change, and so wrote no quality file.
@@ -2691,10 +2693,11 @@ def surviving_mutants(change: GateChange, *, budget: float, test_contexts: str |
 
     test_contexts, when given, is the path of a coverage.py data file of the tree's test run with a context per test,
     as `pytest --cov-context=test` writes it, relative to the current directory. mutmut then runs only the tests of
-    the selection that the file records running a line of a mutated function's body, which spares it two runs of the
-    whole selection before its first mutant (_tests_reaching says which tests, and what makes the file unfit). When
-    the file records no such test, no mutmut starts, and each mutated function is an untested finding. A file unfit
-    to tell them is a not-narrowed finding saying why, and mutmut runs the whole selection.
+    its selection, as pytest collects it in the copy with mutmut's options, that the file records running a line of a
+    mutated function's body, which spares it two runs of the whole selection before its first mutant
+    (_recorded_tests says which tests the file records, and what makes it unfit). When there is no such test, no
+    mutmut starts, and each mutated function is an untested finding. A file unfit to tell them, or a collection that
+    fails, is a not-narrowed finding saying why, and mutmut runs the whole selection.
     """
     functions, out = _changed_python_functions(change)
     if functions:
@@ -2720,25 +2723,34 @@ def _mutation_test(change: GateChange, functions: list[_ChangedFunction], budget
             mutated.append(f)
     if not mutated:
         return out
+    recorded = None
     if test_contexts:
-        tests, why = _tests_reaching(change.root, mutated, table, test_contexts)
+        recorded, why = _recorded_tests(change.root, mutated, os.path.abspath(test_contexts))
         if why:
-            out.append(_finding(None, None, "not-narrowed", f"mutmut was given its whole test selection, not only the "
-                                                            f"tests `--test-contexts` records reaching the changed "
-                                                            f"functions: {why}."))
-        elif not tests:
-            return out + [_finding(f.path, f.line, "untested", f"no test of [tool.mutmut]'s selection runs `{f.name}`, "
-                                                               f"as `--test-contexts` records them, so mutmut was not "
-                                                               f"started.") for f in mutated]
-        else:
-            # mutmut appends tests_dir, a deprecated alias, to the selection.
-            table = {**{k: v for k, v in table.items() if k != "tests_dir"},
-                     "pytest_add_cli_args_test_selection": tests}
+            out.append(_not_narrowed(why))
+            recorded = None
+        elif not recorded:
+            return out + _untested_by_contexts(mutated)
     return out + _in_scratch_directory("not-run", "to run mutmut on a copy of the tree in",
-                                       lambda tmp: _mutmut_on_copy(change.root, tmp, mutated, table, budget))
+                                       lambda tmp: _mutmut_on_copy(change.root, tmp, mutated, table, budget, recorded))
 
 
-# The program _tests_reaching runs in the gate's own interpreter, as the gate runs mutmut, so that it reads a
+def _not_narrowed(why: str) -> dict:
+    """The not-narrowed finding: `--test-contexts` was given, but why, a clause, kept the gate from narrowing mutmut's
+    test selection to the tests it records."""
+    return _finding(None, None, "not-narrowed", f"mutmut was given its whole test selection, not only the tests "
+                                                f"`--test-contexts` records reaching the changed functions: {why}.")
+
+
+def _untested_by_contexts(functions: list[_ChangedFunction]) -> list[dict]:
+    """An untested finding for each of functions, which no test of mutmut's selection reaches as `--test-contexts`
+    records the tests, so that mutmut is not started."""
+    return [_finding(f.path, f.line, "untested", f"no test of [tool.mutmut]'s selection runs `{f.name}`, as "
+                                                 f"`--test-contexts` records them, so mutmut was not started.")
+            for f in functions]
+
+
+# The program _recorded_tests runs in the gate's own interpreter, as the gate runs mutmut, so that it reads a
 # coverage.py data file through coverage's API rather than its SQLite schema. argv[1] is the data file, argv[2] JSON
 # [[path, first, last], ...], each path real and absolute. It prints JSON {"tests": n, "busiest": m, "reached": [...]}:
 # n the tests the file records a context of, m the most of them it records running any one line, and for each span the
@@ -2778,33 +2790,13 @@ print(json.dumps({"tests": len(set().union(*by_line)), "busiest": max(map(len, b
 _UNDER_RECORDED_SHARE = 10
 
 
-def _tests_reaching(root: str, functions: list[_ChangedFunction], table: dict,
-                    test_contexts: str) -> tuple[list[str], str | None]:
-    """The pytest node ids, sorted, of the tests of table's selection, a [tool.mutmut]'s
-    pytest_add_cli_args_test_selection less what its and pytest_add_cli_args's --ignore and --ignore-glob options
-    leave out, that test_contexts, the path of a coverage.py data file with a context per test, records running a line
-    of the body of any of functions, those in root's working tree; a one-line function's own line counts as its body.
-    Or [] and why the file cannot tell them, a clause: coverage.py cannot read it, it holds no test's context, it
-    records too few tests on each line (_UNDER_RECORDED_SHARE), or it did not measure the file of one of functions.
-
-    The node ids are as pytest names the tests from the rootdir of the run that wrote the file, which must be root, as
-    mutmut runs them in its copy of root. The selection's other options cannot be applied to node ids, so a selection
-    holding one is a why too."""
-    selection = [*table.get("pytest_add_cli_args_test_selection", []), *table.get("tests_dir", [])]
-    ignored, globs, options = _ignored_paths([*table.get("pytest_add_cli_args", []), *selection])
-    if unapplied := [a for a in selection if a.startswith("-") and a not in options]:
-        return [], (f"[tool.mutmut] pytest_add_cli_args_test_selection holds `{one_line(unapplied[0])}`, which the "
-                    f"gate cannot apply to the tests the file records")
-    paths = [a for a in selection if a not in options]
-    reaching, why = _recorded_tests(root, functions, os.path.abspath(test_contexts))
-    return sorted(i for i in reaching if any(_in_node(i, p) and not _left_out_below(i, p, ignored, globs)
-                                             for p in paths or ["."])), why
-
-
 def _recorded_tests(root: str, functions: list[_ChangedFunction], data_file: str) -> tuple[set[str], str | None]:
     """The pytest node ids of the tests that data_file, the absolute path of a coverage.py data file with a context
-    per test, records running a line of the body of any of functions, as _tests_reaching takes them. Or an empty set
-    and why the file cannot tell them, a clause, as _tests_reaching says."""
+    per test, records running a line of the body of any of functions, those in root's working tree; a one-line
+    function's own line counts as its body. Or an empty set and why the file cannot tell them, a clause: coverage.py
+    cannot read it, it holds no test's context, it records too few tests on each line (_UNDER_RECORDED_SHARE), or it
+    did not measure the file of one of functions. The node ids are as pytest names the tests from the rootdir of the
+    run that wrote the file, which must be root, as mutmut runs them in its copy of root."""
     spans = [[os.path.realpath(os.path.join(root, f.path)), f.line + 1 if f.last > f.line else f.line, f.last]
              for f in functions]
     # -I: the program runs in root, whose own modules, such as a json.py, must not stand in for the ones it imports.
@@ -2836,50 +2828,14 @@ def _recorded_tests(root: str, functions: list[_ChangedFunction], data_file: str
     return {i for tests in reached for i in tests}, None
 
 
-def _ignored_paths(args: list[str]) -> tuple[list[str], list[str], set[str]]:
-    """What args, pytest's command-line arguments, leave out of its collection: the paths of its --ignore options and
-    the patterns of its --ignore-glob options, each given as `--OPTION=VALUE` or as `--OPTION` and VALUE; and the
-    arguments those options are made of. pytest applies neither to a node id it is given."""
-    found: dict[str, list[str]] = {"--ignore": [], "--ignore-glob": []}
-    options = set()
-    for i, a in enumerate(args):
-        name, eq, operand = a.partition("=")
-        if name in found and eq:
-            found[name].append(operand)
-            options.add(a)
-        elif a in found and i + 1 < len(args):
-            found[a].append(args[i + 1])
-            options |= {a, args[i + 1]}
-    return found["--ignore"], found["--ignore-glob"], options
-
-
-def _left_out_below(node_id: str, entry: str, ignored: list[str], globs: list[str]) -> bool:
-    """Whether pytest, given entry, a selection path the test node_id lies in, leaves the test out as it collects
-    what lies below entry: its file, or a directory between entry and the file, is one of ignored, paths of --ignore,
-    or matches one of globs, patterns of --ignore-glob, whole; all relative to the rootdir. entry itself, and what lies
-    above it, pytest collects whatever those options say, as it does a file or node id named on its command line."""
-    path = _node_parts(node_id)[0]
-    parts = path.split("/")
-    top = os.path.normpath(entry.split("::")[0])
-    below = [p for p in itertools.accumulate(parts, lambda a, b: f"{a}/{b}")
-             if top == "." or p.startswith(f"{top}/")]
-    return any(p == os.path.normpath(i) for p in below for i in ignored) or any(
-        fnmatch.fnmatchcase(p, os.path.normpath(g)) for p in below for g in globs)
-
-
-def _in_node(node_id: str, path: str) -> bool:
-    """Whether the test node_id is path's or one inside it, path a directory, a file or a node id as pytest takes it
-    on its command line, relative to the rootdir; "." is every test."""
-    path = os.path.normpath(path)
-    return path == "." or node_id == path or node_id.startswith((f"{path}/", f"{path}::", f"{path}["))
-
-
-def _mutmut_on_copy(root: str, tmp: str, functions: list[_ChangedFunction], table: dict, budget: float) -> list[dict]:
+def _mutmut_on_copy(root: str, tmp: str, functions: list[_ChangedFunction], table: dict, budget: float,
+                    recorded: set[str] | None = None) -> list[dict]:
     """Copies the files git tracks in root's working tree into tmp, an empty private directory, as _copy_tracked
     does, but for what it tracks under mutmut's state, _MUTMUT_STATE, marked for mutmut to skip all but
     functions, with table, the rules' [tool.mutmut], in place of its own; runs mutmut there on functions for
     budget seconds, its pytest runs taking no configuration or conftest.py from above the copy, and returns what
-    it found."""
+    it found. recorded, when given, are the node ids of the tests `--test-contexts` records reaching functions:
+    mutmut is then given those of them its selection collects, as _narrowed_table says."""
     tree_copy = os.path.join(tmp, "tree")
     added = table.get("pytest_add_cli_args", [])
     try:
@@ -2898,6 +2854,11 @@ def _mutmut_on_copy(root: str, tmp: str, functions: list[_ChangedFunction], tabl
         # project's own configuration is read from mutmut's copy of it in mutants/, which also_copy makes, since
         # pytest takes paths in it, such as pythonpath, from where it is: there they name the mutated code.
         config = _pytest_config(tree_copy, tmp)
+        narrowed: list[dict] = []
+        if recorded is not None:
+            table, narrowed = _narrowed_table(_PytestSetup(tree_copy, config, tree_copy), table, recorded)
+            if not table:
+                return _untested_by_contexts(functions)
         mutants = os.path.join(tree_copy, _MUTMUT_STATE)
         also_copy = table.get("also_copy", [])
         if os.path.dirname(config) == tree_copy:
@@ -2907,10 +2868,35 @@ def _mutmut_on_copy(root: str, tmp: str, functions: list[_ChangedFunction], tabl
                                       "pytest_add_cli_args": [*added, "-c", config, "--confcutdir", mutants]})
         run, stopped = _run_mutmut(tree_copy, ["run"], budget)
     except (OSError, GateError) as e:
-        return [_mutation_not_run(f"could not start mutmut: {e}")]
+        return [*narrowed, _mutation_not_run(f"could not start mutmut: {e}")]
     except ValueError as e:
-        return [_mutation_not_run(str(e))]
-    return _mutmut_findings(tree_copy, functions, run, stopped, budget, table)
+        return [*narrowed, _mutation_not_run(str(e))]
+    return narrowed + _mutmut_findings(tree_copy, functions, run, stopped, budget, table)
+
+
+def _narrowed_table(setup: _PytestSetup, table: dict, recorded: set[str]) -> tuple[dict, list[dict]]:
+    """table, a [tool.mutmut], with its test selection narrowed to those of recorded, pytest node ids, that pytest
+    collects from it at setup, a copy of the tree, by the selection and pytest_add_cli_args mutmut's own runs are
+    given: so pytest itself applies their paths, --ignore, --deselect, -m and the like. And [] beside it; or {} and []
+    when it collects none of them; or table as it is, and the not-narrowed finding saying why, when the collection
+    fails. The copy holds every tracked file, where mutmut's own holds source_paths, also_copy and tests/, so a
+    selection that reaches outside those is collected wider here than mutmut runs it."""
+    # mutmut appends tests_dir, a deprecated alias, to the selection.
+    selection = [*table.get("pytest_add_cli_args_test_selection", []), *table.get("tests_dir", [])]
+    doing = "collecting [tool.mutmut]'s test selection"
+    # Exit status 5: pytest collected no test. Without pytest-randomly, which only shuffles the list.
+    proc, problem = _pytest(setup, doing, ["-p", "no:randomly", "--collect-only", *selection,
+                                           *table.get("pytest_add_cli_args", [])],
+                            ok=(0, 5), timeout=TEST_COLLECTION_TIMEOUT)
+    if problem or proc is None:
+        return table, [_not_narrowed(problem or f"pytest could not be started, {doing}")]
+    # At verbosity -1 pytest lists one node id a line, unindented, before its summary.
+    collected = {line for line in proc.stdout.split("\n") if "::" in line and not line[:1].isspace()}
+    if proc.returncode == 0 and not collected:
+        return table, [_not_narrowed(f"pytest, {doing}, printed no node id the gate could read: {_said(proc)}")]
+    if not (tests := sorted(recorded & collected)):
+        return {}, []
+    return {**{k: v for k, v in table.items() if k != "tests_dir"}, "pytest_add_cli_args_test_selection": tests}, []
 
 
 def _mutmut_findings(tree_copy: str, functions: list[_ChangedFunction], run: subprocess.CompletedProcess,

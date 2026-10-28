@@ -3403,14 +3403,14 @@ class TestSurvivingMutants(RepositoryTest):
         return data_file
 
     def selections(self):
-        """The test selection of each [tool.mutmut] the check starts mutmut by, as a list it fills in; mutmut runs
-        as it would."""
-        selections, run = [], gate._mutmut_on_copy
+        """The test selection of each [tool.mutmut] the check writes for mutmut in its copy, as a list it fills in;
+        mutmut runs as it would."""
+        selections, use = [], gate._use_mutmut_table
 
-        def on_copy(root, tmp, functions, table, budget):
+        def use_table(tree_copy, table):
             selections.append(table.get("pytest_add_cli_args_test_selection"))
-            return run(root, tmp, functions, table, budget)
-        p = patch.object(gate, "_mutmut_on_copy", on_copy)
+            return use(tree_copy, table)
+        p = patch.object(gate, "_use_mutmut_table", use_table)
         p.start()
         self.addCleanup(p.stop)
         return selections
@@ -3418,7 +3418,8 @@ class TestSurvivingMutants(RepositoryTest):
     def test_mutmut_runs_only_the_tests_the_contexts_record_reaching_the_changed_functions(self):
         self.change_the_functions("checked", "unchecked")
         selections = self.selections()
-        # A parity test reaches checked too, but the rules leave tests/parity out, as this repository's do.
+        # A parity test reaches checked too, but the rules leave tests/parity out, as this repository's do; and the
+        # tree has none, so pytest collects it from no selection.
         data_file = self.contexts({"tests/test_calc.py::test_checked": [1, 2],
                                    "tests/test_calc.py::test_unchecked": [5, 6],
                                    "tests/test_calc.py::test_untouched": [9, 10],
@@ -3430,53 +3431,59 @@ class TestSurvivingMutants(RepositoryTest):
         # The same verdicts as with the whole selection: unchecked's test never looks at what it returns.
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 5, "survived")])
 
-    def test_the_recorded_tests_are_kept_within_the_selection_s_paths_and_out_of_its_ignored_ones(self):
-        data_file = self.contexts({"tests/test_calc.py::test_checked[1]": [2], "tests/test_calc.py::TestX::test_y": [2],
-                                   "tests/test_calcs.py::test_z": [2], "tests/parity/test_p.py::test_p": [2],
-                                   "other/test_o.py::test_o": [2]})
-        [checked] = [f for f in gate._python_units("calc.py", self.BASE, ast.parse(self.BASE)) if f.name == "checked"]
+    # Test files beside tests/test_calc.py, for pytest to collect by a selection: each holds one test, named for it.
+    MORE_TESTS = {"tests/test_calcs.py": "test_z", "tests/parity/test_p.py": "test_p", "tests/slow/test_w.py": "test_w",
+                  "other/test_o.py": "test_o"}
+
+    def test_mutmut_is_given_the_recorded_tests_pytest_collects_by_its_selection_and_options(self):
+        for path, name in self.MORE_TESTS.items():
+            self.put(path, f"def {name}():\n    pass\n")
+        recorded = {"tests/test_calc.py::test_checked", *(f"{p}::{n}" for p, n in self.MORE_TESTS.items())}
+        setup = gate._PytestSetup(self.repo, gate._pytest_config(self.repo, self.bin), self.repo)
+        selection, args = "pytest_add_cli_args_test_selection", "pytest_add_cli_args"
+        # What pytest 9 collects, by its own rules, of each selection with each of mutmut's options.
         cases = [
-            ({"pytest_add_cli_args_test_selection": ["./tests/test_calc.py"]},
-             ["tests/test_calc.py::TestX::test_y", "tests/test_calc.py::test_checked[1]"]),
-            ({"pytest_add_cli_args_test_selection": ["tests/test_calc.py::test_checked"]},
-             ["tests/test_calc.py::test_checked[1]"]),
-            ({"pytest_add_cli_args_test_selection": ["tests/", "--ignore", "tests/parity"],
-              "pytest_add_cli_args": ["--ignore=tests/test_calcs.py"]},
-             ["tests/test_calc.py::TestX::test_y", "tests/test_calc.py::test_checked[1]"]),
-            ({"pytest_add_cli_args_test_selection": ["tests/", "--ignore-glob=tests/par*"],
-              "pytest_add_cli_args": ["--ignore-glob", "./tests/*s.py"]},
-             ["tests/test_calc.py::TestX::test_y", "tests/test_calc.py::test_checked[1]"]),
-            # A pattern that matches a directory leaves out what is under it.
-            ({"pytest_add_cli_args": ["--ignore-glob=*/parity", "--ignore-glob=other"]},
-             ["tests/test_calc.py::TestX::test_y", "tests/test_calc.py::test_checked[1]",
-              "tests/test_calcs.py::test_z"]),
-            # pytest collects what the selection names, and what lies above it, whatever --ignore and --ignore-glob
-            # say; they leave out only what it finds below.
-            ({"pytest_add_cli_args_test_selection": ["tests/parity", "tests/test_calcs.py"],
-              "pytest_add_cli_args": ["--ignore-glob=*/parity", "--ignore=tests/test_calcs.py", "--ignore=tests"]},
-             ["tests/parity/test_p.py::test_p", "tests/test_calcs.py::test_z"]),
-            ({"pytest_add_cli_args_test_selection": ["tests/parity/test_p.py::test_p"],
-              "pytest_add_cli_args": ["--ignore-glob=tests/parity/*.py"]},
-             ["tests/parity/test_p.py::test_p"]),
-            # mutmut's default, no selection, runs every test pytest finds.
-            ({}, ["other/test_o.py::test_o", "tests/parity/test_p.py::test_p", "tests/test_calc.py::TestX::test_y",
-                  "tests/test_calc.py::test_checked[1]", "tests/test_calcs.py::test_z"]),
+            ({selection: ["tests/"], args: ["--ignore=tests/parity"]},
+             ["tests/slow/test_w.py::test_w", "tests/test_calc.py::test_checked", "tests/test_calcs.py::test_z"]),
+            # A selection entry inside another is dropped before pytest collects; the outer one's walk applies
+            # the glob below it.
+            ({selection: ["tests", "tests/slow"], args: ["--ignore-glob=*/slow"]},
+             ["tests/parity/test_p.py::test_p", "tests/test_calc.py::test_checked", "tests/test_calcs.py::test_z"]),
+            # What the selection names pytest collects whatever --ignore and --ignore-glob say.
+            ({selection: ["tests/slow"], args: ["--ignore-glob=*/slow"]}, ["tests/slow/test_w.py::test_w"]),
+            ({selection: ["tests/test_calc.py::test_checked", "tests/test_calcs.py"],
+              args: ["--ignore=tests/test_calcs.py", "--ignore=tests"]},
+             ["tests/test_calc.py::test_checked", "tests/test_calcs.py::test_z"]),
+            ({selection: ["tests/"], args: ["--deselect=tests/test_calcs.py::test_z", "--ignore-glob=*/p*"]},
+             ["tests/slow/test_w.py::test_w", "tests/test_calc.py::test_checked"]),
+            # No selection: every test pytest finds; tests_dir, mutmut's old name for it, joins the selection.
+            ({}, sorted(recorded)),
+            ({"tests_dir": ["other/"]}, ["other/test_o.py::test_o"]),
         ]
         for table, tests in cases:
             with self.subTest(table=table):
-                self.assertEqual(gate._tests_reaching(self.repo, [checked], table, data_file), (tests, None))
-        tests, why = gate._tests_reaching(self.repo, [checked], {"pytest_add_cli_args_test_selection": ["-m", "fast"]},
-                                          data_file)
-        self.assertEqual(tests, [])
-        self.assertIn("holds `-m`, which the gate cannot apply", why)
+                narrowed, found = gate._narrowed_table(setup, table, recorded)
+                self.assertEqual((narrowed[selection], found), (tests, []))
+                # The rest of the table stays, but for tests_dir, now in the selection.
+                self.assertEqual({k: v for k, v in narrowed.items() if k != selection},
+                                 {k: v for k, v in table.items() if k not in (selection, "tests_dir")})
+        with self.subTest("none of the recorded tests collected"):
+            self.assertEqual(gate._narrowed_table(setup, {selection: ["other/"]}, {"tests/test_calcs.py::test_z"}),
+                             ({}, []))
+        with self.subTest("a collection that fails"):
+            table = {selection: ["tests/missing.py"]}
+            narrowed, found = gate._narrowed_table(setup, table, recorded)
+            self.assertEqual(narrowed, table)
+            self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [(None, None, "not-narrowed")])
+            self.assertIn("collecting [tool.mutmut]'s test selection, exited with status 4", found[0]["message"])
 
     def test_the_tree_s_own_modules_do_not_stand_in_for_the_reader_s(self):
         data_file = self.contexts({"tests/test_calc.py::test_checked": [2]})
         for module in ("json.py", "coverage.py"):
             self.put(module, "raise SystemExit('the tree's own module ran')\n")
         [checked] = [f for f in gate._python_units("calc.py", self.BASE, ast.parse(self.BASE)) if f.name == "checked"]
-        self.assertEqual(gate._tests_reaching(self.repo, [checked], {}, data_file),
-                         (["tests/test_calc.py::test_checked"], None))
+        self.assertEqual(gate._recorded_tests(self.repo, [checked], data_file),
+                         ({"tests/test_calc.py::test_checked"}, None))
 
     def test_a_reader_output_of_the_wrong_shape_is_a_reason_not_a_crash(self):
         [checked] = [f for f in gate._python_units("calc.py", self.BASE, ast.parse(self.BASE)) if f.name == "checked"]
@@ -3484,8 +3491,8 @@ class TestSurvivingMutants(RepositoryTest):
             printed = f'{{"tests": 1, "busiest": 1, "reached": {reached}}}'
             with self.subTest(reached=reached), patch.object(
                     gate, "_run_in_session", return_value=(subprocess.CompletedProcess([], 0, printed, ""), False)):
-                tests, why = gate._tests_reaching(self.repo, [checked], {}, "test.coverage")
-                self.assertEqual(tests, [])
+                tests, why = gate._recorded_tests(self.repo, [checked], "test.coverage")
+                self.assertEqual(tests, set())
                 self.assertIn("printed what the gate cannot read", why)
 
     def test_without_test_contexts_mutmut_runs_the_whole_selection(self):
