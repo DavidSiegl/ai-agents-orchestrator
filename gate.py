@@ -2827,7 +2827,7 @@ def _tests_reaching(root: str, functions: list[_ChangedFunction], table: dict,
         return [], f"`{one_line(data_file)}` did not measure `{one_line(unmeasured[0].path)}`"
     return sorted({i for tests in reached for i in tests
                    if any(_in_node(i, p) for p in paths or ["."]) and not any(_in_node(i, p) for p in ignored)
-                   and not any(fnmatch.fnmatchcase(_node_parts(i)[0], os.path.normpath(g)) for g in globs)}), None
+                   and not _globbed(i, globs)}), None
 
 
 def _ignored_paths(args: list[str]) -> tuple[list[str], list[str], set[str]]:
@@ -2845,6 +2845,14 @@ def _ignored_paths(args: list[str]) -> tuple[list[str], list[str], set[str]]:
             found[a].append(args[i + 1])
             options |= {a, args[i + 1]}
     return found["--ignore"], found["--ignore-glob"], options
+
+
+def _globbed(node_id: str, globs: list[str]) -> bool:
+    """Whether one of globs, patterns of pytest's --ignore-glob relative to the rootdir, leaves out the test node_id,
+    as pytest leaves out what it would collect: its file, or a directory above the file, matching a pattern whole."""
+    path = _node_parts(node_id)[0]
+    above = itertools.accumulate(path.split("/")[:-1], lambda a, b: f"{a}/{b}")
+    return any(fnmatch.fnmatchcase(p, os.path.normpath(g)) for p in [path, *above] for g in globs)
 
 
 def _in_node(node_id: str, path: str) -> bool:

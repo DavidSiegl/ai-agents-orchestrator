@@ -3446,6 +3446,10 @@ class TestSurvivingMutants(RepositoryTest):
             ({"pytest_add_cli_args_test_selection": ["tests/", "--ignore-glob=tests/par*"],
               "pytest_add_cli_args": ["--ignore-glob", "./tests/*s.py"]},
              ["tests/test_calc.py::TestX::test_y", "tests/test_calc.py::test_checked[1]"]),
+            # A pattern that matches a directory leaves out what is under it.
+            ({"pytest_add_cli_args": ["--ignore-glob=*/parity", "--ignore-glob=other"]},
+             ["tests/test_calc.py::TestX::test_y", "tests/test_calc.py::test_checked[1]",
+              "tests/test_calcs.py::test_z"]),
             # mutmut's default, no selection, runs every test pytest finds.
             ({}, ["other/test_o.py::test_o", "tests/parity/test_p.py::test_p", "tests/test_calc.py::TestX::test_y",
                   "tests/test_calc.py::test_checked[1]", "tests/test_calcs.py::test_z"]),
