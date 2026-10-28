@@ -2,6 +2,7 @@
 dependency added (task.md). evals/acceptance.py says how it is run."""
 
 import ast
+import os
 import pathlib
 import sys
 import tempfile
@@ -71,10 +72,10 @@ class NoDependency(Acceptance):
 
     def project_files(self) -> list[str]:
         """The project's files, committed or not, as paths relative to it; not what git ignores, such as a virtual
-        environment uv made or the run's own directory."""
+        environment uv made or the run's own directory, nor a committed file deleted since."""
         proc = self.in_repo("git", "ls-files", "--cached", "--others", "--exclude-standard", timeout=60)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        return proc.stdout.splitlines()
+        return [f for f in proc.stdout.splitlines() if os.path.exists(os.path.join(self.repo, f))]
 
 
 if __name__ == "__main__":

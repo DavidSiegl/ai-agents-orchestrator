@@ -40,7 +40,9 @@ from collections.abc import Callable
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TASKS_DIR = os.path.join(ROOT, "evals", "tasks")
-RESULTS_DIR = os.path.join(ROOT, "evals", "results")
+# Where the result lines go, relative to the checkout's top, and there.
+RESULTS_SUBDIR = os.path.join("evals", "results")
+RESULTS_DIR = os.path.join(ROOT, RESULTS_SUBDIR)
 # The version of a result line's shape (Eval.record), raised when a key changes its meaning or goes.
 RECORD_VERSION = 1
 # Where a run keeps its files in the project it runs on, one directory per run named by its run id.
@@ -332,7 +334,9 @@ def _head_commit() -> str:
     "unknown" when git cannot say."""
     try:
         head = _subprocess(["git", "-C", ROOT, "rev-parse", "HEAD"])
-        changed = _subprocess(["git", "-C", ROOT, "diff", "--quiet", "HEAD"])
+        # Not the results files, which an eval of earlier the same day appended to.
+        changed = _subprocess(["git", "-C", ROOT, "diff", "--quiet", "HEAD", "--", ".",
+                               f":(exclude){RESULTS_SUBDIR}"])
     except OSError:
         return "unknown"
     if head.returncode != 0 or changed.returncode not in (0, 1):

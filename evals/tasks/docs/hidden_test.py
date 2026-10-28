@@ -32,7 +32,7 @@ class Docs(Acceptance):
         for line in pathlib.Path(self.repo, "README.md").read_text().splitlines(keepends=True):
             # A line starting with # inside a fenced block, such as a shell comment, is not a heading.
             heading = not fenced and re.match(r"#{1,2} ", line)
-            if line.startswith("```"):
+            if re.match(r" {0,3}(```|~~~)", line):
                 fenced = not fenced
             if heading and lines:
                 break

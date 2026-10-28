@@ -8,8 +8,8 @@ that each is written once. The output must not change.
 
 ## Requirements
 
-- One function in `render.py`, `money(amount)`, rounds an amount to the cent, half up, returning a `Decimal`; every rounding in
-  `render.py` goes through it, and `render.py` calls `quantize` nowhere else.
+- One function in `render.py`, `money(amount)`, rounds an amount to the cent, half up, returning a `Decimal`; every
+  rounding in `render.py` goes through it, and `render.py` calls `quantize` nowhere else.
 - One function, `item_line(name, quantity, price)`, returns an item's line as both renderers print it, without
   its line ending, for the price as given (the credit note passes its negated price).
 - `render_invoice` and `render_credit_note` keep their names, arguments and output, byte for byte, for every input

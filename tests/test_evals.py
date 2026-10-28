@@ -414,6 +414,11 @@ class TestHeadCommit(unittest.TestCase):
                 with open(os.path.join(repo, "untracked.txt"), "w") as f:
                     f.write("x\n")
                 self.assertEqual(evals._head_commit(), commit)
+                os.makedirs(os.path.join(repo, "evals", "results"))
+                with open(os.path.join(repo, "evals", "results", "x.jsonl"), "w") as f:
+                    f.write("{}\n")
+                Host().git(repo, "add", "evals")
+                self.assertEqual(evals._head_commit(), commit, "a results file is not a change")
                 with open(os.path.join(repo, "prompt.txt"), "w") as f:
                     f.write("v2\n")
                 self.assertEqual(evals._head_commit(), f"{commit}-dirty")

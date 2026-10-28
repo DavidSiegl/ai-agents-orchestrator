@@ -69,12 +69,16 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   Python engine is frozen (above); `EVAL_ENGINE` points it at the Rust engine. Whether the Rust engine gets an `eval`
   command of its own is open. Not covered: the quality gate, since the toy repositories have no quality job and their
   origin is a bundle no snapshot can be pushed to, so `quality rounds` stays 0; a `--worktree` or `--machine` run,
-  which the runner refuses; and an interview, which `--spec` skips. Not yet done: the ticket's verification run, one
-  real `evals/run.py --tasks <one> --repeat 1` from a herdr pane, with its result line committed under
-  `evals/results/` and its row in the pull request's description; no agent has run a task yet, so a task text or
-  hidden test that misjudges real work would show only then (cross-review 80, F9). Decided 2026-10-28.
+  which the runner refuses; and an interview, which `--spec` skips. Decided 2026-10-28. The verification run it
+  still lacks is under Open issues.
 
 ## Open issues
+
+- **No agent has run an eval task yet.** live-checks/04's verification asks for one real `evals/run.py --tasks <one>
+  --repeat 1` from a herdr pane (it starts real agents, so it was left to the user), with its row in the pull
+  request's description and its result line committed under `evals/results/`. Cross-review 80 (F9, 2026-10-28):
+  "Finding 1 is the kind of defect only a real run's output (or a test built from one) shows": a task text or a
+  hidden test that misjudges real work shows only then. Closed by that run, and by fixing what its output shows.
 
 - **A quality build now takes longer than `QUALITY_TIMEOUT`.** The contract test's one live run (live-checks/01,
   2026-10-27) triggered build #59 of `Octoflow-AI/py-octoflow-ai-quality` with `GIT_REF=main` (`f4628cc`): it ended
