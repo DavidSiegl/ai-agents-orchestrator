@@ -6098,8 +6098,7 @@ class TestQualityFileContract(unittest.TestCase):
         text = quality_report(word, "intro", conditions=conditions, issues=issues, to_weigh=to_weigh, elsewhere=4,
                               tests=tests, coverage="62.5% of 40 new lines to cover.",
                               suppressions=[("a.py", 3, "x = 1  # noqa: F401")],
-                              edited=list(gate.BUILD_CONFIG_FILES), rules_from="`main.toml`",
-                              mutmut_state=["mutants/a.py.meta"])
+                              edited=list(gate.BUILD_CONFIG_FILES), rules_from="`main.toml`")
         return text, conditions, issues, tests
 
     def expected_fingerprints(self, issues, tests):
@@ -6221,13 +6220,11 @@ class TestQualityReport(unittest.TestCase):
     def test_a_path_with_a_line_break_stays_on_its_own_line_and_compares_alike_in_every_round(self):
         issues = [{"path": p, "line": 2, "severity": "error", "rule": "ruff F401", "message": "unused"}
                   for p in ("a b.py", "c\rd.py", "e\u2028f.py")]
-        text = quality_report("ERROR", "intro", issues=issues, suppressions=[("g\nh.py", 1, "# noqa")],
-                              mutmut_state=["mutants/i\x85j.py"])
+        text = quality_report("ERROR", "intro", issues=issues, suppressions=[("g\nh.py", 1, "# noqa")])
         self.assertIn("1. `a b.py:2` error ruff F401: unused\n", text)
         self.assertIn("2. `c\\x0dd.py:2` error ruff F401: unused\n", text)
         self.assertIn("3. `e\\u2028f.py:2` error ruff F401: unused\n", text)
         self.assertIn("- `g\\x0ah.py:1` `# noqa`\n", text)
-        self.assertIn("`mutants/i\\x85j.py`", text)
         self.assertEqual(text.splitlines(), text.split("\n")[:-1])
         failures = orchestrator.gate_failures(text)
         self.assertEqual(len(failures.fingerprints["ruff"]), 3)

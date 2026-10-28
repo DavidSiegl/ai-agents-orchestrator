@@ -74,6 +74,17 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Open issues
 
+- **The eval set's code has review 88's findings open.** Raised by cross-review 88 (2026-10-28) in code PR #167
+  brought, recorded here rather than fixed in an unrelated branch: the docs task's hidden test sees only ``` fences
+  in column 0 (`evals/tasks/docs/hidden_test.py:64`, F1) and its `usage()` closes a fence on any fence line, not the
+  matching one (`:35`, F2); `evals/run.py`'s `_run_metrics` trusts the shape of a metrics.json it could parse (F3);
+  `evals/make_bundles.py`'s git inherits `GIT_DIR`, `GIT_INDEX_FILE` and `GIT_WORK_TREE` (F4); `evals/acceptance.py`'s
+  summary takes every unittest error for a test case (F5); and `evals/run.py:167` drops a failed removal of the clone
+  (F6). Closes with each fixed in a pull request of the eval set's.
+- **The Gate stage's comment on report order describes a window that has closed.** The Jenkinsfile passes the Rust
+  reports before the Python's for a main whose `gate.py` took `--tests` and `--coverage` once; main's takes them
+  repeatedly since #163, so the order and its comment can go. Raised by cross-review 88 (F9, 2026-10-28).
+
 - **No agent has run an eval task yet.** live-checks/04's verification asks for one real `evals/run.py --tasks <one>
   --repeat 1` from a herdr pane (it starts real agents, so it was left to the user), with its row in the pull
   request's description and its result line committed under `evals/results/`. Cross-review 80 (F9, 2026-10-28):
@@ -138,12 +149,13 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   many events a step sends depends on where serve's one-second poll falls among the run's saves, so the stream
   between two checkpoints differs from run to run. Closes with a serve whose poll the harness can step, which would
   be a hook in the engine, or the user's ruling that the folded stream is the contract, as the desktop app reads it.
-- **`test-integrity` does not see a golden file's change.** A golden file under `tests/golden/` (`tests/golden.py`)
-  is an expected value outside any assertion, as a text file the check does not parse, so a change that rewrites one
-  with `UPDATE_GOLDEN=1` alongside the code it pins gets no `expected-value-changed` finding; the Reviewer sees the
-  rewrite only in the diff. Found while adding the golden files (orchestrator-test-methods/06, 2026-10-27). Closes
-  with the check reporting a changed file under a project's golden directory, which would need that directory to be
-  a setting for projects other than this one (gate-split/04, the test-file patterns).
+
+- **`test-integrity` knows golden files only by this repository's layout.** `_golden_file` (`gate.py`) takes a
+  golden file to be one under a `golden` directory inside a `tests` directory, as `tests/golden.py` keeps them, so
+  another project's expected output under another name, such as `__snapshots__/`, rewritten alongside the code it
+  pins gets no `expected-value-changed` finding. Left by the fix of "`test-integrity` did not see a golden file's
+  change" (Fixed, 2026-10-28). Closes with the golden directory a setting, beside the test-file patterns of
+  `.scratch/gate-split/issues/04-configurable-test-files.md`, which does not name it yet.
 
 - **A quality build of a snapshot from before `gate.py` fails mypy.** A quality build judges by main's rules
   (`--config`), and since the split main's `[tool.mypy] files` names `gate.py`, which mypy reads relative to the
@@ -244,11 +256,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   Raised by cross-review 66 (F11, 2026-10-27): "The gate is OK on a change that the workspace's rules make
   uncompilable". Closes with a second, uncapped clippy run whose rustc errors (codes `E` and four digits, such as E0453)
   are compile errors, or with the forbidden lints read from the manifests and an added allow of one failing the gate.
-- **A cargo config under the build's `CARGO_HOME` is not listed as build configuration.** `clippy_config_files` in
-  `gate.py` lists cargo's config only under a `.cargo` directory, but the Jenkinsfile sets `CARGO_HOME` to
-  `$WORKSPACE/.cargo-home`, so a change that tracks `.cargo-home/config.toml` could change clippy's lint levels or
-  rustflags without the quality file listing it. Raised by cross-review 70 (round 1, not recorded, 2026-10-27).
-  Closes with `CARGO_HOME`'s config files listed too, or `.cargo-home/` refused in a change.
 - **A quality build judges Rust by the snapshot's own clippy rules.** `Clippy` in `gate.py` chooses no lints (it caps
   their levels at warn, `--cap-lints`), so clippy reads each workspace's `[lints]`, `clippy.toml`, `.cargo/config.toml`
   rustflags and `rust-toolchain.toml` from the judged tree, where a change can loosen them; `--config` replaces only
@@ -443,10 +450,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   mutmut was stopped at 600 s after trying 0 of 253 mutants, so its stats and clean runs of the now 1348-test suite
   took the whole budget, and surviving-mutants judges nothing on Jenkins; the parity scenarios, left out of mutmut's
   runs, add nothing to that.
-- **`parse_args` still yields many survivors after `do_not_mutate_patterns = ['\bhelp=']`.** Its `description=` texts
-  and flag names are mutated, and few tests check them word for word: 105 of 305 mutants survived on this branch's
-  change. Reported per function, so it is one finding. Closes with a decision to add `'\bdescription='` to the
-  pattern, or to leave it.
 - **Mutation-testing the code that runs mutmut leaves processes behind.** When mutmut stops a mutant at its own
   timeout it kills the worker, and a real mutmut that `TestSurvivingMutants` started in its own session lives on as
   an orphan group of one process per CPU. It only happens when a change edits that code. Jenkins' process-tree
@@ -457,17 +460,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   (`_edits_test`). Kept as the ticket states it. Closes with a decision to pass `_edits_test`-like counting to
   `_changed_python_functions`. The cognitive-complexity check has a walker of its own (`_scored_functions`), so it
   is not affected.
-- **Committed mutmut output is read as the change's own code by the linters.** The checks leave `mutants/` out, by the
-  user's decision of 2026-10-24 (review round 9, F33): `GateChange.from_tree` diffs the tree without it, so no check
-  (test-integrity, flaky-tests, surviving-mutants, cognitive-complexity) selects a test, a function or a changed line
-  there or counts an edit there as a change to the code, and the build configuration listing still names such files.
-  That filter does not reach the linters: `judge_change` runs them over every tracked file their pathspecs match and
-  keeps their findings on its own, unfiltered `changed_lines`, so a change that commits `mutants/calc.py`, mutmut's
-  mutated copy with its trampolines, has its added lines there linted, and their findings can fail the gate. The same
-  unfiltered lines feed the suppressions list, the stray-line-end refusal and the coverage condition; coverage counts
-  such files only when the project's coverage measures them, since `new_coverage` reads only the files the Cobertura
-  report lists. Whether the linters should read them, leave them out, or the gate refuse them is open. Closes with that
-  decision.
 - **mutmut reads a symlinked `.py` file in the surviving-mutants copy.** `_copy_tracked` copies a tracked symlink
   as a link (`gate.py`), `_mark_for_mutmut` leaves links unmarked, and mutmut 3.8.0's `walk_all_files` lists
   a symlink to a file and `create_mutants_for_file` opens it. So once any changed function starts mutmut, a change
@@ -477,16 +469,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `gate-python-files` (R2-F1, 2026-10-26); rests on mutmut's source, not on a run. Closes with the copy or
   `_mark_for_mutmut` keeping links out of mutmut's walk, without breaking a tracked link the tests import through,
   and a test that also edits a real function.
-- **passes-at-base misses a deleted Python script with no `.py`.** `_edits_python_source` (`gate.py`)
-  counts a deleted file as Python source only by its `.py`, so a change that only deletes a `#!` python script
-  outside the tests edits no Python source for it. Found while fixing the cognitive-complexity check's same gap
-  (2026-10-25). Closes with that branch asking `_was_python_source`, which the complexity check now uses.
-- **A Python script with no `.py` is never judged by the cognitive-complexity check.** `_judged_files` judges only
-  paths ending in `.py`, while the pairing reads a script whose `#!` line names python as Python
-  (`_is_python_source`), so a function moved unchanged into `bin/tool` keeps its base, but one the change grows
-  there, or writes new over the limit, is not a finding. `docs/quality-gate.md` says "a `.py` file". Raised by the
-  spec-conformance pass of review round 6 of ticket 06; ticket 06's "the Python functions the change touches" can be
-  read either way. Closes with `_judged_files` taking `_is_python_source`, or a decision that `.py` is the scope.
 - **A body moved into a file hides a function with that body moved out of it, which is then judged as new.** The
   cognitive-complexity check takes a base function as gone from its file when the file now holds its body fewer times
   than the base did (`_BasePool._gone`), without asking where the working tree's copies came from. So when `calc.py`'s
@@ -543,14 +525,81 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Fixed
 
+- **passes-at-base missed a deleted Python script with no `.py`.** `_edits_python_source` counted a deleted file as
+  Python source only by its `.py`, so a change that only deleted a `#!` python script outside the tests edited no
+  Python source for it. Found while fixing the cognitive-complexity check's same gap (2026-10-25). Fixed
+  (2026-10-28, with cross-review 79's F5): `_edits_python_source` asks `_python_code` of each side of each changed
+  path, which takes `_was_python_source` at the base, and test-integrity's Python detector uses the same function as
+  its `is_code`, so the two checks give one answer to "does the change edit Python code outside the tests".
+
+- **`test-integrity` did not see a golden file's change.** A golden file under `tests/golden/` (`tests/golden.py`) is
+  an expected value outside any assertion, so a change that rewrote one with `UPDATE_GOLDEN=1` alongside the code it
+  pins got no `expected-value-changed` finding. Found while adding the golden files (orchestrator-test-methods/06,
+  2026-10-27). Fixed (2026-10-28): `weakened_tests` adds `_changed_golden_files`, one weighed
+  `expected-value-changed` finding on the whole file for each golden file the change edits or deletes when it also
+  edits Python code outside the tests (`_edits_code`, by `_python_code`, which passes-at-base shares: a `#!` python
+  script counts, on either side, and nothing `_beside_tests` sets with the tests does); an added golden file, or one
+  renamed unedited, is none. What stays open, other projects' golden files, is "`test-integrity` knows golden files
+  only by this repository's layout" in Open issues.
+
+- **A `# noqa` inside a string, or in a file no linter reads it in, was listed under "Suppressions added".**
+  `added_suppressions` matched one pattern, `_SUPPRESSION`, against every added line of every file, so `"add # noqa"`
+  in a Python string or docstring, `# noqa` quoted in Markdown or a YAML comment, and `# pragma: no cover` in a text
+  file were listed for the Reviewer as suppressions. Found by the user (2026-10-28). Fixed (2026-10-28):
+  `_suppressing_lines` chooses the pattern by the kind of file: in a Python file (`_holds_python`) only a `COMMENT`
+  token that `_PYTHON_SUPPRESSION` matches counts, falling back to every matching line when the file does not
+  tokenize; `_SHELL_SUPPRESSION` in a `.sh` file or a workflow; `_MARKDOWN_SUPPRESSION`, a pymarkdown pragma that is
+  a whole line from its first column, in Markdown; `_RUST_SUPPRESSION` alone in Rust; nothing in any other file. Not
+  closed: in a shell script the pattern still reads the line's text, so the words inside a shell string still count.
+  A pragma line inside a Markdown code block is listed, rightly: pymarkdownlnt 0.9.41 honours it there too.
+
+- **A cargo config under the build's `CARGO_HOME` was not listed as build configuration.** `clippy_config_files`
+  listed cargo's config only under a `.cargo` directory, but the Jenkinsfile sets `CARGO_HOME` to
+  `$WORKSPACE/.cargo-home`, so a change tracking `.cargo-home/config.toml` could change clippy's lint levels or
+  rustflags unlisted. Raised by cross-review 70 (round 1, not recorded, 2026-10-27). Fixed (2026-10-28):
+  `clippy_config_files` also lists `config` and `config.toml` directly in the `CARGO_HOME` of the environment clippy
+  runs with (`tool_env`), when `_cargo_home_in` finds it inside the tree. Listed, not refused, as `.cargo/config.toml`
+  is (see "A quality build judges Rust by the snapshot's own clippy rules" in Open issues).
+
+- **Committed mutmut output was read as the change's own code by the linters.** The checks left `mutants/` out
+  (`GateChange.from_tree`), but `judge_change` ran the linters over every tracked file and kept their findings on its
+  own, unfiltered changed lines, which also fed the suppressions list, the stray-line-end refusal and the coverage
+  condition, so a change committing `mutants/calc.py` had its lines there linted. Fixed (2026-10-28, the user's
+  decision in `.scratch/gate-open-decisions/issues/04-committed-mutants-dir.md`: refuse): `judge_change` reads only
+  `GateChange.from_tree`'s change, whose `changed` and `diff` every reader shares, and `_linted_files` gives no
+  linter a file under `mutants/`, nor clippy a manifest there to find a workspace by; a change that adds, edits or
+  moves in files there fails with one condition naming them (`GateChange.mutmut_state`, `_mutmut_state_condition`),
+  which replaces their listing under build configuration (`mutmut_state_files` is gone). Deleting such files passes.
+  Not closed: mypy reads the files `[tool.mypy] files` names, not the gate's list, so rules naming a directory above
+  `mutants/` still have mypy read them; their findings count nowhere, since no line there is a changed one.
+
+- **A Python script with no `.py` was never judged by the cognitive-complexity check.** `_judged_files` judged only
+  paths ending in `.py`, while the pairing read a script whose `#!` line names python as Python, so a function the
+  change grew in `bin/tool`, or wrote new there over the limit, was not a finding. Fixed (2026-10-28, the user's
+  decision in `.scratch/gate-open-decisions/issues/05-complexity-scope.md`): `_parsed_changed_files` takes
+  `_is_python_source` as its test, so cognitive-complexity, vague-names, surviving-mutants and flaky-tests all read
+  such a script as Python, at the cost of reading the first line of each changed file with no `.py`; flaky-tests
+  still picks only `_python_test_file`s, which end in `.py`, and surviving-mutants says such a script's changed
+  functions are `not-mutated`, since mutmut 3.8.0 reads only `*.py` (`_outside_mutmut`). `docs/quality-gate.md` says
+  "a Python file" where it said "a `.py` file".
+
+- **`parse_args` still yielded many survivors after `do_not_mutate_patterns = ['\bhelp=']`.** Its `description=`
+  texts were mutated, and few tests check them word for word: 105 of 305 mutants survived on one change. Fixed
+  (2026-10-28, the user's decision in `.scratch/gate-open-decisions/issues/02-description-pattern.md`):
+  `pyproject.toml`'s `[tool.mutmut]` adds `'\bdescription='`, with a comment saying why, and `gate.py`'s `parse_args`
+  passes its description to `ArgumentParser` as `description=` rather than setting `parser.description`, which the
+  pattern would not match. Flag names stay mutated where they start a line of their own. Not closed: the pattern
+  matches any `description=` keyword, so the statement holding `Pipeline(..., description=description)` in
+  `orchestrator.py`'s `parse_workflow` is not mutated either.
+
 - **A quality build left out the parity scenarios when only `tests/guard_errors.py` changed.** The Test stage's path
   list named `tests/conftest.py`, whose guards the scenarios run under, but not `tests/guard_errors.py`, which holds
   the errors those guards raise. Raised by cross-review 76 (F1, 2026-10-27), in code PR #162 brought. Fixed
   (2026-10-27): the list names it.
 
 - **`tool_env` passed `UPDATE_GOLDEN` to the pytest and mutmut runs the gate starts.** Under `UPDATE_GOLDEN=1`
-  `assert_golden` rewrites its file instead of comparing, so the gate's flaky-tests reruns would rewrite
-  `tests/golden/*.txt` and pass a golden test that should fail. Raised by cross-review 76 (F2, 2026-10-27). Fixed
+  `assert_golden` rewrites its file instead of comparing, so a golden test the gate runs could not fail (why:
+  `tool_env`'s docstring). Raised by cross-review 76 (F2, 2026-10-27). Fixed
   (2026-10-27): `tool_env` leaves it out, as it does the Jenkins credentials (`TestChildEnvironment`, which also checks it
   under `UPDATE_GOLDEN=1`).
 

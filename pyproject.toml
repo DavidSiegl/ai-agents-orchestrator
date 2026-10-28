@@ -7,7 +7,7 @@ addopts = ["-m", "not contract"]
 
 [project]
 name = "octoflow"
-version = "0.40.0"
+version = "0.41.0"
 description = "Octoflow AI: coding agents in relay, spec to build to review, each role judged by another, in herdr"
 readme = "README.md"
 # The orchestrator is stdlib-only, so it runs with a system python3 3.13+ without uv.
@@ -69,9 +69,12 @@ pytest_add_cli_args_test_selection = ["tests/"]
 # Jenkinsfile's Test stage leaves them out of a quality build too, under a condition it states.
 pytest_add_cli_args = ["--ignore=tests/parity"]
 also_copy = ["examples/", "docs/", "evals/"]
-# argparse's help texts, which no test reads word for word. mutmut matches each pattern against each source line and
-# skips every expression that starts on a matching line, with what it holds, the following lines of a help text too.
-do_not_mutate_patterns = ['\bhelp=']
+# argparse's help and description texts: prose, not behaviour, which no test reads word for word. mutmut matches each
+# pattern against each source line and skips every expression that starts on a matching line, with what it holds, the
+# following lines of a text too. The patterns match any keyword argument of those names, not only argparse's: the
+# statement holding `Pipeline(..., description=description)` in orchestrator.py's parse_workflow is skipped too.
+# Flag names stay mutated: they are behaviour.
+do_not_mutate_patterns = ['\bhelp=', '\bdescription=']
 
 [tool.pymarkdown]
 # The docs wrap at 120, by eye. README.md opens with its logo in HTML, which also keeps a heading off its first line.

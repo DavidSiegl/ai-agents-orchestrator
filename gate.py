@@ -58,7 +58,8 @@ from xml.etree import ElementTree
 BUILD_CONFIG_FILES = ("Jenkinsfile", "pyproject.toml", "uv.lock")
 # The names of the files, anywhere in the tree, that clippy takes its rules or its toolchain from, which the change
 # judged supplies whatever --config says: a manifest's [lints], clippy's configuration, the toolchain that brings
-# clippy, and, under a `.cargo` directory, cargo's configuration, whose rustflags can set lint levels.
+# clippy, and, under a `.cargo` directory or in the CARGO_HOME clippy runs with (_cargo_home_in), cargo's
+# configuration, whose rustflags can set lint levels.
 CLIPPY_CONFIG_NAMES = ("Cargo.toml", "clippy.toml", ".clippy.toml", "rust-toolchain", "rust-toolchain.toml")
 CARGO_CONFIG_NAMES = ("config", "config.toml")
 # The most findings the quality file lists, issues and findings to weigh numbered as one list, and the most failing
@@ -111,7 +112,8 @@ def tool_env() -> dict[str, str]:
 
     So a test the change brings, which the flaky-tests check reruns or mutmut runs, never inherits the tokens when the
     gate runs where they are set. A golden test (tests/golden.py) under UPDATE_GOLDEN=1 rewrites its file instead of
-    comparing with it, so a rerun would change the working tree and pass a test that should fail. And the gate's
+    comparing with it: a golden test the flaky-tests reruns, the passes-at-base run or mutmut run, each in a copy of
+    the tree, could then not fail. And the gate's
     pathspecs are written in git's default syntax, which each switch breaks without an error: under
     GIT_LITERAL_PATHSPECS the linters' globs and GateChange.from_tree's exclude match nothing, under
     GIT_NOGLOB_PATHSPECS the globs match nothing, under GIT_GLOB_PATHSPECS "*.py" matches only the top level's files,
@@ -301,7 +303,7 @@ FAILING_TESTS = "## Failing tests"
 def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (), issues=(), to_weigh=(),
                    elsewhere: int = 0, tests: list[tuple[str, str]] | None = None,
                    coverage: str | None = None, suppressions: list[tuple[str, int, str]] | tuple = (),
-                   edited=(), rules_from: str | None = None, mutmut_state=(), clippy_config=()) -> str:
+                   edited=(), rules_from: str | None = None, clippy_config=()) -> str:
     """The quality file: the gate, GATE_OK or GATE_ERROR, on its first line, then what the Builder has to answer.
 
     conditions are the failed ones, each a sentence. issues, the findings that fail the gate, and to_weigh,
@@ -309,12 +311,11 @@ def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (),
     for one about the whole file and path None for one about the whole change. Both are listed in the order
     given and numbered as one list, issues first, at most QUALITY_ISSUE_LIMIT in all; the rest are counted.
     elsewhere counts the linter findings left out for not being on lines the change added. tests are the
-    (name, detail) of the failing tests of the test report the gate was given, None for no tests section, as when
+    (name, detail) of the failing tests of every test report the gate was given, None for no tests section, as when
     it was given none. coverage is the sentence about coverage of new code, None for no such section.
     suppressions are the (path, line, text) of lint suppressions the change added. edited are the
     BUILD_CONFIG_FILES the change edits; rules_from names the file the gate took its rules from when that was not the
-    edited pyproject.toml. mutmut_state are the files the change adds or edits under mutmut's state, as
-    mutmut_state_files gives them. clippy_config are the files the change edits that clippy takes its rules or its
+    edited pyproject.toml. clippy_config are the files the change edits that clippy takes its rules or its
     toolchain from, as clippy_config_files gives them.
     """
     out = [f"GATE: {gate}", "", intro]
@@ -330,8 +331,8 @@ def quality_report(gate: str, intro: str, *, conditions: list[str] | tuple = (),
     if suppressions:
         out += ["", "## Suppressions added", "",
                 *(one_line(f"- `{path}:{line}` `{text}`") for path, line, text in suppressions)]
-    if edited or mutmut_state or clippy_config:
-        out += _config_section(edited, rules_from, mutmut_state, clippy_config)
+    if edited or clippy_config:
+        out += _config_section(edited, rules_from, clippy_config)
     return "\n".join(out) + "\n"
 
 
@@ -406,7 +407,7 @@ def _tests_section(tests: list[tuple[str, str]]) -> list[str]:
     return out
 
 
-def _config_section(edited, rules_from: str | None, mutmut_state, clippy_config) -> list[str]:
+def _config_section(edited, rules_from: str | None, clippy_config) -> list[str]:
     out = ["", "## Build configuration", ""]
     if "Jenkinsfile" in edited:
         out.append("- The change edits `Jenkinsfile`. The quality job reads it from `main`, "
@@ -422,12 +423,6 @@ def _config_section(edited, rules_from: str | None, mutmut_state, clippy_config)
         named = _series([f"`{f}`" for f in clippy_config], limit=5)
         out.append(f"- The change edits {named}, which clippy takes its rules or its toolchain from; it judged the "
                    f"change by the edited ones.")
-    if mutmut_state:
-        named = _series([f"`{one_line(f)}`" for f in mutmut_state], limit=5)
-        out.append(f"- The change adds or edits {named} under "
-                   f"`{_MUTMUT_STATE}/`, where mutmut keeps its state. The gate's checks leave them out: none selects "
-                   f"a test or a function in them or counts them as a change to the code, and the surviving-mutants "
-                   f"check runs mutmut without them. The linters read them as they read any tracked file.")
     return [one_line(line) for line in out]
 
 
@@ -437,25 +432,34 @@ def edited_config(diff: str, changed: dict[str, set[int]]) -> list[str]:
     return [f for f in BUILD_CONFIG_FILES if f in touched]
 
 
-def clippy_config_files(diff: str, changed: dict[str, set[int]]) -> list[str]:
+def clippy_config_files(diff: str, changed: dict[str, set[int]], cargo_home: str | None = None) -> list[str]:
     """The files clippy takes its rules or its toolchain from, by CLIPPY_CONFIG_NAMES and CARGO_CONFIG_NAMES, that
-    the diff changes, deletes or renames away, in path order."""
+    the diff changes, deletes or renames away, in path order. cargo_home is the directory, relative to the tree's top
+    and "" for the top itself, of the CARGO_HOME clippy runs with, as _cargo_home_in gives it; None when that is
+    outside the tree, so that no file of the tree is cargo's configuration there."""
     def configures_clippy(path: str) -> bool:
-        name = os.path.basename(path)
+        name, where = os.path.basename(path), os.path.dirname(path)
         return name in CLIPPY_CONFIG_NAMES or (name in CARGO_CONFIG_NAMES
-                                               and os.path.basename(os.path.dirname(path)) == ".cargo")
+                                               and (os.path.basename(where) == ".cargo" or where == cargo_home))
     return sorted(f for f in _touched_paths(diff, changed) if configures_clippy(f))
+
+
+def _cargo_home_in(root: str) -> str | None:
+    """The CARGO_HOME of tool_env, the environment clippy runs with, relative to root, the tree's top, "" when it is
+    root itself; None when it is unset or outside root. A relative CARGO_HOME is taken from root, though cargo takes
+    it from each workspace it runs in."""
+    home = tool_env().get("CARGO_HOME")
+    if not home:
+        return None
+    where = os.path.relpath(os.path.realpath(os.path.join(root, home)), os.path.realpath(root))
+    if where == os.pardir or where.startswith(os.pardir + os.sep):
+        return None
+    return "" if where == os.curdir else where
 
 
 def _touched_paths(diff: str, changed: dict[str, set[int]]) -> set[str]:
     """The paths diff, of changed as changed_lines gives it, changes, deletes or renames away."""
     return set(changed) | set(re.findall(r"^(?:--- a/|rename from )(.+?)\t?$", diff, re.MULTILINE))
-
-
-def mutmut_state_files(changed: dict[str, set[int]]) -> list[str]:
-    """The files a change adds or edits under mutmut's state, _MUTMUT_STATE, by path, of changed as changed_lines
-    gives it: the files GateChange.from_tree leaves out of what the checks see."""
-    return sorted(f for f in changed if f == _MUTMUT_STATE or f.startswith(f"{_MUTMUT_STATE}/"))
 
 
 @dataclass(frozen=True)
@@ -471,13 +475,14 @@ class GateTool:
     line_ends: tuple[str, ...]
 
     def run(self, root: str, rules: str, files: list[str], tracked: set[str]) -> tuple[list[dict], list[str]]:
-        """The linter's findings over files, the tracked files its pathspecs match, in the repository whose top level
-        is root, and the failed conditions it caused, each a sentence, none when it ran as it should.
+        """The linter's findings over files, the tracked files its pathspecs match outside mutmut's state
+        (_linted_files), in the repository whose top level is root, and the failed conditions it caused, each a
+        sentence, none when it ran as it should.
 
         rules is the pyproject.toml whose rules decide, tracked every file git tracks, as _git_run's verbatim output
-        names them. The findings are {path, line, severity, rule, message} as tool_findings gives them, wherever they
-        are; the gate keeps those on added lines. A tool that is missing, fails or times out is a condition, never an
-        exception."""
+        names them, by which the findings' paths are read. The findings are {path, line, severity, rule, message} as
+        tool_findings gives them, wherever they are; the gate keeps those on added lines. A tool that is missing,
+        fails or times out is a condition, never an exception."""
         raise NotImplementedError
 
 
@@ -507,7 +512,7 @@ class TextTool(GateTool):
 
 @dataclass(frozen=True)
 class Clippy(GateTool):
-    """cargo clippy over every Cargo workspace that a manifest the repository tracks belongs to, all its targets
+    """cargo clippy over every Cargo workspace that a manifest among the files it is given belongs to, all its targets
     checked, tests and examples included.
 
     Which lints are on is each workspace's own choice, the [lints] tables of its manifests and its clippy.toml: the
@@ -522,21 +527,24 @@ class Clippy(GateTool):
     build on no line it added.
 
     The cargo commands it runs, each within GATE_TOOL_TIMEOUT: `cargo clippy --version`, whose failure is clippy
-    missing; `cargo locate-project` for each tracked Cargo.toml; and `cargo clippy` in each workspace, which builds
-    what it needs to (target/ in the workspace) and may fetch the crates it uses. That last runs with --locked when
-    git tracks the workspace's Cargo.lock, so that it judges the versions the change commits and never rewrites the
-    file; without one, cargo writes an untracked Cargo.lock beside the manifest.
+    missing; `cargo locate-project` for each Cargo.toml among the files it is given; and `cargo clippy` in each
+    workspace, which builds what it needs to (target/ in the workspace) and may fetch the crates it uses. That last
+    runs with --locked when git tracks the workspace's Cargo.lock, so that it judges the versions the change commits
+    and never rewrites the file; without one, cargo writes an untracked Cargo.lock beside the manifest.
     """
 
     def run(self, root: str, rules: str, files: list[str], tracked: set[str]) -> tuple[list[dict], list[str]]:
-        """As GateTool.run says; files and rules play no part, since clippy reads crates by their manifests."""
+        """As GateTool.run says; of files only the manifests play a part, by which clippy reads crates, and rules
+        plays none. Without a Rust source among files there is nothing to lint, and cargo does not run."""
+        if not any(f.endswith(".rs") for f in files):
+            return [], []
         proc = _tool_process(self.name, ["cargo", "clippy", "--version"], root)
         if isinstance(proc, str):
             return [], [proc]
         if proc.returncode != 0:
             return [], [(f"`{self.name}` is not installed: `cargo clippy --version` failed with exit status "
                          f"{proc.returncode}: {_said(proc)}")]
-        manifests, problems = _cargo_workspaces(root, tracked)
+        manifests, problems = _cargo_workspaces(root, files)
         found: list[dict] = []
         for manifest in manifests:
             lints, problem = self._lint_workspace(root, manifest, tracked)
@@ -596,36 +604,41 @@ GATE_TOOLS = (
              detail=re.compile(r"(?P<message>.+) \[(?P<rule>[\w-]+)\]")),
     # rustc numbers lines at "\n" alone, though Rust counts a lone "\r", NEL, U+2028 and U+2029 as whitespace:
     # observed with clippy 0.1.99 (rustc 1.99.1), whose finding below a line holding all four was on git's line.
-    Clippy("clippy", ("*.rs",), ()),
+    # Its manifests are among its files only to say which workspaces it lints (Clippy.run).
+    Clippy("clippy", ("*.rs", "*Cargo.toml"), ()),
 )
 
 
 @dataclass(frozen=True)
 class GateChange:
-    """The change the gate judges, as each GateCheck is given it; from_tree makes one."""
+    """The change the gate judges, as judge_change reads it and each GateCheck is given it; from_tree makes one."""
     root: str  # the repository's top level; its working tree is the change's new side
     base: str  # the commit the change is judged against, a full sha
-    diff: str  # _change_diff from base to the working tree, of the files the checks see
+    diff: str  # _change_diff from base to the working tree, of the files the gate sees
     changed: dict[str, set[int]]  # changed_lines(diff)
-    files: list[tuple[str | None, str | None]]  # _changed_files from base, of the files the checks see
+    files: list[tuple[str | None, str | None]]  # _changed_files from base, of the files the gate sees
     # The path of the pyproject.toml whose rules judge the change, as judge_change passes it: `gate.py --config`'s, else
     # the tree's own. None, which only a caller other than judge_change passes, also means the tree's own.
     rules: str | None = None
+    # The files the change adds or edits under mutmut's state, _MUTMUT_STATE, the one part of it the fields above
+    # leave out, in path order: a file it adds, renames into it or changes there in any way but deleting it.
+    mutmut_state: tuple[str, ...] = ()
 
     @classmethod
     def from_tree(cls, root: str, base: str, rules: str | None = None) -> "GateChange":
         """The change from base, a full sha, to the working tree of the repository whose top level is root, judged by
         rules as the rules field says.
 
-        The checks see the change as if git tracked nothing under mutmut's state, _MUTMUT_STATE, on either side: no
-        check selects a test, a function or a changed line there, or counts an edit there as a change to the code. A
-        file moved out of it is an added file, and one moved into it a deleted one. That is the one place mutmut's
-        state is left out; the linters and the build-configuration listing see it as any other tracked file.
+        Its diff, changed and files show the change as if git tracked nothing under mutmut's state, _MUTMUT_STATE, on
+        either side, so nothing that reads them selects a test, a function or a changed line there, or counts an edit
+        there as a change to the code. A file moved out of it is an added file, and one moved into it a deleted one,
+        which mutmut_state names instead.
 
         Raises GateError when git cannot diff the tree against base."""
-        pathspecs = (f":(top,exclude,literal){_MUTMUT_STATE}",)
-        diff = _change_diff(root, base, pathspecs)
-        return cls(root, base, diff, changed_lines(diff), _changed_files(root, base, pathspecs), rules)
+        diff = _change_diff(root, base, (_OUTSIDE_MUTMUT_STATE,))
+        mutmut_state = sorted(new for _, new in _changed_files(root, base, (_INSIDE_MUTMUT_STATE,)) if new)
+        return cls(root, base, diff, changed_lines(diff), _changed_files(root, base, (_OUTSIDE_MUTMUT_STATE,)), rules,
+                   tuple(mutmut_state))
 
 
 @dataclass(frozen=True)
@@ -661,11 +674,16 @@ class GateCheck:
 # A finding's location, before the tool's own part; lineless when the tool names only the file.
 _FINDING_AT = re.compile(r"(?P<path>[^:]+):(?:(?P<line>\d+):(?:\d+:)?)? (?P<detail>.+)")
 
-# Comments that silence a linter or exempt lines from coverage, which the quality file lists for the Reviewer; and in
-# a Rust file, the attributes that silence a lint: an allow or expect inside one attribute's brackets, also inside a
-# cfg_attr, as in `#![cfg_attr(test, allow(...))]`, or alone on a line, as rustfmt wraps a long cfg_attr's.
-_SUPPRESSION = re.compile(r"#.*\b(?:noqa|type:\s*ignore|shellcheck\s+disable|pragma:\s*no\s*(?:cover|branch|mutate))\b"
-                          r"|<!--\s*pyml\s+disable")
+# What silences a linter or exempts lines from coverage or mutation, which the quality file lists for the Reviewer, in
+# each kind of file that something the gate runs reads it in (_suppressing_lines): in Python, a comment for ruff,
+# mypy, coverage.py or mutmut, matched against its comments alone; in a shell script, and in a workflow, whose run
+# scripts actionlint has shellcheck read, a comment for shellcheck; in Markdown, a line that is pymarkdown's pragma,
+# an HTML comment from the line's first column to its end (pymarkdownlnt 0.9.41's PragmaToken.look_for_pragmas);
+# and in Rust, an attribute: an allow or expect inside one attribute's brackets, also inside a cfg_attr, as in
+# `#![cfg_attr(test, allow(...))]`, or alone on a line, as rustfmt wraps a long cfg_attr's.
+_PYTHON_SUPPRESSION = re.compile(r"#.*\b(?:noqa|type:\s*ignore|pragma:\s*no\s*(?:cover|branch|mutate))\b")
+_SHELL_SUPPRESSION = re.compile(r"#.*\bshellcheck\s+disable\b")
+_MARKDOWN_SUPPRESSION = re.compile(r"^<!---?\s*pyml\s+disable.*-->\s*$", re.IGNORECASE)
 _RUST_SUPPRESSION = re.compile(r"#!?\[[^\]]*\b(?:allow|expect)\s*\(|^\s*(?:allow|expect)\s*\(")
 
 
@@ -688,19 +706,21 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
                  coverage: list[str] | tuple[str, ...] = (), tests: list[str] | tuple[str, ...] = ()) -> str:
     """The quality file for the change from base to the working tree of the git repository at cwd.
 
-    Runs each GATE_TOOLS linter whose files the repository tracks over those files, with the rules of the pyproject.toml
-    at rules, or the tree's own, and lists the findings on lines the change added and the lineless ones on files it
-    touched. Then runs each of checks, such as gate_checks gives, on the change as GateChange.from_tree gives it, and
-    lists what it finds, as an issue or as a finding to weigh as GateCheck.judged says. The gate is ERROR when there is
-    such a linter finding or a check's finding judged an error, when a linter is missing, fails or prints nothing
-    readable, when a file a linter reads and the change adds lines to holds a line end that git does not count, as
-    stray_line_ends finds, when one of tests, JUnit reports of the tree's tests such as pytest's --junitxml and
-    cargo-nextest's, has a failing test, or when coverage, Cobertura reports of the tree such as pytest-cov's
-    coverage.xml and cargo-llvm-cov's, merged as new_coverage says, puts new code below GATE_MIN_COVERAGE percent on
-    GATE_MIN_NEW_LINES or more new lines to cover; else OK. With no tests, or no coverage, the quality file has no
-    section on them. Suppressions the change added are listed, not counted against it. Paths are absolute or relative
-    to the process's working directory. A file name that is not UTF-8 appears in the quality file with each byte it
-    cannot decode as `\\xNN`.
+    The change is GateChange.from_tree's, which every part of the judgement below reads: none reads what the tree
+    tracks under mutmut's state, _MUTMUT_STATE. Runs each GATE_TOOLS linter whose files the repository tracks outside
+    it over those files, with the rules of the pyproject.toml at rules, or the tree's own, and lists the findings on
+    lines the change added and the lineless ones on files it touched. Then runs each of checks, such as gate_checks
+    gives, on the change, and lists what it finds, as an issue or as a finding to weigh as GateCheck.judged says. The
+    gate is ERROR when the change adds or edits files under mutmut's state (GateChange.mutmut_state), which is always
+    mutmut's scratch state committed by accident, when there is such a linter finding or a check's finding judged an
+    error, when a linter is missing, fails or prints nothing readable, when a file a linter reads and the change adds
+    lines to holds a line end that git does not count, as stray_line_ends finds, when one of tests, JUnit reports of
+    the tree's tests such as pytest's --junitxml and cargo-nextest's, has a failing test, or when coverage, Cobertura
+    reports of the tree such as pytest-cov's coverage.xml and cargo-llvm-cov's, merged as new_coverage says, puts new
+    code below GATE_MIN_COVERAGE percent on GATE_MIN_NEW_LINES or more new lines to cover; else OK. With no tests, or
+    no coverage, the quality file has no section on them. Suppressions the change added are listed, not counted
+    against it. Paths are absolute or relative to the process's working directory. A file name that is not UTF-8
+    appears in the quality file with each byte it cannot decode as `\\xNN`.
 
     Raises GateError when it cannot judge: cwd is not in a git work tree, base names no commit, there
     is no rules file, a test or coverage report cannot be read, or git prints what it cannot decode outside
@@ -718,14 +738,13 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
     if not os.path.isfile(rules_path):
         raise GateError(f"no rules: {rules_path} is not a file")
 
-    diff = _change_diff(root, base_sha)
-    changed = changed_lines(diff)
+    change = GateChange.from_tree(root, base_sha, rules_path)
+    changed = change.changed
     tracked = {f for f in _git(root, "ls-files", "-z", verbatim=True).split("\0") if f}
-    conditions, findings = [], []
+    conditions, findings = _mutmut_state_condition(change), []
     reads: list[tuple[GateTool, list[str]]] = []  # each linter, with the tracked files it reads
     for tool in GATE_TOOLS:
-        files = [f for f in _git(root, "ls-files", "-z", "--", *tool.pathspecs, verbatim=True).split("\0")
-                 if f]
+        files = _linted_files(root, tool)
         reads.append((tool, files))
         if files:
             found, problems = tool.run(root, rules_path, files, tracked)
@@ -741,7 +760,6 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
                    f"write it as an escape in a string."
                    for path, n, end in stray_line_ends(root, changed, reads)]
     to_weigh: list[dict] = []
-    change = GateChange.from_tree(root, base_sha, rules_path)
     for check in checks:
         found = [check.judged(f) for f in check.find(change)]
         errors = [f for f in found if f["severity"] == "error"]
@@ -770,13 +788,31 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
              + (f", by the rules in `{rules}`." if rules else "."))
     text = quality_report(GATE_ERROR if conditions else GATE_OK, intro, conditions=conditions, issues=issues,
                           to_weigh=to_weigh, elsewhere=elsewhere, tests=failing, coverage=coverage_sentence,
-                          suppressions=added_suppressions(root, changed), edited=edited_config(diff, changed),
-                          clippy_config=clippy_config_files(diff, changed),
-                          mutmut_state=mutmut_state_files(changed),
+                          suppressions=added_suppressions(root, changed), edited=edited_config(change.diff, changed),
+                          clippy_config=clippy_config_files(change.diff, changed, _cargo_home_in(root)),
                           rules_from=f"`{rules}`" if rules else None)
     # Paths and linter output come verbatim, so a name that is not UTF-8 holds lone surrogates, which no file or
     # terminal can take: give their bytes back, then write each byte that is not UTF-8 as \xNN.
     return text.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
+
+
+def _linted_files(root: str, tool: GateTool) -> list[str]:
+    """The files tool reads in the repository whose top level is root: those git tracks that its pathspecs match,
+    but none under mutmut's state, as _git_run's verbatim output names them. Raises GateError as _git does."""
+    # Filtered here rather than by _OUTSIDE_MUTMUT_STATE: beside an exclude, git 2.47 lists nothing for actionlint's
+    # two globs, `.github/workflows/*.yml` and `*.yaml`.
+    return [f for f in _git(root, "ls-files", "-z", "--", *tool.pathspecs, verbatim=True).split("\0")
+            if f and f != _MUTMUT_STATE and not f.startswith(f"{_MUTMUT_STATE}/")]
+
+
+def _mutmut_state_condition(change: GateChange) -> list[str]:
+    """The failed condition, as a list of one, naming the files change commits under mutmut's state
+    (GateChange.mutmut_state); none when it commits none."""
+    if not change.mutmut_state:
+        return []
+    named = _series([f"`{path}`" for path in change.mutmut_state], limit=5)
+    return [(f"The change adds or edits {named} under `{_MUTMUT_STATE}/`, where mutmut keeps its scratch state, "
+             f"which is never part of a change; the gate judged none of them. Remove them from the change.")]
 
 
 def _tool_process(name: str, argv: list[str], cwd: str) -> subprocess.CompletedProcess | str:
@@ -797,12 +833,12 @@ def _tool_process(name: str, argv: list[str], cwd: str) -> subprocess.CompletedP
     return proc
 
 
-def _cargo_workspaces(root: str, tracked: set[str]) -> tuple[list[str], list[str]]:
-    """The root manifest of each Cargo workspace that a tracked Cargo.toml belongs to, relative to root, the
-    repository's top level, in path order; and a failed condition, naming clippy, for each manifest whose workspace
-    cargo cannot tell."""
+def _cargo_workspaces(root: str, files: Iterable[str]) -> tuple[list[str], list[str]]:
+    """The root manifest of each Cargo workspace that a Cargo.toml among files, paths relative to root, the
+    repository's top level, belongs to, relative to root, in path order; and a failed condition, naming clippy, for
+    each manifest whose workspace cargo cannot tell."""
     roots, problems = set(), []
-    for manifest in sorted(f for f in tracked if os.path.basename(f) == "Cargo.toml"):
+    for manifest in sorted(f for f in files if os.path.basename(f) == "Cargo.toml"):
         proc = _tool_process("clippy", ["cargo", "locate-project", "--workspace", "--message-format", "plain",
                                         "--manifest-path", manifest], root)
         if isinstance(proc, str):
@@ -1017,16 +1053,39 @@ def _floor_tenth(percent: float) -> str:
 
 
 def added_suppressions(root: str, changed: dict[str, set[int]]) -> list[tuple[str, int, str]]:
-    """The (path, line, text) of each added line, in the working tree at root, that silences a linter or coverage.
-    Raises GateError when a file the change adds lines to cannot be read."""
+    """The (path, line, text) of each added line, in the working tree at root, that silences a linter, coverage or
+    mutmut, as _suppressing_lines finds them: in its file's own syntax, and in a Python file only by a comment, not by
+    the same words in a string. Raises GateError when a file the change adds lines to cannot be read."""
     out = []
     for path, added, lines in _files_with_added_lines(root, changed):
-        silencing = (_SUPPRESSION, _RUST_SUPPRESSION) if path.endswith(".rs") else (_SUPPRESSION,)
-        for n in sorted(a for a in added if a <= len(lines)):
-            text = lines[n - 1].decode("utf-8", "replace")
-            if any(p.search(text) for p in silencing):
-                out.append((path, n, text.strip()[:160]))
+        for n in sorted(added & _suppressing_lines(path, lines)):
+            out.append((path, n, lines[n - 1].decode("utf-8", "replace").strip()[:160]))
     return out
+
+
+def _suppressing_lines(path: str, lines: list[bytes]) -> set[int]:
+    """The numbers, from 1, of the lines that silence something the gate runs in the file at path, whose lines, as
+    _files_with_added_lines splits them, are lines: by the suppressions above for its kind of file, a Python file as
+    _holds_python tells one; none in a file of any other kind, in which nothing the gate runs reads a suppression.
+
+    A Python file's lines are those holding a comment that _PYTHON_SUPPRESSION matches; when the file does not
+    tokenize, each line that the pattern matches, so that a suppression in a file ruff reports as broken is still
+    listed."""
+    if _holds_python(path, lambda: lines[0][:_FIRST_LINE_BYTES]):
+        try:
+            tokens = tokenize.tokenize(io.BytesIO(b"\n".join(lines)).readline)
+            return {t.start[0] for t in tokens if t.type == tokenize.COMMENT and _PYTHON_SUPPRESSION.search(t.string)}
+        except (tokenize.TokenError, SyntaxError, UnicodeDecodeError, LookupError):
+            pattern = _PYTHON_SUPPRESSION
+    elif path.endswith(".sh") or (path.startswith(".github/workflows/") and path.endswith((".yml", ".yaml"))):
+        pattern = _SHELL_SUPPRESSION
+    elif path.endswith(".md"):
+        pattern = _MARKDOWN_SUPPRESSION
+    elif path.endswith(".rs"):
+        pattern = _RUST_SUPPRESSION
+    else:
+        return set()
+    return {n for n, line in enumerate(lines, 1) if pattern.search(line.decode("utf-8", "replace"))}
 
 
 def stray_line_ends(root: str, changed: dict[str, set[int]],
@@ -1092,9 +1151,10 @@ class ChangedTestFile:
 class WeakenedTestsDetector:
     """How the test-integrity check reads one language's tests."""
     language: str
-    # Whether a repository path is one of the language's test files, and whether it is the language's at all.
+    # Whether a repository path is one of the language's test files; and whether a path of the change, on either of
+    # its sides, holds the language's code outside its tests, the code its tests test.
     is_test: Callable[[str], bool]
-    is_source: Callable[[str], bool]
+    is_code: Callable[[GateChange, str], bool]
     # The findings on every one of the language's test files the change touched, as GateCheck.find returns them,
     # given whether the change also edits the language's code outside its tests.
     find: Callable[[list[ChangedTestFile], bool], list[dict]]
@@ -1103,8 +1163,9 @@ class WeakenedTestsDetector:
 def weakened_tests(change: GateChange) -> list[dict]:
     """The test-integrity check's find: in each WEAKENED_TESTS_DETECTORS language, the tests the change removed,
     skipped, stripped of assertions or wrapped in a swallowed error, and the expected values it changed together
-    with the code under test. The change leaves out mutmut's state, as GateChange.from_tree says."""
-    out: list[dict] = []
+    with the code under test; and, in any language, the golden files it changed so (_changed_golden_files). The change
+    leaves out mutmut's state, as GateChange.from_tree says."""
+    out: list[dict] = _changed_golden_files(change)
     for detector in WEAKENED_TESTS_DETECTORS:
         files, unreadable = [], []
         for old, new in change.files:
@@ -1118,10 +1179,44 @@ def weakened_tests(change: GateChange) -> list[dict]:
             except (GateError, OSError, UnicodeDecodeError) as e:
                 unreadable.append(_finding(new or old, None, "unreadable",
                                            f"could not be read, so its tests were not checked: {e}", severity="error"))
-        code_changed = any(detector.is_source(p) and not detector.is_test(p)
-                           for pair in change.files for p in pair if p)
-        out += unreadable + (detector.find(files, code_changed) if files else [])
+        out += unreadable + (detector.find(files, _edits_code(change, detector)) if files else [])
     return out
+
+
+def _edits_code(change: GateChange, detector: WeakenedTestsDetector) -> bool:
+    """Whether the change edits, adds, deletes or renames code of detector's language outside its tests."""
+    return any(detector.is_code(change, p) for pair in change.files for p in pair if p)
+
+
+def _changed_golden_files(change: GateChange) -> list[dict]:
+    """An expected-value-changed finding, on the whole file, for each golden file (_golden_file) that the change edits
+    or deletes, when it also edits the code of a WEAKENED_TESTS_DETECTORS language outside its tests: such a file is an
+    expected value outside any assertion, which `UPDATE_GOLDEN=1` rewrites to whatever the code now writes. A golden
+    file the change adds, or renames without editing, has no old value to lose."""
+    golden = [(old, new) for old, new in change.files if old is not None and _golden_file(old)]
+    if not golden or not any(_edits_code(change, detector) for detector in WEAKENED_TESTS_DETECTORS):
+        return []
+    removals = _removal_points(change.diff)
+    out = []
+    for old, new in golden:
+        if new is None:
+            out.append(_finding(old, None, "expected-value-changed",
+                                "a golden file, the expected output of a test, deleted in a change that also edits "
+                                "the code under test; check that no test still needs it.", severity="error"))
+        elif change.changed.get(new) or removals.get(new):
+            out.append(_finding(new, None, "expected-value-changed",
+                                "a golden file, the expected output of a test, changed in a change that also edits "
+                                "the code under test; check that its diff is what the change means the output to "
+                                "become.", severity="error"))
+    return sorted(out, key=lambda f: f["path"])
+
+
+def _golden_file(path: str) -> bool:
+    """Whether a repository path is a golden file, as this repository keeps them (tests/golden.py): under a directory
+    named golden inside a tests directory. A project that keeps its expected output under another name, such as
+    __snapshots__, is not read so."""
+    *dirs, _ = path.split("/")
+    return "golden" in dirs and "tests" in dirs[:dirs.index("golden")]
 
 
 def _read_text(path: str) -> str:
@@ -1160,6 +1255,13 @@ def _python_test_file(path: str) -> bool:
     """pytest's and unittest's usual places: under a tests directory, test_*.py or *_test.py."""
     *dirs, name = path.split("/")
     return name.endswith(".py") and ("tests" in dirs or name.startswith("test_") or name.endswith("_test.py"))
+
+
+def _python_code(change: GateChange, path: str) -> bool:
+    """Whether path, on either side of change, holds Python code outside the tests: Python source, as
+    _is_python_source tells it in the working tree or _was_python_source at the base, that _beside_tests does not set
+    with the tests."""
+    return not _beside_tests(path) and (_is_python_source(change, path) or _was_python_source(change, path))
 
 
 def _body_fingerprint(definition: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> str:
@@ -1645,8 +1747,7 @@ def _clip(text: str, n: int = 160) -> str:
 
 
 WEAKENED_TESTS_DETECTORS = (
-    WeakenedTestsDetector("python", is_test=_python_test_file, is_source=lambda path: path.endswith(".py"),
-                          find=python_weakened_tests),
+    WeakenedTestsDetector("python", is_test=_python_test_file, is_code=_python_code, find=python_weakened_tests),
 )
 
 
@@ -2251,17 +2352,14 @@ def passes_at_base(change: GateChange, *, budget: float) -> list[dict]:
 
 
 def _edits_python_source(change: GateChange) -> bool:
-    """Whether the change edits Python source outside the tests, as _beside_tests tells them: a file it leaves in the
-    working tree that _is_python_source accepts, or a .py file it deletes."""
-    return any((new is not None and not _beside_tests(new) and _is_python_source(change, new))
-               or (new is None and old is not None and old.endswith(".py") and not _beside_tests(old))
-               for old, new in change.files)
+    """Whether the change edits, adds, deletes or renames Python code outside the tests, as _python_code tells it."""
+    return any(_python_code(change, p) for pair in change.files for p in pair if p)
 
 
 def _beside_tests(path: str) -> bool:
-    """Whether a repository path belongs with the tests rather than with the code they test, as passes_at_base reads
-    it: a Python test file (_python_test_file), a conftest.py, or any file under a tests directory, such as a fixture's
-    data."""
+    """Whether a repository path belongs with the tests rather than with the code they test, as passes_at_base and
+    test-integrity read it (_python_code): a Python test file (_python_test_file), a conftest.py, or any file under a
+    tests directory, such as a fixture's data."""
     *dirs, name = path.split("/")
     return _python_test_file(path) or name == "conftest.py" or "tests" in dirs
 
@@ -2648,9 +2746,12 @@ def _unlinked_path(dest: str, path: str) -> str:
 _MUTMUT_SKIP = "  # pragma: no mutate block"
 
 # The directory in the tree mutmut runs in where it keeps its state: its copy of the code with the mutants, and each
-# module's results in <path>.meta beside it. What a tree tracks there is no part of the change the checks see
-# (GateChange.from_tree).
+# module's results in <path>.meta beside it. What a tree tracks there is no part of the change the gate reads
+# (GateChange.from_tree), and a change that commits files there fails the gate (judge_change).
 _MUTMUT_STATE = "mutants"
+# The git pathspec of every path outside _MUTMUT_STATE, and the one of the paths inside it.
+_OUTSIDE_MUTMUT_STATE = f":(top,exclude,literal){_MUTMUT_STATE}"
+_INSIDE_MUTMUT_STATE = f":(top,literal){_MUTMUT_STATE}"
 
 # How `mutmut results` words a mutant it did not try against a test: one the budget stopped it before, and one of a
 # function no test calls.
@@ -2968,12 +3069,15 @@ def _mutmut_table(rules: str) -> tuple[dict, str | None]:
 
 def _outside_mutmut(path: str, table: dict) -> str | None:
     """Why mutmut, set up by table, a [tool.mutmut] with source_paths, mutates nothing in the file at path, relative to
-    the tree's top; None when it may. As mutmut 3.8.0 decides it, by walking source_paths, then Config.should_mutate's
-    only_mutate and do_not_mutate globs."""
+    the tree's top; None when it may. As mutmut 3.8.0 decides it, by walking source_paths for files named *.py
+    (walk_source_files), so never a #! python script without the name, then Config.should_mutate's only_mutate and
+    do_not_mutate globs."""
     sources: list[str] = table.get("source_paths") or table.get("paths_to_mutate") or []
     roots = [os.path.normpath(p) for p in sources]
     if not any(r == "." or path == r or path.startswith(f"{r}/") for r in roots):
         return f"it is outside [tool.mutmut] source_paths ({', '.join(sources)})"
+    if not path.endswith(".py"):
+        return "mutmut mutates only files named *.py"
     only = table.get("only_mutate", [])
     if only and not any(fnmatch.fnmatch(path, g) for g in only):
         return f"[tool.mutmut] only_mutate ({', '.join(only)}) leaves it out"
@@ -3414,8 +3518,8 @@ def _base_scores(change: GateChange,
     in its file's base. A function of judged takes no base under _COMPLEXITY_EXEMPT, since the tests were never held
     to the limit; and a base that cannot be read or parsed has no functions.
 
-    The functions of every other changed Python file, which the check does not judge, such as one under
-    _COMPLEXITY_EXEMPT or a script whose name has no .py (_is_python_source), pair by body too, from any base, and in
+    The functions of every other changed Python file (_is_python_source), which the check does not judge, such as one
+    under _COMPLEXITY_EXEMPT or one the change adds no line to, pair by body too, from any base, and in
     each step before the judged ones, so that one moved unchanged into such a file is still itself and lends its base
     to no copy, whatever the copy's name.
 
@@ -3499,8 +3603,9 @@ class _BasePool:
 
 
 def _judged_files(change: GateChange) -> tuple[list[dict], dict[str, tuple[list[_ScoredFunction], set[int]]]]:
-    """A finding for each Python file outside _COMPLEXITY_EXEMPT that the change adds lines to and that cannot be read
-    or parsed; and, by path, the scored functions of each of the others, with the lines the change adds to it."""
+    """A finding for each Python file outside _COMPLEXITY_EXEMPT that the change adds lines to, as
+    _parsed_changed_files gives them, and that cannot be read or parsed; and, by path, the scored functions of each of
+    the others, with the lines the change adds to it."""
     out: list[dict] = []
     judged: dict[str, tuple[list[_ScoredFunction], set[int]]] = {}
     for changed in _parsed_changed_files(change, lambda path, added, removed: bool(added)
@@ -3515,7 +3620,8 @@ def _judged_files(change: GateChange) -> tuple[list[dict], dict[str, tuple[list[
 
 @dataclass(frozen=True)
 class _ChangedPythonFile:
-    """A .py file of the change, as the working tree holds it and _parse_working_file reads it."""
+    """A Python source file of the change, as _is_python_source tells one, as the working tree holds it and
+    _parse_working_file reads it."""
     path: str
     added: set[int]  # the lines the change adds to it, from 1
     removed: set[int]  # the points it only removes lines at, as _removal_points gives them; empty when there are none
@@ -3526,15 +3632,16 @@ class _ChangedPythonFile:
 
 def _parsed_changed_files(change: GateChange, wanted: Callable[[str, set[int], set[int]], bool]
                           = lambda path, added, removed: bool(added)) -> Iterator[_ChangedPythonFile]:
-    """Each .py file the change touches that wanted(path, added, removed) accepts, by default each it adds lines to,
-    read and parsed; the arguments are what the _ChangedPythonFile fields of those names hold. Only a regular file of
-    the working tree is read: a symlink, a submodule, a FIFO or a device is left out whatever wanted says
-    (_is_link_or_special). A file the change deletes is not among them, as changed_lines says, nor is one under
-    mutmut's state, as GateChange.from_tree says."""
+    """Each Python source file the change touches, a .py file or a script whose #! line names python
+    (_is_python_source), that wanted(path, added, removed) accepts, by default each it adds lines to, read and parsed;
+    the arguments are what the _ChangedPythonFile fields of those names hold. Only a regular file of the working tree
+    is read: a symlink, a submodule, a FIFO or a device is left out whatever wanted says (_is_link_or_special). A file
+    the change deletes is not among them, as changed_lines says, nor is one under mutmut's state, as
+    GateChange.from_tree says."""
     removals = _removal_points(change.diff)
     for path, added in change.changed.items():
         removed = removals.get(path, set())
-        if path.endswith(".py") and wanted(path, added, removed) and not _is_link_or_special(change, path):
+        if wanted(path, added, removed) and _is_python_source(change, path):
             yield _ChangedPythonFile(path, added, removed, *_parse_working_file(change, path))
 
 
@@ -4078,16 +4185,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """The gate's command-line arguments argv, sys.argv[1:] by default, parsed: one attribute per option, as
     gate_command's parameters name them. Bad arguments and --help end the process through argparse's SystemExit,
     status 2 and 0."""
-    parser = argparse.ArgumentParser(prog="gate.py")
-    parser.description = (
+    parser = argparse.ArgumentParser(prog="gate.py", description=(
         f"Run ruff, mypy, pymarkdown, shellcheck, actionlint and clippy over the files the repository tracks and "
         f"write the quality file: GATE: OK or GATE: ERROR on its first line, then the failed conditions, the findings "
         f"on lines added since --base and the checks' errors, the findings to weigh, failing tests, coverage of new "
         f"code, suppressions added and edited build configuration. Any finding on an added line or a check's error "
         f"fails the gate, and so do a linter that is missing or fails, a Cargo workspace that does not compile, a "
-        f"failing test, and coverage below "
+        f"failing test, files committed under mutmut's {_MUTMUT_STATE}/, and coverage below "
         f"{GATE_MIN_COVERAGE:g}% on {GATE_MIN_NEW_LINES} or more new lines to cover. Exit status 0 for OK, 1 for "
-        f"ERROR, {EXIT_GATE_UNJUDGED} when it could not judge, writing no quality file.")
+        f"ERROR, {EXIT_GATE_UNJUDGED} when it could not judge, writing no quality file."))
     parser.add_argument("--base", required=True, metavar="REV", help="the commit the change is measured from")
     parser.add_argument("--config", metavar="PYPROJECT",
                         help="take the linters' rules from this pyproject.toml instead of the tree's own")
