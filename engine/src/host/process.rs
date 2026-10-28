@@ -160,7 +160,7 @@ fn timed_out(argv: &[String], seconds: u64) -> String {
 enum ProcessError {
     /// The command could not be started.
     Start(std::io::Error),
-    /// Its input could not be written, or its output read.
+    /// Its input could not be written, its output read, or its exit waited for.
     Io(std::io::Error),
     /// It had not exited and closed its output when its time ran out; its process group was killed.
     Timeout,

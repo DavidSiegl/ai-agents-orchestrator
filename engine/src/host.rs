@@ -61,7 +61,8 @@ pub struct Completed<T = String> {
     pub status: i32,
     /// What it wrote to its standard output, as Exec::stdout says.
     pub stdout: T,
-    /// What it wrote to its standard error, as Exec::stderr says. For a verbatim run, decoded with each byte that is not UTF-8 replaced, as it is only ever shown.
+    /// What it wrote to its standard error, as Exec::stderr says. For a verbatim run, decoded with each byte that is
+    /// not UTF-8 replaced, as it is only ever shown.
     pub stderr: String,
 }
 
@@ -725,8 +726,11 @@ pub trait Host {
             let Some(head) = head.as_str() else {
                 return Err(format!("expected string or bytes-like object, got '{}'", py_type(head)));
             };
+            if !is_commit_id(head) {
+                return Ok(None);
+            }
             let closed = subscript(&pr, "closedAt")?;
-            if !is_commit_id(head) || !(closed.is_null() || closed.as_str().is_some()) {
+            if !(closed.is_null() || closed.as_str().is_some()) {
                 return Ok(None);
             }
             let closed_at = closed.as_str().map(String::from);

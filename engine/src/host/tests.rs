@@ -746,6 +746,8 @@ fn pull_request_unexpected_output() {
         ("{\"state\": \"MERGED\"}".to_string(), ": 'headRefOid'"),
         ("{\"state\": 5}".to_string(), ", not a pull request's state"),
         (open("headRefOid", "\"main\""), ", not a pull request's state"),
+        // A head that is no commit is judged before closedAt is read.
+        ("{\"state\": \"OPEN\", \"headRefOid\": \"main\"}".to_string(), ", not a pull request's state"),
         (open("headRefOid", "7"), ": expected string or bytes-like object, got 'int'"),
         (open("closedAt", "5"), ", not a pull request's state"),
         (open("state", "1"), ", not a pull request's state"),
@@ -790,15 +792,21 @@ fn merge_view() {
         PullRequestMerge { state: "OPEN".into(), is_draft: true, mergeable: "MERGEABLE".into(), body: "text".into() }
     );
     assert_eq!(gh_argv(&bin.path()), ["pr", "view", URL, "--json", "state,isDraft,mergeable,body"]);
-    for bad in [
-        pr.replace("MERGEABLE", "BLOCKED"),
-        pr.replace("true", "\"yes\""),
-        pr.replace("\"text\"", "null"),
-        "{\"state\": \"OPEN\"}".to_string(),
+    let not_a_state = ", not a pull request's state";
+    for (bad, why) in [
+        (pr.replace("MERGEABLE", "BLOCKED"), not_a_state),
+        (pr.replace("\"MERGEABLE\"", "[\"MERGEABLE\"]"), not_a_state),
+        (pr.replace("true", "\"yes\""), not_a_state),
+        (pr.replace("\"text\"", "null"), not_a_state),
+        ("{\"state\": \"OPEN\"}".to_string(), ": 'isDraft'"),
+        ("{\"state\": 1}".to_string(), not_a_state),
+        ("{\"state\": \"OPEN\", \"isDraft\": false, \"mergeable\": \"UNKNOWN\"}".to_string(), ": 'body'"),
+        ("[1]".to_string(), ": list indices must be integers or slices, not str"),
     ] {
         let (host, _bin) = gh_host(&bad, "", 0);
         let e = OrchestratorError::from(host.pull_request_merge("/", URL).unwrap_err());
-        assert!(e.0.starts_with(&format!("gh pr view {URL} printed ")), "{bad}: {e}");
+        let printed = format!("gh pr view {URL} printed {}", crate::py::text::repr(&bad));
+        assert!(e.0.starts_with(&format!("{printed}{why}")), "{bad}: {e}");
     }
     let (host, _bin) = gh_host("", "gh auth login\n", 4);
     assert!(matches!(host.pull_request_merge("/", URL), Err(GhError::Unusable(_))));
