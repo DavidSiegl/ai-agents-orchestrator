@@ -68,7 +68,11 @@ pub(crate) struct FakePyPI {
 impl FakePyPI {
     /// PyPI with these projects, by name.
     pub fn with(projects: &[(&str, ProjectJson)]) -> Arc<FakePyPI> {
-        let projects = projects.iter().map(|(name, p)| (*name, p.json())).collect();
+        FakePyPI::from_json(projects.iter().map(|(name, p)| (*name, p.json())).collect())
+    }
+
+    /// PyPI with these projects' JSON, by name.
+    pub fn from_json(projects: Map<Json>) -> Arc<FakePyPI> {
         Arc::new(FakePyPI { state: Mutex::new(FakePyPIState { projects, ..FakePyPIState::default() }) })
     }
 

@@ -3,6 +3,7 @@
 
 pub mod py;
 pub mod ci;
+pub mod checks;
 pub mod constants;
 pub mod env;
 pub mod error;
