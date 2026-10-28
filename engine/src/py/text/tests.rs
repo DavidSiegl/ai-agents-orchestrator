@@ -55,6 +55,20 @@ fn close_match_picks_what_difflib_does() {
 }
 
 #[test]
+fn utf8_errors_are_worded_as_pythons() {
+    for (bytes, said) in [
+        (&b"ab\xffc"[..], "'utf-8' codec can't decode byte 0xff in position 2: invalid start byte"),
+        (b"ab\xe2\x82", "'utf-8' codec can't decode bytes in position 2-3: unexpected end of data"),
+        (b"ab\xe2(", "'utf-8' codec can't decode byte 0xe2 in position 2: invalid continuation byte"),
+        (b"\xc0\xaf", "'utf-8' codec can't decode byte 0xc0 in position 0: invalid start byte"),
+        (b"ab\xe2", "'utf-8' codec can't decode byte 0xe2 in position 2: unexpected end of data"),
+    ] {
+        assert_eq!(utf8_error(bytes, &std::str::from_utf8(bytes).unwrap_err()), said);
+    }
+    assert_eq!(rstrip(" a \u{1f}\u{3000}"), " a");
+}
+
+#[test]
 fn decimal_digits_are_pythons() {
     assert_eq!(decimal_value('7'), Some(7));
     assert_eq!(decimal_value('\u{0663}'), Some(3));

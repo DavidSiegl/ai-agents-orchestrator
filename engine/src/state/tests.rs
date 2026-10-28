@@ -69,6 +69,19 @@ fn fields_it_does_not_know_are_kept_and_written_back() {
 }
 
 #[test]
+fn fields_lists_every_field_to_json_writes_and_no_unknown_one_replaces_it() {
+    let written: Vec<String> = match RunState::new("r", "t", "/p").to_json() {
+        Json::Object(map) => map.keys().map(String::from).collect(),
+        _ => panic!("an object"),
+    };
+    assert_eq!(written, FIELDS[..FIELDS.len() - 1]);
+    let mut state = RunState::new("r", "t", "/p");
+    state.unknown.insert("phase", Json::from("stale"));
+    assert!(state.to_text().contains("\"phase\": \"spec\""));
+    assert!(!state.to_text().contains("stale"));
+}
+
+#[test]
 fn a_new_state_writes_what_the_python_engines_does() {
     let state = RunState::new("20260929-120000-a1b2c3", "add a rate limiter", "/proj");
     let text = state.to_text();

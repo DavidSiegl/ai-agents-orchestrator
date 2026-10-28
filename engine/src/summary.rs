@@ -4,7 +4,7 @@
 use crate::constants::DEFAULT_AGENT;
 use crate::pipeline::Pipeline;
 use crate::py::json::{Json, Map};
-use crate::py::text::strip;
+use crate::py::text::{rstrip, strip};
 use crate::state::RunState;
 
 /// The version of run_metrics' shape, raised when a key changes its meaning or goes.
@@ -222,7 +222,7 @@ pub fn turn_lines(turns: &[Map<Json>]) -> Vec<String> {
     rows.iter()
         .map(|r| {
             let cells: Vec<String> = r.iter().zip(&widths).map(|(cell, w)| format!("{cell:<w$}")).collect();
-            cells.join("  ").trim_end().to_string()
+            rstrip(&cells.join("  ")).to_string()
         })
         .collect()
 }

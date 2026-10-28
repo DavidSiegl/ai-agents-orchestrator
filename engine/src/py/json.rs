@@ -114,9 +114,14 @@ pub enum Json {
 
 impl Json {
     /// The value text holds, as json.loads reads it; the parser's error for text that is not JSON. Unlike
-    /// json.loads, it refuses NaN and Infinity, which no file of the engine's holds.
+    /// json.loads, it refuses NaN and Infinity, and an integer beyond 64 bits, which serde_json would read as a float;
+    /// no file of the engine's holds them.
     pub fn parse(text: &str) -> Result<Json, String> {
-        serde_json::from_str(text).map_err(|e| e.to_string())
+        let value: Json = serde_json::from_str(text).map_err(|e| e.to_string())?;
+        match wide_integer(text) {
+            Some(literal) => Err(format!("the integer {literal} is beyond 64 bits")),
+            None => Ok(value),
+        }
     }
 
     /// The value as json.dumps(value) writes it: ", " and ": " between items and keys, every character outside
@@ -286,6 +291,37 @@ fn write_chars(s: &str, ascii_only: bool, out: &mut String) {
         }
     }
     out.push('"');
+}
+
+/// The first integer literal of JSON text, outside its strings, that neither i64 nor u64 holds; None for none.
+fn wide_integer(text: &str) -> Option<&str> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            b'-' | b'0'..=b'9' => {
+                let start = i;
+                i += 1;
+                while i < bytes.len() && matches!(bytes[i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-') {
+                    i += 1;
+                }
+                let literal = &text[start..i];
+                let integer = !literal.contains(['.', 'e', 'E']);
+                if integer && literal.parse::<i64>().is_err() && literal.parse::<u64>().is_err() {
+                    return Some(literal);
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
 }
 
 /// x as Python's float.__repr__ writes it, which json.dumps uses: the shortest digits that read back as x, in

@@ -81,24 +81,46 @@ fn a_malformed_line_is_named_without_its_content() {
 }
 
 #[test]
+fn a_directory_or_an_unreadable_file_is_named_as_python_names_it() {
+    let dir = TempDir::new();
+    let path = dir.join("ci.env");
+    std::fs::create_dir(&path).unwrap();
+    assert_eq!(ci_credentials(&from(&[]), &path).unwrap_err().0, format!("could not read {path}: [Errno 21] Is a directory: '{path}'"));
+    let (_dir, path) = env_file("JENKINS_URL=x\n", 0o000);
+    // root reads any file; anyone else is refused.
+    if let Err(e) = ci_credentials(&from(&[]), &path) {
+        assert_eq!(e.0, format!("could not read {path}: [Errno 13] Permission denied: '{path}'"));
+    }
+}
+
+#[test]
 fn a_file_that_is_not_utf8_is_named() {
     let dir = TempDir::new();
     let path = dir.join("ci.env");
     std::fs::write(&path, b"JENKINS_URL=\xff\n").unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    assert!(ci_credentials(&from(&[]), &path).unwrap_err().0.starts_with(&format!("could not read {path}: ")));
+    assert_eq!(
+        ci_credentials(&from(&[]), &path).unwrap_err().0,
+        format!("could not read {path}: 'utf-8' codec can't decode byte 0xff in position 12: invalid start byte")
+    );
 }
 
 #[test]
 fn path_follows_xdg_config_home() {
     let env = from(&[("XDG_CONFIG_HOME", "/xdg"), ("HOME", "/home/u")]);
-    assert_eq!(ConfigDir::for_env(&env).ci_env_path(), "/xdg/ai-agents-orchestrator/ci.env");
+    assert_eq!(ConfigDir::for_env(&env, &|| None).ci_env_path(), "/xdg/ai-agents-orchestrator/ci.env");
     let env = from(&[("XDG_CONFIG_HOME", "relative"), ("HOME", "/home/u/")]);
-    let config = ConfigDir::for_env(&env);
+    let config = ConfigDir::for_env(&env, &|| None);
     assert_eq!(config.ci_env_path(), "/home/u/.config/ai-agents-orchestrator/ci.env");
     assert_eq!(config.prompts_dir(), "/home/u/.config/ai-agents-orchestrator/prompts");
     assert_eq!(config.workflows_dir(), "/home/u/.config/ai-agents-orchestrator/workflows");
-    assert_eq!(ConfigDir::for_env(&from(&[])).path(), "~/.config/ai-agents-orchestrator");
+    assert_eq!(ConfigDir::for_env(&from(&[]), &|| None).path(), "~/.config/ai-agents-orchestrator");
+    // Without HOME, the user's home from /etc/passwd, as os.path.expanduser takes it.
+    assert_eq!(ConfigDir::for_env(&from(&[]), &|| Some("/home/p".into())).path(), "/home/p/.config/ai-agents-orchestrator");
+    let passwd = "root:x:0:0:root:/root:/bin/sh\nbad line\nu:x:1001:1001::/home/u:/bin/sh\n";
+    assert_eq!(home_of(passwd, "1001").as_deref(), Some("/home/u"));
+    assert_eq!(home_of(passwd, "7"), None);
+    assert!(passwd_home().is_some_and(|home| home.starts_with('/')));
     assert_eq!(ConfigDir::at("/").ci_env_path(), "/ci.env");
     assert!(ConfigDir::from_env().ci_env_path().ends_with("/ai-agents-orchestrator/ci.env"));
 }

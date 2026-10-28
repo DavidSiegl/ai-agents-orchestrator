@@ -40,6 +40,17 @@ fn truthiness_is_pythons() {
 }
 
 #[test]
+fn floats_read_as_python_reads_them_and_wide_integers_are_refused() {
+    for text in ["26.010854494457302", "0.1", "1e-07", "123456789.12345679", "-0.0"] {
+        assert_eq!(Json::parse(text).unwrap().dumps(), text, "{text}");
+    }
+    assert_eq!(Json::parse("[18446744073709551615, -9223372036854775808]").unwrap().dumps(), "[18446744073709551615, -9223372036854775808]");
+    assert_eq!(Json::parse("18446744073709551616").unwrap_err(), "the integer 18446744073709551616 is beyond 64 bits");
+    assert!(Json::parse("[-9223372036854775809]").is_err());
+    assert!(Json::parse(r#"{"a\"1": "99999999999999999999", "b": 1.5e300}"#).is_ok());
+}
+
+#[test]
 fn text_that_is_not_json_is_refused() {
     assert!(Json::parse("{").is_err());
     assert!(Json::parse("[1] x").is_err());

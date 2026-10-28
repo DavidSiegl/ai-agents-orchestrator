@@ -69,43 +69,58 @@ pub struct Chunk {
 /// The template as string.Formatter().parse reads it; the ValueError Python raises for a lone brace, an unclosed
 /// field or a bad conversion.
 pub fn parse(template: &str) -> Result<Vec<Chunk>, FormatError> {
+    chunks(template).collect()
+}
+
+/// The template's chunks one by one, as Python's MarkupIterator reads them: an error ends them, after the chunks
+/// before it, so that a template filled in chunk by chunk fails on the first problem in its order.
+fn chunks(template: &str) -> impl Iterator<Item = Result<Chunk, FormatError>> {
     let chars: Vec<char> = template.chars().collect();
     let mut pos = 0;
-    let mut chunks = Vec::new();
-    while pos < chars.len() {
-        let start = pos;
-        let mut brace = None;
-        while pos < chars.len() {
-            let c = chars[pos];
-            pos += 1;
-            if c == '{' || c == '}' {
-                brace = Some(c);
-                break;
-            }
+    let mut failed = false;
+    std::iter::from_fn(move || {
+        if failed || pos >= chars.len() {
+            return None;
         }
-        let at_end = pos >= chars.len();
-        let mut literal_end = pos;
-        let mut field_follows = brace.is_some();
-        if let Some(c) = brace {
-            if c == '}' && (at_end || chars[pos] != '}') {
-                return Err(FormatError::value("Single '}' encountered in format string"));
-            }
-            if c == '{' && at_end {
-                return Err(FormatError::value("Single '{' encountered in format string"));
-            }
-            if chars[pos] == c {
-                // A doubled brace: the literal keeps one of them, and no field follows.
-                pos += 1;
-                field_follows = false;
-            } else {
-                literal_end -= 1;
-            }
+        let chunk = next_chunk(&chars, &mut pos);
+        failed = chunk.is_err();
+        Some(chunk)
+    })
+}
+
+/// The chunk that starts at chars[*pos], read past.
+fn next_chunk(chars: &[char], pos: &mut usize) -> Result<Chunk, FormatError> {
+    let start = *pos;
+    let mut brace = None;
+    while *pos < chars.len() {
+        let c = chars[*pos];
+        *pos += 1;
+        if c == '{' || c == '}' {
+            brace = Some(c);
+            break;
         }
-        let literal: String = chars[start..literal_end].iter().collect();
-        let field = if field_follows { Some(parse_field(&chars, &mut pos)?) } else { None };
-        chunks.push(Chunk { literal, field });
     }
-    Ok(chunks)
+    let at_end = *pos >= chars.len();
+    let mut literal_end = *pos;
+    let mut field_follows = brace.is_some();
+    if let Some(c) = brace {
+        if c == '}' && (at_end || chars[*pos] != '}') {
+            return Err(FormatError::value("Single '}' encountered in format string"));
+        }
+        if c == '{' && at_end {
+            return Err(FormatError::value("Single '{' encountered in format string"));
+        }
+        if chars[*pos] == c {
+            // A doubled brace: the literal keeps one of them, and no field follows.
+            *pos += 1;
+            field_follows = false;
+        } else {
+            literal_end -= 1;
+        }
+    }
+    let literal: String = chars[start..literal_end].iter().collect();
+    let field = if field_follows { Some(parse_field(chars, pos)?) } else { None };
+    Ok(Chunk { literal, field })
 }
 
 /// The field that starts at chars[*pos], just after its `{`, read up to and past its `}` (parse_field in CPython's
@@ -177,8 +192,8 @@ pub fn field_names(template: &str) -> Result<Vec<String>, FormatError> {
     Ok(parse(template)?.into_iter().filter_map(|chunk| chunk.field.map(|f| f.name)).collect())
 }
 
-/// template.format(**values), where values gives each keyword's str, or None for a keyword it lacks; the error Python
-/// raises otherwise.
+/// template.format(**values), where values gives each keyword's str, or None for a keyword it lacks; otherwise the
+/// first error Python raises, filling the template in from its start.
 pub fn format(template: &str, values: &dyn Fn(&str) -> Option<String>) -> Result<String, FormatError> {
     let mut numbering = Numbering::Unset;
     build(template, values, 2, &mut numbering)
@@ -203,7 +218,8 @@ fn build(
         return Err(FormatError::value("Max string recursion exceeded"));
     }
     let mut out = String::new();
-    for chunk in parse(template)? {
+    for chunk in chunks(template) {
+        let chunk = chunk?;
         out.push_str(&chunk.literal);
         let Some(field) = chunk.field else { continue };
         let mut value = field_value(&field.name, values, numbering)?;
@@ -211,7 +227,7 @@ fn build(
             None | Some('s') => value,
             Some('r') => repr(&value),
             Some('a') => ascii(&value),
-            Some(c) => return Err(FormatError::value(format!("Unknown conversion specifier {c}"))),
+            Some(c) => return Err(FormatError::value(format!("Unknown conversion specifier {}", char_text(c)))),
         };
         let spec = if field.spec.contains('{') {
             build(&field.spec, values, depth - 1, numbering)?
@@ -452,6 +468,17 @@ fn code_text(kind: char) -> String {
         format!("'{kind}'")
     } else {
         format!("'\\x{code:x}'")
+    }
+}
+
+/// A conversion character as CPython's error writes it: as it is where it is printable ASCII, else `\x` and its code
+/// in hex digits, as few as it takes. (Unlike a presentation type's, DEL is written as its code.)
+fn char_text(c: char) -> String {
+    let code = c as u32;
+    if code > 32 && code < 127 {
+        c.to_string()
+    } else {
+        format!("\\x{code:x}")
     }
 }
 

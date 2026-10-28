@@ -1349,6 +1349,66 @@
    }
   ],
   [
+   "{a:\u007f}",
+   {
+    "error": "ValueError: Unknown format code '\u007f' for object of type 'str'"
+   }
+  ],
+  [
+   "{a:,\u007f}",
+   {
+    "error": "ValueError: Cannot specify ',' with '\u007f'."
+   }
+  ],
+  [
+   "{a! }",
+   {
+    "error": "ValueError: Unknown conversion specifier \\x20"
+   }
+  ],
+  [
+   "{a!\u00e9}",
+   {
+    "error": "ValueError: Unknown conversion specifier \\xe9"
+   }
+  ],
+  [
+   "{a!\u0001}",
+   {
+    "error": "ValueError: Unknown conversion specifier \\x1"
+   }
+  ],
+  [
+   "{a!\u007f}",
+   {
+    "error": "ValueError: Unknown conversion specifier \\x7f"
+   }
+  ],
+  [
+   "{a!~}",
+   {
+    "error": "ValueError: Unknown conversion specifier ~"
+   }
+  ],
+  [
+   "{q} }",
+   {
+    "error": "KeyError: 'q'"
+   }
+  ],
+  [
+   "{a}{q}{",
+   {
+    "error": "KeyError: 'q'"
+   }
+  ],
+  [
+   "{q:{}}",
+   {
+    "error": "KeyError: 'q'"
+   }
+  ],
+  [
    "{a{b}}",
    {
     "error": "ValueError: unexpected '{' in field name"
@@ -2220,6 +2280,122 @@
       "",
       "a",
       "\u00e9",
+      null
+     ]
+    ]
+   }
+  ],
+  [
+   "{a:\u007f}",
+   {
+    "ok": [
+     [
+      "",
+      "a",
+      "\u007f",
+      null
+     ]
+    ]
+   }
+  ],
+  [
+   "{a:,\u007f}",
+   {
+    "ok": [
+     [
+      "",
+      "a",
+      ",\u007f",
+      null
+     ]
+    ]
+   }
+  ],
+  [
+   "{a! }",
+   {
+    "ok": [
+     [
+      "",
+      "a",
+      "",
+      " "
+     ]
+    ]
+   }
+  ],
+  [
+   "{a!\u00e9}",
+   {
+    "ok": [
+     [
+      "",
+      "a",
+      "",
+      "\u00e9"
+     ]
+    ]
+   }
+  ],
+  [
+   "{a!\u0001}",
+   {
+    "ok": [
+     [
+      "",
+      "a",
+      "",
+      "\u0001"
+     ]
+    ]
+   }
+  ],
+  [
+   "{a!\u007f}",
+   {
+    "ok": [
+     [
+      "",
+      "a",
+      "",
+      "\u007f"
+     ]
+    ]
+   }
+  ],
+  [
+   "{a!~}",
+   {
+    "ok": [
+     [
+      "",
+      "a",
+      "",
+      "~"
+     ]
+    ]
+   }
+  ],
+  [
+   "{q} }",
+   {
+    "error": "ValueError: Single '}' encountered in format string"
+   }
+  ],
+  [
+   "{a}{q}{",
+   {
+    "error": "ValueError: Single '{' encountered in format string"
+   }
+  ],
+  [
+   "{q:{}}",
+   {
+    "ok": [
+     [
+      "",
+      "q",
+      "{}",
       null
      ]
     ]

@@ -47,16 +47,21 @@ pub fn strip(s: &str) -> &str {
     s.trim_matches(is_space)
 }
 
+/// s without the blanks at its end: str.rstrip().
+pub fn rstrip(s: &str) -> &str {
+    s.trim_end_matches(is_space)
+}
+
 /// s without the blanks at its start: str.lstrip().
 pub fn lstrip(s: &str) -> &str {
     s.trim_start_matches(is_space)
 }
 
 /// The characters that end a line for str.splitlines, besides "\r\n", which ends one as a pair.
-const LINE_BREAKS: [char; 10] = ['\n', '\r', '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\u{85}', '\u{2028}', '\u{2029}'];
+pub const LINE_BREAKS: [char; 10] = ['\n', '\r', '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\u{85}', '\u{2028}', '\u{2029}'];
 
 /// The lines of s, as str.splitlines() gives them: without their line ends, a line ending at any of LINE_BREAKS or
-/// at "\r\n", and no empty line after a last line end. None for an empty s.
+/// at "\r\n", and no empty line after a last line end; none for an empty s.
 pub fn splitlines(s: &str) -> Vec<&str> {
     let mut lines = Vec::new();
     let mut start = 0;
@@ -100,7 +105,8 @@ pub fn basename(path: &str) -> &str {
 }
 
 /// s with the first letter of each run of ASCII letters in upper case and the others in lower case, as str.title()
-/// writes text that is all ASCII; a character that is not ASCII is left as it is, and ends no run.
+/// writes text that is all ASCII. A character that is not ASCII is left as it is and ends the run, where str.title()
+/// would take a letter beyond ASCII into it; the engine titles only names of ASCII letters, digits, - and _.
 pub fn title_ascii(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut in_word = false;
@@ -114,6 +120,21 @@ pub fn title_ascii(s: &str) -> String {
         }
     }
     out
+}
+
+/// What Python's UnicodeDecodeError says of bytes that are not UTF-8, as e found them: `'utf-8' codec can't decode
+/// byte 0xff in position 2: invalid start byte`, or the bytes' positions for an incomplete sequence at the end.
+pub fn utf8_error(bytes: &[u8], e: &std::str::Utf8Error) -> String {
+    let at = e.valid_up_to();
+    let byte = || format!("byte 0x{:02x} in position {at}", bytes[at]);
+    let (what, reason) = match e.error_len() {
+        None if bytes.len() - at > 1 => (format!("bytes in position {at}-{}", bytes.len() - 1), "unexpected end of data"),
+        None => (byte(), "unexpected end of data"),
+        // A byte that may start a sequence, followed by one that cannot go on with it.
+        Some(_) if (0xc2..=0xf4).contains(&bytes[at]) => (byte(), "invalid continuation byte"),
+        Some(_) => (byte(), "invalid start byte"),
+    };
+    format!("'utf-8' codec can't decode {what}: {reason}")
 }
 
 /// s as Python's repr() writes a str: in single quotes, or in double quotes when s holds a single quote and no

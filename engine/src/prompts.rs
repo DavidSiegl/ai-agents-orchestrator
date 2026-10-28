@@ -359,7 +359,10 @@ pub fn load_prompts(config: &ConfigDir) -> Result<Prompts, OrchestratorError> {
         let bytes = std::fs::read(&path)
             .map_err(|e| OrchestratorError(format!("cannot read prompt file {path}: {}", strerror(&e))))?;
         let text = String::from_utf8(bytes)
-            .map_err(|e| OrchestratorError(format!("{path}: not UTF-8 text: {e}")))?
+            .map_err(|e| {
+                let why = crate::py::text::utf8_error(e.as_bytes(), &e.utf8_error());
+                OrchestratorError(format!("{path}: not UTF-8 text: {why}"))
+            })?
             .replace("\r\n", "\n")
             .replace('\r', "\n");
         let text = text.strip_suffix('\n').unwrap_or(&text).to_string();

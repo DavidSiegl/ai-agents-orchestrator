@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use crate::constants::CONSOLE_TAIL_LINES;
 use crate::handoff::first_line_word;
 use crate::py::json::Map;
-use crate::py::text::{decimal_value, is_space, splitlines, strip};
+use crate::py::text::{decimal_value, is_space, splitlines, strip, LINE_BREAKS};
 
 /// The words of the gate line, the file's first non-blank one. Only the engine writes BUILD_FAILED, for a build that
 /// ended before its Gate stage (Workflow::quality_report).
@@ -31,12 +31,9 @@ pub const QUALITY_TO_WEIGH_NOTE: &str = "These do not fail the gate. Fix each, o
 /// The most findings a quality file lists, numbered as one list, and the most failing tests; the rest are counted.
 pub const QUALITY_FINDINGS_LIMIT: usize = 50;
 
-/// Each character that ends a line in some reader of the quality file, which one_line escapes as gate.py's
-/// _LINE_BREAK_ESCAPES writes it, so a list item the engine adds reads back as the one line the gate's would.
-const LINE_BREAKS: [char; 10] = ['\n', '\r', '\x0b', '\x0c', '\x1c', '\x1d', '\x1e', '\u{85}', '\u{2028}', '\u{2029}'];
-
 /// text as a quality file writes it within one of its lines, such as one item of a list: each character that ends a
-/// line in some reader written as an escape, `\x` and two hex digits up to U+00FF, `\u` and four beyond, anything
+/// line in some reader (str.splitlines's LINE_BREAKS) written as an escape, as gate.py's _LINE_BREAK_ESCAPES writes it,
+/// so a list item the engine adds reads back as the one line the gate's would, `\x` and two hex digits up to U+00FF, `\u` and four beyond, anything
 /// else as it is.
 pub fn one_line(text: &str) -> String {
     let mut out = String::with_capacity(text.len());

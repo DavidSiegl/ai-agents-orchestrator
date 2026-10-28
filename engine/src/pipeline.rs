@@ -22,6 +22,8 @@ pub const PROMPT_FIELDS: [&str; 8] = ["task", "cwd", "n", "change", "approve", "
 /// The per-step paths: (prefix, suffix) around a step's id.
 pub const PATH_FIELDS: [(&str, &str); 3] = [("", "_path"), ("prev_", "_path"), ("earlier_", "_paths")];
 
+/// The run's state, RunState, in the run directory.
+pub const STATE_FILE: &str = "state.json";
 /// Written into the run directory whenever the run ends: what it did, and where its time went.
 pub const SUMMARY_FILE: &str = "summary.md";
 /// Written into the run directory when the run is done: run_metrics, for the metrics command.
@@ -30,7 +32,7 @@ pub const METRICS_FILE: &str = "metrics.json";
 /// Whether name is one the run writes into its directory itself, beside the steps' handoff files: state.json,
 /// SUMMARY_FILE, METRICS_FILE, or quality-*, locked-* or proofs-*, the * holding no newline.
 pub fn is_run_file(name: &str) -> bool {
-    matches!(name, "state.json" | "summary.md" | "metrics.json")
+    [STATE_FILE, SUMMARY_FILE, METRICS_FILE].contains(&name)
         || ["quality-", "locked-", "proofs-"]
             .iter()
             .any(|prefix| name.strip_prefix(prefix).is_some_and(|rest| !rest.contains('\n')))
@@ -540,8 +542,8 @@ fn fill_problem(step: &Step, known: &BTreeSet<&str>) -> Option<String> {
     let name = step.name(1, 0);
     if name.contains('/') || matches!(name.as_str(), "" | "." | "..") || is_run_file(&name) {
         return Some(format!(
-            "handoff file {} must be a plain file name, and not state.json, summary.md, metrics.json, quality-*, \
-             locked-* or proofs-*, which the run writes itself",
+            "handoff file {} must be a plain file name, and not {STATE_FILE}, {SUMMARY_FILE}, {METRICS_FILE}, \
+             quality-*, locked-* or proofs-*, which the run writes itself",
             step.file
         ));
     }

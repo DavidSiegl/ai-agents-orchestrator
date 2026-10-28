@@ -7,7 +7,8 @@ use std::io::{ErrorKind, Read};
 use std::os::unix::fs::PermissionsExt;
 
 use crate::constants::{CI_ENV, GIT_PATHSPEC_ENV};
-use crate::error::OrchestratorError;
+use crate::error::{os_error, OrchestratorError};
+use crate::py::text::utf8_error;
 use crate::py::json::Map;
 
 /// The environment for every process the orchestrator starts: its own, without the CI credentials (CI_ENV) and
@@ -37,15 +38,15 @@ pub struct ConfigDir {
 
 impl ConfigDir {
     /// The configuration directory of the user running the engine: ai-agents-orchestrator in $XDG_CONFIG_HOME when
-    /// that is an absolute path, else in ~/.config.
+    /// that is an absolute path, else in ~/.config, ~ being $HOME, or without it the user's home in /etc/passwd.
     pub fn from_env() -> ConfigDir {
-        ConfigDir::for_env(&|name| std::env::var(name).ok())
+        ConfigDir::for_env(&|name| std::env::var(name).ok(), &passwd_home)
     }
 
-    /// from_env for the environment env gives, by variable name.
-    fn for_env(env: &dyn Fn(&str) -> Option<String>) -> ConfigDir {
+    /// from_env for the environment env gives, by variable name, and home, the user's home without HOME.
+    fn for_env(env: &dyn Fn(&str) -> Option<String>, home: &dyn Fn() -> Option<String>) -> ConfigDir {
         let config = env("XDG_CONFIG_HOME").filter(|c| c.starts_with('/'));
-        let config = config.unwrap_or_else(|| match env("HOME") {
+        let config = config.unwrap_or_else(|| match env("HOME").or_else(home) {
             Some(home) => format!("{}/.config", home.trim_end_matches('/')),
             None => "~/.config".to_string(),
         });
@@ -82,6 +83,23 @@ impl ConfigDir {
     }
 }
 
+/// The home directory /etc/passwd gives the user the engine runs as, which os.path.expanduser falls back on without
+/// HOME; None when either file cannot be read or names none. Unlike Python's pwd module, it reads the file alone, not
+/// whatever else the system's name service has.
+fn passwd_home() -> Option<String> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let uid = status.lines().find_map(|line| line.strip_prefix("Uid:"))?.split_whitespace().next()?.to_string();
+    home_of(&std::fs::read_to_string("/etc/passwd").ok()?, &uid)
+}
+
+/// The home directory of the user of uid in passwd, a passwd(5) file's text.
+fn home_of(passwd: &str, uid: &str) -> Option<String> {
+    passwd.lines().find_map(|line| {
+        let fields: Vec<&str> = line.split(':').collect();
+        (fields.len() >= 7 && fields[2] == uid).then(|| fields[5].to_string())
+    })
+}
+
 /// CI_ENV from environ, by name, each one it lacks or has empty taken from the file at path, with every other
 /// assignment the file holds; a value in environ wins over the file's.
 ///
@@ -97,13 +115,18 @@ pub fn ci_credentials(environ: &dyn Fn(&str) -> Option<String>, path: &str) -> R
     if found.len() == CI_ENV.len() {
         return Ok(found);
     }
-    let unreadable = |e: &dyn std::fmt::Display| OrchestratorError(format!("could not read {path}: {e}"));
+    let unreadable = |e: &std::io::Error| OrchestratorError(format!("could not read {path}: {}", os_error(e, path)));
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(found),
         Err(e) => return Err(unreadable(&e)),
     };
-    let mode = file.metadata().map_err(|e| unreadable(&e))?.permissions().mode();
+    let metadata = file.metadata().map_err(|e| unreadable(&e))?;
+    if metadata.is_dir() {
+        // Python's open refuses a directory, before any look at its mode.
+        return Err(unreadable(&std::io::Error::from_raw_os_error(21)));
+    }
+    let mode = metadata.permissions().mode();
     if mode & 0o077 != 0 {
         return Err(OrchestratorError(format!(
             "{path} holds tokens but others may read it; run: chmod 600 {path}"
@@ -111,7 +134,9 @@ pub fn ci_credentials(environ: &dyn Fn(&str) -> Option<String>, path: &str) -> R
     }
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).map_err(|e| unreadable(&e))?;
-    let text = String::from_utf8(bytes).map_err(|e| unreadable(&e))?;
+    let text = String::from_utf8(bytes).map_err(|e| {
+        OrchestratorError(format!("could not read {path}: {}", utf8_error(e.as_bytes(), &e.utf8_error())))
+    })?;
     let mut values = parse_env_file(&text, path)?;
     for (k, v) in found {
         values.insert(k, v);

@@ -120,7 +120,8 @@ pub struct RunState {
     pub unknown: Map<Json>,
 }
 
-/// The fields of RunState, in state.json's order.
+/// The fields of RunState, in state.json's order: those to_json writes and Fields::read reads, which the tests hold
+/// to this list.
 const FIELDS: [&str; 45] = [
     "run_id",
     "task",
@@ -311,8 +312,11 @@ impl RunState {
         out.insert("locked", Json::Object(s.locked.iter().map(|(k, v)| (k, list(v))).collect()));
         out.insert("restored", records(&s.restored));
         out.insert("proofs", records(&s.proofs));
+        // Never over a field of its own, which a stale copy of the state's would otherwise replace.
         for (k, v) in s.unknown.iter() {
-            out.insert(k, v.clone());
+            if !out.contains_key(k) {
+                out.insert(k, v.clone());
+            }
         }
         Json::Object(out)
     }
