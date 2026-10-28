@@ -64,6 +64,14 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   bodies, which the recordings hold as sent where a scenario reaches them, and which would test only the frozen Python
   engine, not the Rust one.
 
+- **The eval set: what it does not cover.** `evals/run.py` (live-checks/04, docs/design.md, Evals) runs the engine as
+  a program, `run --no-pr --spec`, rather than being the `orchestrator.py eval` command the ticket named, since the
+  Python engine is frozen (above); `EVAL_ENGINE` points it at the Rust engine. Whether the Rust engine gets an `eval`
+  command of its own is open. Not covered: the quality gate, since the toy repositories have no quality job and their
+  origin is a bundle no snapshot can be pushed to, so `quality rounds` stays 0; a `--worktree` or `--machine` run,
+  which the runner refuses; and an interview, which `--spec` skips. Its first real run is still to be made by hand.
+  Decided 2026-10-28.
+
 ## Open issues
 
 - **A quality build now takes longer than `QUALITY_TIMEOUT`.** The contract test's one live run (live-checks/01,
