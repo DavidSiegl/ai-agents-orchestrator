@@ -78,11 +78,100 @@ impl Drop for TempDir {
     }
 }
 
+/// The repository's examples/workflows/.
+pub const EXAMPLES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../examples/workflows");
+
 /// An oracle file of engine/tests/oracle/, which its generator there wrote from the Python engine, parsed.
 pub fn oracle(file: &str) -> crate::py::json::Json {
     let text = match file {
         "texts.json" => include_str!("../tests/oracle/texts.json"),
+        "workflows.json" => include_str!("../tests/oracle/workflows.json"),
         _ => panic!("no oracle file {file}"),
     };
     crate::py::json::Json::parse(text).unwrap_or_else(|e| panic!("{file}: {e}"))
+}
+
+// -- The workflows tests/test_orchestrator.py defines, by its names -------------------------------------------------
+
+use crate::pipeline::{Pipeline, PipelineSettings, Step};
+use crate::py::json::Map;
+
+/// A role map of (key, label) pairs, in pane order.
+pub fn roles(pairs: &[(&str, &str)]) -> Map<String> {
+    pairs.iter().map(|(k, v)| (*k, v.to_string())).collect()
+}
+
+/// Step::new, with again set.
+pub fn again(mut st: Step, text: &str) -> Step {
+    st.again = Some(text.to_string());
+    st
+}
+
+/// No spec step: the task is the Builder's contract.
+pub fn quick() -> Pipeline {
+    let mut build = again(Step::new("build", "build", "build-{n}.md", "Build {task} in {cwd}; report to {build_path}."),
+        "Fix {prev_review_path}; report to {build_path}.");
+    build.edits = true;
+    let mut review = again(Step::new("review", "review", "review-{n}.md", "Review {change} against {task}; write {review_path}."),
+        "Recheck {build_path}; write {review_path}.");
+    review.loop_to = Some("build".into());
+    Pipeline::new("quick", roles(&[("build", "Builder"), ("review", "Reviewer")]), vec![build, review]).unwrap()
+}
+
+/// Four roles: the tests are written once, and the review loop goes back to the Builder only.
+pub fn four_steps() -> Vec<Step> {
+    let mut spec = Step::new("spec", "spec", "spec.md", "Interview about {task}; write {spec_path}.");
+    spec.human_paced = true;
+    let mut tests = Step::new("tests", "tests", "tests.md", "Write tests for {spec_path}; report to {tests_path}.");
+    tests.edits = true;
+    let mut build = again(Step::new("build", "build", "build-{n}.md", "Build {spec_path} against {tests_path}; report to {build_path}."),
+        "Fix {prev_review_path}; report to {build_path}.");
+    build.fresh_note = Some("Earlier reports: {earlier_build_paths}.".into());
+    build.fresh_repeats_again = true;
+    build.edits = true;
+    let mut review = again(Step::new("review", "review", "review-{n}.md", "Review {change}; write {review_path}."),
+        "Recheck; write {review_path}.");
+    review.loop_to = Some("build".into());
+    vec![spec, tests, build, review]
+}
+
+pub fn four_roles() -> Map<String> {
+    roles(&[("spec", "Spec Collector"), ("tests", "Test Writer"), ("build", "Builder"), ("review", "Reviewer")])
+}
+
+pub fn four() -> Pipeline {
+    Pipeline::new("four", four_roles(), four_steps()).unwrap()
+}
+
+/// FOUR with its Test Writer locking the tests it writes.
+pub fn locking() -> Pipeline {
+    let steps = four_steps().into_iter().map(|mut st| { st.locks = st.id == "tests"; st }).collect();
+    Pipeline::new("locking", four_roles(), steps).unwrap()
+}
+
+/// The quality-gated step is not called build.
+pub fn impl_() -> Pipeline {
+    let mut imp = again(Step::new("impl", "impl", "impl-{n}.md", "Implement {task}; report to {impl_path}."),
+        "Fix {prev_review_path}; report to {impl_path}.");
+    imp.fresh_note = Some("Earlier reports: {earlier_impl_paths}.".into());
+    imp.edits = true;
+    imp.quality_gated = true;
+    let mut review = again(Step::new("review", "review", "review-{n}.md", "Review {change} with {impl_path}; write {path}."),
+        "Recheck {impl_path}; write {review_path}.");
+    review.loop_to = Some("impl".into());
+    Pipeline::new("impl", roles(&[("impl", "Implementer"), ("review", "Reviewer")]), vec![imp, review]).unwrap()
+}
+
+/// No verdict step: the run finishes when the Builder's one turn is done.
+pub fn solo() -> Pipeline {
+    let mut build = Step::new("build", "build", "build.md", "Build {task} in {cwd}; report to {path}.");
+    build.edits = true;
+    Pipeline::new("solo", roles(&[("build", "Builder")]), vec![build]).unwrap()
+}
+
+/// p with other settings, validated again, as dataclasses.replace makes one.
+pub fn replaced(p: &Pipeline, change: impl FnOnce(&mut PipelineSettings)) -> Result<Pipeline, String> {
+    let mut settings = p.settings().clone();
+    change(&mut settings);
+    Pipeline::with(p.name(), p.roles().clone(), p.steps().to_vec(), settings)
 }

@@ -1,5 +1,5 @@
-//! The environment the engine gives the processes it starts, where its configuration lives, and the quality gate's
-//! credentials, from the environment or the file ci.env.
+//! The environment the engine gives the processes it starts, where its configuration lives (ConfigDir), and the
+//! quality gate's credentials, from the environment or the file ci.env.
 
 use std::ffi::OsString;
 use std::fs::File;
@@ -27,25 +27,59 @@ fn without_withheld(vars: impl Iterator<Item = (OsString, OsString)>) -> Vec<(Os
     vars.filter(|(k, _)| !CI_ENV.iter().chain(&GIT_PATHSPEC_ENV).any(|w| k == w)).collect()
 }
 
-/// The orchestrator's own configuration directory, on the machine it runs on: ai-agents-orchestrator in
-/// $XDG_CONFIG_HOME when that is an absolute path, else in ~/.config.
-pub fn config_dir() -> String {
-    config_dir_in(&|name| std::env::var(name).ok())
+/// The orchestrator's own configuration directory, on the machine it runs on, and where in it each of its files is:
+/// ci.env, the prompt files and the workflow files.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigDir {
+    /// The directory's path, without a trailing "/".
+    path: String,
 }
 
-/// config_dir for the environment env gives, by variable name.
-fn config_dir_in(env: &dyn Fn(&str) -> Option<String>) -> String {
-    let config = env("XDG_CONFIG_HOME").filter(|c| c.starts_with('/'));
-    let config = config.unwrap_or_else(|| match env("HOME") {
-        Some(home) => format!("{}/.config", home.trim_end_matches('/')),
-        None => "~/.config".to_string(),
-    });
-    format!("{}/ai-agents-orchestrator", config.trim_end_matches('/'))
-}
+impl ConfigDir {
+    /// The configuration directory of the user running the engine: ai-agents-orchestrator in $XDG_CONFIG_HOME when
+    /// that is an absolute path, else in ~/.config.
+    pub fn from_env() -> ConfigDir {
+        ConfigDir::for_env(&|name| std::env::var(name).ok())
+    }
 
-/// The file the quality gate's credentials come from when the environment lacks them.
-pub fn ci_env_path() -> String {
-    format!("{}/ci.env", config_dir())
+    /// from_env for the environment env gives, by variable name.
+    fn for_env(env: &dyn Fn(&str) -> Option<String>) -> ConfigDir {
+        let config = env("XDG_CONFIG_HOME").filter(|c| c.starts_with('/'));
+        let config = config.unwrap_or_else(|| match env("HOME") {
+            Some(home) => format!("{}/.config", home.trim_end_matches('/')),
+            None => "~/.config".to_string(),
+        });
+        ConfigDir::at(&format!("{}/ai-agents-orchestrator", config.trim_end_matches('/')))
+    }
+
+    /// The configuration directory at path.
+    pub fn at(path: &str) -> ConfigDir {
+        let trimmed = path.trim_end_matches('/');
+        ConfigDir { path: if trimmed.is_empty() { "/".to_string() } else { trimmed.to_string() } }
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// The file the quality gate's credentials come from when the environment lacks them.
+    pub fn ci_env_path(&self) -> String {
+        self.join("ci.env")
+    }
+
+    /// Where a new run finds its prompt files, NAME.md for the Prompt named NAME (crate::prompts).
+    pub fn prompts_dir(&self) -> String {
+        self.join("prompts")
+    }
+
+    /// Where `run --workflow NAME` finds NAME.toml (crate::workflow_file).
+    pub fn workflows_dir(&self) -> String {
+        self.join("workflows")
+    }
+
+    fn join(&self, name: &str) -> String {
+        format!("{}/{name}", self.path.trim_end_matches('/'))
+    }
 }
 
 /// CI_ENV from environ, by name, each one it lacks or has empty taken from the file at path, with every other

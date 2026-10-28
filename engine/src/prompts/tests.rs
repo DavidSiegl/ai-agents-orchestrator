@@ -3,6 +3,7 @@ use std::os::unix::fs::PermissionsExt;
 use super::*;
 use crate::py::json::Json;
 use crate::test_support::{oracle, TempDir};
+use crate::env::ConfigDir;
 
 #[test]
 fn every_built_in_text_is_the_python_engines() {
@@ -24,15 +25,18 @@ fn every_built_in_prompt_is_overridable() {
     }
 }
 
-/// A directory of prompt files, each written as an editor would, with a newline at its end.
-fn prompt_dir(files: &[(&str, &[u8])]) -> TempDir {
+/// A configuration directory with these prompt files, each written as an editor would, with a newline at its end;
+/// the files' paths are its join("prompts/<name>").
+fn prompt_dir(files: &[(&str, &[u8])]) -> (TempDir, ConfigDir) {
     let dir = TempDir::new();
+    std::fs::create_dir(dir.join("prompts")).unwrap();
     for (name, text) in files {
         let mut bytes = text.to_vec();
         bytes.push(b'\n');
-        std::fs::write(dir.join(name), bytes).unwrap();
+        std::fs::write(dir.join(&format!("prompts/{name}")), bytes).unwrap();
     }
-    dir
+    let config = ConfigDir::at(&dir.join(""));
+    (dir, config)
 }
 
 #[test]
@@ -60,29 +64,28 @@ fn bad_files_are_refused_naming_them() {
         ("FIX_PROMPT.md", b"Fix \xe9", "not UTF-8 text"),
     ];
     for (name, text, message) in cases {
-        let dir = prompt_dir(&[(name, text)]);
-        let e = load_prompts_from(dir.join("").trim_end_matches('/')).unwrap_err();
-        let path = dir.join(name);
+        let (dir, config) = prompt_dir(&[(name, text)]);
+        let e = load_prompts(&config).unwrap_err();
+        let path = dir.join(&format!("prompts/{name}"));
         assert!(e.0.starts_with(&format!("{path}: {message}")), "{name}: {e}");
     }
 }
 
 #[test]
 fn an_unreadable_file_names_it() {
-    let dir = TempDir::new();
-    let path = dir.join("FIX_PROMPT.md");
+    let (dir, config) = prompt_dir(&[]);
+    let path = dir.join("prompts/FIX_PROMPT.md");
     std::fs::create_dir(&path).unwrap();
-    let e = load_prompts_from(dir.join("").trim_end_matches('/')).unwrap_err();
+    let e = load_prompts(&config).unwrap_err();
     assert_eq!(e.0, format!("cannot read prompt file {path}: Is a directory"));
 }
 
 #[test]
 fn an_unlistable_directory_names_it() {
-    let dir = TempDir::new();
+    let (dir, config) = prompt_dir(&[]);
     let prompts = dir.join("prompts");
-    std::fs::create_dir(&prompts).unwrap();
     std::fs::set_permissions(&prompts, std::fs::Permissions::from_mode(0o000)).unwrap();
-    let listed = load_prompts_from(&prompts);
+    let listed = load_prompts(&config);
     std::fs::set_permissions(&prompts, std::fs::Permissions::from_mode(0o700)).unwrap();
     // root lists any directory; anyone else is refused.
     if let Err(e) = listed {
@@ -92,16 +95,15 @@ fn an_unlistable_directory_names_it() {
 
 #[test]
 fn without_prompt_files_nothing_changes() {
-    let dir = prompt_dir(&[("notes.txt", b"not a prompt file")]);
-    assert_eq!(load_prompts_from(dir.join("").trim_end_matches('/')).unwrap(), Prompts::default());
-    assert_eq!(load_prompts_from(&dir.join("missing")).unwrap(), Prompts::default());
-    assert!(prompts_dir().ends_with("/ai-agents-orchestrator/prompts"));
+    let (dir, config) = prompt_dir(&[("notes.txt", b"not a prompt file")]);
+    assert_eq!(load_prompts(&config).unwrap(), Prompts::default());
+    assert_eq!(load_prompts(&ConfigDir::at(&dir.join("missing"))).unwrap(), Prompts::default());
 }
 
 #[test]
 fn an_override_ends_with_one_newline_less_and_its_line_ends_read_as_newlines() {
-    let dir = prompt_dir(&[("BLOCKED_NOTE.md", b"Ask.\n"), ("CONTINUE_PROMPT.md", b"Go on\r\nto\r{path}.\r")]);
-    let prompts = load_prompts_from(dir.join("").trim_end_matches('/')).unwrap();
+    let (_dir, config) = prompt_dir(&[("BLOCKED_NOTE.md", b"Ask.\n"), ("CONTINUE_PROMPT.md", b"Go on\r\nto\r{path}.\r")]);
+    let prompts = load_prompts(&config).unwrap();
     assert_eq!(prompts.text(Prompt::BlockedNote), "Ask.\n");
     // "\r\n" with the editor's newline is the one trailing newline left out.
     assert_eq!(prompts.text(Prompt::ContinuePrompt), "Go on\nto\n{path}.");

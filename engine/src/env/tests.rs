@@ -92,10 +92,15 @@ fn a_file_that_is_not_utf8_is_named() {
 #[test]
 fn path_follows_xdg_config_home() {
     let env = from(&[("XDG_CONFIG_HOME", "/xdg"), ("HOME", "/home/u")]);
-    assert_eq!(config_dir_in(&env), "/xdg/ai-agents-orchestrator");
-    let env = from(&[("XDG_CONFIG_HOME", "relative"), ("HOME", "/home/u")]);
-    assert_eq!(config_dir_in(&env), "/home/u/.config/ai-agents-orchestrator");
-    assert!(ci_env_path().ends_with("/ai-agents-orchestrator/ci.env"));
+    assert_eq!(ConfigDir::for_env(&env).ci_env_path(), "/xdg/ai-agents-orchestrator/ci.env");
+    let env = from(&[("XDG_CONFIG_HOME", "relative"), ("HOME", "/home/u/")]);
+    let config = ConfigDir::for_env(&env);
+    assert_eq!(config.ci_env_path(), "/home/u/.config/ai-agents-orchestrator/ci.env");
+    assert_eq!(config.prompts_dir(), "/home/u/.config/ai-agents-orchestrator/prompts");
+    assert_eq!(config.workflows_dir(), "/home/u/.config/ai-agents-orchestrator/workflows");
+    assert_eq!(ConfigDir::for_env(&from(&[])).path(), "~/.config/ai-agents-orchestrator");
+    assert_eq!(ConfigDir::at("/").ci_env_path(), "/ci.env");
+    assert!(ConfigDir::from_env().ci_env_path().ends_with("/ai-agents-orchestrator/ci.env"));
 }
 
 #[test]

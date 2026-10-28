@@ -1,7 +1,7 @@
 //! The texts a run sends agents besides a workflow file's own prompts, and the prompt files that replace them: each
 //! byte for byte the Python engine's, since the prompts are the product.
 
-use crate::env::config_dir;
+use crate::env::ConfigDir;
 use crate::error::OrchestratorError;
 use crate::proof_copies_dir;
 use crate::py::format::field_names;
@@ -301,12 +301,7 @@ pub fn saved_prompts(overrides: &Map<String>, run_id: &str) -> Result<Prompts, O
 
 // -- Prompt files --------------------------------------------------------------------------------------------------
 
-/// Where a new run finds its prompt files, NAME.md for the Prompt named NAME, on the orchestrator's machine.
-pub fn prompts_dir() -> String {
-    format!("{}/prompts", config_dir())
-}
-
-/// Name -> path of each .md file in dir, unread, in name order; none without the directory. Other files are not
+/// Name -> path of each .md file in dir, ConfigDir::prompts_dir, unread, in name order; none without the directory. Other files are not
 /// prompt files, as an editor's backup is not. Errors: the directory cannot be listed.
 pub fn prompt_files(dir: &str) -> Result<Map<String>, OrchestratorError> {
     files_with_extension(dir, ".md")
@@ -340,20 +335,15 @@ pub(crate) fn files_with_extension(dir: &str, ext: &str) -> Result<Map<String>, 
         .collect())
 }
 
-/// The prompts a new run starts with: the built-in texts, each one a prompt file in prompts_dir() names replaced by
-/// the file's content, its line ends read as "\n" and one trailing newline left out.
+/// The prompts a new run starts with: the built-in texts, each one a prompt file in config's prompts_dir names
+/// replaced by the file's content, its line ends read as "\n" and one trailing newline left out.
 ///
 /// Errors, naming the file: one that names no Prompt, cannot be read, is not UTF-8, or uses other placeholders than
-/// the built-in text (prompt_problem).
-pub fn load_prompts() -> Result<Prompts, OrchestratorError> {
-    load_prompts_from(&prompts_dir())
-}
-
-/// load_prompts, with its prompt files in dir.
-pub fn load_prompts_from(dir: &str) -> Result<Prompts, OrchestratorError> {
+/// the built-in text (prompt_problem); and a prompts directory that cannot be listed.
+pub fn load_prompts(config: &ConfigDir) -> Result<Prompts, OrchestratorError> {
     use crate::error::strerror;
     let mut overrides = Map::new();
-    for (name, path) in prompt_files(dir)? {
+    for (name, path) in prompt_files(&config.prompts_dir())? {
         if Prompt::named(&name).is_none() {
             let names = Prompt::ALL.iter().map(|p| p.name());
             let hint = match close_match(&name, names) {

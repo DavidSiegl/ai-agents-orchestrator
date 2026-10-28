@@ -5,7 +5,9 @@ pub mod py;
 pub mod constants;
 pub mod env;
 pub mod error;
+pub mod pipeline;
 pub mod prompts;
+pub mod workflow_file;
 
 #[cfg(test)]
 mod test_support;

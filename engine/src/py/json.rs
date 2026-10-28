@@ -79,6 +79,8 @@ impl<V: PartialEq> PartialEq for Map<V> {
     }
 }
 
+impl<V: Eq> Eq for Map<V> {}
+
 impl<K: Into<String>, V> FromIterator<(K, V)> for Map<V> {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
         let mut map = Map::new();
@@ -246,10 +248,23 @@ impl<T: Into<Json>> From<Option<T>> for Json {
     }
 }
 
+/// s as json.dumps(s, ensure_ascii=False) writes it: as write_string, but every character beyond ASCII as it is.
+pub fn unicode_string(s: &str) -> String {
+    let mut out = String::new();
+    write_chars(s, false, &mut out);
+    out
+}
+
 /// s as a JSON string with json.dumps's ensure_ascii: `"` and `\` escaped, "\n", "\r", "\t", "\b" and "\f" by
 /// their letters, every other character outside space to `~` as `\u` and four hex digits, a surrogate pair beyond
 /// U+FFFF.
 fn write_string(s: &str, out: &mut String) {
+    write_chars(s, true, out);
+}
+
+/// write_string, or with ascii_only false, unicode_string: a control character escaped either way, and DEL only
+/// with ascii_only.
+fn write_chars(s: &str, ascii_only: bool, out: &mut String) {
     out.push('"');
     for c in s.chars() {
         match c {
@@ -261,6 +276,7 @@ fn write_string(s: &str, out: &mut String) {
             '\u{8}' => out.push_str("\\b"),
             '\u{c}' => out.push_str("\\f"),
             ' '..='~' => out.push(c),
+            _ if !ascii_only && c >= '\u{7f}' => out.push(c),
             _ => {
                 let mut units = [0u16; 2];
                 for unit in c.encode_utf16(&mut units) {
