@@ -3,8 +3,8 @@
 //!
 //! [`Host`] is a trait so that the engine's tests can stand a fake in for the machine. Every operation is a provided
 //! method built on two primitives, [`Host::exec`], which runs one command, and [`Host::ssh_target`]: [`ProcessHost`]
-//! implements only those, and a fake overrides what it plays in memory, as one that plays git one command at a time
-//! through [`Host::git_run`] has Host's own git steps run on it.
+//! implements only those, and a fake overrides what it plays in memory, as `FakeHost` (host/fake.rs) plays git one
+//! command at a time through [`Host::git_run`], so that Host's own git steps run on it.
 
 use crate::constants::{NETWORK_TIMEOUT, REMOTE, RUNS_DIR};
 use crate::error::OrchestratorError;
@@ -16,6 +16,9 @@ mod scan;
 
 pub use process::ProcessHost;
 pub use scan::{Leak, LeaksFound};
+
+#[cfg(test)]
+pub(crate) mod fake;
 
 /// How long a command may take when its caller names no other time, in seconds.
 pub const DEFAULT_TIMEOUT: u64 = 60;
