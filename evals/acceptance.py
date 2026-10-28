@@ -62,6 +62,7 @@ def main(case: type[Acceptance], argv: list[str] | None = None) -> int:
     if result.wasSuccessful():
         return 0
     # Last, so that the tail of the output the runner keeps names every check that did not pass.
-    failed = sorted({test._testMethodName for test, _ in result.failures + result.errors})
+    # A failure inside a subTest is reported with the subtest, whose test_case is the check.
+    failed = sorted({getattr(test, "test_case", test)._testMethodName for test, _ in result.failures + result.errors})
     print(f"not accepted: {', '.join(failed)}", file=sys.stderr)
     return 1

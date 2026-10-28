@@ -69,8 +69,10 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   Python engine is frozen (above); `EVAL_ENGINE` points it at the Rust engine. Whether the Rust engine gets an `eval`
   command of its own is open. Not covered: the quality gate, since the toy repositories have no quality job and their
   origin is a bundle no snapshot can be pushed to, so `quality rounds` stays 0; a `--worktree` or `--machine` run,
-  which the runner refuses; and an interview, which `--spec` skips. Its first real run is still to be made by hand.
-  Decided 2026-10-28.
+  which the runner refuses; and an interview, which `--spec` skips. Not yet done: the ticket's verification run, one
+  real `evals/run.py --tasks <one> --repeat 1` from a herdr pane, with its result line committed under
+  `evals/results/` and its row in the pull request's description; no agent has run a task yet, so a task text or
+  hidden test that misjudges real work would show only then (cross-review 80, F9). Decided 2026-10-28.
 
 ## Open issues
 

@@ -191,11 +191,12 @@ A result line holds `version` (1), `date`, `config`, `run_args`, `engine` (`EVAL
 `commit`, `task`, `repeat`, `passed`, `engine_exit` (the exit status of the engine's run), `seconds`,
 `hidden_test_output` (the last lines of its output, ending with the checks that did not pass), `run_id`, and from
 `metrics.json`, `null` without one: `outcome`, `rounds`, `quality_rounds`, and `tokens`, the four counts summed,
-`null` also when a turn's are unknown. `jq` sums a file up by task; run it on the file before a change and the one
-after to compare:
+`null` also when a turn's are unknown. Evals of one configuration on one day share a file, told apart by `commit`,
+which ends in `-dirty` when a tracked file differed from it. `jq` sums a file up by commit and task:
 
 ```sh
-jq -s 'group_by(.task) | map({task: .[0].task, passed: (map(select(.passed)) | length), runs: length})' \
+jq -c -s 'group_by([.commit, .task]) | map({commit: .[0].commit[:12], task: .[0].task,
+                                             passed: (map(select(.passed)) | length), runs: length})' \
     evals/results/2026-10-28-default.jsonl
 ```
 

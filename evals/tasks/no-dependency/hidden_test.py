@@ -13,8 +13,9 @@ from acceptance import Acceptance, main
 HEADER = ["name", "qty", "price"]
 ROWS = [["apple", "3", "1.50"], ["banana", "12", "0.25"]]
 TABLE = "name   | qty | price\n-------+-----+------\napple  |   3 |  1.50\nbanana |  12 |  0.25\n"
-# Files that list a project's dependencies, beside pyproject.toml.
-DEPENDENCY_LISTS = ("setup.py", "setup.cfg", "Pipfile", "environment.yml", "uv.lock", "poetry.lock")
+# Files that list a project's dependencies, beside pyproject.toml. Not a lock file, which a tool such as uv writes
+# of pyproject.toml's dependencies, none or not.
+DEPENDENCY_LISTS = ("setup.py", "setup.cfg", "Pipfile", "environment.yml")
 
 
 def imported(path: pathlib.Path) -> set[str]:
@@ -60,13 +61,20 @@ class NoDependency(Acceptance):
         self.assertEqual(project["project"].get("dependencies"), [])
         self.assertNotIn("optional-dependencies", project["project"])
         self.assertNotIn("dependency-groups", project)
-        lists = [p.name for p in pathlib.Path(self.repo).iterdir()
-                 if p.name.startswith("requirements") or p.name in DEPENDENCY_LISTS]
+        files = self.project_files()
+        lists = [f for f in files if "/" not in f and (f.startswith("requirements") or f in DEPENDENCY_LISTS)]
         self.assertEqual(lists, [])
-        for path in pathlib.Path(self.repo).rglob("*.py"):
-            if ".orchestrator" not in path.parts:
-                with self.subTest(path=str(path)):
-                    self.assertLessEqual(imported(path) - set(sys.stdlib_module_names), {"report", "tests"})
+        for path in (f for f in files if f.endswith(".py")):
+            with self.subTest(path=path):
+                imports = imported(pathlib.Path(self.repo, path))
+                self.assertLessEqual(imports - set(sys.stdlib_module_names), {"report", "tests"})
+
+    def project_files(self) -> list[str]:
+        """The project's files, committed or not, as paths relative to it; not what git ignores, such as a virtual
+        environment uv made or the run's own directory."""
+        proc = self.in_repo("git", "ls-files", "--cached", "--others", "--exclude-standard", timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc.stdout.splitlines()
 
 
 if __name__ == "__main__":

@@ -28,9 +28,17 @@ class Docs(Acceptance):
 
     def usage(self) -> str:
         """The text of README.md's `## Usage` section, up to the next heading of its level or above; "" without one."""
-        text = pathlib.Path(self.repo, "README.md").read_text()
-        m = re.search(r"^## Usage[ \t]*\n(.*?)(?=^#{1,2} |\Z)", text, re.MULTILINE | re.DOTALL)
-        return m.group(1) if m else ""
+        lines, fenced = [], False
+        for line in pathlib.Path(self.repo, "README.md").read_text().splitlines(keepends=True):
+            # A line starting with # inside a fenced block, such as a shell comment, is not a heading.
+            heading = not fenced and re.match(r"#{1,2} ", line)
+            if line.startswith("```"):
+                fenced = not fenced
+            if heading and lines:
+                break
+            if lines or (heading and re.match(r"## Usage\s*$", line)):
+                lines.append(line)
+        return "".join(lines[1:])
 
     def check_code_unchanged(self):
         """Each module is as the task found it but for docstrings."""

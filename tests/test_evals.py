@@ -132,7 +132,8 @@ def render_credit_note(customer, items, tax_rate):
     "docs": {
         "README.md": "# kvstore\n\nA key-value store in a JSON file.\n\n## Usage\n\n"
                      "Every command takes `--file PATH`, the store, `store.json` by default.\n\n"
-                     "```sh\npython -m kvstore set colour blue\npython -m kvstore get colour\n"
+                     "```sh\n# a shell comment, which is no heading\npython -m kvstore set colour blue\n"
+                     "python -m kvstore get colour\n"
                      "python -m kvstore --file other.json delete colour\npython -m kvstore list\n```\n\n"
                      "`get` prints the value, `list` every key; `get` and `delete` exit with status 1 when the key "
                      "does not exist.\n",
@@ -172,6 +173,10 @@ def render_table(header, rows):
             "    sys.stdout.write(write_csv(header, rows))\n",
             '    render = render_table if args.format == "table" else write_csv\n'
             "    sys.stdout.write(render(header, rows))\n"),
+        # What running the tests with uv leaves, which adds no dependency.
+        "uv.lock": "version = 1\n",
+        ".venv/.gitignore": "*\n",
+        ".venv/lib/vendored.py": "import numpy\n",
         "tests/test_table.py": "import unittest\n\nfrom report import render_table\n\n\n"
                                "class TestTable(unittest.TestCase):\n"
                                "    def test_one_column(self):\n"
@@ -227,6 +232,9 @@ class TestTasks(FakeEngineTest):
                 self.plan()
                 untouched = self.trial(name)
                 self.assertFalse(untouched.passed, untouched.hidden_test_output)
+                # The last line names the checks, also those that failed in a subtest.
+                last = untouched.hidden_test_output.splitlines()[-1]
+                self.assertRegex(last, r"^not accepted: check_\w+(, check_\w+)*$")
                 self.plan(files=SOLUTIONS[name])
                 solved = self.trial(name)
                 self.assertTrue(solved.passed, solved.hidden_test_output)
@@ -373,12 +381,12 @@ class TestTable(unittest.TestCase):
 
 class TestRecords(unittest.TestCase):
     def test_a_record_is_the_evals_fields_then_the_trials(self):
-        run = evals.Eval("2026-10-28", "workflow-quick", ["--workflow", "quick"], "orchestrator.py", "abc")
-        record = run.record(trial(run_id="r", rounds=1))
+        evaluation = evals.Eval("2026-10-28", "workflow-quick", ["--workflow", "quick"], "orchestrator.py", "abc")
+        record = evaluation.record(trial(run_id="r", rounds=1))
         self.assertEqual(list(record)[:7], ["version", "date", "config", "run_args", "engine", "commit", "task"])
         self.assertEqual((record["version"], record["config"], record["passed"], record["rounds"], record["tokens"]),
                          (1, "workflow-quick", True, 1, None))
-        self.assertEqual(run.results_path, os.path.join(evals.RESULTS_DIR, "2026-10-28-workflow-quick.jsonl"))
+        self.assertEqual(evaluation.results_path, os.path.join(evals.RESULTS_DIR, "2026-10-28-workflow-quick.jsonl"))
 
     def test_records_are_appended_a_line_each(self):
         with tempfile.TemporaryDirectory() as d:
@@ -395,18 +403,38 @@ class TestRecords(unittest.TestCase):
         self.assertEqual(len(evals.config_name(["--model", "x" * 100])), 60)
 
 
+class TestHeadCommit(unittest.TestCase):
+    def test_a_tracked_change_marks_the_commit_dirty(self):
+        with tempfile.TemporaryDirectory() as d:
+            commit = make_bundles.make_bundle({"prompt.txt": "v1\n"}, os.path.join(d, "b.bundle"))
+            Host().git(d, "clone", "--quiet", os.path.join(d, "b.bundle"), "repo")
+            repo = os.path.join(d, "repo")
+            with patch.object(evals, "ROOT", repo):
+                self.assertEqual(evals._head_commit(), commit)
+                with open(os.path.join(repo, "untracked.txt"), "w") as f:
+                    f.write("x\n")
+                self.assertEqual(evals._head_commit(), commit)
+                with open(os.path.join(repo, "prompt.txt"), "w") as f:
+                    f.write("v2\n")
+                self.assertEqual(evals._head_commit(), f"{commit}-dirty")
+
+
 class TestArgs(unittest.TestCase):
     def test_run_args_follow_the_double_dash(self):
         args = evals.parse_args(["--tasks", "a,b", "--repeat", "2", "--", "--model", "sonnet"])
         self.assertEqual((args.tasks, args.repeat, args.run_args), ("a,b", 2, ["--model", "sonnet"]))
 
     def test_the_runners_own_flags_are_refused_in_run_args(self):
-        for flag in ("--no-pr", "--spec=x", "--cwd", "--machine", "--worktree"):
+        for flag in ("--no-pr", "--spec=x", "--cwd", "--machine", "--worktree", "--workt", "--cw", "--sp=x"):
             with self.subTest(flag=flag), contextlib.redirect_stderr(io.StringIO()) as err, \
                     self.assertRaises(SystemExit) as exit:
                 evals.parse_args(["--", flag])
             self.assertEqual(exit.exception.code, 2)
             self.assertIn("RUN_ARGS cannot hold", err.getvalue())
+
+    def test_the_engines_other_flags_pass(self):
+        args = evals.parse_args(["--", "--workflow", "quick", "--model", "sonnet", "--max-rounds", "2", "--", "x"])
+        self.assertEqual(args.run_args, ["--workflow", "quick", "--model", "sonnet", "--max-rounds", "2", "--", "x"])
 
     def test_repeat_is_at_least_one(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

@@ -8,7 +8,9 @@ Run it from a herdr pane, as `orchestrator.py run`: every trial is a real run, w
 `--no-pr`, `--spec` and `--cwd` itself, and refuses those, `--machine` and `--worktree` there.
 
 The engine is the command line `EVAL_ENGINE` gives, as tests/parity's PARITY_ENGINE does, else this checkout's
-orchestrator.py on the Python running this script; it is run as a program, through `run` and `close` only.
+orchestrator.py on the Python running this script. It is run as a program, through `run` and `close`, and must keep
+a run's files as orchestrator.py does: the runner finds the run under `.orchestrator/runs/<run id>/` in the clone, and
+its numbers in `metrics.json` there (docs/design.md, Run metrics).
 
 A task is a directory evals/tasks/<name>/ holding:
 
@@ -129,8 +131,8 @@ def config_name(run_args: list[str]) -> str:
 
 def run_trial(task: Task, repeat: int, engine: list[str], run_args: list[str], keep: bool = False) -> Trial:
     """Run task once: clone its bundle into a directory of its own under the temporary directory, have the engine
-    run its spec there with run_args and without a pull request, run its hidden test on the result, close the run's
-    workspace, and remove the directory unless keep, saying where it is when kept.
+    run its spec there with run_args and without a pull request, close the run's workspace, run the hidden test on
+    what the run left, and remove the directory unless keep, saying where it is when kept.
 
     Neither the hidden test nor the task's directory is reachable from the clone: the spec is a copy beside it, and
     its origin a copy of the bundle. The engine's and the hidden test's output go to this process's standard error
@@ -145,12 +147,13 @@ def run_trial(task: Task, repeat: int, engine: list[str], run_args: list[str], k
         started = time.monotonic()
         engine_exit = _run_engine([*engine, "run", "--no-pr", "--spec", spec, "--cwd", repo, *run_args])
         seconds = round(time.monotonic() - started, 1)
+        known = _run_metrics(repo)
+        if known["run_id"]:
+            _close(engine, known["run_id"], repo)
+        else:
+            print(f"warning: the engine left no run directory under {RUNS_DIR} in {repo}", file=sys.stderr)
         passed, output = _run_hidden_test(task, repo, work)
-        trial = Trial(task.name, repeat, passed, engine_exit, seconds, output)
-        _read_metrics(trial, repo)
-        if trial.run_id:
-            _close(engine, trial.run_id, repo)
-        return trial
+        return Trial(task.name, repeat, passed, engine_exit, seconds, output, **known)
     except KeyboardInterrupt:
         interrupted = True
         print(f"interrupted: the run's clone stays in {repo}", file=sys.stderr)
@@ -214,26 +217,29 @@ def _run_hidden_test(task: Task, repo: str, work: str) -> tuple[bool, str]:
     return proc.returncode == 0, "\n".join(lines[-HIDDEN_TEST_TAIL_LINES:])
 
 
-def _read_metrics(trial: Trial, repo: str) -> None:
-    """Fill trial's run id from the one run directory in repo, and the fields metrics.json gives from it, if the run
-    wrote one (docs/design.md, Run metrics). A run directory or metrics.json that cannot be read leaves them None."""
+def _run_metrics(repo: str) -> dict:
+    """The Trial fields a run in repo gives: its run id, the name of the one run directory there, and what its
+    metrics.json says (docs/design.md, Run metrics); None for each that a missing or unreadable directory or file
+    leaves unknown."""
+    known: dict = {"run_id": None, "outcome": None, "rounds": None, "quality_rounds": None, "tokens": None}
     try:
         run_ids = sorted(os.listdir(os.path.join(repo, RUNS_DIR)))
     except OSError:
-        return
+        return known
     if not run_ids:
-        return
-    trial.run_id = run_ids[-1]
+        return known
+    known["run_id"] = run_ids[-1]
     try:
-        with open(os.path.join(repo, RUNS_DIR, trial.run_id, "metrics.json"), encoding="utf-8") as f:
+        with open(os.path.join(repo, RUNS_DIR, known["run_id"], "metrics.json"), encoding="utf-8") as f:
             metrics = json.load(f)
     except (OSError, ValueError):
-        return
-    trial.outcome, trial.rounds = metrics.get("outcome"), metrics.get("rounds")
-    trial.quality_rounds = len(metrics.get("quality_rounds") or [])
+        return known
+    known["outcome"], known["rounds"] = metrics.get("outcome"), metrics.get("rounds")
+    known["quality_rounds"] = len(metrics.get("quality_rounds") or [])
     counts = [t["tokens"] for t in metrics.get("turns", []) if t.get("harness")]
     if counts and all(isinstance(c, dict) for c in counts):
-        trial.tokens = {k: sum(c.get(k, 0) for c in counts) for k in ("input", "output", "cache_read", "cache_write")}
+        known["tokens"] = {k: sum(c.get(k, 0) for c in counts) for k in ("input", "output", "cache_read", "cache_write")}
+    return known
 
 
 def _close(engine: list[str], run_id: str, repo: str) -> None:
@@ -254,7 +260,7 @@ class Eval:
     config: str  # the name of its configuration, config_name's or --config's
     run_args: list[str]  # what the engine's run was given beyond the runner's own flags
     engine: str  # EVAL_ENGINE, or "orchestrator.py" for this checkout's
-    commit: str  # this checkout's HEAD: the prompts and workflows the default engine ran with
+    commit: str  # this checkout's HEAD, "-dirty" after it with tracked changes: what the default engine ran with
 
     @property
     def results_path(self) -> str:
@@ -321,12 +327,17 @@ def _count(n: float) -> str:
 
 
 def _head_commit() -> str:
-    """This checkout's HEAD, the prompts and workflows the default engine runs with; "unknown" when git cannot say."""
+    """This checkout's HEAD, the prompts and workflows the default engine runs with, followed by "-dirty" when a file
+    git tracks differs from it, so that numbers of an uncommitted edit are not credited to the commit without it;
+    "unknown" when git cannot say."""
     try:
-        proc = _subprocess(["git", "-C", ROOT, "rev-parse", "HEAD"])
+        head = _subprocess(["git", "-C", ROOT, "rev-parse", "HEAD"])
+        changed = _subprocess(["git", "-C", ROOT, "diff", "--quiet", "HEAD"])
     except OSError:
         return "unknown"
-    return proc.stdout.strip() if proc.returncode == 0 else "unknown"
+    if head.returncode != 0 or changed.returncode not in (0, 1):
+        return "unknown"
+    return head.stdout.strip() + ("-dirty" if changed.returncode == 1 else "")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -342,10 +353,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     args = parser.parse_args(own)
     if args.repeat < 1:
         parser.error("--repeat must be at least 1")
-    if refused := [a for a in run_args if a.split("=", 1)[0] in OWN_FLAGS]:
+    # By prefix too: the engine's argparse takes --workt for --worktree.
+    if refused := [a for a in run_args if _abbreviates_own_flag(a.split("=", 1)[0])]:
         parser.error(f"RUN_ARGS cannot hold {', '.join(refused)}: the runner sets or refuses {', '.join(OWN_FLAGS)}")
     args.run_args = run_args
     return args
+
+
+def _abbreviates_own_flag(arg: str) -> bool:
+    """Whether arg is one of OWN_FLAGS, or the start of one that argparse would take for it."""
+    return arg.startswith("--") and len(arg) > 2 and any(flag.startswith(arg) for flag in OWN_FLAGS)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -353,8 +370,8 @@ def main(argv: list[str] | None = None) -> int:
     evals/results/<date>-<config>.jsonl as each trial ends; the exit status is the module docstring's."""
     args = parse_args(sys.argv[1:] if argv is None else argv)
     engine = engine_command()
-    run = Eval(datetime.date.today().isoformat(), args.config or config_name(args.run_args), args.run_args,
-               os.environ.get("EVAL_ENGINE") or "orchestrator.py", _head_commit())
+    evaluation = Eval(datetime.date.today().isoformat(), args.config or config_name(args.run_args), args.run_args,
+                      os.environ.get("EVAL_ENGINE") or "orchestrator.py", _head_commit())
     trials: list[Trial] = []
     exit_code = 0
     try:
@@ -363,7 +380,7 @@ def main(argv: list[str] | None = None) -> int:
             for repeat in range(1, args.repeat + 1):
                 trial = run_trial(task, repeat, engine, args.run_args, keep=args.keep)
                 trials.append(trial)
-                append_records(run.results_path, [run.record(trial)])
+                append_records(evaluation.results_path, [evaluation.record(trial)])
     except (EvalError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
         exit_code = 1
@@ -371,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
         exit_code = EXIT_INTERRUPTED
     if trials:
         print(table(trials), end="")
-        print(f"results appended to {os.path.relpath(run.results_path)}")
+        print(f"results appended to {os.path.relpath(evaluation.results_path)}")
     return exit_code
 
 if __name__ == "__main__":
