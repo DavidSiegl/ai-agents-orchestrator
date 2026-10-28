@@ -10,13 +10,14 @@ use crate::constants::{NETWORK_TIMEOUT, REMOTE, RUNS_DIR};
 use crate::error::OrchestratorError;
 use crate::harness::{harness, SessionLog};
 use crate::py::json::{Json, Map};
-use crate::py::text::{repr, shlex_join, strip};
+use crate::py::text::{repr, shlex_join, strip, universal_newlines};
 
 mod process;
 mod scan;
 
 pub use process::ProcessHost;
 pub use scan::LeaksFound;
+pub(crate) use process::{run_process, ProcessError};
 
 use crate::quality::Leak;
 
@@ -1071,13 +1072,5 @@ fn python_int(text: &str) -> Option<i64> {
     text.replace('_', "").parse().ok()
 }
 
-/// text with each "\r\n" and each lone "\r" made "\n", as Python's text mode reads a process's output.
-fn universal_newlines(text: &str) -> String {
-    if !text.contains('\r') {
-        return text.to_string();
-    }
-    text.replace("\r\n", "\n").replace('\r', "\n")
-}
-
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

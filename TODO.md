@@ -96,13 +96,15 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `restore`, `changed_line_counts` and `crate::patch::added_lines` (so by the secret scan too), where Python reads it
   as `os.fsdecode` does, and a base's gitleaks rules file that is not UTF-8 fails the scan closed, where the Python
   engine crashes writing it (`engine/src/host.rs`, `utf8_path`; `engine/src/host/scan.rs`, `base_rules_file`).
-  And from the agents' session logs (rust-engine ticket 06, 2026-10-28): a session log's line that holds
+  And from the agents' session logs and herdr (rust-engine ticket 06, 2026-10-28): a session log's line that holds
   `NaN`, `Infinity` or an integer beyond 64 bits is skipped, as `Json::parse` refuses it, where Python counts its
   tokens, and a lone surrogate in a line, as an escape or as a byte that is not UTF-8, is read as U+FFFD, so that two
   Claude Code message ids that differ only there count as one answer, where Python counts two
   (`Harness::session_usage` in `engine/src/harness.rs`, `Json::parse_lossy`); a harness that is not one of
   `AGENT_KINDS`, as a hand-edited `state.json` can name, is refused naming those there are (`crate::harness::harness`),
-  where the Python engine fails on a KeyError. Decided against unless a run is found that writes such input.
+  where the Python engine fails on a KeyError; and an answer of herdr's that lacks what its command gives, or is not
+  UTF-8, is a `bad_response` naming the command or a failure naming it (`engine/src/herdr.rs`), where Python fails on
+  a KeyError or a UnicodeDecodeError. Decided against unless a run is found that writes such input.
 - **Host tests and a Host need of the CLI's, left for rust-engine ticket 09.** `TestHostGit`'s `test_prune_on_real_git`
   and `test_close_on_real_git` and `TestHostPullRequest.test_closed_without_a_time` (`tests/test_orchestrator.py`)
   drive `prune_branches`, `close_run` and `pull_request_pending`, which the Rust engine has not ported, so ticket 05
