@@ -1,0 +1,1000 @@
+{
+ "files": [
+  {
+   "from": "tests/golden/gate_error.txt",
+   "text": "GATE: ERROR\n\n`orchestrator.py gate` judged the working tree at `<head>` against the base `<base>`.\n\n## Failed conditions\n\n- 1 findings on lines the change added; each is listed below.\n- 1 findings of the `test-integrity` check; each is listed below.\n- 1 tests fail; each is listed below.\n- Coverage of new code is 50.0%; the gate wants at least 80% once a change has 20 or more new lines to cover.\n\n## Issues on changed lines\n\n1. `f.py:4` error ruff B023: Function definition does not bind loop variable `x`\n2. `tests/test_f.py:4` error test-integrity skip: `pytest.mark.skip` added: it skips a test or expects it to fail.\n\n1 other open issues in the project are not on lines this change added, so they are not listed.\n\n## Findings to weigh\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n3. `tests/test_f.py:5` warning test-integrity removed-test: `test_two` is gone; this was line 5 at the base.\n\n## Failing tests\n\n- `tests.T.test_limit`: AssertionError: 3 != 2\n\n## Coverage on new code\n\n50.0% of 20 new lines to cover; 10 lines are not covered.\n\n## Suppressions added\n\n- `f.py:23` `import os  # noqa: F401`\n\n## Build configuration\n\n- The change edits `uv.lock`, which pins the versions of the linters the gate ran.\n",
+   "gate": "ERROR",
+   "conditions": [
+    "1 findings on lines the change added; each is listed below.",
+    "1 findings of the `test-integrity` check; each is listed below.",
+    "1 tests fail; each is listed below.",
+    "Coverage of new code is 50.0%; the gate wants at least 80% once a change has 20 or more new lines to cover."
+   ],
+   "fingerprints": {
+    "ruff": [
+     "54bd947dfb7aa9b3"
+    ],
+    "test-integrity": [
+     "f25a43cb5f933480"
+    ],
+    "tests": [
+     "38c58eb9f18ce615"
+    ]
+   }
+  },
+  {
+   "from": "tests/golden/gate_ok.txt",
+   "text": "GATE: OK\n\n`orchestrator.py gate` judged the working tree at `<head>` against the base `<head>`.\n\n## Issues on changed lines\n\nNone.\n\n## Failing tests\n\nNone.\n\n## Coverage on new code\n\n100.0% of 1 new lines to cover; 0 lines are not covered.\n\nNot measured: `m\\xff.py`; coverage.py records no data for a file whose name is not UTF-8.\n",
+   "gate": "OK",
+   "conditions": [],
+   "fingerprints": {}
+  },
+  {
+   "from": "tests/golden/quality_report_error.txt",
+   "text": "GATE: ERROR\n\nThe intro.\n\n## Failed conditions\n\n- 2 findings on lines the change added; each is listed below.\n- `ruff` is not installed.\n\n## Issues on changed lines\n\n1. `f.py:1` HIGH r: m1\n2. `f.py:2` HIGH r: m2\n\n3 other open issues in the project are not on lines this change added, so they are not listed.\n\n## Findings to weigh\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n3. `t.py:9` warning flaky test_x: m\n\n## Failing tests\n\n- `t.T.test_x`: AssertionError: 3 != 2\n- `t.T.test_y`: failed\n\n## Coverage on new code\n\n50.0% of 20 new lines to cover; 10 lines are not covered.\n\n## Suppressions added\n\n- `f.py:3` `x = 1  # noqa: F401`\n- `g\\x0dh.py:1` `# noqa`\n\n## Build configuration\n\n- The change edits `Jenkinsfile`. The quality job reads it from `main`, so this analysis ran without the edit.\n- The change edits `pyproject.toml`, which holds the gate's rules; the change was judged by the edited rules.\n- The change edits `uv.lock`, which pins the versions of the linters the gate ran.\n- The change edits `c0/Cargo.toml`, `c1/Cargo.toml`, `c2/Cargo.toml`, `c3/Cargo.toml`, `c4/Cargo.toml` and 2 more, which clippy takes its rules or its toolchain from; it judged the change by the edited ones.\n- The change adds or edits `mutants/calc.py` under `mutants/`, where mutmut keeps its state. The gate's checks leave them out: none selects a test or a function in them or counts them as a change to the code, and the surviving-mutants check runs mutmut without them. The linters read them as they read any tracked file.\n",
+   "gate": "ERROR",
+   "conditions": [
+    "2 findings on lines the change added; each is listed below.",
+    "`ruff` is not installed."
+   ],
+   "fingerprints": {
+    "r": [
+     "b2b06463a79229ef",
+     "b2b06463a79229ef"
+    ],
+    "tests": [
+     "5e16eb07b39e3b67",
+     "e24cc0bb16c91b20"
+    ]
+   }
+  },
+  {
+   "from": "tests/golden/quality_report_error_over_limit.txt",
+   "text": "GATE: ERROR\n\nThe intro.\n\n## Issues on changed lines\n\n1. `f.py:1` HIGH r: m1\n2. `f.py:2` HIGH r: m2\n3. `f.py:3` HIGH r: m3\n4. `f.py:4` HIGH r: m4\n5. `f.py:5` HIGH r: m5\n6. `f.py:6` HIGH r: m6\n7. `f.py:7` HIGH r: m7\n8. `f.py:8` HIGH r: m8\n9. `f.py:9` HIGH r: m9\n10. `f.py:10` HIGH r: m10\n11. `f.py:11` HIGH r: m11\n12. `f.py:12` HIGH r: m12\n13. `f.py:13` HIGH r: m13\n14. `f.py:14` HIGH r: m14\n15. `f.py:15` HIGH r: m15\n16. `f.py:16` HIGH r: m16\n17. `f.py:17` HIGH r: m17\n18. `f.py:18` HIGH r: m18\n19. `f.py:19` HIGH r: m19\n20. `f.py:20` HIGH r: m20\n21. `f.py:21` HIGH r: m21\n22. `f.py:22` HIGH r: m22\n23. `f.py:23` HIGH r: m23\n24. `f.py:24` HIGH r: m24\n25. `f.py:25` HIGH r: m25\n26. `f.py:26` HIGH r: m26\n27. `f.py:27` HIGH r: m27\n28. `f.py:28` HIGH r: m28\n29. `f.py:29` HIGH r: m29\n30. `f.py:30` HIGH r: m30\n31. `f.py:31` HIGH r: m31\n32. `f.py:32` HIGH r: m32\n33. `f.py:33` HIGH r: m33\n34. `f.py:34` HIGH r: m34\n35. `f.py:35` HIGH r: m35\n36. `f.py:36` HIGH r: m36\n37. `f.py:37` HIGH r: m37\n38. `f.py:38` HIGH r: m38\n39. `f.py:39` HIGH r: m39\n40. `f.py:40` HIGH r: m40\n41. `f.py:41` HIGH r: m41\n42. `f.py:42` HIGH r: m42\n43. `f.py:43` HIGH r: m43\n44. `f.py:44` HIGH r: m44\n45. `f.py:45` HIGH r: m45\n46. `f.py:46` HIGH r: m46\n47. `f.py:47` HIGH r: m47\n48. `f.py:48` HIGH r: m48\n49. `f.py:49` HIGH r: m49\n50. `f.py:50` HIGH r: m50\n\n2 more issues on changed lines are not listed; fix the ones above first.\n\n## Findings to weigh\n\n2 findings to weigh are not listed; answer the issues above first.\n\n## Failing tests\n\n- `t.T.test_0`: failed\n- `t.T.test_1`: failed\n- `t.T.test_2`: failed\n- `t.T.test_3`: failed\n- `t.T.test_4`: failed\n- `t.T.test_5`: failed\n- `t.T.test_6`: failed\n- `t.T.test_7`: failed\n- `t.T.test_8`: failed\n- `t.T.test_9`: failed\n- `t.T.test_10`: failed\n- `t.T.test_11`: failed\n- `t.T.test_12`: failed\n- `t.T.test_13`: failed\n- `t.T.test_14`: failed\n- `t.T.test_15`: failed\n- `t.T.test_16`: failed\n- `t.T.test_17`: failed\n- `t.T.test_18`: failed\n- `t.T.test_19`: failed\n- `t.T.test_20`: failed\n- `t.T.test_21`: failed\n- `t.T.test_22`: failed\n- `t.T.test_23`: failed\n- `t.T.test_24`: failed\n- `t.T.test_25`: failed\n- `t.T.test_26`: failed\n- `t.T.test_27`: failed\n- `t.T.test_28`: failed\n- `t.T.test_29`: failed\n- `t.T.test_30`: failed\n- `t.T.test_31`: failed\n- `t.T.test_32`: failed\n- `t.T.test_33`: failed\n- `t.T.test_34`: failed\n- `t.T.test_35`: failed\n- `t.T.test_36`: failed\n- `t.T.test_37`: failed\n- `t.T.test_38`: failed\n- `t.T.test_39`: failed\n- `t.T.test_40`: failed\n- `t.T.test_41`: failed\n- `t.T.test_42`: failed\n- `t.T.test_43`: failed\n- `t.T.test_44`: failed\n- `t.T.test_45`: failed\n- `t.T.test_46`: failed\n- `t.T.test_47`: failed\n- `t.T.test_48`: failed\n- `t.T.test_49`: failed\n- and 1 more.\n",
+   "gate": "ERROR",
+   "conditions": [],
+   "fingerprints": {
+    "r": [
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef"
+    ],
+    "tests": [
+     "7d52a4c8a74981a2",
+     "95244c21670dc746",
+     "1cc46a75df52f9f7",
+     "d3d84f4b18042ee0",
+     "ce9b32e0c0cc72a3",
+     "892f38aba9532291",
+     "2f284a2db2058ec6",
+     "bfbfd152fcf5a72d",
+     "11bf035c8108e835",
+     "a9d1c1146df667e5",
+     "d6ccb556803bf834",
+     "3c6337bdf26e171e",
+     "d084a3310ec66eee",
+     "08ac08e2e0247c1c",
+     "0ce936a1e4f0052e",
+     "0dee3d17e1d5a5f4",
+     "ec3dad1b7f53a5e8",
+     "a0933cf32cb39c2c",
+     "84fb87261ba9f2b9",
+     "037f0e3ac5f713f9",
+     "3000fe3737002b74",
+     "3793564ebe256940",
+     "4471f655d093fc18",
+     "ebe54144958e3f01",
+     "f6dd96daaf3aba7c",
+     "ab8d1e5e3b97f32e",
+     "a550aea7edce246a",
+     "fb222240d0104db7",
+     "1a858e36d47ebcb2",
+     "3412c54bc23ef355",
+     "f2c5d28296d11138",
+     "d213385415e34d51",
+     "f7721538650132f0",
+     "fc0cc0c55c576ff4",
+     "8419150967bb5ace",
+     "2bdc1d2efcf34bda",
+     "f4a90014a2202916",
+     "0e8d200478139824",
+     "8749c1edf659a96f",
+     "02576f04061ad838",
+     "8211b67e9bc59125",
+     "2250d0574abd2a91",
+     "18f9e8726f68fcf9",
+     "75c2668c1212e582",
+     "f2e22f607b9ea812",
+     "a8b79cd745bf50bd",
+     "5ddb3b32f95df33f",
+     "c2f26ad9043f3596",
+     "3fa4add8cecd0623",
+     "6fa3dc294ec65928"
+    ]
+   }
+  },
+  {
+   "from": "tests/golden/quality_report_error_to_weigh_cut.txt",
+   "text": "GATE: ERROR\n\nThe intro.\n\n## Issues on changed lines\n\n1. `f.py:1` HIGH r: m1\n2. `f.py:2` HIGH r: m2\n3. `f.py:3` HIGH r: m3\n4. `f.py:4` HIGH r: m4\n5. `f.py:5` HIGH r: m5\n6. `f.py:6` HIGH r: m6\n7. `f.py:7` HIGH r: m7\n8. `f.py:8` HIGH r: m8\n9. `f.py:9` HIGH r: m9\n10. `f.py:10` HIGH r: m10\n11. `f.py:11` HIGH r: m11\n12. `f.py:12` HIGH r: m12\n13. `f.py:13` HIGH r: m13\n14. `f.py:14` HIGH r: m14\n15. `f.py:15` HIGH r: m15\n16. `f.py:16` HIGH r: m16\n17. `f.py:17` HIGH r: m17\n18. `f.py:18` HIGH r: m18\n19. `f.py:19` HIGH r: m19\n20. `f.py:20` HIGH r: m20\n21. `f.py:21` HIGH r: m21\n22. `f.py:22` HIGH r: m22\n23. `f.py:23` HIGH r: m23\n24. `f.py:24` HIGH r: m24\n25. `f.py:25` HIGH r: m25\n26. `f.py:26` HIGH r: m26\n27. `f.py:27` HIGH r: m27\n28. `f.py:28` HIGH r: m28\n29. `f.py:29` HIGH r: m29\n30. `f.py:30` HIGH r: m30\n31. `f.py:31` HIGH r: m31\n32. `f.py:32` HIGH r: m32\n33. `f.py:33` HIGH r: m33\n34. `f.py:34` HIGH r: m34\n35. `f.py:35` HIGH r: m35\n36. `f.py:36` HIGH r: m36\n37. `f.py:37` HIGH r: m37\n38. `f.py:38` HIGH r: m38\n39. `f.py:39` HIGH r: m39\n40. `f.py:40` HIGH r: m40\n41. `f.py:41` HIGH r: m41\n42. `f.py:42` HIGH r: m42\n43. `f.py:43` HIGH r: m43\n44. `f.py:44` HIGH r: m44\n45. `f.py:45` HIGH r: m45\n46. `f.py:46` HIGH r: m46\n47. `f.py:47` HIGH r: m47\n48. `f.py:48` HIGH r: m48\n49. `f.py:49` HIGH r: m49\n\n## Findings to weigh\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n50. `t.py:1` warning flaky test_x: m\n\n2 more findings to weigh are not listed.\n\n## Build configuration\n\n- The change edits `clippy.toml` and `ui/Cargo.toml`, which clippy takes its rules or its toolchain from; it judged the change by the edited ones.\n",
+   "gate": "ERROR",
+   "conditions": [],
+   "fingerprints": {
+    "r": [
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef",
+     "b2b06463a79229ef"
+    ]
+   }
+  },
+  {
+   "from": "tests/golden/quality_report_ok.txt",
+   "text": "GATE: OK\n\nThe intro.\n\n## Issues on changed lines\n\nNone.\n",
+   "gate": "OK",
+   "conditions": [],
+   "fingerprints": {}
+  },
+  {
+   "from": "tests/golden/quality_report_ok_to_weigh.txt",
+   "text": "GATE: OK\n\nThe intro.\n\n## Issues on changed lines\n\nNone.\n\n## Findings to weigh\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n1. `t.py:3` warning flaky test_x: m\n2. `t.py (the whole file)` warning flaky test_x: m\n3. The change as a whole: warning mutants budget: m\n\n## Failing tests\n\nNone.\n\n## Coverage on new code\n\n85.0% of 20 new lines to cover; 3 lines are not covered.\n\n## Build configuration\n\n- The change edits `pyproject.toml`. The gate took its rules from `main`'s `pyproject.toml`, so the edit did not change how the change was judged.\n",
+   "gate": "OK",
+   "conditions": [],
+   "fingerprints": {}
+  },
+  {
+   "from": "gate_turned_on_by_resume.json runs/<run:1>/quality-1-1.md",
+   "text": "GATE: OK\n\nJenkins build #1 judged snapshot `<sha:2>` (round 1, quality round 1 of 3) and ended SUCCESS.\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n1. `tests/test_calc.py (the whole file)` warning unexpected-paths: the spec mentions neither this path nor its file name.\n",
+   "gate": "OK",
+   "conditions": [],
+   "fingerprints": {}
+  },
+  {
+   "from": "quality_build_failed.json runs/<run:1>/quality-1-1.md",
+   "text": "GATE: BUILD_FAILED\n\nJenkins build #1 of snapshot `<sha:2>` (round 1, quality round 1 of 2) ended FAILURE before the quality gate ran, so nothing judged the change. Make it build first.\n\n## Failing tests\n\n- `tests.test_calc.test_subtract`: AssertionError: 1 != -1\n",
+   "gate": "BUILD_FAILED",
+   "conditions": [],
+   "fingerprints": {
+    "tests": [
+     "d8690bb10c7608a8"
+    ]
+   }
+  },
+  {
+   "from": "quality_build_failed.json runs/<run:1>/quality-1-2.md",
+   "text": "GATE: BUILD_FAILED\n\nJenkins build #2 of snapshot `<sha:3>` (round 1, quality round 2 of 2) ended FAILURE before the quality gate ran, so nothing judged the change. Make it build first.\n\n## Failing tests\n\nJenkins has no test report for this build.\n\n## The last 60 lines of the build's console\n\n````\nStarted\n+ uv sync --frozen\nerror: lock file out of date\nFinished\n````\n",
+   "gate": "BUILD_FAILED",
+   "conditions": [],
+   "fingerprints": {}
+  },
+  {
+   "from": "quality_fails_then_passes.json runs/<run:1>/quality-1-1.md",
+   "text": "GATE: ERROR\n\nJenkins build #1 judged snapshot `<sha:2>` (round 1, quality round 1 of 3) and ended UNSTABLE.\n\n## Failed conditions\n\n- 1 findings of the `ruff` check; each is listed below.\n\n## Findings\n\n1. `src/calc.py:7` error ruff F821: undefined name `c`\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n2. `tests/test_calc.py (the whole file)` warning unexpected-paths: the spec mentions neither this path nor its file name.\n",
+   "gate": "ERROR",
+   "conditions": [
+    "1 findings of the `ruff` check; each is listed below."
+   ],
+   "fingerprints": {
+    "ruff": [
+     "621e234af67debfb"
+    ]
+   }
+  },
+  {
+   "from": "quality_fails_then_passes.json runs/<run:1>/quality-1-2.md",
+   "text": "GATE: OK\n\nJenkins build #2 judged snapshot `<sha:3>` (round 1, quality round 2 of 3) and ended SUCCESS.\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n1. `tests/test_calc.py (the whole file)` warning unexpected-paths: the spec mentions neither this path nor its file name.\n",
+   "gate": "OK",
+   "conditions": [],
+   "fingerprints": {}
+  },
+  {
+   "from": "quality_passes.json runs/<run:1>/quality-1-1.md",
+   "text": "GATE: OK\n\nJenkins build #1 judged snapshot `<sha:2>` (round 1, quality round 1 of 3) and ended SUCCESS.\n\nEvery condition holds.\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n1. `pyproject.toml:4` warning new-dependencies added: `attrs`, which the spec names: on PyPI since 2015-01-29, latest 25.3.0 of 2025-03-13, license MIT.\n2. `pyproject.toml (the whole file)` warning unexpected-paths: the spec mentions neither this path nor its file name.\n",
+   "gate": "OK",
+   "conditions": [],
+   "fingerprints": {}
+  },
+  {
+   "from": "quality_stuck.json runs/<run:1>/quality-1-2.md",
+   "text": "GATE: ERROR\n\nJenkins build #2 judged snapshot `<sha:3>` (round 1, quality round 2 of 3) and ended UNSTABLE.\n\n## Failed conditions\n\n- 1 findings of the `ruff` check; each is listed below.\n\n## Findings\n\n1. `src/calc.py:7` error ruff F821: undefined name `c`\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n2. `tests/test_calc.py (the whole file)` warning unexpected-paths: the spec mentions neither this path nor its file name.\n",
+   "gate": "ERROR",
+   "conditions": [
+    "1 findings of the `ruff` check; each is listed below."
+   ],
+   "fingerprints": {
+    "ruff": [
+     "621e234af67debfb"
+    ]
+   }
+  },
+  {
+   "from": "quality_workflow_without_review.json runs/<run:1>/quality-1-1.md",
+   "text": "GATE: ERROR\n\nJenkins build #1 judged snapshot `<sha:2>` (round 1, quality round 1 of 1) and ended UNSTABLE.\n\n## Failed conditions\n\n- 1 findings of the `ruff` check; each is listed below.\n\n## Findings\n\n1. `src/calc.py:7` error ruff F821: undefined name `c`\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n2. `src/calc.py (the whole file)` warning unexpected-paths: the spec mentions neither this path nor its file name.\n3. `tests/test_calc.py (the whole file)` warning unexpected-paths: the spec mentions neither this path nor its file name.\n",
+   "gate": "ERROR",
+   "conditions": [
+    "1 findings of the `ruff` check; each is listed below."
+   ],
+   "fingerprints": {
+    "ruff": [
+     "621e234af67debfb"
+    ]
+   }
+  },
+  {
+   "from": "full_report(OK, 0)",
+   "text": "GATE: OK\n\nintro\n\n## Failed conditions\n\n- `ruff` is not installed: it is not on PATH.\n- 2 tests fail; each is listed below.\n\n## Issues on changed lines\n\nNone.\n\n4 other open issues in the project are not on lines this change added, so they are not listed.\n\n## Findings to weigh\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n1. `t.py:9` warning flaky-tests mixed-results: m\n2. The change as a whole: warning surviving-mutants budget-reached: m\n\n## Failing tests\n\n- `t.T.test_a`: AssertionError: 1 != 2\n- `t.T.test_b`: failed\n\n## Coverage on new code\n\n62.5% of 40 new lines to cover.\n\n## Suppressions added\n\n- `a.py:3` `x = 1  # noqa: F401`\n\n## Build configuration\n\n- The change edits `Jenkinsfile`. The quality job reads it from `main`, so this analysis ran without the edit.\n- The change edits `pyproject.toml`. The gate took its rules from `main.toml`, so the edit did not change how the change was judged.\n- The change edits `uv.lock`, which pins the versions of the linters the gate ran.\n- The change adds or edits `mutants/a.py.meta` under `mutants/`, where mutmut keeps its state. The gate's checks leave them out: none selects a test or a function in them or counts them as a change to the code, and the surviving-mutants check runs mutmut without them. The linters read them as they read any tracked file.\n",
+   "gate": "OK",
+   "conditions": [
+    "`ruff` is not installed: it is not on PATH.",
+    "2 tests fail; each is listed below."
+   ],
+   "fingerprints": {
+    "tests": [
+     "ad799dd6b0748a63",
+     "704ba105df6e996a"
+    ]
+   }
+  },
+  {
+   "from": "full_report(ERROR, 3)",
+   "text": "GATE: ERROR\n\nintro\n\n## Failed conditions\n\n- `ruff` is not installed: it is not on PATH.\n- 2 tests fail; each is listed below.\n\n## Issues on changed lines\n\n1. `a.py:3` error ruff F0: m0 at 10\n2. `b.py (the whole file)` error ruff F1: m1 at 11\n3. The change as a whole: error ruff F2: m2 at 12\n\n4 other open issues in the project are not on lines this change added, so they are not listed.\n\n## Findings to weigh\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n4. `t.py:9` warning flaky-tests mixed-results: m\n5. The change as a whole: warning surviving-mutants budget-reached: m\n\n## Failing tests\n\n- `t.T.test_a`: AssertionError: 1 != 2\n- `t.T.test_b`: failed\n\n## Coverage on new code\n\n62.5% of 40 new lines to cover.\n\n## Suppressions added\n\n- `a.py:3` `x = 1  # noqa: F401`\n\n## Build configuration\n\n- The change edits `Jenkinsfile`. The quality job reads it from `main`, so this analysis ran without the edit.\n- The change edits `pyproject.toml`. The gate took its rules from `main.toml`, so the edit did not change how the change was judged.\n- The change edits `uv.lock`, which pins the versions of the linters the gate ran.\n- The change adds or edits `mutants/a.py.meta` under `mutants/`, where mutmut keeps its state. The gate's checks leave them out: none selects a test or a function in them or counts them as a change to the code, and the surviving-mutants check runs mutmut without them. The linters read them as they read any tracked file.\n",
+   "gate": "ERROR",
+   "conditions": [
+    "`ruff` is not installed: it is not on PATH.",
+    "2 tests fail; each is listed below."
+   ],
+   "fingerprints": {
+    "ruff": [
+     "2d320a995c295f9a",
+     "d1cb4a2c51b3a86c",
+     "251e9f259a49bad6"
+    ],
+    "tests": [
+     "ad799dd6b0748a63",
+     "704ba105df6e996a"
+    ]
+   }
+  },
+  {
+   "from": "full_report(ERROR, 52)",
+   "text": "GATE: ERROR\n\nintro\n\n## Failed conditions\n\n- `ruff` is not installed: it is not on PATH.\n- 2 tests fail; each is listed below.\n\n## Issues on changed lines\n\n1. `a.py:3` error ruff F0: m0 at 10\n2. `b.py (the whole file)` error ruff F1: m1 at 11\n3. The change as a whole: error ruff F2: m2 at 12\n4. `a.py:3` error ruff F3: m3 at 13\n5. `b.py (the whole file)` error ruff F4: m4 at 14\n6. The change as a whole: error ruff F5: m5 at 15\n7. `a.py:3` error ruff F6: m6 at 16\n8. `b.py (the whole file)` error ruff F7: m7 at 17\n9. The change as a whole: error ruff F8: m8 at 18\n10. `a.py:3` error ruff F9: m9 at 19\n11. `b.py (the whole file)` error ruff F10: m10 at 110\n12. The change as a whole: error ruff F11: m11 at 111\n13. `a.py:3` error ruff F12: m12 at 112\n14. `b.py (the whole file)` error ruff F13: m13 at 113\n15. The change as a whole: error ruff F14: m14 at 114\n16. `a.py:3` error ruff F15: m15 at 115\n17. `b.py (the whole file)` error ruff F16: m16 at 116\n18. The change as a whole: error ruff F17: m17 at 117\n19. `a.py:3` error ruff F18: m18 at 118\n20. `b.py (the whole file)` error ruff F19: m19 at 119\n21. The change as a whole: error ruff F20: m20 at 120\n22. `a.py:3` error ruff F21: m21 at 121\n23. `b.py (the whole file)` error ruff F22: m22 at 122\n24. The change as a whole: error ruff F23: m23 at 123\n25. `a.py:3` error ruff F24: m24 at 124\n26. `b.py (the whole file)` error ruff F25: m25 at 125\n27. The change as a whole: error ruff F26: m26 at 126\n28. `a.py:3` error ruff F27: m27 at 127\n29. `b.py (the whole file)` error ruff F28: m28 at 128\n30. The change as a whole: error ruff F29: m29 at 129\n31. `a.py:3` error ruff F30: m30 at 130\n32. `b.py (the whole file)` error ruff F31: m31 at 131\n33. The change as a whole: error ruff F32: m32 at 132\n34. `a.py:3` error ruff F33: m33 at 133\n35. `b.py (the whole file)` error ruff F34: m34 at 134\n36. The change as a whole: error ruff F35: m35 at 135\n37. `a.py:3` error ruff F36: m36 at 136\n38. `b.py (the whole file)` error ruff F37: m37 at 137\n39. The change as a whole: error ruff F38: m38 at 138\n40. `a.py:3` error ruff F39: m39 at 139\n41. `b.py (the whole file)` error ruff F40: m40 at 140\n42. The change as a whole: error ruff F41: m41 at 141\n43. `a.py:3` error ruff F42: m42 at 142\n44. `b.py (the whole file)` error ruff F43: m43 at 143\n45. The change as a whole: error ruff F44: m44 at 144\n46. `a.py:3` error ruff F45: m45 at 145\n47. `b.py (the whole file)` error ruff F46: m46 at 146\n48. The change as a whole: error ruff F47: m47 at 147\n49. `a.py:3` error ruff F48: m48 at 148\n50. `b.py (the whole file)` error ruff F49: m49 at 149\n\n2 more issues on changed lines are not listed; fix the ones above first.\n\n4 other open issues in the project are not on lines this change added, so they are not listed.\n\n## Findings to weigh\n\n2 findings to weigh are not listed; answer the issues above first.\n\n## Failing tests\n\n- `t.T.test_a`: AssertionError: 1 != 2\n- `t.T.test_b`: failed\n\n## Coverage on new code\n\n62.5% of 40 new lines to cover.\n\n## Suppressions added\n\n- `a.py:3` `x = 1  # noqa: F401`\n\n## Build configuration\n\n- The change edits `Jenkinsfile`. The quality job reads it from `main`, so this analysis ran without the edit.\n- The change edits `pyproject.toml`. The gate took its rules from `main.toml`, so the edit did not change how the change was judged.\n- The change edits `uv.lock`, which pins the versions of the linters the gate ran.\n- The change adds or edits `mutants/a.py.meta` under `mutants/`, where mutmut keeps its state. The gate's checks leave them out: none selects a test or a function in them or counts them as a change to the code, and the surviving-mutants check runs mutmut without them. The linters read them as they read any tracked file.\n",
+   "gate": "ERROR",
+   "conditions": [
+    "`ruff` is not installed: it is not on PATH.",
+    "2 tests fail; each is listed below."
+   ],
+   "fingerprints": {
+    "ruff": [
+     "2d320a995c295f9a",
+     "d1cb4a2c51b3a86c",
+     "251e9f259a49bad6",
+     "e542eae9be70b565",
+     "557891df0bc0641a",
+     "4d7f241a1c5c88b1",
+     "7a924f8cc950d61b",
+     "50801f4501502ebc",
+     "aa209c6c39184559",
+     "39207e3cca1a824f",
+     "f9065ccc698df248",
+     "9641a8355f3d254b",
+     "cd45866cb9c7d993",
+     "69089a8603fb1302",
+     "cbc669c7458becfd",
+     "e298d094abe5143f",
+     "fa36c15c9c30932a",
+     "cd8b10a681e6328b",
+     "cdfabf22a5083c66",
+     "ad47a978c1356193",
+     "2675c018b931b9a6",
+     "9ef49d87ccd78a3b",
+     "db0f1ad12b5eed4b",
+     "8751855ba415ca24",
+     "544b88c00bd30298",
+     "674935a58c179a5e",
+     "211b859deaa9a47c",
+     "d16ac3d06340d3fc",
+     "69c3387b99ac410f",
+     "df8538c96e0f8238",
+     "43449a1b6de2e15f",
+     "e5e179ecbf3bd7ad",
+     "2ff47c93b6fcaf48",
+     "e2ee3182655cd0b3",
+     "c0ebf3fae8ce4c6d",
+     "3098d80dcde4abec",
+     "a168bccae22dbfe6",
+     "20d7d89304e654cb",
+     "9f69341fec65ddb1",
+     "95ced7bb65628332",
+     "462571598f62b59d",
+     "60f161627bb40087",
+     "1a5ad5f68e018c94",
+     "712ce5fe9f42f9aa",
+     "317cae61dba5fa6c",
+     "c24c59e5d4cdc3c9",
+     "af24cd2e57bc747b",
+     "544d608b9d1ac2de",
+     "6e8825a7878e3eb9",
+     "10ac2813548aa1cc"
+    ],
+    "tests": [
+     "ad799dd6b0748a63",
+     "704ba105df6e996a"
+    ]
+   }
+  },
+  {
+   "from": "judge_run amended",
+   "text": "GATE: ERROR\n\nintro\n\n## Failed conditions\n\n- `ruff` is not installed: it is not on PATH.\n- 2 tests fail; each is listed below.\n- 1 findings of the `new-dependencies` check; each is listed below.\n\n## Issues on changed lines\n\nNone.\n\n4 other open issues in the project are not on lines this change added, so they are not listed.\n\n## Findings to weigh\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n1. `t.py:9` warning flaky-tests mixed-results: m\n2. The change as a whole: warning surviving-mutants budget-reached: m\n\n## Failing tests\n\n- `t.T.test_a`: AssertionError: 1 != 2\n- `t.T.test_b`: failed\n\n## Coverage on new code\n\n62.5% of 40 new lines to cover.\n\n## Suppressions added\n\n- `a.py:3` `x = 1  # noqa: F401`\n\n## Build configuration\n\n- The change edits `Jenkinsfile`. The quality job reads it from `main`, so this analysis ran without the edit.\n- The change edits `pyproject.toml`. The gate took its rules from `main.toml`, so the edit did not change how the change was judged.\n- The change edits `uv.lock`, which pins the versions of the linters the gate ran.\n- The change adds or edits `mutants/a.py.meta` under `mutants/`, where mutmut keeps its state. The gate's checks leave them out: none selects a test or a function in them or counts them as a change to the code, and the surviving-mutants check runs mutmut without them. The linters read them as they read any tracked file.\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\n3. `pyproject.toml:5` error new-dependencies not-in-spec: names a package at 7\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n4. The change as a whole: warning new-dependencies over-budget: m\n",
+   "gate": "ERROR",
+   "conditions": [
+    "`ruff` is not installed: it is not on PATH.",
+    "2 tests fail; each is listed below.",
+    "1 findings of the `new-dependencies` check; each is listed below."
+   ],
+   "fingerprints": {
+    "tests": [
+     "ad799dd6b0748a63",
+     "704ba105df6e996a"
+    ],
+    "new-dependencies": [
+     "b4906c0e8f409365"
+    ]
+   }
+  },
+  {
+   "from": "coverage 50.0",
+   "text": "GATE: ERROR\n\njudged.\n\n## Failed conditions\n\n- Coverage of new code is 50.0%.\n\n## Issues on changed lines\n\nNone.\n",
+   "gate": "ERROR",
+   "conditions": [
+    "Coverage of new code is 50.0%."
+   ],
+   "fingerprints": {}
+  },
+  {
+   "from": "coverage 60.0",
+   "text": "GATE: ERROR\n\njudged.\n\n## Failed conditions\n\n- Coverage of new code is 60.0%.\n\n## Issues on changed lines\n\nNone.\n",
+   "gate": "ERROR",
+   "conditions": [
+    "Coverage of new code is 60.0%."
+   ],
+   "fingerprints": {}
+  },
+  {
+   "from": "findings, tests and findings to weigh",
+   "text": "GATE: ERROR\n\njudged.\n\n## Failed conditions\n\n- 1 tests fail; each is listed below.\n- 1 findings of the `diff-budget` check; each is listed below.\n\n## Issues on changed lines\n\n1. `a.py:3` error ruff F401: `os` unused\n2. `b.py (the whole file)` error mypy: bad: 2 errors\n\n## Findings to weigh\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n3. `a.py:4` warning flaky-tests failed: x\n\n## Failing tests\n\n- `tests.test_a.T.test_x`: AssertionError: 1 != 2\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\n4. The change as a whole: error diff-budget: too big: 900 lines\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n5. `a.py:4` warning diff-budget flaky-tests failed: x\n",
+   "gate": "ERROR",
+   "conditions": [
+    "1 tests fail; each is listed below.",
+    "1 findings of the `diff-budget` check; each is listed below."
+   ],
+   "fingerprints": {
+    "ruff": [
+     "619b14dc8bcaacfd"
+    ],
+    "mypy": [
+     "6d74d8a39a903544"
+    ],
+    "tests": [
+     "cb55b51ed10352f3"
+    ],
+    "diff-budget": [
+     "ad2b2234013bf746"
+    ]
+   }
+  },
+  {
+   "from": "ok",
+   "text": "GATE: OK\n\njudged.\n\n## Issues on changed lines\n\nNone.\n",
+   "gate": "OK",
+   "conditions": [],
+   "fingerprints": {}
+  },
+  {
+   "from": "leak_report 0",
+   "text": "GATE: LEAK\n\nfound.\n\n## Secrets found\n\n1. `limiter.py:3` github-pat in c0ffeec0ffee (fingerprint `c0ffee:limiter.py:github-pat:3`)\n",
+   "gate": "LEAK",
+   "conditions": [],
+   "fingerprints": {
+    "gitleaks": [
+     "166fbffb5b9d4c15-1"
+    ]
+   }
+  },
+  {
+   "from": "leak_report 1",
+   "text": "GATE: LEAK\n\nfound.\n\n## Secrets found\n\n1. `limiter.py:3` github-pat in snap1 (fingerprint `c0ffee:limiter.py:github-pat:3`)\n2. `limiter.py:9` github-pat in snap2 (fingerprint `snap2:limiter.py:github-pat:9`)\n",
+   "gate": "LEAK",
+   "conditions": [],
+   "fingerprints": {
+    "gitleaks": [
+     "166fbffb5b9d4c15-1",
+     "166fbffb5b9d4c15-2"
+    ]
+   }
+  },
+  {
+   "from": "leak_report 2",
+   "text": "GATE: LEAK\n\nfound.\n\n## Secrets found\n\n1. `limiter.py:9` github-pat in snap2 (fingerprint `snap2:limiter.py:github-pat:9`)\n2. `limiter.py:3` github-pat in c0ffeec0ffee (fingerprint `c0ffee:limiter.py:github-pat:3`)\n3. `dir/a\\x0ab.py:3` aws-access-token in c0ffeec0ffee (fingerprint `c0ffee:limiter.py:github-pat:3`)\n",
+   "gate": "LEAK",
+   "conditions": [],
+   "fingerprints": {
+    "gitleaks": [
+     "166fbffb5b9d4c15-1",
+     "166fbffb5b9d4c15-2",
+     "63dccb770ff7b1a6-1"
+    ]
+   }
+  },
+  {
+   "from": "leak_report 3",
+   "text": "GATE: LEAK\n\nfound.\n\n## Secrets found\n\n",
+   "gate": "LEAK",
+   "conditions": [],
+   "fingerprints": {}
+  },
+  {
+   "from": "build_failed_report 0",
+   "text": "GATE: BUILD_FAILED\n\nintro\n\n## Failing tests\n\nJenkins has no test report for this build.\n\n## The last 60 lines of the build's console\n\n````\nlast\nlines\n````\n",
+   "gate": "BUILD_FAILED",
+   "conditions": [],
+   "fingerprints": {}
+  },
+  {
+   "from": "build_failed_report 1",
+   "text": "GATE: BUILD_FAILED\n\nintro\n\n## Failing tests\n\n- `t.T.test_x`: AssertionError\n",
+   "gate": "BUILD_FAILED",
+   "conditions": [],
+   "fingerprints": {
+    "tests": [
+     "5e16eb07b39e3b67"
+    ]
+   }
+  },
+  {
+   "from": "build_failed_report 2",
+   "text": "GATE: BUILD_FAILED\n\nintro\n\n## Failing tests\n\nNone.\n",
+   "gate": "BUILD_FAILED",
+   "conditions": [],
+   "fingerprints": {}
+  },
+  {
+   "from": "build_failed_report 3",
+   "text": "GATE: BUILD_FAILED\n\nintro\n\n## Failing tests\n\n- `t.T.test_0`: failed\n- `t.T.test_1`: failed\n- `t.T.test_2`: failed\n- `t.T.test_3`: failed\n- `t.T.test_4`: failed\n- `t.T.test_5`: failed\n- `t.T.test_6`: failed\n- `t.T.test_7`: failed\n- `t.T.test_8`: failed\n- `t.T.test_9`: failed\n- `t.T.test_10`: failed\n- `t.T.test_11`: failed\n- `t.T.test_12`: failed\n- `t.T.test_13`: failed\n- `t.T.test_14`: failed\n- `t.T.test_15`: failed\n- `t.T.test_16`: failed\n- `t.T.test_17`: failed\n- `t.T.test_18`: failed\n- `t.T.test_19`: failed\n- `t.T.test_20`: failed\n- `t.T.test_21`: failed\n- `t.T.test_22`: failed\n- `t.T.test_23`: failed\n- `t.T.test_24`: failed\n- `t.T.test_25`: failed\n- `t.T.test_26`: failed\n- `t.T.test_27`: failed\n- `t.T.test_28`: failed\n- `t.T.test_29`: failed\n- `t.T.test_30`: failed\n- `t.T.test_31`: failed\n- `t.T.test_32`: failed\n- `t.T.test_33`: failed\n- `t.T.test_34`: failed\n- `t.T.test_35`: failed\n- `t.T.test_36`: failed\n- `t.T.test_37`: failed\n- `t.T.test_38`: failed\n- `t.T.test_39`: failed\n- `t.T.test_40`: failed\n- `t.T.test_41`: failed\n- `t.T.test_42`: failed\n- `t.T.test_43`: failed\n- `t.T.test_44`: failed\n- `t.T.test_45`: failed\n- `t.T.test_46`: failed\n- `t.T.test_47`: failed\n- `t.T.test_48`: failed\n- `t.T.test_49`: failed\n- and 3 more.\n",
+   "gate": "BUILD_FAILED",
+   "conditions": [],
+   "fingerprints": {
+    "tests": [
+     "7d52a4c8a74981a2",
+     "95244c21670dc746",
+     "1cc46a75df52f9f7",
+     "d3d84f4b18042ee0",
+     "ce9b32e0c0cc72a3",
+     "892f38aba9532291",
+     "2f284a2db2058ec6",
+     "bfbfd152fcf5a72d",
+     "11bf035c8108e835",
+     "a9d1c1146df667e5",
+     "d6ccb556803bf834",
+     "3c6337bdf26e171e",
+     "d084a3310ec66eee",
+     "08ac08e2e0247c1c",
+     "0ce936a1e4f0052e",
+     "0dee3d17e1d5a5f4",
+     "ec3dad1b7f53a5e8",
+     "a0933cf32cb39c2c",
+     "84fb87261ba9f2b9",
+     "037f0e3ac5f713f9",
+     "3000fe3737002b74",
+     "3793564ebe256940",
+     "4471f655d093fc18",
+     "ebe54144958e3f01",
+     "f6dd96daaf3aba7c",
+     "ab8d1e5e3b97f32e",
+     "a550aea7edce246a",
+     "fb222240d0104db7",
+     "1a858e36d47ebcb2",
+     "3412c54bc23ef355",
+     "f2c5d28296d11138",
+     "d213385415e34d51",
+     "f7721538650132f0",
+     "fc0cc0c55c576ff4",
+     "8419150967bb5ace",
+     "2bdc1d2efcf34bda",
+     "f4a90014a2202916",
+     "0e8d200478139824",
+     "8749c1edf659a96f",
+     "02576f04061ad838",
+     "8211b67e9bc59125",
+     "2250d0574abd2a91",
+     "18f9e8726f68fcf9",
+     "75c2668c1212e582",
+     "f2e22f607b9ea812",
+     "a8b79cd745bf50bd",
+     "5ddb3b32f95df33f",
+     "c2f26ad9043f3596",
+     "3fa4add8cecd0623",
+     "6fa3dc294ec65928"
+    ]
+   }
+  },
+  {
+   "from": "build_failed_report 4",
+   "text": "GATE: BUILD_FAILED\n\ntwo\nlines\n\n## Failing tests\n\n- `a\\x0ab`: detail\n- `c`: failed\n\n## The last 60 lines of the build's console\n\n````\nx\n````\n",
+   "gate": "BUILD_FAILED",
+   "conditions": [],
+   "fingerprints": {
+    "tests": [
+     "cab75cb0c6f5e6b2",
+     "ef89ba6ff35bff8e"
+    ]
+   }
+  }
+ ],
+ "leak_reports": [
+  {
+   "leaks": [
+    {
+     "rule": "github-pat",
+     "file": "limiter.py",
+     "line": 3,
+     "commit": "c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ff",
+     "fingerprint": "c0ffee:limiter.py:github-pat:3"
+    }
+   ],
+   "intro": "found.",
+   "text": "GATE: LEAK\n\nfound.\n\n## Secrets found\n\n1. `limiter.py:3` github-pat in c0ffeec0ffee (fingerprint `c0ffee:limiter.py:github-pat:3`)\n"
+  },
+  {
+   "leaks": [
+    {
+     "rule": "github-pat",
+     "file": "limiter.py",
+     "line": 3,
+     "commit": "snap1",
+     "fingerprint": "c0ffee:limiter.py:github-pat:3"
+    },
+    {
+     "rule": "github-pat",
+     "file": "limiter.py",
+     "line": 9,
+     "commit": "snap2",
+     "fingerprint": "snap2:limiter.py:github-pat:9"
+    }
+   ],
+   "intro": "found.",
+   "text": "GATE: LEAK\n\nfound.\n\n## Secrets found\n\n1. `limiter.py:3` github-pat in snap1 (fingerprint `c0ffee:limiter.py:github-pat:3`)\n2. `limiter.py:9` github-pat in snap2 (fingerprint `snap2:limiter.py:github-pat:9`)\n"
+  },
+  {
+   "leaks": [
+    {
+     "rule": "github-pat",
+     "file": "limiter.py",
+     "line": 9,
+     "commit": "snap2",
+     "fingerprint": "snap2:limiter.py:github-pat:9"
+    },
+    {
+     "rule": "github-pat",
+     "file": "limiter.py",
+     "line": 3,
+     "commit": "c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ff",
+     "fingerprint": "c0ffee:limiter.py:github-pat:3"
+    },
+    {
+     "rule": "aws-access-token",
+     "file": "dir/a\nb.py",
+     "line": 3,
+     "commit": "c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ff",
+     "fingerprint": "c0ffee:limiter.py:github-pat:3"
+    }
+   ],
+   "intro": "found.",
+   "text": "GATE: LEAK\n\nfound.\n\n## Secrets found\n\n1. `limiter.py:9` github-pat in snap2 (fingerprint `snap2:limiter.py:github-pat:9`)\n2. `limiter.py:3` github-pat in c0ffeec0ffee (fingerprint `c0ffee:limiter.py:github-pat:3`)\n3. `dir/a\\x0ab.py:3` aws-access-token in c0ffeec0ffee (fingerprint `c0ffee:limiter.py:github-pat:3`)\n"
+  },
+  {
+   "leaks": [],
+   "intro": "found.",
+   "text": "GATE: LEAK\n\nfound.\n\n## Secrets found\n\n"
+  }
+ ],
+ "build_failed": [
+  {
+   "intro": "intro",
+   "tests": null,
+   "console": "last\nlines",
+   "text": "GATE: BUILD_FAILED\n\nintro\n\n## Failing tests\n\nJenkins has no test report for this build.\n\n## The last 60 lines of the build's console\n\n````\nlast\nlines\n````\n"
+  },
+  {
+   "intro": "intro",
+   "tests": [
+    [
+     "t.T.test_x",
+     "AssertionError\ntraceback"
+    ]
+   ],
+   "console": "",
+   "text": "GATE: BUILD_FAILED\n\nintro\n\n## Failing tests\n\n- `t.T.test_x`: AssertionError\n"
+  },
+  {
+   "intro": "intro",
+   "tests": [],
+   "console": "",
+   "text": "GATE: BUILD_FAILED\n\nintro\n\n## Failing tests\n\nNone.\n"
+  },
+  {
+   "intro": "intro",
+   "tests": [
+    [
+     "t.T.test_0",
+     ""
+    ],
+    [
+     "t.T.test_1",
+     ""
+    ],
+    [
+     "t.T.test_2",
+     ""
+    ],
+    [
+     "t.T.test_3",
+     ""
+    ],
+    [
+     "t.T.test_4",
+     ""
+    ],
+    [
+     "t.T.test_5",
+     ""
+    ],
+    [
+     "t.T.test_6",
+     ""
+    ],
+    [
+     "t.T.test_7",
+     ""
+    ],
+    [
+     "t.T.test_8",
+     ""
+    ],
+    [
+     "t.T.test_9",
+     ""
+    ],
+    [
+     "t.T.test_10",
+     ""
+    ],
+    [
+     "t.T.test_11",
+     ""
+    ],
+    [
+     "t.T.test_12",
+     ""
+    ],
+    [
+     "t.T.test_13",
+     ""
+    ],
+    [
+     "t.T.test_14",
+     ""
+    ],
+    [
+     "t.T.test_15",
+     ""
+    ],
+    [
+     "t.T.test_16",
+     ""
+    ],
+    [
+     "t.T.test_17",
+     ""
+    ],
+    [
+     "t.T.test_18",
+     ""
+    ],
+    [
+     "t.T.test_19",
+     ""
+    ],
+    [
+     "t.T.test_20",
+     ""
+    ],
+    [
+     "t.T.test_21",
+     ""
+    ],
+    [
+     "t.T.test_22",
+     ""
+    ],
+    [
+     "t.T.test_23",
+     ""
+    ],
+    [
+     "t.T.test_24",
+     ""
+    ],
+    [
+     "t.T.test_25",
+     ""
+    ],
+    [
+     "t.T.test_26",
+     ""
+    ],
+    [
+     "t.T.test_27",
+     ""
+    ],
+    [
+     "t.T.test_28",
+     ""
+    ],
+    [
+     "t.T.test_29",
+     ""
+    ],
+    [
+     "t.T.test_30",
+     ""
+    ],
+    [
+     "t.T.test_31",
+     ""
+    ],
+    [
+     "t.T.test_32",
+     ""
+    ],
+    [
+     "t.T.test_33",
+     ""
+    ],
+    [
+     "t.T.test_34",
+     ""
+    ],
+    [
+     "t.T.test_35",
+     ""
+    ],
+    [
+     "t.T.test_36",
+     ""
+    ],
+    [
+     "t.T.test_37",
+     ""
+    ],
+    [
+     "t.T.test_38",
+     ""
+    ],
+    [
+     "t.T.test_39",
+     ""
+    ],
+    [
+     "t.T.test_40",
+     ""
+    ],
+    [
+     "t.T.test_41",
+     ""
+    ],
+    [
+     "t.T.test_42",
+     ""
+    ],
+    [
+     "t.T.test_43",
+     ""
+    ],
+    [
+     "t.T.test_44",
+     ""
+    ],
+    [
+     "t.T.test_45",
+     ""
+    ],
+    [
+     "t.T.test_46",
+     ""
+    ],
+    [
+     "t.T.test_47",
+     ""
+    ],
+    [
+     "t.T.test_48",
+     ""
+    ],
+    [
+     "t.T.test_49",
+     ""
+    ],
+    [
+     "t.T.test_50",
+     ""
+    ],
+    [
+     "t.T.test_51",
+     ""
+    ],
+    [
+     "t.T.test_52",
+     ""
+    ]
+   ],
+   "console": "",
+   "text": "GATE: BUILD_FAILED\n\nintro\n\n## Failing tests\n\n- `t.T.test_0`: failed\n- `t.T.test_1`: failed\n- `t.T.test_2`: failed\n- `t.T.test_3`: failed\n- `t.T.test_4`: failed\n- `t.T.test_5`: failed\n- `t.T.test_6`: failed\n- `t.T.test_7`: failed\n- `t.T.test_8`: failed\n- `t.T.test_9`: failed\n- `t.T.test_10`: failed\n- `t.T.test_11`: failed\n- `t.T.test_12`: failed\n- `t.T.test_13`: failed\n- `t.T.test_14`: failed\n- `t.T.test_15`: failed\n- `t.T.test_16`: failed\n- `t.T.test_17`: failed\n- `t.T.test_18`: failed\n- `t.T.test_19`: failed\n- `t.T.test_20`: failed\n- `t.T.test_21`: failed\n- `t.T.test_22`: failed\n- `t.T.test_23`: failed\n- `t.T.test_24`: failed\n- `t.T.test_25`: failed\n- `t.T.test_26`: failed\n- `t.T.test_27`: failed\n- `t.T.test_28`: failed\n- `t.T.test_29`: failed\n- `t.T.test_30`: failed\n- `t.T.test_31`: failed\n- `t.T.test_32`: failed\n- `t.T.test_33`: failed\n- `t.T.test_34`: failed\n- `t.T.test_35`: failed\n- `t.T.test_36`: failed\n- `t.T.test_37`: failed\n- `t.T.test_38`: failed\n- `t.T.test_39`: failed\n- `t.T.test_40`: failed\n- `t.T.test_41`: failed\n- `t.T.test_42`: failed\n- `t.T.test_43`: failed\n- `t.T.test_44`: failed\n- `t.T.test_45`: failed\n- `t.T.test_46`: failed\n- `t.T.test_47`: failed\n- `t.T.test_48`: failed\n- `t.T.test_49`: failed\n- and 3 more.\n"
+  },
+  {
+   "intro": "two\nlines",
+   "tests": [
+    [
+     "a\nb",
+     "  \n\u0085 detail\u2028more"
+    ],
+    [
+     "c",
+     " \t"
+    ]
+   ],
+   "console": "x",
+   "text": "GATE: BUILD_FAILED\n\ntwo\nlines\n\n## Failing tests\n\n- `a\\x0ab`: detail\n- `c`: failed\n\n## The last 60 lines of the build's console\n\n````\nx\n````\n"
+  }
+ ],
+ "one_line": [
+  [
+   "plain",
+   "plain"
+  ],
+  [
+   "a\nb\rc\u000bd\fe\u001cf\u001dg\u001eh\u0085i\u2028j\u2029k",
+   "a\\x0ab\\x0dc\\x0bd\\x0ce\\x1cf\\x1dg\\x1eh\\x85i\\u2028j\\u2029k"
+  ],
+  [
+   "tab\tstays",
+   "tab\tstays"
+  ],
+  [
+   "\u00e9\ud83d\ude00",
+   "\u00e9\ud83d\ude00"
+  ]
+ ],
+ "fingerprints": [
+  [
+   "a.py",
+   "ruff C901",
+   "too complex (16 > 15)",
+   "d0917b36716743cd"
+  ],
+  [
+   null,
+   "x",
+   "y",
+   "2081f4f26135019e"
+  ],
+  [
+   "\u00e9/\u00fc.py",
+   "r",
+   "\u0663 and 3 and \u00b2",
+   "bd01727f291b3ab7"
+  ],
+  [
+   "",
+   "",
+   "",
+   "96a296d224f285c6"
+  ],
+  [
+   "a\u0000b",
+   "rule",
+   "m",
+   "62f3c27545353791"
+  ]
+ ]
+}

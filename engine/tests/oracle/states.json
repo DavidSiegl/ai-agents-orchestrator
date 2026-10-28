@@ -1,0 +1,35 @@
+{
+ "recorded": 306,
+ "changed": [
+  {
+   "text": "{\"run_id\": \"20260101-000000-abc123\", \"task\": \"t\", \"cwd\": \"/p\", \"phase\": \"build\", \"round\": 1, \"agents\": {\"spec\": {\"name\": \"spec-abc123\", \"pane\": \"w1:p1\"}}, \"agent_args\": [\"--permission-mode\", \"acceptEdits\"]}\n",
+   "back": {
+    "text": "{\"run_id\": \"20260101-000000-abc123\", \"task\": \"t\", \"cwd\": \"/p\", \"machine\": null, \"phase\": \"build\", \"round\": 1, \"workspace_id\": \"\", \"root_pane\": \"w1:p1\", \"base\": null, \"base_branch\": null, \"branch\": null, \"pr_url\": null, \"verdict\": null, \"conflicts\": [], \"error\": null, \"agents\": {\"spec\": {\"name\": \"spec-abc123\", \"pane\": \"w1:p1\"}}, \"max_rounds\": 3, \"turn_timeout\": 1800, \"permission_mode\": \"acceptEdits\", \"models\": {}, \"agent_kinds\": {}, \"pull_request\": false, \"prompted\": null, \"retried\": [], \"retrying\": null, \"owner\": null, \"heartbeat_at\": null, \"quality_job\": null, \"quality_gate_disabled\": false, \"max_quality_rounds\": 3, \"quality_round\": 0, \"ci\": {}, \"workflow\": \"default\", \"workflow_definition\": null, \"prompt_overrides\": {}, \"branch_cleanup\": null, \"worktree\": null, \"closed\": null, \"turns\": [], \"quality_rounds\": [], \"blocked\": null, \"locked\": {}, \"restored\": [], \"proofs\": []}\n"
+   }
+  },
+  {
+   "text": "{\"run_id\": \"20260101-000000-abc124\", \"task\": \"t\", \"cwd\": \"/p\", \"agent_args\": []}\n",
+   "back": {
+    "text": "{\"run_id\": \"20260101-000000-abc124\", \"task\": \"t\", \"cwd\": \"/p\", \"machine\": null, \"phase\": \"spec\", \"round\": 0, \"workspace_id\": \"\", \"root_pane\": \"\", \"base\": null, \"base_branch\": null, \"branch\": null, \"pr_url\": null, \"verdict\": null, \"conflicts\": [], \"error\": null, \"agents\": {}, \"max_rounds\": 3, \"turn_timeout\": 1800, \"permission_mode\": null, \"models\": {}, \"agent_kinds\": {}, \"pull_request\": false, \"prompted\": null, \"retried\": [], \"retrying\": null, \"owner\": null, \"heartbeat_at\": null, \"quality_job\": null, \"quality_gate_disabled\": false, \"max_quality_rounds\": 3, \"quality_round\": 0, \"ci\": {}, \"workflow\": \"default\", \"workflow_definition\": null, \"prompt_overrides\": {}, \"branch_cleanup\": null, \"worktree\": null, \"closed\": null, \"turns\": [], \"quality_rounds\": [], \"blocked\": null, \"locked\": {}, \"restored\": [], \"proofs\": []}\n"
+   }
+  },
+  {
+   "text": "{\"run_id\": \"20260101-000000-abc125\", \"task\": \"t\", \"cwd\": \"/p\", \"agent_args\": [\"--model\", \"x\"]}\n",
+   "back": {
+    "error": "run state 20260101-000000-abc125 has agent_args ['--model', 'x'], which name no permission mode"
+   }
+  },
+  {
+   "text": "{\"run_id\": \"20260101-000000-abc126\", \"task\": \"t\"}\n",
+   "back": {
+    "error": "run state 20260101-000000-abc126 is incomplete: RunState.__init__() missing 1 required positional argument: 'cwd'"
+   }
+  },
+  {
+   "text": "{\"run_id\": \"r-abc\", \"task\": \"t\", \"cwd\": \"/p\", \"workflow\": \"default\", \"root_pane\": \"\", \"agents\": {\"review\": {\"name\": \"review-abc\", \"pane\": \"w9:p2\"}, \"spec\": {\"name\": \"spec-abc\", \"pane\": \"w9:p1\"}}}\n",
+   "back": {
+    "text": "{\"run_id\": \"r-abc\", \"task\": \"t\", \"cwd\": \"/p\", \"machine\": null, \"phase\": \"spec\", \"round\": 0, \"workspace_id\": \"\", \"root_pane\": \"w9:p1\", \"base\": null, \"base_branch\": null, \"branch\": null, \"pr_url\": null, \"verdict\": null, \"conflicts\": [], \"error\": null, \"agents\": {\"review\": {\"name\": \"review-abc\", \"pane\": \"w9:p2\"}, \"spec\": {\"name\": \"spec-abc\", \"pane\": \"w9:p1\"}}, \"max_rounds\": 3, \"turn_timeout\": 1800, \"permission_mode\": null, \"models\": {}, \"agent_kinds\": {}, \"pull_request\": false, \"prompted\": null, \"retried\": [], \"retrying\": null, \"owner\": null, \"heartbeat_at\": null, \"quality_job\": null, \"quality_gate_disabled\": false, \"max_quality_rounds\": 3, \"quality_round\": 0, \"ci\": {}, \"workflow\": \"default\", \"workflow_definition\": null, \"prompt_overrides\": {}, \"branch_cleanup\": null, \"worktree\": null, \"closed\": null, \"turns\": [], \"quality_rounds\": [], \"blocked\": null, \"locked\": {}, \"restored\": [], \"proofs\": []}\n"
+   }
+  }
+ ]
+}

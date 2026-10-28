@@ -1,0 +1,8 @@
+# The Rust toolchain every cargo step of the workspace runs on: the one the Jenkins agent's image provides, whose
+# rustup home a build cannot add to (the Jenkinsfile's Install stage checks for the components). clippy is gate.py's
+# Rust linter, and llvm-tools has the llvm-profdata and llvm-cov that cargo-llvm-cov reads the Test stage's coverage
+# with. A rustup without this toolchain installs it on the first cargo command, components included.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "llvm-tools"]
+profile = "minimal"

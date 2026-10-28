@@ -35,6 +35,31 @@ the tunables (`QUALITY_ISSUE_LIMIT`, `GATE_MIN_COVERAGE`, `MUTATION_BUDGET`, ...
 `GateCheck` and `judge_change`, which runs them; the checks `gate_checks` lists, from `weakened_tests` to
 `vague_names`; and `gate_command`, `parse_args` and `main`.
 
+## `engine/`: the Rust engine
+
+The port of `orchestrator.py` to Rust, which replaces it in one release (`TODO.md`, "The Python engine is
+frozen"), a library crate, `octoflow-engine`, in the top-level Cargo workspace. It reads and writes every file,
+prompt and run state as the Python engine does. So far it holds, by module:
+
+| Module | What it holds, by its Python name |
+|---|---|
+| `py` | What the port needs of Python itself: `text` (str's `splitlines`, `strip`, `os.path.splitext`, `repr`, `difflib.get_close_matches`, with Python's character classes in `unicode_tables`, which `engine/tools/unicode_tables.py` writes), `format` (`str.format`'s language, filling and failing as Python does) and `json` (`Json`, a value whose objects keep their order, and `Map`, written as `json.dumps` writes it). |
+| `constants`, `error`, `env` | The constants, `OrchestratorError`, `child_env`, `ci_credentials` and `parse_env_file`; `ConfigDir` is `config_dir` and where its files are. |
+| `prompts` | The built-in prompts, `Prompts` (by `Prompt`), `load_prompts`, `prompt_problem` and `saved_prompts`. |
+| `pipeline`, `workflow_file` | `Step`, `Pipeline` with all its checks, `default_workflow`, `find_workflow`, `is_built_in`; `parse_workflow`, `load_workflow_file`, `workflow_files`, `named_workflow`, `workflow_definition`, `workflow_toml`, `run_pipeline` and `saved_pipeline`. |
+| `state` | `RunState`, with the fields of a `state.json` it does not know kept, after its own. |
+| `handoff`, `quality` | `parse_verdict` and `parse_blocked`; the quality-file reader, `parse_gate`, `gate_failures`, `finding_fingerprint`, and the engine's own quality files, `leak_report` and `build_failed_report`. |
+| `pull_request`, `summary`, `proofs` | `spec_title`, `branch_name`, `verdict_line`, `commit_note`, `provenance`, `pr_body` and `without_conflict_warning`; `run_summary`, `run_metrics`, `turns_table`, `turn_lines`, `format_duration`, `format_age`, `iso_utc` and `epoch_seconds`; `proofs_section`. |
+
+Its tests are each module's `<module>/tests.rs`, the Python tests of those parts ported case for case, and checks
+against the Python engine as the oracle: `engine/tests/oracle/` holds what the Python engine gives for the
+engine's inputs (each `.json` written by the generator of the same name, which `tests/test_rust_oracle.py` keeps
+current), and the parity recordings (`tests/parity/recorded/`) are read as they are: every `state.json` they hold
+reads into `RunState` and writes back byte for byte, every workflow the repository defines parses to the Python
+engine's definition, every recorded run's commit note, trailers, pull request body, `summary.md` and
+`metrics.json` come out as the Python engine wrote them, and every prompt the scenarios recorded is made of the
+engine's templates (`prompt_parity.rs`).
+
 ## The phase machine
 
 ```
@@ -268,7 +293,7 @@ layout), with no Python of its own.
   raw HTML skipped, and fetches it again whenever its mtime changes.
 - **Tests.** Vitest with React Testing Library in jsdom: `App.test.tsx` replays `test/recorded-stream.json`
   through `test/fakes.ts`'s `FakeEventSource`, with `fetch` stubbed. The recording is the events a real
-  `serve` sent over a scripted run. `runs.test.ts` covers the pure helpers. `cargo test` in `src-tauri/` starts
+  `serve` sent over a scripted run. `runs.test.ts` covers the pure helpers. `cargo test -p octoflow-ui` starts
   and stops a real sidecar.
 
 ## Tests
@@ -333,6 +358,9 @@ description in `tests/conftest.py` says when a run takes them.
 - `ui/package.json`: the desktop app's npm scripts, `dev`, `build`, `test`, `typecheck`, `lint` and `tauri`. Its
   `.npmrc` sets `legacy-peer-deps`, because npm 9.2 as Debian ships it cannot resolve Vitest's optional peers.
   Jenkins runs the frontend's `typecheck`, `lint` and `test`, and the shell's tests under cargo-llvm-cov.
+- `Cargo.toml`: the Cargo workspace, whose members are the Rust engine (`engine/`, the library `octoflow-engine`) and
+  the desktop shell (`ui/src-tauri/`), with one `Cargo.lock`, the lints every member takes (`[workspace.lints]`), and
+  `rust-toolchain.toml`, the toolchain and components the Jenkins agent's image has.
 - `packaging/build-desktop.sh`: builds the desktop app with `tauri build`, the binary `build-binary.sh` built
   copied in as its `externalBin` sidecar and `pyproject.toml`'s version, through a release config the script
   writes and merges over `tauri.conf.json`, which bundles nothing. It writes
@@ -347,7 +375,7 @@ description in `tests/conftest.py` says when a run takes them.
   draws every font in one fixed bitmap size; it refuses a Tk without libXft.
 - `Jenkinsfile`: `uv sync --frozen`, `uv run pytest` with branch coverage of `orchestrator` and `gate` (without
   `tests/parity` in a quality build whose change touches nothing the scenarios judge; the Test stage lists what) and
-  `ui/src-tauri/`'s tests with line coverage (`cargo llvm-cov nextest`), a UI stage that runs `ui/`'s `npm ci`,
+  the Cargo workspace's tests with line coverage (`cargo llvm-cov nextest`), a UI stage that runs `ui/`'s `npm ci`,
   `typecheck`, `lint` and `test`, failing the build before the gate, a Gate stage that runs `gate.py` and archives
   `quality.md` (see [quality gate](quality-gate.md)), and a Package stage that runs `packaging/build-binary.sh` and
   `packaging/build-desktop.sh` on every build but a quality build (`GIT_REF` set). On `main` a Release stage publishes a

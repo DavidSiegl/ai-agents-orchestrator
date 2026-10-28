@@ -193,7 +193,8 @@ smoke_dmg() {
 }
 
 # A bundle without the sidecar still builds and opens, then says only that it cannot start the orchestrator.
-out="ui/src-tauri/target/release/bundle"
+# The Cargo workspace's target directory (Cargo.toml at the top), where tauri build writes the shell's bundles.
+out="target/release/bundle"
 if [ "$os" = linux ]; then
     for deb in "$out/deb/Octoflow_${version}_"*.deb; do
         # A .deb's paths start with ./ when dpkg-deb built it, and may not when Tauri did.

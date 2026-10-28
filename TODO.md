@@ -83,6 +83,14 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   gate-open-decisions ticket 06's. Closes when
   a quality build that runs the scenarios fits in `QUALITY_TIMEOUT`, shown by the contract test green against one, or
   with a larger `QUALITY_TIMEOUT` in the Rust engine.
+- **The Rust engine reads some input no run writes otherwise than the Python engine.** Each is a difference only for a
+  file a human edited, or a case no test of the Python engine pins (rust-engine ticket 04, 2026-10-28): `state.json`
+  with `NaN`, `Infinity` or an integer beyond 64 bits is refused, as serde_json reads it (`engine/src/py/json.rs`),
+  where Python reads it; a time without an offset is taken as UTC, where Python's `fromisoformat` takes it as local
+  time, and a turn whose start is not a time is left out of `summary.md` and `metrics.json`, where the Python engine
+  fails (`epoch_seconds` and `turn_starts` in `engine/src/summary.rs`); a `state.json` field of another type than the
+  Python engine writes is refused naming the run, where Python keeps it, and one it does not know is kept, where Python
+  drops it, as the spec asks (`RunState::from_saved`). Decided against unless a run is found that writes such input.
 - **The contract test leaves its Jenkins build running when it fails.** `tests/contract/test_jenkins.py` triggers one
   quality build and nothing stops it on a failure or a Ctrl-C, so the build holds an executor until it ends, up to
   the 22 minutes build #59 took. Raised by cross-review 73 (F11, 2026-10-27): "a Ctrl-C during the queue wait leaves
@@ -95,7 +103,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   beside a 10-line test read as 40%, not 0%. coverage.py's report of the Python has only `orchestrator` and `gate`.
   Found while adding Rust coverage (rust-engine ticket 03, 2026-10-27). Closes with test modules left out of the
   report, by `#[coverage(off)]` once it is stable or by the tests moving to files that `--ignore-filename-regex`
-  can leave out, or with `gate.py` skipping the lines a `#[cfg(test)]` item spans.
+  can leave out, or with `gate.py` skipping the lines a `#[cfg(test)]` item spans. The Rust engine's tests are in
+  such files already (`engine/src/**/tests.rs`, `engine/src/prompt_parity.rs`, `engine/src/test_support.rs`); the
+  desktop shell's are a `#[cfg(test)]` module in `ui/src-tauri/src/lib.rs`.
 - **No build runs the Rust doctests.** cargo-nextest does not run doctests, and since the Test stage's `cargo llvm-cov
   nextest` replaced the UI stage's `cargo test`, nothing does: `octoflow_ui_lib` is an `rlib` among its crate types
   (`ui/src-tauri/Cargo.toml`), so `cargo test` ran them. The crate has no doc example today. Raised by cross-review 72
@@ -103,12 +113,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   Decided against for now: a `cargo test --doc` beside it, which builds the dependencies a third time, uninstrumented,
   under the agent's 3 GB, for no example. Closes with `cargo test --doc --locked` in the Test stage once a doc example
   lands, or with cargo-llvm-cov's `--doctests` once it runs on a stable toolchain.
-- **Jenkins runs the Rust tests of `ui/src-tauri` alone.** The Test stage runs `cargo llvm-cov nextest` in that
-  directory, while `gate.py`'s clippy lints every Cargo workspace git tracks; a crate in another workspace, such as
-  the Rust engine's top-level one (rust-engine spec, Lane), has its lines judged by clippy but its tests never run,
-  and its added lines count as nothing to cover. Found while adding Rust coverage (rust-engine ticket 03, 2026-10-27).
-  Closes when the top-level workspace takes `ui/src-tauri` in as a member and the Test stage runs there, or with
-  the Test stage running each workspace and passing each report to the gate.
 - **The parity harness records `state.json` at each command the fakes get, not after each save.** Ticket
   rust-engine/01 asks for "`state.json` after each save"; the ledger reads it only when herdr, gh, Jenkins or PyPI
   gets a call, and leaves out a change to `heartbeat_at` alone (`tests/parity/fakes.py`, `_changed_states`). Raised
@@ -225,8 +229,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   "forbid"` no longer gives E0453 and its unsafe block is no finding: the gate is OK on a change the workspace's rules
   make uncompilable, and only "Suppressions added" lists the allow, and not even that when the change adds the lint as
   one line inside an existing wrapped `#[allow(\n    a,\n    b,\n)]`, since `_RUST_SUPPRESSION` reads one added line at
-  a time (F15). Nothing in this repository sets `forbid` (`ui/src-tauri/Cargo.toml` is all `warn`), and the Test stage's
-  uncapped `cargo llvm-cov nextest` and the UI stage's `cargo check` would still fail such a build of `ui/src-tauri`.
+  a time (F15). Nothing in this repository sets `forbid` (the top-level `Cargo.toml`'s `[workspace.lints]` are all
+  `warn`), and the Test stage's uncapped `cargo llvm-cov nextest` and the UI stage's `cargo check` would still fail
+  such a build of the workspace.
   Raised by cross-review 66 (F11, 2026-10-27): "The gate is OK on a change that the workspace's rules make
   uncompilable". Closes with a second, uncapped clippy run whose rustc errors (codes `E` and four digits, such as E0453)
   are compile errors, or with the forbidden lints read from the manifests and an added allow of one failing the gate.
@@ -501,6 +506,20 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   subdirectory.
 
 ## Fixed
+
+- **The Rust engine read a workflow file's tables with their keys sorted.** The toml crate keeps a table in a
+  `BTreeMap` without its `preserve_order` feature, so a table with two problems could be refused naming the other one
+  first, where tomllib gives the file's order. Raised in rust-engine ticket 04 (2026-10-28). Fixed (2026-10-28, the
+  user allowed `indexmap`): toml's `preserve_order` (`engine/Cargo.toml`), held by
+  `a_table_with_two_problems_names_the_first_in_the_file_as_python_does` (`engine/src/workflow_file/tests.rs`).
+- **Jenkins ran the Rust tests of `ui/src-tauri` alone.** The Test stage ran `cargo llvm-cov nextest` in that
+  directory, while `gate.py`'s clippy lints every Cargo workspace git tracks; a crate in another workspace, such as
+  the Rust engine's, would have had its lines judged by clippy but its tests never run, and its added lines counted as
+  nothing to cover. Found while adding Rust coverage (rust-engine ticket 03, 2026-10-27). Fixed (2026-10-28,
+  rust-engine ticket 04): the top-level `Cargo.toml` is the one workspace, with `engine/` and `ui/src-tauri/` as
+  members, one `Cargo.lock`, `[workspace.lints]` and `rust-toolchain.toml`; the Test stage runs `cargo llvm-cov
+  nextest --workspace` and the UI stage `cargo check --workspace` at the top, and the Gate stage reads
+  `target/nextest/ci/junit.xml` there.
 
 - **A quality build left out the parity scenarios when only `tests/guard_errors.py` changed.** The Test stage's path
   list named `tests/conftest.py`, whose guards the scenarios run under, but not `tests/guard_errors.py`, which holds

@@ -23,9 +23,11 @@ quality.md
 # binary packaging/build-desktop.sh copies in for it to bundle
 ui/node_modules/
 ui/dist/
-ui/src-tauri/target/
 ui/src-tauri/gen/
 ui/src-tauri/binaries/
+
+# The Cargo workspace's build output
+/target/
 
 # What Hypothesis keeps of the examples it tried
 .hypothesis/

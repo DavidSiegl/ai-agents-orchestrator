@@ -14,9 +14,9 @@ need the run's spec.
 
 ```bash
 uv run pytest --cov=orchestrator --cov=gate --cov-branch --cov-report=xml --junitxml=test-results.xml
-(cd ui/src-tauri && cargo llvm-cov nextest --workspace --ignore-run-fail --profile ci \
-    --config-file ../../ci/nextest.toml --cobertura --output-path ../../coverage-rust.xml)
-uv run python gate.py --base main --tests test-results.xml --tests ui/src-tauri/target/nextest/ci/junit.xml \
+cargo llvm-cov nextest --workspace --ignore-run-fail --profile ci \
+    --config-file ci/nextest.toml --cobertura --output-path coverage-rust.xml
+uv run python gate.py --base main --tests test-results.xml --tests target/nextest/ci/junit.xml \
     --coverage coverage.xml --coverage coverage-rust.xml --out quality.md
 ```
 
@@ -39,7 +39,7 @@ listed and never held against the change, so the gate judges the change rather t
 | pymarkdown | `*.md` | `[tool.pymarkdown]` |
 | shellcheck | `*.sh` | its defaults |
 | actionlint | `.github/workflows/*.yml` | its defaults |
-| clippy | `*.rs`, in each Cargo workspace, here `ui/src-tauri/` | the workspace's `[lints]` and `clippy.toml` |
+| clippy | `*.rs`, in each Cargo workspace, here the top-level one | the workspace's `[lints]` and `clippy.toml` |
 
 ruff's rules include the coding rules the agents are given as prose that a linter can apply, so that every harness
 gets them, every time: a docstring on every public module, class, method and function (`D100`-`D104`, `D106`,
@@ -57,12 +57,13 @@ ruff's rules are the project's; the gate caps each at warn, so that a lint at `d
 crate's build and stop cargo before the crates after it, is a finding like the rest. The cap also lets an
 `#[allow(...)]` override a `forbid`, which rustc otherwise refuses, so such an allow silences its lint for the gate;
 it is listed under the suppressions added only where its added line holds the allow itself, not a lint added inside an
-existing wrapped `#[allow(` list (`TODO.md` has the rest). `ui/src-tauri/Cargo.toml` sets its lints to `warn`
-all the same, since rustc's `unsafe_code` at `deny` would stop `cargo test`. Its table adds to clippy's
-defaults the lints `main` passed when it was set, so that clippy found nothing on old lines. A workspace that still
+existing wrapped `#[allow(` list (`TODO.md` has the rest). The top-level `Cargo.toml` sets its `[workspace.lints]`,
+which every member takes, to `warn` all the same, since rustc's `unsafe_code` at `deny` would stop `cargo test`. Its
+table adds to clippy's defaults the lints `main` passed when it was set, so that clippy found nothing on old lines. A
+workspace that still
 does not compile is a failed condition naming the compiler's first error in a tracked file, wherever it is, else
-cargo's own: a change that deletes a function an old line calls breaks the build on no line it added. A linter that
-outlives its timeout is killed with every process it started, such as cargo's rustc.
+cargo's own: a change that deletes a function an old line calls breaks the build on no line it added. A linter
+that outlives its timeout is killed with every process it started, such as cargo's rustc.
 
 ruff, mypy and pymarkdownlnt are in uv's `dev` group, so `uv run` puts them on `PATH`; shellcheck, actionlint, cargo
 and clippy come from the Jenkins agent image (see "What Jenkins needs"). `gate.py`, like the orchestrator, stays
@@ -393,8 +394,8 @@ first, at most 50 in all, then a count:
 The Rust tests run with [cargo-nextest](https://nexte.st/), under
 [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov), which builds them with rustc's `-C instrument-coverage`
 and turns what they ran into a Cobertura report with the toolchain's own `llvm-profdata` and `llvm-cov`, from rustup's
-`llvm-tools-preview` component. Jenkins's Test stage runs them in the one Cargo workspace it knows, `ui/src-tauri/`
-(`TODO.md`):
+`llvm-tools-preview` component. Jenkins's Test stage runs them in the repository's one Cargo workspace, the top-level
+`Cargo.toml`, whose members are the engine (`engine/`) and the desktop shell (`ui/src-tauri/`):
 
 ```bash
 cargo llvm-cov nextest --locked --workspace --ignore-run-fail --profile ci --config-file "$WORKSPACE/ci/nextest.toml" \
@@ -407,8 +408,8 @@ cargo llvm-cov nextest --locked --workspace --ignore-run-fail --profile ci --con
   own lines count as covered when they run, so they raise a change's coverage that adds both a function and its tests
   (`TODO.md`).
 - **Paths.** cargo-llvm-cov names each file relative to the workspace's directory, which it gives as the report's
-  `<source>`, so the gate reads `src/lib.rs` as `ui/src-tauri/src/lib.rs`, as long as the report was written in the
-  tree the gate judges; an absolute path stands as it is.
+  `<source>`, here the repository's top, so the gate reads `engine/src/lib.rs` as it is, as long as the report was
+  written in the tree the gate judges; an absolute path stands as it is.
 - **Failing tests** do not stop the build, as pytest's do not: `--ignore-run-fail` runs every test and writes the
   report whatever fails, and the `ci` profile of `ci/nextest.toml` writes their JUnit report to
   `target/nextest/ci/junit.xml` in the workspace, which the Gate stage passes as another `--tests`. A workspace that
@@ -533,8 +534,8 @@ request](#a-build-of-main-judged-at-its-pull-request)).
   `cargo test` took about 100 s on 2 CPUs, and the Test stage's instrumented run of the same tests about 100 s on 3 of
   the development host's CPUs; `CARGO_HOME` is kept in the workspace, so nothing is cached between builds. The UI stage
   runs `cargo check` under the same lock, since the Test stage's build of the dependencies is not the check clippy
-  needs: with them checked, the Gate stage's clippy checks only the shell, in about 2 s, against 77 s for a clean one on
-  the development host's 6 CPUs. Package bundles the `.deb` with `dpkg-deb`, and the `.AppImage` with `linuxdeploy`,
+  needs: with them checked, the Gate stage's clippy checks only the workspace's own crates, in about 2 s for the shell
+  alone, against 77 s for a clean one on the development host's 6 CPUs. Package bundles the `.deb` with `dpkg-deb`, and the `.AppImage` with `linuxdeploy`,
   which `tauri build` downloads from GitHub each build.
 - **`gh` on the agent, and a GitHub token** for the Release stage: a Secret text credential with the ID
   `GitHub-Agents`, holding a token with *Contents: read and write* on this repository. It is the agents' own

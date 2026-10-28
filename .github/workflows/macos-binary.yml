@@ -19,6 +19,10 @@ on:
     paths:
       - packaging/**
       - ui/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - engine/**
       - pyproject.toml
       - uv.lock
       - .python-version
@@ -67,7 +71,7 @@ jobs:
       # The script Jenkins builds the Linux binary with; it smoke-tests --help, workflows and gui --smoke-test.
       - run: packaging/build-binary.sh
 
-      # The runner's Rust builds the shell; Node is pinned to what ui/package.json's tools need, 20.19 or later.
+      # rustup installs the toolchain rust-toolchain.toml pins, which builds the shell; Node is pinned to what ui/package.json's tools need, 20.19 or later.
       - uses: actions/setup-node@v5
         with:
           node-version: 22
