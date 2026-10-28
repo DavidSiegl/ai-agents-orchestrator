@@ -6,6 +6,7 @@ pub mod constants;
 pub mod env;
 pub mod error;
 pub mod handoff;
+pub mod patch;
 pub mod pipeline;
 pub mod proofs;
 pub mod prompts;
