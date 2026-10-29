@@ -79,7 +79,13 @@ impl Cli {
                 Some((option, value)) if arg.starts_with("--") => (option, Some(value.to_string())),
                 _ => (arg.as_str(), None),
             };
-            let mut value = || inline.clone().or_else(|| args.next().cloned());
+            let mut value = || {
+                let value = inline.clone().or_else(|| args.next().cloned());
+                if value.is_none() {
+                    eprintln!("sigint: {option} takes a value");
+                }
+                value
+            };
             match option {
                 "--list" => cli.list = true,
                 "--exact" => cli.exact = true,
@@ -102,10 +108,9 @@ impl Cli {
 
     /// Whether the test named name is to be run (or listed).
     fn runs(&self, name: &str) -> bool {
+        // As libtest, --exact holds for the skips too.
         let named = |f: &String| if self.exact { f == name } else { name.contains(f.as_str()) };
-        !self.ignored_only
-            && (self.filters.is_empty() || self.filters.iter().any(named))
-            && !self.skips.iter().any(|skip| name.contains(skip.as_str()))
+        !self.ignored_only && (self.filters.is_empty() || self.filters.iter().any(named)) && !self.skips.iter().any(named)
     }
 }
 

@@ -593,7 +593,7 @@ fn a_command_that_closed_its_output_is_stopped_too_and_hears_the_ctrl_c_first() 
     let host = ProcessHost::local(&interrupt);
     let raising = raise_once_written(&pid, &interrupt);
     // It takes a while over its SIGINT, as git may: the grace waits for it.
-    let script = "exec >/dev/null 2>&1; trap 'sleep 0.1; echo SIGINT > \"$2\"; exit 0' INT; echo $$ > \"$1\"; \
+    let script = "exec >/dev/null 2>&1; trap 'sleep 0.02; echo SIGINT > \"$2\"; exit 0' INT; echo $$ > \"$1\"; \
                   while :; do sleep 0.05; done";
     let e = host.run(&["sh", "-c", script, "_", &pid, &heard], None, 600).unwrap_err();
     raising.join().unwrap();

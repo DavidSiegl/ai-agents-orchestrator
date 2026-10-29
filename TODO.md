@@ -222,8 +222,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   checked between them, or one run on a thread the Workflow stops waiting for), or with the user's ruling that the
   wait is acceptable. (3) Under macOS, `on_sigint` reads no `/proc/self/status` and takes the kernel to discard a
   SIGINT that was ignored when the engine started, even while blocked, as the BSD kernels do, and `run_process` gives
-  a command the whole 250 ms grace, nix having no `waitid` there; unchecked on a Mac, closes with
-  `engine/tests/sigint.rs` run on one. A process that left the command's group, as a daemon does, is not reached, as at
+  a command the whole 250 ms grace, nix having no `waitid` there; unchecked on a Mac. Closes with
+  `engine/tests/sigint.rs`, which is Linux's (it reads `/proc` and starts the engine with GNU `env`), ported to macOS
+  and run on one. A process that left the command's group, as a daemon does, is not reached, as at
   a timeout; that is no gap, as the terminal's Ctrl-C does not reach one in Python either.
 - **The Rust engine talks to Jenkins and PyPI otherwise than urllib in a few cases.** Its transport is ureq
   (`HttpClient`, `engine/src/http.rs`, rust-engine ticket 07, 2026-10-28), which differs from `urlopen` where no test of
