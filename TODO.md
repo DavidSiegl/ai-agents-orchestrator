@@ -852,7 +852,10 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `doctor`, `judged-in-quality` (ticket 09b) and `serve` (ticket 10); 56 passing in 210 s locally with SIGINT and
   SIGHUP ignored, the Python engine's 43 taking 192 s. Ticket 09b (2026-10-29) adds `drain`, `refresh`,
   `judged-in-quality` and `doctor`, so the stage runs every scenario but serve's, 42 and the 18 switched: 60 passing
-  in 228 s locally, so too.
+  in 228 s locally, so too (380 s on agentbox0, PR-178). Ticket 10 (2026-10-29) adds `serve`, so `PARITY_COMMANDS` names
+  every command but gui and the stage runs every scenario, 43 and the 18 switched: 61 passing in 253 s locally with
+  SIGINT and SIGHUP ignored, `serve_endpoints_and_events` taking 24 s of it; about 405 s expected on agentbox0, by
+  PR-178's ratio.
 - **The commands the Rust engine runs outlived an engine that got a SIGTERM or a SIGHUP.** The commands run in
   process groups of their own, so a SIGTERM of the engine (a kill, a service manager's stop) or the SIGHUP a closed
   terminal sends its foreground group ended the engine and left the running command to finish unwatched, and the run

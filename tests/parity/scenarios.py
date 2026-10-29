@@ -567,7 +567,9 @@ class EventStream:
                 elif line == "" and kind is not None:
                     self._add((kind, payload))
                     kind, payload = None, None
-        except (OSError, ValueError, http.client.HTTPException):
+        # AttributeError: close() racing a read of a chunked response, which the Rust engine's serve sends an
+        # HTTP/1.1 client, leaves http.client peeking at a connection it has set to None.
+        except (OSError, ValueError, AttributeError, http.client.HTTPException):
             return
 
     def _add(self, item) -> None:
