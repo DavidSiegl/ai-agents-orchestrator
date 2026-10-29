@@ -6,7 +6,8 @@ use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
 
 use super::*;
-use crate::test_support::{oracle, TempDir};
+use crate::interrupt::Interrupt;
+use crate::test_support::{ended, oracle, raise_once_written, TempDir, HEARS_SIGINT};
 
 /// A token-shaped string, built so that no scanner takes this file for a leak.
 pub(crate) const FAKE_TOKEN: &str = concat!("ghp_", "Zq7Zq7Zq7Zq7", "Zq7Zq7Zq7Zq7", "Zq7Zq7Zq7Zq7");
@@ -28,7 +29,7 @@ pub(crate) fn environment(dir: Option<&str>, set: &[(&str, &str)]) -> Vec<(OsStr
 
 /// A Host on this machine whose commands find the tools in dir first.
 pub(crate) fn host_with_tools(dir: &str) -> ProcessHost {
-    ProcessHost::in_environment(environment(Some(dir), &[]).into_iter())
+    ProcessHost::in_environment(environment(Some(dir), &[]).into_iter(), &Interrupt::new())
 }
 
 /// Write an executable script named name into dir.
@@ -76,7 +77,7 @@ pub(crate) struct Repo {
 
 impl Repo {
     pub fn new(base_files: &[(&str, &str)]) -> Repo {
-        Repo::with_host(base_files, ProcessHost::local())
+        Repo::with_host(base_files, ProcessHost::local(&Interrupt::new()))
     }
 
     /// new, with host as the Host.
@@ -139,7 +140,7 @@ impl FakeSsh {
              for a in \"$@\"; do printf '%s\\0' \"$a\"; done > \"$d/$n\"\n\
              eval \"last=\\${$#}\"\nexec sh -c \"$last\"\n",
         );
-        let host = ProcessHost::in_environment(environment(Some(&bin), set).into_iter()).over_ssh("remote-host");
+        let host = ProcessHost::in_environment(environment(Some(&bin), set).into_iter(), &Interrupt::new()).over_ssh("remote-host");
         FakeSsh { dir, host }
     }
 
@@ -264,9 +265,9 @@ fn an_unusable_runtime_directory_falls_back_to_tmp() {
 #[test]
 fn read_missing_file() {
     let d = TempDir::new();
-    assert_eq!(ProcessHost::local().read(&d.join("spec.md")).unwrap(), None);
+    assert_eq!(ProcessHost::local(&Interrupt::new()).read(&d.join("spec.md")).unwrap(), None);
     // A directory is no file either.
-    assert_eq!(ProcessHost::local().read(&d.path()).unwrap(), None);
+    assert_eq!(ProcessHost::local(&Interrupt::new()).read(&d.path()).unwrap(), None);
 }
 
 #[test]
@@ -278,7 +279,7 @@ fn read_failure_raises() {
     if std::fs::read(&path).is_ok() {
         return; // Run as root, which reads any file.
     }
-    let e = ProcessHost::local().read(&path).unwrap_err();
+    let e = ProcessHost::local(&Interrupt::new()).read(&path).unwrap_err();
     assert_eq!(e.0, format!("reading {path}: cat: {path}: Permission denied"));
 }
 
@@ -326,14 +327,14 @@ fn create_pr_runs_gh_in_the_project() {
 #[test]
 fn git_head_outside_repo() {
     let d = TempDir::new();
-    assert_eq!(ProcessHost::local().git_head(&d.path()).unwrap(), None);
+    assert_eq!(ProcessHost::local(&Interrupt::new()).git_head(&d.path()).unwrap(), None);
 }
 
 #[test]
 fn run_states() {
     let d = TempDir::new();
     let cwd = d.path();
-    let host = ProcessHost::local();
+    let host = ProcessHost::local(&Interrupt::new());
     let runs = format!("{cwd}/{RUNS_DIR}");
     put(&format!("{runs}/a/state.json"), "{\"run_id\": \"a\"}\n");
     put(&format!("{runs}/b/state.json"), "{\"run_id\": \"b\"}");
@@ -356,14 +357,14 @@ fn run_states() {
 fn run_states_corrupt() {
     let d = TempDir::new();
     put(&d.join(&format!("{RUNS_DIR}/a/state.json")), "{\"run_id\": \n");
-    let e = ProcessHost::local().run_states(&d.path()).unwrap_err();
+    let e = ProcessHost::local(&Interrupt::new()).run_states(&d.path()).unwrap_err();
     assert!(e.0.starts_with(&format!("corrupt run state under {}/{RUNS_DIR}: ", d.path())), "{e}");
 }
 
 #[test]
 fn real_filesystem_roundtrip() {
     let d = TempDir::new();
-    let host = ProcessHost::local();
+    let host = ProcessHost::local(&Interrupt::new());
     let path = d.join("nested/file.md");
     assert_eq!(host.read(&path).unwrap(), None);
     host.write(&path, "hello", false).unwrap();
@@ -381,7 +382,7 @@ fn real_filesystem_roundtrip() {
 fn now_and_mtime_on_the_real_host() {
     let d = TempDir::new();
     let path = d.join("review 1.md");
-    let host = ProcessHost::local();
+    let host = ProcessHost::local(&Interrupt::new());
     host.write(&path, "x", false).unwrap();
     set_mtime(&path, 1_700_000_000);
     assert_eq!(host.mtime(&path).unwrap(), 1_700_000_000);
@@ -433,7 +434,7 @@ fn rename_over_ssh() {
 #[test]
 fn rename_failure_raises() {
     let d = TempDir::new();
-    let e = ProcessHost::local().rename(&d.join("review-1.md"), &d.join("review-1.rejected.md")).unwrap_err();
+    let e = ProcessHost::local(&Interrupt::new()).rename(&d.join("review-1.md"), &d.join("review-1.rejected.md")).unwrap_err();
     assert!(e.0.contains("No such file or directory"), "{e}");
     assert!(e.0.starts_with("mv -f -- "), "{e}");
     let ssh = FakeSsh::new(&[]);
@@ -443,7 +444,7 @@ fn rename_failure_raises() {
 
 #[test]
 fn output_that_is_not_utf8_raises_naming_the_command() {
-    let host = ProcessHost::local();
+    let host = ProcessHost::local(&Interrupt::new());
     let e = host.run(&["printf", "\\351"], None, 60).unwrap_err();
     assert!(e.0.starts_with("printf '\\351': printed what is not UTF-8: 'utf-8' codec can't decode byte 0xe9"), "{e}");
     assert_eq!(host.run_verbatim(&["printf", "\\351"], None, 60).unwrap().stdout, b"\xe9");
@@ -457,7 +458,7 @@ fn output_that_is_not_utf8_raises_naming_the_command() {
 
 #[test]
 fn line_ends_are_made_newlines_in_text_and_kept_verbatim() {
-    let host = ProcessHost::local();
+    let host = ProcessHost::local(&Interrupt::new());
     let argv = ["printf", "a\\r\\nb\\rc\\n"];
     assert_eq!(host.run(&argv, None, 60).unwrap().stdout, "a\nb\nc\n");
     assert_eq!(host.run_verbatim(&argv, None, 60).unwrap().stdout, b"a\r\nb\rc\n");
@@ -465,7 +466,7 @@ fn line_ends_are_made_newlines_in_text_and_kept_verbatim() {
 
 #[test]
 fn output_and_input_beyond_a_pipe_s_buffer_are_read_and_written_whole() {
-    let host = ProcessHost::local();
+    let host = ProcessHost::local(&Interrupt::new());
     let input = "x".repeat(1 << 20);
     // cat echoes its input to both outputs while it reads, so neither side may wait for the other to finish.
     let proc = host.run(&["sh", "-c", "tee /dev/stderr"], Some(&input), 60).unwrap();
@@ -481,7 +482,7 @@ fn output_and_input_beyond_a_pipe_s_buffer_are_read_and_written_whole() {
 fn a_command_that_runs_out_of_time_is_killed_with_its_process_group() {
     let d = TempDir::new();
     let pid_file = d.join("pid");
-    let host = ProcessHost::local();
+    let host = ProcessHost::local(&Interrupt::new());
     let started = std::time::Instant::now();
     let script = "sleep 30 & echo $! > \"$1\"; wait";
     let e = host.run(&["sh", "-c", script, "_", &pid_file], None, 1).unwrap_err();
@@ -508,7 +509,7 @@ fn a_command_that_runs_out_of_time_is_killed_with_its_process_group() {
 
 #[test]
 fn a_child_that_holds_the_input_open_unread_ends_the_command_at_its_time() {
-    let host = ProcessHost::local();
+    let host = ProcessHost::local(&Interrupt::new());
     let input = "x".repeat(1 << 20);
     let started = std::time::Instant::now();
     // The command exits at once, but the subshell it leaves keeps its input open without reading it (given it
@@ -521,7 +522,7 @@ fn a_child_that_holds_the_input_open_unread_ends_the_command_at_its_time() {
 
 #[test]
 fn a_child_that_holds_the_output_open_ends_the_command_at_its_time() {
-    let host = ProcessHost::local();
+    let host = ProcessHost::local(&Interrupt::new());
     let started = std::time::Instant::now();
     let e = host.run(&["sh", "-c", "sleep 30 & echo started"], None, 1).unwrap_err();
     assert!(e.0.ends_with("timed out after 1 seconds"), "{e}");
@@ -530,14 +531,90 @@ fn a_child_that_holds_the_output_open_ends_the_command_at_its_time() {
 
 #[test]
 fn a_command_that_cannot_be_started_names_it() {
-    let e = ProcessHost::local().run(&["no-such-command-here", "x"], None, 60).unwrap_err();
+    let e = ProcessHost::local(&Interrupt::new()).run(&["no-such-command-here", "x"], None, 60).unwrap_err();
     assert_eq!(e.0, "no-such-command-here x: [Errno 2] No such file or directory: 'no-such-command-here'");
 }
 
 #[test]
 fn a_command_ended_by_a_signal_has_its_negative_number() {
-    let proc = ProcessHost::local().run(&["sh", "-c", "kill -TERM $$"], None, 60).unwrap();
+    let proc = ProcessHost::local(&Interrupt::new()).run(&["sh", "-c", "kill -TERM $$"], None, 60).unwrap();
     assert_eq!(proc.status, -15);
+}
+
+// -- The Ctrl-C (not in Python, whose commands get the terminal's SIGINT themselves) ----------------------------------
+
+#[test]
+fn a_ctrl_c_stops_the_running_command_with_its_process_group() {
+    let d = TempDir::new();
+    let (pid, background, interrupt) = (d.join("pid"), d.join("background"), Interrupt::new());
+    let host = ProcessHost::local(&interrupt);
+    let raising = raise_once_written(&pid, &interrupt);
+    let started = std::time::Instant::now();
+    let script = "sleep 600 & echo $! > \"$2\"; echo $$ > \"$1\"; wait";
+    let e = host.run(&["sh", "-c", script, "_", &pid, &background], None, 600).unwrap_err();
+    raising.join().unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(60));
+    assert_eq!(e.0, format!("sh -c 'sleep 600 & echo $! > \"$2\"; echo $$ > \"$1\"; wait' _ {pid} {background}: interrupted"));
+    assert!(ended(&pid), "the command outlived the Ctrl-C");
+    assert!(ended(&background), "what it started outlived the Ctrl-C");
+}
+
+#[test]
+fn a_command_hears_the_ctrl_c_first_and_fails_even_when_it_then_succeeds() {
+    // SIGINT first, so that git, say, removes its lock files; whatever the command does then, it was interrupted.
+    let d = TempDir::new();
+    let (pid, heard, interrupt) = (d.join("pid"), d.join("heard"), Interrupt::new());
+    let host = ProcessHost::local(&interrupt);
+    let raising = raise_once_written(&pid, &interrupt);
+    let script = "trap 'echo SIGINT > \"$2\"; exit 0' INT; echo $$ > \"$1\"; while :; do sleep 0.05; done";
+    let e = host.run(&[&HEARS_SIGINT[..], &["sh", "-c", script, "_", &pid, &heard]].concat(), None, 600).unwrap_err();
+    raising.join().unwrap();
+    assert!(e.0.ends_with(": interrupted"), "{e}");
+    assert_eq!(read(&heard), "SIGINT\n");
+}
+
+#[test]
+fn a_command_that_ignores_the_ctrl_c_is_killed() {
+    let d = TempDir::new();
+    let (pid, interrupt) = (d.join("pid"), Interrupt::new());
+    let host = ProcessHost::local(&interrupt);
+    let raising = raise_once_written(&pid, &interrupt);
+    let script = "trap '' INT; echo $$ > \"$1\"; while :; do sleep 0.05; done";
+    let e = host.run(&["sh", "-c", script, "_", &pid], None, 600).unwrap_err();
+    raising.join().unwrap();
+    assert!(e.0.ends_with(": interrupted"), "{e}");
+    assert!(ended(&pid), "the command outlived the Ctrl-C");
+}
+
+#[test]
+fn a_command_that_closed_its_output_is_stopped_too_and_hears_the_ctrl_c_first() {
+    let d = TempDir::new();
+    let (pid, heard, interrupt) = (d.join("pid"), d.join("heard"), Interrupt::new());
+    let host = ProcessHost::local(&interrupt);
+    let raising = raise_once_written(&pid, &interrupt);
+    // It takes a while over its SIGINT, as git may: the grace waits for it.
+    let script = "exec >/dev/null 2>&1; trap 'sleep 0.02; echo SIGINT > \"$2\"; exit 0' INT; echo $$ > \"$1\"; \
+                  while :; do sleep 0.05; done";
+    let e = host.run(&[&HEARS_SIGINT[..], &["sh", "-c", script, "_", &pid, &heard]].concat(), None, 600).unwrap_err();
+    raising.join().unwrap();
+    assert!(e.0.ends_with(": interrupted"), "{e}");
+    assert!(ended(&pid), "the command outlived the Ctrl-C");
+    assert_eq!(read(&heard), "SIGINT\n");
+}
+
+#[test]
+fn no_command_starts_while_the_ctrl_c_is_pending() {
+    let d = TempDir::new();
+    let (ran, interrupt) = (d.join("ran"), Interrupt::new());
+    let host = ProcessHost::local(&interrupt);
+    interrupt.raise();
+    let e = host.run(&["touch", &ran], None, 60).unwrap_err();
+    assert_eq!(e.0, format!("touch {ran}: interrupted"));
+    assert!(!std::path::Path::new(&ran).exists());
+    // Caught, as the Workflow catches it to record the stop, commands run again.
+    interrupt.catch();
+    host.check(&["touch", &ran], None, 60).unwrap();
+    assert!(std::path::Path::new(&ran).exists());
 }
 
 // -- TestChildEnvironment --------------------------------------------------------------------------------------------
@@ -565,7 +642,7 @@ pub(crate) fn assert_scrubbed(env: &str) {
 
 #[test]
 fn a_real_process_sees_no_credentials() {
-    let host = ProcessHost::in_environment(environment(None, &with_credentials()).into_iter());
+    let host = ProcessHost::in_environment(environment(None, &with_credentials()).into_iter(), &Interrupt::new());
     assert_scrubbed(&host.check(&["env"], None, 60).unwrap());
 }
 
@@ -581,7 +658,7 @@ fn host_commands_over_ssh_get_no_credentials() {
 #[test]
 fn real_filesystem_state() {
     let d = TempDir::new();
-    let host = ProcessHost::local();
+    let host = ProcessHost::local(&Interrupt::new());
     let run_dir = d.join(&format!("{RUNS_DIR}/r-abc"));
     host.write(&format!("{run_dir}/state.json"), "{\"run_id\": \"r-abc\"}\n", false).unwrap();
     host.write(&format!("{run_dir}/state.json"), "{\"run_id\": \"r-abc\", \"phase\": \"build\"}\n", false).unwrap();
@@ -596,7 +673,7 @@ fn real_filesystem_state() {
 #[test]
 fn keep_mtime() {
     let d = TempDir::new();
-    let (host, path) = (ProcessHost::local(), d.join("state.json"));
+    let (host, path) = (ProcessHost::local(&Interrupt::new()), d.join("state.json"));
     host.write(&path, "old\n", false).unwrap();
     set_mtime(&path, 1_000_000_000);
     host.write(&path, "new\n", true).unwrap();
@@ -617,7 +694,7 @@ fn keep_mtime() {
 #[test]
 fn run_files_of_a_real_directory_oldest_first() {
     let d = TempDir::new();
-    let host = ProcessHost::local();
+    let host = ProcessHost::local(&Interrupt::new());
     let run_dir = d.join(&format!("{RUNS_DIR}/r-abc"));
     // Name order is a, b, c, d; modification order is c, a, then b and d together.
     for (name, mtime) in [("b.md", 300), ("a.md", 200), ("c.md", 100), ("d.md", 300), ("state.json", 50),
@@ -670,7 +747,7 @@ fn session_log_finds_the_file_under_home() {
     let home = TempDir::new();
     put(&home.join(".claude/projects/-proj/abc-123.jsonl"), "log\n");
     put(&home.join(".pi/agent/sessions/x/2026_s-1.jsonl"), "pi\n");
-    let host = ProcessHost::in_environment(environment(None, &[("HOME", &home.path())]).into_iter());
+    let host = ProcessHost::in_environment(environment(None, &[("HOME", &home.path())]).into_iter(), &Interrupt::new());
     assert_eq!(host.session_log("claude", "abc-123").unwrap().as_deref(), Some(&b"log\n"[..]));
     assert_eq!(host.session_log("pi", "s-1").unwrap().as_deref(), Some(&b"pi\n"[..]));
     assert_eq!(host.session_log("claude", "other").unwrap(), None);
@@ -682,7 +759,7 @@ fn session_log_finds_the_file_under_home() {
 #[test]
 fn run_metrics_reads_each_run_s_line() {
     let d = TempDir::new();
-    let host = ProcessHost::local();
+    let host = ProcessHost::local(&Interrupt::new());
     let runs = d.join(RUNS_DIR);
     put(&format!("{runs}/a/metrics.json"), "{\"run\": \"a\"}");
     put(&format!("{runs}/b/metrics.json"), "{\"run\": \"b\"}\n");
@@ -778,7 +855,7 @@ fn unusable_gh() {
     // gh is not installed: sh's status 127.
     let bin = TempDir::new();
     std::os::unix::fs::symlink("/bin/sh", bin.join("sh")).unwrap();
-    let host = ProcessHost::in_environment(environment(None, &[("PATH", &bin.path())]).into_iter());
+    let host = ProcessHost::in_environment(environment(None, &[("PATH", &bin.path())]).into_iter(), &Interrupt::new());
     assert!(matches!(host.pull_request("/", URL), Err(GhError::Unusable(_))));
 }
 
@@ -848,7 +925,7 @@ struct Clones {
 impl Clones {
     fn new() -> Clones {
         let tmp = TempDir::new();
-        let host = ProcessHost::local();
+        let host = ProcessHost::local(&Interrupt::new());
         let dir = tmp.path();
         let origin = format!("{dir}/origin.git");
         host.check(&["git", "init", "--quiet", "--bare", "-b", "main", &origin], None, 60).unwrap();
@@ -1153,6 +1230,16 @@ fn a_count_that_is_no_count_raises() {
 }
 
 #[test]
+fn has_origin_on_real_git() {
+    let c = Clones::new();
+    assert!(c.host.has_origin(&c.a).unwrap());
+    c.sh(&["git", "-C", &c.a, "remote", "remove", "origin"]);
+    assert!(!c.host.has_origin(&c.a).unwrap());
+    // Outside a repository git cannot name a URL either.
+    assert!(!c.host.has_origin(&c.dir()).unwrap());
+}
+
+#[test]
 fn worktree_steps() {
     let c = Clones::new();
     put(&format!("{}/.orchestrator/.gitignore", c.a), "*\n");
@@ -1352,9 +1439,9 @@ fn host_s_constants_are_the_python_engine_s() {
 #[test]
 fn checked_names_the_command_and_the_target() {
     let failed = Completed::new(2, "out", " oops \n");
-    let e = checked(&ProcessHost::local(), &["git", "a b"], failed.clone()).unwrap_err();
+    let e = checked(&ProcessHost::local(&Interrupt::new()), &["git", "a b"], failed.clone()).unwrap_err();
     assert_eq!(e.0, "git 'a b' failed: oops");
-    let remote = ProcessHost::local().over_ssh("box");
+    let remote = ProcessHost::local(&Interrupt::new()).over_ssh("box");
     assert_eq!(checked(&remote, &["x"], failed).unwrap_err().0, "x failed on box: oops");
     assert_eq!(checked(&remote, &["x"], Completed::new(0, "out", "")).unwrap(), "out");
 }

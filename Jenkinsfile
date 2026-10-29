@@ -234,8 +234,7 @@ pipeline {
                         gate = "${env.WORKSPACE_TMP}/main/gate.py"
                         rules = "${env.WORKSPACE_TMP}/main/pyproject.toml"
                     } else if (env.CHANGE_TARGET) {
-                        sh 'git fetch --quiet origin "+refs/heads/$CHANGE_TARGET:refs/remotes/origin/$CHANGE_TARGET"'
-                        base = sh(returnStdout: true, script: 'git merge-base HEAD "origin/$CHANGE_TARGET"').trim()
+                        base = sh(returnStdout: true, script: 'ci/pr-base.sh').trim()
                     } else {
                         base = env.PREVIOUS_SUCCESSFUL_COMMIT ?: 'HEAD^1'
                     }
@@ -265,6 +264,43 @@ pipeline {
             post {
                 always {
                     archiveArtifacts artifacts: 'quality.md', allowEmptyArchive: true
+                }
+            }
+        }
+
+        // The parity scenarios of run and resume against the Rust engine's binary, and those that switch engines at the
+        // kill (tests/parity/test_parity.py: PARITY_ENGINE, and PARITY_COMMANDS for the commands the binary has), on a
+        // pull request build whose change touches engine/, tests/parity/ or the workspace's Cargo.toml, Cargo.lock or
+        // rust-toolchain.toml since the base Gate judges it from (ci/pr-base.sh), by a git diff as the Test stage's for
+        // a quality build's parity scenarios: a diff, or a base, that fails counts as a change. The Test stage runs
+        // every scenario against orchestrator.py. The binary is the one the Test stage's cargo-llvm-cov built,
+        // instrumented for coverage, so it is given LLVM_PROFILE_FILE /dev/null through env, the harness giving the
+        // engine an environment of its own: else each invocation would write its profile into the scenario's project.
+        // After Gate, so that a failing scenario fails the build with quality.md archived.
+        stage('Rust parity') {
+            when {
+                changeRequest()
+                expression {
+                    return sh(returnStatus: true, script: '''
+                        base=$(ci/pr-base.sh)
+                        git diff --quiet "$base" HEAD -- engine tests/parity Cargo.toml Cargo.lock rust-toolchain.toml
+                    ''') != 0
+                }
+            }
+            steps {
+                sh '''
+                    engine="$WORKSPACE/target/llvm-cov-target/debug/orchestrator"
+                    if [ ! -x "$engine" ]; then
+                        echo "the Test stage built no $engine" >&2
+                        exit 1
+                    fi
+                    PARITY_ENGINE="env LLVM_PROFILE_FILE=/dev/null '$engine'" PARITY_COMMANDS=run,resume \\
+                        uv run --frozen pytest tests/parity --junitxml=parity-rust.xml
+                '''
+            }
+            post {
+                always {
+                    junit 'parity-rust.xml'
                 }
             }
         }

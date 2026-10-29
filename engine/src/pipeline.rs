@@ -114,15 +114,17 @@ impl Step {
         !self.human_paced && self.loop_to.is_none()
     }
 
-    /// The handoff file of round n in run_dir; with q other than 0, the answer to quality round q.
-    pub fn path(&self, run_dir: &str, n: u32, q: u32) -> String {
+    /// The handoff file of round n in run_dir; with q other than 0, the answer to quality round q. n is a round as
+    /// Python's int holds it: -1, the round before round 0, names the file no turn writes that a prev_ placeholder
+    /// of round 0 gives.
+    pub fn path(&self, run_dir: &str, n: impl Into<i64>, q: u32) -> String {
         format!("{run_dir}/{}", self.name(n, q))
     }
 
-    /// The handoff file's name in round n; with q other than 0, the answer to quality round q, with -q<q> before
-    /// the extension.
-    pub fn name(&self, n: u32, q: u32) -> String {
-        let number = n.to_string();
+    /// The handoff file's name in round n (as path takes it); with q other than 0, the answer to quality round q,
+    /// with -q<q> before the extension.
+    pub fn name(&self, n: impl Into<i64>, q: u32) -> String {
+        let number = n.into().to_string();
         let name = format(&self.file, &|field| (field == "n").then(|| number.clone())).unwrap_or(self.file.clone());
         if q == 0 {
             return name;
@@ -495,6 +497,24 @@ impl Pipeline {
     pub fn contract(&self) -> Option<&Step> {
         let first = &self.steps[0];
         (!first.edits && !first.per_round()).then_some(first)
+    }
+
+    /// The step a run given its spec (run --spec, crate::spec_file) starts at: the one after the contract step.
+    /// Errors: the workflow has no contract step, or no step after it.
+    pub fn seeded_start(&self) -> Result<&Step, OrchestratorError> {
+        let Some(contract) = self.contract() else {
+            return Err(OrchestratorError(format!(
+                "workflow {} starts with step {}, which edits or writes a file per round; --spec needs a first step \
+                 that writes the spec",
+                self.name, self.steps[0].id
+            )));
+        };
+        self.after(&contract.id).ok_or_else(|| {
+            OrchestratorError(format!(
+                "workflow {} has no step after {}, so with --spec it has nothing to do",
+                self.name, contract.id
+            ))
+        })
     }
 
     /// The step whose file the run ends on.

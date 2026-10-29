@@ -3,6 +3,7 @@
 //! engine's answers.
 
 use super::*;
+use crate::interrupt::Interrupt;
 use crate::host::tests::{environment, put, read, tool, Repo, FAKE_TOKEN};
 use crate::host::{ProcessHost, PushError};
 use crate::test_support::oracle;
@@ -72,7 +73,7 @@ impl Scan {
     fn host(bin: &str, set: &[(&str, &str)]) -> ProcessHost {
         let mut set = set.to_vec();
         set.push(("TOKEN", FAKE_TOKEN));
-        ProcessHost::in_environment(environment(Some(bin), &set).into_iter())
+        ProcessHost::in_environment(environment(Some(bin), &set).into_iter(), &Interrupt::new())
     }
 
     fn mode(&self, mode: &str) {
@@ -464,7 +465,7 @@ fn the_preflight_needs_gitleaks_git() {
     let e = s.repo.host.check_gitleaks().unwrap_err();
     assert!(e.0.contains("`gitleaks git` does not run: install gitleaks 8.19"), "{e}");
     // No gitleaks at all.
-    let nowhere = ProcessHost::in_environment(environment(None, &[("PATH", &s.run_dir)]).into_iter());
+    let nowhere = ProcessHost::in_environment(environment(None, &[("PATH", &s.run_dir)]).into_iter(), &Interrupt::new());
     let e = nowhere.check_gitleaks().unwrap_err();
     assert!(e.0.contains("gitleaks cannot be started (") && e.0.contains("install gitleaks 8.19"), "{e}");
 }

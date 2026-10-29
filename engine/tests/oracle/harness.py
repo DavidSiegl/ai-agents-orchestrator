@@ -2,16 +2,19 @@
 for the cases the Rust engine's tests replay: the arguments an agent starts with (launch_args) for every harness,
 permission mode, model, session and extra directory, each mode's permission_args, the token usage session_usage
 reads from sample Claude Code and pi session logs (given as hex, since they hold bytes that are not UTF-8), the
-tokens turn_tokens sums for turns over them, and the time datetime.fromisoformat reads from ISO strings, which the
-logs' and the turns' times are. Run `uv run python engine/tests/oracle/harness.py` to rewrite it.
+tokens turn_tokens sums for turns over them, the time datetime.fromisoformat reads from ISO strings, which the logs'
+and the turns' times are, and the local time time.strftime writes a run's id with (new_run_id). Run
+`uv run python engine/tests/oracle/harness.py` to rewrite it.
 
-A time without an offset is local time to Python and UTC to the Rust engine (TODO.md, "The Rust engine reads some
-input no run writes otherwise than the Python engine"), so fromisoformat's answer for one is recorded as UTC's, and
-no log or turn here has one."""
+A time without an offset is the machine's local time to timestamp(), so the times are read with TZ set to ZONE, which
+the Rust test reads them in too; no log or turn here has one. strftime's times are written in each of ZONES."""
 
+import contextlib
 import json
 import os
 import sys
+import time
+from collections.abc import Iterator
 from datetime import UTC, datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -154,9 +157,24 @@ TURNS = [
     {"agent": "claude", "session": "s", "started_at": o.iso_utc(EPOCH - 10**6), "ended_at": o.iso_utc(EPOCH + 10**6)},
 ]
 
+# The zone TIMES are read in: central Europe's rule as POSIX writes it, which the C library and the Rust test's jiff
+# both apply to every year, with no database. 2026-03-29T02:30 is a time its clocks skip, 2026-10-25T02:30 one they
+# show twice.
+ZONE = "CET-1CEST,M3.5.0,M10.5.0/3"
+
+# Zones as TZ names them, each a POSIX rule, which the Rust test's jiff reads without a database: ZONE, one east of UTC
+# by a fraction of an hour, UTC, and one west of it whose clocks change in March and November.
+ZONES = [ZONE, "<+0545>-5:45", "UTC0", "<-0330>3:30<-0230>,M3.2.0,M11.1.0"]
+# Seconds since the epoch: around ZONE's changes of 2026 (01:00 UTC on 29 March and 25 October), the epoch, a time
+# before it, and an ordinary one.
+SECONDS = [1774745999, 1774746000, 1792889999, 1792890000, 0, -2208992400, 1793283753]
+
 # ISO strings, as datetime.fromisoformat reads them: the forms a harness or the engine writes, each other form it
 # takes, and near misses of each.
 TIMES = [
+    "2026-03-29T02:30:00", "2026-03-29T01:59:59", "2026-03-29T03:00:00", "2026-10-25T02:30:00.5",
+    "2026-10-25T01:59:59", "2026-10-25T03:00:00", "2026-07-01T12:00:00", "1900-01-01T00:00", "0001-01-01T00:00",
+    "9999-12-31T23:59:59",
     "2026-10-28T12:00:00.250Z", "2026-10-28T12:00:00+00:00", "2026-10-28T12:00:00.123456+00:00", "2026-10-28",
     "2026-10-28T12:00:00", "2026-10-28 12:00:00", "2026-10-28T12:00:00.1234567Z", "2026-10-28T12:00:00.1Z",
     "2026-10-28T12:00:00,5Z", "20261028T120000Z", "20261028T1200", "2026-W43-3", "2026W433", "2026-W43",
@@ -208,10 +226,25 @@ def fuzzed_times(n: int) -> list[str]:
 def timestamp(iso: str) -> dict:
     """{"ok": the time fromisoformat reads, as timestamp() gives it}, or {"error": what it raises}."""
     try:
-        read = datetime.fromisoformat(iso)
-        return {"ok": (read if read.tzinfo else read.replace(tzinfo=UTC)).timestamp()}
+        return {"ok": datetime.fromisoformat(iso).timestamp()}
     except ValueError as e:
         return {"error": str(e)}
+
+
+@contextlib.contextmanager
+def local_zone(zone: str) -> Iterator[None]:
+    """While open, the process's local time is zone's, a value of TZ; afterwards it is what it was."""
+    before = os.environ.get("TZ")
+    os.environ["TZ"] = zone
+    time.tzset()
+    try:
+        yield
+    finally:
+        if before is None:
+            del os.environ["TZ"]
+        else:
+            os.environ["TZ"] = before
+        time.tzset()
 
 
 def usage(kind: str, log: bytes) -> list:
@@ -223,6 +256,12 @@ def build() -> dict:
     """The oracle: each kind of call with its cases and Python's answers."""
     kinds = list(o.AGENT_KINDS)
     claude_usage = [o.session_usage("claude", os.fsdecode(log)) for _, log in CLAUDE_LOGS]
+    with local_zone(ZONE):
+        times = [[iso, timestamp(iso)] for iso in TIMES + fuzzed_times(3000)]
+    run_times = []
+    for zone in ZONES:
+        with local_zone(zone):
+            run_times += [[zone, seconds, time.strftime("%Y%m%d-%H%M%S", time.localtime(seconds))] for seconds in SECONDS]
     return {
         "constants": {name: getattr(o, name) for name in [
             "AGENT_KINDS", "DEFAULT_AGENT", "PERMISSION_ARGS", "RESUME_ARGS", "ADD_DIR_ARGS", "SESSION_LOGS"]},
@@ -234,7 +273,8 @@ def build() -> dict:
                           for kind, logs in (("claude", CLAUDE_LOGS), ("pi", PI_LOGS)) for name, log in logs],
         "turn_tokens": [[turn, [o.turn_tokens(turn, u) for u in claude_usage] + [o.turn_tokens(turn, None)]]
                         for turn in TURNS],
-        "fromisoformat": [[iso, timestamp(iso)] for iso in TIMES + fuzzed_times(3000)],
+        "fromisoformat": times,
+        "strftime_local": run_times,
     }
 
 

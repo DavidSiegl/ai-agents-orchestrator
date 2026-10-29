@@ -16,6 +16,7 @@ use std::time::Duration;
 use crate::constants::AGENT_START_TIMEOUT_MS;
 use crate::error::OrchestratorError;
 use crate::host::{run_process, ProcessError};
+use crate::interrupt::Interrupt;
 use crate::py::json::Json;
 use crate::py::text::{strip, universal_newlines};
 
@@ -156,7 +157,9 @@ type RunHerdr = dyn Fn(&[String], Option<Duration>) -> Ran + Send + Sync;
 
 /// herdr reached by running its CLI here, each command forwarded to a saved SSH machine (herdr's `--machine`) when
 /// the run has one. Each command runs in the engine's environment as child_env gives it (crate::env::child_env), so
-/// herdr and the agents it starts never inherit the CI credentials.
+/// herdr and the agents it starts never inherit the CI credentials, and fails as interrupted when the Interrupt it
+/// was given is raised while it runs, even one that herdr had already carried out, such as a prompt delivered
+/// (crate::host::run_process).
 #[derive(Clone)]
 pub struct ProcessHerdr {
     /// The herdr machine its commands are forwarded to, as `herdr machine list` names it by label or id; None for
@@ -173,9 +176,10 @@ impl fmt::Debug for ProcessHerdr {
 }
 
 impl ProcessHerdr {
-    /// herdr here, its commands forwarded to machine when given one; an empty machine is none.
-    pub fn new(machine: Option<&str>) -> ProcessHerdr {
-        ProcessHerdr::in_environment(machine, std::env::vars_os())
+    /// herdr here, its commands forwarded to machine when given one, an empty machine being none, and stopped by
+    /// interrupt.
+    pub fn new(machine: Option<&str>, interrupt: &Interrupt) -> ProcessHerdr {
+        ProcessHerdr::in_environment(machine, std::env::vars_os(), interrupt)
     }
 
     /// As new, the CLI found on and run in the environment vars as child_env would give it, were vars the engine's
@@ -183,9 +187,10 @@ impl ProcessHerdr {
     pub(crate) fn in_environment(
         machine: Option<&str>,
         vars: impl Iterator<Item = (OsString, OsString)>,
+        interrupt: &Interrupt,
     ) -> ProcessHerdr {
-        let env = crate::env::without_withheld(vars);
-        ProcessHerdr::with_runner(machine, move |argv, limit| run_process(argv, None, limit, &env))
+        let (env, interrupt) = (crate::env::without_withheld(vars), interrupt.clone());
+        ProcessHerdr::with_runner(machine, move |argv, limit| run_process(argv, None, limit, &env, &interrupt))
     }
 
     /// As new, each command run by run in place of a process: Python's Herdr(run=...), for the tests.
@@ -263,7 +268,8 @@ impl ProcessHerdr {
     }
 
     /// The standard output of `herdr args`, run with limit on its process (None: as long as it takes). Errors: herdr
-    /// is not on PATH; its process runs out of time (timeout); it exits with a status other than 0, with the code and
+    /// is not on PATH; its process runs out of time (timeout); the Interrupt is raised while it runs ("herdr ...:
+    /// interrupted", no code); it exits with a status other than 0, with the code and
     /// message of the error it printed as JSON on stderr or stdout, else exit_<status> and what it printed; or it
     /// prints what is not UTF-8.
     fn exec(&self, args: &[&str], limit: Option<Duration>) -> Result<String, HerdrError> {
@@ -281,6 +287,7 @@ impl ProcessHerdr {
             Err(ProcessError::Timeout) => {
                 return Err(HerdrError::new("timeout", format!("herdr {command} did not return")));
             }
+            Err(ProcessError::Interrupted) => return Err(failed("interrupted".to_string())),
         };
         let decode = |bytes: Vec<u8>| {
             String::from_utf8(bytes)

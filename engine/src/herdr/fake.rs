@@ -6,14 +6,17 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use super::{Agent, Direction, Herdr, HerdrError};
+use crate::error::OrchestratorError;
 use crate::harness::{harness, Resume};
 use crate::host::fake::FakeHost;
 use crate::host::Host;
+use crate::interrupt::Interrupt;
 use crate::state::RunState;
 
 /// One turn of a role's agent: given the prompt it was sent, the run's state and the host, it may write files, as an
-/// agent writes its handoff file, and gives the status the agent shows afterwards.
-pub(crate) type Turn = Box<dyn FnMut(&str, &RunState, &FakeHost) -> String>;
+/// agent writes its handoff file, or have the host's clock write them later, and gives the status the agent shows
+/// afterwards.
+pub(crate) type Turn = Box<dyn FnMut(&str, &RunState, &Rc<FakeHost>) -> String>;
 
 /// herdr played in memory: each agent prompted plays its role's next turn from the script at once. An agent's role is
 /// its name up to the first `-`, as the engine names agents `<role>-<key>`.
@@ -76,7 +79,29 @@ pub(crate) struct FakeHerdrState {
     pub blocked_at_start: HashSet<String>,
     /// ("workspace" or "split", cwd) of each workspace created and pane split.
     pub cwds: Vec<(String, String)>,
+    /// What every wait does instead of the above, when set, given (name, timeout_ms, until): a Python test's own
+    /// FakeHerdr.wait.
+    pub wait_with: Option<WaitWith>,
+    /// The error close_workspace fails with, when set.
+    pub close_error: Option<HerdrError>,
+    /// Run before each command calls records, given it, when set: what a Python test does in its own
+    /// FakeHerdr.focus or create_workspace before the fake's.
+    pub before_call: Option<BeforeCall>,
+    /// The run's Ctrl-C, when set: one a turn raises fails the prompt that played it, so that nothing after the
+    /// prompt runs, as after Python's raise KeyboardInterrupt in a turn, and as ProcessHerdr's prompt fails when the
+    /// Ctrl-C comes while it runs, even once herdr has delivered it.
+    pub interrupt: Option<Interrupt>,
+    /// Run first by every prompt, given (name, text), when set: an error it gives is the prompt's, which then plays
+    /// nothing; a test's own herdr prompt, such as a real ProcessHerdr's.
+    pub prompt_with: Option<PromptWith>,
 }
+
+/// A test's own wait (FakeHerdrState::wait_with).
+pub(crate) type WaitWith = Box<dyn FnMut(&str, Option<u64>, &[&str]) -> Result<String, HerdrError>>;
+/// A test's prompt (FakeHerdrState::prompt_with).
+pub(crate) type PromptWith = Box<dyn FnMut(&str, &str) -> Result<(), HerdrError>>;
+/// A test's hook on commands (FakeHerdrState::before_call).
+pub(crate) type BeforeCall = Box<dyn FnMut(&Call)>;
 
 impl FakeHerdr {
     /// herdr playing each role's agent from script, turn by turn, on host, each turn given run.
@@ -102,13 +127,50 @@ impl FakeHerdr {
                 taken: HashMap::new(),
                 blocked_at_start: HashSet::new(),
                 cwds: vec![],
+                wait_with: None,
+                close_error: None,
+                before_call: None,
+                interrupt: None,
+                prompt_with: None,
             }),
         }
+    }
+
+    /// The wait the fake plays when no wait_with is set: a wait until working (a delivery check) answers whether
+    /// the agent took its last prompt, timing out when it did not and failing with agent_not_found for an agent that
+    /// has exited; any other wait is recorded in waits and answers done. For a test's wait_with that changes the
+    /// fake and then waits as it does.
+    pub fn own_wait(&self, name: &str, timeout_ms: Option<u64>, until: &[&str]) -> Result<String, HerdrError> {
+        let mut s = self.state();
+        if until.contains(&"working") {
+            // A taken prompt had the agent working, whatever it shows now.
+            s.deliveries.push((name.to_string(), timeout_ms));
+            if !s.statuses.contains_key(name) {
+                return Err(HerdrError::new("agent_not_found", format!("agent target {name} not found")));
+            }
+            if !s.taken.get(name).copied().unwrap_or(false) {
+                return Err(HerdrError::new("timeout", format!("agent {name} did not reach {until:?}")));
+            }
+            return Ok("working".to_string());
+        }
+        s.waits.push(until.iter().map(|u| u.to_string()).collect());
+        Ok("done".to_string())
     }
 
     /// What the fake holds and records, to script it or look at it; dropped before the next command it is given.
     pub fn state(&self) -> RefMut<'_, FakeHerdrState> {
         self.state.borrow_mut()
+    }
+
+    /// Record call in calls, after running the test's before_call on it with the fake's state released, so that the
+    /// hook may read the fake or the host itself.
+    fn record(&self, call: Call) {
+        let hook = self.state().before_call.take();
+        if let Some(mut hook) = hook {
+            hook(&call);
+            self.state().before_call = Some(hook);
+        }
+        self.state().calls.push(call);
     }
 }
 
@@ -137,28 +199,28 @@ pub(crate) fn resumed_session(kind: &str, args: &[String]) -> Option<String> {
 
 impl Herdr for FakeHerdr {
     fn create_workspace(&self, cwd: &str, label: &str) -> Result<(String, String), HerdrError> {
+        self.record(Call::Workspace { label: label.to_string() });
         let mut s = self.state();
-        s.calls.push(Call::Workspace { label: label.to_string() });
         s.cwds.push(("workspace".to_string(), cwd.to_string()));
         s.workspaces.insert("w1".to_string());
         Ok(("w1".to_string(), s.pane()))
     }
 
     fn split(&self, pane: &str, direction: Direction, cwd: &str) -> Result<String, HerdrError> {
+        self.record(Call::Split { pane: pane.to_string(), direction });
         let mut s = self.state();
-        s.calls.push(Call::Split { pane: pane.to_string(), direction });
         s.cwds.push(("split".to_string(), cwd.to_string()));
         Ok(s.pane())
     }
 
     fn rename_pane(&self, pane: &str, label: &str) -> Result<(), HerdrError> {
-        self.state().calls.push(Call::Rename { pane: pane.to_string(), label: label.to_string() });
+        self.record(Call::Rename { pane: pane.to_string(), label: label.to_string() });
         Ok(())
     }
 
     fn start_agent(&self, name: &str, pane: &str, kind: &str, args: &[String]) -> Result<bool, HerdrError> {
+        self.record(Call::Start { name: name.to_string(), pane: pane.to_string(), args: args.to_vec() });
         let mut s = self.state();
-        s.calls.push(Call::Start { name: name.to_string(), pane: pane.to_string(), args: args.to_vec() });
         s.kinds.push((name.to_string(), kind.to_string()));
         let session = resumed_session(kind, args).unwrap_or_else(|| format!("session-{}", s.calls.len()));
         if s.lost_sessions.contains(&session) {
@@ -170,9 +232,16 @@ impl Herdr for FakeHerdr {
     }
 
     fn prompt(&self, name: &str, text: &str) -> Result<(), HerdrError> {
+        self.record(Call::Prompt { name: name.to_string() });
+        // Played with the fake's state released, as wait_with is.
+        let prompt_with = self.state().prompt_with.take();
+        if let Some(mut prompt) = prompt_with {
+            let sent = prompt(name, text);
+            self.state().prompt_with = Some(prompt);
+            sent?;
+        }
         let (mut turn, run) = {
             let mut s = self.state();
-            s.calls.push(Call::Prompt { name: name.to_string() });
             s.prompts.push((name.to_string(), text.to_string()));
             if let Some(n) = s.dropped.get_mut(role(name)).filter(|n| **n > 0) {
                 *n -= 1;
@@ -188,25 +257,23 @@ impl Herdr for FakeHerdr {
         let run = saved.map_or(run, |text| RunState::from_text(&text).expect("the run's state.json reads"));
         // Played with the fake's state released, so that a turn may script the fake itself.
         let status = turn(text, &run, &self.host);
-        self.state().statuses.insert(name.to_string(), status);
+        let mut s = self.state();
+        if s.interrupt.as_ref().is_some_and(Interrupt::is_raised) {
+            return Err(HerdrError::Failed(OrchestratorError(format!("herdr agent prompt {name}: interrupted"))));
+        }
+        s.statuses.insert(name.to_string(), status);
         Ok(())
     }
 
     fn wait(&self, name: &str, timeout_ms: Option<u64>, until: &[&str]) -> Result<String, HerdrError> {
-        let mut s = self.state();
-        if until.contains(&"working") {
-            // A taken prompt had the agent working, whatever it shows now.
-            s.deliveries.push((name.to_string(), timeout_ms));
-            if !s.statuses.contains_key(name) {
-                return Err(HerdrError::new("agent_not_found", format!("agent target {name} not found")));
-            }
-            if !s.taken.get(name).copied().unwrap_or(false) {
-                return Err(HerdrError::new("timeout", format!("agent {name} did not reach {until:?}")));
-            }
-            return Ok("working".to_string());
+        // Played with the fake's state released, so that the test's wait may script the fake itself.
+        let wait_with = self.state().wait_with.take();
+        if let Some(mut wait) = wait_with {
+            let answer = wait(name, timeout_ms, until);
+            self.state().wait_with = Some(wait);
+            return answer;
         }
-        s.waits.push(until.iter().map(|u| u.to_string()).collect());
-        Ok("done".to_string())
+        self.own_wait(name, timeout_ms, until)
     }
 
     fn agent(&self, name: &str) -> Result<Option<Agent>, HerdrError> {
@@ -223,13 +290,16 @@ impl Herdr for FakeHerdr {
     }
 
     fn focus(&self, name: &str) -> Result<(), HerdrError> {
-        self.state().calls.push(Call::Focus { name: name.to_string() });
+        self.record(Call::Focus { name: name.to_string() });
         Ok(())
     }
 
     fn close_workspace(&self, workspace: &str) -> Result<(), HerdrError> {
+        self.record(Call::Close { workspace: workspace.to_string() });
         let mut s = self.state();
-        s.calls.push(Call::Close { workspace: workspace.to_string() });
+        if let Some(e) = s.close_error.clone() {
+            return Err(e);
+        }
         s.workspaces.remove(workspace);
         Ok(())
     }

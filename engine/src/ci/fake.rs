@@ -31,12 +31,12 @@ pub(crate) fn credentials() -> Map<String> {
 
 /// JOB on fake, with credentials(): Python's ci_for.
 pub(crate) fn jenkins_on(fake: &Arc<FakeJenkins>) -> Jenkins {
-    Jenkins::new(
-        JOB,
-        &credentials(),
-        "/home/u/.config/ai-agents-orchestrator/ci.env",
-        Arc::clone(fake) as Arc<dyn Http>,
-    )
+    jenkins_with(fake, &credentials())
+}
+
+/// JOB on fake, with these credentials of CI_ENV, by name: Python's ci_for with env.
+pub(crate) fn jenkins_with(fake: &Arc<FakeJenkins>, credentials: &Map<String>) -> Jenkins {
+    Jenkins::new(JOB, credentials, "/home/u/.config/ai-agents-orchestrator/ci.env", Arc::clone(fake) as Arc<dyn Http>)
 }
 
 /// What one build does: Python's outcome().
@@ -134,6 +134,13 @@ pub(crate) struct FakeJenkinsState {
     pub job_gone: bool,
     /// Whether Jenkins forgot its queue items.
     pub forgotten: bool,
+    /// Whether Jenkins cancelled each queue item: it answers `{"cancelled": true}` for it.
+    pub cancelled: bool,
+    /// The text of each archived quality.md served, in order.
+    pub quality_reads: Vec<String>,
+    /// What the k-th read of an archived quality.md, from 1, is answered with instead of the file, by k: a copy that
+    /// archiveArtifacts has not finished.
+    pub quality_replies: BTreeMap<usize, String>,
     pub builds: BTreeMap<i64, Build>,
     pub queue: BTreeMap<i64, Waiting>,
     /// The number of the newest build.
@@ -166,6 +173,9 @@ impl FakeJenkins {
                 fail: Vec::new(),
                 job_gone: false,
                 forgotten: false,
+                cancelled: false,
+                quality_reads: Vec::new(),
+                quality_replies: BTreeMap::new(),
                 builds: BTreeMap::new(),
                 queue: BTreeMap::new(),
                 number: 40,
@@ -206,6 +216,9 @@ impl FakeJenkinsState {
             let Some(waiting) = self.queue.get_mut(&item).filter(|_| !self.forgotten) else {
                 return ("queue".to_string(), Answer::Status(404));
             };
+            if self.cancelled {
+                return json("queue", object(&[("cancelled", true.into())]));
+            }
             if waiting.left > 0 {
                 waiting.left -= 1;
                 return json("queue", object(&[("why", "Waiting for next available executor".into())]));
@@ -272,7 +285,10 @@ impl FakeJenkinsState {
             }
             "artifact/quality.md" => match &build.outcome.quality {
                 Some(quality) if build.left <= build.outcome.after_gate => {
-                    ("quality".to_string(), Answer::Body(quality.clone(), None))
+                    let quality = quality.clone();
+                    self.quality_reads.push(quality.clone());
+                    let reply = self.quality_replies.get(&self.quality_reads.len()).cloned();
+                    ("quality".to_string(), Answer::Body(reply.unwrap_or(quality), None))
                 }
                 _ => ("quality".to_string(), Answer::Status(404)),
             },

@@ -6,9 +6,19 @@ edition = "2021"
 publish = false
 
 [dependencies]
-# Process groups and signals, and the user's id, without unsafe code: a Host command's group is killed when it runs out
-# of time (host/process.rs).
-nix = { version = "0.31", default-features = false, features = ["signal", "user"] }
+# The command line (crate::cli): its subcommands, flags and usage errors, by the builder API, which can lay out a flag
+# per role and share groups of flags between subcommands as argparse's parents do. 4.6.7 is from 2026-09-14.
+clap = { version = "4.6.7", default-features = false, features = ["std", "help", "usage", "error-context", "string"] }
+# The machine's local time, as Python's time.strftime and a naive datetime's timestamp() read it (py/datetime.rs): its
+# zone from TZ, else /etc/localtime, else UTC, and a zone's rules from /usr/share/zoneinfo, with no database of its
+# own. 0.2.38 is from 2026-10-06; ui/src-tauri's crates had it in Cargo.lock already. Approved by the user for ticket
+# 08, 2026-10-29.
+jiff = { version = "0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
+# Process groups and signals, the user's id, the machine's name and its monotonic clock, through nix's safe API: a Host
+# command's group is killed when it runs out of time or at a Ctrl-C, a SIGTERM or a SIGHUP (host/process.rs), which a
+# thread waits for and the program ends by (interrupt.rs), a run's owner record names its host and pid (runs.rs), and a
+# run's deadlines are kept on the clock Python's time.monotonic reads (workflow/system.rs).
+nix = { version = "0.31", default-features = false, features = ["hostname", "signal", "time", "user"] }
 serde = "1"
 # float_roundtrip: a float reads as the nearest f64, as Python reads it, so that state.json writes back as it was.
 serde_json = { version = "1", features = ["float_roundtrip"] }
@@ -30,6 +40,17 @@ toml = { version = "1", default-features = false, features = ["parse", "preserve
 [dev-dependencies]
 # The local HTTP server the tests of http.rs and ci.rs answer requests from.
 tiny_http = "0.12"
+
+# The orchestrator program: crate::cli::main, after the Ctrl-C's signal thread is started.
+[[bin]]
+name = "orchestrator"
+path = "src/main.rs"
+
+# The engine's SIGINT, SIGTERM and SIGHUP, in processes of its own, which need a main of their own (the test's
+# module doc).
+[[test]]
+name = "signals"
+harness = false
 
 [lints]
 workspace = true

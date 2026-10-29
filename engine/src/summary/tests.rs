@@ -1,6 +1,6 @@
 use super::*;
 use crate::pipeline::DEFAULT_WORKFLOW;
-use crate::test_support::{helper_cases, oracle, unhex};
+use crate::test_support::{helper_cases, oracle, unhex, GOLDEN_SUMMARY};
 use crate::workflow_file::saved_pipeline;
 
 #[test]
@@ -40,12 +40,12 @@ fn times_are_written_and_read_as_python_does() {
     }
     assert_eq!(epoch_seconds("2026-10-03T06:00:00+02:00"), Ok(1_791_000_000));
     assert_eq!(epoch_seconds("2026-10-03T04:00:00.999Z"), Ok(1_791_000_000));
-    assert_eq!(epoch_seconds("2026-10-03 04:00"), Ok(1_791_000_000));
-    assert_eq!(epoch_seconds("2026-10-03"), Ok(1_790_985_600));
+    // Each with an offset: a time without one is the machine's local time (crate::py::datetime's tests).
+    assert_eq!(epoch_seconds("2026-10-03 04:00Z"), Ok(1_791_000_000));
     assert_eq!(epoch_seconds("2026-10-03T04:00:00-0130"), Ok(1_791_005_400));
     // Midnight as hour 24, and any one character between the date and the time, as fromisoformat reads them.
-    assert_eq!(epoch_seconds("2026-10-03T24:00:00"), Ok(1_791_072_000));
-    assert_eq!(epoch_seconds("2026-10-03X04:00"), Ok(1_791_000_000));
+    assert_eq!(epoch_seconds("2026-10-03T24:00:00Z"), Ok(1_791_072_000));
+    assert_eq!(epoch_seconds("2026-10-03X04:00Z"), Ok(1_791_000_000));
     // int() of a time before the epoch with a fraction rounds toward it.
     assert_eq!(epoch_seconds("1969-12-31T23:59:59.5Z"), Ok(0));
     for bad in [
@@ -80,40 +80,6 @@ fn a_pipe_in_a_cell_does_not_split_it() {
     let table = turns_table(&[turn("build", "a|b.md", Some(0), Some(5), |t| t.insert("model", Json::from("x|y")))]);
     assert!(table.ends_with("| build | build | 1 | claude | x\\|y | 2026-10-03 04:00:00 | 5s | a\\|b.md |"), "{table}");
 }
-
-const GOLDEN_SUMMARY: &str = "\
-# Run 20260929-120000-a1b2c3
-
-- **Workflow:** default
-- **Outcome:** APPROVE
-- **Pull request:** https://github.com/o/r/pull/7
-- **Branch:** `orchestrator/add-a-token-bucket-rate-limiter-a1b2c3`
-- **Wall time:** 35m 00s, from the first turn's start to 2026-10-03T04:35:00+00:00
-
-## Task
-
-add a rate limiter
-
-## Roles
-
-| role | harness | model |
-| --- | --- | --- |
-| Spec Collector (spec) | claude | default |
-| Builder (build) | codex | default |
-| Reviewer (review) | claude | opus |
-
-## Turns
-
-| step | role | round | harness | model | start (UTC) | duration | file |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| spec (human-paced) | spec | 0 | claude | default | 2026-10-03 04:00:00 | 10m 00s | spec.md |
-| build | build | 1 | codex | default | 2026-10-03 04:10:00 | 20m 00s | build-1.md |
-| review | review | 1 | claude | opus | 2026-10-03 04:30:00 | 5m 00s | review-1.md |
-
-## Rounds
-
-- Round 1: review APPROVE
-";
 
 fn approved_run() -> RunState {
     let mut s = RunState::new("20260929-120000-a1b2c3", "add a rate limiter", "/proj");

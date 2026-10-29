@@ -30,7 +30,8 @@ impl std::error::Error for PyPIError {}
 /// When a file was uploaded to PyPI.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Upload {
-    /// Seconds since the epoch, with their fraction; a time PyPI gave without an offset is taken as UTC.
+    /// Seconds since the epoch, with their fraction; a time PyPI gave without an offset is the machine's local time,
+    /// as Python's timestamp() takes it (crate::py::datetime::IsoTime::timestamp).
     pub at: f64,
     /// Its date, YYYY-MM-DD, in the offset PyPI gave the time in: UTC, as PyPI gives every time.
     pub date: String,
@@ -143,7 +144,7 @@ fn first_upload(files: &[&Json]) -> Result<Option<Upload>, String> {
 /// The upload at the ISO 8601 time iso, as datetime.fromisoformat reads it.
 fn upload_of(iso: &str) -> Result<Upload, String> {
     let time = IsoTime::parse(iso)?;
-    Ok(Upload { at: time.timestamp(), date: time.date() })
+    Ok(Upload { at: time.timestamp()?, date: time.date() })
 }
 
 /// The project's license, as PyPIProject::license says.

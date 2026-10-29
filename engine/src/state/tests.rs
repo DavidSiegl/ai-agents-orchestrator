@@ -161,3 +161,31 @@ fn the_runs_paths() {
     s.prompt_overrides.insert("LATER_NOTE", "x".to_string());
     assert!(s.prompts().unwrap_err().0.contains("replaces prompt LATER_NOTE"));
 }
+
+#[test]
+fn a_state_with_a_field_it_does_not_know_and_without_later_ones_reads_with_their_defaults() {
+    // TestResume.test_from_dict_ignores_unknown_keys_and_fills_new_ones; the unknown field is kept, as
+    // fields_it_does_not_know_are_kept_and_written_back says.
+    let text = r#"{"run_id": "r-abc", "task": "t", "cwd": "/p", "later_field": 1,
+        "agents": {"spec": {"name": "spec-abc", "pane": "w9:p1"}}}"#;
+    let state = RunState::from_text(text).unwrap();
+    assert_eq!((state.root_pane.as_str(), state.prompted, state.owner), ("w9:p1", None, None));
+    assert_eq!(state.max_rounds, crate::constants::DEFAULT_MAX_ROUNDS);
+}
+
+#[test]
+fn a_state_saved_before_the_gate_has_none() {
+    // TestQualityCLI.test_state_saved_before_the_gate_has_none, on a review saved in round 1: its one case that is
+    // RunState's. Its others are the CLI's (test_flag_checks, test_gate_reaches_the_workflow,
+    // test_list_shows_the_quality_phase: rust-engine ticket 09) and resumable_state's
+    // (test_resume_limit_against_the_saved_quality_round, test_resume_limit_needs_the_gate: cli/start/tests.rs).
+    let mut state = RunState::new("20260929-120000-a1b2c3", "add a rate limiter", "/proj");
+    (state.phase, state.round) = ("review".into(), 1);
+    let mut saved = state.to_json().as_object().unwrap().clone();
+    for key in ["quality_job", "max_quality_rounds", "quality_round", "ci"] {
+        assert!(saved.remove(key).is_some(), "{key}");
+    }
+    let state = RunState::from_saved(&saved).unwrap();
+    assert_eq!((state.quality_job.as_deref(), state.quality_round, state.ci.is_empty()), (None, 0, true));
+    assert_eq!(state.last_report_path(1), state.build_path(1));
+}

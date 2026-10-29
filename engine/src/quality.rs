@@ -55,6 +55,15 @@ pub fn parse_gate(quality: &str) -> Option<&'static str> {
     first_line_word(quality, "GATE", &[QUALITY_OK, QUALITY_ERROR, QUALITY_BUILD_FAILED, QUALITY_LEAK])
 }
 
+/// The quality file with line as a paragraph of its own right after its gate line, the first non-blank one; after
+/// its last line when it has none.
+pub fn under_gate_line(quality: &str, line: &str) -> String {
+    let mut lines: Vec<&str> = quality.split('\n').collect();
+    let at = lines.iter().position(|x| !strip(x).is_empty()).unwrap_or(lines.len() - 1);
+    lines.splice(at + 1..at + 1, ["", line]);
+    lines.join("\n")
+}
+
 /// A secret gitleaks found in a commit a push would publish, or a `gitleaks:allow` comment the push would add. It
 /// holds where the secret is, never the secret: nothing built from a Leak can carry it into a log, a prompt, a pull
 /// request or state.json.

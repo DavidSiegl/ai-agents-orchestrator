@@ -1,5 +1,12 @@
-//! What the engine needs of Python's datetime: the time an ISO 8601 string names, as datetime.fromisoformat reads it
-//! and timestamp() and strftime's date give it.
+//! What the engine needs of Python's datetime and time: the time an ISO 8601 string names, as datetime.fromisoformat
+//! reads it and timestamp() and strftime's date give it, and a time as time.strftime writes it in the machine's zone.
+//!
+//! The machine's zone is jiff's TimeZone::system(), which reads it as the C library does for Python: the TZ variable
+//! (a zone's name, a file or a POSIX rule; empty is UTC), else /etc/localtime, a zone's rules coming from
+//! /usr/share/zoneinfo; and UTC where neither names one that can be read, as glibc takes it.
+
+use jiff::tz::TimeZone;
+use jiff::Timestamp;
 
 use super::text::repr;
 
@@ -25,10 +32,26 @@ impl IsoTime {
         fromisoformat(iso).map(|(local, offset)| IsoTime { local, offset })
     }
 
-    /// Seconds since the epoch, with their fraction, as `timestamp()` gives them; a time without an offset is taken
-    /// as UTC, where Python takes it as the machine's local time.
-    pub fn timestamp(self) -> f64 {
-        seconds_of_micros(self.local - self.offset.unwrap_or(0))
+    /// Seconds since the epoch, with their fraction, as `timestamp()` gives them: a time without an offset is the
+    /// machine's local time (the module's doc says how its zone is found). Errors: a time without an offset within a
+    /// day of the years 1 to 9999's ends, which CPython 3.14's timestamp() refuses, as its message says.
+    pub fn timestamp(self) -> Result<f64, String> {
+        // The machine's zone is read only for a time that needs it; UTC stands in for one that has its offset.
+        let zone = if self.offset.is_some() { TimeZone::UTC } else { TimeZone::system() };
+        self.timestamp_in(&zone)
+    }
+
+    /// timestamp(), a time without an offset being a time in zone; errors as its.
+    fn timestamp_in(self, zone: &TimeZone) -> Result<f64, String> {
+        match self.offset {
+            Some(offset) => Ok(seconds_of_micros(self.local - offset)),
+            None => {
+                // As CPython's datetime_timestamp adds them: whole seconds, then the microseconds as a fraction.
+                let (seconds, micros) = (self.local.div_euclid(1_000_000), self.local.rem_euclid(1_000_000));
+                // Years 1 to 10000 (hour 24 of 9999-12-31) are far inside an i64 of seconds.
+                Ok(local_to_seconds(seconds as i64, zone)? as f64 + micros as f64 / 1e6)
+            }
+        }
     }
 
     /// Its date as written, in its own offset, as `f"{time:%Y-%m-%d}"` writes it: 2026-10-29 for
@@ -39,10 +62,73 @@ impl IsoTime {
     }
 }
 
+/// The seconds since the epoch at which zone's clocks show the time shown, written as seconds since 1970-01-01T00:00
+/// of its date and time, solved as CPython's local_to_seconds solves it for fold 0 (Modules/_datetimemodule.c, 3.14):
+/// at a time the clocks show twice, the first; at one they skip, the time the offset before the change gives (PEP
+/// 495). Errors: a time whose solving reaches a year beyond 1 to 9999, which CPython 3.14 refuses, as its message
+/// says.
+fn local_to_seconds(shown: i64, zone: &TimeZone) -> Result<i64, String> {
+    /// CPython's max_fold_seconds: the farthest apart two times its clocks show alike can be.
+    const MAX_FOLD_SECONDS: i64 = 24 * 3600;
+    // What zone's clocks show at u, as CPython's local() gives it.
+    let local = |u: i64| -> Result<i64, String> {
+        // jiff holds no time after 9999-12-30T22:00Z, which CPython's local() reaches for a time near the end of 9999;
+        // the offset there is taken as the one at that bound, which holds unless a zone's rule changes its clocks in
+        // the last 26 hours of 9999, as no tzdb zone does.
+        let at = Timestamp::from_second(u.clamp(Timestamp::MIN.as_second(), Timestamp::MAX.as_second()))
+            .map_err(|e| e.to_string())?;
+        let lt = u + i64::from(zone.to_offset(at).seconds());
+        let (year, _, _) = civil_from_days(lt.div_euclid(86_400));
+        if (1..=9999).contains(&year) {
+            Ok(lt)
+        } else {
+            Err(format!("year must be in 1..9999, not {year}"))
+        }
+    };
+    let t = shown;
+    let a = local(t)? - t;
+    let u1 = t - a;
+    let t1 = local(u1)?;
+    let b = if t1 == t {
+        // One solution; an earlier one is the one fold 0 wants, if there is one.
+        let u2 = u1 - MAX_FOLD_SECONDS;
+        let b = local(u2)? - u2;
+        if a == b {
+            return Ok(u1);
+        }
+        b
+    } else {
+        t1 - u1
+    };
+    let u2 = t - b;
+    if local(u2)? == t {
+        return Ok(u2);
+    }
+    if t1 == t {
+        return Ok(u1);
+    }
+    // Neither offset solves it: t is in a gap.
+    Ok(u1.max(u2))
+}
+
+/// The time seconds since the epoch name, as `time.strftime(format, time.localtime(seconds))` writes it in the
+/// machine's zone (the module's doc says how it is found), for a format of %Y, %m, %d, %H, %M, %S and other text and
+/// a year from 1000 to 9999: 20261029-142233 for `%Y%m%d-%H%M%S`. Errors: seconds is beyond jiff's years -9999 to
+/// 9999, or format holds a conversion jiff does not know, as jiff's message says.
+pub fn strftime_local(format: &str, seconds: i64) -> Result<String, String> {
+    strftime_in(format, seconds, &TimeZone::system())
+}
+
+/// strftime_local in zone.
+fn strftime_in(format: &str, seconds: i64, zone: &TimeZone) -> Result<String, String> {
+    let at = Timestamp::from_second(seconds).map_err(|e| e.to_string())?;
+    jiff::fmt::strtime::format(format, zone.to_datetime(at)).map_err(|e| e.to_string())
+}
+
 /// `IsoTime::parse(iso)?.timestamp()`: the seconds since the epoch of the time iso names, as
-/// `datetime.fromisoformat(iso).timestamp()` gives them. Errors: as IsoTime::parse's.
+/// `datetime.fromisoformat(iso).timestamp()` gives them. Errors: as IsoTime::parse's and IsoTime::timestamp's.
 pub fn fromisoformat_timestamp(iso: &str) -> Result<f64, String> {
-    IsoTime::parse(iso).map(IsoTime::timestamp)
+    IsoTime::parse(iso)?.timestamp()
 }
 
 /// The time iso names, as CPython's datetime_fromisoformat reads it (Modules/_datetimemodule.c, 3.14): microseconds

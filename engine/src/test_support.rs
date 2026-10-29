@@ -83,6 +83,55 @@ impl Drop for TempDir {
     }
 }
 
+/// What starts a command with SIGINT at its default, so that a shell can trap it: one that the tests' process ignores,
+/// as Jenkins's does, stays ignored in what it starts, as in Python, and a shell cannot trap a signal ignored on entry.
+pub const HEARS_SIGINT: [&str; 2] = ["env", "--default-signal=INT"];
+
+/// A shell script for a program the engine runs, such as a fake herdr, that runs body with SIGINT at its default,
+/// whatever the tests' process does with it: it starts itself again through HEARS_SIGINT, once, with its arguments.
+pub fn hearing_sigint(body: &str) -> String {
+    format!(
+        "#!/bin/sh\n[ -n \"$HEARS_SIGINT\" ] || {{ HEARS_SIGINT=1; export HEARS_SIGINT; exec {} \"$0\" \"$@\"; }}\n{body}",
+        HEARS_SIGINT.join(" ")
+    )
+}
+
+/// How long the Ctrl-C tests wait for a command to get somewhere or a process to end, before they fail.
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Raise interrupt, from a thread of its own, once path exists: the human's Ctrl-C while a command that writes path
+/// as it starts runs. The thread panics, failing the join, when path is not written within PATIENCE.
+pub fn raise_once_written(path: &str, interrupt: &crate::interrupt::Interrupt) -> std::thread::JoinHandle<()> {
+    let (path, interrupt) = (path.to_string(), interrupt.clone());
+    std::thread::spawn(move || {
+        assert!(eventually(|| std::fs::metadata(&path).is_ok_and(|m| m.len() > 0)), "{path} was not written");
+        interrupt.raise();
+    })
+}
+
+/// Whether the process whose pid path holds, as `echo $$` wrote it, has ended (gone, or a zombie no one reaps yet)
+/// within PATIENCE: on Linux, as /proc shows it.
+pub fn ended(path: &str) -> bool {
+    let pid = std::fs::read_to_string(path).expect("a pid file").trim().to_string();
+    eventually(|| match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        // The state follows the parenthesized command name.
+        Ok(stat) => stat.rsplit_once(") ").is_some_and(|(_, rest)| rest.starts_with('Z')),
+        Err(_) => true,
+    })
+}
+
+/// Whether done holds within PATIENCE, asked every 10 ms.
+pub fn eventually(mut done: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while std::time::Instant::now() < deadline {
+        if done() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    done()
+}
+
 /// The repository's examples/workflows/.
 pub const EXAMPLES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../examples/workflows");
 
@@ -290,4 +339,59 @@ pub fn helper_cases() -> Vec<HelperCase> {
         out.push(HelperCase { expected: case.clone(), saved, state, spec, report, review, evidence, now });
     }
     out
+}
+
+/// The summary of the default workflow approved in round 1, as TestTurnTimings has it: crate::summary's tests
+/// make it of a state, the Workflow's of a whole run.
+pub const GOLDEN_SUMMARY: &str = "\
+# Run 20260929-120000-a1b2c3
+
+- **Workflow:** default
+- **Outcome:** APPROVE
+- **Pull request:** https://github.com/o/r/pull/7
+- **Branch:** `orchestrator/add-a-token-bucket-rate-limiter-a1b2c3`
+- **Wall time:** 35m 00s, from the first turn's start to 2026-10-03T04:35:00+00:00
+
+## Task
+
+add a rate limiter
+
+## Roles
+
+| role | harness | model |
+| --- | --- | --- |
+| Spec Collector (spec) | claude | default |
+| Builder (build) | codex | default |
+| Reviewer (review) | claude | opus |
+
+## Turns
+
+| step | role | round | harness | model | start (UTC) | duration | file |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| spec (human-paced) | spec | 0 | claude | default | 2026-10-03 04:00:00 | 10m 00s | spec.md |
+| build | build | 1 | codex | default | 2026-10-03 04:10:00 | 20m 00s | build-1.md |
+| review | review | 1 | claude | opus | 2026-10-03 04:30:00 | 5m 00s | review-1.md |
+
+## Rounds
+
+- Round 1: review APPROVE
+";
+
+/// The JSON object text holds, as a saved record reads; panics on text that is not one.
+pub fn object(text: &str) -> Map<crate::py::json::Json> {
+    match crate::py::json::Json::parse(text) {
+        Ok(crate::py::json::Json::Object(map)) => map,
+        other => panic!("not a JSON object: {other:?}"),
+    }
+}
+
+/// resumable_state for `resume a1b2c3` with flags over one run, saved as saved 10^4 s ago, in /proj, on host "here",
+/// whose pids are all dead: Python's resumable helpers.
+pub fn resumable(flags: &[&str], saved: &Map<crate::py::json::Json>) -> Result<crate::state::RunState, crate::error::OrchestratorError> {
+    let argv = ["resume", "a1b2c3"].iter().chain(flags).map(std::ffi::OsString::from);
+    let Ok(crate::cli::Command::Resume(args)) = crate::cli::parse_args(argv, &crate::env::ConfigDir::at("/nowhere")) else {
+        panic!("not a resume: {flags:?}")
+    };
+    let runs = [(10_000, crate::py::json::Json::Object(saved.clone()))];
+    crate::cli::resumable_state(&runs, &args, "/proj", "here", &|_| false).map(|(state, _)| state)
 }

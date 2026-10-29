@@ -86,9 +86,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 - **The Rust engine reads some input no run writes otherwise than the Python engine.** Each is a difference only for a
   file a human edited, or a case no test of the Python engine pins (rust-engine ticket 04, 2026-10-28): `state.json`
   with `NaN`, `Infinity` or an integer beyond 64 bits is refused, as serde_json reads it (`engine/src/py/json.rs`),
-  where Python reads it; a time without an offset is taken as UTC, where Python's `fromisoformat` takes it as local
-  time (every other time is read as CPython 3.14's `fromisoformat` reads it, `crate::py::datetime`, since ticket 06;
-  3.13, which a system `python3` may be and `packaging/build-binary.sh` builds the Linux binary with, refuses hour 24,
+  where Python reads it; a time is read as CPython 3.14's `fromisoformat` reads it (`crate::py::datetime`, since
+  ticket 06; one without an offset in the machine's zone since ticket 08's follow-ups, Fixed, "The Rust engine named a
+  new run by the time in UTC"; 3.13, which a system `python3` may be and `packaging/build-binary.sh` builds the Linux binary with, refuses hour 24,
   which 3.14 reads as the next day's midnight, and reads `T12.5`, `T12:00.5` and `T12:00:00.Z`, which 3.14 refuses
   (cross-review 92, F4); no harness or run writes either), and a turn whose start is not a time is left out of `summary.md` and `metrics.json`, where the Python engine
   fails (`epoch_seconds` and `turn_starts` in `engine/src/summary.rs`); a `state.json` field of another type than the
@@ -106,7 +106,16 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `AGENT_KINDS`, as a hand-edited `state.json` can name, is refused naming those there are (`crate::harness::harness`),
   where the Python engine fails on a KeyError; and an answer of herdr's that lacks what its command gives, or is not
   UTF-8, is a `bad_response` naming the command or a failure naming it (`engine/src/herdr.rs`), where Python fails on
-  a KeyError or a UnicodeDecodeError. Decided against unless a run is found that writes such input.
+  a KeyError or a UnicodeDecodeError. And from the Workflow's locks and proofs (rust-engine ticket 08, part 4,
+  2026-10-29): a `restored` or `proofs` record of `state.json` without a field the engines write, or with one of
+  another type, stops the run naming it (`Restored::read` in `engine/src/workflow/locks.rs`, `ProofRun::read` in
+  `engine/src/proofs.rs`), where Python fails on a KeyError or a TypeError, or, for a `restored` record without
+  `paths`, restores nothing, or, for a `proofs` record without `said`, reads it only where it needs `said` (no release
+  wrote one: v0.24.0, the first with proofs, writes `said` in every record, and only commits before it on main did
+  not; cross-review 98, F1); and a proof's output that is not UTF-8 is quoted with each such byte as U+FFFD
+  (`Workflow::run_proof`), where Python keeps it as a lone surrogate, which `state.json` holds as an escape and the
+  write of the review then fails on (a UnicodeEncodeError, uncaught).
+  Decided against unless a run is found that writes such input.
 - **Host tests and a Host need of the CLI's, left for rust-engine ticket 09.** `TestHostGit`'s `test_prune_on_real_git`
   and `test_close_on_real_git` and `TestHostPullRequest.test_closed_without_a_time` (`tests/test_orchestrator.py`)
   drive `prune_branches`, `close_run` and `pull_request_pending`, which the Rust engine has not ported, so ticket 05
@@ -119,30 +128,81 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 - **Harness tests left for rust-engine tickets 08 and 09.** Ticket 06 ported `launch_args`, `session_usage` and
   `turn_tokens` (`engine/src/harness/tests.rs`, `engine/src/summary/tests.rs`), but the Python cases that drive them
   through `Workflow`, `parse_args`, `new_state` or `resumable_state` wait for those (cross-review 92, F1: "As merged,
-  the ticket's verification is unmet and nothing tracks the gap"). For ticket 08, which ports `Workflow`: all of
-  `TestHarnesses`; of `TestHarnessFlags`, `test_role_agent_starts_that_role_in_its_harness`,
-  `test_resume_with_a_new_harness_relaunches_in_it`, `test_a_030_state_resumes_on_claude` and the Workflow half of
-  `test_run_dir_granted_in_worktree_runs_only`; of `TestRunMetrics`, `test_tokens_come_from_the_session_the_turn_ran_in`
-  and `test_a_turn_that_changed_sessions_has_unknown_tokens` (`Workflow._count_tokens`). For ticket 09, which ports
-  the CLI: `test_precedence`, `test_flags_reach_the_workflow`, `test_role_agent_for_a_role_the_workflow_lacks`,
-  `test_unknown_kinds_are_argparse_errors` and `test_resume_keeps_or_overrides_the_saved_harnesses`. Ported already:
-  `test_launch_args_leave_the_permission_table_alone`, the `launch_args` half of
-  `test_run_dir_granted_in_worktree_runs_only`, `test_turn_tokens_needs_a_known_window_and_a_harness_it_reads` (ticket
-  06) and `test_a_030_state_without_a_permission_mode` and `test_unreadable_agent_args` (ticket 04,
-  `engine/src/state/tests.rs` and states.json). Closes with tickets 08 and 09 porting each case named here.
-- **A Ctrl-C at the terminal does not reach the command the Rust engine's `Host` or herdr is running.** `ProcessHost`
-  starts each command in a process group of its own, so that a timeout kills the command with whatever it started
-  (`run_process` in `engine/src/host/process.rs`, rust-engine ticket 05, 2026-10-28), and `ProcessHerdr` runs the
-  herdr CLI the same way (`engine/src/herdr.rs`, ticket 06, where a timeout kills herdr's group, not herdr alone as
-  Python's `subprocess.run` does); the terminal sends SIGINT to its foreground group only, which holds the engine and
-  no longer the git, gh, gitleaks, ssh or herdr it waits on. In the Python engine every child is in the foreground
-  group and gets the SIGINT too, the desktop app's Stop (`killpg` with SIGINT) included. Until the Rust engine handles
-  SIGINT, which nothing does before ticket 08/09, it dies at once and leaves the command running to its end or its
-  timeout (300 s for a push or a scan, and none for `herdr agent wait` without `--timeout`, which `Herdr::wait` with
-  no time gives: cross-review 92, F2, "a Ctrl-C ... during an unbounded `wait(name, None, …)` won't reach `herdr
-  agent wait`"). Closes with the interrupt handling of rust-engine ticket 08/09 killing the running command's group
-  (its pid is its group's id; for herdr, that also ends the engine's wait for its output) before it releases the run,
-  and a test that interrupts a run waiting on a command and one waiting on herdr.
+  the ticket's verification is unmet and nothing tracks the gap"). Ticket 08's part 2 (2026-10-29) ported its
+  Workflow cases to `engine/src/workflow/tests/harnesses.rs` and `turn_timings.rs`: all of `TestHarnesses`;
+  `test_role_agent_starts_that_role_in_its_harness`, `test_resume_with_a_new_harness_relaunches_in_it` and
+  `test_a_030_state_resumes_on_claude`, each on the state `new_state` or `resumable_state` would give, built by hand;
+  `test_tokens_come_from_the_session_the_turn_ran_in` and `test_a_turn_that_changed_sessions_has_unknown_tokens`.
+  Part 3 (2026-10-29) ported the Workflow half of `test_run_dir_granted_in_worktree_runs_only`, with worktree runs.
+  Part 7 (2026-10-29), which ports `resumable_state` with resume's flags, ported their `resumable_state` halves
+  (`test_a_030_state_resumes_on_claude`'s 0.3.0 state resumed without flags, `test_resume_with_a_new_harness_relaunches_in_it`'s
+  `--agent pi`) and `test_resume_keeps_or_overrides_the_saved_harnesses`, in `harnesses.rs`. For ticket 09, which ports
+  the CLI: `test_precedence`, `test_flags_reach_the_workflow`, `test_role_agent_for_a_role_the_workflow_lacks` and
+  `test_unknown_kinds_are_argparse_errors`, which drive `parse_args`, `new_state` and `main` as a whole. Ported already: `test_launch_args_leave_the_permission_table_alone`,
+  the `launch_args` half of `test_run_dir_granted_in_worktree_runs_only`,
+  `test_turn_tokens_needs_a_known_window_and_a_harness_it_reads` (ticket 06) and
+  `test_a_030_state_without_a_permission_mode` and `test_unreadable_agent_args` (ticket 04, `engine/src/state/tests.rs`
+  and states.json). Closes with ticket 09 porting each case named here.
+- **The Rust engine's Ctrl-C, what is left.** Rust-engine ticket 08's part 6 (2026-10-29) has a SIGINT raise the
+  `Interrupt`, which stops the command the engine waits on (Fixed, "A Ctrl-C at the terminal does not reach the
+  command the Rust engine's `Host` or herdr is running"). Not closed: (1) the `orchestrator` binary's `main`
+  calls `by_signals` first (ticket 08's part 7, `engine/src/main.rs`), and `run` and `resume` turn a raised `Interrupt`
+  outside a Workflow (resolving the directory, reading the run, switching its gate) into the interrupted note and exit
+  status 130 (`crate::cli`, `stop`), as Python's KeyboardInterrupt anywhere does; the commands ticket 09 adds (`list`,
+  `show`, `prune`, `close`, `drain` between runs, the sweep before a run) must do the same through it, and `serve`
+  (ticket 10) has its own SIGINT and SIGTERM, which `by_signals` would take over; closes with those tickets. (2) A
+  Ctrl-C during a Jenkins or PyPI request (`crate::http`, ureq) waits for the request to end, up to its timeout, where
+  Python's KeyboardInterrupt stops `urlopen` at once: there is no process to stop, and ureq has no way to abandon a
+  request from another thread. The user accepted that wait for a Ctrl-C (2026-10-29, review 100). Since ticket 08's
+  follow-ups a SIGTERM or a SIGHUP waits so too (cross-review 102, F4: "a `kill <pid>` or a service manager's stop
+  during the quality gate's Jenkins polling or the dependency check's PyPI request waits up to the request
+  timeout"), where it ended the Python engine at once; a service manager that sends SIGKILL after a shorter grace
+  kills the engine with the run unreleased. Closes with a request the Interrupt can cut short (one whose reads are
+  given slices of the timeout, the Interrupt checked between them, or one run on a thread the Workflow stops waiting
+  for), or with the user's ruling that the wait is acceptable for SIGTERM and SIGHUP too. (3) Under macOS, `by_signals`
+  reads no `/proc/self/status` and takes the kernel to discard a signal that was ignored when the engine started, even
+  while blocked, as the BSD kernels do, and `run_process` gives
+  a command the whole 250 ms grace, nix having no `waitid` there; unchecked on a Mac. Closes with
+  `engine/tests/signals.rs`, which is Linux's (it reads `/proc` and starts the engine with GNU `env`), ported to macOS
+  and run on one. A process that left the command's group, as a daemon does, is not reached, as at
+  a timeout; that is no gap, as the terminal's Ctrl-C does not reach one in Python either. (4) On a Linux whose
+  `/proc/self/status` cannot be read, as in a container or sandbox without `/proc`, `ignored_signals` finds nothing
+  ignored, so `by_signals` waits for a signal the engine started with ignored and takes it, Linux queueing a blocked
+  signal whatever its disposition (cross-review 102, F2: "an engine under `nohup` in a container or sandbox without
+  /proc is hung up: the Interrupt is raised, the run released as interrupted", and `interrupt::exit`'s raise of the
+  still-ignored signal returns, so the program exits 129 by `std::process::exit`). Part 6 had the gap for SIGINT;
+  the follow-ups extend it to SIGTERM and SIGHUP. nix reads a signal's disposition only through `sigaction`, which
+  is `unsafe`. Closes with that query, the user's choice of a second `unsafe` block, or with refusing to start on a
+  Linux without `/proc`.
+- **The Rust engine's fromisoformat words some errors as CPython 3.13 does.** `IsoTime::parse`
+  (`engine/src/py/datetime.rs`, rust-engine ticket 06) says its errors are 3.14's, but gives 3.13's wording for a
+  year, month or day out of range and an offset of a day or more: `year 0 is out of range` where 3.14 says `year must
+  be in 1..9999, not 0`, `month must be in 1..12` (3.14 adds `, not 13`), `day is out of range for month` (3.14:
+  `day 29 must be in range 1..28 for month 2 in year 2026`), and the offset's message without 3.14's `, not
+  datetime.timedelta(...)`; 28 of the 3106 `fromisoformat` cases of `engine/tests/oracle/harness.json` differ so.
+  The oracle test compares only whether such a time is refused (found by cross-review 102's F3, 2026-10-29, when it
+  began comparing `timestamp()`'s own refusals by their message). Only the wording differs, and only for times no harness,
+  run or PyPI writes. Closes with the messages worded as 3.14's and the test comparing every message.
+- **The Rust engine's `run` does not prune earlier runs' branches yet.** Python's `main` runs `sweep_branches` before
+  a `run` that opens a pull request; the Rust `run` (rust-engine ticket 08, part 7) does not, since `prune_branches`
+  is the `prune` command's and ticket 09 ports both with `TestPrune` and `TestSweepOnRun`. No `run` parity scenario
+  shows it: none starts beside an earlier run with a pull request but `runs_listed_and_shown`, ticket 09's. Closes with
+  ticket 09.
+- **Local times the Rust engine has yet to read, for rust-engine ticket 09.** Python reads a time in the machine's zone
+  in two places: `time.strftime` in `new_run_id`, and `datetime.fromisoformat(...).timestamp()` of a time without an
+  offset (`epoch_seconds`, `session_usage`, `_young`'s PyPI upload and `pull_request_pending`'s `closedAt`). All but
+  the last are ported and read as Python does (Fixed, "The Rust engine named a new run by the time in UTC");
+  `pull_request_pending` is `prune`'s and the sweep before a run's, and its `closedAt` is GitHub's, which carries a
+  `Z`. Closes with ticket 09 reading it through `crate::py::datetime::fromisoformat_timestamp`.
+- **The commands the Rust engine runs outlive an engine that is SIGKILLed.** Each command runs in a process group of
+  its own (rust-engine tickets 05, 06), so a SIGKILL of the engine, or of its group, ends the engine and leaves a
+  running `herdr agent wait`, `gh pr create` or push to finish unwatched, where the Python engine's children are in
+  its group and end with it when the group is killed. SIGINT, SIGTERM and SIGHUP now stop them (Fixed, "The commands
+  the Rust engine runs outlived an engine that got a SIGTERM or a SIGHUP"); a SIGKILL cannot be caught. The parity
+  harness's kill kills each process below the engine too (`Invocation.kill`), as "a crash or a lost machine" does;
+  before, `kill_in_publish` against the Rust binary got a pull request from the orphaned `gh`. Closes with the user's
+  ruling that this is acceptable, or with the command's group killed when the engine dies (Linux's
+  `PR_SET_PDEATHSIG`, set in `run_process`'s `pre_exec`, reaches only the command itself, not what it starts).
 - **The Rust engine talks to Jenkins and PyPI otherwise than urllib in a few cases.** Its transport is ureq
   (`HttpClient`, `engine/src/http.rs`, rust-engine ticket 07, 2026-10-28), which differs from `urlopen` where no test of
   the Python engine pins it: ureq reaches an http URL through a proxy with CONNECT, as it does an https one, where
@@ -168,7 +228,10 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   queue item, a build's result, a list of builds or a test report is a `CIError` that may pass, where the Python engine
   fails with an `AttributeError`, and a queue item's `executable.number` that is not an integer is one too, where Python
   keeps it; a manifest is read as TOML 1.1, which tomllib before Python 3.15 refuses in part, and why one is not TOML is
-  the toml crate's words with tomllib's `(at line L, column C)`. Closes, for the proxy, with a transport that sends an
+  the toml crate's words with tomllib's `(at line L, column C)`; and rustls refuses a server certificate that is a
+  CA's own, as a self-signed one made by `openssl req -x509` with its default extensions is (`CaUsedAsEndEntity`),
+  where OpenSSL accepts it when it is trusted, so the parity harness's PyPI has a leaf under a CA of its own (found by
+  ticket 08's part 7, 2026-10-29). Closes, for the proxy, with a transport that sends an
   http request through a proxy as urllib does, or with `no_proxy` naming Jenkins; the rest decided against unless a
   setup is found that needs it. Decided against (2026-10-28, ticket 07, design-it-twice): `CI` and `PyPI` as traits of
   their own with in-memory fakes. The engine's tests would then word every URL and error twice, in the code and in the
@@ -176,16 +239,15 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   port only by re-deriving them; with the seam at `Http`, as Python's at `urlopen`, `FakeJenkins` and `FakePyPI` play
   the servers and every line of `Jenkins` and `PyPI` runs in those tests. The user kept the `Http` seam and amended the
   spec's Lane to say so (2026-10-28, cross-review 93, F1), and issue 08 says which seam it is given.
-- **Checks and Jenkins calls whose tests need the Workflow or the CLI, left for rust-engine tickets 08 and 09.**
-  Ticket 07 ported `TestOrchestratorChecks` on `judge_run` of the build's quality file, not through a quality round:
-  `test_a_build_that_failed_before_the_gate_is_not_checked`, `test_without_the_quality_gate_none_of_this_runs`, the
-  round's spec being its contract step's file or its task, and the heartbeat kept between PyPI's requests by the
-  round's `in_time` (`_judged_by_orchestrator`, `_in_time`) are the Workflow's, and FakePyPI's clock and `events`
-  with them (`engine/src/pypi/fake.rs` has neither). `judged_in_quality`, `_build_trust`, `_judging_changes`,
+- **Jenkins calls whose tests need the CLI, left for rust-engine ticket 09.** Ticket 07 ported `TestOrchestratorChecks`
+  on `judge_run` of the build's quality file; its Workflow cases (`test_a_build_that_failed_before_the_gate_is_not_checked`,
+  `test_without_the_quality_gate_none_of_this_runs`, `test_the_spec_is_the_runs_task_without_a_contract_step` and the
+  heartbeat kept between PyPI's requests, `test_slow_pypi_keeps_the_run_alive_and_stops_at_the_rounds_deadline`) ticket
+  08's part 5 ported through its quality round (`engine/src/workflow/tests/orchestrator_checks.rs`, 2026-10-29), on
+  FakePyPI's clock and `events`. `judged_in_quality`, `_build_trust`, `_judging_changes`,
   `JUDGING_FILES` and `JUDGED_DESCRIPTION`, with `TestJudgedInQuality`, are the `judged-in-quality` command's; the
-  Rust `Jenkins::retained_builds` they read is ported. Issues 08 and 09 name them (2026-10-28). Closes with ticket 08
-  porting those cases through its quality round on `FakeJenkins` and `FakePyPI`, and ticket 09 porting the command and
-  its tests.
+  Rust `Jenkins::retained_builds` they read is ported. Issue 09 names them (2026-10-28). Closes with ticket 09 porting
+  the command and its tests.
 - **The contract test leaves its Jenkins build running when it fails.** `tests/contract/test_jenkins.py` triggers one
   quality build and nothing stops it on a failure or a Ctrl-C, so the build holds an executor until it ends, up to
   the 22 minutes build #59 took. Raised by cross-review 73 (F11, 2026-10-27): "a Ctrl-C during the queue wait leaves
@@ -602,6 +664,150 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Fixed
 
+- **The Rust engine's Workflow is ported in parts, and its Python tests with them.** Rust-engine ticket 08 lands in
+  seven parts (its issue's Plan): part 1 (`engine/src/workflow.rs`, 2026-10-29) runs a workflow in the project's
+  checkout, its turns, verdict retries, pull request, saves, heartbeat and takeover, and ports `TestWorkflow`,
+  `TestPullRequest`, `TestUpToDateBase`, `TestHeartbeat`, `TestRunHealth`'s `run_health` cases (its two `print_runs` cases are ticket 09's, with `list`), `TestPidAlive` and
+  `TestOneRunPerCheckout` but its worktree cases (which part 3 ported) and its resume --force
+  cases (`test_force_takes_over_the_run_itself`, `test_force_does_not_override_another_live_run`, which go through
+  `resumable_state`, with the minimal `run`/`resume`). Part 2 (2026-10-29, tests only: the cases found nothing
+  missing in part 1's Workflow) ports `TestResume`, `TestPromptDelivery`, `TestResumePullRequest`, `TestTurnTimings`,
+  `TestHarnesses`, the Workflow cases of `TestHarnessFlags` and `TestRunMetrics`, and `TestWorkflowFileAgents`'
+  `test_saved_with_the_run` (`engine/src/workflow/tests/`), but for: the cases of a gated run, which part 5 ported
+  (`TestResumePullRequest.test_resume_on_another_branch_fails_before_any_turn`'s quality phase, and there its check
+  that Jenkins was asked nothing in the other phases; `TestTurnTimings.test_quality_rounds_and_answers_have_records_of_their_own`
+  and `test_a_resumed_analysis_keeps_its_start`; `TestRunMetrics.test_a_gated_run_of_two_rounds_records_its_turns_and_quality_rounds`
+  and `test_a_resumed_quality_round_is_recorded_once`); `TestTurnTimings.test_a_seeded_spec_has_no_record`, which part 3 ported;
+  TestResume's two `RunState.from_dict` cases, which are `crate::state`'s (`engine/src/state/tests.rs`); and the
+  CLI's, for ticket 09 (`TestResumePullRequest.test_cli_exits_1_on_another_branch` and
+  `test_no_pr_is_saved_with_the_run`, `TestRunMetrics.test_the_metrics_command_prints_a_line_per_run_that_is_done`,
+  `TestWorkflowFileAgents.test_workflows_prints_it`). Part 3 (2026-10-29) adds blocked reports (`turn`'s blocks,
+  `block`, `unblocked`, `finish_block`, `block_answer` in `engine/src/workflow/turn.rs`), worktree runs
+  (`open_worktree`, `check_worktree`, the worktree halves of `switch_to_branch` and `leave_work_dir`, `Host::has_origin`)
+  and a seeded spec (`RunSettings::spec`, `seed_spec`, `crate::spec_file`'s `SpecFile` and `read_spec_file`,
+  `Pipeline::seeded_start`), and ports `TestBlocked`, `TestBlockedResume`, `TestWorktreeRun`, `TestOneRunPerCheckout`'s
+  worktree cases, `TestSeededSpec`, `TestOtherWorkflows`, `TestWorkflowWithoutAVerdict`, `TestSavedBeforeWorkflows`,
+  `TestDefaultWorkflowPrompts`, `TestWorkflowPromptsGolden`, `TestSpecBuildReviewExample` and the Workflow-driven cases
+  of `TestWorkflowDefinitions`, `TestWorkflowFiles` and `TestPromptFiles`, but for: the cases of a gated run, which part
+  5 ported (`TestBlocked.test_a_blocked_quality_answer_waits_then_goes_back_to_the_quality_round` and
+  `test_the_note_is_in_every_prompt_of_the_steps_that_can_block_only`; `TestOtherWorkflows.test_gated_step_with_another_name`,
+  `test_fresh_gated_step_answering_a_quality_round` and `test_resumed_gated_step_checks_the_credentials_first`;
+  `TestWorkflowWithoutAVerdict.test_a_gate_that_still_fails_is_not_finished`, `test_a_missing_last_quality_file_fails_the_gate`
+  and `test_a_gate_that_passes_is_finished`; `TestSavedBeforeWorkflows.test_quality_resumes_under_the_default`;
+  `TestDefaultWorkflowPrompts.test_gate_passes_after_a_fix_then_runs_out`, `test_gate_runs_out_then_passes`,
+  `test_fresh_builder_in_round_two_after_quality_rounds`, `test_fresh_builder_answering_a_quality_round_in_round_two` and
+  `test_fresh_reviewer_in_round_two_with_the_gate`; `TestWorkflowDefinitions.test_the_gate_needs_a_gated_step`;
+  `TestPromptFiles.test_a_note_file_reaches_the_turn_that_uses_it`); `resumable_state`'s, for part 7
+  (`TestWorkflowFiles.test_a_saved_definition_that_cannot_be_filled_in_stops_the_resume` and
+  `test_a_corrupt_saved_definition_is_an_error`, `TestPromptFiles.test_a_state_that_replaces_an_unknown_prompt`); and
+  the CLI's, for ticket 09 (`TestWorktreeRun.test_a_run_flag` and `test_flag_reaches_the_workflow`, the `print_runs` half
+  of `TestBlocked.test_the_wait_is_saved_and_listed`, `TestBlockedListing`, `TestSpecCLI` but for `read_spec_file`'s
+  cases, which `engine/src/spec_file/tests.rs` holds, the `role_models` half of
+  `TestOtherWorkflows.test_model_reaches_a_role_without_its_own_flag`,
+  `TestWorkflowWithoutAVerdict.test_a_failed_gate_exits_as_changes_requested` and `test_finished_exits_zero`,
+  `TestWorkflowFiles.test_list_reads_the_gated_step_from_the_saved_definition`, and `TestPromptFiles`' cases of main and
+  drain). Part 4 (2026-10-29) adds locked files (`hold_locks`, `locked_changes`, `locks_note` and `clean_up_locks`
+  in `engine/src/workflow/locks.rs`) and proofs (`judge_proofs`, `rerun_proofs`, `carried_proofs`, `run_proof` under
+  GNU `timeout` and the notes, in `engine/src/workflow/proof_runs.rs`, with `crate::proofs::ProofRun`), and ports
+  `TestLockedFiles`, `TestProofs` and `TestProofInAWorktree` (whose proof is a shell script that finds its repository
+  with git, where Python's is run by pytest, which the Rust tests do not have), but for the cases of a gated run, which
+  part 5 ported (`TestLockedFiles.test_the_gate_judges_the_restored_tests`,
+  `TestProofs.test_a_carried_proof_runs_again_after_the_rounds_last_quality_round_and_before_the_review`), and the
+  pipeline's and workflow file's, which ticket 04 ported. Part 5 (2026-10-29) adds the quality gate's rounds
+  (`judge_quality`, `stuck`, `quality_note`, `gate_passed`, `quality` to `clean_up_quality`, with `require_origin`,
+  `delete_ci_refs` and `delete_ci_ref`, in `engine/src/workflow/quality_rounds.rs`; `check_gate` and the credentials
+  check of `check_start`; `Collaborators::jenkins` and `pypi`; `crate::quality::under_gate_line`), and ports
+  `TestQualityGate`, `TestStuckQualityLoop`, `TestQualityResume`, `TestSecretScanWorkflow`, the Workflow cases of
+  `TestOrchestratorChecks` and `TestQualityCLI`'s `test_state_saved_before_the_gate_has_none`, with every gated case
+  the earlier parts left for it, on `FakeJenkins` (which gains `cancelled`, `quality_reads` and `quality_replies`) and
+  `FakePyPI` (which gains its clock, a `FakeTime`, and `events`); `TestQualityCLI`'s other cases are the CLI's
+  (`test_flag_checks`, `test_gate_reaches_the_workflow`, `test_list_shows_the_quality_phase`, ticket 09) and
+  `resumable_state`'s (`test_resume_limit_against_the_saved_quality_round`, `test_resume_limit_needs_the_gate`, part
+  7). Each test module's doc names the cases it leaves out. Part 6 (2026-10-29) adds the Ctrl-C (`interrupt::on_sigint`,
+  now `by_signals`, the command's group stopped by `run_process`, `SystemClocks`, `LocalHuman`, which is Python's
+  `notify_locally` and
+  `log`); it ports no Python test, whose fakes raise KeyboardInterrupt themselves, and adds the Rust cases the Fixed
+  entry on the Ctrl-C names. Fixed (2026-10-29) by part 7, the last: the `orchestrator` binary (`engine/src/main.rs`,
+  `crate::cli`) with `run` and `resume`, their flags and checks on clap, `new_state`, `resumable_state`,
+  `resumed_state`, `turn_quality_gate_on` and `_off` (`engine/src/workflow/gate_switch.rs`) and `finish`, and the
+  Python cases left for it (`TestQualityGateOnResume`, `TestQualityGateOffOnResume` but `test_show_names_the_gate`,
+  which is `show`'s and ticket 09's, `TestResumableState`,
+  `TestFindRun`, `TestOneRunPerCheckout`'s resume --force cases, `TestWorkflowFiles`', `TestPromptFiles`' and
+  `TestQualityCLI`'s `resumable_state` cases, `engine/src/cli/start/tests.rs`); every `run` and `resume` parity scenario
+  passes against the binary, and so does each scenario that kills a run, with the engines switched at the kill
+  (`tests/parity/test_parity.py`, SWITCHED). What the Rust CLI still lacks is ticket 09's.
+- **The Rust engine named a new run by the time in UTC.** `new_run_id` (`engine/src/cli/start.rs`) wrote the time the
+  run started in UTC, where Python's `time.strftime` writes the local time, and `IsoTime::timestamp` took a time
+  without an offset as UTC, where Python's `timestamp()` takes it as local time: the engine had no time zone database
+  to read. So a run id read an hour or more off in another zone, and runs of both engines in one checkout listed out
+  of start order there (`run_states` sorts by id). Fixed (2026-10-29, rust-engine ticket 08's follow-ups, the user's
+  ruling of 2026-10-29): the jiff crate (0.2.38, its `std`, `tz-system` and `tzdb-zoneinfo` features, no bundled
+  database) reads the zone as the C library does for Python, TZ, else `/etc/localtime`, the rules from
+  `/usr/share/zoneinfo`, UTC where neither can be read (`crate::py::datetime`); `new_run_id` writes the time by
+  `strftime_local`, and `IsoTime::timestamp` solves a time without an offset as CPython's `local_to_seconds` does
+  (fold 0: the first of a time shown twice, the offset before the change for one skipped, and its error within a day
+  of the years 1 and 9999), for `epoch_seconds`, `session_usage` and PyPI's upload times. Held by
+  `engine/tests/oracle/harness.py`'s `fromisoformat` cases, now read in a zone with summer time and with times it skips
+  and shows twice, and its `strftime_local` cases in four zones, and by `engine/tests/program.rs`'s
+  `a_run_is_named_by_the_time_in_the_machine_s_zone` (TZ 5:45 east of UTC). The parity harness still runs in UTC.
+  What Python reads in local time outside run and resume is the Open issue "Local times the Rust engine has yet to
+  read, for rust-engine ticket 09".
+- **The parity scenarios did not run against the Rust binary in Jenkins.** The Test stage runs `tests/parity` against
+  `orchestrator.py` only, and the Rust tickets ran `PARITY_ENGINE=target/.../orchestrator uv run pytest tests/parity`
+  by hand, with the scenarios that switch engines at the kill (`SWITCHED` in `test_parity.py`). Fixed (2026-10-29,
+  rust-engine ticket 08's follow-ups, the user's ruling of 2026-10-29): the Jenkinsfile's Rust parity stage, after
+  Gate, on a pull request build (`changeRequest()`) whose change touches `engine/`, `tests/parity/`, `Cargo.toml`,
+  `Cargo.lock` or `rust-toolchain.toml` (the user's later ruling, 2026-10-29) since the base Gate judges it from
+  (`ci/pr-base.sh`, now Gate's too; a `git diff --quiet` as the Test stage's for a quality build;
+  a base or diff that fails runs it), runs them against the binary the Test stage's cargo-llvm-cov built
+  (`target/llvm-cov-target/debug/orchestrator`, instrumented, its profiles sent to `/dev/null` by `LLVM_PROFILE_FILE`
+  through `env`, since the harness gives the engine an environment of its own), limited to the
+  scenarios whose recordings invoke only `run` and `resume` (`PARITY_COMMANDS`, new in `test_parity.py`): 33 and the
+  18 switched, 51 passing in 198 s locally with SIGINT and SIGHUP ignored, as a Jenkins `sh` step starts them. A
+  failing scenario fails the build; its JUnit report is `parity-rust.xml`. Unverified until a pull request build runs
+  it: the declarative `when` (`changeRequest()` with an `expression` that runs `sh`), the stage's time on agentbox0
+  and the binary's path there. Quality builds and builds of main do not run it, and ticket 09's commands are added to
+  `PARITY_COMMANDS` as they land.
+- **The commands the Rust engine runs outlived an engine that got a SIGTERM or a SIGHUP.** The commands run in
+  process groups of their own, so a SIGTERM of the engine (a kill, a service manager's stop) or the SIGHUP a closed
+  terminal sends its foreground group ended the engine and left the running command to finish unwatched, and the run
+  unreleased (Open issue "The commands the Rust engine runs outlive an engine that is SIGKILLed", which this narrows).
+  Fixed (2026-10-29, rust-engine ticket 08's follow-ups, the user's ruling of 2026-10-29): `interrupt::by_signals`,
+  which was `on_sigint`, waits for SIGTERM and SIGHUP as for SIGINT (`interrupt::SIGNALS`), so each raises the
+  `Interrupt`: the running command's group is stopped and the Workflow releases the run as interrupted, the program
+  prints the interrupted note with its resume hint (a line stderr does not take, as after a hangup, is lost), and
+  `interrupt::exit`, which `main` ends by, ends the process by the first SIGTERM or SIGHUP it got, as the signal's
+  default action does (a shell's `$?` 143 or 129), where a SIGINT alone exits 130. The exit status is the Python
+  engine's, which those signals kill at once; the release and the note are not: Python leaves the run owned by its
+  dead pid, to be resumed as a stale run, and prints nothing. A signal the engine started with ignored stays ignored,
+  for it and its commands, as nohup's SIGHUP; the commands start with the three unblocked (`unblock_signals`). Held by
+  `engine/tests/signals.rs` (real signals to an engine in a group of its own: a SIGTERM and a SIGHUP stop the command
+  and end the engine by the signal, an ignored SIGHUP reaches neither the engine nor its command) and
+  `engine/tests/program.rs`'s `a_sigterm_or_a_sighup_before_the_run_ends_the_program_by_it_with_the_interrupted_note`.
+- **A Ctrl-C at the terminal does not reach the command the Rust engine's `Host` or herdr is running.** `ProcessHost`
+  and `ProcessHerdr` run each command in a process group of its own (rust-engine tickets 05 and 06), which the
+  terminal's SIGINT, sent to its foreground group, no longer reaches, where in the Python engine every child gets it
+  too, the desktop app's Stop (`killpg` with SIGINT) included; so a Ctrl-C left a push, a scan or an unbounded `herdr
+  agent wait` running (cross-review 92, F2). Fixed (2026-10-29, rust-engine ticket 08, part 6): `interrupt::on_sigint`
+  (now `by_signals`) blocks SIGINT and starts a thread that waits for it (sigwait) and raises the `Interrupt` at each
+  one, from the
+  terminal or a kill of the engine's group; `ProcessHost::local` and `ProcessHerdr::new` take the `Interrupt`, and
+  `run_process` (`engine/src/host/process.rs`) watches it while a command runs: at a raise the command's group gets
+  SIGINT and, once the command exits or `INTERRUPT_GRACE_MS` (250 ms, Python's `Popen._sigint_wait_secs`) pass, SIGKILL,
+  and the command fails as interrupted, also one that answered meanwhile, such as a `herdr agent prompt` herdr had
+  delivered (review 97, F1); while the `Interrupt` is pending no command starts, until the Workflow catches it
+  (`Interrupt::catch`) to release the run; what only logs its failures (the heartbeat, the end's clean-ups, which then
+  keep `RunState::ci`) stops the run at a Ctrl-C, as Python's KeyboardInterrupt passes `except OrchestratorError`, and
+  the proof copies are removed as Python's finally removes them (`Interrupt::finally`); `SystemClocks`' sleep ends at a
+  raise; the children start with SIGINT
+  unblocked (`unblock_sigint`, now `unblock_signals`, the engine's one `unsafe`, `CommandExt::pre_exec`). A SIGINT
+  ignored when the engine started stays ignored, as in Python. Held by the Ctrl-C cases of `engine/src/host/tests.rs`
+  and
+  `engine/src/herdr/tests.rs`, `workflow/tests/interrupted.rs` (a run waiting on herdr, one during a prompt herdr
+  delivered, one already done), `a_ctrl_c_while_a_proof_runs_stops_it_with_what_it_started` (the proof under GNU
+  `timeout`, which leads the group ProcessHost started) and `engine/tests/sigint.rs` (now `signals.rs`: a real SIGINT to
+  an engine's group, and one it inherited ignored). What is left is the Open issue "The Rust engine's Ctrl-C, what is
+  left".
 - **The Rust engine read a workflow file's tables with their keys sorted.** The toml crate keeps a table in a
   `BTreeMap` without its `preserve_order` feature, so a table with two problems could be refused naming the other one
   first, where tomllib gives the file's order. Raised in rust-engine ticket 04 (2026-10-28). Fixed (2026-10-28, the

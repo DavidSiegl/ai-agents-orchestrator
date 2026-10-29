@@ -4,6 +4,8 @@
 use std::cell::{RefCell, RefMut};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use super::{ChangedFile, Completed, Exec, Host};
 use crate::quality::Leak;
@@ -18,11 +20,82 @@ pub(crate) const HOST_EPOCH: i64 = 1_791_000_000;
 /// FakeState::leaks' stand-in for the commit a scan is of.
 pub(crate) const SCANNED: &str = "scanned";
 
+/// What a test plays after each sleep of a FakeClock, given the time then.
+type ClockHook = Box<dyn FnMut(f64)>;
+
+/// Time that passes only when the workflow sleeps (crate::workflow::Clocks, which the Workflow tests' fixture
+/// implements for it), or when a test moves it on; hooks play the world after each sleep, each given the time now.
+#[derive(Default)]
+pub(crate) struct FakeClock {
+    now: FakeTime,
+    hooks: RefCell<Vec<ClockHook>>,
+}
+
+/// A FakeClock's time, shared with what moves it on from another thread's side of a seam, such as a fake server
+/// behind crate::http::Http, which must be Send and Sync: seconds as an f64's bits.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FakeTime(Arc<AtomicU64>);
+
+impl FakeTime {
+    /// The time, in seconds.
+    pub fn get(&self) -> f64 {
+        f64::from_bits(self.0.load(Ordering::SeqCst))
+    }
+
+    /// Set the time to seconds.
+    pub fn set(&self, seconds: f64) {
+        self.0.store(seconds.to_bits(), Ordering::SeqCst);
+    }
+
+    /// Let seconds pass, as a request that takes them does; one step, so that two threads' advances both count.
+    pub fn advance(&self, seconds: f64) {
+        let later = |bits: u64| Some((f64::from_bits(bits) + seconds).to_bits());
+        // The closure always gives Some, so the update cannot fail.
+        let _ = self.0.try_update(Ordering::SeqCst, Ordering::SeqCst, later);
+    }
+}
+
+impl FakeClock {
+    /// The time, in seconds.
+    pub fn now(&self) -> f64 {
+        self.now.get()
+    }
+
+    /// The clock's time, for a fake that lets time pass without the workflow sleeping.
+    pub fn time(&self) -> FakeTime {
+        self.now.clone()
+    }
+
+    /// Let seconds pass without the workflow sleeping, as a test's own herdr wait or an agent's work does.
+    pub fn advance(&self, seconds: f64) {
+        self.now.advance(seconds);
+    }
+
+    /// Set the time to seconds, as a Python test sets clock.now.
+    pub fn set(&self, seconds: f64) {
+        self.now.set(seconds);
+    }
+
+    /// Run hook after every sleep.
+    pub fn hook(&self, hook: impl FnMut(f64) + 'static) {
+        self.hooks.borrow_mut().push(Box::new(hook));
+    }
+
+    /// Wait that many seconds: the time moves on, then each hook runs.
+    pub fn sleep(&self, seconds: f64) {
+        self.advance(seconds);
+        let now = self.now();
+        for hook in self.hooks.borrow_mut().iter_mut() {
+            hook(now);
+        }
+    }
+}
+
 /// An in-memory filesystem and git checkout standing in for the machine the agents run on.
 ///
 /// Files written outside .orchestrator/ count as uncommitted changes until a commit. Git is played at the level of
 /// single commands (Host::git_run), so Host's own fetch, fast-forward and merge steps run on it; a process of any other
-/// kind panics the test. A test scripts it through [`FakeHost::state`], whose fields say what each scripts.
+/// kind panics the test, unless FakeState::processes runs it. A test scripts it through [`FakeHost::state`], whose fields say what each scripts.
 pub(crate) struct FakeHost {
     state: RefCell<FakeState>,
 }
@@ -85,6 +158,8 @@ pub(crate) struct FakeState {
     pub snapshots: Vec<(String, String)>,
     /// origin's branches, by name, with their commit: those `push --force` created, which `ls-remote` lists.
     pub remote: Map<String>,
+    /// The stderr of a failing `ls-remote --heads origin`, which lists remote; None lists it.
+    pub list_remote_error: Option<String>,
     /// What `git diff -U0` from the base to a snapshot prints.
     pub diff: String,
     /// The checkout has an origin at all.
@@ -115,8 +190,8 @@ pub(crate) struct FakeState {
     /// Every path written with keep_mtime.
     pub mtime_kept: Vec<String>,
     /// The workflow's clock, in seconds; the host's own time is HOST_EPOCH later: now() reads it, and write() stamps
-    /// each file's mtime with it. None reads 0.
-    pub clock: Option<Rc<dyn Fn() -> f64>>,
+    /// each file's mtime with it. None reads 0. A turn that takes time moves it on (workflow::fixture::taking).
+    pub clock: Option<Rc<FakeClock>>,
     /// Each file's modification time, by path; a file put straight into files has none, so mtime() gives now.
     pub mtimes: HashMap<String, i64>,
     /// What scan_unpublished finds: every scan finds them all, a Leak whose commit is SCANNED in the commit scanned.
@@ -141,7 +216,33 @@ pub(crate) struct FakeState {
     pub restores: Vec<(String, Vec<String>)>,
     /// What session_log reads, by (harness, session).
     pub session_logs: HashMap<(String, String), String>,
+    /// Run before each write, given its path and text, when set: an error fails the write, as a Python test's own
+    /// FakeHost.write fails it.
+    pub before_write: Option<BeforeWrite>,
+    /// Run before each rename, given its path and new path, when set: what a Python test does in its own
+    /// FakeHost.rename before the fake's.
+    pub before_rename: Option<BeforeRename>,
+    /// Run before each git command, given its directory and arguments, when set: what a Python test does in its own
+    /// FakeHost method, such as remove_worktree, before the fake's.
+    pub before_git: Option<BeforeGit>,
+    /// What run_states answers instead, when set and it gives Some: a Python test's own FakeHost.run_states.
+    pub run_states_with: Option<RunStatesWith>,
+    /// The real host a command the host runs other than git (Host::exec, so run, check and run_files) runs on, a
+    /// process on this machine, when set, as a Python test's `host._run = subprocess.run` makes it: a ProcessHost,
+    /// given the Interrupt that is to stop its commands. Such a command, run_files included, sees the machine's real
+    /// files, while read, write and rename stay in `files` and git stays played: a file a test puts there is not one
+    /// a real command finds. None: such a command panics the test.
+    pub processes: Option<super::ProcessHost>,
 }
+
+/// A test's hook on writes (FakeState::before_write).
+pub(crate) type BeforeWrite = Box<dyn FnMut(&str, &str) -> Result<(), OrchestratorError>>;
+/// A test's hook on renames (FakeState::before_rename).
+pub(crate) type BeforeRename = Box<dyn FnMut(&str, &str)>;
+/// A test's hook on git commands (FakeState::before_git).
+pub(crate) type BeforeGit = Box<dyn FnMut(&str, &[&str])>;
+/// A test's own run_states (FakeState::run_states_with).
+pub(crate) type RunStatesWith = Box<dyn FnMut(&str) -> Option<Result<Vec<(u64, Json)>, OrchestratorError>>>;
 
 impl FakeHost {
     /// A checkout of /proj at commit head (None: no repository with a commit), on branch.
@@ -163,6 +264,7 @@ impl FakeHost {
                 merge_head: false,
                 snapshots: vec![],
                 remote: Map::new(),
+                list_remote_error: None,
                 diff: String::new(),
                 has_origin: true,
                 ages: HashMap::new(),
@@ -189,6 +291,11 @@ impl FakeHost {
                 refs: Map::new(),
                 restores: vec![],
                 session_logs: HashMap::new(),
+                before_write: None,
+                before_rename: None,
+                before_git: None,
+                run_states_with: None,
+                processes: None,
             }),
         }
     }
@@ -223,7 +330,7 @@ impl FakeState {
     }
 
     fn now(&self) -> i64 {
-        HOST_EPOCH + self.clock.as_ref().map_or(0, |clock| clock() as i64)
+        HOST_EPOCH + self.clock.as_ref().map_or(0, |clock| clock.now() as i64)
     }
 
     /// Snapshot what is changed under cwd: snap<n>, which trees then holds.
@@ -340,6 +447,9 @@ impl FakeState {
                     return Completed::new(1, "", &said);
                 }
             }
+            ["ls-remote", "--heads", "origin"] if self.list_remote_error.is_some() => {
+                return Completed::new(128, "", self.list_remote_error.as_deref().unwrap_or_default());
+            }
             ["ls-remote", "--heads", "origin"] => {
                 return ok(&self.remote.iter().map(|(b, c)| format!("{c}\trefs/heads/{b}\n")).collect::<String>());
             }
@@ -412,15 +522,30 @@ impl Host for FakeHost {
         None
     }
 
-    fn exec(&self, argv: &[&str], _stdin: Option<&[u8]>, _timeout: u64) -> Result<Exec, OrchestratorError> {
-        panic!("FakeHost ran a real process: {argv:?}")
+    fn exec(&self, argv: &[&str], stdin: Option<&[u8]>, timeout: u64) -> Result<Exec, OrchestratorError> {
+        // Cloned, so that the command runs with the fake's state released.
+        let Some(host) = self.state().processes.clone() else { panic!("FakeHost ran a real process: {argv:?}") };
+        host.exec(argv, stdin, timeout)
     }
 
     fn read(&self, path: &str) -> Result<Option<String>, OrchestratorError> {
         Ok(self.state().files.get(path).cloned())
     }
 
+    /// The path as given, as Python's tests patch resolve_dir to give theirs: a fake's paths are absolute already,
+    /// and none is a link.
+    fn resolve_dir(&self, path: &str) -> Result<String, OrchestratorError> {
+        Ok(path.to_string())
+    }
+
     fn write(&self, path: &str, text: &str, keep_mtime: bool) -> Result<(), OrchestratorError> {
+        // Run with the host's state released, so that the hook may read or write the host itself.
+        let hook = self.state().before_write.take();
+        if let Some(mut hook) = hook {
+            let allowed = hook(path, text);
+            self.state().before_write = Some(hook);
+            allowed?;
+        }
         let mut s = self.state();
         s.writes.push(path.to_string());
         if keep_mtime {
@@ -439,6 +564,12 @@ impl Host for FakeHost {
     }
 
     fn rename(&self, path: &str, new_path: &str) -> Result<(), OrchestratorError> {
+        // Run with the host's state released, as before_write is.
+        let hook = self.state().before_rename.take();
+        if let Some(mut hook) = hook {
+            hook(path, new_path);
+            self.state().before_rename = Some(hook);
+        }
         let mut s = self.state();
         let text = s.files.remove(path).unwrap_or_else(|| panic!("FakeHost has no {path} to rename"));
         s.files.insert(new_path, text);
@@ -462,6 +593,12 @@ impl Host for FakeHost {
     }
 
     fn git_run(&self, cwd: &str, args: &[&str], _timeout: u64) -> Result<Completed, OrchestratorError> {
+        // Run with the host's state released, as before_write is.
+        let hook = self.state().before_git.take();
+        if let Some(mut hook) = hook {
+            hook(cwd, args);
+            self.state().before_git = Some(hook);
+        }
         let mut s = self.state();
         let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
         s.git_calls.push(owned.clone());
@@ -647,6 +784,14 @@ impl Host for FakeHost {
     }
 
     fn run_states(&self, cwd: &str) -> Result<Vec<(u64, Json)>, OrchestratorError> {
+        let hook = self.state().run_states_with.take();
+        if let Some(mut hook) = hook {
+            let answer = hook(cwd);
+            self.state().run_states_with = Some(hook);
+            if let Some(answer) = answer {
+                return answer;
+            }
+        }
         let s = self.state();
         let runs = format!("{cwd}/{}/", crate::constants::RUNS_DIR);
         let mut states = vec![];
