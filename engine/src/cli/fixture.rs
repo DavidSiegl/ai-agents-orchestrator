@@ -5,9 +5,11 @@ use std::cell::RefCell;
 use std::ffi::OsString;
 use std::rc::Rc;
 
-use super::{ended_status, herdrless_command, parse_args, run_command, Command, Connected, Ended, Local, Stop};
+use super::{
+    ended_status, herdrless_command, parse_args, run_command, run_workflow, Command, Connected, Ended, Local,
+    RunWorkflow, Stop,
+};
 use crate::ci::fake::jenkins_on;
-use crate::ci::Jenkins;
 use crate::env::ConfigDir;
 use crate::error::OrchestratorError;
 use crate::herdr::fake::Turn;
@@ -53,25 +55,32 @@ impl Cli {
         }
     }
 
-    /// The world run_command is given, on f's fakes, with a Jenkins on f.ci for each job.
-    fn connected<'a>(
-        &'a self,
-        jenkins: &'a dyn Fn(&str) -> Result<Jenkins, OrchestratorError>,
-        print: &'a dyn Fn(&str),
-    ) -> Connected<'a> {
-        let mut with = self.f.collaborators();
-        with.jenkins = None;
-        Connected { with, jenkins, config: &self.config, local_host: "here", stdout: print }
+    /// Run f with the world: run_command's, on f's fakes, with a Jenkins on f.ci for each job, its runs driven by
+    /// run_workflow.
+    pub fn with<T>(&self, f: impl FnOnce(&Connected) -> T) -> T {
+        self.with_workflow(&run_workflow, f)
     }
 
-    /// Run f with the world.
-    pub fn with<T>(&self, f: impl FnOnce(&Connected) -> T) -> T {
+    /// with, its runs driven by workflow, as a Python test patches Workflow.run.
+    pub fn with_workflow<T>(&self, workflow: &RunWorkflow<'_>, f: impl FnOnce(&Connected) -> T) -> T {
         let jenkins = |job: &str| {
             self.jobs.borrow_mut().push(job.to_string());
             Ok(jenkins_on(&self.f.ci))
         };
         let print = |text: &str| self.out.borrow_mut().push_str(text);
-        f(&self.connected(&jenkins, &print))
+        let stderr = |text: &str| self.err.borrow_mut().push_str(text);
+        let mut with = self.f.collaborators();
+        with.jenkins = None;
+        let world = Connected {
+            with,
+            jenkins: &jenkins,
+            config: &self.config,
+            local_host: "here",
+            stdout: &print,
+            stderr: &stderr,
+            workflow,
+        };
+        f(&world)
     }
 
     /// How main's command of argv ended, connected to the fakes, or run without herdr as main runs workflows, on
@@ -172,9 +181,16 @@ impl Cli {
     }
 
     /// A new run of argv (after `run`) in /proj, its roles played by script against the run it started: how main's
-    /// command ended. The fake herdr's turns are written for the fixture's run, so each prompt first points the fake
-    /// at the run whose agent is prompted, by the key ending the agent's name.
+    /// command ended (playing).
     pub fn played(&self, argv: &[&str], script: Vec<(&str, Vec<Turn>)>) -> Result<Ended, Stop> {
+        let argv: Vec<&str> = ["run", "--cwd", "/proj"].iter().chain(argv).copied().collect();
+        self.playing(script, || self.ended(&argv))
+    }
+
+    /// What f gives, the roles of each run it starts in /proj played by script, each role's turns in order whichever
+    /// run its agent is in. The fake herdr's turns are written for the fixture's run, so each prompt first points the
+    /// fake at the run whose agent is prompted, by the key ending the agent's name.
+    pub fn playing<T>(&self, script: Vec<(&str, Vec<Turn>)>, f: impl FnOnce() -> T) -> T {
         for (role, turns) in script {
             self.f.play(role, turns);
         }
@@ -190,10 +206,9 @@ impl Cli {
             }
             Ok(())
         }));
-        let argv: Vec<&str> = ["run", "--cwd", "/proj"].iter().chain(argv).copied().collect();
-        let ended = self.ended(&argv);
+        let played = f();
         self.f.herdr.state().prompt_with = None;
-        ended
+        played
     }
 
     /// The saved state of run_id in /proj, as JSON.

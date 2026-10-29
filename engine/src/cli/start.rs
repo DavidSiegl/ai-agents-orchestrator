@@ -60,7 +60,7 @@ pub fn new_state(
 }
 
 /// The workflow run's --workflow-file or --workflow names, worded by prompts.
-fn flagged_workflow(args: &RunArgs, prompts: &Prompts, world: &Connected) -> Result<Pipeline, OrchestratorError> {
+pub(super) fn flagged_workflow(args: &RunArgs, prompts: &Prompts, world: &Connected) -> Result<Pipeline, OrchestratorError> {
     match &args.starts.workflow_file {
         Some(path) => load_workflow_file(path, prompts),
         None => named_workflow(world.config, &args.starts.workflow, prompts),

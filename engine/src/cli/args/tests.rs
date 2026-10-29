@@ -286,8 +286,7 @@ fn the_commands_about_runs_and_workflows() {
 
 // -- The flags each command's help names, as orchestrator.py's ------------------------------------------------------
 
-/// The commands of orchestrator.py's parse_args that ticket 09b ports; it empties this list.
-const NOT_YET: [&str; 1] = ["drain"];
+
 
 /// The flags text names, as engine/tests/oracle/cli.py finds them: each long flag (two hyphens, lowercase words
 /// joined by hyphens) or -h that stands alone, not part of a longer word.
@@ -330,7 +329,7 @@ fn help_names_the_flags_python_names() {
     }
     let missing: Vec<&str> =
         commands.iter().map(String::as_str).filter(|c| !ported.iter().any(|p| p == c) && !["gui", "serve"].contains(c)).collect();
-    assert_eq!(missing, NOT_YET);
+    assert_eq!(missing, Vec::<&str>::new());
     assert!(ported.iter().all(|c| commands.contains(c)), "{ported:?}");
 }
 

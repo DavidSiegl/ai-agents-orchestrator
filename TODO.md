@@ -115,6 +115,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   not; cross-review 98, F1); and a proof's output that is not UTF-8 is quoted with each such byte as U+FFFD
   (`Workflow::run_proof`), where Python keeps it as a lone surrogate, which `state.json` holds as an escape and the
   write of the review then fails on (a UnicodeEncodeError, uncaught).
+  And from drain (rust-engine ticket 09b, 2026-10-29): a name in drain's DIR that is not UTF-8 is left out of the
+  queue (`crate::cli::drain::queue`, `read_queue`), where Python reads its spec.md through os.fsdecode.
   Decided against unless a run is found that writes such input.
 - **The Rust engine's Ctrl-C, what is left.** Rust-engine ticket 08's part 6 (2026-10-29) has a SIGINT raise the
   `Interrupt`, which stops the command the engine waits on (Fixed, "A Ctrl-C at the terminal does not reach the
@@ -123,9 +125,10 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   outside a Workflow (resolving the directory, reading the run, switching its gate) into the interrupted note and exit
   status 130 (`crate::cli`, `stop`), as Python's KeyboardInterrupt anywhere does; so do ticket 09a's (`list`, `metrics`,
   `show`, `prune`, `close`, `workflows`, the sweep before a run: `run_command`, `herdrless_command`, and
-  `prune_branches` and `fill_pr_states` stop at a failure met while it is raised), and `drain` between runs must too
-  (ticket 09b), and `serve`
-  (ticket 10) has its own SIGINT and SIGTERM, which `by_signals` would take over; closes with those tickets. (2) A
+  `prune_branches` and `fill_pr_states` stop at a failure met while it is raised), and ticket 09b's (`refresh`,
+  `judged-in-quality`, `doctor`, which prints nothing then, and `drain`, which stops between runs and after its last,
+  having printed its spec changes: `crate::cli::drain`, `drain_command`), and `serve`
+  (ticket 10) has its own SIGINT and SIGTERM, which `by_signals` would take over; closes with that ticket. (2) A
   Ctrl-C during a Jenkins or PyPI request (`crate::http`, ureq) waits for the request to end, up to its timeout, where
   Python's KeyboardInterrupt stops `urlopen` at once: there is no process to stop, and ureq has no way to abandon a
   request from another thread. The user accepted that wait for a Ctrl-C (2026-10-29, review 100). Since ticket 08's
