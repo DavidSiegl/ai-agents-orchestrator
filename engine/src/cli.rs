@@ -4,6 +4,7 @@
 //! [`herdrless_command`] for one that needs no herdr; ticket 09a has `run`, `resume`, the commands about a project's
 //! runs (crate::cli::listing, prune, close) and `workflows`.
 
+use std::cell::Cell;
 use std::ffi::OsString;
 use std::io::Write;
 
@@ -93,8 +94,10 @@ pub(super) enum Stop {
 /// The program: argv are its arguments, without its own name; interrupt is crate::interrupt::by_signals', which the
 /// process's SIGINT, SIGTERM and SIGHUP raise rather than end it. Returns its exit status: a usage error's 2 (help's
 /// 0), EXIT_ERROR for an error, EXIT_INTERRUPTED once interrupt is raised (crate::interrupt::exit then ends a process
-/// that got a SIGTERM or SIGHUP by that signal), or how the run ended (finish). Prints the run's last line on stdout,
-/// and its log, errors and the usage on stderr.
+/// that got a SIGTERM or SIGHUP by that signal), or how the run ended (finish). Prints what the command prints and the
+/// run's last line on stdout, and its log, errors and the usage on stderr. Standard output that does not take a write
+/// (a full disk, a pipe closed early) makes it EXIT_ERROR, but for an interrupted command, as Python's print raising
+/// OSError ends the program with status 1; the command runs on, the rest of what it prints lost.
 pub fn main(argv: impl IntoIterator<Item = OsString>, interrupt: &Interrupt) -> i32 {
     let config = ConfigDir::from_env();
     let command = match parse_args(argv, &config) {
@@ -105,17 +108,29 @@ pub fn main(argv: impl IntoIterator<Item = OsString>, interrupt: &Interrupt) -> 
             return e.exit_code();
         }
     };
+    // The first write standard output refused, if one did. Not a panic, which would end the program before
+    // interrupt::exit ends it by a SIGHUP that closed the terminal.
+    let unwritten: Cell<Option<std::io::Error>> = Cell::new(None);
     let print = |text: &str| {
-        // A line stdout does not take is lost, as after a hangup, rather than a panic that would end the program before
-        // interrupt::exit ends it by the SIGHUP: the status still tells.
         let mut stdout = std::io::stdout().lock();
-        let _ = stdout.write_all(text.as_bytes()).and_then(|()| stdout.flush());
+        if let Err(e) = stdout.write_all(text.as_bytes()).and_then(|()| stdout.flush()) {
+            let first = unwritten.take().unwrap_or(e);
+            unwritten.set(Some(first));
+        }
     };
     let ended = match herdrless_command(&command, &config, &print, interrupt) {
         Some(ended) => ended,
         None => connect(&command, interrupt, &LocalHuman::new(interrupt), &config, &print),
     };
-    ended_status(ended, &command, &print)
+    let status = ended_status(ended, &command, &print);
+    match unwritten.take() {
+        Some(e) if status != EXIT_INTERRUPTED => {
+            // A line stderr does not take is lost too; the status still tells.
+            let _ = writeln!(std::io::stderr(), "error: cannot write standard output: {e}");
+            EXIT_ERROR
+        }
+        _ => status,
+    }
 }
 
 /// Run command if it is one that needs no herdr pane, on this machine, printing by print, and say how it ended; None
@@ -142,7 +157,7 @@ fn ended_status(ended: Result<Ended, Stop>, command: &Command, print: &dyn Fn(&s
     match ended {
         Ok(Ended::Ran(ran)) => finish(ran.verdict.as_deref().unwrap_or("None"), &ran.state, &ran.pipeline, print),
         Ok(Ended::Status(status)) => status,
-        // A line stderr does not take is lost, as after a hangup (finish says why).
+        // A line stderr does not take is lost, as after a hangup; the status still tells.
         Err(Stop::Failed(e)) => {
             let _ = writeln!(std::io::stderr(), "error: {e}");
             EXIT_ERROR

@@ -92,6 +92,16 @@ fn a_command_about_runs_outside_a_herdr_pane_is_refused_but_workflows_is_not() {
 }
 
 #[test]
+fn standard_output_that_takes_no_write_is_an_error() {
+    // As Python's print raising OSError ends orchestrator.py with status 1: what the command prints is its product.
+    let dir = Dir::new("full");
+    let full = std::fs::OpenOptions::new().write(true).open("/dev/full").expect("/dev/full opens");
+    let out = program(&dir, &["workflows"], None).stdout(full).output().expect("the program runs");
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).starts_with("error: cannot write standard output: "), "{}", stderr(&out));
+}
+
+#[test]
 fn no_arguments_print_the_help_as_a_usage_error() {
     // The tk GUI is not ported (the rust-engine spec's Decisions): the help, where Python without a display says the
     // command is missing, both with exit status 2.
