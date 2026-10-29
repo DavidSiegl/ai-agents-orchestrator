@@ -664,7 +664,11 @@ request](#a-build-of-main-judged-at-its-pull-request)).
   the development host's CPUs; `CARGO_HOME` is kept in the workspace, so nothing is cached between builds. The UI stage
   runs `cargo check` under the same lock, since the Test stage's build of the dependencies is not the check clippy
   needs: with them checked, the Gate stage's clippy checks only the shell, in about 2 s, against 77 s for a clean one on
-  the development host's 6 CPUs. Package bundles the `.deb` with `dpkg-deb`, and the `.AppImage` with `linuxdeploy`,
+  the development host's 6 CPUs. The Install stage builds the [gate-rust helper](#reading-rust-the-gate-rust-helper)
+  with `cargo build --release --locked`, from the judged `main`'s `ci/gate-rust/` in a quality build, fetching syn,
+  proc-macro2 and serde_json from crates.io, in about 35 s on those 6 CPUs, and checks the tree's own
+  `ci/gate-rust/` for the Gate stage's clippy as the UI stage checks the shell, in about 4 s, which leaves clippy under
+  a second for it. Package bundles the `.deb` with `dpkg-deb`, and the `.AppImage` with `linuxdeploy`,
   which `tauri build` downloads from GitHub each build.
 - **`gh` on the agent, and a GitHub token** for the Release stage: a Secret text credential with the ID
   `GitHub-Agents`, holding a token with *Contents: read and write* on this repository. It is the agents' own
@@ -704,7 +708,7 @@ empty `GIT_REF`, before it accepts `buildWithParameters`.
 
 | Build | `--base` | Gate and rules |
 |---|---|---|
-| Quality build (`GIT_REF` set) | `HEAD^`: the snapshot's only parent is the run's base | `main`'s `gate.py` and `pyproject.toml`, from the `origin/main` commit its description names (below); a commit without `gate.py` fails the stage, unjudged |
+| Quality build (`GIT_REF` set) | `HEAD^`: the snapshot's only parent is the run's base | `main`'s `gate.py`, `pyproject.toml` and gate-rust helper, from the `origin/main` commit its description names (below); a commit without `gate.py` fails the stage, unjudged |
 | Pull request (`CHANGE_TARGET` set) | the merge base with the target branch, fetched first | its own, `Jenkinsfile` included (below) |
 | `main` | the last successful build's commit, else `HEAD^1` | its own; none when judged at its pull request (below) |
 

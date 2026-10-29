@@ -112,6 +112,40 @@ pipeline {
                 '''
                 sh 'ci/install-tools.sh "$WORKSPACE/.tools/bin"'
                 script {
+                    // gate.py reads Rust through the gate-rust helper (docs/quality-gate.md, "Reading Rust: the
+                    // gate-rust helper"), built here from the tree the Gate stage takes gate.py from: a quality build's
+                    // from the judged main, as Checkout named it, any other build's from its own. A main from before
+                    // the helper has no ci/gate-rust, and its gate.py no --rust-syntax, so nothing is built. The target
+                    // directory is in the workspace, which cleanWs empties, so no build runs what an earlier one
+                    // compiled; the lock as in the UI stage, which says why a quality build may skip it. The Gate
+                    // stage's clippy lints the tree's own ci/gate-rust as a workspace of its own, so that is checked
+                    // here too, for the reason the UI stage checks the shell: with syn checked, clippy checks only the
+                    // helper, in under a second rather than 5 on the development host. A check that fails leaves the
+                    // build to the Gate stage, whose clippy names the error as the change's.
+                    if (env.JUDGED_AT_PR != 'true') {
+                        sh '''
+                            src=ci/gate-rust
+                            if [ -n "${GIT_REF:-}" ]; then
+                                : "${JUDGED_MAIN:?is unset; run the whole build, not a restart from a later stage}"
+                                src="$WORKSPACE_TMP/main/ci/gate-rust"
+                                rm -rf "$src"
+                                mkdir -p "$WORKSPACE_TMP/main"
+                                if git cat-file -e "$JUDGED_MAIN:ci/gate-rust/Cargo.toml" 2>/dev/null; then
+                                    git archive -o "$WORKSPACE_TMP/main/gate-rust.tar" "$JUDGED_MAIN" ci/gate-rust
+                                    tar -x -f "$WORKSPACE_TMP/main/gate-rust.tar" -C "$WORKSPACE_TMP/main"
+                                fi
+                            fi
+                            if [ -f "$src/Cargo.toml" ]; then
+                                "$WORKSPACE/ci/cargo-lock.sh" ${GIT_REF:+--no-wait} cargo build --release --locked \\
+                                    --manifest-path "$src/Cargo.toml" --target-dir "$WORKSPACE/.gate-rust-target"
+                            fi
+                            if [ -f ci/gate-rust/Cargo.toml ]; then
+                                "$WORKSPACE/ci/cargo-lock.sh" ${GIT_REF:+--no-wait} cargo check --locked --all-targets \\
+                                    --manifest-path ci/gate-rust/Cargo.toml \\
+                                    || echo "cargo check of ci/gate-rust failed; the Gate stage's clippy judges it" >&2
+                            fi
+                        '''
+                    }
                     // The version a release on main is tagged with.
                     env.PROJECT_VERSION = sh(returnStdout: true, script: '''
                         uv run --frozen python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])'
@@ -255,12 +289,16 @@ pipeline {
                     // Python as before, but not on its Rust tests, which only the junit step's UNSTABLE shows, nor on
                     // the Rust's coverage; that window closes when main's gate.py takes both more than once. Likewise
                     // --test-contexts goes only to a gate.py that defines it, so a quality build judged by a main from
-                    // before it has mutmut run its whole selection rather than the gate fail on an unknown option.
+                    // before it has mutmut run its whole selection rather than the gate fail on an unknown option; and
+                    // so does --rust-syntax, with the helper the Install stage built from the same tree as that gate.py.
                     withEnv(["GATE=${gate}", "GATE_RULES=${rules}", "GATE_BASE=${base}"]) {
                         status = sh(returnStatus: true, script: '''
                             set --
                             if grep -q -- '"--test-contexts"' "$GATE"; then
                                 set -- --test-contexts "$COVERAGE_FILE"
+                            fi
+                            if grep -q -- '"--rust-syntax"' "$GATE"; then
+                                set -- "$@" --rust-syntax "$WORKSPACE/.gate-rust-target/release/gate-rust"
                             fi
                             uv run --frozen python "$GATE" --base "$GATE_BASE" --config "$GATE_RULES" \\
                                 --tests ui/src-tauri/target/nextest/ci/junit.xml --tests test-results.xml \\
