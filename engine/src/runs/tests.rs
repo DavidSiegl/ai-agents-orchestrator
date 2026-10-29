@@ -92,6 +92,13 @@ fn exited_process_is_not() {
 }
 
 #[test]
+fn an_id_of_0_or_below_names_a_group() {
+    // This process's own group, and every process it may signal: both have this process in them.
+    assert!(pid_alive(0));
+    assert!(pid_alive(-1));
+}
+
+#[test]
 fn another_users_process_is_alive() {
     // pid 1 is root's init: kill answers EPERM to any other user, and succeeds for root.
     assert!(pid_alive(1));

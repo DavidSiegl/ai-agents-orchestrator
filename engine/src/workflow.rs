@@ -66,7 +66,9 @@ pub struct Collaborators<'a> {
     pub host: &'a dyn Host,
     /// The herdr the agents run in.
     pub herdr: &'a dyn Herdr,
+    /// The time the run keeps: its deadlines, pauses and the times state.json records.
     pub clocks: &'a dyn Clocks,
+    /// Who is told what needs them, and everything the run does.
     pub human: &'a dyn Human,
     /// The Ctrl-C: once raised, the run stops at its next pause, or at the failure of what was running when it was
     /// raised, as interrupted.
@@ -80,6 +82,8 @@ pub struct Collaborators<'a> {
 /// starts from them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RunSettings {
+    /// The last round a verdict of CHANGES_REQUESTED loops back from: in round max_rounds the run ends whatever the
+    /// verdict.
     pub max_rounds: u32,
     /// Seconds a turn of a step that is not human-paced may take.
     pub turn_timeout: u64,
@@ -741,12 +745,8 @@ impl<'a> Workflow<'a> {
             .find(|(x, _, _)| x == name)
             .ok_or_else(|| OrchestratorError(format!("step {} has no placeholder {name}", step.id)))?;
         match *prefix {
-            // Before round 1, as Python's n - 1 gives it: round -1's file, which no turn writes.
-            "prev_" if n == 0 => {
-                let name = format(&other.file, &|field| (field == "n").then(|| "-1".to_string()))
-                    .map_err(|e| prompt_error(&other.id, &e))?;
-                Ok(format!("{}/{name}", s.dir()))
-            }
+            // Round 0's previous round is -1, as Python's n - 1 gives it, whose file no turn writes.
+            "prev_" if n == 0 => Ok(other.path(&s.dir(), -1, 0)),
             "prev_" => Ok(self.reports(other, n - 1)?.pop().unwrap_or_default()),
             "earlier_" => {
                 let mut reports = vec![];
