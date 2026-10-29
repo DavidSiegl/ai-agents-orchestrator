@@ -1,4 +1,4 @@
-//! tests/test_orchestrator.py's TestRunHealth (its print_runs cases are the CLI's, ticket 09) and TestPidAlive.
+//! tests/test_orchestrator.py's TestRunHealth (its print_runs cases are crate::cli::listing's tests) and TestPidAlive.
 
 use super::*;
 use crate::constants::APPROVE;

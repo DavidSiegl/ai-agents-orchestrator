@@ -2,7 +2,7 @@
 //! TestOneRunPerCheckout's two resume --force cases, TestWorkflowFiles' and TestPromptFiles' saved definitions and
 //! prompts that stop a resume, and TestQualityCLI's resume limits. TestHarnessFlags' resumable_state halves are in
 //! crate::workflow's harnesses tests, beside the Workflow halves of the same cases. new_state has no Python test but
-//! through main (TestCLI, ticket 09); its cases here are the Rust engine's.
+//! through main (TestCLI, crate::cli's tests); its cases here are the Rust engine's.
 
 use std::rc::Rc;
 
@@ -279,7 +279,7 @@ type MakeJenkins = dyn Fn(&str) -> Result<crate::ci::Jenkins, OrchestratorError>
 
 /// A Connected of f's fakes, the configuration directory config, and jenkins for a run's quality job.
 fn connected<'a>(f: &'a Fixture, config: &'a ConfigDir, jenkins: &'a MakeJenkins) -> Connected<'a> {
-    Connected { with: f.collaborators(), jenkins, config, local_host: "here" }
+    Connected { with: f.collaborators(), jenkins, config, local_host: "here", print: &|_| {} }
 }
 
 fn no_jenkins(job: &str) -> Result<crate::ci::Jenkins, OrchestratorError> {

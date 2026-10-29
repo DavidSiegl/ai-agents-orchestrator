@@ -116,40 +116,22 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   (`Workflow::run_proof`), where Python keeps it as a lone surrogate, which `state.json` holds as an escape and the
   write of the review then fails on (a UnicodeEncodeError, uncaught).
   Decided against unless a run is found that writes such input.
-- **Host tests and a Host need of the CLI's, left for rust-engine ticket 09.** `TestHostGit`'s `test_prune_on_real_git`
-  and `test_close_on_real_git` and `TestHostPullRequest.test_closed_without_a_time` (`tests/test_orchestrator.py`)
-  drive `prune_branches`, `close_run` and `pull_request_pending`, which the Rust engine has not ported, so ticket 05
-  ported every other `TestHost*` case and not these (cross-review 89, F2, 2026-10-28: "these cases would quietly never
-  be ported"). And `Host::exec` words a command that cannot be started as a message only, so the doctor's `_run_tool`,
-  which tells a tool missing from PATH by its FileNotFoundError, cannot tell it so (cross-review 89, F9: "porting
-  `_run_tool`'s 'not on PATH' check will need either string matching or an interface change"). Closes with ticket 09
-  porting the three cases, and either an error of `exec`'s own for a command not found or the doctor asking
-  `command -v` first, as `_on_path` already does.
-- **Harness tests left for rust-engine tickets 08 and 09.** Ticket 06 ported `launch_args`, `session_usage` and
-  `turn_tokens` (`engine/src/harness/tests.rs`, `engine/src/summary/tests.rs`), but the Python cases that drive them
-  through `Workflow`, `parse_args`, `new_state` or `resumable_state` wait for those (cross-review 92, F1: "As merged,
-  the ticket's verification is unmet and nothing tracks the gap"). Ticket 08's part 2 (2026-10-29) ported its
-  Workflow cases to `engine/src/workflow/tests/harnesses.rs` and `turn_timings.rs`: all of `TestHarnesses`;
-  `test_role_agent_starts_that_role_in_its_harness`, `test_resume_with_a_new_harness_relaunches_in_it` and
-  `test_a_030_state_resumes_on_claude`, each on the state `new_state` or `resumable_state` would give, built by hand;
-  `test_tokens_come_from_the_session_the_turn_ran_in` and `test_a_turn_that_changed_sessions_has_unknown_tokens`.
-  Part 3 (2026-10-29) ported the Workflow half of `test_run_dir_granted_in_worktree_runs_only`, with worktree runs.
-  Part 7 (2026-10-29), which ports `resumable_state` with resume's flags, ported their `resumable_state` halves
-  (`test_a_030_state_resumes_on_claude`'s 0.3.0 state resumed without flags, `test_resume_with_a_new_harness_relaunches_in_it`'s
-  `--agent pi`) and `test_resume_keeps_or_overrides_the_saved_harnesses`, in `harnesses.rs`. For ticket 09, which ports
-  the CLI: `test_precedence`, `test_flags_reach_the_workflow`, `test_role_agent_for_a_role_the_workflow_lacks` and
-  `test_unknown_kinds_are_argparse_errors`, which drive `parse_args`, `new_state` and `main` as a whole. Ported already: `test_launch_args_leave_the_permission_table_alone`,
-  the `launch_args` half of `test_run_dir_granted_in_worktree_runs_only`,
-  `test_turn_tokens_needs_a_known_window_and_a_harness_it_reads` (ticket 06) and
-  `test_a_030_state_without_a_permission_mode` and `test_unreadable_agent_args` (ticket 04, `engine/src/state/tests.rs`
-  and states.json). Closes with ticket 09 porting each case named here.
+- **A Host need of the doctor's, left for rust-engine ticket 09b.** `Host::exec` words a command that cannot be
+  started as a message only, so the doctor's `_run_tool`, which tells a tool missing from PATH by its
+  FileNotFoundError, cannot tell it so (cross-review 89, F9: "porting `_run_tool`'s 'not on PATH' check will need
+  either string matching or an interface change"). Closes with ticket 09b, which ports `doctor`, giving `exec` an
+  error of its own for a command not found or having the doctor ask `command -v` first, as `_on_path` already does.
+  The three `TestHost*` cases this entry also named (`test_prune_on_real_git`, `test_close_on_real_git`,
+  `test_closed_without_a_time`) are ported (Fixed, "The Rust engine's CLI commands about a project's runs").
 - **The Rust engine's Ctrl-C, what is left.** Rust-engine ticket 08's part 6 (2026-10-29) has a SIGINT raise the
   `Interrupt`, which stops the command the engine waits on (Fixed, "A Ctrl-C at the terminal does not reach the
   command the Rust engine's `Host` or herdr is running"). Not closed: (1) the `orchestrator` binary's `main`
   calls `by_signals` first (ticket 08's part 7, `engine/src/main.rs`), and `run` and `resume` turn a raised `Interrupt`
   outside a Workflow (resolving the directory, reading the run, switching its gate) into the interrupted note and exit
-  status 130 (`crate::cli`, `stop`), as Python's KeyboardInterrupt anywhere does; the commands ticket 09 adds (`list`,
-  `show`, `prune`, `close`, `drain` between runs, the sweep before a run) must do the same through it, and `serve`
+  status 130 (`crate::cli`, `stop`), as Python's KeyboardInterrupt anywhere does; so do ticket 09a's (`list`, `metrics`,
+  `show`, `prune`, `close`, `workflows`, the sweep before a run: `run_command`, `herdrless_command`, and
+  `prune_branches` and `fill_pr_states` stop at a failure met while it is raised), and `drain` between runs must too
+  (ticket 09b), and `serve`
   (ticket 10) has its own SIGINT and SIGTERM, which `by_signals` would take over; closes with those tickets. (2) A
   Ctrl-C during a Jenkins or PyPI request (`crate::http`, ureq) waits for the request to end, up to its timeout, where
   Python's KeyboardInterrupt stops `urlopen` at once: there is no process to stop, and ureq has no way to abandon a
@@ -183,17 +165,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   The oracle test compares only whether such a time is refused (found by cross-review 102's F3, 2026-10-29, when it
   began comparing `timestamp()`'s own refusals by their message). Only the wording differs, and only for times no harness,
   run or PyPI writes. Closes with the messages worded as 3.14's and the test comparing every message.
-- **The Rust engine's `run` does not prune earlier runs' branches yet.** Python's `main` runs `sweep_branches` before
-  a `run` that opens a pull request; the Rust `run` (rust-engine ticket 08, part 7) does not, since `prune_branches`
-  is the `prune` command's and ticket 09 ports both with `TestPrune` and `TestSweepOnRun`. No `run` parity scenario
-  shows it: none starts beside an earlier run with a pull request but `runs_listed_and_shown`, ticket 09's. Closes with
-  ticket 09.
-- **Local times the Rust engine has yet to read, for rust-engine ticket 09.** Python reads a time in the machine's zone
-  in two places: `time.strftime` in `new_run_id`, and `datetime.fromisoformat(...).timestamp()` of a time without an
-  offset (`epoch_seconds`, `session_usage`, `_young`'s PyPI upload and `pull_request_pending`'s `closedAt`). All but
-  the last are ported and read as Python does (Fixed, "The Rust engine named a new run by the time in UTC");
-  `pull_request_pending` is `prune`'s and the sweep before a run's, and its `closedAt` is GitHub's, which carries a
-  `Z`. Closes with ticket 09 reading it through `crate::py::datetime::fromisoformat_timestamp`.
 - **The commands the Rust engine runs outlive an engine that is SIGKILLed.** Each command runs in a process group of
   its own (rust-engine tickets 05, 06), so a SIGKILL of the engine, or of its group, ends the engine and leaves a
   running `herdr agent wait`, `gh pr create` or push to finish unwatched, where the Python engine's children are in
@@ -239,15 +210,15 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   port only by re-deriving them; with the seam at `Http`, as Python's at `urlopen`, `FakeJenkins` and `FakePyPI` play
   the servers and every line of `Jenkins` and `PyPI` runs in those tests. The user kept the `Http` seam and amended the
   spec's Lane to say so (2026-10-28, cross-review 93, F1), and issue 08 says which seam it is given.
-- **Jenkins calls whose tests need the CLI, left for rust-engine ticket 09.** Ticket 07 ported `TestOrchestratorChecks`
+- **Jenkins calls whose tests need the CLI, left for rust-engine ticket 09b.** Ticket 07 ported `TestOrchestratorChecks`
   on `judge_run` of the build's quality file; its Workflow cases (`test_a_build_that_failed_before_the_gate_is_not_checked`,
   `test_without_the_quality_gate_none_of_this_runs`, `test_the_spec_is_the_runs_task_without_a_contract_step` and the
   heartbeat kept between PyPI's requests, `test_slow_pypi_keeps_the_run_alive_and_stops_at_the_rounds_deadline`) ticket
   08's part 5 ported through its quality round (`engine/src/workflow/tests/orchestrator_checks.rs`, 2026-10-29), on
   FakePyPI's clock and `events`. `judged_in_quality`, `_build_trust`, `_judging_changes`,
   `JUDGING_FILES` and `JUDGED_DESCRIPTION`, with `TestJudgedInQuality`, are the `judged-in-quality` command's; the
-  Rust `Jenkins::retained_builds` they read is ported. Issue 09 names them (2026-10-28). Closes with ticket 09 porting
-  the command and its tests.
+  Rust `Jenkins::retained_builds` they read is ported. Issue 09 names them (2026-10-28); its Plan (split) gives them to
+  09b (2026-10-29). Closes with ticket 09b porting the command and its tests.
 - **The contract test leaves its Jenkins build running when it fails.** `tests/contract/test_jenkins.py` triggers one
   quality build and nothing stops it on a failure or a Ctrl-C, so the build holds an executor until it ends, up to
   the 22 minutes build #59 took. Raised by cross-review 73 (F11, 2026-10-27): "a Ctrl-C during the queue wait leaves
@@ -664,6 +635,58 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Fixed
 
+- **The Rust engine's CLI commands about a project's runs.** Fixed (2026-10-29, rust-engine ticket 09a): the
+  `orchestrator` binary has `list` (and `--json`, `--pr-state`), `metrics`, `show`, `prune`, `close` and `workflows`
+  beside `run` and `resume` (`crate::cli::args`' `Command::Runs` and `Command::Workflows`; `crate::cli`'s
+  `runs_command`, `herdrless_command` and `record_in_state`; `crate::cli::listing`, `prune`, `close` and
+  `workflows`), each flag of Python's parse_args for them, argparse's last-wins for a flag given twice
+  (`args_override_self`), and each command's `--help` naming the flags Python's names
+  (`engine/tests/oracle/cli.py`, `help_names_the_flags_python_names`, whose `NOT_YET` is drain, refresh,
+  judged-in-quality and doctor, ticket 09b's). Ported with them: `TestCLI`, `TestRunRecord`, `TestListJSON`,
+  `TestRunHealth`'s print_runs cases, `TestShow`, `TestBlockedListing` but its GUI case, `TestPrune`,
+  `TestSweepSummary`, `TestPruneCLI`, `TestClose`, `TestSweepOnRun`, `TestResumeCLI`, `TestWorkflowCLI`,
+  `TestWorkflowFileCLI`, `TestSpecCLI`'s main cases, `TestHostGit`'s `test_prune_on_real_git` and
+  `test_close_on_real_git`, `TestHostPullRequest.test_closed_without_a_time`, and each CLI case tickets 06 to 08
+  left (the Fixed entry "Harness tests left for rust-engine tickets 08 and 09", and the parts of the
+  Fixed entry on the Workflow that say "for ticket 09"), in `engine/src/cli/**/tests.rs` and `engine/tests/program.rs`.
+  The parity scenarios `workflows_listed`, `runs_listed_and_shown`, `branches_pruned`, `failed_run_closed` and
+  `finished_run_closed` pass against the binary. No arguments print the help on stderr with exit status 2, where
+  Python without a display exits 2 naming the missing command (the spec's Decisions: no tk GUI). Not closed: drain,
+  refresh, doctor and judged-in-quality (ticket 09b) and serve (ticket 10).
+- **Harness tests left for rust-engine tickets 08 and 09.** (Moved from Open issues, 2026-10-29.) Ticket 06 ported `launch_args`, `session_usage` and
+  `turn_tokens` (`engine/src/harness/tests.rs`, `engine/src/summary/tests.rs`), but the Python cases that drive them
+  through `Workflow`, `parse_args`, `new_state` or `resumable_state` wait for those (cross-review 92, F1: "As merged,
+  the ticket's verification is unmet and nothing tracks the gap"). Ticket 08's part 2 (2026-10-29) ported its
+  Workflow cases to `engine/src/workflow/tests/harnesses.rs` and `turn_timings.rs`: all of `TestHarnesses`;
+  `test_role_agent_starts_that_role_in_its_harness`, `test_resume_with_a_new_harness_relaunches_in_it` and
+  `test_a_030_state_resumes_on_claude`, each on the state `new_state` or `resumable_state` would give, built by hand;
+  `test_tokens_come_from_the_session_the_turn_ran_in` and `test_a_turn_that_changed_sessions_has_unknown_tokens`.
+  Part 3 (2026-10-29) ported the Workflow half of `test_run_dir_granted_in_worktree_runs_only`, with worktree runs.
+  Part 7 (2026-10-29), which ports `resumable_state` with resume's flags, ported their `resumable_state` halves
+  (`test_a_030_state_resumes_on_claude`'s 0.3.0 state resumed without flags, `test_resume_with_a_new_harness_relaunches_in_it`'s
+  `--agent pi`) and `test_resume_keeps_or_overrides_the_saved_harnesses`, in `harnesses.rs`. For ticket 09, which ports
+  the CLI: `test_precedence`, `test_flags_reach_the_workflow`, `test_role_agent_for_a_role_the_workflow_lacks` and
+  `test_unknown_kinds_are_argparse_errors`, which drive `parse_args`, `new_state` and `main` as a whole. Ported already: `test_launch_args_leave_the_permission_table_alone`,
+  the `launch_args` half of `test_run_dir_granted_in_worktree_runs_only`,
+  `test_turn_tokens_needs_a_known_window_and_a_harness_it_reads` (ticket 06) and
+  `test_a_030_state_without_a_permission_mode` and `test_unreadable_agent_args` (ticket 04, `engine/src/state/tests.rs`
+  and states.json). Fixed (2026-10-29, ticket 09a): `test_precedence`, `test_flags_reach_the_workflow`,
+  `test_role_agent_for_a_role_the_workflow_lacks` and `test_unknown_kinds_are_argparse_errors` are ported, in
+  `engine/src/cli/tests.rs` and `engine/src/cli/args/tests.rs` (Fixed, "The Rust engine's CLI commands about a
+  project's runs").
+- **The Rust engine's `run` did not prune earlier runs' branches.** Python's `main` runs `sweep_branches` before a
+  `run` that opens a pull request; the Rust `run` of rust-engine ticket 08's part 7 did not. Fixed (2026-10-29,
+  ticket 09a): `crate::cli::prune` has `prune_branches`, `pull_request_pending`, `sweep_summary` and `sweep_branches`,
+  which `crate::cli`'s `new_run` calls before `new_state` for a run without `--no-pr`; a failure is logged and the run
+  goes on, but one met while the Interrupt is raised ends the command interrupted. `TestPrune`, `TestSweepSummary`,
+  `TestPruneCLI` and `TestSweepOnRun` are ported (`engine/src/cli/prune/tests.rs`), and the parity scenario
+  `branches_pruned` passes against the binary.
+- **Local times the Rust engine had yet to read.** Python reads a time without an offset in the machine's zone in
+  `time.strftime` (`new_run_id`) and `datetime.fromisoformat(...).timestamp()` (`epoch_seconds`, `session_usage`,
+  `_young`'s PyPI upload, `pull_request_pending`'s `closedAt`); all but the last were ported so by ticket 08's
+  follow-ups. Fixed (2026-10-29, ticket 09a): `crate::cli::prune::pull_request_pending` reads `closedAt` through
+  `crate::py::datetime::fromisoformat_timestamp`, and words a `closedAt` that is no time, or none, as Python does
+  (`PR #7 is closed at None, which is not a time`).
 - **The Rust engine's Workflow is ported in parts, and its Python tests with them.** Rust-engine ticket 08 lands in
   seven parts (its issue's Plan): part 1 (`engine/src/workflow.rs`, 2026-10-29) runs a workflow in the project's
   checkout, its turns, verdict retries, pull request, saves, heartbeat and takeover, and ports `TestWorkflow`,
@@ -750,8 +773,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `engine/tests/oracle/harness.py`'s `fromisoformat` cases, now read in a zone with summer time and with times it skips
   and shows twice, and its `strftime_local` cases in four zones, and by `engine/tests/program.rs`'s
   `a_run_is_named_by_the_time_in_the_machine_s_zone` (TZ 5:45 east of UTC). The parity harness still runs in UTC.
-  What Python reads in local time outside run and resume is the Open issue "Local times the Rust engine has yet to
-  read, for rust-engine ticket 09".
+  What Python reads in local time outside run and resume was the Open issue "Local times the Rust engine has yet to
+  read, for rust-engine ticket 09", now Fixed ("Local times the Rust engine had yet to read").
 - **The parity scenarios did not run against the Rust binary in Jenkins.** The Test stage runs `tests/parity` against
   `orchestrator.py` only, and the Rust tickets ran `PARITY_ENGINE=target/.../orchestrator uv run pytest tests/parity`
   by hand, with the scenarios that switch engines at the kill (`SWITCHED` in `test_parity.py`). Fixed (2026-10-29,

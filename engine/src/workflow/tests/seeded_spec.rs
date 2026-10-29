@@ -1,8 +1,8 @@
 //! TestSeededSpec, and TestTurnTimings' test_a_seeded_spec_has_no_record: a run given its spec with run --spec skips
 //! the contract step's turn, its spec written as that step's file.
 //!
-//! Not here: TestSpecCLI, main's (rust-engine ticket 09), but for its read_spec_file cases, which are
-//! crate::spec_file's.
+//! Not here: TestSpecCLI, main's (crate::cli's tests and crate::cli::args'), but for its read_spec_file cases, which
+//! are crate::spec_file's.
 
 use std::cell::RefCell;
 

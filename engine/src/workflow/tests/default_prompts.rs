@@ -2,8 +2,9 @@
 //! prompts each workflow sends as Workflow fills them in, held to the Python engine's texts, and the prompt files that
 //! word them.
 //!
-//! Not here: TestPromptFiles' cases of main and drain (test_bad_files_stop_run_before_any_agent,
-//! test_a_bad_file_stops_drain_before_any_run, test_workflows_*) are the CLI's (ticket 09), and
+//! Not here: TestPromptFiles' cases of main (test_bad_files_stop_run_before_any_agent, test_workflows_*) are the
+//! CLI's (crate::cli's tests and crate::cli::workflows'), test_a_bad_file_stops_drain_before_any_run drain's (ticket
+//! 09b), and
 //! test_a_state_that_replaces_an_unknown_prompt resumable_state's (crate::cli, cli/start/tests.rs); its other cases are crate::prompts' and
 //! crate::workflow_file's (ticket 04). The cases here that Python starts with new_state run on the state it would give,
 //! built by hand (new_state is the CLI's).

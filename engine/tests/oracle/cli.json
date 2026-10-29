@@ -1,0 +1,160 @@
+{
+ "commands": [
+  "run",
+  "resume",
+  "list",
+  "metrics",
+  "show",
+  "prune",
+  "drain",
+  "close",
+  "refresh",
+  "workflows",
+  "judged-in-quality",
+  "doctor",
+  "gui",
+  "serve"
+ ],
+ "flags": {
+  "": [
+   "--help",
+   "-h"
+  ],
+  "run": [
+   "--agent",
+   "--approval-mode",
+   "--build-model",
+   "--cwd",
+   "--dangerously-bypass-approvals-and-sandbox",
+   "--full-auto",
+   "--help",
+   "--machine",
+   "--max-quality-rounds",
+   "--max-rounds",
+   "--model",
+   "--no-pr",
+   "--permission-mode",
+   "--quality-gate",
+   "--review-model",
+   "--role-agent",
+   "--role-model",
+   "--sandbox",
+   "--spec",
+   "--spec-model",
+   "--timeout",
+   "--workflow",
+   "--workflow-file",
+   "--worktree",
+   "-h"
+  ],
+  "resume": [
+   "--agent",
+   "--approval-mode",
+   "--build-model",
+   "--cwd",
+   "--dangerously-bypass-approvals-and-sandbox",
+   "--force",
+   "--full-auto",
+   "--help",
+   "--machine",
+   "--max-quality-rounds",
+   "--max-rounds",
+   "--model",
+   "--no-quality-gate",
+   "--permission-mode",
+   "--quality-gate",
+   "--review-model",
+   "--role-agent",
+   "--role-model",
+   "--sandbox",
+   "--spec-model",
+   "--timeout",
+   "-h"
+  ],
+  "list": [
+   "--cwd",
+   "--help",
+   "--json",
+   "--machine",
+   "--pr-state",
+   "-h"
+  ],
+  "metrics": [
+   "--cwd",
+   "--help",
+   "--machine",
+   "-h"
+  ],
+  "show": [
+   "--cwd",
+   "--help",
+   "--machine",
+   "-h"
+  ],
+  "prune": [
+   "--cwd",
+   "--dry-run",
+   "--help",
+   "--machine",
+   "-h"
+  ],
+  "drain": [
+   "--agent",
+   "--approval-mode",
+   "--build-model",
+   "--cwd",
+   "--dangerously-bypass-approvals-and-sandbox",
+   "--dry-run",
+   "--full-auto",
+   "--help",
+   "--machine",
+   "--max-quality-rounds",
+   "--max-rounds",
+   "--model",
+   "--no-pr",
+   "--permission-mode",
+   "--quality-gate",
+   "--review-model",
+   "--role-agent",
+   "--role-model",
+   "--sandbox",
+   "--spec",
+   "--spec-model",
+   "--timeout",
+   "--workflow",
+   "--workflow-file",
+   "--worktree",
+   "-h"
+  ],
+  "close": [
+   "--cwd",
+   "--help",
+   "--machine",
+   "--worktree",
+   "-h"
+  ],
+  "refresh": [
+   "--cwd",
+   "--help",
+   "--machine",
+   "-h"
+  ],
+  "workflows": [
+   "--help",
+   "--workflow",
+   "-h"
+  ],
+  "judged-in-quality": [
+   "--help",
+   "--quality-gate",
+   "--target",
+   "-h"
+  ],
+  "doctor": [
+   "--cwd",
+   "--help",
+   "--machine",
+   "-h"
+  ]
+ }
+}

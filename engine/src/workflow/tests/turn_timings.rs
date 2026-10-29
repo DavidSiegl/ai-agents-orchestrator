@@ -5,7 +5,7 @@
 //! calls turn_tokens on a log it makes, is crate::summary's (turn_tokens_sums_the_answers_within_the_turn_as_the_python_engine_does).
 //!
 //! Not here: test_a_seeded_spec_has_no_record, in seeded_spec.rs; test_the_metrics_command_prints_a_line_per_run_that_is_done,
-//! the metrics command's (ticket 09). test_durations, test_a_pipe_in_a_cell_does_not_split_it,
+//! the metrics command's, in crate::cli::listing's tests. test_durations, test_a_pipe_in_a_cell_does_not_split_it,
 //! test_turn_tokens_needs_a_known_window_and_a_harness_it_reads and test_session_log_finds_the_file_under_home are
 //! crate::summary's and crate::host's (ticket 06).
 

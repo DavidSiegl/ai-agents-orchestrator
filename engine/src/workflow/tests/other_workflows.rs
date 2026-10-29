@@ -2,7 +2,7 @@
 //! Workflow-driven cases of TestWorkflowDefinitions and TestWorkflowFiles: workflows other than the default, a run
 //! saved before workflows existed, and a workflow file's run.
 //!
-//! Not here: the CLI's (ticket 09): role_models' half of
+//! Not here: the CLI's (crate::cli's tests): role_models' half of
 //! TestOtherWorkflows.test_model_reaches_a_role_without_its_own_flag, TestWorkflowWithoutAVerdict's
 //! test_a_failed_gate_exits_as_changes_requested and test_finished_exits_zero, and TestWorkflowFiles'
 //! test_list_reads_the_gated_step_from_the_saved_definition; resumable_state's, in crate::cli (cli/start/tests.rs): TestWorkflowFiles'
@@ -159,7 +159,7 @@ fn interrupted_mid_loop_resumes_at_the_right_step() {
 
 #[test]
 fn model_reaches_a_role_without_its_own_flag() {
-    // Its Workflow half: the models role_models gives for --model X --build-model Y (ticket 09).
+    // Its Workflow half: the models role_models gives for --model X --build-model Y (crate::cli's tests).
     let four = four();
     let f = Fixture::on(Rc::new(FakeHost::default()), new_run(&four), vec![
         ("spec", vec![spec_turn()]),

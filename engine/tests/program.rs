@@ -80,6 +80,29 @@ fn a_run_outside_a_herdr_pane_without_a_machine_is_refused() {
 }
 
 #[test]
+fn a_command_about_runs_outside_a_herdr_pane_is_refused_but_workflows_is_not() {
+    // TestCLI.test_refuses_outside_herdr, and the workflows command, which needs no herdr.
+    let dir = Dir::new("herdrless");
+    let out = program(&dir, &["list"], Some("")).output().expect("the program runs");
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(stderr(&out), "error: not inside a herdr pane; run from herdr, or pass --machine\n");
+    let out = program(&dir, &["workflows"], None).output().expect("the program runs");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("default  built in\n"));
+}
+
+#[test]
+fn no_arguments_print_the_help_as_a_usage_error() {
+    // The tk GUI is not ported (the rust-engine spec's Decisions): the help, where Python without a display says the
+    // command is missing, both with exit status 2.
+    let dir = Dir::new("no-args");
+    let out = program(&dir, &[], None).output().expect("the program runs");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(stderr(&out).contains("Commands:") && stderr(&out).contains("workflows"), "{}", stderr(&out));
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
 fn a_usage_error_exits_2() {
     let dir = Dir::new("usage");
     let out = program(&dir, &["run", "--max-rounds", "0", "t"], Some("1")).output().expect("the program runs");

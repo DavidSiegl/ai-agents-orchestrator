@@ -2,8 +2,8 @@
 //! The worktree cases of TestOneRunPerCheckout and TestHarnessFlags are in one_run.rs and harnesses.rs, on
 //! worktree_run.
 //!
-//! Not here: test_a_run_flag and test_flag_reaches_the_workflow, parse_args', new_state's and main's (rust-engine
-//! ticket 09).
+//! Not here: test_a_run_flag and test_flag_reaches_the_workflow, parse_args', new_state's and main's (crate::cli's
+//! tests and crate::cli::args').
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, VecDeque};
