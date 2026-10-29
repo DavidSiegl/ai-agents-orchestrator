@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use super::{ChangedFile, Completed, Exec, Host};
+use super::{ChangedFile, Completed, Exec, ExecError, Host};
 use crate::quality::Leak;
 use crate::constants::WORKTREES_DIR;
 use crate::error::OrchestratorError;
@@ -522,7 +522,7 @@ impl Host for FakeHost {
         None
     }
 
-    fn exec(&self, argv: &[&str], stdin: Option<&[u8]>, timeout: u64) -> Result<Exec, OrchestratorError> {
+    fn exec(&self, argv: &[&str], stdin: Option<&[u8]>, timeout: u64) -> Result<Exec, ExecError> {
         // Cloned, so that the command runs with the fake's state released.
         let Some(host) = self.state().processes.clone() else { panic!("FakeHost ran a real process: {argv:?}") };
         host.exec(argv, stdin, timeout)

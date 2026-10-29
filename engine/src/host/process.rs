@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use nix::sys::signal::{killpg, SigSet, Signal};
 use nix::unistd::{getuid, Pid};
 
-use super::{Exec, Host};
+use super::{Exec, ExecError, Host};
 use crate::error::{os_error, OrchestratorError};
 use crate::interrupt::Interrupt;
 use crate::py::text::{is_space, repr, shlex_join};
@@ -45,11 +45,17 @@ pub struct ProcessHost {
     /// The environment every command it starts gets, the engine's own as child_env gives it
     /// (crate::env::child_env): without the CI credentials and git's pathspec switches.
     env: Arc<Vec<(OsString, OsString)>>,
-    /// The Ctrl-C that stops its commands.
-    interrupt: Interrupt,
+    /// Runs one command, over SSH the ssh that carries it: run_process, stopped by the host's Interrupt.
+    run: Arc<RunCommand>,
     /// This engine's SSH control sockets.
     ssh: Arc<Mutex<SshControl>>,
 }
+
+/// Runs one command as run_process does, given its argv, standard input, time limit and environment, and gives its
+/// exit status and outputs, or why it gave none.
+pub(crate) type RunCommand = dyn Fn(&[String], Option<&[u8]>, Option<Duration>, &[(OsString, OsString)]) -> Result<(i32, Vec<u8>, Vec<u8>), ProcessError>
+    + Send
+    + Sync;
 
 impl ProcessHost {
     /// A Host that runs its commands on this machine, in the engine's environment as child_env gives it, each
@@ -61,10 +67,23 @@ impl ProcessHost {
     /// As local, in the environment vars as child_env would give it, were vars the engine's own: what the tests
     /// give a Host in place of the process's environment, which is shared by every test.
     pub(crate) fn in_environment(vars: impl Iterator<Item = (OsString, OsString)>, interrupt: &Interrupt) -> ProcessHost {
+        let interrupt = interrupt.clone();
+        ProcessHost::with_runner(vars, move |argv, stdin, timeout, env| run_process(argv, stdin, timeout, env, &interrupt))
+    }
+
+    /// As in_environment, each command run by run in place of a process, ssh included for a host over_ssh makes of
+    /// it: Python's Host(run=...), for the tests.
+    pub(crate) fn with_runner(
+        vars: impl Iterator<Item = (OsString, OsString)>,
+        run: impl Fn(&[String], Option<&[u8]>, Option<Duration>, &[(OsString, OsString)]) -> Result<(i32, Vec<u8>, Vec<u8>), ProcessError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> ProcessHost {
         ProcessHost {
             ssh_target: None,
             env: Arc::new(crate::env::without_withheld(vars)),
-            interrupt: interrupt.clone(),
+            run: Arc::new(run),
             ssh: Arc::new(Mutex::new(SshControl::default())),
         }
     }
@@ -130,20 +149,22 @@ impl Host for ProcessHost {
         self.ssh_target.as_deref()
     }
 
-    fn exec(&self, argv: &[&str], stdin: Option<&[u8]>, timeout: u64) -> Result<Exec, OrchestratorError> {
+    fn exec(&self, argv: &[&str], stdin: Option<&[u8]>, timeout: u64) -> Result<Exec, ExecError> {
         let argv: Vec<String> = match &self.ssh_target {
             Some(target) => ssh_argv(target, self.ssh_sharing_options(), argv),
             None => argv.iter().map(|a| a.to_string()).collect(),
         };
         let command = shlex_join(&argv);
-        match run_process(&argv, stdin, Some(Duration::from_secs(timeout)), &self.env, &self.interrupt) {
+        let failed = |why: String| ExecError::Failed(OrchestratorError(format!("{command}: {why}")));
+        match (self.run)(&argv, stdin, Some(Duration::from_secs(timeout)), &self.env) {
             Ok((status, stdout, stderr)) => Ok(Exec { command, status, stdout, stderr }),
-            Err(ProcessError::Start(e)) => {
-                Err(OrchestratorError(format!("{command}: {}", os_error(&e, Some(&argv[0])))))
+            Err(ProcessError::Start(e)) if e.kind() == ErrorKind::NotFound => {
+                Err(ExecError::NotFound(OrchestratorError(format!("{command}: {}", os_error(&e, Some(&argv[0]))))))
             }
-            Err(ProcessError::Io(e)) => Err(OrchestratorError(format!("{command}: {}", os_error(&e, None)))),
-            Err(ProcessError::Timeout) => Err(OrchestratorError(format!("{command}: {}", timed_out(&argv, timeout)))),
-            Err(ProcessError::Interrupted) => Err(OrchestratorError(format!("{command}: interrupted"))),
+            Err(ProcessError::Start(e)) => Err(failed(os_error(&e, Some(&argv[0])))),
+            Err(ProcessError::Io(e)) => Err(failed(os_error(&e, None))),
+            Err(ProcessError::Timeout) => Err(failed(timed_out(&argv, timeout))),
+            Err(ProcessError::Interrupted) => Err(failed("interrupted".to_string())),
         }
     }
 }

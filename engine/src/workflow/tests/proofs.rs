@@ -589,7 +589,7 @@ impl Host for Unpublished<'_> {
         None
     }
 
-    fn exec(&self, argv: &[&str], stdin: Option<&[u8]>, timeout: u64) -> Result<crate::host::Exec, crate::error::OrchestratorError> {
+    fn exec(&self, argv: &[&str], stdin: Option<&[u8]>, timeout: u64) -> Result<crate::host::Exec, crate::host::ExecError> {
         self.0.exec(argv, stdin, timeout)
     }
 

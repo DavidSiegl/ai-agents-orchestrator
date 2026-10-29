@@ -536,6 +536,21 @@ fn a_command_that_cannot_be_started_names_it() {
 }
 
 #[test]
+fn exec_tells_a_command_not_on_path_from_one_that_cannot_be_started_otherwise() {
+    // As the doctor tells a tool missing here (cross-review 89, F9): Python's FileNotFoundError from subprocess.
+    let host = ProcessHost::local(&Interrupt::new());
+    let message = "no-such-command-here x: [Errno 2] No such file or directory: 'no-such-command-here'";
+    assert_eq!(host.exec(&["no-such-command-here", "x"], None, 60), Err(ExecError::NotFound(OrchestratorError::new(message))));
+    let dir = TempDir::new();
+    let path = dir.join("not-executable");
+    put(&path, "#!/bin/sh\n");
+    match host.exec(&[&path], None, 60) {
+        Err(ExecError::Failed(e)) => assert!(e.0.contains("Permission denied"), "{e}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn a_command_ended_by_a_signal_has_its_negative_number() {
     let proc = ProcessHost::local(&Interrupt::new()).run(&["sh", "-c", "kill -TERM $$"], None, 60).unwrap();
     assert_eq!(proc.status, -15);
