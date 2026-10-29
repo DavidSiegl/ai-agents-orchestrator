@@ -1,9 +1,11 @@
 //! FakeHost, the machine the Workflow tests run on: an in-memory filesystem and git checkout, played as
 //! tests/test_orchestrator.py's FakeHost plays them.
 
-use std::cell::{Cell, RefCell, RefMut};
+use std::cell::{RefCell, RefMut};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use super::{ChangedFile, Completed, Exec, Host};
 use crate::quality::Leak;
@@ -25,8 +27,28 @@ type ClockHook = Box<dyn FnMut(f64)>;
 /// implements for it), or when a test moves it on; hooks play the world after each sleep, each given the time now.
 #[derive(Default)]
 pub(crate) struct FakeClock {
-    now: Cell<f64>,
+    now: FakeTime,
     hooks: RefCell<Vec<ClockHook>>,
+}
+
+/// A FakeClock's time, shared with what moves it on from another thread's side of a seam, such as a fake server
+/// behind crate::http::Http, which must be Send and Sync: seconds as an f64's bits.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FakeTime(Arc<AtomicU64>);
+
+impl FakeTime {
+    pub fn get(&self) -> f64 {
+        f64::from_bits(self.0.load(Ordering::SeqCst))
+    }
+
+    pub fn set(&self, seconds: f64) {
+        self.0.store(seconds.to_bits(), Ordering::SeqCst);
+    }
+
+    /// Let seconds pass, as a request that takes them does.
+    pub fn advance(&self, seconds: f64) {
+        self.set(self.get() + seconds);
+    }
 }
 
 impl FakeClock {
@@ -35,9 +57,14 @@ impl FakeClock {
         self.now.get()
     }
 
+    /// The clock's time, for a fake that lets time pass without the workflow sleeping.
+    pub fn time(&self) -> FakeTime {
+        self.now.clone()
+    }
+
     /// Let seconds pass without the workflow sleeping, as a test's own herdr wait or an agent's work does.
     pub fn advance(&self, seconds: f64) {
-        self.now.set(self.now.get() + seconds);
+        self.now.advance(seconds);
     }
 
     /// Set the time to seconds, as a Python test sets clock.now.
@@ -127,6 +154,8 @@ pub(crate) struct FakeState {
     pub snapshots: Vec<(String, String)>,
     /// origin's branches, by name, with their commit: those `push --force` created, which `ls-remote` lists.
     pub remote: Map<String>,
+    /// The stderr of a failing `ls-remote --heads origin`, which lists remote; None lists it.
+    pub list_remote_error: Option<String>,
     /// What `git diff -U0` from the base to a snapshot prints.
     pub diff: String,
     /// The checkout has an origin at all.
@@ -230,6 +259,7 @@ impl FakeHost {
                 merge_head: false,
                 snapshots: vec![],
                 remote: Map::new(),
+                list_remote_error: None,
                 diff: String::new(),
                 has_origin: true,
                 ages: HashMap::new(),
@@ -411,6 +441,9 @@ impl FakeState {
                     let said = format!("error: unable to delete '{git_ref}': remote ref does not exist");
                     return Completed::new(1, "", &said);
                 }
+            }
+            ["ls-remote", "--heads", "origin"] if self.list_remote_error.is_some() => {
+                return Completed::new(128, "", self.list_remote_error.as_deref().unwrap_or_default());
             }
             ["ls-remote", "--heads", "origin"] => {
                 return ok(&self.remote.iter().map(|(b, c)| format!("{c}\trefs/heads/{b}\n")).collect::<String>());

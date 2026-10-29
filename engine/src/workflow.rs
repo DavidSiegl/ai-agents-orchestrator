@@ -13,8 +13,9 @@ use std::rc::Rc;
 
 use crate::constants::{
     APPROVE, CHANGES_REQUESTED, DEFAULT_AGENT, DEFAULT_MAX_QUALITY_ROUNDS, DEFAULT_MAX_ROUNDS, DEFAULT_TURN_TIMEOUT,
-    FINISHED, HEARTBEAT_SECONDS, REMOTE, SUCCEEDED,
+    FINISHED, HEARTBEAT_SECONDS, QUALITY_GATE_FAILED, REMOTE, SUCCEEDED,
 };
+use crate::ci::Jenkins;
 use crate::error::OrchestratorError;
 use crate::handoff::parse_verdict;
 use crate::harness::{harness, AgentSettings};
@@ -25,6 +26,7 @@ use crate::pipeline::{is_built_in, Pipeline, Step, DONE, METRICS_FILE, PUBLISH, 
 use crate::prompts::{Prompt, Prompts};
 use crate::proofs::PROOF_TIMEOUT;
 use crate::pull_request::{branch_name, commit_note, pr_body, provenance, spec_title, GateEvidence, QualityFile};
+use crate::pypi::PyPI;
 use crate::py::format::format;
 use crate::py::json::{Json, Map};
 use crate::py::text::{basename, rstrip, strip};
@@ -37,6 +39,7 @@ use crate::workflow_file::{run_pipeline, workflow_definition};
 
 mod locks;
 mod proof_runs;
+mod quality_rounds;
 mod turn;
 
 #[cfg(test)]
@@ -80,6 +83,12 @@ pub struct Collaborators<'a> {
     /// Whether a process of a pid exists on this machine, for judging the checkout's other runs (run_health):
     /// crate::runs::pid_alive, which a test replaces.
     pub pid_alive: &'a dyn Fn(i128) -> bool,
+    /// The quality job that judges the change in the quality rounds: Some turns the run's quality gate on, None
+    /// leaves it off. Python's ci.
+    pub jenkins: Option<&'a Jenkins>,
+    /// The index the quality rounds' new-dependencies check asks about each package the change adds
+    /// (crate::checks); a run without the quality gate never asks it.
+    pub pypi: &'a PyPI,
 }
 
 /// How a run is to go, as Workflow's keyword arguments in orchestrator.py: each but spec saved in the state, so that a
@@ -182,6 +191,10 @@ enum How {
 /// With pull_request, the editing steps work on a new branch, and the finished change is committed, pushed and
 /// opened as a pull request against the branch the run started on, which is checked out again afterwards. The
 /// workspace is then closed. A run that fails keeps its workspace and branch, to see what happened.
+///
+/// With a Jenkins job (Collaborators::jenkins), each turn of the quality-gated step is followed by a quality round
+/// (phase quality) that has the job judge a snapshot of the change; a gate that does not pass goes back to that step,
+/// up to max_quality_rounds analyses per round, before the next step.
 pub struct Workflow<'a> {
     host: &'a dyn Host,
     herdr: &'a dyn Herdr,
@@ -189,6 +202,9 @@ pub struct Workflow<'a> {
     human: &'a dyn Human,
     interrupt: &'a Interrupt,
     pid_alive: &'a dyn Fn(i128) -> bool,
+    /// Collaborators::jenkins.
+    jenkins: Option<&'a Jenkins>,
+    pypi: &'a PyPI,
     state: RunState,
     /// The run's workflow, shared so that a step borrowed from it outlives no borrow of the Workflow.
     pipeline: Rc<Pipeline>,
@@ -212,14 +228,21 @@ impl<'a> Workflow<'a> {
     /// A Workflow for the run state describes, with settings saved into it; settings.pipeline, else the workflow the
     /// state names (and its saved definition), is the run's.
     ///
-    /// Errors: the state's prompt overrides or saved workflow cannot be read, or the run is to end in a pull request
-    /// and its workflow has no editing step.
+    /// Errors: the state's prompt overrides or saved workflow cannot be read, the run has the quality gate
+    /// (with.jenkins) and its workflow no quality-gated step, or the run is to end in a pull request and its workflow
+    /// has no editing step.
     pub fn new(with: Collaborators<'a>, mut state: RunState, settings: RunSettings) -> Result<Workflow<'a>, OrchestratorError> {
         let prompts = state.prompts()?;
         let pipeline = match settings.pipeline {
             Some(p) => p,
             None => run_pipeline(&state.workflow, state.workflow_definition.as_ref(), &prompts)?,
         };
+        if with.jenkins.is_some() && pipeline.gated().is_none() {
+            return Err(OrchestratorError(format!(
+                "workflow {} has no quality-gated step, so the quality gate does not apply",
+                pipeline.name()
+            )));
+        }
         // Publishing commits on the run's branch, which only the first editing step creates.
         if settings.pull_request && pipeline.first_edit().is_none() {
             return Err(OrchestratorError(format!(
@@ -241,7 +264,7 @@ impl<'a> Workflow<'a> {
             .map(|role| (role, agents.kinds.get(role).cloned().unwrap_or_else(|| DEFAULT_AGENT.to_string())))
             .collect();
         state.pull_request = settings.pull_request;
-        state.quality_job = None;
+        state.quality_job = with.jenkins.map(|j| j.job().to_string());
         state.max_quality_rounds = settings.max_quality_rounds;
         let me = [
             ("host", Json::from(local_host())),
@@ -257,6 +280,8 @@ impl<'a> Workflow<'a> {
             human: with.human,
             interrupt: with.interrupt,
             pid_alive: with.pid_alive,
+            jenkins: with.jenkins,
+            pypi: with.pypi,
             state,
             pipeline: Rc::new(pipeline),
             prompts,
@@ -274,7 +299,8 @@ impl<'a> Workflow<'a> {
     }
 
     /// Run every phase not yet done and return the final verdict: the verdict step's, or for a workflow without one,
-    /// FINISHED. A run already done returns its saved verdict.
+    /// FINISHED, or QUALITY_GATE_FAILED when its quality gate still failed. A run already done returns its saved
+    /// verdict.
     ///
     /// Errors: why the run stopped (Stopped); for a failure or an interrupt, after recording it in state.json and
     /// writing summary.md, as far as saving still works.
@@ -327,11 +353,13 @@ impl<'a> Workflow<'a> {
         }
         self.walk()?;
         if self.pipeline.verdict_step().is_none() {
-            self.state.verdict = Some(FINISHED.to_string());
+            let passed = self.gate_passed(self.state.round)?;
+            self.state.verdict = Some(if passed { FINISHED } else { QUALITY_GATE_FAILED }.to_string());
         }
         if self.state.pull_request {
             self.publish()?;
         }
+        self.clean_up_quality();
         self.clean_up_locks();
         Ok(())
     }
@@ -362,22 +390,50 @@ impl<'a> Workflow<'a> {
         if self.state.worktree.is_some() {
             self.check_worktree()?;
         }
-        Ok(self.check_branch()?)
+        self.check_branch()?;
+        if let Some(jenkins) = self.jenkins {
+            let phase = self.state.phase.as_str();
+            if phase == QUALITY || self.pipeline.gated().is_some_and(|gated| gated.id == phase) {
+                // Before a turn of the gated step that may take half an hour, not after it.
+                jenkins.check_credentials()?;
+            }
+        }
+        Ok(())
     }
 
-    /// Open the run's worktree, if it has one, and fail if the run could not push what it makes or open its pull
-    /// request, before the Spec Collector's first turn.
+    /// Open the run's worktree, if it has one, and fail if the run could not push what it makes, run its quality
+    /// gate or open its pull request, before the Spec Collector's first turn.
     fn check_before_interview(&mut self) -> Outcome<()> {
         if self.state.worktree.is_some() {
             self.open_worktree()?;
         }
-        if self.state.pull_request {
+        if self.state.pull_request || self.jenkins.is_some() {
             self.host.check_gitleaks()?;
-            if self.state.worktree.is_none() {
-                self.check_repo()?;
-            }
+        }
+        if let Some(jenkins) = self.jenkins {
+            self.check_gate(jenkins)?;
+        }
+        if self.state.pull_request && self.state.worktree.is_none() {
+            self.check_repo()?;
         }
         Ok(())
+    }
+
+    /// Fail before the interview if the quality gate, of jenkins, could not run.
+    fn check_gate(&self, jenkins: &Jenkins) -> Result<(), OrchestratorError> {
+        let cwd = &self.state.cwd;
+        if self.host.git_head(cwd)?.is_none() {
+            return Err(OrchestratorError(format!(
+                "the quality gate needs a git repository, and {cwd} is not one with a commit"
+            )));
+        }
+        // check_repo checks both for a pull-request run, and a worktree run's worktree starts out clean.
+        if !self.state.pull_request {
+            // A snapshot takes every change in the tree, so the tree must start with none.
+            self.require_clean()?;
+            quality_rounds::require_origin(self.host, cwd)?;
+        }
+        jenkins.preflight()
     }
 
     /// Before the interview, check out origin's base branch, detached, in the run's worktree.
@@ -688,6 +744,17 @@ impl<'a> Workflow<'a> {
         self.save()
     }
 
+    /// The quality-gated step, whose quality round phase quality is. Errors: the workflow has none, which check_phase
+    /// rules out for that phase.
+    fn gated_step(&self) -> Result<Step, OrchestratorError> {
+        self.pipeline.gated().cloned().ok_or_else(|| {
+            OrchestratorError(format!(
+                "a quality round in workflow {}, which has no quality-gated step",
+                self.pipeline.name()
+            ))
+        })
+    }
+
     /// The step of the current phase. Errors: the workflow has none, which check_phase rules out.
     fn current_step(&self) -> Result<Step, OrchestratorError> {
         let phase = &self.state.phase;
@@ -711,8 +778,16 @@ impl<'a> Workflow<'a> {
         let pipeline = Rc::clone(&self.pipeline);
         loop {
             let n = self.state.round;
-            let step = self.current_step()?;
-            if !self.take_turn(&step, n)? {
+            let (step, finished) = if self.state.phase == QUALITY {
+                let gated = self.gated_step()?;
+                let finished = self.judge_quality(&gated, n)?;
+                (gated, finished)
+            } else {
+                let step = self.current_step()?;
+                let finished = self.take_turn(&step, n)?;
+                (step, finished)
+            };
+            if !finished {
                 continue;
             }
             match pipeline.after(&step.id) {
@@ -732,10 +807,15 @@ impl<'a> Workflow<'a> {
             // Before the quality round, so the gate judges the locked files.
             self.hold_locks(step, n)?;
         }
-        if step.quality_gated && self.state.quality_round > 0 {
+        if step.quality_gated && (self.jenkins.is_some() || self.state.quality_round > 0) {
             // The report goes to the next quality round. A round whose gate resume turned off since its last quality
             // round never analyses it, and the next step reads the report all the same (Step::last_path).
             self.state.quality_round += 1;
+            if self.jenkins.is_some() {
+                self.state.phase = QUALITY.to_string();
+                self.save()?;
+                return Ok(false);
+            }
         }
         let Some(loop_to) = &step.loop_to else { return Ok(true) };
         // turn accepts no verdict file without one.
@@ -823,10 +903,13 @@ impl<'a> Workflow<'a> {
             fill.insert(name, value);
         }
         let template = |t: &str| format(t, &|name| fill.get(name).cloned()).map_err(|e| prompt_error(&step.id, &e));
-        // What the verdict step hears of its round besides its prompt: the locked files restored, and the proofs run
-        // again.
-        let notes =
-            if step.loop_to.is_some() { self.locks_note(n)? + &self.carried_proofs_note(n)? } else { String::new() };
+        // What the verdict step hears of its round besides its prompt: its last quality file, the locked files
+        // restored, and the proofs run again.
+        let notes = if step.loop_to.is_some() {
+            self.quality_note(n)? + &self.locks_note(n)? + &self.carried_proofs_note(n)?
+        } else {
+            String::new()
+        };
         let first = template(&step.prompt)? + &notes;
         let follow = if q > 0 {
             let report_path = self.own_path(step, n);

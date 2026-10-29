@@ -1,9 +1,7 @@
 //! TestBlocked and TestBlockedResume: a step that can block writes a BLOCKED report, the turn waits for the human's
 //! answer and then for the report again, and an orchestrator killed at each point of a block resumes from there.
 //!
-//! Not here: TestBlocked's test_a_blocked_quality_answer_waits_then_goes_back_to_the_quality_round and
-//! test_the_note_is_in_every_prompt_of_the_steps_that_can_block_only, which run the quality gate, with the quality
-//! round (rust-engine ticket 08, part 5); the print_runs half of test_the_wait_is_saved_and_listed, list's (ticket
+//! Not here: the print_runs half of test_the_wait_is_saved_and_listed, list's (ticket
 //! 09); TestBlockedListing, list's and show's (ticket 09); TestParseBlocked, crate::handoff's and crate::pipeline's
 //! (ticket 04).
 
@@ -258,6 +256,72 @@ fn an_empty_report_after_a_block_aborts_and_ends_the_block() {
     assert!(message.contains("build-1.md was written empty by the Builder"), "{message}");
     let saved = b.f.saved();
     assert_eq!((saved.get("blocked"), saved.get("prompted")), (Some(&Json::Null), Some(&Json::Null)));
+}
+
+#[test]
+fn a_blocked_quality_answer_waits_then_goes_back_to_the_quality_round() {
+    let (blocks, reviews) = (seen(), seen());
+    let q1 = |s: &RunState| s.quality_build_path(1, 1);
+    let f = Fixture::new(vec![
+        ("spec", vec![spec_turn()]),
+        (
+            "build",
+            vec![
+                build_turn(1),
+                recording(blocked_report(q1, QUESTION), &blocks),
+                recording(answered(q1, "report 1 q1"), &blocks),
+            ],
+        ),
+        ("review", vec![recording(review_turn(1, APPROVE), &reviews)]),
+    ])
+    .gated();
+    f.ci.state().outcomes = vec![red(), green()].into();
+    bounded(&f);
+
+    let mut wf = f.workflow(RunSettings::default());
+    assert_eq!(wf.run(), verdict(APPROVE));
+    assert_eq!(blocked_files(&f.host), ["build-1-q1.blocked-1.md"]);
+    assert!(blocks.borrow()[0].ends_with(&note()));
+    assert_eq!(blocks.borrow()[1], blocked_prompt(&format!("{D}/build-1-q1.md"), 1));
+    assert!(f.told.titles().contains(&"Builder is blocked: which database?".to_string()));
+    let quality = f.host.state().files.get(&format!("{D}/quality-1-2.md")).cloned().unwrap_or_default();
+    assert!(quality.starts_with("GATE: OK\n"), "{quality}");
+    assert!(reviews.borrow()[0].contains(&format!("The Builder's report is in {D}/build-1-q1.md.")));
+    let s = wf.state();
+    assert_eq!((s.round, s.quality_round, s.blocked.is_none()), (1, 2, true));
+}
+
+#[test]
+fn the_note_is_in_every_prompt_of_the_steps_that_can_block_only() {
+    let (specs, builds, reviews) = (seen(), seen(), seen());
+    let f = Fixture::new(vec![
+        ("spec", vec![recording(spec_turn(), &specs)]),
+        ("build", [build_turn(1), fix_turn(1, 1), build_turn(2)].into_iter().map(|t| recording(t, &builds)).collect()),
+        (
+            "review",
+            [malformed_review(1, "looks fine"), review_turn(1, CHANGES_REQUESTED), review_turn(2, APPROVE)]
+                .into_iter()
+                .map(|t| recording(t, &reviews))
+                .collect(),
+        ),
+    ])
+    .gated();
+    f.ci.state().outcomes = vec![red(), green(), green()].into();
+
+    assert_eq!(f.workflow(RunSettings::default()).run(), verdict(APPROVE));
+    // First, quality fix and again; the fresh prompts are in default_prompts.rs's golden texts.
+    let blocked_note = crate::py::format::format(crate::prompts::BLOCKED_NOTE, &|_| None).unwrap();
+    assert_eq!(builds.borrow().len(), 3);
+    for prompt in builds.borrow().iter() {
+        assert!(prompt.ends_with(&note()));
+        assert_eq!(prompt.matches(blocked_note.as_str()).count(), 1);
+    }
+    // The Reviewer's first, retry and again.
+    assert_eq!(reviews.borrow().len(), 3);
+    for prompt in specs.borrow().iter().chain(reviews.borrow().iter()) {
+        assert!(!prompt.contains("BLOCKED"));
+    }
+    assert_eq!(super::default_prompts::FRESH_BUILD_2.matches(blocked_note.as_str()).count(), 1);
 }
 
 #[test]

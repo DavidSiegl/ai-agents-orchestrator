@@ -4,6 +4,7 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::constants::PYPI_TIMEOUT;
+use crate::host::fake::FakeTime;
 use crate::http::{Http, HttpError, Request, Response};
 use crate::py::json::{Json, Map};
 
@@ -71,6 +72,11 @@ pub(crate) struct FakePyPIState {
     pub down: bool,
     /// The project names asked for, in order.
     pub asked: Vec<String>,
+    /// The time each request lets pass, seconds: a FakeClock's time, which the request moves on by seconds; None lets
+    /// none pass.
+    pub clock: Option<(FakeTime, f64)>,
+    /// What happened, in order: `ask <name>` for each request, and what a test adds between them.
+    pub events: Vec<String>,
 }
 
 pub(crate) struct FakePyPI {
@@ -104,6 +110,10 @@ impl Http for FakePyPI {
             .unwrap_or_else(|| panic!("not a PyPI project's URL: {}", request.url));
         let mut state = self.state();
         state.asked.push(name.to_string());
+        state.events.push(format!("ask {name}"));
+        if let Some((time, seconds)) = &state.clock {
+            time.advance(*seconds);
+        }
         if state.down {
             return Err(HttpError::NoAnswer("timed out".to_string()));
         }

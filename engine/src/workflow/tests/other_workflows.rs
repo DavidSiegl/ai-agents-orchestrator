@@ -2,12 +2,7 @@
 //! Workflow-driven cases of TestWorkflowDefinitions and TestWorkflowFiles: workflows other than the default, a run
 //! saved before workflows existed, and a workflow file's run.
 //!
-//! Not here: the cases that run the quality gate, with the quality round (rust-engine ticket 08, part 5):
-//! TestOtherWorkflows' test_gated_step_with_another_name, test_fresh_gated_step_answering_a_quality_round and
-//! test_resumed_gated_step_checks_the_credentials_first, TestWorkflowWithoutAVerdict's
-//! test_a_gate_that_still_fails_is_not_finished, test_a_missing_last_quality_file_fails_the_gate and
-//! test_a_gate_that_passes_is_finished, TestSavedBeforeWorkflows' test_quality_resumes_under_the_default and
-//! TestWorkflowDefinitions' test_the_gate_needs_a_gated_step. The CLI's (ticket 09): role_models' half of
+//! Not here: the CLI's (ticket 09): role_models' half of
 //! TestOtherWorkflows.test_model_reaches_a_role_without_its_own_flag, TestWorkflowWithoutAVerdict's
 //! test_a_failed_gate_exits_as_changes_requested and test_finished_exits_zero, and TestWorkflowFiles'
 //! test_list_reads_the_gated_step_from_the_saved_definition; resumable_state's (part 7): TestWorkflowFiles'
@@ -17,9 +12,12 @@
 //! crate::state's (ticket 04).
 
 use super::*;
-use crate::constants::FINISHED;
+use crate::ci::fake::{credentials, Outcome, JOB};
+use crate::constants::{FINISHED, QUALITY_GATE_FAILED};
+use crate::prompts::QUALITY_PASSED_NOTE;
 use crate::pipeline::{Pipeline, Step, DEFAULT_WORKFLOW};
-use crate::test_support::{four, quick, roles, solo, TempDir, EXAMPLES};
+use crate::py::text::basename;
+use crate::test_support::{four, impl_, quick, roles, solo, TempDir, EXAMPLES};
 use crate::workflow_file::{load_workflow_file, workflow_definition};
 
 const D: &str = "/proj/.orchestrator/runs/20260929-120000-a1b2c3";
@@ -179,6 +177,109 @@ fn model_reaches_a_role_without_its_own_flag() {
     assert!(called(&f, &start));
 }
 
+/// The Implementer's report in round n of test_support's impl workflow, answering quality round q when q is not 0.
+fn impl_turn(n: u32, q: u32) -> Turn {
+    Box::new(move |_, state, host| {
+        host.write("/proj/limiter.py", &format!("version {n}.{q}"), false).expect("the fake host writes");
+        let path = impl_().steps()[0].path(&state.dir(), n, q);
+        host.write(&path, &format!("impl {n} q{q}"), false).expect("the fake host writes");
+        "done".to_string()
+    })
+}
+
+/// The files the run wrote to its run directory, but state.json, by name and in order.
+fn written(f: &Fixture) -> Vec<String> {
+    let h = f.host.state();
+    h.writes.iter().filter(|p| p.starts_with(D) && !p.ends_with("state.json")).map(|p| basename(p).to_string()).collect()
+}
+
+/// A saved run of the impl workflow in round 1 of phase impl, with the gate's job and the Implementer's agent.
+fn impl_saved() -> RunState {
+    let mut state = saved_run("impl", 1, &[]);
+    (state.quality_job, state.workflow) = (Some(JOB.to_string()), "impl".into());
+    let agent = [("name", "impl-a1b2c3".to_string()), ("pane", "w1:p1".to_string())].into_iter().collect();
+    state.agents.insert("impl", agent);
+    state
+}
+
+#[test]
+fn gated_step_with_another_name() {
+    let imp = impl_();
+    let (impls, reviews) = (seen(), seen());
+    let f = Fixture::on(Rc::new(FakeHost::default()), new_run(&imp), vec![
+        ("impl", vec![recording(impl_turn(1, 0), &impls), recording(impl_turn(1, 1), &impls)]),
+        ("review", vec![recording(review_turn(1, APPROVE), &reviews)]),
+    ])
+    .gated();
+    f.ci.state().outcomes = vec![red(), green()].into();
+
+    assert_eq!(f.workflow(with_pipeline(&imp)).run(), verdict(APPROVE));
+    let fix = filled(crate::prompts::QUALITY_FIX_PROMPT, &[
+        ("quality_path", &format!("{D}/quality-1-1.md")),
+        ("report_path", &format!("{D}/impl-1-q1.md")),
+    ]);
+    assert_eq!(*impls.borrow(), [format!("Implement add a rate limiter; report to {D}/impl-1.md.{}", note()), fix + &note()]);
+    let passed = quality_note(QUALITY_PASSED_NOTE, &format!("{D}/quality-1-2.md"));
+    assert_eq!(*reviews.borrow(), [format!("Review {CHANGE} with {D}/impl-1-q1.md; write {D}/review-1.md.\n\n{passed}")]);
+    assert_eq!(written(&f), [
+        "impl-1.md",
+        "quality-1-1.md",
+        "impl-1-q1.md",
+        "quality-1-2.md",
+        "review-1.md",
+        "summary.md",
+        "metrics.json"
+    ]);
+    let file = |name: &str| f.host.state().files.get(&format!("{D}/{name}")).cloned().unwrap_or_default();
+    assert!(file("quality-1-1.md").starts_with("GATE: ERROR\n"));
+    assert!(file("quality-1-2.md").starts_with("GATE: OK\n"));
+    assert_eq!(f.ci.state().triggered(), [REF_1_1, "orchestrator-ci/a1b2c3-1-q2"]);
+    let pr = f.host.state().prs[0].clone();
+    assert!(pr.body.contains("<summary>Builder report (round 1)</summary>\n\nimpl 1 q1"));
+    assert!(pr.body.contains("<summary>Quality gate (round 1)</summary>\n\nGATE: OK"));
+    assert_eq!(pr.title, "add a rate limiter");
+}
+
+#[test]
+fn fresh_gated_step_answering_a_quality_round() {
+    let seen = seen();
+    let mut state = impl_saved();
+    (state.quality_round, state.prompted) = (1, Some("impl-1-q1.md".into()));
+    let script = vec![("impl", vec![recording(impl_turn(1, 1), &seen)]), ("review", vec![review_turn(1, APPROVE)])];
+    let f = Fixture::resume_gated(Rc::new(FakeHost::default()), state, script, &[]);
+    f.put(&format!("{D}/impl-1.md"), "impl 1");
+    f.put(&f.state.quality_path(1, 1), "GATE: ERROR\n");
+
+    let mut wf = f.workflow(RunSettings { pipeline: Some(impl_()), ..f.as_saved_gated() });
+    assert_eq!(wf.run(), verdict(APPROVE));
+    let fix = filled(crate::prompts::QUALITY_FIX_PROMPT, &[
+        ("quality_path", &format!("{D}/quality-1-1.md")),
+        ("report_path", &format!("{D}/impl-1-q1.md")),
+    ]);
+    assert_eq!(
+        *seen.borrow(),
+        [format!(
+            "Implement add a rate limiter; report to {D}/impl-1-q1.md.\n\nEarlier reports: {D}/impl-1.md.\n\n{fix}{}",
+            note()
+        )]
+    );
+    // The second role goes to the right of the first.
+    assert_eq!(calls_of(&f, "split"), [split("w1:p1", Direction::Right)]);
+    assert_eq!(wf.state().quality_round, 2);
+}
+
+#[test]
+fn resumed_gated_step_checks_the_credentials_first() {
+    let mut env = credentials();
+    env.remove("JENKINS_TOKEN");
+    let f = Fixture::resume(Rc::new(FakeHost::default()), impl_saved(), vec![("impl", vec![impl_turn(1, 0)])], &[], &[])
+        .gated_with(&env);
+
+    let e = failure(f.workflow(RunSettings { pipeline: Some(impl_()), ..f.as_saved() }).run());
+    assert!(e.contains("needs JENKINS_TOKEN"), "{e}");
+    assert!(names(&f, "prompt").is_empty());
+}
+
 #[test]
 fn phase_outside_the_workflow_is_refused() {
     let f = Fixture::on(Rc::new(FakeHost::default()), new_run(&four()), vec![]);
@@ -240,6 +341,61 @@ fn a_resume_at_publish_keeps_the_outcome() {
     assert!(!f.host.state().prs[0].draft);
 }
 
+/// A run of a one-step gated workflow, with up to two quality rounds playing outcomes: its verdict and fixture.
+fn gated_solo(outcomes: Vec<Outcome>) -> (Result<Option<String>, Stopped>, Fixture) {
+    let mut step = Step::new("impl", "impl", "impl-{n}.md", "Implement {task}; report to {path}.");
+    (step.edits, step.quality_gated) = (true, true);
+    let solo = Pipeline::new("gsolo", roles(&[("impl", "Implementer")]), vec![step]).unwrap();
+    let f = Fixture::on(Rc::new(FakeHost::default()), new_run(&solo), vec![("impl", vec![impl_turn(1, 0), impl_turn(1, 1)])])
+        .gated();
+    f.ci.state().outcomes = outcomes.into();
+    let ran = f.workflow(RunSettings { max_quality_rounds: 2, ..with_pipeline(&solo) }).run();
+    (ran, f)
+}
+
+#[test]
+fn a_gate_that_still_fails_is_not_finished() {
+    let (ran, f) = gated_solo(vec![red(), red()]);
+
+    assert_eq!(ran, verdict(QUALITY_GATE_FAILED));
+    let pr = f.host.state().prs[0].clone();
+    assert!(pr.draft);
+    let parts: Vec<&str> = pr.body.splitn(3, "\n\n").collect();
+    assert_eq!(
+        parts[0],
+        "Opened by Octoflow AI run `20260929-120000-a1b2c3`. **QUALITY_GATE_FAILED**: its workflow has no review step, \
+         and the quality gate still did not pass after the last quality round, so this is a draft."
+    );
+    assert!(parts[1].split('\n').any(|l| l == "| Orchestrator-Gate | `ERROR after 2 quality rounds` |"), "{}", parts[1]);
+    assert!(parts[2].starts_with("<details open>"));
+    assert!(!pr.body.contains("Reviewer"));
+    assert!(pr.body.contains("<summary>Quality gate (round 1)</summary>\n\nGATE: ERROR"));
+    assert_eq!(commit_args(&f)[5], "Orchestrator run 20260929-120000-a1b2c3: QUALITY_GATE_FAILED, unreviewed.");
+    assert!(f.told.titles().contains(&"Run finished: QUALITY_GATE_FAILED".to_string()));
+}
+
+#[test]
+fn a_missing_last_quality_file_fails_the_gate() {
+    // The quality round before passed, but the current one's file is not written: as before gate_passed read
+    // last_quality, which falls back to the round before.
+    let state = quality_state(2);
+    let f = Fixture::resume(Rc::new(FakeHost::default()), state, vec![], &[], &[]).gated();
+    f.put(&f.state.quality_path(1, 1), "GATE: OK\n");
+    let wf = f.workflow(f.as_saved());
+    assert_eq!(wf.gate_passed(1), Ok(false));
+    f.put(&f.state.quality_path(1, 2), "GATE: OK\n");
+    assert_eq!(wf.gate_passed(1), Ok(true));
+}
+
+#[test]
+fn a_gate_that_passes_is_finished() {
+    let (ran, f) = gated_solo(vec![red(), green()]);
+    assert_eq!(ran, verdict(FINISHED));
+    let pr = f.host.state().prs[0].clone();
+    assert!(!pr.draft);
+    assert!(pr.body.contains("<summary>Quality gate (round 1)</summary>\n\nGATE: OK"));
+}
+
 // -- TestSavedBeforeWorkflows: state.json as commit d6bb100 wrote it, without a workflow field. --------------------
 
 /// state as a run saved before workflows existed would read: without its workflow field.
@@ -289,7 +445,30 @@ fn each_phase_resumes_under_the_default() {
     }
 }
 
+#[test]
+fn quality_resumes_under_the_default() {
+    let reviews = seen();
+    let state = old(&quality_state(1));
+    let script = vec![("review", vec![recording(review_turn(1, APPROVE), &reviews)])];
+    let f = Fixture::resume_gated(Rc::new(FakeHost::default()), state, script, &[]);
+    f.put(&f.state.quality_path(1, 1), "GATE: OK\n");
+
+    let mut wf = f.workflow(f.as_saved_gated());
+    assert_eq!(wf.run(), verdict(APPROVE));
+    assert_eq!(wf.state().workflow, "default");
+    assert_eq!(wf.state().phase, "done");
+    assert!(reviews.borrow()[0].contains(&quality_note(QUALITY_PASSED_NOTE, &f.state.quality_path(1, 1))));
+}
+
 // -- The Workflow-driven cases of TestWorkflowDefinitions and TestWorkflowFiles, and TestSpecBuildReviewExample ------
+
+#[test]
+fn the_gate_needs_a_gated_step() {
+    let quick = quick();
+    let f = Fixture::on(Rc::new(FakeHost::default()), new_run(&quick), vec![]).gated();
+    let refused = f.try_workflow(with_pipeline(&quick)).err().map(|e| e.0);
+    assert_eq!(refused.as_deref(), Some("workflow quick has no quality-gated step, so the quality gate does not apply"));
+}
 
 #[test]
 fn a_pull_request_needs_an_editing_step() {

@@ -172,3 +172,17 @@ fn a_state_with_a_field_it_does_not_know_and_without_later_ones_reads_with_their
     assert_eq!((state.root_pane.as_str(), state.prompted, state.owner), ("w9:p1", None, None));
     assert_eq!(state.max_rounds, crate::constants::DEFAULT_MAX_ROUNDS);
 }
+
+#[test]
+fn a_state_saved_before_the_gate_has_none() {
+    // TestQualityCLI.test_state_saved_before_the_gate_has_none, on a review saved in round 1.
+    let mut state = RunState::new("20260929-120000-a1b2c3", "add a rate limiter", "/proj");
+    (state.phase, state.round) = ("review".into(), 1);
+    let mut saved = state.to_json().as_object().unwrap().clone();
+    for key in ["quality_job", "max_quality_rounds", "quality_round", "ci"] {
+        assert!(saved.remove(key).is_some(), "{key}");
+    }
+    let state = RunState::from_saved(&saved).unwrap();
+    assert_eq!((state.quality_job.as_deref(), state.quality_round, state.ci.is_empty()), (None, 0, true));
+    assert_eq!(state.last_report_path(1), state.build_path(1));
+}

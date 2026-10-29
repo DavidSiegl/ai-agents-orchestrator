@@ -9,9 +9,12 @@
 //! test_the_reviewers_own_proofs_heading_does_not_stop_the_run has the Reviewer write its own "## Proofs" section,
 //! where Python's adds it as the review is read.
 //!
-//! Not here: test_a_carried_proof_runs_again_after_the_rounds_last_quality_round_and_before_the_review, which runs
-//! the quality gate, with the quality round (rust-engine ticket 08, part 5);
-//! test_proof_command_needs_a_verdict_step_and_names_the_proof_once, test_a_workflow_file_takes_proof_command_and_proofs_dir
+//! test_a_carried_proof_runs_again_after_the_rounds_last_quality_round_and_before_the_review logs what happens in a
+//! file of the scratch project, which the proof appends to too, where Python wraps the Workflow's _judge_quality and
+//! _run_proof: a quality round is logged as its snapshot is pushed, and a proof without its round, which its place
+//! among the turns gives.
+//!
+//! Not here: test_proof_command_needs_a_verdict_step_and_names_the_proof_once, test_a_workflow_file_takes_proof_command_and_proofs_dir
 //! and test_proof_command_round_trips_through_a_workflow_file, which are crate::pipeline's and crate::workflow_file's
 //! (ticket 04).
 
@@ -24,7 +27,7 @@ use crate::host::fake::FakeClock;
 use crate::host::tests::Repo;
 use crate::host::{ProcessHost, PushError};
 use crate::interrupt::Interrupt;
-use crate::pipeline::Pipeline;
+use crate::pipeline::{Pipeline, DEFAULT_WORKFLOW};
 use crate::proofs::PROOFS_HEADING;
 use crate::test_support::{object as record, quick, replaced, TempDir};
 use crate::workflow::Collaborators;
@@ -142,19 +145,14 @@ fn run_proofs(proj: &TempDir, reviews: Vec<(&'static str, Vec<(&'static str, Exi
     Proving { reviews, ..Proving::default() }.run_in(proj)
 }
 
-fn fill(template: &str, values: &[(&str, &str)]) -> String {
-    let value = |name: &str| values.iter().find(|(n, _)| *n == name).map(|(_, v)| v.to_string());
-    crate::py::format::format(template, &value).expect("the built-in note fills in")
-}
-
 fn proofs_note(proofs: &str) -> String {
-    format!("\n\n{}", fill(crate::prompts::PROOFS_NOTE, &[("proofs", proofs)]))
+    format!("\n\n{}", filled(crate::prompts::PROOFS_NOTE, &[("proofs", proofs)]))
 }
 
 /// The note the Reviewer hears of proofs from earlier rounds run again in proj, items being its list's items.
 fn carried_note(proj: &str, items: &[&str]) -> String {
     let proofs = items.join("\n\n");
-    let note = fill(crate::prompts::CARRIED_PROOFS_NOTE, &[("command", COMMAND), ("cwd", proj), ("proofs", &proofs)]);
+    let note = filled(crate::prompts::CARRIED_PROOFS_NOTE, &[("command", COMMAND), ("cwd", proj), ("proofs", &proofs)]);
     format!("\n\n{note}")
 }
 
@@ -618,6 +616,8 @@ fn a_proof_runs_on_the_worktrees_code_and_the_commit_holds_no_copy_of_it() {
         human: &told,
         interrupt: &interrupt,
         pid_alive: &crate::runs::pid_alive,
+        jenkins: None,
+        pypi: &crate::pypi::PyPI::new(crate::pypi::fake::FakePyPI::from_json(Default::default())),
     };
     let mut wf = crate::workflow::Workflow::new(with, state.clone(), settings(&proving(), 3)).unwrap();
     // Ignores the checkout's .orchestrator directory and owns the run, as a run's start does.
@@ -652,4 +652,86 @@ fn a_proof_runs_on_the_worktrees_code_and_the_commit_holds_no_copy_of_it() {
     let committed = repo.git(&["ls-tree", "-r", "--name-only", BRANCH]);
     assert_eq!(committed.split_whitespace().collect::<Vec<_>>(), ["limiter.sh"]);
     assert_eq!(repo.git(&["show", &format!("{BRANCH}:limiter.sh")]), "RATE=change\n");
+}
+
+#[test]
+fn a_carried_proof_runs_again_after_the_rounds_last_quality_round_and_before_the_review() {
+    // Round 2's first quality round fails, so its last is the one after the Builder's fix.
+    let proj = TempDir::new();
+    let dir = proj.path();
+    let log = format!("{dir}/events.log");
+    let event = {
+        let log = log.clone();
+        move |line: String| {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&log).unwrap();
+            writeln!(file, "{line}").unwrap();
+        }
+    };
+    let logged = |name: &'static str, mut turn: Turn| -> Turn {
+        let event = event.clone();
+        Box::new(move |prompt, state, host| {
+            event(format!("{name} {}", state.round));
+            turn(prompt, state, host)
+        })
+    };
+    let mut review_1 = review_turn(1, CHANGES_REQUESTED);
+    let proof_log = log.clone();
+    let review_with_proof: Turn = Box::new(move |prompt, state, host| {
+        std::fs::create_dir_all(state.proofs_dir(1)).unwrap();
+        std::fs::write(format!("{}/test_1.sh", state.proofs_dir(1)), format!("echo proof >> '{proof_log}'\nexit 1\n"))
+            .unwrap();
+        review_1(prompt, state, host)
+    });
+    let pipeline = replaced(&DEFAULT_WORKFLOW, |s| s.proof_command = Some(COMMAND.into())).unwrap();
+    let mut state = RunState::new(RUN_ID, TASK, &dir);
+    (state.phase, state.workflow) = ("build".into(), pipeline.name().to_string());
+    let host = real_processes();
+    // git ignores the scratch project's .orchestrator, as FakeHost has it ignore /proj's, for the gate's clean-tree
+    // check; and a quality round is logged as its snapshot is pushed.
+    let (weak, orchestrator_dir, pushed) = (Rc::downgrade(&host), format!("{dir}/.orchestrator/"), event.clone());
+    host.state().before_git = Some(Box::new(move |_, args| {
+        if let Some(host) = weak.upgrade() {
+            host.state().changed.retain(|p| !p.starts_with(&orchestrator_dir));
+        }
+        if let ["push", "--quiet", "--force", "origin", refspec] = args {
+            let round = refspec.rsplit_once("a1b2c3-").map_or("", |(_, nq)| nq).replace("-q", " ");
+            pushed(format!("quality round {round}"));
+        }
+    }));
+    let f = Fixture::on(host, state, vec![
+        ("build", vec![logged("build", build_turn(1)), logged("build", build_turn(2)), logged("quality fix", fix_turn(2, 1))]),
+        ("review", vec![logged("review", review_with_proof), logged("review", review_turn(2, APPROVE))]),
+    ])
+    .gated();
+    f.ci.state().outcomes = vec![green(), red(), green()].into();
+
+    let mut wf = f.workflow(settings(&pipeline, 3));
+    assert_eq!(wf.run(), verdict(APPROVE));
+    let events = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        events.lines().collect::<Vec<_>>(),
+        [
+            "build 1",
+            "quality round 1 1",
+            "review 1",
+            "proof",
+            "build 2",
+            "quality round 2 1",
+            "quality fix 2",
+            "quality round 2 2",
+            "proof",
+            "review 2"
+        ]
+    );
+    let proofs: Vec<(Option<i128>, Option<i128>, Option<bool>)> = wf
+        .state()
+        .proofs
+        .iter()
+        .map(|p| {
+            let int = |k: &str| p.get(k).and_then(Json::as_int);
+            (int("round"), int("written"), p.get("demonstrated").and_then(Json::as_bool))
+        })
+        .collect();
+    assert_eq!(proofs, [(Some(1), Some(1), Some(true)), (Some(2), Some(1), Some(true))]);
 }

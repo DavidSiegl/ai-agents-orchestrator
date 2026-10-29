@@ -458,7 +458,7 @@ impl Workflow<'_> {
     }
 
     /// The index in RunState.turns of the record of the turn under way that writes file; None when there is none.
-    fn open_turn(&self, file: &str) -> Option<usize> {
+    pub(super) fn open_turn(&self, file: &str) -> Option<usize> {
         self.state.turns.iter().position(|t| file_of(t) == Some(file) && t.get("ended_at").is_some_and(Json::is_null))
     }
 

@@ -3,9 +3,15 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use super::{Clocks, Collaborators, Human, RunSettings, Workflow};
+use crate::ci::fake::{jenkins_on, FakeJenkins, Outcome};
+use crate::ci::Jenkins;
 use crate::herdr::fake::{FakeHerdr, Turn};
+use crate::http::Http;
+use crate::pypi::fake::FakePyPI;
+use crate::pypi::PyPI;
 use crate::host::fake::{FakeClock, FakeHost};
 use crate::host::Host;
 use crate::interrupt::Interrupt;
@@ -73,6 +79,15 @@ pub(crate) struct Fixture {
     pub pid_alive: Box<dyn Fn(i128) -> bool>,
     /// The state the Workflow starts from.
     pub state: RunState,
+    /// The Jenkins behind jenkins, Python's FakeCI: there for every fixture, so that a run without the quality gate
+    /// can be shown to ask it nothing.
+    pub ci: Arc<FakeJenkins>,
+    /// The quality job the Workflow is given: None for a run without the quality gate, until gated gives it one.
+    pub jenkins: Option<Jenkins>,
+    /// The PyPI behind the Workflow's index, with no project unless a test adds them.
+    pub pypi: Arc<FakePyPI>,
+    /// The index the Workflow is given, on pypi.
+    index: PyPI,
 }
 
 /// The default run's new state.
@@ -104,6 +119,8 @@ impl Fixture {
         if host.state().clock.is_none() {
             host.state().clock = Some(Rc::clone(&clock));
         }
+        let pypi = FakePyPI::from_json(Map::new());
+        let index = PyPI::new(Arc::clone(&pypi) as Arc<dyn Http>);
         Fixture {
             host,
             herdr,
@@ -112,7 +129,33 @@ impl Fixture {
             interrupt,
             pid_alive: Box::new(pid_alive),
             state,
+            ci: FakeJenkins::new(),
+            jenkins: None,
+            pypi,
+            index,
         }
+    }
+
+    /// The fixture with the quality gate on: the Workflow is given the quality job on ci, with every credential, as
+    /// Python's gated gives it.
+    pub fn gated(mut self) -> Fixture {
+        self.jenkins = Some(jenkins_on(&self.ci));
+        self
+    }
+
+    /// The fixture with the quality gate on, asked with these credentials of CI_ENV, by name: Python's gated with
+    /// env.
+    pub fn gated_with(mut self, credentials: &Map<String>) -> Fixture {
+        let ci_env = "/home/u/.config/ai-agents-orchestrator/ci.env";
+        self.jenkins = Some(Jenkins::new(crate::ci::fake::JOB, credentials, ci_env, Arc::clone(&self.ci) as Arc<dyn Http>));
+        self
+    }
+
+    /// The fixture whose Workflow asks this PyPI instead.
+    pub fn with_pypi(mut self, pypi: Arc<FakePyPI>) -> Fixture {
+        self.index = PyPI::new(Arc::clone(&pypi) as Arc<dyn Http>);
+        self.pypi = pypi;
+        self
     }
 
     /// resume: the saved run state describes, in workspace w1 whose panes its agents had, those of the roles alive
@@ -155,6 +198,8 @@ impl Fixture {
             human: &self.told,
             interrupt: &self.interrupt,
             pid_alive: &*self.pid_alive,
+            jenkins: self.jenkins.as_ref(),
+            pypi: &self.index,
         };
         Workflow::new(with, self.state.clone(), settings)
     }
@@ -384,4 +429,113 @@ pub(crate) fn saved_run(phase: &str, rnd: u32, roles: &[&str]) -> RunState {
         state.agents.insert(*role, agent);
     }
     state
+}
+
+// -- The quality gate's, by Python's names -----------------------------------------------------------------------
+
+/// The ref of round 1's first quality round.
+pub(crate) const REF_1_1: &str = "orchestrator-ci/a1b2c3-1-q1";
+
+/// A build whose gate fails on an unused import: Python's outcome(**RED).
+pub(crate) fn red() -> Outcome {
+    Outcome::gate("ERROR", &["`limiter.py:3` error ruff F401: `os` imported but unused"])
+}
+
+/// A build whose gate fails on something else than red's: outcome(**RED2).
+pub(crate) fn red2() -> Outcome {
+    Outcome::gate("ERROR", &["`limiter.py:9` error mypy arg-type: Argument 1 has incompatible type"])
+}
+
+/// A build whose gate passes: outcome().
+pub(crate) fn green() -> Outcome {
+    Outcome::gate("OK", &[])
+}
+
+/// The Builder's answer to quality-<n>-<q>.md: it changes /proj/limiter.py and reports.
+pub(crate) fn fix_turn(n: u32, q: u32) -> Turn {
+    Box::new(move |_, state, host| {
+        host.write("/proj/limiter.py", &format!("version {n}.{q}"), false).expect("the fake host writes");
+        host.write(&state.quality_build_path(n, q), &format!("report {n} q{q}"), false).expect("the fake host writes");
+        "done".to_string()
+    })
+}
+
+/// FakeJenkins's request names without repeats in a row, which polls make.
+pub(crate) fn collapsed(names: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for name in names {
+        if out.last() != Some(name) {
+            out.push(name.clone());
+        }
+    }
+    out
+}
+
+/// Whether text holds the Jenkins token of the tests: Python's leaks.
+pub(crate) fn holds_token(text: &str) -> bool {
+    text.contains(crate::ci::fake::JENKINS_TOKEN)
+}
+
+/// A run saved in quality round q of round 1 of the default workflow, with the gate's job: Python's quality_state.
+pub(crate) fn quality_state(q: u32) -> RunState {
+    let mut state = saved_run("quality", 1, &["spec", "build"]);
+    state.quality_job = Some(crate::ci::fake::JOB.to_string());
+    state.quality_round = q;
+    state
+}
+
+/// make_workflow with the quality gate, its builds playing outcomes, in order, and then green ones.
+pub(crate) fn gated_building(script: Vec<(&str, Vec<Turn>)>, outcomes: Vec<Outcome>) -> Fixture {
+    let f = Fixture::new(script).gated();
+    f.ci.state().outcomes = outcomes.into();
+    f
+}
+
+/// RunState::ci of a round in flight, as pairs of its fields.
+pub(crate) fn ci_of(fields: &[(&str, Json)]) -> Map<Json> {
+    fields.iter().cloned().collect()
+}
+
+impl Fixture {
+    /// Python's resume_gated: a resume of state with the gate on, the ref in flight, if any, on origin, and round 1's
+    /// build report written.
+    pub fn resume_gated(host: Rc<FakeHost>, state: RunState, script: Vec<(&str, Vec<Turn>)>, alive: &[&str]) -> Fixture {
+        if let (Some(Json::Str(git_ref)), Some(Json::Str(sha))) = (state.ci.get("ref"), state.ci.get("sha")) {
+            let mut h = host.state();
+            if !h.remote.contains_key(git_ref) {
+                h.remote.insert(git_ref.as_str(), sha.clone());
+            }
+        }
+        host.state().files.insert(state.build_path(1), "report 1".to_string());
+        Fixture::resume(host, state, script, alive, &[]).gated()
+    }
+
+    /// The text of the run's quality-<n>-<q>.md. Panics when it is not written.
+    pub fn quality_file(&self, n: u32, q: u32) -> String {
+        let path = self.state.quality_path(n, q);
+        self.host.state().files.get(&path).cloned().unwrap_or_else(|| panic!("no {path}"))
+    }
+
+    /// The settings a resume with the gate runs with: as_saved's, with the saved limit of quality rounds, as Python's
+    /// resume_gated gives it.
+    pub fn as_saved_gated(&self) -> RunSettings {
+        RunSettings { max_quality_rounds: self.state.max_quality_rounds, ..self.as_saved() }
+    }
+}
+
+/// template, one of crate::prompts' prompts, filled in with values by name.
+pub(crate) fn filled(template: &str, values: &[(&str, &str)]) -> String {
+    let value = |name: &str| values.iter().find(|(n, _)| *n == name).map(|(_, v)| v.to_string());
+    crate::py::format::format(template, &value).expect("the prompt fills in")
+}
+
+/// The QUALITY_FIX_PROMPT the Builder of state's run hears for quality round q of round n.
+pub(crate) fn quality_fix(state: &RunState, n: u32, q: u32) -> String {
+    let (quality_path, report_path) = (state.quality_path(n, q), state.quality_build_path(n, q));
+    filled(crate::prompts::QUALITY_FIX_PROMPT, &[("quality_path", &quality_path), ("report_path", &report_path)])
+}
+
+/// note, one of the quality notes the verdict step hears, of the quality file at quality_path.
+pub(crate) fn quality_note(note: &str, quality_path: &str) -> String {
+    filled(note, &[("quality_path", quality_path)])
 }

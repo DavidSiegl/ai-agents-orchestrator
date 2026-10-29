@@ -1,10 +1,10 @@
 //! TestTurnTimings and TestRunMetrics: each turn's record on the host's clock, summary.md at every end and
 //! metrics.json at a run's end, with each agent turn's tokens.
 //!
-//! Not here: the cases of a gated run (TestTurnTimings' test_quality_rounds_and_answers_have_records_of_their_own and
-//! test_a_resumed_analysis_keeps_its_start, TestRunMetrics' test_a_gated_run_of_two_rounds_records_its_turns_and_quality_rounds
-//! and test_a_resumed_quality_round_is_recorded_once), with the quality round (rust-engine ticket 08, part 5);
-//! test_a_seeded_spec_has_no_record, in seeded_spec.rs; test_the_metrics_command_prints_a_line_per_run_that_is_done,
+//! The turn_tokens half of TestRunMetrics' test_a_gated_run_of_two_rounds_records_its_turns_and_quality_rounds, which
+//! calls turn_tokens on a log it makes, is crate::summary's (turn_tokens_sums_the_answers_within_the_turn_as_the_python_engine_does).
+//!
+//! Not here: test_a_seeded_spec_has_no_record, in seeded_spec.rs; test_the_metrics_command_prints_a_line_per_run_that_is_done,
 //! the metrics command's (ticket 09). test_durations, test_a_pipe_in_a_cell_does_not_split_it,
 //! test_turn_tokens_needs_a_known_window_and_a_harness_it_reads and test_session_log_finds_the_file_under_home are
 //! crate::summary's and crate::host's (ticket 06).
@@ -394,4 +394,217 @@ fn a_turn_that_changed_sessions_has_unknown_tokens() {
     assert_eq!(wf.run(), verdict(APPROVE));
     let first = &wf.state().turns[0];
     assert_eq!((first.get("session").unwrap(), first.get("tokens").unwrap()), (&Json::Null, &Json::from("unknown")));
+}
+
+// -- The cases of a gated run -------------------------------------------------------------------------------------
+
+fn field<'j>(t: &'j Map<Json>, key: &str) -> &'j Json {
+    t.get(key).unwrap_or_else(|| panic!("no {key} in {t:?}"))
+}
+
+#[test]
+fn quality_rounds_and_answers_have_records_of_their_own() {
+    let f = gated_building(
+        vec![
+            ("spec", vec![spec_turn()]),
+            ("build", vec![build_turn(1), fix_turn(1, 1)]),
+            ("review", vec![review_turn(1, APPROVE)]),
+        ],
+        vec![red(), green()],
+    );
+    let mut wf = f.workflow(RunSettings::default());
+
+    assert_eq!(wf.run(), verdict(APPROVE));
+    let turns = wf.state().turns.clone();
+    let shape: Vec<(Json, Json, Json, Json, Json)> = turns
+        .iter()
+        .map(|t| {
+            let get = |k: &str| field(t, k).clone();
+            (get("file"), get("step"), get("role"), get("round"), get("quality_round"))
+        })
+        .collect();
+    let row = |file: &str, step: &str, n: i64, q: i64| {
+        (Json::from(file), Json::from(step), Json::from(step), Json::from(n), Json::from(q))
+    };
+    assert_eq!(shape, [
+        row("spec.md", "spec", 0, 0),
+        row("build-1.md", "build", 1, 0),
+        row("quality-1-1.md", "quality", 1, 1),
+        row("build-1-q1.md", "build", 1, 1),
+        row("quality-1-2.md", "quality", 1, 2),
+        row("review-1.md", "review", 1, 0),
+    ]);
+    let quality: Vec<&Map<Json>> = turns.iter().filter(|t| t.get("role") == Some(&Json::from("quality"))).collect();
+    for t in &quality {
+        assert_eq!((field(t, "agent"), field(t, "model"), field(t, "human_paced")), (&Json::Null, &Json::Null, &Json::Bool(false)));
+    }
+    let seconds = |t: &Map<Json>, k: &str| crate::summary::epoch_seconds(field(t, k).as_str().unwrap()).unwrap();
+    for t in &turns {
+        assert!(seconds(t, "started_at") <= seconds(t, "ended_at"));
+        assert_eq!(field(t, "seconds"), &Json::from(seconds(t, "ended_at") - seconds(t, "started_at")));
+    }
+    // Each quality round polls Jenkins, which takes the host's time too.
+    assert!(field(quality[0], "seconds").as_int().unwrap() > 0);
+    let summary = summary(&f).unwrap();
+    assert!(summary.contains("| quality | quality | 1 q1 | - | - |"), "{summary}");
+    assert!(summary.contains("- Round 1: quality gate ERROR, OK; review APPROVE\n"), "{summary}");
+}
+
+#[test]
+fn a_resumed_analysis_keeps_its_start() {
+    let mut state = quality_state(1);
+    let host = Rc::new(FakeHost::default());
+    let fake_ci_build = 41;
+    state.ci = ci_of(&[
+        ("ref", REF_1_1.into()),
+        ("sha", "snap9".into()),
+        ("queue_url", format!("{}/queue/item/1/", crate::ci::fake::JENKINS).into()),
+        ("build", fake_ci_build.into()),
+    ]);
+    state.turns = vec![record("quality", "quality-1-1.md", Some(-500), None)
+        .with("quality_round", 1)
+        .with("agent", Json::Null)
+        .map()];
+    let f = Fixture::resume_gated(host, state, vec![("review", vec![review_turn(1, APPROVE)])], &[]);
+    assert_eq!(f.ci.state().add_build(REF_1_1, green()), fake_ci_build);
+    let mut wf = f.workflow(f.as_saved_gated());
+
+    assert_eq!(wf.run(), verdict(APPROVE));
+    // build-1.md was written before turns were recorded.
+    let files: Vec<&Json> = wf.state().turns.iter().map(|t| field(t, "file")).collect();
+    assert_eq!(files, [&Json::from("quality-1-1.md"), &Json::from("review-1.md")]);
+    assert_eq!(field(&wf.state().turns[0], "started_at"), &Json::from(at(-500)));
+}
+
+#[test]
+fn a_gated_run_of_two_rounds_records_its_turns_and_quality_rounds() {
+    let f = gated_building(
+        vec![
+            ("spec", vec![taking(600, spec_turn())]),
+            (
+                "build",
+                vec![
+                    taking(100, build_turn(1)),
+                    taking(50, fix_turn(1, 1)),
+                    taking(100, build_turn(2)),
+                    taking(50, fix_turn(2, 1)),
+                ],
+            ),
+            ("review", vec![taking(30, review_turn(1, CHANGES_REQUESTED)), taking(30, review_turn(2, APPROVE))]),
+        ],
+        vec![red(), green(), red(), red()],
+    );
+
+    assert_eq!(f.workflow(RunSettings::default()).run(), verdict(APPROVE));
+
+    let path = format!("{}/metrics.json", f.state.dir());
+    let written = f.host.state().files.get(&path).cloned().unwrap();
+    assert_eq!(written.matches('\n').count(), 1);
+    let metrics = Json::parse(&written).unwrap();
+    let metrics = metrics.as_object().unwrap();
+    let turns: Vec<&Map<Json>> = field(metrics, "turns").as_array().unwrap().iter().map(|t| t.as_object().unwrap()).collect();
+    let shape: Vec<(Json, Json, Json, Json)> = turns
+        .iter()
+        .map(|t| (field(t, "step").clone(), field(t, "round").clone(), field(t, "quality_round").clone(), field(t, "harness").clone()))
+        .collect();
+    let row = |step: &str, n: i64, q: i64| {
+        let harness = if step == "quality" { Json::Null } else { Json::from("claude") };
+        (Json::from(step), Json::from(n), Json::from(q), harness)
+    };
+    assert_eq!(shape, [
+        row("spec", 0, 0),
+        row("build", 1, 0),
+        row("quality", 1, 1),
+        row("build", 1, 1),
+        row("quality", 1, 2),
+        row("review", 1, 0),
+        row("build", 2, 0),
+        row("quality", 2, 1),
+        row("build", 2, 1),
+        row("quality", 2, 2),
+        row("review", 2, 0),
+    ]);
+    assert_eq!(field(turns[0], "seconds"), &Json::from(600));
+    let expected: Map<Json> = [
+        ("step", Json::from("build")),
+        ("role", Json::from("build")),
+        ("harness", Json::from("claude")),
+        ("model", Json::Null),
+        ("round", Json::from(1)),
+        ("quality_round", Json::from(1)),
+        ("human_paced", Json::Bool(false)),
+        ("started_at", Json::from(at(730))),
+        ("ended_at", Json::from(at(780))),
+        ("seconds", Json::from(50)),
+        ("tokens", Json::from("unknown")),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(turns[3], &expected);
+    assert_eq!(field(turns[2], "tokens"), &Json::Null);
+    let tokens: Vec<&Json> = turns.iter().take(3).map(|t| field(t, "tokens")).collect();
+    assert_eq!(tokens, [&Json::from("unknown"), &Json::from("unknown"), &Json::Null]);
+    let ruff = crate::quality::finding_fingerprint(Some("limiter.py"), "ruff F401", "`os` imported but unused");
+    let round = |n: i64, q: i64, failed: bool| -> Json {
+        let fingerprints: Map<Json> = if failed {
+            [("ruff", Json::Array(vec![Json::from(ruff.as_str())]))].into_iter().collect()
+        } else {
+            Map::new()
+        };
+        Json::Object(
+            [
+                ("round", Json::from(n)),
+                ("quality_round", Json::from(q)),
+                ("gate", Json::from(if failed { "ERROR" } else { "OK" })),
+                ("conditions", Json::Array(vec![])),
+                ("fingerprints_by_check", Json::Object(fingerprints)),
+            ]
+            .into_iter()
+            .collect(),
+        )
+    };
+    let quality_rounds = Json::Array(vec![round(1, 1, true), round(1, 2, false), round(2, 1, true), round(2, 2, true)]);
+    assert_eq!(field(metrics, "quality_rounds"), &quality_rounds);
+    let expected = [
+        ("version", Json::from(1)),
+        ("run_id", Json::from(RUN_ID)),
+        ("workflow", Json::from("default")),
+        ("outcome", Json::from(APPROVE)),
+        ("rounds", Json::from(2)),
+        ("quality_gate", Json::Bool(true)),
+        ("max_quality_rounds", Json::from(3)),
+        ("pull_request", Json::from("https://github.com/o/r/pull/7")),
+        ("restored_locked_files", Json::from(0)),
+    ];
+    for (key, value) in expected {
+        assert_eq!(field(metrics, key), &value, "{key}");
+    }
+    let claude: Json = Json::Object([("harness", Json::from("claude")), ("model", Json::Null)].into_iter().collect());
+    let roles: Map<Json> = [("spec", claude.clone()), ("build", claude.clone()), ("review", claude)].into_iter().collect();
+    assert_eq!(field(metrics, "roles"), &Json::Object(roles));
+    assert_eq!(field(metrics, "started_at"), &Json::from(at(0)));
+    let ended = crate::summary::epoch_seconds(field(metrics, "ended_at").as_str().unwrap()).unwrap();
+    assert_eq!(field(metrics, "seconds"), &Json::from(ended - HOST_EPOCH));
+    assert_eq!(f.saved().get("quality_rounds"), Some(&quality_rounds));
+}
+
+#[test]
+fn a_resumed_quality_round_is_recorded_once() {
+    let mut state = quality_state(1);
+    let recorded: Map<Json> = [
+        ("round", Json::from(1)),
+        ("quality_round", Json::from(1)),
+        ("gate", Json::from("OK")),
+        ("conditions", Json::Array(vec![])),
+        ("fingerprints_by_check", Json::Object(Map::new())),
+    ]
+    .into_iter()
+    .collect();
+    state.quality_rounds = vec![recorded];
+    let path = state.quality_path(1, 1);
+    let f = Fixture::resume_gated(Rc::new(FakeHost::default()), state, vec![("review", vec![review_turn(1, APPROVE)])], &[]);
+    f.put(&path, "GATE: OK\n");
+    let mut wf = f.workflow(f.as_saved_gated());
+    assert_eq!(wf.run(), verdict(APPROVE));
+    assert_eq!(wf.state().quality_rounds.len(), 1);
 }

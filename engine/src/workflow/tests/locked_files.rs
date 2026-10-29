@@ -1,8 +1,7 @@
 //! TestLockedFiles: the Test Writer locks the tests it writes, a later editing turn that changes them has them
 //! restored, and the Reviewer is told.
 //!
-//! Not here: test_the_gate_judges_the_restored_tests, which runs the quality gate, with the quality round (rust-engine
-//! ticket 08, part 5); test_only_an_editing_step_may_lock and test_locks_round_trip_through_a_workflow_file, which are
+//! Not here: test_only_an_editing_step_may_lock and test_locks_round_trip_through_a_workflow_file, which are
 //! crate::pipeline's and crate::workflow_file's (ticket 04).
 
 use super::*;
@@ -191,4 +190,42 @@ fn a_malformed_restored_record_stops_the_run_naming_it() {
     f.put(&format!("{D}/build-1.md"), "report 1");
     let e = failure(f.workflow(with_pipeline(&locking(), f.as_saved())).run());
     assert_eq!(e, "a restored record in state.json has no paths");
+}
+
+#[test]
+fn the_gate_judges_the_restored_tests() {
+    let base = locking();
+    let steps = base.steps().iter().cloned().map(|mut st| {
+        st.quality_gated |= st.id == "build";
+        st
+    });
+    let pipeline = Pipeline::new("locking", base.roles().clone(), steps.collect()).unwrap();
+    let mut fix_1 = fix_turn(1, 1);
+    let fix: Turn = Box::new(move |prompt, state, host| {
+        host.write(TEST_FILE, "assert 1", false).expect("the fake host writes");
+        fix_1(prompt, state, host)
+    });
+    let f = Fixture::on(Rc::new(FakeHost::default()), new_run(&pipeline), vec![
+        ("spec", vec![spec_turn()]),
+        ("tests", vec![locked_tests_turn()]),
+        ("build", vec![build_touching_tests(1, Some("assert True")), fix]),
+        ("review", vec![review_turn(1, APPROVE)]),
+    ])
+    .gated();
+    f.ci.state().outcomes = vec![red(), green()].into();
+
+    let mut wf = f.workflow(with_pipeline(&pipeline, RunSettings::default()));
+    assert_eq!(wf.run(), verdict(APPROVE));
+    let h = f.host.state();
+    let judged: Vec<Option<String>> = h
+        .snapshots
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, message))| message.contains("quality round"))
+        .map(|(i, _)| h.trees[&format!("snap{}", i + 1)].get(TEST_FILE).cloned().flatten())
+        .collect();
+    let restored = Some("assert limit() == 3".to_string());
+    assert_eq!(judged, [restored.clone(), restored]);
+    let files: Vec<Option<&str>> = wf.state().restored.iter().map(|r| r.get("file").and_then(Json::as_str)).collect();
+    assert_eq!(files, [Some("locked-build-1.diff"), Some("locked-build-1-q1.diff")]);
 }

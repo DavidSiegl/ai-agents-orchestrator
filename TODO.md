@@ -152,7 +152,7 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `resumable_state`, with the minimal `run`/`resume`). Part 2 (2026-10-29, tests only: the cases found nothing
   missing in part 1's Workflow) ports `TestResume`, `TestPromptDelivery`, `TestResumePullRequest`, `TestTurnTimings`,
   `TestHarnesses`, the Workflow cases of `TestHarnessFlags` and `TestRunMetrics`, and `TestWorkflowFileAgents`'
-  `test_saved_with_the_run` (`engine/src/workflow/tests/`), but for: the cases of a gated run, for part 5
+  `test_saved_with_the_run` (`engine/src/workflow/tests/`), but for: the cases of a gated run, which part 5 ported
   (`TestResumePullRequest.test_resume_on_another_branch_fails_before_any_turn`'s quality phase, and there its check
   that Jenkins was asked nothing in the other phases; `TestTurnTimings.test_quality_rounds_and_answers_have_records_of_their_own`
   and `test_a_resumed_analysis_keeps_its_start`; `TestRunMetrics.test_a_gated_run_of_two_rounds_records_its_turns_and_quality_rounds`
@@ -167,8 +167,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `Pipeline::seeded_start`), and ports `TestBlocked`, `TestBlockedResume`, `TestWorktreeRun`, `TestOneRunPerCheckout`'s
   worktree cases, `TestSeededSpec`, `TestOtherWorkflows`, `TestWorkflowWithoutAVerdict`, `TestSavedBeforeWorkflows`,
   `TestDefaultWorkflowPrompts`, `TestWorkflowPromptsGolden`, `TestSpecBuildReviewExample` and the Workflow-driven cases
-  of `TestWorkflowDefinitions`, `TestWorkflowFiles` and `TestPromptFiles`, but for: the cases of a gated run, for part 5
-  (`TestBlocked.test_a_blocked_quality_answer_waits_then_goes_back_to_the_quality_round` and
+  of `TestWorkflowDefinitions`, `TestWorkflowFiles` and `TestPromptFiles`, but for: the cases of a gated run, which part
+  5 ported (`TestBlocked.test_a_blocked_quality_answer_waits_then_goes_back_to_the_quality_round` and
   `test_the_note_is_in_every_prompt_of_the_steps_that_can_block_only`; `TestOtherWorkflows.test_gated_step_with_another_name`,
   `test_fresh_gated_step_answering_a_quality_round` and `test_resumed_gated_step_checks_the_credentials_first`;
   `TestWorkflowWithoutAVerdict.test_a_gate_that_still_fails_is_not_finished`, `test_a_missing_last_quality_file_fails_the_gate`
@@ -189,11 +189,21 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   in `engine/src/workflow/locks.rs`) and proofs (`judge_proofs`, `rerun_proofs`, `carried_proofs`, `run_proof` under
   GNU `timeout` and the notes, in `engine/src/workflow/proof_runs.rs`, with `crate::proofs::ProofRun`), and ports
   `TestLockedFiles`, `TestProofs` and `TestProofInAWorktree` (whose proof is a shell script that finds its repository
-  with git, where Python's is run by pytest, which the Rust tests do not have), but for the cases of a gated run, for
-  part 5 (`TestLockedFiles.test_the_gate_judges_the_restored_tests`,
+  with git, where Python's is run by pytest, which the Rust tests do not have), but for the cases of a gated run, which
+  part 5 ported (`TestLockedFiles.test_the_gate_judges_the_restored_tests`,
   `TestProofs.test_a_carried_proof_runs_again_after_the_rounds_last_quality_round_and_before_the_review`), and the
-  pipeline's and workflow file's, which ticket 04 ported. Each test module's doc names the cases it leaves out. Until
-  the later parts, a Rust Workflow has no quality round, and nothing starts one but the tests. Closes with the last part, every `run`/`resume` parity
+  pipeline's and workflow file's, which ticket 04 ported. Part 5 (2026-10-29) adds the quality gate's rounds
+  (`judge_quality`, `stuck`, `quality_note`, `gate_passed`, `quality` to `clean_up_quality`, with `require_origin`,
+  `delete_ci_refs` and `delete_ci_ref`, in `engine/src/workflow/quality_rounds.rs`; `check_gate` and the credentials
+  check of `check_start`; `Collaborators::jenkins` and `pypi`; `crate::quality::under_gate_line`), and ports
+  `TestQualityGate`, `TestStuckQualityLoop`, `TestQualityResume`, `TestSecretScanWorkflow`, the Workflow cases of
+  `TestOrchestratorChecks` and `TestQualityCLI`'s `test_state_saved_before_the_gate_has_none`, with every gated case
+  the earlier parts left for it, on `FakeJenkins` (which gains `cancelled`, `quality_reads` and `quality_replies`) and
+  `FakePyPI` (which gains its clock, a `FakeTime`, and `events`); `TestQualityCLI`'s other cases are the CLI's
+  (`test_flag_checks`, `test_gate_reaches_the_workflow`, `test_list_shows_the_quality_phase`, ticket 09) and
+  `resumable_state`'s (`test_resume_limit_against_the_saved_quality_round`, `test_resume_limit_needs_the_gate`, part
+  7). Each test module's doc names the cases it leaves out. Until part 7, nothing starts a Rust Workflow but the
+  tests. Closes with the last part, every `run`/`resume` parity
   scenario passing against the Rust binary.
 - **A Ctrl-C at the terminal does not reach the command the Rust engine's `Host` or herdr is running.** `ProcessHost`
   starts each command in a process group of its own, so that a timeout kills the command with whatever it started
@@ -244,16 +254,15 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   port only by re-deriving them; with the seam at `Http`, as Python's at `urlopen`, `FakeJenkins` and `FakePyPI` play
   the servers and every line of `Jenkins` and `PyPI` runs in those tests. The user kept the `Http` seam and amended the
   spec's Lane to say so (2026-10-28, cross-review 93, F1), and issue 08 says which seam it is given.
-- **Checks and Jenkins calls whose tests need the Workflow or the CLI, left for rust-engine tickets 08 and 09.**
-  Ticket 07 ported `TestOrchestratorChecks` on `judge_run` of the build's quality file, not through a quality round:
-  `test_a_build_that_failed_before_the_gate_is_not_checked`, `test_without_the_quality_gate_none_of_this_runs`, the
-  round's spec being its contract step's file or its task, and the heartbeat kept between PyPI's requests by the
-  round's `in_time` (`_judged_by_orchestrator`, `_in_time`) are the Workflow's, and FakePyPI's clock and `events`
-  with them (`engine/src/pypi/fake.rs` has neither). `judged_in_quality`, `_build_trust`, `_judging_changes`,
+- **Jenkins calls whose tests need the CLI, left for rust-engine ticket 09.** Ticket 07 ported `TestOrchestratorChecks`
+  on `judge_run` of the build's quality file; its Workflow cases (`test_a_build_that_failed_before_the_gate_is_not_checked`,
+  `test_without_the_quality_gate_none_of_this_runs`, `test_the_spec_is_the_runs_task_without_a_contract_step` and the
+  heartbeat kept between PyPI's requests, `test_slow_pypi_keeps_the_run_alive_and_stops_at_the_rounds_deadline`) ticket
+  08's part 5 ported through its quality round (`engine/src/workflow/tests/orchestrator_checks.rs`, 2026-10-29), on
+  FakePyPI's clock and `events`. `judged_in_quality`, `_build_trust`, `_judging_changes`,
   `JUDGING_FILES` and `JUDGED_DESCRIPTION`, with `TestJudgedInQuality`, are the `judged-in-quality` command's; the
-  Rust `Jenkins::retained_builds` they read is ported. Issues 08 and 09 name them (2026-10-28). Closes with ticket 08
-  porting those cases through its quality round on `FakeJenkins` and `FakePyPI`, and ticket 09 porting the command and
-  its tests.
+  Rust `Jenkins::retained_builds` they read is ported. Issue 09 names them (2026-10-28). Closes with ticket 09 porting
+  the command and its tests.
 - **The contract test leaves its Jenkins build running when it fails.** `tests/contract/test_jenkins.py` triggers one
   quality build and nothing stops it on a failure or a Ctrl-C, so the build holds an executor until it ends, up to
   the 22 minutes build #59 took. Raised by cross-review 73 (F11, 2026-10-27): "a Ctrl-C during the queue wait leaves
