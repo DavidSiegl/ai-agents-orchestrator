@@ -236,7 +236,8 @@ fn on(listener: &std::net::TcpListener) -> io::Result<tiny_http::Server> {
 
 /// Hand each request the server in listening takes a thread of its own, answering as the server shared says, until it
 /// stops (shared.stopping); when tiny_http's server stops accepting connections meanwhile, start another on listener,
-/// a 100 ms pause after each that fails, so that a lasting EMFILE does not spin.
+/// 100 ms after the last one stopped or failed to start: a lasting EMFILE fails each new server's first accept, which
+/// shows only as its recv failing at once, so without the pause the restarts would spin.
 fn dispatch(listener: &std::net::TcpListener, listening: &Mutex<Option<Arc<tiny_http::Server>>>, shared: &Arc<Shared>) {
     loop {
         // None once RunServer's drop has taken it, at the stop.
@@ -248,6 +249,8 @@ fn dispatch(listener: &std::net::TcpListener, listening: &Mutex<Option<Arc<tiny_
             let _ = std::thread::Builder::new().name("serve-request".to_string()).spawn(move || answer(&shared, request));
         }
         loop {
+            // Ends at once at the stop, which the check below then sees.
+            shared.stopping.sleep(Duration::from_millis(100));
             let mut current = lock(listening);
             if current.is_none() {
                 return;
@@ -256,8 +259,6 @@ fn dispatch(listener: &std::net::TcpListener, listening: &Mutex<Option<Arc<tiny_
                 *current = Some(Arc::new(http));
                 break;
             }
-            drop(current);
-            shared.stopping.sleep(Duration::from_millis(100));
         }
     }
 }

@@ -1,7 +1,6 @@
 //! The state a run starts from: a new run's, from run's flags (new_state), and a stopped run's, from its saved state
 //! and resume's flags (resumed_state), each with its workflow.
 
-
 use super::args::{ResumeArgs, RunArgs, Settings};
 use super::Connected;
 use crate::constants::{DEFAULT_MAX_QUALITY_ROUNDS, DEFAULT_MAX_ROUNDS, DEFAULT_TURN_TIMEOUT, RUNS_DIR, WORKTREES_DIR};

@@ -1005,6 +1005,8 @@ fn a_server_that_stops_accepting_is_started_again_on_the_port() {
         assert!(started.elapsed() < Duration::from_secs(5), "no server was started again");
         std::thread::sleep(Duration::from_millis(10));
     }
+    // Not at once: a lasting accept error would make each new server stop at once, and the restarts spin.
+    assert!(started.elapsed() >= Duration::from_millis(100), "started again after {:?}", started.elapsed());
     drop(first);
     assert_eq!(served.get(&Served::query("/runs", &[]), &[]).status, Some(200));
     let port = served.port;
