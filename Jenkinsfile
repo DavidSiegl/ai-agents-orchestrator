@@ -268,8 +268,8 @@ pipeline {
             }
         }
 
-        // The parity scenarios of run and resume against the Rust engine's binary, and those that switch engines at the
-        // kill (tests/parity/test_parity.py: PARITY_ENGINE, and PARITY_COMMANDS for the commands the binary has), on a
+        // The parity scenarios of the commands the Rust engine's binary has against it, and those that switch engines at
+        // the kill (tests/parity/test_parity.py: PARITY_ENGINE, and PARITY_COMMANDS for those commands), on a
         // pull request build whose change touches engine/, tests/parity/ or the workspace's Cargo.toml, Cargo.lock or
         // rust-toolchain.toml since the base Gate judges it from (ci/pr-base.sh), by a git diff as the Test stage's for
         // a quality build's parity scenarios: a diff, or a base, that fails counts as a change. The Test stage runs
@@ -294,7 +294,7 @@ pipeline {
                         echo "the Test stage built no $engine" >&2
                         exit 1
                     fi
-                    PARITY_ENGINE="env LLVM_PROFILE_FILE=/dev/null '$engine'" PARITY_COMMANDS=run,resume \\
+                    PARITY_ENGINE="env LLVM_PROFILE_FILE=/dev/null '$engine'" PARITY_COMMANDS=run,resume,list,metrics,show,prune,close,workflows \\
                         uv run --frozen pytest tests/parity --junitxml=parity-rust.xml
                 '''
             }

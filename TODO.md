@@ -790,7 +790,10 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   failing scenario fails the build; its JUnit report is `parity-rust.xml`. Unverified until a pull request build runs
   it: the declarative `when` (`changeRequest()` with an `expression` that runs `sh`), the stage's time on agentbox0
   and the binary's path there. Quality builds and builds of main do not run it, and ticket 09's commands are added to
-  `PARITY_COMMANDS` as they land.
+  `PARITY_COMMANDS` as they land: ticket 09a (2026-10-29) adds `list`, `metrics`, `show`, `prune`, `close` and
+  `workflows`, so the stage runs 38 scenarios and the 18 switched, every one but those of `drain`, `refresh`,
+  `doctor`, `judged-in-quality` (ticket 09b) and `serve` (ticket 10); 56 passing in 210 s locally with SIGINT and
+  SIGHUP ignored, the Python engine's 43 taking 192 s.
 - **The commands the Rust engine runs outlived an engine that got a SIGTERM or a SIGHUP.** The commands run in
   process groups of their own, so a SIGTERM of the engine (a kill, a service manager's stop) or the SIGHUP a closed
   terminal sends its foreground group ended the engine and left the running command to finish unwatched, and the run
