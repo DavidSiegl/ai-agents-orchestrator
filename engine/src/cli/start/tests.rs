@@ -279,7 +279,7 @@ type MakeJenkins = dyn Fn(&str) -> Result<crate::ci::Jenkins, OrchestratorError>
 
 /// A Connected of f's fakes, the configuration directory config, and jenkins for a run's quality job.
 fn connected<'a>(f: &'a Fixture, config: &'a ConfigDir, jenkins: &'a MakeJenkins) -> Connected<'a> {
-    Connected { with: f.collaborators(), jenkins, config, local_host: "here", print: &|_| {} }
+    Connected { with: f.collaborators(), jenkins, config, local_host: "here", stdout: &|_| {} }
 }
 
 fn no_jenkins(job: &str) -> Result<crate::ci::Jenkins, OrchestratorError> {

@@ -43,8 +43,7 @@ pub const BLOCKED_STATUS: &str = "blocked";
 /// - turns: the turn records as saved, [] for a run saved before them.
 /// - resume_command: the command that resumes a stale run that is not closed; null otherwise.
 pub fn run_record(s: &Json, age: u64, local_host: &str, pid_alive: &dyn Fn(i128) -> bool, target: &[String]) -> Map<Json> {
-    let empty = Map::new();
-    let saved = s.as_object().unwrap_or(&empty);
+    let saved = s.as_object_or_empty();
     let field = |key: &str| saved.get(key).cloned().unwrap_or(Json::Null);
     let truthy = |key: &str| saved.get(key).filter(|v| v.truthy());
     let run_id = field("run_id").python_str();
@@ -246,8 +245,7 @@ pub fn show_run(world: &Connected, cwd: &str, run_ref: &str, target: &[String]) 
     let runs = host.run_states(cwd)?;
     let (age, s) = find_run(&runs, run_ref, cwd)?;
     let row = &run_rows(&[(*age, s.clone())], world.local_host, world.with.pid_alive, target)[0];
-    let empty = Map::new();
-    let saved = s.as_object().unwrap_or(&empty);
+    let saved = s.as_object_or_empty();
     let truthy = |key: &str| saved.get(key).filter(|v| v.truthy());
     world.say(&run_line(row));
     world.say(&format!("    {}", saved.get("task").map_or("None".to_string(), Json::python_str)));

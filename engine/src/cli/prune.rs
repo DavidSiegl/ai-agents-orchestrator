@@ -21,7 +21,10 @@ pub const BRANCH_KEPT: &str = "kept: ";
 /// What prune_branches did with one run's branch, locally and on origin, and what it recorded for it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PrunedRun {
+    /// The run's id, as its state.json saves it.
     pub run_id: String,
+    /// The run's branch, as its state.json saves it: one the orchestrator made (BRANCH_PREFIX), since prune takes
+    /// no other.
     pub branch: String,
     /// What became of the local branch: BRANCH_DELETED, "would be deleted", "gone", or BRANCH_KEPT and why; empty
     /// when it was not decided.
@@ -78,8 +81,7 @@ pub fn prune_branches(
     for saved in runs {
         let text = |key: &str| saved.get(key).map_or(String::new(), Json::python_str);
         let mut run = PrunedRun { run_id: text("run_id"), branch: text("branch"), ..PrunedRun::default() };
-        let now = world.with.clocks.wall();
-        match prune_run(host, cwd, &saved, &mut run, now, &checked_out, dry_run) {
+        match prune_run(world, cwd, &saved, &mut run, &checked_out, dry_run) {
             Ok(()) => {}
             Err(e) if world.with.interrupt.is_raised() => return Err(e.into()),
             Err(GhError::Unusable(e)) => {
@@ -117,20 +119,21 @@ fn is_prune_candidate(s: &Json, age: u64, world: &Connected, revisit: bool) -> b
 }
 
 /// Decide each side of the branch of the run saved as saved, delete what may go, unless dry_run, and record the
-/// result in its state.json, filling run in; now is the wall clock's time. Errors: GhError::Unusable when gh is,
-/// else GhError::Failed with what failed.
+/// result in its state.json, on world's host, filling run in; checked_out maps each branch checked out to its
+/// worktree. Errors: GhError::Unusable when gh is, else GhError::Failed with what failed.
 fn prune_run(
-    host: &dyn Host,
+    world: &Connected,
     cwd: &str,
     saved: &Json,
     run: &mut PrunedRun,
-    now: f64,
     checked_out: &crate::py::json::Map<String>,
     dry_run: bool,
 ) -> Result<(), GhError> {
     let failed = GhError::Failed;
-    let empty = crate::py::json::Map::new();
-    let state = RunState::from_saved(saved.as_object().unwrap_or(&empty)).map_err(failed)?;
+    let host = world.with.host;
+    // Before gh pr view, as Python reads wall() for prune_run's call.
+    let now = world.with.clocks.wall();
+    let state = RunState::from_saved(saved.as_object_or_empty()).map_err(failed)?;
     // is_prune_candidate takes only runs with both.
     let (Some(url), Some(branch)) = (state.pr_url.as_deref(), state.branch.as_deref()) else {
         return Err(failed(OrchestratorError::new("the run has no branch or no pull request")));

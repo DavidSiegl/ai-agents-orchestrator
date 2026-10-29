@@ -5,7 +5,7 @@ use super::{record_in_state, Connected};
 use crate::constants::RUNS_DIR;
 use crate::error::OrchestratorError;
 use crate::herdr::Herdr;
-use crate::py::json::{Json, Map};
+use crate::py::json::Json;
 use crate::py::text::splitlines;
 use crate::runs::{run_health, RUNNING};
 use crate::state::RunState;
@@ -27,8 +27,7 @@ pub fn close_run(world: &Connected, cwd: &str, run_ref: &str) -> Result<String, 
     let host = world.with.host;
     let runs = host.run_states(cwd)?;
     let (age, saved) = find_run(&runs, run_ref, cwd)?;
-    let empty = Map::new();
-    let state = RunState::from_saved(saved.as_object().unwrap_or(&empty))?;
+    let state = RunState::from_saved(saved.as_object_or_empty())?;
     if let Some(closed) = state.closed.as_deref().filter(|c| !c.is_empty()) {
         world.say(&format!("run {} is already closed: {closed}", state.run_id));
         return Ok(closed.to_string());

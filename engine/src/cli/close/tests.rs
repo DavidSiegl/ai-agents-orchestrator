@@ -16,6 +16,7 @@ use crate::herdr::fake::Call;
 use crate::herdr::HerdrError;
 use crate::host::tests::Repo;
 use crate::host::Host;
+use crate::py::json::Map;
 use crate::test_support::resumable;
 use crate::workflow::fixture::saved_run;
 

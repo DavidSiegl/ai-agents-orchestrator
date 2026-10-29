@@ -21,8 +21,8 @@ impl<V> Default for Map<V> {
 }
 
 impl<V> Map<V> {
-    pub fn new() -> Self {
-        Map::default()
+    pub const fn new() -> Self {
+        Map { entries: Vec::new() }
     }
 
     pub fn len(&self) -> usize {
@@ -275,6 +275,12 @@ impl Json {
             Json::Object(map) => Some(map),
             _ => None,
         }
+    }
+
+    /// The object's members; none for any other value, as the CLI reads a saved state that is not an object.
+    pub fn as_object_or_empty(&self) -> &Map<Json> {
+        static EMPTY: Map<Json> = Map::new();
+        self.as_object().unwrap_or(&EMPTY)
     }
 
     pub fn is_null(&self) -> bool {

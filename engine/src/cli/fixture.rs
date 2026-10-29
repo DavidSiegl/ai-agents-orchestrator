@@ -52,7 +52,7 @@ impl Cli {
     ) -> Connected<'a> {
         let mut with = self.f.collaborators();
         with.jenkins = None;
-        Connected { with, jenkins, config: &self.config, local_host: "here", print }
+        Connected { with, jenkins, config: &self.config, local_host: "here", stdout: print }
     }
 
     /// Run f with the world.

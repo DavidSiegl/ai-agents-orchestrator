@@ -57,7 +57,7 @@ fn run_on(f: &Fixture, argv: &[&str], ci: &Arc<FakeJenkins>, jobs: &RefCell<Vec<
     };
     let mut with = f.collaborators();
     with.jenkins = None;
-    let world = Connected { with, jenkins: &jenkins, config: &config, local_host: "here", print: &|_| {} };
+    let world = Connected { with, jenkins: &jenkins, config: &config, local_host: "here", stdout: &|_| {} };
     match run_command(&command(argv), &world)? {
         Ended::Ran(ran) => Ok(*ran),
         Ended::Status(n) => panic!("{argv:?} ran no workflow, ending with {n}"),

@@ -14,7 +14,7 @@ use crate::env::ConfigDir;
 use crate::error::OrchestratorError;
 use crate::harness::AgentSettings;
 use crate::herdr::ProcessHerdr;
-use crate::host::ProcessHost;
+use crate::host::{Host, ProcessHost};
 use crate::interrupt::Interrupt;
 use crate::pipeline::Pipeline;
 use crate::py::text::shlex_join;
@@ -48,19 +48,19 @@ pub struct Connected<'a> {
     pub config: &'a ConfigDir,
     /// This machine's name, which an owner record of a run here names (crate::runs::local_host).
     pub local_host: &'a str,
-    /// Writes text on the program's standard output as it is, a line with its line end: what a command prints.
-    pub print: &'a dyn Fn(&str),
+    /// The program's standard output, which takes text as it is, a line with its line end: what a command prints.
+    pub stdout: &'a dyn Fn(&str),
 }
 
 impl Connected<'_> {
     /// Print line and a line end on standard output, as Python's print(line).
     pub fn say(&self, line: &str) {
-        (self.print)(&format!("{line}\n"));
+        (self.stdout)(&format!("{line}\n"));
     }
 
     /// Print text on standard output as it is, as Python's print(text, end="").
     pub fn print(&self, text: &str) {
-        (self.print)(text);
+        (self.stdout)(text);
     }
 }
 
@@ -208,7 +208,7 @@ fn connect(
         jenkins: &jenkins,
         config,
         local_host: &here,
-        print,
+        stdout: print,
     };
     run_command(command, &world)
 }
@@ -317,7 +317,7 @@ fn runs_command(runs: &RunsCommand, world: &Connected, cwd: &str, target: &[Stri
 ///
 /// Errors: the file is gone or changed (naming key and meanwhile), is not JSON, or cannot be read or written.
 pub fn record_in_state(
-    host: &dyn crate::host::Host,
+    host: &dyn Host,
     path: &str,
     saved: &Json,
     key: &str,
