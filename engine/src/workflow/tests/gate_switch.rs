@@ -670,3 +670,32 @@ fn a_state_saved_before_the_switch_loads_with_the_gate_not_turned_off() {
     assert_eq!(f.workflow(f.as_saved_gated()).run(), verdict(APPROVE));
     assert_eq!(f.ci.state().triggered(), [REF_1_1]);
 }
+
+// -- Not Python's: a failure after the checks ---------------------------------------------------------------------
+
+/// A host whose every read fails, and which runs no command.
+struct Unreadable;
+
+impl Host for Unreadable {
+    fn ssh_target(&self) -> Option<&str> {
+        None
+    }
+
+    fn exec(&self, argv: &[&str], _: Option<&[u8]>, _: u64) -> Result<crate::host::Exec, OrchestratorError> {
+        panic!("Unreadable ran {argv:?}")
+    }
+
+    fn read(&self, path: &str) -> Result<Option<String>, OrchestratorError> {
+        Err(OrchestratorError(format!("cannot read {path}")))
+    }
+}
+
+#[test]
+fn a_failed_read_of_the_next_steps_file_leaves_the_state_as_it_was() {
+    // In round 0 no check of turn_quality_gate_on's runs a command, so the read of review-0.md is the only call.
+    let mut state = pr_run("review", 0);
+    let before = state.to_json();
+    let e = turn_quality_gate_on(&mut state, &DEFAULT_WORKFLOW, &Unreadable, &Told::default(), &jenkins_on(&FakeJenkins::new()));
+    assert_eq!(e.unwrap_err().0, format!("cannot read {}/review-0.md", state.dir()));
+    assert_eq!(state.to_json(), before);
+}

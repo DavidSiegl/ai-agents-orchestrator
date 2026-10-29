@@ -19,7 +19,8 @@ use crate::state::RunState;
 ///
 /// Errors, with state unchanged: the run is in phase done or publish (even with its own job), had its gate turned
 /// off, has another job, is of a workflow without a quality-gated step, or is an in-place --no-pr run past round 0,
-/// whose working tree may hold the human's own changes that a snapshot would take; or a check of round 1 on fails.
+/// whose working tree may hold the human's own changes that a snapshot would take; a check of round 1 on fails; or the
+/// next step's file cannot be read.
 pub fn turn_quality_gate_on(
     state: &mut RunState,
     pipeline: &Pipeline,
@@ -38,7 +39,8 @@ pub fn turn_quality_gate_on(
         host.check_gitleaks()?;
         jenkins.preflight()?;
     }
-    s.quality_job = Some(jenkins.job().to_string());
+    // Whether the run goes to quality round 1 first: read before state changes, so that a failed read leaves it as it was.
+    let mut judge_first = false;
     if let Some(following) = pipeline.after(&gated.id).filter(|f| f.id == s.phase) {
         let path = following.path(&s.dir(), s.round, 0);
         let file = basename(&path);
@@ -46,10 +48,12 @@ pub fn turn_quality_gate_on(
         // change; only one with none of these has not.
         let blocked = s.blocked.as_ref().and_then(|b| b.get("file")).and_then(|f| f.as_str());
         let started = [s.prompted.as_deref(), s.retrying.as_deref(), blocked].contains(&Some(file));
-        if !started && host.read(&format!("{}/{file}", s.dir()))?.is_none() {
-            s.phase = QUALITY.to_string();
-            s.quality_round = 1;
-        }
+        judge_first = !started && host.read(&format!("{}/{file}", s.dir()))?.is_none();
+    }
+    s.quality_job = Some(jenkins.job().to_string());
+    if judge_first {
+        s.phase = QUALITY.to_string();
+        s.quality_round = 1;
     }
     human.log(&format!("turned the quality gate of run {} on, with job {}", s.run_id, jenkins.job()));
     Ok(())
