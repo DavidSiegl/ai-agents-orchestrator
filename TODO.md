@@ -115,14 +115,11 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   not; cross-review 98, F1); and a proof's output that is not UTF-8 is quoted with each such byte as U+FFFD
   (`Workflow::run_proof`), where Python keeps it as a lone surrogate, which `state.json` holds as an escape and the
   write of the review then fails on (a UnicodeEncodeError, uncaught).
+  And from drain (rust-engine ticket 09b, 2026-10-29): a name in drain's DIR that is not UTF-8 is left out of the
+  queue (`crate::cli::drain::queue`, `read_queue`), where Python reads its spec.md through os.fsdecode; and doctor
+  reads a tool's version number in ASCII digits only (`crate::cli::doctor`, `version_number`), where Python's `\d`
+  takes any Unicode digit (cross-review 104, F6).
   Decided against unless a run is found that writes such input.
-- **A Host need of the doctor's, left for rust-engine ticket 09b.** `Host::exec` words a command that cannot be
-  started as a message only, so the doctor's `_run_tool`, which tells a tool missing from PATH by its
-  FileNotFoundError, cannot tell it so (cross-review 89, F9: "porting `_run_tool`'s 'not on PATH' check will need
-  either string matching or an interface change"). Closes with ticket 09b, which ports `doctor`, giving `exec` an
-  error of its own for a command not found or having the doctor ask `command -v` first, as `_on_path` already does.
-  The three `TestHost*` cases this entry also named (`test_prune_on_real_git`, `test_close_on_real_git`,
-  `test_closed_without_a_time`) are ported (Fixed, "The Rust engine's CLI commands about a project's runs").
 - **The Rust engine's Ctrl-C, what is left.** Rust-engine ticket 08's part 6 (2026-10-29) has a SIGINT raise the
   `Interrupt`, which stops the command the engine waits on (Fixed, "A Ctrl-C at the terminal does not reach the
   command the Rust engine's `Host` or herdr is running"). Not closed: (1) the `orchestrator` binary's `main`
@@ -130,9 +127,10 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   outside a Workflow (resolving the directory, reading the run, switching its gate) into the interrupted note and exit
   status 130 (`crate::cli`, `stop`), as Python's KeyboardInterrupt anywhere does; so do ticket 09a's (`list`, `metrics`,
   `show`, `prune`, `close`, `workflows`, the sweep before a run: `run_command`, `herdrless_command`, and
-  `prune_branches` and `fill_pr_states` stop at a failure met while it is raised), and `drain` between runs must too
-  (ticket 09b), and `serve`
-  (ticket 10) has its own SIGINT and SIGTERM, which `by_signals` would take over; closes with those tickets. (2) A
+  `prune_branches` and `fill_pr_states` stop at a failure met while it is raised), and ticket 09b's (`refresh`,
+  `judged-in-quality`, `doctor`, which prints nothing then, and `drain`, which stops between runs and after its last,
+  having printed its spec changes: `crate::cli::drain`, `drain_command`), and `serve`
+  (ticket 10) has its own SIGINT and SIGTERM, which `by_signals` would take over; closes with that ticket. (2) A
   Ctrl-C during a Jenkins or PyPI request (`crate::http`, ureq) waits for the request to end, up to its timeout, where
   Python's KeyboardInterrupt stops `urlopen` at once: there is no process to stop, and ureq has no way to abandon a
   request from another thread. The user accepted that wait for a Ctrl-C (2026-10-29, review 100). Since ticket 08's
@@ -210,15 +208,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   port only by re-deriving them; with the seam at `Http`, as Python's at `urlopen`, `FakeJenkins` and `FakePyPI` play
   the servers and every line of `Jenkins` and `PyPI` runs in those tests. The user kept the `Http` seam and amended the
   spec's Lane to say so (2026-10-28, cross-review 93, F1), and issue 08 says which seam it is given.
-- **Jenkins calls whose tests need the CLI, left for rust-engine ticket 09b.** Ticket 07 ported `TestOrchestratorChecks`
-  on `judge_run` of the build's quality file; its Workflow cases (`test_a_build_that_failed_before_the_gate_is_not_checked`,
-  `test_without_the_quality_gate_none_of_this_runs`, `test_the_spec_is_the_runs_task_without_a_contract_step` and the
-  heartbeat kept between PyPI's requests, `test_slow_pypi_keeps_the_run_alive_and_stops_at_the_rounds_deadline`) ticket
-  08's part 5 ported through its quality round (`engine/src/workflow/tests/orchestrator_checks.rs`, 2026-10-29), on
-  FakePyPI's clock and `events`. `judged_in_quality`, `_build_trust`, `_judging_changes`,
-  `JUDGING_FILES` and `JUDGED_DESCRIPTION`, with `TestJudgedInQuality`, are the `judged-in-quality` command's; the
-  Rust `Jenkins::retained_builds` they read is ported. Issue 09 names them (2026-10-28); its Plan (split) gives them to
-  09b (2026-10-29). Closes with ticket 09b porting the command and its tests.
 - **The contract test leaves its Jenkins build running when it fails.** `tests/contract/test_jenkins.py` triggers one
   quality build and nothing stops it on a failure or a Ctrl-C, so the build holds an executor until it ends, up to
   the 22 minutes build #59 took. Raised by cross-review 73 (F11, 2026-10-27): "a Ctrl-C during the queue wait leaves
@@ -635,6 +624,32 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Fixed
 
+- **A Host need of the doctor's, left for rust-engine ticket 09b.** (Moved from Open issues, 2026-10-29.) `Host::exec` words a command that cannot be
+  started as a message only, so the doctor's `_run_tool`, which tells a tool missing from PATH by its
+  FileNotFoundError, cannot tell it so (cross-review 89, F9: "porting `_run_tool`'s 'not on PATH' check will need
+  either string matching or an interface change"). Closes with ticket 09b, which ports `doctor`, giving `exec` an
+  error of its own for a command not found or having the doctor ask `command -v` first, as `_on_path` already does.
+  The three `TestHost*` cases this entry also named (`test_prune_on_real_git`, `test_close_on_real_git`,
+  `test_closed_without_a_time`) are ported (Fixed, "The Rust engine's CLI commands about a project's runs").
+  Fixed (2026-10-29, ticket 09b): `Host::exec` fails with `ExecError::NotFound` for a command not on PATH and
+  `ExecError::Failed` for any other (`engine/src/host.rs`), and the doctor's `run_tool` (`crate::cli::doctor`) tells a
+  missing tool by it, as `_run_tool` by FileNotFoundError; `ProcessHost::with_runner` runs a test's FakeTools in
+  place of processes, as Python's `Host(run=...)`. `doctor` is ported with `TestCheckSetup` and `TestDoctorCommand`
+  (`engine/src/cli/doctor/tests.rs`) but for its tkinter check, which the Rust engine, without the GUI, does not
+  make (`test_without_tkinter` not ported); the parity scenario `doctor_checks` passes against the binary.
+- **Jenkins calls whose tests need the CLI, left for rust-engine ticket 09b.** (Moved from Open issues, 2026-10-29.) Ticket 07 ported `TestOrchestratorChecks`
+  on `judge_run` of the build's quality file; its Workflow cases (`test_a_build_that_failed_before_the_gate_is_not_checked`,
+  `test_without_the_quality_gate_none_of_this_runs`, `test_the_spec_is_the_runs_task_without_a_contract_step` and the
+  heartbeat kept between PyPI's requests, `test_slow_pypi_keeps_the_run_alive_and_stops_at_the_rounds_deadline`) ticket
+  08's part 5 ported through its quality round (`engine/src/workflow/tests/orchestrator_checks.rs`, 2026-10-29), on
+  FakePyPI's clock and `events`. `judged_in_quality`, `_build_trust`, `_judging_changes`,
+  `JUDGING_FILES` and `JUDGED_DESCRIPTION`, with `TestJudgedInQuality`, are the `judged-in-quality` command's; the
+  Rust `Jenkins::retained_builds` they read is ported. Issue 09 names them (2026-10-28); its Plan (split) gives them to
+  09b (2026-10-29). Fixed (2026-10-29, ticket 09b): `crate::cli::judged` has `judged_in_quality`, `build_trust`, `judging_changes`,
+  `JUDGING_FILES` and the description's format (`Judged::read`, in place of the regular expression), and
+  `judged-in-quality` runs without herdr (`crate::cli`'s `herdrless_command`, given a `Local`), with
+  `TestJudgedInQuality` in `engine/src/cli/judged/tests.rs`; the parity scenario `judged_in_quality` passes against
+  the binary.
 - **The Rust engine's CLI commands about a project's runs.** Fixed (2026-10-29, rust-engine ticket 09a): the
   `orchestrator` binary has `list` (and `--json`, `--pr-state`), `metrics`, `show`, `prune`, `close` and `workflows`
   beside `run` and `resume` (`crate::cli::args`' `Command::Runs` and `Command::Workflows`; `crate::cli`'s
@@ -651,8 +666,12 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   Fixed entry on the Workflow that say "for ticket 09"), in `engine/src/cli/**/tests.rs` and `engine/tests/program.rs`.
   The parity scenarios `workflows_listed`, `runs_listed_and_shown`, `branches_pruned`, `failed_run_closed` and
   `finished_run_closed` pass against the binary. No arguments print the help on stderr with exit status 2, where
-  Python without a display exits 2 naming the missing command (the spec's Decisions: no tk GUI). Not closed: drain,
-  refresh, doctor and judged-in-quality (ticket 09b) and serve (ticket 10).
+  Python without a display exits 2 naming the missing command (the spec's Decisions: no tk GUI). Ticket 09b
+  (2026-10-29) adds `drain`, `refresh`, `doctor` and `judged-in-quality` (`crate::cli::drain`, `refresh`, `doctor` and
+  `judged`), with `TestDrain`, `TestDrainWorkflows`, TestPromptFiles' drain case, `TestRefresh`, `TestCheckSetup`,
+  `TestDoctorCommand` and `TestJudgedInQuality`, and empties `NOT_YET`: every command's `--help` names Python's flags,
+  and the parity scenarios `specs_drained`, `conflict_refreshed`, `doctor_checks` and `judged_in_quality` pass. Not
+  closed: serve (ticket 10).
 - **Harness tests left for rust-engine tickets 08 and 09.** (Moved from Open issues, 2026-10-29.) Ticket 06 ported `launch_args`, `session_usage` and
   `turn_tokens` (`engine/src/harness/tests.rs`, `engine/src/summary/tests.rs`), but the Python cases that drive them
   through `Workflow`, `parse_args`, `new_state` or `resumable_state` wait for those (cross-review 92, F1: "As merged,
@@ -793,7 +812,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `PARITY_COMMANDS` as they land: ticket 09a (2026-10-29) adds `list`, `metrics`, `show`, `prune`, `close` and
   `workflows`, so the stage runs 38 scenarios and the 18 switched, every one but those of `drain`, `refresh`,
   `doctor`, `judged-in-quality` (ticket 09b) and `serve` (ticket 10); 56 passing in 210 s locally with SIGINT and
-  SIGHUP ignored, the Python engine's 43 taking 192 s.
+  SIGHUP ignored, the Python engine's 43 taking 192 s. Ticket 09b (2026-10-29) adds `drain`, `refresh`,
+  `judged-in-quality` and `doctor`, so the stage runs every scenario but serve's, 42 and the 18 switched: 60 passing
+  in 228 s locally, so too.
 - **The commands the Rust engine runs outlived an engine that got a SIGTERM or a SIGHUP.** The commands run in
   process groups of their own, so a SIGTERM of the engine (a kill, a service manager's stop) or the SIGHUP a closed
   terminal sends its foreground group ended the engine and left the running command to finish unwatched, and the run

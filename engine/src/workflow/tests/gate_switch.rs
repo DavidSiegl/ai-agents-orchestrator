@@ -681,7 +681,7 @@ impl Host for Unreadable {
         None
     }
 
-    fn exec(&self, argv: &[&str], _: Option<&[u8]>, _: u64) -> Result<crate::host::Exec, OrchestratorError> {
+    fn exec(&self, argv: &[&str], _: Option<&[u8]>, _: u64) -> Result<crate::host::Exec, crate::host::ExecError> {
         panic!("Unreadable ran {argv:?}")
     }
 

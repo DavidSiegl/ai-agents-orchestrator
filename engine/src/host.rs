@@ -133,6 +133,31 @@ impl From<GhError> for OrchestratorError {
     }
 }
 
+/// Why [`Host::exec`] gave no Exec.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExecError {
+    /// The command's program is not on this host's PATH, so it could not be started: Python's FileNotFoundError from
+    /// subprocess. Over SSH it is the remote shell that cannot find a program, which exits 127 as an Exec does.
+    NotFound(OrchestratorError),
+    /// Any other failure: the command could not be started otherwise, timed out, was interrupted, or its output could
+    /// not be read.
+    Failed(OrchestratorError),
+}
+
+impl From<ExecError> for OrchestratorError {
+    fn from(e: ExecError) -> OrchestratorError {
+        match e {
+            ExecError::NotFound(e) | ExecError::Failed(e) => e,
+        }
+    }
+}
+
+impl From<OrchestratorError> for ExecError {
+    fn from(e: OrchestratorError) -> ExecError {
+        ExecError::Failed(e)
+    }
+}
+
 /// Why a push of a run's work did not happen.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PushError {
@@ -169,23 +194,15 @@ pub trait Host {
     fn ssh_target(&self) -> Option<&str>;
 
     /// Runs argv on this host and gives its exit status and output, as they are, once it has exited and closed its
-    /// output. stdin, when given, is its standard input, else it reads none. Errors: argv cannot be started, or runs
-    /// longer than timeout seconds, in which case every process it started that has not left its process group is
-    /// killed.
-    fn exec(&self, argv: &[&str], stdin: Option<&[u8]>, timeout: u64) -> Result<Exec, OrchestratorError>;
+    /// output. stdin, when given, is its standard input, else it reads none. Errors: ExecError::NotFound when argv[0]
+    /// is not on PATH; ExecError::Failed when argv cannot be started otherwise, or runs longer than timeout seconds,
+    /// in which case every process it started that has not left its process group is killed.
+    fn exec(&self, argv: &[&str], stdin: Option<&[u8]>, timeout: u64) -> Result<Exec, ExecError>;
 
     /// argv's exit status and output as text, each line end made "\n", which suits output that is parsed, such as
     /// JSON or a state file. stdin is as for exec. Errors: as exec's, and output that is not UTF-8.
     fn run(&self, argv: &[&str], stdin: Option<&str>, timeout: u64) -> Result<Completed, OrchestratorError> {
-        let Exec { command, status, stdout, stderr } = self.exec(argv, stdin.map(str::as_bytes), timeout)?;
-        let decode = |bytes: Vec<u8>| {
-            String::from_utf8(bytes).map(|text| universal_newlines(&text)).map_err(|e| {
-                let why = crate::py::text::utf8_error(e.as_bytes(), &e.utf8_error());
-                OrchestratorError(format!("{command}: printed what is not UTF-8: {why}"))
-            })
-        };
-        let stdout = decode(stdout)?;
-        Ok(Completed { status, stdout, stderr: decode(stderr)? })
+        decoded(self.exec(argv, stdin.map(str::as_bytes), timeout)?)
     }
 
     /// argv's exit status and output as the command printed it, for output that carries paths or file contents: line
@@ -916,9 +933,23 @@ fn git_test<H: Host + ?Sized>(host: &H, cwd: &str, args: &[&str]) -> Result<bool
     }
 }
 
+/// exec's exit status and output as Host::run gives them: as text, each line end made "\n". Errors: the output is
+/// not UTF-8.
+pub fn decoded(exec: Exec) -> Result<Completed, OrchestratorError> {
+    let Exec { command, status, stdout, stderr } = exec;
+    let decode = |bytes: Vec<u8>| {
+        String::from_utf8(bytes).map(|text| universal_newlines(&text)).map_err(|e| {
+            let why = crate::py::text::utf8_error(e.as_bytes(), &e.utf8_error());
+            OrchestratorError(format!("{command}: printed what is not UTF-8: {why}"))
+        })
+    };
+    let stdout = decode(stdout)?;
+    Ok(Completed { status, stdout, stderr: decode(stderr)? })
+}
+
 /// git pathspecs that each match exactly one of paths, relative to the repository's top level, whatever directory git
 /// runs in, and with no glob in them.
-fn top_literal<S: AsRef<str>>(paths: &[S]) -> Vec<String> {
+pub(crate) fn top_literal<S: AsRef<str>>(paths: &[S]) -> Vec<String> {
     paths.iter().map(|p| format!(":(top,literal){}", p.as_ref())).collect()
 }
 

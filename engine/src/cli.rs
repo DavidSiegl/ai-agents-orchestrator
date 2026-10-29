@@ -1,8 +1,10 @@
 //! The orchestrator program's command line, as orchestrator.py's main: [`main`] reads the arguments (crate::cli::args),
 //! connects to herdr and the project's host, runs the command and turns how it ended into the program's exit status
 //! and its last lines. A command joins as a [`Command`] arm of [`run_command`], given the same [`Connected`], or of
-//! [`herdrless_command`] for one that needs no herdr; ticket 09a has `run`, `resume`, the commands about a project's
-//! runs (crate::cli::listing, prune, close) and `workflows`.
+//! [`herdrless_command`], given the same [`Local`], for one that needs no herdr pane: every command of Python's but gui
+//! and serve. `run` and `resume` are here and in crate::cli::start; the commands about a project's runs in
+//! crate::cli::listing, prune and close; `workflows`, `drain`, `refresh`, `judged-in-quality` and `doctor` in modules
+//! of their names (judged for judged-in-quality).
 
 use std::cell::Cell;
 use std::ffi::OsString;
@@ -27,6 +29,10 @@ use crate::workflow::{Collaborators, LocalHuman, RunSettings, Stopped, SystemClo
 
 pub mod args;
 mod close;
+pub mod doctor;
+pub mod drain;
+pub mod judged;
+pub mod refresh;
 pub mod listing;
 pub mod prune;
 mod start;
@@ -50,7 +56,15 @@ pub struct Connected<'a> {
     pub local_host: &'a str,
     /// The program's standard output, which takes text as it is, a line with its line end: what a command prints.
     pub stdout: &'a dyn Fn(&str),
+    /// The program's standard error, as stdout takes text: what a command prints there itself, not its log.
+    pub stderr: &'a dyn Fn(&str),
+    /// How a run is driven to its verdict: run_workflow, which a test replaces as Python's patch Workflow.run.
+    pub workflow: &'a RunWorkflow<'a>,
 }
+
+/// Drives the run a state describes through its workflow, as run_workflow does: given the world, the state, the
+/// workflow and, for a run started from a spec, the spec.
+pub type RunWorkflow<'w> = dyn Fn(&Connected, RunState, Pipeline, Option<SpecFile>) -> Result<Ran, Stopped> + 'w;
 
 impl Connected<'_> {
     /// Print line and a line end on standard output, as Python's print(line).
@@ -62,6 +76,34 @@ impl Connected<'_> {
     pub fn print(&self, text: &str) {
         (self.stdout)(text);
     }
+
+    /// Print line and a line end on standard error, as Python's print(line, file=sys.stderr).
+    pub fn say_err(&self, line: &str) {
+        (self.stderr)(&format!("{line}\n"));
+    }
+}
+
+/// What a command that needs no herdr pane talks to: this machine, where the orchestrator runs; also what connect
+/// reaches herdr and the project's host from.
+pub(super) struct Local<'a> {
+    /// This machine: its commands, git among them, and over SSH from it a herdr machine's (doctor).
+    pub host: &'a ProcessHost,
+    /// The herdr here, its commands forwarded to the herdr machine given (ProcessHerdr::new).
+    pub herdr: &'a dyn Fn(Option<&str>) -> ProcessHerdr,
+    /// Whether this process runs in a pane herdr manages (in_herdr_pane).
+    pub in_herdr_pane: bool,
+    /// The quality job of a name, as Connected's jenkins.
+    pub jenkins: &'a dyn Fn(&str) -> Result<Jenkins, OrchestratorError>,
+    /// The current directory (current_dir). Errors: it is gone or not UTF-8.
+    pub cwd: &'a dyn Fn() -> Result<String, OrchestratorError>,
+    /// The orchestrator's configuration directory on this machine.
+    pub config: &'a ConfigDir,
+    /// The program's standard output, as Connected's stdout.
+    pub stdout: &'a dyn Fn(&str),
+    /// The program's standard error, which takes text as it is, a line with its line end.
+    pub stderr: &'a dyn Fn(&str),
+    /// The Ctrl-C, a SIGTERM or a SIGHUP: once raised, the command ends interrupted.
+    pub interrupt: &'a Interrupt,
 }
 
 /// How a command ended, when it ended as it should.
@@ -72,14 +114,14 @@ pub(super) enum Ended {
     Status(i32),
 }
 
-/// How a command that ran a workflow ended, for the program's last line and exit status (finish).
-pub(super) struct Ran {
+/// How a run a Workflow drove ended, for the program's last line and exit status (finish).
+pub struct Ran {
     /// What Workflow::run returned: the run's verdict; None prints as Python's str(None) does, "None".
-    verdict: Option<String>,
+    pub verdict: Option<String>,
     /// The run's state as the Workflow left it, at its end.
-    state: RunState,
+    pub state: RunState,
     /// The run's workflow.
-    pipeline: Pipeline,
+    pub pipeline: Pipeline,
 }
 
 /// Why a command did not end as it should.
@@ -118,9 +160,25 @@ pub fn main(argv: impl IntoIterator<Item = OsString>, interrupt: &Interrupt) -> 
             unwritten.set(Some(first));
         }
     };
-    let ended = match herdrless_command(&command, &config, &print, interrupt) {
+    let local_host = ProcessHost::local(interrupt);
+    let jenkins = |job: &str| Jenkins::from_env(job, &config);
+    // A line stderr does not take is lost, as after a hangup; the status still tells.
+    let stderr = |text: &str| drop(std::io::stderr().lock().write_all(text.as_bytes()));
+    let herdr = |machine: Option<&str>| ProcessHerdr::new(machine, interrupt);
+    let local = Local {
+        host: &local_host,
+        herdr: &herdr,
+        in_herdr_pane: in_herdr_pane(),
+        jenkins: &jenkins,
+        cwd: &current_dir,
+        config: &config,
+        stdout: &print,
+        stderr: &stderr,
+        interrupt,
+    };
+    let ended = match herdrless_command(&command, &local) {
         Some(ended) => ended,
-        None => connect(&command, interrupt, &LocalHuman::new(interrupt), &config, &print),
+        None => connect(&command, &local, &LocalHuman::new(interrupt)),
     };
     let status = ended_status(ended, &command, &print);
     match unwritten.take() {
@@ -133,22 +191,50 @@ pub fn main(argv: impl IntoIterator<Item = OsString>, interrupt: &Interrupt) -> 
     }
 }
 
-/// Run command if it is one that needs no herdr pane, on this machine, printing by print, and say how it ended; None
-/// for any other command, which main runs after connect. Python's herdrless_command.
-fn herdrless_command(
-    command: &Command,
-    config: &ConfigDir,
-    print: &dyn Fn(&str),
-    interrupt: &Interrupt,
-) -> Option<Result<Ended, Stop>> {
-    // Workflows are on this machine, so listing them needs no herdr.
-    let Command::Workflows(reference) = command else { return None };
-    let ran = workflows::workflows_command(config, reference.as_deref(), print);
-    Some(match ran {
+/// Run command if it is one that needs no herdr pane, in local, and say how it ended; None for any other command,
+/// which main runs after connect. Python's herdrless_command.
+fn herdrless_command(command: &Command, local: &Local) -> Option<Result<Ended, Stop>> {
+    let interrupt = local.interrupt;
+    let ended = match command {
+        // Workflows are on this machine, so listing them needs no herdr.
+        Command::Workflows(reference) => {
+            workflows::workflows_command(local.config, reference.as_deref(), local.stdout).map(|()| 0)
+        }
+        Command::JudgedInQuality { job, branch } => judged_in_quality_command(local, job, branch),
+        // Not being in a herdr pane is one of the things doctor reports.
+        Command::Doctor(target) => doctor::doctor_command(local, target),
+        _ => return None,
+    };
+    Some(match ended {
         Err(e) => Err(stop(e, interrupt, None)),
-        Ok(()) if interrupt.is_raised() => Err(Stop::Interrupted(None)),
-        Ok(()) => Ok(Ended::Status(0)),
+        Ok(_) if interrupt.is_raised() => Err(Stop::Interrupted(None)),
+        Ok(status) => Ok(Ended::Status(status)),
     })
+}
+
+/// Say whether a build of the Jenkins quality job job already judged the current directory's HEAD, as
+/// judged::judged_in_quality decides it for a pull request into the branch: 0, naming the build on standard output,
+/// when one did; otherwise EXIT_ERROR, with one line on standard error saying why, the condition the closest build
+/// fails or what stopped the question being answered. Python's judged_in_quality_command. Errors: only one met while
+/// local's interrupt is raised, which is not printed.
+fn judged_in_quality_command(local: &Local, job: &str, branch: &str) -> Result<i32, OrchestratorError> {
+    let judged = (local.cwd)().and_then(|cwd| {
+        let ci = (local.jenkins)(job)?;
+        judged::judged_in_quality(local.host, &cwd, &ci, branch)
+    });
+    match judged {
+        Ok(number) => {
+            (local.stdout)(&format!(
+                "judged-in-quality: build #{number} of {job} judged HEAD's tree from its merge base with {branch}\n"
+            ));
+            Ok(0)
+        }
+        Err(e) if local.interrupt.is_raised() => Err(e),
+        Err(e) => {
+            (local.stderr)(&format!("judged-in-quality: {}\n", crate::py::text::splitlines(&e.0).join(" ")));
+            Ok(EXIT_ERROR)
+        }
+    }
 }
 
 /// The exit status of a command that ended so, its last line printed: finish's for a run, by print, the command's
@@ -171,24 +257,19 @@ fn ended_status(ended: Result<Ended, Stop>, command: &Command, print: &dyn Fn(&s
 }
 
 /// Connect to the herdr and the host command names, on this machine (which must be a herdr pane) or over SSH to its
-/// --machine, and run it, printing by print. Python's connect, then the rest of main.
-fn connect(
-    command: &Command,
-    interrupt: &Interrupt,
-    human: &LocalHuman,
-    config: &ConfigDir,
-    print: &dyn Fn(&str),
-) -> Result<Ended, Stop> {
+/// --machine, reached from local's host, and run it, printing by local's stdout and stderr, telling human. Python's
+/// connect, then the rest of main.
+fn connect(command: &Command, local: &Local, human: &LocalHuman) -> Result<Ended, Stop> {
+    let Local { interrupt, config, stdout, stderr, .. } = *local;
     let stopped = |e: OrchestratorError| stop(e, interrupt, None);
     let machine = command.target().and_then(|t| t.machine.as_deref());
     let herdr = ProcessHerdr::new(machine, interrupt);
-    let local = ProcessHost::local(interrupt);
     let host = match machine {
-        Some(_) => local.over_ssh(&herdr.ssh_target().map_err(|e| stopped(e.into()))?),
+        Some(_) => local.host.over_ssh(&herdr.ssh_target().map_err(|e| stopped(e.into()))?),
         None if !in_herdr_pane() => {
             return Err(stopped(OrchestratorError::new("not inside a herdr pane; run from herdr, or pass --machine")))
         }
-        None => local,
+        None => local.host.clone(),
     };
     let clocks = SystemClocks::new(interrupt).map_err(stopped)?;
     let pypi = PyPI::from_env();
@@ -208,7 +289,9 @@ fn connect(
         jenkins: &jenkins,
         config,
         local_host: &here,
-        stdout: print,
+        stdout,
+        stderr,
+        workflow: &run_workflow,
     };
     run_command(command, &world)
 }
@@ -236,12 +319,24 @@ fn run_command(command: &Command, world: &Connected) -> Result<Ended, Stop> {
             runs_command(runs, world, &cwd, &target.flags()).map_err(stopped)?;
             return if interrupt.is_raised() { Err(Stop::Interrupted(None)) } else { Ok(Ended::Status(0)) };
         }
-        Command::Workflows(_) => unreachable!("main runs workflows without herdr (herdrless_command)"),
+        Command::Drain(args) => return drain::drain_command(args, world, &cwd),
+        Command::Refresh(_, run_ref) => {
+            let status = refresh::refresh_command(world, &cwd, run_ref.as_deref()).map_err(stopped)?;
+            return if interrupt.is_raised() { Err(Stop::Interrupted(None)) } else { Ok(Ended::Status(status)) };
+        }
+        Command::Workflows(_) | Command::JudgedInQuality { .. } | Command::Doctor(_) => {
+            unreachable!("main runs {command:?} without herdr (herdrless_command)")
+        }
     };
     if interrupt.is_raised() {
         return Err(Stop::Interrupted(Some(state.run_id)));
     }
-    run_workflow(world, state, pipeline, spec).map(|ran| Ended::Ran(Box::new(ran)))
+    let run_id = state.run_id.clone();
+    match (world.workflow)(world, state, pipeline, spec) {
+        Ok(ran) => Ok(Ended::Ran(Box::new(ran))),
+        Err(Stopped::Interrupted) => Err(Stop::Interrupted(Some(run_id))),
+        Err(Stopped::Failed(e) | Stopped::TakenOver(e)) => Err(stop(e, interrupt, Some(&run_id))),
+    }
 }
 
 /// The project directory target names, the current directory without one, as world's host resolves it. Errors: the
@@ -340,16 +435,16 @@ pub fn record_in_state(
 }
 
 /// Drive the run state describes through pipeline, by the settings saved in state, to its verdict. spec is the file
-/// a new run --spec run starts from; None for any other run.
-fn run_workflow(
+/// a new run --spec run starts from; None for any other run. Errors: as Workflow::new and Workflow::run, and
+/// Stopped::Failed when the run's quality job cannot be made.
+pub fn run_workflow(
     world: &Connected,
     state: RunState,
     pipeline: Pipeline,
     spec: Option<SpecFile>,
-) -> Result<Ran, Stop> {
-    let interrupt = world.with.interrupt;
+) -> Result<Ran, Stopped> {
     let jenkins = match state.quality_job.as_deref().filter(|j| !j.is_empty()) {
-        Some(job) => Some((world.jenkins)(job).map_err(|e| stop(e, interrupt, Some(&state)))?),
+        Some(job) => Some((world.jenkins)(job).map_err(Stopped::Failed)?),
         None => None,
     };
     let settings = RunSettings {
@@ -366,19 +461,16 @@ fn run_workflow(
         spec,
     };
     let with = Collaborators { jenkins: jenkins.as_ref(), ..world.with };
-    let mut workflow = Workflow::new(with, state.clone(), settings).map_err(|e| stop(e, interrupt, Some(&state)))?;
-    match workflow.run() {
-        Ok(verdict) => Ok(Ran { verdict, state: workflow.state().clone(), pipeline }),
-        Err(Stopped::Interrupted) => Err(Stop::Interrupted(Some(workflow.state().run_id.clone()))),
-        Err(Stopped::Failed(e) | Stopped::TakenOver(e)) => Err(Stop::Failed(e)),
-    }
+    let mut workflow = Workflow::new(with, state, settings).map_err(Stopped::Failed)?;
+    let verdict = workflow.run()?;
+    Ok(Ran { verdict, state: workflow.state().clone(), pipeline })
 }
 
 /// What error e means for main: the Ctrl-C when the interrupt is pending, since a command it stopped fails for it,
-/// else the error itself. state is the run's, for the hint that resumes it.
-fn stop(e: OrchestratorError, interrupt: &Interrupt, state: Option<&RunState>) -> Stop {
+/// else the error itself. run_id is the run's, for the hint that resumes it.
+fn stop(e: OrchestratorError, interrupt: &Interrupt, run_id: Option<&str>) -> Stop {
     if interrupt.is_raised() {
-        Stop::Interrupted(state.map(|s| s.run_id.clone()))
+        Stop::Interrupted(run_id.map(String::from))
     } else {
         Stop::Failed(e)
     }

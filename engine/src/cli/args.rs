@@ -1,7 +1,6 @@
 //! The command line as orchestrator.py's parse_args reads it, on clap: the subcommands with their flags, and the
-//! checks argparse's types cannot make (check_flag_values, check_spec_args). Ticket 09a has run, resume, the commands
-//! about a project's runs and workflows; drain, refresh, doctor and judged-in-quality join [`parser`] and
-//! [`Command`] with ticket 09b; gui is not ported (the rust-engine spec's Decisions), and serve is ticket 10's.
+//! checks argparse's types cannot make (check_flag_values, check_spec_args): every command of Python's but gui, which
+//! is not ported (the rust-engine spec's Decisions), and serve, which is ticket 10's.
 //!
 //! The flags come in groups that several subcommands share, as argparse's parent parsers: [`Target`] (where the
 //! project is), [`Settings`] (how a run goes, which resume may change) and [`Starts`] (what a run is started with).
@@ -14,8 +13,10 @@ use clap::{Arg, ArgAction, ArgMatches};
 
 use crate::constants::{
     AGENT_KINDS, CLOSED_BRANCH_GRACE, DEFAULT_AGENT, DEFAULT_MAX_QUALITY_ROUNDS, DEFAULT_MAX_ROUNDS,
-    DEFAULT_TURN_TIMEOUT, REMOTE, ROLE_LABELS,
+    DEFAULT_TURN_TIMEOUT, EXIT_ERROR, EXIT_WAITING, REMOTE, ROLE_LABELS,
 };
+use crate::cli::doctor::{dotted, GIT_MIN_VERSION, HERDR_MIN_VERSION};
+use crate::cli::drain::{DRAIN_DIR, SPEC_DONE, SPEC_FOR_HUMAN, SPEC_IN_REVIEW, SPEC_READY};
 use crate::cli::listing::RUN_RECORD_VERSION;
 use crate::pipeline::METRICS_FILE;
 use crate::env::ConfigDir;
@@ -33,6 +34,21 @@ pub enum Command {
     Runs(Target, RunsCommand),
     /// `workflows`: list the workflows, or print the one named, a name or a file's path, as a workflow file.
     Workflows(Option<String>),
+    /// `drain`: run each ready spec in a directory, one after another.
+    Drain(DrainArgs),
+    /// `refresh`: clear a resolved conflict from the pull request of the run named, by its id or key, or of every
+    /// finished run with one when None.
+    Refresh(Target, Option<String>),
+    /// `doctor`: check what a run needs where the agents run, and the project at the Target's cwd when it has one.
+    Doctor(Target),
+    /// `judged-in-quality`: whether a build of the quality job already judged the current directory's HEAD as a
+    /// pull request's build into the branch would.
+    JudgedInQuality {
+        /// --quality-gate: the quality job's full name.
+        job: String,
+        /// --target: the branch the pull request would merge into.
+        branch: String,
+    },
 }
 
 /// A command about a project's runs.
@@ -115,6 +131,18 @@ pub struct RunArgs {
     pub no_pr: bool,
 }
 
+/// `drain`'s flags and arguments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DrainArgs {
+    /// The flags each run drain starts is given, as run --spec runs its spec: their task and spec None, and no_pr
+    /// false, since each run opens a pull request.
+    pub run: RunArgs,
+    /// The directory of specs, on this machine, each DIR/<slug>/spec.md; DRAIN_DIR unless given.
+    pub dir: String,
+    /// --dry-run: print what would change and run, and write, run and delete nothing.
+    pub dry_run: bool,
+}
+
 /// `resume`'s flags and arguments.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResumeArgs {
@@ -133,13 +161,15 @@ pub struct ResumeArgs {
 }
 
 impl Command {
-    /// Where the project is, as the human gave it; None for workflows, which names no project.
+    /// Where the project is, as the human gave it; None for workflows and judged-in-quality, which take no
+    /// --machine or --cwd.
     pub fn target(&self) -> Option<&Target> {
         match self {
             Command::Run(a) => Some(&a.target),
             Command::Resume(a) => Some(&a.target),
-            Command::Runs(target, _) => Some(target),
-            Command::Workflows(_) => None,
+            Command::Drain(a) => Some(&a.run.target),
+            Command::Runs(target, _) | Command::Refresh(target, _) | Command::Doctor(target) => Some(target),
+            Command::Workflows(_) | Command::JudgedInQuality { .. } => None,
         }
     }
 
@@ -148,7 +178,8 @@ impl Command {
         match self {
             Command::Run(a) => Some(&a.settings),
             Command::Resume(a) => Some(&a.settings),
-            Command::Runs(..) | Command::Workflows(_) => None,
+            Command::Drain(a) => Some(&a.run.settings),
+            _ => None,
         }
     }
 }
@@ -178,16 +209,29 @@ pub fn parse_args(argv: impl IntoIterator<Item = OsString>, config: &ConfigDir) 
         Some(("run", m)) => Command::Run(RunArgs {
             target: target(m),
             settings: settings(m),
-            starts: Starts {
-                workflow: string(m, "workflow").unwrap_or_else(|| "default".to_string()),
-                workflow_file: string(m, "workflow-file"),
-                worktree: m.get_flag("worktree"),
-                quality_gate: string(m, "quality-gate"),
-            },
+            starts: starts(m),
             task: string(m, "task"),
             spec: string(m, "spec"),
             no_pr: m.get_flag("no-pr"),
         }),
+        Some(("drain", m)) => Command::Drain(DrainArgs {
+            run: RunArgs {
+                target: target(m),
+                settings: settings(m),
+                starts: starts(m),
+                task: None,
+                spec: None,
+                no_pr: false,
+            },
+            dir: string(m, "dir").unwrap_or_else(|| DRAIN_DIR.to_string()),
+            dry_run: m.get_flag("dry-run"),
+        }),
+        Some(("refresh", m)) => Command::Refresh(target(m), string(m, "run_ref")),
+        Some(("doctor", m)) => Command::Doctor(target(m)),
+        Some(("judged-in-quality", m)) => Command::JudgedInQuality {
+            job: string(m, "quality-gate").unwrap_or_default(),
+            branch: string(m, "target").unwrap_or_default(),
+        },
         Some(("resume", m)) => Command::Resume(ResumeArgs {
             target: target(m),
             settings: settings(m),
@@ -325,6 +369,79 @@ pub fn parser(config: &ConfigDir) -> clap::Command {
             config.workflows_dir()
         ))
         .arg(Arg::new("workflow").value_name("WORKFLOW").help("a workflow's name, or a file's path"));
+    let drain = clap::Command::new("drain")
+        .about("run every ready spec in a directory, one pull request each")
+        .long_about(format!(
+            "Run each DIR/<slug>/spec.md whose header says {SPEC_READY} and whose blockers are {SPEC_DONE}, one after \
+             another, as run --spec runs it, and record each in the spec's header: {SPEC_IN_REVIEW} with its pull \
+             request, or {SPEC_FOR_HUMAN}, which stops the drain. First it marks {SPEC_DONE} each spec whose pull \
+             request has merged, and refreshes the runs of {SPEC_IN_REVIEW} and {SPEC_FOR_HUMAN} specs as the refresh \
+             command does, moving a {SPEC_FOR_HUMAN} spec whose approved pull request no longer conflicts to \
+             {SPEC_IN_REVIEW}. Exits 0 once no spec is {SPEC_READY}, and {EXIT_WAITING} when the ones left have \
+             blockers that are not {SPEC_DONE}."
+        ))
+        .args(target_args())
+        .args(settings_args())
+        .args(starts_args(config))
+        .arg(
+            Arg::new("dir")
+                .value_name("DIR")
+                .help(format!("the directory of specs, on this machine; default {DRAIN_DIR}")),
+        )
+        .arg(Arg::new("dry-run").long("dry-run").action(ArgAction::SetTrue).help(
+            "print the changes to the specs' status and the specs it would run, in order, and write, run and delete \
+             nothing",
+        ))
+        // Hidden and refused by check_spec_args, as for resume.
+        .arg(Arg::new("spec").long("spec").num_args(0..=1).default_missing_value("").hide(true));
+    let refresh = clap::Command::new("refresh")
+        .about("clear a resolved conflict from a run's pull request")
+        .long_about(format!(
+            "For a finished run whose pull request was opened as a draft over conflicts with its base, ask gh whether \
+             it merges cleanly now. If it does, remove the conflict warning from its description, keeping every \
+             other edit, mark it ready for review if the run approved or finished, and forget the conflicts in the \
+             run's state; a pull request merged or closed only has its run's conflicts forgotten. Without RUN, every \
+             finished run with a pull request and conflicts. Prints a line per run. Exit status 0 when each conflict \
+             is cleared or forgotten, {EXIT_WAITING} when a pull request still conflicts or GitHub has not computed \
+             whether it does."
+        ))
+        .args(target_args())
+        .arg(Arg::new("run_ref").value_name("RUN").help(format!("{RUN_REF_HELP}; default: every such run")));
+    let judged = clap::Command::new("judged-in-quality")
+        .about("exit 0 when a quality build already judged HEAD as its pull request's build would")
+        .long_about(format!(
+            "Exit 0 when a build of the quality job JOB already judged HEAD as a pull request's build into BRANCH \
+             would, so that build need not judge it again; docs/quality-gate.md says when. Fetches BRANCH, and the \
+             main commit a build names. Otherwise, and on any error, exit {EXIT_ERROR}, saying why in one line on \
+             standard error. Needs JENKINS_URL, JENKINS_USER and JENKINS_TOKEN, from the environment or {}.",
+            config.ci_env_path()
+        ))
+        .arg(
+            Arg::new("quality-gate")
+                .long("quality-gate")
+                .value_name("JOB")
+                .required(true)
+                .help("the quality job's full name, folders included"),
+        )
+        .arg(
+            Arg::new("target")
+                .long("target")
+                .value_name("BRANCH")
+                .required(true)
+                .help("the branch the pull request would merge into"),
+        );
+    let doctor = clap::Command::new("doctor")
+        .about("check what a run needs, and say what to run for each that is missing")
+        .long_about(format!(
+            "Check what a run needs where the agents run, on this machine or with --machine on that one: herdr {} or \
+             later and a way to reach it, each harness's CLI and herdr integration, git {} or later, gh logged in, \
+             gitleaks, and with --cwd a git checkout with an {REMOTE}. Prints a line each, ok, missing, or warn for \
+             one only some runs need, with a fix under each that is not ok. Installs and changes nothing. Exit \
+             status 0 when nothing is missing, {EXIT_ERROR} otherwise.",
+            dotted(&HERDR_MIN_VERSION),
+            dotted(&GIT_MIN_VERSION)
+        ))
+        .args(target_args());
     clap::Command::new("orchestrator")
         .about(
             "Role-based handoff between agent sessions in herdr, each role in the harness of its choice; by default \
@@ -335,7 +452,10 @@ pub fn parser(config: &ConfigDir) -> clap::Command {
         // argparse takes an unambiguous abbreviation of a long flag.
         .infer_long_args(true)
         // argparse takes the last of a flag given twice, where clap would refuse it.
-        .subcommands([run, resume, list, metrics, show, prune, close, workflows].map(|c| c.args_override_self(true)))
+        .subcommands(
+            [run, resume, list, metrics, show, prune, drain, close, refresh, workflows, judged, doctor]
+                .map(|c| c.args_override_self(true)),
+        )
 }
 
 /// What a RUN argument takes.
@@ -419,6 +539,16 @@ fn settings_args() -> Vec<Arg> {
     args
 }
 
+/// The Starts in m.
+fn starts(m: &ArgMatches) -> Starts {
+    Starts {
+        workflow: string(m, "workflow").unwrap_or_else(|| "default".to_string()),
+        workflow_file: string(m, "workflow-file"),
+        worktree: m.get_flag("worktree"),
+        quality_gate: string(m, "quality-gate"),
+    }
+}
+
 /// The flags of Starts. --workflow offers the workflows in config, or the built-in ones where that cannot be listed,
 /// as the workflows command then says why.
 fn starts_args(config: &ConfigDir) -> Vec<Arg> {
@@ -474,7 +604,7 @@ fn role_agent_arg(text: &str) -> Result<(String, String), String> {
     }
 }
 
-/// A usage error for a run with neither a task nor --spec, or a resume given --spec.
+/// A usage error for a run with neither a task nor --spec, or a resume or drain given --spec.
 fn check_spec_args(matches: &ArgMatches, p: &mut clap::Command) -> Result<(), clap::Error> {
     match matches.subcommand() {
         Some(("run", m)) if !m.contains_id("task") && !m.contains_id("spec") => {
@@ -483,13 +613,16 @@ fn check_spec_args(matches: &ArgMatches, p: &mut clap::Command) -> Result<(), cl
         Some(("resume", m)) if m.contains_id("spec") => {
             Err(subcommand_error(p, "resume", "unrecognized arguments: --spec; a resumed run keeps the spec it has"))
         }
+        Some(("drain", m)) if m.contains_id("spec") => {
+            Err(subcommand_error(p, "drain", "unrecognized arguments: --spec; drain runs the specs in DIR"))
+        }
         _ => Ok(()),
     }
 }
 
 /// A usage error for flag values the parser cannot rule out: --machine without --cwd, a --max-rounds or
-/// --max-quality-rounds below 1, a run given --max-quality-rounds without --quality-gate, a resume given it with
-/// --no-quality-gate, and a --quality-gate that is not a Jenkins job's full name.
+/// --max-quality-rounds below 1, a run or drain given --max-quality-rounds without --quality-gate, a resume given it
+/// with --no-quality-gate, and a --quality-gate that is not a Jenkins job's full name.
 ///
 /// A flag command does not take is not checked.
 fn check_flag_values(command: &Command, p: &mut clap::Command) -> Result<(), clap::Error> {
@@ -497,12 +630,15 @@ fn check_flag_values(command: &Command, p: &mut clap::Command) -> Result<(), cla
     if command.target().is_some_and(|t| t.machine.is_some() && t.cwd.is_none()) {
         return error(p, "--cwd is required with --machine");
     }
-    let Some(settings) = command.settings() else { return Ok(()) };
     let (quality_gate, no_quality_gate) = match command {
         Command::Run(a) => (a.starts.quality_gate.as_deref(), false),
+        Command::Drain(a) => (a.run.starts.quality_gate.as_deref(), false),
         Command::Resume(a) => (a.quality_gate.as_deref(), a.no_quality_gate),
-        Command::Runs(..) | Command::Workflows(_) => (None, false),
+        Command::JudgedInQuality { job, .. } => (Some(job.as_str()), false),
+        _ => (None, false),
     };
+    let unset = Settings::default();
+    let settings = command.settings().unwrap_or(&unset);
     if settings.max_rounds.is_some_and(|n| n < 1) {
         return error(p, "--max-rounds must be at least 1");
     }
@@ -510,7 +646,7 @@ fn check_flag_values(command: &Command, p: &mut clap::Command) -> Result<(), cla
         if n < 1 {
             return error(p, "--max-quality-rounds must be at least 1");
         }
-        if matches!(command, Command::Run(_)) && quality_gate.is_none_or(str::is_empty) {
+        if matches!(command, Command::Run(_) | Command::Drain(_)) && quality_gate.is_none_or(str::is_empty) {
             return error(p, "--max-quality-rounds needs --quality-gate");
         }
         if no_quality_gate {
