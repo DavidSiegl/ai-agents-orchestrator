@@ -92,7 +92,7 @@ fn failed_heartbeat_is_not_fatal() {
     ]);
     let failures = Rc::new(RefCell::new(vec![]));
     let (failed, clock) = (Rc::clone(&failures), Rc::clone(&f.clock));
-    f.host.state().before_write = Some(Box::new(move |path| {
+    f.host.state().before_write = Some(Box::new(move |path, _| {
         if path.ends_with("state.json") && clock.now() > 100.0 && failed.borrow().is_empty() {
             failed.borrow_mut().push(path.to_string());
             return Err(OrchestratorError("ssh: connection reset".into()));

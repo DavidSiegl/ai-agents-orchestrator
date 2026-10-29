@@ -161,3 +161,14 @@ fn the_runs_paths() {
     s.prompt_overrides.insert("LATER_NOTE", "x".to_string());
     assert!(s.prompts().unwrap_err().0.contains("replaces prompt LATER_NOTE"));
 }
+
+#[test]
+fn a_state_with_a_field_it_does_not_know_and_without_later_ones_reads_with_their_defaults() {
+    // TestResume.test_from_dict_ignores_unknown_keys_and_fills_new_ones; the unknown field is kept, as
+    // fields_it_does_not_know_are_kept_and_written_back says.
+    let text = r#"{"run_id": "r-abc", "task": "t", "cwd": "/p", "later_field": 1,
+        "agents": {"spec": {"name": "spec-abc", "pane": "w9:p1"}}}"#;
+    let state = RunState::from_text(text).unwrap();
+    assert_eq!((state.root_pane.as_str(), state.prompted, state.owner), ("w9:p1", None, None));
+    assert_eq!(state.max_rounds, crate::constants::DEFAULT_MAX_ROUNDS);
+}

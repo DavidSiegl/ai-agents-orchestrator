@@ -1,5 +1,5 @@
-//! tests/test_orchestrator.py's TestWorkflow, TestPullRequest, TestUpToDateBase, TestHeartbeat and
-//! TestOneRunPerCheckout, case for case, on the fixture's fakes (fixture.rs).
+//! tests/test_orchestrator.py's Workflow classes, case for case, on the fixture's fakes (fixture.rs): TestWorkflow
+//! here, and each other class in the submodule named after it.
 
 use std::rc::Rc;
 
@@ -16,11 +16,19 @@ use crate::host::Host;
 use crate::py::json::{Json, Map};
 use crate::state::RunState;
 
+mod harnesses;
 mod heartbeat;
 mod one_run;
+mod prompt_delivery;
 mod pull_request;
+mod resume;
+mod resume_pull_request;
+mod turn_timings;
 
 type Script = Vec<(&'static str, Vec<Turn>)>;
+
+/// The default workflow's roles, each with an agent: Python's FULL.
+const FULL: &[&str] = &["spec", "build", "review"];
 
 /// The default workflow approved in round 1.
 fn approved() -> Script {
@@ -59,6 +67,33 @@ fn names(f: &Fixture, kind: &str) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+/// (name, pane, args) of each agent started, in order.
+fn starts(f: &Fixture) -> Vec<(String, String, Vec<String>)> {
+    let calls = f.herdr.state().calls.clone();
+    calls
+        .into_iter()
+        .filter_map(|c| match c {
+            Call::Start { name, pane, args } => Some((name, pane, args)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// How many prompts went to the agent named name.
+fn prompts_to(f: &Fixture, name: &str) -> usize {
+    names(f, "prompt").iter().filter(|n| *n == name).count()
+}
+
+/// Whether herdr was given call.
+fn called(f: &Fixture, call: &Call) -> bool {
+    f.herdr.state().calls.contains(call)
+}
+
+/// Owned strings of a.
+fn strings(a: &[&str]) -> Vec<String> {
+    a.iter().map(|s| s.to_string()).collect()
 }
 
 fn text(saved: &Map<Json>, key: &str) -> Option<String> {

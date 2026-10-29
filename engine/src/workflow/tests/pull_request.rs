@@ -12,13 +12,13 @@ fn rounds(verdicts: &[&str]) -> Script {
     vec![("spec", vec![spec_turn()]), ("build", (1..=n).map(build_turn).collect()), ("review", reviews)]
 }
 
-const BRANCH: &str = "orchestrator/add-a-token-bucket-rate-limiter-a1b2c3";
+pub(super) const BRANCH: &str = "orchestrator/add-a-token-bucket-rate-limiter-a1b2c3";
 
-fn args(a: &[&str]) -> Vec<String> {
+pub(super) fn args(a: &[&str]) -> Vec<String> {
     a.iter().map(|s| s.to_string()).collect()
 }
 
-fn git_calls(f: &Fixture) -> Vec<Vec<String>> {
+pub(super) fn git_calls(f: &Fixture) -> Vec<Vec<String>> {
     f.host.state().git_calls.clone()
 }
 
@@ -160,9 +160,9 @@ fn no_pr_neither_fetches_nor_merges_even_when_origin_moved() {
 // -- TestUpToDateBase: the base branch is brought up to origin's before the interview and the branch, and merged in
 // before the push. ------------------------------------------------------------------------------------------------
 
-const FETCH: &[&str] = &["fetch", "--quiet", "origin", "main"];
-const FAST_FORWARD: &[&str] = &["merge", "--ff-only", "--quiet", "origin/main"];
-const MERGE: &[&str] = &["merge", "--no-edit", "--quiet", "origin/main"];
+pub(super) const FETCH: &[&str] = &["fetch", "--quiet", "origin", "main"];
+pub(super) const FAST_FORWARD: &[&str] = &["merge", "--ff-only", "--quiet", "origin/main"];
+pub(super) const MERGE: &[&str] = &["merge", "--no-edit", "--quiet", "origin/main"];
 
 /// The default run approved, or ending with verdict, its turns replaced where given.
 fn script(spec: Option<Turn>, build: Option<Turn>, review: Option<Turn>, verdict: &str) -> Script {

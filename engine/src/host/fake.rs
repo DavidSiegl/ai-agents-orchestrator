@@ -141,7 +141,7 @@ pub(crate) struct FakeState {
     pub restores: Vec<(String, Vec<String>)>,
     /// What session_log reads, by (harness, session).
     pub session_logs: HashMap<(String, String), String>,
-    /// Run before each write, given its path, when set: an error fails the write, as a Python test's own
+    /// Run before each write, given its path and text, when set: an error fails the write, as a Python test's own
     /// FakeHost.write fails it.
     pub before_write: Option<BeforeWrite>,
     /// What run_states answers instead, when set and it gives Some: a Python test's own FakeHost.run_states.
@@ -149,7 +149,7 @@ pub(crate) struct FakeState {
 }
 
 /// A test's hook on writes (FakeState::before_write).
-pub(crate) type BeforeWrite = Box<dyn FnMut(&str) -> Result<(), OrchestratorError>>;
+pub(crate) type BeforeWrite = Box<dyn FnMut(&str, &str) -> Result<(), OrchestratorError>>;
 /// A test's own run_states (FakeState::run_states_with).
 pub(crate) type RunStatesWith = Box<dyn FnMut(&str) -> Option<Result<Vec<(u64, Json)>, OrchestratorError>>>;
 
@@ -436,7 +436,7 @@ impl Host for FakeHost {
         // Run with the host's state released, so that the hook may read or write the host itself.
         let hook = self.state().before_write.take();
         if let Some(mut hook) = hook {
-            let allowed = hook(path);
+            let allowed = hook(path, text);
             self.state().before_write = Some(hook);
             allowed?;
         }

@@ -69,8 +69,8 @@ takes from the environment it is given rather than the process's. `harness/tests
 launch arguments for every harness, permission mode, model, session and directory, and its token counts of sample
 session logs; `herdr/tests.rs` replays every herdr command the parity scenarios recorded through `ProcessHerdr`, and
 checks each recorded agent start against the launch arguments of the run's state as last saved before it.
-`workflow/tests.rs` runs `Workflow` on `FakeHost`, `FakeHerdr` and `FakeClock`, the Python tests of it ported case for
-case.
+`workflow/tests.rs` and its submodules, one per Python class or two, run `Workflow` on `FakeHost`, `FakeHerdr` and
+`FakeClock`, the Python tests of it ported case for case.
 `checks/tests.rs` runs `judge_run` on every quality file a parity recording holds, from the build's quality.md its
 scenario's Jenkins served, and gives the recorded file (`engine/tests/oracle/checks.py` rebuilds each input and checks
 it on the Python engine first).

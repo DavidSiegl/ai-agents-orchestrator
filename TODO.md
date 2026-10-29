@@ -119,17 +119,19 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 - **Harness tests left for rust-engine tickets 08 and 09.** Ticket 06 ported `launch_args`, `session_usage` and
   `turn_tokens` (`engine/src/harness/tests.rs`, `engine/src/summary/tests.rs`), but the Python cases that drive them
   through `Workflow`, `parse_args`, `new_state` or `resumable_state` wait for those (cross-review 92, F1: "As merged,
-  the ticket's verification is unmet and nothing tracks the gap"). For ticket 08, which ports `Workflow`: all of
-  `TestHarnesses`; of `TestHarnessFlags`, `test_role_agent_starts_that_role_in_its_harness`,
-  `test_resume_with_a_new_harness_relaunches_in_it`, `test_a_030_state_resumes_on_claude` and the Workflow half of
-  `test_run_dir_granted_in_worktree_runs_only`; of `TestRunMetrics`, `test_tokens_come_from_the_session_the_turn_ran_in`
-  and `test_a_turn_that_changed_sessions_has_unknown_tokens` (`Workflow._count_tokens`). For ticket 09, which ports
-  the CLI: `test_precedence`, `test_flags_reach_the_workflow`, `test_role_agent_for_a_role_the_workflow_lacks`,
-  `test_unknown_kinds_are_argparse_errors` and `test_resume_keeps_or_overrides_the_saved_harnesses`. Ported already:
-  `test_launch_args_leave_the_permission_table_alone`, the `launch_args` half of
-  `test_run_dir_granted_in_worktree_runs_only`, `test_turn_tokens_needs_a_known_window_and_a_harness_it_reads` (ticket
-  06) and `test_a_030_state_without_a_permission_mode` and `test_unreadable_agent_args` (ticket 04,
-  `engine/src/state/tests.rs` and states.json). Closes with tickets 08 and 09 porting each case named here.
+  the ticket's verification is unmet and nothing tracks the gap"). Ticket 08's part 2 (2026-10-29) ported its
+  Workflow cases to `engine/src/workflow/tests/harnesses.rs` and `turn_timings.rs`: all of `TestHarnesses`;
+  `test_role_agent_starts_that_role_in_its_harness`, `test_resume_with_a_new_harness_relaunches_in_it` and
+  `test_a_030_state_resumes_on_claude`, each on the state `new_state` or `resumable_state` would give, built by hand;
+  `test_tokens_come_from_the_session_the_turn_ran_in` and `test_a_turn_that_changed_sessions_has_unknown_tokens`.
+  Left for ticket 08's part 3, with worktree runs: the Workflow half of `test_run_dir_granted_in_worktree_runs_only`.
+  For ticket 09, which ports the CLI: `test_precedence`, `test_flags_reach_the_workflow`,
+  `test_role_agent_for_a_role_the_workflow_lacks`, `test_unknown_kinds_are_argparse_errors` and
+  `test_resume_keeps_or_overrides_the_saved_harnesses`. Ported already: `test_launch_args_leave_the_permission_table_alone`,
+  the `launch_args` half of `test_run_dir_granted_in_worktree_runs_only`,
+  `test_turn_tokens_needs_a_known_window_and_a_harness_it_reads` (ticket 06) and
+  `test_a_030_state_without_a_permission_mode` and `test_unreadable_agent_args` (ticket 04, `engine/src/state/tests.rs`
+  and states.json). Closes with ticket 08's part 3 and ticket 09 porting each case named here.
 - **The Rust engine's Workflow is ported in parts, and its Python tests with them.** Rust-engine ticket 08 lands in
   seven parts (its issue's Plan): part 1 (`engine/src/workflow.rs`, 2026-10-29) runs a workflow in the project's
   checkout, its turns, verdict retries, pull request, saves, heartbeat and takeover, and ports `TestWorkflow`,
@@ -137,7 +139,17 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `TestOneRunPerCheckout` but its worktree cases (`test_worktree_runs_do_not_refuse_each_other`,
   `test_a_worktree_run_and_one_in_the_checkout_do_not_refuse_each_other`, with worktree runs) and its resume --force
   cases (`test_force_takes_over_the_run_itself`, `test_force_does_not_override_another_live_run`, which go through
-  `resumable_state`, with the minimal `run`/`resume`). Until the later parts, a Rust Workflow has no worktree, blocked
+  `resumable_state`, with the minimal `run`/`resume`). Part 2 (2026-10-29, tests only: the cases found nothing
+  missing in part 1's Workflow) ports `TestResume`, `TestPromptDelivery`, `TestResumePullRequest`, `TestTurnTimings`,
+  `TestHarnesses`, the Workflow cases of `TestHarnessFlags` and `TestRunMetrics`, and `TestWorkflowFileAgents`'
+  `test_saved_with_the_run` (`engine/src/workflow/tests/`), but for: the cases of a gated run, for part 5
+  (`TestResumePullRequest.test_resume_on_another_branch_fails_before_any_turn`'s quality phase, and there its check
+  that Jenkins was asked nothing in the other phases; `TestTurnTimings.test_quality_rounds_and_answers_have_records_of_their_own`
+  and `test_a_resumed_analysis_keeps_its_start`; `TestRunMetrics.test_a_gated_run_of_two_rounds_records_its_turns_and_quality_rounds`
+  and `test_a_resumed_quality_round_is_recorded_once`); `TestTurnTimings.test_a_seeded_spec_has_no_record`, for part 3;
+  and the CLI's, for ticket 09 (`TestResumePullRequest.test_cli_exits_1_on_another_branch` and
+  `test_no_pr_is_saved_with_the_run`, `TestRunMetrics.test_the_metrics_command_prints_a_line_per_run_that_is_done`,
+  `TestWorkflowFileAgents.test_workflows_prints_it`). Until the later parts, a Rust Workflow has no worktree, blocked
   report, seeded spec, lock, proof or quality round, and nothing starts one but the tests. Closes with the last part,
   every `run`/`resume` parity scenario passing against the Rust binary.
 - **A Ctrl-C at the terminal does not reach the command the Rust engine's `Host` or herdr is running.** `ProcessHost`

@@ -9,7 +9,7 @@ use crate::herdr::fake::{FakeHerdr, Turn};
 use crate::host::fake::FakeHost;
 use crate::host::Host;
 use crate::interrupt::Interrupt;
-use crate::py::json::Map;
+use crate::py::json::{Json, Map};
 use crate::runs::pid_alive;
 use crate::state::RunState;
 
@@ -35,6 +35,11 @@ impl FakeClock {
     /// Let seconds pass without the workflow sleeping, as a test's own herdr wait does.
     pub fn advance(&self, seconds: f64) {
         self.now.set(self.now.get() + seconds);
+    }
+
+    /// Set the time to seconds, as a Python test sets clock.now.
+    pub fn set(&self, seconds: f64) {
+        self.now.set(seconds);
     }
 
     /// Run hook after every sleep.
@@ -179,10 +184,28 @@ impl Fixture {
         Workflow::new(with, self.state.clone(), settings)
     }
 
+    /// Add turns to those the role's agent plays, after the ones it has: for a turn that needs the fixture's own
+    /// fakes, such as taking, which the script is written before.
+    pub fn play(&self, role: &str, turns: Vec<Turn>) {
+        self.herdr.state().script.entry(role.to_string()).or_default().extend(turns);
+    }
+
+    /// The settings a resume of the fixture's state runs with: the defaults, the pull request as the state saved it,
+    /// as main gives a resumed run the choice it was started with (Python's resume).
+    pub fn as_saved(&self) -> RunSettings {
+        RunSettings { pull_request: self.state.pull_request, ..RunSettings::default() }
+    }
+
+    /// Put text at path as Python's tests put a file straight into FakeHost.files: no write is recorded, and the
+    /// file has no mtime of its own, so mtime() gives the time it is asked.
+    pub fn put(&self, path: &str, text: &str) {
+        self.host.state().files.insert(path, text.to_string());
+    }
+
     /// The run's state.json as the host holds it now.
-    pub fn saved(&self) -> Map<crate::py::json::Json> {
+    pub fn saved(&self) -> Map<Json> {
         let text = self.host.state().files.get(&format!("{}/state.json", self.state.dir())).cloned();
-        match crate::py::json::Json::parse(&text.expect("the run has a state.json")) {
+        match Json::parse(&text.expect("the run has a state.json")) {
             Ok(crate::py::json::Json::Object(saved)) => saved,
             other => panic!("state.json is no object: {other:?}"),
         }
@@ -262,6 +285,83 @@ pub(crate) fn retry_prompt(path: &str) -> String {
         _ => None,
     };
     crate::py::format::format(crate::prompts::RETRY_VERDICT_PROMPT, &value).expect("the built-in prompt fills in")
+}
+
+/// The prompt that tells a resumed agent to go on writing path.
+pub(crate) fn continue_prompt(path: &str) -> String {
+    let value = |name: &str| (name == "path").then(|| path.to_string());
+    crate::py::format::format(crate::prompts::CONTINUE_PROMPT, &value).expect("the built-in prompt fills in")
+}
+
+/// turn, its agent working for seconds of the host's time before it plays turn: the clock moves on without the
+/// workflow sleeping.
+pub(crate) fn taking(clock: &Rc<FakeClock>, seconds: u32, mut turn: Turn) -> Turn {
+    let clock = Rc::clone(clock);
+    Box::new(move |prompt, state, host| {
+        clock.advance(f64::from(seconds));
+        turn(prompt, state, host)
+    })
+}
+
+/// A turn whose agent works on and writes nothing, until the test writes its file.
+pub(crate) fn working() -> Turn {
+    showing("working")
+}
+
+/// The time on a FakeHost whose clock reads seconds, as a turn record has it.
+pub(crate) fn at(seconds: i64) -> String {
+    crate::summary::iso_utc(crate::host::fake::HOST_EPOCH + seconds)
+}
+
+/// The turn record of a step that started and ended at these host clock readings (None: not known), as Python's
+/// turn() makes it: equal to a record that holds each of its fields, whatever session and tokens that has unless
+/// with gives them.
+#[derive(Clone, Debug)]
+pub(crate) struct Record(Map<Json>);
+
+/// record of a turn of round 1 and quality round 0, by step's own role, in claude with no model, not human-paced.
+pub(crate) fn record(step: &str, file: &str, start: Option<i64>, end: Option<i64>) -> Record {
+    let time = |t: Option<i64>| t.map_or(Json::Null, |t| Json::from(at(t)));
+    let seconds = match (start, end) {
+        (Some(start), Some(end)) => Json::from(end - start),
+        _ => Json::Null,
+    };
+    Record(
+        [
+            ("step", Json::from(step)),
+            ("role", Json::from(step)),
+            ("round", Json::from(1)),
+            ("quality_round", Json::from(0)),
+            ("file", Json::from(file)),
+            ("agent", Json::from("claude")),
+            ("model", Json::Null),
+            ("human_paced", Json::Bool(false)),
+            ("started_at", time(start)),
+            ("ended_at", time(end)),
+            ("seconds", seconds),
+        ]
+        .into_iter()
+        .collect(),
+    )
+}
+
+impl Record {
+    /// The record with field key holding value instead, or as well.
+    pub fn with(mut self, key: &str, value: impl Into<Json>) -> Record {
+        self.0.insert(key, value.into());
+        self
+    }
+
+    /// The record as a saved run holds it, Python's dict(turn(...)): only its fields.
+    pub fn map(&self) -> Map<Json> {
+        self.0.clone()
+    }
+}
+
+impl PartialEq<Map<Json>> for Record {
+    fn eq(&self, other: &Map<Json>) -> bool {
+        self.0.iter().all(|(key, value)| other.get(key) == Some(value))
+    }
 }
 
 /// What every prompt of a step that can block ends with.

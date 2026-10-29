@@ -81,7 +81,9 @@ fn a_pipe_in_a_cell_does_not_split_it() {
     assert!(table.ends_with("| build | build | 1 | claude | x\\|y | 2026-10-03 04:00:00 | 5s | a\\|b.md |"), "{table}");
 }
 
-const GOLDEN_SUMMARY: &str = "\
+/// The summary of the default workflow approved in round 1, as TestTurnTimings has it: the Workflow's tests expect it of a
+/// whole run.
+pub(crate) const GOLDEN_SUMMARY: &str = "\
 # Run 20260929-120000-a1b2c3
 
 - **Workflow:** default
