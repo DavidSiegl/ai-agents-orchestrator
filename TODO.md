@@ -159,8 +159,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   timeout"), where it ended the Python engine at once; a service manager that sends SIGKILL after a shorter grace
   kills the engine with the run unreleased. Closes with a request the Interrupt can cut short (one whose reads are
   given slices of the timeout, the Interrupt checked between them, or one run on a thread the Workflow stops waiting
-  for), or with the user's ruling that the wait is acceptable for SIGTERM and SIGHUP too. (3) Under macOS, `by_signals` reads no `/proc/self/status` and takes the kernel to discard a
-  signal that was ignored when the engine started, even while blocked, as the BSD kernels do, and `run_process` gives
+  for), or with the user's ruling that the wait is acceptable for SIGTERM and SIGHUP too. (3) Under macOS, `by_signals`
+  reads no `/proc/self/status` and takes the kernel to discard a signal that was ignored when the engine started, even
+  while blocked, as the BSD kernels do, and `run_process` gives
   a command the whole 250 ms grace, nix having no `waitid` there; unchecked on a Mac. Closes with
   `engine/tests/signals.rs`, which is Linux's (it reads `/proc` and starts the engine with GNU `env`), ported to macOS
   and run on one. A process that left the command's group, as a daemon does, is not reached, as at

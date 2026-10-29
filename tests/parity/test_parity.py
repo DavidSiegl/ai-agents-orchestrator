@@ -9,8 +9,9 @@ With PARITY_ENGINE set, each scenario that kills a run and resumes it (SWITCHED)
 at the kill, the Python engine first and PARITY_ENGINE's after it and the reverse, against the same recording: a run
 one engine leaves resumes in the other as in itself (the rust-engine spec's Decisions, "Runs carry over").
 
-With PARITY_COMMANDS set to commands of the engine, comma-separated, such as `run,resume`, only the scenarios whose
-recording invokes no other command run, for an engine that has only those (the Rust engine, until its CLI is whole).
+With PARITY_COMMANDS set to commands of the engine, comma-separated, such as `run,resume`, a scenario whose recording
+invokes another command is left out, for an engine that has only those (the Rust engine, until its CLI is whole); one
+not recorded yet runs, and fails for want of its recording.
 """
 
 import json
@@ -74,7 +75,7 @@ def recorded_commands(name: str) -> set[str] | None:
 def runs() -> list:
     """test_scenario's parameters: each scenario on engine_command, as (name, None); with PARITY_ENGINE set, also each
     of SWITCHED with the engines switched at the kill, as (name, engines), engines being World's. With
-    PARITY_COMMANDS set, only the scenarios whose recording invokes the engine with those commands alone."""
+    PARITY_COMMANDS set, without the scenarios whose recording invokes the engine with another command."""
     names = sorted(SCENARIOS)
     if commands := os.environ.get("PARITY_COMMANDS"):
         names = [name for name in names

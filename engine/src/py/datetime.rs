@@ -72,8 +72,9 @@ fn local_to_seconds(shown: i64, zone: &TimeZone) -> Result<i64, String> {
     const MAX_FOLD_SECONDS: i64 = 24 * 3600;
     // What zone's clocks show at u, as CPython's local() gives it.
     let local = |u: i64| -> Result<i64, String> {
-        // jiff holds no time in the last day of 9999 or the first of -9999, which CPython's local() reaches near the
-        // years' ends; the offset there is the one at jiff's bound, as no zone changes its clocks in those days.
+        // jiff holds no time after 9999-12-30T22:00Z, which CPython's local() reaches for a time near the end of 9999;
+        // the offset there is taken as the one at that bound, which holds unless a zone's rule changes its clocks in
+        // the last 26 hours of 9999, as no tzdb zone does.
         let at = Timestamp::from_second(u.clamp(Timestamp::MIN.as_second(), Timestamp::MAX.as_second()))
             .map_err(|e| e.to_string())?;
         let lt = u + i64::from(zone.to_offset(at).seconds());
