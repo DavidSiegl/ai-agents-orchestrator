@@ -7,6 +7,7 @@ use super::fake::{
     credentials, jenkins_on, parse_qsl, split_url, FakeJenkins, Outcome, JENKINS, JENKINS_TOKEN, JOB, JOB_PATH,
 };
 use super::*;
+use crate::interrupt::Interrupt;
 use crate::http::tests::{direct, Answer, LocalServer};
 use crate::http::Response;
 
@@ -550,6 +551,6 @@ fn ci_reads_the_file_but_no_child_process_sees_it() {
     assert_eq!(jenkins.mask(token), "****");
     // The file's values stay in Jenkins: none reaches the process's environment, nor a child's.
     assert!(CI_ENV.iter().all(|k| std::env::var(k).ok().as_deref() != Some(token)));
-    let env = ProcessHost::local().check(&["env"], None, 60).unwrap();
+    let env = ProcessHost::local(&Interrupt::new()).check(&["env"], None, 60).unwrap();
     assert!(!env.contains(token), "a child saw the token");
 }

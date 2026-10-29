@@ -13,7 +13,7 @@ use crate::host::fake::FakeHost;
 use crate::host::tests::{assert_scrubbed, environment, tool, with_credentials};
 use crate::host::Host;
 use crate::state::RunState;
-use crate::test_support::{recordings, TempDir};
+use crate::test_support::{ended, raise_once_written, recordings, TempDir};
 
 /// Each command a ProcessHerdr ran, with the limit on its process.
 type Commands = Arc<Mutex<Vec<(Vec<String>, Option<Duration>)>>>;
@@ -188,7 +188,7 @@ fn missing_binary() {
     // And on a real PATH without it.
     let d = TempDir::new();
     let vars = environment(None, &[("PATH", &d.path())]);
-    let e = ProcessHerdr::in_environment(None, vars.into_iter()).focus("x").unwrap_err();
+    let e = ProcessHerdr::in_environment(None, vars.into_iter(), &Interrupt::new()).focus("x").unwrap_err();
     assert_eq!(e.to_string(), "herdr is not on PATH");
 }
 
@@ -234,7 +234,7 @@ fn a_command_that_does_not_return_is_a_timeout() {
     let d = TempDir::new();
     tool(&d.path(), "herdr", "#!/bin/sh\nsleep 5\n");
     let list = |machine: Option<&str>| {
-        let herdr = ProcessHerdr::in_environment(machine, environment(Some(&d.path()), &[]).into_iter());
+        let herdr = ProcessHerdr::in_environment(machine, environment(Some(&d.path()), &[]).into_iter(), &Interrupt::new());
         herdr.call_within(&["agent", "list"], Some(Duration::from_millis(200))).unwrap_err()
     };
     let e = list(None);
@@ -250,8 +250,37 @@ fn an_unbounded_wait_runs_the_cli_as_long_as_it_takes() {
     let d = TempDir::new();
     let answer = result(r#"{"agent": {"agent_status": "done"}}"#);
     tool(&d.path(), "herdr", &format!("#!/bin/sh\nsleep 0.2\necho '{answer}'\n"));
-    let herdr = ProcessHerdr::in_environment(None, environment(Some(&d.path()), &[]).into_iter());
+    let herdr = ProcessHerdr::in_environment(None, environment(Some(&d.path()), &[]).into_iter(), &Interrupt::new());
     assert_eq!(herdr.wait("x", None, &["done"]), Ok("done".to_string()));
+}
+
+#[test]
+fn the_ctrl_c_ends_an_unbounded_wait() {
+    let d = TempDir::new();
+    let (pid, interrupt) = (d.join("pid"), Interrupt::new());
+    tool(&d.path(), "herdr", &format!("#!/bin/sh\necho $$ > '{pid}'\nexec sleep 600\n"));
+    let herdr = ProcessHerdr::in_environment(None, environment(Some(&d.path()), &[]).into_iter(), &interrupt);
+    let raising = raise_once_written(&pid, &interrupt);
+    let e = herdr.wait("x", None, &["done"]).unwrap_err();
+    raising.join().unwrap();
+    assert_eq!((e.code(), e.to_string()), (None, "herdr agent wait x: interrupted".to_string()));
+    assert!(ended(&pid), "herdr agent wait outlived the Ctrl-C");
+}
+
+#[test]
+fn a_prompt_herdr_delivered_before_the_ctrl_c_fails() {
+    // herdr carries out the prompt and exits 0 at the SIGINT: the engine must not go on to record it as sent, as
+    // Python's KeyboardInterrupt in herdr's prompt records nothing (FakeHerdrState::interrupt plays the same).
+    let d = TempDir::new();
+    let (delivered, interrupt) = (d.join("delivered"), Interrupt::new());
+    let script = format!("#!/bin/sh\ntrap 'exit 0' INT\necho \"$4\" > '{delivered}'\nwhile :; do sleep 0.05; done\n");
+    tool(&d.path(), "herdr", &script);
+    let herdr = ProcessHerdr::in_environment(None, environment(Some(&d.path()), &[]).into_iter(), &interrupt);
+    let raising = raise_once_written(&delivered, &interrupt);
+    let e = herdr.prompt("build-x", "write report-1.md").unwrap_err();
+    raising.join().unwrap();
+    assert_eq!(e.to_string(), "herdr agent prompt build-x: interrupted");
+    assert_eq!(std::fs::read_to_string(&delivered).unwrap(), "write report-1.md\n");
 }
 
 #[test]
@@ -329,7 +358,7 @@ fn herdr_gets_no_credentials() {
     let env = d.join("env");
     tool(&d.path(), "herdr", &format!("#!/bin/sh\nenv > '{env}'\necho '{{\"result\": {{}}}}'\n"));
     let vars = environment(Some(&d.path()), &with_credentials());
-    ProcessHerdr::in_environment(None, vars.into_iter()).focus("x").unwrap();
+    ProcessHerdr::in_environment(None, vars.into_iter(), &Interrupt::new()).focus("x").unwrap();
     assert_scrubbed(&std::fs::read_to_string(env).unwrap());
 }
 

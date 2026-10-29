@@ -11,11 +11,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use nix::sys::signal::{killpg, Signal};
+use nix::sys::signal::{killpg, SigSet, Signal};
 use nix::unistd::{getuid, Pid};
 
 use super::{Exec, Host};
 use crate::error::{os_error, OrchestratorError};
+use crate::interrupt::Interrupt;
 use crate::py::text::{is_space, repr, shlex_join};
 
 /// How long, in seconds, an SSH master connection (ssh_sharing_options) outlives the last command that used it.
@@ -33,6 +34,7 @@ const SSH_DIR_PREFIX: &str = "octoflow-ssh-";
 
 /// The machine the agents run on, reached by running real processes: this machine, or one over SSH
 /// (`ssh -o BatchMode=yes`), all of whose commands to one target share a single connection (ssh_sharing_options).
+/// A command fails as interrupted when the Interrupt it was given is raised while it runs (run_process).
 ///
 /// Clones, and the hosts over_ssh makes, share their SSH control directory, which the last of them to be dropped
 /// removes.
@@ -43,23 +45,26 @@ pub struct ProcessHost {
     /// The environment every command it starts gets, the engine's own as child_env gives it
     /// (crate::env::child_env): without the CI credentials and git's pathspec switches.
     env: Arc<Vec<(OsString, OsString)>>,
+    /// The Ctrl-C that stops its commands.
+    interrupt: Interrupt,
     /// This engine's SSH control sockets.
     ssh: Arc<Mutex<SshControl>>,
 }
 
 impl ProcessHost {
-    /// A Host that runs its commands on this machine, in the engine's environment as child_env gives it.
-    pub fn local() -> ProcessHost {
-        ProcessHost::in_environment(std::env::vars_os())
+    /// A Host that runs its commands on this machine, in the engine's environment as child_env gives it, each
+    /// stopped by interrupt.
+    pub fn local(interrupt: &Interrupt) -> ProcessHost {
+        ProcessHost::in_environment(std::env::vars_os(), interrupt)
     }
 
-    /// A Host that runs its commands on this machine, in the environment vars as child_env would give it, were vars
-    /// the engine's own: what the tests give a Host in place of the process's environment, which is shared by every
-    /// test.
-    pub(crate) fn in_environment(vars: impl Iterator<Item = (OsString, OsString)>) -> ProcessHost {
+    /// As local, in the environment vars as child_env would give it, were vars the engine's own: what the tests
+    /// give a Host in place of the process's environment, which is shared by every test.
+    pub(crate) fn in_environment(vars: impl Iterator<Item = (OsString, OsString)>, interrupt: &Interrupt) -> ProcessHost {
         ProcessHost {
             ssh_target: None,
             env: Arc::new(crate::env::without_withheld(vars)),
+            interrupt: interrupt.clone(),
             ssh: Arc::new(Mutex::new(SshControl::default())),
         }
     }
@@ -131,13 +136,14 @@ impl Host for ProcessHost {
             None => argv.iter().map(|a| a.to_string()).collect(),
         };
         let command = shlex_join(&argv);
-        match run_process(&argv, stdin, Some(Duration::from_secs(timeout)), &self.env) {
+        match run_process(&argv, stdin, Some(Duration::from_secs(timeout)), &self.env, &self.interrupt) {
             Ok((status, stdout, stderr)) => Ok(Exec { command, status, stdout, stderr }),
             Err(ProcessError::Start(e)) => {
                 Err(OrchestratorError(format!("{command}: {}", os_error(&e, Some(&argv[0])))))
             }
             Err(ProcessError::Io(e)) => Err(OrchestratorError(format!("{command}: {}", os_error(&e, None)))),
             Err(ProcessError::Timeout) => Err(OrchestratorError(format!("{command}: {}", timed_out(&argv, timeout)))),
+            Err(ProcessError::Interrupted) => Err(OrchestratorError(format!("{command}: interrupted"))),
         }
     }
 }
@@ -164,35 +170,54 @@ pub(crate) enum ProcessError {
     Io(std::io::Error),
     /// It had not exited and closed its output when its time ran out; its process group was killed.
     Timeout,
+    /// The Interrupt was raised while it ran: its process group was stopped (stop_group), whatever it had done or
+    /// answered by then. Or it was pending already, and the command was not started.
+    Interrupted,
 }
+
+/// How long a command's process group has after the SIGINT of an Interrupt to end before it is killed (SIGKILL), in
+/// milliseconds: Python's subprocess waits as long (Popen._sigint_wait_secs) for a child to end on the Ctrl-C it got
+/// too before it kills it. The SIGINT first lets git remove its lock files, as it does at a Ctrl-C.
+const INTERRUPT_GRACE_MS: u64 = 250;
 
 /// argv's exit status, as Python's returncode gives it, and its standard output and error, once it has exited and
 /// closed both: run with exactly env as its environment, argv[0] found on its PATH, stdin as its standard input (none
 /// when None), in a process group of its own, so that when it has not finished within timeout, it and every process it
-/// started that stayed in its group are killed (SIGKILL); a timeout of None lets it run as long as it takes. A process
-/// that left the group, as a daemon does, is not killed; if it holds the output open, the threads reading it end when
-/// it closes it.
+/// started that stayed in its group are killed (SIGKILL); a timeout of None lets it run as long as it takes. When
+/// interrupt is raised while it runs, the group is sent SIGINT, and SIGKILL INTERRUPT_GRACE_MS later unless every pipe
+/// closed first, and the command fails as Interrupted; while interrupt is pending, no command starts. A process that
+/// left the group, as a daemon does, is not killed; if it holds the output open, the threads reading it end when it
+/// closes it.
 pub(crate) fn run_process(
     argv: &[String],
     stdin: Option<&[u8]>,
     timeout: Option<Duration>,
     env: &[(OsString, OsString)],
+    interrupt: &Interrupt,
 ) -> Result<(i32, Vec<u8>, Vec<u8>), ProcessError> {
     let deadline = timeout.map(|timeout| Instant::now() + timeout);
-    let mut child = Command::new(&argv[0])
+    // Before the command starts, so that a raise between its start and the wait below still reaches it.
+    let (sender, received) = mpsc::channel();
+    let woken = sender.clone();
+    let wake = move || {
+        // As for the pipes' sends below.
+        let _ = woken.send(Piped::Interrupted);
+    };
+    let Some(watch) = interrupt.watch(wake) else { return Err(ProcessError::Interrupted) };
+    let mut command = Command::new(&argv[0]);
+    command
         .args(&argv[1..])
         .env_clear()
         .envs(env.iter().map(|(k, v)| (k, v)))
         .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-        .map_err(ProcessError::Start)?;
+        .process_group(0);
+    unblock_sigint(&mut command);
+    let mut child = command.spawn().map_err(ProcessError::Start)?;
     // Input and output each on a thread of their own, so that a command that writes much before it reads all its
     // input, or fills one pipe while the other is read, never waits on the engine, and the engine waits on none of
     // them past the deadline.
-    let (sender, received) = mpsc::channel();
     let mut pending = 2;
     if let (Some(mut pipe), Some(data)) = (child.stdin.take(), stdin) {
         let (sender, data) = (sender.clone(), data.to_vec());
@@ -221,20 +246,26 @@ pub(crate) fn run_process(
     }
     drop(sender);
     let mut outputs: [Vec<u8>; 2] = [vec![], vec![]];
-    for _ in 0..pending {
+    while pending > 0 {
         let piped = match deadline {
             Some(deadline) => received.recv_timeout(deadline.saturating_duration_since(Instant::now())).ok(),
             None => received.recv().ok(),
         };
-        // Every sender is gone only once each pipe's thread has sent, so a None is the deadline passing.
+        // The watch's sender lasts as long as the watch, so a None is the deadline passing.
         let Some(piped) = piped else { return Err(abandon(&mut child, ProcessError::Timeout)) };
         match piped {
             Piped::Output(n, Ok(out)) => outputs[n] = out,
             Piped::Output(_, Err(e)) | Piped::Input(Err(e)) => return Err(abandon(&mut child, ProcessError::Io(e))),
             Piped::Input(Ok(())) => {}
+            Piped::Interrupted => return Err(stop_group(&mut child, &received, pending)),
         }
+        pending -= 1;
     }
     let status = loop {
+        // A command that closed its output and runs on is stopped by the interrupt as one that did not.
+        if let Ok(Piped::Interrupted) = received.try_recv() {
+            return Err(stop_group(&mut child, &received, 0));
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if deadline.is_some_and(|deadline| Instant::now() >= deadline) => {
@@ -244,30 +275,76 @@ pub(crate) fn run_process(
             Err(e) => return Err(abandon(&mut child, ProcessError::Io(e))),
         }
     };
+    if watch.interrupted() {
+        return Err(ProcessError::Interrupted);
+    }
     let code = status.code().or_else(|| status.signal().map(|signal| -signal)).unwrap_or(-1);
     let [stdout, stderr] = outputs;
     Ok((code, stdout, stderr))
 }
 
+/// Have command start with SIGINT unblocked. The engine blocks it in every thread for the thread that waits for it
+/// (crate::interrupt::on_sigint), a child inherits that across exec, and std's Command leaves it so; unblocked, the
+/// command, and an agent or a herdr server it starts, hears a Ctrl-C as one started from a shell does.
+fn unblock_sigint(command: &mut Command) {
+    let mut sigint = SigSet::empty();
+    sigint.add(Signal::SIGINT);
+    // SAFETY: the closure runs in the child between fork and exec, where only async-signal-safe functions may be
+    // called; it calls pthread_sigmask alone, which is one (POSIX.1-2008, signal-safety(7)), on a set made before the
+    // fork, and allocates nothing.
+    #[allow(unsafe_code, reason = "CommandExt::pre_exec is unsafe, and nix has no safe way to start a child with a signal unblocked")]
+    unsafe {
+        command.pre_exec(move || sigint.thread_unblock().map_err(std::io::Error::from));
+    }
+}
+
 /// What one of a command's pipes ended with: its input written (Input), or one of its outputs read to the end, by
-/// number, 0 for stdout and 1 for stderr (Output).
+/// number, 0 for stdout and 1 for stderr (Output); or the Interrupt was raised (Interrupted).
 enum Piped {
     Input(std::io::Result<()>),
     Output(usize, std::io::Result<Vec<u8>>),
+    Interrupted,
+}
+
+/// Stop child's process group for an Interrupt, child included, and reap child: SIGINT, then SIGKILL once the pending
+/// pipes still open have closed, or INTERRUPT_GRACE_MS has passed. Gives Interrupted, or the error that stopped the
+/// signals.
+fn stop_group(child: &mut Child, received: &mpsc::Receiver<Piped>, mut pending: usize) -> ProcessError {
+    if let Err(e) = kill_group(child, Signal::SIGINT) {
+        return abandon(child, ProcessError::Io(e));
+    }
+    let grace = Instant::now() + Duration::from_millis(INTERRUPT_GRACE_MS);
+    while pending > 0 {
+        match received.recv_timeout(grace.saturating_duration_since(Instant::now())) {
+            Ok(Piped::Interrupted) => {}
+            Ok(_) => pending -= 1,
+            Err(_) => break,
+        }
+    }
+    // Killed while child is not reaped, so that its pid, the group's id, names no other group.
+    abandon(child, ProcessError::Interrupted)
 }
 
 /// Kill child's process group, child included, and reap child, for a command that failed with why: why, or the error
 /// that stopped the kill.
 fn abandon(child: &mut Child, why: ProcessError) -> ProcessError {
-    let group = Pid::from_raw(i32::try_from(child.id()).expect("a pid fits an i32"));
-    // ESRCH: every process of the group has exited. EPERM: macOS refuses a group of zombies.
-    match killpg(group, Signal::SIGKILL) {
-        Ok(()) | Err(nix::errno::Errno::ESRCH | nix::errno::Errno::EPERM) => {}
-        Err(e) => return ProcessError::Io(e.into()),
+    if let Err(e) = kill_group(child, Signal::SIGKILL) {
+        return ProcessError::Io(e);
     }
     match child.wait() {
         Ok(_) => why,
         Err(e) => ProcessError::Io(e),
+    }
+}
+
+/// Send signal to the process group child leads, which child must not have been reaped from yet; a group with no
+/// process left to signal is no error.
+fn kill_group(child: &Child, signal: Signal) -> std::io::Result<()> {
+    let group = Pid::from_raw(i32::try_from(child.id()).expect("a pid fits an i32"));
+    // ESRCH: every process of the group has exited. EPERM: macOS refuses a group of zombies.
+    match killpg(group, signal) {
+        Ok(()) | Err(nix::errno::Errno::ESRCH | nix::errno::Errno::EPERM) => Ok(()),
+        Err(e) => Err(e.into()),
     }
 }
 

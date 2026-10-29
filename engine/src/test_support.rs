@@ -83,6 +83,42 @@ impl Drop for TempDir {
     }
 }
 
+/// How long the Ctrl-C tests wait for a command to get somewhere or a process to end, before they fail.
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Raise interrupt, from a thread of its own, once path exists: the human's Ctrl-C while a command that writes path
+/// as it starts runs. The thread panics, failing the join, when path is not written within PATIENCE.
+pub fn raise_once_written(path: &str, interrupt: &crate::interrupt::Interrupt) -> std::thread::JoinHandle<()> {
+    let (path, interrupt) = (path.to_string(), interrupt.clone());
+    std::thread::spawn(move || {
+        assert!(eventually(|| std::fs::metadata(&path).is_ok_and(|m| m.len() > 0)), "{path} was not written");
+        interrupt.raise();
+    })
+}
+
+/// Whether the process whose pid path holds, as `echo $$` wrote it, has ended (gone, or a zombie no one reaps yet)
+/// within PATIENCE: on Linux, as /proc shows it.
+pub fn ended(path: &str) -> bool {
+    let pid = std::fs::read_to_string(path).expect("a pid file").trim().to_string();
+    eventually(|| match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        // The state follows the parenthesized command name.
+        Ok(stat) => stat.rsplit_once(") ").is_some_and(|(_, rest)| rest.starts_with('Z')),
+        Err(_) => true,
+    })
+}
+
+/// Whether done holds within PATIENCE, asked every 10 ms.
+pub fn eventually(mut done: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while std::time::Instant::now() < deadline {
+        if done() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    done()
+}
+
 /// The repository's examples/workflows/.
 pub const EXAMPLES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../examples/workflows");
 

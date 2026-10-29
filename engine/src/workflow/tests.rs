@@ -20,6 +20,7 @@ mod blocked;
 mod default_prompts;
 mod harnesses;
 mod heartbeat;
+mod interrupted;
 mod locked_files;
 mod one_run;
 mod orchestrator_checks;

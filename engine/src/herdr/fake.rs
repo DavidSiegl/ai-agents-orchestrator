@@ -88,14 +88,18 @@ pub(crate) struct FakeHerdrState {
     /// FakeHerdr.focus or create_workspace before the fake's.
     pub before_call: Option<BeforeCall>,
     /// The run's Ctrl-C, when set: one a turn raises fails the prompt that played it, so that nothing after the
-    /// prompt runs, as after Python's raise KeyboardInterrupt in a turn. The real engine does not do that yet: an
-    /// interrupted ProcessHerdr::prompt failing so is a condition of the Ctrl-C handling that rust-engine ticket 08's
-    /// part 6 adds (TODO.md, the Ctrl-C entry), until which these cases hold on the fake only.
+    /// prompt runs, as after Python's raise KeyboardInterrupt in a turn, and as ProcessHerdr's prompt fails when the
+    /// Ctrl-C comes while it runs, even once herdr has delivered it.
     pub interrupt: Option<Interrupt>,
+    /// Run first by every prompt, given (name, text), when set: an error it gives is the prompt's, which then plays
+    /// nothing; a test's own herdr prompt, such as a real ProcessHerdr's.
+    pub prompt_with: Option<PromptWith>,
 }
 
 /// A test's own wait (FakeHerdrState::wait_with).
 pub(crate) type WaitWith = Box<dyn FnMut(&str, Option<u64>, &[&str]) -> Result<String, HerdrError>>;
+/// A test's prompt (FakeHerdrState::prompt_with).
+pub(crate) type PromptWith = Box<dyn FnMut(&str, &str) -> Result<(), HerdrError>>;
 /// A test's hook on commands (FakeHerdrState::before_call).
 pub(crate) type BeforeCall = Box<dyn FnMut(&Call)>;
 
@@ -127,6 +131,7 @@ impl FakeHerdr {
                 close_error: None,
                 before_call: None,
                 interrupt: None,
+                prompt_with: None,
             }),
         }
     }
@@ -228,6 +233,13 @@ impl Herdr for FakeHerdr {
 
     fn prompt(&self, name: &str, text: &str) -> Result<(), HerdrError> {
         self.record(Call::Prompt { name: name.to_string() });
+        // Played with the fake's state released, as wait_with is.
+        let prompt_with = self.state().prompt_with.take();
+        if let Some(mut prompt) = prompt_with {
+            let sent = prompt(name, text);
+            self.state().prompt_with = Some(prompt);
+            sent?;
+        }
         let (mut turn, run) = {
             let mut s = self.state();
             s.prompts.push((name.to_string(), text.to_string()));

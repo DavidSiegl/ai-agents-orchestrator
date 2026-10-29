@@ -43,14 +43,14 @@ fn without_a_usable_control_path_a_command_runs_on_a_connection_of_its_own() {
 
 #[test]
 fn a_host_over_ssh_says_where() {
-    let host = ProcessHost::local();
+    let host = ProcessHost::local(&Interrupt::new());
     assert_eq!(host.ssh_target(), None);
     assert_eq!(host.over_ssh("me@box").ssh_target(), Some("me@box"));
     // An empty target is this machine, as Python's Host takes it.
     assert_eq!(host.over_ssh("").ssh_target(), None);
-    let secret = ProcessHost::in_environment([("GH_TOKEN".into(), "token-value".into())].into_iter());
+    let secret = ProcessHost::in_environment([("GH_TOKEN".into(), "token-value".into())].into_iter(), &Interrupt::new());
     let shown = format!("{:?}", secret.over_ssh("box"));
     assert!(shown.contains("box") && !shown.contains("token-value"), "{shown}");
     let vars = [("A".into(), "1".into()), ("A".into(), "2".into())];
-    assert_eq!(ProcessHost::in_environment(vars.into_iter()).var("A").as_deref(), Some("2"));
+    assert_eq!(ProcessHost::in_environment(vars.into_iter(), &Interrupt::new()).var("A").as_deref(), Some("2"));
 }

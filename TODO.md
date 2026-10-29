@@ -202,25 +202,25 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `FakePyPI` (which gains its clock, a `FakeTime`, and `events`); `TestQualityCLI`'s other cases are the CLI's
   (`test_flag_checks`, `test_gate_reaches_the_workflow`, `test_list_shows_the_quality_phase`, ticket 09) and
   `resumable_state`'s (`test_resume_limit_against_the_saved_quality_round`, `test_resume_limit_needs_the_gate`, part
-  7). Each test module's doc names the cases it leaves out. Until part 7, nothing starts a Rust Workflow but the
+  7). Each test module's doc names the cases it leaves out. Part 6 (2026-10-29) adds the Ctrl-C (`interrupt::on_sigint`,
+  the command's group stopped by `run_process`, `SystemClocks`, `LocalHuman`, which is Python's `notify_locally` and
+  `log`); it ports no Python test, whose fakes raise KeyboardInterrupt themselves, and adds the Rust cases the Fixed
+  entry on the Ctrl-C names. Until part 7, nothing starts a Rust Workflow but the
   tests. Closes with the last part, every `run`/`resume` parity
   scenario passing against the Rust binary.
-- **A Ctrl-C at the terminal does not reach the command the Rust engine's `Host` or herdr is running.** `ProcessHost`
-  starts each command in a process group of its own, so that a timeout kills the command with whatever it started
-  (`run_process` in `engine/src/host/process.rs`, rust-engine ticket 05, 2026-10-28), and `ProcessHerdr` runs the
-  herdr CLI the same way (`engine/src/herdr.rs`, ticket 06, where a timeout kills herdr's group, not herdr alone as
-  Python's `subprocess.run` does); the terminal sends SIGINT to its foreground group only, which holds the engine and
-  no longer the git, gh, gitleaks, ssh or herdr it waits on. In the Python engine every child is in the foreground
-  group and gets the SIGINT too, the desktop app's Stop (`killpg` with SIGINT) included. Until the Rust engine handles
-  SIGINT, which nothing does before ticket 08/09, it dies at once and leaves the command running to its end or its
-  timeout (300 s for a push or a scan, and none for `herdr agent wait` without `--timeout`, which `Herdr::wait` with
-  no time gives: cross-review 92, F2, "a Ctrl-C ... during an unbounded `wait(name, None, …)` won't reach `herdr
-  agent wait`"). Closes with the interrupt handling of rust-engine ticket 08/09 killing the running command's group
-  (its pid is its group's id; for herdr, that also ends the engine's wait for its output) before it releases the run,
-  with a command it interrupts failing, a `herdr agent prompt` included even when herdr delivered the text before the
-  kill (the Workflow then saves no `prompted` and opens no turn record, as Python's KeyboardInterrupt in a turn saves
-  nothing: the Workflow tests' `FakeHerdr` already plays it so, `FakeHerdrState::interrupt`, ticket 08's part 3), and a
-  test that interrupts a run waiting on a command and one waiting on herdr.
+- **The Rust engine's Ctrl-C, what is left.** Rust-engine ticket 08's part 6 (2026-10-29) has a SIGINT raise the
+  `Interrupt`, which stops the command the engine waits on (Fixed, "A Ctrl-C at the terminal does not reach the
+  command the Rust engine's `Host` or herdr is running"). Not closed: (1) nothing calls `interrupt::on_sigint` yet;
+  the `orchestrator` binary's `main` (ticket 08's part 7, then ticket 09) must call it first, on the main thread, and,
+  since SIGINT then no longer ends the process, turn a raised `Interrupt` outside a Workflow (the checks and
+  `sweep_branches` before it, `list`, `show`, `prune`, `close`, `drain` between runs) into the interrupted note and
+  exit status 130, as Python's KeyboardInterrupt anywhere does; `serve` (ticket 10) has its own SIGINT, which
+  `on_sigint` would take over. (2) A Ctrl-C during a Jenkins or PyPI request (`crate::http`, ureq) waits for the
+  request to end, up to its timeout, where Python's KeyboardInterrupt stops `urlopen` at once: no process to stop.
+  (3) Under macOS, `on_sigint` reads no `/proc/self/status` and takes the kernel to discard a SIGINT that was ignored
+  when the engine started, even while blocked, as the BSD kernels do; unchecked on a Mac. (4) A process that left the
+  command's group, as a daemon does, is not reached, as at a timeout. Each closes with the ticket named, or with a
+  test on macOS for (3).
 - **The Rust engine talks to Jenkins and PyPI otherwise than urllib in a few cases.** Its transport is ureq
   (`HttpClient`, `engine/src/http.rs`, rust-engine ticket 07, 2026-10-28), which differs from `urlopen` where no test of
   the Python engine pins it: ureq reaches an http URL through a proxy with CONNECT, as it does an https one, where
@@ -679,6 +679,24 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Fixed
 
+- **A Ctrl-C at the terminal does not reach the command the Rust engine's `Host` or herdr is running.** `ProcessHost`
+  and `ProcessHerdr` run each command in a process group of its own (rust-engine tickets 05 and 06), which the
+  terminal's SIGINT, sent to its foreground group, no longer reaches, where in the Python engine every child gets it
+  too, the desktop app's Stop (`killpg` with SIGINT) included; so a Ctrl-C left a push, a scan or an unbounded `herdr
+  agent wait` running (cross-review 92, F2). Fixed (2026-10-29, rust-engine ticket 08, part 6): `interrupt::on_sigint`
+  blocks SIGINT and starts a thread that waits for it (sigwait) and raises the `Interrupt` at each one, from the
+  terminal or a kill of the engine's group; `ProcessHost::local` and `ProcessHerdr::new` take the `Interrupt`, and
+  `run_process` (`engine/src/host/process.rs`) watches it while a command runs: at a raise the command's group gets
+  SIGINT and, unless its pipes close within `INTERRUPT_GRACE_MS` (250 ms, Python's `Popen._sigint_wait_secs`), SIGKILL,
+  and the command fails as interrupted, also one that answered meanwhile, such as a `herdr agent prompt` herdr had
+  delivered (review 97, F1); while the `Interrupt` is pending no command starts, until the Workflow catches it
+  (`Interrupt::catch`) to release the run; `SystemClocks`' sleep ends at a raise; the children start with SIGINT
+  unblocked (`unblock_sigint`, the engine's one `unsafe`, `CommandExt::pre_exec`). A SIGINT ignored when the engine
+  started stays ignored, as in Python. Held by the Ctrl-C cases of `engine/src/host/tests.rs` and
+  `engine/src/herdr/tests.rs`, `workflow/tests/interrupted.rs` (a run waiting on herdr, one during a prompt herdr
+  delivered, one already done), `a_ctrl_c_while_a_proof_runs_stops_it_with_what_it_started` (the proof under GNU
+  `timeout`, which leads the group ProcessHost started) and `engine/tests/sigint.rs` (a real SIGINT to an engine's
+  group, and one it inherited ignored). What is left is the Open issue "The Rust engine's Ctrl-C, what is left".
 - **The Rust engine read a workflow file's tables with their keys sorted.** The toml crate keeps a table in a
   `BTreeMap` without its `preserve_order` feature, so a table with two problems could be refused naming the other one
   first, where tomllib gives the file's order. Raised in rust-engine ticket 04 (2026-10-28). Fixed (2026-10-28, the

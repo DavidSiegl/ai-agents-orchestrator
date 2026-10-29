@@ -29,7 +29,7 @@ use crate::host::{ProcessHost, PushError};
 use crate::interrupt::Interrupt;
 use crate::pipeline::{Pipeline, DEFAULT_WORKFLOW};
 use crate::proofs::PROOFS_HEADING;
-use crate::test_support::{object as record, quick, replaced, TempDir};
+use crate::test_support::{ended, object as record, quick, raise_once_written, replaced, TempDir};
 use crate::workflow::Collaborators;
 
 const COMMAND: &str = "sh {proofs}";
@@ -58,10 +58,10 @@ fn write_proof(dir: &str, name: &str, exit: Exit) {
     std::fs::write(format!("{dir}/{name}"), format!("echo checking {name}\n{check}")).unwrap();
 }
 
-/// A FakeHost whose commands but git run for real.
+/// A FakeHost whose commands but git run for real, stopped by the Interrupt of the fixture it is given to.
 fn real_processes() -> Rc<FakeHost> {
     let host = Rc::new(FakeHost::default());
-    host.state().processes = true;
+    host.state().processes = Some(ProcessHost::local(&Interrupt::new()));
     host
 }
 
@@ -550,6 +550,30 @@ fn an_interrupted_proof_is_no_outcome() {
     assert_eq!(wf.run_proof(COMMAND, 1, "test_1.sh"), Err(Stopped::Interrupted));
     assert!(!std::path::Path::new(&ran).exists(), "the proof ran");
     assert!(!std::path::Path::new(&format!("{}/{PROOF_COPIES_DIR}", proj.path())).exists());
+}
+
+#[test]
+fn a_ctrl_c_while_a_proof_runs_stops_it_with_what_it_started() {
+    // Not in Python's TestProofs: the proof runs under GNU timeout, which leads the process group ProcessHost started,
+    // so the group the Ctrl-C stops holds the proof and what it started; and the run records no outcome of it.
+    let proj = TempDir::new();
+    let (pid, background) = (proj.join("pid"), proj.join("background"));
+    let p = run_proofs(&proj, vec![(CHANGES_REQUESTED, vec![]), (APPROVE, vec![])]);
+    let dir = p.f.state.proofs_dir(1);
+    std::fs::create_dir_all(&dir).unwrap();
+    let proof = format!("sleep 600 & echo $! > '{background}'\necho $$ > '{pid}'\nwait\n");
+    std::fs::write(format!("{dir}/test_1.sh"), proof).unwrap();
+    let raising = raise_once_written(&pid, &p.f.interrupt);
+    let started = std::time::Instant::now();
+    assert_eq!(p.f.workflow(p.settings.clone()).run(), Err(Stopped::Interrupted));
+    raising.join().unwrap();
+    // Caught, so that the release's commands ran.
+    assert!(!p.f.interrupt.is_raised());
+    assert!(started.elapsed() < std::time::Duration::from_secs(60));
+    assert!(ended(&pid), "the proof outlived the Ctrl-C");
+    assert!(ended(&background), "what the proof started outlived the Ctrl-C");
+    let saved = RunState::from_saved(&p.f.saved()).unwrap();
+    assert_eq!((saved.error.as_deref(), saved.phase.as_str(), saved.proofs.len()), (Some("interrupted"), "review", 0));
 }
 
 // -- TestProofInAWorktree ------------------------------------------------------------------------------------------

@@ -13,7 +13,7 @@ use crate::http::Http;
 use crate::pypi::fake::FakePyPI;
 use crate::pypi::PyPI;
 use crate::host::fake::{FakeClock, FakeHost};
-use crate::host::Host;
+use crate::host::{Host, ProcessHost};
 use crate::interrupt::Interrupt;
 use crate::py::json::{Json, Map};
 use crate::runs::pid_alive;
@@ -110,7 +110,8 @@ impl Fixture {
     }
 
     /// make_workflow with host and state: the run state describes on host, the roles played by script. The host's
-    /// clock becomes the fixture's unless it has one.
+    /// clock becomes the fixture's unless it has one, and its real processes (FakeState::processes), when it has
+    /// them, are stopped by the fixture's interrupt.
     pub fn on(host: Rc<FakeHost>, state: RunState, script: Vec<(&str, Vec<Turn>)>) -> Fixture {
         let herdr = Rc::new(FakeHerdr::new(Rc::clone(&host), state.clone(), script));
         let interrupt = Interrupt::new();
@@ -118,6 +119,9 @@ impl Fixture {
         let clock = Rc::new(FakeClock::default());
         if host.state().clock.is_none() {
             host.state().clock = Some(Rc::clone(&clock));
+        }
+        if host.state().processes.is_some() {
+            host.state().processes = Some(ProcessHost::local(&interrupt));
         }
         let pypi = FakePyPI::from_json(Map::new());
         let index = PyPI::new(Arc::clone(&pypi) as Arc<dyn Http>);

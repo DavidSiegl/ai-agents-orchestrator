@@ -40,7 +40,10 @@ use crate::workflow_file::{run_pipeline, workflow_definition};
 mod locks;
 mod proof_runs;
 mod quality_rounds;
+mod system;
 mod turn;
+
+pub use system::{LocalHuman, SystemClocks};
 
 #[cfg(test)]
 pub(crate) mod fixture;
@@ -303,8 +306,9 @@ impl<'a> Workflow<'a> {
     /// FINISHED, or QUALITY_GATE_FAILED when its quality gate still failed. A run already done returns its saved
     /// verdict.
     ///
-    /// Errors: why the run stopped (Stopped); for a failure or an interrupt, after recording it in state.json and
-    /// writing summary.md, as far as saving still works.
+    /// Errors: why the run stopped (Stopped); for a failure or an interrupt before the run was done, after recording
+    /// it in state.json and writing summary.md, as far as saving still works. An interrupt once the run is done stops
+    /// what is left of its ending, as Python's KeyboardInterrupt there does, and the run stays done.
     pub fn run(&mut self) -> Result<Option<String>, Stopped> {
         if self.state.phase == DONE {
             return Ok(self.state.verdict.clone());
@@ -319,18 +323,33 @@ impl<'a> Workflow<'a> {
                 return Err(Stopped::Failed(e));
             }
             Err(_) => {
+                // Caught, so that the commands that record the stop run.
+                self.interrupt.catch();
                 self.release("interrupted");
                 return Err(Stopped::Interrupted);
             }
         }
+        match self.end_done_run() {
+            Err(Stopped::Failed(_)) if self.interrupt.is_raised() => Err(Stopped::Interrupted),
+            ended => ended.map(|()| self.state.verdict.clone()),
+        }
+    }
+
+    /// What follows the last phase: the run saved as done and released, its summary and metrics written, the human
+    /// told, and the workspace of a published run closed. What only costs a file or a notice is logged when it fails,
+    /// but none goes on past the Ctrl-C.
+    fn end_done_run(&mut self) -> Outcome<()> {
         self.state.phase = DONE.to_string();
         // Saved first: the run is done whatever counting the tokens meets.
         self.save()?;
         self.count_tokens();
+        self.check_interrupt()?;
         self.state.owner = None;
         self.save()?;
         self.write_summary();
+        self.check_interrupt()?;
         self.write_metrics();
+        self.check_interrupt()?;
         let s = &self.state;
         if let (Some(worktree), false) = (&s.worktree, s.pull_request) {
             self.human.log(&format!("the change is in worktree {worktree}"));
@@ -338,10 +357,11 @@ impl<'a> Workflow<'a> {
         let verdict = s.verdict.clone().unwrap_or_else(|| "None".to_string());
         let body = s.pr_url.as_deref().filter(|url| !url.is_empty()).unwrap_or(&s.task);
         self.human.notify(&format!("Run finished: {verdict}"), body);
+        self.check_interrupt()?;
         if self.state.pull_request {
             self.close_workspace();
         }
-        Ok(self.state.verdict.clone())
+        self.check_interrupt()
     }
 
     /// Everything of run between checking the phase and the end: what a failure in it releases the run for.
