@@ -98,6 +98,8 @@ impl Fixture {
     /// clock becomes the fixture's unless it has one.
     pub fn on(host: Rc<FakeHost>, state: RunState, script: Vec<(&str, Vec<Turn>)>) -> Fixture {
         let herdr = Rc::new(FakeHerdr::new(Rc::clone(&host), state.clone(), script));
+        let interrupt = Interrupt::new();
+        herdr.state().interrupt = Some(interrupt.clone());
         let clock = Rc::new(FakeClock::default());
         if host.state().clock.is_none() {
             host.state().clock = Some(Rc::clone(&clock));
@@ -107,7 +109,7 @@ impl Fixture {
             herdr,
             clock,
             told: Told::default(),
-            interrupt: Interrupt::new(),
+            interrupt,
             pid_alive: Box::new(pid_alive),
             state,
         }
@@ -228,6 +230,15 @@ pub(crate) fn review_turn(n: u32, verdict: &str) -> Turn {
     writes(move |s| s.review_path(n), &format!("**VERDICT: {verdict}**\n1. finding"), "done")
 }
 
+/// The Builder's one turn of test_support's solo workflow: it changes /proj/limiter.py and reports.
+pub(crate) fn solo_turn() -> Turn {
+    Box::new(|_, state, host| {
+        host.write("/proj/limiter.py", "version 1", false).expect("the fake host writes");
+        host.write(&format!("{}/build.md", state.dir()), "solo report", false).expect("the fake host writes");
+        "done".to_string()
+    })
+}
+
 /// A review of round n that starts with no VERDICT line.
 pub(crate) fn malformed_review(n: u32, text: &str) -> Turn {
     writes(move |s| s.review_path(n), text, "done")
@@ -273,6 +284,17 @@ pub(crate) fn taking(seconds: u32, mut turn: Turn) -> Turn {
         let clock = host.state().clock.clone().expect("a host with a clock");
         clock.advance(f64::from(seconds));
         turn(prompt, state, host)
+    })
+}
+
+/// turn, after which the human presses Ctrl-C, interrupting its prompt (FakeHerdrState::interrupt): Python's turn that
+/// plays turn and then raises KeyboardInterrupt.
+pub(crate) fn then_interrupted(interrupt: &Interrupt, mut turn: Turn) -> Turn {
+    let interrupt = interrupt.clone();
+    Box::new(move |prompt, state, host| {
+        let status = turn(prompt, state, host);
+        interrupt.raise();
+        status
     })
 }
 

@@ -3,8 +3,7 @@
 //!
 //! Not here: TestHarnessFlags' cases of parse_args, new_state and main (test_precedence, test_flags_reach_the_workflow,
 //! test_role_agent_for_a_role_the_workflow_lacks, test_unknown_kinds_are_argparse_errors) and
-//! test_resume_keeps_or_overrides_the_saved_harnesses, which ticket 09 ports with the CLI; the worktree half of
-//! test_run_dir_granted_in_worktree_runs_only, with worktree runs (rust-engine ticket 08, part 3); and
+//! test_resume_keeps_or_overrides_the_saved_harnesses, which ticket 09 ports with the CLI; and
 //! TestWorkflowFileAgents' test_workflows_prints_it, the workflows command's (ticket 09). The two 0.3.0 cases here run
 //! on the state resumable_state would give, built by hand; their halves that check resumable_state itself are left
 //! with it: test_a_030_state_resumes_on_claude's (a 0.3.0 state resumed without flags keeps acceptEdits and no
@@ -13,6 +12,7 @@
 //! cases, and TestHarnessFlags' of launch_args and of reading a 0.3.0 state, are crate::workflow_file's,
 //! crate::harness's and crate::state's (tickets 04 and 06).
 
+use super::worktree::worktree_run;
 use super::*;
 
 const KINDS: &[&str] = &["claude", "codex", "gemini", "opencode", "pi"];
@@ -296,4 +296,18 @@ fn saved_with_the_run() {
     assert_eq!(review.dumps(), r#"{"label": "Reviewer", "agent": "codex"}"#);
     let back = crate::workflow_file::run_pipeline("coded", Some(&definition), &crate::prompts::Prompts::default()).unwrap();
     assert_eq!(back, p);
+}
+
+#[test]
+fn run_dir_granted_in_worktree_runs_only() {
+    // TestHarnessFlags.test_run_dir_granted_in_worktree_runs_only, its Workflow half; the launch_args half is
+    // crate::harness's.
+    let f = worktree_run(Rc::new(FakeHost::default()), None);
+    f.workflow(RunSettings::default()).run().unwrap();
+    let args: Vec<Vec<String>> = starts(&f).into_iter().map(|(_, _, args)| args).collect();
+    assert_eq!(args, vec![strings(&["--add-dir", &f.state.dir()]); 3]);
+    let f = Fixture::new(approved());
+    f.workflow(RunSettings::default()).run().unwrap();
+    let args: Vec<Vec<String>> = starts(&f).into_iter().map(|(_, _, args)| args).collect();
+    assert_eq!(args, vec![Vec::<String>::new(); 3]);
 }

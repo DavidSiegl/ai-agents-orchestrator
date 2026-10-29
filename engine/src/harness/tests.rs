@@ -93,8 +93,8 @@ fn launch_args_are_the_same_each_time() {
 
 #[test]
 fn the_run_directory_is_granted_where_the_harness_can() {
-    // TestHarnessFlags.test_run_dir_granted_in_worktree_runs_only, its launch_args half; the Workflow half is ticket
-    // 08's.
+    // TestHarnessFlags.test_run_dir_granted_in_worktree_runs_only, its launch_args half; the Workflow half is in
+    // workflow/tests/harnesses.rs.
     let d = "/proj/.orchestrator/runs/r";
     let grants: [(&str, &[&str]); 5] = [
         ("claude", &["--add-dir", d]),

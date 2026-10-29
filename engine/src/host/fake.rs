@@ -186,12 +186,22 @@ pub(crate) struct FakeState {
     /// Run before each write, given its path and text, when set: an error fails the write, as a Python test's own
     /// FakeHost.write fails it.
     pub before_write: Option<BeforeWrite>,
+    /// Run before each rename, given its path and new path, when set: what a Python test does in its own
+    /// FakeHost.rename before the fake's.
+    pub before_rename: Option<BeforeRename>,
+    /// Run before each git command, given its directory and arguments, when set: what a Python test does in its own
+    /// FakeHost method, such as remove_worktree, before the fake's.
+    pub before_git: Option<BeforeGit>,
     /// What run_states answers instead, when set and it gives Some: a Python test's own FakeHost.run_states.
     pub run_states_with: Option<RunStatesWith>,
 }
 
 /// A test's hook on writes (FakeState::before_write).
 pub(crate) type BeforeWrite = Box<dyn FnMut(&str, &str) -> Result<(), OrchestratorError>>;
+/// A test's hook on renames (FakeState::before_rename).
+pub(crate) type BeforeRename = Box<dyn FnMut(&str, &str)>;
+/// A test's hook on git commands (FakeState::before_git).
+pub(crate) type BeforeGit = Box<dyn FnMut(&str, &[&str])>;
 /// A test's own run_states (FakeState::run_states_with).
 pub(crate) type RunStatesWith = Box<dyn FnMut(&str) -> Option<Result<Vec<(u64, Json)>, OrchestratorError>>>;
 
@@ -242,6 +252,8 @@ impl FakeHost {
                 restores: vec![],
                 session_logs: HashMap::new(),
                 before_write: None,
+                before_rename: None,
+                before_git: None,
                 run_states_with: None,
             }),
         }
@@ -500,6 +512,12 @@ impl Host for FakeHost {
     }
 
     fn rename(&self, path: &str, new_path: &str) -> Result<(), OrchestratorError> {
+        // Run with the host's state released, as before_write is.
+        let hook = self.state().before_rename.take();
+        if let Some(mut hook) = hook {
+            hook(path, new_path);
+            self.state().before_rename = Some(hook);
+        }
         let mut s = self.state();
         let text = s.files.remove(path).unwrap_or_else(|| panic!("FakeHost has no {path} to rename"));
         s.files.insert(new_path, text);
@@ -523,6 +541,12 @@ impl Host for FakeHost {
     }
 
     fn git_run(&self, cwd: &str, args: &[&str], _timeout: u64) -> Result<Completed, OrchestratorError> {
+        // Run with the host's state released, as before_write is.
+        let hook = self.state().before_git.take();
+        if let Some(mut hook) = hook {
+            hook(cwd, args);
+            self.state().before_git = Some(hook);
+        }
         let mut s = self.state();
         let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
         s.git_calls.push(owned.clone());

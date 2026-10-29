@@ -21,6 +21,7 @@ pub mod pull_request;
 pub mod pypi;
 pub mod quality;
 pub mod runs;
+pub mod spec_file;
 pub mod state;
 pub mod summary;
 pub mod workflow;

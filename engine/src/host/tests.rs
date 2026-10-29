@@ -1153,6 +1153,16 @@ fn a_count_that_is_no_count_raises() {
 }
 
 #[test]
+fn has_origin_on_real_git() {
+    let c = Clones::new();
+    assert!(c.host.has_origin(&c.a).unwrap());
+    c.sh(&["git", "-C", &c.a, "remote", "remove", "origin"]);
+    assert!(!c.host.has_origin(&c.a).unwrap());
+    // Outside a repository git cannot name a URL either.
+    assert!(!c.host.has_origin(&c.dir()).unwrap());
+}
+
+#[test]
 fn worktree_steps() {
     let c = Clones::new();
     put(&format!("{}/.orchestrator/.gitignore", c.a), "*\n");

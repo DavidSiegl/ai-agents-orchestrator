@@ -26,9 +26,10 @@ use crate::prompts::{Prompt, Prompts};
 use crate::pull_request::{branch_name, commit_note, pr_body, provenance, spec_title, GateEvidence, QualityFile};
 use crate::py::format::format;
 use crate::py::json::{Json, Map};
-use crate::py::text::{rstrip, strip};
+use crate::py::text::{basename, rstrip, strip};
 use crate::quality::parse_gate;
 use crate::runs::{local_host, run_health, RUNNING};
+use crate::spec_file::SpecFile;
 use crate::state::RunState;
 use crate::summary::{iso_utc, run_metrics, run_summary, turn_tokens};
 use crate::workflow_file::{run_pipeline, workflow_definition};
@@ -78,8 +79,8 @@ pub struct Collaborators<'a> {
     pub pid_alive: &'a dyn Fn(i128) -> bool,
 }
 
-/// How a run is to go, as Workflow's keyword arguments in orchestrator.py: each saved in the state, so that a resume
-/// starts from them.
+/// How a run is to go, as Workflow's keyword arguments in orchestrator.py: each but spec saved in the state, so that a
+/// resume starts from them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RunSettings {
     /// How many rounds the verdict step's loop takes at most: a verdict other than APPROVE in a round before round
@@ -96,6 +97,10 @@ pub struct RunSettings {
     pub max_quality_rounds: u32,
     /// The run's workflow; None for the one the state names.
     pub pipeline: Option<Pipeline>,
+    /// The spec given with run --spec, for a new run whose state starts at the step after the contract step
+    /// (Pipeline::seeded_start): written as the contract step's file before the run's first state.json, where a
+    /// resume, which is given none, finds it. None for every other run.
+    pub spec: Option<SpecFile>,
 }
 
 impl Default for RunSettings {
@@ -107,6 +112,7 @@ impl Default for RunSettings {
             pull_request: true,
             max_quality_rounds: DEFAULT_MAX_QUALITY_ROUNDS,
             pipeline: None,
+            spec: None,
         }
     }
 }
@@ -185,6 +191,8 @@ pub struct Workflow<'a> {
     pipeline: Rc<Pipeline>,
     /// Every prompt the workflow sends that its definition does not word: the follow-ups and notes.
     prompts: Prompts,
+    /// RunSettings::spec.
+    spec: Option<SpecFile>,
     /// This orchestrator as state.json's owner records it, {"host", "pid", "started_at"}: the run is this one's
     /// while the saved owner equals it.
     me: Map<Json>,
@@ -247,6 +255,7 @@ impl<'a> Workflow<'a> {
             state,
             pipeline: Rc::new(pipeline),
             prompts,
+            spec: settings.spec,
             me,
             last_write: 0.0,
             told_dropped: HashSet::new(),
@@ -341,15 +350,20 @@ impl<'a> Workflow<'a> {
         self.check_alone()?;
         // Round 0: the run has not reached its first editing step, so it has no base or branch yet.
         if self.state.round == 0 {
-            self.check_before_interview()
-        } else {
-            Ok(self.check_branch()?)
+            return self.check_before_interview();
         }
+        if self.state.worktree.is_some() {
+            self.check_worktree()?;
+        }
+        Ok(self.check_branch()?)
     }
 
-    /// Fail if the run could not push what it makes or open its pull request, before the Spec Collector's first
-    /// turn.
+    /// Open the run's worktree, if it has one, and fail if the run could not push what it makes or open its pull
+    /// request, before the Spec Collector's first turn.
     fn check_before_interview(&mut self) -> Outcome<()> {
+        if self.state.worktree.is_some() {
+            self.open_worktree()?;
+        }
         if self.state.pull_request {
             self.host.check_gitleaks()?;
             if self.state.worktree.is_none() {
@@ -357,6 +371,59 @@ impl<'a> Workflow<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Before the interview, check out origin's base branch, detached, in the run's worktree.
+    ///
+    /// The base branch is the one checked out in the project. The checkout itself is left as it is, so it need not be
+    /// clean or up to date, and the human can go on working in it.
+    fn open_worktree(&mut self) -> Outcome<()> {
+        let (cwd, worktree) = (self.state.cwd.clone(), self.state.worktree.clone().unwrap_or_default());
+        if self.host.git_head(&cwd)?.is_none() {
+            return Err(Stopped::Failed(OrchestratorError(format!(
+                "{cwd} is not a git repository with a commit, which --worktree needs"
+            ))));
+        }
+        let branch = strip(&self.host.git(&cwd, &["rev-parse", "--abbrev-ref", "HEAD"])?).to_string();
+        if branch == "HEAD" {
+            return Err(Stopped::Failed(OrchestratorError(format!(
+                "{cwd} is on a detached HEAD; --worktree bases the run on the checked-out branch, so check one out"
+            ))));
+        }
+        if !self.host.has_origin(&cwd)? {
+            return Err(Stopped::Failed(OrchestratorError(format!(
+                "--worktree starts the run from {REMOTE}'s branch, and {cwd} has no {REMOTE}"
+            ))));
+        }
+        // Kept once recorded, as check_repo keeps it.
+        if self.state.base_branch.as_deref().is_none_or(str::is_empty) {
+            self.state.base_branch = Some(branch);
+        }
+        let run_id = self.state.run_id.clone();
+        // A resume before the first editing step: the run's worktree holds nothing it needs to keep.
+        if self.host.is_worktree(&cwd, &worktree)? {
+            self.human.log(&format!("run {run_id} resumes in worktree {worktree}"));
+            return Ok(());
+        }
+        let base_branch = self.base_branch()?;
+        let upstream = self.host.fetch(&cwd, &base_branch)?;
+        self.host.add_worktree(&cwd, &worktree, &upstream)?;
+        self.human.log(&format!("run {run_id} in worktree {worktree}, at {REMOTE}/{base_branch}"));
+        self.save()
+    }
+
+    /// Fail if the run's worktree, which holds its change, is gone; unless the pull request has the change.
+    fn check_worktree(&self) -> Result<(), OrchestratorError> {
+        let s = &self.state;
+        let worktree = s.worktree.as_deref().unwrap_or_default();
+        if !s.pr_url.as_deref().unwrap_or_default().is_empty() || self.host.is_worktree(&s.cwd, worktree)? {
+            return Ok(());
+        }
+        Err(OrchestratorError(format!(
+            "the worktree of run {}, {worktree}, is gone or no longer a git worktree, and with it the run's change; \
+             the run cannot go on",
+            s.run_id
+        )))
     }
 
     /// Fail if another run in this checkout is live: the two would share one working tree.
@@ -391,6 +458,9 @@ impl<'a> Workflow<'a> {
     pub(crate) fn claim(&mut self) -> Outcome<()> {
         let cwd = self.state.cwd.clone();
         self.ignore_orchestrator_dir(&cwd)?;
+        if self.spec.is_some() {
+            self.seed_spec()?;
+        }
         self.state.error = None;
         self.state.owner = Some(self.me.clone());
         // Not save: the caller has already decided that any earlier owner is gone.
@@ -405,6 +475,27 @@ impl<'a> Workflow<'a> {
         if self.host.read(&ignore)?.is_none() {
             self.host.write(&ignore, "*\n", false)?;
         }
+        Ok(())
+    }
+
+    /// Write the spec given with run --spec (RunSettings::spec) as the contract step's file.
+    ///
+    /// After .gitignore, which keeps it out of the clean-tree check, and before the first state.json, which starts
+    /// the run after the contract step: a resume of that run must find the file.
+    fn seed_spec(&self) -> Result<(), OrchestratorError> {
+        let (Some(spec), Some(contract)) = (&self.spec, self.pipeline.contract()) else {
+            return Err(OrchestratorError(format!("workflow {} has no step to seed a spec in", self.pipeline.name())));
+        };
+        let path = contract.path(&self.state.dir(), 0, 0);
+        self.host.write(&path, &spec.text, false)?;
+        let skipped = if contract.human_paced { "interview" } else { "turn" };
+        self.human.log(&format!(
+            "[{}] {} is a copy of {}; skipping the {}'s {skipped}",
+            contract.role,
+            basename(&path),
+            spec.path,
+            self.label(&contract.role)
+        ));
         Ok(())
     }
 
@@ -673,6 +764,7 @@ impl<'a> Workflow<'a> {
             watch_stalls: !step.human_paced,
             announce: if step.human_paced { turn::Announce::Interview } else { turn::Announce::Nothing },
             verdict: step.loop_to.is_some(),
+            blocks: step.can_block(),
         };
         self.turn(turn)
     }
@@ -801,14 +893,21 @@ impl<'a> Workflow<'a> {
             self.require_clean()?;
             // Again, because the interview can take hours: the branch starts from origin's latest base.
             let base_branch = self.base_branch()?;
-            if current != base_branch {
-                return Err(Stopped::Failed(OrchestratorError(format!(
-                    "{cwd} is on {current}, not {base_branch}, which the pull request targets; check out \
-                     {base_branch} and resume"
-                ))));
+            if self.state.worktree.is_some() {
+                // From origin's base itself: the worktree's detached HEAD is where it was before the interview, and
+                // the project's own base branch is the human's.
+                let upstream = self.host.fetch(&work_dir, &base_branch)?;
+                self.host.git(&work_dir, &["switch", "-c", &branch, &upstream])?;
+            } else {
+                if current != base_branch {
+                    return Err(Stopped::Failed(OrchestratorError(format!(
+                        "{cwd} is on {current}, not {base_branch}, which the pull request targets; check out \
+                         {base_branch} and resume"
+                    ))));
+                }
+                self.host.fast_forward(&cwd, &base_branch)?;
+                self.host.git(&cwd, &["switch", "-c", &branch])?;
             }
-            self.host.fast_forward(&cwd, &base_branch)?;
-            self.host.git(&cwd, &["switch", "-c", &branch])?;
         }
         self.human.log(&format!("building on branch {branch}"));
         Ok(())
@@ -911,11 +1010,29 @@ impl<'a> Workflow<'a> {
         }
     }
 
-    /// Once the pull request has the change: check the base branch out again, so the checkout is where the human had
-    /// it and the next run branches from there too. The run's branch stays.
+    /// Once the pull request has the change: check the base branch out again, or remove the run's worktree.
+    ///
+    /// The base branch leaves the checkout where the human had it, so the next run branches from there too. The
+    /// worktree goes without --force, which git refuses for one with untracked or modified files. publish has
+    /// committed them all, so a refusal means someone changed the worktree since; that, like any failure in removing
+    /// it, is only logged. The run's branch stays either way.
     fn leave_work_dir(&self) -> Result<(), OrchestratorError> {
-        let base_branch = self.base_branch()?;
-        self.host.git(&self.state.cwd, &["switch", "--quiet", &base_branch]).map(drop)
+        let s = &self.state;
+        let Some(worktree) = &s.worktree else {
+            let base_branch = self.base_branch()?;
+            return self.host.git(&s.cwd, &["switch", "--quiet", &base_branch]).map(drop);
+        };
+        let removed = self.host.is_worktree(&s.cwd, worktree).and_then(|is| {
+            if is {
+                self.host.remove_worktree(&s.cwd, worktree, false)?;
+                self.human.log(&format!("removed worktree {worktree}"));
+            }
+            Ok(())
+        });
+        if let Err(e) = removed {
+            self.human.log(&format!("could not remove worktree {worktree}: {e}"));
+        }
+        Ok(())
     }
 
     /// The step's last file of round n, or "" for no step or no file.

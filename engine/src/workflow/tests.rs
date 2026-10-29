@@ -16,14 +16,19 @@ use crate::host::Host;
 use crate::py::json::{Json, Map};
 use crate::state::RunState;
 
+mod blocked;
+mod default_prompts;
 mod harnesses;
 mod heartbeat;
 mod one_run;
+mod other_workflows;
 mod prompt_delivery;
 mod pull_request;
 mod resume;
 mod resume_pull_request;
+mod seeded_spec;
 mod turn_timings;
+mod worktree;
 
 type Script = Vec<(&'static str, Vec<Turn>)>;
 

@@ -4,7 +4,7 @@
 //! Not here: the cases of a gated run (TestTurnTimings' test_quality_rounds_and_answers_have_records_of_their_own and
 //! test_a_resumed_analysis_keeps_its_start, TestRunMetrics' test_a_gated_run_of_two_rounds_records_its_turns_and_quality_rounds
 //! and test_a_resumed_quality_round_is_recorded_once), with the quality round (rust-engine ticket 08, part 5);
-//! test_a_seeded_spec_has_no_record, with a seeded spec (part 3); test_the_metrics_command_prints_a_line_per_run_that_is_done,
+//! test_a_seeded_spec_has_no_record, in seeded_spec.rs; test_the_metrics_command_prints_a_line_per_run_that_is_done,
 //! the metrics command's (ticket 09). test_durations, test_a_pipe_in_a_cell_does_not_split_it,
 //! test_turn_tokens_needs_a_known_window_and_a_harness_it_reads and test_session_log_finds_the_file_under_home are
 //! crate::summary's and crate::host's (ticket 06).
@@ -171,11 +171,6 @@ fn a_state_saved_before_turns_resumes_and_records_its_files_without_a_start() {
 fn every_end_writes_a_summary() {
     let d = new_state().dir();
     let solo = crate::test_support::solo();
-    let solo_turn: Turn = Box::new(|_, state, host| {
-        host.write("/proj/limiter.py", "version 1", false).unwrap();
-        host.write(&format!("{}/build.md", state.dir()), "solo report", false).unwrap();
-        "done".into()
-    });
     let cases: Vec<(&str, RunState, Script, RunSettings, Vec<String>)> = vec![
         (
             "changes requested",
@@ -191,7 +186,7 @@ fn every_end_writes_a_summary() {
         (
             "finished",
             new_run(&solo),
-            vec![("build", vec![solo_turn])],
+            vec![("build", vec![solo_turn()])],
             RunSettings { pipeline: Some(solo.clone()), pull_request: false, ..RunSettings::default() },
             strings(&[
                 "- **Workflow:** solo\n",

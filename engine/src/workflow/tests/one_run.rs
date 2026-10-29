@@ -1,7 +1,8 @@
 //! TestOneRunPerCheckout: a run refuses to go on while another run in its checkout is live, since both would edit one
-//! tree. Its worktree cases are ported with worktree runs, and its resume --force cases with resumable_state (issue
-//! rust-engine/08's Plan, parts 3 and 7).
+//! tree, and a worktree run neither refuses nor counts. Its resume --force cases are ported with resumable_state (issue
+//! rust-engine/08's Plan, part 7).
 
+use super::worktree::worktree_run;
 use super::*;
 use crate::constants::{HEARTBEAT_SECONDS, STALE_SECONDS};
 use crate::runs::local_host;
@@ -130,5 +131,24 @@ fn two_runs_that_claim_together_both_refuse() {
         let saved = f.saved();
         assert!(text(&saved, "error").unwrap().contains("one run at a time per checkout"));
         assert_eq!(saved.get("owner"), Some(&Json::Null));
+    }
+}
+
+#[test]
+fn worktree_runs_do_not_refuse_each_other() {
+    let host = host_with_other_run(16, &[("worktree", Json::from("/proj/.orchestrator/worktrees/537935"))]);
+    let mut f = worktree_run(host, None);
+    f.pid_alive = Box::new(|_| true);
+    assert_eq!(f.workflow(RunSettings::default()).run(), verdict(APPROVE));
+}
+
+#[test]
+fn a_worktree_run_and_one_in_the_checkout_do_not_refuse_each_other() {
+    let in_place = Fixture::on(host_with_other_run(16, &[("worktree", Json::from("/elsewhere"))]), new_state(), approved());
+    let in_worktree = worktree_run(host_with_other_run(16, &[]), Some(approved()));
+    // An in-place run beside a live worktree run, and a worktree run beside a live in-place run.
+    for mut f in [in_place, in_worktree] {
+        f.pid_alive = Box::new(|_| true);
+        assert_eq!(f.workflow(RunSettings::default()).run(), verdict(APPROVE));
     }
 }

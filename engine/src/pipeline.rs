@@ -499,6 +499,24 @@ impl Pipeline {
         (!first.edits && !first.per_round()).then_some(first)
     }
 
+    /// The step a run given its spec (run --spec, crate::spec_file) starts at: the one after the contract step.
+    /// Errors: the workflow has no contract step, or no step after it.
+    pub fn seeded_start(&self) -> Result<&Step, OrchestratorError> {
+        let Some(contract) = self.contract() else {
+            return Err(OrchestratorError(format!(
+                "workflow {} starts with step {}, which edits or writes a file per round; --spec needs a first step \
+                 that writes the spec",
+                self.name, self.steps[0].id
+            )));
+        };
+        self.after(&contract.id).ok_or_else(|| {
+            OrchestratorError(format!(
+                "workflow {} has no step after {}, so with --spec it has nothing to do",
+                self.name, contract.id
+            ))
+        })
+    }
+
     /// The step whose file the run ends on.
     pub fn result(&self) -> &Step {
         self.verdict_step().unwrap_or(&self.steps[self.steps.len() - 1])

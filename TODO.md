@@ -124,7 +124,7 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `test_role_agent_starts_that_role_in_its_harness`, `test_resume_with_a_new_harness_relaunches_in_it` and
   `test_a_030_state_resumes_on_claude`, each on the state `new_state` or `resumable_state` would give, built by hand;
   `test_tokens_come_from_the_session_the_turn_ran_in` and `test_a_turn_that_changed_sessions_has_unknown_tokens`.
-  Left for ticket 08's part 3, with worktree runs: the Workflow half of `test_run_dir_granted_in_worktree_runs_only`.
+  Part 3 (2026-10-29) ported the Workflow half of `test_run_dir_granted_in_worktree_runs_only`, with worktree runs.
   For part 7, which ports `resumable_state`: `test_a_030_state_resumes_on_claude`'s check that a 0.3.0 state resumed
   without flags keeps `acceptEdits` and no harnesses. For ticket 09, which ports the CLI: `test_precedence`,
   `test_flags_reach_the_workflow`, `test_role_agent_for_a_role_the_workflow_lacks`,
@@ -133,13 +133,12 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   the `launch_args` half of `test_run_dir_granted_in_worktree_runs_only`,
   `test_turn_tokens_needs_a_known_window_and_a_harness_it_reads` (ticket 06) and
   `test_a_030_state_without_a_permission_mode` and `test_unreadable_agent_args` (ticket 04, `engine/src/state/tests.rs`
-  and states.json). Closes with ticket 08's parts 3 and 7 and ticket 09 porting each case named here.
+  and states.json). Closes with ticket 08's part 7 and ticket 09 porting each case named here.
 - **The Rust engine's Workflow is ported in parts, and its Python tests with them.** Rust-engine ticket 08 lands in
   seven parts (its issue's Plan): part 1 (`engine/src/workflow.rs`, 2026-10-29) runs a workflow in the project's
   checkout, its turns, verdict retries, pull request, saves, heartbeat and takeover, and ports `TestWorkflow`,
   `TestPullRequest`, `TestUpToDateBase`, `TestHeartbeat`, `TestRunHealth`'s `run_health` cases (its two `print_runs` cases are ticket 09's, with `list`), `TestPidAlive` and
-  `TestOneRunPerCheckout` but its worktree cases (`test_worktree_runs_do_not_refuse_each_other`,
-  `test_a_worktree_run_and_one_in_the_checkout_do_not_refuse_each_other`, with worktree runs) and its resume --force
+  `TestOneRunPerCheckout` but its worktree cases (which part 3 ported) and its resume --force
   cases (`test_force_takes_over_the_run_itself`, `test_force_does_not_override_another_live_run`, which go through
   `resumable_state`, with the minimal `run`/`resume`). Part 2 (2026-10-29, tests only: the cases found nothing
   missing in part 1's Workflow) ports `TestResume`, `TestPromptDelivery`, `TestResumePullRequest`, `TestTurnTimings`,
@@ -148,13 +147,38 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   (`TestResumePullRequest.test_resume_on_another_branch_fails_before_any_turn`'s quality phase, and there its check
   that Jenkins was asked nothing in the other phases; `TestTurnTimings.test_quality_rounds_and_answers_have_records_of_their_own`
   and `test_a_resumed_analysis_keeps_its_start`; `TestRunMetrics.test_a_gated_run_of_two_rounds_records_its_turns_and_quality_rounds`
-  and `test_a_resumed_quality_round_is_recorded_once`); `TestTurnTimings.test_a_seeded_spec_has_no_record`, for part 3;
+  and `test_a_resumed_quality_round_is_recorded_once`); `TestTurnTimings.test_a_seeded_spec_has_no_record`, which part 3 ported;
   TestResume's two `RunState.from_dict` cases, which are `crate::state`'s (`engine/src/state/tests.rs`); and the
   CLI's, for ticket 09 (`TestResumePullRequest.test_cli_exits_1_on_another_branch` and
   `test_no_pr_is_saved_with_the_run`, `TestRunMetrics.test_the_metrics_command_prints_a_line_per_run_that_is_done`,
-  `TestWorkflowFileAgents.test_workflows_prints_it`). Until the later parts, a Rust Workflow has no worktree, blocked
-  report, seeded spec, lock, proof or quality round, and nothing starts one but the tests. Closes with the last part,
-  every `run`/`resume` parity scenario passing against the Rust binary.
+  `TestWorkflowFileAgents.test_workflows_prints_it`). Part 3 (2026-10-29) adds blocked reports (`turn`'s blocks,
+  `block`, `unblocked`, `finish_block`, `block_answer` in `engine/src/workflow/turn.rs`), worktree runs
+  (`open_worktree`, `check_worktree`, the worktree halves of `switch_to_branch` and `leave_work_dir`, `Host::has_origin`)
+  and a seeded spec (`RunSettings::spec`, `seed_spec`, `crate::spec_file`'s `SpecFile` and `read_spec_file`,
+  `Pipeline::seeded_start`), and ports `TestBlocked`, `TestBlockedResume`, `TestWorktreeRun`, `TestOneRunPerCheckout`'s
+  worktree cases, `TestSeededSpec`, `TestOtherWorkflows`, `TestWorkflowWithoutAVerdict`, `TestSavedBeforeWorkflows`,
+  `TestDefaultWorkflowPrompts`, `TestWorkflowPromptsGolden`, `TestSpecBuildReviewExample` and the Workflow-driven cases
+  of `TestWorkflowDefinitions`, `TestWorkflowFiles` and `TestPromptFiles`, but for: the cases of a gated run, for part 5
+  (`TestBlocked.test_a_blocked_quality_answer_waits_then_goes_back_to_the_quality_round` and
+  `test_the_note_is_in_every_prompt_of_the_steps_that_can_block_only`; `TestOtherWorkflows.test_gated_step_with_another_name`,
+  `test_fresh_gated_step_answering_a_quality_round` and `test_resumed_gated_step_checks_the_credentials_first`;
+  `TestWorkflowWithoutAVerdict.test_a_gate_that_still_fails_is_not_finished`, `test_a_missing_last_quality_file_fails_the_gate`
+  and `test_a_gate_that_passes_is_finished`; `TestSavedBeforeWorkflows.test_quality_resumes_under_the_default`;
+  `TestDefaultWorkflowPrompts.test_gate_passes_after_a_fix_then_runs_out`, `test_gate_runs_out_then_passes`,
+  `test_fresh_builder_in_round_two_after_quality_rounds`, `test_fresh_builder_answering_a_quality_round_in_round_two` and
+  `test_fresh_reviewer_in_round_two_with_the_gate`; `TestWorkflowDefinitions.test_the_gate_needs_a_gated_step`;
+  `TestPromptFiles.test_a_note_file_reaches_the_turn_that_uses_it`); `resumable_state`'s, for part 7
+  (`TestWorkflowFiles.test_a_saved_definition_that_cannot_be_filled_in_stops_the_resume` and
+  `test_a_corrupt_saved_definition_is_an_error`, `TestPromptFiles.test_a_state_that_replaces_an_unknown_prompt`); and
+  the CLI's, for ticket 09 (`TestWorktreeRun.test_a_run_flag` and `test_flag_reaches_the_workflow`, the `print_runs` half
+  of `TestBlocked.test_the_wait_is_saved_and_listed`, `TestBlockedListing`, `TestSpecCLI` but for `read_spec_file`'s
+  cases, which `engine/src/spec_file/tests.rs` holds, the `role_models` half of
+  `TestOtherWorkflows.test_model_reaches_a_role_without_its_own_flag`,
+  `TestWorkflowWithoutAVerdict.test_a_failed_gate_exits_as_changes_requested` and `test_finished_exits_zero`,
+  `TestWorkflowFiles.test_list_reads_the_gated_step_from_the_saved_definition`, and `TestPromptFiles`' cases of main and
+  drain). Each test module's doc names the cases it leaves out. Until the later parts, a Rust Workflow has no lock,
+  proof or quality round, and nothing starts one but the tests. Closes with the last part, every `run`/`resume` parity
+  scenario passing against the Rust binary.
 - **A Ctrl-C at the terminal does not reach the command the Rust engine's `Host` or herdr is running.** `ProcessHost`
   starts each command in a process group of its own, so that a timeout kills the command with whatever it started
   (`run_process` in `engine/src/host/process.rs`, rust-engine ticket 05, 2026-10-28), and `ProcessHerdr` runs the

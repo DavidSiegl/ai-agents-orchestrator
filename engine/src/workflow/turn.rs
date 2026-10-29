@@ -7,7 +7,7 @@ use crate::constants::{
     STALL_SECONDS,
 };
 use crate::error::OrchestratorError;
-use crate::handoff::parse_verdict;
+use crate::handoff::{parse_blocked, parse_verdict};
 use crate::harness::harness;
 use crate::herdr::{Agent, Direction, HerdrError};
 use crate::prompts::Prompt;
@@ -21,6 +21,8 @@ pub(super) enum Announce {
     Nothing,
     /// The human-paced step's: focus the agent's pane and tell the human it waits for them.
     Interview,
+    /// A blocked turn's wait for the human's answer: focus the agent's pane and tell the human its question.
+    Blocked { question: String },
 }
 
 /// The turn a step asks of a role: what Python's Workflow._turn takes.
@@ -40,6 +42,9 @@ pub(super) struct Turn {
     /// The verdict step's turn: a file without a VERDICT first line is asked for once more (retry) before it ends
     /// the run.
     pub verdict: bool,
+    /// Whether a BLOCKED report waits for the human (block), as often as it comes; for a step that can block
+    /// (Step::can_block), which the verdict step cannot.
+    pub blocks: bool,
 }
 
 /// Why an agent could not be started: herdr refused, with its code, which a resume into a saved session gets past by
@@ -85,7 +90,25 @@ impl Workflow<'_> {
         if t.verdict {
             return self.verdict_turn(t);
         }
-        let out = self.written(&t)?;
+        let file = basename(&t.path).to_string();
+        let block = self.state.blocked.clone().filter(|b| t.blocks && file_of(b) == Some(&file));
+        let out = match block {
+            // A resume in the middle of a block.
+            Some(block) => {
+                self.finish_block(&t.path, &block)?;
+                self.unblocked(&t.role, &t.path, block)?
+            }
+            None => {
+                let out = self.written(&t)?;
+                match parse_blocked(&out).filter(|_| t.blocks) {
+                    Some(question) => {
+                        let block = self.block(&t.role, &t.path, &question)?;
+                        self.unblocked(&t.role, &t.path, block)?
+                    }
+                    None => out,
+                }
+            }
+        };
         if strip(&out).is_empty() {
             let why = format!("was written empty by the {}", self.label(&t.role));
             return Err(self.reject(&t.path, &why));
@@ -161,7 +184,89 @@ impl Workflow<'_> {
                 self.human.log(&format!("[{role}] answer the {label} in pane {pane}"));
                 Ok(())
             }
+            Announce::Blocked { question } => {
+                self.herdr.focus(&self.agent_field(role, "name"))?;
+                self.ask_human(role, &format!("is blocked: {question}"));
+                Ok(())
+            }
         }
+    }
+
+    /// The report of a blocked turn once it is no longer BLOCKED, block being the state's record of the block it is
+    /// in (RunState::blocked); each that still is waits again (block).
+    fn unblocked(&mut self, role: &str, path: &str, mut block: Map<Json>) -> Outcome<String> {
+        let out = loop {
+            let out = self.block_answer(role, path, &block)?;
+            match parse_blocked(&out) {
+                Some(question) => block = self.block(role, path, &question)?,
+                None => break out,
+            }
+        };
+        self.state.blocked = None;
+        self.save()?;
+        Ok(out)
+    }
+
+    /// Move a BLOCKED report aside to its next blocked name, and record the block, so that the turn waits for the
+    /// human's answer and then for the report again. Returns the record, RunState::blocked.
+    fn block(&mut self, role: &str, path: &str, question: &str) -> Outcome<Map<Json>> {
+        let file = basename(path).to_string();
+        let s = &mut self.state;
+        let k = match &s.blocked {
+            Some(b) if file_of(b) == Some(&file) => block_number(b) + 1,
+            _ => 1,
+        };
+        let blocked = blocked_path(path, k);
+        // Everything is saved before the rename, which a resume finishes (finish_block): dying at any point leaves the
+        // report to be judged again, as block k once more, or the wait under way, never a report lost or counted
+        // twice. No prompt counts as delivered, so even an agent that is alive gets BLOCKED_PROMPT.
+        s.prompted = None;
+        let record: Map<Json> =
+            [("file", Json::from(file.as_str())), ("question", Json::from(question)), ("k", Json::Int(k))]
+                .into_iter()
+                .collect();
+        s.blocked = Some(record.clone());
+        // The turn's record, which written closed, goes with the file, as in retry; the wait opens a record of its
+        // own, human-paced (turn_record).
+        let moved = basename(&blocked).to_string();
+        if let Some(t) = s.turns.iter_mut().rev().find(|t| file_of(t) == Some(&file)) {
+            t.insert("file", Json::from(moved.as_str()));
+        }
+        self.save()?;
+        self.host.rename(path, &blocked)?;
+        self.human.log(&format!("[{role}] {file} is blocked: {question}; moved it to {moved}"));
+        Ok(record)
+    }
+
+    /// Make the rename of the block, RunState::blocked, that the orchestrator saved but may have died before making.
+    fn finish_block(&self, path: &str, block: &Map<Json>) -> Result<(), OrchestratorError> {
+        let blocked = blocked_path(path, block_number(block));
+        if self.host.read(&blocked)?.is_none() && self.host.read(path)?.is_some() {
+            self.host.rename(path, &blocked)?;
+        }
+        Ok(())
+    }
+
+    /// The role's report once the human has answered the BLOCKED question of block, RunState::blocked, in its pane.
+    ///
+    /// As for the interview: no turn timeout and no stall notice, since the agent waits for the human. A resumed wait
+    /// announces itself again, and prompts as prompt_for does, with BLOCKED_PROMPT in place of the step's.
+    fn block_answer(&mut self, role: &str, path: &str, block: &Map<Json>) -> Outcome<String> {
+        let blocked = blocked_path(path, block_number(block));
+        let prompt = self.fill(Prompt::BlockedPrompt, &[("path", path), ("blocked_path", &blocked)])?;
+        let question = block.get("question").map(Json::python_str).unwrap_or_default();
+        let t = Turn {
+            role: role.to_string(),
+            path: path.to_string(),
+            text: prompt.clone(),
+            fresh_text: Some(prompt),
+            timeout: None,
+            watch_stalls: false,
+            announce: Announce::Blocked { question },
+            verdict: false,
+            blocks: false,
+        };
+        self.written(&t)
     }
 
     /// Prompt the role's agent with message until it takes it (taken), sending it at most twice.
@@ -365,7 +470,7 @@ impl Workflow<'_> {
                 (Json::from(kind), text(s.models.get(role)), text(known.and_then(|a| a.get("session"))))
             }
         };
-        let blocked = s.blocked.as_ref().is_some_and(|b| b.get("file").and_then(Json::as_str) == Some(file));
+        let blocked = s.blocked.as_ref().is_some_and(|b| file_of(b) == Some(file));
         let quality_round = if step.is_none_or(|st| st.quality_gated) { s.quality_round } else { 0 };
         [
             ("step", Json::from(s.phase.as_str())),
@@ -582,14 +687,25 @@ impl Workflow<'_> {
     }
 
     /// The role's label, as the workflow names it to the human.
-    fn label(&self, role: &str) -> String {
+    pub(super) fn label(&self, role: &str) -> String {
         self.pipeline.roles().get(role).cloned().unwrap_or_else(|| role.to_string())
     }
 }
 
-/// The file a turn record is of; None for a record without one.
+/// The file a turn record, or the record of a block (RunState::blocked), is of; None for a record without one.
 fn file_of(record: &Map<Json>) -> Option<&str> {
     record.get("file").and_then(Json::as_str)
+}
+
+/// Where a BLOCKED report of the handoff file at path is moved the k-th time its turn blocks.
+fn blocked_path(path: &str, k: i128) -> String {
+    let (stem, ext) = splitext(path);
+    format!("{stem}.blocked-{k}{ext}")
+}
+
+/// The k of a block, RunState::blocked: how many times its turn has blocked, its report's blocked name's number.
+fn block_number(block: &Map<Json>) -> i128 {
+    block.get("k").and_then(Json::as_int).unwrap_or(1)
 }
 
 /// Where a malformed verdict file is moved, for its retry.
