@@ -1,5 +1,5 @@
 """Write engine/tests/oracle/python.json: what Python 3.14, the engine's Python, gives for the str methods, format
-strings, difflib matches, shlex.join and json.dumps that engine/src/py ports, for cases the Rust tests replay against
+strings, difflib matches, shlex.join, json.dumps, urlsplit and parse_qsl that engine/src/py ports, for cases the Rust tests replay against
 the port.
 
 Run `uv run python engine/tests/oracle/python.py` after changing a case; tests/test_rust_oracle.py fails while the
@@ -10,6 +10,7 @@ import json
 import os
 import shlex
 import string
+import urllib.parse
 
 OUT = os.path.join(os.path.dirname(__file__), "python.json")
 
@@ -43,6 +44,12 @@ VALUES = {"a": "hey", "b": "3", "c": "x", "e": "it's é\u200b\n"}
 JSON_VALUES = [None, True, False, 0, -7, 2**63, -2**63, 1.0, -0.0, 0.5, 1e16, 1e15, 1.5e-5, 0.0001, 123.456, 1e300,
                2.5e-300, 1 / 3, "", "a\"b\\c", "\n\r\t\b\f\x00\x1f\x7f", "é😀\u2028", [], {}, [1, [2, {}]],
                {"z": 1, "a": [True, None], "é": {"k": "v"}}]
+# Request targets as serve gets them, and query strings in them.
+URLS = ["/runs?cwd=%2Fp&token=t", "/runs", "/runs?", "/a#b?c", "/a?b#c?d", "  /x?y", "\t/r\nu\rns?a=1", "*",
+        "http://127.0.0.1:9/runs?cwd=x", "HTTP://h", "//h/p?q", "x:y", "1x:y", "a+b-c.d:rest", "a_b:rest", ":x",
+        "/c:d", "mailto:", "/p?q?r", ""]
+QUERIES = ["cwd=%2Fp&token=t", "a=1&a=2", "a", "a=", "=v", "&&a=1&", "a=b=c", "a+b=c+d", "x=%41%4a%4A", "x=%", "x=%4",
+           "x=%zz", "x=%C3%A9", "x=%ED%B2%80", "x=%FF", "x=%C3", "x=%e2%82", "é=ü%C3%A9", "a;b=c", "", "token=%20"]
 
 
 def outcome(call):
@@ -73,6 +80,8 @@ def build() -> dict:
         + [[ARGV, shlex.join(ARGV)]],
         "json": [[json.dumps(v, ensure_ascii=False), json.dumps(v), json.dumps(v, indent=2)] for v in JSON_VALUES],
         "values": VALUES,
+        "urlsplit": [[u, list(urllib.parse.urlsplit(u))] for u in URLS],
+        "parse_qsl": [[q, [list(p) for p in urllib.parse.parse_qsl(q, keep_blank_values=True)]] for q in QUERIES],
     }
 
 
