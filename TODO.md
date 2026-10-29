@@ -756,8 +756,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `orchestrator.py` only, and the Rust tickets ran `PARITY_ENGINE=target/.../orchestrator uv run pytest tests/parity`
   by hand, with the scenarios that switch engines at the kill (`SWITCHED` in `test_parity.py`). Fixed (2026-10-29,
   rust-engine ticket 08's follow-ups, the user's ruling of 2026-10-29): the Jenkinsfile's Rust parity stage, after
-  Gate, on a pull request build (`changeRequest()`) whose change touches `engine/` or `tests/parity/` since the base
-  Gate judges it from (`ci/pr-base.sh`, now Gate's too; a `git diff --quiet` as the Test stage's for a quality build;
+  Gate, on a pull request build (`changeRequest()`) whose change touches `engine/`, `tests/parity/`, `Cargo.toml`,
+  `Cargo.lock` or `rust-toolchain.toml` (the user's later ruling, 2026-10-29) since the base Gate judges it from
+  (`ci/pr-base.sh`, now Gate's too; a `git diff --quiet` as the Test stage's for a quality build;
   a base or diff that fails runs it), runs them against the binary the Test stage's cargo-llvm-cov built
   (`target/llvm-cov-target/debug/orchestrator`, instrumented, its profiles sent to `/dev/null` by `LLVM_PROFILE_FILE`
   through `env`, since the harness gives the engine an environment of its own), limited to the

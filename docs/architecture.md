@@ -352,7 +352,8 @@ instead, from the Python engine only. A `World` can run another engine per invoc
 other. `PARITY_COMMANDS` (`run,resume`, say) runs only the scenarios whose recording invokes the engine with those
 commands alone, for an engine that has no others yet. A kill ends the engine's group and each process below it, since
 the Rust engine runs each command in a group of its own. Jenkins runs them against the Rust binary on a pull request
-that touches `engine/` or `tests/parity/` (the Jenkinsfile's Rust parity stage).
+that touches `engine/`, `tests/parity/` or the workspace's `Cargo.toml`, `Cargo.lock` or `rust-toolchain.toml` (the
+Jenkinsfile's Rust parity stage).
 
 Golden files hold generated text to a reviewed copy of it under `tests/golden/`: `assert_golden` (`tests/golden.py`)
 fails with a unified diff naming the file when the text differs, and `UPDATE_GOLDEN=1 uv run pytest` rewrites the
