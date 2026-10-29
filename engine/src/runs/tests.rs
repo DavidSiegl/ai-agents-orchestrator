@@ -93,7 +93,8 @@ fn exited_process_is_not() {
 
 #[test]
 fn an_id_of_0_or_below_names_a_group() {
-    // This process's own group, and every process it may signal: both have this process in them.
+    // This process's own group holds this process; -1 leaves this process and init out, and holds the test runner
+    // that started it.
     assert!(pid_alive(0));
     assert!(pid_alive(-1));
 }

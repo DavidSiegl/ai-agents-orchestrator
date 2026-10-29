@@ -40,7 +40,7 @@ pub fn run_health(state: &Json, age: u64, local_host: &str, pid_alive: &dyn Fn(i
 
 /// Whether a process of that id exists on this machine, under this user or another, as kill(pid, 0) tells; false for
 /// an id beyond a pid's range. As in Python, an id of 0 or below is not a process's: it names a process group (0 this
-/// one's, -1 every process this one may signal, -N group N), which counts as alive when kill finds a process in it.
+/// one's, -1 every process but this one and init, -N group N), which counts as alive when kill finds a process in it.
 pub fn pid_alive(pid: i128) -> bool {
     use nix::errno::Errno;
     use nix::sys::signal::kill;

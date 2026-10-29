@@ -82,8 +82,9 @@ pub struct Collaborators<'a> {
 /// starts from them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RunSettings {
-    /// The last round a verdict of CHANGES_REQUESTED loops back from: in round max_rounds the run ends whatever the
-    /// verdict.
+    /// How many rounds the verdict step's loop takes at most: a verdict other than APPROVE in a round before round
+    /// max_rounds sends the run back to the loop's target in the next round, and from round max_rounds on the run
+    /// goes on past the verdict step whatever the verdict.
     pub max_rounds: u32,
     /// Seconds a turn of a step that is not human-paced may take.
     pub turn_timeout: u64,
