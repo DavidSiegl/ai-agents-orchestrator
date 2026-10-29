@@ -4,7 +4,7 @@
 //!
 //! Not here: TestPromptFiles' cases of main and drain (test_bad_files_stop_run_before_any_agent,
 //! test_a_bad_file_stops_drain_before_any_run, test_workflows_*) are the CLI's (ticket 09), and
-//! test_a_state_that_replaces_an_unknown_prompt resumable_state's (part 7); its other cases are crate::prompts' and
+//! test_a_state_that_replaces_an_unknown_prompt resumable_state's (crate::cli, cli/start/tests.rs); its other cases are crate::prompts' and
 //! crate::workflow_file's (ticket 04). The cases here that Python starts with new_state run on the state it would give,
 //! built by hand (new_state is the CLI's).
 

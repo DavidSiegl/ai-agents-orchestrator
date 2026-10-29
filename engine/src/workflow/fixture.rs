@@ -195,7 +195,12 @@ impl Fixture {
     }
 
     pub fn try_workflow(&self, settings: RunSettings) -> Result<Workflow<'_>, crate::error::OrchestratorError> {
-        let with = Collaborators {
+        Workflow::new(self.collaborators(), self.state.clone(), settings)
+    }
+
+    /// The fixture's fakes as a Workflow is given them.
+    pub fn collaborators(&self) -> Collaborators<'_> {
+        Collaborators {
             host: &*self.host as &dyn Host,
             herdr: &*self.herdr,
             clocks: &*self.clock,
@@ -204,8 +209,7 @@ impl Fixture {
             pid_alive: &*self.pid_alive,
             jenkins: self.jenkins.as_ref(),
             pypi: &self.index,
-        };
-        Workflow::new(with, self.state.clone(), settings)
+        }
     }
 
     /// Add turns to those the role's agent plays, after the ones it has: for a turn that needs the fixture's own

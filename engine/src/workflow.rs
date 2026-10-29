@@ -37,12 +37,14 @@ use crate::state::RunState;
 use crate::summary::{iso_utc, run_metrics, run_summary, turn_tokens};
 use crate::workflow_file::{run_pipeline, workflow_definition};
 
+mod gate_switch;
 mod locks;
 mod proof_runs;
 mod quality_rounds;
 mod system;
 mod turn;
 
+pub use gate_switch::{turn_quality_gate_off, turn_quality_gate_on};
 pub use system::{LocalHuman, SystemClocks};
 
 #[cfg(test)]

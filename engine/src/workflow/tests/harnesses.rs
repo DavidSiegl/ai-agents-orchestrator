@@ -1,18 +1,14 @@
-//! TestHarnesses, the Workflow's cases of TestHarnessFlags, and TestWorkflowFileAgents' test_saved_with_the_run: each
-//! role's agent started, resumed and saved in its harness.
+//! TestHarnesses, the Workflow's and resumable_state's cases of TestHarnessFlags, and TestWorkflowFileAgents'
+//! test_saved_with_the_run: each role's agent started, resumed and saved in its harness.
 //!
 //! Not here: TestHarnessFlags' cases of parse_args, new_state and main (test_precedence, test_flags_reach_the_workflow,
-//! test_role_agent_for_a_role_the_workflow_lacks, test_unknown_kinds_are_argparse_errors) and
-//! test_resume_keeps_or_overrides_the_saved_harnesses, which ticket 09 ports with the CLI; and
-//! TestWorkflowFileAgents' test_workflows_prints_it, the workflows command's (ticket 09). The two 0.3.0 cases here run
-//! on the state resumable_state would give, built by hand; their halves that check resumable_state itself are left
-//! with it: test_a_030_state_resumes_on_claude's (a 0.3.0 state resumed without flags keeps acceptEdits and no
-//! harnesses) for part 7, which ports resumable_state, and test_resume_with_a_new_harness_relaunches_in_it's
-//! (`--agent pi` gives every role pi) for ticket 09, with the --agent flag of resume. TestWorkflowFileAgents' other
-//! cases, and TestHarnessFlags' of launch_args and of reading a 0.3.0 state, are crate::workflow_file's,
-//! crate::harness's and crate::state's (tickets 04 and 06).
+//! test_role_agent_for_a_role_the_workflow_lacks, test_unknown_kinds_are_argparse_errors), which ticket 09 ports with
+//! the CLI; and TestWorkflowFileAgents' test_workflows_prints_it, the workflows command's (ticket 09).
+//! TestWorkflowFileAgents' other cases, and TestHarnessFlags' of launch_args and of reading a 0.3.0 state, are
+//! crate::workflow_file's, crate::harness's and crate::state's (tickets 04 and 06).
 
 use super::worktree::worktree_run;
+use crate::test_support::resumable;
 use super::*;
 
 const KINDS: &[&str] = &["claude", "codex", "gemini", "opencode", "pi"];
@@ -229,7 +225,7 @@ fn role_agent_starts_that_role_in_its_harness() {
 
 /// state.json as 0.3.0 wrote it, in phase and round 2: Claude Code's agent_args, no harnesses, agent records without a
 /// kind; the Builder's in session s-build.
-fn v030_state(phase: &str) -> RunState {
+fn v030_saved(phase: &str) -> Map<Json> {
     let mut state = saved_run(phase, 2, FULL);
     state.prompted = Some("build-2.md".into());
     state.agents.get_mut("build").unwrap().insert("session", "s-build".to_string());
@@ -238,14 +234,30 @@ fn v030_state(phase: &str) -> RunState {
         saved.remove(key);
     }
     saved.insert("agent_args", Json::parse(r#"["--permission-mode", "acceptEdits"]"#).unwrap());
-    RunState::from_saved(&saved).unwrap()
+    saved
+}
+
+#[test]
+fn resume_keeps_or_overrides_the_saved_harnesses() {
+    let mut saved = saved_run("build", 2, FULL).to_json().as_object().unwrap().clone();
+    let kinds = r#"{"spec": "claude", "build": "codex", "review": "gemini"}"#;
+    saved.insert("agent_kinds", Json::parse(kinds).unwrap());
+    let cases: [(&[&str], Map<String>); 3] = [
+        (&[], [("spec", "claude"), ("build", "codex"), ("review", "gemini")].map(|(r, k)| (r, k.to_string())).into_iter().collect()),
+        (&["--agent", "pi"], every_role("pi")),
+        (
+            &["--role-agent", "review=opencode"],
+            [("spec", "claude"), ("build", "codex"), ("review", "opencode")].map(|(r, k)| (r, k.to_string())).into_iter().collect(),
+        ),
+    ];
+    for (flags, kinds) in cases {
+        assert_eq!(resumable(flags, &saved).unwrap().agent_kinds, kinds, "{flags:?}");
+    }
 }
 
 #[test]
 fn resume_with_a_new_harness_relaunches_in_it() {
-    // The state resumable_state would give for `resume a1b2c3 --agent pi` (see the module's doc): every role in pi.
-    let mut state = v030_state("review");
-    state.agent_kinds = every_role("pi");
+    let state = resumable(&["--agent", "pi"], &v030_saved("review")).unwrap();
     let agents = agent_settings(state.permission_mode.as_deref(), &[], state.agent_kinds.clone());
     let script = vec![("review", vec![review_turn(2, APPROVE)])];
     let f = Fixture::resume(Rc::new(FakeHost::default()), state, script, &[], &[]);
@@ -256,8 +268,7 @@ fn resume_with_a_new_harness_relaunches_in_it() {
 
 #[test]
 fn a_030_state_resumes_on_claude() {
-    // As read: what resumable_state gives without flags (see the module's doc).
-    let state = v030_state("build");
+    let state = resumable(&[], &v030_saved("build")).unwrap();
     assert_eq!((state.permission_mode.as_deref(), state.agent_kinds.is_empty()), (Some("acceptEdits"), true));
     let seen = seen();
     let mut agents = agent_settings(state.permission_mode.as_deref(), &[], state.agent_kinds.clone());

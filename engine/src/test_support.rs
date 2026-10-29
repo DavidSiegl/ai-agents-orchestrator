@@ -384,3 +384,14 @@ pub fn object(text: &str) -> Map<crate::py::json::Json> {
         other => panic!("not a JSON object: {other:?}"),
     }
 }
+
+/// resumable_state for `resume a1b2c3` with flags over one run, saved as saved 10^4 s ago, in /proj, on host "here",
+/// whose pids are all dead: Python's resumable helpers.
+pub fn resumable(flags: &[&str], saved: &Map<crate::py::json::Json>) -> Result<crate::state::RunState, crate::error::OrchestratorError> {
+    let argv = ["resume", "a1b2c3"].iter().chain(flags).map(std::ffi::OsString::from);
+    let Ok(crate::cli::Command::Resume(args)) = crate::cli::parse_args(argv, &crate::env::ConfigDir::at("/nowhere")) else {
+        panic!("not a resume: {flags:?}")
+    };
+    let runs = [(10_000, crate::py::json::Json::Object(saved.clone()))];
+    crate::cli::resumable_state(&runs, &args, "/proj", "here", &|_| false)
+}

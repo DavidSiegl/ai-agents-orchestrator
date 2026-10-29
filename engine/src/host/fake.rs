@@ -532,6 +532,12 @@ impl Host for FakeHost {
         Ok(self.state().files.get(path).cloned())
     }
 
+    /// The path as given, as Python's tests patch resolve_dir to give theirs: a fake's paths are absolute already,
+    /// and none is a link.
+    fn resolve_dir(&self, path: &str) -> Result<String, OrchestratorError> {
+        Ok(path.to_string())
+    }
+
     fn write(&self, path: &str, text: &str, keep_mtime: bool) -> Result<(), OrchestratorError> {
         // Run with the host's state released, so that the hook may read or write the host itself.
         let hook = self.state().before_write.take();

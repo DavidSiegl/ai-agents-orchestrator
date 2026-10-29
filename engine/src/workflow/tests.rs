@@ -18,6 +18,7 @@ use crate::state::RunState;
 
 mod blocked;
 mod default_prompts;
+mod gate_switch;
 mod harnesses;
 mod heartbeat;
 mod interrupted;

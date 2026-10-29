@@ -581,7 +581,7 @@ pub(super) fn require_origin(host: &dyn Host, cwd: &str) -> Result<(), Orchestra
 
 /// Delete the run's quality snapshot refs on origin and forget its build in flight (RunState::ci); a failure is only
 /// logged, to human.
-fn delete_ci_refs(host: &dyn Host, human: &dyn Human, state: &mut RunState) {
+pub(super) fn delete_ci_refs(host: &dyn Host, human: &dyn Human, state: &mut RunState) {
     let refs = host.remote_branches(&state.cwd, &format!("{CI_REF_PREFIX}{}-", state.key())).unwrap_or_else(|e| {
         human.log(&format!("could not list the {CI_REF_PREFIX} branches on {REMOTE}: {e}"));
         Vec::new()

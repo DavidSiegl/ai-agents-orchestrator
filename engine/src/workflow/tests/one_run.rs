@@ -1,6 +1,6 @@
 //! TestOneRunPerCheckout: a run refuses to go on while another run in its checkout is live, since both would edit one
-//! tree, and a worktree run neither refuses nor counts. Its resume --force cases are ported with resumable_state (issue
-//! rust-engine/08's Plan, part 7).
+//! tree, and a worktree run neither refuses nor counts. Its resume --force cases, which go through resumable_state, are
+//! crate::cli's (cli/start/tests.rs).
 
 use super::worktree::worktree_run;
 use super::*;

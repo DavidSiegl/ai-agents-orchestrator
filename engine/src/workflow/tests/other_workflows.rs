@@ -5,7 +5,7 @@
 //! Not here: the CLI's (ticket 09): role_models' half of
 //! TestOtherWorkflows.test_model_reaches_a_role_without_its_own_flag, TestWorkflowWithoutAVerdict's
 //! test_a_failed_gate_exits_as_changes_requested and test_finished_exits_zero, and TestWorkflowFiles'
-//! test_list_reads_the_gated_step_from_the_saved_definition; resumable_state's (part 7): TestWorkflowFiles'
+//! test_list_reads_the_gated_step_from_the_saved_definition; resumable_state's, in crate::cli (cli/start/tests.rs): TestWorkflowFiles'
 //! test_a_saved_definition_that_cannot_be_filled_in_stops_the_resume and test_a_corrupt_saved_definition_is_an_error.
 //! The other cases of TestWorkflowDefinitions and TestWorkflowFiles, and TestSavedBeforeWorkflows'
 //! test_root_pane_comes_from_the_workflows_first_role, are crate::pipeline's, crate::workflow_file's and
