@@ -2,10 +2,12 @@
 //! whatever happens to run, so it is a value that what waits checks instead, and that stops the commands the engine
 //! is waiting on (crate::host::run_process) when it is raised.
 //!
-//! In Python every command the engine runs is in the terminal's foreground group and gets the Ctrl-C's SIGINT too.
-//! The Rust engine runs each command in a process group of its own, which the terminal does not signal, so raising
-//! the Interrupt is what reaches them: [`on_sigint`] has SIGINT raise it, from the terminal or from a kill of the
-//! engine's group, such as the desktop app's Stop.
+//! In Python every command the engine runs is in the terminal's foreground group and gets the Ctrl-C's SIGINT too, and
+//! the SIGHUP of a closed terminal. The Rust engine runs each command in a process group of its own, which the
+//! terminal does not signal, so raising the Interrupt is what reaches them: [`by_signals`] has SIGINT raise it, from
+//! the terminal or from a kill of the engine's group, such as the desktop app's Stop, and SIGTERM and SIGHUP too, which
+//! end the Python engine at once, so that no command outlives the engine; [`exit`] then ends the process by the
+//! signal, as they end Python's.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
@@ -17,7 +19,7 @@ use nix::sys::signal::{SigSet, Signal};
 /// from its raise until a handler catches it. While it is pending, every command a Host or herdr waits on fails
 /// (crate::host::run_process), one already running and one started meanwhile, and a sleep on it ends; the Workflow
 /// stops at its next pause, and catches it (Interrupt::catch) to release the run. Clones share one Interrupt, so the
-/// signal thread (on_sigint) or a test playing the human raises what a Workflow and its commands see.
+/// signal thread (by_signals) or a test playing the human raises what a Workflow and its commands see.
 #[derive(Clone, Debug, Default)]
 pub struct Interrupt(Arc<Shared>);
 
@@ -155,35 +157,51 @@ impl Drop for Watch<'_> {
     }
 }
 
-/// The Interrupt this process's SIGINT raises, from the terminal's Ctrl-C or from any kill, such as the desktop app's
-/// Stop, which signals the engine's process group: each SIGINT raises it, and none ends the process any more, so
-/// whatever runs must check it. Every call gives the same one; the first blocks SIGINT in the calling thread, which
-/// every thread started afterwards inherits, and starts the thread that waits for it (sigwait). So it must be called
-/// on the main thread before any other thread starts: a thread that does not block SIGINT would get it and end the
-/// process. The commands the engine starts get SIGINT unblocked (crate::host::run_process).
+/// The signals that raise by_signals' Interrupt: the Ctrl-C's, a kill's default and a closed terminal's.
+pub(crate) const SIGNALS: [Signal; 3] = [Signal::SIGINT, Signal::SIGTERM, Signal::SIGHUP];
+
+/// The first SIGTERM or SIGHUP the signal thread took, which exit ends the process by; unset while none came.
+static ENDING: OnceLock<Signal> = OnceLock::new();
+
+/// The Interrupt this process's SIGINT, SIGTERM and SIGHUP raise (SIGNALS): the terminal's Ctrl-C, the desktop app's
+/// Stop, which sends the engine's process group SIGINT, a kill, and a closed terminal. Each such signal raises it, and
+/// none ends the process any more, so whatever runs must check it, and the program must end by [`exit`], which ends
+/// it by the first SIGTERM or SIGHUP. Every call gives the same one; the first blocks the signals in the calling
+/// thread, which every thread started afterwards inherits, and starts the thread that waits for them (sigwait). So it
+/// must be called on the main thread before any other thread starts: a thread that does not block them would get one
+/// and end the process. The commands the engine starts get them unblocked (crate::host::run_process).
 ///
-/// Where the process started with SIGINT ignored, as a Jenkins sh step's command or nohup's does, it stays ignored and
-/// the Interrupt is never raised, as Python then never raises KeyboardInterrupt. That is read from Linux's
-/// /proc/self/status, since Linux keeps an ignored signal for a thread that blocks it; where it cannot be read, as on
-/// macOS, the kernel is taken to discard an ignored signal even while it is blocked, as the BSD kernels do.
+/// A signal the process started with ignored, as a Jenkins sh step's command ignores SIGINT and nohup's SIGHUP, stays
+/// ignored and never raises it, as Python then never raises KeyboardInterrupt, and nohup's Python is not hung up.
+/// That is read from Linux's /proc/self/status, since Linux keeps an ignored signal for a thread that blocks it; where
+/// it cannot be read, as on macOS, the kernel is taken to discard an ignored signal even while it is blocked, as the
+/// BSD kernels do.
 ///
-/// Errors: SIGINT could not be blocked, or the thread could not be started.
-pub fn on_sigint() -> std::io::Result<Interrupt> {
+/// Errors: the signals could not be blocked, or the thread could not be started.
+pub fn by_signals() -> std::io::Result<Interrupt> {
     static ONE: OnceLock<Interrupt> = OnceLock::new();
-    // Whether the thread is waiting for SIGINT.
+    // Whether the thread is waiting for the signals.
     static STARTED: Mutex<bool> = Mutex::new(false);
     let interrupt = ONE.get_or_init(Interrupt::new).clone();
     let mut started = STARTED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if *started || sigint_ignored() {
+    if *started {
         return Ok(interrupt);
     }
-    let mut sigint = SigSet::empty();
-    sigint.add(Signal::SIGINT);
-    sigint.thread_block()?;
+    let ignored = ignored_signals();
+    let waited: Vec<Signal> = SIGNALS.into_iter().filter(|signal| !ignored.contains(signal)).collect();
+    if waited.is_empty() {
+        return Ok(interrupt);
+    }
+    let waited: SigSet = waited.into_iter().collect();
+    waited.thread_block()?;
     let raised = interrupt.clone();
-    std::thread::Builder::new().name("sigint".to_string()).spawn(move || {
+    std::thread::Builder::new().name("signals".to_string()).spawn(move || {
         // sigwait fails only for a set that holds no valid signal, which this one does.
-        while sigint.wait().is_ok() {
+        while let Ok(signal) = waited.wait() {
+            if signal != Signal::SIGINT {
+                // The first stays: a later one changes nothing about how the process ends.
+                let _ = ENDING.set(signal);
+            }
             raised.raise();
         }
     })?;
@@ -191,13 +209,33 @@ pub fn on_sigint() -> std::io::Result<Interrupt> {
     Ok(interrupt)
 }
 
-/// Whether this process ignores SIGINT, as /proc/self/status's SigIgn mask says; false where that cannot be read.
-fn sigint_ignored() -> bool {
-    let Ok(status) = std::fs::read_to_string("/proc/self/status") else { return false };
+/// End the process with status, as std::process::exit does; but once a SIGTERM or SIGHUP has raised by_signals'
+/// Interrupt, by the first of them, as its default action ends a process, so that its parent sees the signal's death
+/// (a shell's $? 128 plus its number, 143 and 129), as the Python engine dies by it. stdout is flushed first, as at
+/// the end of main.
+pub fn exit(status: i32) -> ! {
+    use std::io::Write;
+    // Nowhere to say that stdout did not take its last line.
+    let _ = std::io::stdout().flush();
+    if let Some(&signal) = ENDING.get() {
+        // Blocked in every thread, and at its default, since by_signals waits only for a signal not ignored at start
+        // and sets no handler: unblocked here, raising it ends the process before raise returns.
+        let _ = SigSet::from(signal).thread_unblock();
+        let _ = nix::sys::signal::raise(signal);
+        // Reached only if raise failed: the status a shell gives that death.
+        std::process::exit(128 + signal as i32);
+    }
+    std::process::exit(status)
+}
+
+/// The signals among SIGNALS this process ignores, as /proc/self/status's SigIgn mask says; none where that cannot be
+/// read.
+fn ignored_signals() -> Vec<Signal> {
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else { return vec![] };
     let mask = status.lines().find_map(|line| line.strip_prefix("SigIgn:")).map(str::trim);
+    let Some(mask) = mask.and_then(|hex| u64::from_str_radix(hex, 16).ok()) else { return vec![] };
     // Bit n-1 of the mask stands for signal n.
-    mask.and_then(|hex| u64::from_str_radix(hex, 16).ok())
-        .is_some_and(|mask| mask & (1 << (Signal::SIGINT as i32 - 1)) != 0)
+    SIGNALS.into_iter().filter(|&signal| mask & (1 << (signal as i32 - 1)) != 0).collect()
 }
 
 #[cfg(test)]

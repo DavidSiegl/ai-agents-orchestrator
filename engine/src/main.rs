@@ -1,16 +1,16 @@
-//! The orchestrator program: crate::cli::main, once the Ctrl-C's signal thread runs.
+//! The orchestrator program: crate::cli::main, once the signals' thread runs, ending as interrupt::exit ends it.
 
 use octoflow_engine::constants::EXIT_ERROR;
-use octoflow_engine::interrupt::on_sigint;
+use octoflow_engine::interrupt::{by_signals, exit};
 
 fn main() {
-    // First, on the main thread, before any other thread starts (on_sigint says why).
-    let interrupt = match on_sigint() {
+    // First, on the main thread, before any other thread starts (by_signals says why).
+    let interrupt = match by_signals() {
         Ok(interrupt) => interrupt,
         Err(e) => {
-            eprintln!("error: cannot wait for the Ctrl-C's SIGINT: {e}");
+            eprintln!("error: cannot wait for SIGINT, SIGTERM and SIGHUP: {e}");
             std::process::exit(EXIT_ERROR);
         }
     };
-    std::process::exit(octoflow_engine::cli::main(std::env::args_os().skip(1), &interrupt));
+    exit(octoflow_engine::cli::main(std::env::args_os().skip(1), &interrupt));
 }

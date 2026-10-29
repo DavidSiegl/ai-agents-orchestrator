@@ -2,11 +2,11 @@
 //! by a script on its PATH. What it does in between, run and resume to their verdicts, is the parity scenarios'
 //! (tests/parity) and crate::cli's tests'.
 //!
-//! Linux only, as the engine's other process tests: GNU env starts the program with SIGINT at its default, whatever
-//! the test's own process does with it (Jenkins runs the tests with SIGINT ignored).
+//! Linux only, as the engine's other process tests: GNU env starts the program with SIGINT, SIGTERM and SIGHUP at
+//! their default, whatever the test's own process does with them (Jenkins runs the tests with SIGINT ignored).
 
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -43,11 +43,11 @@ impl Drop for Dir {
     }
 }
 
-/// The program, with args, started with SIGINT at its default, in a process group of its own, its PATH beginning with
-/// dir's bin, and HERDR_ENV as herdr_env gives it.
+/// The program, with args, started with SIGINT, SIGTERM and SIGHUP at their default, in a process group of its own,
+/// its PATH beginning with dir's bin, and HERDR_ENV as herdr_env gives it.
 fn program(dir: &Dir, args: &[&str], herdr_env: Option<&str>) -> Command {
     let mut command = Command::new("env");
-    command.arg("--default-signal=INT").arg(env!("CARGO_BIN_EXE_orchestrator")).args(args);
+    command.arg("--default-signal=INT,TERM,HUP").arg(env!("CARGO_BIN_EXE_orchestrator")).args(args);
     let path = format!("{}:{}", dir.0.join("bin").display(), std::env::var("PATH").unwrap_or_default());
     command.env("PATH", path).env("XDG_CONFIG_HOME", dir.0.join("config")).env_remove("HERDR_ENV");
     if let Some(value) = herdr_env {
@@ -108,6 +108,29 @@ fn a_ctrl_c_before_the_run_exits_130_with_the_interrupted_note() {
     assert_eq!(std::fs::read_to_string(&asked).unwrap(), "machine list --json\n");
     assert_eq!(out.status.code(), Some(130), "{}", stderr(&out));
     assert_eq!(stderr(&out), "interrupted; the role agents keep running in herdr\n");
+}
+
+#[test]
+fn a_sigterm_or_a_sighup_before_the_run_ends_the_program_by_it_with_the_interrupted_note() {
+    for signal in [Signal::SIGTERM, Signal::SIGHUP] {
+        // As in the Ctrl-C's case: herdr hangs until the signal stops it, and leaves its pid.
+        let dir = Dir::new(&format!("signal-{}", signal as i32));
+        let pid = dir.0.join("pid");
+        dir.tool("herdr", &format!("#!/bin/sh\necho $$ > '{}'\nexec sleep 600\n", pid.display()));
+        let child = program(&dir, &["resume", "a1b2c3", "--machine", "box", "--cwd", "/p"], None)
+            .spawn()
+            .expect("the program starts");
+        wait_for(&pid);
+        let herdr = std::fs::read_to_string(&pid).expect("herdr's pid").trim().to_string();
+        let started = Instant::now();
+        killpg(Pid::from_raw(child.id() as i32), signal).expect("the program's group is signalled");
+        let out = child.wait_with_output().expect("the program ends");
+        assert!(started.elapsed() < PATIENCE);
+        assert_eq!(out.status.signal(), Some(signal as i32), "{signal}: {:?}, {}", out.status, stderr(&out));
+        assert_eq!(stderr(&out), "interrupted; the role agents keep running in herdr\n");
+        // herdr ran in a group of its own, which the signal did not reach: the program stopped it.
+        assert!(!Path::new(&format!("/proc/{herdr}")).exists(), "herdr outlived the {signal}");
+    }
 }
 
 #[test]

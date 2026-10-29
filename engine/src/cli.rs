@@ -4,6 +4,7 @@
 //! of [`run_command`] given the same [`Connected`].
 
 use std::ffi::OsString;
+use std::io::Write;
 
 use crate::ci::Jenkins;
 use crate::constants::{EXIT_CHANGES_REQUESTED, EXIT_CONFLICT, EXIT_ERROR, EXIT_INTERRUPTED, SUCCEEDED};
@@ -56,15 +57,16 @@ struct Ran {
 enum Stop {
     /// The error main prints, with exit status EXIT_ERROR.
     Failed(OrchestratorError),
-    /// The Ctrl-C (exit status EXIT_INTERRUPTED); the id of the run it stopped, None before the run's state was made,
-    /// for the hint that resumes it.
+    /// The Interrupt, raised by a Ctrl-C, a SIGTERM or a SIGHUP (exit status EXIT_INTERRUPTED); the id of the run it
+    /// stopped, None before the run's state was made, for the hint that resumes it.
     Interrupted(Option<String>),
 }
 
-/// The program: argv are its arguments, without its own name; interrupt is the Ctrl-C, crate::interrupt::on_sigint's,
-/// whose SIGINT no longer ends the process. Returns its exit status: a usage error's 2 (help's 0), EXIT_ERROR for an
-/// error, EXIT_INTERRUPTED at a Ctrl-C, or how the run ended (finish). Prints the run's last line on stdout, and its
-/// log, errors and the usage on stderr.
+/// The program: argv are its arguments, without its own name; interrupt is crate::interrupt::by_signals', which the
+/// process's SIGINT, SIGTERM and SIGHUP raise rather than end it. Returns its exit status: a usage error's 2 (help's
+/// 0), EXIT_ERROR for an error, EXIT_INTERRUPTED once interrupt is raised (crate::interrupt::exit then ends a process
+/// that got a SIGTERM or SIGHUP by that signal), or how the run ended (finish). Prints the run's last line on stdout,
+/// and its log, errors and the usage on stderr.
 pub fn main(argv: impl IntoIterator<Item = OsString>, interrupt: &Interrupt) -> i32 {
     let config = ConfigDir::from_env();
     let command = match parse_args(argv, &config) {
@@ -85,12 +87,13 @@ pub fn main(argv: impl IntoIterator<Item = OsString>, interrupt: &Interrupt) -> 
 fn ended_status(ended: Result<Ran, Stop>, command: &Command) -> i32 {
     match ended {
         Ok(ran) => finish(ran.verdict.as_deref().unwrap_or("None"), &ran.state, &ran.pipeline),
+        // A line stderr does not take is lost, as a closed terminal's SIGHUP leaves it: the status still tells.
         Err(Stop::Failed(e)) => {
-            eprintln!("error: {e}");
+            let _ = writeln!(std::io::stderr(), "error: {e}");
             EXIT_ERROR
         }
         Err(Stop::Interrupted(run_id)) => {
-            eprintln!("{}", interrupted_note(run_id.as_deref(), &command.target().flags()));
+            let _ = writeln!(std::io::stderr(), "{}", interrupted_note(run_id.as_deref(), &command.target().flags()));
             EXIT_INTERRUPTED
         }
     }
@@ -251,7 +254,7 @@ pub fn resume_command(run_id: &str, target: &[String]) -> String {
     shlex_join(&argv)
 }
 
-/// What to tell the human whose Ctrl-C stopped the orchestrator, with the command that resumes the run of run_id,
+/// What to tell the human whose Ctrl-C, or a SIGTERM or SIGHUP, stopped the orchestrator, with the command that resumes the run of run_id,
 /// target being its --machine and --cwd flags; run_id is None for a Ctrl-C before the run's state existed, and the
 /// note names no command.
 fn interrupted_note(run_id: Option<&str>, target: &[String]) -> String {

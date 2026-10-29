@@ -1,5 +1,5 @@
-//! The Interrupt as a value: raised, caught and raised again, its sleeps and the commands' watches. Its SIGINT
-//! (on_sigint) is engine/tests/sigint.rs's, in processes of its own.
+//! The Interrupt as a value: raised, caught and raised again, its sleeps and the commands' watches. Its signals
+//! (by_signals, exit) are engine/tests/signals.rs's, in processes of its own.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};

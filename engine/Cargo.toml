@@ -46,9 +46,10 @@ tiny_http = "0.12"
 name = "orchestrator"
 path = "src/main.rs"
 
-# The engine's SIGINT, in processes of its own, which need a main of their own (the test's module doc).
+# The engine's SIGINT, SIGTERM and SIGHUP, in processes of its own, which need a main of their own (the test's
+# module doc).
 [[test]]
-name = "sigint"
+name = "signals"
 harness = false
 
 [lints]

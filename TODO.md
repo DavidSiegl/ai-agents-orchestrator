@@ -146,19 +146,20 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 - **The Rust engine's Ctrl-C, what is left.** Rust-engine ticket 08's part 6 (2026-10-29) has a SIGINT raise the
   `Interrupt`, which stops the command the engine waits on (Fixed, "A Ctrl-C at the terminal does not reach the
   command the Rust engine's `Host` or herdr is running"). Not closed: (1) the `orchestrator` binary's `main`
-  calls `on_sigint` first (ticket 08's part 7, `engine/src/main.rs`), and `run` and `resume` turn a raised `Interrupt`
+  calls `by_signals` first (ticket 08's part 7, `engine/src/main.rs`), and `run` and `resume` turn a raised `Interrupt`
   outside a Workflow (resolving the directory, reading the run, switching its gate) into the interrupted note and exit
   status 130 (`crate::cli`, `stop`), as Python's KeyboardInterrupt anywhere does; the commands ticket 09 adds (`list`,
   `show`, `prune`, `close`, `drain` between runs, the sweep before a run) must do the same through it, and `serve`
-  (ticket 10) has its own SIGINT, which `on_sigint` would take over; closes with those tickets. (2) A Ctrl-C during a Jenkins or PyPI request
-  (`crate::http`, ureq) waits for the request to end, up to its timeout, where Python's KeyboardInterrupt stops
+  (ticket 10) has its own SIGINT and SIGTERM, which `by_signals` would take over; closes with those tickets. (2) A
+  Ctrl-C during a Jenkins or PyPI request (`crate::http`, ureq) waits for the request to end, up to its timeout, where
+  Python's KeyboardInterrupt stops
   `urlopen` at once: there is no process to stop, and ureq has no way to abandon a request from another thread.
   Closes with a request the Interrupt can cut short (one whose reads are given slices of the timeout, the Interrupt
   checked between them, or one run on a thread the Workflow stops waiting for), or with the user's ruling that the
-  wait is acceptable. (3) Under macOS, `on_sigint` reads no `/proc/self/status` and takes the kernel to discard a
-  SIGINT that was ignored when the engine started, even while blocked, as the BSD kernels do, and `run_process` gives
+  wait is acceptable. (3) Under macOS, `by_signals` reads no `/proc/self/status` and takes the kernel to discard a
+  signal that was ignored when the engine started, even while blocked, as the BSD kernels do, and `run_process` gives
   a command the whole 250 ms grace, nix having no `waitid` there; unchecked on a Mac. Closes with
-  `engine/tests/sigint.rs`, which is Linux's (it reads `/proc` and starts the engine with GNU `env`), ported to macOS
+  `engine/tests/signals.rs`, which is Linux's (it reads `/proc` and starts the engine with GNU `env`), ported to macOS
   and run on one. A process that left the command's group, as a daemon does, is not reached, as at
   a timeout; that is no gap, as the terminal's Ctrl-C does not reach one in Python either.
 - **The Rust engine's `run` does not prune earlier runs' branches yet.** Python's `main` runs `sweep_branches` before
@@ -172,14 +173,15 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   the last are ported and read as Python does (Fixed, "The Rust engine named a new run by the time in UTC");
   `pull_request_pending` is `prune`'s and the sweep before a run's, and its `closedAt` is GitHub's, which carries a
   `Z`. Closes with ticket 09 reading it through `crate::py::datetime::fromisoformat_timestamp`.
-- **The commands the Rust engine runs outlive an engine that is killed.** Each command runs in a process group of its
-  own (rust-engine tickets 05, 06), so a SIGKILL of the engine's group, or the SIGHUP a closed terminal sends its
-  foreground group, ends the engine and leaves a running `herdr agent wait`, `gh pr create` or push to finish
-  unwatched, where the Python engine's children are in its group and end with it. A Ctrl-C (SIGINT) stops them through
-  the `Interrupt`. The parity harness's kill now kills each process below the engine too (`Invocation.kill`), as
-  "a crash or a lost machine" does; before, `kill_in_publish` against the Rust binary got a pull request from the
-  orphaned `gh`. Closes with the engine stopping its command's group at SIGHUP and SIGTERM as at SIGINT (a SIGKILL
-  cannot be caught), or with the user's ruling that this is acceptable.
+- **The commands the Rust engine runs outlive an engine that is SIGKILLed.** Each command runs in a process group of
+  its own (rust-engine tickets 05, 06), so a SIGKILL of the engine, or of its group, ends the engine and leaves a
+  running `herdr agent wait`, `gh pr create` or push to finish unwatched, where the Python engine's children are in
+  its group and end with it when the group is killed. SIGINT, SIGTERM and SIGHUP now stop them (Fixed, "The commands
+  the Rust engine runs outlived an engine that got a SIGTERM or a SIGHUP"); a SIGKILL cannot be caught. The parity
+  harness's kill kills each process below the engine too (`Invocation.kill`), as "a crash or a lost machine" does;
+  before, `kill_in_publish` against the Rust binary got a pull request from the orphaned `gh`. Closes with the user's
+  ruling that this is acceptable, or with the command's group killed when the engine dies (Linux's
+  `PR_SET_PDEATHSIG`, set in `run_process`'s `pre_exec`, reaches only the command itself, not what it starts).
 - **The parity scenarios do not run against the Rust binary in Jenkins.** The Test stage runs `tests/parity` against
   `orchestrator.py` only; the Rust tickets run `PARITY_ENGINE=target/.../orchestrator uv run pytest tests/parity`
   by hand, which also runs the scenarios that switch engines at the kill (`SWITCHED` in `test_parity.py`; they are
@@ -708,7 +710,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   (`test_flag_checks`, `test_gate_reaches_the_workflow`, `test_list_shows_the_quality_phase`, ticket 09) and
   `resumable_state`'s (`test_resume_limit_against_the_saved_quality_round`, `test_resume_limit_needs_the_gate`, part
   7). Each test module's doc names the cases it leaves out. Part 6 (2026-10-29) adds the Ctrl-C (`interrupt::on_sigint`,
-  the command's group stopped by `run_process`, `SystemClocks`, `LocalHuman`, which is Python's `notify_locally` and
+  now `by_signals`, the command's group stopped by `run_process`, `SystemClocks`, `LocalHuman`, which is Python's
+  `notify_locally` and
   `log`); it ports no Python test, whose fakes raise KeyboardInterrupt themselves, and adds the Rust cases the Fixed
   entry on the Ctrl-C names. Fixed (2026-10-29) by part 7, the last: the `orchestrator` binary (`engine/src/main.rs`,
   `crate::cli`) with `run` and `resume`, their flags and checks on clap, `new_state`, `resumable_state`,
@@ -735,12 +738,29 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `a_run_is_named_by_the_time_in_the_machine_s_zone` (TZ 5:45 east of UTC). The parity harness still runs in UTC.
   What Python reads in local time outside run and resume is the Open issue "Local times the Rust engine has yet to
   read, for rust-engine ticket 09".
+- **The commands the Rust engine runs outlived an engine that got a SIGTERM or a SIGHUP.** The commands run in
+  process groups of their own, so a SIGTERM of the engine (a kill, a service manager's stop) or the SIGHUP a closed
+  terminal sends its foreground group ended the engine and left the running command to finish unwatched, and the run
+  unreleased (Open issue "The commands the Rust engine runs outlive an engine that is SIGKILLed", which this narrows).
+  Fixed (2026-10-29, rust-engine ticket 08's follow-ups, the user's ruling of 2026-10-29): `interrupt::by_signals`,
+  which was `on_sigint`, waits for SIGTERM and SIGHUP as for SIGINT (`interrupt::SIGNALS`), so each raises the
+  `Interrupt`: the running command's group is stopped and the Workflow releases the run as interrupted, the program
+  prints the interrupted note with its resume hint (a line stderr does not take, as after a hangup, is lost), and
+  `interrupt::exit`, which `main` ends by, ends the process by the first SIGTERM or SIGHUP it got, as the signal's
+  default action does (a shell's `$?` 143 or 129), where a SIGINT alone exits 130. The exit status is the Python
+  engine's, which those signals kill at once; the release and the note are not: Python leaves the run owned by its
+  dead pid, to be resumed as a stale run, and prints nothing. A signal the engine started with ignored stays ignored,
+  for it and its commands, as nohup's SIGHUP; the commands start with the three unblocked (`unblock_signals`). Held by
+  `engine/tests/signals.rs` (real signals to an engine in a group of its own: a SIGTERM and a SIGHUP stop the command
+  and end the engine by the signal, an ignored SIGHUP reaches neither the engine nor its command) and
+  `engine/tests/program.rs`'s `a_sigterm_or_a_sighup_before_the_run_ends_the_program_by_it_with_the_interrupted_note`.
 - **A Ctrl-C at the terminal does not reach the command the Rust engine's `Host` or herdr is running.** `ProcessHost`
   and `ProcessHerdr` run each command in a process group of its own (rust-engine tickets 05 and 06), which the
   terminal's SIGINT, sent to its foreground group, no longer reaches, where in the Python engine every child gets it
   too, the desktop app's Stop (`killpg` with SIGINT) included; so a Ctrl-C left a push, a scan or an unbounded `herdr
   agent wait` running (cross-review 92, F2). Fixed (2026-10-29, rust-engine ticket 08, part 6): `interrupt::on_sigint`
-  blocks SIGINT and starts a thread that waits for it (sigwait) and raises the `Interrupt` at each one, from the
+  (now `by_signals`) blocks SIGINT and starts a thread that waits for it (sigwait) and raises the `Interrupt` at each
+  one, from the
   terminal or a kill of the engine's group; `ProcessHost::local` and `ProcessHerdr::new` take the `Interrupt`, and
   `run_process` (`engine/src/host/process.rs`) watches it while a command runs: at a raise the command's group gets
   SIGINT and, once the command exits or `INTERRUPT_GRACE_MS` (250 ms, Python's `Popen._sigint_wait_secs`) pass, SIGKILL,
@@ -750,12 +770,14 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   keep `RunState::ci`) stops the run at a Ctrl-C, as Python's KeyboardInterrupt passes `except OrchestratorError`, and
   the proof copies are removed as Python's finally removes them (`Interrupt::finally`); `SystemClocks`' sleep ends at a
   raise; the children start with SIGINT
-  unblocked (`unblock_sigint`, the engine's one `unsafe`, `CommandExt::pre_exec`). A SIGINT ignored when the engine
-  started stays ignored, as in Python. Held by the Ctrl-C cases of `engine/src/host/tests.rs` and
+  unblocked (`unblock_sigint`, now `unblock_signals`, the engine's one `unsafe`, `CommandExt::pre_exec`). A SIGINT
+  ignored when the engine started stays ignored, as in Python. Held by the Ctrl-C cases of `engine/src/host/tests.rs`
+  and
   `engine/src/herdr/tests.rs`, `workflow/tests/interrupted.rs` (a run waiting on herdr, one during a prompt herdr
   delivered, one already done), `a_ctrl_c_while_a_proof_runs_stops_it_with_what_it_started` (the proof under GNU
-  `timeout`, which leads the group ProcessHost started) and `engine/tests/sigint.rs` (a real SIGINT to an engine's
-  group, and one it inherited ignored). What is left is the Open issue "The Rust engine's Ctrl-C, what is left".
+  `timeout`, which leads the group ProcessHost started) and `engine/tests/sigint.rs` (now `signals.rs`: a real SIGINT to
+  an engine's group, and one it inherited ignored). What is left is the Open issue "The Rust engine's Ctrl-C, what is
+  left".
 - **The Rust engine read a workflow file's tables with their keys sorted.** The toml crate keeps a table in a
   `BTreeMap` without its `preserve_order` feature, so a table with two problems could be refused naming the other one
   first, where tomllib gives the file's order. Raised in rust-engine ticket 04 (2026-10-28). Fixed (2026-10-28, the

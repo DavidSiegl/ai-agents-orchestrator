@@ -213,7 +213,7 @@ pub(crate) fn run_process(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
-    unblock_sigint(&mut command);
+    unblock_signals(&mut command);
     let mut child = command.spawn().map_err(ProcessError::Start)?;
     // Input and output each on a thread of their own, so that a command that writes much before it reads all its
     // input, or fills one pipe while the other is read, never waits on the engine, and the engine waits on none of
@@ -283,18 +283,18 @@ pub(crate) fn run_process(
     Ok((code, stdout, stderr))
 }
 
-/// Have command start with SIGINT unblocked. The engine blocks it in every thread for the thread that waits for it
-/// (crate::interrupt::on_sigint), a child inherits that across exec, and std's Command leaves it so; unblocked, the
-/// command, and an agent or a herdr server it starts, hears a Ctrl-C as one started from a shell does.
-fn unblock_sigint(command: &mut Command) {
-    let mut sigint = SigSet::empty();
-    sigint.add(Signal::SIGINT);
+/// Have command start with SIGINT, SIGTERM and SIGHUP unblocked (crate::interrupt::SIGNALS). The engine blocks them
+/// in every thread for the thread that waits for them (crate::interrupt::by_signals), a child inherits that across
+/// exec, and std's Command leaves it so; unblocked, the command, and an agent or a herdr server it starts, hears a
+/// Ctrl-C, a kill and a hangup as one started from a shell does. One the engine started with ignored stays ignored.
+fn unblock_signals(command: &mut Command) {
+    let signals: SigSet = crate::interrupt::SIGNALS.into_iter().collect();
     // SAFETY: the closure runs in the child between fork and exec, where only async-signal-safe functions may be
     // called; it calls pthread_sigmask alone, which is one (POSIX.1-2008, signal-safety(7)), on a set made before the
     // fork, and allocates nothing.
     #[allow(unsafe_code, reason = "CommandExt::pre_exec is unsafe, and nix has no safe way to start a child with a signal unblocked")]
     unsafe {
-        command.pre_exec(move || sigint.thread_unblock().map_err(std::io::Error::from));
+        command.pre_exec(move || signals.thread_unblock().map_err(std::io::Error::from));
     }
 }
 
