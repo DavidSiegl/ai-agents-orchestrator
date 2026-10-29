@@ -178,7 +178,7 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   year, month or day out of range and an offset of a day or more: `year 0 is out of range` where 3.14 says `year must
   be in 1..9999, not 0`, `month must be in 1..12` (3.14 adds `, not 13`), `day is out of range for month` (3.14:
   `day 29 must be in range 1..28 for month 2 in year 2026`), and the offset's message without 3.14's `, not
-  datetime.timedelta(...)`; 30 of the 3106 `fromisoformat` cases of `engine/tests/oracle/harness.json` differ so.
+  datetime.timedelta(...)`; 28 of the 3106 `fromisoformat` cases of `engine/tests/oracle/harness.json` differ so.
   The oracle test compares only whether such a time is refused (found by cross-review 102's F3, 2026-10-29, when it
   began comparing `timestamp()`'s own refusals by their message). Only the wording differs, and only for times no harness,
   run or PyPI writes. Closes with the messages worded as 3.14's and the test comparing every message.
