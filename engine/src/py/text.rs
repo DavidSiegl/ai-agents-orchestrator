@@ -199,7 +199,8 @@ pub fn shlex_join<S: AsRef<str>>(argv: &[S]) -> String {
     argv.iter().map(|word| shlex_quote(word.as_ref())).collect::<Vec<_>>().join(" ")
 }
 
-fn shlex_quote(word: &str) -> String {
+/// word quoted for sh as shlex.quote quotes it, as shlex_join says.
+pub fn shlex_quote(word: &str) -> String {
     if word.is_empty() {
         return "''".to_string();
     }

@@ -20,9 +20,11 @@ mod blocked;
 mod default_prompts;
 mod harnesses;
 mod heartbeat;
+mod locked_files;
 mod one_run;
 mod other_workflows;
 mod prompt_delivery;
+mod proofs;
 mod pull_request;
 mod resume;
 mod resume_pull_request;
@@ -113,6 +115,11 @@ fn split(pane: &str, direction: Direction) -> Call {
 /// Whether herdr was given call.
 fn called(f: &Fixture, call: &Call) -> bool {
     f.herdr.state().calls.contains(call)
+}
+
+/// The Test Writer's turn of FOUR.
+fn write_tests() -> Turn {
+    writes(|s| format!("{}/tests.md", s.dir()), "tests written", "done")
 }
 
 /// Owned strings of a.

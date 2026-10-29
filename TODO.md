@@ -106,7 +106,14 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `AGENT_KINDS`, as a hand-edited `state.json` can name, is refused naming those there are (`crate::harness::harness`),
   where the Python engine fails on a KeyError; and an answer of herdr's that lacks what its command gives, or is not
   UTF-8, is a `bad_response` naming the command or a failure naming it (`engine/src/herdr.rs`), where Python fails on
-  a KeyError or a UnicodeDecodeError. Decided against unless a run is found that writes such input.
+  a KeyError or a UnicodeDecodeError. And from the Workflow's locks and proofs (rust-engine ticket 08, part 4,
+  2026-10-29): a `restored` or `proofs` record of `state.json` without a field the engines write, or with one of
+  another type, stops the run naming it (`Restored::read` in `engine/src/workflow/locks.rs`, `ProofRun::read` in
+  `engine/src/proofs.rs`), where Python fails on a KeyError or a TypeError, or, for a `restored` record without
+  `paths`, restores nothing; and a proof's output that is not UTF-8 is quoted with each such byte as U+FFFD
+  (`Workflow::run_proof`), where Python keeps it as a lone surrogate, which `state.json` holds as an escape and the
+  write of the review then fails on (a UnicodeEncodeError, uncaught).
+  Decided against unless a run is found that writes such input.
 - **Host tests and a Host need of the CLI's, left for rust-engine ticket 09.** `TestHostGit`'s `test_prune_on_real_git`
   and `test_close_on_real_git` and `TestHostPullRequest.test_closed_without_a_time` (`tests/test_orchestrator.py`)
   drive `prune_branches`, `close_run` and `pull_request_pending`, which the Rust engine has not ported, so ticket 05
@@ -176,8 +183,15 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `TestOtherWorkflows.test_model_reaches_a_role_without_its_own_flag`,
   `TestWorkflowWithoutAVerdict.test_a_failed_gate_exits_as_changes_requested` and `test_finished_exits_zero`,
   `TestWorkflowFiles.test_list_reads_the_gated_step_from_the_saved_definition`, and `TestPromptFiles`' cases of main and
-  drain). Each test module's doc names the cases it leaves out. Until the later parts, a Rust Workflow has no lock,
-  proof or quality round, and nothing starts one but the tests. Closes with the last part, every `run`/`resume` parity
+  drain). Part 4 (2026-10-29) adds locked files (`hold_locks`, `locked_changes`, `locks_note` and `clean_up_locks`
+  in `engine/src/workflow/locks.rs`) and proofs (`judge_proofs`, `rerun_proofs`, `carried_proofs`, `run_proof` under
+  GNU `timeout` and the notes, in `engine/src/workflow/proof_runs.rs`, with `crate::proofs::ProofRun`), and ports
+  `TestLockedFiles`, `TestProofs` and `TestProofInAWorktree` (whose proof is a shell script that finds its repository
+  with git, where Python's is run by pytest, which the Rust tests do not have), but for the cases of a gated run, for
+  part 5 (`TestLockedFiles.test_the_gate_judges_the_restored_tests`,
+  `TestProofs.test_a_carried_proof_runs_again_after_the_rounds_last_quality_round_and_before_the_review`), and the
+  pipeline's and workflow file's, which ticket 04 ported. Each test module's doc names the cases it leaves out. Until
+  the later parts, a Rust Workflow has no quality round, and nothing starts one but the tests. Closes with the last part, every `run`/`resume` parity
   scenario passing against the Rust binary.
 - **A Ctrl-C at the terminal does not reach the command the Rust engine's `Host` or herdr is running.** `ProcessHost`
   starts each command in a process group of its own, so that a timeout kills the command with whatever it started

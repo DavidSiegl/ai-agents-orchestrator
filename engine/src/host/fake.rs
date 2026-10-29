@@ -64,7 +64,7 @@ impl FakeClock {
 ///
 /// Files written outside .orchestrator/ count as uncommitted changes until a commit. Git is played at the level of
 /// single commands (Host::git_run), so Host's own fetch, fast-forward and merge steps run on it; a process of any other
-/// kind panics the test. A test scripts it through [`FakeHost::state`], whose fields say what each scripts.
+/// kind panics the test, unless FakeState::processes runs it. A test scripts it through [`FakeHost::state`], whose fields say what each scripts.
 pub(crate) struct FakeHost {
     state: RefCell<FakeState>,
 }
@@ -194,6 +194,10 @@ pub(crate) struct FakeState {
     pub before_git: Option<BeforeGit>,
     /// What run_states answers instead, when set and it gives Some: a Python test's own FakeHost.run_states.
     pub run_states_with: Option<RunStatesWith>,
+    /// Whether a command the host runs other than git (Host::exec, so run, check and run_files) is a real process on
+    /// this machine, as a Python test's `host._run = subprocess.run` makes it; the files and git stay the fake's.
+    /// False: such a command panics the test.
+    pub processes: bool,
 }
 
 /// A test's hook on writes (FakeState::before_write).
@@ -255,6 +259,7 @@ impl FakeHost {
                 before_rename: None,
                 before_git: None,
                 run_states_with: None,
+                processes: false,
             }),
         }
     }
@@ -478,8 +483,11 @@ impl Host for FakeHost {
         None
     }
 
-    fn exec(&self, argv: &[&str], _stdin: Option<&[u8]>, _timeout: u64) -> Result<Exec, OrchestratorError> {
-        panic!("FakeHost ran a real process: {argv:?}")
+    fn exec(&self, argv: &[&str], stdin: Option<&[u8]>, timeout: u64) -> Result<Exec, OrchestratorError> {
+        if !self.state().processes {
+            panic!("FakeHost ran a real process: {argv:?}")
+        }
+        super::ProcessHost::local().exec(argv, stdin, timeout)
     }
 
     fn read(&self, path: &str) -> Result<Option<String>, OrchestratorError> {

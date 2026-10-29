@@ -23,6 +23,7 @@ use crate::host::{Host, PushError};
 use crate::interrupt::Interrupt;
 use crate::pipeline::{is_built_in, Pipeline, Step, DONE, METRICS_FILE, PUBLISH, QUALITY, SUMMARY_FILE};
 use crate::prompts::{Prompt, Prompts};
+use crate::proofs::PROOF_TIMEOUT;
 use crate::pull_request::{branch_name, commit_note, pr_body, provenance, spec_title, GateEvidence, QualityFile};
 use crate::py::format::format;
 use crate::py::json::{Json, Map};
@@ -34,6 +35,8 @@ use crate::state::RunState;
 use crate::summary::{iso_utc, run_metrics, run_summary, turn_tokens};
 use crate::workflow_file::{run_pipeline, workflow_definition};
 
+mod locks;
+mod proof_runs;
 mod turn;
 
 #[cfg(test)]
@@ -201,6 +204,8 @@ pub struct Workflow<'a> {
     last_write: f64,
     /// The roles whose harness has no equivalent of the permission mode and that the log has said so for.
     told_dropped: HashSet<String>,
+    /// Seconds one proof may run: PROOF_TIMEOUT, which a test shortens.
+    proof_timeout: u64,
 }
 
 impl<'a> Workflow<'a> {
@@ -259,6 +264,7 @@ impl<'a> Workflow<'a> {
             me,
             last_write: 0.0,
             told_dropped: HashSet::new(),
+            proof_timeout: PROOF_TIMEOUT,
         })
     }
 
@@ -326,6 +332,7 @@ impl<'a> Workflow<'a> {
         if self.state.pull_request {
             self.publish()?;
         }
+        self.clean_up_locks();
         Ok(())
     }
 
@@ -717,7 +724,14 @@ impl<'a> Workflow<'a> {
 
     /// The step's turn in round n; false when the run goes on elsewhere than the next step.
     fn take_turn(&mut self, step: &Step, n: u32) -> Outcome<bool> {
+        if step.loop_to.is_some() {
+            self.rerun_proofs(step, n)?;
+        }
         let out = self.step_turn(step, n)?;
+        if step.edits {
+            // Before the quality round, so the gate judges the locked files.
+            self.hold_locks(step, n)?;
+        }
         if step.quality_gated && self.state.quality_round > 0 {
             // The report goes to the next quality round. A round whose gate resume turned off since its last quality
             // round never analyses it, and the next step reads the report all the same (Step::last_path).
@@ -728,6 +742,9 @@ impl<'a> Workflow<'a> {
         let verdict = parse_verdict(&out).unwrap_or_default();
         self.state.verdict = Some(verdict.to_string());
         self.human.log(&format!("[{}] round {n}: {verdict}", step.role));
+        if verdict == CHANGES_REQUESTED && self.pipeline.proof_command().is_some() {
+            self.judge_proofs(step, n, &out)?;
+        }
         if verdict != APPROVE && n < self.state.max_rounds {
             self.state.quality_round = 0;
             let pipeline = Rc::clone(&self.pipeline);
@@ -806,13 +823,17 @@ impl<'a> Workflow<'a> {
             fill.insert(name, value);
         }
         let template = |t: &str| format(t, &|name| fill.get(name).cloned()).map_err(|e| prompt_error(&step.id, &e));
-        let first = template(&step.prompt)?;
+        // What the verdict step hears of its round besides its prompt: the locked files restored, and the proofs run
+        // again.
+        let notes =
+            if step.loop_to.is_some() { self.locks_note(n)? + &self.carried_proofs_note(n)? } else { String::new() };
+        let first = template(&step.prompt)? + &notes;
         let follow = if q > 0 {
             let report_path = self.own_path(step, n);
             let quality_path = s.quality_path(n, q);
             self.fill(Prompt::QualityFixPrompt, &[("quality_path", &quality_path), ("report_path", &report_path)])?
         } else if n > 1 {
-            template(step.again.as_deref().filter(|a| !a.is_empty()).unwrap_or(&step.prompt))?
+            template(step.again.as_deref().filter(|a| !a.is_empty()).unwrap_or(&step.prompt))? + &notes
         } else {
             return Ok((first, None));
         };
@@ -824,7 +845,9 @@ impl<'a> Workflow<'a> {
         if q > 0 || step.fresh_repeats_again {
             fresh.push(follow.clone());
         }
-        Ok((follow, Some(fresh.join("\n\n"))))
+        // Last, so a fresh session hears it too, whatever its prompt repeats.
+        let proofs = if q > 0 { String::new() } else { self.proofs_note(step, n)? };
+        Ok((follow + &proofs, Some(fresh.join("\n\n") + &proofs)))
     }
 
     /// The value of a prompt placeholder (see Step) in the step's turn in round n.

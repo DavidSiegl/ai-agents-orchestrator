@@ -30,16 +30,10 @@ fn with_pipeline(p: &Pipeline) -> RunSettings {
     RunSettings { pipeline: Some(p.clone()), ..RunSettings::default() }
 }
 
-/// The Test Writer's turn of FOUR.
-fn write_tests() -> Turn {
-    writes(|s| format!("{}/tests.md", s.dir()), "tests written", "done")
-}
-
 /// The arguments of the commit the run made.
 fn commit_args(f: &Fixture) -> Vec<String> {
     f.host.state().git_calls.iter().find(|c| c[0] == "commit").cloned().expect("a commit")
 }
-
 
 #[test]
 fn workflow_without_a_spec_step() {

@@ -114,7 +114,7 @@ pub struct RunState {
     /// number in that name, demonstrated whether it failed against the change, and said how it exited and the last
     /// PROOF_TAIL_LINES lines it printed. A proof first runs in the round that wrote it (Workflow::judge_proofs), then
     /// again in every later round until it does not fail (Workflow::rerun_proofs). A record saved before written
-    /// existed is a first run: proof_written reads it.
+    /// existed is a first run, as crate::proofs::ProofRun reads it.
     pub proofs: Vec<Map<Json>>,
     /// The fields of a state.json that this engine does not know, as they were read, in their order.
     pub unknown: Map<Json>,
