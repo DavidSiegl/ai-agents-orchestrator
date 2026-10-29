@@ -156,7 +156,7 @@ pub fn resumable_state(
 }
 
 /// The run of runs named by its full id, or else by its key. Errors: none or several match.
-fn find_run<'r>(runs: &'r [(u64, Json)], run_ref: &str, cwd: &str) -> Result<&'r (u64, Json), OrchestratorError> {
+pub(super) fn find_run<'r>(runs: &'r [(u64, Json)], run_ref: &str, cwd: &str) -> Result<&'r (u64, Json), OrchestratorError> {
     let id = |run: &(u64, Json)| run.1.get("run_id").map(|v| v.as_str().map_or_else(|| v.python_str(), String::from));
     let mut matches: Vec<_> = runs.iter().filter(|r| id(r).as_deref() == Some(run_ref)).collect();
     if matches.is_empty() {

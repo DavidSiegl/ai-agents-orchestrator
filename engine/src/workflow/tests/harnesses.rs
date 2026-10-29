@@ -2,8 +2,8 @@
 //! test_saved_with_the_run: each role's agent started, resumed and saved in its harness.
 //!
 //! Not here: TestHarnessFlags' cases of parse_args, new_state and main (test_precedence, test_flags_reach_the_workflow,
-//! test_role_agent_for_a_role_the_workflow_lacks, test_unknown_kinds_are_argparse_errors), which ticket 09 ports with
-//! the CLI; and TestWorkflowFileAgents' test_workflows_prints_it, the workflows command's (ticket 09).
+//! test_role_agent_for_a_role_the_workflow_lacks, test_unknown_kinds_are_argparse_errors), crate::cli's tests' and
+//! crate::cli::args'; and TestWorkflowFileAgents' test_workflows_prints_it, crate::cli::workflows'.
 //! TestWorkflowFileAgents' other cases, and TestHarnessFlags' of launch_args and of reading a 0.3.0 state, are
 //! crate::workflow_file's, crate::harness's and crate::state's (tickets 04 and 06).
 
@@ -213,7 +213,7 @@ fn every_roles_harness_is_saved() {
 
 #[test]
 fn role_agent_starts_that_role_in_its_harness() {
-    // The harnesses new_state gives `run task --agent gemini --role-agent review=pi`, as test_precedence (ticket 09)
+    // The harnesses new_state gives `run task --agent gemini --role-agent review=pi`, as test_precedence (crate::cli's tests)
     // checks.
     let expected = [("spec", "gemini"), ("build", "gemini"), ("review", "pi")];
     let f = Fixture::new(approved());

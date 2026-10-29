@@ -1,8 +1,8 @@
 //! TestBlocked and TestBlockedResume: a step that can block writes a BLOCKED report, the turn waits for the human's
 //! answer and then for the report again, and an orchestrator killed at each point of a block resumes from there.
 //!
-//! Not here: the print_runs half of test_the_wait_is_saved_and_listed, list's (ticket
-//! 09); TestBlockedListing, list's and show's (ticket 09); TestParseBlocked, crate::handoff's and crate::pipeline's
+//! Not here: the print_runs half of test_the_wait_is_saved_and_listed, in
+//! crate::cli::listing's tests, with TestBlockedListing; TestParseBlocked, crate::handoff's and crate::pipeline's
 //! (ticket 04).
 
 use std::cell::RefCell;

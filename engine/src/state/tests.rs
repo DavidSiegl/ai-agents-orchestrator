@@ -177,7 +177,7 @@ fn a_state_with_a_field_it_does_not_know_and_without_later_ones_reads_with_their
 fn a_state_saved_before_the_gate_has_none() {
     // TestQualityCLI.test_state_saved_before_the_gate_has_none, on a review saved in round 1: its one case that is
     // RunState's. Its others are the CLI's (test_flag_checks, test_gate_reaches_the_workflow,
-    // test_list_shows_the_quality_phase: rust-engine ticket 09) and resumable_state's
+    // test_list_shows_the_quality_phase: crate::cli's tests) and resumable_state's
     // (test_resume_limit_against_the_saved_quality_round, test_resume_limit_needs_the_gate: cli/start/tests.rs).
     let mut state = RunState::new("20260929-120000-a1b2c3", "add a rate limiter", "/proj");
     (state.phase, state.round) = ("review".into(), 1);

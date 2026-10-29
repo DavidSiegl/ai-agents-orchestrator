@@ -807,6 +807,27 @@ impl Host for FakeHost {
         Ok(states)
     }
 
+    /// The real host's listing when FakeState::processes is set; else the files of run_dir in `files`, as the real
+    /// one lists them (no state.json, no temporary file), by their mtimes, those of one time, and those put straight
+    /// into files (time 0), in the order first written, as Python's ShowHost lists them.
+    fn run_files(&self, run_dir: &str) -> Result<Vec<super::RunFile>, OrchestratorError> {
+        let s = self.state();
+        if let Some(real) = &s.processes {
+            return real.run_files(run_dir);
+        }
+        let mut files: Vec<super::RunFile> = s
+            .files
+            .keys()
+            .filter_map(|path| {
+                let name = path.strip_prefix(run_dir)?.strip_prefix('/')?;
+                let listed = !name.contains('/') && name != "state.json" && !name.contains(".tmp.");
+                listed.then(|| super::RunFile { path: path.to_string(), mtime: s.mtimes.get(path).copied().unwrap_or(0) })
+            })
+            .collect();
+        files.sort_by_key(|f| f.mtime);
+        Ok(files)
+    }
+
     fn session_log(&self, kind: &str, session: &str) -> Result<Option<Vec<u8>>, OrchestratorError> {
         let s = self.state();
         Ok(s.session_logs.get(&(kind.to_string(), session.to_string())).map(|log| log.clone().into_bytes()))

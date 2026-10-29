@@ -1,6 +1,7 @@
 //! The command line as orchestrator.py's parse_args reads it, on clap: the subcommands with their flags, and the
-//! checks argparse's types cannot make (check_flag_values, check_spec_args). Ticket 08 has run and resume only; the
-//! other subcommands of parse_args join [`parser`] and [`Command`] with ticket 09.
+//! checks argparse's types cannot make (check_flag_values, check_spec_args). Ticket 09a has run, resume, the commands
+//! about a project's runs and workflows; drain, refresh, doctor and judged-in-quality join [`parser`] and
+//! [`Command`] with ticket 09b; gui is not ported (the rust-engine spec's Decisions), and serve is ticket 10's.
 //!
 //! The flags come in groups that several subcommands share, as argparse's parent parsers: [`Target`] (where the
 //! project is), [`Settings`] (how a run goes, which resume may change) and [`Starts`] (what a run is started with).
@@ -12,8 +13,11 @@ use clap::error::ErrorKind;
 use clap::{Arg, ArgAction, ArgMatches};
 
 use crate::constants::{
-    AGENT_KINDS, DEFAULT_AGENT, DEFAULT_MAX_QUALITY_ROUNDS, DEFAULT_MAX_ROUNDS, DEFAULT_TURN_TIMEOUT, ROLE_LABELS,
+    AGENT_KINDS, CLOSED_BRANCH_GRACE, DEFAULT_AGENT, DEFAULT_MAX_QUALITY_ROUNDS, DEFAULT_MAX_ROUNDS,
+    DEFAULT_TURN_TIMEOUT, REMOTE, ROLE_LABELS,
 };
+use crate::cli::listing::RUN_RECORD_VERSION;
+use crate::pipeline::METRICS_FILE;
 use crate::env::ConfigDir;
 use crate::pipeline::WORKFLOWS;
 use crate::workflow_file::workflow_names;
@@ -25,6 +29,26 @@ pub enum Command {
     Run(RunArgs),
     /// `resume`: go on with a run whose orchestrator has stopped.
     Resume(ResumeArgs),
+    /// A command about the runs of the project at the Target, which starts none: Python's RUNS_COMMANDS.
+    Runs(Target, RunsCommand),
+    /// `workflows`: list the workflows, or print the one named, a name or a file's path, as a workflow file.
+    Workflows(Option<String>),
+}
+
+/// A command about a project's runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RunsCommand {
+    /// `list`: each run's line; with json, one JSON document of run records instead, each with its pull request's
+    /// state from gh when pr_state.
+    List { json: bool, pr_state: bool },
+    /// `metrics`: the metrics.json of each run that is done, a line each.
+    Metrics,
+    /// `show`: one run in full, by its id or key.
+    Show(String),
+    /// `prune`: delete the branches of runs whose pull request is done; with dry_run, only say what would go.
+    Prune { dry_run: bool },
+    /// `close`: clean up after a run that is finished, failed or stale, by its id or key.
+    Close(String),
 }
 
 /// Where the project is: `--machine` and `--cwd`.
@@ -109,19 +133,22 @@ pub struct ResumeArgs {
 }
 
 impl Command {
-    /// Where the project is, as the human gave it.
-    pub fn target(&self) -> &Target {
+    /// Where the project is, as the human gave it; None for workflows, which names no project.
+    pub fn target(&self) -> Option<&Target> {
         match self {
-            Command::Run(a) => &a.target,
-            Command::Resume(a) => &a.target,
+            Command::Run(a) => Some(&a.target),
+            Command::Resume(a) => Some(&a.target),
+            Command::Runs(target, _) => Some(target),
+            Command::Workflows(_) => None,
         }
     }
 
-    /// The run's settings as the flags give them.
-    pub fn settings(&self) -> &Settings {
+    /// The run's settings as the flags give them; None for a command that starts no run.
+    pub fn settings(&self) -> Option<&Settings> {
         match self {
-            Command::Run(a) => &a.settings,
-            Command::Resume(a) => &a.settings,
+            Command::Run(a) => Some(&a.settings),
+            Command::Resume(a) => Some(&a.settings),
+            Command::Runs(..) | Command::Workflows(_) => None,
         }
     }
 }
@@ -169,9 +196,20 @@ pub fn parse_args(argv: impl IntoIterator<Item = OsString>, config: &ConfigDir) 
             quality_gate: string(m, "quality-gate"),
             no_quality_gate: m.get_flag("no-quality-gate"),
         }),
+        Some(("list", m)) => {
+            Command::Runs(target(m), RunsCommand::List { json: m.get_flag("json"), pr_state: m.get_flag("pr-state") })
+        }
+        Some(("metrics", m)) => Command::Runs(target(m), RunsCommand::Metrics),
+        Some(("show", m)) => Command::Runs(target(m), RunsCommand::Show(string(m, "run_ref").unwrap_or_default())),
+        Some(("prune", m)) => Command::Runs(target(m), RunsCommand::Prune { dry_run: m.get_flag("dry-run") }),
+        Some(("close", m)) => Command::Runs(target(m), RunsCommand::Close(string(m, "run_ref").unwrap_or_default())),
+        Some(("workflows", m)) => Command::Workflows(string(m, "workflow")),
         _ => unreachable!("clap requires one of the subcommands parser defines"),
     };
     check_spec_args(&matches, &mut p)?;
+    if let Command::Runs(_, RunsCommand::List { json: false, pr_state: true }) = command {
+        return Err(subcommand_error(&mut p, "list", "--pr-state needs --json"));
+    }
     check_flag_values(&command, &mut p)?;
     Ok(command)
 }
@@ -205,7 +243,7 @@ pub fn parser(config: &ConfigDir) -> clap::Command {
         )
         .args(target_args())
         .args(settings_args())
-        .arg(Arg::new("run_ref").value_name("RUN").required(true).help("the run id, or the six-character key at its end"))
+        .arg(Arg::new("run_ref").value_name("RUN").required(true).help(RUN_REF_HELP))
         .arg(Arg::new("force").long("force").action(ArgAction::SetTrue).help("take over a run that still looks alive"))
         // Hidden and refused by check_spec_args: a resumed run keeps its spec, and an abbreviation of --spec-model
         // must not be taken for it.
@@ -221,6 +259,72 @@ pub fn parser(config: &ConfigDir) -> clap::Command {
             "turn the run's quality gate off for good, deleting its refs on origin; an analysis under way is \
              dropped, and the Reviewer is told what the gate last found",
         ));
+    let run_ref = || Arg::new("run_ref").value_name("RUN").required(true).help(RUN_REF_HELP);
+    let list = clap::Command::new("list")
+        .about("list the runs in the project directory")
+        .long_about("List the runs in the project directory: each run's id, phase, round and outcome, and its task.")
+        .args(target_args())
+        .arg(Arg::new("json").long("json").action(ArgAction::SetTrue).help(format!(
+            "print one JSON document instead, {{\"version\": {RUN_RECORD_VERSION}, \"runs\": [...]}}, with a record \
+             of each run's state"
+        )))
+        .arg(
+            Arg::new("pr-state")
+                .long("pr-state")
+                .action(ArgAction::SetTrue)
+                .help("with --json, ask gh for the state of each run's pull request, one call per run"),
+        );
+    let metrics = clap::Command::new("metrics")
+        .about("print the metrics of every run that is done, a JSON line each")
+        .long_about(format!(
+            "Print the {METRICS_FILE} of every run in the project directory that is done, one JSON object per line, \
+             oldest run first, for jq or a spreadsheet: its outcome, roles, turns with their times and tokens, and \
+             quality rounds. A run that is not done has none and is left out."
+        ))
+        .args(target_args());
+    let show = clap::Command::new("show")
+        .about("print one run in full: its state, files and last review")
+        .long_about(
+            "Print one run: its line as list shows it and its whole task, its workflow, branch and pull request, \
+             each role's agent, the files in its run directory, and the last review.",
+        )
+        .args(target_args())
+        .arg(run_ref());
+    let prune = clap::Command::new("prune")
+        .about("delete the branches of runs whose pull request is done")
+        .long_about(format!(
+            "Delete the branch of each run whose pull request is merged, or closed for {} days, locally and on \
+             {REMOTE}, and print what became of each. A branch with commits its pull request lacks, or one checked \
+             out, is kept. Every run that opens a pull request does this first, except for branches kept before.",
+            CLOSED_BRANCH_GRACE / 86400
+        ))
+        .args(target_args())
+        .arg(
+            Arg::new("dry-run")
+                .long("dry-run")
+                .action(ArgAction::SetTrue)
+                .help("print what would be deleted, and delete nothing"),
+        );
+    let close = clap::Command::new("close")
+        .about("clean up after a finished or failed run: its workspace, worktree and branch")
+        .long_about(
+            "Clean up after a run that is finished, failed or stale, and record it in the run's state, so that \
+             resume refuses it. Closes the run's herdr workspace. A failed or stale --worktree run also loses its \
+             worktree, uncommitted changes included, which are listed first, and its branch, unless that has \
+             commits beyond the run's base. A finished run keeps its worktree; an in-place run keeps its checkout \
+             and branch. A running run is refused.",
+        )
+        .args(target_args())
+        .arg(run_ref());
+    let workflows = clap::Command::new("workflows")
+        .about("list the workflows, or print one as a workflow file")
+        .long_about(format!(
+            "Without WORKFLOW, list the workflows `run --workflow` offers: the built-in ones and the workflow files \
+             in {}. With it, print that workflow, or the file at that path, as a workflow file, a starting point \
+             for your own.",
+            config.workflows_dir()
+        ))
+        .arg(Arg::new("workflow").value_name("WORKFLOW").help("a workflow's name, or a file's path"));
     clap::Command::new("orchestrator")
         .about(
             "Role-based handoff between agent sessions in herdr, each role in the harness of its choice; by default \
@@ -230,8 +334,12 @@ pub fn parser(config: &ConfigDir) -> clap::Command {
         .arg_required_else_help(true)
         // argparse takes an unambiguous abbreviation of a long flag.
         .infer_long_args(true)
-        .subcommands([run, resume])
+        // argparse takes the last of a flag given twice, where clap would refuse it.
+        .subcommands([run, resume, list, metrics, show, prune, close, workflows].map(|c| c.args_override_self(true)))
 }
+
+/// What a RUN argument takes.
+const RUN_REF_HELP: &str = "the run id, or the six-character key at its end";
 
 /// --machine and --cwd.
 fn target_args() -> Vec<Arg> {
@@ -382,16 +490,19 @@ fn check_spec_args(matches: &ArgMatches, p: &mut clap::Command) -> Result<(), cl
 /// A usage error for flag values the parser cannot rule out: --machine without --cwd, a --max-rounds or
 /// --max-quality-rounds below 1, a run given --max-quality-rounds without --quality-gate, a resume given it with
 /// --no-quality-gate, and a --quality-gate that is not a Jenkins job's full name.
+///
+/// A flag command does not take is not checked.
 fn check_flag_values(command: &Command, p: &mut clap::Command) -> Result<(), clap::Error> {
     let error = |p: &mut clap::Command, message: &str| Err(p.error(ErrorKind::ValueValidation, message));
-    let (target, settings) = (command.target(), command.settings());
+    if command.target().is_some_and(|t| t.machine.is_some() && t.cwd.is_none()) {
+        return error(p, "--cwd is required with --machine");
+    }
+    let Some(settings) = command.settings() else { return Ok(()) };
     let (quality_gate, no_quality_gate) = match command {
         Command::Run(a) => (a.starts.quality_gate.as_deref(), false),
         Command::Resume(a) => (a.quality_gate.as_deref(), a.no_quality_gate),
+        Command::Runs(..) | Command::Workflows(_) => (None, false),
     };
-    if target.machine.is_some() && target.cwd.as_deref().is_none_or(str::is_empty) {
-        return error(p, "--cwd is required with --machine");
-    }
     if settings.max_rounds.is_some_and(|n| n < 1) {
         return error(p, "--max-rounds must be at least 1");
     }

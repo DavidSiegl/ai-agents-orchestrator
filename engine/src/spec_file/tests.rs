@@ -1,5 +1,5 @@
 //! read_spec_file and SpecFile::task as TestSpecCLI's cases see them through main; the CLI half of each, and the
-//! class's other cases, are main's (rust-engine ticket 09).
+//! class's other cases, are main's (crate::cli's tests and crate::cli::args').
 
 use super::*;
 use crate::test_support::TempDir;

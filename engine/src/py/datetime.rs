@@ -57,7 +57,8 @@ impl IsoTime {
     /// Its date as written, in its own offset, as `f"{time:%Y-%m-%d}"` writes it: 2026-10-29 for
     /// 2026-10-28T24:00:00Z.
     pub fn date(self) -> String {
-        let (year, month, day) = civil_from_days(i64::try_from(self.local.div_euclid(86_400_000_000)).expect("years 1 to 9999 fit"));
+        let days = i64::try_from(self.local.div_euclid(86_400_000_000)).expect("years 1 to 9999 fit");
+        let (year, month, day) = civil_from_days(days);
         format!("{year:04}-{month:02}-{day:02}")
     }
 }
