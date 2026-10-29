@@ -2,11 +2,12 @@ use super::*;
 use crate::py::oracle;
 
 #[test]
-fn dumps_writes_what_json_dumps_does() {
+fn dumps_writes_what_json_dumps_does_with_and_without_indent() {
     for case in oracle("json") {
         let case = case.as_array().unwrap();
         let value = Json::parse(case[0].as_str().unwrap()).unwrap();
         assert_eq!(value.dumps(), case[1].as_str().unwrap());
+        assert_eq!(value.dumps_indented(2), case[2].as_str().unwrap());
     }
 }
 

@@ -71,7 +71,7 @@ def build() -> dict:
         "parse": [[t, outcome(lambda t=t: chunks(t))] for t in TEMPLATES],
         "shlex_join": [[[s], shlex.join([s])] for s in [*STRINGS, *WORDS, *PATHS, *SHELL_WORDS]]
         + [[ARGV, shlex.join(ARGV)]],
-        "json": [[json.dumps(v, ensure_ascii=False), json.dumps(v)] for v in JSON_VALUES],
+        "json": [[json.dumps(v, ensure_ascii=False), json.dumps(v), json.dumps(v, indent=2)] for v in JSON_VALUES],
         "values": VALUES,
     }
 

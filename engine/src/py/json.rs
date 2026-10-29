@@ -140,11 +140,29 @@ impl Json {
     /// printable ASCII escaped, and a float as Python's repr writes it.
     pub fn dumps(&self) -> String {
         let mut out = String::new();
-        self.write(&mut out);
+        self.write(&mut out, None, 0);
         out
     }
 
-    fn write(&self, out: &mut String) {
+    /// The value as json.dumps(value, indent=indent) writes it: as dumps, but each item of a non-empty array or
+    /// object on a line of its own, indented by indent spaces a level, and "," between items.
+    pub fn dumps_indented(&self, indent: usize) -> String {
+        let mut out = String::new();
+        self.write(&mut out, Some(indent), 0);
+        out
+    }
+
+    /// Write the value at out's end, as dumps does without indent and as dumps_indented does with it, level being
+    /// how many arrays and objects hold it.
+    fn write(&self, out: &mut String, indent: Option<usize>, level: usize) {
+        // What comes before the first item, between two, and after the last of a container that has any.
+        let (open, between, close) = match indent {
+            None => (String::new(), ", ".to_string(), String::new()),
+            Some(n) => {
+                let inner = format!("\n{}", " ".repeat(n * (level + 1)));
+                (inner.clone(), format!(",{inner}"), format!("\n{}", " ".repeat(n * level)))
+            }
+        };
         match self {
             Json::Null => out.push_str("null"),
             Json::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
@@ -154,22 +172,24 @@ impl Json {
             Json::Array(items) => {
                 out.push('[');
                 for (i, item) in items.iter().enumerate() {
-                    if i > 0 {
-                        out.push_str(", ");
-                    }
-                    item.write(out);
+                    out.push_str(if i > 0 { &between } else { &open });
+                    item.write(out, indent, level + 1);
+                }
+                if !items.is_empty() {
+                    out.push_str(&close);
                 }
                 out.push(']');
             }
             Json::Object(map) => {
                 out.push('{');
                 for (i, (k, v)) in map.iter().enumerate() {
-                    if i > 0 {
-                        out.push_str(", ");
-                    }
+                    out.push_str(if i > 0 { &between } else { &open });
                     write_string(k, out);
                     out.push_str(": ");
-                    v.write(out);
+                    v.write(out, indent, level + 1);
+                }
+                if !map.is_empty() {
+                    out.push_str(&close);
                 }
                 out.push('}');
             }

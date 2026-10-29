@@ -71,6 +71,18 @@ pub const LINE_BREAKS: [char; 10] = ['\n', '\r', '\x0b', '\x0c', '\x1c', '\x1d',
 /// The lines of s, as str.splitlines() gives them: without their line ends, a line ending at any of LINE_BREAKS or
 /// at "\r\n", and no empty line after a last line end; none for an empty s.
 pub fn splitlines(s: &str) -> Vec<&str> {
+    splitlines_keepends(s)
+        .into_iter()
+        .map(|line| match line.strip_suffix("\r\n") {
+            Some(bare) => bare,
+            None => line.strip_suffix(|c| LINE_BREAKS.contains(&c)).unwrap_or(line),
+        })
+        .collect()
+}
+
+/// The lines of s, as str.splitlines(keepends=True) gives them: each with its line end, if it has one, as splitlines
+/// tells them apart.
+pub fn splitlines_keepends(s: &str) -> Vec<&str> {
     let mut lines = Vec::new();
     let mut start = 0;
     let mut chars = s.char_indices().peekable();
@@ -78,7 +90,6 @@ pub fn splitlines(s: &str) -> Vec<&str> {
         if !LINE_BREAKS.contains(&c) {
             continue;
         }
-        lines.push(&s[start..i]);
         let mut end = i + c.len_utf8();
         if c == '\r' {
             if let Some(&(j, '\n')) = chars.peek() {
@@ -86,6 +97,7 @@ pub fn splitlines(s: &str) -> Vec<&str> {
                 end = j + 1;
             }
         }
+        lines.push(&s[start..end]);
         start = end;
     }
     if start < s.len() {
