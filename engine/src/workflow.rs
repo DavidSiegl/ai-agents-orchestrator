@@ -380,9 +380,10 @@ impl<'a> Workflow<'a> {
         if self.state.pull_request {
             self.publish()?;
         }
-        self.clean_up_quality();
+        // As Python's KeyboardInterrupt, which the clean-ups' logged failures do not catch.
+        self.clean_up_quality()?;
         self.clean_up_locks();
-        Ok(())
+        self.check_interrupt()
     }
 
     fn check_phase(&self) -> Result<(), OrchestratorError> {
@@ -1301,7 +1302,8 @@ impl<'a> Workflow<'a> {
             return Ok(());
         }
         match self.save() {
-            Err(Stopped::Failed(e)) => {
+            // A save the Ctrl-C failed is the Ctrl-C.
+            Err(Stopped::Failed(e)) if !self.interrupt.is_raised() => {
                 // A run looks stale only after several missed beats, so one failure costs nothing; the next try comes
                 // a full interval later rather than on every poll.
                 self.human.log(&format!("heartbeat failed: {e}"));

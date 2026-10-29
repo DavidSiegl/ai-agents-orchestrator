@@ -215,12 +215,16 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   since SIGINT then no longer ends the process, turn a raised `Interrupt` outside a Workflow (the checks and
   `sweep_branches` before it, `list`, `show`, `prune`, `close`, `drain` between runs) into the interrupted note and
   exit status 130, as Python's KeyboardInterrupt anywhere does; `serve` (ticket 10) has its own SIGINT, which
-  `on_sigint` would take over. (2) A Ctrl-C during a Jenkins or PyPI request (`crate::http`, ureq) waits for the
-  request to end, up to its timeout, where Python's KeyboardInterrupt stops `urlopen` at once: no process to stop.
-  (3) Under macOS, `on_sigint` reads no `/proc/self/status` and takes the kernel to discard a SIGINT that was ignored
-  when the engine started, even while blocked, as the BSD kernels do; unchecked on a Mac. (4) A process that left the
-  command's group, as a daemon does, is not reached, as at a timeout. Each closes with the ticket named, or with a
-  test on macOS for (3).
+  `on_sigint` would take over; closes with those tickets. (2) A Ctrl-C during a Jenkins or PyPI request
+  (`crate::http`, ureq) waits for the request to end, up to its timeout, where Python's KeyboardInterrupt stops
+  `urlopen` at once: there is no process to stop, and ureq has no way to abandon a request from another thread.
+  Closes with a request the Interrupt can cut short (one whose reads are given slices of the timeout, the Interrupt
+  checked between them, or one run on a thread the Workflow stops waiting for), or with the user's ruling that the
+  wait is acceptable. (3) Under macOS, `on_sigint` reads no `/proc/self/status` and takes the kernel to discard a
+  SIGINT that was ignored when the engine started, even while blocked, as the BSD kernels do, and `run_process` gives
+  a command the whole 250 ms grace, nix having no `waitid` there; unchecked on a Mac, closes with
+  `engine/tests/sigint.rs` run on one. A process that left the command's group, as a daemon does, is not reached, as at
+  a timeout; that is no gap, as the terminal's Ctrl-C does not reach one in Python either.
 - **The Rust engine talks to Jenkins and PyPI otherwise than urllib in a few cases.** Its transport is ureq
   (`HttpClient`, `engine/src/http.rs`, rust-engine ticket 07, 2026-10-28), which differs from `urlopen` where no test of
   the Python engine pins it: ureq reaches an http URL through a proxy with CONNECT, as it does an https one, where
@@ -687,10 +691,13 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   blocks SIGINT and starts a thread that waits for it (sigwait) and raises the `Interrupt` at each one, from the
   terminal or a kill of the engine's group; `ProcessHost::local` and `ProcessHerdr::new` take the `Interrupt`, and
   `run_process` (`engine/src/host/process.rs`) watches it while a command runs: at a raise the command's group gets
-  SIGINT and, unless its pipes close within `INTERRUPT_GRACE_MS` (250 ms, Python's `Popen._sigint_wait_secs`), SIGKILL,
+  SIGINT and, once the command exits or `INTERRUPT_GRACE_MS` (250 ms, Python's `Popen._sigint_wait_secs`) pass, SIGKILL,
   and the command fails as interrupted, also one that answered meanwhile, such as a `herdr agent prompt` herdr had
   delivered (review 97, F1); while the `Interrupt` is pending no command starts, until the Workflow catches it
-  (`Interrupt::catch`) to release the run; `SystemClocks`' sleep ends at a raise; the children start with SIGINT
+  (`Interrupt::catch`) to release the run; what only logs its failures (the heartbeat, the end's clean-ups, which then
+  keep `RunState::ci`) stops the run at a Ctrl-C, as Python's KeyboardInterrupt passes `except OrchestratorError`, and
+  the proof copies are removed as Python's finally removes them (`Interrupt::finally`); `SystemClocks`' sleep ends at a
+  raise; the children start with SIGINT
   unblocked (`unblock_sigint`, the engine's one `unsafe`, `CommandExt::pre_exec`). A SIGINT ignored when the engine
   started stays ignored, as in Python. Held by the Ctrl-C cases of `engine/src/host/tests.rs` and
   `engine/src/herdr/tests.rs`, `workflow/tests/interrupted.rs` (a run waiting on herdr, one during a prompt herdr

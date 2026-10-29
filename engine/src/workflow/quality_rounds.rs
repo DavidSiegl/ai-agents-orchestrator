@@ -527,10 +527,19 @@ impl<'a> Workflow<'a> {
 
     /// At the end of a run that has or had the quality gate, delete its refs on origin, again for one whose gate
     /// resume turned off, in case deleting them then failed; a failure is only logged.
-    pub(super) fn clean_up_quality(&mut self) {
+    ///
+    /// Errors: the Ctrl-C, raised meanwhile, which keeps RunState::ci, as Python's KeyboardInterrupt in
+    /// delete_ci_refs does, for a resume to find the build.
+    pub(super) fn clean_up_quality(&mut self) -> Outcome<()> {
         if self.state.had_quality_gate() {
+            let ci = self.state.ci.clone();
             delete_ci_refs(self.host, self.human, &mut self.state);
+            if self.interrupt.is_raised() {
+                self.state.ci = ci;
+                return Err(Stopped::Interrupted);
+            }
         }
+        Ok(())
     }
 
     /// RunState::ci's field key, a string. Errors: it is missing or not a string, as no engine saves it.

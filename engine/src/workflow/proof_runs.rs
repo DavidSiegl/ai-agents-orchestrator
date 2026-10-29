@@ -180,7 +180,8 @@ impl Workflow<'_> {
             let argv = ["sh", "-c", PROOF_SCRIPT, "_", work_dir, &cmd, &limit];
             self.host.run_verbatim(&argv, None, self.proof_timeout + 30)
         });
-        self.remove_proof_copies(&copies);
+        // As Python's finally, which removes them also when the proof's run raises KeyboardInterrupt.
+        self.interrupt.finally(|| self.remove_proof_copies(&copies));
         // As Python's KeyboardInterrupt, which the proof's run raises: nothing of an interrupted proof is recorded.
         self.check_interrupt()?;
         let proc = match ran {

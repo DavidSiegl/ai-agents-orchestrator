@@ -175,8 +175,8 @@ pub(crate) enum ProcessError {
     Interrupted,
 }
 
-/// How long a command's process group has after the SIGINT of an Interrupt to end before it is killed (SIGKILL), in
-/// milliseconds: Python's subprocess waits as long (Popen._sigint_wait_secs) for a child to end on the Ctrl-C it got
+/// How long a command has after the SIGINT of an Interrupt to exit before its process group is killed (SIGKILL), in
+/// milliseconds: Python's subprocess waits as long (Popen._sigint_wait_secs) for a child to exit on the Ctrl-C it got
 /// too before it kills it. The SIGINT first lets git remove its lock files, as it does at a Ctrl-C.
 const INTERRUPT_GRACE_MS: u64 = 250;
 
@@ -184,8 +184,8 @@ const INTERRUPT_GRACE_MS: u64 = 250;
 /// closed both: run with exactly env as its environment, argv[0] found on its PATH, stdin as its standard input (none
 /// when None), in a process group of its own, so that when it has not finished within timeout, it and every process it
 /// started that stayed in its group are killed (SIGKILL); a timeout of None lets it run as long as it takes. When
-/// interrupt is raised while it runs, the group is sent SIGINT, and SIGKILL INTERRUPT_GRACE_MS later unless every pipe
-/// closed first, and the command fails as Interrupted; while interrupt is pending, no command starts. A process that
+/// interrupt is raised while it runs, the command fails as Interrupted, its group sent SIGINT, and SIGKILL once it has
+/// exited or INTERRUPT_GRACE_MS have passed (stop_group); while interrupt is pending, no command starts. A process that
 /// left the group, as a daemon does, is not killed; if it holds the output open, the threads reading it end when it
 /// closes it.
 pub(crate) fn run_process(
@@ -257,14 +257,14 @@ pub(crate) fn run_process(
             Piped::Output(n, Ok(out)) => outputs[n] = out,
             Piped::Output(_, Err(e)) | Piped::Input(Err(e)) => return Err(abandon(&mut child, ProcessError::Io(e))),
             Piped::Input(Ok(())) => {}
-            Piped::Interrupted => return Err(stop_group(&mut child, &received, pending)),
+            Piped::Interrupted => return Err(stop_group(&mut child)),
         }
         pending -= 1;
     }
     let status = loop {
         // A command that closed its output and runs on is stopped by the interrupt as one that did not.
         if let Ok(Piped::Interrupted) = received.try_recv() {
-            return Err(stop_group(&mut child, &received, 0));
+            return Err(stop_group(&mut child));
         }
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -306,23 +306,38 @@ enum Piped {
     Interrupted,
 }
 
-/// Stop child's process group for an Interrupt, child included, and reap child: SIGINT, then SIGKILL once the pending
-/// pipes still open have closed, or INTERRUPT_GRACE_MS has passed. Gives Interrupted, or the error that stopped the
-/// signals.
-fn stop_group(child: &mut Child, received: &mpsc::Receiver<Piped>, mut pending: usize) -> ProcessError {
+/// Stop child's process group for an Interrupt, child included, and reap child: SIGINT, then SIGKILL to what is left
+/// of the group once child has exited, or INTERRUPT_GRACE_MS have passed. Gives Interrupted, or the error that stopped
+/// the signals or the wait.
+fn stop_group(child: &mut Child) -> ProcessError {
     if let Err(e) = kill_group(child, Signal::SIGINT) {
         return abandon(child, ProcessError::Io(e));
     }
     let grace = Instant::now() + Duration::from_millis(INTERRUPT_GRACE_MS);
-    while pending > 0 {
-        match received.recv_timeout(grace.saturating_duration_since(Instant::now())) {
-            Ok(Piped::Interrupted) => {}
-            Ok(_) => pending -= 1,
-            Err(_) => break,
+    loop {
+        match exited(child) {
+            Ok(false) if Instant::now() < grace => thread::sleep(Duration::from_millis(5)),
+            Ok(_) => break,
+            Err(e) => return abandon(child, ProcessError::Io(e)),
         }
     }
     // Killed while child is not reaped, so that its pid, the group's id, names no other group.
     abandon(child, ProcessError::Interrupted)
+}
+
+/// Whether child has exited, without reaping it (waitid's WNOWAIT), so that its pid still names its group.
+#[cfg(target_os = "linux")]
+fn exited(child: &Child) -> std::io::Result<bool> {
+    use nix::sys::wait::{waitid, Id, WaitPidFlag, WaitStatus};
+    let pid = Pid::from_raw(i32::try_from(child.id()).expect("a pid fits an i32"));
+    let flags = WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT;
+    Ok(!matches!(waitid(Id::Pid(pid), flags)?, WaitStatus::StillAlive))
+}
+
+/// Never known before the grace ends where nix has no waitid, as on macOS: the group then has the whole grace.
+#[cfg(not(target_os = "linux"))]
+fn exited(_child: &Child) -> std::io::Result<bool> {
+    Ok(false)
 }
 
 /// Kill child's process group, child included, and reap child, for a command that failed with why: why, or the error

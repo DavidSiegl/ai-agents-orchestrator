@@ -65,3 +65,30 @@ fn a_watch_hears_each_raise_while_it_lasts() {
     interrupt.catch();
     assert!(!interrupt.watch(|| {}).expect("caught").interrupted());
 }
+
+#[test]
+fn a_finally_runs_its_commands_and_leaves_it_pending() {
+    let interrupt = Interrupt::new();
+    // Not pending: nothing changes.
+    assert!(interrupt.finally(|| interrupt.watch(|| {}).is_some()));
+    assert!(!interrupt.is_raised());
+    interrupt.raise();
+    assert!(interrupt.finally(|| interrupt.watch(|| {}).is_some()), "a command could not start in the finally");
+    assert!(interrupt.is_raised());
+    // Raised during it, it is pending after it too.
+    interrupt.catch();
+    interrupt.finally(|| interrupt.raise());
+    assert!(interrupt.is_raised());
+}
+
+#[test]
+fn a_sleep_too_long_for_the_clock_waits_for_the_raise() {
+    let interrupt = Interrupt::new();
+    let raiser = interrupt.clone();
+    let raising = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        raiser.raise();
+    });
+    interrupt.sleep(Duration::MAX);
+    raising.join().unwrap();
+}

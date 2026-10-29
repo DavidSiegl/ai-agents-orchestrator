@@ -21,13 +21,16 @@ use nix::sys::signal::{SigSet, Signal};
 #[derive(Clone, Debug, Default)]
 pub struct Interrupt(Arc<Shared>);
 
+/// What the clones of one Interrupt share.
 #[derive(Debug, Default)]
 struct Shared {
+    /// Its raises and the commands watching it.
     state: Mutex<Raises>,
-    /// Notified at each raise, for the sleeps.
+    /// Notified at each raise, under state's lock, for the sleeps waiting on it.
     raised: Condvar,
 }
 
+/// An Interrupt's history, from which whether it is pending follows, and who is to hear of its next raise.
 #[derive(Default)]
 struct Raises {
     /// How many times it has been raised.
@@ -76,16 +79,36 @@ impl Interrupt {
         s.caught = s.raised;
     }
 
-    /// Wait for duration to pass, or less once it is pending: at once when it is pending already.
+    /// Run f as Python runs a finally block that a KeyboardInterrupt passes through: f's commands start, as if it
+    /// were caught, and afterwards it is pending again if it was before f or was raised during it.
+    pub fn finally<T>(&self, f: impl FnOnce() -> T) -> T {
+        let held = {
+            let mut s = self.lock();
+            let held = s.caught;
+            s.caught = s.raised;
+            held
+        };
+        let done = f();
+        self.lock().caught = held;
+        done
+    }
+
+    /// Wait for duration to pass, or less once it is pending: at once when it is pending already. A duration too
+    /// long for the clock to reach waits until it is raised.
     pub fn sleep(&self, duration: Duration) {
-        let deadline = Instant::now() + duration;
+        let deadline = Instant::now().checked_add(duration);
         let mut s = self.lock();
         while s.raised == s.caught {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return;
-            }
-            s = self.0.raised.wait_timeout(s, left).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
+            s = match deadline {
+                Some(deadline) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return;
+                    }
+                    self.0.raised.wait_timeout(s, left).unwrap_or_else(|poisoned| poisoned.into_inner()).0
+                }
+                None => self.0.raised.wait(s).unwrap_or_else(|poisoned| poisoned.into_inner()),
+            };
         }
     }
 

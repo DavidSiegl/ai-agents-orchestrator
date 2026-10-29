@@ -587,16 +587,19 @@ fn a_command_that_ignores_the_ctrl_c_is_killed() {
 }
 
 #[test]
-fn a_command_that_closed_its_output_is_stopped_too() {
+fn a_command_that_closed_its_output_is_stopped_too_and_hears_the_ctrl_c_first() {
     let d = TempDir::new();
-    let (pid, interrupt) = (d.join("pid"), Interrupt::new());
+    let (pid, heard, interrupt) = (d.join("pid"), d.join("heard"), Interrupt::new());
     let host = ProcessHost::local(&interrupt);
     let raising = raise_once_written(&pid, &interrupt);
-    let script = "exec >/dev/null 2>&1; echo $$ > \"$1\"; while :; do sleep 0.05; done";
-    let e = host.run(&["sh", "-c", script, "_", &pid], None, 600).unwrap_err();
+    // It takes a while over its SIGINT, as git may: the grace waits for it.
+    let script = "exec >/dev/null 2>&1; trap 'sleep 0.1; echo SIGINT > \"$2\"; exit 0' INT; echo $$ > \"$1\"; \
+                  while :; do sleep 0.05; done";
+    let e = host.run(&["sh", "-c", script, "_", &pid, &heard], None, 600).unwrap_err();
     raising.join().unwrap();
     assert!(e.0.ends_with(": interrupted"), "{e}");
     assert!(ended(&pid), "the command outlived the Ctrl-C");
+    assert_eq!(read(&heard), "SIGINT\n");
 }
 
 #[test]

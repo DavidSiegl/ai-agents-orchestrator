@@ -75,8 +75,10 @@ impl Human for LocalHuman {
         }
     }
 
+    /// A line stderr does not take is lost: there is nowhere else to tell the human, and a run is not stopped for it.
     fn log(&self, line: &str) {
-        eprintln!("  {line}");
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), "  {line}");
     }
 }
 

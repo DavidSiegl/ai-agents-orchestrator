@@ -93,3 +93,55 @@ fn a_ctrl_c_that_fails_the_done_runs_save_is_the_interrupt_not_a_failure() {
     assert_eq!(f.workflow(RunSettings::default()).run(), Err(Stopped::Interrupted));
     assert_eq!(RunState::from_saved(&f.saved()).unwrap().error, None);
 }
+
+/// A run resumed at publish, with locked files, and with or without a quality gate that was on, whose human presses
+/// Ctrl-C at its first git_command; the fixture, once its run has stopped as interrupted.
+fn interrupted_at_the_end(had_gate: bool, git_command: &'static str) -> Fixture {
+    let mut state = saved_run("publish", 1, &["build"]);
+    state.pull_request = true;
+    (state.base_branch, state.branch) = (Some("main".into()), Some("orchestrator/x-a1b2c3".into()));
+    (state.verdict, state.workflow) = (Some(crate::constants::FINISHED.into()), "solo".into());
+    state.quality_gate_disabled = had_gate;
+    state.ci = [("build", Json::from(41))].into_iter().collect();
+    state.locked = [("build", vec!["tests/test_x.py".to_string()])].into_iter().collect();
+    let host = Rc::new(FakeHost::new(Some("def456"), "orchestrator/x-a1b2c3"));
+    host.state().refs.insert(format!("{}build/1", state.refs_prefix()), "abc123".to_string());
+    let f = Fixture::resume(Rc::clone(&host), state, vec![], &[], &[]);
+    let interrupt = f.interrupt.clone();
+    host.state().before_git = Some(Box::new(move |_, args| {
+        if args.first() == Some(&git_command) {
+            interrupt.raise();
+        }
+    }));
+    let settings = RunSettings { pipeline: Some(crate::test_support::solo()), ..f.as_saved() };
+    assert_eq!(f.workflow(settings).run(), Err(Stopped::Interrupted));
+    assert_eq!(interrupted(&f).phase, "publish");
+    f
+}
+
+#[test]
+fn a_ctrl_c_during_the_end_clean_ups_releases_the_run_and_keeps_its_build() {
+    // As Python's KeyboardInterrupt in _clean_up_quality, which its logged failures do not catch: the run is released
+    // as interrupted, with RunState::ci kept for a resume, and its local refs are not deleted.
+    let f = interrupted_at_the_end(true, "ls-remote");
+    assert_eq!(RunState::from_saved(&f.saved()).unwrap().ci, [("build", Json::from(41))].into_iter().collect::<Map<Json>>());
+    assert_eq!(f.host.state().refs.len(), 1, "the local refs were deleted");
+    // And at publish's last command, which a FakeHost lets succeed where a ProcessHost fails it: the run is released
+    // as interrupted all the same.
+    interrupted_at_the_end(false, "switch");
+}
+
+#[test]
+fn a_ctrl_c_that_fails_a_heartbeat_is_the_interrupt_not_a_missed_beat() {
+    let f = Fixture::new(vec![("spec", vec![working()])]);
+    let (interrupt, clock, state) = (f.interrupt.clone(), Rc::clone(&f.clock), format!("{}/state.json", f.state.dir()));
+    f.host.state().before_write = Some(Box::new(move |path, _| {
+        if path == state && clock.now() >= crate::constants::HEARTBEAT_SECONDS as f64 {
+            interrupt.raise();
+            return Err(crate::error::OrchestratorError(format!("{path}: interrupted")));
+        }
+        Ok(())
+    }));
+    assert_eq!(f.workflow(RunSettings::default()).run(), Err(Stopped::Interrupted));
+    assert!(!f.told.lines().iter().any(|line| line.starts_with("heartbeat failed")), "{:?}", f.told.lines());
+}

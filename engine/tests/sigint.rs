@@ -3,7 +3,7 @@
 //! out. So this test binary has a main of its own (harness = false), which runs as a parent that starts itself again
 //! as the engine, in a process group of its own that the parent then signals, as the terminal's Ctrl-C and the
 //! desktop app's Stop signal the engine's group. The parent answers the parts of libtest's command line that cargo
-//! test and cargo-nextest use: `--list --format terse [--ignored]`, and a name to run, `--exact` or not.
+//! test and cargo-nextest use (Cli), and refuses any other option.
 //!
 //! Linux only, as the engine's other process tests: the engine reads /proc, and GNU env starts the engine with SIGINT
 //! at its default or ignored, whatever the test's own process does (Jenkins runs the tests with SIGINT ignored).
@@ -37,13 +37,9 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let exact = args.iter().any(|a| a == "--exact");
-    let ignored_only = args.iter().any(|a| a == "--ignored");
-    let filters: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).filter(|a| *a != "terse").collect();
-    let chosen = TESTS.iter().filter(|(name, _)| {
-        !ignored_only && (filters.is_empty() || filters.iter().any(|f| if exact { *f == name } else { name.contains(f.as_str()) }))
-    });
-    if args.iter().any(|a| a == "--list") {
+    let Some(cli) = Cli::parse(&args) else { return ExitCode::from(101) };
+    let chosen = TESTS.iter().filter(|(name, _)| cli.runs(name));
+    if cli.list {
         for (name, _) in chosen {
             println!("{name}: test");
         }
@@ -56,6 +52,61 @@ fn main() -> ExitCode {
         failed += usize::from(!passed);
     }
     if failed == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+}
+
+/// What the command line asks of the parent, in libtest's terms.
+struct Cli {
+    /// --list: name the tests rather than run them.
+    list: bool,
+    /// --exact: a filter is a whole name, not a part of one.
+    exact: bool,
+    /// --ignored: only the ignored tests, of which there are none.
+    ignored_only: bool,
+    /// The names, or parts of names, of the tests to run; every test when empty.
+    filters: Vec<String>,
+    /// --skip's: the tests whose names hold one are not run.
+    skips: Vec<String>,
+}
+
+impl Cli {
+    /// The command line args, after the program's name; None, having said why on stderr, for an option libtest does
+    /// not have or that this harness cannot honour.
+    fn parse(args: &[String]) -> Option<Cli> {
+        let mut cli = Cli { list: false, exact: false, ignored_only: false, filters: vec![], skips: vec![] };
+        let mut args = args.iter();
+        while let Some(arg) = args.next() {
+            let (option, inline) = match arg.split_once('=') {
+                Some((option, value)) if arg.starts_with("--") => (option, Some(value.to_string())),
+                _ => (arg.as_str(), None),
+            };
+            let mut value = || inline.clone().or_else(|| args.next().cloned());
+            match option {
+                "--list" => cli.list = true,
+                "--exact" => cli.exact = true,
+                "--ignored" => cli.ignored_only = true,
+                // Every test runs, one after the other, whatever these say.
+                "--include-ignored" | "--nocapture" | "--show-output" | "--quiet" | "-q" => {}
+                "--test-threads" | "--format" | "--color" | "-Z" => {
+                    value()?;
+                }
+                "--skip" => cli.skips.push(value()?),
+                option if option.starts_with('-') => {
+                    eprintln!("sigint: {option} is not an option this harness takes");
+                    return None;
+                }
+                _ => cli.filters.push(arg.clone()),
+            }
+        }
+        Some(cli)
+    }
+
+    /// Whether the test named name is to be run (or listed).
+    fn runs(&self, name: &str) -> bool {
+        let named = |f: &String| if self.exact { f == name } else { name.contains(f.as_str()) };
+        !self.ignored_only
+            && (self.filters.is_empty() || self.filters.iter().any(named))
+            && !self.skips.iter().any(|skip| name.contains(skip.as_str()))
+    }
 }
 
 /// The engine's side of case, writing what it saw into dir.

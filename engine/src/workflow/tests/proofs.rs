@@ -58,11 +58,11 @@ fn write_proof(dir: &str, name: &str, exit: Exit) {
     std::fs::write(format!("{dir}/{name}"), format!("echo checking {name}\n{check}")).unwrap();
 }
 
-/// A FakeHost whose commands but git run for real, stopped by the Interrupt of the fixture it is given to.
-fn real_processes() -> Rc<FakeHost> {
-    let host = Rc::new(FakeHost::default());
-    host.state().processes = Some(ProcessHost::local(&Interrupt::new()));
-    host
+/// The fixture of state played by script on a FakeHost whose commands but git run for real.
+fn on_real_processes(state: RunState, script: Script) -> Fixture {
+    let f = Fixture::on(Rc::new(FakeHost::default()), state, script);
+    f.run_processes();
+    f
 }
 
 /// A quick run in a scratch project whose Reviewer writes, per round, a review with a verdict and proofs: Python's
@@ -129,7 +129,7 @@ impl Proving {
         let mut state = RunState::new(RUN_ID, TASK, &proj.path());
         state.phase = "build".to_string();
         state.workflow = self.pipeline.name().to_string();
-        let f = Fixture::on(real_processes(), state, vec![("build", builds), ("review", reviews)]);
+        let f = on_real_processes(state, vec![("build", builds), ("review", reviews)]);
         let settings = settings(&self.pipeline, self.max_rounds);
         Proved { f, settings, seen, reviewed }
     }
@@ -262,7 +262,7 @@ fn resumed_in_review(proj: &TempDir, review: &str, proofs: Vec<Map<Json>>) -> (F
     (state.phase, state.round, state.workflow, state.base) = ("review".into(), 1, "quick".into(), Some("abc123".into()));
     state.proofs = proofs;
     let seen = seen();
-    let f = Fixture::on(real_processes(), state.clone(), vec![
+    let f = on_real_processes(state.clone(), vec![
         ("build", vec![recording(build_turn(2), &seen)]),
         ("review", vec![review_turn(2, APPROVE)]),
     ]);
@@ -371,7 +371,7 @@ fn saved_with_proofs(proj: &TempDir, phase: &str, n: u32, runs: Vec<Map<Json>>, 
     let mut state = RunState::new(RUN_ID, TASK, &proj.path());
     (state.phase, state.round, state.workflow, state.base) = (phase.into(), n, "quick".into(), Some("abc123".into()));
     state.proofs = runs;
-    let f = Fixture::on(real_processes(), state.clone(), script);
+    let f = on_real_processes(state.clone(), script);
     for i in 1..n {
         f.put(&state.build_path(i), &format!("report {i}"));
     }
@@ -572,6 +572,8 @@ fn a_ctrl_c_while_a_proof_runs_stops_it_with_what_it_started() {
     assert!(started.elapsed() < std::time::Duration::from_secs(60));
     assert!(ended(&pid), "the proof outlived the Ctrl-C");
     assert!(ended(&background), "what the proof started outlived the Ctrl-C");
+    // Removed as Python's finally removes them.
+    assert!(!std::path::Path::new(&format!("{}/{PROOF_COPIES_DIR}", proj.path())).exists());
     let saved = RunState::from_saved(&p.f.saved()).unwrap();
     assert_eq!((saved.error.as_deref(), saved.phase.as_str(), saved.proofs.len()), (Some("interrupted"), "review", 0));
 }
@@ -710,7 +712,7 @@ fn a_carried_proof_runs_again_after_the_rounds_last_quality_round_and_before_the
     let pipeline = replaced(&DEFAULT_WORKFLOW, |s| s.proof_command = Some(COMMAND.into())).unwrap();
     let mut state = RunState::new(RUN_ID, TASK, &dir);
     (state.phase, state.workflow) = ("build".into(), pipeline.name().to_string());
-    let host = real_processes();
+    let host = Rc::new(FakeHost::default());
     // git ignores the scratch project's .orchestrator, as FakeHost has it ignore /proj's, for the gate's clean-tree
     // check; and a quality round is logged as its snapshot is pushed.
     let (weak, orchestrator_dir, pushed) = (Rc::downgrade(&host), format!("{dir}/.orchestrator/"), event.clone());
@@ -728,6 +730,7 @@ fn a_carried_proof_runs_again_after_the_rounds_last_quality_round_and_before_the
         ("review", vec![logged("review", review_with_proof), logged("review", review_turn(2, APPROVE))]),
     ])
     .gated();
+    f.run_processes();
     f.ci.state().outcomes = vec![green(), red(), green()].into();
 
     let mut wf = f.workflow(settings(&pipeline, 3));

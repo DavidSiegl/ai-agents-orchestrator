@@ -110,8 +110,7 @@ impl Fixture {
     }
 
     /// make_workflow with host and state: the run state describes on host, the roles played by script. The host's
-    /// clock becomes the fixture's unless it has one, and its real processes (FakeState::processes), when it has
-    /// them, are stopped by the fixture's interrupt.
+    /// clock becomes the fixture's unless it has one.
     pub fn on(host: Rc<FakeHost>, state: RunState, script: Vec<(&str, Vec<Turn>)>) -> Fixture {
         let herdr = Rc::new(FakeHerdr::new(Rc::clone(&host), state.clone(), script));
         let interrupt = Interrupt::new();
@@ -119,9 +118,6 @@ impl Fixture {
         let clock = Rc::new(FakeClock::default());
         if host.state().clock.is_none() {
             host.state().clock = Some(Rc::clone(&clock));
-        }
-        if host.state().processes.is_some() {
-            host.state().processes = Some(ProcessHost::local(&interrupt));
         }
         let pypi = FakePyPI::from_json(Map::new());
         let index = PyPI::new(Arc::clone(&pypi) as Arc<dyn Http>);
@@ -138,6 +134,11 @@ impl Fixture {
             pypi,
             index,
         }
+    }
+
+    /// Have the host's commands but git run for real (FakeState::processes), stopped by the fixture's interrupt.
+    pub fn run_processes(&self) {
+        self.host.state().processes = Some(ProcessHost::local(&self.interrupt));
     }
 
     /// The fixture with the quality gate on: the Workflow is given the quality job on ci, with every credential, as
