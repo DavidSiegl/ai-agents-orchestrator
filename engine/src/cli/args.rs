@@ -407,12 +407,10 @@ fn is_job_name(job: &str) -> bool {
     job.split('/').all(|part| !part.is_empty())
 }
 
-/// A usage error of the subcommand name, with its usage.
+/// A usage error of the subcommand name, one parser defines, with its usage.
 fn subcommand_error(p: &mut clap::Command, name: &str, message: &str) -> clap::Error {
-    match p.find_subcommand_mut(name) {
-        Some(sub) => sub.error(ErrorKind::MissingRequiredArgument, message),
-        None => p.error(ErrorKind::MissingRequiredArgument, message),
-    }
+    let sub = p.find_subcommand_mut(name).expect("check_spec_args names the subcommands parser defines");
+    sub.error(ErrorKind::MissingRequiredArgument, message)
 }
 
 /// The value of the flag or argument id as given; None when it was not.

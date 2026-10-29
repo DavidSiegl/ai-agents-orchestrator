@@ -11,7 +11,7 @@ use crate::ci::fake::{jenkins_on, FakeJenkins, JOB};
 use crate::constants::APPROVE;
 use crate::host::fake::FakeHost;
 use crate::py::json::Json;
-use crate::workflow::fixture::{saved_run, Fixture};
+use crate::workflow::fixture::{build_turn, saved_run, then_interrupted, Fixture};
 
 /// The command line argv, after the program's name.
 fn command(argv: &[&str]) -> Command {
@@ -105,6 +105,18 @@ fn a_ctrl_c_outside_the_workflow_is_the_interrupt() {
     let Err(Stop::Interrupted(Some(run_id))) = ended else { panic!("not interrupted with its run") };
     assert_eq!(run_id, "20260929-120000-a1b2c3");
     assert!(f.herdr.state().calls.is_empty());
+}
+
+#[test]
+fn a_ctrl_c_in_the_workflow_names_the_run_it_stopped() {
+    let (f, _) = saved_on_host(saved_run("build", 1, &["spec", "build"]));
+    f.play("build", vec![then_interrupted(&f.interrupt, build_turn(1))]);
+    let argv = ["resume", "a1b2c3", "--cwd", "/proj"];
+    let Err(Stop::Interrupted(Some(run_id))) = run_on(&f, &argv, &FakeJenkins::new(), &RefCell::new(vec![])) else {
+        panic!("the run was not interrupted")
+    };
+    assert_eq!(run_id, "20260929-120000-a1b2c3");
+    assert_eq!(f.saved().get("error"), Some(&Json::from("interrupted")));
 }
 
 #[test]

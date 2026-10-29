@@ -109,3 +109,13 @@ fn a_ctrl_c_before_the_run_exits_130_with_the_interrupted_note() {
     assert_eq!(out.status.code(), Some(130), "{}", stderr(&out));
     assert_eq!(stderr(&out), "interrupted; the role agents keep running in herdr\n");
 }
+
+#[test]
+fn a_resume_of_no_run_names_where_it_looked() {
+    // In a herdr pane, the project being the current directory: everything but the run's state is there.
+    let dir = Dir::new("no-run");
+    let out = program(&dir, &["resume", "b0b0b0"], Some("1")).output().expect("the program runs");
+    assert_eq!(out.status.code(), Some(1));
+    let project = std::fs::canonicalize(&dir.0).expect("the directory resolves");
+    assert_eq!(stderr(&out), format!("error: no run b0b0b0 under {}/.orchestrator/runs\n", project.display()));
+}
