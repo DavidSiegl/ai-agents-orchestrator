@@ -550,6 +550,8 @@ class EventStream:
         # Each item read so far, in order: (when it arrived, by time.monotonic, and the event's kind and payload, or
         # None for a comment).
         self.items: list[tuple[float, tuple[str, dict] | None]] = []
+        # Set by close(), after which a read that fails on the closed connection is the stream's end.
+        self._closed = False
         self._lock = threading.Lock()
         threading.Thread(target=self._read, daemon=True).start()
 
@@ -569,6 +571,11 @@ class EventStream:
                     kind, payload = None, None
         except (OSError, ValueError, http.client.HTTPException):
             return
+        except AttributeError:
+            # close() racing a read of a chunked response, which the Rust engine's serve sends an HTTP/1.1 client,
+            # leaves http.client peeking at a connection it has set to None; any other is a bug of this reader's.
+            if not self._closed:
+                raise
 
     def _add(self, item) -> None:
         with self._lock:
@@ -586,6 +593,7 @@ class EventStream:
             return [item for _, item in self.items if item is not None]
 
     def close(self) -> None:
+        self._closed = True
         self._conn.close()
 
 

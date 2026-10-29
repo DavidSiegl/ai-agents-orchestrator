@@ -268,7 +268,8 @@ fn credentials_travel_only_in_the_authorization_header() {
         "CALLS calls each public method of Jenkins once"
     );
 
-    // The one place that sets an Authorization header, among the engine's sources.
+    // The one place that sets an Authorization header, among the engine's sources; serve.rs, the engine's server,
+    // reads the header of the requests it gets and names it in its CORS answer, and sends no request.
     let src = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
     let mut setters = Vec::new();
     let mut dirs = vec![std::path::PathBuf::from(src)];
@@ -278,7 +279,7 @@ fn credentials_travel_only_in_the_authorization_header() {
             let name = path.file_name().unwrap().to_string_lossy().to_string();
             if path.is_dir() {
                 dirs.push(path);
-            } else if name.ends_with(".rs") && name != "tests.rs" && name != "fake.rs" {
+            } else if name.ends_with(".rs") && !["tests.rs", "fake.rs", "serve.rs"].contains(&name.as_str()) {
                 let text = std::fs::read_to_string(&path).unwrap();
                 setters.extend(
                     text.lines()

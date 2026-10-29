@@ -1,8 +1,6 @@
 //! The state a run starts from: a new run's, from run's flags (new_state), and a stopped run's, from its saved state
 //! and resume's flags (resumed_state), each with its workflow.
 
-use std::io::Read;
-
 use super::args::{ResumeArgs, RunArgs, Settings};
 use super::Connected;
 use crate::constants::{DEFAULT_MAX_QUALITY_ROUNDS, DEFAULT_MAX_ROUNDS, DEFAULT_TURN_TIMEOUT, RUNS_DIR, WORKTREES_DIR};
@@ -71,9 +69,7 @@ pub(super) fn flagged_workflow(args: &RunArgs, prompts: &Prompts, world: &Connec
 /// zone (crate::py::datetime::strftime_local), and six random hex digits, as 20261029-142233-a1b2c3. Errors: the
 /// system's random bytes cannot be read, or wall is beyond the year 9999.
 fn new_run_id(wall: f64) -> Result<String, OrchestratorError> {
-    let mut bytes = [0u8; 3];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut bytes))
+    let bytes: [u8; 3] = crate::env::random_bytes()
         .map_err(|e| OrchestratorError(format!("cannot read /dev/urandom for a run id: {e}")))?;
     let time = strftime_local("%Y%m%d-%H%M%S", wall.floor() as i64)
         .map_err(|e| OrchestratorError(format!("cannot name a run by the time {wall}: {e}")))?;

@@ -1,10 +1,11 @@
 //! The orchestrator program's command line, as orchestrator.py's main: [`main`] reads the arguments (crate::cli::args),
 //! connects to herdr and the project's host, runs the command and turns how it ended into the program's exit status
 //! and its last lines. A command joins as a [`Command`] arm of [`run_command`], given the same [`Connected`], or of
-//! [`herdrless_command`], given the same [`Local`], for one that needs no herdr pane: every command of Python's but gui
-//! and serve. `run` and `resume` are here and in crate::cli::start; the commands about a project's runs in
-//! crate::cli::listing, prune and close; `workflows`, `drain`, `refresh`, `judged-in-quality` and `doctor` in modules
-//! of their names (judged for judged-in-quality).
+//! [`herdrless_command`], given the same [`Local`], for one that needs no herdr pane: every command of Python's but
+//! gui, not ported, and serve, crate::serve's, which main runs before it starts the others' signal handling. `run`
+//! and `resume` are here and in crate::cli::start; the commands about a project's runs in crate::cli::listing, prune
+//! and close; `workflows`, `drain`, `refresh`, `judged-in-quality` and `doctor` in modules of their names (judged for
+//! judged-in-quality).
 
 use std::cell::Cell;
 use std::ffi::OsString;
@@ -133,14 +134,18 @@ pub(super) enum Stop {
     Interrupted(Option<String>),
 }
 
-/// The program: argv are its arguments, without its own name; interrupt is crate::interrupt::by_signals', which the
-/// process's SIGINT, SIGTERM and SIGHUP raise rather than end it. Returns its exit status: a usage error's 2 (help's
-/// 0), EXIT_ERROR for an error, EXIT_INTERRUPTED once interrupt is raised (crate::interrupt::exit then ends a process
-/// that got a SIGTERM or SIGHUP by that signal), or how the run ended (finish). Prints what the command prints and the
-/// run's last line on stdout, and its log, errors and the usage on stderr. Standard output that does not take a write
-/// (a full disk, a pipe closed early) makes it EXIT_ERROR, but for an interrupted command, as Python's print raising
-/// OSError ends the program with status 1; the command runs on, the rest of what it prints lost.
-pub fn main(argv: impl IntoIterator<Item = OsString>, interrupt: &Interrupt) -> i32 {
+/// The program: argv are its arguments, without its own name. Returns its exit status: a usage error's 2 (help's 0),
+/// EXIT_ERROR for an error, EXIT_INTERRUPTED once the Interrupt is raised (crate::interrupt::exit then ends a process
+/// that got a SIGTERM or SIGHUP by that signal), serve's (crate::serve::serve_command), or how the run ended
+/// (finish). Prints what the command prints and the run's last line on stdout, and its log, errors and the usage on
+/// stderr. Standard output that does not take a write (a full disk, a pipe closed early) makes it EXIT_ERROR, but for
+/// an interrupted command, as Python's print raising OSError ends the program with status 1; the command runs on,
+/// the rest of what it prints lost.
+///
+/// Must be called on the main thread before any other thread starts, since it starts the process's handling of
+/// SIGINT, SIGTERM and SIGHUP: serve's own, or else crate::interrupt::by_signals, which those signals then raise
+/// rather than end the process.
+pub fn main(argv: impl IntoIterator<Item = OsString>) -> i32 {
     let config = ConfigDir::from_env();
     let command = match parse_args(argv, &config) {
         Ok(command) => command,
@@ -148,6 +153,17 @@ pub fn main(argv: impl IntoIterator<Item = OsString>, interrupt: &Interrupt) -> 
             // Nowhere else to tell the human, if stdout or stderr does not take the usage.
             let _ = e.print();
             return e.exit_code();
+        }
+    };
+    if let Command::Serve(origins) = &command {
+        return crate::serve::serve_command(origins);
+    }
+    let interrupt = &match crate::interrupt::by_signals() {
+        Ok(interrupt) => interrupt,
+        Err(e) => {
+            // Nowhere else to say it, if stderr does not take it; the status still tells.
+            let _ = writeln!(std::io::stderr(), "error: cannot wait for SIGINT, SIGTERM and SIGHUP: {e}");
+            return EXIT_ERROR;
         }
     };
     // The first write standard output refused, if one did. Not a panic, which would end the program before
@@ -324,8 +340,8 @@ fn run_command(command: &Command, world: &Connected) -> Result<Ended, Stop> {
             let status = refresh::refresh_command(world, &cwd, run_ref.as_deref()).map_err(stopped)?;
             return if interrupt.is_raised() { Err(Stop::Interrupted(None)) } else { Ok(Ended::Status(status)) };
         }
-        Command::Workflows(_) | Command::JudgedInQuality { .. } | Command::Doctor(_) => {
-            unreachable!("main runs {command:?} without herdr (herdrless_command)")
+        Command::Workflows(_) | Command::JudgedInQuality { .. } | Command::Doctor(_) | Command::Serve(_) => {
+            unreachable!("main runs {command:?} without herdr (herdrless_command, serve_command)")
         }
     };
     if interrupt.is_raised() {

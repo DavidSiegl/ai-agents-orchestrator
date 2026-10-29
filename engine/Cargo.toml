@@ -33,15 +33,14 @@ rustls-native-certs = "0.8.5"
 # Where the system keeps its certificates, when the environment names none (http.rs, root_certs). 0.2.1 in Cargo.lock:
 # 0.2.2 is from 2026-10-26, under two weeks old. Approved by the user for ticket 07, 2026-10-28.
 openssl-probe = "0.2.1"
+# serve's HTTP server on 127.0.0.1 (serve.rs), blocking, a thread per request; also the local server the tests of
+# http.rs and ci.rs answer requests from. Approved by the user for serve (the rust-engine spec's Decisions).
+tiny_http = "0.12"
 # preserve_order: a table's keys come in the file's order, as tomllib gives them, so a table with two problems is
 # refused naming the first, as the Python engine refuses it.
 toml = { version = "1", default-features = false, features = ["parse", "preserve_order", "serde", "std"] }
 
-[dev-dependencies]
-# The local HTTP server the tests of http.rs and ci.rs answer requests from.
-tiny_http = "0.12"
-
-# The orchestrator program: crate::cli::main, after the Ctrl-C's signal thread is started.
+# The orchestrator program: crate::cli::main.
 [[bin]]
 name = "orchestrator"
 path = "src/main.rs"

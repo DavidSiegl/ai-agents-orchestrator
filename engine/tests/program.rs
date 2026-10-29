@@ -197,3 +197,164 @@ fn a_run_is_named_by_the_time_in_the_machine_s_zone() {
     let time = &id[..15];
     assert!(before.as_str() <= time && time <= after.as_str(), "{id} is not between {before} and {after}");
 }
+
+// -- serve: TestServeCommand's process cases, and project_host's (TestProjectHost) through it ---------------------
+
+/// A started serve, its first line read: the process, its url and token, and the rest of its standard output.
+struct Serving {
+    child: std::process::Child,
+    url: String,
+    token: String,
+    rest: std::io::BufReader<std::process::ChildStdout>,
+}
+
+impl Serving {
+    /// serve with args, started as program starts it, once it has printed its first line, which must be its one
+    /// JSON line with exactly url and token.
+    fn start(dir: &Dir, args: &[&str]) -> Serving {
+        Serving::start_as(program(dir, &[&["serve"], args].concat(), None))
+    }
+
+    fn start_as(mut command: Command) -> Serving {
+        use std::io::BufRead;
+        let mut child = command.spawn().expect("serve starts");
+        let mut rest = std::io::BufReader::new(child.stdout.take().expect("its stdout is piped"));
+        let mut line = String::new();
+        rest.read_line(&mut line).expect("serve prints its line");
+        let first: serde_json::Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("{line:?}: {e}"));
+        let keys: Vec<&String> = first.as_object().expect("an object").keys().collect();
+        assert_eq!(keys, ["token", "url"], "{line}");
+        let field = |key: &str| first[key].as_str().expect("a string").to_string();
+        Serving { child, url: field("url"), token: field("token"), rest }
+    }
+
+    fn port(&self) -> u16 {
+        self.url.strip_prefix("http://127.0.0.1:").and_then(|p| p.parse().ok()).unwrap_or_else(|| panic!("{}", self.url))
+    }
+
+    /// The status and body of a GET of target with the token in its query.
+    fn get(&self, target: &str) -> (u16, String) {
+        use std::io::{Read, Write};
+        let mut conn = std::net::TcpStream::connect(("127.0.0.1", self.port())).expect("serve takes the connection");
+        conn.set_read_timeout(Some(PATIENCE)).unwrap();
+        let sep = if target.contains('?') { '&' } else { '?' };
+        let request = format!(
+            "GET {target}{sep}token={} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+            self.token,
+            self.port()
+        );
+        conn.write_all(request.as_bytes()).unwrap();
+        let mut reply = String::new();
+        let _ = conn.read_to_string(&mut reply);
+        let (head, body) = reply.split_once("\r\n\r\n").unwrap_or_else(|| panic!("no reply: {reply:?}"));
+        let status = head.split(' ').nth(1).and_then(|s| s.parse().ok()).unwrap_or_else(|| panic!("{head}"));
+        (status, body.to_string())
+    }
+
+    /// Signal the group serve leads, which this test made for it, and give how it ended and what it wrote after its
+    /// first line, on stdout and on stderr.
+    fn stop(mut self, signal: Signal) -> (std::process::ExitStatus, String, String) {
+        use std::io::Read;
+        killpg(Pid::from_raw(self.child.id() as i32), signal).expect("serve's group is signalled");
+        let mut out = String::new();
+        self.rest.read_to_string(&mut out).expect("serve's stdout is read");
+        let mut err = String::new();
+        self.child.stderr.take().expect("its stderr is piped").read_to_string(&mut err).expect("serve's stderr is read");
+        (self.child.wait().expect("serve ends"), out, err)
+    }
+}
+
+/// The path a URL's query takes for dir, percent-encoded.
+fn encoded(dir: &Path) -> String {
+    let unreserved = |b: u8| b.is_ascii_alphanumeric() || b"/-_.".contains(&b);
+    let escaped = |b: u8| if unreserved(b) { char::from(b).to_string() } else { format!("%{b:02X}") };
+    dir.display().to_string().bytes().map(escaped).collect()
+}
+
+#[test]
+fn serve_prints_one_json_line_then_serves_until_a_sigint_or_sigterm() {
+    // Without a herdr pane: serve needs none.
+    for signal in [Signal::SIGTERM, Signal::SIGINT] {
+        let dir = Dir::new(&format!("serve-{}", signal as i32));
+        let serving = Serving::start(&dir, &["--origin", "tauri://localhost"]);
+        assert!(serving.url.starts_with("http://127.0.0.1:"), "{}", serving.url);
+        assert_eq!(serving.token.len(), 43);
+        let (status, body) = serving.get(&format!("/runs?cwd={}", encoded(&dir.0)));
+        assert_eq!((status, body.as_str()), (200, r#"{"version": 1, "runs": []}"#));
+        let (ended, out, err) = serving.stop(signal);
+        assert_eq!(ended.code(), Some(0), "{signal}: {ended:?}");
+        // Nothing more on standard output or standard error: no request is logged, the token least of all.
+        assert_eq!((out.as_str(), err.as_str()), ("", ""), "{signal}");
+    }
+}
+
+#[test]
+fn serve_ends_at_a_sighup_by_it() {
+    // As SIGHUP's default action ends Python's serve, which handles only SIGINT and SIGTERM.
+    let dir = Dir::new("serve-hup");
+    let (ended, _, err) = Serving::start(&dir, &[]).stop(Signal::SIGHUP);
+    assert_eq!(ended.signal(), Some(Signal::SIGHUP as i32), "{ended:?}: {err}");
+}
+
+#[test]
+fn serve_stops_at_a_sigint_it_started_with_ignored() {
+    // As Python's signal.signal replaces the disposition a Jenkins sh step's SIGINT has: ignored.
+    let dir = Dir::new("serve-ignored");
+    let command = program(&dir, &["serve"], None);
+    let args: Vec<_> = command.get_args().map(|a| a.to_os_string()).collect();
+    let mut ignoring = Command::new("env");
+    ignoring.args(["--default-signal=TERM,HUP", "--ignore-signal=INT"]).args(&args[1..]);
+    for (key, value) in command.get_envs() {
+        match value {
+            Some(value) => ignoring.env(key, value),
+            None => ignoring.env_remove(key),
+        };
+    }
+    ignoring.current_dir(&dir.0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
+    let (ended, _, err) = Serving::start_as(ignoring).stop(Signal::SIGINT);
+    assert_eq!(ended.code(), Some(0), "{ended:?}: {err}");
+}
+
+#[test]
+fn serve_with_a_closed_stdout_ends_naming_why() {
+    // serve's standard output is a pipe whose reader has gone, as when the app quit before reading the line.
+    let dir = Dir::new("serve-closed");
+    let (reader, writer) = nix::unistd::pipe().expect("a pipe");
+    drop(reader);
+    let child = program(&dir, &["serve"], None).stdout(Stdio::from(writer)).spawn().expect("serve starts");
+    let out = child.wait_with_output().expect("serve ends");
+    assert_eq!(out.status.code(), Some(1), "{:?}", out.status);
+    assert_eq!(stderr(&out), "error: cannot print the server's address: [Errno 32] Broken pipe\n");
+}
+
+#[test]
+fn serve_reaches_a_machine_by_its_saved_target() {
+    // TestProjectHost: herdr names the machine's SSH target, and ssh, played by a script here, runs each command
+    // where the project is; with no machine, herdr is not asked.
+    let dir = Dir::new("serve-machine");
+    let asked = dir.0.join("asked");
+    let machines = r#"[{"label": "box", "id": "m1", "enabled": true, "target": "me@box"}]"#;
+    dir.tool("herdr", &format!("#!/bin/sh\necho \"herdr $*\" >> '{}'\necho '{machines}'\n", asked.display()));
+    let ssh = format!("#!/bin/sh\nfor a; do last=$a; done\necho \"ssh $*\" >> '{}'\nexec sh -c \"$last\"\n", asked.display());
+    dir.tool("ssh", &ssh);
+    let project = dir.0.join("proj");
+    std::fs::create_dir_all(project.join(".orchestrator/runs/20261024-120000-5e7e00")).unwrap();
+    let state = r#"{"run_id": "20261024-120000-5e7e00", "task": "t", "phase": "build", "round": 1}"#;
+    std::fs::write(project.join(".orchestrator/runs/20261024-120000-5e7e00/state.json"), state).unwrap();
+    let serving = Serving::start(&dir, &[]);
+    let (status, body) = serving.get(&format!("/runs?cwd={}", encoded(&project)));
+    assert_eq!(status, 200, "{body}");
+    assert!(!asked.exists(), "{:?}", std::fs::read_to_string(&asked));
+    let (status, body) = serving.get(&format!("/runs?cwd={}&machine=box", encoded(&project)));
+    assert_eq!(status, 200, "{body}");
+    let record: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(record["runs"][0]["id"], "20261024-120000-5e7e00");
+    let log = std::fs::read_to_string(&asked).expect("herdr and ssh were asked");
+    let mut lines = log.lines();
+    assert_eq!(lines.next(), Some("herdr machine list --json"));
+    assert!(lines.all(|l| l.starts_with("ssh -o BatchMode=yes ") && l.contains(" me@box ")), "{log}");
+    let (status, body) = serving.get(&format!("/runs?cwd={}&machine=nosuch", encoded(&project)));
+    assert_eq!((status, body.as_str()), (502, r#"{"error": "no saved herdr machine named nosuch"}"#));
+    let (ended, _, err) = serving.stop(Signal::SIGTERM);
+    assert_eq!(ended.code(), Some(0), "{err}");
+}
