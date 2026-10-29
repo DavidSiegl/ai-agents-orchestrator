@@ -43,7 +43,7 @@ prompt and run state as the Python engine does. So far it holds, by module:
 
 | Module | What it holds, by its Python name |
 |---|---|
-| `py` | What the port needs of Python itself: `text` (str's `splitlines`, `strip`, `os.path.splitext`, `repr`, `difflib.get_close_matches`, text mode's universal newlines, with Python's character classes in `unicode_tables`, which `engine/tools/unicode_tables.py` writes), `format` (`str.format`'s language, filling and failing as Python does), `json` (`Json`, a value whose objects keep their order, and `Map`, written as `json.dumps` writes it; `parse_lossy` reads a lone surrogate as U+FFFD), `toml` (TOML as `tomllib` reads it, and what `str`, `repr` and `json.dumps` write of its values), `url` (`urllib.parse`'s `quote` and `urlencode`) and `datetime` (`fromisoformat_timestamp`, the time CPython's C `fromisoformat` reads, quirks included, one without an offset in the machine's zone, and `strftime_local`, `time.strftime` there; the zone is jiff's, read as the C library reads it). |
+| `py` | What the port needs of Python itself: `text` (str's `splitlines`, `strip`, `os.path.splitext`, `repr`, `difflib.get_close_matches`, text mode's universal newlines, with Python's character classes in `unicode_tables`, which `engine/tools/unicode_tables.py` writes), `format` (`str.format`'s language, filling and failing as Python does), `json` (`Json`, a value whose objects keep their order, and `Map`, written as `json.dumps` writes it; `parse_lossy` reads a lone surrogate as U+FFFD), `toml` (TOML as `tomllib` reads it, and what `str`, `repr` and `json.dumps` write of its values), `url` (`urllib.parse`'s `quote` and `urlencode`) and `datetime` (`IsoTime`, a time as CPython's C `fromisoformat` reads it, quirks included, with its `timestamp()`, which takes one without an offset in the machine's zone, and its date; `fromisoformat_timestamp`, the two in one call; and `strftime_local`, `time.strftime` there; the zone is jiff's, read as the C library reads it). |
 | `constants`, `error`, `env` | The constants, `OrchestratorError`, `child_env`, `ci_credentials` and `parse_env_file`; `ConfigDir` is `config_dir` and where its files are. |
 | `prompts` | The built-in prompts, `Prompts` (by `Prompt`), `load_prompts`, `prompt_problem` and `saved_prompts`. |
 | `pipeline`, `workflow_file` | `Step`, `Pipeline` with all its checks, `default_workflow`, `find_workflow`, `is_built_in`; `parse_workflow`, `load_workflow_file`, `workflow_files`, `named_workflow`, `workflow_definition`, `workflow_toml`, `run_pipeline` and `saved_pipeline`. |
@@ -349,8 +349,9 @@ whose record differs from `recorded/<scenario>.json`, naming where; `PARITY_RECO
 instead, from the Python engine only. A `World` can run another engine per invocation (`engines`): with
 `PARITY_ENGINE` set, each scenario that kills a run and resumes it runs also with the Python engine before the kill and
 `PARITY_ENGINE`'s after it, and the reverse, against the same recording, so that a run one engine left resumes in the
-other. `PARITY_COMMANDS` (`run,resume`, say) runs only the scenarios whose recording invokes the engine with those
-commands alone, for an engine that has no others yet. A kill ends the engine's group and each process below it, since
+other. `PARITY_COMMANDS` (`run,resume`, say) leaves out each scenario whose recording invokes the engine with another
+command, for an engine that has no others yet; a scenario not recorded yet still runs, and fails for want of its
+recording. A kill ends the engine's group and each process below it, since
 the Rust engine runs each command in a group of its own. Jenkins runs them against the Rust binary on a pull request
 that touches `engine/`, `tests/parity/` or the workspace's `Cargo.toml`, `Cargo.lock` or `rust-toolchain.toml` (the
 Jenkinsfile's Rust parity stage).
