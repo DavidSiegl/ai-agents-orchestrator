@@ -122,10 +122,9 @@ fn a_herdr_error_other_than_a_timeout_propagates() {
 fn an_agent_exiting_while_its_prompt_is_awaited_fails_the_turn() {
     let f = default_run(idle());
     let herdr = Rc::clone(&f.herdr);
-    // The agent exits, and the fake's own wait then finds no agent to wait on, as herdr does.
-    f.herdr.state().wait_with = Some(Box::new(move |name, _, _| {
+    f.herdr.state().wait_with = Some(Box::new(move |name, timeout_ms, until| {
         herdr.state().statuses.remove(name);
-        Err(HerdrError::new("agent_not_found", format!("agent target {name} not found")))
+        herdr.own_wait(name, timeout_ms, until)
     }));
     let message = failure(f.workflow(RunSettings::default()).run());
     assert_eq!(message, format!("the Builder exited without writing {}/build-1.md", f.state.dir()));

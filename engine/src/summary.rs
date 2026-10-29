@@ -288,4 +288,4 @@ pub fn run_metrics(state: &RunState, now: i64) -> Json {
 }
 
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;

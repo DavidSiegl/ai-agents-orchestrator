@@ -1,7 +1,7 @@
 //! FakeHost, the machine the Workflow tests run on: an in-memory filesystem and git checkout, played as
 //! tests/test_orchestrator.py's FakeHost plays them.
 
-use std::cell::{RefCell, RefMut};
+use std::cell::{Cell, RefCell, RefMut};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
@@ -17,6 +17,48 @@ use crate::py::json::{Json, Map};
 pub(crate) const HOST_EPOCH: i64 = 1_791_000_000;
 /// FakeState::leaks' stand-in for the commit a scan is of.
 pub(crate) const SCANNED: &str = "scanned";
+
+/// What a test plays after each sleep of a FakeClock, given the time then.
+type ClockHook = Box<dyn FnMut(f64)>;
+
+/// Time that passes only when the workflow sleeps (crate::workflow::Clocks, which the Workflow tests' fixture
+/// implements for it), or when a test moves it on; hooks play the world after each sleep, each given the time now.
+#[derive(Default)]
+pub(crate) struct FakeClock {
+    now: Cell<f64>,
+    hooks: RefCell<Vec<ClockHook>>,
+}
+
+impl FakeClock {
+    /// The time, in seconds.
+    pub fn now(&self) -> f64 {
+        self.now.get()
+    }
+
+    /// Let seconds pass without the workflow sleeping, as a test's own herdr wait or an agent's work does.
+    pub fn advance(&self, seconds: f64) {
+        self.now.set(self.now.get() + seconds);
+    }
+
+    /// Set the time to seconds, as a Python test sets clock.now.
+    pub fn set(&self, seconds: f64) {
+        self.now.set(seconds);
+    }
+
+    /// Run hook after every sleep.
+    pub fn hook(&self, hook: impl FnMut(f64) + 'static) {
+        self.hooks.borrow_mut().push(Box::new(hook));
+    }
+
+    /// Wait that many seconds: the time moves on, then each hook runs.
+    pub fn sleep(&self, seconds: f64) {
+        self.advance(seconds);
+        let now = self.now();
+        for hook in self.hooks.borrow_mut().iter_mut() {
+            hook(now);
+        }
+    }
+}
 
 /// An in-memory filesystem and git checkout standing in for the machine the agents run on.
 ///
@@ -115,8 +157,8 @@ pub(crate) struct FakeState {
     /// Every path written with keep_mtime.
     pub mtime_kept: Vec<String>,
     /// The workflow's clock, in seconds; the host's own time is HOST_EPOCH later: now() reads it, and write() stamps
-    /// each file's mtime with it. None reads 0.
-    pub clock: Option<Rc<dyn Fn() -> f64>>,
+    /// each file's mtime with it. None reads 0. A turn that takes time moves it on (workflow::fixture::taking).
+    pub clock: Option<Rc<FakeClock>>,
     /// Each file's modification time, by path; a file put straight into files has none, so mtime() gives now.
     pub mtimes: HashMap<String, i64>,
     /// What scan_unpublished finds: every scan finds them all, a Leak whose commit is SCANNED in the commit scanned.
@@ -235,7 +277,7 @@ impl FakeState {
     }
 
     fn now(&self) -> i64 {
-        HOST_EPOCH + self.clock.as_ref().map_or(0, |clock| clock() as i64)
+        HOST_EPOCH + self.clock.as_ref().map_or(0, |clock| clock.now() as i64)
     }
 
     /// Snapshot what is changed under cwd: snap<n>, which trees then holds.

@@ -1,5 +1,5 @@
 //! tests/test_orchestrator.py's Workflow classes, case for case, on the fixture's fakes (fixture.rs): TestWorkflow
-//! here, and each other class in the submodule named after it.
+//! here, and the others in submodules, each named after its first class and saying in its doc which it holds.
 
 use std::rc::Rc;
 

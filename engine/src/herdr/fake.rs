@@ -116,6 +116,27 @@ impl FakeHerdr {
         }
     }
 
+    /// The wait the fake plays when no wait_with is set: a wait until working (a delivery check) answers whether
+    /// the agent took its last prompt, timing out when it did not and failing with agent_not_found for an agent that
+    /// has exited; any other wait is recorded in waits and answers done. For a test's wait_with that changes the
+    /// fake and then waits as it does.
+    pub fn own_wait(&self, name: &str, timeout_ms: Option<u64>, until: &[&str]) -> Result<String, HerdrError> {
+        let mut s = self.state();
+        if until.contains(&"working") {
+            // A taken prompt had the agent working, whatever it shows now.
+            s.deliveries.push((name.to_string(), timeout_ms));
+            if !s.statuses.contains_key(name) {
+                return Err(HerdrError::new("agent_not_found", format!("agent target {name} not found")));
+            }
+            if !s.taken.get(name).copied().unwrap_or(false) {
+                return Err(HerdrError::new("timeout", format!("agent {name} did not reach {until:?}")));
+            }
+            return Ok("working".to_string());
+        }
+        s.waits.push(until.iter().map(|u| u.to_string()).collect());
+        Ok("done".to_string())
+    }
+
     /// What the fake holds and records, to script it or look at it; dropped before the next command it is given.
     pub fn state(&self) -> RefMut<'_, FakeHerdrState> {
         self.state.borrow_mut()
@@ -210,20 +231,7 @@ impl Herdr for FakeHerdr {
             self.state().wait_with = Some(wait);
             return answer;
         }
-        let mut s = self.state();
-        if until.contains(&"working") {
-            // A taken prompt had the agent working, whatever it shows now.
-            s.deliveries.push((name.to_string(), timeout_ms));
-            if !s.statuses.contains_key(name) {
-                return Err(HerdrError::new("agent_not_found", format!("agent target {name} not found")));
-            }
-            if !s.taken.get(name).copied().unwrap_or(false) {
-                return Err(HerdrError::new("timeout", format!("agent {name} did not reach {until:?}")));
-            }
-            return Ok("working".to_string());
-        }
-        s.waits.push(until.iter().map(|u| u.to_string()).collect());
-        Ok("done".to_string())
+        self.own_wait(name, timeout_ms, until)
     }
 
     fn agent(&self, name: &str) -> Result<Option<Agent>, HerdrError> {

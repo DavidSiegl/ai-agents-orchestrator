@@ -1,11 +1,12 @@
 //! TestResumePullRequest: a resumed run that ends in a pull request keeps its base branch, finishes publishing where
 //! an earlier orchestrator stopped, and refuses to go on while the checkout is on another branch than the run's.
 //!
-//! Not here: the quality phase of test_resume_on_another_branch_fails_before_any_turn, with the quality round
-//! (rust-engine ticket 08, part 5), which also checks that Jenkins was asked nothing; test_cli_exits_1_on_another_branch
-//! and test_no_pr_is_saved_with_the_run, which drive main and parse_args (ticket 09).
+//! Not here: from test_resume_on_another_branch_fails_before_any_turn, its quality phase and, in every phase, its check
+//! that Jenkins was asked nothing, which need the Workflow's Jenkins of the quality round (rust-engine ticket 08, part
+//! 5); test_cli_exits_1_on_another_branch and test_no_pr_is_saved_with_the_run, which drive main and parse_args
+//! (ticket 09).
 
-use super::pull_request::{args, git_calls, BRANCH, FAST_FORWARD, FETCH, MERGE};
+use super::pull_request::{git_calls, BRANCH, FAST_FORWARD, FETCH, MERGE};
 use super::*;
 
 const ON_BRANCH: &[&str] = &["rev-parse", "--abbrev-ref", "HEAD"];
@@ -34,7 +35,7 @@ fn host_on(head: &str, branch: &str) -> Rc<FakeHost> {
 }
 
 fn count(calls: &[Vec<String>], call: &[&str]) -> usize {
-    calls.iter().filter(|c| **c == args(call)).count()
+    calls.iter().filter(|c| **c == strings(call)).count()
 }
 
 /// The run fails naming both branches, state.json records it as resumable, and nothing in git_calls changed the
@@ -123,11 +124,11 @@ fn publish_resumed_mid_merge_aborts_it_before_committing() {
     let calls = git_calls(&f);
     // The branch is checked at the start and again in publish, before anything touches the tree.
     assert_eq!(calls[..5], [
-        args(ON_BRANCH),
-        args(ON_BRANCH),
-        args(&["rev-parse", "-q", "--verify", "MERGE_HEAD"]),
-        args(&["merge", "--abort"]),
-        args(&["status", "--porcelain"]),
+        strings(ON_BRANCH),
+        strings(ON_BRANCH),
+        strings(&["rev-parse", "-q", "--verify", "MERGE_HEAD"]),
+        strings(&["merge", "--abort"]),
+        strings(&["status", "--porcelain"]),
     ]);
     assert!(!calls.iter().any(|c| c[0] == "add" || c[0] == "commit"));
     // The merge is tried again, conflicts again, and is aborted again.
@@ -144,7 +145,7 @@ fn publish_resumed_after_the_pull_request_only_switches_back() {
     let mut wf = f.workflow(f.as_saved());
     assert_eq!(wf.run(), verdict(APPROVE));
     assert!(f.host.state().prs.is_empty());
-    assert_eq!(git_calls(&f), [args(&["switch", "--quiet", "main"])]);
+    assert_eq!(git_calls(&f), [strings(&["switch", "--quiet", "main"])]);
     assert_eq!(wf.state().phase, "done");
 }
 
@@ -162,7 +163,7 @@ fn resume_on_another_branch_fails_before_any_turn() {
             let saved = assert_refused(&f, current);
             assert_eq!(text(&saved, "phase").as_deref(), Some(phase));
             assert_eq!(f.herdr.state().calls, []);
-            assert_eq!(git_calls(&f), [args(ON_BRANCH)]);
+            assert_eq!(git_calls(&f), [strings(ON_BRANCH)]);
         }
     }
 }
@@ -177,7 +178,7 @@ fn publish_resumed_on_another_branch_touches_nothing() {
     }
     let f = Fixture::resume(host, approved_publish(), vec![], &[], &[]);
     assert_refused(&f, "main");
-    assert_eq!(git_calls(&f), [args(ON_BRANCH)]);
+    assert_eq!(git_calls(&f), [strings(ON_BRANCH)]);
     assert!(f.host.state().merge_head);
 }
 
@@ -213,7 +214,7 @@ fn branch_switched_during_a_turn_is_refused_before_the_commit() {
             saved
         };
         assert_eq!(text(&saved, "phase").as_deref(), Some("publish"), "{role}");
-        assert_eq!(git_calls(&f), [args(ON_BRANCH)], "{role}");
+        assert_eq!(git_calls(&f), [strings(ON_BRANCH)], "{role}");
 
         f.host.state().branch = BRANCH.into();
         let f2 = Fixture::resume(Rc::clone(&f.host), RunState::from_saved(&saved).unwrap(), vec![], &[], &[]);

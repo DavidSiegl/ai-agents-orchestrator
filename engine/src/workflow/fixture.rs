@@ -1,12 +1,12 @@
 //! What the Workflow tests run on, as tests/test_orchestrator.py's make_workflow, saved_run and resume build it: a
 //! FakeHost, a FakeHerdr playing the roles' scripts, a FakeClock, the human as Told, and the turn helpers.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::{Clocks, Collaborators, Human, RunSettings, Workflow};
 use crate::herdr::fake::{FakeHerdr, Turn};
-use crate::host::fake::FakeHost;
+use crate::host::fake::{FakeClock, FakeHost};
 use crate::host::Host;
 use crate::interrupt::Interrupt;
 use crate::py::json::{Json, Map};
@@ -17,44 +17,10 @@ use crate::state::RunState;
 pub(crate) const RUN_ID: &str = "20260929-120000-a1b2c3";
 pub(crate) const TASK: &str = "add a rate limiter";
 
-/// What a test plays after each sleep, given the time then.
-type ClockHook = Box<dyn FnMut(f64)>;
-
-/// Time that passes only when the workflow sleeps; hooks play the world meanwhile, each given the time now.
-#[derive(Default)]
-pub(crate) struct FakeClock {
-    now: Cell<f64>,
-    hooks: RefCell<Vec<ClockHook>>,
-}
-
-impl FakeClock {
-    pub fn now(&self) -> f64 {
-        self.now.get()
-    }
-
-    /// Let seconds pass without the workflow sleeping, as a test's own herdr wait does.
-    pub fn advance(&self, seconds: f64) {
-        self.now.set(self.now.get() + seconds);
-    }
-
-    /// Set the time to seconds, as a Python test sets clock.now.
-    pub fn set(&self, seconds: f64) {
-        self.now.set(seconds);
-    }
-
-    /// Run hook after every sleep.
-    pub fn hook(&self, hook: impl FnMut(f64) + 'static) {
-        self.hooks.borrow_mut().push(Box::new(hook));
-    }
-}
-
+/// A FakeClock as a Workflow's time: its monotonic and wall clocks both read the fake's time.
 impl Clocks for FakeClock {
     fn sleep(&self, seconds: f64) {
-        self.advance(seconds);
-        let now = self.now();
-        for hook in self.hooks.borrow_mut().iter_mut() {
-            hook(now);
-        }
+        FakeClock::sleep(self, seconds);
     }
 
     fn monotonic(&self) -> f64 {
@@ -114,6 +80,14 @@ pub(crate) fn new_state() -> RunState {
     RunState::new(RUN_ID, TASK, "/proj")
 }
 
+/// A new run's state of pipeline, as main makes it for the workflow: Python's new_run, in the workflow's first step.
+pub(crate) fn new_run(pipeline: &crate::pipeline::Pipeline) -> RunState {
+    let mut state = new_state();
+    state.phase = pipeline.steps()[0].id.clone();
+    state.workflow = pipeline.name().to_string();
+    state
+}
+
 impl Fixture {
     /// make_workflow: a new run on a default FakeHost, the roles played by script.
     pub fn new(script: Vec<(&str, Vec<Turn>)>) -> Fixture {
@@ -126,8 +100,7 @@ impl Fixture {
         let herdr = Rc::new(FakeHerdr::new(Rc::clone(&host), state.clone(), script));
         let clock = Rc::new(FakeClock::default());
         if host.state().clock.is_none() {
-            let time = Rc::clone(&clock);
-            host.state().clock = Some(Rc::new(move || time.now()));
+            host.state().clock = Some(Rc::clone(&clock));
         }
         Fixture {
             host,
@@ -185,7 +158,7 @@ impl Fixture {
     }
 
     /// Add turns to those the role's agent plays, after the ones it has: for a turn that needs the fixture's own
-    /// fakes, such as taking, which the script is written before.
+    /// fakes, which the script is written before.
     pub fn play(&self, role: &str, turns: Vec<Turn>) {
         self.herdr.state().script.entry(role.to_string()).or_default().extend(turns);
     }
@@ -293,11 +266,11 @@ pub(crate) fn continue_prompt(path: &str) -> String {
     crate::py::format::format(crate::prompts::CONTINUE_PROMPT, &value).expect("the built-in prompt fills in")
 }
 
-/// turn, its agent working for seconds of the host's time before it plays turn: the clock moves on without the
-/// workflow sleeping.
-pub(crate) fn taking(clock: &Rc<FakeClock>, seconds: u32, mut turn: Turn) -> Turn {
-    let clock = Rc::clone(clock);
+/// turn, its agent working for seconds of the host's time before it plays turn: the host's clock moves on without
+/// the workflow sleeping. Panics on a host without a clock, which Fixture::on gives every host.
+pub(crate) fn taking(seconds: u32, mut turn: Turn) -> Turn {
     Box::new(move |prompt, state, host| {
+        let clock = host.state().clock.clone().expect("a host with a clock");
         clock.advance(f64::from(seconds));
         turn(prompt, state, host)
     })

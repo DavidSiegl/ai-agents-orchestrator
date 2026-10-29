@@ -30,10 +30,12 @@ fn files_written_outside_the_run_directory_are_changes() {
 fn the_host_s_clock_is_far_from_the_workflow_s() {
     let host = FakeHost::default();
     assert_eq!(host.now().unwrap(), HOST_EPOCH);
-    host.state().clock = Some(Rc::new(|| 42.9));
+    let clock = Rc::new(FakeClock::default());
+    host.state().clock = Some(Rc::clone(&clock));
+    clock.set(42.9);
     assert_eq!(host.now().unwrap(), HOST_EPOCH + 42);
     host.write("/proj/review-1.md", "x", false).unwrap();
-    host.state().clock = Some(Rc::new(|| 50.0));
+    clock.set(50.0);
     assert_eq!(host.mtime("/proj/review-1.md").unwrap(), HOST_EPOCH + 42);
     assert_eq!(host.mtime("/proj/never-written.md").unwrap(), HOST_EPOCH + 50);
     host.rename("/proj/review-1.md", "/proj/review-1.rejected.md").unwrap();

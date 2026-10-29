@@ -13,7 +13,7 @@ use std::cell::RefCell;
 
 use super::*;
 use crate::host::fake::HOST_EPOCH;
-use crate::summary::tests::GOLDEN_SUMMARY;
+use crate::test_support::GOLDEN_SUMMARY;
 
 /// The run's summary.md, if written.
 fn summary(f: &Fixture) -> Option<String> {
@@ -28,10 +28,11 @@ fn settings(change: impl FnOnce(&mut RunSettings)) -> RunSettings {
 
 #[test]
 fn each_turn_of_an_approved_run_is_recorded_on_the_host_clock() {
-    let f = Fixture::new(vec![]);
-    f.play("spec", vec![taking(&f.clock, 600, spec_turn())]);
-    f.play("build", vec![taking(&f.clock, 1200, build_turn(1))]);
-    f.play("review", vec![taking(&f.clock, 300, review_turn(1, APPROVE))]);
+    let f = Fixture::new(vec![
+        ("spec", vec![taking(600, spec_turn())]),
+        ("build", vec![taking(1200, build_turn(1))]),
+        ("review", vec![taking(300, review_turn(1, APPROVE))]),
+    ]);
     let mut wf = f.workflow(settings(|s| {
         s.agents.models.insert("review", "opus".into());
         s.agents.kinds.insert("build", "codex".into());
@@ -71,14 +72,13 @@ fn the_end_is_the_files_mtime_even_when_no_orchestrator_watched() {
     assert!(written.contains("| build | build | 1 | claude | default | 2026-10-03 04:00:00 | ? | build-1.md |\n"), "{written}");
 
     // The Builder finishes while no orchestrator runs, and one resumes the run much later. The host keeps this
-    // fixture's clock, which the resumed run's turn takes its time from too.
+    // fixture's clock, which the resumed run's turn moves on too.
     f.clock.set(1200.0);
     build_turn(1)("", &saved, &f.host);
     f.clock.set(5000.0);
-    let pull_request = saved.pull_request;
-    let review = vec![("review", vec![taking(&f.clock, 100, review_turn(1, APPROVE))])];
+    let review = vec![("review", vec![taking(100, review_turn(1, APPROVE))])];
     let f2 = Fixture::resume(Rc::clone(&f.host), saved, review, &["build"], &[]);
-    let mut wf = f2.workflow(RunSettings { pull_request, ..RunSettings::default() });
+    let mut wf = f2.workflow(f2.as_saved());
     assert_eq!(wf.run(), verdict(APPROVE));
     let builds: Vec<&Map<Json>> = wf.state().turns.iter().filter(|t| t.get("file") == Some(&Json::from("build-1.md"))).collect();
     assert_eq!([record("build", "build-1.md", Some(0), Some(1200))], builds.into_iter().cloned().collect::<Vec<_>>()[..]);
@@ -99,10 +99,8 @@ fn a_restarted_agent_keeps_its_turns_record() {
     let mut state = saved_run("build", 2, FULL);
     state.prompted = Some("build-2.md".into());
     state.turns = vec![record("build", "build-2.md", Some(-1000), None).with("round", 2).map()];
-    let f = Fixture::resume(Rc::new(FakeHost::default()), state, vec![("review", vec![review_turn(2, APPROVE)])], &[
-        "review",
-    ], &[]);
-    f.play("build", vec![taking(&f.clock, 50, build_turn(2))]);
+    let script = vec![("build", vec![taking(50, build_turn(2))]), ("review", vec![review_turn(2, APPROVE)])];
+    let f = Fixture::resume(Rc::new(FakeHost::default()), state, script, &["review"], &[]);
     let mut wf = f.workflow(f.as_saved());
     assert_eq!(wf.run(), verdict(APPROVE));
     assert!(called(&f, &Call::Prompt { name: "build-a1b2c3".into() }));
@@ -128,8 +126,11 @@ fn a_record_closed_before_the_run_moved_on_is_not_recorded_again() {
 
 #[test]
 fn a_rejected_verdict_keeps_its_record_under_its_new_name() {
-    let f = Fixture::new(vec![("spec", vec![spec_turn()]), ("build", vec![build_turn(1)])]);
-    f.play("review", vec![taking(&f.clock, 60, malformed_review(1, "looks fine")), taking(&f.clock, 30, review_turn(1, APPROVE))]);
+    let f = Fixture::new(vec![
+        ("spec", vec![spec_turn()]),
+        ("build", vec![build_turn(1)]),
+        ("review", vec![taking(60, malformed_review(1, "looks fine")), taking(30, review_turn(1, APPROVE))]),
+    ]);
     let mut wf = f.workflow(RunSettings::default());
     assert_eq!(wf.run(), verdict(APPROVE));
     assert_eq!(
@@ -169,8 +170,6 @@ fn a_state_saved_before_turns_resumes_and_records_its_files_without_a_start() {
 #[test]
 fn every_end_writes_a_summary() {
     let d = new_state().dir();
-    let mut solo = new_state();
-    (solo.phase, solo.workflow) = ("build".into(), "solo".into());
     let solo_turn: Turn = Box::new(|_, state, host| {
         host.write("/proj/limiter.py", "version 1", false).unwrap();
         host.write(&format!("{}/build.md", state.dir()), "solo report", false).unwrap();
@@ -190,7 +189,7 @@ fn every_end_writes_a_summary() {
         ),
         (
             "finished",
-            solo,
+            new_run(&crate::test_support::solo()),
             vec![("build", vec![solo_turn])],
             RunSettings { pipeline: Some(crate::test_support::solo()), pull_request: false, ..RunSettings::default() },
             strings(&[
@@ -333,8 +332,7 @@ fn a_failed_run_writes_no_metrics() {
 
 #[test]
 fn tokens_come_from_the_session_the_turn_ran_in() {
-    let f = Fixture::new(vec![("spec", vec![spec_turn()])]);
-    f.play("build", vec![taking(&f.clock, 100, build_turn(1))]);
+    let f = Fixture::new(vec![("spec", vec![spec_turn()]), ("build", vec![taking(100, build_turn(1))])]);
     // The sessions are known once both agents have started: the logs are put in place during the review, which
     // Python's test does just before publishing.
     let sessions = Rc::new(RefCell::new(Map::new()));
@@ -363,7 +361,7 @@ fn tokens_come_from_the_session_the_turn_ran_in() {
         drop(h);
         review(prompt, state, host)
     });
-    f.play("review", vec![taking(&f.clock, 60, with_logs)]);
+    f.play("review", vec![taking(60, with_logs)]);
     let mut wf = f.workflow(settings(|s| {
         s.agents.kinds.insert("review", "pi".into());
     }));

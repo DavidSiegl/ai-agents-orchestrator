@@ -2,12 +2,16 @@
 //! role's agent started, resumed and saved in its harness.
 //!
 //! Not here: TestHarnessFlags' cases of parse_args, new_state and main (test_precedence, test_flags_reach_the_workflow,
-//! test_role_agent_for_a_role_the_workflow_lacks, test_unknown_kinds_are_argparse_errors), and
-//! test_resume_keeps_or_overrides_the_saved_harnesses, of resumable_state, which ticket 09 ports with the CLI; its
-//! worktree half of test_run_dir_granted_in_worktree_runs_only, with worktree runs (rust-engine ticket 08, part 3); and
-//! TestWorkflowFileAgents' test_workflows_prints_it, the workflows command's (ticket 09). Its other cases, and
-//! TestHarnessFlags' of launch_args and of reading a 0.3.0 state, are crate::workflow_file's, crate::harness's and
-//! crate::state's (tickets 04 and 06).
+//! test_role_agent_for_a_role_the_workflow_lacks, test_unknown_kinds_are_argparse_errors) and
+//! test_resume_keeps_or_overrides_the_saved_harnesses, which ticket 09 ports with the CLI; the worktree half of
+//! test_run_dir_granted_in_worktree_runs_only, with worktree runs (rust-engine ticket 08, part 3); and
+//! TestWorkflowFileAgents' test_workflows_prints_it, the workflows command's (ticket 09). The two 0.3.0 cases here run
+//! on the state resumable_state would give, built by hand; their halves that check resumable_state itself are left
+//! with it: test_a_030_state_resumes_on_claude's (a 0.3.0 state resumed without flags keeps acceptEdits and no
+//! harnesses) for part 7, which ports resumable_state, and test_resume_with_a_new_harness_relaunches_in_it's
+//! (`--agent pi` gives every role pi) for ticket 09, with the --agent flag of resume. TestWorkflowFileAgents' other
+//! cases, and TestHarnessFlags' of launch_args and of reading a 0.3.0 state, are crate::workflow_file's,
+//! crate::harness's and crate::state's (tickets 04 and 06).
 
 use super::*;
 
@@ -35,13 +39,17 @@ fn every_role(kind: &str) -> Map<String> {
     FULL.iter().map(|role| (*role, kind.to_string())).collect()
 }
 
-/// RunSettings of these AgentSettings: a permission mode, the models and the harnesses by role.
-fn agents(permission_mode: Option<&str>, models: &[(&str, &str)], kinds: Map<String>) -> RunSettings {
-    let agents = AgentSettings {
+/// AgentSettings of a permission mode, the models and the harnesses by role.
+fn agent_settings(permission_mode: Option<&str>, models: &[(&str, &str)], kinds: Map<String>) -> AgentSettings {
+    AgentSettings {
         permission_mode: permission_mode.map(String::from),
         models: models.iter().map(|(r, m)| (*r, m.to_string())).collect(),
         kinds,
-    };
+    }
+}
+
+/// The default settings, with agents.
+fn with_agents(agents: AgentSettings) -> RunSettings {
     RunSettings { agents, ..RunSettings::default() }
 }
 
@@ -53,7 +61,8 @@ fn run_default(settings: RunSettings) -> (Started, Vec<String>) {
     let f = Fixture::new(approved());
     assert_eq!(f.workflow(settings).run(), verdict(APPROVE));
     let kinds = f.herdr.state().kinds.clone();
-    let started = starts(&f).into_iter().zip(kinds).map(|((name, _, args), (_, kind))| (role_of(&name), kind, args));
+    let kind_of = |name: &str| kinds.iter().find(|(n, _)| n == name).map(|(_, kind)| kind.clone()).expect("a start's kind");
+    let started = starts(&f).into_iter().map(|(name, _, args)| (role_of(&name), kind_of(&name), args));
     (started.collect(), f.told.lines())
 }
 
@@ -62,8 +71,8 @@ fn role_of(name: &str) -> String {
     name.split('-').next().unwrap().to_string()
 }
 
-/// (role, kind, args) of each of the default workflow's roles, all in harness kind.
-fn each_role(kind: &str, args: [Vec<String>; 3]) -> Started {
+/// The starts of the default workflow's roles in order, all in harness kind, each with its args.
+fn expected_starts(kind: &str, args: [Vec<String>; 3]) -> Started {
     FULL.iter().zip(args).map(|(role, args)| (role.to_string(), kind.to_string(), args)).collect()
 }
 
@@ -75,8 +84,8 @@ fn dropped(logged: &[String]) -> Vec<String> {
 #[test]
 fn a_new_agent_in_each_harness() {
     for kind in KINDS {
-        let (started, _) = run_default(agents(None, &[("build", "m")], every_role(kind)));
-        assert_eq!(started, each_role(kind, [vec![], strings(&["--model", "m"]), vec![]]), "{kind}");
+        let (started, _) = run_default(with_agents(agent_settings(None, &[("build", "m")], every_role(kind))));
+        assert_eq!(started, expected_starts(kind, [vec![], strings(&["--model", "m"]), vec![]]), "{kind}");
     }
 }
 
@@ -84,11 +93,11 @@ fn a_new_agent_in_each_harness() {
 fn each_permission_mode_in_each_harness() {
     for kind in KINDS {
         for mode in MODES {
-            let (started, logged) = run_default(agents(Some(mode), &[("review", "m")], every_role(kind)));
+            let (started, logged) = run_default(with_agents(agent_settings(Some(mode), &[("review", "m")], every_role(kind))));
             let expected = permissions(kind, mode);
             let args = expected.clone().unwrap_or_default();
             let review = [args.clone(), strings(&["--model", "m"])].concat();
-            assert_eq!(started, each_role(kind, [args.clone(), args, review]), "{kind} {mode}");
+            assert_eq!(started, expected_starts(kind, [args.clone(), args, review]), "{kind} {mode}");
             let told: Vec<String> = match expected {
                 None => FULL
                     .iter()
@@ -103,9 +112,9 @@ fn each_permission_mode_in_each_harness() {
 
 #[test]
 fn without_a_harness_every_role_is_claude_as_before() {
-    let (started, logged) = run_default(agents(Some("auto"), &[], Map::new()));
+    let (started, logged) = run_default(with_agents(agent_settings(Some("auto"), &[], Map::new())));
     let auto = strings(&["--permission-mode", "auto"]);
-    assert_eq!(started, each_role("claude", [auto.clone(), auto.clone(), auto]));
+    assert_eq!(started, expected_starts("claude", [auto.clone(), auto.clone(), auto]));
     assert!(dropped(&logged).is_empty());
 }
 
@@ -116,7 +125,7 @@ fn a_dropped_mode_is_logged_once_per_role() {
     let script = vec![("build", vec![build_turn(2)]), ("review", vec![review_turn(2, APPROVE)])];
     let f = Fixture::resume(Rc::new(FakeHost::default()), state, script, &["review"], &[("build", "s-gone")]);
     f.herdr.state().lost_sessions.insert("s-gone".into());
-    let settings = RunSettings { pull_request: false, ..agents(Some("plan"), &[], every_role("pi")) };
+    let settings = RunSettings { agents: agent_settings(Some("plan"), &[], every_role("pi")), ..f.as_saved() };
     assert_eq!(f.workflow(settings).run(), verdict(APPROVE));
     let args: Vec<Vec<String>> = starts(&f).into_iter().map(|(_, _, args)| args).collect();
     assert_eq!(args, [strings(&["--session", "s-gone"]), vec![]]);
@@ -141,7 +150,7 @@ fn an_exited_agent_resumes_in_its_own_harness() {
         state.agents.get_mut("build").unwrap().insert("kind", kind.to_string());
         let script = vec![("build", vec![recording(build_turn(2), &seen)]), ("review", vec![review_turn(2, APPROVE)])];
         let f = Fixture::resume(Rc::new(FakeHost::default()), state, script, &["review"], &[("build", "s-build")]);
-        let settings = RunSettings { pull_request: false, ..agents(Some("acceptEdits"), &[("build", "m")], every_role(kind)) };
+        let settings = RunSettings { agents: agent_settings(Some("acceptEdits"), &[("build", "m")], every_role(kind)), ..f.as_saved() };
         let mut wf = f.workflow(settings);
         assert_eq!(wf.run(), verdict(APPROVE), "{kind}");
         assert_eq!(starts(&f), [("build-a1b2c3".into(), "w1:p2".into(), resumed(kind))], "{kind}");
@@ -164,7 +173,7 @@ fn a_changed_harness_starts_fresh() {
         let script = vec![("build", vec![recording(build_turn(2), &seen)]), ("review", vec![review_turn(2, APPROVE)])];
         let f = Fixture::resume(Rc::new(FakeHost::default()), state, script, &["review"], &[("build", "s-build")]);
         let kinds = [("build", kind.to_string())].into_iter().collect();
-        let settings = RunSettings { pull_request: false, ..agents(None, &[], kinds) };
+        let settings = RunSettings { agents: agent_settings(None, &[], kinds), ..f.as_saved() };
         assert_eq!(f.workflow(settings).run(), verdict(APPROVE), "{kind}");
         assert_eq!(starts(&f), [("build-a1b2c3".into(), "w1:p2".into(), vec![])]);
         assert_eq!(f.herdr.state().kinds, [("build-a1b2c3".to_string(), kind.to_string())]);
@@ -184,7 +193,7 @@ fn a_live_agent_keeps_its_harness() {
     let script = vec![("review", vec![review_turn(1, APPROVE)])];
     let f = Fixture::resume(Rc::new(FakeHost::default()), saved_run("review", 1, FULL), script, &["review"], &[]);
     f.put(&f.state.build_path(1), "report 1");
-    let settings = RunSettings { pull_request: false, ..agents(None, &[], every_role("codex")) };
+    let settings = RunSettings { agents: agent_settings(None, &[], every_role("codex")), ..f.as_saved() };
     assert_eq!(f.workflow(settings).run(), verdict(APPROVE));
     assert!(f.herdr.state().kinds.is_empty());
     assert!(called(&f, &Call::Prompt { name: "review-a1b2c3".into() }));
@@ -194,7 +203,7 @@ fn a_live_agent_keeps_its_harness() {
 fn every_roles_harness_is_saved() {
     let f = Fixture::new(approved());
     let kinds = [("review", "pi".to_string())].into_iter().collect();
-    f.workflow(agents(Some("plan"), &[], kinds)).run().unwrap();
+    f.workflow(with_agents(agent_settings(Some("plan"), &[], kinds))).run().unwrap();
     let saved = f.saved();
     assert_eq!(saved.get("agent_kinds").unwrap().dumps(), r#"{"spec": "claude", "build": "claude", "review": "pi"}"#);
     assert_eq!(text(&saved, "permission_mode").as_deref(), Some("plan"));
@@ -213,7 +222,7 @@ fn role_agent_starts_that_role_in_its_harness() {
     let expected = [("spec", "gemini"), ("build", "gemini"), ("review", "pi")];
     let f = Fixture::new(approved());
     let kinds = expected.iter().map(|(r, k)| (*r, k.to_string())).collect();
-    f.workflow(agents(None, &[], kinds)).run().unwrap();
+    f.workflow(with_agents(agent_settings(None, &[], kinds))).run().unwrap();
     let started: Vec<(String, String)> = f.herdr.state().kinds.iter().map(|(name, kind)| (role_of(name), kind.clone())).collect();
     assert_eq!(started, expected.map(|(r, k)| (r.to_string(), k.to_string())));
 }
@@ -234,28 +243,29 @@ fn v030_state(phase: &str) -> RunState {
 
 #[test]
 fn resume_with_a_new_harness_relaunches_in_it() {
-    // As resumable_state gives it for `resume a1b2c3 --agent pi`, which part 7 ports: every role in pi.
+    // The state resumable_state would give for `resume a1b2c3 --agent pi` (see the module's doc): every role in pi.
     let mut state = v030_state("review");
     state.agent_kinds = every_role("pi");
-    let settings = agents(state.permission_mode.as_deref(), &[], state.agent_kinds.clone());
+    let agents = agent_settings(state.permission_mode.as_deref(), &[], state.agent_kinds.clone());
     let script = vec![("review", vec![review_turn(2, APPROVE)])];
     let f = Fixture::resume(Rc::new(FakeHost::default()), state, script, &[], &[]);
     f.put(&f.state.build_path(2), "report 2");
-    assert_eq!(f.workflow(RunSettings { pull_request: false, ..settings }).run(), verdict(APPROVE));
+    assert_eq!(f.workflow(RunSettings { agents, ..f.as_saved() }).run(), verdict(APPROVE));
     assert_eq!(f.herdr.state().kinds, [("review-a1b2c3".to_string(), "pi".to_string())]);
 }
 
 #[test]
 fn a_030_state_resumes_on_claude() {
-    // resumable_state without flags keeps the state as read.
+    // The state resumable_state would give without flags (see the module's doc), which keeps it as read: here, as
+    // read.
     let state = v030_state("build");
     assert_eq!((state.permission_mode.as_deref(), state.agent_kinds.is_empty()), (Some("acceptEdits"), true));
     let seen = seen();
-    let mut settings = agents(state.permission_mode.as_deref(), &[], state.agent_kinds.clone());
-    settings.agents.models = state.models.clone();
+    let mut agents = agent_settings(state.permission_mode.as_deref(), &[], state.agent_kinds.clone());
+    agents.models = state.models.clone();
     let script = vec![("build", vec![recording(build_turn(2), &seen)]), ("review", vec![review_turn(2, APPROVE)])];
     let f = Fixture::resume(Rc::new(FakeHost::default()), state, script, &[], &[]);
-    let mut wf = f.workflow(RunSettings { pull_request: false, ..settings });
+    let mut wf = f.workflow(RunSettings { agents, ..f.as_saved() });
     assert_eq!(wf.run(), verdict(APPROVE));
     let args: Vec<Vec<String>> = starts(&f).into_iter().map(|(_, _, args)| args).collect();
     let accept = strings(&["--permission-mode", "acceptEdits"]);
@@ -276,9 +286,7 @@ fn saved_with_the_run() {
     let mut settings = quick.settings().clone();
     settings.agents.insert("review", "codex".to_string());
     let p = crate::pipeline::Pipeline::with("coded", quick.roles().clone(), quick.steps().to_vec(), settings).unwrap();
-    let mut state = new_state();
-    (state.phase, state.workflow) = ("build".into(), "coded".into());
-    let f = Fixture::on(Rc::new(FakeHost::default()), state, vec![
+    let f = Fixture::on(Rc::new(FakeHost::default()), new_run(&p), vec![
         ("build", vec![build_turn(1)]),
         ("review", vec![review_turn(1, APPROVE)]),
     ]);

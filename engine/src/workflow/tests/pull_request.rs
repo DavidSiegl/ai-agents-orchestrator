@@ -14,16 +14,13 @@ fn rounds(verdicts: &[&str]) -> Script {
 
 pub(super) const BRANCH: &str = "orchestrator/add-a-token-bucket-rate-limiter-a1b2c3";
 
-pub(super) fn args(a: &[&str]) -> Vec<String> {
-    a.iter().map(|s| s.to_string()).collect()
-}
 
 pub(super) fn git_calls(f: &Fixture) -> Vec<Vec<String>> {
     f.host.state().git_calls.clone()
 }
 
 fn position(calls: &[Vec<String>], call: &[&str]) -> usize {
-    calls.iter().position(|c| *c == args(call)).unwrap_or_else(|| panic!("no git {call:?} in {calls:?}"))
+    calls.iter().position(|c| *c == strings(call)).unwrap_or_else(|| panic!("no git {call:?} in {calls:?}"))
 }
 
 #[test]
@@ -31,11 +28,11 @@ fn approved_change_becomes_a_pull_request() {
     let f = Fixture::new(rounds(&[APPROVE]));
     assert_eq!(f.workflow(RunSettings::default()).run(), verdict(APPROVE));
     let calls = git_calls(&f);
-    assert!(calls.contains(&args(&["switch", "-c", BRANCH])));
+    assert!(calls.contains(&strings(&["switch", "-c", BRANCH])));
     let commit = calls.iter().find(|c| c[0] == "commit").unwrap();
     let m = commit.iter().position(|a| a == "-m").unwrap();
     assert_eq!(commit[m + 1], "Add a token-bucket rate limiter");
-    assert!(calls.contains(&args(&["push", "--quiet", "--set-upstream", "origin", BRANCH])));
+    assert!(calls.contains(&strings(&["push", "--quiet", "--set-upstream", "origin", BRANCH])));
     let host = f.host.state();
     let pr = &host.prs[0];
     assert_eq!((pr.base.as_str(), pr.head.as_str(), pr.draft), ("main", BRANCH, false));
@@ -197,7 +194,7 @@ fn base_is_fast_forwarded_before_the_interview() {
     let f = Fixture::on(Rc::new(host), new_state(), script(Some(watching), None, None, APPROVE));
     assert_eq!(f.workflow(RunSettings::default()).run(), verdict(APPROVE));
     let (calls, head) = at_interview.borrow()[0].clone();
-    assert_eq!(calls[position(&calls, FETCH) + 1], args(FAST_FORWARD));
+    assert_eq!(calls[position(&calls, FETCH) + 1], strings(FAST_FORWARD));
     assert_eq!(head.as_deref(), Some("u1"));
 }
 
@@ -241,7 +238,7 @@ fn base_is_fast_forwarded_again_before_branching() {
     assert_eq!(wf.run(), verdict(APPROVE));
     let calls = git_calls(&f);
     let switch = position(&calls, &["switch", "-c", BRANCH]);
-    assert_eq!(calls[switch - 2..switch], [args(FETCH), args(FAST_FORWARD)]);
+    assert_eq!(calls[switch - 2..switch], [strings(FETCH), strings(FAST_FORWARD)]);
     assert_eq!(wf.state().base.as_deref(), Some("u2"));
     assert!(seen.borrow()[0].contains("git diff u2"));
 }
@@ -251,7 +248,7 @@ fn switching_away_from_the_base_during_the_interview_is_refused() {
     let spec = after(|h| h.branch = "wip".into(), spec_turn());
     let f = Fixture::new(script(Some(spec), None, None, APPROVE));
     assert!(failure(f.workflow(RunSettings::default()).run()).contains("is on wip, not main"));
-    assert!(!git_calls(&f).contains(&args(&["switch", "-c", BRANCH])));
+    assert!(!git_calls(&f).contains(&strings(&["switch", "-c", BRANCH])));
 }
 
 #[test]
@@ -282,12 +279,12 @@ fn base_already_merged_is_not_merged_again() {
     // Then the branch's commit is read, for the secret scan before the push.
     let branch_ref = format!("refs/heads/{BRANCH}");
     let before = [
-        args(FETCH),
-        args(&["merge-base", "--is-ancestor", "origin/main", "HEAD"]),
-        args(&["rev-parse", "--verify", &branch_ref]),
+        strings(FETCH),
+        strings(&["merge-base", "--is-ancestor", "origin/main", "HEAD"]),
+        strings(&["rev-parse", "--verify", &branch_ref]),
     ];
     assert_eq!(calls[push - 3..push], before);
-    assert!(!calls.contains(&args(MERGE)));
+    assert!(!calls.contains(&strings(MERGE)));
 }
 
 /// A run whose base conflicts with the Builder's change when it publishes, ending with verdict in round 1; the

@@ -1,6 +1,6 @@
 use super::*;
 use crate::pipeline::DEFAULT_WORKFLOW;
-use crate::test_support::{helper_cases, oracle, unhex};
+use crate::test_support::{helper_cases, oracle, unhex, GOLDEN_SUMMARY};
 use crate::workflow_file::saved_pipeline;
 
 #[test]
@@ -81,41 +81,6 @@ fn a_pipe_in_a_cell_does_not_split_it() {
     assert!(table.ends_with("| build | build | 1 | claude | x\\|y | 2026-10-03 04:00:00 | 5s | a\\|b.md |"), "{table}");
 }
 
-/// The summary of the default workflow approved in round 1, as TestTurnTimings has it: the Workflow's tests expect it of a
-/// whole run.
-pub(crate) const GOLDEN_SUMMARY: &str = "\
-# Run 20260929-120000-a1b2c3
-
-- **Workflow:** default
-- **Outcome:** APPROVE
-- **Pull request:** https://github.com/o/r/pull/7
-- **Branch:** `orchestrator/add-a-token-bucket-rate-limiter-a1b2c3`
-- **Wall time:** 35m 00s, from the first turn's start to 2026-10-03T04:35:00+00:00
-
-## Task
-
-add a rate limiter
-
-## Roles
-
-| role | harness | model |
-| --- | --- | --- |
-| Spec Collector (spec) | claude | default |
-| Builder (build) | codex | default |
-| Reviewer (review) | claude | opus |
-
-## Turns
-
-| step | role | round | harness | model | start (UTC) | duration | file |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| spec (human-paced) | spec | 0 | claude | default | 2026-10-03 04:00:00 | 10m 00s | spec.md |
-| build | build | 1 | codex | default | 2026-10-03 04:10:00 | 20m 00s | build-1.md |
-| review | review | 1 | claude | opus | 2026-10-03 04:30:00 | 5m 00s | review-1.md |
-
-## Rounds
-
-- Round 1: review APPROVE
-";
 
 fn approved_run() -> RunState {
     let mut s = RunState::new("20260929-120000-a1b2c3", "add a rate limiter", "/proj");
