@@ -122,15 +122,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   Decided against unless a run is found that writes such input.
 - **The Rust engine's Ctrl-C, what is left.** Rust-engine ticket 08's part 6 (2026-10-29) has a SIGINT raise the
   `Interrupt`, which stops the command the engine waits on (Fixed, "A Ctrl-C at the terminal does not reach the
-  command the Rust engine's `Host` or herdr is running"). Not closed: (1) the `orchestrator` binary's `main`
-  calls `by_signals` first (ticket 08's part 7, `engine/src/main.rs`), and `run` and `resume` turn a raised `Interrupt`
-  outside a Workflow (resolving the directory, reading the run, switching its gate) into the interrupted note and exit
-  status 130 (`crate::cli`, `stop`), as Python's KeyboardInterrupt anywhere does; so do ticket 09a's (`list`, `metrics`,
-  `show`, `prune`, `close`, `workflows`, the sweep before a run: `run_command`, `herdrless_command`, and
-  `prune_branches` and `fill_pr_states` stop at a failure met while it is raised), and ticket 09b's (`refresh`,
-  `judged-in-quality`, `doctor`, which prints nothing then, and `drain`, which stops between runs and after its last,
-  having printed its spec changes: `crate::cli::drain`, `drain_command`), and `serve`
-  (ticket 10) has its own SIGINT and SIGTERM, which `by_signals` would take over; closes with that ticket. (2) A
+  command the Rust engine's `Host` or herdr is running", which since ticket 10 also says how every command of the
+  binary takes it). Not closed: (1) A
   Ctrl-C during a Jenkins or PyPI request (`crate::http`, ureq) waits for the request to end, up to its timeout, where
   Python's KeyboardInterrupt stops `urlopen` at once: there is no process to stop, and ureq has no way to abandon a
   request from another thread. The user accepted that wait for a Ctrl-C (2026-10-29, review 100). Since ticket 08's
@@ -139,13 +132,15 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   timeout"), where it ended the Python engine at once; a service manager that sends SIGKILL after a shorter grace
   kills the engine with the run unreleased. Closes with a request the Interrupt can cut short (one whose reads are
   given slices of the timeout, the Interrupt checked between them, or one run on a thread the Workflow stops waiting
-  for), or with the user's ruling that the wait is acceptable for SIGTERM and SIGHUP too. (3) Under macOS, `by_signals`
+  for), or with the user's ruling that the wait is acceptable for SIGTERM and SIGHUP too. (2) Under macOS, `by_signals`
   reads no `/proc/self/status` and takes the kernel to discard a signal that was ignored when the engine started, even
-  while blocked, as the BSD kernels do, and `run_process` gives
+  while blocked, as the BSD kernels do, so `serve`, which waits for SIGINT and SIGTERM also when it started with one
+  ignored, as Python's `signal.signal` replaces an ignored disposition (ticket 10, `crate::serve::serve_command`),
+  does not stop at one it started ignoring there, and `run_process` gives
   a command the whole 250 ms grace, nix having no `waitid` there; unchecked on a Mac. Closes with
   `engine/tests/signals.rs`, which is Linux's (it reads `/proc` and starts the engine with GNU `env`), ported to macOS
   and run on one. A process that left the command's group, as a daemon does, is not reached, as at
-  a timeout; that is no gap, as the terminal's Ctrl-C does not reach one in Python either. (4) On a Linux whose
+  a timeout; that is no gap, as the terminal's Ctrl-C does not reach one in Python either. (3) On a Linux whose
   `/proc/self/status` cannot be read, as in a container or sandbox without `/proc`, `ignored_signals` finds nothing
   ignored, so `by_signals` waits for a signal the engine started with ignored and takes it, Linux queueing a blocked
   signal whatever its disposition (cross-review 102, F2: "an engine under `nohup` in a container or sandbox without
@@ -238,6 +233,28 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   every save: for the Python engine an audit hook through `sitecustomize`, or a `mv` on PATH that `Host.write` calls,
   would catch them, and the Rust engine could be held to neither. Closes with the user's ruling on the ticket's
   wording, or a way to see each write of `state.json` from outside the process (inotify has no stdlib binding).
+- **serve answers some requests otherwise than Python's http.server.** The Rust engine's serve is on tiny_http
+  (rust-engine ticket 10, `engine/src/serve.rs`), which reads a request otherwise in a few cases no client of serve's
+  sends: a request line or header with a byte beyond ASCII gets no answer, its connection closed, where Python reads
+  it as Latin-1 and answers, a token so 401 (`non_ascii_tokens`); a header's value loses its trailing blanks, so a
+  `Host` or `Authorization` header with one passes where Python's fails it; a header continued on a folded line is
+  refused with 400, where Python joins the lines; a netloc with one square bracket in an absolute request target is
+  read as it is (`crate::py::url::urlsplit`), where Python's handler fails on urlsplit's ValueError and answers
+  nothing; tiny_http answers a bad request line, an `Expect` other than `100-continue` and HTTP/2 itself (400, 417,
+  505), and neither those nor the 501 to another method are logged on stderr, where http.server logs each error it
+  sends; and a reply names tiny_http in its `Server` header. An event stream to an HTTP/1.1 client is chunked, ending
+  with its last chunk, where Python's HTTP/1.0 stream ends with the connection: tiny_http keeps the connection, so a
+  close-delimited stream would not end for a client at a server's stop. The parity harness's `EventStream` takes the
+  closed chunked stream's AttributeError for its end (`tests/parity/scenarios.py`). Every security check refuses
+  what Python's refuses; these change only how. Decided against unless a client is found that sends such a request.
+- **serve reads a run's files through a symbolic link.** A run's files are listed and read by `Host.run_files` and
+  `Host.read`, which follow a symbolic link (`[ -f ]`, `cat`), so a link an agent leaves in its run directory, or a
+  run directory that is a link, lets `/file` and the event stream show a file outside the run, `~/.ssh/id_rsa` say, to
+  the desktop app's window; the name a request gives is still only a plain name, and only the token's holder can ask.
+  The Rust engine's serve reads them as Python's does (rust-engine ticket 10,
+  `a_link_in_the_run_directory_is_followed_as_python_follows_it`), the Python engine being the parity oracle. Closes
+  with a ruling: refuse a link whose target is outside the run directory, in both engines' `ProjectRuns` (the Rust
+  one only, while the Python engine is frozen), or keep reading through it.
 - **The parity harness compares serve's event stream at checkpoints, not event by event.** `serve_endpoints_and_events`
   keeps, at each point where the run waits on an agent and once it is done, the last `record` and `files` event of
   each run (`tests/parity/scenarios.py`, `last_by_run`). Raised by cross-review 65 (F10, 2026-10-27), against the
@@ -624,6 +641,26 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Fixed
 
+- **The Rust engine had no serve.** The desktop app starts `orchestrator serve --origin ...` as its sidecar
+  (`ui/src-tauri/src/lib.rs`), which the `orchestrator` binary did not have. Fixed (2026-10-29, rust-engine ticket 10):
+  `crate::serve`, on tiny_http, a thread per request: `serve_command` prints `{"url", "token"}` and serves until
+  SIGINT or SIGTERM (Fixed, "A Ctrl-C at the terminal does not reach the command the Rust engine's `Host` or herdr is
+  running"); `RunServer` binds 127.0.0.1 on a free port and checks each request in Python's order, the `Host` header,
+  the `Origin` against its own and `--origin`'s, a CORS preflight answered then, the token from `secrets.token_urlsafe`
+  's 32 bytes compared in constant time (`same_bytes`) as `Authorization: Bearer` or `?token=`, the endpoint, its
+  parameters, the project (`project_host`, connected once per machine and directory), and in
+  `crate::serve::runs` `plain_name` and state.json's refusal (`RunReadError::Refused`, Python's `RunPathRefused`)
+  before anything is read; `/runs`, `/files`, `/file` and `/events`, whose `RunWatch` polls every second, every 5 for a
+  `--machine`, and sends `record`, `files` and `problem` events, a comment when nothing changed, until the client goes
+  or the server stops, which also stops the commands its projects' `Host`s run. A request is read as http.server reads
+  it (`crate::py::url`'s `urlsplit` and `parse_qsl`, against Python 3.14's answers in `engine/tests/oracle/python.json`;
+  a path that starts with `//` collapsed; the last of a parameter given twice), and any method but GET and OPTIONS gets
+  http.server's 501 page. Ported: `TestServeEndpoints`, `TestServeSecurity`, `TestServeEvents`,
+  `TestServeEventsOnAMachine`, `TestRunWatch`, `TestServeCommand` and `TestProjectHost` (`engine/src/serve/tests.rs`,
+  `engine/src/serve/runs/tests.rs`, and their process cases in `engine/tests/program.rs`), with each refusal; not
+  `TestProjectRuns`, whose `project_runs` is the tk GUI's. The parity scenario `serve_endpoints_and_events` passes
+  against the binary. Where it answers otherwise than Python: the Open issues "serve answers some requests otherwise
+  than Python's http.server" and "serve reads a run's files through a symbolic link".
 - **A Host need of the doctor's, left for rust-engine ticket 09b.** (Moved from Open issues, 2026-10-29.) `Host::exec` words a command that cannot be
   started as a message only, so the doctor's `_run_tool`, which tells a tool missing from PATH by its
   FileNotFoundError, cannot tell it so (cross-review 89, F9: "porting `_run_tool`'s 'not on PATH' check will need
@@ -670,8 +707,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   (2026-10-29) adds `drain`, `refresh`, `doctor` and `judged-in-quality` (`crate::cli::drain`, `refresh`, `doctor` and
   `judged`), with `TestDrain`, `TestDrainWorkflows`, TestPromptFiles' drain case, `TestRefresh`, `TestCheckSetup`,
   `TestDoctorCommand` and `TestJudgedInQuality`, and empties `NOT_YET`: every command's `--help` names Python's flags,
-  and the parity scenarios `specs_drained`, `conflict_refreshed`, `doctor_checks` and `judged_in_quality` pass. Not
-  closed: serve (ticket 10).
+  and the parity scenarios `specs_drained`, `conflict_refreshed`, `doctor_checks` and `judged_in_quality` pass. Ticket
+  10 (2026-10-29) adds `serve` (`crate::serve`, Fixed, "The Rust engine had no serve"), so the `--help` test covers
+  every command but gui (`engine/tests/oracle/cli.py`'s `NOT_PORTED`).
 - **Harness tests left for rust-engine tickets 08 and 09.** (Moved from Open issues, 2026-10-29.) Ticket 06 ported `launch_args`, `session_usage` and
   `turn_tokens` (`engine/src/harness/tests.rs`, `engine/src/summary/tests.rs`), but the Python cases that drive them
   through `Workflow`, `parse_args`, `new_state` or `resumable_state` wait for those (cross-review 92, F1: "As merged,
@@ -853,8 +891,18 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `engine/src/herdr/tests.rs`, `workflow/tests/interrupted.rs` (a run waiting on herdr, one during a prompt herdr
   delivered, one already done), `a_ctrl_c_while_a_proof_runs_stops_it_with_what_it_started` (the proof under GNU
   `timeout`, which leads the group ProcessHost started) and `engine/tests/sigint.rs` (now `signals.rs`: a real SIGINT to
-  an engine's group, and one it inherited ignored). What is left is the Open issue "The Rust engine's Ctrl-C, what is
-  left".
+  an engine's group, and one it inherited ignored). Every command of the binary takes it since: `run` and `resume`
+  turn a raised `Interrupt` outside a Workflow (resolving the directory, reading the run, switching its gate) into the
+  interrupted note and exit status 130 (ticket 08's part 7, `crate::cli`, `stop`), as Python's KeyboardInterrupt
+  anywhere does; so do ticket 09a's (`list`, `metrics`, `show`, `prune`, `close`, `workflows`, the sweep before a run:
+  `run_command`, `herdrless_command`, and `prune_branches` and `fill_pr_states` stop at a failure met while it is
+  raised), and ticket 09b's (`refresh`, `judged-in-quality`, `doctor`, which prints nothing then, and `drain`, which
+  stops between runs and after its last, having printed its spec changes: `crate::cli::drain`, `drain_command`). And
+  `serve` keeps SIGINT and SIGTERM its own, as Python's does (ticket 10, 2026-10-29): `crate::cli::main` runs it
+  before it calls `by_signals`, and `crate::serve::serve_command` blocks the two and waits for them itself, also one
+  ignored at start, then stops the server, which raises the `Interrupt` its projects' commands watch, and exits 0;
+  SIGHUP keeps its default and ends it, as it ends Python's serve (`engine/tests/program.rs`, the serve cases). What is
+  left is the Open issue "The Rust engine's Ctrl-C, what is left".
 - **The Rust engine read a workflow file's tables with their keys sorted.** The toml crate keeps a table in a
   `BTreeMap` without its `preserve_order` feature, so a table with two problems could be refused naming the other one
   first, where tomllib gives the file's order. Raised in rust-engine ticket 04 (2026-10-28). Fixed (2026-10-28, the

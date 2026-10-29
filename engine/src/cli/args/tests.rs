@@ -128,7 +128,6 @@ fn usage_errors_exit_2_naming_the_problem() {
         (&["list", "--pr-state"], "--pr-state needs --json"),
         (&["show"], "RUN"),
         (&["list", "--model", "sonnet"], "--model"),
-        (&["serve"], "serve"),
     ];
     for (argv, why) in cases {
         let (message, status) = refused(argv);
@@ -326,7 +325,7 @@ fn help_names_the_flags_python_names() {
         assert_eq!(flags_in(&help), python, "{name:?}'s help:\n{help}");
     }
     let missing: Vec<&str> =
-        commands.iter().map(String::as_str).filter(|c| !ported.iter().any(|p| p == c) && !["gui", "serve"].contains(c)).collect();
+        commands.iter().map(String::as_str).filter(|c| !ported.iter().any(|p| p == c) && *c != "gui").collect();
     assert_eq!(missing, Vec::<&str>::new());
     assert!(ported.iter().all(|c| commands.contains(c)), "{ported:?}");
 }
@@ -339,4 +338,16 @@ fn a_flag_given_twice_takes_the_last() {
     let show = parse(&["show", "--machine", "a", "--machine", "b", "--cwd", "/p", "x"]).unwrap();
     assert_eq!(show.target().and_then(|t| t.machine.as_deref()), Some("b"));
     assert!(matches!(parse(&["list", "--json", "--json"]), Ok(Command::Runs(_, RunsCommand::List { json: true, .. }))));
+}
+
+#[test]
+fn serve_takes_each_origin_given() {
+    assert_eq!(parse(&["serve"]).unwrap(), Command::Serve(vec![]));
+    let both = parse(&["serve", "--origin", "tauri://localhost", "--origin=http://localhost:1420"]).unwrap();
+    assert_eq!(both, Command::Serve(vec!["tauri://localhost".to_string(), "http://localhost:1420".to_string()]));
+    // argparse takes an abbreviation of a long flag.
+    assert_eq!(parse(&["serve", "--or", "x"]).unwrap(), Command::Serve(vec!["x".to_string()]));
+    assert_eq!(parse(&["serve", "--origin"]).unwrap_err().exit_code(), 2);
+    assert_eq!(parse(&["serve", "x"]).unwrap_err().exit_code(), 2);
+    assert_eq!(parse(&["serve", "--cwd", "/p"]).unwrap_err().exit_code(), 2);
 }

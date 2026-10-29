@@ -1,6 +1,6 @@
 //! The command line as orchestrator.py's parse_args reads it, on clap: the subcommands with their flags, and the
 //! checks argparse's types cannot make (check_flag_values, check_spec_args): every command of Python's but gui, which
-//! is not ported (the rust-engine spec's Decisions), and serve, which is ticket 10's.
+//! is not ported (the rust-engine spec's Decisions).
 //!
 //! The flags come in groups that several subcommands share, as argparse's parent parsers: [`Target`] (where the
 //! project is), [`Settings`] (how a run goes, which resume may change) and [`Starts`] (what a run is started with).
@@ -49,6 +49,9 @@ pub enum Command {
         /// --target: the branch the pull request would merge into.
         branch: String,
     },
+    /// `serve`: serve the runs of any project, read-only, over HTTP on 127.0.0.1, also answering the origins given
+    /// with --origin, in their order.
+    Serve(Vec<String>),
 }
 
 /// A command about a project's runs.
@@ -161,7 +164,7 @@ pub struct ResumeArgs {
 }
 
 impl Command {
-    /// Where the project is, as the human gave it; None for workflows and judged-in-quality, which take no
+    /// Where the project is, as the human gave it; None for workflows, judged-in-quality and serve, which take no
     /// --machine or --cwd.
     pub fn target(&self) -> Option<&Target> {
         match self {
@@ -169,7 +172,7 @@ impl Command {
             Command::Resume(a) => Some(&a.target),
             Command::Drain(a) => Some(&a.run.target),
             Command::Runs(target, _) | Command::Refresh(target, _) | Command::Doctor(target) => Some(target),
-            Command::Workflows(_) | Command::JudgedInQuality { .. } => None,
+            Command::Workflows(_) | Command::JudgedInQuality { .. } | Command::Serve(_) => None,
         }
     }
 
@@ -248,6 +251,7 @@ pub fn parse_args(argv: impl IntoIterator<Item = OsString>, config: &ConfigDir) 
         Some(("prune", m)) => Command::Runs(target(m), RunsCommand::Prune { dry_run: m.get_flag("dry-run") }),
         Some(("close", m)) => Command::Runs(target(m), RunsCommand::Close(string(m, "run_ref").unwrap_or_default())),
         Some(("workflows", m)) => Command::Workflows(string(m, "workflow")),
+        Some(("serve", m)) => Command::Serve(m.get_many::<String>("origin").into_iter().flatten().cloned().collect()),
         _ => unreachable!("clap requires one of the subcommands parser defines"),
     };
     check_spec_args(&matches, &mut p)?;
@@ -442,6 +446,17 @@ pub fn parser(config: &ConfigDir) -> clap::Command {
             dotted(&GIT_MIN_VERSION)
         ))
         .args(target_args());
+    let serve = clap::Command::new("serve")
+        .about("serve the runs of any project, read-only, over HTTP on 127.0.0.1, for the desktop app")
+        .long_about(
+            "Serve the runs of any project, local or on a saved herdr machine, read-only: the run records list --json \
+             prints, each run's files and their contents, and a stream of events as they change. Prints one JSON \
+             line, {\"url\": ..., \"token\": ...}, then serves on a free port of 127.0.0.1 until SIGINT or SIGTERM, \
+             and exits 0. Every request needs the token.",
+        )
+        .arg(Arg::new("origin").long("origin").value_name("ORIGIN").action(ArgAction::Append).help(
+            "also answer requests from this origin, such as the desktop app's webview, tauri://localhost; repeatable",
+        ));
     clap::Command::new("orchestrator")
         .about(
             "Role-based handoff between agent sessions in herdr, each role in the harness of its choice; by default \
@@ -453,7 +468,7 @@ pub fn parser(config: &ConfigDir) -> clap::Command {
         .infer_long_args(true)
         // argparse takes the last of a flag given twice, where clap would refuse it.
         .subcommands(
-            [run, resume, list, metrics, show, prune, drain, close, refresh, workflows, judged, doctor]
+            [run, resume, list, metrics, show, prune, drain, close, refresh, workflows, judged, doctor, serve]
                 .map(|c| c.args_override_self(true)),
         )
 }

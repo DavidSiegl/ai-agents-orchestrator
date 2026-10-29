@@ -16,9 +16,8 @@ import orchestrator  # found through the path above
 
 OUT = os.path.join(os.path.dirname(__file__), "cli.json")
 
-# The commands the Rust engine does not port: the tk GUI (the rust-engine spec's Decisions), and serve, which has a
-# ticket of its own and its own help.
-NOT_PORTED = ("gui", "serve")
+# The commands the Rust engine does not port: the tk GUI (the rust-engine spec's Decisions).
+NOT_PORTED = ("gui",)
 
 # A flag as help names it, in its usage or its text: a long flag, or -h.
 FLAG = re.compile(r"(?<![\w-])(--[a-z][a-z-]*[a-z]|-h)(?![\w-])")

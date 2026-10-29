@@ -155,6 +155,12 @@
    "--help",
    "--machine",
    "-h"
+  ],
+  "serve": [
+   "--help",
+   "--json",
+   "--origin",
+   "-h"
   ]
  }
 }
