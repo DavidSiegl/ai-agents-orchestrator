@@ -1089,3 +1089,14 @@ fn two_specs_end_as_two_pull_requests() {
         assert_eq!(d.status_pr(slug), (some(SPEC_IN_REVIEW), some("https://github.com/o/r/pull/7")));
     }
 }
+
+#[test]
+fn a_blocker_with_an_empty_status_waits_as_one_with_none() {
+    // As Python's `blocker.status or 'no status'` reads an empty Status: (cross-review 104, F1).
+    let d = Drain::new();
+    d.spec("a", &spec_text("First", Some(""), &[&format!("PR: {PR_A}")]));
+    d.spec("b", &spec_text("Second", Some(SPEC_READY), &["Blocked by: a"]));
+    let r = d.drain(vec![], &[]);
+    assert_eq!(r.status, EXIT_WAITING);
+    assert!(r.out.ends_with(&format!("b waits on:\n    a: no status  {PR_A}\n")), "{}", r.out);
+}

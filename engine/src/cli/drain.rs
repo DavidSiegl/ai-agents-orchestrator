@@ -62,18 +62,8 @@ pub(super) fn drain_command(args: &DrainArgs, world: &Connected, cwd: &str) -> R
         return if interrupt.is_raised() { Err(Stop::Interrupted(None)) } else { Ok(Ended::Status(0)) };
     }
     prune::sweep_branches(world, cwd).map_err(stopped)?;
-    let drained = (|| -> Result<Option<i32>, Stop> {
-        loop {
-            // A Ctrl-C between runs, which no run took.
-            if interrupt.is_raised() {
-                return Err(Stop::Interrupted(None));
-            }
-            let Some(ready) = next_startable(&mut specs, &by_slug, world) else { return Ok(None) };
-            if let Some(status) = drain_spec(args, world, cwd, &mut specs[ready])? {
-                return Ok(Some(status));
-            }
-        }
-    })();
+    let drained = drain_ready(args, world, cwd, &mut specs, &by_slug);
+    // Whether the drain ended or failed, as Python's finally prints them.
     print_spec_changes(&specs, world);
     let status = match drained? {
         Some(status) => status,
@@ -83,6 +73,28 @@ pub(super) fn drain_command(args: &DrainArgs, world: &Connected, cwd: &str) -> R
         return Err(Stop::Interrupted(None));
     }
     Ok(Ended::Status(status))
+}
+
+/// Run each of specs that is startable, in turn, until none is (None) or one stops the drain (its exit status), as
+/// drain_spec runs it; by_slug indexes specs by slug. Errors: as drain_spec's, and the interrupt raised between runs
+/// (Stop::Interrupted, no run named).
+fn drain_ready(
+    args: &DrainArgs,
+    world: &Connected,
+    cwd: &str,
+    specs: &mut [QueuedSpec],
+    by_slug: &HashMap<String, usize>,
+) -> Result<Option<i32>, Stop> {
+    loop {
+        // A Ctrl-C between runs, which no run took.
+        if world.with.interrupt.is_raised() {
+            return Err(Stop::Interrupted(None));
+        }
+        let Some(ready) = next_startable(specs, by_slug, world) else { return Ok(None) };
+        if let Some(status) = drain_spec(args, world, cwd, &mut specs[ready])? {
+            return Ok(Some(status));
+        }
+    }
 }
 
 /// Whether drain runs the spec: it is SPEC_READY and each of its blockers, among specs by by_slug, is SPEC_DONE.
@@ -181,7 +193,8 @@ fn drain_end(specs: &[QueuedSpec], by_slug: &HashMap<String, usize>, world: &Con
             if let Some(gone) = &blocker.gone {
                 world.say(&format!("    {b}: gone ({gone})"));
             } else {
-                let status = blocker.status().unwrap_or_else(|| "no status".to_string());
+                // An empty Status: is none, as Python's `or` reads it.
+                let status = blocker.status().filter(|s| !s.is_empty()).unwrap_or_else(|| "no status".to_string());
                 let pr = blocker.pr().filter(|p| !p.is_empty()).map(|p| format!("  {p}")).unwrap_or_default();
                 world.say(&format!("    {b}: {status}{pr}"));
             }
