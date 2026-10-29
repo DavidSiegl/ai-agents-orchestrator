@@ -270,8 +270,8 @@ pipeline {
 
         // The parity scenarios of the commands the Rust engine's binary has, every one but serve's, against it, and
         // those that switch engines at the kill (tests/parity/test_parity.py: PARITY_ENGINE, and PARITY_COMMANDS for
-        // those commands), on a pull request build whose change touches engine/, tests/parity/ or the workspace's Cargo.toml, Cargo.lock or
-        // rust-toolchain.toml since the base Gate judges it from (ci/pr-base.sh), by a git diff as the Test stage's for
+        // those commands), on a pull request build whose change touches engine/, tests/parity/ or the workspace's
+        // Cargo.toml, Cargo.lock or rust-toolchain.toml since the base Gate judges it from (ci/pr-base.sh), by a git diff as the Test stage's for
         // a quality build's parity scenarios: a diff, or a base, that fails counts as a change. The Test stage runs
         // every scenario against orchestrator.py. The binary is the one the Test stage's cargo-llvm-cov built,
         // instrumented for coverage, so it is given LLVM_PROFILE_FILE /dev/null through env, the harness giving the

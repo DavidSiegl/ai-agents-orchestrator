@@ -116,7 +116,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   (`Workflow::run_proof`), where Python keeps it as a lone surrogate, which `state.json` holds as an escape and the
   write of the review then fails on (a UnicodeEncodeError, uncaught).
   And from drain (rust-engine ticket 09b, 2026-10-29): a name in drain's DIR that is not UTF-8 is left out of the
-  queue (`crate::cli::drain::queue`, `read_queue`), where Python reads its spec.md through os.fsdecode.
+  queue (`crate::cli::drain::queue`, `read_queue`), where Python reads its spec.md through os.fsdecode; and doctor
+  reads a tool's version number in ASCII digits only (`crate::cli::doctor`, `version_number`), where Python's `\d`
+  takes any Unicode digit (cross-review 104, F6).
   Decided against unless a run is found that writes such input.
 - **The Rust engine's Ctrl-C, what is left.** Rust-engine ticket 08's part 6 (2026-10-29) has a SIGINT raise the
   `Interrupt`, which stops the command the engine waits on (Fixed, "A Ctrl-C at the terminal does not reach the

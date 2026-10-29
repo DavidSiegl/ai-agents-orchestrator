@@ -286,8 +286,6 @@ fn the_commands_about_runs_and_workflows() {
 
 // -- The flags each command's help names, as orchestrator.py's ------------------------------------------------------
 
-
-
 /// The flags text names, as engine/tests/oracle/cli.py finds them: each long flag (two hyphens, lowercase words
 /// joined by hyphens) or -h that stands alone, not part of a longer word.
 fn flags_in(text: &str) -> std::collections::BTreeSet<String> {
