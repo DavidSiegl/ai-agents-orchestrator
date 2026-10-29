@@ -693,9 +693,14 @@ impl Host for Unreadable {
 #[test]
 fn a_failed_read_of_the_next_steps_file_leaves_the_state_as_it_was() {
     // In round 0 no check of turn_quality_gate_on's runs a command, so the read of review-0.md is the only call.
-    let mut state = pr_run("review", 0);
-    let before = state.to_json();
-    let e = turn_quality_gate_on(&mut state, &DEFAULT_WORKFLOW, &Unreadable, &Told::default(), &jenkins_on(&FakeJenkins::new()));
-    assert_eq!(e.unwrap_err().0, format!("cannot read {}/review-0.md", state.dir()));
-    assert_eq!(state.to_json(), before);
+    // Also once the Reviewer was prompted, whose file then decides nothing.
+    for prompted in [None, Some("review-0.md")] {
+        let mut state = pr_run("review", 0);
+        state.prompted = prompted.map(String::from);
+        let before = state.to_json();
+        let jenkins = jenkins_on(&FakeJenkins::new());
+        let e = turn_quality_gate_on(&mut state, &DEFAULT_WORKFLOW, &Unreadable, &Told::default(), &jenkins);
+        assert_eq!(e.unwrap_err().0, format!("cannot read {}/review-0.md", state.dir()), "{prompted:?}");
+        assert_eq!(state.to_json(), before);
+    }
 }

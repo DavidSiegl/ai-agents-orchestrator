@@ -91,23 +91,26 @@ class Invocation:
         (engine/src/host/process.rs), which a kill of the engine's group alone would leave running. Each is stopped
         first, until a listing finds none new, so that none starts another between the listing and the kill."""
         stopped: set[int] = set()
-        while True:
-            # The engine's group, then what the listing finds below it that is not stopped yet.
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(self.process.pid, signal.SIGSTOP)
-            below = fakes.descendants(self.process.pid) - {self.process.pid} - stopped
-            if not below:
-                break
-            for pid in below:
-                # Each a process of the engine's, or one that ended meanwhile.
+        try:
+            while True:
+                # The engine's group, then what the listing finds below it that is not stopped yet.
                 with contextlib.suppress(ProcessLookupError):
-                    os.kill(pid, signal.SIGSTOP)
-            stopped |= below
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(self.process.pid, signal.SIGKILL)
-        for pid in stopped:
+                    os.killpg(self.process.pid, signal.SIGSTOP)
+                below = fakes.descendants(self.process.pid) - {self.process.pid} - stopped
+                if not below:
+                    break
+                for pid in below:
+                    # Each a process of the engine's, or one that ended meanwhile.
+                    with contextlib.suppress(ProcessLookupError):
+                        os.kill(pid, signal.SIGSTOP)
+                stopped |= below
+        finally:
+            # Also when a listing fails: nothing is left stopped.
             with contextlib.suppress(ProcessLookupError):
-                os.kill(pid, signal.SIGKILL)
+                os.killpg(self.process.pid, signal.SIGKILL)
+            for pid in stopped:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
         self.process.wait()
         self.killed = True
 

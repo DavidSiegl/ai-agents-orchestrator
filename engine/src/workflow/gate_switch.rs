@@ -48,7 +48,9 @@ pub fn turn_quality_gate_on(
         // change; only one with none of these has not.
         let blocked = s.blocked.as_ref().and_then(|b| b.get("file")).and_then(|f| f.as_str());
         let started = [s.prompted.as_deref(), s.retrying.as_deref(), blocked].contains(&Some(file));
-        judge_first = !started && host.read(&format!("{}/{file}", s.dir()))?.is_none();
+        // Read whether or not the turn started, as Python reads it first: a failed read stops the resume either way.
+        let missing = host.read(&format!("{}/{file}", s.dir()))?.is_none();
+        judge_first = missing && !started;
     }
     s.quality_job = Some(jenkins.job().to_string());
     if judge_first {
