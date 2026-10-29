@@ -113,18 +113,7 @@ pub fn load_workflow_file(path: &str, prompts: &Prompts) -> Result<Pipeline, Orc
 
 /// The table TOML text holds, as Json; the parser's error, with its line and column, for text that is not TOML.
 pub fn parse_toml(text: &str) -> Result<Json, String> {
-    toml::from_str::<Json>(text).map_err(|e| {
-        let message = e.message().trim_end();
-        match e.span() {
-            Some(span) => {
-                let before = &text[..span.start.min(text.len())];
-                let line = before.matches('\n').count() + 1;
-                let column = before.rsplit('\n').next().unwrap_or(before).chars().count() + 1;
-                format!("{message} (at line {line}, column {column})")
-            }
-            None => message.to_string(),
-        }
-    })
+    toml::from_str::<Json>(text).map_err(|e| crate::py::toml::syntax_error(text, &e))
 }
 
 /// The workflow a definition describes, as a workflow file or a run's state.json holds it, a step with a use taking

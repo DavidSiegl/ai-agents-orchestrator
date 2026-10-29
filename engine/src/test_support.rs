@@ -100,6 +100,7 @@ pub fn oracle(file: &str) -> crate::py::json::Json {
         "quality.json" => include_str!("../tests/oracle/quality.json"),
         "helpers.json" => include_str!("../tests/oracle/helpers.json"),
         "host.json" => include_str!("../tests/oracle/host.json"),
+        "checks.json" => include_str!("../tests/oracle/checks.json"),
         "harness.json" => include_str!("../tests/oracle/harness.json"),
         _ => panic!("no oracle file {file}"),
     };

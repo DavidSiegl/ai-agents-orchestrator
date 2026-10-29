@@ -143,6 +143,49 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   agent wait`"). Closes with the interrupt handling of rust-engine ticket 08/09 killing the running command's group
   (its pid is its group's id; for herdr, that also ends the engine's wait for its output) before it releases the run,
   and a test that interrupts a run waiting on a command and one waiting on herdr.
+- **The Rust engine talks to Jenkins and PyPI otherwise than urllib in a few cases.** Its transport is ureq
+  (`HttpClient`, `engine/src/http.rs`, rust-engine ticket 07, 2026-10-28), which differs from `urlopen` where no test of
+  the Python engine pins it: ureq reaches an http URL through a proxy with CONNECT, as it does an https one, where
+  urllib sends the request itself to the proxy, so a proxy that allows CONNECT only to port 443, as squid does by
+  default, refuses a plain-http Jenkins that `http_proxy` sends through it; TLS trusts the certificates of the places
+  the environment names, else of the system's as openssl-probe finds them, each read by rustls-native-certs
+  (`root_certs`), which trusts otherwise than OpenSSL does for Python in five ways (the user's rulings, 2026-10-28,
+  cross-review 93, F22 and F23): with `SSL_CERT_FILE` set non-empty and `SSL_CERT_DIR` unset, or the reverse, it reads
+  only what is set, where OpenSSL adds the system's default directory or file (with the other set empty, OpenSSL adds
+  nothing either), so an `SSL_CERT_FILE` that cannot be read, such as a removed virtualenv's, trusts none where Python
+  still trusts `/etc/ssl/certs`; a variable set empty counts as unset, which departs from OpenSSL only where the other
+  is unset or empty too: with `SSL_CERT_FILE` empty and `SSL_CERT_DIR` unset the system's bundle is trusted too, where
+  OpenSSL reads no file for it, with `SSL_CERT_DIR` empty and `SSL_CERT_FILE` unset the system's directories are, where
+  OpenSSL reads no directory for it, and with both empty the whole system store is, or Mozilla's roots on a machine with
+  no certificate, where Python loads no certificate at all; it reads every file of a certificate directory, where
+  OpenSSL opens only the files named by a subject's hash, from `.0` up to the first missing or broken one, so a
+  certificate under another name, or behind a broken link, is trusted here only; without either variable it takes the
+  system's bundle and directories from openssl-probe's list of places, not from OpenSSL's compiled-in ones, also on
+  macOS, where neither engine reads the keychain; and without either variable, on a machine with no certificate at all,
+  it trusts Mozilla's roots (webpki-roots), where Python trusts none and fails every https request; and the timeout
+  bounds the connect and each read and write, as urllib's does, but not name resolution. In what it reads
+  (`engine/src/ci.rs`, `engine/src/pypi.rs`, `engine/src/py/toml.rs`): an answer of Jenkins's of another shape than a
+  queue item, a build's result, a list of builds or a test report is a `CIError` that may pass, where the Python engine
+  fails with an `AttributeError`, and a queue item's `executable.number` that is not an integer is one too, where Python
+  keeps it; a manifest is read as TOML 1.1, which tomllib before Python 3.15 refuses in part, and why one is not TOML is
+  the toml crate's words with tomllib's `(at line L, column C)`. Closes, for the proxy, with a transport that sends an
+  http request through a proxy as urllib does, or with `no_proxy` naming Jenkins; the rest decided against unless a
+  setup is found that needs it. Decided against (2026-10-28, ticket 07, design-it-twice): `CI` and `PyPI` as traits of
+  their own with in-memory fakes. The engine's tests would then word every URL and error twice, in the code and in the
+  fake, and ticket 08's Workflow tests, which read the requests Jenkins got (`FakeCI.names`, `requests`, `auth`), would
+  port only by re-deriving them; with the seam at `Http`, as Python's at `urlopen`, `FakeJenkins` and `FakePyPI` play
+  the servers and every line of `Jenkins` and `PyPI` runs in those tests. The user kept the `Http` seam and amended the
+  spec's Lane to say so (2026-10-28, cross-review 93, F1), and issue 08 says which seam it is given.
+- **Checks and Jenkins calls whose tests need the Workflow or the CLI, left for rust-engine tickets 08 and 09.**
+  Ticket 07 ported `TestOrchestratorChecks` on `judge_run` of the build's quality file, not through a quality round:
+  `test_a_build_that_failed_before_the_gate_is_not_checked`, `test_without_the_quality_gate_none_of_this_runs`, the
+  round's spec being its contract step's file or its task, and the heartbeat kept between PyPI's requests by the
+  round's `in_time` (`_judged_by_orchestrator`, `_in_time`) are the Workflow's, and FakePyPI's clock and `events`
+  with them (`engine/src/pypi/fake.rs` has neither). `judged_in_quality`, `_build_trust`, `_judging_changes`,
+  `JUDGING_FILES` and `JUDGED_DESCRIPTION`, with `TestJudgedInQuality`, are the `judged-in-quality` command's; the
+  Rust `Jenkins::retained_builds` they read is ported. Issues 08 and 09 name them (2026-10-28). Closes with ticket 08
+  porting those cases through its quality round on `FakeJenkins` and `FakePyPI`, and ticket 09 porting the command and
+  its tests.
 - **The contract test leaves its Jenkins build running when it fails.** `tests/contract/test_jenkins.py` triggers one
   quality build and nothing stops it on a failure or a Ctrl-C, so the build holds an executor until it ends, up to
   the 22 minutes build #59 took. Raised by cross-review 73 (F11, 2026-10-27): "a Ctrl-C during the queue wait leaves

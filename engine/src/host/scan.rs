@@ -7,7 +7,7 @@ use super::{checked, git_timed, Host, DEFAULT_TIMEOUT, IN_DIR};
 use crate::constants::{GITLEAKS_ALLOW, GITLEAKS_EXTEND_DEPTH, GITLEAKS_TIMEOUT, REMOTE};
 use crate::error::OrchestratorError;
 use crate::py::json::Json;
-use crate::py::text::{repr, strip};
+use crate::py::text::{repr, shortened, strip};
 use crate::quality::Leak;
 
 /// A push refused because what it would publish holds secrets, as Host::refuse_leaks finds them.
@@ -370,16 +370,6 @@ fn normpath(path: &str) -> String {
     } else {
         joined
     }
-}
-
-/// text, or its first n - 1 characters and an ellipsis when it is longer than n characters.
-pub(crate) fn shortened(text: &str, n: usize) -> String {
-    if text.chars().count() <= n {
-        return text.to_string();
-    }
-    let mut out: String = text.chars().take(n - 1).collect();
-    out.push('…');
-    out
 }
 
 /// Whether needle occurs in haystack.

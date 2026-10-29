@@ -1,24 +1,53 @@
 //! What the engine needs of Python's datetime: the time an ISO 8601 string names, as datetime.fromisoformat reads it
-//! and timestamp() gives it.
+//! and timestamp() and strftime's date give it.
 
 use super::text::repr;
 
-/// The seconds since the epoch of the time iso names, as `datetime.fromisoformat(iso).timestamp()` gives them in
-/// CPython 3.14, which .python-version pins for the repository's tests and harness.json's answers; 3.13 reads a few
-/// malformed times otherwise (TODO.md, "The Rust engine reads some input no run writes otherwise"). Every form
-/// 3.14's fromisoformat reads (a date as YYYY-MM-DD, YYYYMMDD or an ISO week date, then any one character and
-/// a time of hours, minutes and seconds with or without colons, a fraction of a second after `.` or `,` of which the
-/// first six digits count, hour 24 as the next day's midnight, and Z or an offset of hours, minutes, seconds and a
-/// fraction), with its quirks. A time without an offset is taken as UTC, where Python takes it as the machine's local
-/// time. Errors: what fromisoformat raises for iso, as its message says.
+/// A time as `datetime.fromisoformat` reads it in CPython 3.14, which .python-version pins for the repository's tests
+/// and harness.json's answers; 3.13 reads a few malformed times otherwise (TODO.md, "The Rust engine reads some input
+/// no run writes otherwise").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IsoTime {
+    /// Microseconds since 1970-01-01T00:00 of its date and time as they are written, hour 24 already turned into the
+    /// next day's midnight.
+    local: i128,
+    /// Its offset from UTC in microseconds, east positive; None for a time written without one.
+    offset: Option<i128>,
+}
+
+impl IsoTime {
+    /// The time iso names, read in every form 3.14's fromisoformat reads (a date as YYYY-MM-DD, YYYYMMDD or an ISO
+    /// week date, then any one character and a time of hours, minutes and seconds with or without colons, a fraction
+    /// of a second after `.` or `,` of which the first six digits count, hour 24 as the next day's midnight, and Z or
+    /// an offset of hours, minutes, seconds and a fraction), with its quirks. Errors: what fromisoformat raises for
+    /// iso, as its message says.
+    pub fn parse(iso: &str) -> Result<IsoTime, String> {
+        fromisoformat(iso).map(|(local, offset)| IsoTime { local, offset })
+    }
+
+    /// Seconds since the epoch, with their fraction, as `timestamp()` gives them; a time without an offset is taken
+    /// as UTC, where Python takes it as the machine's local time.
+    pub fn timestamp(self) -> f64 {
+        seconds_of_micros(self.local - self.offset.unwrap_or(0))
+    }
+
+    /// Its date as written, in its own offset, as `f"{time:%Y-%m-%d}"` writes it: 2026-10-29 for
+    /// 2026-10-28T24:00:00Z.
+    pub fn date(self) -> String {
+        let (year, month, day) = civil_from_days(i64::try_from(self.local.div_euclid(86_400_000_000)).expect("years 1 to 9999 fit"));
+        format!("{year:04}-{month:02}-{day:02}")
+    }
+}
+
+/// `IsoTime::parse(iso)?.timestamp()`: the seconds since the epoch of the time iso names, as
+/// `datetime.fromisoformat(iso).timestamp()` gives them. Errors: as IsoTime::parse's.
 pub fn fromisoformat_timestamp(iso: &str) -> Result<f64, String> {
-    let (micros, offset) = fromisoformat(iso)?;
-    Ok(seconds_of_micros(micros - offset.unwrap_or(0)))
+    IsoTime::parse(iso).map(IsoTime::timestamp)
 }
 
 /// The time iso names, as CPython's datetime_fromisoformat reads it (Modules/_datetimemodule.c, 3.14): microseconds
 /// since 1970-01-01T00:00 of its date and time as they are written, and its offset from UTC in microseconds, None for a
-/// time without one. Errors: as fromisoformat_timestamp's.
+/// time without one. Errors: as IsoTime::parse's.
 fn fromisoformat(iso: &str) -> Result<(i128, Option<i128>), String> {
     let invalid = || format!("Invalid isoformat string: {}", repr(iso));
     if iso.chars().count() < 7 {
@@ -281,7 +310,7 @@ fn days_in_month(year: i64, month: i64) -> i64 {
 }
 
 /// Days since 1970-01-01 of a date of the proleptic Gregorian calendar (Howard Hinnant's days_from_civil).
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+pub(crate) fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let y = if month <= 2 { year - 1 } else { year };
     let era = y.div_euclid(400);
     let yoe = y - era * 400;

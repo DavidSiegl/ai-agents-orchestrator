@@ -58,6 +58,14 @@ fn text_that_is_not_json_is_refused() {
 }
 
 #[test]
+fn python_str_is_str_of_what_json_loads_read() {
+    let value = Json::parse(r#"[null, true, false, 1, 2.5, 1e300, "it's", {"k": [], "q\"": "a"}]"#).unwrap();
+    assert_eq!(value.python_str(), r#"[None, True, False, 1, 2.5, 1e+300, "it's", {'k': [], 'q"': 'a'}]"#);
+    assert_eq!(Json::from("plain").python_str(), "plain");
+    assert_eq!(Json::Float(f64::INFINITY).python_str(), "inf");
+}
+
+#[test]
 fn a_lone_surrogate_reads_as_the_replacement_character() {
     let read = |text: &str| Json::parse_lossy(text).map(|j| j.as_str().map(String::from));
     // Halves without their pair, high or low, at the end or before another character.
