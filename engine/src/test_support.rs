@@ -83,6 +83,19 @@ impl Drop for TempDir {
     }
 }
 
+/// What starts a command with SIGINT at its default, so that a shell can trap it: one that the tests' process ignores,
+/// as Jenkins's does, stays ignored in what it starts, as in Python, and a shell cannot trap a signal ignored on entry.
+pub const HEARS_SIGINT: [&str; 2] = ["env", "--default-signal=INT"];
+
+/// A shell script for a program the engine runs, such as a fake herdr, that runs body with SIGINT at its default,
+/// whatever the tests' process does with it: it starts itself again through HEARS_SIGINT, once, with its arguments.
+pub fn hearing_sigint(body: &str) -> String {
+    format!(
+        "#!/bin/sh\n[ -n \"$HEARS_SIGINT\" ] || {{ HEARS_SIGINT=1; export HEARS_SIGINT; exec {} \"$0\" \"$@\"; }}\n{body}",
+        HEARS_SIGINT.join(" ")
+    )
+}
+
 /// How long the Ctrl-C tests wait for a command to get somewhere or a process to end, before they fail.
 const PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
 

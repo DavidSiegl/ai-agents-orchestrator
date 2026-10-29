@@ -7,7 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 
 use super::*;
 use crate::interrupt::Interrupt;
-use crate::test_support::{ended, oracle, raise_once_written, TempDir};
+use crate::test_support::{ended, oracle, raise_once_written, TempDir, HEARS_SIGINT};
 
 /// A token-shaped string, built so that no scanner takes this file for a leak.
 pub(crate) const FAKE_TOKEN: &str = concat!("ghp_", "Zq7Zq7Zq7Zq7", "Zq7Zq7Zq7Zq7", "Zq7Zq7Zq7Zq7");
@@ -542,10 +542,6 @@ fn a_command_ended_by_a_signal_has_its_negative_number() {
 }
 
 // -- The Ctrl-C (not in Python, whose commands get the terminal's SIGINT themselves) ----------------------------------
-
-/// What starts a command with SIGINT at its default, so that a shell can trap it: one that the tests' process ignores,
-/// as Jenkins's does, stays ignored in what it starts, as in Python, and a shell cannot trap a signal ignored on entry.
-const HEARS_SIGINT: [&str; 2] = ["env", "--default-signal=INT"];
 
 #[test]
 fn a_ctrl_c_stops_the_running_command_with_its_process_group() {

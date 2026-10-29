@@ -5,7 +5,7 @@
 use super::*;
 use crate::herdr::{Herdr, ProcessHerdr};
 use crate::host::tests::{environment, tool};
-use crate::test_support::{ended, raise_once_written, TempDir};
+use crate::test_support::{ended, hearing_sigint, raise_once_written, TempDir};
 
 /// A ProcessHerdr of the fixture's Ctrl-C whose herdr is script, in a directory of its own.
 fn real_herdr(f: &Fixture, d: &TempDir, script: &str) -> ProcessHerdr {
@@ -45,7 +45,7 @@ fn a_ctrl_c_during_a_prompt_herdr_delivered_records_no_prompt() {
     let d = TempDir::new();
     let delivered = d.join("delivered");
     let f = Fixture::new(vec![("spec", vec![spec_turn()])]);
-    let script = format!("#!/bin/sh\ntrap 'exit 0' INT\necho \"$4\" > '{delivered}'\nwhile :; do sleep 0.05; done\n");
+    let script = hearing_sigint(&format!("trap 'exit 0' INT\necho \"$4\" > '{delivered}'\nwhile :; do sleep 0.05; done\n"));
     let herdr = real_herdr(&f, &d, &script);
     f.herdr.state().prompt_with = Some(Box::new(move |name, text| herdr.prompt(name, text)));
     let raising = raise_once_written(&delivered, &f.interrupt);

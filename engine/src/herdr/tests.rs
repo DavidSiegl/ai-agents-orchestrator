@@ -13,7 +13,7 @@ use crate::host::fake::FakeHost;
 use crate::host::tests::{assert_scrubbed, environment, tool, with_credentials};
 use crate::host::Host;
 use crate::state::RunState;
-use crate::test_support::{ended, raise_once_written, recordings, TempDir};
+use crate::test_support::{ended, hearing_sigint, raise_once_written, recordings, TempDir};
 
 /// Each command a ProcessHerdr ran, with the limit on its process.
 type Commands = Arc<Mutex<Vec<(Vec<String>, Option<Duration>)>>>;
@@ -273,7 +273,7 @@ fn a_prompt_herdr_delivered_before_the_ctrl_c_fails() {
     // Python's KeyboardInterrupt in herdr's prompt records nothing (FakeHerdrState::interrupt plays the same).
     let d = TempDir::new();
     let (delivered, interrupt) = (d.join("delivered"), Interrupt::new());
-    let script = format!("#!/bin/sh\ntrap 'exit 0' INT\necho \"$4\" > '{delivered}'\nwhile :; do sleep 0.05; done\n");
+    let script = hearing_sigint(&format!("trap 'exit 0' INT\necho \"$4\" > '{delivered}'\nwhile :; do sleep 0.05; done\n"));
     tool(&d.path(), "herdr", &script);
     let herdr = ProcessHerdr::in_environment(None, environment(Some(&d.path()), &[]).into_iter(), &interrupt);
     let raising = raise_once_written(&delivered, &interrupt);
