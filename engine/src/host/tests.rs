@@ -543,6 +543,10 @@ fn a_command_ended_by_a_signal_has_its_negative_number() {
 
 // -- The Ctrl-C (not in Python, whose commands get the terminal's SIGINT themselves) ----------------------------------
 
+/// What starts a command with SIGINT at its default, so that a shell can trap it: one that the tests' process ignores,
+/// as Jenkins's does, stays ignored in what it starts, as in Python, and a shell cannot trap a signal ignored on entry.
+const HEARS_SIGINT: [&str; 2] = ["env", "--default-signal=INT"];
+
 #[test]
 fn a_ctrl_c_stops_the_running_command_with_its_process_group() {
     let d = TempDir::new();
@@ -567,7 +571,7 @@ fn a_command_hears_the_ctrl_c_first_and_fails_even_when_it_then_succeeds() {
     let host = ProcessHost::local(&interrupt);
     let raising = raise_once_written(&pid, &interrupt);
     let script = "trap 'echo SIGINT > \"$2\"; exit 0' INT; echo $$ > \"$1\"; while :; do sleep 0.05; done";
-    let e = host.run(&["sh", "-c", script, "_", &pid, &heard], None, 600).unwrap_err();
+    let e = host.run(&[&HEARS_SIGINT[..], &["sh", "-c", script, "_", &pid, &heard]].concat(), None, 600).unwrap_err();
     raising.join().unwrap();
     assert!(e.0.ends_with(": interrupted"), "{e}");
     assert_eq!(read(&heard), "SIGINT\n");
@@ -595,7 +599,7 @@ fn a_command_that_closed_its_output_is_stopped_too_and_hears_the_ctrl_c_first() 
     // It takes a while over its SIGINT, as git may: the grace waits for it.
     let script = "exec >/dev/null 2>&1; trap 'sleep 0.02; echo SIGINT > \"$2\"; exit 0' INT; echo $$ > \"$1\"; \
                   while :; do sleep 0.05; done";
-    let e = host.run(&["sh", "-c", script, "_", &pid, &heard], None, 600).unwrap_err();
+    let e = host.run(&[&HEARS_SIGINT[..], &["sh", "-c", script, "_", &pid, &heard]].concat(), None, 600).unwrap_err();
     raising.join().unwrap();
     assert!(e.0.ends_with(": interrupted"), "{e}");
     assert!(ended(&pid), "the command outlived the Ctrl-C");

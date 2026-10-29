@@ -58,13 +58,13 @@ fn main() -> ExitCode {
 struct Cli {
     /// --list: name the tests rather than run them.
     list: bool,
-    /// --exact: a filter is a whole name, not a part of one.
+    /// --exact: a filter or a skip is a whole name, not a part of one.
     exact: bool,
     /// --ignored: only the ignored tests, of which there are none.
     ignored_only: bool,
     /// The names, or parts of names, of the tests to run; every test when empty.
     filters: Vec<String>,
-    /// --skip's: the tests whose names hold one are not run.
+    /// --skip's: the tests not run, each a whole name under --exact, else a part of one, as a filter is.
     skips: Vec<String>,
 }
 
