@@ -1,6 +1,6 @@
 """Write engine/tests/oracle/python.json: what Python 3.14, the engine's Python, gives for the str methods, format
-strings, difflib matches, shlex.join, json.dumps, urlsplit and parse_qsl that engine/src/py ports, for cases the Rust tests replay against
-the port.
+strings, difflib matches, shlex.join, json.dumps, urlsplit and parse_qsl that engine/src/py ports, for cases the Rust
+tests replay against the port.
 
 Run `uv run python engine/tests/oracle/python.py` after changing a case; tests/test_rust_oracle.py fails while the
 file is not what this writes."""
