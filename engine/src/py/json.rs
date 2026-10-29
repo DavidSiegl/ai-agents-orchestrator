@@ -68,6 +68,10 @@ impl<V> Map<V> {
         self.entries.iter().map(|(_, v)| v)
     }
 
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
+        self.entries.iter_mut().map(|(_, v)| v)
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&str, &V)> {
         self.entries.iter().map(|(k, v)| (k.as_str(), v))
     }

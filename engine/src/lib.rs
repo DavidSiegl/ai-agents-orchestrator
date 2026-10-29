@@ -12,6 +12,7 @@ pub mod harness;
 pub mod herdr;
 pub mod host;
 pub mod http;
+pub mod interrupt;
 pub mod patch;
 pub mod pipeline;
 pub mod proofs;
@@ -22,6 +23,7 @@ pub mod quality;
 pub mod runs;
 pub mod state;
 pub mod summary;
+pub mod workflow;
 pub mod workflow_file;
 
 #[cfg(test)]

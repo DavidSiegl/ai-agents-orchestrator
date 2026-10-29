@@ -76,7 +76,15 @@ pub(crate) struct FakeHerdrState {
     pub blocked_at_start: HashSet<String>,
     /// ("workspace" or "split", cwd) of each workspace created and pane split.
     pub cwds: Vec<(String, String)>,
+    /// What every wait does instead of the above, when set, given (name, timeout_ms, until): a Python test's own
+    /// FakeHerdr.wait.
+    pub wait_with: Option<WaitWith>,
+    /// The error close_workspace fails with, when set.
+    pub close_error: Option<HerdrError>,
 }
+
+/// A test's own wait (FakeHerdrState::wait_with).
+pub(crate) type WaitWith = Box<dyn FnMut(&str, Option<u64>, &[&str]) -> Result<String, HerdrError>>;
 
 impl FakeHerdr {
     /// herdr playing each role's agent from script, turn by turn, on host, each turn given run.
@@ -102,6 +110,8 @@ impl FakeHerdr {
                 taken: HashMap::new(),
                 blocked_at_start: HashSet::new(),
                 cwds: vec![],
+                wait_with: None,
+                close_error: None,
             }),
         }
     }
@@ -193,6 +203,13 @@ impl Herdr for FakeHerdr {
     }
 
     fn wait(&self, name: &str, timeout_ms: Option<u64>, until: &[&str]) -> Result<String, HerdrError> {
+        // Played with the fake's state released, so that the test's wait may script the fake itself.
+        let wait_with = self.state().wait_with.take();
+        if let Some(mut wait) = wait_with {
+            let answer = wait(name, timeout_ms, until);
+            self.state().wait_with = Some(wait);
+            return answer;
+        }
         let mut s = self.state();
         if until.contains(&"working") {
             // A taken prompt had the agent working, whatever it shows now.
@@ -230,6 +247,9 @@ impl Herdr for FakeHerdr {
     fn close_workspace(&self, workspace: &str) -> Result<(), HerdrError> {
         let mut s = self.state();
         s.calls.push(Call::Close { workspace: workspace.to_string() });
+        if let Some(e) = s.close_error.clone() {
+            return Err(e);
+        }
         s.workspaces.remove(workspace);
         Ok(())
     }

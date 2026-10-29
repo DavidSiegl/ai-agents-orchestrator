@@ -141,7 +141,17 @@ pub(crate) struct FakeState {
     pub restores: Vec<(String, Vec<String>)>,
     /// What session_log reads, by (harness, session).
     pub session_logs: HashMap<(String, String), String>,
+    /// Run before each write, given its path, when set: an error fails the write, as a Python test's own
+    /// FakeHost.write fails it.
+    pub before_write: Option<BeforeWrite>,
+    /// What run_states answers instead, when set and it gives Some: a Python test's own FakeHost.run_states.
+    pub run_states_with: Option<RunStatesWith>,
 }
+
+/// A test's hook on writes (FakeState::before_write).
+pub(crate) type BeforeWrite = Box<dyn FnMut(&str) -> Result<(), OrchestratorError>>;
+/// A test's own run_states (FakeState::run_states_with).
+pub(crate) type RunStatesWith = Box<dyn FnMut(&str) -> Option<Result<Vec<(u64, Json)>, OrchestratorError>>>;
 
 impl FakeHost {
     /// A checkout of /proj at commit head (None: no repository with a commit), on branch.
@@ -189,6 +199,8 @@ impl FakeHost {
                 refs: Map::new(),
                 restores: vec![],
                 session_logs: HashMap::new(),
+                before_write: None,
+                run_states_with: None,
             }),
         }
     }
@@ -421,6 +433,13 @@ impl Host for FakeHost {
     }
 
     fn write(&self, path: &str, text: &str, keep_mtime: bool) -> Result<(), OrchestratorError> {
+        // Run with the host's state released, so that the hook may read or write the host itself.
+        let hook = self.state().before_write.take();
+        if let Some(mut hook) = hook {
+            let allowed = hook(path);
+            self.state().before_write = Some(hook);
+            allowed?;
+        }
         let mut s = self.state();
         s.writes.push(path.to_string());
         if keep_mtime {
@@ -647,6 +666,14 @@ impl Host for FakeHost {
     }
 
     fn run_states(&self, cwd: &str) -> Result<Vec<(u64, Json)>, OrchestratorError> {
+        let hook = self.state().run_states_with.take();
+        if let Some(mut hook) = hook {
+            let answer = hook(cwd);
+            self.state().run_states_with = Some(hook);
+            if let Some(answer) = answer {
+                return answer;
+            }
+        }
         let s = self.state();
         let runs = format!("{cwd}/{}/", crate::constants::RUNS_DIR);
         let mut states = vec![];
