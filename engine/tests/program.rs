@@ -119,3 +119,25 @@ fn a_resume_of_no_run_names_where_it_looked() {
     let project = std::fs::canonicalize(&dir.0).expect("the directory resolves");
     assert_eq!(stderr(&out), format!("error: no run b0b0b0 under {}/.orchestrator/runs\n", project.display()));
 }
+
+#[test]
+fn a_run_is_named_by_the_time_in_the_machine_s_zone() {
+    // herdr fails the run's first command, once its state is saved under its id.
+    let dir = Dir::new("run-id");
+    dir.tool("herdr", "#!/bin/sh\nexit 1\n");
+    // A zone as a POSIX rule, which needs no database: 5:45 east of UTC.
+    let zone = "<+0545>-5:45";
+    let clock = jiff::tz::TimeZone::posix(zone).expect("a zone");
+    let shown = |at: jiff::Timestamp| clock.to_datetime(at).strftime("%Y%m%d-%H%M%S").to_string();
+    let before = shown(jiff::Timestamp::now());
+    let out = program(&dir, &["run", "--no-pr", "a task"], Some("1")).env("TZ", zone).output().expect("the program runs");
+    let after = shown(jiff::Timestamp::now());
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let runs: Vec<String> = std::fs::read_dir(dir.0.join(".orchestrator/runs"))
+        .expect("the run's state was saved")
+        .map(|entry| entry.expect("an entry").file_name().into_string().expect("a UTF-8 name"))
+        .collect();
+    let [id] = &runs[..] else { panic!("runs: {runs:?}") };
+    let time = &id[..15];
+    assert!(before.as_str() <= time && time <= after.as_str(), "{id} is not between {before} and {after}");
+}

@@ -9,6 +9,11 @@ publish = false
 # The command line (crate::cli): its subcommands, flags and usage errors, by the builder API, which can lay out a flag
 # per role and share groups of flags between subcommands as argparse's parents do. 4.6.7 is from 2026-09-14.
 clap = { version = "4.6.7", default-features = false, features = ["std", "help", "usage", "error-context", "string"] }
+# The machine's local time, as Python's time.strftime and a naive datetime's timestamp() read it (py/datetime.rs): its
+# zone from TZ, else /etc/localtime, else UTC, and a zone's rules from /usr/share/zoneinfo, with no database of its
+# own. 0.2.38 is from 2026-10-06; ui/src-tauri's crates had it in Cargo.lock already. Approved by the user for ticket
+# 08, 2026-10-29.
+jiff = { version = "0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 # Process groups and signals, the user's id, the machine's name and its monotonic clock, through nix's safe API: a Host
 # command's group is killed when it runs out of time or at a Ctrl-C (host/process.rs), whose SIGINT a thread waits for
 # (interrupt.rs), a run's owner record names its host and pid (runs.rs), and a run's deadlines are kept on the clock

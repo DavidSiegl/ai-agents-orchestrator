@@ -21,8 +21,8 @@ pub fn iso_utc(seconds: i64) -> String {
 }
 
 /// The seconds since the epoch of an ISO 8601 time, as int(datetime.fromisoformat(iso).timestamp()) gives them, a time
-/// without an offset taken as UTC (crate::py::datetime::fromisoformat_timestamp). Errors: iso is not a time
-/// fromisoformat reads.
+/// without an offset being the machine's local time (crate::py::datetime::fromisoformat_timestamp). Errors: iso is not
+/// a time fromisoformat reads, or one timestamp() refuses.
 pub fn epoch_seconds(iso: &str) -> Result<i64, String> {
     fromisoformat_timestamp(iso).map(|seconds| seconds.trunc() as i64)
 }

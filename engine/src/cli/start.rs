@@ -9,11 +9,11 @@ use crate::constants::{DEFAULT_MAX_QUALITY_ROUNDS, DEFAULT_MAX_ROUNDS, DEFAULT_T
 use crate::error::OrchestratorError;
 use crate::pipeline::{Pipeline, DONE, QUALITY};
 use crate::prompts::{load_prompts, Prompts};
+use crate::py::datetime::strftime_local;
 use crate::py::json::{Json, Map};
 use crate::runs::{run_health, RUNNING};
 use crate::spec_file::SpecFile;
 use crate::state::RunState;
-use crate::summary::iso_utc;
 use crate::workflow::{turn_quality_gate_off, turn_quality_gate_on};
 use crate::workflow_file::{load_workflow_file, named_workflow, run_pipeline};
 
@@ -67,18 +67,18 @@ fn flagged_workflow(args: &RunArgs, prompts: &Prompts, world: &Connected) -> Res
     }
 }
 
-/// A new run's id: the time wall (seconds since the epoch) names, in UTC, and six random hex digits, as
-/// 20261029-142233-a1b2c3. Python's new_run_id names the local time; this engine has no time zone database to read.
-/// Errors: the system's random bytes cannot be read.
+/// A new run's id, as Python's new_run_id makes it: the time wall (seconds since the epoch) names in the machine's
+/// zone (crate::py::datetime::strftime_local), and six random hex digits, as 20261029-142233-a1b2c3. Errors: the
+/// system's random bytes cannot be read, or wall is beyond the year 9999.
 fn new_run_id(wall: f64) -> Result<String, OrchestratorError> {
     let mut bytes = [0u8; 3];
     std::fs::File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut bytes))
         .map_err(|e| OrchestratorError(format!("cannot read /dev/urandom for a run id: {e}")))?;
-    // iso_utc gives 2026-10-29T14:22:33+00:00.
-    let time: String = iso_utc(wall.floor() as i64).chars().take(19).filter(char::is_ascii_digit).collect();
+    let time = strftime_local("%Y%m%d-%H%M%S", wall.floor() as i64)
+        .map_err(|e| OrchestratorError(format!("cannot name a run by the time {wall}: {e}")))?;
     let key: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    Ok(format!("{}-{}-{key}", &time[..8], &time[8..]))
+    Ok(format!("{time}-{key}"))
 }
 
 /// The state of the run args.run_ref names among cwd's runs and its workflow, as resumable_state finds them, with the

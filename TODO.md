@@ -86,9 +86,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 - **The Rust engine reads some input no run writes otherwise than the Python engine.** Each is a difference only for a
   file a human edited, or a case no test of the Python engine pins (rust-engine ticket 04, 2026-10-28): `state.json`
   with `NaN`, `Infinity` or an integer beyond 64 bits is refused, as serde_json reads it (`engine/src/py/json.rs`),
-  where Python reads it; a time without an offset is taken as UTC, where Python's `fromisoformat` takes it as local
-  time (every other time is read as CPython 3.14's `fromisoformat` reads it, `crate::py::datetime`, since ticket 06;
-  3.13, which a system `python3` may be and `packaging/build-binary.sh` builds the Linux binary with, refuses hour 24,
+  where Python reads it; a time is read as CPython 3.14's `fromisoformat` reads it (`crate::py::datetime`, since
+  ticket 06; one without an offset in the machine's zone since ticket 08's follow-ups, Fixed, "The Rust engine named a
+  new run by the time in UTC"; 3.13, which a system `python3` may be and `packaging/build-binary.sh` builds the Linux binary with, refuses hour 24,
   which 3.14 reads as the next day's midnight, and reads `T12.5`, `T12:00.5` and `T12:00:00.Z`, which 3.14 refuses
   (cross-review 92, F4); no harness or run writes either), and a turn whose start is not a time is left out of `summary.md` and `metrics.json`, where the Python engine
   fails (`epoch_seconds` and `turn_starts` in `engine/src/summary.rs`); a `state.json` field of another type than the
@@ -166,12 +166,12 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   is the `prune` command's and ticket 09 ports both with `TestPrune` and `TestSweepOnRun`. No `run` parity scenario
   shows it: none starts beside an earlier run with a pull request but `runs_listed_and_shown`, ticket 09's. Closes with
   ticket 09.
-- **The Rust engine names a new run by the time in UTC.** `new_run_id` (`engine/src/cli/start.rs`) writes the time
-  the run started in UTC, where Python's `time.strftime` writes the local time: the engine has no time zone database to
-  read without a crate the spec does not list, or a second `unsafe` block for libc's localtime. A run id reads an hour
-  or more off in another zone, and runs of both engines in one checkout list out of start order there (`run_states`
-  sorts by id); the parity harness runs in UTC and normalizes ids. Closes with the user's choice of a crate (such as
-  `jiff` or `time`, which read the system's zone), localtime through `unsafe`, or this.
+- **Local times the Rust engine has yet to read, for rust-engine ticket 09.** Python reads a time in the machine's zone
+  in two places: `time.strftime` in `new_run_id`, and `datetime.fromisoformat(...).timestamp()` of a time without an
+  offset (`epoch_seconds`, `session_usage`, `_young`'s PyPI upload and `pull_request_pending`'s `closedAt`). All but
+  the last are ported and read as Python does (Fixed, "The Rust engine named a new run by the time in UTC");
+  `pull_request_pending` is `prune`'s and the sweep before a run's, and its `closedAt` is GitHub's, which carries a
+  `Z`. Closes with ticket 09 reading it through `crate::py::datetime::fromisoformat_timestamp`.
 - **The commands the Rust engine runs outlive an engine that is killed.** Each command runs in a process group of its
   own (rust-engine tickets 05, 06), so a SIGKILL of the engine's group, or the SIGHUP a closed terminal sends its
   foreground group, ends the engine and leaves a running `herdr agent wait`, `gh pr create` or push to finish
@@ -719,6 +719,22 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `TestQualityCLI`'s `resumable_state` cases, `engine/src/cli/start/tests.rs`); every `run` and `resume` parity scenario
   passes against the binary, and so does each scenario that kills a run, with the engines switched at the kill
   (`tests/parity/test_parity.py`, SWITCHED). What the Rust CLI still lacks is ticket 09's.
+- **The Rust engine named a new run by the time in UTC.** `new_run_id` (`engine/src/cli/start.rs`) wrote the time the
+  run started in UTC, where Python's `time.strftime` writes the local time, and `IsoTime::timestamp` took a time
+  without an offset as UTC, where Python's `timestamp()` takes it as local time: the engine had no time zone database
+  to read. So a run id read an hour or more off in another zone, and runs of both engines in one checkout listed out
+  of start order there (`run_states` sorts by id). Fixed (2026-10-29, rust-engine ticket 08's follow-ups, the user's
+  ruling of 2026-10-29): the jiff crate (0.2.38, its `std`, `tz-system` and `tzdb-zoneinfo` features, no bundled
+  database) reads the zone as the C library does for Python, TZ, else `/etc/localtime`, the rules from
+  `/usr/share/zoneinfo`, UTC where neither can be read (`crate::py::datetime`); `new_run_id` writes the time by
+  `strftime_local`, and `IsoTime::timestamp` solves a time without an offset as CPython's `local_to_seconds` does
+  (fold 0: the first of a time shown twice, the offset before the change for one skipped, and its error within a day
+  of the years 1 and 9999), for `epoch_seconds`, `session_usage` and PyPI's upload times. Held by
+  `engine/tests/oracle/harness.py`'s `fromisoformat` cases, now read in a zone with summer time and with times it skips
+  and shows twice, and its `strftime_local` cases in four zones, and by `engine/tests/program.rs`'s
+  `a_run_is_named_by_the_time_in_the_machine_s_zone` (TZ 5:45 east of UTC). The parity harness still runs in UTC.
+  What Python reads in local time outside run and resume is the Open issue "Local times the Rust engine has yet to
+  read, for rust-engine ticket 09".
 - **A Ctrl-C at the terminal does not reach the command the Rust engine's `Host` or herdr is running.** `ProcessHost`
   and `ProcessHerdr` run each command in a process group of its own (rust-engine tickets 05 and 06), which the
   terminal's SIGINT, sent to its foreground group, no longer reaches, where in the Python engine every child gets it
