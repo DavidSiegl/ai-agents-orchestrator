@@ -546,8 +546,8 @@ as git numbers them. Each document is an object:
   associated type), `const`, `static`, and `use-as` (the new name of a `use ... as name`). A pattern binds each
   identifier in it that does not start with an uppercase letter: syn cannot tell `None` or a `const` from a new name,
   and Rust names those in CamelCase or capitals, its bindings in snake case. `_` binds nothing. Bindings inside a
-  macro's tokens are listed only where `asserts` looks inside one; the `fn` a binding is in is the innermost of `fns`
-  whose lines hold its line.
+  macro's tokens are listed only where `asserts` looks inside one, so not a capture in a `matches!` pattern, which is
+  no expression; the `fn` a binding is in is the innermost of `fns` whose lines hold its line.
 
 ### Whose rules judge a change
 
@@ -668,7 +668,8 @@ request](#a-build-of-main-judged-at-its-pull-request)).
   with `cargo build --release --locked`, from the judged `main`'s `ci/gate-rust/` in a quality build, fetching syn,
   proc-macro2 and serde_json from crates.io, in about 35 s on those 6 CPUs, and checks the tree's own
   `ci/gate-rust/` for the Gate stage's clippy as the UI stage checks the shell, in about 4 s, which leaves clippy under
-  a second for it. Package bundles the `.deb` with `dpkg-deb`, and the `.AppImage` with `linuxdeploy`,
+  a second for it. A helper that does not build, as when crates.io cannot be reached, does not stop the build: the gate
+  then reports a change to Rust as not run by each check that reads it. Package bundles the `.deb` with `dpkg-deb`, and the `.AppImage` with `linuxdeploy`,
   which `tauri build` downloads from GitHub each build.
 - **`gh` on the agent, and a GitHub token** for the Release stage: a Secret text credential with the ID
   `GitHub-Agents`, holding a token with *Contents: read and write* on this repository. It is the agents' own

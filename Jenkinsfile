@@ -120,8 +120,10 @@ pipeline {
                     // compiled; the lock as in the UI stage, which says why a quality build may skip it. The Gate
                     // stage's clippy lints the tree's own ci/gate-rust as a workspace of its own, so that is checked
                     // here too, for the reason the UI stage checks the shell: with syn checked, clippy checks only the
-                    // helper, in under a second rather than 5 on the development host. A check that fails leaves the
-                    // build to the Gate stage, whose clippy names the error as the change's.
+                    // helper, in under a second rather than 5 on the development host. Neither stops the build when it
+                    // fails: a helper that did not build is one the gate cannot run, which each check that reads Rust
+                    // reports as not run on a change to Rust (so a failing check fails the gate), while a change to no
+                    // Rust is judged as before; and a check that failed leaves the error to the Gate stage's clippy.
                     if (env.JUDGED_AT_PR != 'true') {
                         sh '''
                             src=ci/gate-rust
@@ -137,7 +139,8 @@ pipeline {
                             fi
                             if [ -f "$src/Cargo.toml" ]; then
                                 "$WORKSPACE/ci/cargo-lock.sh" ${GIT_REF:+--no-wait} cargo build --release --locked \\
-                                    --manifest-path "$src/Cargo.toml" --target-dir "$WORKSPACE/.gate-rust-target"
+                                    --manifest-path "$src/Cargo.toml" --target-dir "$WORKSPACE/.gate-rust-target" \\
+                                    || echo "the gate-rust helper did not build; gate.py reports Rust as not run" >&2
                             fi
                             if [ -f ci/gate-rust/Cargo.toml ]; then
                                 "$WORKSPACE/ci/cargo-lock.sh" ${GIT_REF:+--no-wait} cargo check --locked --all-targets \\

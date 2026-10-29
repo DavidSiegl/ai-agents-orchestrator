@@ -146,6 +146,10 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   joined it with gate-rust-checks ticket 01 (2026-10-29).
   Closes when the top-level workspace takes `ui/src-tauri` in as a member and the Test stage runs there, or with
   the Test stage running each workspace and passing each report to the gate.
+- **`GateChange.rust_files` starts one `git cat-file` per base `.rs` file.** `_rust_paths` in `gate.py` copies each
+  base side out of git with its own process, so a change to N Rust files starts N git processes before the helper's
+  one run; about 5 ms each here. Raised by cross-review 106 (F5, 2026-10-30): "one `cat-file --batch` or `git archive`
+  would do." Closes with one `git cat-file --batch` over all the base paths.
 - **The parity harness records `state.json` at each command the fakes get, not after each save.** Ticket
   rust-engine/01 asks for "`state.json` after each save"; the ledger reads it only when herdr, gh, Jenkins or PyPI
   gets a call, and leaves out a change to `heartbeat_at` alone (`tests/parity/fakes.py`, `_changed_states`). Raised

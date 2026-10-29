@@ -1230,14 +1230,16 @@ class TestRustFiles(RepositoryTest):
         named = f"the gate-rust helper `{os.path.join(self.outside, 'gate-rust')}`"
         rebuild = "where this gate.py reads schema 1; build the helper from the tree this gate.py comes from, its " \
                   "`ci/gate-rust`"
+        undecodable = "'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"
         cases = [
             ('print("boom", file=sys.stderr)\nsys.exit(3)', f"{named} failed with exit status 3: boom"),
             ('print("not json")', f"{named} printed what is not JSON: not json"),
-            ('print(json.dumps([1]))', f"{named} printed a document of schema None, {rebuild}"),
+            ('print(json.dumps([1]))', f"{named} printed a document of schema null, {rebuild}"),
             ('print(json.dumps({"schema": 2}))', f"{named} printed a document of schema 2, {rebuild}"),
             # One file, kept.rs, on two sides.
             ('print(json.dumps({"schema": 1}))', f"{named} printed 1 documents for 2 files"),
             ('print(json.dumps({"schema": 1}), end="")', f'{named} did not end its output with a newline: {{"schema": 1}}'),
+            ('sys.stdout.buffer.write(b"\\xff\\n")', f"{named} printed what is not UTF-8: {undecodable}"),
         ]
         for code, why in cases:
             with self.subTest(code):
@@ -1264,26 +1266,36 @@ class TestRustFiles(RepositoryTest):
         self.assertEqual(finding["message"], "could not make a directory to copy the base's Rust files into: no space; "
                                              "nothing ran, so the check judged nothing.")
 
-    def test_rust_syntax_names_the_helper_from_the_working_directory_for_the_checks(self):
+    def test_the_checks_read_rust_with_the_helper_judge_change_is_given(self):
         self.touch_rust()
-        self.helper()
+        helper = self.helper()
         seen = []
 
         def reads_rust(change):
             seen.append(change.rust_syntax)
             return change.rust_files[1]
         checks = (gate.GateCheck("reads-rust", fails=True, find=reads_rust),)
-        with contextlib.chdir(self.outside):
-            text = gate.judge_change(self.repo, "HEAD", checks, rust_syntax="gate-rust")
-        self.assertEqual(seen, [os.path.join(self.outside, "gate-rust")])
+        text = gate.judge_change(self.repo, "HEAD", checks, rust_syntax=helper)
+        self.assertEqual(seen, [helper])
         self.assertIn("GATE: OK\n", text)
         text = gate.judge_change(self.repo, "HEAD", checks)
         self.assertIn("1. The change as a whole: error reads-rust not-run: `gate.py --rust-syntax` was not given, so "
                       "the check judged none of the change's Rust.\n", text)
+
+    def test_rust_syntax_names_the_helper_from_the_current_directory(self):
         with patch.object(gate, "judge_change", return_value="GATE: OK\n") as judge, \
-                contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(gate.main(["--base", "HEAD", "--rust-syntax", "gate-rust"]), 0)
-        self.assertEqual(judge.call_args.kwargs["rust_syntax"], "gate-rust")
+                contextlib.redirect_stdout(io.StringIO()), contextlib.chdir(self.outside):
+            self.assertEqual(gate.main(["--base", "HEAD", "--rust-syntax", "bin/gate-rust"]), 0)
+            self.assertEqual(gate.main(["--base", "HEAD"]), 0)
+        self.assertEqual([c.kwargs["rust_syntax"] for c in judge.call_args_list],
+                         [os.path.join(self.outside, "bin/gate-rust"), None])
+
+    def test_a_document_whose_schema_is_true_is_not_schema_1(self):
+        self.touch_rust()
+        helper = self.helper('for _ in files:\n    print(json.dumps({"schema": True}))')
+        self.assertEqual(self.rust_files(helper), ([], self.not_run(
+            f"the gate-rust helper `{helper}` printed a document of schema true, where this gate.py reads schema 1; "
+            f"build the helper from the tree this gate.py comes from, its `ci/gate-rust`")))
 
 
 class TestTestIntegrityCheck(unittest.TestCase):
