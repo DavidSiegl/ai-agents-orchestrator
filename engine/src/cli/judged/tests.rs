@@ -445,3 +445,12 @@ fn a_description_reads_only_in_its_format() {
         assert_eq!(super::Judged::read(&bad), None, "{bad}");
     }
 }
+
+#[test]
+fn of_builds_that_meet_as_many_conditions_the_newest_is_named() {
+    // As Python's max keeps the first of equals, the builds coming newest first.
+    let t = Judging::new();
+    t.build_ending("UNSTABLE");
+    let n = t.build_ending("FAILURE");
+    t.refused(&[], &[&format!("#{n}"), "FAILURE"]);
+}

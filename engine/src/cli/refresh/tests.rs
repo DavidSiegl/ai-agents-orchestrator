@@ -180,7 +180,8 @@ fn a_pull_request_that_still_conflicts_or_is_not_known_is_left() {
 fn a_merged_or_closed_pull_request_only_forgets_the_conflict() {
     for state in ["MERGED", "CLOSED"] {
         let t = Refresh::new();
-        t.add_run(&[("state", Json::from(state))]);
+        // Whatever GitHub says of its mergeability, which decides nothing once it is not open.
+        t.add_run(&[("state", Json::from(state)), ("mergeable", Json::from("CONFLICTING"))]);
         let line = format!("{REFRESH_ID}: {}, conflict forgotten\n", state.to_lowercase());
         assert_eq!(t.refresh(&[REFRESH_ID]), (0, line));
         assert_eq!(t.pr_edits(), []);
