@@ -224,5 +224,12 @@ fn name_and_value(text: &str) -> Option<(&str, &str)> {
 const UNQUOTED_EXCLUDED: [char; 17] =
     [' ', '\t', '\'', '"', '\\', '$', '`', ';', '&', '|', '<', '>', '(', ')', '~', '{', '\0'];
 
+/// N bytes from the system's random source, /dev/urandom, for run ids and serve's tokens. Errors: it cannot be read.
+pub fn random_bytes<const N: usize>() -> std::io::Result<[u8; N]> {
+    let mut bytes = [0u8; N];
+    File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests;

@@ -535,7 +535,8 @@ fn bytes_are_the_same_only_when_equal() {
 fn bound_to_loopback_only() {
     let served = Served::fake(&Arc::new(ServeHost::on(None)), &[]);
     assert_eq!(served.server.url(), format!("http://127.0.0.1:{}", served.port));
-    let bound = served.server.http.server_addr().to_ip().map(|a| a.ip().to_string());
+    let http = lock(&served.server.listening).clone().expect("it listens");
+    let bound = http.server_addr().to_ip().map(|a| a.ip().to_string());
     assert_eq!(bound.as_deref(), Some("127.0.0.1"));
 }
 
@@ -923,7 +924,7 @@ fn in_process() {
     let serving = std::thread::spawn(move || {
         let mut err = vec![];
         let status = serve(RunServer::start(&[], Box::new(connect)), &mut Lines(lines), &mut err, || {
-            let _ = stopped.recv();
+            stopped.recv().map_err(io::Error::other)
         });
         (status, err)
     });
@@ -965,7 +966,7 @@ fn an_unprintable_line_ends_it() {
     let started = RunServer::start(&[], Box::new(connect)).unwrap();
     let port = port_of(started.url());
     let mut err = vec![];
-    let status = serve(Ok(started), &mut BrokenPipe, &mut err, || panic!("serve waited"));
+    let status = serve(Ok(started), &mut BrokenPipe, &mut err, || -> io::Result<()> { panic!("serve waited") });
     assert_eq!(status, EXIT_ERROR);
     assert_eq!(String::from_utf8(err).unwrap(), "error: cannot print the server's address: [Errno 32] Broken pipe\n");
     assert_eq!(status_at(port), None, "the stopped server still answers");
@@ -974,9 +975,41 @@ fn an_unprintable_line_ends_it() {
 #[test]
 fn no_port() {
     let mut err = vec![];
-    let status = serve(Err(io::Error::from_raw_os_error(98)), &mut Vec::new(), &mut err, || panic!("serve waited"));
+    let unbound = Err(io::Error::from_raw_os_error(98));
+    let status = serve(unbound, &mut Vec::new(), &mut err, || -> io::Result<()> { panic!("serve waited") });
     assert_eq!(status, EXIT_ERROR);
     assert_eq!(String::from_utf8(err).unwrap(), "error: cannot serve on 127.0.0.1: [Errno 98] Address already in use\n");
+}
+
+#[test]
+fn a_wait_for_the_signals_that_fails_ends_it() {
+    let connect = |_: &str, _: &str, _: &Interrupt| Err(OrchestratorError::new("not asked"));
+    let started = RunServer::start(&[], Box::new(connect)).unwrap();
+    let port = port_of(started.url());
+    let (mut out, mut err) = (vec![], vec![]);
+    let status = serve(Ok(started), &mut out, &mut err, || Err(io::Error::from_raw_os_error(22)));
+    assert_eq!(status, EXIT_ERROR);
+    assert!(String::from_utf8(out).unwrap().starts_with(r#"{"url": "http://127.0.0.1:"#));
+    assert_eq!(String::from_utf8(err).unwrap(), "error: cannot wait for SIGINT and SIGTERM: [Errno 22] Invalid argument\n");
+    assert_eq!(status_at(port), None, "the stopped server still answers");
+}
+
+#[test]
+fn a_server_that_stops_accepting_is_started_again_on_the_port() {
+    // As tiny_http's server ends at the first error accept gives: its recv fails while the RunServer is not stopping.
+    let served = Served::fake(&Arc::new(ServeHost::on(None)), &[]);
+    let first = lock(&served.server.listening).clone().expect("it listens");
+    first.unblock();
+    let started = Instant::now();
+    while lock(&served.server.listening).as_ref().is_some_and(|http| Arc::ptr_eq(http, &first)) {
+        assert!(started.elapsed() < Duration::from_secs(5), "no server was started again");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(first);
+    assert_eq!(served.get(&Served::query("/runs", &[]), &[]).status, Some(200));
+    let port = served.port;
+    drop(served);
+    assert_eq!(status_at(port), None, "the stopped server still answers");
 }
 
 #[test]

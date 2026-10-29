@@ -247,6 +247,16 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   close-delimited stream would not end for a client at a server's stop. The parity harness's `EventStream` takes the
   closed chunked stream's AttributeError for its end (`tests/parity/scenarios.py`). Every security check refuses
   what Python's refuses; these change only how. Decided against unless a client is found that sends such a request.
+- **serve has no limit on its threads, and no timeout for a client that sends nothing.** The Rust engine's serve
+  answers each request on a thread of its own, and tiny_http keeps a thread for each open connection, kept alive
+  between requests (rust-engine ticket 10, `engine/src/serve.rs`); cross-review 105, F3: "A client that sends a
+  partial request or idles holds it for good. Python's server closed after each reply. Any local process that finds
+  the port can exhaust threads or fds." Python's `ThreadingHTTPServer` too starts a thread per connection without a
+  limit, and `RunRequestHandler` sets no `timeout`, so a connection that sends nothing holds its thread there as well;
+  what differs is the kept-alive connection after a reply. A server that stops accepting connections at an error is
+  started again on its port (`dispatch`). Closes with a read timeout and a cap on connections, which tiny_http 0.12
+  does not offer (a `TcpListener` of serve's own, its streams given a read timeout, would be its own HTTP server), or
+  the user's ruling that a local process able to exhaust the user's threads can do worse anyway.
 - **serve reads a run's files through a symbolic link.** A run's files are listed and read by `Host.run_files` and
   `Host.read`, which follow a symbolic link (`[ -f ]`, `cat`), so a link an agent leaves in its run directory, or a
   run directory that is a link, lets `/file` and the event stream show a file outside the run, `~/.ssh/id_rsa` say, to

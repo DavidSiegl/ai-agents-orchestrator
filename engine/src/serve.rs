@@ -64,15 +64,18 @@ pub fn serve_command(origins: &[String]) -> i32 {
         return EXIT_ERROR;
     }
     let started = RunServer::start(origins, Box::new(project_host));
-    serve(started, &mut io::stdout(), &mut io::stderr(), || {
-        // sigwait fails only for a set that holds no valid signal, which this one does.
-        let _ = signals.wait();
-    })
+    serve(started, &mut io::stdout(), &mut io::stderr(), || signals.wait().map(drop).map_err(io::Error::from))
 }
 
 /// serve_command's serving, given the started server: print its line on out, wait for until to return, and stop it;
-/// the exit status and errors on err as serve_command's. The server is stopped when this returns.
-fn serve(started: io::Result<RunServer>, out: &mut dyn Write, err: &mut dyn Write, until: impl FnOnce()) -> i32 {
+/// the exit status and errors on err as serve_command's, and EXIT_ERROR too when until fails, naming why. The server
+/// is stopped when this returns.
+fn serve(
+    started: io::Result<RunServer>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    until: impl FnOnce() -> io::Result<()>,
+) -> i32 {
     let server = match started {
         Ok(server) => server,
         Err(e) => {
@@ -86,8 +89,13 @@ fn serve(started: io::Result<RunServer>, out: &mut dyn Write, err: &mut dyn Writ
         let _ = writeln!(err, "error: cannot print the server's address: {}", os_error(&e, None));
         return EXIT_ERROR;
     }
-    until();
-    0
+    match until() {
+        Ok(()) => 0,
+        Err(e) => {
+            let _ = writeln!(err, "error: cannot wait for SIGINT and SIGTERM: {}", os_error(&e, None));
+            EXIT_ERROR
+        }
+    }
 }
 
 /// The Host that reaches the project, on the saved herdr machine or, with machine empty, here, and the project's
@@ -130,8 +138,11 @@ pub fn project_host(
 pub struct RunServer {
     /// What its request threads share.
     shared: Arc<Shared>,
-    /// tiny_http's server, which the dispatcher takes requests from; dropped last, which closes its port.
-    http: Arc<tiny_http::Server>,
+    /// tiny_http's server on the port, which the dispatcher takes requests from; None once the server has stopped.
+    /// The dispatcher starts another on the same port when tiny_http's stops accepting connections, which it does
+    /// at the first error accept gives (tiny_http 0.12's lib.rs, `Err(e) => ... break`), so that a passing EMFILE does
+    /// not leave a server that answers nothing, as Python's socketserver goes on after it.
+    listening: Arc<Mutex<Option<Arc<tiny_http::Server>>>>,
     /// The thread that hands each request a thread of its own; None once it has been joined.
     dispatcher: Option<JoinHandle<()>>,
 }
@@ -149,9 +160,11 @@ struct Shared {
     origins: Vec<String>,
     /// Raised when the server stops, which ends every event stream and stops every command a project's Host runs.
     stopping: Interrupt,
+    /// How a request's project is reached (Connect).
     connect: Box<Connect>,
     /// By the machine and directory a request names, the project connect gave for them, each connected once.
     projects: Mutex<HashMap<(String, String), Arc<ProjectRuns>>>,
+    /// How often its event streams poll their projects.
     polls: Polls,
 }
 
@@ -166,9 +179,8 @@ impl RunServer {
     /// As start, the event streams polling every polls.
     pub(crate) fn start_polling(origins: &[String], connect: Box<Connect>, polls: Polls) -> io::Result<RunServer> {
         let token = new_token()?;
-        let http = tiny_http::Server::http("127.0.0.1:0")
-            .map_err(|e| e.downcast::<io::Error>().map_or_else(io::Error::other, |e| *e))?;
-        let port = http.server_addr().to_ip().map_or(0, |a| a.port());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
         let url = format!("http://127.0.0.1:{port}");
         let mut all_origins = vec![url.clone(), format!("http://localhost:{port}")];
         all_origins.extend(origins.iter().cloned());
@@ -182,17 +194,11 @@ impl RunServer {
             projects: Mutex::new(HashMap::new()),
             polls,
         });
-        let http = Arc::new(http);
-        let (from, to) = (Arc::clone(&http), Arc::clone(&shared));
-        let dispatcher = std::thread::Builder::new().name("serve".to_string()).spawn(move || {
-            // recv fails once the server is unblocked, at its stop, or when tiny_http can accept no more connections.
-            while let Ok(request) = from.recv() {
-                let shared = Arc::clone(&to);
-                // A request that gets no thread is dropped, which tiny_http answers with 500.
-                let _ = std::thread::Builder::new().name("serve-request".to_string()).spawn(move || answer(&shared, request));
-            }
-        })?;
-        Ok(RunServer { shared, http, dispatcher: Some(dispatcher) })
+        let listening = Arc::new(Mutex::new(Some(Arc::new(on(&listener)?))));
+        let (dispatched, to) = (Arc::clone(&listening), Arc::clone(&shared));
+        let dispatcher =
+            std::thread::Builder::new().name("serve".to_string()).spawn(move || dispatch(&listener, &dispatched, &to))?;
+        Ok(RunServer { shared, listening, dispatcher: Some(dispatcher) })
     }
 
     /// Where it answers: `http://127.0.0.1:<port>`.
@@ -211,12 +217,54 @@ impl RunServer {
 impl Drop for RunServer {
     fn drop(&mut self) {
         self.shared.stopping.raise();
-        self.http.unblock();
+        // Under the lock dispatch starts a server by, so that it starts none after this.
+        if let Some(http) = lock(&self.listening).take() {
+            http.unblock();
+        }
         if let Some(dispatcher) = self.dispatcher.take() {
             // A dispatcher that panicked has nothing left to stop.
             let _ = dispatcher.join();
         }
     }
+}
+
+/// A tiny_http server accepting connections on listener, which it shares. Errors: listener cannot be shared.
+fn on(listener: &std::net::TcpListener) -> io::Result<tiny_http::Server> {
+    tiny_http::Server::from_listener(listener.try_clone()?, None)
+        .map_err(|e| e.downcast::<io::Error>().map_or_else(io::Error::other, |e| *e))
+}
+
+/// Hand each request the server in listening takes a thread of its own, answering as the server shared says, until it
+/// stops (shared.stopping); when tiny_http's server stops accepting connections meanwhile, start another on listener,
+/// a 100 ms pause after each that fails, so that a lasting EMFILE does not spin.
+fn dispatch(listener: &std::net::TcpListener, listening: &Mutex<Option<Arc<tiny_http::Server>>>, shared: &Arc<Shared>) {
+    loop {
+        // None once RunServer's drop has taken it, at the stop.
+        let Some(http) = lock(listening).clone() else { return };
+        // recv fails once the server is unblocked, at its stop, or when tiny_http can accept no more connections.
+        while let Ok(request) = http.recv() {
+            let shared = Arc::clone(shared);
+            // A request that gets no thread is dropped, which tiny_http answers with 500.
+            let _ = std::thread::Builder::new().name("serve-request".to_string()).spawn(move || answer(&shared, request));
+        }
+        loop {
+            let mut current = lock(listening);
+            if current.is_none() {
+                return;
+            }
+            if let Ok(http) = on(listener) {
+                *current = Some(Arc::new(http));
+                break;
+            }
+            drop(current);
+            shared.stopping.sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+/// The server in listening, its lock held; a poisoned lock only means a thread panicked while it held it.
+fn lock(listening: &Mutex<Option<Arc<tiny_http::Server>>>) -> std::sync::MutexGuard<'_, Option<Arc<tiny_http::Server>>> {
+    listening.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl Shared {
@@ -460,14 +508,8 @@ fn error(message: &str) -> Json {
 /// The --machine and --cwd flags a request's machine and cwd stand for, each left out when empty, as Python's
 /// target_args leaves them.
 fn target_args(machine: &str, cwd: &str) -> Vec<String> {
-    let mut out = vec![];
-    if !machine.is_empty() {
-        out.extend(["--machine".to_string(), machine.to_string()]);
-    }
-    if !cwd.is_empty() {
-        out.extend(["--cwd".to_string(), cwd.to_string()]);
-    }
-    out
+    let given = |flag: &str| (!flag.is_empty()).then(|| flag.to_string());
+    crate::cli::Target { machine: given(machine), cwd: given(cwd) }.flags()
 }
 
 /// Whether given and expected are the same bytes, in a time that depends on their lengths alone and not on where
@@ -484,8 +526,7 @@ fn same_bytes(given: &[u8], expected: &[u8]) -> bool {
 /// A new token: 32 bytes from the system's random source, in base64url without padding, as
 /// secrets.token_urlsafe(32) makes it. Errors: /dev/urandom cannot be read.
 fn new_token() -> io::Result<String> {
-    let mut bytes = [0u8; 32];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    let bytes: [u8; 32] = crate::env::random_bytes()?;
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut token = String::with_capacity(43);
     for chunk in bytes.chunks(3) {
