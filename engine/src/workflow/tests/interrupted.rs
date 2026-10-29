@@ -76,3 +76,20 @@ fn a_ctrl_c_once_the_run_is_done_stops_what_is_left_of_its_end() {
     assert!(!f.told.titles().iter().any(|t| t.starts_with("Run finished")), "{:?}", f.told.titles());
     assert!(!f.herdr.state().calls.iter().any(|c| matches!(c, Call::Close { .. })));
 }
+
+#[test]
+fn a_ctrl_c_that_fails_the_done_runs_save_is_the_interrupt_not_a_failure() {
+    // On a ProcessHost the save is a command, which the Ctrl-C fails: that is the interrupt, as Python's
+    // KeyboardInterrupt in the save is, not an error the CLI would print.
+    let f = Fixture::new(approved());
+    let (interrupt, state) = (f.interrupt.clone(), format!("{}/state.json", f.state.dir()));
+    f.host.state().before_write = Some(Box::new(move |path, text| {
+        if path == state && text.contains("\"phase\": \"done\"") {
+            interrupt.raise();
+            return Err(crate::error::OrchestratorError(format!("{path}: interrupted")));
+        }
+        Ok(())
+    }));
+    assert_eq!(f.workflow(RunSettings::default()).run(), Err(Stopped::Interrupted));
+    assert_eq!(RunState::from_saved(&f.saved()).unwrap().error, None);
+}
