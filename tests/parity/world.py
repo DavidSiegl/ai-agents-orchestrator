@@ -52,9 +52,14 @@ PROJECT_FILES = {
 
 
 def engine_command() -> list[str]:
-    """The engine every world runs, as PARITY_ENGINE gives it, else orchestrator.py on this Python."""
+    """The engine a world runs, as PARITY_ENGINE gives it, else orchestrator.py on this Python (python_engine)."""
     if command := os.environ.get("PARITY_ENGINE"):
         return shlex.split(command)
+    return python_engine()
+
+
+def python_engine() -> list[str]:
+    """The Python engine, the oracle: this checkout's orchestrator.py on the Python that runs the tests."""
     return [sys.executable, os.path.join(ROOT, "orchestrator.py")]
 
 
@@ -123,11 +128,14 @@ class World:
     output). Use it as a context manager: leaving it stops the servers and kills any invocation still running.
     """
 
-    def __init__(self, root: str):
-        """root: an empty directory the world may fill, removed by its owner afterwards. Raises RuntimeError, which
-        fails the scenario, where gitleaks or openssl is not on PATH or openssl cannot make the fake PyPI's
-        certificate."""
+    def __init__(self, root: str, engines: list[list[str]] | None = None):
+        """root: an empty directory the world may fill, removed by its owner afterwards. engines: the engine each
+        invocation runs, as a command line, the n-th for invocation n and the last for every one after it, so that a
+        run one engine started and was killed in is resumed by another; [engine_command()] when not given. Raises
+        RuntimeError, which fails the scenario, where gitleaks or openssl is not on PATH or openssl cannot make the
+        fake PyPI's certificate."""
         self.root = os.path.realpath(root)
+        self.engines = engines or [engine_command()]
         self.project = os.path.join(self.root, "project")
         self.origin = os.path.join(self.root, "origin.git")
         self.config = os.path.join(self.root, "config", "ai-agents-orchestrator")
@@ -288,7 +296,7 @@ class World:
         out = os.path.join(self.root, "out", str(n))
         with open(out, "w") as stdout, open(out + ".err", "w") as stderr:
             process = subprocess.Popen(  # noqa: S603 - the engine under test, with the scenario's arguments
-                [*engine_command(), *args], cwd=cwd or self.project, env=self._env(n), stdin=subprocess.DEVNULL,
+                [*self.engines[min(n, len(self.engines)) - 1], *args], cwd=cwd or self.project, env=self._env(n), stdin=subprocess.DEVNULL,
                 stdout=stdout, stderr=stderr, start_new_session=True)
         self.normalizer.pid(process.pid, n)
         with self.ledger.change() as state:
