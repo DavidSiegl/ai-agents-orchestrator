@@ -145,6 +145,7 @@ impl Event {
 
 /// What one event stream has told its client about a project's runs, and the events that bring it up to date.
 pub struct RunWatch<'p> {
+    /// The project whose runs the stream tells of.
     project: &'p ProjectRuns,
     /// By run id, the run's record without AGING_RECORD_KEYS and its files, as last sent.
     sent: BTreeMap<String, (Map<Json>, Json)>,
