@@ -77,8 +77,11 @@ pub struct Starts {
 /// `run`'s flags and arguments.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunArgs {
+    /// Where the project is.
     pub target: Target,
+    /// How the run goes, each unset one at its default.
     pub settings: Settings,
+    /// What the run is started with.
     pub starts: Starts,
     /// What to build; None only with spec, whose title is then the task.
     pub task: Option<String>,
@@ -91,7 +94,9 @@ pub struct RunArgs {
 /// `resume`'s flags and arguments.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResumeArgs {
+    /// Where the project is, and the machine this resume addresses, which the run then saves.
     pub target: Target,
+    /// The run's settings this resume changes; each unset one keeps the saved one.
     pub settings: Settings,
     /// The run's id, or the key at its end.
     pub run_ref: String,
@@ -109,6 +114,14 @@ impl Command {
         match self {
             Command::Run(a) => &a.target,
             Command::Resume(a) => &a.target,
+        }
+    }
+
+    /// The run's settings as the flags give them.
+    pub fn settings(&self) -> &Settings {
+        match self {
+            Command::Run(a) => &a.settings,
+            Command::Resume(a) => &a.settings,
         }
     }
 }
@@ -371,10 +384,7 @@ fn check_spec_args(matches: &ArgMatches, p: &mut clap::Command) -> Result<(), cl
 /// --no-quality-gate, and a --quality-gate that is not a Jenkins job's full name.
 fn check_flag_values(command: &Command, p: &mut clap::Command) -> Result<(), clap::Error> {
     let error = |p: &mut clap::Command, message: &str| Err(p.error(ErrorKind::ValueValidation, message));
-    let (target, settings) = match command {
-        Command::Run(a) => (&a.target, &a.settings),
-        Command::Resume(a) => (&a.target, &a.settings),
-    };
+    let (target, settings) = (command.target(), command.settings());
     let (quality_gate, no_quality_gate) = match command {
         Command::Run(a) => (a.starts.quality_gate.as_deref(), false),
         Command::Resume(a) => (a.quality_gate.as_deref(), a.no_quality_gate),

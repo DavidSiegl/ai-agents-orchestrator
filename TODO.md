@@ -713,7 +713,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   entry on the Ctrl-C names. Fixed (2026-10-29) by part 7, the last: the `orchestrator` binary (`engine/src/main.rs`,
   `crate::cli`) with `run` and `resume`, their flags and checks on clap, `new_state`, `resumable_state`,
   `resumed_state`, `turn_quality_gate_on` and `_off` (`engine/src/workflow/gate_switch.rs`) and `finish`, and the
-  Python cases left for it (`TestQualityGateOnResume`, `TestQualityGateOffOnResume`, `TestResumableState`,
+  Python cases left for it (`TestQualityGateOnResume`, `TestQualityGateOffOnResume` but `test_show_names_the_gate`,
+  which is `show`'s and ticket 09's, `TestResumableState`,
   `TestFindRun`, `TestOneRunPerCheckout`'s resume --force cases, `TestWorkflowFiles`', `TestPromptFiles`' and
   `TestQualityCLI`'s `resumable_state` cases, `engine/src/cli/start/tests.rs`); every `run` and `resume` parity scenario
   passes against the binary, and so does each scenario that kills a run, with the engines switched at the kill

@@ -17,7 +17,7 @@ use crate::pipeline::Pipeline;
 use crate::py::text::shlex_join;
 use crate::pypi::PyPI;
 use crate::runs::{local_host, pid_alive};
-use crate::spec_file::read_spec_file;
+use crate::spec_file::{read_spec_file, SpecFile};
 use crate::state::RunState;
 use crate::workflow::{Collaborators, LocalHuman, RunSettings, Stopped, SystemClocks, Workflow};
 
@@ -44,8 +44,11 @@ pub struct Connected<'a> {
 
 /// How a command that ran a workflow ended, for the program's last line and exit status (finish).
 struct Ran {
+    /// What Workflow::run returned: the run's verdict; None prints as Python's str(None) does, "None".
     verdict: Option<String>,
+    /// The run's state as the Workflow left it, at its end.
     state: RunState,
+    /// The run's workflow.
     pipeline: Pipeline,
 }
 
@@ -138,28 +141,33 @@ fn in_herdr_pane() -> bool {
 /// Run command in world: a run or a resume, to its verdict.
 fn run_command(command: &Command, world: &Connected) -> Result<Ran, Stop> {
     let interrupt = world.with.interrupt;
-    let host = world.with.host;
-    let cwd_arg = command.target().cwd.clone();
-    let cwd = match cwd_arg {
-        Some(cwd) => cwd,
-        None => current_dir().map_err(|e| stop(e, interrupt, None))?,
-    };
-    let cwd = host.resolve_dir(&cwd).map_err(|e| stop(e, interrupt, None))?;
-    let (state, pipeline, spec) = match command {
-        Command::Run(args) => {
-            let spec = args.spec.as_deref().map(read_spec_file).transpose().map_err(|e| stop(e, interrupt, None))?;
-            let (state, pipeline) = new_state(args, &cwd, spec.as_ref(), world).map_err(|e| stop(e, interrupt, None))?;
-            (state, pipeline, spec)
-        }
-        Command::Resume(args) => {
-            let (state, pipeline) = resumed_state(args, &cwd, world).map_err(|e| stop(e, interrupt, None))?;
-            (state, pipeline, None)
-        }
-    };
+    let (state, pipeline, spec) = starting_state(command, world).map_err(|e| stop(e, interrupt, None))?;
     if interrupt.is_raised() {
         return Err(Stop::Interrupted(Some(state.run_id)));
     }
     run_workflow(world, state, pipeline, spec)
+}
+
+/// The state command's run starts from, its workflow and, for run --spec, its spec, in the project command names, as
+/// world's host resolves it. Errors: what each step gives, a command a Ctrl-C stopped among them, which run_command
+/// takes for the interrupt.
+fn starting_state(command: &Command, world: &Connected) -> Result<(RunState, Pipeline, Option<SpecFile>), OrchestratorError> {
+    let cwd = match &command.target().cwd {
+        Some(cwd) => cwd.clone(),
+        None => current_dir()?,
+    };
+    let cwd = world.with.host.resolve_dir(&cwd)?;
+    Ok(match command {
+        Command::Run(args) => {
+            let spec = args.spec.as_deref().map(read_spec_file).transpose()?;
+            let (state, pipeline) = new_state(args, &cwd, spec.as_ref(), world)?;
+            (state, pipeline, spec)
+        }
+        Command::Resume(args) => {
+            let (state, pipeline) = resumed_state(args, &cwd, world)?;
+            (state, pipeline, None)
+        }
+    })
 }
 
 /// Drive the run state describes through pipeline, by the settings saved in state, to its verdict. spec is the file
@@ -168,7 +176,7 @@ fn run_workflow(
     world: &Connected,
     state: RunState,
     pipeline: Pipeline,
-    spec: Option<crate::spec_file::SpecFile>,
+    spec: Option<SpecFile>,
 ) -> Result<Ran, Stop> {
     let interrupt = world.with.interrupt;
     let jenkins = match state.quality_job.as_deref().filter(|j| !j.is_empty()) {

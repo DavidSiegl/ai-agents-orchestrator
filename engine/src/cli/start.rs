@@ -81,7 +81,7 @@ fn new_run_id(wall: f64) -> Result<String, OrchestratorError> {
     Ok(format!("{}-{}-{key}", &time[..8], &time[8..]))
 }
 
-/// The state of the run args.run_ref names among cwd's runs, as resumable_state finds it, and its workflow, with the
+/// The state of the run args.run_ref names among cwd's runs and its workflow, as resumable_state finds them, with the
 /// quality gate turned on or off as args asks (turn_quality_gate_on and _off: the job's preflight, and the run's
 /// refs on origin deleted). Changes nothing on disk.
 ///
@@ -90,8 +90,7 @@ fn new_run_id(wall: f64) -> Result<String, OrchestratorError> {
 pub fn resumed_state(args: &ResumeArgs, cwd: &str, world: &Connected) -> Result<(RunState, Pipeline), OrchestratorError> {
     let w = &world.with;
     let runs = w.host.run_states(cwd)?;
-    let mut state = resumable_state(&runs, args, cwd, world.local_host, w.pid_alive)?;
-    let pipeline = run_pipeline(&state.workflow, state.workflow_definition.as_ref(), &state.prompts()?)?;
+    let (mut state, pipeline) = resumable_state(&runs, args, cwd, world.local_host, w.pid_alive)?;
     if let Some(job) = args.quality_gate.as_deref().filter(|j| !j.is_empty()) {
         turn_quality_gate_on(&mut state, &pipeline, w.host, w.human, &(world.jenkins)(job)?)?;
     } else if args.no_quality_gate {
@@ -101,7 +100,8 @@ pub fn resumed_state(args: &ResumeArgs, cwd: &str, world: &Connected) -> Result<
 }
 
 /// The saved state of the run to resume among runs, each (seconds since its state.json was written, the state as
-/// saved), with resume's settings flags applied and its machine the one args names.
+/// saved), with resume's settings flags applied and its machine the one args names; and its workflow, from the
+/// definition and prompts it saved.
 ///
 /// The run's health is judged from local_host by pid_alive (crate::runs::run_health). Errors: no run or several
 /// match args.run_ref; its state cannot be read, or its saved workflow or prompts; it was closed; it looks alive and
@@ -113,7 +113,7 @@ pub fn resumable_state(
     cwd: &str,
     local_host: &str,
     pid_alive: &dyn Fn(i128) -> bool,
-) -> Result<RunState, OrchestratorError> {
+) -> Result<(RunState, Pipeline), OrchestratorError> {
     let (age, saved) = find_run(runs, &args.run_ref, cwd)?;
     let saved_map = saved.as_object().ok_or_else(|| OrchestratorError("a run state is a JSON object".into()))?;
     let mut state = RunState::from_saved(saved_map)?;
@@ -152,7 +152,7 @@ pub fn resumable_state(
     resume_quality_limit(&mut state, &pipeline, args)?;
     // The herdr this resume addresses: the saved one may name the same herdr reached another way.
     state.machine = args.target.machine.clone();
-    Ok(state)
+    Ok((state, pipeline))
 }
 
 /// The run of runs named by its full id, or else by its key. Errors: none or several match.

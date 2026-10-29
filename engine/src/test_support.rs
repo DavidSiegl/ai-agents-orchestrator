@@ -393,5 +393,5 @@ pub fn resumable(flags: &[&str], saved: &Map<crate::py::json::Json>) -> Result<c
         panic!("not a resume: {flags:?}")
     };
     let runs = [(10_000, crate::py::json::Json::Object(saved.clone()))];
-    crate::cli::resumable_state(&runs, &args, "/proj", "here", &|_| false)
+    crate::cli::resumable_state(&runs, &args, "/proj", "here", &|_| false).map(|(state, _)| state)
 }

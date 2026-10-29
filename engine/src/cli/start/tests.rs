@@ -131,7 +131,7 @@ fn live_run_needs_force() {
         "run 20260929-120000-a1b2c3 looks alive (pid 42 on here, beat 30s ago); pass --force to take it over"
     );
     let forced = resumable_state(&[(30, saved)], &resume_args(&["a1b2c3", "--force"]), "/proj", "here", &alive);
-    assert_eq!(forced.unwrap().run_id, "20260929-120000-a1b2c3");
+    assert_eq!(forced.unwrap().0.run_id, "20260929-120000-a1b2c3");
 }
 
 #[test]
@@ -160,7 +160,7 @@ fn force_resume(host: Rc<FakeHost>) -> Fixture {
     host.state().files.insert(format!("{}/state.json", saved.dir()), saved.to_text());
     host.state().ages.insert(saved.run_id.clone(), 30);
     let runs = host.run_states("/proj").unwrap();
-    let state = resumable_state(&runs, &resume_args(&["a1b2c3", "--force"]), "/proj", &local_host(), &|_| true)
+    let (state, _) = resumable_state(&runs, &resume_args(&["a1b2c3", "--force"]), "/proj", &local_host(), &|_| true)
         .expect("--force resumes a run that looks alive");
     let mut f = Fixture::resume(host, state, vec![("review", vec![review_turn(1, APPROVE)])], &[], &[]);
     f.pid_alive = Box::new(|_| true);
