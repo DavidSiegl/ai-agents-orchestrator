@@ -287,7 +287,7 @@ fn the_commands_about_runs_and_workflows() {
 // -- The flags each command's help names, as orchestrator.py's ------------------------------------------------------
 
 /// The commands of orchestrator.py's parse_args that ticket 09b ports; it empties this list.
-const NOT_YET: [&str; 3] = ["drain", "refresh", "doctor"];
+const NOT_YET: [&str; 2] = ["drain", "doctor"];
 
 /// The flags text names, as engine/tests/oracle/cli.py finds them: each long flag (two hyphens, lowercase words
 /// joined by hyphens) or -h that stands alone, not part of a longer word.

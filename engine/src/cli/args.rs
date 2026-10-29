@@ -1,6 +1,6 @@
 //! The command line as orchestrator.py's parse_args reads it, on clap: the subcommands with their flags, and the
 //! checks argparse's types cannot make (check_flag_values, check_spec_args). Ticket 09a has run, resume, the commands
-//! about a project's runs and workflows, and 09b judged-in-quality; drain, refresh and doctor join [`parser`] and
+//! about a project's runs and workflows, and 09b judged-in-quality and refresh; drain and doctor join [`parser`] and
 //! [`Command`] with the rest of ticket 09b; gui is not ported (the rust-engine spec's Decisions), and serve is ticket
 //! 10's.
 //!
@@ -15,7 +15,7 @@ use clap::{Arg, ArgAction, ArgMatches};
 
 use crate::constants::{
     AGENT_KINDS, CLOSED_BRANCH_GRACE, DEFAULT_AGENT, DEFAULT_MAX_QUALITY_ROUNDS, DEFAULT_MAX_ROUNDS,
-    DEFAULT_TURN_TIMEOUT, EXIT_ERROR, REMOTE, ROLE_LABELS,
+    DEFAULT_TURN_TIMEOUT, EXIT_ERROR, EXIT_WAITING, REMOTE, ROLE_LABELS,
 };
 use crate::cli::listing::RUN_RECORD_VERSION;
 use crate::pipeline::METRICS_FILE;
@@ -34,6 +34,9 @@ pub enum Command {
     Runs(Target, RunsCommand),
     /// `workflows`: list the workflows, or print the one named, a name or a file's path, as a workflow file.
     Workflows(Option<String>),
+    /// `refresh`: clear a resolved conflict from the pull request of the run named, by its id or key, or of every
+    /// finished run with one when None.
+    Refresh(Target, Option<String>),
     /// `judged-in-quality`: whether a build of the quality job already judged the current directory's HEAD as a
     /// pull request's build into the branch would.
     JudgedInQuality {
@@ -148,7 +151,7 @@ impl Command {
         match self {
             Command::Run(a) => Some(&a.target),
             Command::Resume(a) => Some(&a.target),
-            Command::Runs(target, _) => Some(target),
+            Command::Runs(target, _) | Command::Refresh(target, _) => Some(target),
             Command::Workflows(_) | Command::JudgedInQuality { .. } => None,
         }
     }
@@ -193,6 +196,7 @@ pub fn parse_args(argv: impl IntoIterator<Item = OsString>, config: &ConfigDir) 
             spec: string(m, "spec"),
             no_pr: m.get_flag("no-pr"),
         }),
+        Some(("refresh", m)) => Command::Refresh(target(m), string(m, "run_ref")),
         Some(("judged-in-quality", m)) => Command::JudgedInQuality {
             job: string(m, "quality-gate").unwrap_or_default(),
             branch: string(m, "target").unwrap_or_default(),
@@ -334,6 +338,19 @@ pub fn parser(config: &ConfigDir) -> clap::Command {
             config.workflows_dir()
         ))
         .arg(Arg::new("workflow").value_name("WORKFLOW").help("a workflow's name, or a file's path"));
+    let refresh = clap::Command::new("refresh")
+        .about("clear a resolved conflict from a run's pull request")
+        .long_about(format!(
+            "For a finished run whose pull request was opened as a draft over conflicts with its base, ask gh whether \
+             it merges cleanly now. If it does, remove the conflict warning from its description, keeping every \
+             other edit, mark it ready for review if the run approved or finished, and forget the conflicts in the \
+             run's state; a pull request merged or closed only has its run's conflicts forgotten. Without RUN, every \
+             finished run with a pull request and conflicts. Prints a line per run. Exit status 0 when each conflict \
+             is cleared or forgotten, {EXIT_WAITING} when a pull request still conflicts or GitHub has not computed \
+             whether it does."
+        ))
+        .args(target_args())
+        .arg(Arg::new("run_ref").value_name("RUN").help(format!("{RUN_REF_HELP}; default: every such run")));
     let judged = clap::Command::new("judged-in-quality")
         .about("exit 0 when a quality build already judged HEAD as its pull request's build would")
         .long_about(format!(
@@ -368,7 +385,7 @@ pub fn parser(config: &ConfigDir) -> clap::Command {
         .infer_long_args(true)
         // argparse takes the last of a flag given twice, where clap would refuse it.
         .subcommands(
-            [run, resume, list, metrics, show, prune, close, workflows, judged]
+            [run, resume, list, metrics, show, prune, close, refresh, workflows, judged]
                 .map(|c| c.args_override_self(true)),
         )
 }

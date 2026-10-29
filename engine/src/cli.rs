@@ -3,7 +3,7 @@
 //! and its last lines. A command joins as a [`Command`] arm of [`run_command`], given the same [`Connected`], or of
 //! [`herdrless_command`], given the same [`Local`], for one that needs no herdr pane; ticket 09a has `run`, `resume`,
 //! the commands about a project's runs (crate::cli::listing, prune, close) and `workflows`, and 09b
-//! `judged-in-quality` (crate::cli::judged).
+//! `judged-in-quality` (crate::cli::judged) and `refresh` (crate::cli::refresh).
 
 use std::cell::Cell;
 use std::ffi::OsString;
@@ -29,6 +29,7 @@ use crate::workflow::{Collaborators, LocalHuman, RunSettings, Stopped, SystemClo
 pub mod args;
 mod close;
 pub mod judged;
+pub mod refresh;
 pub mod listing;
 pub mod prune;
 mod start;
@@ -294,6 +295,10 @@ fn run_command(command: &Command, world: &Connected) -> Result<Ended, Stop> {
         Command::Runs(target, runs) => {
             runs_command(runs, world, &cwd, &target.flags()).map_err(stopped)?;
             return if interrupt.is_raised() { Err(Stop::Interrupted(None)) } else { Ok(Ended::Status(0)) };
+        }
+        Command::Refresh(_, run_ref) => {
+            let status = refresh::refresh_command(world, &cwd, run_ref.as_deref()).map_err(stopped)?;
+            return if interrupt.is_raised() { Err(Stop::Interrupted(None)) } else { Ok(Ended::Status(status)) };
         }
         Command::Workflows(_) | Command::JudgedInQuality { .. } => {
             unreachable!("main runs {command:?} without herdr (herdrless_command)")
