@@ -131,8 +131,11 @@ impl Judging {
         };
         let interrupt = Interrupt::new();
         let (stdout, stderr) = (|t: &str| out.borrow_mut().push_str(t), |t: &str| err.borrow_mut().push_str(t));
+        let herdr = |_: Option<&str>| -> crate::herdr::ProcessHerdr { panic!("judged-in-quality asked for herdr") };
         let local = Local {
             host: &self.repo.host,
+            herdr: &herdr,
+            in_herdr_pane: false,
             jenkins: &jenkins,
             cwd,
             config: &config,

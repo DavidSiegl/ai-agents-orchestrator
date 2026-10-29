@@ -3,7 +3,7 @@
 //! and its last lines. A command joins as a [`Command`] arm of [`run_command`], given the same [`Connected`], or of
 //! [`herdrless_command`], given the same [`Local`], for one that needs no herdr pane; ticket 09a has `run`, `resume`,
 //! the commands about a project's runs (crate::cli::listing, prune, close) and `workflows`, and 09b
-//! `judged-in-quality` (crate::cli::judged) and `refresh` (crate::cli::refresh).
+//! `judged-in-quality` (crate::cli::judged), `refresh` (crate::cli::refresh) and `doctor` (crate::cli::doctor).
 
 use std::cell::Cell;
 use std::ffi::OsString;
@@ -28,6 +28,7 @@ use crate::workflow::{Collaborators, LocalHuman, RunSettings, Stopped, SystemClo
 
 pub mod args;
 mod close;
+pub mod doctor;
 pub mod judged;
 pub mod refresh;
 pub mod listing;
@@ -69,8 +70,12 @@ impl Connected<'_> {
 
 /// What a command that needs no herdr pane talks to: this machine, where the orchestrator runs.
 pub(super) struct Local<'a> {
-    /// This machine: its commands, git among them.
+    /// This machine: its commands, git among them, and over SSH from it a herdr machine's (doctor).
     pub host: &'a ProcessHost,
+    /// The herdr here, its commands forwarded to the herdr machine given (ProcessHerdr::new).
+    pub herdr: &'a dyn Fn(Option<&str>) -> ProcessHerdr,
+    /// Whether this process runs in a pane herdr manages (in_herdr_pane).
+    pub in_herdr_pane: bool,
     /// The quality job of a name, as Connected's jenkins.
     pub jenkins: &'a dyn Fn(&str) -> Result<Jenkins, OrchestratorError>,
     /// The current directory (current_dir). Errors: it is gone or not UTF-8.
@@ -143,8 +148,11 @@ pub fn main(argv: impl IntoIterator<Item = OsString>, interrupt: &Interrupt) -> 
     let jenkins = |job: &str| Jenkins::from_env(job, &config);
     // A line stderr does not take is lost, as after a hangup; the status still tells.
     let stderr = |text: &str| drop(std::io::stderr().lock().write_all(text.as_bytes()));
+    let herdr = |machine: Option<&str>| ProcessHerdr::new(machine, interrupt);
     let local = Local {
         host: &local_host,
+        herdr: &herdr,
+        in_herdr_pane: in_herdr_pane(),
         jenkins: &jenkins,
         cwd: &current_dir,
         config: &config,
@@ -177,6 +185,8 @@ fn herdrless_command(command: &Command, local: &Local) -> Option<Result<Ended, S
             workflows::workflows_command(local.config, reference.as_deref(), local.stdout).map(|()| 0)
         }
         Command::JudgedInQuality { job, branch } => judged_in_quality_command(local, job, branch),
+        // Not being in a herdr pane is one of the things doctor reports.
+        Command::Doctor(target) => doctor::doctor_command(local, target),
         _ => return None,
     };
     Some(match ended {
@@ -300,7 +310,7 @@ fn run_command(command: &Command, world: &Connected) -> Result<Ended, Stop> {
             let status = refresh::refresh_command(world, &cwd, run_ref.as_deref()).map_err(stopped)?;
             return if interrupt.is_raised() { Err(Stop::Interrupted(None)) } else { Ok(Ended::Status(status)) };
         }
-        Command::Workflows(_) | Command::JudgedInQuality { .. } => {
+        Command::Workflows(_) | Command::JudgedInQuality { .. } | Command::Doctor(_) => {
             unreachable!("main runs {command:?} without herdr (herdrless_command)")
         }
     };

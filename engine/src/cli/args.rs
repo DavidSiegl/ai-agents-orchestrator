@@ -1,6 +1,6 @@
 //! The command line as orchestrator.py's parse_args reads it, on clap: the subcommands with their flags, and the
 //! checks argparse's types cannot make (check_flag_values, check_spec_args). Ticket 09a has run, resume, the commands
-//! about a project's runs and workflows, and 09b judged-in-quality and refresh; drain and doctor join [`parser`] and
+//! about a project's runs and workflows, and 09b judged-in-quality, refresh and doctor; drain joins [`parser`] and
 //! [`Command`] with the rest of ticket 09b; gui is not ported (the rust-engine spec's Decisions), and serve is ticket
 //! 10's.
 //!
@@ -17,6 +17,7 @@ use crate::constants::{
     AGENT_KINDS, CLOSED_BRANCH_GRACE, DEFAULT_AGENT, DEFAULT_MAX_QUALITY_ROUNDS, DEFAULT_MAX_ROUNDS,
     DEFAULT_TURN_TIMEOUT, EXIT_ERROR, EXIT_WAITING, REMOTE, ROLE_LABELS,
 };
+use crate::cli::doctor::{dotted, GIT_MIN_VERSION, HERDR_MIN_VERSION};
 use crate::cli::listing::RUN_RECORD_VERSION;
 use crate::pipeline::METRICS_FILE;
 use crate::env::ConfigDir;
@@ -37,6 +38,8 @@ pub enum Command {
     /// `refresh`: clear a resolved conflict from the pull request of the run named, by its id or key, or of every
     /// finished run with one when None.
     Refresh(Target, Option<String>),
+    /// `doctor`: check what a run needs where the agents run, and the project at the Target's cwd when it has one.
+    Doctor(Target),
     /// `judged-in-quality`: whether a build of the quality job already judged the current directory's HEAD as a
     /// pull request's build into the branch would.
     JudgedInQuality {
@@ -151,7 +154,7 @@ impl Command {
         match self {
             Command::Run(a) => Some(&a.target),
             Command::Resume(a) => Some(&a.target),
-            Command::Runs(target, _) | Command::Refresh(target, _) => Some(target),
+            Command::Runs(target, _) | Command::Refresh(target, _) | Command::Doctor(target) => Some(target),
             Command::Workflows(_) | Command::JudgedInQuality { .. } => None,
         }
     }
@@ -197,6 +200,7 @@ pub fn parse_args(argv: impl IntoIterator<Item = OsString>, config: &ConfigDir) 
             no_pr: m.get_flag("no-pr"),
         }),
         Some(("refresh", m)) => Command::Refresh(target(m), string(m, "run_ref")),
+        Some(("doctor", m)) => Command::Doctor(target(m)),
         Some(("judged-in-quality", m)) => Command::JudgedInQuality {
             job: string(m, "quality-gate").unwrap_or_default(),
             branch: string(m, "target").unwrap_or_default(),
@@ -374,6 +378,18 @@ pub fn parser(config: &ConfigDir) -> clap::Command {
                 .required(true)
                 .help("the branch the pull request would merge into"),
         );
+    let doctor = clap::Command::new("doctor")
+        .about("check what a run needs, and say what to run for each that is missing")
+        .long_about(format!(
+            "Check what a run needs where the agents run, on this machine or with --machine on that one: herdr {} or \
+             later and a way to reach it, each harness's CLI and herdr integration, git {} or later, gh logged in, \
+             gitleaks, and with --cwd a git checkout with an {REMOTE}. Prints a line each, ok, missing, or warn for \
+             one only some runs need, with a fix under each that is not ok. Installs and changes nothing. Exit \
+             status 0 when nothing is missing, {EXIT_ERROR} otherwise.",
+            dotted(&HERDR_MIN_VERSION),
+            dotted(&GIT_MIN_VERSION)
+        ))
+        .args(target_args());
     clap::Command::new("orchestrator")
         .about(
             "Role-based handoff between agent sessions in herdr, each role in the harness of its choice; by default \
@@ -385,7 +401,7 @@ pub fn parser(config: &ConfigDir) -> clap::Command {
         .infer_long_args(true)
         // argparse takes the last of a flag given twice, where clap would refuse it.
         .subcommands(
-            [run, resume, list, metrics, show, prune, close, refresh, workflows, judged]
+            [run, resume, list, metrics, show, prune, close, refresh, workflows, judged, doctor]
                 .map(|c| c.args_override_self(true)),
         )
 }

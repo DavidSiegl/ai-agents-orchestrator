@@ -116,13 +116,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   (`Workflow::run_proof`), where Python keeps it as a lone surrogate, which `state.json` holds as an escape and the
   write of the review then fails on (a UnicodeEncodeError, uncaught).
   Decided against unless a run is found that writes such input.
-- **A Host need of the doctor's, left for rust-engine ticket 09b.** `Host::exec` words a command that cannot be
-  started as a message only, so the doctor's `_run_tool`, which tells a tool missing from PATH by its
-  FileNotFoundError, cannot tell it so (cross-review 89, F9: "porting `_run_tool`'s 'not on PATH' check will need
-  either string matching or an interface change"). Closes with ticket 09b, which ports `doctor`, giving `exec` an
-  error of its own for a command not found or having the doctor ask `command -v` first, as `_on_path` already does.
-  The three `TestHost*` cases this entry also named (`test_prune_on_real_git`, `test_close_on_real_git`,
-  `test_closed_without_a_time`) are ported (Fixed, "The Rust engine's CLI commands about a project's runs").
 - **The Rust engine's Ctrl-C, what is left.** Rust-engine ticket 08's part 6 (2026-10-29) has a SIGINT raise the
   `Interrupt`, which stops the command the engine waits on (Fixed, "A Ctrl-C at the terminal does not reach the
   command the Rust engine's `Host` or herdr is running"). Not closed: (1) the `orchestrator` binary's `main`
@@ -626,6 +619,19 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Fixed
 
+- **A Host need of the doctor's, left for rust-engine ticket 09b.** (Moved from Open issues, 2026-10-29.) `Host::exec` words a command that cannot be
+  started as a message only, so the doctor's `_run_tool`, which tells a tool missing from PATH by its
+  FileNotFoundError, cannot tell it so (cross-review 89, F9: "porting `_run_tool`'s 'not on PATH' check will need
+  either string matching or an interface change"). Closes with ticket 09b, which ports `doctor`, giving `exec` an
+  error of its own for a command not found or having the doctor ask `command -v` first, as `_on_path` already does.
+  The three `TestHost*` cases this entry also named (`test_prune_on_real_git`, `test_close_on_real_git`,
+  `test_closed_without_a_time`) are ported (Fixed, "The Rust engine's CLI commands about a project's runs").
+  Fixed (2026-10-29, ticket 09b): `Host::exec` fails with `ExecError::NotFound` for a command not on PATH and
+  `ExecError::Failed` for any other (`engine/src/host.rs`), and the doctor's `run_tool` (`crate::cli::doctor`) tells a
+  missing tool by it, as `_run_tool` by FileNotFoundError; `ProcessHost::with_runner` runs a test's FakeTools in
+  place of processes, as Python's `Host(run=...)`. `doctor` is ported with `TestCheckSetup` and `TestDoctorCommand`
+  (`engine/src/cli/doctor/tests.rs`) but for its tkinter check, which the Rust engine, without the GUI, does not
+  make (`test_without_tkinter` not ported); the parity scenario `doctor_checks` passes against the binary.
 - **Jenkins calls whose tests need the CLI, left for rust-engine ticket 09b.** (Moved from Open issues, 2026-10-29.) Ticket 07 ported `TestOrchestratorChecks`
   on `judge_run` of the build's quality file; its Workflow cases (`test_a_build_that_failed_before_the_gate_is_not_checked`,
   `test_without_the_quality_gate_none_of_this_runs`, `test_the_spec_is_the_runs_task_without_a_contract_step` and the

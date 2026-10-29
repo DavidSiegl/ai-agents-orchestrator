@@ -90,8 +90,11 @@ impl Cli {
         let print = |text: &str| self.out.borrow_mut().push_str(text);
         let stderr = |text: &str| self.err.borrow_mut().push_str(text);
         let cwd = || Ok(cwd.to_string());
+        let herdr = |_: Option<&str>| -> crate::herdr::ProcessHerdr { panic!("{argv:?} asked for herdr here") };
         let local = Local {
             host,
+            herdr: &herdr,
+            in_herdr_pane: true,
             jenkins: &jenkins,
             cwd: &cwd,
             config: &self.config,
