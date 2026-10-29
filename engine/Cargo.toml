@@ -6,9 +6,9 @@ edition = "2021"
 publish = false
 
 [dependencies]
-# Process groups and signals, and the user's id, without unsafe code: a Host command's group is killed when it runs out
-# of time (host/process.rs).
-nix = { version = "0.31", default-features = false, features = ["signal", "user"] }
+# Process groups and signals, the user's id and the machine's name, without unsafe code: a Host command's group is
+# killed when it runs out of time (host/process.rs), and a run's owner record names its host and pid (runs.rs).
+nix = { version = "0.31", default-features = false, features = ["hostname", "signal", "user"] }
 serde = "1"
 # float_roundtrip: a float reads as the nearest f64, as Python reads it, so that state.json writes back as it was.
 serde_json = { version = "1", features = ["float_roundtrip"] }

@@ -19,6 +19,7 @@ pub mod prompts;
 pub mod pull_request;
 pub mod pypi;
 pub mod quality;
+pub mod runs;
 pub mod state;
 pub mod summary;
 pub mod workflow_file;
