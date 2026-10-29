@@ -88,13 +88,24 @@ class Invocation:
     def kill(self) -> None:
         """Kill it with SIGKILL, and every process it started, as a crash or a lost machine would stop it: its
         process group, and each process below it in groups of their own, as the Rust engine starts every command
-        (engine/src/host/process.rs), which a kill of the engine's group alone would leave running."""
-        below = fakes.descendants(self.process.pid) - {self.process.pid}
-        # Gone already when the engine and everything it started have ended.
+        (engine/src/host/process.rs), which a kill of the engine's group alone would leave running. Each is stopped
+        first, until a listing finds none new, so that none starts another between the listing and the kill."""
+        stopped: set[int] = set()
+        while True:
+            # The engine's group, then what the listing finds below it that is not stopped yet.
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(self.process.pid, signal.SIGSTOP)
+            below = fakes.descendants(self.process.pid) - {self.process.pid} - stopped
+            if not below:
+                break
+            for pid in below:
+                # Each a process of the engine's, or one that ended meanwhile.
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGSTOP)
+            stopped |= below
         with contextlib.suppress(ProcessLookupError):
             os.killpg(self.process.pid, signal.SIGKILL)
-        for pid in below:
-            # Each one a process of the engine's, or one that ended meanwhile.
+        for pid in stopped:
             with contextlib.suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGKILL)
         self.process.wait()
