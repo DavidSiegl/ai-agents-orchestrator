@@ -130,6 +130,16 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `test_run_dir_granted_in_worktree_runs_only`, `test_turn_tokens_needs_a_known_window_and_a_harness_it_reads` (ticket
   06) and `test_a_030_state_without_a_permission_mode` and `test_unreadable_agent_args` (ticket 04,
   `engine/src/state/tests.rs` and states.json). Closes with tickets 08 and 09 porting each case named here.
+- **The Rust engine's Workflow is ported in parts, and its Python tests with them.** Rust-engine ticket 08 lands in
+  seven parts (its issue's Plan): part 1 (`engine/src/workflow.rs`, 2026-10-29) runs a workflow in the project's
+  checkout, its turns, verdict retries, pull request, saves, heartbeat and takeover, and ports `TestWorkflow`,
+  `TestPullRequest`, `TestUpToDateBase`, `TestHeartbeat`, `TestRunHealth`'s `run_health` cases (its two `print_runs` cases are ticket 09's, with `list`), `TestPidAlive` and
+  `TestOneRunPerCheckout` but its worktree cases (`test_worktree_runs_do_not_refuse_each_other`,
+  `test_a_worktree_run_and_one_in_the_checkout_do_not_refuse_each_other`, with worktree runs) and its resume --force
+  cases (`test_force_takes_over_the_run_itself`, `test_force_does_not_override_another_live_run`, which go through
+  `resumable_state`, with the minimal `run`/`resume`). Until the later parts, a Rust Workflow has no worktree, blocked
+  report, seeded spec, lock, proof or quality round, and nothing starts one but the tests. Closes with the last part,
+  every `run`/`resume` parity scenario passing against the Rust binary.
 - **A Ctrl-C at the terminal does not reach the command the Rust engine's `Host` or herdr is running.** `ProcessHost`
   starts each command in a process group of its own, so that a timeout kills the command with whatever it started
   (`run_process` in `engine/src/host/process.rs`, rust-engine ticket 05, 2026-10-28), and `ProcessHerdr` runs the
