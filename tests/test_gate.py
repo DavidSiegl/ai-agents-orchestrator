@@ -1094,6 +1094,198 @@ class TestClippy(RepositoryTest):
         self.assertIn("`crate/src/lib.rs:5` warning clippy clippy::needless_return", out)
 
 
+class TestRustFiles(RepositoryTest):
+    """GateChange.rust_files, which reads the .rs files a change touches with the gate-rust helper, here a fake one
+    that prints each file's text as its document, and `gate.py --rust-syntax`, which names the helper."""
+
+    BASE_FILES = {"pyproject.toml": "[tool.ruff]\n", "notes.txt": "notes\n", "src/kept.rs": "fn kept() {}\n",
+                  "src/gone.rs": "fn gone() {}\n", "src/moved.rs": "fn moved() {}\n",
+                  "src/script.rs": "fn script() {}\n"}
+
+    # A helper's code that prints, for each of its files, a document holding the file's bytes as Latin-1 text.
+    ECHO = """
+        for path in files:
+            with open(path, "rb") as f:
+                print(json.dumps({"schema": 1, "text": f.read().decode("latin-1")}))
+        """
+
+    def helper(self, code=ECHO):
+        """The path of a fake gate-rust, a Python script that runs code, dedented, with json, os, subprocess, sys and
+        time imported and files its arguments, after appending those as a line of JSON to the file runs()
+        reads."""
+        path = os.path.join(self.outside, "gate-rust")
+        with open(path, "w") as f:
+            f.write(f"#!{sys.executable}\nimport json, os, subprocess, sys, time\nfiles = sys.argv[1:]\n"
+                    f"with open({os.path.join(self.outside, 'runs')!r}, 'a') as runs:\n"
+                    f"    runs.write(json.dumps(files) + '\\n')\n" + textwrap.dedent(code))
+        os.chmod(path, 0o700)
+        return path
+
+    def runs(self):
+        """The arguments of each run of the fake helper so far, in order."""
+        try:
+            with open(os.path.join(self.outside, "runs")) as f:
+                return [json.loads(line) for line in f]
+        except FileNotFoundError:
+            return []
+
+    def rust_files(self, helper):
+        return gate.GateChange.from_tree(self.repo, self.base, rust_syntax=helper).rust_files
+
+    def not_run(self, why):
+        return [{"path": None, "line": None, "severity": "warning", "rule": "not-run",
+                 "message": f"{why}, so the check judged none of the change's Rust."}]
+
+    def touch_rust(self):
+        self.put("src/kept.rs", "fn kept() { 1 }\n")
+
+    def test_each_rs_file_the_change_touches_is_read_at_the_base_and_in_the_working_tree_in_one_run(self):
+        self.touch_rust()
+        self.git("rm", "--quiet", "src/gone.rs")
+        self.git("mv", "src/moved.rs", "src/renamed.rs")
+        self.git("mv", "src/script.rs", "src/script.txt")
+        self.put("src/new.rs", "fn new() {}\n")
+        self.put("notes.txt", "more notes\n")
+        self.git("add", "src/new.rs")
+        with open(os.path.join(self.repo, "src/script.txt"), "a") as f:
+            f.write("// caf\xe9\n")
+        files, findings = self.rust_files(self.helper())
+
+        def doc(text):
+            return {"schema": 1, "text": text}
+        self.assertEqual(findings, [])
+        # In the order of GateChange.files, git's.
+        self.assertEqual(files, [
+            gate.RustFile("src/gone.rs", None, doc("fn gone() {}\n"), None),
+            gate.RustFile("src/kept.rs", "src/kept.rs", doc("fn kept() {}\n"), doc("fn kept() { 1 }\n")),
+            gate.RustFile(None, "src/new.rs", None, doc("fn new() {}\n")),
+            gate.RustFile("src/moved.rs", "src/renamed.rs", doc("fn moved() {}\n"), doc("fn moved() {}\n")),
+            gate.RustFile("src/script.rs", None, doc("fn script() {}\n"), None),
+        ])
+        [run] = self.runs()
+        in_tree = [p for p in run if p.startswith(self.repo + os.sep)]
+        self.assertEqual(in_tree, [os.path.join(self.repo, p) for p in ("src/kept.rs", "src/new.rs", "src/renamed.rs")])
+        # The base's four, copied into a directory of their own, removed afterwards.
+        copies = {os.path.dirname(p) for p in run if p not in in_tree}
+        self.assertEqual((len(run), len(copies)), (7, 1))
+        self.assertFalse(os.path.exists(copies.pop()))
+
+    def test_a_base_file_is_given_to_the_helper_as_git_stores_its_bytes(self):
+        latin1 = "fn f() {}\n// caf\udce9\n"
+        with open(os.path.join(self.repo, "src/kept.rs"), "wb") as f:
+            f.write(os.fsencode(latin1))
+        self.commit({}, "Latin-1")
+        base = self.git("rev-parse", "HEAD").strip()
+        self.touch_rust()
+        [file], _ = gate.GateChange.from_tree(self.repo, base, rust_syntax=self.helper()).rust_files
+        self.assertEqual(file.before, {"schema": 1, "text": "fn f() {}\n// caf\xe9\n"})
+
+    def test_a_change_to_no_rs_file_starts_no_helper_with_or_without_one(self):
+        self.put("notes.txt", "more notes\n")
+        self.assertEqual(self.rust_files(self.helper()), ([], []))
+        self.assertEqual(self.rust_files(None), ([], []))
+        self.assertEqual(self.runs(), [])
+
+    def test_the_helper_runs_once_however_often_the_files_are_asked_for(self):
+        self.touch_rust()
+        change = gate.GateChange.from_tree(self.repo, self.base, rust_syntax=self.helper())
+        self.assertIs(change.rust_files, change.rust_files)
+        self.assertEqual(len(self.runs()), 1)
+
+    def test_a_change_to_rust_without_the_helper_is_not_run(self):
+        self.touch_rust()
+        self.assertEqual(self.rust_files(None), ([], self.not_run("`gate.py --rust-syntax` was not given")))
+
+    def test_a_helper_that_is_not_there_or_cannot_start_is_not_run(self):
+        self.touch_rust()
+        missing = os.path.join(self.outside, "missing")
+        self.assertEqual(self.rust_files(missing),
+                         ([], self.not_run(f"the gate-rust helper `{missing}` is not there")))
+        helper = self.helper()
+        os.chmod(helper, 0o600)
+        files, [finding] = self.rust_files(helper)
+        self.assertEqual(files, [])
+        self.assertTrue(finding["message"].startswith(f"the gate-rust helper `{helper}` could not be started: "
+                                                      f"[Errno 13] Permission denied"), finding)
+
+    def test_a_helper_past_the_timeout_is_killed_with_the_processes_it_started(self):
+        self.touch_rust()
+        child = os.path.join(self.outside, "child")
+        helper = self.helper(f"""
+            with open({child!r}, "w") as f:
+                f.write(str(subprocess.Popen(["sleep", "60"]).pid))
+            time.sleep(60)
+            """)
+        with patch.object(gate, "GATE_TOOL_TIMEOUT", 1):
+            self.assertEqual(self.rust_files(helper),
+                             ([], self.not_run(f"the gate-rust helper `{helper}` did not finish within 1 seconds")))
+        with open(child) as f:
+            pid = f.read().strip()
+        # Killed, the sleep is gone, or a zombie until this container's init reaps it.
+        with contextlib.suppress(FileNotFoundError), open(f"/proc/{pid}/stat") as f:
+            self.assertEqual(f.read().rpartition(")")[2].split()[0], "Z")
+
+    def test_a_helper_that_fails_or_prints_other_than_its_documents_is_not_run(self):
+        self.touch_rust()
+        named = f"the gate-rust helper `{os.path.join(self.outside, 'gate-rust')}`"
+        rebuild = "where this gate.py reads schema 1; build the helper from the tree this gate.py comes from, its " \
+                  "`ci/gate-rust`"
+        cases = [
+            ('print("boom", file=sys.stderr)\nsys.exit(3)', f"{named} failed with exit status 3: boom"),
+            ('print("not json")', f"{named} printed what is not JSON: not json"),
+            ('print(json.dumps([1]))', f"{named} printed a document of schema None, {rebuild}"),
+            ('print(json.dumps({"schema": 2}))', f"{named} printed a document of schema 2, {rebuild}"),
+            # One file, kept.rs, on two sides.
+            ('print(json.dumps({"schema": 1}))', f"{named} printed 1 documents for 2 files"),
+            ('print(json.dumps({"schema": 1}), end="")', f'{named} did not end its output with a newline: {{"schema": 1}}'),
+        ]
+        for code, why in cases:
+            with self.subTest(code):
+                self.assertEqual(self.rust_files(self.helper(code)), ([], self.not_run(why)))
+
+    def test_a_base_git_cannot_show_is_not_run(self):
+        self.touch_rust()
+        # A change whose base lacks the file it names, as no change from_tree makes can, but a commit git cannot read
+        # would.
+        change = gate.GateChange.from_tree(self.repo, self.base, rust_syntax=self.helper())
+        change = gate.GateChange(change.root, change.base, change.diff, change.changed, [("src/nowhere.rs", None)],
+                                 rust_syntax=change.rust_syntax)
+        files, [finding] = change.rust_files
+        self.assertEqual(files, [])
+        self.assertTrue(finding["message"].startswith("the base's Rust files could not be copied out of git for the "
+                                                      "helper: "), finding)
+        self.assertEqual(self.runs(), [])
+
+    def test_the_scratch_directory_that_cannot_be_made_is_not_run(self):
+        self.touch_rust()
+        with patch.object(gate.tempfile, "mkdtemp", side_effect=OSError("no space")):
+            files, [finding] = self.rust_files(self.helper())
+        self.assertEqual((files, finding["rule"]), ([], "not-run"))
+        self.assertEqual(finding["message"], "could not make a directory to copy the base's Rust files into: no space; "
+                                             "nothing ran, so the check judged nothing.")
+
+    def test_rust_syntax_names_the_helper_from_the_working_directory_for_the_checks(self):
+        self.touch_rust()
+        self.helper()
+        seen = []
+
+        def reads_rust(change):
+            seen.append(change.rust_syntax)
+            return change.rust_files[1]
+        checks = (gate.GateCheck("reads-rust", fails=True, find=reads_rust),)
+        with contextlib.chdir(self.outside):
+            text = gate.judge_change(self.repo, "HEAD", checks, rust_syntax="gate-rust")
+        self.assertEqual(seen, [os.path.join(self.outside, "gate-rust")])
+        self.assertIn("GATE: OK\n", text)
+        text = gate.judge_change(self.repo, "HEAD", checks)
+        self.assertIn("1. The change as a whole: error reads-rust not-run: `gate.py --rust-syntax` was not given, so "
+                      "the check judged none of the change's Rust.\n", text)
+        with patch.object(gate, "judge_change", return_value="GATE: OK\n") as judge, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(gate.main(["--base", "HEAD", "--rust-syntax", "gate-rust"]), 0)
+        self.assertEqual(judge.call_args.kwargs["rust_syntax"], "gate-rust")
+
+
 class TestTestIntegrityCheck(unittest.TestCase):
     def test_it_fails_the_gate_but_weighs_what_a_spec_can_ask_for(self):
         [check] = [c for c in gate.gate_checks() if c.name == "test-integrity"]

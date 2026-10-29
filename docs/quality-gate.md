@@ -16,13 +16,16 @@ need the run's spec.
 uv run pytest --cov=orchestrator --cov=gate --cov-branch --cov-report=xml --junitxml=test-results.xml
 (cd ui/src-tauri && cargo llvm-cov nextest --workspace --ignore-run-fail --profile ci \
     --config-file ../../ci/nextest.toml --cobertura --output-path ../../coverage-rust.xml)
+cargo build --release --locked --manifest-path ci/gate-rust/Cargo.toml
 uv run python gate.py --base main --tests test-results.xml --tests ui/src-tauri/target/nextest/ci/junit.xml \
-    --coverage coverage.xml --coverage coverage-rust.xml --out quality.md
+    --coverage coverage.xml --coverage coverage-rust.xml --rust-syntax ci/gate-rust/target/release/gate-rust \
+    --out quality.md
 ```
 
 The `cargo llvm-cov` command runs the Rust tests and measures their coverage, which takes [cargo-llvm-cov and
 cargo-nextest](#rust-tests-and-coverage); without them, leave out the Rust reports and the gate judges the Python's
-alone.
+alone. The `cargo build` builds the helper the gate reads Rust with ([gate-rust](#reading-rust-the-gate-rust-helper)),
+which `--rust-syntax` names.
 
 `gate.py` is a program of its own beside `orchestrator.py`, and the two share no code: the orchestrator imports
 nothing from it and reads only the file it writes ([the quality file as a
@@ -39,7 +42,7 @@ counted, never listed and never held against the change, so the gate judges the 
 | pymarkdown | `*.md` | `[tool.pymarkdown]` |
 | shellcheck | `*.sh` | its defaults |
 | actionlint | `.github/workflows/*.yml` | its defaults |
-| clippy | `*.rs`, in each Cargo workspace, here `ui/src-tauri/` | the workspace's `[lints]` and `clippy.toml` |
+| clippy | `*.rs`, in each Cargo workspace, here `ui/src-tauri/` and `ci/gate-rust/` | the workspace's `[lints]` and `clippy.toml` |
 
 ruff's rules include the coding rules the agents are given as prose that a linter can apply, so that every harness
 gets them, every time: a docstring on every public module, class, method and function (`D100`-`D104`, `D106`,
@@ -467,6 +470,85 @@ cargo llvm-cov nextest --locked --workspace --ignore-run-fail --profile ci --con
   version and the sha256 of its release's archive; rustup's `llvm-tools` component comes with the agent image, as
   clippy does (see [What Jenkins needs](#what-jenkins-needs)).
 
+### Reading Rust: the gate-rust helper
+
+`gate.py` stays one stdlib-only file, so it reads Rust through a program of its own, `gate-rust`, a small crate in
+`ci/gate-rust/` built on [syn](https://docs.rs/syn/2), which parses each file it is given and prints what the checks
+need to know of it as JSON. `gate.py --rust-syntax PATH` names the built binary:
+
+```bash
+cargo build --release --locked --manifest-path ci/gate-rust/Cargo.toml
+uv run python gate.py --base main --rust-syntax ci/gate-rust/target/release/gate-rust --out quality.md
+```
+
+The gate runs it once per run, over every `.rs` file the change adds, edits, deletes or renames, on both sides of the
+change: each file as the base has it, copied into a temporary directory, and as the working tree has it. It runs as a
+linter does, in a session of its own, killed with what it started after `GATE_TOOL_TIMEOUT` (600) seconds. Its JSON is
+`GateChange.rust_files` in `gate.py`, which the Rust checks read. A change to no `.rs` file never starts it, and so
+does not need `--rust-syntax`: a repository without Rust, or another Python project, is judged as before. Where a
+change does touch Rust and the gate cannot read it, each Rust check says so as a lineless `not-run` finding of its
+own, with the reason, and judges none of the change's Rust: `--rust-syntax` was not given, the helper is not there or
+cannot be started, it fails, outlives its time, or prints anything but one document of the schema below per file.
+For a check that fails the gate, such a finding fails it, so a gate that cannot read the Rust never passes it.
+
+**What it prints.** `gate-rust FILE...` reads each `FILE`, every argument a path, and prints one line of JSON per
+file, in the order given, then exits 0; it exits 1 when it cannot write them. A file it cannot read, that is not
+UTF-8 or that does not parse is still a line of its own, an error document. Lines are numbered from 1, at `\n` alone,
+as git numbers them. Each document is an object:
+
+- `schema`: `1`, the version of this schema, raised by any change to it. The gate refuses a helper of another version
+  with the `not-run` finding above, naming both, so that a helper built from an older tree is never misread;
+- `error`, only in an error document, which has no other field but `schema`: `{"message": ..., "line": N}`, syn's
+  message and the line it points at; `line` is `null` for a file it could not read or decode, and where syn points at
+  no place, as for a file that ends inside an item;
+- `fns`: every `fn` that has a body or could have one: free, in an `impl` or `trait` (a trait's declaration without a
+  body included), and nested in another `fn` or anywhere inside one, in the order they start. Not a `fn` in an
+  `extern` block, nor one inside a macro's tokens, such as the items a `macro_rules!` writes. Each is
+  `{"name", "line", "attrs_line", "end", "holders", "attrs", "asserts", "discards", "body_digest"}`:
+  - `name` is its identifier as Rust reads it, without `r#`;
+  - `line` is the line of its first token after its outer attributes, its `pub` or `fn` or `async`; `attrs_line` the
+    line its first outer attribute starts on, doc comments included, which is `line` when it has none; and `end` the
+    line of its last token, the `}` of its body or the `;` of a bodiless trait `fn`;
+  - `holders` are the items it lies in, outermost first, each `{"kind", "name"}`: kind `mod` (an inline module), `impl`,
+    `trait`, `fn`, `const` or `static`. An `impl`'s name is its type's tokens as syn writes them, such as `Foo < T >`, and
+    it has a `trait` too: the trait's path, as `fmt :: Display`, or `null` for an inherent `impl`;
+  - `attrs` are its outer attributes other than doc comments, in order, each `{"path", "text", "line"}`: `path` the
+    attribute's path with its segments joined by `::`, as `test`, `tokio::test`, `should_panic` or `cfg`; `text` the
+    attribute as written in the file, from `#` to `]`; `line` where it starts. Which attributes make a test is the
+    checks' to say, from these;
+  - `asserts` are the assertion macros its body calls, in the order they start: `assert!`, `assert_eq!`, `assert_ne!`,
+    `debug_assert!`, `debug_assert_eq!`, `debug_assert_ne!` and `panic!`, named by the last segment of the macro's path,
+    so `pretty_assertions::assert_eq!` counts. Each is `{"name", "line", "text", "shape", "literals"}`: `name` as
+    `assert_eq`; `line` where the macro's path starts; `text` the call as written, from its path to its closing
+    delimiter; `literals` every literal token in its arguments, in order, as written (`1`, `"a"`, `r#"b"#`, `b'c'`), the
+    sign of a negative number not among them, and a `matches!` and its pattern inside the call included; and `shape` the
+    arguments' tokens as syn writes them, layout and comments gone, with each of those literals written `$lit`, so
+    that two calls that differ only in their literals have one shape. An assertion inside a closure the body holds
+    counts, as does one in the arguments of another macro whose arguments parse as expressions separated by commas,
+    such as `vec![...]` or another assertion; one inside a nested `fn` is that `fn`'s, and one inside any other macro,
+    such as `tokio::select!`, is not seen;
+  - `discards` are the values its body throws away, in order, each `{"kind", "line", "text"}`: kind `let` for
+    `let _ = expr;`, `assign` for `_ = expr;`, and `ok` for a statement `expr.ok();`; `text` is `expr` as written, the
+    value thrown away, without the `.ok()`, and `line` where it starts. As for `asserts`, those of a nested `fn` are
+    its own;
+  - `body_digest` is 16 hexadecimal digits that are the same for two bodies of the same tokens, whatever their layout
+    and comments, and differ otherwise but by a 64-bit hash's collision; `null` for a `fn` with no body. It is the
+    helper's own hash, so compare digests only within one run of one build;
+- `mods`: every inline module, `mod name { ... }`, nested ones included, in the order they start, each
+  `{"name", "line", "attrs_line", "end", "cfg_test"}`, the lines as for `fns`. `cfg_test` is true when an attribute of
+  its own, outer or inner, is `cfg(P)` with a `P` that holds only under `cfg(test)`: `test` itself, or an `all(...)`
+  with such a `P` among its arguments. A `mod name;` that names another file is not listed;
+- `bindings`: every name the file binds, in the order they appear, each `{"name", "kind", "line"}`, `name` without
+  `r#` and `line` its identifier's. `kind` is one of `let` (the names of a `let`'s pattern, a `let ... else` included),
+  `param` (of a `fn`, `self` left out), `closure-param`, `for` (a `for` loop's pattern), `match` (an arm's pattern),
+  `if-let` and `while-let` (the pattern of a `let` in an `if`'s or a `while`'s condition, each of a chain's; `if-let`
+  too for one anywhere else, such as a `match` guard), `fn`, `struct`, `enum`, `union`, `trait`, `type` (an alias or an
+  associated type), `const`, `static`, and `use-as` (the new name of a `use ... as name`). A pattern binds each
+  identifier in it that does not start with an uppercase letter: syn cannot tell `None` or a `const` from a new name,
+  and Rust names those in CamelCase or capitals, its bindings in snake case. `_` binds nothing. Bindings inside a
+  macro's tokens are listed only where `asserts` looks inside one; the `fn` a binding is in is the innermost of `fns`
+  whose lines hold its line.
+
 ### Whose rules judge a change
 
 Every linter but clippy gets its rules from one `pyproject.toml`: the tree's own, or the one `--config` names. A
@@ -505,7 +587,9 @@ uv run python path/to/gate.py --base main --tests test-results.xml --coverage co
 It takes what it runs from that project, so the project's dev dependencies hold them: ruff, mypy and pymarkdownlnt from
 `PATH`, which `uv run` points at the project's environment, and pytest, pytest-randomly and mutmut through the Python
 that runs `gate.py`, for the flaky-tests, passes-at-base and surviving-mutants checks. shellcheck, actionlint and clippy
-come from the machine, and only for a project that tracks shell scripts, GitHub workflows or Rust files. A linter that
+come from the machine, and only for a project that tracks shell scripts, GitHub workflows or Rust files. A change to
+Rust files is read with the [gate-rust helper](#reading-rust-the-gate-rust-helper), built from this repository's
+`ci/gate-rust/` at the same commit as `gate.py` and named with `--rust-syntax`; a project without Rust needs neither. A linter that
 is missing is a failed condition naming it, and for clippy that is a `cargo clippy --version` that fails, as it does
 where rustup's `clippy` component is not installed; a check that cannot run is one of its own findings. The rules come
 from the project's `pyproject.toml`, or the one `--config` names, as [whose rules judge a

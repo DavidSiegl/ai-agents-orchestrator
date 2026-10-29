@@ -3,6 +3,7 @@ The quality gate: judge the change a git working tree makes since a commit, and 
 
     python gate.py --base REV [--config PYPROJECT] [--tests JUNIT]... [--coverage XML]... [--out FILE]
                    [--mutation-budget SECONDS] [--base-run-budget SECONDS] [--test-contexts COVERAGE]
+                   [--rust-syntax PATH]
 
 It judges the working tree of the git repository that holds the current directory: the linters (GATE_TOOLS) over
 the files the repository tracks, keeping the findings on the lines the change adds since --base, and the checks
@@ -14,7 +15,8 @@ bad arguments, and EXIT_INTERRUPTED (130) for Ctrl-C, likewise writing nothing.
 The gate imports nothing but the standard library, so this one file is the whole program, to copy into another
 project or take from a commit with `git show REV:gate.py`. What it runs it takes from the project it judges: the
 linters from PATH, and pytest, pytest-randomly and mutmut through the Python that runs this file (sys.executable).
-So run it with that project's Python, in which its dev tools are installed, such as `uv run python gate.py`.
+So run it with that project's Python, in which its dev tools are installed, such as `uv run python gate.py`. Rust it
+reads through a helper of its own, built from ci/gate-rust, which --rust-syntax names (GateChange.rust_files).
 
 docs/quality-gate.md says what the gate judges and why, and, under "The quality file as a contract", which parts
 of the file's format the orchestrator reads back. The orchestrator imports nothing from this module: it keeps its
@@ -73,7 +75,7 @@ GATE_ERROR = "ERROR"
 GATE_MIN_COVERAGE = 80.0
 GATE_MIN_NEW_LINES = 20
 # Seconds each process a linter runs may take before the gate counts the linter as failed: its one run for most,
-# and for clippy each of the cargo commands Clippy says.
+# and for clippy each of the cargo commands Clippy says. The gate-rust helper's one run gets as long.
 GATE_TOOL_TIMEOUT = 600
 # Seconds a linter, pytest or mutmut run the gate started is read for after it exited or was killed
 # (_run_in_session), at most: what a process outside its group, still holding its output, prints after that is lost.
@@ -103,6 +105,9 @@ BASE_RUN_BUDGET = 120
 EXIT_GATE_UNJUDGED = 2
 # Its exit status when Ctrl-C stopped it, before it wrote the quality file: 128 + SIGINT, as a shell reports it.
 EXIT_INTERRUPTED = 130
+# The version of the gate-rust helper's schema this gate reads (docs/quality-gate.md, "Reading Rust: the gate-rust
+# helper"), which the helper's SCHEMA must equal; GateChange.rust_files refuses a helper of another.
+RUST_SYNTAX_SCHEMA = 1
 
 
 class GateError(Exception):
@@ -615,6 +620,19 @@ GATE_TOOLS = (
 
 
 @dataclass(frozen=True)
+class RustFile:
+    """A Rust source file the change touches, as the gate-rust helper reads it on each side of the change
+    (GateChange.rust_files)."""
+    old_path: str | None  # its path at the base; None where it is no .rs file there, or none at all
+    new_path: str | None  # its path in the working tree, likewise
+    # The helper's document of the file at the base and in the working tree, of the schema docs/quality-gate.md gives
+    # ("Reading Rust: the gate-rust helper"): its fns, inline modules and bindings, or an error saying why the helper
+    # could not read it. None where the path beside it is None.
+    before: dict | None
+    after: dict | None
+
+
+@dataclass(frozen=True)
 class GateChange:
     """The change the gate judges, as judge_change reads it and each GateCheck is given it; from_tree makes one."""
     root: str  # the repository's top level; its working tree is the change's new side
@@ -628,11 +646,15 @@ class GateChange:
     # The files the change adds or edits under mutmut's state, _MUTMUT_STATE, the one part of it the fields above
     # leave out, in path order: a file it adds, renames into it or changes there in any way but deleting it.
     mutmut_state: tuple[str, ...] = ()
+    # The absolute path of the gate-rust helper, `gate.py --rust-syntax`'s, which rust_files reads the change's Rust
+    # with; None when it was not given.
+    rust_syntax: str | None = None
 
     @classmethod
-    def from_tree(cls, root: str, base: str, rules: str | None = None) -> "GateChange":
+    def from_tree(cls, root: str, base: str, rules: str | None = None,
+                  rust_syntax: str | None = None) -> "GateChange":
         """The change from base, a full sha, to the working tree of the repository whose top level is root, judged by
-        rules as the rules field says.
+        rules as the rules field says, its Rust read with the helper at rust_syntax as that field says.
 
         Its diff, changed and files show the change as if git tracked nothing under mutmut's state, _MUTMUT_STATE, on
         either side, so nothing that reads them selects a test, a function or a changed line there, or counts an edit
@@ -643,7 +665,23 @@ class GateChange:
         diff = _change_diff(root, base, (_OUTSIDE_MUTMUT_STATE,))
         mutmut_state = sorted(new for _, new in _changed_files(root, base, (_INSIDE_MUTMUT_STATE,)) if new)
         return cls(root, base, diff, changed_lines(diff), _changed_files(root, base, (_OUTSIDE_MUTMUT_STATE,)), rules,
-                   tuple(mutmut_state))
+                   tuple(mutmut_state), rust_syntax)
+
+    @functools.cached_property
+    def rust_files(self) -> tuple[list[RustFile], list[dict]]:
+        """Each pair of files the change touches with a .rs path on either side, in files's order, as the gate-rust
+        helper at rust_syntax reads it on each side; and the findings, as GateCheck.find returns them, that a check
+        reading the files lists beside its own.
+
+        Those are a lineless not-run finding, and no files, when the change touches a .rs file and the gate cannot
+        read it: rust_syntax is None, or the helper is not there, cannot start, fails, outlives GATE_TOOL_TIMEOUT
+        seconds, or prints other than one document per file of the schema RUST_SYNTAX_SCHEMA numbers; the base's
+        files cannot be copied out of git for it; or the temporary directory they go in cannot be made. And a
+        not-removed finding when that directory cannot be removed afterwards; the files stand. A change that touches
+        no .rs file gets neither and starts no helper, with or without rust_syntax. The helper runs once, at the
+        first use, so every check reads the one run; a file it could not parse is an error document, which each check
+        judges for itself."""
+        return _read_rust_files(self)
 
 
 @dataclass(frozen=True)
@@ -708,11 +746,13 @@ class NewCoverage:
 
 
 def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: str | None = None,
-                 coverage: list[str] | tuple[str, ...] = (), tests: list[str] | tuple[str, ...] = ()) -> str:
+                 coverage: list[str] | tuple[str, ...] = (), tests: list[str] | tuple[str, ...] = (),
+                 rust_syntax: str | None = None) -> str:
     """The quality file for the change from base to the working tree of the git repository at cwd.
 
     The change is GateChange.from_tree's, which every part of the judgement below reads: none reads what the tree
-    tracks under mutmut's state, _MUTMUT_STATE. Runs each GATE_TOOLS linter whose files the repository tracks outside
+    tracks under mutmut's state, _MUTMUT_STATE; the checks read its Rust with the gate-rust helper at rust_syntax
+    (GateChange.rust_files). Runs each GATE_TOOLS linter whose files the repository tracks outside
     it over those files, with the rules of the pyproject.toml at rules, or the tree's own, and lists the findings on
     lines the change added and the lineless ones on files it touched. Then runs each of checks, such as gate_checks
     gives, on the change, and lists what it finds, as an issue or as a finding to weigh as GateCheck.judged says. The
@@ -743,7 +783,7 @@ def judge_change(cwd: str, base: str, checks: tuple[GateCheck, ...], *, rules: s
     if not os.path.isfile(rules_path):
         raise GateError(f"no rules: {rules_path} is not a file")
 
-    change = GateChange.from_tree(root, base_sha, rules_path)
+    change = GateChange.from_tree(root, base_sha, rules_path, os.path.abspath(rust_syntax) if rust_syntax else None)
     changed = change.changed
     tracked = {f for f in _git(root, "ls-files", "-z", verbatim=True).split("\0") if f}
     conditions, findings = _mutmut_state_condition(change), []
@@ -836,6 +876,86 @@ def _tool_process(name: str, argv: list[str], cwd: str) -> subprocess.CompletedP
     if stopped:
         return f"`{name}` did not finish within {GATE_TOOL_TIMEOUT} seconds."
     return proc
+
+
+def _read_rust_files(change: GateChange) -> tuple[list[RustFile], list[dict]]:
+    """GateChange.rust_files, which says what this gives, read anew: the helper runs over each .rs file at the base,
+    copied out of git into a temporary directory, and in the working tree, all in one run."""
+    pairs = [(old if old and old.endswith(".rs") else None, new if new and new.endswith(".rs") else None)
+             for old, new in change.files]
+    pairs = [pair for pair in pairs if pair != (None, None)]
+    if not pairs:
+        return [], []
+    helper = change.rust_syntax
+    if helper is None:
+        return [], [_rust_not_run("`gate.py --rust-syntax` was not given")]
+    files: list[RustFile] = []
+
+    def read(tmp: str) -> list[dict]:
+        argv = [helper]
+        try:
+            for n, (old, new) in enumerate(pairs):
+                if old:
+                    # Verbatim, so that os.fsencode gives back the bytes git stores, which the helper decodes itself.
+                    blob = _git(change.root, "cat-file", "blob", f"{change.base}:{old}", verbatim=True)
+                    argv.append(os.path.join(tmp, f"{n}.rs"))
+                    with open(argv[-1], "wb") as f:
+                        f.write(os.fsencode(blob))
+                if new:
+                    argv.append(os.path.join(change.root, new))
+        except (GateError, OSError) as e:
+            return [_rust_not_run(f"the base's Rust files could not be copied out of git for the helper: {e}")]
+        documents, why = _rust_documents(helper, argv, change.root)
+        if why:
+            return [_rust_not_run(why)]
+        printed = iter(documents)
+        files.extend(RustFile(old, new, next(printed) if old else None, next(printed) if new else None)
+                     for old, new in pairs)
+        return []
+
+    return files, _in_scratch_directory("not-run", "to copy the base's Rust files into", read)
+
+
+def _rust_documents(helper: str, argv: list[str], cwd: str) -> tuple[list[dict], str | None]:
+    """The documents the gate-rust helper at helper prints, run as argv in cwd as _run_in_session runs a linter, within
+    GATE_TOOL_TIMEOUT seconds, one per file it is given; or none, and why not, a clause naming the helper, when it
+    could not be started, did not finish, failed, or printed other than one document per file of RUST_SYNTAX_SCHEMA's
+    schema."""
+    named = f"the gate-rust helper `{helper}`"
+    try:
+        proc, stopped = _run_in_session(argv, cwd, tool_env(), timeout=GATE_TOOL_TIMEOUT)
+    except FileNotFoundError:
+        return [], f"{named} is not there"
+    except OSError as e:
+        return [], f"{named} could not be started: {e}"
+    if stopped:
+        return [], f"{named} did not finish within {GATE_TOOL_TIMEOUT} seconds"
+    if proc.returncode != 0:
+        return [], f"{named} failed with exit status {proc.returncode}: {_said(proc)}"
+    # JSON writes a newline inside a string as an escape, so only the newline after each document is one.
+    printed = proc.stdout.split("\n")
+    if printed[-1] != "":
+        return [], f"{named} did not end its output with a newline: {_clip(printed[-1])}"
+    documents = []
+    for line in printed[:-1]:
+        try:
+            document = json.loads(line)
+        except ValueError:
+            return [], f"{named} printed what is not JSON: {_clip(line)}"
+        if not isinstance(document, dict) or document.get("schema") != RUST_SYNTAX_SCHEMA:
+            schema = document.get("schema") if isinstance(document, dict) else None
+            return [], (f"{named} printed a document of schema {schema}, where this gate.py reads schema "
+                        f"{RUST_SYNTAX_SCHEMA}; build the helper from the tree this gate.py comes from, its "
+                        f"`ci/gate-rust`")
+        documents.append(document)
+    if len(documents) != len(argv) - 1:
+        return [], f"{named} printed {len(documents)} documents for {len(argv) - 1} files"
+    return documents, None
+
+
+def _rust_not_run(why: str) -> dict:
+    """The not-run finding of a check that reads the change's Rust when, for why, a clause, the gate could not."""
+    return _finding(None, None, "not-run", f"{why}, so the check judged none of the change's Rust.")
 
 
 def _cargo_workspaces(root: str, files: Iterable[str]) -> tuple[list[str], list[str]]:
@@ -4297,16 +4417,17 @@ def _check_condition(name: str, n: int) -> str:
 
 
 def gate_command(base: str, rules: str | None, coverage: list[str], tests: list[str], out: str | None,
-                 mutation_budget: float, base_run_budget: float, test_contexts: str | None = None) -> int:
-    """Write the quality file judge_change gives for the current directory, with gate_checks's checks, to out or
-    standard output.
+                 mutation_budget: float, base_run_budget: float, test_contexts: str | None = None,
+                 rust_syntax: str | None = None) -> int:
+    """Write the quality file judge_change gives for the current directory, with gate_checks's checks and the
+    gate-rust helper at rust_syntax, to out or standard output.
 
     Returns 0 for GATE: OK and 1 for GATE: ERROR; EXIT_GATE_UNJUDGED, having written nothing, when the change
     could not be judged or out could not be written.
     """
     try:
         text = judge_change(os.getcwd(), base, gate_checks(mutation_budget, base_run_budget, test_contexts),
-                            rules=rules, coverage=coverage, tests=tests)
+                            rules=rules, coverage=coverage, tests=tests, rust_syntax=rust_syntax)
         if out:
             write_quality_file(out, text)
     except GateError as e:
@@ -4369,6 +4490,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "--cov-context=test writes it under coverage's ctrace core; mutmut then runs only the "
                              "tests it records reaching the functions the change edits. Without it, mutmut runs "
                              "[tool.mutmut]'s whole test selection")
+    parser.add_argument("--rust-syntax", metavar="PATH",
+                        help="the gate-rust helper, built from ci/gate-rust, through which the checks read the .rs "
+                             "files a change touches; without it, each check that reads Rust reports a change to a .rs "
+                             "file as not run, and a change to none is judged as with it")
     return parser.parse_args(argv)
 
 
@@ -4401,7 +4526,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         return gate_command(args.base, args.config, args.coverage, args.tests, args.out, args.mutation_budget,
-                            args.base_run_budget, args.test_contexts)
+                            args.base_run_budget, args.test_contexts, args.rust_syntax)
     except KeyboardInterrupt:
         # write_quality_file renames the whole file into place last, so out holds what it held before.
         print("interrupted; no quality file was written", file=sys.stderr)
