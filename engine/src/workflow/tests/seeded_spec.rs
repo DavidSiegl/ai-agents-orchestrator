@@ -54,10 +54,6 @@ fn started(f: &Fixture) -> Vec<(String, String)> {
     starts(f).into_iter().map(|(name, pane, _)| (name, pane)).collect()
 }
 
-fn splits(f: &Fixture) -> Vec<Call> {
-    f.herdr.state().calls.iter().filter(|c| matches!(c, Call::Split { .. })).cloned().collect()
-}
-
 fn agents_started(names: &[(&str, &str)]) -> Vec<(String, String)> {
     names.iter().map(|(name, pane)| (name.to_string(), pane.to_string())).collect()
 }
@@ -84,9 +80,9 @@ fn the_spec_is_the_contract_and_the_interview_is_skipped() {
     assert!(seen.borrow()[0].contains(&format!("The spec in {D}/spec.md was agreed")));
     // No Spec Collector: no agent, no pane, no notification.
     assert_eq!(started(&f), agents_started(&[("build-a1b2c3", "w1:p1"), ("review-a1b2c3", "w1:p2")]));
-    assert_eq!(splits(&f), [Call::Split { pane: "w1:p1".into(), direction: Direction::Right }]);
+    assert_eq!(calls_of(&f, "split"), [split("w1:p1", Direction::Right)]);
     assert_eq!(f.herdr.state().panes, 2);
-    assert!(!f.herdr.state().calls.iter().any(|c| matches!(c, Call::Focus { .. })));
+    assert!(calls_of(&f, "focus").is_empty());
     assert!(!f.told.titles().iter().any(|t| t.contains("waiting")));
     let saved = f.saved();
     let roles: Vec<&str> = saved.get("agents").and_then(Json::as_object).unwrap().keys().collect();
@@ -124,7 +120,7 @@ fn a_seeded_run_resumes_like_any_other() {
     assert_eq!(f2.workflow(RunSettings { pull_request, ..RunSettings::default() }).run(), verdict(APPROVE));
     assert_eq!(f2.host.state().files.get(&format!("{D}/spec.md")).map(String::as_str), Some(GIVEN_SPEC));
     assert_eq!(started(&f2), agents_started(&[("review-a1b2c3", "w1:p2")]));
-    assert_eq!(splits(&f2), [Call::Split { pane: "w1:p1".into(), direction: Direction::Right }]);
+    assert_eq!(calls_of(&f2, "split"), [split("w1:p1", Direction::Right)]);
     assert_eq!(f2.host.state().prs[0].title, "Add a token-bucket rate limiter");
 }
 
@@ -146,7 +142,7 @@ fn a_contract_role_with_a_later_step_lays_out_last() {
     assert_eq!(verdict_given, verdict(APPROVE));
     assert_eq!(*seen.borrow(), [format!("Build {D}/plan.md; report to {D}/build-1.md.{}", note())]);
     assert_eq!(started(&f), agents_started(&[("build-a1b2c3", "w1:p1"), ("plan-a1b2c3", "w1:p2")]));
-    assert_eq!(splits(&f), [Call::Split { pane: "w1:p1".into(), direction: Direction::Right }]);
+    assert_eq!(calls_of(&f, "split"), [split("w1:p1", Direction::Right)]);
     let copied = format!("[plan] plan.md is a copy of {SPEC_SOURCE}; skipping the Planner's turn");
     assert!(f.told.lines().contains(&copied), "{:?}", f.told.lines());
 }

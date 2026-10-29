@@ -548,3 +548,16 @@ fn a_report_written_while_no_orchestrator_watched_ends_the_wait() {
     assert_eq!(blocked_files(&f.host), ["build-1.blocked-1.md"]);
     assert_eq!(wf.state().blocked, None);
 }
+
+/// Not Python's: a block record without its k, as only a state.json edited by hand has, stops the resume naming it
+/// (Python's engine fails with a KeyError there).
+#[test]
+fn a_block_without_its_number_stops_the_resume() {
+    let mut state = saved_run("build", 1, &["spec", "build"]);
+    let Ok(Json::Object(block)) = Json::parse(r#"{"file": "build-1.md", "question": "which database?"}"#) else {
+        unreachable!()
+    };
+    state.blocked = Some(block);
+    let f = Fixture::resume(Rc::new(FakeHost::default()), state, vec![], &["build"], &[]);
+    assert_eq!(failure(f.workflow(f.as_saved()).run()), "the block saved in state.json has no k");
+}

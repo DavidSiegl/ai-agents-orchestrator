@@ -191,7 +191,10 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   no time gives: cross-review 92, F2, "a Ctrl-C ... during an unbounded `wait(name, None, …)` won't reach `herdr
   agent wait`"). Closes with the interrupt handling of rust-engine ticket 08/09 killing the running command's group
   (its pid is its group's id; for herdr, that also ends the engine's wait for its output) before it releases the run,
-  and a test that interrupts a run waiting on a command and one waiting on herdr.
+  with a command it interrupts failing, a `herdr agent prompt` included even when herdr delivered the text before the
+  kill (the Workflow then saves no `prompted` and opens no turn record, as Python's KeyboardInterrupt in a turn saves
+  nothing: the Workflow tests' `FakeHerdr` already plays it so, `FakeHerdrState::interrupt`, ticket 08's part 3), and a
+  test that interrupts a run waiting on a command and one waiting on herdr.
 - **The Rust engine talks to Jenkins and PyPI otherwise than urllib in a few cases.** Its transport is ureq
   (`HttpClient`, `engine/src/http.rs`, rust-engine ticket 07, 2026-10-28), which differs from `urlopen` where no test of
   the Python engine pins it: ureq reaches an http URL through a proxy with CONNECT, as it does an https one, where

@@ -662,7 +662,8 @@ pub trait Host {
         self.git(cwd, &["worktree", "add", "--detach", path, commit]).map(drop)
     }
 
-    /// Whether cwd's repository has a remote named origin; any failure of git's to name its URL counts as none.
+    /// Whether cwd's repository has a remote named origin: git names its URL. Any exit of git's but 0 counts as
+    /// none, as outside a repository. Errors: git cannot be run, or runs out of time (run's).
     fn has_origin(&self, cwd: &str) -> Result<bool, OrchestratorError> {
         Ok(self.git_run(cwd, &["remote", "get-url", REMOTE], DEFAULT_TIMEOUT)?.status == 0)
     }

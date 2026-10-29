@@ -150,6 +150,7 @@ fn each_example_workflow() {
     let mut names: Vec<String> =
         std::fs::read_dir(EXAMPLES).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
     names.sort();
+    // Not in Python's case: so that a wrong or empty EXAMPLES cannot pass it; a new example adds one here.
     assert_eq!(names.len(), 3);
     for name in names {
         let pipeline = load_workflow_file(&format!("{EXAMPLES}/{name}"), &Default::default()).unwrap();

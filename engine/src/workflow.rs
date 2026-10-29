@@ -458,8 +458,8 @@ impl<'a> Workflow<'a> {
     pub(crate) fn claim(&mut self) -> Outcome<()> {
         let cwd = self.state.cwd.clone();
         self.ignore_orchestrator_dir(&cwd)?;
-        if self.spec.is_some() {
-            self.seed_spec()?;
+        if let Some(spec) = &self.spec {
+            self.seed_spec(spec)?;
         }
         self.state.error = None;
         self.state.owner = Some(self.me.clone());
@@ -478,13 +478,17 @@ impl<'a> Workflow<'a> {
         Ok(())
     }
 
-    /// Write the spec given with run --spec (RunSettings::spec) as the contract step's file.
+    /// Write spec, given with run --spec (RunSettings::spec), as the contract step's file.
     ///
     /// After .gitignore, which keeps it out of the clean-tree check, and before the first state.json, which starts
-    /// the run after the contract step: a resume of that run must find the file.
-    fn seed_spec(&self) -> Result<(), OrchestratorError> {
-        let (Some(spec), Some(contract)) = (&self.spec, self.pipeline.contract()) else {
-            return Err(OrchestratorError(format!("workflow {} has no step to seed a spec in", self.pipeline.name())));
+    /// the run after the contract step: a resume of that run must find the file. Errors: the workflow has no contract
+    /// step, which Pipeline::seeded_start refuses first; the write fails.
+    fn seed_spec(&self, spec: &SpecFile) -> Result<(), OrchestratorError> {
+        let Some(contract) = self.pipeline.contract() else {
+            return Err(OrchestratorError(format!(
+                "workflow {} has no contract step to write the --spec file as",
+                self.pipeline.name()
+            )));
         };
         let path = contract.path(&self.state.dir(), 0, 0);
         self.host.write(&path, &spec.text, false)?;
@@ -763,8 +767,13 @@ impl<'a> Workflow<'a> {
             timeout: (!step.human_paced).then_some(self.state.turn_timeout),
             watch_stalls: !step.human_paced,
             announce: if step.human_paced { turn::Announce::Interview } else { turn::Announce::Nothing },
-            verdict: step.loop_to.is_some(),
-            blocks: step.can_block(),
+            judged: if step.loop_to.is_some() {
+                turn::Judged::Verdict
+            } else if step.can_block() {
+                turn::Judged::Blocking
+            } else {
+                turn::Judged::AsWritten
+            },
         };
         self.turn(turn)
     }

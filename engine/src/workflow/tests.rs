@@ -91,6 +91,25 @@ fn prompts_to(f: &Fixture, name: &str) -> usize {
     names(f, "prompt").iter().filter(|n| *n == name).count()
 }
 
+/// herdr's commands of kind, split, rename or focus, in order.
+fn calls_of(f: &Fixture, kind: &str) -> Vec<Call> {
+    let calls = f.herdr.state().calls.clone();
+    calls
+        .into_iter()
+        .filter(|c| match c {
+            Call::Split { .. } => kind == "split",
+            Call::Rename { .. } => kind == "rename",
+            Call::Focus { .. } => kind == "focus",
+            _ => false,
+        })
+        .collect()
+}
+
+/// A split of pane in direction, as herdr records it.
+fn split(pane: &str, direction: Direction) -> Call {
+    Call::Split { pane: pane.into(), direction }
+}
+
 /// Whether herdr was given call.
 fn called(f: &Fixture, call: &Call) -> bool {
     f.herdr.state().calls.contains(call)

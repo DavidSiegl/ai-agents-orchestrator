@@ -40,22 +40,6 @@ fn commit_args(f: &Fixture) -> Vec<String> {
     f.host.state().git_calls.iter().find(|c| c[0] == "commit").cloned().expect("a commit")
 }
 
-fn calls_of(f: &Fixture, kind: &str) -> Vec<Call> {
-    let calls = f.herdr.state().calls.clone();
-    calls
-        .into_iter()
-        .filter(|c| match c {
-            Call::Split { .. } => kind == "split",
-            Call::Rename { .. } => kind == "rename",
-            Call::Focus { .. } => kind == "focus",
-            _ => false,
-        })
-        .collect()
-}
-
-fn split(pane: &str, direction: Direction) -> Call {
-    Call::Split { pane: pane.into(), direction }
-}
 
 #[test]
 fn workflow_without_a_spec_step() {

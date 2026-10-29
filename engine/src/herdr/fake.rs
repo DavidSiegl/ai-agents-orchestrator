@@ -87,9 +87,10 @@ pub(crate) struct FakeHerdrState {
     /// Run before each command calls records, given it, when set: what a Python test does in its own
     /// FakeHerdr.focus or create_workspace before the fake's.
     pub before_call: Option<BeforeCall>,
-    /// The run's Ctrl-C, when set: one a turn raises fails the prompt that played it, as the engine's signal handling
-    /// kills the herdr command it interrupts (rust-engine ticket 08's Plan, part 6), so that nothing after the prompt
-    /// runs, as after Python's raise KeyboardInterrupt in a turn.
+    /// The run's Ctrl-C, when set: one a turn raises fails the prompt that played it, so that nothing after the
+    /// prompt runs, as after Python's raise KeyboardInterrupt in a turn. The real engine does not do that yet: an
+    /// interrupted ProcessHerdr::prompt failing so is a condition of the Ctrl-C handling that rust-engine ticket 08's
+    /// part 6 adds (TODO.md, the Ctrl-C entry), until which these cases hold on the fake only.
     pub interrupt: Option<Interrupt>,
 }
 
