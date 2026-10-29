@@ -81,7 +81,6 @@ fn a_pipe_in_a_cell_does_not_split_it() {
     assert!(table.ends_with("| build | build | 1 | claude | x\\|y | 2026-10-03 04:00:00 | 5s | a\\|b.md |"), "{table}");
 }
 
-
 fn approved_run() -> RunState {
     let mut s = RunState::new("20260929-120000-a1b2c3", "add a rate limiter", "/proj");
     s.verdict = Some("APPROVE".into());

@@ -170,6 +170,7 @@ fn a_state_saved_before_turns_resumes_and_records_its_files_without_a_start() {
 #[test]
 fn every_end_writes_a_summary() {
     let d = new_state().dir();
+    let solo = crate::test_support::solo();
     let solo_turn: Turn = Box::new(|_, state, host| {
         host.write("/proj/limiter.py", "version 1", false).unwrap();
         host.write(&format!("{}/build.md", state.dir()), "solo report", false).unwrap();
@@ -189,9 +190,9 @@ fn every_end_writes_a_summary() {
         ),
         (
             "finished",
-            new_run(&crate::test_support::solo()),
+            new_run(&solo),
             vec![("build", vec![solo_turn])],
-            RunSettings { pipeline: Some(crate::test_support::solo()), pull_request: false, ..RunSettings::default() },
+            RunSettings { pipeline: Some(solo.clone()), pull_request: false, ..RunSettings::default() },
             strings(&[
                 "- **Workflow:** solo\n",
                 "- **Outcome:** FINISHED\n",

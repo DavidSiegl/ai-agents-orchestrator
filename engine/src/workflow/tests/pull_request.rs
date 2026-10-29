@@ -14,7 +14,6 @@ fn rounds(verdicts: &[&str]) -> Script {
 
 pub(super) const BRANCH: &str = "orchestrator/add-a-token-bucket-rate-limiter-a1b2c3";
 
-
 pub(super) fn git_calls(f: &Fixture) -> Vec<Vec<String>> {
     f.host.state().git_calls.clone()
 }

@@ -256,8 +256,7 @@ fn resume_with_a_new_harness_relaunches_in_it() {
 
 #[test]
 fn a_030_state_resumes_on_claude() {
-    // The state resumable_state would give without flags (see the module's doc), which keeps it as read: here, as
-    // read.
+    // As read: what resumable_state gives without flags (see the module's doc).
     let state = v030_state("build");
     assert_eq!((state.permission_mode.as_deref(), state.agent_kinds.is_empty()), (Some("acceptEdits"), true));
     let seen = seen();
