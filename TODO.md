@@ -182,13 +182,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   before, `kill_in_publish` against the Rust binary got a pull request from the orphaned `gh`. Closes with the user's
   ruling that this is acceptable, or with the command's group killed when the engine dies (Linux's
   `PR_SET_PDEATHSIG`, set in `run_process`'s `pre_exec`, reaches only the command itself, not what it starts).
-- **The parity scenarios do not run against the Rust binary in Jenkins.** The Test stage runs `tests/parity` against
-  `orchestrator.py` only; the Rust tickets run `PARITY_ENGINE=target/.../orchestrator uv run pytest tests/parity`
-  by hand, which also runs the scenarios that switch engines at the kill (`SWITCHED` in `test_parity.py`; they are
-  generated only with `PARITY_ENGINE` set, as with the Python engine alone they would repeat `kill_in_*`). Against a
-  debug build the run and resume scenarios took about 2 minutes and the switched ones 1.5 more (ticket 08, part 7),
-  within the quality builds' 1200 s only if the build of the binary and the Python run fit beside them. Closes with a
-  Jenkins stage that builds the binary and runs them, or with ticket 11's switch, after which `orchestrator.py` goes.
 - **The Rust engine talks to Jenkins and PyPI otherwise than urllib in a few cases.** Its transport is ureq
   (`HttpClient`, `engine/src/http.rs`, rust-engine ticket 07, 2026-10-28), which differs from `urlopen` where no test of
   the Python engine pins it: ureq reaches an http URL through a proxy with CONNECT, as it does an https one, where
@@ -738,6 +731,21 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `a_run_is_named_by_the_time_in_the_machine_s_zone` (TZ 5:45 east of UTC). The parity harness still runs in UTC.
   What Python reads in local time outside run and resume is the Open issue "Local times the Rust engine has yet to
   read, for rust-engine ticket 09".
+- **The parity scenarios did not run against the Rust binary in Jenkins.** The Test stage runs `tests/parity` against
+  `orchestrator.py` only, and the Rust tickets ran `PARITY_ENGINE=target/.../orchestrator uv run pytest tests/parity`
+  by hand, with the scenarios that switch engines at the kill (`SWITCHED` in `test_parity.py`). Fixed (2026-10-29,
+  rust-engine ticket 08's follow-ups, the user's ruling of 2026-10-29): the Jenkinsfile's Rust parity stage, after
+  Gate, on a pull request build (`changeRequest()`) whose change touches `engine/` or `tests/parity/` against its
+  merge base with the target (a `git diff --quiet` as the Test stage's for a quality build; a fetch or diff that
+  fails runs it), runs them against the binary the Test stage's cargo-llvm-cov built
+  (`target/llvm-cov-target/debug/orchestrator`, instrumented, its profiles sent to `$WORKSPACE_TMP` by
+  `LLVM_PROFILE_FILE` through `env`, since the harness gives the engine an environment of its own), limited to the
+  scenarios whose recordings invoke only `run` and `resume` (`PARITY_COMMANDS`, new in `test_parity.py`): 33 and the
+  18 switched, 51 passing in 198 s locally with SIGINT and SIGHUP ignored, as a Jenkins `sh` step starts them. A
+  failing scenario fails the build; its JUnit report is `parity-rust.xml`. Unverified until a pull request build runs
+  it: the declarative `when` (`changeRequest()` with an `expression` that runs `sh`), the stage's time on agentbox0
+  and the binary's path there. Quality builds and builds of main do not run it, and ticket 09's commands are added to
+  `PARITY_COMMANDS` as they land.
 - **The commands the Rust engine runs outlived an engine that got a SIGTERM or a SIGHUP.** The commands run in
   process groups of their own, so a SIGTERM of the engine (a kill, a service manager's stop) or the SIGHUP a closed
   terminal sends its foreground group ended the engine and left the running command to finish unwatched, and the run

@@ -8,6 +8,9 @@ what changed before committing it.
 With PARITY_ENGINE set, each scenario that kills a run and resumes it (SWITCHED) also runs with the engines switched
 at the kill, the Python engine first and PARITY_ENGINE's after it and the reverse, against the same recording: a run
 one engine leaves resumes in the other as in itself (the rust-engine spec's Decisions, "Runs carry over").
+
+With PARITY_COMMANDS set to commands of the engine, comma-separated, such as `run,resume`, only the scenarios whose
+recording invokes no other command run, for an engine that has only those (the Rust engine, until its CLI is whole).
 """
 
 import json
@@ -57,13 +60,23 @@ def first_difference(want, got, path: str = "$") -> str | None:
 SWITCHED = sorted(name for name in SCENARIOS if name.startswith(("kill_in_", "gate_turned_")))
 
 
+def recorded_commands(name: str) -> set[str]:
+    """The commands scenario name's recording invokes the engine with: each invocation's first argument."""
+    with open(os.path.join(RECORDED, f"{name}.json")) as f:
+        return {invocation["args"][0] for invocation in json.load(f)["invocations"]}
+
+
 def runs() -> list:
     """test_scenario's parameters: each scenario on engine_command, as (name, None); with PARITY_ENGINE set, also each
-    of SWITCHED with the engines switched at the kill, as (name, engines), engines being World's."""
-    out = [pytest.param(name, None, id=name) for name in sorted(SCENARIOS)]
+    of SWITCHED with the engines switched at the kill, as (name, engines), engines being World's. With
+    PARITY_COMMANDS set, only the scenarios whose recording invokes the engine with those commands alone."""
+    names = sorted(SCENARIOS)
+    if commands := os.environ.get("PARITY_COMMANDS"):
+        names = [name for name in names if recorded_commands(name) <= set(commands.split(","))]
+    out = [pytest.param(name, None, id=name) for name in names]
     if os.environ.get("PARITY_ENGINE"):
         python, other = python_engine(), engine_command()
-        for name in SWITCHED:
+        for name in [name for name in SWITCHED if name in names]:
             out.append(pytest.param(name, [python, other], id=f"{name}-python-then-engine"))
             out.append(pytest.param(name, [other, python], id=f"{name}-engine-then-python"))
     return out

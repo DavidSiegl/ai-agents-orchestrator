@@ -269,6 +269,45 @@ pipeline {
             }
         }
 
+        // The parity scenarios of run and resume against the Rust engine's binary, and those that switch engines at the
+        // kill (tests/parity/test_parity.py: PARITY_ENGINE, and PARITY_COMMANDS for the commands the binary has), on a
+        // pull request build whose change touches engine/ or tests/parity/, against its merge base with the target, as
+        // the Test stage decides it for a quality build's parity scenarios: a git diff or fetch that fails counts as a
+        // change. The Test stage runs every scenario against orchestrator.py. The binary is the one the Test stage's
+        // cargo-llvm-cov built, instrumented for coverage, so it is given LLVM_PROFILE_FILE through env, the harness
+        // giving the engine an environment of its own, which keeps its profiles out of the scenarios' projects; they
+        // are not reported. After Gate, so that a failing scenario fails the build with quality.md archived.
+        stage('Rust parity') {
+            when {
+                changeRequest()
+                expression {
+                    return sh(returnStatus: true, script: '''
+                        git fetch --quiet origin "+refs/heads/$CHANGE_TARGET:refs/remotes/origin/$CHANGE_TARGET"
+                        base=$(git merge-base HEAD "origin/$CHANGE_TARGET")
+                        git diff --quiet "$base" HEAD -- engine tests/parity
+                    ''') != 0
+                }
+            }
+            steps {
+                sh '''
+                    engine="$WORKSPACE/target/llvm-cov-target/debug/orchestrator"
+                    if [ ! -x "$engine" ]; then
+                        echo "the Test stage built no $engine" >&2
+                        exit 1
+                    fi
+                    profiles="$WORKSPACE_TMP/parity-profiles"
+                    mkdir -p "$profiles"
+                    PARITY_ENGINE="env 'LLVM_PROFILE_FILE=$profiles/%m.profraw' '$engine'" PARITY_COMMANDS=run,resume \\
+                        uv run --frozen pytest tests/parity --junitxml=parity-rust.xml
+                '''
+            }
+            post {
+                always {
+                    junit 'parity-rust.xml'
+                }
+            }
+        }
+
         // The Linux binary and the desktop app around it, built on every pull request and main build, so a change
         // that breaks either fails before it is merged; Release attaches them. Not in a quality build (GIT_REF set):
         // nothing uses a snapshot's package, since the change is packaged by its pull request's build before it
