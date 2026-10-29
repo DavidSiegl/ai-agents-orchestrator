@@ -83,7 +83,8 @@ impl Connected<'_> {
     }
 }
 
-/// What a command that needs no herdr pane talks to: this machine, where the orchestrator runs.
+/// What a command that needs no herdr pane talks to: this machine, where the orchestrator runs; also what connect
+/// reaches herdr and the project's host from.
 pub(super) struct Local<'a> {
     /// This machine: its commands, git among them, and over SSH from it a herdr machine's (doctor).
     pub host: &'a ProcessHost,
@@ -177,7 +178,7 @@ pub fn main(argv: impl IntoIterator<Item = OsString>, interrupt: &Interrupt) -> 
     };
     let ended = match herdrless_command(&command, &local) {
         Some(ended) => ended,
-        None => connect(&command, interrupt, &LocalHuman::new(interrupt), &config, &print, &stderr),
+        None => connect(&command, &local, &LocalHuman::new(interrupt)),
     };
     let status = ended_status(ended, &command, &print);
     match unwritten.take() {
@@ -256,26 +257,19 @@ fn ended_status(ended: Result<Ended, Stop>, command: &Command, print: &dyn Fn(&s
 }
 
 /// Connect to the herdr and the host command names, on this machine (which must be a herdr pane) or over SSH to its
-/// --machine, and run it, printing by stdout on standard output and by stderr on standard error. Python's connect,
-/// then the rest of main.
-fn connect(
-    command: &Command,
-    interrupt: &Interrupt,
-    human: &LocalHuman,
-    config: &ConfigDir,
-    stdout: &dyn Fn(&str),
-    stderr: &dyn Fn(&str),
-) -> Result<Ended, Stop> {
+/// --machine, reached from local's host, and run it, printing by local's stdout and stderr, telling human. Python's
+/// connect, then the rest of main.
+fn connect(command: &Command, local: &Local, human: &LocalHuman) -> Result<Ended, Stop> {
+    let Local { interrupt, config, stdout, stderr, .. } = *local;
     let stopped = |e: OrchestratorError| stop(e, interrupt, None);
     let machine = command.target().and_then(|t| t.machine.as_deref());
     let herdr = ProcessHerdr::new(machine, interrupt);
-    let local = ProcessHost::local(interrupt);
     let host = match machine {
-        Some(_) => local.over_ssh(&herdr.ssh_target().map_err(|e| stopped(e.into()))?),
+        Some(_) => local.host.over_ssh(&herdr.ssh_target().map_err(|e| stopped(e.into()))?),
         None if !in_herdr_pane() => {
             return Err(stopped(OrchestratorError::new("not inside a herdr pane; run from herdr, or pass --machine")))
         }
-        None => local,
+        None => local.host.clone(),
     };
     let clocks = SystemClocks::new(interrupt).map_err(stopped)?;
     let pypi = PyPI::from_env();
