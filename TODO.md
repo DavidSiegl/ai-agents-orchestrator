@@ -110,7 +110,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   2026-10-29): a `restored` or `proofs` record of `state.json` without a field the engines write, or with one of
   another type, stops the run naming it (`Restored::read` in `engine/src/workflow/locks.rs`, `ProofRun::read` in
   `engine/src/proofs.rs`), where Python fails on a KeyError or a TypeError, or, for a `restored` record without
-  `paths`, restores nothing; and a proof's output that is not UTF-8 is quoted with each such byte as U+FFFD
+  `paths`, restores nothing, or, for a `proofs` record without `said`, reads it only where it needs `said` (no release
+  wrote one: v0.24.0, the first with proofs, writes `said` in every record, and only commits before it on main did
+  not; cross-review 98, F1); and a proof's output that is not UTF-8 is quoted with each such byte as U+FFFD
   (`Workflow::run_proof`), where Python keeps it as a lone surrogate, which `state.json` holds as an escape and the
   write of the review then fails on (a UnicodeEncodeError, uncaught).
   Decided against unless a run is found that writes such input.

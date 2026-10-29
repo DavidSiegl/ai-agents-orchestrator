@@ -327,3 +327,11 @@ add a rate limiter
 
 - Round 1: review APPROVE
 ";
+
+/// The JSON object text holds, as a saved record reads; panics on text that is not one.
+pub fn object(text: &str) -> Map<crate::py::json::Json> {
+    match crate::py::json::Json::parse(text) {
+        Ok(crate::py::json::Json::Object(map)) => map,
+        other => panic!("not a JSON object: {other:?}"),
+    }
+}

@@ -54,9 +54,7 @@ impl Workflow<'_> {
             if records.is_empty() {
                 return Ok(());
             }
-            self.state.proofs.extend(records.iter().map(ProofRun::record));
-            self.save()?;
-            let failing = records.iter().filter(|p| p.demonstrated).count();
+            let failing = self.record_proof_runs(&records)?;
             self.human.log(&format!("[{}] {failing} of {} proofs fail against the change", step.role, records.len()));
         }
         if !review.split('\n').any(|line| line == PROOFS_HEADING) {
@@ -83,9 +81,7 @@ impl Workflow<'_> {
         if records.is_empty() {
             return Ok(());
         }
-        self.state.proofs.extend(records.iter().map(ProofRun::record));
-        self.save()?;
-        let failing = records.iter().filter(|p| p.demonstrated).count();
+        let failing = self.record_proof_runs(&records)?;
         self.human.log(&format!(
             "[{}] {failing} of {} proofs from earlier rounds still fail against the change",
             step.role,
@@ -167,9 +163,10 @@ impl Workflow<'_> {
     /// working tree's .orchestrator directory is made ignored first, so no commit holds the copy; PROOF_COPIES_DIR is
     /// emptied before the copy is made and removed after the proof, so what a proof writes beside itself goes with it.
     ///
-    /// Errors: the Ctrl-C, during the proof or before it; command cannot be filled in, which Pipeline rules out. A
-    /// proof that cannot run is no error, but its outcome.
+    /// Errors: the Ctrl-C, raised before the proof, which then does not run, or during it; command cannot be filled
+    /// in, which Pipeline rules out. A proof that cannot run is no error, but its outcome.
     pub(super) fn run_proof(&self, command: &str, written: u32, file: &str) -> Outcome<(bool, String)> {
+        self.check_interrupt()?;
         let work_dir = self.state.work_dir();
         let copies = format!("{work_dir}/{PROOF_COPIES_DIR}");
         let copy = format!("{copies}/{written}");
@@ -223,6 +220,13 @@ impl Workflow<'_> {
             return Ok(String::new());
         }
         Ok(format!("\n\n{}", self.fill(Prompt::ProofsNote, &[("proofs", &failing.join(", "))])?))
+    }
+
+    /// Add records to RunState::proofs and save it; how many of them failed. Errors: saving fails.
+    fn record_proof_runs(&mut self, records: &[ProofRun]) -> Outcome<usize> {
+        self.state.proofs.extend(records.iter().map(ProofRun::record));
+        self.save()?;
+        Ok(records.iter().filter(|p| p.demonstrated).count())
     }
 
     /// RunState::proofs, read. Errors: as ProofRun::read's.

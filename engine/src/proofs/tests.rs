@@ -1,5 +1,5 @@
 use super::*;
-use crate::test_support::helper_cases;
+use crate::test_support::{helper_cases, object as record};
 use crate::workflow_file::saved_pipeline;
 
 #[test]
@@ -15,10 +15,6 @@ fn every_recorded_proof_run_is_reported_as_the_python_engine_does() {
         compared += 1;
     }
     assert!(compared > 0, "no recorded run has proofs");
-}
-
-fn record(text: &str) -> Map<Json> {
-    Json::parse(text).unwrap().as_object().unwrap().clone()
 }
 
 fn run(text: &str) -> ProofRun {

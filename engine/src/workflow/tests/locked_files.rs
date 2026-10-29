@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::pipeline::Pipeline;
-use crate::test_support::{four, locking};
+use crate::test_support::{four, locking, object as record};
 use crate::workflow_file::workflow_definition;
 
 const D: &str = "/proj/.orchestrator/runs/20260929-120000-a1b2c3";
@@ -64,10 +64,6 @@ fn locked_note(steps: &str, paths: &str, diff_paths: &str) -> String {
     };
     let note = crate::py::format::format(crate::prompts::LOCKED_NOTE, &value).expect("the built-in note fills in");
     format!("\n\n{note}")
-}
-
-fn record(text: &str) -> Map<Json> {
-    Json::parse(text).unwrap().as_object().unwrap().clone()
 }
 
 /// RunState::locked as the Test Writer leaves it.
@@ -187,12 +183,12 @@ fn a_record_saved_before_the_restore_is_restored_on_resume() {
 
 #[test]
 fn a_malformed_restored_record_stops_the_run_naming_it() {
-    // Python's engine fails on a KeyError here; only a state.json edited by hand has such a record.
+    // Python's engine fails on a KeyError when the Reviewer's prompt reads the record; no engine writes one so.
     let mut state = saved_run("build", 1, &["spec", "build"]);
     state.locked = tests_locked();
     state.restored = vec![record(r#"{"round": 1, "file": "locked-build-1.diff"}"#)];
     let f = Fixture::resume(Rc::new(FakeHost::default()), state, vec![], &[], &[]);
     f.put(&format!("{D}/build-1.md"), "report 1");
     let e = failure(f.workflow(with_pipeline(&locking(), f.as_saved())).run());
-    assert_eq!(e, "a restored record in state.json has no paths, or one of another type than the engines write");
+    assert_eq!(e, "a restored record in state.json has no paths");
 }

@@ -23,17 +23,21 @@ struct Restored {
 }
 
 impl Restored {
-    /// The record's turn. Errors: a field missing or of another type than the engines write, as only a state.json
-    /// edited by hand has, where the Python engine fails on a KeyError or a TypeError.
+    /// The record's turn. Errors: a field missing or of another type than the engines write, as no engine's
+    /// state.json has, where the Python engine fails on a KeyError or a TypeError.
     fn read(record: &Map<Json>) -> Result<Restored, OrchestratorError> {
-        let invalid = |key: &str| {
-            OrchestratorError(format!(
-                "a restored record in state.json has no {key}, or one of another type than the engines write"
-            ))
+        let field = |key: &str| {
+            record.get(key).ok_or_else(|| OrchestratorError(format!("a restored record in state.json has no {key}")))
         };
-        let round = record.get("round").and_then(Json::as_int).and_then(|n| u32::try_from(n).ok());
-        let file = record.get("file").and_then(Json::as_str);
-        let paths = record.get("paths").and_then(Json::as_object).and_then(|lockers| {
+        let invalid = |key: &str, value: &Json, what: &str| {
+            OrchestratorError(format!("a restored record in state.json has {key} {}, not {what}", value.dumps()))
+        };
+        let round = field("round")?;
+        let round = round.as_int().and_then(|n| u32::try_from(n).ok()).ok_or_else(|| invalid("round", round, "a round"))?;
+        let file = field("file")?;
+        let file = file.as_str().ok_or_else(|| invalid("file", file, "a string"))?.to_string();
+        let paths = field("paths")?;
+        let lists = paths.as_object().and_then(|lockers| {
             lockers
                 .iter()
                 .map(|(locker, paths)| {
@@ -42,11 +46,8 @@ impl Restored {
                 })
                 .collect::<Option<Map<Vec<String>>>>()
         });
-        Ok(Restored {
-            round: round.ok_or_else(|| invalid("round"))?,
-            file: file.ok_or_else(|| invalid("file"))?.to_string(),
-            paths: paths.ok_or_else(|| invalid("paths"))?,
-        })
+        let paths = lists.ok_or_else(|| invalid("paths", paths, "lists of paths by step"))?;
+        Ok(Restored { round, file, paths })
     }
 
     /// The turn as a RunState::restored record, with its fields in the order the Python engine writes them.

@@ -51,8 +51,9 @@ pub struct ProofRun {
 impl ProofRun {
     /// The run record holds; a record saved before there was a written is the proof's first run.
     ///
-    /// Errors: a field missing or of another type than the engines write, as only a state.json edited by hand has,
-    /// where the Python engine fails on a KeyError or a TypeError.
+    /// Errors: a field missing or of another type than the engines write, as no released engine's state.json has
+    /// (since v0.24.0, the first with proofs, every record has each field but written), where the Python engine fails
+    /// on a KeyError or a TypeError.
     pub fn read(record: &Map<Json>) -> Result<ProofRun, OrchestratorError> {
         let field = |key: &str| {
             record.get(key).ok_or_else(|| OrchestratorError(format!("a proof run saved in state.json has no {key}")))

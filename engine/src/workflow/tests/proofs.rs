@@ -3,7 +3,9 @@
 //! run's worktree.
 //!
 //! TestProofInAWorktree's proof is a shell script that finds its repository with git, which looks upwards from the
-//! proof as pytest does for its rootdir, rather than Python's pytest proof: the Rust tests have no pytest to run.
+//! proof as pytest does for its rootdir, rather than Python's pytest proof: the Rust tests have no pytest to run. So
+//! its one case, test_a_proof_imports_the_worktrees_code_and_the_commit_holds_no_copy_of_it, is
+//! a_proof_runs_on_the_worktrees_code_and_the_commit_holds_no_copy_of_it here.
 //! test_the_reviewers_own_proofs_heading_does_not_stop_the_run has the Reviewer write its own "## Proofs" section,
 //! where Python's adds it as the review is read.
 //!
@@ -24,7 +26,7 @@ use crate::host::{ProcessHost, PushError};
 use crate::interrupt::Interrupt;
 use crate::pipeline::Pipeline;
 use crate::proofs::PROOFS_HEADING;
-use crate::test_support::{quick, replaced, TempDir};
+use crate::test_support::{object as record, quick, replaced, TempDir};
 use crate::workflow::Collaborators;
 
 const COMMAND: &str = "sh {proofs}";
@@ -154,10 +156,6 @@ fn carried_note(proj: &str, items: &[&str]) -> String {
     let proofs = items.join("\n\n");
     let note = fill(crate::prompts::CARRIED_PROOFS_NOTE, &[("command", COMMAND), ("cwd", proj), ("proofs", &proofs)]);
     format!("\n\n{note}")
-}
-
-fn record(text: &str) -> Map<Json> {
-    Json::parse(text).unwrap().as_object().unwrap().clone()
 }
 
 /// (round, written, file, demonstrated) of each proof run the state records.
@@ -541,16 +539,18 @@ fn a_proof_whose_file_or_directory_is_gone_did_not_run() {
 
 #[test]
 fn an_interrupted_proof_is_no_outcome() {
-    // Not in Python's TestProofs: a Ctrl-C during a proof is Python's KeyboardInterrupt, which stops the run before
-    // the proof's outcome is recorded.
+    // Not in Python's TestProofs: a Ctrl-C is Python's KeyboardInterrupt, which stops the run before a proof's outcome
+    // is recorded, and starts no proof once raised.
     let proj = TempDir::new();
     let p = unrun(&proj);
     let wf = p.f.workflow(p.settings.clone());
     let dir = wf.state().proofs_dir(1);
-    write_proof(&dir, "test_1.sh", Exit::Status(1));
+    let ran = proj.join("ran");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(format!("{dir}/test_1.sh"), format!(": > {ran}\nexit 1\n")).unwrap();
     p.f.interrupt.raise();
     assert_eq!(wf.run_proof(COMMAND, 1, "test_1.sh"), Err(Stopped::Interrupted));
-    // Its copy goes all the same.
+    assert!(!std::path::Path::new(&ran).exists(), "the proof ran");
     assert!(!std::path::Path::new(&format!("{}/{PROOF_COPIES_DIR}", proj.path())).exists());
 }
 

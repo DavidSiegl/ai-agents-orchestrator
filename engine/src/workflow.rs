@@ -204,7 +204,7 @@ pub struct Workflow<'a> {
     last_write: f64,
     /// The roles whose harness has no equivalent of the permission mode and that the log has said so for.
     told_dropped: HashSet<String>,
-    /// Seconds one proof may run: PROOF_TIMEOUT, which a test shortens.
+    /// Seconds one proof may run before GNU timeout stops it (Workflow::run_proof): PROOF_TIMEOUT.
     proof_timeout: u64,
 }
 

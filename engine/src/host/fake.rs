@@ -195,8 +195,9 @@ pub(crate) struct FakeState {
     /// What run_states answers instead, when set and it gives Some: a Python test's own FakeHost.run_states.
     pub run_states_with: Option<RunStatesWith>,
     /// Whether a command the host runs other than git (Host::exec, so run, check and run_files) is a real process on
-    /// this machine, as a Python test's `host._run = subprocess.run` makes it; the files and git stay the fake's.
-    /// False: such a command panics the test.
+    /// this machine, as a Python test's `host._run = subprocess.run` makes it. Such a command, run_files included,
+    /// sees the machine's real files, while read, write and rename stay in `files` and git stays played: a file a
+    /// test puts there is not one a real command finds. False: such a command panics the test.
     pub processes: bool,
 }
 
