@@ -204,6 +204,7 @@ pub struct Workflow<'a> {
     pid_alive: &'a dyn Fn(i128) -> bool,
     /// Collaborators::jenkins.
     jenkins: Option<&'a Jenkins>,
+    /// Collaborators::pypi.
     pypi: &'a PyPI,
     state: RunState,
     /// The run's workflow, shared so that a step borrowed from it outlives no borrow of the Workflow.
@@ -566,9 +567,10 @@ impl<'a> Workflow<'a> {
         Ok(())
     }
 
-    /// Record why the run stopped and that no process drives it now, as far as saving still works.
+    /// Record why the run stopped, with the quality job's credentials masked (Jenkins::mask), and that no process
+    /// drives it now, as far as saving still works.
     fn release(&mut self, error: &str) {
-        self.state.error = Some(error.to_string());
+        self.state.error = Some(self.jenkins.map_or_else(|| error.to_string(), |jenkins| jenkins.mask(error)));
         self.state.owner = None;
         if let Err(e) = self.save() {
             self.human.log(&format!("could not record the failure in state.json: {e}"));

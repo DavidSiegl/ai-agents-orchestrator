@@ -37,17 +37,21 @@ pub(crate) struct FakeClock {
 pub(crate) struct FakeTime(Arc<AtomicU64>);
 
 impl FakeTime {
+    /// The time, in seconds.
     pub fn get(&self) -> f64 {
         f64::from_bits(self.0.load(Ordering::SeqCst))
     }
 
+    /// Set the time to seconds.
     pub fn set(&self, seconds: f64) {
         self.0.store(seconds.to_bits(), Ordering::SeqCst);
     }
 
-    /// Let seconds pass, as a request that takes them does.
+    /// Let seconds pass, as a request that takes them does; one step, so that two threads' advances both count.
     pub fn advance(&self, seconds: f64) {
-        self.set(self.get() + seconds);
+        let later = |bits: u64| Some((f64::from_bits(bits) + seconds).to_bits());
+        // The closure always gives Some, so the update cannot fail.
+        let _ = self.0.try_update(Ordering::SeqCst, Ordering::SeqCst, later);
     }
 }
 

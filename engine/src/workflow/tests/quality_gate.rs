@@ -642,3 +642,18 @@ fn a_build_that_failed_with_nothing_listed_is_not_stuck() {
     let (f, _) = stuck_loop(vec![failed.clone(), failed.clone(), failed], 3);
     assert_eq!(prompts_to(&f, "build-a1b2c3"), 3);
 }
+
+#[test]
+fn a_failure_holding_a_credential_is_saved_masked() {
+    // As Python's _release masks the error it saves: here git's own message quotes the token.
+    let host = FakeHost::default();
+    host.state().fetch_error =
+        Some(format!("fatal: unable to access 'https://agents:{}@git.example/r/'", crate::ci::fake::JENKINS_TOKEN));
+    let f = gated_on(host);
+
+    let e = failure(f.workflow(RunSettings::default()).run());
+    assert!(holds_token(&e), "the error itself is git's, as Python raises it: {e}");
+    let saved = text(&f.saved(), "error").unwrap_or_default();
+    assert!(saved.contains("unable to access 'https://agents:****@git.example/r/'"), "{saved}");
+    assert_no_token(&f);
+}

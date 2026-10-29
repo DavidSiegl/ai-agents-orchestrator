@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use super::{Clocks, Collaborators, Human, RunSettings, Workflow};
-use crate::ci::fake::{jenkins_on, FakeJenkins, Outcome};
+use crate::ci::fake::{jenkins_on, jenkins_with, FakeJenkins, Outcome};
 use crate::ci::Jenkins;
 use crate::herdr::fake::{FakeHerdr, Turn};
 use crate::http::Http;
@@ -146,8 +146,7 @@ impl Fixture {
     /// The fixture with the quality gate on, asked with these credentials of CI_ENV, by name: Python's gated with
     /// env.
     pub fn gated_with(mut self, credentials: &Map<String>) -> Fixture {
-        let ci_env = "/home/u/.config/ai-agents-orchestrator/ci.env";
-        self.jenkins = Some(Jenkins::new(crate::ci::fake::JOB, credentials, ci_env, Arc::clone(&self.ci) as Arc<dyn Http>));
+        self.jenkins = Some(jenkins_with(&self.ci, credentials));
         self
     }
 

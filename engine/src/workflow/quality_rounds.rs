@@ -252,8 +252,8 @@ impl<'a> Workflow<'a> {
             earlier = quality;
             Ok(None)
         };
-        let step = format!("waiting for Jenkins build #{number} of {git_ref} to archive quality.md or end");
-        let (result, quality) = self.poll(&step, deadline, gate_or_end)?;
+        let waiting = format!("waiting for Jenkins build #{number} of {git_ref} to archive quality.md or end");
+        let (result, quality) = self.poll(&waiting, deadline, gate_or_end)?;
         if quality.is_none() && result.as_deref() == Some("ABORTED") {
             self.cut_back(Some(number));
             return Err(Stopped::Failed(OrchestratorError(format!(
@@ -272,8 +272,8 @@ impl<'a> Workflow<'a> {
             // stopped before it recorded the queue item.
             let found = if adopt {
                 let rejected = self.ci_rejected();
-                let step = format!("looking for a Jenkins build of {git_ref}");
-                self.once(&step, deadline, |wf| wf.jenkins()?.find_build(git_ref, &rejected))?
+                let waiting = format!("looking for a Jenkins build of {git_ref}");
+                self.once(&waiting, deadline, |wf| wf.jenkins()?.find_build(git_ref, &rejected))?
             } else {
                 None
             };
@@ -282,13 +282,13 @@ impl<'a> Workflow<'a> {
                 self.state.ci.insert("build", Json::from(found));
                 return self.save();
             }
-            let step = format!("triggering Jenkins job {} for {git_ref}", self.jenkins()?.job());
-            let queue_url = self.once(&step, deadline, |wf| wf.jenkins()?.trigger(git_ref))?;
+            let waiting = format!("triggering Jenkins job {} for {git_ref}", self.jenkins()?.job());
+            let queue_url = self.once(&waiting, deadline, |wf| wf.jenkins()?.trigger(git_ref))?;
             self.state.ci.insert("queue_url", Json::from(queue_url));
             self.save()?;
         }
-        let step = format!("waiting for Jenkins to start the build of {git_ref}");
-        let build = self.poll(&step, deadline, |wf| wf.queued_build(git_ref))?;
+        let waiting = format!("waiting for Jenkins to start the build of {git_ref}");
+        let build = self.poll(&waiting, deadline, |wf| wf.queued_build(git_ref))?;
         self.state.ci.insert("build", Json::from(build));
         self.save()
     }
@@ -383,13 +383,13 @@ impl<'a> Workflow<'a> {
             let line = format!("Jenkins build #{build} judged snapshot `{sha}` ({place}) and {how_it_stood}.");
             return Ok(under_gate_line(&judged, &line));
         }
-        let step = format!("reading the test report of Jenkins build #{build}");
-        let tests = self.once(&step, deadline, |wf| wf.jenkins()?.failed_tests(build))?;
+        let waiting = format!("reading the test report of Jenkins build #{build}");
+        let tests = self.once(&waiting, deadline, |wf| wf.jenkins()?.failed_tests(build))?;
         let console = if tests.as_ref().is_some_and(|t| !t.is_empty()) {
             String::new()
         } else {
-            let step = format!("reading the console of Jenkins build #{build}");
-            self.once(&step, deadline, |wf| wf.jenkins()?.console_tail(build))?
+            let waiting = format!("reading the console of Jenkins build #{build}");
+            self.once(&waiting, deadline, |wf| wf.jenkins()?.console_tail(build))?
         };
         let intro = format!(
             "Jenkins build #{build} of snapshot `{sha}` ({place}) ended {} before the quality gate ran, so nothing \
@@ -466,20 +466,20 @@ impl<'a> Workflow<'a> {
     }
 
     /// Call poll every CI_POLL_SECONDS until it gives an answer, and return that, keeping the heartbeat between the
-    /// calls. step says what is waited for, in the errors and the log.
+    /// calls. waiting says what is waited for, in the errors and the log.
     ///
     /// A failure that may pass, such as Jenkins being unreachable, is retried until the round's deadline, a
     /// monotonic time; any other fails the run at once. Either way RunState::ci keeps what is known so far. Errors:
-    /// one that does not pass, named after step, or a refusal as it is; no answer by the deadline, naming the last
+    /// one that does not pass, named after waiting, or a refusal as it is; no answer by the deadline, naming the last
     /// failure; a takeover or the Ctrl-C.
-    fn poll<T>(&mut self, step: &str, deadline: f64, mut poll: impl FnMut(&mut Self) -> Polled<T>) -> Outcome<T> {
+    fn poll<T>(&mut self, waiting: &str, deadline: f64, mut poll: impl FnMut(&mut Self) -> Polled<T>) -> Outcome<T> {
         // The failure of the last call, while the calls fail in a way that may pass.
         let mut failing: Option<CIError> = None;
         loop {
             match poll(self) {
                 Ok(answer) => {
                     if failing.take().is_some() {
-                        self.human.log(&format!("[quality] {step}: answered again"));
+                        self.human.log(&format!("[quality] {waiting}: answered again"));
                     }
                     if let Some(answer) = answer {
                         return Ok(answer);
@@ -487,11 +487,11 @@ impl<'a> Workflow<'a> {
                 }
                 Err(CIError::Refused(e)) => return Err(Stopped::Failed(e)),
                 Err(e) if !e.transient() => {
-                    return Err(Stopped::Failed(OrchestratorError(format!("quality gate: {step}: {e}"))));
+                    return Err(Stopped::Failed(OrchestratorError(format!("quality gate: {waiting}: {e}"))));
                 }
                 Err(e) => {
                     if failing.is_none() {
-                        self.human.log(&format!("[quality] {step}: {e}; retrying"));
+                        self.human.log(&format!("[quality] {waiting}: {e}; retrying"));
                     }
                     failing = Some(e);
                 }
@@ -499,7 +499,7 @@ impl<'a> Workflow<'a> {
             if self.clocks.monotonic() >= deadline {
                 let why = failing.map(|e| format!("; last error: {e}")).unwrap_or_default();
                 return Err(Stopped::Failed(OrchestratorError(format!(
-                    "quality gate: {step} did not finish within {QUALITY_TIMEOUT}s of the round's start{why}; resume \
+                    "quality gate: {waiting} did not finish within {QUALITY_TIMEOUT}s of the round's start{why}; resume \
                      to go on"
                 ))));
             }
@@ -509,8 +509,8 @@ impl<'a> Workflow<'a> {
     }
 
     /// call's answer, retried as poll retries; an answer of None counts here too.
-    fn once<T>(&mut self, step: &str, deadline: f64, mut call: impl FnMut(&mut Self) -> Result<T, CIError>) -> Outcome<T> {
-        self.poll(step, deadline, |wf| call(wf).map(Some))
+    fn once<T>(&mut self, waiting: &str, deadline: f64, mut call: impl FnMut(&mut Self) -> Result<T, CIError>) -> Outcome<T> {
+        self.poll(waiting, deadline, |wf| call(wf).map(Some))
     }
 
     /// After the analysis of git_ref: delete the ref on origin and forget it, as its build no longer needs it.
@@ -544,14 +544,14 @@ impl<'a> Workflow<'a> {
     /// RunState::ci's build number. Errors: it is not an integer, as no engine saves it.
     fn ci_build(&self) -> Result<i64, OrchestratorError> {
         let build = self.state.ci.get("build");
-        build.and_then(Json::as_int).and_then(|n| i64::try_from(n).ok()).ok_or_else(|| ci_error("build", build))
+        build.and_then(Json::as_int).and_then(|number| i64::try_from(number).ok()).ok_or_else(|| ci_error("build", build))
     }
 
     /// The builds RunState::ci records as rejected, which a resume never adopts; an entry that is no build number is
     /// none.
     fn ci_rejected(&self) -> Vec<i64> {
         let rejected = self.state.ci.get("rejected").and_then(Json::as_array).map_or(&[][..], Vec::as_slice);
-        rejected.iter().filter_map(|n| n.as_int().and_then(|n| i64::try_from(n).ok())).collect()
+        rejected.iter().filter_map(|number| number.as_int().and_then(|number| i64::try_from(number).ok())).collect()
     }
 }
 

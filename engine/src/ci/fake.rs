@@ -31,12 +31,12 @@ pub(crate) fn credentials() -> Map<String> {
 
 /// JOB on fake, with credentials(): Python's ci_for.
 pub(crate) fn jenkins_on(fake: &Arc<FakeJenkins>) -> Jenkins {
-    Jenkins::new(
-        JOB,
-        &credentials(),
-        "/home/u/.config/ai-agents-orchestrator/ci.env",
-        Arc::clone(fake) as Arc<dyn Http>,
-    )
+    jenkins_with(fake, &credentials())
+}
+
+/// JOB on fake, with these credentials of CI_ENV, by name: Python's ci_for with env.
+pub(crate) fn jenkins_with(fake: &Arc<FakeJenkins>, credentials: &Map<String>) -> Jenkins {
+    Jenkins::new(JOB, credentials, "/home/u/.config/ai-agents-orchestrator/ci.env", Arc::clone(fake) as Arc<dyn Http>)
 }
 
 /// What one build does: Python's outcome().
