@@ -34,9 +34,11 @@ impl IsoTime {
 
     /// Seconds since the epoch, with their fraction, as `timestamp()` gives them: a time without an offset is the
     /// machine's local time (the module's doc says how its zone is found). Errors: a time without an offset within a
-    /// day of the years 1 to 9999's ends, which CPython's timestamp() refuses, as its message says.
+    /// day of the years 1 to 9999's ends, which CPython 3.14's timestamp() refuses, as its message says.
     pub fn timestamp(self) -> Result<f64, String> {
-        self.timestamp_in(&TimeZone::system())
+        // The machine's zone is read only for a time that needs it; UTC stands in for one that has its offset.
+        let zone = if self.offset.is_some() { TimeZone::UTC } else { TimeZone::system() };
+        self.timestamp_in(&zone)
     }
 
     /// timestamp(), a time without an offset being a time in zone; errors as its.
@@ -46,8 +48,8 @@ impl IsoTime {
             None => {
                 // As CPython's datetime_timestamp adds them: whole seconds, then the microseconds as a fraction.
                 let (seconds, micros) = (self.local.div_euclid(1_000_000), self.local.rem_euclid(1_000_000));
-                let seconds = i64::try_from(seconds).map_err(|_| "year is out of range".to_string())?;
-                Ok(local_to_seconds(seconds, zone)? as f64 + micros as f64 / 1e6)
+                // Years 1 to 10000 (hour 24 of 9999-12-31) are far inside an i64 of seconds.
+                Ok(local_to_seconds(seconds as i64, zone)? as f64 + micros as f64 / 1e6)
             }
         }
     }
@@ -63,13 +65,17 @@ impl IsoTime {
 /// The seconds since the epoch at which zone's clocks show the time shown, written as seconds since 1970-01-01T00:00
 /// of its date and time, solved as CPython's local_to_seconds solves it for fold 0 (Modules/_datetimemodule.c, 3.14):
 /// at a time the clocks show twice, the first; at one they skip, the time the offset before the change gives (PEP
-/// 495). Errors: a time whose solving reaches a year beyond 1 to 9999, which CPython refuses, as its message says.
+/// 495). Errors: a time whose solving reaches a year beyond 1 to 9999, which CPython 3.14 refuses, as its message
+/// says.
 fn local_to_seconds(shown: i64, zone: &TimeZone) -> Result<i64, String> {
     /// CPython's max_fold_seconds: the farthest apart two times its clocks show alike can be.
     const MAX_FOLD_SECONDS: i64 = 24 * 3600;
     // What zone's clocks show at u, as CPython's local() gives it.
     let local = |u: i64| -> Result<i64, String> {
-        let at = Timestamp::from_second(u).map_err(|e| e.to_string())?;
+        // jiff holds no time in the last day of 9999 or the first of -9999, which CPython's local() reaches near the
+        // years' ends; the offset there is the one at jiff's bound, as no zone changes its clocks in those days.
+        let at = Timestamp::from_second(u.clamp(Timestamp::MIN.as_second(), Timestamp::MAX.as_second()))
+            .map_err(|e| e.to_string())?;
         let lt = u + i64::from(zone.to_offset(at).seconds());
         let (year, _, _) = civil_from_days(lt.div_euclid(86_400));
         if (1..=9999).contains(&year) {
@@ -107,7 +113,7 @@ fn local_to_seconds(shown: i64, zone: &TimeZone) -> Result<i64, String> {
 /// The time seconds since the epoch name, as `time.strftime(format, time.localtime(seconds))` writes it in the
 /// machine's zone (the module's doc says how it is found), for a format of %Y, %m, %d, %H, %M, %S and other text and
 /// a year from 1000 to 9999: 20261029-142233 for `%Y%m%d-%H%M%S`. Errors: seconds is beyond jiff's years -9999 to
-/// 9999, or format holds a conversion other than those that jiff does not know.
+/// 9999, or format holds a conversion jiff does not know, as jiff's message says.
 pub fn strftime_local(format: &str, seconds: i64) -> Result<String, String> {
     strftime_in(format, seconds, &TimeZone::system())
 }

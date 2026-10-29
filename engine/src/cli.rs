@@ -87,7 +87,7 @@ pub fn main(argv: impl IntoIterator<Item = OsString>, interrupt: &Interrupt) -> 
 fn ended_status(ended: Result<Ran, Stop>, command: &Command) -> i32 {
     match ended {
         Ok(ran) => finish(ran.verdict.as_deref().unwrap_or("None"), &ran.state, &ran.pipeline),
-        // A line stderr does not take is lost, as a closed terminal's SIGHUP leaves it: the status still tells.
+        // A line stderr does not take is lost, as after a hangup (finish says why).
         Err(Stop::Failed(e)) => {
             let _ = writeln!(std::io::stderr(), "error: {e}");
             EXIT_ERROR
@@ -236,7 +236,13 @@ fn finish(verdict: &str, state: &RunState, pipeline: &Pipeline) -> i32 {
         format!(" (a draft: it conflicts with {})", state.base_branch.as_deref().unwrap_or("None"))
     };
     let result = pipeline.result().last_path(&state.dir(), state.round, state.quality_round);
-    println!("{verdict}: {}{conflict}", state.pr_url.as_deref().filter(|u| !u.is_empty()).unwrap_or(&result));
+    // A line stdout does not take is lost, as after a hangup, rather than a panic that would end the program before
+    // interrupt::exit ends it by the SIGHUP: the status still tells.
+    let _ = writeln!(
+        std::io::stdout(),
+        "{verdict}: {}{conflict}",
+        state.pr_url.as_deref().filter(|u| !u.is_empty()).unwrap_or(&result)
+    );
     if !SUCCEEDED.contains(&verdict) {
         return EXIT_CHANGES_REQUESTED;
     }

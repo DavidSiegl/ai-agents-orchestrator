@@ -60,10 +60,15 @@ def first_difference(want, got, path: str = "$") -> str | None:
 SWITCHED = sorted(name for name in SCENARIOS if name.startswith(("kill_in_", "gate_turned_")))
 
 
-def recorded_commands(name: str) -> set[str]:
-    """The commands scenario name's recording invokes the engine with: each invocation's first argument."""
-    with open(os.path.join(RECORDED, f"{name}.json")) as f:
-        return {invocation["args"][0] for invocation in json.load(f)["invocations"]}
+def recorded_commands(name: str) -> set[str] | None:
+    """The commands scenario name's recording invokes the engine with: each invocation's first argument; None for a
+    scenario not recorded yet, which test_scenario records or fails as with every command."""
+    try:
+        with open(os.path.join(RECORDED, f"{name}.json")) as f:
+            recording = json.load(f)
+    except FileNotFoundError:
+        return None
+    return {invocation["args"][0] for invocation in recording["invocations"]}
 
 
 def runs() -> list:
@@ -72,7 +77,8 @@ def runs() -> list:
     PARITY_COMMANDS set, only the scenarios whose recording invokes the engine with those commands alone."""
     names = sorted(SCENARIOS)
     if commands := os.environ.get("PARITY_COMMANDS"):
-        names = [name for name in names if recorded_commands(name) <= set(commands.split(","))]
+        names = [name for name in names
+                 if (recorded := recorded_commands(name)) is None or recorded <= set(commands.split(","))]
     out = [pytest.param(name, None, id=name) for name in names]
     if os.environ.get("PARITY_ENGINE"):
         python, other = python_engine(), engine_command()

@@ -175,7 +175,7 @@ static ENDING: OnceLock<Signal> = OnceLock::new();
 /// ignored and never raises it, as Python then never raises KeyboardInterrupt, and nohup's Python is not hung up.
 /// That is read from Linux's /proc/self/status, since Linux keeps an ignored signal for a thread that blocks it; where
 /// it cannot be read, as on macOS, the kernel is taken to discard an ignored signal even while it is blocked, as the
-/// BSD kernels do.
+/// BSD kernels do, which a Linux without /proc does not (TODO.md, "The Rust engine's Ctrl-C, what is left").
 ///
 /// Errors: the signals could not be blocked, or the thread could not be started.
 pub fn by_signals() -> std::io::Result<Interrupt> {
@@ -222,7 +222,8 @@ pub fn exit(status: i32) -> ! {
         // and sets no handler: unblocked here, raising it ends the process before raise returns.
         let _ = SigSet::from(signal).thread_unblock();
         let _ = nix::sys::signal::raise(signal);
-        // Reached only if raise failed: the status a shell gives that death.
+        // Reached only if the signal did not end the process (raise failed, or it was ignored after all, as on a Linux
+        // without /proc): the status a shell gives that death.
         std::process::exit(128 + signal as i32);
     }
     std::process::exit(status)

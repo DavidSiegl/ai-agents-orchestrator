@@ -152,16 +152,36 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `show`, `prune`, `close`, `drain` between runs, the sweep before a run) must do the same through it, and `serve`
   (ticket 10) has its own SIGINT and SIGTERM, which `by_signals` would take over; closes with those tickets. (2) A
   Ctrl-C during a Jenkins or PyPI request (`crate::http`, ureq) waits for the request to end, up to its timeout, where
-  Python's KeyboardInterrupt stops
-  `urlopen` at once: there is no process to stop, and ureq has no way to abandon a request from another thread.
-  Closes with a request the Interrupt can cut short (one whose reads are given slices of the timeout, the Interrupt
-  checked between them, or one run on a thread the Workflow stops waiting for), or with the user's ruling that the
-  wait is acceptable. (3) Under macOS, `by_signals` reads no `/proc/self/status` and takes the kernel to discard a
+  Python's KeyboardInterrupt stops `urlopen` at once: there is no process to stop, and ureq has no way to abandon a
+  request from another thread. The user accepted that wait for a Ctrl-C (2026-10-29, review 100). Since ticket 08's
+  follow-ups a SIGTERM or a SIGHUP waits so too (cross-review 102, F4: "a `kill <pid>` or a service manager's stop
+  during the quality gate's Jenkins polling or the dependency check's PyPI request waits up to the request
+  timeout"), where it ended the Python engine at once; a service manager that sends SIGKILL after a shorter grace
+  kills the engine with the run unreleased. Closes with a request the Interrupt can cut short (one whose reads are
+  given slices of the timeout, the Interrupt checked between them, or one run on a thread the Workflow stops waiting
+  for), or with the user's ruling that the wait is acceptable for SIGTERM and SIGHUP too. (3) Under macOS, `by_signals` reads no `/proc/self/status` and takes the kernel to discard a
   signal that was ignored when the engine started, even while blocked, as the BSD kernels do, and `run_process` gives
   a command the whole 250 ms grace, nix having no `waitid` there; unchecked on a Mac. Closes with
   `engine/tests/signals.rs`, which is Linux's (it reads `/proc` and starts the engine with GNU `env`), ported to macOS
   and run on one. A process that left the command's group, as a daemon does, is not reached, as at
-  a timeout; that is no gap, as the terminal's Ctrl-C does not reach one in Python either.
+  a timeout; that is no gap, as the terminal's Ctrl-C does not reach one in Python either. (4) On a Linux whose
+  `/proc/self/status` cannot be read, as in a container or sandbox without `/proc`, `ignored_signals` finds nothing
+  ignored, so `by_signals` waits for a signal the engine started with ignored and takes it, Linux queueing a blocked
+  signal whatever its disposition (cross-review 102, F2: "an engine under `nohup` in a container or sandbox without
+  /proc is hung up: the Interrupt is raised, the run released as interrupted", and `interrupt::exit`'s raise of the
+  still-ignored signal returns, so the program exits 129 by `std::process::exit`). Part 6 had the gap for SIGINT;
+  the follow-ups extend it to SIGTERM and SIGHUP. nix reads a signal's disposition only through `sigaction`, which
+  is `unsafe`. Closes with that query, the user's choice of a second `unsafe` block, or with refusing to start on a
+  Linux without `/proc`.
+- **The Rust engine's fromisoformat words some errors as CPython 3.13 does.** `IsoTime::parse`
+  (`engine/src/py/datetime.rs`, rust-engine ticket 06) says its errors are 3.14's, but gives 3.13's wording for a
+  year, month or day out of range and an offset of a day or more: `year 0 is out of range` where 3.14 says `year must
+  be in 1..9999, not 0`, `month must be in 1..12` (3.14 adds `, not 13`), `day is out of range for month` (3.14:
+  `day 29 must be in range 1..28 for month 2 in year 2026`), and the offset's message without 3.14's `, not
+  datetime.timedelta(...)`; 30 of the 3106 `fromisoformat` cases of `engine/tests/oracle/harness.json` differ so.
+  The oracle test compares only whether such a time is refused (found by cross-review 102's F3, 2026-10-29, when it
+  began comparing `timestamp()`'s own refusals by their message). Only the wording differs, and only for times no harness,
+  run or PyPI writes. Closes with the messages worded as 3.14's and the test comparing every message.
 - **The Rust engine's `run` does not prune earlier runs' branches yet.** Python's `main` runs `sweep_branches` before
   a `run` that opens a pull request; the Rust `run` (rust-engine ticket 08, part 7) does not, since `prune_branches`
   is the `prune` command's and ticket 09 ports both with `TestPrune` and `TestSweepOnRun`. No `run` parity scenario
@@ -735,11 +755,11 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `orchestrator.py` only, and the Rust tickets ran `PARITY_ENGINE=target/.../orchestrator uv run pytest tests/parity`
   by hand, with the scenarios that switch engines at the kill (`SWITCHED` in `test_parity.py`). Fixed (2026-10-29,
   rust-engine ticket 08's follow-ups, the user's ruling of 2026-10-29): the Jenkinsfile's Rust parity stage, after
-  Gate, on a pull request build (`changeRequest()`) whose change touches `engine/` or `tests/parity/` against its
-  merge base with the target (a `git diff --quiet` as the Test stage's for a quality build; a fetch or diff that
-  fails runs it), runs them against the binary the Test stage's cargo-llvm-cov built
-  (`target/llvm-cov-target/debug/orchestrator`, instrumented, its profiles sent to `$WORKSPACE_TMP` by
-  `LLVM_PROFILE_FILE` through `env`, since the harness gives the engine an environment of its own), limited to the
+  Gate, on a pull request build (`changeRequest()`) whose change touches `engine/` or `tests/parity/` since the base
+  Gate judges it from (`ci/pr-base.sh`, now Gate's too; a `git diff --quiet` as the Test stage's for a quality build;
+  a base or diff that fails runs it), runs them against the binary the Test stage's cargo-llvm-cov built
+  (`target/llvm-cov-target/debug/orchestrator`, instrumented, its profiles sent to `/dev/null` by `LLVM_PROFILE_FILE`
+  through `env`, since the harness gives the engine an environment of its own), limited to the
   scenarios whose recordings invoke only `run` and `resume` (`PARITY_COMMANDS`, new in `test_parity.py`): 33 and the
   18 switched, 51 passing in 198 s locally with SIGINT and SIGHUP ignored, as a Jenkins `sh` step starts them. A
   failing scenario fails the build; its JUnit report is `parity-rust.xml`. Unverified until a pull request build runs

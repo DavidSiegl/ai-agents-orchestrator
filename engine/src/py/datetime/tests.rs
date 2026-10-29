@@ -13,8 +13,12 @@ fn every_time_reads_as_python_s_fromisoformat_reads_it() {
         let [iso, read] = &case.as_array().unwrap()[..] else { panic!("{case:?}") };
         let iso = iso.as_str().unwrap();
         let ours = IsoTime::parse(iso).and_then(|time| time.timestamp_in(&zone));
-        let same = match read.get("ok") {
-            Some(Json::Float(seconds)) => ours == Ok(*seconds),
+        let same = match (read.get("ok"), read.get("error").and_then(Json::as_str)) {
+            (Some(Json::Float(seconds)), _) => ours == Ok(*seconds),
+            // timestamp()'s refusal of a time fromisoformat reads, whose message is CPython 3.14's; a refusal by
+            // fromisoformat itself is compared as one (TODO.md, "The Rust engine's fromisoformat words some errors
+            // as CPython 3.13 does").
+            (_, Some(error)) if IsoTime::parse(iso).is_ok() => ours.as_ref().err().map(String::as_str) == Some(error),
             _ => ours.is_err(),
         };
         if !same {
