@@ -1,7 +1,8 @@
 //! The command line as orchestrator.py's parse_args reads it, on clap: the subcommands with their flags, and the
 //! checks argparse's types cannot make (check_flag_values, check_spec_args). Ticket 09a has run, resume, the commands
-//! about a project's runs and workflows; drain, refresh, doctor and judged-in-quality join [`parser`] and
-//! [`Command`] with ticket 09b; gui is not ported (the rust-engine spec's Decisions), and serve is ticket 10's.
+//! about a project's runs and workflows, and 09b judged-in-quality; drain, refresh and doctor join [`parser`] and
+//! [`Command`] with the rest of ticket 09b; gui is not ported (the rust-engine spec's Decisions), and serve is ticket
+//! 10's.
 //!
 //! The flags come in groups that several subcommands share, as argparse's parent parsers: [`Target`] (where the
 //! project is), [`Settings`] (how a run goes, which resume may change) and [`Starts`] (what a run is started with).
@@ -14,7 +15,7 @@ use clap::{Arg, ArgAction, ArgMatches};
 
 use crate::constants::{
     AGENT_KINDS, CLOSED_BRANCH_GRACE, DEFAULT_AGENT, DEFAULT_MAX_QUALITY_ROUNDS, DEFAULT_MAX_ROUNDS,
-    DEFAULT_TURN_TIMEOUT, REMOTE, ROLE_LABELS,
+    DEFAULT_TURN_TIMEOUT, EXIT_ERROR, REMOTE, ROLE_LABELS,
 };
 use crate::cli::listing::RUN_RECORD_VERSION;
 use crate::pipeline::METRICS_FILE;
@@ -33,6 +34,14 @@ pub enum Command {
     Runs(Target, RunsCommand),
     /// `workflows`: list the workflows, or print the one named, a name or a file's path, as a workflow file.
     Workflows(Option<String>),
+    /// `judged-in-quality`: whether a build of the quality job already judged the current directory's HEAD as a
+    /// pull request's build into the branch would.
+    JudgedInQuality {
+        /// --quality-gate: the quality job's full name.
+        job: String,
+        /// --target: the branch the pull request would merge into.
+        branch: String,
+    },
 }
 
 /// A command about a project's runs.
@@ -133,13 +142,14 @@ pub struct ResumeArgs {
 }
 
 impl Command {
-    /// Where the project is, as the human gave it; None for workflows, which names no project.
+    /// Where the project is, as the human gave it; None for workflows and judged-in-quality, which take no
+    /// --machine or --cwd.
     pub fn target(&self) -> Option<&Target> {
         match self {
             Command::Run(a) => Some(&a.target),
             Command::Resume(a) => Some(&a.target),
             Command::Runs(target, _) => Some(target),
-            Command::Workflows(_) => None,
+            Command::Workflows(_) | Command::JudgedInQuality { .. } => None,
         }
     }
 
@@ -148,7 +158,7 @@ impl Command {
         match self {
             Command::Run(a) => Some(&a.settings),
             Command::Resume(a) => Some(&a.settings),
-            Command::Runs(..) | Command::Workflows(_) => None,
+            _ => None,
         }
     }
 }
@@ -178,16 +188,15 @@ pub fn parse_args(argv: impl IntoIterator<Item = OsString>, config: &ConfigDir) 
         Some(("run", m)) => Command::Run(RunArgs {
             target: target(m),
             settings: settings(m),
-            starts: Starts {
-                workflow: string(m, "workflow").unwrap_or_else(|| "default".to_string()),
-                workflow_file: string(m, "workflow-file"),
-                worktree: m.get_flag("worktree"),
-                quality_gate: string(m, "quality-gate"),
-            },
+            starts: starts(m),
             task: string(m, "task"),
             spec: string(m, "spec"),
             no_pr: m.get_flag("no-pr"),
         }),
+        Some(("judged-in-quality", m)) => Command::JudgedInQuality {
+            job: string(m, "quality-gate").unwrap_or_default(),
+            branch: string(m, "target").unwrap_or_default(),
+        },
         Some(("resume", m)) => Command::Resume(ResumeArgs {
             target: target(m),
             settings: settings(m),
@@ -325,6 +334,29 @@ pub fn parser(config: &ConfigDir) -> clap::Command {
             config.workflows_dir()
         ))
         .arg(Arg::new("workflow").value_name("WORKFLOW").help("a workflow's name, or a file's path"));
+    let judged = clap::Command::new("judged-in-quality")
+        .about("exit 0 when a quality build already judged HEAD as its pull request's build would")
+        .long_about(format!(
+            "Exit 0 when a build of the quality job JOB already judged HEAD as a pull request's build into BRANCH \
+             would, so that build need not judge it again; docs/quality-gate.md says when. Fetches BRANCH, and the \
+             main commit a build names. Otherwise, and on any error, exit {EXIT_ERROR}, saying why in one line on \
+             standard error. Needs JENKINS_URL, JENKINS_USER and JENKINS_TOKEN, from the environment or {}.",
+            config.ci_env_path()
+        ))
+        .arg(
+            Arg::new("quality-gate")
+                .long("quality-gate")
+                .value_name("JOB")
+                .required(true)
+                .help("the quality job's full name, folders included"),
+        )
+        .arg(
+            Arg::new("target")
+                .long("target")
+                .value_name("BRANCH")
+                .required(true)
+                .help("the branch the pull request would merge into"),
+        );
     clap::Command::new("orchestrator")
         .about(
             "Role-based handoff between agent sessions in herdr, each role in the harness of its choice; by default \
@@ -335,7 +367,10 @@ pub fn parser(config: &ConfigDir) -> clap::Command {
         // argparse takes an unambiguous abbreviation of a long flag.
         .infer_long_args(true)
         // argparse takes the last of a flag given twice, where clap would refuse it.
-        .subcommands([run, resume, list, metrics, show, prune, close, workflows].map(|c| c.args_override_self(true)))
+        .subcommands(
+            [run, resume, list, metrics, show, prune, close, workflows, judged]
+                .map(|c| c.args_override_self(true)),
+        )
 }
 
 /// What a RUN argument takes.
@@ -419,6 +454,16 @@ fn settings_args() -> Vec<Arg> {
     args
 }
 
+/// The Starts in m.
+fn starts(m: &ArgMatches) -> Starts {
+    Starts {
+        workflow: string(m, "workflow").unwrap_or_else(|| "default".to_string()),
+        workflow_file: string(m, "workflow-file"),
+        worktree: m.get_flag("worktree"),
+        quality_gate: string(m, "quality-gate"),
+    }
+}
+
 /// The flags of Starts. --workflow offers the workflows in config, or the built-in ones where that cannot be listed,
 /// as the workflows command then says why.
 fn starts_args(config: &ConfigDir) -> Vec<Arg> {
@@ -488,8 +533,8 @@ fn check_spec_args(matches: &ArgMatches, p: &mut clap::Command) -> Result<(), cl
 }
 
 /// A usage error for flag values the parser cannot rule out: --machine without --cwd, a --max-rounds or
-/// --max-quality-rounds below 1, a run given --max-quality-rounds without --quality-gate, a resume given it with
-/// --no-quality-gate, and a --quality-gate that is not a Jenkins job's full name.
+/// --max-quality-rounds below 1, a run given --max-quality-rounds without --quality-gate, a resume given it
+/// with --no-quality-gate, and a --quality-gate that is not a Jenkins job's full name.
 ///
 /// A flag command does not take is not checked.
 fn check_flag_values(command: &Command, p: &mut clap::Command) -> Result<(), clap::Error> {
@@ -497,12 +542,14 @@ fn check_flag_values(command: &Command, p: &mut clap::Command) -> Result<(), cla
     if command.target().is_some_and(|t| t.machine.is_some() && t.cwd.is_none()) {
         return error(p, "--cwd is required with --machine");
     }
-    let Some(settings) = command.settings() else { return Ok(()) };
     let (quality_gate, no_quality_gate) = match command {
         Command::Run(a) => (a.starts.quality_gate.as_deref(), false),
         Command::Resume(a) => (a.quality_gate.as_deref(), a.no_quality_gate),
-        Command::Runs(..) | Command::Workflows(_) => (None, false),
+        Command::JudgedInQuality { job, .. } => (Some(job.as_str()), false),
+        _ => (None, false),
     };
+    let unset = Settings::default();
+    let settings = command.settings().unwrap_or(&unset);
     if settings.max_rounds.is_some_and(|n| n < 1) {
         return error(p, "--max-rounds must be at least 1");
     }

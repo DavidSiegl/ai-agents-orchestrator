@@ -918,7 +918,7 @@ fn git_test<H: Host + ?Sized>(host: &H, cwd: &str, args: &[&str]) -> Result<bool
 
 /// git pathspecs that each match exactly one of paths, relative to the repository's top level, whatever directory git
 /// runs in, and with no glob in them.
-fn top_literal<S: AsRef<str>>(paths: &[S]) -> Vec<String> {
+pub(crate) fn top_literal<S: AsRef<str>>(paths: &[S]) -> Vec<String> {
     paths.iter().map(|p| format!(":(top,literal){}", p.as_ref())).collect()
 }
 

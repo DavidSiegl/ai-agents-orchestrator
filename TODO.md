@@ -210,15 +210,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   port only by re-deriving them; with the seam at `Http`, as Python's at `urlopen`, `FakeJenkins` and `FakePyPI` play
   the servers and every line of `Jenkins` and `PyPI` runs in those tests. The user kept the `Http` seam and amended the
   spec's Lane to say so (2026-10-28, cross-review 93, F1), and issue 08 says which seam it is given.
-- **Jenkins calls whose tests need the CLI, left for rust-engine ticket 09b.** Ticket 07 ported `TestOrchestratorChecks`
-  on `judge_run` of the build's quality file; its Workflow cases (`test_a_build_that_failed_before_the_gate_is_not_checked`,
-  `test_without_the_quality_gate_none_of_this_runs`, `test_the_spec_is_the_runs_task_without_a_contract_step` and the
-  heartbeat kept between PyPI's requests, `test_slow_pypi_keeps_the_run_alive_and_stops_at_the_rounds_deadline`) ticket
-  08's part 5 ported through its quality round (`engine/src/workflow/tests/orchestrator_checks.rs`, 2026-10-29), on
-  FakePyPI's clock and `events`. `judged_in_quality`, `_build_trust`, `_judging_changes`,
-  `JUDGING_FILES` and `JUDGED_DESCRIPTION`, with `TestJudgedInQuality`, are the `judged-in-quality` command's; the
-  Rust `Jenkins::retained_builds` they read is ported. Issue 09 names them (2026-10-28); its Plan (split) gives them to
-  09b (2026-10-29). Closes with ticket 09b porting the command and its tests.
 - **The contract test leaves its Jenkins build running when it fails.** `tests/contract/test_jenkins.py` triggers one
   quality build and nothing stops it on a failure or a Ctrl-C, so the build holds an executor until it ends, up to
   the 22 minutes build #59 took. Raised by cross-review 73 (F11, 2026-10-27): "a Ctrl-C during the queue wait leaves
@@ -635,6 +626,19 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Fixed
 
+- **Jenkins calls whose tests need the CLI, left for rust-engine ticket 09b.** (Moved from Open issues, 2026-10-29.) Ticket 07 ported `TestOrchestratorChecks`
+  on `judge_run` of the build's quality file; its Workflow cases (`test_a_build_that_failed_before_the_gate_is_not_checked`,
+  `test_without_the_quality_gate_none_of_this_runs`, `test_the_spec_is_the_runs_task_without_a_contract_step` and the
+  heartbeat kept between PyPI's requests, `test_slow_pypi_keeps_the_run_alive_and_stops_at_the_rounds_deadline`) ticket
+  08's part 5 ported through its quality round (`engine/src/workflow/tests/orchestrator_checks.rs`, 2026-10-29), on
+  FakePyPI's clock and `events`. `judged_in_quality`, `_build_trust`, `_judging_changes`,
+  `JUDGING_FILES` and `JUDGED_DESCRIPTION`, with `TestJudgedInQuality`, are the `judged-in-quality` command's; the
+  Rust `Jenkins::retained_builds` they read is ported. Issue 09 names them (2026-10-28); its Plan (split) gives them to
+  09b (2026-10-29). Fixed (2026-10-29, ticket 09b): `crate::cli::judged` has `judged_in_quality`, `build_trust`, `judging_changes`,
+  `JUDGING_FILES` and the description's format (`Judged::read`, in place of the regular expression), and
+  `judged-in-quality` runs without herdr (`crate::cli`'s `herdrless_command`, given a `Local`), with
+  `TestJudgedInQuality` in `engine/src/cli/judged/tests.rs`; the parity scenario `judged_in_quality` passes against
+  the binary.
 - **The Rust engine's CLI commands about a project's runs.** Fixed (2026-10-29, rust-engine ticket 09a): the
   `orchestrator` binary has `list` (and `--json`, `--pr-state`), `metrics`, `show`, `prune`, `close` and `workflows`
   beside `run` and `resume` (`crate::cli::args`' `Command::Runs` and `Command::Workflows`; `crate::cli`'s

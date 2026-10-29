@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::ffi::OsString;
 use std::rc::Rc;
 
-use super::{ended_status, herdrless_command, parse_args, run_command, Command, Connected, Ended, Stop};
+use super::{ended_status, herdrless_command, parse_args, run_command, Command, Connected, Ended, Local, Stop};
 use crate::ci::fake::jenkins_on;
 use crate::ci::Jenkins;
 use crate::env::ConfigDir;
@@ -13,6 +13,7 @@ use crate::error::OrchestratorError;
 use crate::herdr::fake::Turn;
 use crate::herdr::HerdrError;
 use crate::host::fake::FakeHost;
+use crate::host::ProcessHost;
 use crate::py::json::Json;
 use crate::state::RunState;
 use crate::workflow::fixture::{new_state, Fixture};
@@ -22,6 +23,8 @@ pub(super) struct Cli {
     pub f: Fixture,
     /// Everything printed on standard output, in order.
     pub out: RefCell<String>,
+    /// Everything a command printed on standard error itself, in order: not main's error or interrupted note.
+    pub err: RefCell<String>,
     /// The quality job of each Jenkins a command made, in order.
     pub jobs: RefCell<Vec<String>>,
     /// The configuration directory: /nowhere unless a test gives one.
@@ -41,7 +44,13 @@ impl Cli {
 
     /// A world on f's fakes.
     pub fn of(f: Fixture) -> Cli {
-        Cli { f, out: RefCell::new(String::new()), jobs: RefCell::new(vec![]), config: ConfigDir::at("/nowhere") }
+        Cli {
+            f,
+            out: RefCell::new(String::new()),
+            err: RefCell::new(String::new()),
+            jobs: RefCell::new(vec![]),
+            config: ConfigDir::at("/nowhere"),
+        }
     }
 
     /// The world run_command is given, on f's fakes, with a Jenkins on f.ci for each job.
@@ -65,11 +74,32 @@ impl Cli {
         f(&self.connected(&jenkins, &print))
     }
 
-    /// How main's command of argv ended, connected to the fakes, or run without herdr as main runs workflows.
+    /// How main's command of argv ended, connected to the fakes, or run without herdr as main runs workflows, on
+    /// this machine in /nowhere.
     pub fn ended(&self, argv: &[&str]) -> Result<Ended, Stop> {
+        self.ended_here(argv, &ProcessHost::local(&self.f.interrupt), "/nowhere")
+    }
+
+    /// ended, a command that needs no herdr pane run on host in the current directory cwd.
+    pub fn ended_here(&self, argv: &[&str], host: &ProcessHost, cwd: &str) -> Result<Ended, Stop> {
         let command = self.command(argv);
+        let jenkins = |job: &str| {
+            self.jobs.borrow_mut().push(job.to_string());
+            Ok(jenkins_on(&self.f.ci))
+        };
         let print = |text: &str| self.out.borrow_mut().push_str(text);
-        if let Some(ended) = herdrless_command(&command, &self.config, &print, &self.f.interrupt) {
+        let stderr = |text: &str| self.err.borrow_mut().push_str(text);
+        let cwd = || Ok(cwd.to_string());
+        let local = Local {
+            host,
+            jenkins: &jenkins,
+            cwd: &cwd,
+            config: &self.config,
+            stdout: &print,
+            stderr: &stderr,
+            interrupt: &self.f.interrupt,
+        };
+        if let Some(ended) = herdrless_command(&command, &local) {
             return ended;
         }
         self.with(|world| run_command(&command, world))
