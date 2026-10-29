@@ -144,14 +144,22 @@ impl Reply {
     }
 }
 
-/// Send raw on a new connection to port, and read the reply to the connection's end.
+/// Send raw on a new connection to port, and read the reply to the connection's end, or for 5 s at most: an event
+/// stream the server should have refused never ends, and fails the test on what came meanwhile.
 fn exchange(port: u16, raw: &[u8]) -> Reply {
     let mut conn = TcpStream::connect(("127.0.0.1", port)).expect("the server takes the connection");
-    conn.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     conn.write_all(raw).expect("the request is sent");
+    let deadline = Instant::now() + Duration::from_secs(5);
     let mut got = vec![];
-    // A reset after the reply is read is the end of it too.
-    let _ = conn.read_to_end(&mut got);
+    let mut buf = [0u8; 4096];
+    while let Some(left) = deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) {
+        conn.set_read_timeout(Some(left)).unwrap();
+        // A reset after the reply is read is the end of it too, as is a read that times out at the deadline.
+        match conn.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => got.extend_from_slice(&buf[..n]),
+        }
+    }
     let text = String::from_utf8_lossy(&got).into_owned();
     let Some((head, body)) = text.split_once("\r\n\r\n") else {
         return Reply { status: None, headers: vec![], body: text };
