@@ -81,10 +81,17 @@ class Invocation:
         return self.exit
 
     def kill(self) -> None:
-        """Kill it with SIGKILL, and every process it started, as a crash or a lost machine would stop it."""
+        """Kill it with SIGKILL, and every process it started, as a crash or a lost machine would stop it: its
+        process group, and each process below it in groups of their own, as the Rust engine starts every command
+        (engine/src/host/process.rs), which a kill of the engine's group alone would leave running."""
+        below = fakes.descendants(self.process.pid) - {self.process.pid}
         # Gone already when the engine and everything it started have ended.
         with contextlib.suppress(ProcessLookupError):
             os.killpg(self.process.pid, signal.SIGKILL)
+        for pid in below:
+            # Each one a process of the engine's, or one that ended meanwhile.
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
         self.process.wait()
         self.killed = True
 
@@ -330,7 +337,7 @@ class World:
                     "JENKINS_URL": self._url(self._servers.jenkins), "JENKINS_USER": JENKINS_USER,
                     "JENKINS_TOKEN": JENKINS_TOKEN, "no_proxy": "127.0.0.1,localhost"})
         env["https_proxy"] = self._url(self._servers.pypi)
-        env["SSL_CERT_FILE"] = os.path.join(self.root, "pypi-cert.pem")
+        env["SSL_CERT_FILE"] = os.path.join(self.root, "pypi-ca.pem")
         return env
 
     # -- Making the world -------------------------------------------------------
@@ -394,18 +401,27 @@ class World:
         return servers
 
     def _make_certificate(self) -> None:
-        """Make pypi.org's certificate for the PyPI server, self-signed, which the engine trusts by SSL_CERT_FILE.
-        Raises RuntimeError, naming openssl, where it fails."""
-        # openssl as found on PATH by World.__init__'s check.
-        proc = subprocess.run(  # noqa: S603
-            ["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",  # noqa: S607
-             "-nodes",
-             "-keyout", os.path.join(self.root, "pypi-key.pem"), "-out", os.path.join(self.root, "pypi-cert.pem"),
-             "-days", "30", "-subj", "/CN=pypi.org", "-addext", "subjectAltName=DNS:pypi.org"],
-            capture_output=True, check=False)
-        if proc.returncode != 0:
-            raise RuntimeError(f"openssl could not make the fake PyPI's certificate, exit status {proc.returncode}: "
-                               f"{proc.stderr.decode(errors='replace').strip()}")
+        """Make pypi.org's certificate for the PyPI server, signed by a certificate authority of the world's own, which
+        the engine trusts by SSL_CERT_FILE: a leaf under a CA, as PyPI's is, since rustls refuses a server certificate
+        that is itself a CA's, as a self-signed one is (CaUsedAsEndEntity). Raises RuntimeError, naming openssl,
+        where it fails."""
+        def path(name: str) -> str:
+            return os.path.join(self.root, name)
+        key = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-days", "30"]
+        commands = [
+            ["openssl", "req", "-x509", *key, "-keyout", path("pypi-ca-key.pem"), "-out", path("pypi-ca.pem"),
+             "-subj", "/CN=Parity CA", "-addext", "basicConstraints=critical,CA:TRUE",
+             "-addext", "keyUsage=critical,keyCertSign"],
+            ["openssl", "req", "-x509", *key, "-CA", path("pypi-ca.pem"), "-CAkey", path("pypi-ca-key.pem"),
+             "-keyout", path("pypi-key.pem"), "-out", path("pypi-cert.pem"), "-subj", "/CN=pypi.org",
+             "-addext", "subjectAltName=DNS:pypi.org", "-addext", "basicConstraints=critical,CA:FALSE"],
+        ]
+        for command in commands:
+            # openssl as found on PATH by World.__init__'s check.
+            proc = subprocess.run(command, capture_output=True, check=False)  # noqa: S603
+            if proc.returncode != 0:
+                raise RuntimeError(f"openssl could not make the fake PyPI's certificate, exit status "
+                                   f"{proc.returncode}: {proc.stderr.decode(errors='replace').strip()}")
 
     @staticmethod
     def _url(server: http.server.HTTPServer) -> str:
