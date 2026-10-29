@@ -664,8 +664,12 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   Fixed entry on the Workflow that say "for ticket 09"), in `engine/src/cli/**/tests.rs` and `engine/tests/program.rs`.
   The parity scenarios `workflows_listed`, `runs_listed_and_shown`, `branches_pruned`, `failed_run_closed` and
   `finished_run_closed` pass against the binary. No arguments print the help on stderr with exit status 2, where
-  Python without a display exits 2 naming the missing command (the spec's Decisions: no tk GUI). Not closed: drain,
-  refresh, doctor and judged-in-quality (ticket 09b) and serve (ticket 10).
+  Python without a display exits 2 naming the missing command (the spec's Decisions: no tk GUI). Ticket 09b
+  (2026-10-29) adds `drain`, `refresh`, `doctor` and `judged-in-quality` (`crate::cli::drain`, `refresh`, `doctor` and
+  `judged`), with `TestDrain`, `TestDrainWorkflows`, TestPromptFiles' drain case, `TestRefresh`, `TestCheckSetup`,
+  `TestDoctorCommand` and `TestJudgedInQuality`, and empties `NOT_YET`: every command's `--help` names Python's flags,
+  and the parity scenarios `specs_drained`, `conflict_refreshed`, `doctor_checks` and `judged_in_quality` pass. Not
+  closed: serve (ticket 10).
 - **Harness tests left for rust-engine tickets 08 and 09.** (Moved from Open issues, 2026-10-29.) Ticket 06 ported `launch_args`, `session_usage` and
   `turn_tokens` (`engine/src/harness/tests.rs`, `engine/src/summary/tests.rs`), but the Python cases that drive them
   through `Workflow`, `parse_args`, `new_state` or `resumable_state` wait for those (cross-review 92, F1: "As merged,
@@ -806,7 +810,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `PARITY_COMMANDS` as they land: ticket 09a (2026-10-29) adds `list`, `metrics`, `show`, `prune`, `close` and
   `workflows`, so the stage runs 38 scenarios and the 18 switched, every one but those of `drain`, `refresh`,
   `doctor`, `judged-in-quality` (ticket 09b) and `serve` (ticket 10); 56 passing in 210 s locally with SIGINT and
-  SIGHUP ignored, the Python engine's 43 taking 192 s.
+  SIGHUP ignored, the Python engine's 43 taking 192 s. Ticket 09b (2026-10-29) adds `drain`, `refresh`,
+  `judged-in-quality` and `doctor`, so the stage runs every scenario but serve's, 42 and the 18 switched: 60 passing
+  in 228 s locally, so too.
 - **The commands the Rust engine runs outlived an engine that got a SIGTERM or a SIGHUP.** The commands run in
   process groups of their own, so a SIGTERM of the engine (a kill, a service manager's stop) or the SIGHUP a closed
   terminal sends its foreground group ended the engine and left the running command to finish unwatched, and the run
