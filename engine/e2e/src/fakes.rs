@@ -345,8 +345,8 @@ fn perform(ledger: &Ledger, state: &mut Map<String, Value>, name: &str, action: 
     for (path, text) in files("write") {
         put(&run_dir.join(path), text.as_str());
     }
-    let status = action.get("status").cloned().unwrap_or_else(|| "idle".into());
-    object(state, "agents")[name]["status"] = status;
+    let after = action.get("status").cloned().unwrap_or_else(|| "idle".into());
+    object(state, "agents")[name]["status"] = after;
     if action.get("exit").and_then(Value::as_bool) == Some(true) {
         object(state, "agents").shift_remove(name);
     }
