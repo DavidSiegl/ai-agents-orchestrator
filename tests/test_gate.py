@@ -30,7 +30,7 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 from coverage import CoverageData
-from gitrepo import RepositoryTest
+from gitrepo import RepositoryTest, git
 from golden import assert_golden
 
 import gate
@@ -422,7 +422,7 @@ class TestGate(RepositoryTest):
         with open(os.path.join(self.repo, "f.py"), "ab") as f:
             f.write(b"x = 1\rdiff --git a/g.py b/g.py\r@@ -5,0 +6,2 @@\ny = 2\nz = 3\n")
         base = self.git("rev-parse", "HEAD").strip()
-        self.assertEqual(changed_lines(self.host.change_diff(self.repo, base)), {"f.py": {4, 5, 6}})
+        self.assertEqual(changed_lines(gate._change_diff(self.repo, base)), {"f.py": {4, 5, 6}})
 
     def test_a_carriage_return_inside_an_added_python_line_fails_the_gate(self):
         # Python ends a line at the lone \r and git does not, so ruff's line 6 is git's line 5, the second added
@@ -3073,12 +3073,12 @@ class TestPassesAtBase(RepositoryTest):
         and add test_mul_again, which imports ONE from it and passes at the base."""
         lib = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, lib)
-        self.host.git(lib, "init", "--quiet", "-b", "main")
+        git(lib, "init", "--quiet", "-b", "main")
         with open(os.path.join(lib, "helper.py"), "w") as f:
             f.write("ONE = 1\n")
-        self.host.git(lib, "add", "helper.py")
-        self.host.git(lib, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false",
-                      "commit", "--quiet", "-m", "lib")
+        git(lib, "add", "helper.py")
+        git(lib, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false",
+            "commit", "--quiet", "-m", "lib")
         self.git("-c", "protocol.file.allow=always", "submodule", "--quiet", "add", lib, "vendor/lib")
         self.put("pytest.ini", "[pytest]\npythonpath = . vendor/lib\n")
         self.git("add", "-A")
@@ -4236,7 +4236,7 @@ class TestSurvivingMutants(RepositoryTest):
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 5, "not-mutated")])
         self.assertEqual(found[0]["message"], "`unchecked` was not mutation-tested: mutmut made no mutant of it; a "
                                               "`# pragma: no mutate block` where its header ends keeps it out.")
-        diff = self.host.change_diff(self.repo, self.git("rev-parse", "HEAD").strip())
+        diff = gate._change_diff(self.repo, self.git("rev-parse", "HEAD").strip())
         self.assertEqual(gate.added_suppressions(self.repo, changed_lines(diff)),
                          [("calc.py", 5, "def unchecked(a, b):  # pragma: no mutate block")])
 

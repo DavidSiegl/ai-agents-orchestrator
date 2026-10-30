@@ -6,8 +6,9 @@ serves Jenkins and PyPI over HTTP from this process; the scenario scripts each o
 with `run` or `start`, and `record` then gives what the run did, normalized (normalize.py), for test_parity.py to
 compare with the scenario's recording.
 
-The engine is `PARITY_ENGINE`, a command line, when set, else this checkout's orchestrator.py on the Python that
-runs the tests: the Rust tickets replay the recordings by pointing it at their binary.
+The engine is `PARITY_ENGINE`, a command line, when set, else this checkout's Rust engine, its orchestrator binary
+built with cargo (tests/rust_engine.py). The recordings are the Python engine's, made before the switch to Rust
+removed it.
 """
 
 import contextlib
@@ -27,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Self
 
 import fakes
+import rust_engine
 from normalize import Normalizer, facts
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -52,15 +54,10 @@ PROJECT_FILES = {
 
 
 def engine_command() -> list[str]:
-    """The engine a world runs, as PARITY_ENGINE gives it, else orchestrator.py on this Python (python_engine)."""
+    """The engine a world runs, as PARITY_ENGINE gives it, else this checkout's (rust_engine.binary)."""
     if command := os.environ.get("PARITY_ENGINE"):
         return shlex.split(command)
-    return python_engine()
-
-
-def python_engine() -> list[str]:
-    """The Python engine, the oracle: this checkout's orchestrator.py on the Python that runs the tests."""
-    return [sys.executable, os.path.join(ROOT, "orchestrator.py")]
+    return [rust_engine.binary()]
 
 
 @dataclass

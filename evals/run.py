@@ -3,14 +3,14 @@ and print and keep the numbers. docs/design.md, Evals, says when to run it and w
 
     uv run python evals/run.py [--tasks a,b] [--repeat N] [--config NAME] [--keep] [-- RUN_ARGS...]
 
-Run it from a herdr pane, as `orchestrator.py run`: every trial is a real run, with real agents. RUN_ARGS, after
+Run it from a herdr pane, as `orchestrator run`: every trial is a real run, with real agents. RUN_ARGS, after
 `--`, are given to the engine's `run` unchanged, such as `--workflow quick --model sonnet`; the runner sets
 `--no-pr`, `--spec` and `--cwd` itself, and refuses those, `--machine` and `--worktree` there.
 
-The engine is the command line `EVAL_ENGINE` gives, as tests/parity's PARITY_ENGINE does, else this checkout's
-orchestrator.py on the Python running this script. It is run as a program, through `run` and `close`, and must keep
-a run's files as orchestrator.py does: the runner finds the run under `.orchestrator/runs/<run id>/` in the clone, and
-its numbers in `metrics.json` there (docs/design.md, Run metrics).
+The engine is the command line `EVAL_ENGINE` gives, as tests/parity's PARITY_ENGINE does, else this checkout's own
+build, target/debug/orchestrator (`cargo build -p octoflow-engine`). It is run as a program, through `run` and
+`close`, and must keep a run's files as the orchestrator does: the runner finds the run under
+`.orchestrator/runs/<run id>/` in the clone, and its numbers in `metrics.json` there (docs/design.md, Run metrics).
 
 A task is a directory evals/tasks/<name>/ holding:
 
@@ -117,11 +117,15 @@ def load_tasks(names: list[str] | None, tasks_dir: str = TASKS_DIR) -> list[Task
     return tasks
 
 
+# The engine a trial runs without EVAL_ENGINE: this checkout's debug build, by its path from the checkout's top.
+DEFAULT_ENGINE = "target/debug/orchestrator"
+
+
 def engine_command() -> list[str]:
-    """The engine every trial runs, as EVAL_ENGINE gives it, else this checkout's orchestrator.py on this Python."""
+    """The engine every trial runs, as EVAL_ENGINE gives it, else this checkout's own build, DEFAULT_ENGINE."""
     if command := os.environ.get("EVAL_ENGINE"):
         return shlex.split(command)
-    return [sys.executable, os.path.join(ROOT, "orchestrator.py")]
+    return [os.path.join(ROOT, DEFAULT_ENGINE)]
 
 
 def config_name(run_args: list[str]) -> str:
@@ -261,7 +265,7 @@ class Eval:
     date: str  # the day it started, YYYY-MM-DD
     config: str  # the name of its configuration, config_name's or --config's
     run_args: list[str]  # what the engine's run was given beyond the runner's own flags
-    engine: str  # EVAL_ENGINE, or "orchestrator.py" for this checkout's
+    engine: str  # EVAL_ENGINE, or DEFAULT_ENGINE for this checkout's
     commit: str  # this checkout's HEAD, "-dirty" after it with tracked changes: what the default engine ran with
 
     @property
@@ -375,7 +379,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     engine = engine_command()
     evaluation = Eval(datetime.date.today().isoformat(), args.config or config_name(args.run_args), args.run_args,
-                      os.environ.get("EVAL_ENGINE") or "orchestrator.py", _head_commit())
+                      os.environ.get("EVAL_ENGINE") or DEFAULT_ENGINE, _head_commit())
     trials: list[Trial] = []
     exit_code = 0
     try:

@@ -9,14 +9,15 @@ import functools
 import os
 import pathlib
 import re
+import subprocess
 import unittest
 import urllib.parse
 from unittest.mock import patch
 
 import conftest
+import rust_engine
 
 import gate
-import orchestrator
 
 ROOT = conftest.REPO
 README = ROOT / "README.md"
@@ -32,7 +33,8 @@ NOT_IN_THE_PARSER = {
     ("ui-options.md", "web", None): "the assessment's name for the command, built as serve",
 }
 
-# Backticked ALL_CAPS names the docs give that are neither orchestrator.py's nor gate.py's, with where they come from.
+# Backticked ALL_CAPS names the docs give that are neither the engine's (engine/src) nor gate.py's, with where they
+# come from.
 OTHER_PROGRAMS_NAMES = {
     "PATH": "an environment variable",
     "PWD": "an environment variable",
@@ -64,6 +66,20 @@ FILE_NAMES = {
 }
 
 
+def engine_help(*command: str) -> str:
+    """What the engine prints for `orchestrator [command] --help`."""
+    return subprocess.run([rust_engine.binary(), *command, "--help"], capture_output=True, text=True,  # noqa: S603
+                          check=True).stdout
+
+
+def help_section(text: str, heading: str) -> list[str]:
+    """The lines of a clap help text's section under heading, such as "Commands:", up to the next blank line."""
+    lines = text.splitlines()
+    start = lines.index(heading) + 1
+    end = next((n for n in range(start, len(lines)) if not lines[n].strip()), len(lines))
+    return lines[start:end]
+
+
 def built_parser(parse_args, argv) -> argparse.ArgumentParser:
     """The parser parse_args builds to parse argv, caught before it parses."""
     class Built(Exception):
@@ -87,12 +103,12 @@ def long_flags(parser: argparse.ArgumentParser) -> set[str]:
 
 @functools.cache
 def cli_commands() -> dict[str, set[str]]:
-    """Each command of the parser main builds, by name, with the long flags it takes, and gate.py's, a program of
-    its own, as the command "gate.py"."""
-    parser = built_parser(orchestrator.parse_args, ["list"])
-    (commands,) = [a.choices for a in parser._actions if isinstance(a, argparse._SubParsersAction)]
-    return {**{name: long_flags(sub) for name, sub in commands.items()},
-            "gate.py": long_flags(built_parser(gate.parse_args, ["--base", "main"]))}
+    """Each command of the engine's CLI, by name, with the long flags its help lists, and gate.py's, a program of its
+    own, as the command "gate.py"."""
+    names = [line.split()[0] for line in help_section(engine_help(), "Commands:")]
+    commands = {name: set(FLAG.findall(engine_help(name).partition("\nOptions:\n")[2]))
+                for name in names if name != "help"}
+    return {**commands, "gate.py": long_flags(built_parser(gate.parse_args, ["--base", "main"]))}
 
 
 def prose_lines(path: pathlib.Path):
@@ -107,7 +123,7 @@ def prose_lines(path: pathlib.Path):
 
 def invocations(path: pathlib.Path, commands):
     """(line number, command, the text of its arguments) for each command of the orchestrator's that path shows
-    being run: in a code span or a fenced line, after `orchestrator.py`, or opening a code span, as in `run --spec`;
+    being run: in a code span or a fenced line, after `orchestrator`, or opening a code span, as in `run --spec`;
     and gate.py, as the command "gate.py", wherever it is followed by a flag. Shell comments, and what follows a
     pipe, `&&` or `;`, are left out."""
     for n, line, fenced in prose_lines(path):
@@ -116,12 +132,12 @@ def invocations(path: pathlib.Path, commands):
         else:
             texts = re.findall(r"`([^`]+)`", line)
         for text in (re.split(r"\||&&|;|\s#", t)[0] for t in texts):
-            for m in re.finditer(r"orchestrator\.py\s+([a-z][a-z-]*)(.*)", text):
+            for m in re.finditer(r"\borchestrator\s+([a-z][a-z-]*)(.*)", text):
                 yield n, m.group(1), m.group(2)
             for m in re.finditer(r"\bgate\.py(\s+--.*)", text):
                 yield n, "gate.py", m.group(1)
             words = text.split()
-            # gate.py is not a command after orchestrator.py; the search above has yielded it.
+            # gate.py is not a command after orchestrator; the search above has yielded it.
             if not fenced and len(words) > 1 and words[0] in commands.keys() - {"gate.py"} \
                     and words[1].startswith("--"):
                 yield n, words[0], text[len(words[0]):]
@@ -142,11 +158,39 @@ def flag_table(path: pathlib.Path):
     return rows
 
 
+def rust_names() -> tuple[set[str], set[str], set[str]]:
+    """The names the engine's Rust (engine/src) defines, as source_names gives gate.py's, read by pattern rather than
+    parsed: each fn, struct, enum, trait, type, const, static and mod; as Type.member, each fn of an impl of the type
+    and each field of a struct; and every string literal's text."""
+    names, members, strings = set(), set(), set()
+    item = re.compile(r"\b(?:fn|struct|enum|trait|type|const|static|mod)\s+(?:r#)?([A-Za-z_]\w*)")
+    for path in sorted((ROOT / "engine" / "src").rglob("*.rs")):
+        text = path.read_text()
+        names.update(item.findall(text))
+        strings.update(re.findall(r'"((?:[^"\\]|\\.)*)"', text))
+        # The fns of each impl block and the fields of each struct: the block runs from its { to the } that closes it.
+        for m in re.finditer(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(impl\b[^{;]*?|struct\s+\w+[^{;(]*?)\{", text, re.MULTILINE):
+            owner = re.findall(r"(?:for\s+)?([A-Z]\w*)(?:<[^{]*>)?\s*$", m.group(1).split(" where ")[0].strip())
+            depth, end = 1, m.end()
+            while depth and end < len(text):
+                depth += {"{": 1, "}": -1}.get(text[end], 0)
+                end += 1
+            if not owner:
+                continue
+            body = text[m.end():end]
+            if m.group(1).startswith("impl"):
+                members.update(f"{owner[-1]}.{fn}" for fn in re.findall(r"\bfn\s+(\w+)", body))
+            else:
+                members.update(f"{owner[-1]}.{field}" for field in re.findall(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:",
+                                                                            body, re.MULTILINE))
+    return names, members, strings
+
+
 def source_names() -> tuple[set[str], set[str], set[str]]:
-    """The names orchestrator.py and gate.py define: at module level; as Class.member, an attribute self is given
-    included; and every string constant, which is how they name an environment variable or a Jenkins parameter."""
-    tree = ast.Module(body=[node for source in ("orchestrator.py", "gate.py")
-                            for node in ast.parse((ROOT / source).read_text()).body], type_ignores=[])
+    """The names the engine (rust_names) and gate.py define: at module level; as Class.member, an attribute self is
+    given included; and every string constant, which is how they name an environment variable or a Jenkins
+    parameter."""
+    tree = ast.Module(body=ast.parse((ROOT / "gate.py").read_text()).body, type_ignores=[])
 
     def defined(body):
         for node in body:
@@ -164,7 +208,8 @@ def source_names() -> tuple[set[str], set[str], set[str]]:
                        if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store)
                        and isinstance(node.value, ast.Name) and node.value.id == "self")
     strings = {node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
-    return set(defined(tree.body)), members, strings
+    names, rust_members, rust_strings = rust_names()
+    return set(defined(tree.body)) | names, members | rust_members, strings | rust_strings
 
 
 @functools.cache
@@ -194,7 +239,7 @@ class TestDocs(unittest.TestCase):
                 where = f"{doc.relative_to(ROOT)}:{n}"
                 if command not in commands:
                     if (doc.name, command, None) not in NOT_IN_THE_PARSER:
-                        errors.append(f"{where}: orchestrator.py has no command {command}")
+                        errors.append(f"{where}: the orchestrator has no command {command}")
                     continue
                 errors.extend(f"{where}: {command} takes no {flag}" for flag in FLAG.findall(rest)
                               if flag not in commands[command] and (doc.name, command, flag) not in NOT_IN_THE_PARSER)
@@ -248,17 +293,17 @@ class TestDocs(unittest.TestCase):
                     # A linter's rule code, such as C901 or BLE001, is not a name.
                     if re.fullmatch(r"[A-Z][A-Z0-9_]+", code) and not re.fullmatch(r"[A-Z]+[0-9]+", code):
                         if code not in known and code not in OTHER_PROGRAMS_NAMES:
-                            errors.append(f"{where}: neither orchestrator.py nor gate.py has {code}")
+                            errors.append(f"{where}: neither the engine nor gate.py has {code}")
                     elif m := re.fullmatch(r"(\w+)\(\)", code):
                         if m.group(1) not in names | methods:
-                            errors.append(f"{where}: neither orchestrator.py nor gate.py has a function or method "
+                            errors.append(f"{where}: neither the engine nor gate.py has a function or method "
                                           f"{code}")
                     # Class.member: a capitalized name with a lowercase letter, or an all-caps one that is a class
-                    # of orchestrator.py, such as CI; not CONSTANT.md, a prompt's file, nor one of FILE_NAMES.
+                    # of the engine's, such as CI; not CONSTANT.md, a prompt's file, nor one of FILE_NAMES.
                     elif code not in FILE_NAMES and (m := re.fullmatch(r"([A-Z]\w*)\.([a-z_]\w*)(\(\))?", code)) \
                             and (m.group(1) in classes or re.search("[a-z]", m.group(1))) \
                             and f"{m.group(1)}.{m.group(2)}" not in members:
-                        errors.append(f"{where}: neither orchestrator.py nor gate.py has {m.group(1)}.{m.group(2)}")
+                        errors.append(f"{where}: neither the engine nor gate.py has {m.group(1)}.{m.group(2)}")
         self.assertNoErrors(errors)
 
     def test_each_relative_link_resolves_to_a_file_and_its_anchor_to_a_heading(self):
