@@ -588,7 +588,7 @@ cargo llvm-cov nextest --locked --workspace --ignore-run-fail --profile ci --con
 - **Doctests** do not run: cargo-nextest has none, and cargo-llvm-cov runs them only on a nightly toolchain
   (`TODO.md`).
 - **Where the tools come from**: `ci/install-tools.sh` downloads cargo-llvm-cov and cargo-nextest, each pinned by
-  version and the sha256 of its release's archive; rustup's `llvm-tools` component comes with the agent image, as
+  version and the sha256 of its release's archive, as it does cargo-about for the Package stage; rustup's `llvm-tools` component comes with the agent image, as
   clippy does (see [What Jenkins needs](#what-jenkins-needs)).
 
 ### Reading Rust: the gate-rust helper
@@ -802,7 +802,8 @@ request](#a-build-of-main-judged-at-its-pull-request)).
 - **`curl`, `sha256sum`, `tar` and `openssl` on the agent**: the Install stage downloads, with `ci/install-tools.sh`,
   pinned releases of the gitleaks the parity scenarios (`tests/parity`) run, of cargo-llvm-cov and cargo-nextest,
   for the [Rust tests and coverage](#rust-tests-and-coverage) and the passes-at-base check's run of the changed Rust
-  tests at the base, and of cargo-mutants, for the surviving-mutants check's Rust, into the workspace's `.tools/bin`,
+  tests at the base, of cargo-mutants, for the surviving-mutants check's Rust, and of cargo-about, for the Package
+  stage's third-party licenses, into the workspace's `.tools/bin`,
   which the Jenkinsfile puts first on `PATH`. cargo-mutants releases only a glibc build for linux x86_64, so the agent
   image's glibc must be one it runs on. The scenarios make the fake PyPI's certificate with openssl. Without gitleaks or openssl the
   scenarios fail, naming it.

@@ -58,6 +58,12 @@ jobs:
             ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha
             || format('refs/tags/{0}', env.TAG) }}
 
+      # For build-binary.sh's third-party licenses, at the version ci/install-tools.sh pins for Jenkins. Only the
+      # .dmg uploads them, inside the app: the release has Jenkins's copy of the file, which is the same.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
+
       # The script Jenkins builds the Linux binary with, the Rust engine's, by the toolchain rust-toolchain.toml pins,
       # which rustup installs; it smoke-tests --help and workflows.
       - run: packaging/build-binary.sh

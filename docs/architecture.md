@@ -338,12 +338,15 @@ agent runs in the suite.
   copied in as its `externalBin` sidecar and `pyproject.toml`'s version, through a release config the script
   writes and merges over `tauri.conf.json`, which bundles nothing. It writes
   `dist/octoflow-desktop-<os>-<arch>` `.deb` and `.AppImage` on Linux, `.dmg` on macOS (signed ad hoc),
-  each with its `.sha256`, and refuses a bundle without the sidecar. On Linux it then runs the AppImage as the
+  each with its `.sha256`, and refuses a bundle without the sidecar or without `build-binary.sh`'s third-party
+  licenses, which it bundles as the resource `THIRD-PARTY-LICENSES.html`. On Linux it then runs the AppImage as the
   CLI from a temporary directory: `--help` and `workflows` exit 0, and the orchestrator `serve` execs starts in
   that directory with no `$APPDIR` entry in `LD_LIBRARY_PATH` and no `PYTHONHOME`, read from its `/proc` entry.
 - `packaging/build-binary.sh`: builds `dist/octoflow-<os>-<arch>` (`linux-x86_64`, `macos-arm64`), the engine's
   `orchestrator` binary, `cargo build --release --locked`, and its `.sha256`, then smoke-tests it: `--help`, and
-  `workflows` lists `default`.
+  `workflows` lists `default`. Before the build, cargo-about writes `dist/octoflow-third-party-licenses.html`, the
+  license texts of the crates in the binary and the desktop app, by `packaging/about.toml` and `about.hbs`; a crate
+  under a license `about.toml` does not accept fails the script.
 - `Jenkinsfile`: `uv sync --frozen`, the engine built, `uv run pytest` with branch coverage of `gate` (without
   `tests/parity` in a quality build whose change touches nothing the scenarios judge; the Test stage lists what) and
   the Cargo workspace's tests with line coverage (`cargo llvm-cov nextest`), a UI stage that runs `ui/`'s `npm ci`,
@@ -351,7 +354,7 @@ agent runs in the suite.
   `quality.md` (see [quality gate](quality-gate.md)), and a Package stage that runs `packaging/build-binary.sh` and
   `packaging/build-desktop.sh` on every build but a quality build (`GIT_REF` set). On `main` a Release stage publishes a
   new `pyproject.toml` version as a GitHub release, with the Linux binary and the Linux desktop app, each with its
-  `.sha256`, in one `gh release create`, and `docs/releases/v<version>.md`, where there is one, before GitHub's
+  `.sha256`, and `octoflow-third-party-licenses.html`, in one `gh release create`, and `docs/releases/v<version>.md`, where there is one, before GitHub's
   generated notes. Its parameter `GIT_REF`
   builds another branch; such a build never releases.
 - `.github/workflows/automerge.yml`: keeps auto-merge on for a pull request into `main` from a branch of this

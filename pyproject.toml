@@ -13,6 +13,8 @@ readme = "README.md"
 # gate.py, the quality gate, is all that is Python now that the engine is Rust's (engine/): stdlib-only, so it runs
 # with a system python3 3.13+ without uv.
 requires-python = ">=3.13"
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
 dependencies = []
 
 [dependency-groups]
