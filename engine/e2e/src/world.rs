@@ -139,10 +139,11 @@ fn cargo_build() -> String {
     }
 }
 
-/// command's words, as a POSIX shell splits them, and as Python's shlex.split split PARITY_ENGINE: at unquoted white
-/// space; `'...'` taken as it is; in `"..."`, a backslash escaping only `"`, `\`, `$` and a backtick, and kept before
-/// any other character; and outside quotes, a backslash escaping the next character. Panics, failing the scenario, at
-/// a quote left open or a backslash at the end.
+/// command's words, as a POSIX shell splits them: at unquoted white space; `'...'` taken as it is; in `"..."`, a
+/// backslash escaping only `"`, `\`, `$` and a backtick, and kept before any other character; and outside quotes, a
+/// backslash escaping the next character. Python's shlex.split, which split PARITY_ENGINE, differs only in keeping the
+/// backslash before `$` and a backtick in double quotes. Panics, failing the scenario, at a quote left open or a
+/// backslash at the end.
 fn shell_words(command: &str) -> Vec<String> {
     let unclosed = || -> ! { panic!("E2E_ENGINE has a quote left open or a backslash at its end: {command}") };
     let mut words = Vec::new();
@@ -216,10 +217,11 @@ impl Invocation {
                     return exit;
                 }
                 Ok(None) if Instant::now() > deadline => {
-                    self.kill();
+                    let failures = self.kill();
                     let err: Vec<char> = self.stderr().chars().collect();
                     let tail: String = err[err.len().saturating_sub(3000)..].iter().collect();
-                    panic!("engine {:?} ran over {INVOCATION_TIMEOUT:?}:\n{tail}", self.args);
+                    let killed = if failures.is_empty() { String::new() } else { format!("\n{}", failures.join("\n")) };
+                    panic!("engine {:?} ran over {INVOCATION_TIMEOUT:?}:\n{tail}{killed}", self.args);
                 }
                 Ok(None) => std::thread::sleep(WAIT_POLL),
                 Err(e) => panic!("waiting for engine {:?}: {e}", self.args),
@@ -231,27 +233,32 @@ impl Invocation {
     /// group, and each process below it in groups of their own, as the engine starts every command
     /// (engine/src/host/process.rs), which a kill of the engine's group alone would leave running. Each is stopped
     /// first, until a listing finds none new, so that none starts another between the listing and the kill. Reaps
-    /// the engine.
-    fn kill(&mut self) {
+    /// the engine. A signal or the reaping that fails does not stop the kill: it goes on to the rest, and the failures
+    /// are returned, each a sentence, for the caller to report.
+    fn kill(&mut self) -> Vec<String> {
         let pid = self.pid();
         let group = Pid::from_raw(pid as i32);
+        let mut failures = Vec::new();
         let mut stopped = BTreeSet::new();
         loop {
-            signalled(killpg(group, Signal::SIGSTOP), "stop the engine's group");
+            signalled(killpg(group, Signal::SIGSTOP), "stop the engine's group", &mut failures);
             let below: Vec<i64> = procs::descendants(pid).into_iter().filter(|p| *p != pid && !stopped.contains(p)).collect();
             if below.is_empty() {
                 break;
             }
             for p in below {
-                signalled(kill(Pid::from_raw(p as i32), Signal::SIGSTOP), "stop a process below the engine");
+                signalled(kill(Pid::from_raw(p as i32), Signal::SIGSTOP), "stop a process below the engine", &mut failures);
                 stopped.insert(p);
             }
         }
-        signalled(killpg(group, Signal::SIGKILL), "kill the engine's group");
+        signalled(killpg(group, Signal::SIGKILL), "kill the engine's group", &mut failures);
         for p in stopped {
-            signalled(kill(Pid::from_raw(p as i32), Signal::SIGKILL), "kill a process below the engine");
+            signalled(kill(Pid::from_raw(p as i32), Signal::SIGKILL), "kill a process below the engine", &mut failures);
         }
-        self.child.wait().unwrap_or_else(|e| panic!("reaping engine {:?}: {e}", self.args));
+        if let Err(e) = self.child.wait() {
+            failures.push(format!("could not reap engine {:?}: {e}", self.args));
+        }
+        failures
     }
 
     /// What it printed to its standard output so far.
@@ -265,14 +272,26 @@ impl Invocation {
     }
 }
 
-/// Check the result of a signal sent to what, a process or group being killed: ESRCH, its having ended already, is
-/// what a kill races with and no failure; any other error fails the scenario, or, during a panic, which a drop may
-/// kill in, is printed instead, since a second panic would abort.
-fn signalled(sent: nix::Result<()>, what: &str) {
+/// Add to failures what went wrong with a signal sent to what, a process or group being killed; ESRCH, its having
+/// ended already, is what a kill races with and no failure.
+fn signalled(sent: nix::Result<()>, what: &str, failures: &mut Vec<String>) {
     match sent {
         Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
-        Err(e) if std::thread::panicking() => eprintln!("could not {what}: {e}"),
-        Err(e) => panic!("could not {what}: {e}"),
+        Err(e) => failures.push(format!("could not {what}: {e}")),
+    }
+}
+
+/// Fail the scenario with failures, if there are any; during a panic, which a drop may kill in, print them instead,
+/// since a second panic would abort.
+fn report(failures: &[String]) {
+    if failures.is_empty() {
+        return;
+    }
+    let text = failures.join("\n");
+    if std::thread::panicking() {
+        eprintln!("{text}");
+    } else {
+        panic!("{text}");
     }
 }
 
@@ -780,11 +799,14 @@ impl World {
 
 impl Drop for World {
     fn drop(&mut self) {
+        // Every running invocation is killed before any failure of one is reported.
+        let mut failures = Vec::new();
         for inv in &mut self.invocations {
             if matches!(inv.child.try_wait(), Ok(None)) {
-                inv.kill();
+                failures.extend(inv.kill());
             }
         }
+        report(&failures);
     }
 }
 
