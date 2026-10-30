@@ -3203,8 +3203,6 @@ class TestPassesAtBase(RepositoryTest):
         find.assert_called_once_with("change", budget=42)
 
 
-@unittest.skipUnless(CARGO and shutil.which("cargo-nextest"),
-                     "the Rust half of passes-at-base runs cargo nextest, and cargo or cargo-nextest is not on PATH")
 class TestRustPassesAtBase(RepositoryTest):
     """The passes-at-base check over a real git repository's Cargo package, its tests run with cargo-nextest and read
     with the gate-rust helper built from this tree."""
@@ -3572,7 +3570,6 @@ class TestCargoMutantsOutcomes(unittest.TestCase):
         code = diff.replace("+y\n", '+let p = "a/ui/b/ui/";\n', 1)
         self.assertIn('+let p = "a/ui/b/ui/";\n', gate._diff_under(code, "ui", ["ui/src/a.rs"]))
 
-    @unittest.skipUnless(CARGO, "cargo, which tells a package's workspace, is not on PATH")
     def test_the_workspace_is_the_one_cargo_tells(self):
         with tempfile.TemporaryDirectory() as d:
             package = "\nversion = '0.1.0'\nedition = '2021'\n"
@@ -3598,9 +3595,6 @@ class TestCargoMutantsOutcomes(unittest.TestCase):
         self.assertFalse(gate._RUST_SUPPRESSION.search("let mutants = skip(1);"))
 
 
-@unittest.skipUnless(CARGO and shutil.which("cargo-mutants") and shutil.which("cargo-nextest"),
-                     "the Rust half of surviving-mutants runs cargo mutants with nextest, and cargo, cargo-mutants or "
-                     "cargo-nextest is not on PATH")
 class TestRustSurvivingMutants(RepositoryTest):
     """The surviving-mutants check over a real git repository's Cargo package, with a real cargo-mutants."""
 

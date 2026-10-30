@@ -3198,12 +3198,21 @@ def _changed_rust_tests(change: GateChange) -> tuple[list[_ChangedRustTest], lis
                 out.append(_finding(path, error["line"], "not-run", f"does not parse as Rust ({error['message']}), "
                                                                     f"so its tests were not run at the base."))
             continue
-        for t in _rust_tests(0, path, document):
-            first, last = t.fn["attrs_line"], t.fn["end"]
-            # A removal point first - 1 is an attribute removed from its top, as an #[ignore] taken off it.
-            if any(first <= n <= last for n in added) or any(first - 1 <= n <= last for n in removed):
-                tests.append(_ChangedRustTest(path, t.name, t.fn["line"]))
+        tests += _touched_rust_tests(path, document, added, removed)
     return tests, out
+
+
+def _touched_rust_tests(path: str, document: dict, added: set[int], removed: set[int]) -> list[_ChangedRustTest]:
+    """The Rust tests of document, the gate-rust helper's document of the working tree's file at path that parsed, that
+    the change adds lines to or removes lines from, their outer attributes included, in the order they start: added
+    holds the lines it adds, from 1, and removed its removal points, as _removal_points gives them."""
+    tests = []
+    for t in _rust_tests(0, path, document):
+        first, last = t.fn["attrs_line"], t.fn["end"]
+        # A removal point first - 1 is an attribute removed from its top, as an #[ignore] taken off it.
+        if any(first <= n <= last for n in added) or any(first - 1 <= n <= last for n in removed):
+            tests.append(_ChangedRustTest(path, t.name, t.fn["line"]))
+    return tests
 
 
 def _rust_beside_tests(change: GateChange, path: str) -> bool:
@@ -3271,13 +3280,22 @@ def _rust_target(tree: str, path: str) -> tuple[_RustTarget | None, str]:
     if package is None:
         return None, "no Cargo.toml lies above its file at the base"
     parts = path.split("/")[len(package.split("/")) if package else 0:]
-    stem = parts[-1].removesuffix(".rs")
-    modules = [*parts[:-1], stem]
-    args: tuple[str, ...]
     # A directory of tests/ or src/bin/ is a target only through the main.rs in it.
     holder = parts[:3] if parts[:2] == ["src", "bin"] else parts[:2] if parts[0] == "tests" else []
     if holder and len(parts) > len(holder) and not os.path.isfile(os.path.join(tree, package, *holder, "main.rs")):
         return None, f"no `{'/'.join(holder)}/main.rs` makes a target of its directory"
+    selected = _rust_default_target(tree, package, parts)
+    if selected is None:
+        return None, "Cargo builds no test target from its place by default"
+    return _RustTarget(package, *selected), ""
+
+
+def _rust_default_target(tree: str, package: str, parts: list[str]) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    """_RustTarget's args and module for the file whose path from the package at package in tree is parts, split at
+    "/", by the default places _rust_target names; None where Cargo builds no target from that place. A directory of
+    tests/ or src/bin/ is taken for a target, as its main.rs makes it."""
+    modules = [*parts[:-1], parts[-1].removesuffix(".rs")]
+    args: tuple[str, ...]
     if parts[0] == "tests" and len(parts) >= 2:
         args, rest = ("--test", modules[1]), modules[2:]
     elif parts[:2] == ["src", "bin"] and len(parts) >= 3:
@@ -3288,11 +3306,11 @@ def _rust_target(tree: str, path: str) -> tuple[_RustTarget | None, str]:
         args = ("--lib",) if os.path.isfile(os.path.join(tree, package, "src", "lib.rs")) else ("--bins",)
         rest = modules[1:]
     else:
-        return None, "Cargo builds no test target from its place by default"
+        return None
     # A target's root file, as src/lib.rs or tests/x/main.rs, and a mod.rs name no module of their own.
     if rest and (rest[-1] == "mod" or (len(rest) == 1 and rest[0] in ("lib", "main"))):
         rest = rest[:-1]
-    return _RustTarget(package, args, tuple(rest)), ""
+    return args, tuple(rest)
 
 
 def _rust_target_findings(tree: str, target_dir: str, config: str, store: str, target: _RustTarget,
@@ -4269,26 +4287,35 @@ def _cargo_mutants_run(change: GateChange, tree_copy: str, scratch: str, root: s
                                         soft_stop=(signal.SIGINT, MUTMUT_STOP_GRACE))
     except OSError as e:
         return [_cargo_mutants_not_run(f"could not start cargo-mutants: {e}")], False
-    output = os.path.join(scratch, "mutants.out")
+    return _cargo_mutants_run_findings(proc, stopped, os.path.join(scratch, "mutants.out"), root, budget), stopped
+
+
+def _cargo_mutants_run_findings(proc: subprocess.CompletedProcess, stopped: bool, output: str, root: str,
+                                budget: float) -> list[dict]:
+    """The findings of a finished run of cargo-mutants on the workspace at root: proc is the run, stopped whether the
+    deadline stopped it, output its mutants.out, and budget the check's, as findings name it. A survived finding for
+    each function with missed mutants (_cargo_mutants_survivors), and a budget-reached one when stopped; none when it
+    found nothing to mutate; a not-run finding alone when its outcomes cannot be read, as they may not be when it was
+    stopped, or its unmutated baseline failed."""
     # cargo-mutants writes no outcomes when it finds nothing to mutate in the diff, and exits 0.
     if proc.returncode == 0 and not stopped and not os.path.lexists(os.path.join(output, "outcomes.json")):
-        return [], False
+        return []
     outcomes, problem = _cargo_mutants_outcomes(output)
     if problem and stopped:
         outcomes = []
     elif problem:
         return [_cargo_mutants_not_run(f"cargo-mutants, exiting with status {proc.returncode}, wrote no outcomes the "
-                                       f"gate can read ({problem}): {_said(proc)}")], False
+                                       f"gate can read ({problem}): {_said(proc)}")]
     where = f"the workspace at `{root or '.'}`"
     baseline = next((o["summary"] for o in outcomes if o["scenario"] == "Baseline"), None)
     if baseline not in (None, "Success"):
         return [_cargo_mutants_not_run(f"the unmutated baseline of {where} did not pass ({baseline}, as cargo-mutants "
                                        f"words it; its log is mutants.out/log/baseline.log), so it tried no "
-                                       f"mutant")], stopped
+                                       f"mutant")]
     try:
         out = _cargo_mutants_survivors(f"{root}/" if root else "", outcomes)
     except (KeyError, TypeError, AttributeError) as e:
-        return [_cargo_mutants_not_run(f"cargo-mutants wrote a mutant's outcome the gate cannot read ({e!r})")], stopped
+        return [_cargo_mutants_not_run(f"cargo-mutants wrote a mutant's outcome the gate cannot read ({e!r})")]
     if stopped:
         tried = sum(1 for o in outcomes if o["summary"] in _CARGO_MUTANTS_TRIED)
         when = (f"after {tried} of the mutants cargo-mutants made of {where}" if outcomes
@@ -4296,7 +4323,7 @@ def _cargo_mutants_run(change: GateChange, tree_copy: str, scratch: str, root: s
         out.append(_finding(None, None, "budget-reached",
                             f"budget reached {when}: it was stopped at {budget:g} seconds (`--mutation-budget`), so "
                             f"the mutants it did not try may survive too."))
-    return out, stopped
+    return out
 
 
 def _cargo_mutants_outcomes(output: str) -> tuple[list[dict], str | None]:
