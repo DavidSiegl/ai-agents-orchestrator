@@ -1,5 +1,5 @@
 //! The e2e scenarios: each a function that scripts a World and runs the engine in it, compared with its recording
-//! by octoflow_e2e::check::check, one test each.
+//! by octoflow_e2e::check::Bench::check, one test each.
 //!
 //! A scenario says only what happens: what each role's agent writes when prompted, what gh answers, and which engine
 //! commands run, in which order, with which stopped midway. What the engine did in return is the world's record.

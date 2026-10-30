@@ -164,6 +164,10 @@ pipeline {
             environment {
                 // tests/conftest.py's larger profile: a build tries ten times the examples a local run does.
                 HYPOTHESIS_PROFILE = 'ci'
+                // What both harnesses' scenarios depend on, which a quality build's change must leave alone for it to
+                // leave them out (the steps below): the engine and the Cargo workspace it builds in, the example
+                // workflows they run, and ci/, which pins the gitleaks they run. Each sh step adds its harness's own.
+                SCENARIO_INPUTS = 'engine Cargo.toml Cargo.lock rust-toolchain.toml examples ci'
             }
             steps {
                 // A failing test does not stop the build here: the Gate stage judges it with everything else, so a
@@ -181,13 +185,13 @@ pipeline {
                 //
                 // The e2e scenarios (engine/e2e) run the orchestrator binary this run builds, through E2E_ENGINE, as
                 // the parity scenarios below do; their World keeps its profile out of the scenario's project itself.
-                // A quality build leaves them out on the parity scenarios' terms below, by a nextest filter.
+                // A quality build leaves them out by a nextest filter when its change leaves SCENARIO_INPUTS alone.
                 sh '''
                     junit=target/nextest/ci/junit.xml
                     rm -f "$junit"
                     set --
-                    if [ -n "${GIT_REF:-}" ] && git diff --quiet HEAD^ HEAD -- engine Cargo.toml Cargo.lock \
-                            rust-toolchain.toml examples ci; then
+                    # $SCENARIO_INPUTS unquoted: the stage's list of paths, split into its words, here and below.
+                    if [ -n "${GIT_REF:-}" ] && git diff --quiet HEAD^ HEAD -- $SCENARIO_INPUTS; then
                         set -- -E 'not package(octoflow-e2e)'
                     fi
                     E2E_ENGINE="'$WORKSPACE/target/llvm-cov-target/debug/orchestrator'" \\
@@ -207,10 +211,8 @@ pipeline {
                 // passes through env, the harness giving the engine an environment of its own.
                 //
                 // A quality build (GIT_REF set) leaves out the parity scenarios when its change, against HEAD^, the
-                // run's base, touches nothing they depend on: the engine and the Cargo workspace it builds in, the
-                // harness and its recordings, tests/conftest.py's guards they run under and tests/guard_errors.py's
-                // errors those guards raise, the example workflows they run, the Python environment, and ci/, which
-                // pins the gitleaks they run. They took quality build #59 past the orchestrator's QUALITY_TIMEOUT
+                // run's base, touches nothing they depend on: SCENARIO_INPUTS, the harness, tests/conftest.py's guards
+                // they run under and tests/guard_errors.py's errors those guards raise, and the Python environment. They took quality build #59 past the orchestrator's QUALITY_TIMEOUT
                 // (1299 s of 1200). A git diff that fails counts as a change, so they run. Pull request builds always
                 // run them. [tool.mutmut] in pyproject.toml leaves them out of mutmut's runs.
                 //
@@ -226,9 +228,9 @@ pipeline {
                         exit 1
                     fi
                     parity=''
-                    if [ -n "${GIT_REF:-}" ] && git diff --quiet HEAD^ HEAD -- engine Cargo.toml Cargo.lock \
-                            rust-toolchain.toml tests/parity tests/rust_engine.py tests/conftest.py tests/guard_errors.py \
-                            examples pyproject.toml uv.lock .python-version ci; then
+                    if [ -n "${GIT_REF:-}" ] && git diff --quiet HEAD^ HEAD -- $SCENARIO_INPUTS tests/parity \
+                            tests/rust_engine.py tests/conftest.py tests/guard_errors.py pyproject.toml uv.lock \
+                            .python-version; then
                         parity='--ignore=tests/parity'
                     fi
                     status=0

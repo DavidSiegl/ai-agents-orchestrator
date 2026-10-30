@@ -103,7 +103,8 @@ fn built_engine() -> String {
     path
 }
 
-/// The directory of the engine the e2e scenarios build, `e2e-engine/` of the target directory the test runs from.
+/// The directory of the engine the e2e scenarios build, `<target>/<profile>/e2e-engine/` of the build the test runs
+/// from.
 fn engine_dir() -> PathBuf {
     let exe = std::env::current_exe().unwrap_or_else(|e| panic!("finding the test's own program: {e}"));
     // The test runs from <target>/<profile>/deps/.
@@ -111,10 +112,10 @@ fn engine_dir() -> PathBuf {
 }
 
 /// The path of this checkout's orchestrator binary, built with cargo now, which reports where it put it. It builds in
-/// a target directory of its own, `target/` of engine_dir: the workspace's test build resolves the engine's features
-/// with the e2e package's (serde_json's preserve_order, nix's fs), a build of the engine alone without them, so one
-/// target directory would have each relink `<target>/<profile>/orchestrator` while the engine's own program tests run
-/// it.
+/// a target directory of its own, `target/` of engine_dir: a build of the engine alone resolves its dependencies'
+/// features without the other workspace members' (nix's fs from this package, serde_json's from the desktop shell),
+/// where the workspace's test build resolves them with them, so in one target directory each would relink
+/// `<target>/<profile>/orchestrator` while the engine's own program tests run it.
 fn cargo_build() -> String {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let out = Command::new(&cargo)
@@ -138,28 +139,43 @@ fn cargo_build() -> String {
     }
 }
 
-/// command's words, as a POSIX shell splits them: at unquoted white space, with `'...'` taken as it is, and `"..."`
-/// and a backslash outside quotes escaping the next character.
+/// command's words, as a POSIX shell splits them, and as Python's shlex.split split PARITY_ENGINE: at unquoted white
+/// space; `'...'` taken as it is; in `"..."`, a backslash escaping only `"`, `\`, `$` and a backtick, and kept before
+/// any other character; and outside quotes, a backslash escaping the next character. Panics, failing the scenario, at
+/// a quote left open or a backslash at the end.
 fn shell_words(command: &str) -> Vec<String> {
+    let unclosed = || -> ! { panic!("E2E_ENGINE has a quote left open or a backslash at its end: {command}") };
     let mut words = Vec::new();
     let mut word: Option<String> = None;
     let mut chars = command.chars();
     while let Some(c) = chars.next() {
+        if c.is_whitespace() {
+            words.extend(word.take());
+            continue;
+        }
+        let w = word.get_or_insert_with(String::new);
         match c {
-            c if c.is_whitespace() => words.extend(word.take()),
-            '\'' => word.get_or_insert_with(String::new).extend(chars.by_ref().take_while(|&c| c != '\'')),
-            '"' => {
-                let w = word.get_or_insert_with(String::new);
-                while let Some(c) = chars.next() {
-                    match c {
-                        '"' => break,
-                        '\\' => w.extend(chars.next()),
-                        c => w.push(c),
-                    }
+            '\'' => loop {
+                match chars.next() {
+                    Some('\'') => break,
+                    Some(c) => w.push(c),
+                    None => unclosed(),
                 }
-            }
-            '\\' => word.get_or_insert_with(String::new).extend(chars.next()),
-            c => word.get_or_insert_with(String::new).push(c),
+            },
+            '"' => loop {
+                match chars.next() {
+                    Some('"') => break,
+                    Some('\\') => match chars.next() {
+                        Some(c @ ('"' | '\\' | '$' | '`')) => w.push(c),
+                        Some(c) => w.extend(['\\', c]),
+                        None => unclosed(),
+                    },
+                    Some(c) => w.push(c),
+                    None => unclosed(),
+                }
+            },
+            '\\' => w.push(chars.next().unwrap_or_else(|| unclosed())),
+            c => w.push(c),
         }
     }
     words.extend(word);
@@ -201,8 +217,8 @@ impl Invocation {
                 }
                 Ok(None) if Instant::now() > deadline => {
                     self.kill();
-                    let err = self.stderr();
-                    let tail = &err[err.len().saturating_sub(3000)..];
+                    let err: Vec<char> = self.stderr().chars().collect();
+                    let tail: String = err[err.len().saturating_sub(3000)..].iter().collect();
                     panic!("engine {:?} ran over {INVOCATION_TIMEOUT:?}:\n{tail}", self.args);
                 }
                 Ok(None) => std::thread::sleep(WAIT_POLL),
@@ -221,22 +237,19 @@ impl Invocation {
         let group = Pid::from_raw(pid as i32);
         let mut stopped = BTreeSet::new();
         loop {
-            // ESRCH: the group has ended already, which leaves only what was listed below it to stop.
-            let _ = killpg(group, Signal::SIGSTOP);
+            signalled(killpg(group, Signal::SIGSTOP), "stop the engine's group");
             let below: Vec<i64> = procs::descendants(pid).into_iter().filter(|p| *p != pid && !stopped.contains(p)).collect();
             if below.is_empty() {
                 break;
             }
             for p in below {
-                // ESRCH: it ended between the listing and the signal.
-                let _ = kill(Pid::from_raw(p as i32), Signal::SIGSTOP);
+                signalled(kill(Pid::from_raw(p as i32), Signal::SIGSTOP), "stop a process below the engine");
                 stopped.insert(p);
             }
         }
-        // ESRCH, as above: each signal goes to what may have ended already.
-        let _ = killpg(group, Signal::SIGKILL);
+        signalled(killpg(group, Signal::SIGKILL), "kill the engine's group");
         for p in stopped {
-            let _ = kill(Pid::from_raw(p as i32), Signal::SIGKILL);
+            signalled(kill(Pid::from_raw(p as i32), Signal::SIGKILL), "kill a process below the engine");
         }
         self.child.wait().unwrap_or_else(|e| panic!("reaping engine {:?}: {e}", self.args));
     }
@@ -249,6 +262,17 @@ impl Invocation {
     /// What it printed to its standard error so far.
     pub fn stderr(&self) -> String {
         read_text(&err_path(&self.out_path))
+    }
+}
+
+/// Check the result of a signal sent to what, a process or group being killed: ESRCH, its having ended already, is
+/// what a kill races with and no failure; any other error fails the scenario, or, during a panic, which a drop may
+/// kill in, is printed instead, since a second panic would abort.
+fn signalled(sent: nix::Result<()>, what: &str) {
+    match sent {
+        Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+        Err(e) if std::thread::panicking() => eprintln!("could not {what}: {e}"),
+        Err(e) => panic!("could not {what}: {e}"),
     }
 }
 
@@ -502,11 +526,7 @@ impl World {
 
     /// The saved state of the run with that key, as state.json holds it now.
     pub fn run_state(&self, key: &str) -> Value {
-        let runs = self.project.join(".orchestrator").join("runs");
-        let suffix = format!("-{key}");
-        let names: Vec<PathBuf> =
-            dirs::entries(&runs).unwrap_or_default().into_iter().filter(|(name, _)| name.ends_with(&suffix)).map(|(_, p)| p).collect();
-        let [dir] = names.as_slice() else { panic!("no single run for key {key}: {names:?}") };
+        let dir = dirs::run_dir(&self.project, key);
         let text = read_text(&dir.join("state.json"));
         serde_json::from_str(&text).unwrap_or_else(|e| panic!("the state of run {key} is no JSON: {e}"))
     }
@@ -859,6 +879,14 @@ mod tests {
     #[test]
     fn shell_words_splits_as_sh() {
         assert_eq!(shell_words("env A=/dev/null '/x y/orch' \"a\\\"b\" c\\ d"), ["env", "A=/dev/null", "/x y/orch", "a\"b", "c d"]);
+        assert_eq!(shell_words(r#""/opt/a\b/x" "\$\`\\" '' "#), [r"/opt/a\b/x", r"$`\", ""]);
+    }
+
+    #[test]
+    fn a_quote_left_open_is_no_command() {
+        for command in ["'/x", "\"/x", "/x\\", "\"/x\\"] {
+            assert!(std::panic::catch_unwind(|| shell_words(command)).is_err(), "{command} was split");
+        }
     }
 
     #[test]

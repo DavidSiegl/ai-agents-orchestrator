@@ -63,8 +63,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   byte for byte. Both harnesses run until ticket 02, which ports the rest and removes `tests/parity`. Left for it:
   - the scenarios: `kill_in_*`, `resume_after_agent_exit`, `quality_*`, `judged_in_quality`, `gate_turned_*_by_resume`,
     `serve_endpoints_and_events`;
-  - what only those need: the fake Jenkins, and PyPI behind the HTTPS proxy with its certificate; World's kill of an
-    invocation and the processes below it; `pr create`'s hold in the fake gh; and the `PARITY_COMMANDS` filter.
+  - what only those need: the fake Jenkins, and PyPI behind the HTTPS proxy with its certificate; a public way for a
+    scenario to kill an invocation, whose kill of the processes below it (`Invocation::kill`) is ported already, for
+    a timeout and a dropped world; `pr create`'s hold in the fake gh; and the `PARITY_COMMANDS` filter.
   Ticket 01 named those two servers for its World. They wait for ticket 02 because no scenario of 01 reaches them, so
   they would be code nothing runs.
   Unlike the ticket's plan, `World` does not get the engine through `CARGO_BIN_EXE_orchestrator` and a

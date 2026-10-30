@@ -24,6 +24,19 @@ pub fn entries(dir: &Path) -> Option<Vec<(String, PathBuf)>> {
     Some(found)
 }
 
+/// The run directory of the engine's run whose key is key, in project: the one entry of `.orchestrator/runs/` whose
+/// name ends in `-<key>`. Panics where there is none, or more than one.
+pub fn run_dir(project: &Path, key: &str) -> PathBuf {
+    let runs = project.join(".orchestrator").join("runs");
+    let suffix = format!("-{key}");
+    let found: Vec<PathBuf> =
+        entries(&runs).unwrap_or_default().into_iter().filter(|(name, _)| name.ends_with(&suffix)).map(|(_, p)| p).collect();
+    match found.as_slice() {
+        [one] => one.clone(),
+        _ => panic!("no single run directory for key {key} in {}: {found:?}", runs.display()),
+    }
+}
+
 /// Remove the directory at path and all it holds, if it is there; panics where it cannot.
 pub fn remove_dir(path: &Path) {
     match fs::remove_dir_all(path) {

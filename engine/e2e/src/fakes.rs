@@ -323,7 +323,7 @@ fn perform_released(ledger: &Ledger, state: &mut Map<String, Value>) {
 /// "status", the agent's status afterwards, default idle; and "hold", which World::release takes.
 fn perform(ledger: &Ledger, state: &mut Map<String, Value>, name: &str, action: &Value) {
     let project = PathBuf::from(ledger.script()["project"].as_str().expect("the script's project"));
-    let run_dir = run_dir(&project, role_and_key(name).1);
+    let run_dir = dirs::run_dir(&project, role_and_key(name).1);
     let saved_path = run_dir.join("state.json");
     let text = std::fs::read_to_string(&saved_path).unwrap_or_else(|e| panic!("reading {}: {e}", saved_path.display()));
     let saved: Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{} is no JSON: {e}", saved_path.display()));
@@ -342,18 +342,6 @@ fn perform(ledger: &Ledger, state: &mut Map<String, Value>, name: &str, action: 
     object(state, "agents")[name]["status"] = after;
     if action.get("exit").and_then(Value::as_bool) == Some(true) {
         object(state, "agents").shift_remove(name);
-    }
-}
-
-/// The run directory of the run whose key is key.
-fn run_dir(project: &Path, key: &str) -> PathBuf {
-    let runs = project.join(".orchestrator").join("runs");
-    let suffix = format!("-{key}");
-    let found: Vec<PathBuf> =
-        dirs::entries(&runs).unwrap_or_default().into_iter().filter(|(name, _)| name.ends_with(&suffix)).map(|(_, p)| p).collect();
-    match found.as_slice() {
-        [one] => one.clone(),
-        _ => panic!("no single run directory for key {key} in {}: {found:?}", runs.display()),
     }
 }
 
