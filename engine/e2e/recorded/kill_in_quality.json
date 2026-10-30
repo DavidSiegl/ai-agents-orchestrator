@@ -51,6 +51,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "spec",
       "round": 0,
       "workspace_id": "",
@@ -124,6 +128,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "spec",
       "round": 0,
       "workspace_id": "w1",
@@ -211,6 +219,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "spec",
       "round": 0,
       "workspace_id": "w1",
@@ -283,6 +295,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "spec",
       "round": 0,
       "workspace_id": "w1",
@@ -375,6 +391,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "build",
       "round": 1,
       "workspace_id": "w1",
@@ -497,6 +517,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "build",
       "round": 1,
       "workspace_id": "w1",
@@ -591,6 +615,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "build",
       "round": 1,
       "workspace_id": "w1",
@@ -687,6 +715,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "quality",
       "round": 1,
       "workspace_id": "w1",
@@ -816,6 +848,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "quality",
       "round": 1,
       "workspace_id": "w1",
@@ -941,6 +977,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "quality",
       "round": 1,
       "workspace_id": "w1",
@@ -1072,6 +1112,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "quality",
       "round": 1,
       "workspace_id": "w1",
@@ -1208,6 +1252,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "review",
       "round": 1,
       "workspace_id": "w1",
@@ -1374,6 +1422,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "review",
       "round": 1,
       "workspace_id": "w1",
@@ -1512,6 +1564,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "review",
       "round": 1,
       "workspace_id": "w1",
@@ -1652,6 +1708,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "publish",
       "round": 1,
       "workspace_id": "w1",
@@ -1814,6 +1874,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "done",
       "round": 1,
       "workspace_id": "w1",
@@ -1979,7 +2043,7 @@
   "runs/<run:1>/quality-1-1.md": "GATE: OK\n\nJenkins build #1 judged snapshot `<sha:2>` (round 1, quality round 1 of 3) and ended SUCCESS.\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n1. `tests/test_calc.py (the whole file)` warning unexpected-paths: the spec mentions neither this path nor its file name.\n",
   "runs/<run:1>/review-1.md": "VERDICT: APPROVE\n\nNone.\n",
   "runs/<run:1>/spec.md": "# Add a subtract function\n\nAdd `subtract(a, b)` to `src/calc.py`, returning a - b, with a test.\n",
-  "runs/<run:1>/state.json": "{\"run_id\": \"<run:1>\", \"task\": \"Add a subtract function\", \"cwd\": \"<world>/project\", \"machine\": null, \"phase\": \"done\", \"round\": 1, \"workspace_id\": \"w1\", \"root_pane\": \"p1\", \"base\": \"<sha:1>\", \"base_branch\": \"main\", \"branch\": \"orchestrator/add-a-subtract-function-<key:1>\", \"pr_url\": \"https://github.com/parity/project/pull/1\", \"verdict\": \"APPROVE\", \"conflicts\": [], \"error\": null, \"agents\": {\"spec\": {\"name\": \"spec-<key:1>\", \"pane\": \"p1\", \"kind\": \"claude\", \"session\": \"session-1\"}, \"build\": {\"name\": \"build-<key:1>\", \"pane\": \"p2\", \"kind\": \"claude\", \"session\": \"session-2\"}, \"review\": {\"name\": \"review-<key:1>\", \"pane\": \"p3\", \"kind\": \"claude\", \"session\": \"session-3\"}}, \"max_rounds\": 3, \"turn_timeout\": 1800, \"permission_mode\": null, \"models\": {}, \"agent_kinds\": {\"spec\": \"claude\", \"build\": \"claude\", \"review\": \"claude\"}, \"pull_request\": true, \"prompted\": \"review-1.md\", \"retried\": [], \"retrying\": null, \"owner\": null, \"heartbeat_at\": \"<time>\", \"quality_job\": \"parity/quality\", \"quality_gate_disabled\": false, \"max_quality_rounds\": 3, \"quality_round\": 1, \"ci\": {}, \"workflow\": \"default\", \"workflow_definition\": null, \"prompt_overrides\": {}, \"branch_cleanup\": null, \"worktree\": null, \"closed\": null, \"turns\": [{\"step\": \"spec\", \"role\": \"spec\", \"round\": 0, \"quality_round\": 0, \"file\": \"spec.md\", \"agent\": \"claude\", \"model\": null, \"session\": \"session-1\", \"tokens\": \"unknown\", \"human_paced\": true, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\"}, {\"step\": \"build\", \"role\": \"build\", \"round\": 1, \"quality_round\": 0, \"file\": \"build-1.md\", \"agent\": \"claude\", \"model\": null, \"session\": \"session-2\", \"tokens\": \"unknown\", \"human_paced\": false, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\"}, {\"step\": \"quality\", \"role\": \"quality\", \"round\": 1, \"quality_round\": 1, \"file\": \"quality-1-1.md\", \"agent\": null, \"model\": null, \"session\": null, \"tokens\": null, \"human_paced\": false, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\"}, {\"step\": \"review\", \"role\": \"review\", \"round\": 1, \"quality_round\": 0, \"file\": \"review-1.md\", \"agent\": \"claude\", \"model\": null, \"session\": \"session-3\", \"tokens\": \"unknown\", \"human_paced\": false, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\"}], \"quality_rounds\": [{\"round\": 1, \"quality_round\": 1, \"gate\": \"OK\", \"conditions\": [], \"fingerprints_by_check\": {}}], \"blocked\": null, \"locked\": {}, \"restored\": [], \"proofs\": []}\n",
+  "runs/<run:1>/state.json": "{\"run_id\": \"<run:1>\", \"task\": \"Add a subtract function\", \"cwd\": \"<world>/project\", \"machine\": null, \"herdr_server\": {\"HERDR_SOCKET_PATH\": null, \"HERDR_SESSION\": null}, \"phase\": \"done\", \"round\": 1, \"workspace_id\": \"w1\", \"root_pane\": \"p1\", \"base\": \"<sha:1>\", \"base_branch\": \"main\", \"branch\": \"orchestrator/add-a-subtract-function-<key:1>\", \"pr_url\": \"https://github.com/parity/project/pull/1\", \"verdict\": \"APPROVE\", \"conflicts\": [], \"error\": null, \"agents\": {\"spec\": {\"name\": \"spec-<key:1>\", \"pane\": \"p1\", \"kind\": \"claude\", \"session\": \"session-1\"}, \"build\": {\"name\": \"build-<key:1>\", \"pane\": \"p2\", \"kind\": \"claude\", \"session\": \"session-2\"}, \"review\": {\"name\": \"review-<key:1>\", \"pane\": \"p3\", \"kind\": \"claude\", \"session\": \"session-3\"}}, \"max_rounds\": 3, \"turn_timeout\": 1800, \"permission_mode\": null, \"models\": {}, \"agent_kinds\": {\"spec\": \"claude\", \"build\": \"claude\", \"review\": \"claude\"}, \"pull_request\": true, \"prompted\": \"review-1.md\", \"retried\": [], \"retrying\": null, \"owner\": null, \"heartbeat_at\": \"<time>\", \"quality_job\": \"parity/quality\", \"quality_gate_disabled\": false, \"max_quality_rounds\": 3, \"quality_round\": 1, \"ci\": {}, \"workflow\": \"default\", \"workflow_definition\": null, \"prompt_overrides\": {}, \"branch_cleanup\": null, \"worktree\": null, \"closed\": null, \"turns\": [{\"step\": \"spec\", \"role\": \"spec\", \"round\": 0, \"quality_round\": 0, \"file\": \"spec.md\", \"agent\": \"claude\", \"model\": null, \"session\": \"session-1\", \"tokens\": \"unknown\", \"human_paced\": true, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\"}, {\"step\": \"build\", \"role\": \"build\", \"round\": 1, \"quality_round\": 0, \"file\": \"build-1.md\", \"agent\": \"claude\", \"model\": null, \"session\": \"session-2\", \"tokens\": \"unknown\", \"human_paced\": false, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\"}, {\"step\": \"quality\", \"role\": \"quality\", \"round\": 1, \"quality_round\": 1, \"file\": \"quality-1-1.md\", \"agent\": null, \"model\": null, \"session\": null, \"tokens\": null, \"human_paced\": false, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\"}, {\"step\": \"review\", \"role\": \"review\", \"round\": 1, \"quality_round\": 0, \"file\": \"review-1.md\", \"agent\": \"claude\", \"model\": null, \"session\": \"session-3\", \"tokens\": \"unknown\", \"human_paced\": false, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\"}], \"quality_rounds\": [{\"round\": 1, \"quality_round\": 1, \"gate\": \"OK\", \"conditions\": [], \"fingerprints_by_check\": {}}], \"blocked\": null, \"locked\": {}, \"restored\": [], \"proofs\": []}\n",
   "runs/<run:1>/summary.md": "# Run <run:1>\n\n- **Workflow:** default\n- **Outcome:** APPROVE\n- **Pull request:** https://github.com/parity/project/pull/1\n- **Branch:** `orchestrator/add-a-subtract-function-<key:1>`\n- **Wall time:** <duration>, from the first turn's start to <time>\n\n## Task\n\nAdd a subtract function\n\n## Roles\n\n| role | harness | model |\n| --- | --- | --- |\n| Spec Collector (spec) | claude | default |\n| Builder (build) | claude | default |\n| Reviewer (review) | claude | default |\n\n## Turns\n\n| step | role | round | harness | model | start (UTC) | duration | file |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| spec (human-paced) | spec | 0 | claude | default | <time> | <duration> | spec.md |\n| build | build | 1 | claude | default | <time> | <duration> | build-1.md |\n| quality | quality | 1 q1 | - | - | <time> | <duration> | quality-1-1.md |\n| review | review | 1 | claude | default | <time> | <duration> | review-1.md |\n\n## Rounds\n\n- Round 1: quality gate OK; review APPROVE\n",
   "runs/<run:1>/gitleaks-rules/.gitleaks.toml": "[extend]\nuseDefault = true\n"
  },

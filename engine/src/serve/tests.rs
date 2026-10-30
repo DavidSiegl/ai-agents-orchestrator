@@ -12,7 +12,7 @@ use crate::cli::listing::run_record;
 use crate::constants::{APPROVE, RUNS_DIR, STALE_SECONDS};
 use crate::py::json::Map;
 use crate::py::url::urlencode;
-use crate::serve::fake::ServeHost;
+use crate::serve::fake::{FakeConsole, ServeHost};
 
 const SERVE_ID: &str = "20261024-120000-5e7e00";
 const TAURI_ORIGIN: &str = "tauri://localhost";
@@ -44,11 +44,12 @@ fn host_with_run(ssh_target: Option<&str>) -> Arc<ServeHost> {
     host
 }
 
-/// A RunServer for a test, and the projects it connected, as (machine, cwd).
+/// A RunServer for a test, the projects it connected, as (machine, cwd), and the herdr of every project.
 struct Served {
     server: RunServer,
     port: u16,
     connects: Arc<Mutex<Vec<(String, String)>>>,
+    console: Arc<FakeConsole>,
 }
 
 impl Served {
@@ -61,12 +62,13 @@ impl Served {
         let host = Arc::clone(host);
         let connects = Arc::new(Mutex::new(vec![]));
         let seen = Arc::clone(&connects);
+        let console = Arc::new(FakeConsole::default());
+        let herdr = Arc::clone(&console);
         let connect = move |machine: &str, cwd: &str, _: &Interrupt| {
             seen.lock().unwrap().push((machine.to_string(), cwd.to_string()));
-            let host: Arc<dyn Host + Send + Sync> = host.clone();
-            Ok((host, "/proj".to_string()))
+            Ok(Reached { host: host.clone(), dir: "/proj".to_string(), console: herdr.clone() })
         };
-        Served::start(Box::new(connect), origins, polls, connects)
+        Served { console, ..Served::start(Box::new(connect), origins, polls, connects) }
     }
 
     /// A server whose projects are the real directories here.
@@ -78,7 +80,7 @@ impl Served {
         let origins: Vec<String> = origins.iter().map(|o| o.to_string()).collect();
         let server = RunServer::start_polling(&origins, connect, polls).expect("the server starts");
         let port = port_of(server.url());
-        Served { server, port, connects }
+        Served { server, port, connects, console: Arc::default() }
     }
 
     fn token(&self) -> String {
@@ -93,9 +95,23 @@ impl Served {
         self.ask("GET", target, &all)
     }
 
+    /// The reply to a POST of target with body, the token as a Bearer header and the server's Host.
+    fn post(&self, target: &str, body: &str) -> Reply {
+        let bearer = format!("Bearer {}", self.token());
+        let length = body.len().to_string();
+        let headers =
+            [("Authorization", bearer.as_str()), ("Content-Type", "application/json"), ("Content-Length", &length)];
+        self.ask_with_body("POST", target, &headers, body)
+    }
+
     /// The reply to method of target, with the server's Host header unless headers name one, and headers, each value's
     /// characters sent as Latin-1 bytes, as http.client sends a header's str.
     fn ask(&self, method: &str, target: &str, headers: &[(&str, &str)]) -> Reply {
+        self.ask_with_body(method, target, headers, "")
+    }
+
+    /// As ask, with body after the headers.
+    fn ask_with_body(&self, method: &str, target: &str, headers: &[(&str, &str)], body: &str) -> Reply {
         let mut raw = format!("{method} {target} HTTP/1.1\r\nConnection: close\r\n").into_bytes();
         if !headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("Host")) {
             raw.extend_from_slice(format!("Host: 127.0.0.1:{}\r\n", self.port).as_bytes());
@@ -106,6 +122,7 @@ impl Served {
             raw.extend_from_slice(b"\r\n");
         }
         raw.extend_from_slice(b"\r\n");
+        raw.extend_from_slice(body.as_bytes());
         exchange(self.port, &raw)
     }
 
@@ -621,8 +638,8 @@ fn preflight_of_the_webview() {
     let reply = served.ask("OPTIONS", "/runs", &[("Origin", TAURI_ORIGIN)]);
     assert_eq!(reply.status, Some(204));
     assert_eq!(reply.header("Access-Control-Allow-Origin"), Some(TAURI_ORIGIN));
-    assert_eq!(reply.header("Access-Control-Allow-Headers"), Some("Authorization"));
-    assert_eq!(reply.header("Access-Control-Allow-Methods"), Some("GET"));
+    assert_eq!(reply.header("Access-Control-Allow-Headers"), Some("Authorization, Content-Type"));
+    assert_eq!(reply.header("Access-Control-Allow-Methods"), Some("GET, POST"));
     assert_eq!(reply.body, "");
 }
 
@@ -651,6 +668,113 @@ fn writes_are_not_served() {
         }
     }
     assert_eq!(*served.connects.lock().unwrap(), [(String::new(), "~/proj".to_string())]);
+}
+
+// -- The agents' endpoints ------------------------------------------------------------------------------------------
+
+/// A server whose project holds the run with a build agent named build-5e7e00, which shows "> ready".
+fn served_with_agent() -> Served {
+    let host = Arc::new(ServeHost::on(None));
+    let agents = r#"{"spec": {"name": "", "pane": ""}, "build": {"name": "build-5e7e00", "pane": "w1:p2"}}"#;
+    let state = serve_state(SERVE_ID, &[("agents", Json::parse(agents).unwrap())]);
+    host.state().files.insert(format!("{}/state.json", run_dir()), state);
+    let served = Served::fake(&host, &[]);
+    served.console.state().screens.insert("build-5e7e00".to_string(), "> ready\n".to_string());
+    served
+}
+
+#[test]
+fn an_agent_s_text_is_read_through_herdr_by_run_and_role() {
+    let served = served_with_agent();
+    let reply = served.get(&Served::query("/agent", &[("run", SERVE_ID), ("role", "build")]), &[]);
+    assert_eq!(reply.status, Some(200));
+    assert_eq!(
+        reply.json(),
+        object([("run", Json::from(SERVE_ID)), ("role", Json::from("build")), ("text", Json::from("> ready\n"))])
+    );
+    let reply = served.get(&Served::query("/agent", &[("run", SERVE_ID), ("role", "build"), ("lines", "50")]), &[]);
+    assert_eq!(reply.status, Some(200));
+    assert_eq!(served.console.state().typed, ["read build-5e7e00 200", "read build-5e7e00 50"]);
+    let wrong = "lines must be a whole number from 1 to 2000".to_string();
+    for lines in ["0", "2001", "x", "-1"] {
+        let query = Served::query("/agent", &[("run", SERVE_ID), ("role", "build"), ("lines", lines)]);
+        let reply = served.get(&query, &[]);
+        assert_eq!((reply.status, reply.error()), (Some(400), wrong.clone()), "{lines}");
+    }
+}
+
+#[test]
+fn an_agent_that_is_not_there_is_not_found() {
+    let served = served_with_agent();
+    let ask = |run: &str, role: &str| {
+        let reply = served.get(&Served::query("/agent", &[("run", run), ("role", role)]), &[]);
+        (reply.status, reply.error())
+    };
+    assert_eq!(ask(SERVE_ID, "review"), (Some(404), format!("run {SERVE_ID} has no review agent")));
+    assert_eq!(ask(SERVE_ID, "spec"), (Some(404), format!("run {SERVE_ID} has no spec agent")));
+    assert_eq!(ask("nosuch", "build"), (Some(404), "no run nosuch".to_string()));
+    assert_eq!(ask("../x", "build"), (Some(403), "'../x' is not a name in the run directory".to_string()));
+    served.console.state().screens.clear();
+    assert_eq!(ask(SERVE_ID, "build"), (Some(404), "the build agent has exited".to_string()));
+    served.console.state().down = true;
+    assert_eq!(ask(SERVE_ID, "build"), (Some(502), "herdr is not on PATH".to_string()));
+    let reply = served.get(&Served::query("/agent", &[("run", SERVE_ID)]), &[]);
+    assert_eq!((reply.status, reply.error()), (Some(400), "missing parameter role".to_string()));
+}
+
+#[test]
+fn input_is_typed_into_the_agent_as_a_prompt_or_keys() {
+    let served = served_with_agent();
+    let target = Served::query("/agent/input", &[("run", SERVE_ID), ("role", "build")]);
+    let reply = served.post(&target, r#"{"text": "per client, please"}"#);
+    assert_eq!(reply.status, Some(200));
+    assert_eq!(reply.json(), object([("run", Json::from(SERVE_ID)), ("role", Json::from("build"))]));
+    assert_eq!(served.post(&target, r#"{"keys": ["esc", "ctrl+c"]}"#).status, Some(200));
+    let typed = ["submit build-5e7e00 per client, please", "keys build-5e7e00 esc ctrl+c"];
+    assert_eq!(served.console.state().typed, typed);
+    let wrong = r#"the body must be {"text": "..."} or {"keys": ["...", ...]}"#;
+    let bodies = ["", "x", "[]", "{}", r#"{"text": ""}"#, r#"{"keys": []}"#, r#"{"keys": ["esc", 1]}"#];
+    for body in bodies.into_iter().chain([r#"{"text": "a", "keys": ["esc"]}"#]) {
+        let reply = served.post(&target, body);
+        assert_eq!((reply.status, reply.error()), (Some(400), wrong.to_string()), "{body}");
+    }
+    let long = format!(r#"{{"text": "{}"}}"#, "x".repeat(MAX_BODY_BYTES));
+    assert_eq!(served.post(&target, &long).status, Some(413));
+    assert_eq!(served.console.state().typed.len(), 2);
+    let other = Served::query("/agent/input", &[("run", SERVE_ID), ("role", "review")]);
+    assert_eq!(served.post(&other, r#"{"text": "hi"}"#).status, Some(404));
+}
+
+#[test]
+fn input_needs_the_token_and_the_server_s_own_origin() {
+    let served = served_with_agent();
+    let target = Served::query("/agent/input", &[("run", SERVE_ID), ("role", "build")]);
+    let body = r#"{"text": "rm -rf /"}"#;
+    let length = body.len().to_string();
+    let reply = served.ask_with_body("POST", &target, &[("Content-Length", &length)], body);
+    assert_eq!(reply.status, Some(401));
+    let bearer = format!("Bearer {}", served.token());
+    let headers = [("Authorization", bearer.as_str()), ("Origin", "http://evil.example"), ("Content-Length", &length)];
+    assert_eq!(served.ask_with_body("POST", &target, &headers, body).status, Some(403));
+    assert!(served.console.state().typed.is_empty());
+}
+
+#[test]
+fn a_bad_input_is_refused_before_the_project_is_reached() {
+    let connects = Arc::new(Mutex::new(vec![]));
+    let seen = Arc::clone(&connects);
+    let connect = move |machine: &str, cwd: &str, _: &Interrupt| {
+        seen.lock().unwrap().push((machine.to_string(), cwd.to_string()));
+        Err(OrchestratorError::new("ssh: connection refused"))
+    };
+    let served = Served::start(Box::new(connect), &[], SERVE_POLL, Arc::clone(&connects));
+    let target = Served::query("/agent/input", &[("run", SERVE_ID), ("role", "build"), ("machine", "box")]);
+    assert_eq!(served.post(&target, r#"{"keys": []}"#).status, Some(400));
+    let long = format!(r#"{{"text": "{}"}}"#, "x".repeat(MAX_BODY_BYTES));
+    assert_eq!(served.post(&target, &long).status, Some(413));
+    assert!(connects.lock().unwrap().is_empty(), "a bad body reached the project");
+    let reply = served.post(&target, r#"{"text": "go"}"#);
+    assert_eq!((reply.status, reply.error()), (Some(502), "ssh: connection refused".to_string()));
 }
 
 // -- TestServeEvents and TestServeEventsOnAMachine ---------------------------------------------------------------
@@ -916,8 +1040,7 @@ impl Write for Lines {
 fn in_process() {
     let host = Arc::new(ServeHost::on(None));
     let connect = move |_: &str, _: &str, _: &Interrupt| {
-        let host: Arc<dyn Host + Send + Sync> = host.clone();
-        Ok((host, "/proj".to_string()))
+        Ok(Reached { host: host.clone(), dir: "/proj".to_string(), console: Arc::new(FakeConsole::default()) })
     };
     let (lines, printed) = mpsc::channel();
     let (stop, stopped) = mpsc::channel::<()>();

@@ -5,6 +5,7 @@ use crate::constants::{
     DEFAULT_MAX_QUALITY_ROUNDS, DEFAULT_MAX_ROUNDS, DEFAULT_TURN_TIMEOUT, LOCAL_REFS_PREFIX, RUNS_DIR,
 };
 use crate::error::OrchestratorError;
+use crate::herdr::HerdrServer;
 use crate::prompts::{saved_prompts, Prompts};
 use crate::py::json::{Json, Map};
 use crate::py::text::repr;
@@ -12,7 +13,8 @@ use crate::workflow_file::saved_pipeline;
 
 /// What a run has done so far, saved as state.json in its run directory.
 ///
-/// state.json holds these fields in this order, as orchestrator.py's RunState declares them; a state read with fields
+/// state.json holds these fields in this order, as orchestrator.py's RunState declares them, herdr_server after
+/// machine and only when it is known (the field says why); a state read with fields
 /// this engine does not know keeps them, after its own, so that a state a newer engine wrote survives a round trip.
 /// The records a field holds as Json are kept as they were read, key order included.
 #[derive(Clone, Debug, PartialEq)]
@@ -23,6 +25,13 @@ pub struct RunState {
     pub cwd: String,
     /// The herdr machine the agents run on; None for this one.
     pub machine: Option<String>,
+    /// The herdr server of this machine the run's agents run in: the one the engine that started the run, or last
+    /// resumed it, reached, where it finds or starts each agent it comes to (one a resume has not come to yet may
+    /// still be in an earlier server). serve reaches them there, from whatever environment it runs in. None for a
+    /// run on a machine, whose herdr serves it, for a run saved before the field existed, and for one whose server
+    /// could not be told (HerdrServer::of_environment): serve then reaches the server its own environment picks.
+    /// Left out of state.json while None, so that a state saved before it writes back as it was.
+    pub herdr_server: Option<HerdrServer>,
     /// The current step's id, or quality, publish or done. main starts a run at its workflow's first step.
     pub phase: String,
     pub round: u32,
@@ -123,11 +132,12 @@ pub struct RunState {
 /// The keys of state.json this engine knows, which from_saved keeps out of unknown: every field to_json writes, in its
 /// order, then agent_args, which it only reads. A state/tests.rs test holds to_json's keys to this list; that every
 /// recorded state writes back as it was holds Fields::read to it.
-const FIELDS: [&str; 45] = [
+const FIELDS: [&str; 46] = [
     "run_id",
     "task",
     "cwd",
     "machine",
+    "herdr_server",
     "phase",
     "round",
     "workspace_id",
@@ -180,6 +190,7 @@ impl RunState {
             task: task.to_string(),
             cwd: cwd.to_string(),
             machine: None,
+            herdr_server: None,
             phase: "spec".to_string(),
             round: 0,
             workspace_id: String::new(),
@@ -259,8 +270,8 @@ impl RunState {
         Ok(state)
     }
 
-    /// The state as state.json holds it: every field FIELDS lists but agent_args, which is only read, in FIELDS's order,
-    /// then the unknown ones.
+    /// The state as state.json holds it: every field FIELDS lists but agent_args, which is only read, and herdr_server
+    /// while it is None, in FIELDS's order, then the unknown ones.
     pub fn to_json(&self) -> Json {
         let text = |s: &str| Json::from(s);
         let opt = |s: &Option<String>| Json::from(s.clone());
@@ -274,6 +285,9 @@ impl RunState {
         out.insert("task", text(&s.task));
         out.insert("cwd", text(&s.cwd));
         out.insert("machine", opt(&s.machine));
+        if let Some(server) = &s.herdr_server {
+            out.insert("herdr_server", server.to_json());
+        }
         out.insert("phase", text(&s.phase));
         out.insert("round", number(s.round.into()));
         out.insert("workspace_id", text(&s.workspace_id));
@@ -561,6 +575,11 @@ impl Fields<'_> {
     /// Every field but run_id, task and cwd into state.
     fn read(&self, s: &mut RunState) -> Result<(), OrchestratorError> {
         self.optional("machine", &mut s.machine)?;
+        if let Some(value) = self.saved.get("herdr_server").filter(|v| !v.is_null()) {
+            let server = HerdrServer::from_json(value);
+            let server = server.ok_or_else(|| self.invalid("herdr_server", "an object of herdr's variables"))?;
+            s.herdr_server = Some(server);
+        }
         self.text("phase", &mut s.phase)?;
         self.number("round", &mut s.round)?;
         self.text("workspace_id", &mut s.workspace_id)?;

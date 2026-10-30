@@ -41,6 +41,7 @@ OTHER_PROGRAMS_NAMES = {
     "LD_LIBRARY_PATH": "the dynamic loader's environment variable",
     "PYTEST_ADDOPTS": "pytest's environment variable",
     "CARGO_HOME": "cargo's environment variable",
+    "HERDR_SESSION": "the herdr CLI's environment variable, which picks its session",
     "SSL_CERT_FILE": "OpenSSL's environment variable, which the Rust engine's HttpClient reads too",
     "SSL_CERT_DIR": "OpenSSL's environment variable, which the Rust engine's HttpClient reads too",
     "ORCHESTRATOR_BIN": "the desktop app's environment variable, ui/src-tauri/src/lib.rs",

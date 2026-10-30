@@ -8,6 +8,7 @@ use std::sync::Arc;
 use super::*;
 use crate::ci::fake::Outcome;
 use crate::http::Http;
+use crate::package_index::PackageIndexes;
 use crate::patch::added_lines;
 use crate::pipeline::default_workflow;
 use crate::prompts::Prompts;
@@ -193,14 +194,14 @@ fn judge_run_on_every_recorded_quality_file_gives_the_recorded_result() {
             })
             .collect();
         let change = Change { diff: text("diff"), files, spec: text("spec"), counts: Some(counts) };
-        let pypi = PyPI::new(FakePyPI::from_json(case.get("pypi").and_then(Json::as_object).unwrap().clone()));
+        let indexes = PackageIndexes::with_pypi(FakePyPI::from_json(case.get("pypi").and_then(Json::as_object).unwrap().clone()));
         let pipeline = replaced(&default_workflow(&Prompts::default()), |s| {
             s.max_files = int(case, "max_files");
             s.max_lines = int(case, "max_lines");
         })
         .unwrap();
         let out = change.run(&always, |change| {
-            judge_run(&text("quality"), &orchestrator_checks(&pipeline, &pypi), change).unwrap()
+            judge_run(&text("quality"), &orchestrator_checks(&pipeline, &indexes), change).unwrap()
         });
         assert_eq!(out, text("out"), "{}", text("from"));
     }
@@ -252,8 +253,8 @@ fn checks_come_from_the_workflow() {
         s.max_lines = 40;
     })
     .unwrap();
-    let pypi = PyPI::new(FakePyPI::with(&[]));
-    let checks = orchestrator_checks(&p, &pypi);
+    let indexes = PackageIndexes::with_pypi(FakePyPI::with(&[]));
+    let checks = orchestrator_checks(&p, &indexes);
     assert_eq!(
         checks.iter().map(|c| c.name).collect::<Vec<_>>(),
         ["new-dependencies", "diff-budget", "unexpected-paths"]
@@ -287,8 +288,8 @@ fn severities_are_written_as_the_gate_writes_them() {
 /// workflow's orchestrator_checks judge it with pypi, on TODAY.
 fn quality(change: &Change, pypi: &Arc<FakePyPI>, build: Outcome) -> String {
     let pipeline = default_workflow(&Prompts::default());
-    let pypi = PyPI::new(Arc::clone(pypi) as Arc<dyn Http>);
-    change.run(&always, |c| judge_run(&build.quality.unwrap(), &orchestrator_checks(&pipeline, &pypi), c).unwrap())
+    let indexes = PackageIndexes::with_pypi(Arc::clone(pypi) as Arc<dyn Http>);
+    change.run(&always, |c| judge_run(&build.quality.unwrap(), &orchestrator_checks(&pipeline, &indexes), c).unwrap())
 }
 
 fn limits() -> Arc<FakePyPI> {
@@ -459,9 +460,9 @@ fn slow_pypi_stops_asking_at_the_rounds_deadline_and_keeps_the_heartbeat_between
         asked < 2
     };
     let pipeline = default_workflow(&Prompts::default());
-    let index = PyPI::new(Arc::clone(&pypi) as Arc<dyn Http>);
+    let indexes = PackageIndexes::with_pypi(Arc::clone(&pypi) as Arc<dyn Http>);
     let q = change
-        .run(&in_time, |c| judge_run(&ok().quality.unwrap(), &orchestrator_checks(&pipeline, &index), c).unwrap());
+        .run(&in_time, |c| judge_run(&ok().quality.unwrap(), &orchestrator_checks(&pipeline, &indexes), c).unwrap());
     assert_eq!(pypi.state().asked, ["limits", "rich"]);
     assert_eq!(*beats.borrow(), [0, 1, 2], "a beat before each ask");
     assert!(

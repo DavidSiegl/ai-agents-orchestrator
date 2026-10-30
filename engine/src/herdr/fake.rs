@@ -5,7 +5,7 @@ use std::cell::{RefCell, RefMut};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
-use super::{Agent, Direction, Herdr, HerdrError};
+use super::{Agent, Direction, Herdr, HerdrError, HerdrServer};
 use crate::error::OrchestratorError;
 use crate::harness::{harness, Resume};
 use crate::host::fake::FakeHost;
@@ -94,6 +94,8 @@ pub(crate) struct FakeHerdrState {
     /// Run first by every prompt, given (name, text), when set: an error it gives is the prompt's, which then plays
     /// nothing; a test's own herdr prompt, such as a real ProcessHerdr's.
     pub prompt_with: Option<PromptWith>,
+    /// What server answers: the herdr server the fake stands for. None, as for a herdr machine, unless a test sets it.
+    pub server: Option<HerdrServer>,
 }
 
 /// A test's own wait (FakeHerdrState::wait_with).
@@ -132,6 +134,7 @@ impl FakeHerdr {
                 before_call: None,
                 interrupt: None,
                 prompt_with: None,
+                server: None,
             }),
         }
     }
@@ -302,5 +305,9 @@ impl Herdr for FakeHerdr {
         }
         s.workspaces.remove(workspace);
         Ok(())
+    }
+
+    fn server(&self) -> Option<HerdrServer> {
+        self.state().server.clone()
     }
 }

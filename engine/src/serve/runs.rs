@@ -1,6 +1,8 @@
 //! What serve gives of a project's runs, as orchestrator.py's ProjectRuns, plain_name, RunWatch and sse_event: the
 //! run records `list --json` prints, each run's files and their text, and the events that tell a stream's client what
-//! changed. Every path a client names is checked before anything is read.
+//! changed; and each run's agents, read and typed into through herdr, in the herdr server their run saved. Every path
+//! a client names is checked before anything is read, and an agent is named only by its run and role, never by its
+//! herdr name.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -9,6 +11,7 @@ use std::sync::Arc;
 use crate::cli::listing::run_record;
 use crate::constants::RUNS_DIR;
 use crate::error::OrchestratorError;
+use crate::herdr::{AgentAddress, AgentConsole, HerdrError, HerdrServer};
 use crate::host::Host;
 use crate::py::json::{Json, Map};
 use crate::py::text::repr;
@@ -25,14 +28,16 @@ pub enum RunReadError {
     /// A run id or file name that is not one plain name in the run directory (plain_name), or that names
     /// state.json; nothing was read. serve answers it with 403.
     Refused(String),
-    /// The project could not be read.
+    /// There is no such run, or no agent of the role in it, or the agent has exited. serve answers it with 404.
+    Missing(String),
+    /// The project could not be read, or herdr failed.
     Failed(OrchestratorError),
 }
 
 impl fmt::Display for RunReadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RunReadError::Refused(why) => f.write_str(why),
+            RunReadError::Refused(why) | RunReadError::Missing(why) => f.write_str(why),
             RunReadError::Failed(e) => e.fmt(f),
         }
     }
@@ -53,10 +58,21 @@ pub fn plain_name(name: &str) -> Result<&str, RunReadError> {
     Ok(name)
 }
 
-/// One project's runs and their files, as serve's endpoints give them.
+/// What a client types into a run's agent (ProjectRuns::type_into).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AgentInput {
+    /// Text to submit, as a prompt is.
+    Text(String),
+    /// Keys to press, in order, as herdr names them (AgentConsole::send_keys).
+    Keys(Vec<String>),
+}
+
+/// One project's runs, their files and their agents, as serve's endpoints give them.
 pub struct ProjectRuns {
     /// Reaches the project; its commands are stopped when the server stops.
     host: Arc<dyn Host + Send + Sync>,
+    /// Reaches the project's runs' agents, each in the herdr server its run saved.
+    console: Arc<dyn AgentConsole>,
     /// The project's absolute directory on host.
     cwd: String,
     /// The --machine and --cwd flags as the client gave them (target_args), for the records' resume commands.
@@ -66,9 +82,14 @@ pub struct ProjectRuns {
 }
 
 impl ProjectRuns {
-    /// The project in directory cwd, absolute, on host; target is as the field says.
-    pub fn new(host: Arc<dyn Host + Send + Sync>, cwd: String, target: Vec<String>) -> ProjectRuns {
-        ProjectRuns { host, cwd, target, pid_alive: Arc::new(pid_alive) }
+    /// The project in directory cwd, absolute, on host, its agents reached by console; target is as the field says.
+    pub fn new(
+        host: Arc<dyn Host + Send + Sync>,
+        console: Arc<dyn AgentConsole>,
+        cwd: String,
+        target: Vec<String>,
+    ) -> ProjectRuns {
+        ProjectRuns { host, console, cwd, target, pid_alive: Arc::new(pid_alive) }
     }
 
     /// As new, a run's owner on this machine taken to be alive by pid_alive instead.
@@ -117,9 +138,57 @@ impl ProjectRuns {
         Ok(self.host.read(&format!("{dir}/{}", plain_name(name)?))?)
     }
 
+    /// The last lines of what the run's agent of role shows, at most lines of them (AgentConsole::read). Errors:
+    /// agent_name's, Missing for an agent that has exited, Failed when herdr fails otherwise.
+    pub fn agent_text(&self, run_id: &str, role: &str, lines: u32) -> Result<String, RunReadError> {
+        let agent = self.agent(run_id, role)?;
+        self.console.read(&agent, lines).map_err(|e| herdr_failure(role, e))
+    }
+
+    /// Type input into the run's agent of role, without waiting for it to be taken. Errors: as agent_text's.
+    pub fn type_into(&self, run_id: &str, role: &str, input: &AgentInput) -> Result<(), RunReadError> {
+        let agent = self.agent(run_id, role)?;
+        let typed = match input {
+            AgentInput::Text(text) => self.console.submit(&agent, text),
+            AgentInput::Keys(keys) => {
+                let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+                self.console.send_keys(&agent, &keys)
+            }
+        };
+        typed.map_err(|e| herdr_failure(role, e))
+    }
+
+    /// The run's agent of role as its state.json saves it: its herdr name and its run's herdr server. Errors:
+    /// Refused for a run id that is not a plain name; Missing for no such run, or no started agent of that role in
+    /// it; Failed when state.json cannot be read, is not JSON, or saves a herdr_server of another shape.
+    fn agent(&self, run_id: &str, role: &str) -> Result<AgentAddress, RunReadError> {
+        let path = format!("{}/state.json", self.dir(run_id)?);
+        let text = self.host.read(&path)?.ok_or_else(|| RunReadError::Missing(format!("no run {run_id}")))?;
+        let state = Json::parse(&text).map_err(|e| OrchestratorError(format!("{path}: {e}")))?;
+        let name = state.get("agents").and_then(|a| a.get(role)).and_then(|a| a.get("name")).and_then(Json::as_str);
+        let Some(name) = name.filter(|n| !n.is_empty()) else {
+            return Err(RunReadError::Missing(format!("run {run_id} has no {role} agent")));
+        };
+        let server = match state.get("herdr_server").filter(|s| !s.is_null()) {
+            None => None,
+            Some(saved) => Some(HerdrServer::from_json(saved).ok_or_else(|| {
+                OrchestratorError(format!("{path}: herdr_server is not an object of herdr's variables"))
+            })?),
+        };
+        Ok(AgentAddress { name: name.to_string(), server })
+    }
+
     fn dir(&self, run_id: &str) -> Result<String, RunReadError> {
         Ok(format!("{}/{RUNS_DIR}/{}", self.cwd, plain_name(run_id)?))
     }
+}
+
+/// The RunReadError of herdr's failure e on role's agent: Missing when the agent has exited.
+fn herdr_failure(role: &str, e: HerdrError) -> RunReadError {
+    if e.code() == Some("agent_not_found") {
+        return RunReadError::Missing(format!("the {role} agent has exited"));
+    }
+    RunReadError::Failed(e.into())
 }
 
 /// One event of a stream, as RunWatch::poll gives it.

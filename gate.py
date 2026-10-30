@@ -1579,14 +1579,16 @@ class _ChangedFunction:
         return self.first + len(self.source) - 1
 
 
-def _adds_to(f: _ChangedFunction, added: set[int], removed: set[int]) -> bool:
-    """Whether the change added a line to f, decorators included, as _changed_python_units's touched; lines it only
-    removed do not count."""
-    return any(f.first <= n <= f.last for n in added)
+def _edits_function(f: _ChangedFunction, added: set[int], removed: set[int]) -> bool:
+    """Whether the change added lines to f, decorators included, or removed lines from it, as _changed_python_units's
+    touched: a removed guard clause or decorator changes what f does as an added line does. Lines removed right after
+    its last line count too, though they may have been the blank lines below it. Comments and blank lines above its
+    first decorator do not count, unlike _edits_test's, since they change nothing that mutmut mutates."""
+    return any(f.first <= n <= f.last for n in added) or any(f.first - 1 <= n <= f.last for n in removed)
 
 
 def _changed_python_units(change: GateChange, in_scope: Callable[[str], bool],
-                          touched: Callable[[_ChangedFunction, set[int], set[int]], bool] = _adds_to,
+                          touched: Callable[[_ChangedFunction, set[int], set[int]], bool],
                           ) -> tuple[list[_ChangedFunction], list[tuple[str, str]]]:
     """The top-level functions and methods of top-level classes that the change touched, in the Python files it adds
     lines to or removes lines from whose paths in_scope accepts, as _parsed_changed_files gives those files:
@@ -3473,10 +3475,10 @@ _SURVIVOR_EXAMPLES = 3
 
 def surviving_mutants(change: GateChange, *, budget: float, test_contexts: str | None = None) -> list[dict]:
     """The surviving-mutants check's find: mutation-tests with mutmut each top-level function and method the change adds
-    a line to in a Python file outside the tests, then, with what is left of budget, the Rust the change adds lines to,
-    with cargo-mutants, as _cargo_mutants_on_copy says; mutmut has half the budget when there is Rust to mutate
-    too. Reports at its def each such function that has mutants the
-    tests did not notice, with how many of its mutants they were and what the first _SURVIVOR_EXAMPLES change, as a
+    lines to or removes lines from (_edits_function) in a Python file outside the tests, then, with what is left of
+    budget, the Rust the change adds lines to, with cargo-mutants, as _cargo_mutants_on_copy says; mutmut has half
+    the budget when there is Rust to mutate too. Reports at its def each such function that has mutants the tests did
+    not notice, with how many of its mutants they were and what the first _SURVIVOR_EXAMPLES change, as a
     line before and after; and each such function that no test calls. The change leaves out mutmut's state, as
     GateChange.from_tree says, so no function there is mutated. A changed path that is a symlink, a submodule or a
     special file is not read to choose the functions (_is_link_or_special), so none of its functions is a changed
@@ -3892,10 +3894,10 @@ def _logical_line_ends(text: str) -> tuple[list[int], dict[int, str]]:
 
 
 def _changed_python_functions(change: GateChange) -> tuple[list[_ChangedFunction], list[dict]]:
-    """The functions mutmut mutates as one that the change added lines to, decorators included, in the Python files
-    outside the tests that it left in the working tree; and a finding for each such file that could not be read or
-    parsed."""
-    functions, unreadable = _changed_python_units(change, lambda path: not _python_test_file(path))
+    """The functions mutmut mutates as one that the change added lines to or removed lines from, as _edits_function
+    says, in the Python files outside the tests that it left in the working tree; and a finding for each such file
+    that could not be read or parsed."""
+    functions, unreadable = _changed_python_units(change, lambda path: not _python_test_file(path), _edits_function)
     return functions, [_finding(path, None, "not-run", f"{why}, so its functions were not mutation-tested.")
                        for path, why in unreadable]
 

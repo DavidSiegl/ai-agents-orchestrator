@@ -12,6 +12,7 @@ use crate::cli::args::{parse_args, Command};
 use crate::constants::APPROVE;
 use crate::env::ConfigDir;
 use crate::host::fake::FakeHost;
+use crate::herdr::HerdrServer;
 use crate::host::Host;
 use crate::runs::local_host;
 use crate::test_support::{quick, resumable, solo, TempDir};
@@ -382,4 +383,40 @@ fn a_resume_finds_its_run_on_the_host_and_switches_its_gate() {
     assert_eq!(e.0, "no Jenkins for other/job here");
     let e = resumed_state(&resume_args(&["b0b0b0"]), "/proj", &world).unwrap_err();
     assert_eq!(e.0, "no run b0b0b0 under /proj/.orchestrator/runs");
+}
+
+/// The herdr server whose session is session, its socket path unset.
+fn session(session: &str) -> HerdrServer {
+    HerdrServer::from_json(&Json::Object([("HERDR_SESSION", Json::from(session))].into_iter().collect())).unwrap()
+}
+
+#[test]
+fn a_run_saves_the_herdr_server_it_starts_or_resumes_its_agents_in() {
+    let (f, d) = (Fixture::new(vec![]), TempDir::new());
+    let config = ConfigDir::at(&d.path());
+    let world = connected(&f, &config, &no_jenkins);
+    f.herdr.state().server = Some(session("work"));
+    let (state, _) = new_state(&run_args(&["t"], &config), "/proj", None, &world).unwrap();
+    assert_eq!(state.herdr_server, Some(session("work")));
+    // A herdr forwarding to a machine reaches none of this machine's.
+    f.herdr.state().server = None;
+    let on_box = run_args(&["--machine", "box", "--cwd", "/p", "t"], &config);
+    let (state, _) = new_state(&on_box, "/proj", None, &world).unwrap();
+    assert_eq!(state.herdr_server, None);
+
+    // A resume saves the server it reaches, over the one the run saved.
+    let host = Rc::new(FakeHost::default());
+    let mut saved = saved_run("build", 1, &["spec", "build"]);
+    saved.herdr_server = Some(session("old"));
+    host.state().files.insert(format!("{}/state.json", saved.dir()), saved.to_text());
+    host.state().ages.insert(saved.run_id.clone(), 10_000);
+    let f = Fixture::on(host, saved, vec![]);
+    let world = connected(&f, &config, &no_jenkins);
+    f.herdr.state().server = Some(session("new"));
+    let (state, _) = resumed_state(&resume_args(&["a1b2c3"]), "/proj", &world).unwrap();
+    assert_eq!(state.herdr_server, Some(session("new")));
+    f.herdr.state().server = None;
+    let on_box = resume_args(&["a1b2c3", "--machine", "box", "--cwd", "/p"]);
+    let (state, _) = resumed_state(&on_box, "/proj", &world).unwrap();
+    assert_eq!(state.herdr_server, None);
 }

@@ -2,7 +2,8 @@
 # Build the desktop app in ui/ for release, with the orchestrator binary that build-binary.sh built for this
 # machine inside it as its sidecar, so the app needs no checkout. Writes to dist/, each with its
 # .sha256: on Linux octoflow-desktop-linux-<arch>.deb and .AppImage, on macOS
-# octoflow-desktop-macos-<arch>.dmg, signed ad hoc only. The app's version is pyproject.toml's. Run
+# octoflow-desktop-macos-<arch>.dmg, signed ad hoc only. Each holds build-binary.sh's third-party licenses as
+# THIRD-PARTY-LICENSES.html among the app's resources. The app's version is pyproject.toml's. Run
 # build-binary.sh first. Jenkins's Package stage builds the Linux app with it, and
 # .github/workflows/macos-binary.yml the macOS one.
 set -eu
@@ -21,6 +22,8 @@ case "$(uname -m)" in
 esac
 binary="dist/octoflow-$os-$arch"
 [ -x "$binary" ] || { echo "build-desktop.sh: no $binary; run packaging/build-binary.sh first" >&2; exit 1; }
+notices=dist/octoflow-third-party-licenses.html
+[ -f "$notices" ] || { echo "build-desktop.sh: no $notices; run packaging/build-binary.sh first" >&2; exit 1; }
 
 version=$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -n 1)
 [ -n "$version" ] || { echo "build-desktop.sh: no version in pyproject.toml" >&2; exit 1; }
@@ -32,6 +35,9 @@ triple=$(rustc -vV | sed -n 's/^host: //p')
 # ui/src-tauri/src/lib.rs).
 mkdir -p ui/src-tauri/binaries build/desktop
 cp "$binary" "ui/src-tauri/binaries/octoflow-$triple"
+# Under the name Tauri bundles it as, so the config below names a file in ui/src-tauri, which resource paths are
+# relative to.
+cp "$notices" ui/src-tauri/THIRD-PARTY-LICENSES.html
 
 # Merged over tauri.conf.json, which bundles nothing, so that cargo test and tauri dev need no sidecar on
 # disk. signingIdentity "-" signs the macOS app ad hoc: macOS reports an unsigned app downloaded onto Apple
@@ -43,6 +49,7 @@ cat > "$config" <<EOF
   "bundle": {
     "active": true,
     "externalBin": ["binaries/octoflow"],
+    "resources": ["THIRD-PARTY-LICENSES.html"],
     "macOS": { "signingIdentity": "-" }
   }
 }
@@ -205,6 +212,8 @@ if [ "$os" = linux ]; then
             printf '%s\n' "$files" | grep -E '^(\./)?usr/bin/' >&2 || true
             exit 1
         fi
+        printf '%s\n' "$files" | grep -Eq '/THIRD-PARTY-LICENSES\.html$' \
+            || { echo "build-desktop.sh: $deb has no THIRD-PARTY-LICENSES.html" >&2; exit 1; }
     done
     publish deb "$out/deb/Octoflow_${version}_"*.deb
     publish AppImage "$out/appimage/Octoflow_${version}_"*.AppImage
@@ -212,6 +221,8 @@ if [ "$os" = linux ]; then
 else
     [ -x "$out/macos/Octoflow.app/Contents/MacOS/octoflow" ] \
         || { echo "build-desktop.sh: Octoflow.app has no Contents/MacOS/octoflow" >&2; exit 1; }
+    [ -f "$out/macos/Octoflow.app/Contents/Resources/THIRD-PARTY-LICENSES.html" ] \
+        || { echo "build-desktop.sh: Octoflow.app has no Contents/Resources/THIRD-PARTY-LICENSES.html" >&2; exit 1; }
     publish dmg "$out/dmg/Octoflow_${version}_"*.dmg
     smoke_dmg "$PWD/dist/octoflow-desktop-$os-$arch.dmg"
 fi

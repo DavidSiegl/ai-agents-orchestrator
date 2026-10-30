@@ -1,0 +1,33 @@
+# cargo-about's configuration, with which packaging/build-binary.sh writes dist/octoflow-third-party-licenses.html:
+# the licenses of the crates compiled into the orchestrator binary and the desktop app, whose texts MIT, Apache-2.0 and
+# the rest require every copy of those programs to come with.
+
+# The licenses a dependency may be used under. A crate offered under none of them fails the build, so a dependency
+# under a license nobody has looked at, a copyleft one above all, cannot reach a release unnoticed. For a crate
+# offered under several, the notices give the first one here that it offers. Before adding one, check that it lets
+# the project stay MIT OR Apache-2.0 (README.md, "License").
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+]
+
+# Every target a binary or an app may be built for (build-binary.sh's os and arch), so that the one file covers each
+# release asset, whichever machine wrote it.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+
+# Only what the programs contain: build scripts' and tests' dependencies, and the workspace's own crates, which are
+# under the project's license, are not shipped.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+private = { ignore = true }

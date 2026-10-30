@@ -1,55 +1,17 @@
 //! The Python Package Index's JSON API (https://docs.pypi.org/api/json/), as orchestrator.py's PyPI asks it: what
 //! the new-dependencies check (crate::checks) knows of a package from PyPI.
 
-use std::fmt;
 use std::sync::Arc;
 
 use crate::constants::PYPI_TIMEOUT;
-use crate::http::{Http, HttpClient, HttpError, Method, Request};
-use crate::py::datetime::IsoTime;
+use crate::http::{Http, HttpError, Method, Request};
+use crate::package_index::{IndexError, IndexedPackage, PackageIndex, Upload};
 use crate::py::json::Json;
 use crate::py::text::{shortened, splitlines, strip, utf8_error};
 use crate::py::url::quote;
 
 #[cfg(test)]
 pub(crate) mod fake;
-
-/// PyPI gave no answer the engine can use: none at all, an HTTP error other than 404, or something that is not its
-/// JSON. The message names the URL and why.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PyPIError(pub String);
-
-impl fmt::Display for PyPIError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for PyPIError {}
-
-/// When a file was uploaded to PyPI.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Upload {
-    /// Seconds since the epoch, with their fraction; a time PyPI gave without an offset is the machine's local time,
-    /// as Python's timestamp() takes it (crate::py::datetime::IsoTime::timestamp).
-    pub at: f64,
-    /// Its date, YYYY-MM-DD, in the offset PyPI gave the time in: UTC, as PyPI gives every time.
-    pub date: String,
-}
-
-/// What PyPI knows of a project.
-#[derive(Clone, Debug, PartialEq)]
-pub struct PyPIProject {
-    /// The upload of its earliest file; None when no release has a file.
-    pub first_release: Option<Upload>,
-    /// Its latest version.
-    pub version: String,
-    /// The upload of that version's earliest file; None when it has none.
-    pub latest_release: Option<Upload>,
-    /// Its license expression, else the first line of its license field, cut to 80 characters, else its license
-    /// classifier's last part; None when it states none.
-    pub license: Option<String>,
-}
 
 /// The index, reached through an [`Http`].
 pub struct PyPI {
@@ -61,14 +23,9 @@ impl PyPI {
         PyPI { http }
     }
 
-    /// The index over the network, through the proxy the process's environment names (crate::http::HttpClient).
-    pub fn from_env() -> PyPI {
-        PyPI::new(Arc::new(HttpClient::from_env()))
-    }
-
-    /// What PyPI knows of the project name; None when it has no such project (HTTP 404). Errors: PyPIError, naming
+    /// What PyPI knows of the project name; None when it has no such project (HTTP 404). Errors: IndexError, naming
     /// the URL, when it gives no usable answer within PYPI_TIMEOUT seconds a step.
-    pub fn project(&self, name: &str) -> Result<Option<PyPIProject>, PyPIError> {
+    pub fn project(&self, name: &str) -> Result<Option<IndexedPackage>, IndexError> {
         let url = format!("https://pypi.org/pypi/{}/json", quote(name));
         let request = Request {
             method: Method::Get,
@@ -80,16 +37,31 @@ impl PyPI {
         let body = match self.http.send(&request) {
             Ok(answer) => answer.body,
             Err(HttpError::Status(404)) => return Ok(None),
-            Err(HttpError::Status(status)) => return Err(PyPIError(format!("GET {url}: HTTP {status}"))),
-            Err(HttpError::NoAnswer(why)) => return Err(PyPIError(format!("GET {url}: {why}"))),
+            Err(HttpError::Status(status)) => return Err(IndexError(format!("GET {url}: HTTP {status}"))),
+            Err(HttpError::NoAnswer(why)) => return Err(IndexError(format!("GET {url}: {why}"))),
         };
-        project_of(&body).map(Some).map_err(|why| PyPIError(format!("GET {url}: the answer is not PyPI's JSON: {why}")))
+        project_of(&body).map(Some).map_err(|why| IndexError(format!("GET {url}: the answer is not PyPI's JSON: {why}")))
+    }
+}
+
+impl PackageIndex for PyPI {
+    fn name(&self) -> &'static str {
+        "PyPI"
+    }
+
+    fn unknown_rule(&self) -> &'static str {
+        "not-on-pypi"
+    }
+
+    /// PyPI::project's: PyPI takes a project's normalized name for the project.
+    fn package(&self, key: &str) -> Result<Option<IndexedPackage>, IndexError> {
+        self.project(key)
     }
 }
 
 /// The project of PyPI's JSON answer; why not, as Python's error of the step that fails says it, for an answer of
 /// another shape.
-fn project_of(body: &[u8]) -> Result<PyPIProject, String> {
+fn project_of(body: &[u8]) -> Result<IndexedPackage, String> {
     let text = std::str::from_utf8(body).map_err(|e| utf8_error(body, &e))?;
     let answer = Json::parse(text)?;
     let info = match &answer {
@@ -112,7 +84,7 @@ fn project_of(body: &[u8]) -> Result<PyPIProject, String> {
     }
     let first = first_upload(&files)?;
     let latest = first_upload(&answer.get("urls").map_or(Ok(Vec::new()), iterated)?)?;
-    Ok(PyPIProject { first_release: first, version, latest_release: latest, license: license(info)? })
+    Ok(IndexedPackage { first_release: first, version, latest_release: latest, license: license(info)? })
 }
 
 /// The items of `value or []`; an error for a true value that is not a list.
@@ -133,7 +105,7 @@ fn first_upload(files: &[&Json]) -> Result<Option<Upload>, String> {
             other => return Err(format!("'{}' object is not subscriptable", other.python_type())),
         };
         let Json::Str(time) = time else { return Err("fromisoformat: argument must be str".to_string()) };
-        let upload = upload_of(time)?;
+        let upload = Upload::from_iso(time)?;
         if first.as_ref().is_none_or(|f| upload.at < f.at) {
             first = Some(upload);
         }
@@ -141,13 +113,9 @@ fn first_upload(files: &[&Json]) -> Result<Option<Upload>, String> {
     Ok(first)
 }
 
-/// The upload at the ISO 8601 time iso, as datetime.fromisoformat reads it.
-fn upload_of(iso: &str) -> Result<Upload, String> {
-    let time = IsoTime::parse(iso)?;
-    Ok(Upload { at: time.timestamp()?, date: time.date() })
-}
 
-/// The project's license, as PyPIProject::license says.
+/// The project's license, as IndexedPackage::license holds it: its license expression, else the first line of its
+/// license field, cut to 80 characters, else its license classifier's last part; None when it states none.
 fn license(info: &Json) -> Result<Option<String>, String> {
     let text = |key: &str| -> Result<String, String> {
         match info.get(key) {

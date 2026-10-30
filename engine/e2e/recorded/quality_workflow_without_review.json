@@ -37,6 +37,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "build",
       "round": 0,
       "workspace_id": "",
@@ -128,6 +132,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "build",
       "round": 1,
       "workspace_id": "w1",
@@ -233,6 +241,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "build",
       "round": 1,
       "workspace_id": "w1",
@@ -323,6 +335,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "build",
       "round": 1,
       "workspace_id": "w1",
@@ -415,6 +431,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "quality",
       "round": 1,
       "workspace_id": "w1",
@@ -541,6 +561,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "quality",
       "round": 1,
       "workspace_id": "w1",
@@ -663,6 +687,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "quality",
       "round": 1,
       "workspace_id": "w1",
@@ -789,6 +817,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "publish",
       "round": 1,
       "workspace_id": "w1",
@@ -934,6 +966,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "done",
       "round": 1,
       "workspace_id": "w1",
@@ -1079,7 +1115,7 @@
   "runs/<run:1>/leaks-snapshot.json": "[]\n",
   "runs/<run:1>/metrics.json": "{\"version\": 1, \"run_id\": \"<run:1>\", \"workflow\": \"solo\", \"outcome\": \"QUALITY_GATE_FAILED\", \"rounds\": 1, \"max_rounds\": 3, \"quality_gate\": true, \"max_quality_rounds\": 1, \"pull_request\": \"https://github.com/parity/project/pull/1\", \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\", \"roles\": {\"build\": {\"harness\": \"claude\", \"model\": null}}, \"turns\": [{\"step\": \"build\", \"role\": \"build\", \"harness\": \"claude\", \"model\": null, \"round\": 1, \"quality_round\": 0, \"human_paced\": false, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\", \"tokens\": \"unknown\"}, {\"step\": \"quality\", \"role\": \"quality\", \"harness\": null, \"model\": null, \"round\": 1, \"quality_round\": 1, \"human_paced\": false, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\", \"tokens\": null}], \"quality_rounds\": [{\"round\": 1, \"quality_round\": 1, \"gate\": \"ERROR\", \"conditions\": [\"1 findings of the `ruff` check; each is listed below.\"], \"fingerprints_by_check\": {\"ruff\": [\"621e234af67debfb\"]}}], \"restored_locked_files\": 0}\n",
   "runs/<run:1>/quality-1-1.md": "GATE: ERROR\n\nJenkins build #1 judged snapshot `<sha:2>` (round 1, quality round 1 of 1) and ended UNSTABLE.\n\n## Failed conditions\n\n- 1 findings of the `ruff` check; each is listed below.\n\n## Findings\n\n1. `src/calc.py:7` error ruff F821: undefined name `c`\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n2. `src/calc.py (the whole file)` warning unexpected-paths: the spec mentions neither this path nor its file name.\n3. `tests/test_calc.py (the whole file)` warning unexpected-paths: the spec mentions neither this path nor its file name.\n",
-  "runs/<run:1>/state.json": "{\"run_id\": \"<run:1>\", \"task\": \"Add a subtract function\", \"cwd\": \"<world>/project\", \"machine\": null, \"phase\": \"done\", \"round\": 1, \"workspace_id\": \"w1\", \"root_pane\": \"p1\", \"base\": \"<sha:1>\", \"base_branch\": \"main\", \"branch\": \"orchestrator/add-a-subtract-function-<key:1>\", \"pr_url\": \"https://github.com/parity/project/pull/1\", \"verdict\": \"QUALITY_GATE_FAILED\", \"conflicts\": [], \"error\": null, \"agents\": {\"build\": {\"name\": \"build-<key:1>\", \"pane\": \"p1\", \"kind\": \"claude\", \"session\": \"session-1\"}}, \"max_rounds\": 3, \"turn_timeout\": 1800, \"permission_mode\": null, \"models\": {}, \"agent_kinds\": {\"build\": \"claude\"}, \"pull_request\": true, \"prompted\": \"build-1.md\", \"retried\": [], \"retrying\": null, \"owner\": null, \"heartbeat_at\": \"<time>\", \"quality_job\": \"parity/quality\", \"quality_gate_disabled\": false, \"max_quality_rounds\": 1, \"quality_round\": 1, \"ci\": {}, \"workflow\": \"solo\", \"workflow_definition\": {\"description\": \"Builder alone\", \"roles\": {\"build\": {\"label\": \"Builder\"}}, \"steps\": [{\"id\": \"build\", \"role\": \"build\", \"file\": \"build-{n}.md\", \"prompt\": \"Implement {task} in {cwd}; report to {build_path}.\", \"again\": \"Do it again; report to {build_path}.\", \"fresh_note\": \"You are a fresh session.\", \"fresh_repeats_again\": true, \"edits\": true, \"quality_gated\": true}]}, \"prompt_overrides\": {}, \"branch_cleanup\": null, \"worktree\": null, \"closed\": null, \"turns\": [{\"step\": \"build\", \"role\": \"build\", \"round\": 1, \"quality_round\": 0, \"file\": \"build-1.md\", \"agent\": \"claude\", \"model\": null, \"session\": \"session-1\", \"tokens\": \"unknown\", \"human_paced\": false, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\"}, {\"step\": \"quality\", \"role\": \"quality\", \"round\": 1, \"quality_round\": 1, \"file\": \"quality-1-1.md\", \"agent\": null, \"model\": null, \"session\": null, \"tokens\": null, \"human_paced\": false, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\"}], \"quality_rounds\": [{\"round\": 1, \"quality_round\": 1, \"gate\": \"ERROR\", \"conditions\": [\"1 findings of the `ruff` check; each is listed below.\"], \"fingerprints_by_check\": {\"ruff\": [\"621e234af67debfb\"]}}], \"blocked\": null, \"locked\": {}, \"restored\": [], \"proofs\": []}\n",
+  "runs/<run:1>/state.json": "{\"run_id\": \"<run:1>\", \"task\": \"Add a subtract function\", \"cwd\": \"<world>/project\", \"machine\": null, \"herdr_server\": {\"HERDR_SOCKET_PATH\": null, \"HERDR_SESSION\": null}, \"phase\": \"done\", \"round\": 1, \"workspace_id\": \"w1\", \"root_pane\": \"p1\", \"base\": \"<sha:1>\", \"base_branch\": \"main\", \"branch\": \"orchestrator/add-a-subtract-function-<key:1>\", \"pr_url\": \"https://github.com/parity/project/pull/1\", \"verdict\": \"QUALITY_GATE_FAILED\", \"conflicts\": [], \"error\": null, \"agents\": {\"build\": {\"name\": \"build-<key:1>\", \"pane\": \"p1\", \"kind\": \"claude\", \"session\": \"session-1\"}}, \"max_rounds\": 3, \"turn_timeout\": 1800, \"permission_mode\": null, \"models\": {}, \"agent_kinds\": {\"build\": \"claude\"}, \"pull_request\": true, \"prompted\": \"build-1.md\", \"retried\": [], \"retrying\": null, \"owner\": null, \"heartbeat_at\": \"<time>\", \"quality_job\": \"parity/quality\", \"quality_gate_disabled\": false, \"max_quality_rounds\": 1, \"quality_round\": 1, \"ci\": {}, \"workflow\": \"solo\", \"workflow_definition\": {\"description\": \"Builder alone\", \"roles\": {\"build\": {\"label\": \"Builder\"}}, \"steps\": [{\"id\": \"build\", \"role\": \"build\", \"file\": \"build-{n}.md\", \"prompt\": \"Implement {task} in {cwd}; report to {build_path}.\", \"again\": \"Do it again; report to {build_path}.\", \"fresh_note\": \"You are a fresh session.\", \"fresh_repeats_again\": true, \"edits\": true, \"quality_gated\": true}]}, \"prompt_overrides\": {}, \"branch_cleanup\": null, \"worktree\": null, \"closed\": null, \"turns\": [{\"step\": \"build\", \"role\": \"build\", \"round\": 1, \"quality_round\": 0, \"file\": \"build-1.md\", \"agent\": \"claude\", \"model\": null, \"session\": \"session-1\", \"tokens\": \"unknown\", \"human_paced\": false, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\"}, {\"step\": \"quality\", \"role\": \"quality\", \"round\": 1, \"quality_round\": 1, \"file\": \"quality-1-1.md\", \"agent\": null, \"model\": null, \"session\": null, \"tokens\": null, \"human_paced\": false, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\"}], \"quality_rounds\": [{\"round\": 1, \"quality_round\": 1, \"gate\": \"ERROR\", \"conditions\": [\"1 findings of the `ruff` check; each is listed below.\"], \"fingerprints_by_check\": {\"ruff\": [\"621e234af67debfb\"]}}], \"blocked\": null, \"locked\": {}, \"restored\": [], \"proofs\": []}\n",
   "runs/<run:1>/summary.md": "# Run <run:1>\n\n- **Workflow:** solo\n- **Outcome:** QUALITY_GATE_FAILED\n- **Pull request:** https://github.com/parity/project/pull/1\n- **Branch:** `orchestrator/add-a-subtract-function-<key:1>`\n- **Wall time:** <duration>, from the first turn's start to <time>\n\n## Task\n\nAdd a subtract function\n\n## Roles\n\n| role | harness | model |\n| --- | --- | --- |\n| Builder (build) | claude | default |\n\n## Turns\n\n| step | role | round | harness | model | start (UTC) | duration | file |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| build | build | 1 | claude | default | <time> | <duration> | build-1.md |\n| quality | quality | 1 q1 | - | - | <time> | <duration> | quality-1-1.md |\n\n## Rounds\n\n- Round 1: quality gate ERROR\n",
   "runs/<run:1>/gitleaks-rules/.gitleaks.toml": "[extend]\nuseDefault = true\n"
  },

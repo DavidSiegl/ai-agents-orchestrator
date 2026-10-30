@@ -31,6 +31,8 @@ pub const BLOCKED_STATUS: &str = "blocked";
 ///   step, once it has one; null otherwise.
 /// - role, pane: the current step's role and that role's pane; null in quality, publish or done, or when the
 ///   workflow cannot be loaded, and pane also before the role's agent is started.
+/// - agents: each role's agent the run has started, {"role", "name", "kind"}, in the order they were started: its
+///   herdr name and harness, "claude" for one saved before there were others; [] before the first.
 /// - health, health_reason: RUNNING or STALE and why, as run_health has them; null for a finished or failed run.
 ///   heartbeat_age is age.
 /// - waiting: what the run waits on the human for, {"reason", "detail"}, else null. Reasons, first match wins:
@@ -95,6 +97,7 @@ pub fn run_record(s: &Json, age: u64, local_host: &str, pid_alive: &dyn Fn(i128)
     record.insert("quality_round", truthy("quality_round").filter(|_| in_quality).cloned().unwrap_or(Json::Null));
     record.insert("role", optional(role));
     record.insert("pane", pane.unwrap_or(Json::Null));
+    record.insert("agents", agent_refs(truthy("agents")));
     record.insert("health", optional(health.as_ref().map(|(h, _)| h.to_string())));
     record.insert("health_reason", optional(health.map(|(_, why)| why)));
     record.insert("heartbeat_age", Json::from(age as i64));
@@ -114,6 +117,17 @@ pub fn run_record(s: &Json, age: u64, local_host: &str, pid_alive: &dyn Fn(i128)
     record.insert("turns", turns);
     record.insert("resume_command", optional(resume));
     record
+}
+
+/// run_record's agents, of the state's saved agents, by role.
+fn agent_refs(agents: Option<&Json>) -> Json {
+    let agents = agents.and_then(Json::as_object).into_iter().flat_map(|a| a.iter());
+    let started = agents.filter_map(|(role, agent)| {
+        let name = agent.get("name").and_then(Json::as_str).filter(|n| !n.is_empty())?;
+        let kind = agent.get("kind").and_then(Json::as_str).unwrap_or("claude");
+        Some(object([("role", Json::from(role)), ("name", Json::from(name)), ("kind", Json::from(kind))]))
+    });
+    Json::Array(started.collect())
 }
 
 /// A JSON object of pairs, in their order.
