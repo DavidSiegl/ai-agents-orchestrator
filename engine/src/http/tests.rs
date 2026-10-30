@@ -319,9 +319,16 @@ fn system_store() -> Option<usize> {
     (!ders.is_empty()).then_some(ders.len())
 }
 
+/// The variable whose presence marks a run of this test binary as a_variable_set_empty_is_unset's child, the one run of
+/// the_system_store_in_this_process with the environment it is about.
+const EMPTY_CERT_VARIABLES_CHILD: &str = "OCTOFLOW_HTTP_TESTS_EMPTY_CERT_VARIABLES_CHILD";
+
 #[test]
-#[ignore = "run by a_variable_set_empty_is_unset in an environment of its own"]
 fn the_system_store_in_this_process() {
+    // Any other run has the test runner's environment, which a test may not change, as tests share it.
+    if std::env::var_os(EMPTY_CERT_VARIABLES_CHILD).is_none() {
+        return;
+    }
     for name in ["SSL_CERT_FILE", "SSL_CERT_DIR"] {
         assert_eq!(std::env::var(name).as_deref(), Ok(""), "{name} is not set empty in this process");
     }
@@ -333,7 +340,8 @@ fn a_variable_set_empty_is_unset() {
     // The process's own environment, as the engine has it: an empty SSL_CERT_FILE and SSL_CERT_DIR, which shells and CI
     // wrappers export to unset them, leave the system's store, not none, nor Mozilla's roots where it has certificates.
     let child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "http::tests::the_system_store_in_this_process", "--ignored", "--nocapture"])
+        .args(["--exact", "http::tests::the_system_store_in_this_process", "--nocapture"])
+        .env(EMPTY_CERT_VARIABLES_CHILD, "1")
         .env("SSL_CERT_FILE", "")
         .env("SSL_CERT_DIR", "")
         .output()
