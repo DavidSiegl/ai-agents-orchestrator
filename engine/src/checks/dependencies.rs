@@ -518,22 +518,29 @@ fn cargo_manifest_dependencies(
     let mut out = Map::new();
     for (place, table) in tables {
         for (name, entry) in table {
-            let inherits = entry.as_table().and_then(|t| t.get("workspace")) == Some(&Value::Boolean(true));
-            let (key, source) = if inherits {
-                shared.get(name).cloned().ok_or_else(|| {
-                    format!(
-                        "`{name}` in {place} takes `workspace = true`, but [workspace.dependencies] has no `{name}`"
-                    )
-                })?
-            } else {
-                cargo_entry(name, entry, &place)?
-            };
+            let (key, source) = cargo_member_entry(name, entry, &place, shared)?;
             if !out.contains_key(&key) {
                 out.insert(key, source);
             }
         }
     }
     Ok(out)
+}
+
+/// cargo_entry of a manifest's dependency entry, but for one that takes `workspace = true`, whose crate and source are
+/// shared's entry of the same name; why not, for an entry cargo_entry refuses or one shared does not have.
+fn cargo_member_entry(
+    name: &str,
+    entry: &Value,
+    place: &str,
+    shared: &Map<(String, Option<PackageSource>)>,
+) -> Result<(String, Option<PackageSource>), String> {
+    if entry.as_table().and_then(|t| t.get("workspace")) != Some(&Value::Boolean(true)) {
+        return cargo_entry(name, entry, place);
+    }
+    shared.get(name).cloned().ok_or_else(|| {
+        format!("`{name}` in {place} takes `workspace = true`, but [workspace.dependencies] has no `{name}`")
+    })
 }
 
 /// The package_key of the crate that the dependency entry, under name in the table at place, names, and where it
