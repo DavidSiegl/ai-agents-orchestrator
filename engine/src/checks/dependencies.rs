@@ -414,22 +414,34 @@ pub fn new_dependencies(change: &RunChange, pypi: &PyPI) -> Result<CheckFindings
         );
         found.to_weigh.push(Finding::warning(Some(path), None, "pulled-in", message));
     }
+    found.issues.extend(unchecked_finding(&packages, &known, failure));
+    Ok(found)
+}
+
+/// The unchecked finding new_dependencies fails the gate with: it names, once each and in the order of packages, those
+/// of packages from PyPI that ask_pypi did not ask about, known being what it learned, and gives failure, its reason
+/// for stopping. None when PyPI was asked about every one.
+fn unchecked_finding(
+    packages: &[NewPackage],
+    known: &Map<Option<PyPIProject>>,
+    failure: Option<String>,
+) -> Option<Finding> {
     let mut unasked: Vec<&str> = Vec::new();
     for p in packages.iter().filter(|p| p.source.is_none() && !known.contains_key(&p.key)) {
         if !unasked.contains(&p.key.as_str()) {
             unasked.push(&p.key);
         }
     }
-    if !unasked.is_empty() {
-        let names: Vec<String> = unasked.iter().map(|k| format!("`{k}`")).collect();
-        let message = format!(
-            "PyPI could not be asked about {}: {}; whether they exist is not known.",
-            names.join(", "),
-            failure.unwrap_or_default()
-        );
-        found.issues.push(Finding::error(None, None, "unchecked", message));
+    if unasked.is_empty() {
+        return None;
     }
-    Ok(found)
+    let names: Vec<String> = unasked.iter().map(|k| format!("`{k}`")).collect();
+    let message = format!(
+        "PyPI could not be asked about {}: {}; whether they exist is not known.",
+        names.join(", "),
+        failure.unwrap_or_default()
+    );
+    Some(Finding::error(None, None, "unchecked", message))
 }
 
 /// Whether new_dependencies's finding on package p fails the gate, and the finding; None for a package of a lock

@@ -255,19 +255,10 @@ impl Jenkins {
             urlencode(&[("tree", "builds[number,actions[parameters[name,value]]]{0,20}")])
         );
         let job = self.get_json(&url)?;
+        let shape = || self.not_shaped("GET", &url, "the job's builds");
         for build in listed(job.get("builds")) {
-            let Some(build) = build.as_object() else { return Err(self.not_shaped("GET", &url, "the job's builds")) };
-            let mut built = None;
-            for action in listed(build.get("actions")).iter().filter_map(Json::as_object) {
-                for parameter in listed(action.get("parameters")) {
-                    let Some(parameter) = parameter.as_object() else {
-                        return Err(self.not_shaped("GET", &url, "the job's builds"));
-                    };
-                    if parameter.get("name").and_then(Json::as_str) == Some("GIT_REF") {
-                        built = parameter.get("value");
-                    }
-                }
-            }
+            let build = build.as_object().ok_or_else(shape)?;
+            let built = git_ref_parameter(build).ok_or_else(shape)?;
             let number = build.get("number").and_then(Json::as_int).and_then(|n| i64::try_from(n).ok());
             if let (Some(Json::Str(built)), Some(number)) = (built, number) {
                 if built == git_ref && !skip.contains(&number) {
@@ -335,17 +326,12 @@ impl Jenkins {
             Err(e) if e.status() == Some(404) => return Ok(None),
             Err(e) => return Err(e),
         };
+        let shape = || self.not_shaped("GET", &url, "a test report");
         let mut failed = Vec::new();
         for suite in listed(report.get("suites")) {
-            let Some(suite) = suite.as_object() else { return Err(self.not_shaped("GET", &url, "a test report")) };
+            let suite = suite.as_object().ok_or_else(shape)?;
             for case in listed(suite.get("cases")) {
-                let Some(case) = case.as_object() else { return Err(self.not_shaped("GET", &url, "a test report")) };
-                let field = |name: &str| case.get(name).cloned().unwrap_or(Json::Null);
-                if matches!(case.get("status").and_then(Json::as_str), Some("FAILED" | "REGRESSION")) {
-                    let error = field("errorDetails");
-                    let error = if error.truthy() { error.python_str() } else { String::new() };
-                    failed.push((format!("{}.{}", field("className").python_str(), field("name").python_str()), error));
-                }
+                failed.extend(failed_test(case.as_object().ok_or_else(shape)?));
             }
         }
         Ok(Some(failed))
@@ -414,6 +400,35 @@ impl Jenkins {
 /// Any other true value has none either, where Python would fail on it.
 fn listed(value: Option<&Json>) -> &[Json] {
     value.and_then(Json::as_array).map_or(&[], Vec::as_slice)
+}
+
+/// The value of the last GIT_REF parameter among the actions of build, a build as the job's builds list it:
+/// Some(None) when it has none, or that one has no value; None when one of its parameters is not an object. An action
+/// that is not an object has no parameters.
+fn git_ref_parameter(build: &Map<Json>) -> Option<Option<&Json>> {
+    let mut value = None;
+    for action in listed(build.get("actions")).iter().filter_map(Json::as_object) {
+        for parameter in listed(action.get("parameters")) {
+            let parameter = parameter.as_object()?;
+            if parameter.get("name").and_then(Json::as_str) == Some("GIT_REF") {
+                value = parameter.get("value");
+            }
+        }
+    }
+    Some(value)
+}
+
+/// (test, error) of case, a case of a test report, as failed_tests lists it when it failed (status FAILED or
+/// REGRESSION): its className and name joined by a dot, and its errorDetails, "" for none; None for a case that did
+/// not fail.
+fn failed_test(case: &Map<Json>) -> Option<(String, String)> {
+    if !matches!(case.get("status").and_then(Json::as_str), Some("FAILED" | "REGRESSION")) {
+        return None;
+    }
+    let field = |name: &str| case.get(name).cloned().unwrap_or(Json::Null);
+    let error = field("errorDetails");
+    let error = if error.truthy() { error.python_str() } else { String::new() };
+    Some((format!("{}.{}", field("className").python_str(), field("name").python_str()), error))
 }
 
 /// A string or null field: Some(None) for null or missing, Some(Some(text)) for a string, None for anything else.

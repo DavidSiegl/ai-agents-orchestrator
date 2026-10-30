@@ -160,6 +160,13 @@ enum Answer {
     Body(String, Option<String>),
 }
 
+impl Answer {
+    /// The body that is value, as JSON, with no Location.
+    fn json(value: Json) -> Answer {
+        Answer::Body(value.dumps(), None)
+    }
+}
+
 impl FakeJenkins {
     pub fn new() -> Arc<FakeJenkins> {
         Arc::new(FakeJenkins {
@@ -202,6 +209,8 @@ impl FakeJenkinsState {
         self.builds.values().map(|b| b.git_ref.clone()).collect()
     }
 
+    /// The short name of a request of method to path, with query and the form it posted, decoded, as names records
+    /// it, and what Jenkins answers it with.
     fn answer(
         &mut self,
         method: &'static str,
@@ -209,90 +218,104 @@ impl FakeJenkinsState {
         query: &Map<String>,
         form: &Map<String>,
     ) -> (String, Answer) {
-        let json = |name: &str, value: Json| (name.to_string(), Answer::Body(value.dumps(), None));
-        let unknown = (format!("{method} {path}"), Answer::Status(404));
+        let unknown = || (format!("{method} {path}"), Answer::Status(404));
         if let Some(item) = path.strip_prefix("/queue/item/") {
-            let item: i64 = item.split('/').next().unwrap_or("").parse().unwrap_or(-1);
-            let Some(waiting) = self.queue.get_mut(&item).filter(|_| !self.forgotten) else {
-                return ("queue".to_string(), Answer::Status(404));
-            };
-            if self.cancelled {
-                return json("queue", object(&[("cancelled", true.into())]));
-            }
-            if waiting.left > 0 {
-                waiting.left -= 1;
-                return json("queue", object(&[("why", "Waiting for next available executor".into())]));
-            }
-            return json(
-                "queue",
-                object(&[("cancelled", false.into()), ("executable", object(&[("number", waiting.number.into())]))]),
-            );
+            return ("queue".to_string(), self.queue_item(item));
         }
-        let Some(rest) = path.strip_prefix(JOB_PATH).filter(|_| !self.job_gone) else { return unknown };
+        let Some(rest) = path.strip_prefix(JOB_PATH).filter(|_| !self.job_gone) else { return unknown() };
         let tree = query.get("tree").map_or("", String::as_str);
-        if rest == "api/json" && tree.contains("property") {
-            let definitions = self.parameters.iter().map(|p| object(&[("name", p.as_str().into())])).collect();
-            return json(
-                "parameters",
-                object(&[(
-                    "property",
-                    Json::Array(vec![object(&[]), object(&[("parameterDefinitions", Json::Array(definitions))])]),
-                )]),
-            );
-        }
-        if rest == "api/json" && tree.contains("description") {
-            let builds = self.builds.iter().rev().map(|(&n, b)| {
-                let result = if b.left > 0 { Json::Null } else { b.outcome.result.as_str().into() };
-                object(&[
-                    ("number", n.into()),
-                    ("result", result),
-                    ("description", b.outcome.description.clone().into()),
-                ])
-            });
-            return json("builds", object(&[("builds", Json::Array(builds.collect()))]));
-        }
-        if rest == "api/json" {
-            let builds = self.builds.iter().rev().take(20).map(|(&n, b)| {
-                let parameter = object(&[("name", "GIT_REF".into()), ("value", b.git_ref.as_str().into())]);
-                object(&[
-                    ("number", n.into()),
-                    (
-                        "actions",
-                        Json::Array(vec![object(&[]), object(&[("parameters", Json::Array(vec![parameter]))])]),
-                    ),
-                ])
-            });
-            return json("find", object(&[("builds", Json::Array(builds.collect()))]));
-        }
-        if rest == "buildWithParameters" && method == "POST" {
-            let outcome = self.outcomes.pop_front().unwrap_or_else(|| Outcome::gate("OK", &[]));
-            let n = self.add_build(form.get("GIT_REF").map_or("", String::as_str), outcome);
-            self.queue.insert(900 + n, Waiting { left: 1, number: n });
-            return (
-                "trigger".to_string(),
-                Answer::Body(String::new(), Some(format!("{JENKINS}/queue/item/{}/", 900 + n))),
-            );
-        }
-        let (n, what) = rest.split_once('/').unwrap_or((rest, ""));
-        let Some(build) = n.parse::<i64>().ok().and_then(|n| self.builds.get_mut(&n)) else { return unknown };
-        match what {
-            "api/json" if build.left > 0 => {
-                build.left -= 1;
-                json("build", object(&[("building", true.into()), ("result", Json::Null)]))
+        let answered = match rest {
+            "api/json" if tree.contains("property") => {
+                let definitions = self.parameters.iter().map(|p| object(&[("name", p.as_str().into())])).collect();
+                Some((
+                    "parameters",
+                    Answer::json(object(&[(
+                        "property",
+                        Json::Array(vec![object(&[]), object(&[("parameterDefinitions", Json::Array(definitions))])]),
+                    )])),
+                ))
+            }
+            "api/json" if tree.contains("description") => {
+                let builds = self.builds.iter().rev().map(|(&n, b)| {
+                    let result = if b.left > 0 { Json::Null } else { b.outcome.result.as_str().into() };
+                    object(&[
+                        ("number", n.into()),
+                        ("result", result),
+                        ("description", b.outcome.description.clone().into()),
+                    ])
+                });
+                Some(("builds", Answer::json(object(&[("builds", Json::Array(builds.collect()))]))))
             }
             "api/json" => {
-                json("build", object(&[("building", false.into()), ("result", build.outcome.result.as_str().into())]))
+                let builds = self.builds.iter().rev().take(20).map(|(&n, b)| {
+                    let parameter = object(&[("name", "GIT_REF".into()), ("value", b.git_ref.as_str().into())]);
+                    object(&[
+                        ("number", n.into()),
+                        (
+                            "actions",
+                            Json::Array(vec![object(&[]), object(&[("parameters", Json::Array(vec![parameter]))])]),
+                        ),
+                    ])
+                });
+                Some(("find", Answer::json(object(&[("builds", Json::Array(builds.collect()))]))))
             }
+            "buildWithParameters" if method == "POST" => {
+                let outcome = self.outcomes.pop_front().unwrap_or_else(|| Outcome::gate("OK", &[]));
+                let n = self.add_build(form.get("GIT_REF").map_or("", String::as_str), outcome);
+                self.queue.insert(900 + n, Waiting { left: 1, number: n });
+                Some(("trigger", Answer::Body(String::new(), Some(format!("{JENKINS}/queue/item/{}/", 900 + n)))))
+            }
+            _ => self.build_answer(rest),
+        };
+        answered.map_or_else(unknown, |(name, answer)| (name.to_string(), answer))
+    }
+
+    /// What Jenkins answers a poll of the queue item at `/queue/item/<item>`, item being the rest of the path: 404
+    /// for one it does not have, or when it forgot them all; cancelled when it cancels them; waiting, which uses up
+    /// one of its polls, while it has any left; else the number of the build it started.
+    fn queue_item(&mut self, item: &str) -> Answer {
+        let item: i64 = item.split('/').next().unwrap_or("").parse().unwrap_or(-1);
+        let Some(waiting) = self.queue.get_mut(&item).filter(|_| !self.forgotten) else {
+            return Answer::Status(404);
+        };
+        if self.cancelled {
+            return Answer::json(object(&[("cancelled", true.into())]));
+        }
+        if waiting.left > 0 {
+            waiting.left -= 1;
+            return Answer::json(object(&[("why", "Waiting for next available executor".into())]));
+        }
+        Answer::json(object(&[
+            ("cancelled", false.into()),
+            ("executable", object(&[("number", waiting.number.into())])),
+        ]))
+    }
+
+    /// The short name of a request for one build's page and what Jenkins answers it with, rest being its path under
+    /// JOB_PATH, `<number>/<page>`; None for a build it does not have or a page it does not serve. A poll of a build
+    /// that still runs uses up one of its polls, and a read of its quality.md is recorded in quality_reads.
+    fn build_answer(&mut self, rest: &str) -> Option<(&'static str, Answer)> {
+        let (n, what) = rest.split_once('/').unwrap_or((rest, ""));
+        let build = n.parse::<i64>().ok().and_then(|n| self.builds.get_mut(&n))?;
+        let answered = match what {
+            "api/json" if build.left > 0 => {
+                build.left -= 1;
+                ("build", Answer::json(object(&[("building", true.into()), ("result", Json::Null)])))
+            }
+            "api/json" => (
+                "build",
+                Answer::json(object(&[("building", false.into()), ("result", build.outcome.result.as_str().into())])),
+            ),
             "artifact/quality.md" => match &build.outcome.quality {
                 Some(quality) if build.left <= build.outcome.after_gate => {
                     let quality = quality.clone();
                     self.quality_reads.push(quality.clone());
                     let reply = self.quality_replies.get(&self.quality_reads.len()).cloned();
-                    ("quality".to_string(), Answer::Body(reply.unwrap_or(quality), None))
+                    ("quality", Answer::Body(reply.unwrap_or(quality), None))
                 }
-                _ => ("quality".to_string(), Answer::Status(404)),
+                _ => ("quality", Answer::Status(404)),
             },
-            "testReport/api/json" if !build.outcome.test_report => ("tests".to_string(), Answer::Status(404)),
+            "testReport/api/json" if !build.outcome.test_report => ("tests", Answer::Status(404)),
             "testReport/api/json" => {
                 let mut cases: Vec<Json> = build
                     .outcome
@@ -313,11 +336,15 @@ impl FakeJenkinsState {
                     ("status", "PASSED".into()),
                     ("errorDetails", Json::Null),
                 ]));
-                json("tests", object(&[("suites", Json::Array(vec![object(&[("cases", Json::Array(cases))])]))]))
+                (
+                    "tests",
+                    Answer::json(object(&[("suites", Json::Array(vec![object(&[("cases", Json::Array(cases))])]))])),
+                )
             }
-            "consoleText" => ("console".to_string(), Answer::Body(build.outcome.console.clone(), None)),
-            _ => unknown,
-        }
+            "consoleText" => ("console", Answer::Body(build.outcome.console.clone(), None)),
+            _ => return None,
+        };
+        Some(answered)
     }
 }
 
