@@ -58,6 +58,20 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   orchestrator-test-methods/06): golden files of the engine's follow-up prompts, notes, commit messages and pull request
   bodies, which the recordings hold as sent where a scenario reaches them, and which would test only the frozen Python
   engine, not the Rust one.
+- **The parity harness in Rust: what is left to port.** `engine/e2e/` (octoflow-without-python ticket 01, 2026-10-30)
+  runs 26 of the 43 scenarios against the same recordings, now `engine/e2e/recorded/`, which `E2E_RECORD=1` rewrites
+  byte for byte. Both harnesses run until ticket 02, which ports the rest and removes `tests/parity`. Left for it:
+  - the scenarios: `kill_in_*`, `resume_after_agent_exit`, `quality_*`, `judged_in_quality`, `gate_turned_*_by_resume`,
+    `serve_endpoints_and_events`;
+  - what only those need: the fake Jenkins, and PyPI behind the HTTPS proxy with its certificate; World's kill of an
+    invocation and the processes below it; `pr create`'s hold in the fake gh; and the `PARITY_COMMANDS` filter.
+  Ticket 01 named those two servers for its World. They wait for ticket 02 because no scenario of 01 reaches them, so
+  they would be code nothing runs.
+  Unlike the ticket's plan, `World` does not get the engine through `CARGO_BIN_EXE_orchestrator` and a
+  dev-dependency on `octoflow-engine`: Cargo gives a test only its own package's binaries. It builds the engine with
+  `cargo build` as `tests/rust_engine.py` does, unless `E2E_ENGINE` names one.
+  The Jenkinsfile's Test stage already does part of ticket 02's work: it passes the instrumented engine as `E2E_ENGINE`
+  and, in a quality build, leaves the package out by a nextest filter on the parity scenarios' terms.
 
 - **The eval set: what it does not cover.** `evals/run.py` (live-checks/04, docs/design.md, Evals) runs the engine as
   a program, `run --no-pr --spec`, rather than being the `orchestrator.py eval` command the ticket named, since the

@@ -1,4 +1,4 @@
-"""The parity scenarios, each run against the engine and compared with its recording in recorded/.
+"""The parity scenarios, each run against the engine and compared with its recording in engine/e2e/recorded/.
 
 A scenario's record (World.record) must equal recorded/<name>.json; a difference fails the test, naming where the
 two first part. The recordings are the Python engine's, the oracle the Rust engine was ported against, made before
@@ -17,7 +17,10 @@ import pytest
 from scenarios import SCENARIOS
 from world import World
 
-RECORDED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recorded")
+# The recordings, which the e2e scenarios in Rust (engine/e2e) hold the engine to too, until ticket 02 of
+# octoflow-without-python removes this harness.
+RECORDED = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                        "engine", "e2e", "recorded")
 
 
 def first_difference(want, got, path: str = "$") -> str | None:

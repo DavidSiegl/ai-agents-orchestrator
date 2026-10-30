@@ -42,7 +42,7 @@ ported from. By module:
 
 Its tests are each module's `<module>/tests.rs`, the Python tests of those parts ported case for case, and checks
 against the Python engine as the oracle: `engine/tests/oracle/` holds what the Python engine gave for the engine's
-inputs, each `.json` written by a generator that ran it, removed with it, and the parity recordings (`tests/parity/recorded/`) are read as they are: every `state.json` they hold
+inputs, each `.json` written by a generator that ran it, removed with it, and the parity recordings (`engine/e2e/recorded/`) are read as they are: every `state.json` they hold
 reads into `RunState` and writes back byte for byte, every workflow the repository defines parses to the Python
 engine's definition, every recorded run's commit note, trailers, pull request body, `summary.md` and
 `metrics.json` come out as the Python engine wrote them, and every prompt the scenarios recorded is made of the
@@ -277,7 +277,8 @@ layout), with no Python of its own.
 
 ## Tests
 
-`cargo test --workspace` runs the engine's tests (above) and the desktop shell's. `uv run pytest` runs the rest:
+`cargo test --workspace` runs the engine's tests (above), its e2e scenarios (below) and the desktop shell's. `uv run
+pytest` runs the rest:
 
 `tests/test_gate.py` covers `gate.py`: each check on a real git repository in a temporary directory, the quality
 file `quality_report` writes, and `TestGate`, the program itself, with stub linters on `PATH`.
@@ -294,13 +295,24 @@ killing and resuming it where the scenario says, and the world records, normaliz
 pids, hashes, its own paths and ports): each invocation's exit status, the output programs read whole and other
 output only as its facts; the commands herdr and gh got and the requests Jenkins and PyPI got, in order, with
 `state.json` wherever it changed between them; the run directory's files; and both repositories' refs, commits and
-working trees. `test_parity.py` fails a scenario whose record differs from `recorded/<scenario>.json`, naming where.
+working trees. `test_parity.py` fails a scenario whose record differs from `engine/e2e/recorded/<scenario>.json`,
+naming where.
 The recordings are the Python engine's, made before rust-engine ticket 11 removed it; while both engines were there,
 each scenario that kills a run and resumes it also ran with one engine before the kill and the other after it, so a
 run either engine left resumes in the other. `PARITY_RECORD=1` writes recordings instead, from the Rust engine, for
 a scenario added since, whose recording is then a review of what the engine does. `PARITY_COMMANDS` (`run,resume`,
 say) leaves out each scenario whose recording invokes the engine with another command. A kill ends the engine's
 group and each process below it, since the engine runs each command in a group of its own.
+
+`engine/e2e/` (package `octoflow-e2e`) is that harness in Rust, which replaces it scenario by scenario (the
+octoflow-without-python spec): `tests/scenarios.rs` holds the scenarios ported so far, those without kills, the quality
+gate or serve, each a test that `check` (`src/check.rs`) compares with the same recording. The fakes are the programs
+`fake-herdr`, `fake-gh` and `fake-ssh` (`src/fakes.rs`), sharing the world's ledger (`src/ledger.rs`) under
+`flock`; `World` (`src/world.rs`) makes the world, runs the engine, `E2E_ENGINE`'s command line or this checkout's
+binary built with cargo, and makes the record, which `Normalizer` (`src/normalize.rs`, its matchers finding what
+`normalize.py`'s expressions find) normalizes and `src/pyjson.rs` writes as Python's json module did. `E2E_RECORD=1`
+writes recordings, as `PARITY_RECORD=1` does. Jenkins's Test stage runs them in its nextest run with the instrumented
+engine, and a quality build leaves them out where its change touches nothing they depend on.
 
 Golden files hold generated text to a reviewed copy of it under `tests/golden/`: `assert_golden` (`tests/golden.py`)
 fails with a unified diff naming the file when the text differs, and `UPDATE_GOLDEN=1 uv run pytest` rewrites the

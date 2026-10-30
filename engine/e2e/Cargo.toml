@@ -1,0 +1,30 @@
+[package]
+name = "octoflow-e2e"
+version = "0.1.0"
+description = "The e2e scenarios: the orchestrator program run in a world of fakes, compared with its recordings"
+edition = "2021"
+publish = false
+
+[dependencies]
+# The ledger's lock (src/ledger.rs), flock as fcntl.flock took it in tests/parity/fakes.py; the hostname the
+# normalizer writes <host> for (src/normalize.rs); and killpg, which stops an engine that runs over its time.
+nix = { version = "0.31", default-features = false, features = ["fs", "hostname", "signal"] }
+# preserve_order: an object's keys keep the order they were written in, as a Python dict does, since a recording
+# compares the order of its keys too.
+serde_json = { version = "1", features = ["preserve_order"] }
+
+# The fakes the world puts on the engine's PATH (src/fakes.rs), each a program of its own.
+[[bin]]
+name = "fake-herdr"
+path = "src/bin/fake-herdr.rs"
+
+[[bin]]
+name = "fake-gh"
+path = "src/bin/fake-gh.rs"
+
+[[bin]]
+name = "fake-ssh"
+path = "src/bin/fake-ssh.rs"
+
+[lints]
+workspace = true

@@ -47,6 +47,8 @@ OTHER_PROGRAMS_NAMES = {
     "PARITY_ENGINE": "the parity harness's environment variable, tests/parity/world.py",
     "PARITY_RECORD": "the parity harness's environment variable, tests/parity/test_parity.py",
     "PARITY_COMMANDS": "the parity harness's environment variable, tests/parity/test_parity.py",
+    "E2E_ENGINE": "the e2e scenarios' environment variable, engine/e2e/src/world.rs",
+    "E2E_RECORD": "the e2e scenarios' environment variable, engine/e2e/src/check.rs",
     "EVAL_ENGINE": "the eval runner's environment variable, evals/run.py",
     "UPDATE_GOLDEN": "the golden-file helper's environment variable, tests/golden.py",
     "BUNDLED_NAME": "the desktop app's constant, ui/src-tauri/src/lib.rs",
