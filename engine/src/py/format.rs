@@ -91,84 +91,86 @@ fn chunks(template: &str) -> impl Iterator<Item = Result<Chunk, FormatError>> {
 /// The chunk that starts at chars[*pos], read past.
 fn next_chunk(chars: &[char], pos: &mut usize) -> Result<Chunk, FormatError> {
     let start = *pos;
-    let mut brace = None;
-    while *pos < chars.len() {
-        let c = chars[*pos];
+    let Some(offset) = chars[start..].iter().position(|&c| c == '{' || c == '}') else {
+        *pos = chars.len();
+        return Ok(Chunk { literal: chars[start..].iter().collect(), field: None });
+    };
+    let brace_at = start + offset;
+    let brace = chars[brace_at];
+    *pos = brace_at + 1;
+    if chars.get(*pos) == Some(&brace) {
+        // A doubled brace: the literal keeps one of them, and no field follows.
         *pos += 1;
-        if c == '{' || c == '}' {
-            brace = Some(c);
-            break;
-        }
+        return Ok(Chunk { literal: chars[start..=brace_at].iter().collect(), field: None });
     }
-    let at_end = *pos >= chars.len();
-    let mut literal_end = *pos;
-    let mut field_follows = brace.is_some();
-    if let Some(c) = brace {
-        if c == '}' && (at_end || chars[*pos] != '}') {
-            return Err(FormatError::value("Single '}' encountered in format string"));
-        }
-        if c == '{' && at_end {
-            return Err(FormatError::value("Single '{' encountered in format string"));
-        }
-        if chars[*pos] == c {
-            // A doubled brace: the literal keeps one of them, and no field follows.
-            *pos += 1;
-            field_follows = false;
-        } else {
-            literal_end -= 1;
-        }
+    if brace == '}' {
+        return Err(FormatError::value("Single '}' encountered in format string"));
     }
-    let literal: String = chars[start..literal_end].iter().collect();
-    let field = if field_follows { Some(parse_field(chars, pos)?) } else { None };
-    Ok(Chunk { literal, field })
+    if *pos >= chars.len() {
+        return Err(FormatError::value("Single '{' encountered in format string"));
+    }
+    let literal = chars[start..brace_at].iter().collect();
+    let field = parse_field(chars, pos)?;
+    Ok(Chunk { literal, field: Some(field) })
 }
 
 /// The field that starts at chars[*pos], just after its `{`, read up to and past its `}` (parse_field in CPython's
 /// Objects/stringlib/unicode_format.h).
 fn parse_field(chars: &[char], pos: &mut usize) -> Result<Field, FormatError> {
-    let name_start = *pos;
-    let mut last = '\0';
+    let (name, name_end) = field_name_at(chars, pos)?;
+    let (conversion, end) = match name_end {
+        '!' => {
+            let (conversion, end) = conversion_at(chars, pos)?;
+            (Some(conversion), end)
+        }
+        _ => (None, Some(name_end)),
+    };
+    let spec = if end == Some('}') { String::new() } else { format_spec_at(chars, pos)? };
+    Ok(Field { name, spec, conversion })
+}
+
+/// The field name at chars[*pos], read up to and past the `}`, `:` or `!` that ends it, and that character. A `[`
+/// hides those up to the next `]`, so that `{a[:]}` is named `a[:]`. ValueError for a `{` in the name, or a template
+/// that ends before the name does.
+fn field_name_at(chars: &[char], pos: &mut usize) -> Result<(String, char), FormatError> {
+    let start = *pos;
     while *pos < chars.len() {
-        last = chars[*pos];
+        let c = chars[*pos];
         *pos += 1;
-        match last {
+        match c {
             '{' => return Err(FormatError::value("unexpected '{' in field name")),
             '[' => {
                 while *pos < chars.len() && chars[*pos] != ']' {
                     *pos += 1;
                 }
-                continue;
             }
-            '}' | ':' | '!' => break,
-            _ => continue,
+            '}' | ':' | '!' => return Ok((chars[start..*pos - 1].iter().collect(), c)),
+            _ => {}
         }
     }
-    let name: String = chars[name_start..*pos - 1].iter().collect();
-    if last != '!' && last != ':' {
-        if last != '}' {
-            return Err(FormatError::value("expected '}' before end of string"));
-        }
-        return Ok(Field { name, spec: String::new(), conversion: None });
+    Err(FormatError::value("expected '}' before end of string"))
+}
+
+/// The conversion at chars[*pos], just after its `!`, and the `}` or `:` after it, both read past; None for the
+/// latter when the template ends after the conversion. ValueError when the template ends at the `!`, or another
+/// character follows the conversion.
+fn conversion_at(chars: &[char], pos: &mut usize) -> Result<(char, Option<char>), FormatError> {
+    let Some(&conversion) = chars.get(*pos) else {
+        return Err(FormatError::value("end of string while looking for conversion specifier"));
+    };
+    *pos += 1;
+    let end = chars.get(*pos).copied();
+    *pos += usize::from(end.is_some());
+    match end {
+        None | Some('}' | ':') => Ok((conversion, end)),
+        Some(_) => Err(FormatError::value("expected ':' after conversion specifier")),
     }
-    let mut conversion = None;
-    if last == '!' {
-        if *pos >= chars.len() {
-            return Err(FormatError::value("end of string while looking for conversion specifier"));
-        }
-        conversion = Some(chars[*pos]);
-        *pos += 1;
-        if *pos < chars.len() {
-            let c = chars[*pos];
-            *pos += 1;
-            if c == '}' {
-                return Ok(Field { name, spec: String::new(), conversion });
-            }
-            if c != ':' {
-                return Err(FormatError::value("expected ':' after conversion specifier"));
-            }
-        }
-    }
-    let spec_start = *pos;
+}
+
+/// The format spec at chars[*pos], read up to and past the `}` that closes its field, with its nested fields as
+/// written. ValueError when the template ends first.
+fn format_spec_at(chars: &[char], pos: &mut usize) -> Result<String, FormatError> {
+    let start = *pos;
     let mut depth = 1;
     while *pos < chars.len() {
         let c = chars[*pos];
@@ -178,8 +180,7 @@ fn parse_field(chars: &[char], pos: &mut usize) -> Result<Field, FormatError> {
         } else if c == '}' {
             depth -= 1;
             if depth == 0 {
-                let spec = chars[spec_start..*pos - 1].iter().collect();
-                return Ok(Field { name, spec, conversion });
+                return Ok(chars[start..*pos - 1].iter().collect());
             }
         }
     }
@@ -202,8 +203,38 @@ pub fn format(template: &str, values: &dyn Fn(&str) -> Option<String>) -> Result
 /// How a template numbers its positional fields, which it may not mix.
 enum Numbering {
     Unset,
+    /// Numbered automatically (`{}`), the next such field to get this index.
     Automatic(usize),
     Manual,
+}
+
+impl Numbering {
+    /// The index of the next field numbered automatically (`{}`), from 0, which it uses up; ValueError once a field
+    /// has been numbered by hand.
+    fn next_automatic(&mut self) -> Result<usize, FormatError> {
+        let n = match self {
+            Numbering::Manual => {
+                return Err(FormatError::value(
+                    "cannot switch from manual field specification to automatic field numbering",
+                ))
+            }
+            Numbering::Unset => 0,
+            Numbering::Automatic(n) => *n,
+        };
+        *self = Numbering::Automatic(n + 1);
+        Ok(n)
+    }
+
+    /// Records a field numbered by hand (`{0}`); ValueError once a field has been numbered automatically.
+    fn number_manually(&mut self) -> Result<(), FormatError> {
+        if let Numbering::Automatic(_) = self {
+            return Err(FormatError::value(
+                "cannot switch from automatic field numbering to manual field specification",
+            ));
+        }
+        *self = Numbering::Manual;
+        Ok(())
+    }
 }
 
 /// build_string of CPython's unicode_format.h: depth is how many levels of nested format specs may still be
@@ -240,7 +271,7 @@ fn build(
 }
 
 /// The value a field name gives: its first part looked up, then each `.attribute` and `[index]` after it applied to a
-/// str (get_field_object and FieldNameIterator in CPython).
+/// str (get_field_object in CPython).
 fn field_value(
     name: &str,
     values: &dyn Fn(&str) -> Option<String>,
@@ -250,85 +281,94 @@ fn field_value(
     let first_end = chars.iter().position(|&c| c == '.' || c == '[').unwrap_or(chars.len());
     let first: String = chars[..first_end].iter().collect();
     let index = if first.is_empty() {
-        let n = match numbering {
-            Numbering::Manual => {
-                return Err(FormatError::value(
-                    "cannot switch from manual field specification to automatic field numbering",
-                ))
-            }
-            Numbering::Unset => 0,
-            Numbering::Automatic(n) => *n,
-        };
-        *numbering = Numbering::Automatic(n + 1);
-        Some(n)
+        Some(numbering.next_automatic()?)
     } else if let Some(n) = decimal(&chars[..first_end])? {
-        if let Numbering::Automatic(_) = numbering {
-            return Err(FormatError::value(
-                "cannot switch from automatic field numbering to manual field specification",
-            ));
-        }
-        *numbering = Numbering::Manual;
+        numbering.number_manually()?;
         Some(n)
     } else {
         None
     };
-    let mut value = match index {
-        Some(n) => {
-            return Err(FormatError {
-                kind: ErrorKind::IndexError,
-                message: format!("Replacement index {n} out of range for positional args tuple"),
-            })
-        }
-        None => values(&first).ok_or_else(|| FormatError { kind: ErrorKind::KeyError, message: repr(&first) })?,
-    };
+    if let Some(n) = index {
+        return Err(FormatError {
+            kind: ErrorKind::IndexError,
+            message: format!("Replacement index {n} out of range for positional args tuple"),
+        });
+    }
+    let mut value = values(&first).ok_or_else(|| FormatError { kind: ErrorKind::KeyError, message: repr(&first) })?;
     let mut pos = first_end;
     while pos < chars.len() {
-        let c = chars[pos];
-        pos += 1;
-        if c == '.' {
-            let start = pos;
-            while pos < chars.len() && chars[pos] != '.' && chars[pos] != '[' {
-                pos += 1;
+        value = accessor_at(&chars, &mut pos)?.apply_to(&value)?;
+    }
+    Ok(value)
+}
+
+/// A part of a field name after its first, which looks something up in the value before it.
+enum Accessor<'a> {
+    /// `.attribute`: the attribute's name, never empty.
+    Attribute(&'a [char]),
+    /// `[index]`: the index as written between the brackets, never empty.
+    Index(&'a [char]),
+}
+
+impl Accessor<'_> {
+    /// What this looks up in value, a str: the character at a decimal index. AttributeError for any attribute,
+    /// IndexError for an index past value's end, TypeError for an index that is not decimal, and ValueError for one
+    /// with too many digits.
+    fn apply_to(&self, value: &str) -> Result<String, FormatError> {
+        let index = match *self {
+            Accessor::Attribute(name) => {
+                return Err(FormatError {
+                    kind: ErrorKind::AttributeError,
+                    message: format!("'str' object has no attribute {}", repr(&name.iter().collect::<String>())),
+                })
             }
-            if pos == start {
-                return Err(FormatError::value("Empty attribute in format string"));
-            }
-            let attribute: String = chars[start..pos].iter().collect();
-            return Err(FormatError {
-                kind: ErrorKind::AttributeError,
-                message: format!("'str' object has no attribute {}", repr(&attribute)),
-            });
-        }
-        // c is '[': an index, up to its ']'.
-        let start = pos;
-        while pos < chars.len() && chars[pos] != ']' {
-            pos += 1;
-        }
-        if pos >= chars.len() {
-            return Err(FormatError::value("Missing ']' in format string"));
-        }
-        if pos == start {
-            return Err(FormatError::value("Empty attribute in format string"));
-        }
-        let key = &chars[start..pos];
-        pos += 1;
-        if pos < chars.len() && chars[pos] != '.' && chars[pos] != '[' {
-            return Err(FormatError::value("Only '.' or '[' may follow ']' in format field specifier"));
-        }
-        value = match decimal(key)? {
+            Accessor::Index(index) => index,
+        };
+        match decimal(index)? {
             Some(n) => value.chars().nth(n).map(String::from).ok_or(FormatError {
                 kind: ErrorKind::IndexError,
                 message: "string index out of range".to_string(),
-            })?,
-            None => {
-                return Err(FormatError {
-                    kind: ErrorKind::TypeError,
-                    message: "string indices must be integers, not 'str'".to_string(),
-                })
-            }
-        };
+            }),
+            None => Err(FormatError {
+                kind: ErrorKind::TypeError,
+                message: "string indices must be integers, not 'str'".to_string(),
+            }),
+        }
     }
-    Ok(value)
+}
+
+/// The `.attribute` or `[index]` at chars[*pos], which must be its `.` or `[`, read past (FieldNameIterator in
+/// CPython). ValueError for an empty one, an index without its `]`, or an index followed by anything but a `.` or
+/// `[`.
+fn accessor_at<'a>(chars: &'a [char], pos: &mut usize) -> Result<Accessor<'a>, FormatError> {
+    let opener = chars[*pos];
+    *pos += 1;
+    let start = *pos;
+    if opener == '.' {
+        while *pos < chars.len() && chars[*pos] != '.' && chars[*pos] != '[' {
+            *pos += 1;
+        }
+        if *pos == start {
+            return Err(FormatError::value("Empty attribute in format string"));
+        }
+        return Ok(Accessor::Attribute(&chars[start..*pos]));
+    }
+    // opener is '[': an index, up to its ']'.
+    while *pos < chars.len() && chars[*pos] != ']' {
+        *pos += 1;
+    }
+    if *pos >= chars.len() {
+        return Err(FormatError::value("Missing ']' in format string"));
+    }
+    if *pos == start {
+        return Err(FormatError::value("Empty attribute in format string"));
+    }
+    let index = &chars[start..*pos];
+    *pos += 1;
+    if *pos < chars.len() && chars[*pos] != '.' && chars[*pos] != '[' {
+        return Err(FormatError::value("Only '.' or '[' may follow ']' in format field specifier"));
+    }
+    Ok(Accessor::Index(index))
 }
 
 /// The number that digits spell when every one is a decimal digit (decimal_value), as CPython's get_integer reads a
@@ -355,109 +395,160 @@ fn format_str(value: &str, spec: &str) -> Result<String, FormatError> {
     if spec.is_empty() {
         return Ok(value.to_string());
     }
-    let chars: Vec<char> = spec.chars().collect();
-    let is_align = |c: char| matches!(c, '<' | '>' | '=' | '^');
-    let mut pos = 0;
-    let (mut fill, mut align) = (' ', '<');
-    let mut fill_given = false;
-    if chars.len() >= 2 && is_align(chars[1]) {
-        (fill, align) = (chars[0], chars[1]);
-        fill_given = true;
-        pos = 2;
-    } else if is_align(chars[0]) {
-        align = chars[0];
-        pos = 1;
-    }
-    let sign = chars.get(pos).copied().filter(|c| matches!(c, '+' | '-' | ' '));
-    pos += usize::from(sign.is_some());
-    let no_negative_zero = chars.get(pos) == Some(&'z');
-    pos += usize::from(no_negative_zero);
-    let alternate = chars.get(pos) == Some(&'#');
-    pos += usize::from(alternate);
-    if !fill_given && chars.get(pos) == Some(&'0') {
+    let spec = FormatSpec::parse(spec)?;
+    spec.check_for_str()?;
+    Ok(spec.lay_out(value))
+}
+
+/// A standard format spec as CPython's parse_internal_render_format_spec reads it for a str, before the checks a str
+/// makes of it.
+struct FormatSpec {
+    /// The character padding to the width: as given, else `0` for the zero padding of old, else a space.
+    fill: char,
+    /// `<`, `>`, `^` or `=`; `<` where none is given, as for a str.
+    align: char,
+    /// `+`, `-` or a space, if given.
+    sign: Option<char>,
+    /// Whether `z` is given.
+    no_negative_zero: bool,
+    /// Whether `#` is given.
+    alternate: bool,
+    /// The minimum width in characters; 0 where none is given.
+    width: usize,
+    /// The precision, a str's maximum width in characters, if given.
+    precision: Option<usize>,
+    /// The presentation type, `s` where none is given.
+    presentation: char,
+}
+
+impl FormatSpec {
+    /// spec, which must not be empty, read; the ValueError Python raises for both groupings, a `.` without a
+    /// precision, more than one character after the precision, a grouping the presentation type does not take, or a
+    /// width or precision with too many digits.
+    fn parse(spec: &str) -> Result<FormatSpec, FormatError> {
+        let chars: Vec<char> = spec.chars().collect();
+        let mut pos = 0;
+        let (fill, align) = fill_and_align_at(&chars, &mut pos);
+        let sign = chars.get(pos).copied().filter(|c| matches!(c, '+' | '-' | ' '));
+        pos += usize::from(sign.is_some());
+        let no_negative_zero = chars.get(pos) == Some(&'z');
+        pos += usize::from(no_negative_zero);
+        let alternate = chars.get(pos) == Some(&'#');
+        pos += usize::from(alternate);
         // The zero padding of old: a fill of 0, aligned as a str is by default, to the left.
-        fill = '0';
-        pos += 1;
-    }
-    let width = digits_at(&chars, &mut pos)?;
-    let mut grouping = None;
-    if chars.get(pos) == Some(&',') {
-        grouping = Some(',');
-        pos += 1;
-    }
-    if chars.get(pos) == Some(&'_') {
-        if grouping.is_some() {
-            return Err(FormatError::value("Cannot specify both ',' and '_'."));
+        let zero_padded = fill.is_none() && chars.get(pos) == Some(&'0');
+        pos += usize::from(zero_padded);
+        let fill = fill.unwrap_or(if zero_padded { '0' } else { ' ' });
+        let width = digits_at(&chars, &mut pos)?.unwrap_or(0);
+        let grouping = grouping_at(&chars, &mut pos)?;
+        let precision = precision_at(&chars, &mut pos)?;
+        if chars.len() - pos > 1 {
+            return Err(FormatError::value(format!("Invalid format specifier '{spec}' for object of type 'str'")));
         }
-        grouping = Some('_');
-        pos += 1;
-    }
-    if chars.get(pos) == Some(&',') && grouping == Some('_') {
-        return Err(FormatError::value("Cannot specify both ',' and '_'."));
-    }
-    let mut precision = None;
-    if chars.get(pos) == Some(&'.') {
-        pos += 1;
-        precision = digits_at(&chars, &mut pos)?;
-        if precision.is_none() {
-            return Err(FormatError::value("Format specifier missing precision"));
+        let presentation = chars.get(pos).copied().unwrap_or('s');
+        if let Some(g) = grouping.filter(|&g| !groups_digits(presentation, g)) {
+            return Err(FormatError::value(format!("Cannot specify '{g}' with {}.", code_text(presentation))));
         }
-        // The grouping of the fraction's digits, which no str uses.
-        if matches!(chars.get(pos), Some(',') | Some('_')) {
-            pos += 1;
+        Ok(FormatSpec { fill, align, sign, no_negative_zero, alternate, width, precision, presentation })
+    }
+
+    /// Ok when a str may be formatted with this spec: its presentation type is `s`, and it has none of a sign, `z`,
+    /// `#` and `=` alignment, which only numbers take. Otherwise the ValueError Python raises for the first of those
+    /// it has.
+    fn check_for_str(&self) -> Result<(), FormatError> {
+        if self.presentation != 's' {
+            return Err(FormatError::value(format!(
+                "Unknown format code {} for object of type 'str'",
+                code_text(self.presentation)
+            )));
         }
-    }
-    if chars.len() - pos > 1 {
-        let rest: String = chars.iter().collect();
-        return Err(FormatError::value(format!("Invalid format specifier '{rest}' for object of type 'str'")));
-    }
-    let kind = chars.get(pos).copied().unwrap_or('s');
-    if let Some(g) = grouping {
-        // The presentation types that group digits, which no str has: a str fails on its type then.
-        let groups = matches!(kind, 'd' | 'e' | 'f' | 'g' | 'E' | 'G' | '%' | 'F')
-            || (g == '_' && matches!(kind, 'b' | 'o' | 'x' | 'X'));
-        if !groups {
-            return Err(FormatError::value(format!("Cannot specify '{g}' with {}.", code_text(kind))));
+        if let Some(sign) = self.sign {
+            return Err(FormatError::value(if sign == ' ' {
+                "Space not allowed in string format specifier"
+            } else {
+                "Sign not allowed in string format specifier"
+            }));
         }
+        if self.no_negative_zero {
+            return Err(FormatError::value("Negative zero coercion (z) not allowed in string format specifier"));
+        }
+        if self.alternate {
+            return Err(FormatError::value("Alternate form (#) not allowed in string format specifier"));
+        }
+        if self.align == '=' {
+            return Err(FormatError::value("'=' alignment not allowed in string format specifier"));
+        }
+        Ok(())
     }
-    if kind != 's' {
-        return Err(FormatError::value(format!(
-            "Unknown format code {} for object of type 'str'",
-            code_text(kind)
-        )));
+
+    /// value cut to the precision, then padded with the fill to the width on the side the alignment leaves, `=` as
+    /// `<`.
+    fn lay_out(&self, value: &str) -> String {
+        let mut text: Vec<char> = value.chars().collect();
+        if let Some(p) = self.precision {
+            text.truncate(p);
+        }
+        let pad = self.width.saturating_sub(text.len());
+        let left = match self.align {
+            '>' => pad,
+            '^' => pad / 2,
+            _ => 0,
+        };
+        let mut out = String::new();
+        out.extend(std::iter::repeat_n(self.fill, left));
+        out.extend(text);
+        out.extend(std::iter::repeat_n(self.fill, pad - left));
+        out
     }
-    if let Some(sign) = sign {
-        return Err(FormatError::value(if sign == ' ' {
-            "Space not allowed in string format specifier"
-        } else {
-            "Sign not allowed in string format specifier"
-        }));
+}
+
+/// The [[fill]align] of a format spec at chars[*pos], read past: the fill, None where none is given, and the
+/// alignment, `<` where none is.
+fn fill_and_align_at(chars: &[char], pos: &mut usize) -> (Option<char>, char) {
+    let is_align = |c: Option<&char>| matches!(c, Some('<' | '>' | '=' | '^'));
+    if is_align(chars.get(*pos + 1)) {
+        *pos += 2;
+        (Some(chars[*pos - 2]), chars[*pos - 1])
+    } else if is_align(chars.get(*pos)) {
+        *pos += 1;
+        (None, chars[*pos - 1])
+    } else {
+        (None, '<')
     }
-    if no_negative_zero {
-        return Err(FormatError::value("Negative zero coercion (z) not allowed in string format specifier"));
+}
+
+/// The grouping of a format spec's integer digits at chars[*pos], `,` or `_`, read past; None where neither is.
+/// ValueError when the other follows it.
+fn grouping_at(chars: &[char], pos: &mut usize) -> Result<Option<char>, FormatError> {
+    let grouping = chars.get(*pos).copied().filter(|c| matches!(c, ',' | '_'));
+    *pos += usize::from(grouping.is_some());
+    match (grouping, chars.get(*pos)) {
+        (Some(','), Some('_')) | (Some('_'), Some(',')) => Err(FormatError::value("Cannot specify both ',' and '_'.")),
+        _ => Ok(grouping),
     }
-    if alternate {
-        return Err(FormatError::value("Alternate form (#) not allowed in string format specifier"));
+}
+
+/// The precision of a format spec at chars[*pos], its `.` and digits, read past with the grouping of the fraction's
+/// digits after it, which no str uses; None where no `.` is. ValueError when no digit follows the `.`, or too many do.
+fn precision_at(chars: &[char], pos: &mut usize) -> Result<Option<usize>, FormatError> {
+    if chars.get(*pos) != Some(&'.') {
+        return Ok(None);
     }
-    if align == '=' {
-        return Err(FormatError::value("'=' alignment not allowed in string format specifier"));
-    }
-    let mut text: Vec<char> = value.chars().collect();
-    if let Some(p) = precision {
-        text.truncate(p);
-    }
-    let width = width.unwrap_or(0);
-    let pad = width.saturating_sub(text.len());
-    let left = match align {
-        '>' => pad,
-        '^' => pad / 2,
-        _ => 0,
+    *pos += 1;
+    let Some(precision) = digits_at(chars, pos)? else {
+        return Err(FormatError::value("Format specifier missing precision"));
     };
-    let mut out = String::new();
-    out.extend(std::iter::repeat_n(fill, left));
-    out.extend(text);
-    out.extend(std::iter::repeat_n(fill, pad - left));
-    Ok(out)
+    if matches!(chars.get(*pos), Some(',' | '_')) {
+        *pos += 1;
+    }
+    Ok(Some(precision))
+}
+
+/// Whether presentation type presentation groups its digits with grouping, `,` or `_`. No type a str has does: a str
+/// given a grouping fails on its type then.
+fn groups_digits(presentation: char, grouping: char) -> bool {
+    matches!(presentation, 'd' | 'e' | 'f' | 'g' | 'E' | 'G' | '%' | 'F')
+        || (grouping == '_' && matches!(presentation, 'b' | 'o' | 'x' | 'X'))
 }
 
 /// A presentation type as CPython's messages quote it: the character in quotes where it is printable ASCII, else its
