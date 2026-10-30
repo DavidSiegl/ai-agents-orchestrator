@@ -16,21 +16,24 @@ need the run's spec.
 uv run pytest --cov=orchestrator --cov=gate --cov-branch --cov-report=xml --junitxml=test-results.xml
 cargo llvm-cov nextest --workspace --ignore-run-fail --profile ci \
     --config-file ci/nextest.toml --cobertura --output-path coverage-rust.xml
+cargo build --release --locked --manifest-path ci/gate-rust/Cargo.toml
 uv run python gate.py --base main --tests test-results.xml --tests target/nextest/ci/junit.xml \
-    --coverage coverage.xml --coverage coverage-rust.xml --out quality.md
+    --coverage coverage.xml --coverage coverage-rust.xml --rust-syntax ci/gate-rust/target/release/gate-rust \
+    --out quality.md
 ```
 
 The `cargo llvm-cov` command runs the Rust tests and measures their coverage, which takes [cargo-llvm-cov and
 cargo-nextest](#rust-tests-and-coverage); without them, leave out the Rust reports and the gate judges the Python's
-alone.
+alone. The `cargo build` builds the helper the gate reads Rust with ([gate-rust](#reading-rust-the-gate-rust-helper)),
+which `--rust-syntax` names.
 
 `gate.py` is a program of its own beside `orchestrator.py`, and the two share no code: the orchestrator imports
 nothing from it and reads only the file it writes ([the quality file as a
 contract](#the-quality-file-as-a-contract)).
 
-It runs six linters over the files git tracks, each over the files it reads, and keeps only the findings on
-lines the change adds, and the lineless ones on files it touches. Findings on older lines are counted, never
-listed and never held against the change, so the gate judges the change rather than the codebase.
+It runs six linters over the files git tracks outside `mutants/` (below), each over the files it reads, and keeps
+only the findings on lines the change adds, and the lineless ones on files it touches. Findings on older lines are
+counted, never listed and never held against the change, so the gate judges the change rather than the codebase.
 
 | Linter | Files | Rules |
 |---|---|---|
@@ -39,7 +42,7 @@ listed and never held against the change, so the gate judges the change rather t
 | pymarkdown | `*.md` | `[tool.pymarkdown]` |
 | shellcheck | `*.sh` | its defaults |
 | actionlint | `.github/workflows/*.yml` | its defaults |
-| clippy | `*.rs`, in each Cargo workspace, here the top-level one | the workspace's `[lints]` and `clippy.toml` |
+| clippy | `*.rs`, in each Cargo workspace, here the top-level one and `ci/gate-rust/` | the workspace's `[lints]` and `clippy.toml` |
 
 ruff's rules include the coding rules the agents are given as prose that a linter can apply, so that every harness
 gets them, every time: a docstring on every public module, class, method and function (`D100`-`D104`, `D106`,
@@ -77,13 +80,16 @@ Builder answers and the Reviewer judges without the gate failing. A failing chec
 not only on added lines, and names the check that raised it. A check that cannot run says so as one of its
 findings, so a failing check that cannot run fails the gate.
 
-Every check sees the change without what the tree tracks under `mutants/`, mutmut's state (`GateChange.from_tree`):
-none selects a test, a function or a changed line there, or counts an edit there as a change to the code, and a file
-moved out of it counts as added. The linters and the build configuration listing see those files as any other.
+The gate reads the change without what the tree tracks under `mutants/`, mutmut's state (`GateChange.from_tree`),
+and every part of it reads that one change: no linter finding, suppression, line end or coverage counts there, no
+check selects a test, a function or a changed line there, or counts an edit there as a change to the code, and a file
+moved out of it counts as added. A change that adds or edits files there, or moves files into it, fails the gate with
+one condition naming them, since a committed `mutants/` is always mutmut's scratch state committed by accident.
+Deleting such files is no fault.
 
 | Check | Fails? | Finds |
 |---|---|---|
-| `test-integrity` | yes, but for removed tests, fewer assertions and changed expected values | tests the change weakened, in test files (`tests/**`, `test_*.py`, `*_test.py`) |
+| `test-integrity` | yes, but for removed tests, fewer assertions and changed expected values | tests the change weakened, in test files (`tests/**`, `test_*.py`, `*_test.py`; Rust's below) |
 | `cognitive-complexity` | yes | functions the change edits or adds that it takes over a cognitive complexity of 15 |
 | `flaky-tests` | no | tests the change adds or edits that pass in one order and fail in another |
 | `surviving-mutants` | no | changes to the functions the change edits that no test notices |
@@ -104,7 +110,8 @@ change cannot weaken its tests unseen. Each of these is a finding:
   the base. It is one to weigh, like `removed-test`: a test the spec reshapes may need fewer;
 - `swallowed-error`: a bare `except:`, or an `except Exception:` that does nothing, on an added line;
 - `expected-value-changed`: an assertion whose literals changed while the rest of it stayed, in a change that also
-  edits code outside the tests: the "update the expected value to match the output" move. The finding names the
+  edits code outside the tests, which is Python source as **Passes at base** below counts it, on either side of the
+  change: the "update the expected value to match the output" move. The finding names the
   assertion before and after. An expected value held in a constant counts too: when a kept test's assertions name a
   constant of its own file at the base and still name it, bare or as `module.NAME` (the module by its dotted name or a
   module-level import alias of it), and the constant's expression changed other than in layout, or it is no longer a
@@ -116,38 +123,102 @@ change cannot weaken its tests unseen. Each of these is a finding:
   assignment of one name, bound nowhere else in the module's scope, to an expression with no call in it. One the
   change adds, one imported from another module or computed by a call, one reached through a local or a helper, an
   edit to another constant one is built from, and a fixture's return value do not count. It is one to weigh, like
-  `removed-test`, since the spec may ask for the new value.
+  `removed-test`, since the spec may ask for the new value. A golden file, under a `golden` directory inside a
+  `tests` directory as `tests/golden.py` keeps them, is an expected value too, one that `UPDATE_GOLDEN=1` rewrites
+  to whatever the code now writes: a change that edits or deletes one and also edits code outside the tests gets
+  one such finding per file, on the whole file, also to weigh. A golden file added, or renamed unedited, is none.
 
-It reads Python only; another language is a `WeakenedTestsDetector` beside the Python one in
-`WEAKENED_TESTS_DETECTORS`.
+It reads Python and Rust, and golden files whatever their language; another language is a `WeakenedTestsDetector`
+beside those in `WEAKENED_TESTS_DETECTORS`.
+
+**Rust tests** it reads with the [gate-rust helper](#reading-rust-the-gate-rust-helper). A Rust test is a `fn` with an
+attribute whose path ends in the segment `test`, as `#[test]` and `#[tokio::test]` (not `#[rstest]`), in a `.rs` file
+under a `tests` directory or named `tests.rs`, or anywhere inside an inline module that the helper marks `cfg_test`
+(`#[cfg(test)] mod tests { ... }`) in any other `.rs` file, on either side of the change. A file with such a module
+holds both: the check compares the items of its test modules, and the rest of the file is code. Rust code outside
+the tests is any other `.rs` file in a directory that holds a `Cargo.toml`, or below one, `build.rs` included, and a
+change edits it when it adds, deletes or renames such a file, or adds or removes a line of it outside its `cfg(test)`
+modules; so a change to the tests of `lib.rs` alone edits no code. A file that a `#[cfg(test)] mod name;` elsewhere
+names is read by its own path alone, so its tests count only under `tests/` or as `tests.rs` (`TODO.md`). A test is
+known by its file and the names of the items that hold it, joined by `::`, as `tests::adds`; tests of one name in one
+file, as under two `cfg`s for two platforms, are each a test of its own, matched with the other side's in their
+order. Each finding reads the helper's JSON as Python's reads the syntax tree:
+
+- `removed-test`: a test gone from its file. Its body is the helper's `body_digest`, the same whatever the layout and
+  comments, so a test moved to another file or module, or renamed, with the same body, is not removed. An inline
+  module whose tests all went is one finding, at its `mod` line, as a class is, and so is a deleted file, or one that
+  is no longer Rust;
+- `skip`: an attribute added that skips a test or turns it off: `#[ignore]`, a `cfg` other than `cfg(test)` itself,
+  `cfg(all(test, feature = "slow"))` included, which turns tests off as Python's `skipIf` does, or a `cfg_attr` that
+  writes `ignore`, as an argument after its predicate. It counts among a test's attributes; on a line of its own
+  inside a test's body, where a statement's `cfg` turns an assertion off; among the outer attributes of an inline
+  module holding a test; and as an inner attribute, `#![...]`, on a line of its own inside such a module or anywhere
+  in a file under `tests/`. A `cfg` on a helper `fn` is no skip, nor `#[cfg(test)]` on a new test module. Lines are
+  read for attributes only where they start with `#`, so an attribute after other code on its line, or one written
+  over several lines whose `ignore` is not on its first, is not seen there; a test's own attributes the helper gives
+  whole;
+- `fewer-assertions`: a kept test with fewer of the assertion macros the helper lists (`asserts`: `assert!`,
+  `assert_eq!`, `assert_ne!`, their `debug_` forms, and `panic!`) than at the base. It is one to weigh, as Python's;
+- `swallowed-error`: on an added line, a `#[should_panic]` without `expected` on a test, which any panic passes, a
+  failed assertion's included; or, in any `fn` among the tests, a value thrown away (`let _ = expr;`, `_ = expr;`,
+  `expr.ok();`, the helper's `discards`) whose expression holds one of that `fn`'s assertion macros or a call of
+  `catch_unwind`, which throws away the panic or the `Err` that would fail the test. The helper knows no types, so a
+  `Result` thrown away that holds neither, as `let _ = check();` or `check().ok();`, is not seen, since that is
+  also how a test's cleanup ignores a failure, nor a `catch_unwind` whose result is bound to a name and never read;
+- `expected-value-changed`: a kept test's assertion, its macro and its `shape` the same, whose `literals` changed,
+  the assertions of the two sides aligned by macro and shape, in a change that also edits Rust code outside the
+  tests, on either side. Constants are not followed, as Python's are: an expected value held in a `const` that the
+  change edits is not seen. A golden file changed with Rust code is one such finding, as above;
+- `unparsable`: a test file the helper cannot parse in the working tree while its base held tests, at the line syn
+  points at, failing the gate: those tests cannot be compared. One whose base held none has none to lose, as a
+  fixture under `tests/` that is not Rust on purpose, such as the helper's own `broken.rs`, and is not judged; nor is
+  a base that does not parse;
+- `not-run`: the gate cannot read the change's Rust, as [the helper's section](#reading-rust-the-gate-rust-helper)
+  says, for a change to any `.rs` file: one lineless finding, which fails the gate, and the check judges none of
+  the change's Rust.
 
 **Cognitive complexity** scores the functions the change edits, so that a change cannot pile branches into the
 function it is editing rather than split it. A function counts when the change adds a line to it, decorators
-included, in a `.py` file outside `tests/`, which is exempt as it is from ruff's `C901`: any function that no other
-function holds, a method of a nested class and a function under a module-level `if` or `try` included. A function
-nested in another is part of that one. Files are read as Python reads them, by their byte order mark or coding
-cookie. Its score is G. Ann Campbell's [cognitive complexity](https://www.sonarsource.com/docs/CognitiveComplexity.pdf),
-which SonarQube's rule S3776 measured: a point for each `if`, `elif`, `else`, ternary, loop, `except`, `match`,
-sequence of like boolean operators and recursion, and one more for each level of nesting on those that nest.
+included, in a Python file, a `.py` file or a script whose `#!` line names python, outside `tests/`, which is exempt
+as it is from ruff's `C901`: any function that no other function holds, a method of a nested class and a function
+under a module-level `if` or `try` included. A function nested in another is part of that one. Files are read as
+Python reads them, by their byte order mark or coding cookie. Its score is G. Ann Campbell's
+[cognitive complexity](https://www.sonarsource.com/docs/CognitiveComplexity.pdf), which SonarQube's rule S3776
+measured: a point for each `if`, `elif`, `else`, ternary, loop, `except`, `match`, sequence of like boolean operators
+and recursion, and one more for each level of nesting on those that nest.
 Recursion is a function that calls itself, or one on a cycle of calls through other functions of its module, each of
 which then scores the point. Calls are followed by name, as Python's scopes resolve them, so a call to a parameter
-or a local of the same name is not one to the module's function; not through an alias, nor into another module. The
-comment above `COGNITIVE_COMPLEXITY_LIMIT` in `gate.py` says how each Python construct maps to the paper's
-rules. Each of these is a finding:
+or a local of the same name is not one to the module's function; not through an alias, nor into another module.
+
+Rust is judged the same way, with the same limit, base and findings, read through the [gate-rust
+helper](#reading-rust-the-gate-rust-helper). A function is a `fn` with a body that no other `fn` holds, in an `impl`, a
+`trait` or an inline module or not, named by them as `checks::Workflow<T>::poll`; a `fn` or closure inside it is part of
+it. Its lines start at its first outer attribute, doc comments included. Rust's tests are exempt as Python's are, where
+the spec of the Rust checks places them: every file in a directory named `tests`, at any depth, or named `tests.rs`, and
+every `fn` in an inline module marked `#[cfg(test)]`. Nothing else is: a `#[test]` or `#[cfg(test)]` `fn` outside those,
+and a file that a `#[cfg(test)] mod name;` takes in, are judged (`TODO.md`). Each `if`, `else if`, `else`, `if let`,
+`match`, `loop`, `while`, `while let`, `for` and `let ... else` scores as Python's branches do; a `match` arm adds
+nothing, as a `switch`'s case does not in the paper; a run of `&&` and `||` is a sequence of boolean operators, a
+labelled `break` or `continue` a point, and `?` nothing. Recursion follows calls by path within the file: `f(...)`,
+`self.f(...)`, `Self::f(...)` and `Type::f(...)`, not `crate::f(...)` or a module's `m::f(...)`. A change to Rust that
+the gate cannot read, as without `--rust-syntax`, is a `not-run` finding, which fails the gate as `not-scored` does.
+
+The comment above `COGNITIVE_COMPLEXITY_LIMIT` in `gate.py` says how each Python and Rust construct maps to the
+paper's rules. Each of these is a finding:
 
 - `over-limit`: a function over 15, at its `def` line, when it is new or the change raised its score, as
   "`_poll`: cognitive complexity 19, 14 at the base; the limit is 15". A function already over 15 that the change
   leaves no worse is not a finding, since the gate judges the change. Its base is a function of the base, and each
   base function is the base of one function at most:
   - first, one with the same body, since an unchanged function is that function whatever its name: of its name in
-    its file's base, then of its name in the base of another Python file the change touches, a file it deletes
-    included, which counts as Python by its `.py` or its `#!` line at the base, then of any name in its file's base,
-    then elsewhere. So a function moved to another module, renamed or made a method, but otherwise
+    its file's base, then of its name in the base of another Python or Rust file the change touches, a file it
+    deletes included, which counts as Python by its `.py` or its `#!` line at the base, then of any name in its file's
+    base, then elsewhere. So a function moved to another module, renamed or made a method, but otherwise
     unchanged, keeps its score, and a new function given its old name is new. Its score itself can rise with the
     move: two functions that call each other from two modules score no recursion, and moved into one they each
     score its point. Of a function moved unchanged and a
     copy of it, the one that kept the name takes it, and a function moved unchanged into a file the check does not
-    judge, such as one under `tests/` or a script with no `.py` whose `#!` line names python, takes its own before
+    judge, such as one under `tests/`, takes its own before
     any copy can, whatever the copy's name. A function takes the base of a function in another file only when that
     one's body is gone from it, so an unchanged copy takes nothing from an original still in its place, under its
     name or another; an original edited in place is gone by its body, which is the cost below;
@@ -161,9 +232,10 @@ rules. Each of these is a finding:
   Bodies pairing first has a cost: a copy of a function whose original the change edits keeps the old score and
   passes, as if it were the original renamed and the edited one new, even when the edit takes the original below the
   limit, and wherever the copy is, in a file the check does not judge too. `TODO.md` holds it.
-- `not-scored`: a changed file that could not be read or parsed. Like any finding of the check, it fails the gate: a
-  check that cannot do its work says so rather than pass. A base that cannot be read or parsed is not a finding: its
-  file's functions are judged as new, as `test-integrity` takes a base that does not parse to have no tests.
+- `not-scored`: a changed file that could not be read or parsed, a Rust file at the line the helper names. Like any
+  finding of the check, it fails the gate: a check that cannot do its work says so rather than pass. A base that cannot
+  be read or parsed is not a finding: its file's functions are judged as new, as `test-integrity` takes a base that does
+  not parse to have no tests.
 
 ruff's `C90` stays beside it. It counts branches without their nesting, so it misses a deeply nested function that
 cognitive complexity catches, but it still catches a flat function of many branches, which cognitive complexity scores
@@ -220,13 +292,16 @@ call the function:
 
 - `survived`: a function with mutants no test failed on, at its `def`: how many of its mutants survived out of how many
   were tried, and what the first three change, each as a line before and after. No test checks what those lines do;
-- `untested`: a changed function that no test calls, at its `def`, with how many mutants it has;
+- `untested`: a changed function that no test calls, at its `def`, with how many mutants it has; under
+  `--test-contexts`, when no test of the selection reaches any changed function, each is one without that number, and
+  mutmut is not started;
 - `budget-reached`: mutmut ran out of time, as "budget reached after N of M mutants", N counting the mutants it tried
   against a test, as the `survived` counts do. What the N showed is listed; the others may survive too. It also names,
   with their files, the changed functions in modules mutmut had not reached when it was stopped: it saves a module's
   mutants, none or more, in `mutants/<path>.meta` once it has made them all, and theirs had none;
 - `not-mutated`: a changed function mutmut does not mutate, at its `def`, with the reason: its file is outside
-  `[tool.mutmut]`'s `source_paths`, or left out by `only_mutate` or `do_not_mutate`; it is decorated, other than with
+  `[tool.mutmut]`'s `source_paths`, a script with no `.py`, which mutmut never reads, or left out by `only_mutate` or
+  `do_not_mutate`; it is decorated, other than with
   `@staticmethod` or `@classmethod` alone; or it is `__new__`, `__getattribute__` or `__setattr__`. And a function
   mutmut was given but made no mutant of, with the cause where the gate can tell it, a `# pragma: no mutate block` on
   the line its header ends on, the one form of mutmut's pragmas the gate recognises and names as the cause, or
@@ -238,7 +313,9 @@ call the function:
 - `not-run`: mutmut could not start, failed, as it does when a test fails, or left results the gate could not read; the
   rules name no `source_paths`, or give a key the gate reads or writes a value of another shape; the directory to copy
   the tree into could not be made; or a changed file could not be read or parsed;
-- `not-removed`: the copy mutmut ran in could not be removed afterwards, named so that it can be; the findings stand.
+- `not-removed`: the copy mutmut ran in could not be removed afterwards, named so that it can be; the findings stand;
+- `not-narrowed`: `--test-contexts` was given, but its file could not tell which tests reach the changed functions, so
+  mutmut was given its whole test selection, with the reason (see below). The other findings stand.
 
 mutmut runs in the gate's own interpreter, on a copy of the files git tracks, so the working tree stays as it was; its
 state, `mutants/`, goes into the copy too. Its own selector, mutant names such as
@@ -256,27 +333,81 @@ reruns look in a directory: the project's own, which `also_copy` puts in `mutant
 `pytest.ini` or `conftest.py` from above the copy. In a repository without mutmut, a change to a function gets a
 `not-run` finding.
 
+**Which tests mutmut runs.** Before it tries a mutant, mutmut runs its whole test selection three times: to find which
+tests call each function, to check that they pass, and once more with `-x` until the first test that calls a mutated
+function. Run over this repository's whole suite, those runs alone took longer than the budget on Jenkins. With
+`--test-contexts COVERAGE`, the gate narrows `[tool.mutmut]`'s selection first, to the tests that both:
+
+- the coverage.py data file `COVERAGE` records running a line of a mutated function's body, by their pytest node ids;
+- pytest collects in the copy, run with `--collect-only` and the selection and `pytest_add_cli_args` that mutmut's own
+  runs get, so pytest itself applies their paths, `--ignore`, `--deselect` and the rest.
+
+The Jenkinsfile's Test stage writes the file, `.coverage`, with `--cov-context=test`, and the Gate stage passes it.
+mutmut then runs those tests three times. For PR #113's change, 253 mutants of 7 `orchestrator.py` functions, that is
+312 tests of 1351, and mutmut took 77 seconds instead of 709 on the build host, with the same verdicts, mutant by
+mutant. The cost grows with the tests that reach the change, not with the suite: a change to a function nearly every
+test calls still costs about as much as before. The collection runs in the gate's copy of the tree, which holds every
+tracked file, where mutmut's own copy holds `source_paths`, `also_copy` and `tests/`; a selection that reaches
+outside those is collected wider than mutmut runs it.
+
+The file must hold the run's contexts as pytest-cov writes them (`<node id>|run`, `|setup`, `|teardown`), recorded by
+coverage's C tracer: `[tool.coverage.run] core = "ctrace"` in `pyproject.toml`. Under Python 3.14, coverage's default
+core, `sys.monitoring`, records each line for only the first few tests to run it, so mutmut would miss tests that kill
+its mutants and report them as survivors. Any of these makes a `not-narrowed` finding, and mutmut runs the whole
+selection: the file cannot be read, holds no test's context, or does not measure a changed function's file; no line in
+it is recorded for at least a tenth of the tests it records, as that core writes it; or pytest's collection of the
+selection fails or does not finish. Without `--test-contexts`, as in a local run, mutmut runs the whole selection.
+Tests that reach a function only in a subprocess count neither in mutmut's own record nor in the file.
+
 `--mutation-budget SECONDS`, 600 by default, bounds mutmut's run. Stopping it takes at most 15 seconds more: SIGINT,
 10 seconds to exit, a kill of its process group, and 5 seconds to read what it printed. Listing its results and showing
-the survivors then take at most 60 seconds, each call's stop included. So the check takes at most the budget and 75
-seconds, and the few it takes to copy the tree. With the flaky-tests check's three minutes, passes-at-base's two and
-the test run, a quality build stays inside the orchestrator's `QUALITY_TIMEOUT` of 1200 seconds when Jenkins starts
-it without a wait in the queue.
+the survivors then take at most 60 seconds, each call's stop included. Before mutmut starts, reading `--test-contexts`
+takes at most 35, and collecting the selection 35 more. So the check takes at most the budget and 145 seconds, and the
+few it takes to copy the tree. With the flaky-tests check's three minutes, passes-at-base's two and the test run, a
+quality build stays inside the orchestrator's `QUALITY_TIMEOUT` of 1200 seconds when Jenkins starts it without a wait
+in the queue.
 
-This repository's table keeps mutmut off argparse's help texts, which no test reads word for word:
-`do_not_mutate_patterns = ['\bhelp=']`. mutmut matches each pattern against each source line and skips every expression
-that starts on a matching line, with all it holds, so a help text's later lines are skipped too, and so is a whole
-`add_argument(...)` call that starts on its `help=` line. A change to a help text alone makes no mutant.
+This repository's table keeps mutmut off argparse's help and description texts, which no test reads word for word:
+`do_not_mutate_patterns = ['\bhelp=', '\bdescription=']`. mutmut matches each pattern against each source line and
+skips every expression that starts on a matching line, with all it holds, so a text's later lines are skipped too, and
+so is a whole `add_argument(...)` or `add_parser(...)` call that starts on its `help=` or `description=` line. A change
+to such a text alone makes no mutant. Flag names that start a line of their own are still mutated.
+
+**Rust's mutants.** After mutmut, with what is left of the one `--mutation-budget`, the check mutation-tests the Rust a
+change adds lines to outside the tests (a `.rs` file of a Cargo package, as for test integrity) with
+[cargo-mutants](https://mutants.rs/). When the change has Rust to mutate, mutmut gets half the budget, and
+cargo-mutants the rest, with whatever mutmut left unused; a change with no Python functions to mutate gives
+cargo-mutants all of it. cargo-mutants chooses what to mutate itself: it runs `--in-diff` with the change's diff of the workspace's
+`.rs` files, which mutates only what the added lines hold, `--in-place` in the gate's copy of the files git tracks,
+once per Cargo workspace (that of the nearest `Cargo.toml` above the file, as `cargo locate-project` tells it),
+with `--test-tool nextest` and `--timeout 60` for each mutant's tests. Its outcomes, from `mutants.out/outcomes.json`,
+count as mutmut's do: a missed mutant survived; a caught one, and a timeout, did not; an unviable one, which does not
+build, was not tried. Added lines with nothing to mutate, such as a `use` or a `const`, give nothing. The findings are
+mutmut's kinds:
+
+- `survived`: a function with missed mutants, at the line its `fn` starts, with how many of its tried mutants survived
+  and the first three, each by its line and cargo-mutants' description, such as `replace > with == in unchecked`;
+- `budget-reached`: the budget ran out, before cargo-mutants started (it needs the 15 seconds of its stop, as mutmut
+  does) or while it ran, with how many mutants it had tried; the workspaces after it are `not-run`;
+- `not-run`: cargo-mutants could not start, wrote no outcomes the gate can read, or found the unmutated baseline not
+  passing, as for tests that fail or code that does not build in the copy; or the copy could not be made;
+- `not-mutated`: a changed `.rs` file with no `Cargo.toml` above it, or one whose workspace cargo cannot tell;
+- `not-removed`: the copy could not be removed afterwards; the findings stand.
+
+cargo-mutants' own skip attribute, `#[mutants::skip]`, also inside a `cfg_attr`, wrapped or not, is a suppression: the quality file
+lists the change's, as it lists an `#[allow(...)]`. The copy has no `target/`, so each run builds the workspace and its
+dependencies anew within the budget (see `TODO.md`).
 
 **Passes at base** runs the tests the change adds or edits, picked as flaky-tests picks them, against the base's code,
 since a test that passes without the change cannot be what shows the change works: coverage counts the lines it runs,
 surviving-mutants sees only the functions the change edits, and test integrity only tests getting weaker. For a bug
-fix, a test that fails at the base is the proof the bug was reproduced. The check runs only when the change edits
-Python source outside the tests: a `.py` file, or a script whose `#!` names python, that is not a test file (as for
-test integrity), a `conftest.py` or under a `tests` directory. A change to the tests alone, or to the tests and the
-docs, has no "without the change" a test could see. The base is the files git tracked at `--base`, as `git archive`
-writes them, with every one of the change's files that belong with the tests (those three kinds) taken from the
-working tree, or removed where the change removed it, so the changed tests keep their fixtures and data. A submodule
+fix, a test that fails at the base is the proof the bug was reproduced. The check runs only when the change edits,
+adds or deletes Python source outside the tests: a `.py` file, or a script whose `#!` names python in the working
+tree or at the base, that is not a test file (as for test integrity), a `conftest.py` or under a `tests` directory.
+A change to the tests alone, or to the tests and the docs, has no "without the change" a test could see. The base
+is the files git tracked at `--base`, as `git archive` writes them, with every one of the change's files that belong
+with the tests (those three kinds) taken from the working tree, or removed where the change removed it, so the
+changed tests keep their fixtures and data. A submodule
 holds the files of the commit the base records for it, from its own repository in the working tree; one that is not
 initialised there, or lacks that commit, is left empty, and a `not-run` finding names it. pytest, in the gate's
 interpreter, with the configurations flaky-tests' reruns get, found the same way in the base, once for each, and the
@@ -308,9 +439,33 @@ from a directory other than those roots, or through an import hook placed ahead 
 writes where each module it imported came from, and one that took a project file of the working tree's, whether for a
 changed test, a `conftest.py` or a helper, is one `not-run` finding naming the packages, with no test judged.
 
+Rust's tests are judged the same way after Python's, with what is left of the one `--base-run-budget`, when the change
+edits Rust code outside the tests: a `.rs` file of a Cargo package that is not among Rust's tests (as for test
+integrity), edited outside its inline `#[cfg(test)]` modules, added, deleted or renamed. The changed tests are the
+tests, read through the gate-rust helper as test integrity reads them, whose lines, attributes included, the change
+adds to or removes from. They run in a copy of the base made as above, with these files taken from the working tree:
+any file under a `tests` directory, a `tests.rs`, and a `.rs` file the change edits only inside its `#[cfg(test)]`
+modules. A test in a `#[cfg(test)]` module of a file the change also edits outside it cannot be separated from the
+code it tests, and is a `not-run` finding at its `fn`. Each Cargo target the changed tests are in is built and run on
+its own, with `cargo nextest run --locked --no-fail-fast`, filtered to its tests (`-E 'test(=path::name)'`), in the
+copy's package directory, with a target directory and a nextest store outside the copy and the gate's own nextest
+configuration in place of the copy's. The target is found by Cargo's default places: the package is the nearest
+`Cargo.toml` above the file; `tests/x.rs`, and a file under a `tests/x/` that holds a `main.rs`, are the integration
+test `x`; `src/bin/x.rs` and a file under `src/bin/x/` likewise the binary `x`; `src/main.rs` the package's binary;
+any other file under `src/` a module of the library where `src/lib.rs` exists, else of the binaries. A file elsewhere,
+as a shared `tests/common/mod.rs`, is a `not-run` finding. A target whose tests do not compile at the base (rustc's
+`could not compile`) counts as failing there, which is what the check expects of a test that needs the change, and
+gives no finding: so a change that adds a function and a test file calling it is judged as one whose tests fail at the
+base. Any other cargo error, as a lock file `--locked` refuses, is a `not-run` finding. The findings are those above,
+`cargo nextest` in place of pytest; a test passes when every case nextest reports under its name passed, and a test it
+did not report, as one a `cfg` leaves out at the base, gives nothing. A test edited by removing its first attribute,
+as an `#[ignore]`, counts as edited. The target directory is new for every run, so each run compiles the package's dependencies anew,
+within the budget (see `TODO.md`).
+
 **Vague names** lists the names a change binds that tell a reader nothing about what they hold: `data`, `info`,
 `value`, `status`, `handle` and `manager` (`VAGUE_NAME_WORDS`), or a name ending in one after an underscore, such as
-`raw_info`, in any case. A name counts where a line the change adds binds it: an assignment to a name or to an
+`raw_info`, in any case. A name counts where a line the change adds to a Python file, a `.py` file or a script whose
+`#!` line names python, binds it: an assignment to a name or to an
 attribute of `self` or `cls`, a parameter, a `def` or `class`, a `for` or comprehension target, a `with`'s or an
 `except`'s `as`, an import, a `match` pattern's capture, or a type parameter. Each is a `vague-name` finding once per
 file, at its first such line; a binding on a line the change did not add is never reported, though an added line
@@ -318,6 +473,17 @@ binding the same name is. A function marked `@override` (PEP 698) is skipped, na
 class fixes them; an override without the mark is reported (see `TODO.md`).
 `result` is not on the list, since the rules allow it for what a function returns. A changed file that cannot be read
 or parsed is a `not-read` finding.
+
+Rust is read the same way, through the gate-rust helper's `bindings` (see "Reading Rust: the gate-rust helper"): a name
+counts where a line the change adds to a `.rs` file binds it, by any binding kind the helper lists, from a `let` to a
+`use ... as`. Rust names its types and traits in CamelCase, with no underscore to split on, so its counterpart of the
+underscore rule is a name whose last CamelCase word is one of the words, such as `RunInfo`, `StateManager` or
+`HTTPStatus`, but not `InfoStore`. A constant in capitals, as MAX_VALUE, ends in a word after an underscore, so the
+Python rule catches it. The name and parameters of each `fn` of an `impl Trait for T` are skipped, as `@override` is
+in Python, since the trait fixes them; what such a `fn`'s body binds is still read, as is every `fn` of an inherent
+`impl`. A `.rs` file the helper cannot
+parse is a `not-read` finding at the line it names, and when the helper cannot run, the check lists the `not-run`
+finding the other Rust checks do. A change that adds lines to no `.rs` file starts no helper.
 
 The gate is `GATE: ERROR` when any of these holds, and `GATE: OK` otherwise:
 
@@ -381,13 +547,16 @@ first, at most 50 in all, then a count:
 - **Suppressions added** (`# noqa`, `# type: ignore`, `# shellcheck disable`, `<!-- pyml disable`, `# pragma: no cover`,
   `# pragma: no mutate`, and Rust's `#[allow(` and `#[expect(`) are listed, not failed, so the Reviewer weighs each one.
   A `# pragma: no cover` is listed because it takes lines out of the coverage condition, and a `# pragma: no mutate`
-  because it takes them out of the surviving-mutants check.
+  because it takes them out of the surviving-mutants check. Each counts only in the syntax of the files that what it
+  silences reads: in a Python file (a `.py` file or a `#!` python script), only within a comment, so the same words in
+  a string or a docstring are not one; `# shellcheck disable` in a `.sh` file or a workflow under
+  `.github/workflows/`; in Markdown, a `<!-- pyml disable` pragma that is a line of its own, from its first column,
+  as pymarkdown reads one; the attributes in Rust. Any other file has none.
 - **Build configuration**: an edit to `Jenkinsfile`, `pyproject.toml` or `uv.lock` is noted, since each can change how
   the change was judged, as is one to a file anywhere in the tree that clippy takes its rules or its toolchain from
-  (`Cargo.toml`, `clippy.toml`, `rust-toolchain.toml`, `.cargo/config.toml`; `CLIPPY_CONFIG_NAMES` in `gate.py`), and so
-  is each file the change adds or edits under `mutants/`, where mutmut keeps its state: the checks leave them out, as
-  [the gate](#the-gate) says, and the surviving-mutants check runs mutmut without them, though the linters read them as
-  they read any tracked file.
+  (`Cargo.toml`, `clippy.toml`, `rust-toolchain.toml`, `.cargo/config.toml`; `CLIPPY_CONFIG_NAMES` in `gate.py`),
+  and cargo's `config.toml` in the `CARGO_HOME` clippy runs with when that lies inside the tree, as the Jenkinsfile's
+  `.cargo-home` does.
 
 ### Rust tests and coverage
 
@@ -422,6 +591,113 @@ cargo llvm-cov nextest --locked --workspace --ignore-run-fail --profile ci --con
   version and the sha256 of its release's archive; rustup's `llvm-tools` component comes with the agent image, as
   clippy does (see [What Jenkins needs](#what-jenkins-needs)).
 
+### Reading Rust: the gate-rust helper
+
+`gate.py` stays one stdlib-only file, so it reads Rust through a program of its own, `gate-rust`, a small crate in
+`ci/gate-rust/` built on [syn](https://docs.rs/syn/2), which parses each file it is given and prints what the checks
+need to know of it as JSON. `gate.py --rust-syntax PATH` names the built binary:
+
+```bash
+cargo build --release --locked --manifest-path ci/gate-rust/Cargo.toml
+uv run python gate.py --base main --rust-syntax ci/gate-rust/target/release/gate-rust --out quality.md
+```
+
+The gate runs it once per run, over every `.rs` file the change adds, edits, deletes or renames, on both sides of the
+change: each file as the base has it, copied into a temporary directory, and as the working tree has it. It runs as a
+linter does, in a session of its own, killed with what it started after `GATE_TOOL_TIMEOUT` (600) seconds. Its JSON is
+`GateChange.rust_files` in `gate.py`, which the Rust checks read. A change to no `.rs` file never starts it, and so
+does not need `--rust-syntax`: a repository without Rust, or another Python project, is judged as before. Where a
+change does touch Rust and the gate cannot read it, each Rust check says so as a lineless `not-run` finding of its
+own, with the reason, and judges none of the change's Rust: `--rust-syntax` was not given, the helper is not there or
+cannot be started, it fails, outlives its time, or prints anything but one document of the schema below per file.
+For a check that fails the gate, such a finding fails it, so a gate that cannot read the Rust never passes it.
+
+**What it prints.** `gate-rust FILE...` reads each `FILE`, every argument a path, and prints one line of JSON per
+file, in the order given, then exits 0; it exits 1 when it cannot write them. A file it cannot read, that is not
+UTF-8 or that does not parse is still a line of its own, an error document. Lines are numbered from 1, at `\n` alone,
+as git numbers them. Each document is an object:
+
+- `schema`: `2`, the version of this schema, raised by any change to it. The gate refuses a helper of another version
+  with the `not-run` finding above, naming both, so that a helper built from an older tree is never misread;
+- `error`, only in an error document, which has no other field but `schema`: `{"message": ..., "line": N}`, syn's
+  message and the line it points at; `line` is `null` for a file it could not read or decode, and where syn points at
+  no place, as for a file that ends inside an item;
+- `fns`: every `fn` that has a body or could have one: free, in an `impl` or `trait` (a trait's declaration without a
+  body included), and nested in another `fn` or anywhere inside one, in the order they start. Not a `fn` in an
+  `extern` block, nor one inside a macro's tokens, such as the items a `macro_rules!` writes. Each is
+  `{"name", "line", "attrs_line", "end", "holders", "attrs", "asserts", "discards", "body_digest", "flow"}`:
+  - `name` is its identifier as Rust reads it, without `r#`;
+  - `line` is the line of its first token after its outer attributes, its `pub` or `fn` or `async`; `attrs_line` the
+    line its first outer attribute starts on, doc comments included, which is `line` when it has none; and `end` the
+    line of its last token, the `}` of its body or the `;` of a bodiless trait `fn`;
+  - `holders` are the items it lies in, outermost first, each `{"kind", "name"}`: kind `mod` (an inline module), `impl`,
+    `trait`, `fn`, `const` or `static`. An `impl`'s name is its type's tokens as syn writes them, such as `Foo < T >`, and
+    it has a `trait` too: the trait's path, as `fmt :: Display`, or `null` for an inherent `impl`;
+  - `attrs` are its outer attributes other than doc comments, in order, each `{"path", "text", "line"}`: `path` the
+    attribute's path with its segments joined by `::`, as `test`, `tokio::test`, `should_panic` or `cfg`; `text` the
+    attribute as written in the file, from `#` to `]`; `line` where it starts. Which attributes make a test is the
+    checks' to say, from these;
+  - `asserts` are the assertion macros its body calls, in the order they start: `assert!`, `assert_eq!`, `assert_ne!`,
+    `debug_assert!`, `debug_assert_eq!`, `debug_assert_ne!` and `panic!`, named by the last segment of the macro's path,
+    so `pretty_assertions::assert_eq!` counts. Each is `{"name", "line", "text", "shape", "literals"}`: `name` as
+    `assert_eq`; `line` where the macro's path starts; `text` the call as written, from its path to its closing
+    delimiter; `literals` every literal token in its arguments, in order, as written (`1`, `"a"`, `r#"b"#`, `b'c'`), the
+    sign of a negative number not among them, and a `matches!` and its pattern inside the call included; and `shape` the
+    arguments' tokens as syn writes them, layout and comments gone, with each of those literals written `$lit`, so
+    that two calls that differ only in their literals have one shape. An assertion inside a closure the body holds
+    counts, as does one in the arguments of another macro whose arguments parse as expressions separated by commas,
+    such as `vec![...]` or another assertion; one inside a nested `fn` is that `fn`'s, and one inside any other macro,
+    such as `tokio::select!`, is not seen;
+  - `discards` are the values its body throws away, in order, each `{"kind", "line", "text"}`: kind `let` for
+    `let _ = expr;`, `assign` for `_ = expr;`, and `ok` for a statement `expr.ok();`; `text` is `expr` as written, the
+    value thrown away, without the `.ok()`, and `line` where it starts. As for `asserts`, those of a nested `fn` are
+    its own;
+  - `body_digest` is 16 hexadecimal digits that are the same for two bodies of the same tokens, whatever their layout
+    and comments, and differ otherwise but by a 64-bit hash's collision; `null` for a `fn` with no body. It is the
+    helper's own hash, so compare digests only within one run of one build;
+  - `flow` is what its body does that cognitive complexity weighs, as a list of nodes in the order they start; `null`
+    for a `fn` with no body, and for one that another `fn` holds, whose flow is in that one's, as a `fn` node. The
+    helper says what the code is; how much each node weighs is `gate.py`'s (the comment above
+    `COGNITIVE_COMPLEXITY_LIMIT`). Each node is an object with a `kind` and the `line` it starts on, and lists of nodes
+    for its parts. Any other syntax is no node: what it holds stands in the list where it is, so the nodes of
+    `f(if a { b } else { c })` are those of the `if`, after the `call` of `f`. The kinds:
+    - `if`: `{"cond", "then", "else", "else_if"}`, an `if` or `if let`: `cond` its condition, `then` its block, and
+      `else` its `else` branch, `null` for none. `else_if` is true when that branch is an `if` written `else if`, which
+      is then `else`'s one node, and false for `else { ... }`, an `if` inside it included;
+    - `let-else`: `{"else"}`, a `let ... else`, with its `else` block; the value it matches against is before it;
+    - `match`: `{"scrutinee", "arms"}`, `arms` each arm's guard and body, in order;
+    - `loop`, `while` and `for`: `{"head", "body"}`, `head` a `while`'s condition (`while let` too) or a `for`'s
+      iterator, empty for `loop`;
+    - `break` and `continue`: `{"labelled"}`, true when it names a label, as `break 'outer`. A `break`'s value is after
+      it;
+    - `bool`: `{"ops", "operands"}`, a run of `&&` and `||`: `ops` each operator, `"&&"` or `"||"`, in the order they
+      are written, through parentheses, so `a && (b || c)` is one run of two; and `operands` the nodes of what they
+      join. An operand that is no `&&` or `||` itself, such as `!(a && b)` or `f(a || b)`, ends the run, and what it
+      holds is a run of its own;
+    - `closure`: `{"body"}`, a closure, `async` or not;
+    - `fn`: `{"name", "method", "body"}`, a `fn` its body holds at any depth, also as a method of an `impl` or `trait`
+      there, which `method` says; `body` is that `fn`'s `flow`;
+    - `call`: `{"path"}`, a call of a path, as `f(x)` or `Self::new()`, `path` its segments' identifiers without their
+      generic arguments, as `["Self", "new"]`; or of a method on `self`, as `self.run()`, `["self", "run"]`. A call of
+      anything else, as `x.f()` or `(g)()`, is none.
+
+    As for `asserts`, a macro's arguments are read when they parse as expressions separated by commas, any other
+    macro's tokens not;
+- `mods`: every inline module, `mod name { ... }`, nested ones included, in the order they start, each
+  `{"name", "line", "attrs_line", "end", "cfg_test"}`, the lines as for `fns`. `cfg_test` is true when an attribute of
+  its own, outer or inner, is `cfg(P)` with a `P` that holds only under `cfg(test)`: `test` itself, or an `all(...)`
+  with such a `P` among its arguments. A `mod name;` that names another file is not listed;
+- `bindings`: every name the file binds, in the order they appear, each `{"name", "kind", "line"}`, `name` without
+  `r#` and `line` its identifier's. `kind` is one of `let` (the names of a `let`'s pattern, a `let ... else` included),
+  `param` (of a `fn`, `self` left out), `closure-param`, `for` (a `for` loop's pattern), `match` (an arm's pattern),
+  `if-let` and `while-let` (the pattern of a `let` in an `if`'s or a `while`'s condition, each of a chain's; `if-let`
+  too for one anywhere else, such as a `match` guard), `fn`, `struct`, `enum`, `union`, `trait`, `type` (an alias or an
+  associated type), `const`, `static`, and `use-as` (the new name of a `use ... as name`). A pattern binds each
+  identifier in it that does not start with an uppercase letter: syn cannot tell `None` or a `const` from a new name,
+  and Rust names those in CamelCase or capitals, its bindings in snake case. `_` binds nothing. Bindings inside a
+  macro's tokens are listed only where `asserts` looks inside one, so not a capture in a `matches!` pattern, which is
+  no expression; the `fn` a binding is in is the innermost of `fns` whose lines hold its line.
+
 ### Whose rules judge a change
 
 Every linter but clippy gets its rules from one `pyproject.toml`: the tree's own, or the one `--config` names. A
@@ -438,7 +714,7 @@ alone. In the copy mutmut runs on, that table replaces the tree's own, and only 
 `pyproject.toml`, such as `[tool.pytest.ini_options]`, is how its tests run, which a change may need to alter. Without
 `--config`, the tree's table judges it, as the linters' do. What the tree holds under `mutants/`, mutmut's own state
 and cache of results, is left out of that copy, so mutmut starts afresh and a change cannot mark its mutants killed;
-a change that adds or edits files there is listed under build configuration.
+a change that adds or edits files there fails the gate, as [the gate](#the-gate) says.
 
 The rule sets were tuned until `main` gave a short list of real findings: ruff's defaults plus bugbear,
 simplifications, pyupgrade, bandit, cyclomatic complexity (`C90`, `max-complexity = 15`; nesting is the
@@ -460,12 +736,14 @@ uv run python path/to/gate.py --base main --tests test-results.xml --coverage co
 It takes what it runs from that project, so the project's dev dependencies hold them: ruff, mypy and pymarkdownlnt from
 `PATH`, which `uv run` points at the project's environment, and pytest, pytest-randomly and mutmut through the Python
 that runs `gate.py`, for the flaky-tests, passes-at-base and surviving-mutants checks. shellcheck, actionlint and clippy
-come from the machine, and only for a project that tracks shell scripts, GitHub workflows or Rust files. A linter that
+come from the machine, and only for a project that tracks shell scripts, GitHub workflows or Rust files. A change to
+Rust files is read with the [gate-rust helper](#reading-rust-the-gate-rust-helper), built from this repository's
+`ci/gate-rust/` at the same commit as `gate.py` and named with `--rust-syntax`; a project without Rust needs neither. A linter that
 is missing is a failed condition naming it, and for clippy that is a `cargo clippy --version` that fails, as it does
 where rustup's `clippy` component is not installed; a check that cannot run is one of its own findings. The rules come
 from the project's `pyproject.toml`, or the one `--config` names, as [whose rules judge a
 change](#whose-rules-judge-a-change) says. Which files the test-integrity check takes for tests is fixed for now:
-`tests/**`, `test_*.py` and `*_test.py`.
+`tests/**`, `test_*.py` and `*_test.py`, and Rust's as [the gate](#the-gate) says.
 
 ## The quality file as a contract
 
@@ -522,9 +800,11 @@ request](#a-build-of-main-judged-at-its-pull-request)).
   a build cannot, and the Install stage fails naming a missing one. The gate fails a build that lacks a linter, and
   the tests that run the real clippy fail without it.
 - **`curl`, `sha256sum`, `tar` and `openssl` on the agent**: the Install stage downloads, with `ci/install-tools.sh`,
-  pinned releases of the gitleaks the parity scenarios (`tests/parity`) run and of cargo-llvm-cov and cargo-nextest,
-  for the [Rust tests and coverage](#rust-tests-and-coverage), into the workspace's `.tools/bin`, which the Jenkinsfile
-  puts first on `PATH`. The scenarios make the fake PyPI's certificate with openssl. Without gitleaks or openssl the
+  pinned releases of the gitleaks the parity scenarios (`tests/parity`) run, of cargo-llvm-cov and cargo-nextest,
+  for the [Rust tests and coverage](#rust-tests-and-coverage) and the passes-at-base check's run of the changed Rust
+  tests at the base, and of cargo-mutants, for the surviving-mutants check's Rust, into the workspace's `.tools/bin`,
+  which the Jenkinsfile puts first on `PATH`. cargo-mutants releases only a glibc build for linux x86_64, so the agent
+  image's glibc must be one it runs on. The scenarios make the fake PyPI's certificate with openssl. Without gitleaks or openssl the
   scenarios fail, naming it.
 - **Node 20.19 or later and npm, Rust 1.90 or later, and Tauri 2's system packages on the agent**, for the Test stage's
   Rust tests, the UI stage's checks of the desktop app and the Package stage's `tauri build` of it. Debian 13's `nodejs`
@@ -535,7 +815,13 @@ request](#a-build-of-main-judged-at-its-pull-request)).
   the development host's CPUs; `CARGO_HOME` is kept in the workspace, so nothing is cached between builds. The UI stage
   runs `cargo check` under the same lock, since the Test stage's build of the dependencies is not the check clippy
   needs: with them checked, the Gate stage's clippy checks only the workspace's own crates, in about 2 s for the shell
-  alone, against 77 s for a clean one on the development host's 6 CPUs. Package bundles the `.deb` with `dpkg-deb`, and the `.AppImage` with `linuxdeploy`,
+  alone, against 77 s for a clean one on the development host's 6 CPUs. The Install stage builds the
+  [gate-rust helper](#reading-rust-the-gate-rust-helper) with `cargo build --release --locked`, from the judged
+  `main`'s `ci/gate-rust/` in a quality build, fetching syn, proc-macro2 and serde_json from crates.io, in about 35 s
+  on those 6 CPUs, and checks the tree's own `ci/gate-rust/`, a package outside the top-level workspace, for the Gate
+  stage's clippy as the UI stage checks the workspace, in about 4 s, which leaves clippy under a second for it. A
+  helper that does not build, as when crates.io cannot be reached, does not stop the build: the gate then reports a
+  change to Rust as not run by each check that reads it. Package bundles the `.deb` with `dpkg-deb`, and the `.AppImage` with `linuxdeploy`,
   which `tauri build` downloads from GitHub each build.
 - **`gh` on the agent, and a GitHub token** for the Release stage: a Secret text credential with the ID
   `GitHub-Agents`, holding a token with *Contents: read and write* on this repository. It is the agents' own
@@ -575,7 +861,7 @@ empty `GIT_REF`, before it accepts `buildWithParameters`.
 
 | Build | `--base` | Gate and rules |
 |---|---|---|
-| Quality build (`GIT_REF` set) | `HEAD^`: the snapshot's only parent is the run's base | `main`'s `gate.py` and `pyproject.toml`, from the `origin/main` commit its description names (below); a commit without `gate.py` fails the stage, unjudged |
+| Quality build (`GIT_REF` set) | `HEAD^`: the snapshot's only parent is the run's base | `main`'s `gate.py`, `pyproject.toml` and gate-rust helper, from the `origin/main` commit its description names (below); a commit without `gate.py` fails the stage, unjudged |
 | Pull request (`CHANGE_TARGET` set) | the merge base with the target branch, fetched first | its own, `Jenkinsfile` included (below) |
 | `main` | the last successful build's commit, else `HEAD^1` | its own; none when judged at its pull request (below) |
 

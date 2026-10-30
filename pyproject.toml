@@ -1,11 +1,13 @@
 [tool.pytest.ini_options]
 pythonpath = ["."]
+# Only tests/: evals/tasks/*/hidden_test.py match pytest's *_test.py, and are run by evals/run.py, not by pytest.
+testpaths = ["tests"]
 # Leaves out the contract tests, as their marker says (tests/conftest.py).
 addopts = ["-m", "not contract"]
 
 [project]
 name = "octoflow"
-version = "0.40.0"
+version = "0.48.0"
 description = "Octoflow AI: coding agents in relay, spec to build to review, each role judged by another, in herdr"
 readme = "README.md"
 # The orchestrator is stdlib-only, so it runs with a system python3 3.13+ without uv.
@@ -53,23 +55,35 @@ max-complexity = 15
 "tests/**" = ["S101", "S105", "S106", "S108", "RUF059", "RUF012", "C408", "C901", "D1"]
 
 [tool.mypy]
-# The tests are untyped by design; the orchestrator and the gate are the typed surface.
-files = ["orchestrator.py", "gate.py"]
+# The tests are untyped by design; the orchestrator, the gate and the eval runner are the typed surface.
+files = ["orchestrator.py", "gate.py", "evals/run.py", "evals/make_bundles.py", "evals/acceptance.py"]
 
 [tool.mutmut]
 # What `gate.py`'s surviving-mutants check runs mutmut by, on a copy of the tree in which only the functions a change
 # edits can be mutated (docs/quality-gate.md). The tests read examples/ and docs/ beside the code; mutmut runs them in
-# a directory of its own, which holds only what is listed here.
+# a directory of its own, which holds only what is listed here; tests/test_evals.py imports evals/, and
+# tests/test_gate.py builds the gate-rust helper from ci/gate-rust/'s sources, without its target/: mutmut copies a file
+# into a directory that must be there, which copying src/ first makes.
 source_paths = ["orchestrator.py", "gate.py"]
 pytest_add_cli_args_test_selection = ["tests/"]
 # Without the parity scenarios (tests/parity), which run the engine as a program, about 190 s a run: mutmut's stats
 # and clean runs of them alone would take most of gate.py's mutation budget before it tries a mutant (TODO.md). The
 # Jenkinsfile's Test stage leaves them out of a quality build too, under a condition it states.
 pytest_add_cli_args = ["--ignore=tests/parity"]
-also_copy = ["examples/", "docs/"]
-# argparse's help texts, which no test reads word for word. mutmut matches each pattern against each source line and
-# skips every expression that starts on a matching line, with what it holds, the following lines of a help text too.
-do_not_mutate_patterns = ['\bhelp=']
+also_copy = ["examples/", "docs/", "evals/", "ci/gate-rust/src/", "ci/gate-rust/Cargo.toml", "ci/gate-rust/Cargo.lock"]
+# argparse's help and description texts: prose, not behaviour, which no test reads word for word. mutmut matches each
+# pattern against each source line and skips every expression that starts on a matching line, with what it holds, the
+# following lines of a text too. The patterns match any keyword argument of those names, not only argparse's: the
+# statement holding `Pipeline(..., description=description)` in orchestrator.py's parse_workflow is skipped too.
+# Flag names stay mutated: they are behaviour.
+do_not_mutate_patterns = ['\bhelp=', '\bdescription=']
+
+[tool.coverage.run]
+# The C tracer, which the Jenkinsfile's Test stage records a context per test with (--cov-context=test), for gate.py
+# --test-contexts to pick the tests mutmut runs. Under Python 3.14, coverage's default core, sys.monitoring, records
+# each line for only the first few tests to run it, without a warning: 8 of the 312 tests that reach PR #113's
+# functions. mutmut would then leave out tests that kill its mutants, and report them as survivors.
+core = "ctrace"
 
 [tool.pymarkdown]
 # The docs wrap at 120, by eye. README.md opens with its logo in HTML, which also keeps a heading off its first line.

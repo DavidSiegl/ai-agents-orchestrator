@@ -125,6 +125,13 @@ class TestInvariants(unittest.TestCase):
         self.assertEqual(project["dependencies"], [], "the orchestrator has no runtime dependencies "
                                                       "(pyproject.toml, [project]; docs/ui-options.md, C1)")
 
+    def test_coverage_records_with_the_c_tracer(self):
+        with open(ROOT / "pyproject.toml", "rb") as f:
+            run = tomllib.load(f)["tool"]["coverage"]["run"]
+        self.assertEqual(run.get("core"), "ctrace", "under another core, `--cov-context=test` can record each line for "
+                                                    "its first tests alone, and gate.py --test-contexts then has mutmut "
+                                                    "leave out tests (pyproject.toml, [tool.coverage.run])")
+
     def test_credentials_travel_only_in_an_unredirected_header(self):
         rule = ("the token travels only in the Authorization header, never in a URL, and only to the server asked "
                 "(docs/quality-gate.md, Credentials and permissions)")

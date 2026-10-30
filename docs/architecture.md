@@ -365,6 +365,17 @@ the Rust engine runs each command in a group of its own. Jenkins runs them again
 that touches `engine/`, `tests/parity/` or the workspace's `Cargo.toml`, `Cargo.lock` or `rust-toolchain.toml` (the
 Jenkinsfile's Rust parity stage).
 
+`tests/test_crash_resume.py` crashes the Python engine in-process, on the fakes of `tests/test_orchestrator.py`, right
+after a write of `state.json` (`_claim`'s or `_save`'s), resumes it through `resumed_state` as `resume --force` does,
+and checks that the run ends as an uninterrupted one: the same files, the same `state.json` less its heartbeat and
+owner, and each effect on the world (prompts, herdr's workspace and agents, git's commits, pushes and branches, pull
+requests, Jenkins triggers, notifications) once, but for the repeats `idempotent` names with where the code allows them
+and the known gaps `expected` pins (TODO.md, Open issues). Its agents answer after 90 seconds of `FakeClock`, so each
+turn has a heartbeat save to crash after. `TestCrashAfterEveryWrite` crashes once after each write of five scenarios;
+`TestCrashesAndResumes`, a Hypothesis state machine, crashes as often as it draws, during a resume too. Where the parity
+harness kills the engine as a program at one point per phase, at any moment and on real git, this one crashes after
+every write of `state.json` but only there, and never sees `Host` drive git, gh or herdr.
+
 Golden files hold generated text to a reviewed copy of it under `tests/golden/`: `assert_golden` (`tests/golden.py`)
 fails with a unified diff naming the file when the text differs, and `UPDATE_GOLDEN=1 uv run pytest` rewrites the
 files instead. A change to that text is reviewed as the diff of its golden files. They hold two texts. `gate.py`'s
@@ -379,6 +390,11 @@ session's prompts, the recordings hold only the templates, in `state.json`; the 
 and a fresh session's prompt put together, only the golden files hold, and only for the Python engine. The engine's
 other texts, its follow-up prompts, notes, commit messages and pull request bodies, have no golden files: the
 scenarios record them as sent, where one reaches them. TODO.md lists the texts neither reaches.
+
+`tests/test_evals.py` covers the eval runner, `evals/run.py` ([Evals](design.md#evals)), with
+`tests/fake_engine.py` as its engine, a program that plays a scripted run in the clone, and the eval tasks: each
+bundle is of its source, and each hidden test rejects its task's starting point and accepts a solution of it. No
+agent runs in the suite.
 
 `tests/contract/` holds the contract tests, which check the fakes against the real thing: `test_jenkins.py` drives
 `CI` against the live quality job ([the calls](quality-gate.md#the-calls)). They are marked `contract`, whose

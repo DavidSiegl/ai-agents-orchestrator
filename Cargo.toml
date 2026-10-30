@@ -3,6 +3,9 @@
 # Test stage runs every member's tests here, and gate.py's clippy lints the workspace as a whole.
 [workspace]
 members = ["engine", "ui/src-tauri"]
+# gate.py's Rust reader is a package of its own, with its own Cargo.lock: the Install stage builds it from the judged
+# main's tree, apart from this workspace (Jenkinsfile, and docs/quality-gate.md, "Reading Rust: the gate-rust helper").
+exclude = ["ci/gate-rust"]
 resolver = "2"
 
 # clippy's rules for every member, by which gate.py judges a change to its Rust (docs/quality-gate.md): clippy's

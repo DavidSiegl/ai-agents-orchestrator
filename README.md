@@ -457,3 +457,7 @@ uv run pytest --cov=orchestrator --cov=gate --cov-branch --cov-report=xml && \
 fails a test against its golden file in `tests/golden/`; `UPDATE_GOLDEN=1 uv run pytest` rewrites them, and the
 change is reviewed as their diff (see [Tests](docs/architecture.md#tests)). `packaging/build-binary.sh` builds and
 smoke-tests the binary for the machine it runs on; see [Tooling](docs/architecture.md#tooling).
+
+Before a release that changes a prompt, a workflow or how a harness is run, run the eval set by hand, from a herdr
+pane: `uv run python evals/run.py` gives real agents five small tasks and judges each by a test they never see
+([Evals](docs/design.md#evals)).

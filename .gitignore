@@ -29,5 +29,8 @@ ui/src-tauri/binaries/
 # The Cargo workspace's build output
 /target/
 
+# The build output of gate.py's Rust reader
+ci/gate-rust/target/
+
 # What Hypothesis keeps of the examples it tried
 .hypothesis/

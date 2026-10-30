@@ -3,8 +3,8 @@
 # takes for its cargo steps, and exit with the command's status. While another build holds the lock, say so on
 # standard error and wait for it with no time limit, so that a slow build reads as waiting rather than hung; with
 # --no-wait, say so and run the command at once without the lock. Only this script holds the lock, never the command
-# or anything it starts, so a process the command leaves running does not keep it. Jenkins's Test, UI and Package
-# stages run every cargo step through it.
+# or anything it starts, so a process the command leaves running does not keep it. Jenkins's Install, Test, UI and
+# Package stages run every cargo step through it.
 #
 # The lock is there because all builds on agentbox0 share its Jenkins agent container's 3 GB (mem_limit in the
 # Homelab's jenkins/agentbox0.yaml): two builds compiling the Tauri and GTK crates at once ran rustc out of memory

@@ -64,7 +64,72 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   bodies, which the recordings hold as sent where a scenario reaches them, and which would test only the frozen Python
   engine, not the Rust one.
 
+- **The eval set: what it does not cover.** `evals/run.py` (live-checks/04, docs/design.md, Evals) runs the engine as
+  a program, `run --no-pr --spec`, rather than being the `orchestrator.py eval` command the ticket named, since the
+  Python engine is frozen (above); `EVAL_ENGINE` points it at the Rust engine. Whether the Rust engine gets an `eval`
+  command of its own is open. Not covered: the quality gate, since the toy repositories have no quality job and their
+  origin is a bundle no snapshot can be pushed to, so `quality rounds` stays 0; a `--worktree` or `--machine` run,
+  which the runner refuses; and an interview, which `--spec` skips. Decided 2026-10-28. The verification run it
+  still lacks is under Open issues.
+
+- **The gate judges Rust as it judges Python: the rest of it.** `.scratch/gate-rust-checks/` (spec, 2026-10-29). The
+  helper the checks read Rust through is in: `ci/gate-rust/`, a crate on syn whose JSON (docs/quality-gate.md,
+  "Reading Rust: the gate-rust helper") `GateChange.rust_files` reads, named by `gate.py --rust-syntax`, which the
+  Install stage builds from the tree the Gate stage takes `gate.py` from. `test-integrity` reads Rust's tests through
+  it (ticket 02, 2026-10-30: `rust_weakened_tests`, the `rust` entry of `WEAKENED_TESTS_DETECTORS`), and
+  `cognitive-complexity` scores Rust over the `flow` it prints (ticket 03, 2026-10-30), and `vague-names` reads its
+  `bindings` (ticket 04, 2026-10-30: `_rust_vague_names`), and `passes-at-base` runs the changed Rust tests at the
+  base with cargo-nextest (ticket 05, 2026-10-30: `_rust_passes_at_base`), and `surviving-mutants` mutation-tests
+  the Rust a change adds with cargo-mutants (ticket 06, 2026-10-30: `_cargo_mutants_on_copy`); their blind spots are
+  under Open issues. Left: a Cargo ecosystem for `new-dependencies` after the switch (07). Decided against (2026-10-29, the user's): a Rust counterpart of
+  `flaky-tests`, since nextest runs each test in a process of its own, so the reruns under other seeds that
+  `flaky-tests` does for pytest (`FLAKY_SEEDS`) have little to catch.
+
 ## Open issues
+
+- **Test code outside the places the spec names is judged as code.** The spec of the Rust checks (requirement 2)
+  places Rust's tests in a `tests/` directory, a `tests.rs` and an inline `#[cfg(test)]` module; `_in_rust_tests` and
+  `_rust_test_path` in `gate.py`, which both Rust checks read, follow it (test-integrity's side of this is the
+  out-of-line `mod name;` item in its list below). So `cognitive-complexity` judges a file that a parent takes in
+  with `#[cfg(test)] mod name;`, as the engine keeps its fakes and `test_support.rs` (`engine/src/host.rs:24` on
+  rust-engine): at rust-engine `476b770`, 3 of the 21 engine functions over the limit are theirs (`FakeState::git`,
+  `FakeJenkinsState::answer`, `helper_cases`). Found by gate-rust-checks ticket 03 (2026-10-30). And, as cross-review
+  108 put it (F4): "A file-level `#[cfg(test)] fn` or `#[cfg(test)] impl`, or a `#[test]` fn outside the places
+  requirement 2 names, is judged against 15." Closes with the user's ruling on the spec's definition, and, if those
+  are tests, the helper listing each out-of-line `mod name;` with its `cfg_test`, so that the gate can follow a
+  declaration to its file, and a `cfg_test` of each fn's own and its impl's attributes.
+- **A macro whose arguments are no expressions separated by commas adds nothing to a Rust fn's score.** The helper's
+  `flow` reads a macro's arguments only where they parse that way (`FlowWalker::visit_macro` in
+  `ci/gate-rust/src/main.rs`), as its `asserts` do. Raised by cross-review 108 (F3, 2026-10-30): "A macro whose
+  arguments do not parse as comma-separated expressions (`vec![if a {..} else {..}; n]`, `matches!(x, P if a && b)`,
+  `tracing::info!(target: "x", ..)`, `select!{..}`) is dropped silently, so its branches, loops and closures add
+  nothing to the score." Clippy's own `cognitive_complexity` reads no macro either. Closes with the helper parsing the
+  common other shapes (`expr; n`, `expr, pattern if guard`, `name: expr` arguments) and a `macro` node, unread, that
+  gate.py can count or report.
+- **Rust's test code takes no part in pairing a function with its base.** `_rust_scored_functions` leaves the fns
+  `_in_rust_tests` places among the tests out on both sides, where a Python file under `tests/` stays in
+  `_base_scores`' pool as a file the check does not judge. So a fn moved unchanged into Rust's tests cannot keep its
+  own base before a copy of it elsewhere takes it, and that copy passes as the original. Found by gate-rust-checks
+  ticket 03 (2026-10-30); since its merge with ticket 02 it holds for test files as for inline test modules. Closes
+  with a per-function "exempt" mark on `_ScoredFunction` that `_BasePool` reads where it now asks
+  `_complexity_exempt` of a path.
+
+- **The eval set's code has review 88's findings open.** Raised by cross-review 88 (2026-10-28) in code PR #167
+  brought, recorded here rather than fixed in an unrelated branch: the docs task's hidden test sees only ``` fences
+  in column 0 (`evals/tasks/docs/hidden_test.py:64`, F1) and its `usage()` closes a fence on any fence line, not the
+  matching one (`:35`, F2); `evals/run.py`'s `_run_metrics` trusts the shape of a metrics.json it could parse (F3);
+  `evals/make_bundles.py`'s git inherits `GIT_DIR`, `GIT_INDEX_FILE` and `GIT_WORK_TREE` (F4); `evals/acceptance.py`'s
+  summary takes every unittest error for a test case (F5); and `evals/run.py:167` drops a failed removal of the clone
+  (F6). Closes with each fixed in a pull request of the eval set's.
+- **The Gate stage's comment on report order describes a window that has closed.** The Jenkinsfile passes the Rust
+  reports before the Python's for a main whose `gate.py` took `--tests` and `--coverage` once; main's takes them
+  repeatedly since #163, so the order and its comment can go. Raised by cross-review 88 (F9, 2026-10-28).
+
+- **No agent has run an eval task yet.** live-checks/04's verification asks for one real `evals/run.py --tasks <one>
+  --repeat 1` from a herdr pane (it starts real agents, so it was left to the user), with its row in the pull
+  request's description and its result line committed under `evals/results/`. Cross-review 80 (F9, 2026-10-28):
+  "Finding 1 is the kind of defect only a real run's output (or a test built from one) shows": a task text or a
+  hidden test that misjudges real work shows only then. Closed by that run, and by fixing what its output shows.
 
 - **A quality build now takes longer than `QUALITY_TIMEOUT`.** The contract test's one live run (live-checks/01,
   2026-10-27) triggered build #59 of `Octoflow-AI/py-octoflow-ai-quality` with `GIT_REF=main` (`f4628cc`): it ended
@@ -79,8 +144,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   engine. Narrowed by PR #162 (2026-10-27) for a quality round whose change leaves what the parity scenarios depend on
   alone (Jenkinsfile, Test stage): its build leaves them out. A change that bumps the version touches `pyproject.toml`
   and `uv.lock`, so its build still runs them, and so does the contract test's build of main whenever main's last
-  commit was a releasing merge (build #59, before #162, ran them in any case); Gate's mutmut time is
-  gate-open-decisions ticket 06's. Closes when
+  commit was a releasing merge (build #59, before #162, ran them in any case); Gate's mutmut time is narrowed by
+  `gate.py --test-contexts` (gate-open-decisions ticket 06), which costs the Test stage about 7 % more. Closes when
   a quality build that runs the scenarios fits in `QUALITY_TIMEOUT`, shown by the contract test green against one, or
   with a larger `QUALITY_TIMEOUT` in the Rust engine.
 - **The Rust engine reads some input no run writes otherwise than the Python engine.** Each is a difference only for a
@@ -225,6 +290,41 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   Decided against for now: a `cargo test --doc` beside it, which builds the dependencies a third time, uninstrumented,
   under the agent's 3 GB, for no example. Closes with `cargo test --doc --locked` in the Test stage once a doc example
   lands, or with cargo-llvm-cov's `--doctests` once it runs on a stable toolchain.
+- **Jenkins never runs `ci/gate-rust`'s own tests.** The helper is a package of its own, excluded from the top-level
+  workspace (`Cargo.toml`), whose tests the Test stage runs, so its `cargo test` (`ci/gate-rust/tests/schema.rs`) runs
+  only by hand; its added lines are judged by clippy but count as nothing to cover. `tests/test_gate.py` builds the
+  helper and runs it over Rust snippets, so the Test stage exercises its `flow` (gate-rust-checks ticket 03,
+  2026-10-30), but not its own tests. Narrowed by the Fixed "Jenkins ran the Rust tests of `ui/src-tauri` alone"
+  (rust-engine ticket 04) and the switch's merge of main (rust-engine ticket 11, 2026-10-30), which excluded the
+  helper. Closes with the Test stage also running `cargo nextest` in `ci/gate-rust` and passing its report to the gate.
+- **`GateChange.rust_files` starts one `git cat-file` per base `.rs` file.** `_rust_paths` in `gate.py` copies each
+  base side out of git with its own process, so a change to N Rust files starts N git processes before the helper's
+  one run; about 5 ms each here. Raised by cross-review 106 (F5, 2026-10-30): "one `cat-file --batch` or `git archive`
+  would do." Closes with one `git cat-file --batch` over all the base paths.
+- **test-integrity's Rust detector does not see some weakenings that Python's does, or that its rules name.** Found
+  while writing it (gate-rust-checks ticket 02, 2026-10-30); docs/quality-gate.md, "Rust tests", lists each:
+  - an expected value held in a `const` or `static` the change edits: `_changed_constants` follows Python's
+    module-level constants, and the Rust side has no counterpart. Closes with the helper listing a file's `const`s
+    and `static`s with a digest of their expressions, and `rust_weakened_tests` comparing those an assertion names;
+  - a `Result` thrown away that holds no assertion macro and no `catch_unwind`, such as `let _ = check();` where
+    `check` returns the `Err` that should fail the test, and a `catch_unwind` result bound to a name and never read.
+    The helper knows no types, so `_rust_swallowed_errors` cannot tell such a value from a cleanup's. Closes with a
+    rule on the text the change replaced, such as a `.unwrap()`, `.expect(...)` or `?` at the base on the same
+    expression, which the helper would need to report;
+  - a skipping attribute that does not start its line, or a multi-line `cfg_attr` whose `ignore` is on a later line,
+    in a test's body or on a module (`_rust_skips` reads those lines' text; a test's own attributes come whole from
+    the helper). Closes with the helper listing the attributes of modules and of statements in a test, which raises
+    its schema.
+  - a test module in a file of its own that a `#[cfg(test)] mod name;` names, where that file is neither under
+    `tests/` nor `tests.rs`, as `mod cli_tests;`: `_rust_test_file` reads a path alone, as requirement 2 of the spec
+    defines the files, so that file's tests are not read and its edits count as code. Raised by cross-review 107
+    (2026-10-30, not recorded). Closes with the helper listing each `mod name;` with its `cfg_test`, and the check
+    resolving the file it names as rustc does (`name.rs` or `name/mod.rs` beside the file, or a `#[path]`).
+  - removing the first of two tests of one name in one file, as under two platforms' `cfg`s: `_RustTest.namesake`
+    numbers them in order, so the second then takes the first's number and is compared with the removed one's base,
+    which reads as a fewer-assertions or a changed literal on it, or as nothing, rather than as a removed test. Raised
+    by cross-review 107 (round 2, not recorded). Closes with namesakes matched by their `cfg` attributes, or by body
+    first as removed tests are.
 - **The parity harness records `state.json` at each command the fakes get, not after each save.** Ticket
   rust-engine/01 asks for "`state.json` after each save"; the ledger reads it only when herdr, gh, Jenkins or PyPI
   gets a call, and leaves out a change to `heartbeat_at` alone (`tests/parity/fakes.py`, `_changed_states`). Raised
@@ -272,12 +372,13 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   many events a step sends depends on where serve's one-second poll falls among the run's saves, so the stream
   between two checkpoints differs from run to run. Closes with a serve whose poll the harness can step, which would
   be a hook in the engine, or the user's ruling that the folded stream is the contract, as the desktop app reads it.
-- **`test-integrity` does not see a golden file's change.** A golden file under `tests/golden/` (`tests/golden.py`)
-  is an expected value outside any assertion, as a text file the check does not parse, so a change that rewrites one
-  with `UPDATE_GOLDEN=1` alongside the code it pins gets no `expected-value-changed` finding; the Reviewer sees the
-  rewrite only in the diff. Found while adding the golden files (orchestrator-test-methods/06, 2026-10-27). Closes
-  with the check reporting a changed file under a project's golden directory, which would need that directory to be
-  a setting for projects other than this one (gate-split/04, the test-file patterns).
+
+- **`test-integrity` knows golden files only by this repository's layout.** `_golden_file` (`gate.py`) takes a
+  golden file to be one under a `golden` directory inside a `tests` directory, as `tests/golden.py` keeps them, so
+  another project's expected output under another name, such as `__snapshots__/`, rewritten alongside the code it
+  pins gets no `expected-value-changed` finding. Left by the fix of "`test-integrity` did not see a golden file's
+  change" (Fixed, 2026-10-28). Closes with the golden directory a setting, beside the test-file patterns of
+  `.scratch/gate-split/issues/04-configurable-test-files.md`, which does not name it yet.
 
 - **A quality build of a snapshot from before `gate.py` fails mypy.** A quality build judges by main's rules
   (`--config`), and since the split main's `[tool.mypy] files` names `gate.py`, which mypy reads relative to the
@@ -379,11 +480,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   Raised by cross-review 66 (F11, 2026-10-27): "The gate is OK on a change that the workspace's rules make
   uncompilable". Closes with a second, uncapped clippy run whose rustc errors (codes `E` and four digits, such as E0453)
   are compile errors, or with the forbidden lints read from the manifests and an added allow of one failing the gate.
-- **A cargo config under the build's `CARGO_HOME` is not listed as build configuration.** `clippy_config_files` in
-  `gate.py` lists cargo's config only under a `.cargo` directory, but the Jenkinsfile sets `CARGO_HOME` to
-  `$WORKSPACE/.cargo-home`, so a change that tracks `.cargo-home/config.toml` could change clippy's lint levels or
-  rustflags without the quality file listing it. Raised by cross-review 70 (round 1, not recorded, 2026-10-27).
-  Closes with `CARGO_HOME`'s config files listed too, or `.cargo-home/` refused in a change.
 - **A quality build judges Rust by the snapshot's own clippy rules.** `Clippy` in `gate.py` chooses no lints (it caps
   their levels at warn, `--cap-lints`), so clippy reads each workspace's `[lints]`, `clippy.toml`, `.cargo/config.toml`
   rustflags and `rust-toolchain.toml` from the judged tree, where a change can loosen them; `--config` replaces only
@@ -512,9 +608,58 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 - **`test_invariants.py`'s `AnyJenkins` and `Answer` copy `FakeCI` and `FakeResponse`** of
   `tests/test_orchestrator.py`. Raised by cross-review 60 (F4, 2026-10-27). Closes with one fake Jenkins the two files
   share.
-- **`vague-names` does not split CamelCase.** `vague_names` matches a whole name or its last `_`-separated word,
-  so `user_data` is found but a class `InfoManager` or `UserData` is not. Closes, if the run metrics show such names
-  recur, with the last CamelCase word matched too.
+- **`vague-names` does not split CamelCase in Python.** `vague_names` matches a whole Python name or its last
+  `_`-separated word, so `user_data` is found but a class `InfoManager` or `UserData` is not; in Rust the last CamelCase
+  word is matched too (`_is_vague`, gate-rust-checks ticket 04), which is Rust's counterpart. Closes, if the run metrics
+  show such names recur, with Python's matched the same way.
+- **`vague-names` reports a Rust trait impl's associated types and constants.** Only the name and parameters of a `fn`
+  an `impl Trait for T` holds are skipped (`_rust_fixed_bindings`), as gate-rust-checks ticket 04 asked; a `type Value`
+  or `const STATUS` the trait fixes is reported, as in serde's `impl Visitor for V { type Value = ...; }`. The helper's
+  `bindings` give no holder, so the gate cannot tell them apart from an inherent `impl`'s. Found by ticket 04
+  (2026-10-30). Closes with the helper marking each binding an `impl Trait for T` holds directly, a schema change.
+- **`passes-at-base` builds a Rust package's dependencies anew on every run.** `_rust_base_run_findings` gives each run
+  a target directory in its scratch directory, outside the copy, so every gate run compiles the base's dependencies
+  before it runs a test, within `--base-run-budget`; on a package of many crates that may use the whole budget, which
+  is a `budget-reached` finding. Not measured on Jenkins: gate-rust-checks ticket 05 asked for the Gate stage's added
+  time, which needs a Jenkins build of a Rust change on the branch. Decided against for now: the working tree's own
+  `target/`, where the base's build would overwrite the binaries Cargo copies up to `target/debug`. Closes, if the
+  budget runs out on real changes, with a target directory that lasts between gate runs outside every workspace, as
+  `ci/cargo-lock.sh`'s lock file does.
+- **`surviving-mutants` splits its budget by language, not by work, and builds Rust anew.** `surviving_mutants` gives
+  mutmut half the `--mutation-budget` when the change has Rust to mutate too, and cargo-mutants
+  (`_cargo_mutants_on_copy`) what is left by the check's deadline, however many functions each language has; and
+  cargo-mutants runs `--in-place` in a copy of its own without `target/`, beside mutmut's, so each run copies the
+  tree again and compiles the workspace and its dependencies before its baseline. Not measured on Jenkins: gate-rust-checks ticket 06 asked for the Gate stage's added time on a
+  Rust change, which needs a Jenkins build on the branch. Found by ticket 06 (2026-10-30). Closes, if the run metrics
+  show either language starved, with the budget split by each language's changed functions, one copy for both tools,
+  and a target directory that lasts between gate runs (the same as passes-at-base's below).
+- **cargo-mutants is pinned by the sha256 of its archive as downloaded, not as published.** Its releases publish no
+  checksums file (`ci/install-tools.sh`), so the pin of v27.1.0 holds the archive the gate's author downloaded on
+  2026-10-30, trusted on first use. Closes with a release that publishes checksums, or the asset digest GitHub shows on
+  the release page, checked by hand as cargo-llvm-cov's was.
+- **`passes-at-base` places a Rust test's target by Cargo's default layout only.** `_rust_target` reads the file's
+  place: a target a manifest puts elsewhere (`[[test]] path = ...`, `autotests = false`), a module a `#[path]`
+  attribute names, a module of `src/main.rs` in a package that also has `src/lib.rs` (taken for the library's), and a
+  file under `tests/x/` that `tests/x/main.rs` does not declare are named wrong, so nextest reports no such test and
+  the check gives nothing; a file under `benches/` or `examples/`, or under a `tests/x/` with no `main.rs`, as a
+  shared `tests/common/mod.rs`, is a `not-run` finding. Found by gate-rust-checks
+  ticket 05 (2026-10-30). Closes with the targets read from `cargo metadata` and the module tree from the helper's
+  `mod name;` items.
+- **`passes-at-base` cannot tell a Rust test that needs the change from a base that does not build.** A target whose
+  tests do not compile at the base counts as failing there, whatever rustc's error is (`_NEXTEST_BUILD_FAILED` and
+  `error: could not compile` in `_rust_target_findings`): the test reaching for what the change adds, as the ticket
+  meant, but also a base that does not compile on the gate's machine at all. Any other cargo error, as a lock file
+  `--locked` refuses, is a `not-run` finding. Python's run tells the two apart by whether the failure passes through
+  a file the change edits (`_outside_failed_conftest`). The ticket asked for the build failure to be said "in the
+  finding-free summary, not as a finding"; the quality file has no such summary for a check, so docs/quality-gate.md
+  says it instead. Found by ticket 05 (2026-10-30). Closes with cargo's JSON messages read for the files the errors
+  are in, and the user's ruling on where the summary goes.
+- **`vague-names` skips the parameters of a Rust trait impl's `fn`, which Rust lets the impl rename.** Unlike Python's
+  keyword arguments, a Rust caller never names a parameter, so the trait fixes only the `fn`'s name; gate-rust-checks
+  ticket 04 asked for the parameters to be skipped too, as `@override`'s are, and clippy's `renamed_function_params`
+  (a restriction lint) holds an impl to the trait's names. So a `raw_data` parameter of an `impl Opener for Door` `fn`
+  is not reported. Raised by the code review of ticket 04 (2026-10-30). Closes with the user's ruling on whether the
+  parameters count as fixed.
 - **`vague-names` reports a name an undecorated override cannot change.** A `def handle(self)` in a
   `socketserver.BaseRequestHandler` subclass, or a parameter the overridden signature names, has no fix; only a
   method marked `@override` is skipped (`_bound_names`). Raised by the cross-review of `written-rules` (F6,
@@ -571,17 +716,23 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   Jenkins on 2026-10-24: on PR #50 (surviving-mutants' change) mutmut tried 756 of 3079 mutants and the Gate stage took
   683 s, the build about 850 s; on PR #51, 677 of 801 in a 638 s Gate stage. That fits `QUALITY_TIMEOUT` (1200 s) with
   about 350 s to spare, but not after a wait in Jenkins' queue, which counts against a quality round (PR #52 waited
-  about 860 s behind the others). Those were pull request builds; a quality build has skipped the Package stage
-  since 2026-10-24, so it has more to spare than that. The user kept 600 s (2026-10-24): a stopped run says `budget-reached`, never "none
-  survived". Closes with the shared time budget above, or mutants chosen by the changed lines rather than whole
-  functions. Worse since mutmut's runs pass the suite (mutmut-hypothesis-health-check, PR #112): on PR #113 (2026-10-27)
-  mutmut was stopped at 600 s after trying 0 of 253 mutants, so its stats and clean runs of the now 1348-test suite
-  took the whole budget, and surviving-mutants judges nothing on Jenkins; the parity scenarios, left out of mutmut's
-  runs, add nothing to that.
-- **`parse_args` still yields many survivors after `do_not_mutate_patterns = ['\bhelp=']`.** Its `description=` texts
-  and flag names are mutated, and few tests check them word for word: 105 of 305 mutants survived on this branch's
-  change. Reported per function, so it is one finding. Closes with a decision to add `'\bdescription='` to the
-  pattern, or to leave it.
+  about 860 s behind the others). Those were pull request builds; a quality build has skipped the Package stage since
+  2026-10-24, so it has more to spare than that. The user kept 600 s (2026-10-24): a stopped run says `budget-reached`,
+  never "none survived". Closes with the shared time budget above, or mutants chosen by the changed lines rather than
+  whole functions. On PR #113 (2026-10-27) mutmut was stopped at 600 s after trying 0 of 253 mutants: its three runs of
+  the whole suite before the first mutant took the budget. Narrowed (2026-10-28, gate-open-decisions ticket 06): the
+  Jenkinsfile's Test stage records a coverage context per test, and `gate.py --test-contexts` has mutmut run only the
+  tests that reach the changed functions and its selection collects (`_recorded_tests`, `_narrowed_table`); replayed
+  locally, PR #113's change took mutmut 77 s instead of 709 s, with the same verdicts. Still open: a change to a
+  function nearly every test reaches, such as `tool_env`, still costs about the whole suite three times, and a large
+  change still has more mutants than the budget tries. Not yet shown on Jenkins: the first pull request build with the
+  flag.
+- **`--test-contexts` collects mutmut's selection in a fuller copy than mutmut runs it in.** `_narrowed_table` runs
+  `pytest --collect-only` in the gate's copy of the tree, which holds every tracked file; mutmut's own `mutants/` holds
+  only `source_paths`, `also_copy`, `tests/`, `test/` and a few top-level files. A selection that reaches outside those,
+  such as none in a project with tests under `other/`, can name a recorded test there that mutmut's pytest cannot find,
+  and mutmut's run fails as `not-run`. This repository's selection is `tests/`, so it is not affected. Closes with the
+  collection run in a copy laid out as mutmut lays out `mutants/`, or by mutmut itself.
 - **Mutation-testing the code that runs mutmut leaves processes behind.** When mutmut stops a mutant at its own
   timeout it kills the worker, and a real mutmut that `TestSurvivingMutants` started in its own session lives on as
   an orphan group of one process per CPU. It only happens when a change edits that code. Jenkins' process-tree
@@ -592,17 +743,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   (`_edits_test`). Kept as the ticket states it. Closes with a decision to pass `_edits_test`-like counting to
   `_changed_python_functions`. The cognitive-complexity check has a walker of its own (`_scored_functions`), so it
   is not affected.
-- **Committed mutmut output is read as the change's own code by the linters.** The checks leave `mutants/` out, by the
-  user's decision of 2026-10-24 (review round 9, F33): `GateChange.from_tree` diffs the tree without it, so no check
-  (test-integrity, flaky-tests, surviving-mutants, cognitive-complexity) selects a test, a function or a changed line
-  there or counts an edit there as a change to the code, and the build configuration listing still names such files.
-  That filter does not reach the linters: `judge_change` runs them over every tracked file their pathspecs match and
-  keeps their findings on its own, unfiltered `changed_lines`, so a change that commits `mutants/calc.py`, mutmut's
-  mutated copy with its trampolines, has its added lines there linted, and their findings can fail the gate. The same
-  unfiltered lines feed the suppressions list, the stray-line-end refusal and the coverage condition; coverage counts
-  such files only when the project's coverage measures them, since `new_coverage` reads only the files the Cobertura
-  report lists. Whether the linters should read them, leave them out, or the gate refuse them is open. Closes with that
-  decision.
 - **mutmut reads a symlinked `.py` file in the surviving-mutants copy.** `_copy_tracked` copies a tracked symlink
   as a link (`gate.py`), `_mark_for_mutmut` leaves links unmarked, and mutmut 3.8.0's `walk_all_files` lists
   a symlink to a file and `create_mutants_for_file` opens it. So once any changed function starts mutmut, a change
@@ -612,16 +752,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `gate-python-files` (R2-F1, 2026-10-26); rests on mutmut's source, not on a run. Closes with the copy or
   `_mark_for_mutmut` keeping links out of mutmut's walk, without breaking a tracked link the tests import through,
   and a test that also edits a real function.
-- **passes-at-base misses a deleted Python script with no `.py`.** `_edits_python_source` (`gate.py`)
-  counts a deleted file as Python source only by its `.py`, so a change that only deletes a `#!` python script
-  outside the tests edits no Python source for it. Found while fixing the cognitive-complexity check's same gap
-  (2026-10-25). Closes with that branch asking `_was_python_source`, which the complexity check now uses.
-- **A Python script with no `.py` is never judged by the cognitive-complexity check.** `_judged_files` judges only
-  paths ending in `.py`, while the pairing reads a script whose `#!` line names python as Python
-  (`_is_python_source`), so a function moved unchanged into `bin/tool` keeps its base, but one the change grows
-  there, or writes new over the limit, is not a finding. `docs/quality-gate.md` says "a `.py` file". Raised by the
-  spec-conformance pass of review round 6 of ticket 06; ticket 06's "the Python functions the change touches" can be
-  read either way. Closes with `_judged_files` taking `_is_python_source`, or a decision that `.py` is the scope.
 - **A body moved into a file hides a function with that body moved out of it, which is then judged as new.** The
   cognitive-complexity check takes a base function as gone from its file when the file now holds its body fewer times
   than the base did (`_BasePool._gone`), without asking where the working tree's copies came from. So when `calc.py`'s
@@ -648,6 +778,33 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   it there with `--no-relative`; of `Host._paths_between` it said: "has the same exposure, but it is outside this
   range". Closes with `--no-relative` on both calls and a test that sets `diff.relative` and locks from a
   subdirectory.
+- **A run that dies right after it saved phase `done` never finishes ending.** `Workflow.run` saves `phase = DONE`,
+  counts the turns' tokens, saves again with `owner` cleared, and only then writes `summary.md` and `metrics.json`,
+  notifies the human that the run finished and closes the workspace. A crash after either of those two saves leaves
+  a run that `resume` finds done: `Workflow.run` returns the verdict at once, so neither file is ever written, the
+  human is never told, the herdr workspace stays open, and after the first save `owner` stays set and the turns have
+  no token counts. Found by orchestrator-test-methods/05 (`tests/test_crash_resume.py`, 2026-10-28), whose `expected`
+  pins this behaviour. Not fixed here: the engine is frozen (Planned, "The Python engine is frozen"). Closes in the Rust
+  engine with a resume of a `done` run that finishes whatever of that ending is missing (each step can tell: the files
+  exist, `owner` is cleared, the tokens are counted). The test drives the Python engine in-process, so its pin goes
+  with that engine.
+- **A crash between an agent's start and its session being saved costs that turn its session.** `Workflow._start`
+  saves the agent's record, then asks herdr for it and `_note_session` saves the session. A resume after the first
+  save finds the agent alive (`_agent` returns `ALIVE`) and prompts it without asking herdr, so the turn's record
+  (`_turn_record`) starts with no session; `_note_session` saves it while the turn runs, but `_end_turn` keeps
+  `session` only when it matches the one at the start, so the turn ends with none, and `_count_tokens` cannot count its
+  tokens. Found by orchestrator-test-methods/05 (2026-10-28), whose `expected` pins it. Not fixed here: the engine is
+  frozen. Closes in the Rust engine with `_agent` noting the session of an agent it finds alive; the pin goes with
+  the Python engine, as above.
+- **A resumed interview tells the human again that it waits for them.** `Workflow._step_turn`'s `announce` focuses
+  the human-paced agent's pane and notifies "<label> is waiting for you" in every orchestrator that takes the turn
+  (`_turn`: it "runs once the agent is ready"), so a resume while the interview is under way repeats both, once per
+  resume. Raised by cross-review 81 (F1, 2026-10-28) against ticket orchestrator-test-methods/05, which allows only
+  documented idempotent repeats: "Neither is idempotent: the cited comment … says each orchestrator does it again,
+  which is the repeat the ticket asks the test to fail on." The user ruled it a bug (2026-10-28), not wanted;
+  `tests/test_crash_resume.py`'s `expected` pins it as up to one repeat per resume while orchestrator.py is frozen.
+  Closes with an engine that announces a turn only where none did (for example, only when `prompted` is not the turn's
+  file), the Rust engine's, and the pin removed.
 
 ## Fixed
 
@@ -929,6 +1086,79 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   members, one `Cargo.lock`, `[workspace.lints]` and `rust-toolchain.toml`; the Test stage runs `cargo llvm-cov
   nextest --workspace` and the UI stage `cargo check --workspace` at the top, and the Gate stage reads
   `target/nextest/ci/junit.xml` there.
+- **Where Rust's tests are was decided in two tickets.** Ticket 03 had placed the spec's requirement 2 in
+  `_complexity_exempt` and `_rust_scored_functions`, and ticket 02's Rust `WeakenedTestsDetector`, written in
+  parallel, in `_rust_tests` and `_rust_swallowed_errors`. Found by gate-rust-checks ticket 03 (2026-10-30). Fixed
+  (2026-10-30, merging ticket 02 into 03): one function, `_in_rust_tests`, with `_rust_test_path` for whole files,
+  which both checks call.
+- **passes-at-base missed a deleted Python script with no `.py`.** `_edits_python_source` counted a deleted file as
+  Python source only by its `.py`, so a change that only deleted a `#!` python script outside the tests edited no
+  Python source for it. Found while fixing the cognitive-complexity check's same gap (2026-10-25). Fixed
+  (2026-10-28, with cross-review 79's F5): `_edits_python_source` asks `_python_code` of each side of each changed
+  path, which takes `_was_python_source` at the base, and test-integrity's Python detector uses the same function as
+  its `is_code`, so the two checks give one answer to "does the change edit Python code outside the tests". Since
+  gate-rust-checks ticket 05 (2026-10-30) that question is `_edits_code(change, _python_code)`, one function for every
+  language's `is_code`, and `_edits_python_source` is gone.
+
+- **`test-integrity` did not see a golden file's change.** A golden file under `tests/golden/` (`tests/golden.py`) is
+  an expected value outside any assertion, so a change that rewrote one with `UPDATE_GOLDEN=1` alongside the code it
+  pins got no `expected-value-changed` finding. Found while adding the golden files (orchestrator-test-methods/06,
+  2026-10-27). Fixed (2026-10-28): `weakened_tests` adds `_changed_golden_files`, one weighed
+  `expected-value-changed` finding on the whole file for each golden file the change edits or deletes when it also
+  edits Python code outside the tests (`_edits_code`, by `_python_code`, which passes-at-base shares: a `#!` python
+  script counts, on either side, and nothing `_beside_tests` sets with the tests does); an added golden file, or one
+  renamed unedited, is none. What stays open, other projects' golden files, is "`test-integrity` knows golden files
+  only by this repository's layout" in Open issues.
+
+- **A `# noqa` inside a string, or in a file no linter reads it in, was listed under "Suppressions added".**
+  `added_suppressions` matched one pattern, `_SUPPRESSION`, against every added line of every file, so `"add # noqa"`
+  in a Python string or docstring, `# noqa` quoted in Markdown or a YAML comment, and `# pragma: no cover` in a text
+  file were listed for the Reviewer as suppressions. Found by the user (2026-10-28). Fixed (2026-10-28):
+  `_suppressing_lines` chooses the pattern by the kind of file: in a Python file (`_holds_python`) only a `COMMENT`
+  token that `_PYTHON_SUPPRESSION` matches counts, falling back to every matching line when the file does not
+  tokenize; `_SHELL_SUPPRESSION` in a `.sh` file or a workflow; `_MARKDOWN_SUPPRESSION`, a pymarkdown pragma that is
+  a whole line from its first column, in Markdown; `_RUST_SUPPRESSION` alone in Rust; nothing in any other file. Not
+  closed: in a shell script the pattern still reads the line's text, so the words inside a shell string still count.
+  A pragma line inside a Markdown code block is listed, rightly: pymarkdownlnt 0.9.41 honours it there too.
+
+- **A cargo config under the build's `CARGO_HOME` was not listed as build configuration.** `clippy_config_files`
+  listed cargo's config only under a `.cargo` directory, but the Jenkinsfile sets `CARGO_HOME` to
+  `$WORKSPACE/.cargo-home`, so a change tracking `.cargo-home/config.toml` could change clippy's lint levels or
+  rustflags unlisted. Raised by cross-review 70 (round 1, not recorded, 2026-10-27). Fixed (2026-10-28):
+  `clippy_config_files` also lists `config` and `config.toml` directly in the `CARGO_HOME` of the environment clippy
+  runs with (`tool_env`), when `_cargo_home_in` finds it inside the tree. Listed, not refused, as `.cargo/config.toml`
+  is (see "A quality build judges Rust by the snapshot's own clippy rules" in Open issues).
+
+- **Committed mutmut output was read as the change's own code by the linters.** The checks left `mutants/` out
+  (`GateChange.from_tree`), but `judge_change` ran the linters over every tracked file and kept their findings on its
+  own, unfiltered changed lines, which also fed the suppressions list, the stray-line-end refusal and the coverage
+  condition, so a change committing `mutants/calc.py` had its lines there linted. Fixed (2026-10-28, the user's
+  decision in `.scratch/gate-open-decisions/issues/04-committed-mutants-dir.md`: refuse): `judge_change` reads only
+  `GateChange.from_tree`'s change, whose `changed` and `diff` every reader shares, and `_linted_files` gives no
+  linter a file under `mutants/`, nor clippy a manifest there to find a workspace by; a change that adds, edits or
+  moves in files there fails with one condition naming them (`GateChange.mutmut_state`, `_mutmut_state_condition`),
+  which replaces their listing under build configuration (`mutmut_state_files` is gone). Deleting such files passes.
+  Not closed: mypy reads the files `[tool.mypy] files` names, not the gate's list, so rules naming a directory above
+  `mutants/` still have mypy read them; their findings count nowhere, since no line there is a changed one.
+
+- **A Python script with no `.py` was never judged by the cognitive-complexity check.** `_judged_files` judged only
+  paths ending in `.py`, while the pairing read a script whose `#!` line names python as Python, so a function the
+  change grew in `bin/tool`, or wrote new there over the limit, was not a finding. Fixed (2026-10-28, the user's
+  decision in `.scratch/gate-open-decisions/issues/05-complexity-scope.md`): `_parsed_changed_files` takes
+  `_is_python_source` as its test, so cognitive-complexity, vague-names, surviving-mutants and flaky-tests all read
+  such a script as Python, at the cost of reading the first line of each changed file with no `.py`; flaky-tests
+  still picks only `_python_test_file`s, which end in `.py`, and surviving-mutants says such a script's changed
+  functions are `not-mutated`, since mutmut 3.8.0 reads only `*.py` (`_outside_mutmut`). `docs/quality-gate.md` says
+  "a Python file" where it said "a `.py` file".
+
+- **`parse_args` still yielded many survivors after `do_not_mutate_patterns = ['\bhelp=']`.** Its `description=`
+  texts were mutated, and few tests check them word for word: 105 of 305 mutants survived on one change. Fixed
+  (2026-10-28, the user's decision in `.scratch/gate-open-decisions/issues/02-description-pattern.md`):
+  `pyproject.toml`'s `[tool.mutmut]` adds `'\bdescription='`, with a comment saying why, and `gate.py`'s `parse_args`
+  passes its description to `ArgumentParser` as `description=` rather than setting `parser.description`, which the
+  pattern would not match. Flag names stay mutated where they start a line of their own. Not closed: the pattern
+  matches any `description=` keyword, so the statement holding `Pipeline(..., description=description)` in
+  `orchestrator.py`'s `parse_workflow` is not mutated either.
 
 - **A quality build left out the parity scenarios when only `tests/guard_errors.py` changed.** The Test stage's path
   list named `tests/conftest.py`, whose guards the scenarios run under, but not `tests/guard_errors.py`, which holds
@@ -936,8 +1166,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   (2026-10-27): the list names it.
 
 - **`tool_env` passed `UPDATE_GOLDEN` to the pytest and mutmut runs the gate starts.** Under `UPDATE_GOLDEN=1`
-  `assert_golden` rewrites its file instead of comparing, so the gate's flaky-tests reruns would rewrite
-  `tests/golden/*.txt` and pass a golden test that should fail. Raised by cross-review 76 (F2, 2026-10-27). Fixed
+  `assert_golden` rewrites its file instead of comparing, so a golden test the gate runs could not fail (why:
+  `tool_env`'s docstring). Raised by cross-review 76 (F2, 2026-10-27). Fixed
   (2026-10-27): `tool_env` leaves it out, as it does the Jenkins credentials (`TestChildEnvironment`, which also checks it
   under `UPDATE_GOLDEN=1`).
 

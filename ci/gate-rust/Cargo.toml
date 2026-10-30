@@ -1,0 +1,22 @@
+[package]
+name = "gate-rust"
+version = "0.1.0"
+edition = "2021"
+description = "What gate.py's Rust checks need to know of a Rust file, read with syn (docs/quality-gate.md)"
+publish = false
+
+[dependencies]
+proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
+serde_json = "1.0.154"
+syn = { version = "2.0.119", features = ["full", "visit"] }
+
+# clippy's rules for this crate, by which gate.py judges a change to its Rust (docs/quality-gate.md): clippy's
+# defaults and the lints ui/src-tauri/Cargo.toml adds to them, each at warn, since gate.py caps every level at warn.
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+# A suppression says why it stands: `#[allow(lint, reason = "...")]`.
+allow_attributes_without_reason = "warn"
+dbg_macro = "warn"
+todo = "warn"
