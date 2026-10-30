@@ -223,7 +223,7 @@ impl Serving {
         rest.read_line(&mut line).expect("serve prints its line");
         let first: serde_json::Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("{line:?}: {e}"));
         let keys: Vec<&String> = first.as_object().expect("an object").keys().collect();
-        assert_eq!(keys, ["token", "url"], "{line}");
+        assert_eq!(keys, ["url", "token"], "{line}");
         let field = |key: &str| first[key].as_str().expect("a string").to_string();
         Serving { child, url: field("url"), token: field("token"), rest }
     }

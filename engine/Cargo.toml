@@ -22,7 +22,10 @@ jiff = { version = "0.2.38", default-features = false, features = ["std", "tz-sy
 nix = { version = "0.31", default-features = false, features = ["hostname", "signal", "time", "user"] }
 serde = "1"
 # float_roundtrip: a float reads as the nearest f64, as Python reads it, so that state.json writes back as it was.
-serde_json = { version = "1", features = ["float_roundtrip"] }
+# preserve_order: an object's keys stay in the order they were written. The e2e package needs it, and Cargo turns a
+# feature on for every crate of a build that has it, so the engine asks for it too, to read JSON the same way whether or
+# not that package is built with it.
+serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
 sha2 = "0.10"
 # Jenkins and PyPI, over HTTP or HTTPS (http.rs): blocking, and with rustls rather than the system's TLS library, given
 # the certificates it trusts (root_certs; ureq's own Mozilla roots only as the fallback there); gzip and the other

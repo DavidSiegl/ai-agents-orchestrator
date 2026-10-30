@@ -73,17 +73,15 @@ pub fn engine_command() -> Vec<String> {
         .clone()
 }
 
-/// The path of this checkout's orchestrator binary, built by cargo. nextest runs each test in a process of its own,
-/// so the processes of one nextest run (NEXTEST_RUN_ID) share one build: the first builds and leaves the path in
-/// `e2e-engine/<run id>` of the target directory the test runs from, under a lock, removing the earlier runs' paths,
-/// and the others read it.
+/// The path of this checkout's orchestrator binary, built by cargo into a target directory of its own (cargo_build).
+/// nextest runs each test in a process of its own, so the processes of one nextest run (NEXTEST_RUN_ID) share one
+/// build: the first builds and leaves the path in `<run id>` of engine_dir, under a lock, removing the earlier runs'
+/// paths, and the others read it.
 fn built_engine() -> String {
     let Ok(run) = std::env::var("NEXTEST_RUN_ID") else {
         return cargo_build();
     };
-    let exe = std::env::current_exe().unwrap_or_else(|e| panic!("finding the test's own program: {e}"));
-    // The test runs from <target>/<profile>/deps/.
-    let dir = exe.ancestors().nth(2).expect("a target directory above the test's program").join("e2e-engine");
+    let dir = engine_dir();
     fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("making {}: {e}", dir.display()));
     let lock = fs::File::create(dir.join("lock")).unwrap_or_else(|e| panic!("making {}'s lock: {e}", dir.display()));
     // Held until the function returns, so that one process of the run builds while the others wait for its path.
@@ -97,7 +95,7 @@ fn built_engine() -> String {
     let path = cargo_build();
     for entry in fs::read_dir(&dir).unwrap_or_else(|e| panic!("listing {}: {e}", dir.display())) {
         let entry = entry.unwrap_or_else(|e| panic!("listing {}: {e}", dir.display()));
-        if entry.file_name() != "lock" {
+        if entry.file_name() != "lock" && entry.file_name() != "target" {
             fs::remove_file(entry.path()).unwrap_or_else(|e| panic!("removing {}: {e}", entry.path().display()));
         }
     }
@@ -105,11 +103,24 @@ fn built_engine() -> String {
     path
 }
 
-/// The path of this checkout's orchestrator binary, built with cargo now, which reports where it put it.
+/// The directory of the engine the e2e scenarios build, `e2e-engine/` of the target directory the test runs from.
+fn engine_dir() -> PathBuf {
+    let exe = std::env::current_exe().unwrap_or_else(|e| panic!("finding the test's own program: {e}"));
+    // The test runs from <target>/<profile>/deps/.
+    exe.ancestors().nth(2).expect("a target directory above the test's program").join("e2e-engine")
+}
+
+/// The path of this checkout's orchestrator binary, built with cargo now, which reports where it put it. It builds in
+/// a target directory of its own, `target/` of engine_dir: the workspace's test build resolves the engine's features
+/// with the e2e package's (serde_json's preserve_order, nix's fs), a build of the engine alone without them, so one
+/// target directory would have each relink `<target>/<profile>/orchestrator` while the engine's own program tests run
+/// it.
 fn cargo_build() -> String {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let out = Command::new(&cargo)
         .args(["build", "--locked", "--quiet", "-p", "octoflow-engine", "--bin", "orchestrator", "--message-format=json"])
+        .arg("--target-dir")
+        .arg(engine_dir().join("target"))
         .current_dir(checkout())
         .stderr(Stdio::inherit())
         .output()
