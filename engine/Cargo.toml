@@ -3,6 +3,7 @@ name = "octoflow-engine"
 version = "0.49.0"
 description = "The orchestrator's engine, ported from orchestrator.py (the rust-engine spec)"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]

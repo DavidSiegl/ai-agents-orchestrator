@@ -450,3 +450,10 @@ smoke-tests the binary for the machine it runs on; see [Tooling](docs/architectu
 Before a release that changes a prompt, a workflow or how a harness is run, run the eval set by hand, from a herdr
 pane: `uv run python evals/run.py` gives real agents five small tasks and judges each by a test they never see
 ([Evals](docs/design.md#evals)).
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT), at your
+option. Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this
+project by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms
+or conditions.
