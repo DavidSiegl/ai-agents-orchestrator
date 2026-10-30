@@ -24,9 +24,6 @@ on:
       - rust-toolchain.toml
       - engine/**
       - pyproject.toml
-      - uv.lock
-      - .python-version
-      - orchestrator.py
       - .github/workflows/macos-binary.yml
 
 # Each job asks for what it needs: only upload, which runs no code of the change, may write to releases.
@@ -53,11 +50,6 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-    env:
-      # uv's own Python, which bundles Tcl/Tk. uv would otherwise take the runner's Homebrew python@3.14, which has
-      # no tkinter, and PyInstaller would leave the GUI out of the binary. Set here, not in build-binary.sh, so a
-      # rebuild of a tag cut before this fix gets it too.
-      UV_PYTHON_PREFERENCE: only-managed
     steps:
       # A pull request's head, as it was pushed; a release's or a dispatch's tag.
       - uses: actions/checkout@v5
@@ -66,12 +58,11 @@ jobs:
             ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha
             || format('refs/tags/{0}', env.TAG) }}
 
-      - uses: astral-sh/setup-uv@v6
-
-      # The script Jenkins builds the Linux binary with; it smoke-tests --help, workflows and gui --smoke-test.
+      # The script Jenkins builds the Linux binary with, the Rust engine's, by the toolchain rust-toolchain.toml pins,
+      # which rustup installs; it smoke-tests --help and workflows.
       - run: packaging/build-binary.sh
 
-      # rustup installs the toolchain rust-toolchain.toml pins, which builds the shell; Node is pinned to what ui/package.json's tools need, 20.19 or later.
+      # Node is pinned to what ui/package.json's tools need, 20.19 or later.
       - uses: actions/setup-node@v5
         with:
           node-version: 22

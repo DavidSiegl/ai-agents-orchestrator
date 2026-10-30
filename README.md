@@ -164,8 +164,9 @@ npm test              # the frontend's tests; npm run typecheck and npm run lint
 cargo test -p octoflow-ui     # the shell's, which start and stop a real serve
 ```
 
-The app starts `orchestrator.py serve` beside it and stops it when its window closes; set `ORCHESTRATOR_PY` to
-serve another copy. `serve` works without the app too: it prints one JSON line,
+The app starts `orchestrator serve` beside it, the checkout's own `target/debug/orchestrator` (build it first with
+`cargo build -p octoflow-engine`), and stops it when its window closes; set `ORCHESTRATOR_BIN` to serve another
+binary. `serve` works without the app too: it prints one JSON line,
 `{"url": "http://127.0.0.1:<port>", "token": "..."}`, and serves the project's runs read-only on that port until
 Ctrl-C or SIGTERM. Its endpoints and security checks are in [serve](docs/architecture.md#serve).
 

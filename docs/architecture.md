@@ -287,10 +287,10 @@ A Vite + React + TypeScript frontend in `ui/src/`, in a Tauri 2 shell in `ui/src
 layout), with no Python of its own.
 
 - **Shell.** `src-tauri/src/lib.rs` starts the sidecar in `setup`: `serve --origin <the webview's origin>` of
-  the orchestrator `Orchestrator::locate` picks, `python3 $ORCHESTRATOR_PY`, else the binary beside the app's
-  executable that a release bundles (`BUNDLED_NAME`), else `python3` with the orchestrator.py of the checkout the
-  app was built in. It reads the first line and keeps the URL, the token and the checkout's directory, null for
-  the bundled binary, or why it failed, for the `server` command. With no checkout and no project opened before,
+  the orchestrator `Orchestrator::locate` picks, `$ORCHESTRATOR_BIN`, else the binary beside the app's
+  executable that a release bundles (`BUNDLED_NAME`), else the checkout's own build, `target/debug/orchestrator`
+  of the checkout the app was built in. It reads the first line and keeps the URL, the token and the checkout's
+  directory, null for any binary but the checkout's build, or why it failed, for the `server` command. With no checkout and no project opened before,
   the frontend asks for a project folder. It kills the sidecar on `RunEvent::Exit`. The webview's CSP allows
   connections only to itself, Tauri's IPC and `http://127.0.0.1`.
 - **CLI.** Started with arguments, `main.rs` runs none of that: before GTK or WebKit start, `lib.rs`'s `cli` builds

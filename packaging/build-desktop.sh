@@ -1,6 +1,6 @@
 #!/bin/sh
 # Build the desktop app in ui/ for release, with the orchestrator binary that build-binary.sh built for this
-# machine inside it as its sidecar, so the app needs no Python and no checkout. Writes to dist/, each with its
+# machine inside it as its sidecar, so the app needs no checkout. Writes to dist/, each with its
 # .sha256: on Linux octoflow-desktop-linux-<arch>.deb and .AppImage, on macOS
 # octoflow-desktop-macos-<arch>.dmg, signed ad hoc only. The app's version is pyproject.toml's. Run
 # build-binary.sh first. Jenkins's Package stage builds the Linux app with it, and
@@ -115,8 +115,7 @@ smoke_appimage() {
     done
 
     # The AppImage's runtime extracts the bundle and starts AppRun, which execs the app, which execs the
-    # orchestrator: the nearest descendant running $APPDIR/usr/bin/octoflow is the process the app became (the
-    # one below it is PyInstaller's).
+    # orchestrator: the nearest descendant running $APPDIR/usr/bin/octoflow is the process the app became.
     pids=$serve_pid
     while [ -z "$orchestrator" ] && [ -n "$pids" ]; do
         next=
@@ -171,11 +170,13 @@ smoke_dmg() {
     smoke_cli "$smoke/project" "$smoke/bin/octoflow"
     exe=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist") \
         || smoke_fail "Info.plist names no CFBundleExecutable"
-    # With PATH an empty directory and no ORCHESTRATOR_PY, the app can run only the orchestrator it bundles: its
-    # fallback for a build with none, python3 with the checkout's orchestrator.py (Orchestrator::locate_from), would
-    # pass here, since this script runs in that checkout. PATH is emptied, not unset: unset, execvp would search the
-    # default /usr/bin:/bin, where macOS has a python3.
-    (cd "$smoke/project" && env -u ORCHESTRATOR_PY PATH=/var/empty "$app/Contents/MacOS/$exe" --help >/dev/null) \
+    # With no ORCHESTRATOR_BIN, the app runs the orchestrator it bundles: its fallback for a build with none, the
+    # checkout's target/debug/orchestrator (Orchestrator::locate_from), is one this script never builds, and is
+    # refused below where an earlier build left one, so that it cannot pass for the bundled one. PATH is an empty
+    # directory, so that nothing else the app might start is found either.
+    [ ! -e target/debug/orchestrator ] \
+        || smoke_fail "target/debug/orchestrator exists, so the app's fallback could pass for the bundled orchestrator"
+    (cd "$smoke/project" && env -u ORCHESTRATOR_BIN PATH=/var/empty "$app/Contents/MacOS/$exe" --help >/dev/null) \
         || smoke_fail "$exe --help did not exit 0 with only the bundled orchestrator to run"
     # The volume can be busy for a moment after the processes started from it exit, as Spotlight looks at it.
     tries=0
