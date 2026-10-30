@@ -88,7 +88,7 @@ Deleting such files is no fault.
 
 | Check | Fails? | Finds |
 |---|---|---|
-| `test-integrity` | yes, but for removed tests, fewer assertions and changed expected values | tests the change weakened, in test files (`tests/**`, `test_*.py`, `*_test.py`) |
+| `test-integrity` | yes, but for removed tests, fewer assertions and changed expected values | tests the change weakened, in test files (`tests/**`, `test_*.py`, `*_test.py`; Rust's below) |
 | `cognitive-complexity` | yes | functions the change edits or adds that it takes over a cognitive complexity of 15 |
 | `flaky-tests` | no | tests the change adds or edits that pass in one order and fail in another |
 | `surviving-mutants` | no | changes to the functions the change edits that no test notices |
@@ -127,8 +127,54 @@ change cannot weaken its tests unseen. Each of these is a finding:
   to whatever the code now writes: a change that edits or deletes one and also edits code outside the tests gets
   one such finding per file, on the whole file, also to weigh. A golden file added, or renamed unedited, is none.
 
-It reads Python only, but for golden files; another language is a `WeakenedTestsDetector` beside the Python one in
-`WEAKENED_TESTS_DETECTORS`.
+It reads Python and Rust, and golden files whatever their language; another language is a `WeakenedTestsDetector`
+beside those in `WEAKENED_TESTS_DETECTORS`.
+
+**Rust tests** it reads with the [gate-rust helper](#reading-rust-the-gate-rust-helper). A Rust test is a `fn` with an
+attribute whose path ends in the segment `test`, as `#[test]` and `#[tokio::test]` (not `#[rstest]`), in a `.rs` file
+under a `tests` directory or named `tests.rs`, or anywhere inside an inline module that the helper marks `cfg_test`
+(`#[cfg(test)] mod tests { ... }`) in any other `.rs` file, on either side of the change. A file with such a module
+holds both: the check compares the items of its test modules, and the rest of the file is code. Rust code outside
+the tests is any other `.rs` file in a directory that holds a `Cargo.toml`, or below one, `build.rs` included, and a
+change edits it when it adds, deletes or renames such a file, or adds or removes a line of it outside its `cfg(test)`
+modules; so a change to the tests of `lib.rs` alone edits no code. A file that a `#[cfg(test)] mod name;` elsewhere
+names is read by its own path alone, so its tests count only under `tests/` or as `tests.rs` (`TODO.md`). A test is
+known by its file and the names of the items that hold it, joined by `::`, as `tests::adds`; tests of one name in one
+file, as under two `cfg`s for two platforms, are each a test of its own, matched with the other side's in their
+order. Each finding reads the helper's JSON as Python's reads the syntax tree:
+
+- `removed-test`: a test gone from its file. Its body is the helper's `body_digest`, the same whatever the layout and
+  comments, so a test moved to another file or module, or renamed, with the same body, is not removed. An inline
+  module whose tests all went is one finding, at its `mod` line, as a class is, and so is a deleted file, or one that
+  is no longer Rust;
+- `skip`: an attribute added that skips a test or turns it off: `#[ignore]`, a `cfg` other than `cfg(test)` itself,
+  `cfg(all(test, feature = "slow"))` included, which turns tests off as Python's `skipIf` does, or a `cfg_attr` that
+  writes `ignore`, as an argument after its predicate. It counts among a test's attributes; on a line of its own
+  inside a test's body, where a statement's `cfg` turns an assertion off; among the outer attributes of an inline
+  module holding a test; and as an inner attribute, `#![...]`, on a line of its own inside such a module or anywhere
+  in a file under `tests/`. A `cfg` on a helper `fn` is no skip, nor `#[cfg(test)]` on a new test module. Lines are
+  read for attributes only where they start with `#`, so an attribute after other code on its line, or one written
+  over several lines whose `ignore` is not on its first, is not seen there; a test's own attributes the helper gives
+  whole;
+- `fewer-assertions`: a kept test with fewer of the assertion macros the helper lists (`asserts`: `assert!`,
+  `assert_eq!`, `assert_ne!`, their `debug_` forms, and `panic!`) than at the base. It is one to weigh, as Python's;
+- `swallowed-error`: on an added line, a `#[should_panic]` without `expected` on a test, which any panic passes, a
+  failed assertion's included; or, in any `fn` among the tests, a value thrown away (`let _ = expr;`, `_ = expr;`,
+  `expr.ok();`, the helper's `discards`) whose expression holds one of that `fn`'s assertion macros or a call of
+  `catch_unwind`, which throws away the panic or the `Err` that would fail the test. The helper knows no types, so a
+  `Result` thrown away that holds neither, as `let _ = check();` or `check().ok();`, is not seen, since that is
+  also how a test's cleanup ignores a failure, nor a `catch_unwind` whose result is bound to a name and never read;
+- `expected-value-changed`: a kept test's assertion, its macro and its `shape` the same, whose `literals` changed,
+  the assertions of the two sides aligned by macro and shape, in a change that also edits Rust code outside the
+  tests, on either side. Constants are not followed, as Python's are: an expected value held in a `const` that the
+  change edits is not seen. A golden file changed with Rust code is one such finding, as above;
+- `unparsable`: a test file the helper cannot parse in the working tree while its base held tests, at the line syn
+  points at, failing the gate: those tests cannot be compared. One whose base held none has none to lose, as a
+  fixture under `tests/` that is not Rust on purpose, such as the helper's own `broken.rs`, and is not judged; nor is
+  a base that does not parse;
+- `not-run`: the gate cannot read the change's Rust, as [the helper's section](#reading-rust-the-gate-rust-helper)
+  says, for a change to any `.rs` file: one lineless finding, which fails the gate, and the check judges none of
+  the change's Rust.
 
 **Cognitive complexity** scores the functions the change edits, so that a change cannot pile branches into the
 function it is editing rather than split it. A function counts when the change adds a line to it, decorators
@@ -594,7 +640,7 @@ is missing is a failed condition naming it, and for clippy that is a `cargo clip
 where rustup's `clippy` component is not installed; a check that cannot run is one of its own findings. The rules come
 from the project's `pyproject.toml`, or the one `--config` names, as [whose rules judge a
 change](#whose-rules-judge-a-change) says. Which files the test-integrity check takes for tests is fixed for now:
-`tests/**`, `test_*.py` and `*_test.py`.
+`tests/**`, `test_*.py` and `*_test.py`, and Rust's as [the gate](#the-gate) says.
 
 ## The quality file as a contract
 
