@@ -425,7 +425,12 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   of its six pytest runs waited about the whole `FLAKY_RUN_TIMEOUT`. PR-101 changes only the tests' git fixture.
   Twenty runs here under the load of a parallel suite, with SIGINT ignored, all passed. A rerun that hangs gives a
   `not-rerun` warning, not a wrong verdict. Closes when the run that waits is caught, e.g. with each pytest run's
-  wall time and exit in the test's failure message, and its cause fixed.
+  wall time and exit in the test's failure message, and its cause fixed. A second cause, of a different kind: on
+  PR-190 build 3 (gate-rust-checks 04–06) the reruns of the changed tests did not finish within the 30 s at all,
+  since those tests include dozens that build a small Cargo package with real cargo, cargo-nextest or
+  cargo-mutants, each from a cold target directory in the rerun's copy. A change that adds many such tests is not
+  rerun; that one closes with a limit that grows with the tests rerun, or with the shared time budget
+  (`.scratch/gate-open-decisions/issues/01-shared-time-budget.md`).
 - **`tests/test_docs.py` gets the parser by patching `argparse.ArgumentParser.parse_args`.** `parse_args` builds
   its parser inline and returns only the parsed arguments, so `cli_commands` calls it with `parse_args` patched
   class-wide to hand the parser back, and reads argparse's private `_actions` and `_SubParsersAction`. Raised by
