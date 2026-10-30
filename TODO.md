@@ -82,6 +82,14 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Open issues
 
+- **A prompt template's `.attribute` is an error in the Rust engine, where Python filled it in.** `crate::py::format`,
+  the port of `str.format` that fills workflow prompt templates (`workflow.rs`, `pipeline.rs`, `prompts.rs`), takes a
+  placeholder's value to be a str and answers any attribute with AttributeError (`Accessor::apply_to`), so a template
+  with `{diff.upper}` or `{diff.__class__}` stops the run. Python's `str.format` looked the attribute up on the str:
+  `<class 'str'>`, or a bound method's repr with its address, which no recording can hold. Indexes, `{diff[0]}`,
+  behave as Python's. Found by the code review of the engine's split under the gate's cognitive-complexity limit
+  (2026-10-30). Closes with the docs naming the difference as the engine's, or with attributes refused when the
+  workflow file is read, as a placeholder's name is checked there (`field_names`).
 - **The Rust engine names itself `orchestrator.py`.** Its messages and hints were ported word for word, so the
   parity recordings, made by the Python engine, hold them: `resume: orchestrator.py resume <id>` in `list` and the
   interrupted note (`cli/listing.rs`, `cli.rs`'s `resume_command`), `` `orchestrator.py workflows default` `` in
