@@ -171,6 +171,15 @@ fn fromisoformat(iso: &str) -> Result<(i128, Option<i128>), String> {
         hour = 0;
         (year, month, day) = next_day(year, month, day);
     }
+    let seconds = checked_seconds((year, month, day), [hour, minute, second])?;
+    Ok((i128::from(seconds) * 1_000_000 + i128::from(micro), offset))
+}
+
+/// Seconds since 1970-01-01T00:00 of the date year-month-day at hour:minute:second. Errors: a year beyond 1 to 9999,
+/// a month or day the calendar lacks, or an hour, minute or second beyond 23, 59 or 59, the first in that order, as
+/// CPython's check_date_args and check_time_args say of it (Modules/_datetimemodule.c, 3.14). hour, minute and second
+/// must not be negative, as no field read from digits is.
+fn checked_seconds((year, month, day): (i64, i64, i64), [hour, minute, second]: [i64; 3]) -> Result<i64, String> {
     if !(1..=9999).contains(&year) {
         return Err(format!("year {year} is out of range"));
     }
@@ -185,8 +194,7 @@ fn fromisoformat(iso: &str) -> Result<(i128, Option<i128>), String> {
             return Err(format!("{name} must be in 0..{max}, not {value}"));
         }
     }
-    let seconds = days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second;
-    Ok((i128::from(seconds) * 1_000_000 + i128::from(micro), offset))
+    Ok(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second)
 }
 
 /// A string's bytes as C reads them: followed by a NUL, which every read past the end gives.
@@ -210,32 +218,40 @@ fn separator_location(s: &Terminated, len: usize) -> Option<usize> {
     if len == 7 {
         return Some(7);
     }
-    if s.at(4) == b'-' {
-        if s.at(5) != b'W' {
-            return Some(10);
-        }
-        // YYYY-Www, or YYYY-Www-D.
-        if len < 8 {
+    match (s.at(4), s.at(5)) {
+        (b'-', b'W') => extended_week_separator_location(s, len),
+        (b'-', _) => Some(10), // YYYY-MM-DD.
+        (b'W', _) => Some(basic_week_separator_location(s, len)),
+        _ => Some(8), // YYYYMMDD.
+    }
+}
+
+/// separator_location of s, len bytes long, for a week date with dashes: s starts YYYY-W and len is not 7.
+fn extended_week_separator_location(s: &Terminated, len: usize) -> Option<usize> {
+    // YYYY-Www, or YYYY-Www-D.
+    if len < 8 {
+        return None;
+    }
+    if len > 8 && s.at(8) == b'-' {
+        if len == 9 {
             return None;
         }
-        if len > 8 && s.at(8) == b'-' {
-            if len == 9 {
-                return None;
-            }
-            return Some(if len > 10 && s.at(10).is_ascii_digit() { 8 } else { 10 });
-        }
-        return Some(8);
+        return Some(if len > 10 && s.at(10).is_ascii_digit() { 8 } else { 10 });
     }
-    if s.at(4) == b'W' {
-        // YYYYWww or YYYYWwwD: as many digits as follow decide.
-        let end = (7..len).find(|&i| !s.at(i).is_ascii_digit()).unwrap_or(len.max(7));
-        if end < 9 {
-            return Some(end);
-        }
-        return Some(if end % 2 == 0 { 7 } else { 8 });
-    }
-    // YYYYMMDD.
     Some(8)
+}
+
+/// separator_location of s, len bytes long, for a week date without dashes: s starts YYYYW and len is not 7.
+fn basic_week_separator_location(s: &Terminated, len: usize) -> usize {
+    // YYYYWww or YYYYWwwD: as many digits as follow decide.
+    let end = (7..len).find(|&i| !s.at(i).is_ascii_digit()).unwrap_or(len.max(7));
+    if end < 9 {
+        end
+    } else if end % 2 == 0 {
+        7
+    } else {
+        8
+    }
 }
 
 /// The year, month and day of the date of s that ends at len, as parse_isoformat_date reads it, unchecked; None when
@@ -317,30 +333,28 @@ fn time(s: &Terminated, start: usize, end: usize) -> Option<([i64; 4], Option<i1
 fn hh_mm_ss_ff(s: &Terminated, start: usize, end: usize) -> Option<([i64; 4], bool)> {
     let mut parts = [0; 4];
     let mut p = start;
-    let mut colons = true;
+    // Whether the fields are separated by colons, as the character after the hours decides for all of them.
+    let colons = s.at(start + 2) == b':';
     for i in 0..3 {
         parts[i] = s.digits(p, 2)?;
         let c = s.at(p + 2);
         p += 3;
-        if i == 0 {
-            colons = c == b':';
-        }
         if c == b'.' || c == b',' {
             // A fraction of the seconds only, with a digit.
             if i < 2 || p >= end {
                 return None;
             }
             break;
-        } else if p >= end {
+        }
+        if p >= end {
             return Some((parts, c != 0));
-        } else if colons && c == b':' {
-            if i == 2 {
-                return None;
-            }
-        } else if !colons {
-            p -= 1;
-        } else {
-            return None;
+        }
+        match (colons, c) {
+            // A colon after the hours or the minutes; one after the seconds is malformed.
+            (true, b':') if i < 2 => {}
+            // Without colons, the next field starts right after this one.
+            (false, _) => p -= 1,
+            _ => return None,
         }
     }
     // The fraction: up to six digits count, the rest are skipped.

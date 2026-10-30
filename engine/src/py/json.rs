@@ -155,44 +155,20 @@ impl Json {
     /// Write the value at out's end, as dumps does without indent and as dumps_indented does with it, level being
     /// how many arrays and objects hold it.
     fn write(&self, out: &mut String, indent: Option<usize>, level: usize) {
-        // What comes before the first item, between two, and after the last of a container that has any.
-        let (open, between, close) = match indent {
-            None => (String::new(), ", ".to_string(), String::new()),
-            Some(n) => {
-                let inner = format!("\n{}", " ".repeat(n * (level + 1)));
-                (inner.clone(), format!(",{inner}"), format!("\n{}", " ".repeat(n * level)))
-            }
-        };
         match self {
             Json::Null => out.push_str("null"),
             Json::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
             Json::Int(n) => out.push_str(&n.to_string()),
             Json::Float(x) => out.push_str(&float_text(*x)),
             Json::Str(s) => write_string(s, out),
-            Json::Array(items) => {
-                out.push('[');
-                for (i, item) in items.iter().enumerate() {
-                    out.push_str(if i > 0 { &between } else { &open });
-                    item.write(out, indent, level + 1);
-                }
-                if !items.is_empty() {
-                    out.push_str(&close);
-                }
-                out.push(']');
-            }
-            Json::Object(map) => {
-                out.push('{');
-                for (i, (k, v)) in map.iter().enumerate() {
-                    out.push_str(if i > 0 { &between } else { &open });
-                    write_string(k, out);
-                    out.push_str(": ");
-                    v.write(out, indent, level + 1);
-                }
-                if !map.is_empty() {
-                    out.push_str(&close);
-                }
-                out.push('}');
-            }
+            Json::Array(items) => write_items(out, ('[', ']'), items, indent, level, |item, out| {
+                item.write(out, indent, level + 1);
+            }),
+            Json::Object(map) => write_items(out, ('{', '}'), map.iter(), indent, level, |(k, v), out| {
+                write_string(k, out);
+                out.push_str(": ");
+                v.write(out, indent, level + 1);
+            }),
         }
     }
 
@@ -349,6 +325,38 @@ impl<T: Into<Json>> From<Option<T>> for Json {
     }
 }
 
+/// Write the items of an array or object that level arrays and objects hold at out's end, between brackets (opening,
+/// closing), as Json::write does: each by write_item, which writes the item it is given at the end of the String it
+/// is given, separated and indented as dumps_indented says with indent, and as dumps says without.
+fn write_items<T>(
+    out: &mut String,
+    brackets: (char, char),
+    items: impl IntoIterator<Item = T>,
+    indent: Option<usize>,
+    level: usize,
+    mut write_item: impl FnMut(T, &mut String),
+) {
+    // What comes before the first item, between two, and after the last of a container that has any.
+    let (open, between, close) = match indent {
+        None => (String::new(), ", ".to_string(), String::new()),
+        Some(n) => {
+            let inner = format!("\n{}", " ".repeat(n * (level + 1)));
+            (inner.clone(), format!(",{inner}"), format!("\n{}", " ".repeat(n * level)))
+        }
+    };
+    out.push(brackets.0);
+    let mut empty = true;
+    for item in items {
+        out.push_str(if empty { &open } else { &between });
+        write_item(item, out);
+        empty = false;
+    }
+    if !empty {
+        out.push_str(&close);
+    }
+    out.push(brackets.1);
+}
+
 /// s as json.dumps(s, ensure_ascii=False) writes it: as write_string, but every character beyond ASCII as it is.
 pub fn unicode_string(s: &str) -> String {
     let mut out = String::new();
@@ -434,19 +442,11 @@ fn wide_integer(text: &str) -> Option<&str> {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'"' => {
-                i += 1;
-                while i < bytes.len() && bytes[i] != b'"' {
-                    i += if bytes[i] == b'\\' { 2 } else { 1 };
-                }
-                i += 1;
-            }
+            b'"' => i = string_end(bytes, i),
             b'-' | b'0'..=b'9' => {
                 let start = i;
-                i += 1;
-                while i < bytes.len() && matches!(bytes[i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-') {
-                    i += 1;
-                }
+                let number = |b: &u8| matches!(b, b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-');
+                i = bytes[start + 1..].iter().position(|b| !number(b)).map_or(bytes.len(), |n| start + 1 + n);
                 let literal = &text[start..i];
                 let integer = !literal.contains(['.', 'e', 'E']);
                 if integer && literal.parse::<i64>().is_err() && literal.parse::<u64>().is_err() {
@@ -457,6 +457,16 @@ fn wide_integer(text: &str) -> Option<&str> {
         }
     }
     None
+}
+
+/// Where the JSON string whose opening quote is at byte quote of bytes ends: the byte after its closing quote, a
+/// backslash's next byte never taken for one; at or past bytes's end for a string that is not closed.
+fn string_end(bytes: &[u8], quote: usize) -> usize {
+    let mut i = quote + 1;
+    while i < bytes.len() && bytes[i] != b'"' {
+        i += if bytes[i] == b'\\' { 2 } else { 1 };
+    }
+    i + 1
 }
 
 /// x as Python's float.__repr__ writes it, which json.dumps uses: the shortest digits that read back as x, in
@@ -476,21 +486,30 @@ fn float_text(x: f64) -> String {
     let negative = mantissa.starts_with('-');
     let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
     let sign = if negative { "-" } else { "" };
-    if (-4..16).contains(&exp) {
-        let point = exp + 1;
-        let body = if point <= 0 {
-            format!("0.{}{}", "0".repeat(point.unsigned_abs() as usize), digits)
-        } else if point as usize >= digits.len() {
-            format!("{}{}.0", digits, "0".repeat(point as usize - digits.len()))
-        } else {
-            format!("{}.{}", &digits[..point as usize], &digits[point as usize..])
-        };
-        format!("{sign}{body}")
+    let body = if (-4..16).contains(&exp) { positional(&digits, exp + 1) } else { scientific(&digits, exp) };
+    format!("{sign}{body}")
+}
+
+/// The number whose significant digits are digits, without sign, with the decimal point after point of them, in
+/// positional notation with at least one digit after the point: 0.0012 for "12" at -2, 1200.0 for "12" at 4, 1.25 for
+/// "125" at 1. digits holds ASCII digits only.
+fn positional(digits: &str, point: i32) -> String {
+    if point <= 0 {
+        format!("0.{}{}", "0".repeat(point.unsigned_abs() as usize), digits)
+    } else if point as usize >= digits.len() {
+        format!("{}{}.0", digits, "0".repeat(point as usize - digits.len()))
     } else {
-        let rest = if digits.len() > 1 { format!(".{}", &digits[1..]) } else { String::new() };
-        let exp_sign = if exp < 0 { '-' } else { '+' };
-        format!("{sign}{}{rest}e{exp_sign}{:02}", &digits[..1], exp.unsigned_abs())
+        format!("{}.{}", &digits[..point as usize], &digits[point as usize..])
     }
+}
+
+/// The number whose significant digits are digits, without sign, times ten to exp, the point after the first digit,
+/// in scientific notation with a sign and at least two digits in the exponent: 1.25e+16 for "125" at 16, 5e-05 for "5"
+/// at -5. digits holds at least one ASCII digit and nothing else.
+fn scientific(digits: &str, exp: i32) -> String {
+    let rest = if digits.len() > 1 { format!(".{}", &digits[1..]) } else { String::new() };
+    let exp_sign = if exp < 0 { '-' } else { '+' };
+    format!("{}{rest}e{exp_sign}{:02}", &digits[..1], exp.unsigned_abs())
 }
 
 impl<'de> Deserialize<'de> for Json {
