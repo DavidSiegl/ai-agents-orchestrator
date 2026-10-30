@@ -93,8 +93,7 @@ impl Host for ServeHost {
 }
 
 /// An AgentConsole whose agents show `screens`, by herdr name, and which records what is typed into them in `typed`.
-/// An agent without a screen has exited (herdr's agent_not_found); while `down` is set, every command fails as herdr
-/// does when it cannot be reached.
+/// An agent without a screen has exited (herdr's agent_not_found).
 #[derive(Default)]
 pub struct FakeConsole {
     state: Mutex<Consoled>,
@@ -107,10 +106,13 @@ pub struct Consoled {
     pub screens: BTreeMap<String, String>,
     /// Each command, as `read NAME LINES`, `submit NAME TEXT` or `keys NAME KEY...`, in order.
     pub typed: Vec<String>,
+    /// While true, every command fails as herdr does when it cannot be reached (still recorded in `typed`).
     pub down: bool,
 }
 
 impl FakeConsole {
+    /// What the console holds and has recorded, to set its screens or `down` and to read `typed`; the console waits
+    /// for its commands until the guard is dropped.
     pub fn state(&self) -> MutexGuard<'_, Consoled> {
         self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }

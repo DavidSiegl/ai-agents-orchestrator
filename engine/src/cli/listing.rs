@@ -119,7 +119,6 @@ pub fn run_record(s: &Json, age: u64, local_host: &str, pid_alive: &dyn Fn(i128)
     record
 }
 
-/// A JSON object of pairs, in their order.
 /// run_record's agents, of the state's saved agents, by role.
 fn agent_refs(agents: Option<&Json>) -> Json {
     let agents = agents.and_then(Json::as_object).into_iter().flat_map(|a| a.iter());
@@ -131,6 +130,7 @@ fn agent_refs(agents: Option<&Json>) -> Json {
     Json::Array(started.collect())
 }
 
+/// A JSON object of pairs, in their order.
 fn object<const N: usize>(pairs: [(&str, Json); N]) -> Json {
     Json::Object(pairs.into_iter().collect())
 }

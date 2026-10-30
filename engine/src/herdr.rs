@@ -120,7 +120,8 @@ pub trait Herdr {
     /// directory it has not seen: herdr keeps the name bound, so the agent can still be waited on.
     fn start_agent(&self, name: &str, pane: &str, kind: &str, args: &[String]) -> Result<bool, HerdrError>;
 
-    /// Send the agent a prompt, without waiting for it to be taken.
+    /// Send the agent a prompt, without waiting for it to be taken. Errors: Failed, without asking herdr, for text
+    /// that starts like a long option, `--` and a letter or digit, which herdr cannot be given (see argument).
     fn prompt(&self, name: &str, text: &str) -> Result<(), HerdrError>;
 
     /// Wait for the agent to reach one of the statuses until (any change when empty), for at most timeout_ms
@@ -157,10 +158,12 @@ pub trait AgentConsole: Send + Sync {
     fn read(&self, name: &str, lines: u32) -> Result<String, HerdrError>;
 
     /// Type text into the agent and submit it, as herdr's `agent prompt` does, without waiting for it to be taken.
+    /// Errors: as Herdr::prompt's, so Failed, without asking herdr, for text that starts like a long option.
     fn submit(&self, name: &str, text: &str) -> Result<(), HerdrError>;
 
     /// Press keys in the agent's terminal, in order, each as herdr names it (`esc`, `enter`, `up`, `ctrl+c`); herdr
-    /// checks every key before it sends any, so a key it does not know sends none.
+    /// checks every key before it sends any, so a key it does not know sends none. Errors: Failed, without asking
+    /// herdr, when a key starts like a long option, `--` and a letter or digit, which herdr cannot be given.
     fn send_keys(&self, name: &str, keys: &[&str]) -> Result<(), HerdrError>;
 }
 
@@ -360,6 +363,20 @@ fn field(answer: &Json, command: &str, path: &[&str]) -> Result<String, HerdrErr
         .ok_or_else(|| HerdrError::new("bad_response", format!("{command}: no {} in the answer", path.join("."))))
 }
 
+/// arg, a prompt's text or a key, once it is safe to pass herdr's `agent prompt` and `agent send-keys` as a positional
+/// argument; what names it in the error ("a prompt", "a key"). herdr 0.9.1 reads those positionals as they are and
+/// has no `--` to end options there (it would take a `--` as the text or a key itself), but takes its long launch
+/// options (--session, --remote, --remote-keybindings, --handoff) out of all of its argv before any command sees it.
+/// So arg must not look like a long option: `--` then a letter or digit, wider than the options herdr 0.9.1 takes,
+/// against ones a later herdr adds; `-`, `- item` and `---` stay safe. Errors: Failed for an arg that looks like one.
+fn argument<'a>(what: &str, arg: &'a str) -> Result<&'a str, HerdrError> {
+    if arg.strip_prefix("--").and_then(|rest| rest.chars().next()).is_some_and(|c| c.is_ascii_alphanumeric()) {
+        let why = format!("{what} cannot start with -- and a letter or digit: herdr may take it for its own option");
+        return Err(HerdrError::Failed(OrchestratorError::new(why)));
+    }
+    Ok(arg)
+}
+
 impl Herdr for ProcessHerdr {
     fn create_workspace(&self, cwd: &str, label: &str) -> Result<(String, String), HerdrError> {
         let args = ["workspace", "create", "--cwd", cwd, "--label", label, "--no-focus"];
@@ -391,7 +408,7 @@ impl Herdr for ProcessHerdr {
     }
 
     fn prompt(&self, name: &str, text: &str) -> Result<(), HerdrError> {
-        self.call(&["agent", "prompt", name, text]).map(drop)
+        self.call(&["agent", "prompt", name, argument("a prompt", text)?]).map(drop)
     }
 
     fn wait(&self, name: &str, timeout_ms: Option<u64>, until: &[&str]) -> Result<String, HerdrError> {
@@ -446,7 +463,9 @@ impl AgentConsole for ProcessHerdr {
 
     fn send_keys(&self, name: &str, keys: &[&str]) -> Result<(), HerdrError> {
         let mut args = vec!["agent", "send-keys", name];
-        args.extend(keys);
+        for key in keys {
+            args.push(argument("a key", key)?);
+        }
         self.call(&args).map(drop)
     }
 }

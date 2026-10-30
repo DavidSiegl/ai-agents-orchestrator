@@ -320,6 +320,25 @@ fn the_console_reads_the_agent_s_text_and_types_into_it() {
 }
 
 #[test]
+fn the_console_refuses_what_herdr_would_take_for_its_own_option() {
+    let (herdr, ran) = answering(None, 0, &result("{}"), "");
+    // herdr takes --session, --remote and --handoff out of its whole argv, and has no -- to stop it.
+    let refused = herdr.submit("build-x", "--session").unwrap_err();
+    assert!(refused.to_string().contains("a prompt cannot start with --"), "{refused}");
+    let refused = herdr.send_keys("build-x", &["esc", "--remote=box"]).unwrap_err();
+    assert!(refused.to_string().contains("a key cannot start with --"), "{refused}");
+    assert_eq!(herdr.prompt("spec-x", "--help").unwrap_err().code(), None);
+    assert!(ran.lock().unwrap().is_empty(), "herdr was asked");
+    // What herdr takes as it is still goes to it, positionally.
+    herdr.submit("build-x", "- one\n- two").unwrap();
+    assert_eq!(last(&ran).0, argv(&["herdr", "agent", "prompt", "build-x", "- one\n- two"]));
+    herdr.prompt("spec-x", "---\ntitle: x\n---").unwrap();
+    assert_eq!(last(&ran).0, argv(&["herdr", "agent", "prompt", "spec-x", "---\ntitle: x\n---"]));
+    herdr.send_keys("build-x", &["-", "--"]).unwrap();
+    assert_eq!(last(&ran).0, argv(&["herdr", "agent", "send-keys", "build-x", "-", "--"]));
+}
+
+#[test]
 fn the_console_names_herdr_s_errors() {
     let (herdr, _) = answering(None, 1, "", &error("agent_not_found", "no agent build-x"));
     assert_eq!(AgentConsole::read(&herdr, "build-x", 10).unwrap_err().code(), Some("agent_not_found"));

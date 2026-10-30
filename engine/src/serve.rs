@@ -138,7 +138,8 @@ pub fn project_host(machine: &str, cwd: &str, stopping: &Interrupt) -> Result<Re
 ///   one that has exited.
 /// - POST /agent/input?run=ID&role=ROLE: types into that agent the JSON body's {"text": "..."}, submitted as a prompt,
 ///   or {"keys": ["esc", ...]}, pressed in order, and answers {"run", "role"}, without waiting for the agent to take
-///   it; 400 for a body of another shape, 413 for one over MAX_BODY_BYTES, 404 as /agent's.
+///   it; 400 for a body of another shape, 413 for one over MAX_BODY_BYTES, both before the project is reached, 404 as
+///   /agent's, and 502 for a text or key herdr cannot be given (AgentConsole::submit and send_keys say which).
 /// - /events: a text/event-stream of RunWatch's events, polled every SERVE_POLL.local, every SERVE_POLL.remote for a
 ///   --machine project, until the client goes or the server stops. An HTTP/1.1 client gets it chunked, so that the
 ///   end of the stream is the end of the response; an HTTP/1.0 client's ends when the connection closes.
@@ -352,10 +353,10 @@ type Answer = (u16, Json);
 
 /// Answer request, as RunServer's doc comment says.
 fn answer(shared: &Shared, request: Request) {
-    let (path, _) = target(&request);
+    let (path, query) = target(&request);
     match request.method().as_str() {
-        "GET" => get(shared, request),
-        "POST" if path == AGENT_INPUT => post_input(shared, request),
+        "GET" => get(shared, request, &path, &query),
+        "POST" if path == AGENT_INPUT => post_input(shared, request, &query),
         "OPTIONS" => preflight(shared, request),
         method => {
             let method = repr(method);
@@ -423,16 +424,15 @@ fn preflight(shared: &Shared, request: Request) {
     send(request, response);
 }
 
-/// Answer a GET of one of the endpoints.
-fn get(shared: &Shared, request: Request) {
-    let (path, query) = target(&request);
-    if let Some((code, body)) = refusal(shared, &request, &query) {
+/// Answer a GET of one of the endpoints, at path with the query's parameters, as target gives them.
+fn get(shared: &Shared, request: Request, path: &str, query: &HashMap<String, String>) {
+    if let Some((code, body)) = refusal(shared, &request, query) {
         return send_json(request, code, &body);
     }
-    let Some((endpoint, params)) = Endpoint::at(&path) else {
+    let Some((endpoint, params)) = Endpoint::at(path) else {
         return send_json(request, 404, &error(&format!("no endpoint {path}")));
     };
-    let project = match project_of(shared, &query, params) {
+    let project = match project_of(shared, query, params) {
         Ok(project) => project,
         Err((code, body)) => return send_json(request, code, &body),
     };
@@ -472,18 +472,18 @@ fn agent_lines(given: Option<&String>) -> Result<u32, Answer> {
         .ok_or_else(|| (400, error(&format!("lines must be a whole number from 1 to {most}"))))
 }
 
-/// Answer a POST of /agent/input.
-fn post_input(shared: &Shared, mut request: Request) {
-    let (_, query) = target(&request);
-    if let Some((code, body)) = refusal(shared, &request, &query) {
+/// Answer a POST of /agent/input with the query's parameters, as target gives them. The body is read and checked
+/// before the project is reached, so that a bad one is told so without a connect that may fail.
+fn post_input(shared: &Shared, mut request: Request, query: &HashMap<String, String>) {
+    if let Some((code, body)) = refusal(shared, &request, query) {
         return send_json(request, code, &body);
     }
-    let project = match project_of(shared, &query, &["run", "role"]) {
-        Ok(project) => project,
-        Err((code, body)) => return send_json(request, code, &body),
-    };
     let input = match agent_input(&mut request) {
         Ok(input) => input,
+        Err((code, body)) => return send_json(request, code, &body),
+    };
+    let project = match project_of(shared, query, &["run", "role"]) {
+        Ok(project) => project,
         Err((code, body)) => return send_json(request, code, &body),
     };
     let param = |name: &str| query.get(name).map_or("", String::as_str);

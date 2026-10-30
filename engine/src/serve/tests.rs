@@ -759,6 +759,24 @@ fn input_needs_the_token_and_the_server_s_own_origin() {
     assert!(served.console.state().typed.is_empty());
 }
 
+#[test]
+fn a_bad_input_is_refused_before_the_project_is_reached() {
+    let connects = Arc::new(Mutex::new(vec![]));
+    let seen = Arc::clone(&connects);
+    let connect = move |machine: &str, cwd: &str, _: &Interrupt| {
+        seen.lock().unwrap().push((machine.to_string(), cwd.to_string()));
+        Err(OrchestratorError::new("ssh: connection refused"))
+    };
+    let served = Served::start(Box::new(connect), &[], SERVE_POLL, Arc::clone(&connects));
+    let target = Served::query("/agent/input", &[("run", SERVE_ID), ("role", "build"), ("machine", "box")]);
+    assert_eq!(served.post(&target, r#"{"keys": []}"#).status, Some(400));
+    let long = format!(r#"{{"text": "{}"}}"#, "x".repeat(MAX_BODY_BYTES));
+    assert_eq!(served.post(&target, &long).status, Some(413));
+    assert!(connects.lock().unwrap().is_empty(), "a bad body reached the project");
+    let reply = served.post(&target, r#"{"text": "go"}"#);
+    assert_eq!((reply.status, reply.error()), (Some(502), "ssh: connection refused".to_string()));
+}
+
 // -- TestServeEvents and TestServeEventsOnAMachine ---------------------------------------------------------------
 
 /// An event stream as an EventSource reads it, with the token in the URL, its events parsed on a thread as they
