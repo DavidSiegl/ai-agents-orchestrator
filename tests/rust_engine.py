@@ -2,12 +2,14 @@
 
 import functools
 import json
-import os
 import shutil
 import subprocess
 
-# The repository's top directory, where the Cargo workspace is.
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+import conftest
+
+# The repository's top directory, where the Cargo workspace is: under mutmut too, whose copy of the tree holds no
+# engine/ (conftest.REPO).
+ROOT = conftest.REPO
 
 
 @functools.cache

@@ -43,7 +43,7 @@ pipeline {
         // A quality build (GIT_REF set) records what it judges as its build description, before Install runs any
         // code of the change: exactly `judged tree=<sha> parent=<sha> main=<sha>`, full lowercase shas, one space
         // apart. tree is the snapshot's tree, parent its only parent, the run's base, and main the origin/main
-        // commit whose gate and rules the Gate stage judges with. `orchestrator.py judged-in-quality` parses it, by
+        // commit whose gate and rules the Gate stage judges with. `orchestrator judged-in-quality` parses it, by
         // JUDGED_DESCRIPTION. A build restarted from a later stage records none, so nothing trusts it. No later stage
         // may fetch GIT_REF: the orchestrator deletes that branch once the Gate stage has archived quality.md, while
         // the build may still run (docs/quality-gate.md, "The calls").
@@ -170,14 +170,17 @@ pipeline {
                 // quality build's report lists failing tests and findings together. Any other exit status means
                 // pytest itself could not run.
                 //
-                // A quality build (GIT_REF set) leaves out the parity scenarios (tests/parity) when its change, against
-                // HEAD^, the run's base, touches nothing they depend on: the engine, the harness and its recordings,
-                // tests/conftest.py's guards they run under and tests/guard_errors.py's errors those guards raise, the
-                // example workflows they run, the Python environment, and ci/, which pins the gitleaks they run. They
-                // took quality build #59 past the orchestrator's QUALITY_TIMEOUT (1299 s of 1200), and while
-                // orchestrator.py is frozen a quality round seldom touches those paths. A git diff that fails counts as
-                // a change, so they run. Pull request builds always run them. [tool.mutmut] in pyproject.toml leaves
-                // them out of mutmut's runs.
+                // The parity scenarios (tests/parity) replay the Python engine's recordings against the Rust engine's
+                // orchestrator binary, which tests/rust_engine.py has cargo build; it is built here first, under the
+                // cargo lock (the UI stage says why), so that pytest's cargo finds it built and compiles nothing.
+                //
+                // A quality build (GIT_REF set) leaves out the parity scenarios when its change, against HEAD^, the
+                // run's base, touches nothing they depend on: the engine and the Cargo workspace it builds in, the
+                // harness and its recordings, tests/conftest.py's guards they run under and tests/guard_errors.py's
+                // errors those guards raise, the example workflows they run, the Python environment, and ci/, which
+                // pins the gitleaks they run. They took quality build #59 past the orchestrator's QUALITY_TIMEOUT
+                // (1299 s of 1200). A git diff that fails counts as a change, so they run. Pull request builds always
+                // run them. [tool.mutmut] in pyproject.toml leaves them out of mutmut's runs.
                 //
                 // --cov-context=test records which tests run each line, in COVERAGE_FILE, for the Gate stage's
                 // --test-contexts: mutmut then runs only the tests that reach the changed functions. It takes about 7 %
@@ -185,14 +188,15 @@ pipeline {
                 // set to an absolute path, under TMPDIR or elsewhere, the file vanished during a run and over 2300
                 // tests errored.
                 sh '''
+                    ci/cargo-lock.sh ${GIT_REF:+--no-wait} cargo build --locked -p octoflow-engine --bin orchestrator
                     parity=''
-                    if [ -n "${GIT_REF:-}" ] && git diff --quiet HEAD^ HEAD -- orchestrator.py tests/parity \
-                            tests/conftest.py tests/guard_errors.py examples pyproject.toml uv.lock .python-version \
-                            ci; then
+                    if [ -n "${GIT_REF:-}" ] && git diff --quiet HEAD^ HEAD -- engine Cargo.toml Cargo.lock \
+                            rust-toolchain.toml tests/parity tests/rust_engine.py tests/conftest.py tests/guard_errors.py \
+                            examples pyproject.toml uv.lock .python-version ci; then
                         parity='--ignore=tests/parity'
                     fi
                     status=0
-                    uv run pytest $parity --cov=orchestrator --cov=gate --cov-branch --cov-context=test --cov-report=xml \\
+                    uv run pytest $parity --cov=gate --cov-branch --cov-context=test --cov-report=xml \\
                         --junitxml=test-results.xml || status=$?
                     [ "$status" -le 1 ] || exit "$status"
                 '''
@@ -322,44 +326,6 @@ pipeline {
             }
         }
 
-        // Every parity scenario against the Rust engine's binary, serve's too, and those that switch engines at the
-        // kill (tests/parity/test_parity.py: PARITY_ENGINE, and PARITY_COMMANDS, which names every command the binary
-        // has, all of orchestrator.py's but gui), on a pull request build whose change touches engine/, tests/parity/
-        // or the workspace's Cargo.toml, Cargo.lock or rust-toolchain.toml since the base Gate judges it from
-        // (ci/pr-base.sh), by a git diff as the Test stage's for a quality build's parity scenarios: a diff, or a base,
-        // that fails counts as a change. The Test stage runs every scenario against orchestrator.py. The binary is the
-        // one the Test stage's cargo-llvm-cov built, instrumented for coverage, so it is given LLVM_PROFILE_FILE
-        // /dev/null through env, the harness giving the engine an environment of its own: else each invocation would
-        // write its profile into the scenario's project. After Gate, so that a failing scenario fails the build with
-        // quality.md archived.
-        stage('Rust parity') {
-            when {
-                changeRequest()
-                expression {
-                    return sh(returnStatus: true, script: '''
-                        base=$(ci/pr-base.sh)
-                        git diff --quiet "$base" HEAD -- engine tests/parity Cargo.toml Cargo.lock rust-toolchain.toml
-                    ''') != 0
-                }
-            }
-            steps {
-                sh '''
-                    engine="$WORKSPACE/target/llvm-cov-target/debug/orchestrator"
-                    if [ ! -x "$engine" ]; then
-                        echo "the Test stage built no $engine" >&2
-                        exit 1
-                    fi
-                    PARITY_ENGINE="env LLVM_PROFILE_FILE=/dev/null '$engine'" PARITY_COMMANDS=run,resume,list,metrics,show,prune,drain,close,refresh,workflows,judged-in-quality,doctor,serve \\
-                        uv run --frozen pytest tests/parity --junitxml=parity-rust.xml
-                '''
-            }
-            post {
-                always {
-                    junit 'parity-rust.xml'
-                }
-            }
-        }
-
         // The Linux binary and the desktop app around it, built on every pull request and main build, so a change
         // that breaks either fails before it is merged; Release attaches them. Not in a quality build (GIT_REF set):
         // nothing uses a snapshot's package, since the change is packaged by its pull request's build before it
@@ -404,15 +370,13 @@ pipeline {
                                  octoflow-desktop-linux-x86_64.AppImage; do
                             [ -f "dist/$f.sha256" ] || { echo "no dist/$f; run the whole build" >&2; exit 1; }
                         done
-                        # orchestrator.py packed as an executable zipapp, which runs on any machine with Python 3.13+.
-                        mkdir -p build/pyz dist
-                        cp orchestrator.py build/pyz/
-                        echo 'import sys, orchestrator; sys.exit(orchestrator.main(sys.argv[1:]))' > build/pyz/__main__.py
-                        uv run --frozen python -m zipapp build/pyz -p '/usr/bin/env python3' -c -o dist/octoflow.pyz
-                        uv run --frozen python dist/octoflow.pyz --help >/dev/null
-                        (cd dist && sha256sum octoflow.pyz > octoflow.pyz.sha256)
+                        # A release's own words, docs/releases/v<version>.md, when there is such a file: GitHub puts
+                        # them before the notes it generates from the pull requests.
+                        notes=docs/releases/$tag.md
+                        set --
+                        [ ! -f "$notes" ] || set -- --notes-file "$notes"
                         # Publishing it starts .github/workflows/macos-binary.yml, which adds the macOS binary and app.
-                        gh release create "$tag" dist/octoflow.pyz dist/octoflow.pyz.sha256 \
+                        gh release create "$tag" "$@" \
                             dist/octoflow-linux-x86_64 dist/octoflow-linux-x86_64.sha256 \
                             dist/octoflow-desktop-linux-x86_64.deb dist/octoflow-desktop-linux-x86_64.deb.sha256 \
                             dist/octoflow-desktop-linux-x86_64.AppImage \
