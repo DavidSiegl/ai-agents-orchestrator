@@ -26,7 +26,7 @@ use crate::pipeline::{is_built_in, Pipeline, Step, DONE, METRICS_FILE, PUBLISH, 
 use crate::prompts::{Prompt, Prompts};
 use crate::proofs::PROOF_TIMEOUT;
 use crate::pull_request::{branch_name, commit_note, pr_body, provenance, spec_title, GateEvidence, QualityFile};
-use crate::pypi::PyPI;
+use crate::package_index::PackageIndexes;
 use crate::py::format::format;
 use crate::py::json::{Json, Map};
 use crate::py::text::{basename, rstrip, strip};
@@ -91,9 +91,9 @@ pub struct Collaborators<'a> {
     /// The quality job that judges the change in the quality rounds: Some turns the run's quality gate on, None
     /// leaves it off. Python's ci.
     pub jenkins: Option<&'a Jenkins>,
-    /// The index the quality rounds' new-dependencies check asks about each package the change adds
-    /// (crate::checks); a run without the quality gate never asks it.
-    pub pypi: &'a PyPI,
+    /// The indexes the quality rounds' new-dependencies check asks about each package the change adds
+    /// (crate::checks); a run without the quality gate never asks them.
+    pub indexes: &'a PackageIndexes,
 }
 
 /// How a run is to go, as Workflow's keyword arguments in orchestrator.py: each but spec saved in the state, so that a
@@ -209,8 +209,8 @@ pub struct Workflow<'a> {
     pid_alive: &'a dyn Fn(i128) -> bool,
     /// Collaborators::jenkins.
     jenkins: Option<&'a Jenkins>,
-    /// Collaborators::pypi.
-    pypi: &'a PyPI,
+    /// Collaborators::indexes.
+    indexes: &'a PackageIndexes,
     state: RunState,
     /// The run's workflow, shared so that a step borrowed from it outlives no borrow of the Workflow.
     pipeline: Rc<Pipeline>,
@@ -287,7 +287,7 @@ impl<'a> Workflow<'a> {
             interrupt: with.interrupt,
             pid_alive: with.pid_alive,
             jenkins: with.jenkins,
-            pypi: with.pypi,
+            indexes: with.indexes,
             state,
             pipeline: Rc::new(pipeline),
             prompts,

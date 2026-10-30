@@ -70,16 +70,28 @@ export class FakeEventSource {
   }
 }
 
-/** Stub EventSource, and fetch with a server whose /file answers the text of `files` by name, else 404. */
-export function stubServer(files: Record<string, string>) {
+/** Stub EventSource, and fetch with a server whose /file answers the text of `files` by name, else 404; whose /agent
+ * answers the screen of `agents` by role, else 404 as for an agent that has exited; and whose POST /agent/input
+ * takes any input. */
+export function stubServer(files: Record<string, string>, agents: Record<string, string> = {}) {
   FakeEventSource.opened = [];
   vi.stubGlobal("EventSource", FakeEventSource);
-  const fetch = vi.fn(async (url: string) => {
-    const name = new URL(url).searchParams.get("name") ?? "";
+  const answer = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
+  const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+    const { pathname, searchParams } = new URL(url);
+    const role = searchParams.get("role") ?? "";
+    if (pathname === "/agent/input") {
+      return init?.method === "POST" ? answer(200, { run: "r", role }) : answer(501, {});
+    }
+    if (pathname === "/agent") {
+      const text = agents[role];
+      return text === undefined
+        ? answer(404, { error: `the ${role} agent has exited` })
+        : answer(200, { run: "r", role, text });
+    }
+    const name = searchParams.get("name") ?? "";
     const text = files[name];
-    return text === undefined
-      ? new Response(JSON.stringify({ error: `no file ${name}` }), { status: 404 })
-      : new Response(JSON.stringify({ run: "r", name, text }), { status: 200 });
+    return text === undefined ? answer(404, { error: `no file ${name}` }) : answer(200, { run: "r", name, text });
   });
   vi.stubGlobal("fetch", fetch);
   return fetch;

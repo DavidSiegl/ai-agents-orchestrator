@@ -106,8 +106,8 @@ The tk window that `gui` opened went with the Python engine; the [desktop app](#
 
 ### Desktop app
 
-A desktop app shows your runs. So far it is read-only: it shows one project's
-runs and their handoff files live, and starts no runs. It is a Tauri 2 app in [`ui/`](ui). Each release has it
+A desktop app shows your runs: one project's runs, their handoff files and their agents, live. It starts no runs,
+and changes nothing of them but what you type to an agent. It is a Tauri 2 app in [`ui/`](ui). Each release has it
 for Linux x86_64, as `octoflow-desktop-linux-x86_64.deb` and `.AppImage`, and for Apple Silicon macOS, as
 `octoflow-desktop-macos-arm64.dmg`, each with its `.sha256` and the orchestrator inside, so it needs no
 checkout. The macOS app is signed ad hoc only, not notarized, so macOS refuses to open it the
@@ -117,6 +117,12 @@ first time when a browser downloaded it, as it does the binary.
   running or stale, the question it is blocked on, its verdict and its pull request.
 - **Run detail:** the files in a run's directory, the newest or the one you pick rendered as Markdown, updated
   as they are written.
+- **Agents:** a tab for each agent the run has started, showing the last lines of its herdr pane, read again every
+  two seconds, with a box to type a message to it and keys (Esc, Enter, ↑, ↓, Ctrl+C), as you would in the pane:
+  to answer a question it asked, or stop it. The window reaches each agent in the herdr session its run was
+  started or last resumed in, wherever the window was opened, in herdr or not. A run an earlier version saved did
+  not record its session; its agents are reached in the one the herdr CLI picks where the window was opened: its
+  herdr pane's, else `HERDR_SESSION`'s, else the default one.
 - **Project bar:** a project folder and, for agents on another machine, a saved herdr machine. The app reopens
   the project you opened last.
 

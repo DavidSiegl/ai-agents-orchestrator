@@ -1,7 +1,8 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "./App";
-import { CONNECTION, FakeEventSource, stubServer } from "./test/fakes";
+import { AGENT_POLL_MS } from "./components/AgentPanes";
+import { CONNECTION, FakeEventSource, RECORDED, stubServer } from "./test/fakes";
 
 const RUN = "20261024-140000-c0ffee";
 const DONE = "20261024-090000-beef00";
@@ -9,8 +10,8 @@ const connect = () => Promise.resolve(CONNECTION);
 
 const SPEC = "# Add a token-bucket rate limiter\n\n- **10** requests a second\n\n| Limit | Value |\n|---|---|\n| burst | 20 |\n\n<script>alert('x')</script>\n<b>raw</b>\n";
 
-async function openApp(files: Record<string, string> = {}) {
-  const fetch = stubServer(files);
+async function openApp(files: Record<string, string> = {}, agents: Record<string, string> = {}) {
+  const fetch = stubServer(files, agents);
   render(<App connect={connect} />);
   // The stream opens in an effect, which may run after the first render shows.
   await waitFor(() => expect(FakeEventSource.opened).toHaveLength(1));
@@ -198,5 +199,150 @@ describe("the run detail", () => {
     expect(screen.getByRole("region", { name: "run beef00" })).toBeInTheDocument();
     act(() => source.replay("the finished run was deleted"));
     expect(screen.queryByRole("region", { name: "run beef00" })).not.toBeInTheDocument();
+  });
+});
+
+describe("the agents", () => {
+  const AGENTS = [
+    { role: "spec", name: "spec-c0ffee", kind: "claude" },
+    { role: "build", name: "build-c0ffee", kind: "codex" },
+  ];
+
+  /** Open the app on the run in its build, with the agents above, and its detail. */
+  async function openAgents(screens: Record<string, string>) {
+    const opened = await openApp({ "spec.md": SPEC }, screens);
+    act(() => opened.source.replay("the spec was written and the build started"));
+    const batch = RECORDED.find((b) => b.after === "the spec was written and the build started");
+    const record = batch?.events.find((e) => e.kind === "record")?.record as Record<string, unknown>;
+    act(() => opened.source.emit("record", { run: RUN, record: { ...record, agents: AGENTS } }));
+    fireEvent.click(row(RUN));
+    return { ...opened, agents: screen.getByRole("region", { name: "agents" }) };
+  }
+
+  function agentCalls(fetch: ReturnType<typeof stubServer>) {
+    return fetch.mock.calls
+      .map(([url, init]) => [new URL(url as string), init as RequestInit | undefined] as const)
+      .filter(([url]) => url.pathname.startsWith("/agent"));
+  }
+
+  it("shows the current role's agent first, and another when its tab is chosen", async () => {
+    const { fetch, agents } = await openAgents({ build: "> building the limiter\n", spec: "> spec written\n" });
+    expect(within(agents).getAllByRole("tab").map((t) => t.textContent)).toEqual(["spec", "build"]);
+    expect(within(agents).getByRole("tab", { name: "build" })).toHaveAttribute("aria-selected", "true");
+    expect(await within(agents).findByText("> building the limiter")).toBeInTheDocument();
+    const [url, init] = agentCalls(fetch)[0] ?? [];
+    const asked = [url?.pathname, url?.searchParams.get("run"), url?.searchParams.get("role"), url?.searchParams.get("lines")];
+    expect(asked).toEqual(["/agent", RUN, "build", "200"]);
+    expect(init?.headers).toEqual({ Authorization: "Bearer s3cret" });
+
+    fireEvent.click(within(agents).getByRole("tab", { name: "spec" }));
+    expect(await within(agents).findByText("> spec written")).toBeInTheDocument();
+  });
+
+  it("reads the shown agent again while it is shown", async () => {
+    vi.useFakeTimers();
+    const fetch = stubServer({ "spec.md": SPEC }, { build: "> one\n" });
+    render(<App connect={connect} />);
+    await act(async () => {});
+    const source = FakeEventSource.last;
+    act(() => source.replay("the spec was written and the build started"));
+    const batch = RECORDED.find((b) => b.after === "the spec was written and the build started");
+    const record = batch?.events.find((e) => e.kind === "record")?.record as Record<string, unknown>;
+    act(() => source.emit("record", { run: RUN, record: { ...record, agents: AGENTS } }));
+    fireEvent.click(row(RUN));
+    await act(async () => {});
+    const reads = () => agentCalls(fetch).length;
+    expect(reads()).toBe(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(reads()).toBe(2);
+    fireEvent.click(screen.getByRole("button", { name: "‹ Runs" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10000);
+    });
+    expect(reads()).toBe(2);
+  });
+
+  it("types a message and keys into the agent", async () => {
+    const { fetch, agents } = await openAgents({ build: "> which limit?\n" });
+    await within(agents).findByText("> which limit?");
+    const box = within(agents).getByLabelText("Message to the build agent");
+    fireEvent.change(box, { target: { value: "per client" } });
+    fireEvent.click(within(agents).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(box).toHaveValue(""));
+    fireEvent.click(within(agents).getByRole("button", { name: "press esc" }));
+    await waitFor(() => expect(agentCalls(fetch).filter(([, init]) => init?.method === "POST")).toHaveLength(2));
+    const posts = agentCalls(fetch).filter(([, init]) => init?.method === "POST");
+    expect(posts.map(([url, init]) => [url.pathname, url.searchParams.get("role"), init?.body])).toEqual([
+      ["/agent/input", "build", JSON.stringify({ text: "per client" })],
+      ["/agent/input", "build", JSON.stringify({ keys: ["esc"] })],
+    ]);
+  });
+
+  it("sends a message once while it is being sent, and keeps it when the send fails", async () => {
+    const { fetch, agents } = await openAgents({ build: "> which limit?\n" });
+    await within(agents).findByText("> which limit?");
+    // Hold each send until the test answers it.
+    const serve = fetch.getMockImplementation();
+    const answers: ((response: Response) => void)[] = [];
+    fetch.mockImplementation((url: string, init?: RequestInit) =>
+      new URL(url).pathname === "/agent/input"
+        ? new Promise<Response>((resolve) => answers.push(resolve))
+        : (serve?.(url, init) ?? Promise.reject(new Error("no server"))),
+    );
+    const posts = () => agentCalls(fetch).filter(([, init]) => init?.method === "POST");
+    const box = within(agents).getByLabelText("Message to the build agent");
+    const send = within(agents).getByRole("button", { name: "Send" });
+    fireEvent.change(box, { target: { value: "per client" } });
+    fireEvent.submit(box);
+    fireEvent.submit(box);
+    fireEvent.click(send);
+    expect(posts()).toHaveLength(1);
+    expect(send).toBeDisabled();
+
+    await act(async () => answers[0]?.(new Response(JSON.stringify({ error: "herdr: no such pane" }), { status: 502 })));
+    expect(await within(agents).findByText("herdr: no such pane")).toBeInTheDocument();
+    expect(box).toHaveValue("per client");
+    expect(send).toBeEnabled();
+
+    fireEvent.submit(box);
+    expect(posts()).toHaveLength(2);
+    await act(async () => answers[1]?.(new Response(JSON.stringify({ run: "r", role: "build" }), { status: 200 })));
+    await waitFor(() => expect(box).toHaveValue(""));
+  });
+
+  it("stops reading an agent that has exited, until a send", async () => {
+    vi.useFakeTimers();
+    const fetch = stubServer({ "spec.md": SPEC }, {});
+    render(<App connect={connect} />);
+    await act(async () => {});
+    const source = FakeEventSource.last;
+    act(() => source.replay("the spec was written and the build started"));
+    const batch = RECORDED.find((b) => b.after === "the spec was written and the build started");
+    const record = batch?.events.find((e) => e.kind === "record")?.record as Record<string, unknown>;
+    act(() => source.emit("record", { run: RUN, record: { ...record, agents: AGENTS } }));
+    fireEvent.click(row(RUN));
+    await act(async () => {});
+    const reads = () => agentCalls(fetch).filter(([url]) => url.pathname === "/agent").length;
+    expect(screen.getByText("the build agent has exited")).toBeInTheDocument();
+    expect(reads()).toBe(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10 * AGENT_POLL_MS);
+    });
+    expect(reads()).toBe(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "press esc" }));
+    await act(async () => {});
+    expect(reads()).toBe(2);
+  });
+
+  it("says when an agent has exited, and when none has started", async () => {
+    const { agents } = await openAgents({});
+    expect(await within(agents).findByText("the build agent has exited")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "‹ Runs" }));
+    fireEvent.click(row(DONE));
+    expect(within(screen.getByRole("region", { name: "agents" })).getByText("No agent has started yet.")).toBeInTheDocument();
   });
 });

@@ -31,8 +31,8 @@ const SHOW_DIR: &str = "/proj/.orchestrator/runs/20260929-120000-a1b2c3";
 const JOB: &str = crate::ci::fake::JOB;
 
 /// The keys of a run record, in the order run_record gives them.
-const RUN_RECORD_KEYS: [&str; 22] = [
-    "id", "key", "task", "workflow", "steps", "phase", "round", "quality_round", "role", "pane", "health",
+const RUN_RECORD_KEYS: [&str; 23] = [
+    "id", "key", "task", "workflow", "steps", "phase", "round", "quality_round", "role", "pane", "agents", "health",
     "health_reason", "heartbeat_age", "waiting", "verdict", "error", "closed", "branch", "worktree", "pr", "turns",
     "resume_command",
 ];
@@ -178,6 +178,24 @@ fn every_key_is_present() {
     assert_eq!(key(&record, "turns"), json("[]"));
     assert_eq!((key(&record, "waiting"), key(&record, "resume_command")), (Json::Null, Json::Null));
     Json::Object(record).dumps();
+}
+
+#[test]
+fn the_agents_are_those_started_with_their_names_and_kinds() {
+    let agents = json(
+        r#"{"spec": {"name": "spec-c0ffee", "pane": "w1:p1"},
+            "build": {"name": "build-c0ffee", "pane": "w1:p2", "kind": "codex"},
+            "review": {"name": "", "pane": ""}}"#,
+    );
+    let record = record(&with(mine(), &[("agents", agents)]), 40, true, &[]);
+    assert_eq!(
+        key(&record, "agents"),
+        json(
+            r#"[{"role": "spec", "name": "spec-c0ffee", "kind": "claude"},
+                {"role": "build", "name": "build-c0ffee", "kind": "codex"}]"#
+        )
+    );
+    assert_eq!(key(&self::record(&mine(), 40, true, &[]), "agents"), json("[]"));
 }
 
 #[test]

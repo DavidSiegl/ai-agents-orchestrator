@@ -4298,6 +4298,15 @@ class TestSurvivingMutants(RepositoryTest):
         with patch.object(gate, "_mutant_statuses", results):
             return made, self.found(budget)
 
+    def test_a_function_whose_edit_only_removes_a_guard_is_mutated(self):
+        self.put("calc.py", self.BASE.replace("def unchecked(a, b):\n",
+                                              "def unchecked(a, b):\n    if a is None:\n        return 0\n"))
+        self.git("commit", "--quiet", "-am", "guarded")
+        self.put("calc.py", self.BASE)
+        made, found = self.found_and_made()
+        self.assertEqual({re.sub(r"__mutmut_\d+$", "", m) for m in made}, {"calc.x_unchecked"})
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in found], [("calc.py", 5, "survived")])
+
     def test_the_rules_mutmut_table_judges_the_change_not_the_tree_s(self):
         self.change_the_functions()
         # The change tells mutmut to leave every line alone; the rules it is judged by do not.

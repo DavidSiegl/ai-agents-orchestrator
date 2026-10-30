@@ -1,10 +1,12 @@
-//! The Python tests' ServeHost: a Host that serve's threads can share, its files in memory.
+//! The Python tests' ServeHost: a Host that serve's threads can share, its files in memory; and FakeConsole, the herdr
+//! its runs' agents are in.
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard};
 
 use crate::constants::RUNS_DIR;
 use crate::error::OrchestratorError;
+use crate::herdr::{AgentAddress, AgentConsole, HerdrError, HerdrServer};
 use crate::host::{Exec, ExecError, Host, RunFile};
 use crate::py::json::Json;
 
@@ -87,5 +89,60 @@ impl Host for ServeHost {
             .collect();
         files.sort();
         Ok(files.into_iter().map(|(mtime, path)| RunFile { path, mtime }).collect())
+    }
+}
+
+/// An AgentConsole whose agents show `screens`, by herdr name, whatever server they are addressed in, and which
+/// records what is typed into them in `typed`, and the server of each in `servers`. An agent without a screen has
+/// exited (herdr's agent_not_found).
+#[derive(Default)]
+pub struct FakeConsole {
+    state: Mutex<Consoled>,
+}
+
+/// What a FakeConsole holds and records.
+#[derive(Default)]
+pub struct Consoled {
+    /// By agent name, what its terminal shows.
+    pub screens: BTreeMap<String, String>,
+    /// Each command, as `read NAME LINES`, `submit NAME TEXT` or `keys NAME KEY...`, in order.
+    pub typed: Vec<String>,
+    /// The server each command of `typed` addressed its agent in, in the same order (AgentAddress::server).
+    pub servers: Vec<Option<HerdrServer>>,
+    /// While true, every command fails as herdr does when it cannot be reached (still recorded in `typed`).
+    pub down: bool,
+}
+
+impl FakeConsole {
+    /// What the console holds and has recorded, to set its screens or `down` and to read `typed`; the console waits
+    /// for its commands until the guard is dropped.
+    pub fn state(&self) -> MutexGuard<'_, Consoled> {
+        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The agent's screen, after recording command and the agent's server; herdr's errors as the type says.
+    fn answer(&self, agent: &AgentAddress, command: String) -> Result<String, HerdrError> {
+        let mut s = self.state();
+        s.typed.push(command);
+        s.servers.push(agent.server.clone());
+        if s.down {
+            return Err(HerdrError::Failed(OrchestratorError::new("herdr is not on PATH")));
+        }
+        let name = &agent.name;
+        s.screens.get(name).cloned().ok_or_else(|| HerdrError::new("agent_not_found", format!("no agent {name}")))
+    }
+}
+
+impl AgentConsole for FakeConsole {
+    fn read(&self, agent: &AgentAddress, lines: u32) -> Result<String, HerdrError> {
+        self.answer(agent, format!("read {} {lines}", agent.name))
+    }
+
+    fn submit(&self, agent: &AgentAddress, text: &str) -> Result<(), HerdrError> {
+        self.answer(agent, format!("submit {} {text}", agent.name)).map(drop)
+    }
+
+    fn send_keys(&self, agent: &AgentAddress, keys: &[&str]) -> Result<(), HerdrError> {
+        self.answer(agent, format!("keys {} {}", agent.name, keys.join(" "))).map(drop)
     }
 }

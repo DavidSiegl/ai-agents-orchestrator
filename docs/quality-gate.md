@@ -284,9 +284,10 @@ A change to a helper or fixture outside the tests' `def`s reruns nothing. The ch
 off, and `--randomly-seed=N` repeats an order.
 
 **Surviving mutants** mutation-tests the functions the change edits, so that code its tests run without checking what
-it does is found; coverage counts such code as tested. A function counts when the change adds a line to it, decorators
-included: a top-level function, or a method of a top-level class, in a Python file outside the test files and, as
-above, `mutants/`. mutmut, in the `dev` group, makes small changes to each, one at a time - an operator
+it does is found; coverage counts such code as tested. A function counts when the change adds lines to it or removes
+lines from it, decorators included, since a deleted guard clause needs a test as much as an added one: a top-level
+function, or a method of a top-level class, in a Python file outside the test files and, as above, `mutants/`.
+mutmut, in the `dev` group, makes small changes to each, one at a time - an operator
 swapped, a number or a string altered, an argument dropped - and runs each of these mutants against the tests that
 call the function:
 
@@ -1050,38 +1051,53 @@ workflow, or the run's task for a workflow without one. Each check is an `Orches
 
 | Check | Fails? | Finds |
 |---|---|---|
-| `new-dependencies` | yes | packages the change adds that the spec does not name or PyPI does not know |
+| `new-dependencies` | yes | packages the change adds that the spec does not name or their index does not know |
 | `diff-budget` | no | a change over the workflow's `max_files` or `max_lines` |
 | `unexpected-paths` | no | changed paths the spec never mentions |
 
-**New dependencies** reads the project's manifests at the repository's top level only, `pyproject.toml` and the
-`uv.lock` beside it, when the change touches either: a manifest anywhere else, such as a test fixture, is not the
-project's. It reads them in the snapshot and at the base, both at the top level: a file the change moves there, such
-as a fixture's `pyproject.toml`, was not the project's at the base, so what it lists is new. The direct
-dependencies are `pyproject.toml`'s `[project] dependencies` and `optional-dependencies` and its
-`[dependency-groups]`, the project itself left out, so `all = ["myproj[a,b]"]` adds nothing; the locked packages are
-`uv.lock`'s, the project and its workspace members left out. A package is new when the snapshot's files name it and
-the base's do not. Names compare as PyPI compares them (PEP 503), and the spec names a package when it holds the name as
-a word, in any case, so `pytest_randomly` names `pytest-randomly` and `pytest-randomly` does not name `pytest`. The
-spec was agreed with the human, so naming a package there is the approval.
+**New dependencies** reads the project's manifests from the repository's top level only, in two ecosystems: a Python
+project's `pyproject.toml` and the `uv.lock` beside it, when the change touches either, and a Cargo workspace's
+`Cargo.toml`, the manifests of the members its `[workspace] members` names and the `Cargo.lock` beside it, when the
+change touches any `Cargo.toml` or that `Cargo.lock`. A manifest anywhere else, such as a test fixture, is not the
+project's. It reads them in the snapshot and at the base, both from the top level: a file the change moves there, such
+as a fixture's `pyproject.toml`, was not the project's at the base, so what it lists is new. The direct dependencies
+are `pyproject.toml`'s `[project] dependencies` and `optional-dependencies` and its `[dependency-groups]`, the project
+itself left out, so `all = ["myproj[a,b]"]` adds nothing; the locked packages are `uv.lock`'s, the project and its
+workspace members left out. A Cargo workspace's direct dependencies are the `[dependencies]`, `[dev-dependencies]` and
+`[build-dependencies]` of the top-level manifest and each member's, with their `[target.<cfg>]` forms, and the top
+level's `[workspace.dependencies]`, each by its crate's name (its `package` when the entry renames it); a member named
+by a glob, such as `crates/*`, makes the manifest `unreadable`, since the check does not expand it. The locked
+packages are `Cargo.lock`'s from a registry or a repository, the workspace's own crates and those from a path left
+out. A package is new when the snapshot's files name it and the base's do not. Names compare as PyPI compares them
+(PEP 503), which is also how crates.io compares a crate's, and the spec names a package when it holds the name as a
+word, in any case, so `pytest_randomly` names `pytest-randomly` and `pytest-randomly` does not name `pytest`. The spec
+was agreed with the human, so naming a package there is the approval.
 
-Where a package comes from decides whether PyPI is asked about it. A direct dependency's source is its
-`[tool.uv.sources]` entry (`workspace`, `path`, `git`, `url` or `index`), else its PEP 508 URL (`name @ url`), else
-the `[[tool.uv.index]]` marked `default = true`, else the registry `uv.lock` has it from; a locked package's is its
-`source` in `uv.lock`. Only a package from PyPI's own index (`https://pypi.org/simple`) is looked up, at
-`https://pypi.org/pypi/<name>/json`, with a timeout of 15 seconds (`PYPI_TIMEOUT`). A package from another index is
-never looked up on pypi.org, so a name someone squatted there cannot lend it pypi.org's metadata: that is the
-dependency-confusion case, and the finding names the index instead. Such a package is therefore never `not-on-pypi`;
-only the spec rule can fail it.
+Where a package comes from decides whether its index, PyPI for a Python package and crates.io for a crate, is asked
+about it. A direct dependency's source is its `[tool.uv.sources]` entry (`workspace`, `path`, `git`, `url` or
+`index`), else its PEP 508 URL (`name @ url`), else the `[[tool.uv.index]]` marked `default = true`, else the registry
+`uv.lock` has it from; a locked package's is its `source` in `uv.lock`. Only a package from PyPI's own index
+(`https://pypi.org/simple`) is looked up, at `https://pypi.org/pypi/<name>/json`, with a timeout of 15 seconds
+(`PYPI_TIMEOUT`). A package from another index is never looked up on pypi.org, so a name someone squatted there cannot
+lend it pypi.org's metadata: that is the dependency-confusion case, and the finding names the index instead. Such a
+package is therefore never `not-on-pypi`; only the spec rule can fail it. A crate's source is its entry's: `path`, a
+member of the workspace, which the spec need not name; `git`; `registry` or `registry-index`, an index other than
+crates.io, whose crate is `other-index`; else crates.io. An entry with `workspace = true` has its
+`[workspace.dependencies]` entry's source, and a locked crate its `source` in `Cargo.lock`. Only a crate from
+crates.io is looked up, at `https://crates.io/api/v1/crates/<name>`, with a timeout of 15 seconds
+(`CRATES_IO_TIMEOUT`) and a User-Agent that names the project, which crates.io requires; nothing of the user's goes
+with it. Its first release is the crate's creation, and its latest version crates.io's default one, the highest that
+is neither yanked nor a pre-release.
 
 - `not-in-spec` (fails): a new direct dependency the spec does not name, with where it comes from, unless it is a
   member of the project's workspace (`{ workspace = true }`): the project's own code, not a package from outside;
 - `not-on-pypi` (fails): a package from PyPI that PyPI answers 404 for. That is the slopsquatting case: a name an
-  agent made up, which anyone could register;
-- `unchecked` (fails): the packages from PyPI that PyPI was not asked about, because a request got no usable answer
-  (no answer, a timeout, an HTTP error other than 404, an answer that is not PyPI's JSON), or because the quality
-  round had too little time left. PyPI is asked no more after the first such request, and none is started with less
-  than 60 seconds (`SLOW_STEP_MARGIN`) of the round's `QUALITY_TIMEOUT` left. The run's heartbeat is kept between
+  agent made up, which anyone could register. `not-on-crates-io` is the same for a crate;
+- `unchecked` (fails): the packages from an index that it was not asked about, one finding per index, because a
+  request got no usable answer (no answer, a timeout, an HTTP error other than 404, an answer that is not the index's
+  JSON), or because the quality round had too little time left. An index is asked no more after the first such
+  request it gets, while the other still is, and none is started with less than 60 seconds (`SLOW_STEP_MARGIN`) of
+  the round's `QUALITY_TIMEOUT` left. The run's heartbeat is kept between
   requests, so a long list of new packages cannot make a live run look stale. A package that could not be checked is
   never reported as passed, so the next quality round asks again;
 - `unreadable` (fails): a manifest in the change that is not UTF-8 TOML, or not in the shape above. One that cannot
@@ -1092,7 +1108,7 @@ only the spec rule can fail it.
 - `added` (reports): a new direct dependency the spec names, or a workspace member, with its first release date, its
   latest version and its date, and its license, or the path, repository or URL it comes from. `young` instead when its
   first release is less than 14 days old (`YOUNG_PACKAGE_DAYS`), or it has no release files: few have used it yet.
-  `other-index` instead for one from an index other than PyPI's, naming the index, and `unknown-source` for one whose
+  `other-index` instead for one from an index other than its ecosystem's, naming the index, and `unknown-source` for one whose
   `[tool.uv.sources]` entry has a shape this check does not know (none of `workspace`, `path`, `git`, `url` or
   `index`), quoting the entry: where it comes from is not checked, so it is reported rather than passed in silence;
 - `pulled-in` (reports): one finding per `uv.lock`, listing with the same facts the packages it alone adds, those the

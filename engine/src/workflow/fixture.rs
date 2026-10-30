@@ -11,7 +11,7 @@ use crate::ci::Jenkins;
 use crate::herdr::fake::{FakeHerdr, Turn};
 use crate::http::Http;
 use crate::pypi::fake::FakePyPI;
-use crate::pypi::PyPI;
+use crate::package_index::PackageIndexes;
 use crate::host::fake::{FakeClock, FakeHost};
 use crate::host::{Host, ProcessHost};
 use crate::interrupt::Interrupt;
@@ -84,10 +84,10 @@ pub(crate) struct Fixture {
     pub ci: Arc<FakeJenkins>,
     /// The quality job the Workflow is given: None for a run without the quality gate, until gated gives it one.
     pub jenkins: Option<Jenkins>,
-    /// The PyPI behind the Workflow's index, with no project unless a test adds them.
+    /// The PyPI behind the Workflow's indexes, with no project unless a test adds them.
     pub pypi: Arc<FakePyPI>,
-    /// The index the Workflow is given, on pypi.
-    index: PyPI,
+    /// The indexes the Workflow is given: pypi, and a crates.io that knows no crate.
+    indexes: PackageIndexes,
 }
 
 /// The default run's new state.
@@ -120,7 +120,7 @@ impl Fixture {
             host.state().clock = Some(Rc::clone(&clock));
         }
         let pypi = FakePyPI::from_json(Map::new());
-        let index = PyPI::new(Arc::clone(&pypi) as Arc<dyn Http>);
+        let indexes = PackageIndexes::with_pypi(Arc::clone(&pypi) as Arc<dyn Http>);
         Fixture {
             host,
             herdr,
@@ -132,7 +132,7 @@ impl Fixture {
             ci: FakeJenkins::new(),
             jenkins: None,
             pypi,
-            index,
+            indexes,
         }
     }
 
@@ -157,7 +157,7 @@ impl Fixture {
 
     /// The fixture whose Workflow asks this PyPI instead.
     pub fn with_pypi(mut self, pypi: Arc<FakePyPI>) -> Fixture {
-        self.index = PyPI::new(Arc::clone(&pypi) as Arc<dyn Http>);
+        self.indexes = PackageIndexes::with_pypi(Arc::clone(&pypi) as Arc<dyn Http>);
         self.pypi = pypi;
         self
     }
@@ -208,7 +208,7 @@ impl Fixture {
             interrupt: &self.interrupt,
             pid_alive: &*self.pid_alive,
             jenkins: self.jenkins.as_ref(),
-            pypi: &self.index,
+            indexes: &self.indexes,
         }
     }
 
