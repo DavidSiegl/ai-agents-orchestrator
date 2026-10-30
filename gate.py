@@ -51,7 +51,7 @@ import threading
 import time
 import tokenize
 import tomllib
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 from xml.etree import ElementTree
@@ -219,9 +219,18 @@ def _removal_points(diff: str) -> dict[str, set[int]]:
     return _hunk_positions(diff, _hunk_removal_point)
 
 
+# Cached since the Rust detector of test-integrity asks it of the one diff once for each path it judges (_rust_code).
+@functools.lru_cache(maxsize=2)
+def _removed_lines(diff: str) -> dict[str, set[int]]:
+    """For each file of a `git diff -U0`, by its path in the new tree, the lines of its old side that the diff
+    removes, as the old side numbers them. The files are changed_lines', so a deleted file is left out; one that
+    removes no line maps to an empty set. The caller must not change the sets: the result is cached."""
+    return _hunk_positions(diff, _hunk_removed_lines)
+
+
 def _hunk_positions(diff: str, positions: Callable[[str], Iterable[int]]) -> dict[str, set[int]]:
-    """The new tree's lines that positions gives for each `@@` line of each file of a `git diff -U0`, by its path in
-    the new tree, the files as changed_lines says."""
+    """The lines that positions gives for each `@@` line of each file of a `git diff -U0`, by its path in the new tree,
+    the files as changed_lines says."""
     out: dict[str, set[int]] = {}
     path, in_hunk = None, False
     for line in diff.split("\n"):
@@ -245,11 +254,21 @@ def _note_path(out: dict[str, set[int]], path: str | None) -> str | None:
 
 def _hunk_lines(line: str) -> range:
     """The new tree's lines that a `@@` line's hunk adds."""
-    m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
+    return _hunk_span(line, "+")
+
+
+def _hunk_removed_lines(line: str) -> range:
+    """The old tree's lines that a `@@` line's hunk removes."""
+    return _hunk_span(line, "-")
+
+
+def _hunk_span(line: str, side: str) -> range:
+    """The lines that a `@@` line's hunk spans on one side, "-" the old tree's and "+" the new tree's."""
+    m = re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
     if not m:
         return range(0)
-    start = int(m.group(1))
-    return range(start, start + (1 if m.group(2) is None else int(m.group(2))))
+    start, count = m.group(1, 2) if side == "-" else m.group(3, 4)
+    return range(int(start), int(start) + (1 if count is None else int(count)))
 
 
 def _hunk_removal_point(line: str) -> list[int]:
@@ -907,10 +926,14 @@ def _read_rust_files(change: GateChange) -> tuple[list[RustFile], list[dict]]:
 
 
 def _rust_pairs(change: GateChange) -> list[tuple[str | None, str | None]]:
-    """The pairs of change.files with a .rs path on either side, in their order, each side None that is not one."""
-    def rust(path: str | None) -> str | None:
-        return path if path and path.endswith(".rs") else None
-    return [(rust(old), rust(new)) for old, new in change.files if rust(old) or rust(new)]
+    """The pairs of change.files with a .rs path on either side, in their order, each side None that is not one, as
+    _rust_side gives it: so the RustFile of a pair of change.files has (_rust_side(old), _rust_side(new)) for paths."""
+    return [(_rust_side(old), _rust_side(new)) for old, new in change.files if _rust_side(old) or _rust_side(new)]
+
+
+def _rust_side(path: str | None) -> str | None:
+    """path when it names a .rs file, else None."""
+    return path if path and path.endswith(".rs") else None
 
 
 def _rust_paths(change: GateChange, pairs: list[tuple[str | None, str | None]], tmp: str) -> list[str]:
@@ -1296,13 +1319,15 @@ class ChangedTestFile:
 class WeakenedTestsDetector:
     """How the test-integrity check reads one language's tests."""
     language: str
-    # Whether a repository path is one of the language's test files; and whether a path of the change, on either of
-    # its sides, holds the language's code outside its tests, the code its tests test.
-    is_test: Callable[[str], bool]
+    # Whether a path of the change, on either of its sides, is one of the language's test files: a file that holds
+    # its tests, and may hold code beside them, as a Rust file with an inline test module does. And whether the
+    # change edits the language's code outside its tests, the code its tests test, at a path of the change.
+    is_test: Callable[[GateChange, str], bool]
     is_code: Callable[[GateChange, str], bool]
-    # The findings on every one of the language's test files the change touched, as GateCheck.find returns them,
-    # given whether the change also edits the language's code outside its tests.
-    find: Callable[[list[ChangedTestFile], bool], list[dict]]
+    # The findings on the language's test files the change touched, all of them and possibly none, as GateCheck.find
+    # returns them, given the change and whether it also edits the language's code outside its tests. When the
+    # change touches the language's files and find cannot read them, a finding says so.
+    find: Callable[[GateChange, list[ChangedTestFile], bool], list[dict]]
 
 
 def weakened_tests(change: GateChange) -> list[dict]:
@@ -1314,7 +1339,7 @@ def weakened_tests(change: GateChange) -> list[dict]:
     for detector in WEAKENED_TESTS_DETECTORS:
         files, unreadable = [], []
         for old, new in change.files:
-            if not any(p is not None and detector.is_test(p) for p in (old, new)):
+            if not any(p is not None and detector.is_test(change, p) for p in (old, new)):
                 continue
             try:
                 files.append(ChangedTestFile(
@@ -1324,7 +1349,8 @@ def weakened_tests(change: GateChange) -> list[dict]:
             except (GateError, OSError, UnicodeDecodeError) as e:
                 unreadable.append(_finding(new or old, None, "unreadable",
                                            f"could not be read, so its tests were not checked: {e}", severity="error"))
-        out += unreadable + (detector.find(files, _edits_code(change, detector)) if files else [])
+        # find runs without files too, so that it can say it could not read the change, as the Rust detector does.
+        out += unreadable + detector.find(change, files, bool(files) and _edits_code(change, detector))
     return out
 
 
@@ -1650,7 +1676,7 @@ def _python_removed_tests(files: list[ChangedTestFile], before: list[_PythonTest
     return out
 
 
-def _names(tests: list[_PythonTest], limit: int = 5) -> str:
+def _names(tests: "Sequence[_PythonTest | _RustTest]", limit: int = 5) -> str:
     shown = ", ".join(f"`{t.name}`" for t in tests[:limit])
     return shown + (f" and {len(tests) - limit} more" if len(tests) > limit else "")
 
@@ -1891,8 +1917,294 @@ def _clip(text: str, n: int = 160) -> str:
     return text if len(text) <= n else text[:n - 1] + "…"
 
 
+# Rust's tests, as the gate-rust helper reads them (GateChange.rust_files). docs/quality-gate.md, "Test integrity", says
+# which functions are tests and how each finding reads them.
+
+def _rust_test_path(path: str) -> bool:
+    """Whether path is a Rust file that holds tests by where it is: under a tests directory, as Cargo's integration
+    tests are, or named tests.rs, as a module of unit tests is."""
+    *dirs, name = path.split("/")
+    return name.endswith(".rs") and ("tests" in dirs or name == "tests.rs")
+
+
+def _rust_test_file(change: GateChange, path: str) -> bool:
+    """WeakenedTestsDetector.is_test for Rust: a .rs file that _rust_test_path places among the tests, or one that holds
+    an inline cfg(test) module on either side of change, as the helper read it. Where the gate could not run the
+    helper, the place alone decides."""
+    return path.endswith(".rs") and (_rust_test_path(path) or any(
+        _rust_test_spans(document) for f in change.rust_files[0]
+        for side, document in ((f.old_path, f.before), (f.new_path, f.after)) if side == path))
+
+
+def _rust_test_spans(document: dict | None) -> list[tuple[int, int]]:
+    """The first and last line of each inline module that document, one side of a RustFile, marks cfg(test), its
+    attributes included; none for a side the helper could not parse or the change has no file on."""
+    if document is None or "error" in document:
+        return []
+    return [(m["attrs_line"], m["end"]) for m in document["mods"] if m["cfg_test"]]
+
+
+def _within(line: int, spans: list[tuple[int, int]]) -> bool:
+    return any(first <= line <= last for first, last in spans)
+
+
+def _in_rust_tests(path: str | None, document: dict, line: int) -> bool:
+    """Whether line of the Rust file at path, whose helper's document is document, lies among Rust's tests, as the
+    spec of the Rust checks places them (requirement 2): in a file _rust_test_path places there, or in an inline
+    cfg(test) module. The one rule test-integrity and cognitive-complexity both read; path None is no file."""
+    return (path is not None and _rust_test_path(path)) or _within(line, _rust_test_spans(document))
+
+
+def _rust_code(change: GateChange, path: str) -> bool:
+    """WeakenedTestsDetector.is_code for Rust: whether path is a .rs file of a Cargo package (_in_cargo_package) that
+    _rust_test_path does not place among the tests, and the change adds, deletes or renames it, or edits it outside its
+    inline cfg(test) modules: adds a line outside them in the working tree, or removes one outside them at the base.
+    Where the helper could not read the file on a side, or the gate could not run it, any edit of the file counts."""
+    if not path.endswith(".rs") or _rust_test_path(path) or not _in_cargo_package(change, path):
+        return False
+    read = [f for f in change.rust_files[0] if path in (f.old_path, f.new_path)]
+    if not read:
+        return True
+    # Each pair here that keeps its path is the one file edited in place, whose lines the diff numbers under path.
+    removed = _removed_lines(change.diff).get(path, set())
+    return any(f.old_path != f.new_path
+               or any(not _within(n, _rust_test_spans(f.after)) for n in change.changed.get(path, ()))
+               or any(not _within(n, _rust_test_spans(f.before)) for n in removed)
+               for f in read)
+
+
+def _in_cargo_package(change: GateChange, path: str) -> bool:
+    """Whether a Cargo.toml lies in path's directory or one above it, up to the repository's top level: in the working
+    tree, or at the base where the change deletes or renames it."""
+    gone = {old for old, new in change.files if old is not None and old != new}
+    dirs = path.split("/")[:-1]
+    manifests = ("/".join([*dirs[:n], "Cargo.toml"]) for n in range(len(dirs) + 1))
+    return any(m in gone or os.path.isfile(os.path.join(change.root, m)) for m in manifests)
+
+
+@dataclass(frozen=True)
+class _RustTest:
+    """A Rust test, a fn with an attribute whose path ends in `test`, on one side of a ChangedTestFile, in a file that
+    _rust_test_path places among the tests or in an inline cfg(test) module."""
+    file: int  # the ChangedTestFile's index in the list find was given
+    name: str  # _rust_name's, as tests::adds or tests::<Fixture as Drop>::drop
+    fn: dict  # its entry in the helper's fns
+    # How many tests of its file and side come before it under the same name, as two fns of one name under cfgs that
+    # never hold together can be, or a macro's: so each of them is a test of its own, the first matched with the first.
+    namesake: int = 0
+
+    def key(self) -> tuple[int, str, int]:
+        return self.file, self.name, self.namesake
+
+
+def rust_weakened_tests(change: GateChange, files: list[ChangedTestFile], code_changed: bool) -> list[dict]:
+    """WeakenedTestsDetector.find for Rust, over the helper's documents of files (GateChange.rust_files): tests removed
+    (renamed or moved ones match their old selves by body_digest), skips and swallowed errors on added lines
+    (_rust_skips, _rust_swallowed_errors), fewer assertion macros in a test, and, when code_changed, an assertion whose
+    literals changed while its macro and the rest of it stayed. A test file the helper could not parse in the working
+    tree is an unparsable finding instead. When the gate could not read the change's Rust, rust_files's not-run finding
+    alone."""
+    read, problems = change.rust_files
+    if problems and not read:
+        return problems
+    documents, out = _rust_test_documents(files, read)
+    before = [t for k, (was, _) in documents.items() for t in _rust_tests(k, files[k].old_path, was)]
+    after = [t for k, (_, now) in documents.items() for t in _rust_tests(k, files[k].new_path, now)]
+    for k, (_, now) in documents.items():
+        if now is not None:
+            mine = [t for t in after if t.file == k]
+            out += _rust_skips(files[k], now, mine) + _rust_swallowed_errors(files[k], now, mine)
+    out += _rust_removed_tests(files, documents, before, after)
+    at_base = {t.key(): t for t in before}
+    for t in after:
+        if t.key() in at_base:
+            out += _rust_kept_test(files[t.file].new_path, at_base[t.key()], t, code_changed)
+    return sorted(problems + out, key=lambda f: (f["path"] or "", f["line"] or 0))
+
+
+def _rust_test_documents(files: list[ChangedTestFile],
+                         read: list[RustFile]) -> tuple[dict[int, tuple[dict | None, dict | None]], list[dict]]:
+    """The helper's two documents of each of files, out of read, GateChange.rust_files's, by the file's index in files,
+    each None on a side that holds no Rust the helper could parse, since a base that does not parse has no tests to
+    lose. A file the helper could not parse in the working tree is left out, and is an unparsable finding when its base
+    held tests; one whose base held none has none to lose, as a fixture under tests/ that is not Rust on purpose."""
+    sides = {(f.old_path, f.new_path): f for f in read}
+    documents: dict[int, tuple[dict | None, dict | None]] = {}
+    unparsable = []
+    for k, f in enumerate(files):
+        pair = sides.get((_rust_side(f.old_path), _rust_side(f.new_path)))
+        was, now = (pair.before, pair.after) if pair else (None, None)
+        was = None if was is None or "error" in was else was
+        if now is not None and "error" in now and _rust_tests(k, f.old_path, was):
+            error = now["error"]
+            where = f" at line {error['line']}" if error["line"] is not None else ""
+            unparsable.append(_finding(f.new_path, error["line"], "unparsable",
+                                       f"the gate-rust helper could not read it as Rust{where}: {error['message']}; so "
+                                       f"its tests were not checked.", severity="error"))
+        elif now is None or "error" not in now:
+            documents[k] = was, now
+    return documents, unparsable
+
+
+def _rust_kept_test(path: str | None, was: _RustTest, now: _RustTest, code_changed: bool) -> list[dict]:
+    """The findings on a test the change kept, was at the base and now in the working tree, in the file at path: fewer
+    assertion macros than at the base, and, when code_changed, each assertion whose literals changed while its macro
+    and the rest of it stayed."""
+    out = []
+    if len(now.fn["asserts"]) < len(was.fn["asserts"]):
+        out.append(_finding(path, now.fn["line"], "fewer-assertions",
+                            f"`{now.name}` has {len(now.fn['asserts'])} assertions, {len(was.fn['asserts'])} at the "
+                            f"base.", severity="error"))
+    if code_changed:
+        out += [_finding(path, b["line"], "expected-value-changed",
+                         f"`{now.name}`: `{_first_line(a['text'])}` became `{_first_line(b['text'])}`, in a change "
+                         f"that also edits the code under test.", severity="error")
+                for a, b in _rust_changed_literals(was.fn["asserts"], now.fn["asserts"])]
+    return out
+
+
+def _rust_tests(k: int, path: str | None, document: dict | None) -> list[_RustTest]:
+    """The tests of document, the helper's of files[k] on the side whose path is path, as _RustTest says which."""
+    if document is None or path is None:
+        return []
+    seen: collections.Counter[str] = collections.Counter()
+    out = []
+    for fn in document["fns"]:
+        if (any(a["path"].split("::")[-1] == "test" for a in fn["attrs"])
+                and _in_rust_tests(path, document, fn["line"])):
+            name = _rust_name(fn)
+            out.append(_RustTest(k, name, fn, seen[name]))
+            seen[name] += 1
+    return out
+
+
+def _rust_removed_tests(files: list[ChangedTestFile], documents: dict[int, tuple[dict | None, dict | None]],
+                        before: list[_RustTest], after: list[_RustTest]) -> list[dict]:
+    """One finding per test the change removed, an inline module with every test in it counting as one, and a file
+    deleted, or left with no Rust, as one; a test whose body reappears under another name or in another file is not
+    removed. documents are each file's two documents as rust_weakened_tests holds them."""
+    now = {t.key() for t in after}
+    was = {t.key() for t in before}
+    bodies = collections.Counter(t.fn["body_digest"] for t in after if t.key() not in was)
+    removed = []
+    for t in before:
+        if t.key() in now:
+            continue
+        if bodies[t.fn["body_digest"]]:
+            bodies[t.fn["body_digest"]] -= 1
+        else:
+            removed.append(t)
+    out = []
+    for k, f in enumerate(files):
+        mine = [t for t in removed if t.file == k]
+        old, new = documents.get(k, (None, None))
+        if mine and new is None:
+            out.append(_finding(f.old_path, None, "removed-test",
+                                f"deleted, with its {len(mine)} tests: {_names(mine)}.", severity="error"))
+        elif mine and old is not None:
+            out += _rust_removed_from(f.old_path, old, [t for t in before if t.file == k], mine)
+    return out
+
+
+def _rust_removed_from(path: str | None, document: dict, tests: list[_RustTest], removed: list[_RustTest]) -> list[dict]:
+    """The removed-test findings on removed, tests of the file at path that the change keeps, out of tests, all of its
+    tests at the base, whose document is document: one for each inline module whose tests are all removed, the
+    outermost such module of each test, and one for each test outside such a module."""
+    def inside(m: dict, t: _RustTest) -> bool:
+        return m["attrs_line"] <= t.fn["line"] <= m["end"]
+
+    # The modules that hold a removed test and only removed ones, outermost first.
+    emptied = [m for m in sorted(document["mods"], key=lambda m: m["attrs_line"])
+               if any(inside(m, t) for t in removed) and all(t in removed for t in tests if inside(m, t))]
+    out = []
+    for t in removed:
+        whole = next((m for m in emptied if inside(m, t)), None)
+        if whole is None:
+            out.append(_finding(path, t.fn["line"], "removed-test",
+                                f"`{t.name}` is gone; this was line {t.fn['line']} at the base.", severity="error"))
+        elif t is next(u for u in removed if inside(whole, u)):
+            n = sum(1 for u in removed if inside(whole, u))
+            out.append(_finding(path, whole["line"], "removed-test",
+                                f"`{whole['name']}` and its {n} tests are gone; this was line {whole['line']} at the "
+                                f"base.", severity="error"))
+    return out
+
+
+# An attribute that skips a test, or turns it or the module holding it off: #[ignore], a cfg other than cfg(test), such
+# as cfg(all(test, feature = "slow")), which turns tests off as Python's skipIf does, or a cfg_attr that writes ignore,
+# as an argument after its predicate's comma. Matched at the attribute's `#`, reading no further than its first `]`.
+_RUST_SKIPPING = re.compile(r"#!?\[\s*(?:ignore\b|cfg\s*\((?!\s*test\s*\)\s*\])"
+                            r"|cfg_attr\s*\([^\]]*,\s*ignore\s*[=,)])")
+
+
+def _rust_skips(f: ChangedTestFile, document: dict, tests: list[_RustTest]) -> list[dict]:
+    """The skips on the lines the change added to f, a Rust test file whose document in the working tree is document,
+    and tests its tests there. A skip is an attribute _RUST_SKIPPING matches: of a test, as the helper gives them; on a
+    line of its own inside a test's body, as a statement's; among the outer attributes of an inline module holding a
+    test; or an inner attribute, `#![...]`, on a line of its own inside such a module, or anywhere in a file
+    _rust_test_path places among the tests."""
+    path = f.new_path
+    skips = {a["line"]: a["text"] for t in tests for a in t.fn["attrs"]
+             if a["line"] in f.added and _RUST_SKIPPING.match(a["text"])}
+    holding = [m for m in document["mods"] if any(m["attrs_line"] <= t.fn["line"] <= m["end"] for t in tests)]
+    lines = f.after.split("\n")
+    for n in sorted(f.added - skips.keys()):
+        text = lines[n - 1].lstrip() if n <= len(lines) else ""
+        if text.startswith("#!"):
+            judged = (path is not None and _rust_test_path(path)) or any(m["line"] <= n <= m["end"] for m in holding)
+        else:
+            judged = text.startswith("#") and (any(t.fn["line"] < n <= t.fn["end"] for t in tests)
+                                               or any(m["attrs_line"] <= n < m["line"] for m in holding))
+        found = [m.start() for m in re.finditer(r"#!?\[", text) if _RUST_SKIPPING.match(text, m.start())]
+        if judged and found:
+            skips[n] = text[found[0]:]
+    return [_finding(path, n, "skip", f"`{_first_line(text)}` added: it skips a test or turns it off.",
+                     severity="error") for n, text in sorted(skips.items())]
+
+
+def _rust_swallowed_errors(f: ChangedTestFile, document: dict, tests: list[_RustTest]) -> list[dict]:
+    """The swallowed errors on the lines the change added to f, a Rust test file whose document in the working tree is
+    document, and tests its tests there: a #[should_panic] without `expected` on a test, which any panic passes; and a
+    value thrown away (the helper's discards) in any fn among the file's tests, a test or a helper, that holds an
+    assertion macro the fn calls or a call of catch_unwind, so that the panic or the Err that would fail the test is
+    thrown away with it."""
+    path = f.new_path
+    out = [_finding(path, a["line"], "swallowed-error",
+                    f"`{_first_line(a['text'])}` without `expected` added on `{t.name}`: any panic passes it, a failed "
+                    f"assertion's too.", severity="error")
+           for t in tests for a in t.fn["attrs"]
+           if a["line"] in f.added and a["path"] == "should_panic" and "expected" not in a["text"]]
+    for fn in document["fns"]:
+        if not _in_rust_tests(path, document, fn["line"]):
+            continue
+        for d in fn["discards"]:
+            if d["line"] in f.added and ("catch_unwind" in d["text"]
+                                         or any(a["text"] in d["text"] for a in fn["asserts"])):
+                written = {"let": "let _ = {};", "assign": "_ = {};", "ok": "{}.ok();"}[d["kind"]].format(d["text"])
+                out.append(_finding(path, d["line"], "swallowed-error",
+                                    f"`{_first_line(written)}` added in `{_rust_name(fn)}`: it throws away the panic "
+                                    f"or the `Err` that would fail the test.", severity="error"))
+    return out
+
+
+def _rust_changed_literals(was: list[dict], now: list[dict]) -> list[tuple[dict, dict]]:
+    """The (before, after) pairs of a test's assertions, as the helper's asserts give them, that kept their macro and
+    shape but not their literals, the assertions of each side aligned by macro and shape."""
+    blocks = difflib.SequenceMatcher(None, [(a["name"], a["shape"]) for a in was],
+                                     [(b["name"], b["shape"]) for b in now], autojunk=False).get_matching_blocks()
+    return [(was[i + d], now[j + d]) for i, j, n in blocks for d in range(n)
+            if was[i + d]["literals"] != now[j + d]["literals"]]
+
+
+def _first_line(text: str) -> str:
+    """text's first line, clipped, for a finding's message."""
+    return _clip(text.split("\n")[0])
+
+
 WEAKENED_TESTS_DETECTORS = (
-    WeakenedTestsDetector("python", is_test=_python_test_file, is_code=_python_code, find=python_weakened_tests),
+    WeakenedTestsDetector("python", is_test=lambda change, path: _python_test_file(path), is_code=_python_code,
+                          find=lambda change, files, code_changed: python_weakened_tests(files, code_changed)),
+    WeakenedTestsDetector("rust", is_test=_rust_test_file, is_code=_rust_code, find=rust_weakened_tests),
 )
 
 
@@ -3658,7 +3970,7 @@ def _mutation_not_run(problem: str) -> dict:
 #   its file, as for Python, and for a fn nested in it that calls itself. Calls resolve by path, as
 #   _rust_recursive_functions says, and not through a local that shadows a fn's name, a `use`, or a trait object.
 # - A fn is judged as one when no fn holds it, whatever modules, `impl`s or traits do; Rust's tests are exempt, as
-#   _complexity_exempt and _rust_scored_functions place them.
+#   _in_rust_tests places them, as it does for test-integrity.
 
 # The cognitive-complexity check's limit: a function the change edits fails the gate above it, as with SonarQube's
 # default for S3776.
@@ -3667,13 +3979,10 @@ COGNITIVE_COMPLEXITY_LIMIT = 15
 
 def _complexity_exempt(path: str) -> bool:
     """Whether the check judges no function of the file at path, as one of the tests: a Python file under tests/,
-    as `per-file-ignores` in pyproject.toml exempts them from ruff's C901; or a Rust file in a directory named tests
-    at any depth or named tests.rs, where the spec of the Rust checks places Rust's tests (a #[cfg(test)] module
-    elsewhere is _rust_scored_functions' to leave out)."""
-    if path.endswith(".rs"):
-        *directories, name = path.split("/")
-        return name == "tests.rs" or "tests" in directories
-    return path.startswith("tests/")
+    as `per-file-ignores` in pyproject.toml exempts them from ruff's C901; or a Rust file that _rust_test_path places
+    among the tests (a fn of an inline #[cfg(test)] module elsewhere is _rust_scored_functions' to leave out, by
+    _in_rust_tests)."""
+    return _rust_test_path(path) if path.endswith(".rs") else path.startswith("tests/")
 
 
 @dataclass(frozen=True)
@@ -3977,7 +4286,8 @@ def _judged_rust_files(change: GateChange) -> tuple[list[dict], dict[str, tuple[
             if error:
                 out.append(_not_scored(rust.new_path, error["line"], f"does not parse as Rust ({error['message']})"))
             else:
-                judged[rust.new_path] = (_rust_scored_functions(rust.after), paths[rust.new_path])
+                functions = _rust_scored_functions(rust.new_path, rust.after)
+                judged[rust.new_path] = (functions, paths[rust.new_path])
     return out, judged
 
 
@@ -4076,7 +4386,7 @@ def _working_functions(change: GateChange, path: str) -> tuple[list[_ScoredFunct
         document = _rust_document(change, path, base=False)
         if document is None or "error" in document:
             return None, "the gate-rust helper could not read it"
-        return _rust_scored_functions(document), ""
+        return _rust_scored_functions(path, document), ""
     _, tree, why = _parse_working_file(change, path)
     return (None, why) if tree is None else (_scored_functions(tree), "")
 
@@ -4099,7 +4409,7 @@ def _base_functions(change: GateChange, path: str) -> list[_ScoredFunction]:
     cannot be read or parsed, whose functions the change can then only be judged as adding."""
     if path.endswith(".rs"):
         document = _rust_document(change, path, base=True)
-        return [] if document is None or "error" in document else _rust_scored_functions(document)
+        return [] if document is None or "error" in document else _rust_scored_functions(path, document)
     try:
         # Verbatim, so that os.fsencode gives back the bytes git stores, which _decode_python decodes as Python would.
         tree = _parse_python(_decode_python(os.fsencode(
@@ -4117,14 +4427,13 @@ def _rust_document(change: GateChange, path: str, *, base: bool) -> dict | None:
                  if (rust.old_path if base else rust.new_path) == path), None)
 
 
-def _rust_scored_functions(document: dict) -> list[_ScoredFunction]:
-    """Each fn of document, a gate-rust helper's document of a file that parsed, that the cognitive-complexity check
-    judges as one, scored, in the order they start: a fn with a body that no other fn holds, as _ScoredFunction says
-    of Python's functions, outside every #[cfg(test)] module, where Rust's tests are (with _complexity_exempt's)."""
-    tests = [(m["attrs_line"], m["end"]) for m in document["mods"] if m["cfg_test"]]
+def _rust_scored_functions(path: str, document: dict) -> list[_ScoredFunction]:
+    """Each fn of document, a gate-rust helper's document of the file at path that parsed, that the cognitive-complexity
+    check judges as one, scored, in the order they start: a fn with a body that no other fn holds, as _ScoredFunction
+    says of Python's functions, outside Rust's tests (_in_rust_tests), which the check never judges and which so take
+    no part in pairing a function with its base either."""
     # The helper gives a flow to just the fns with a body that no fn holds.
-    judged = [f for f in document["fns"] if f["flow"] is not None
-              and not any(first <= f["attrs_line"] <= last for first, last in tests)]
+    judged = [f for f in document["fns"] if f["flow"] is not None and not _in_rust_tests(path, document, f["line"])]
     recursive = _rust_recursive_functions(judged)
     return [_ScoredFunction(_rust_name(f), f["attrs_line"], f["end"], f["line"],
                             _rust_cognitive_complexity(f["flow"], recursive=i in recursive), f["body_digest"])

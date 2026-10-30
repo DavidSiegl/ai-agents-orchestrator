@@ -75,19 +75,20 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 - **The gate judges Rust as it judges Python: the rest of it.** `.scratch/gate-rust-checks/` (spec, 2026-10-29). The
   helper the checks read Rust through is in: `ci/gate-rust/`, a crate on syn whose JSON (docs/quality-gate.md,
   "Reading Rust: the gate-rust helper") `GateChange.rust_files` reads, named by `gate.py --rust-syntax`, which the
-  Install stage builds from the tree the Gate stage takes `gate.py` from; `cognitive-complexity` scores Rust over the
-  `flow` it prints (ticket 03). Left: Rust in `test-integrity` (ticket 02, which the Rust engine's switch waits for),
-  `vague-names`,
-  `passes-at-base`, `surviving-mutants` with cargo-mutants, and a Cargo ecosystem for `new-dependencies` after the
-  switch (04 to 07). Decided against (2026-10-29, the user's): a Rust counterpart of `flaky-tests`, since nextest runs
-  each test in a process of its own, so the reruns under other seeds that `flaky-tests` does for pytest
-  (`FLAKY_SEEDS`) have little to catch.
+  Install stage builds from the tree the Gate stage takes `gate.py` from. `test-integrity` reads Rust's tests through
+  it (ticket 02, 2026-10-30: `rust_weakened_tests`, the `rust` entry of `WEAKENED_TESTS_DETECTORS`), and
+  `cognitive-complexity` scores Rust over the `flow` it prints (ticket 03, 2026-10-30); their blind spots are under Open
+  issues. Left: `vague-names`, `passes-at-base`, `surviving-mutants` with cargo-mutants, and a Cargo ecosystem for
+  `new-dependencies` after the switch (04 to 07). Decided against (2026-10-29, the user's): a Rust counterpart of
+  `flaky-tests`, since nextest runs each test in a process of its own, so the reruns under other seeds that
+  `flaky-tests` does for pytest (`FLAKY_SEEDS`) have little to catch.
 
 ## Open issues
 
 - **Test code outside the places the spec names is judged as code.** The spec of the Rust checks (requirement 2)
-  places Rust's tests in a `tests/` directory, a `tests.rs` and an inline `#[cfg(test)]` module; `_complexity_exempt`
-  and `_rust_scored_functions` in `gate.py` follow it. So `cognitive-complexity` judges a file that a parent takes in
+  places Rust's tests in a `tests/` directory, a `tests.rs` and an inline `#[cfg(test)]` module; `_in_rust_tests` and
+  `_rust_test_path` in `gate.py`, which both Rust checks read, follow it (test-integrity's side of this is the
+  out-of-line `mod name;` item in its list below). So `cognitive-complexity` judges a file that a parent takes in
   with `#[cfg(test)] mod name;`, as the engine keeps its fakes and `test_support.rs` (`engine/src/host.rs:24` on
   rust-engine): at rust-engine `476b770`, 3 of the 21 engine functions over the limit are theirs (`FakeState::git`,
   `FakeJenkinsState::answer`, `helper_cases`). Found by gate-rust-checks ticket 03 (2026-10-30). And, as cross-review
@@ -103,16 +104,13 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   nothing to the score." Clippy's own `cognitive_complexity` reads no macro either. Closes with the helper parsing the
   common other shapes (`expr; n`, `expr, pattern if guard`, `name: expr` arguments) and a `macro` node, unread, that
   gate.py can count or report.
-- **A Rust fn in a `#[cfg(test)]` module takes no part in pairing a function with its base.** `_rust_scored_functions`
-  leaves such fns out on both sides, where a Python file under `tests/` stays in `_base_scores`' pool as a file the
-  check does not judge. So a fn moved unchanged into a test module cannot keep its own base before a copy of it
-  elsewhere takes it, and that copy passes as the original. Found by gate-rust-checks ticket 03 (2026-10-30). Closes
+- **Rust's test code takes no part in pairing a function with its base.** `_rust_scored_functions` leaves the fns
+  `_in_rust_tests` places among the tests out on both sides, where a Python file under `tests/` stays in
+  `_base_scores`' pool as a file the check does not judge. So a fn moved unchanged into Rust's tests cannot keep its
+  own base before a copy of it elsewhere takes it, and that copy passes as the original. Found by gate-rust-checks
+  ticket 03 (2026-10-30); since its merge with ticket 02 it holds for test files as for inline test modules. Closes
   with a per-function "exempt" mark on `_ScoredFunction` that `_BasePool` reads where it now asks
   `_complexity_exempt` of a path.
-- **Where Rust's tests are is decided in two tickets.** Ticket 03 put the spec's requirement 2 in
-  `_complexity_exempt` and `_rust_scored_functions`; ticket 02's Rust `WeakenedTestsDetector`, written in parallel,
-  needs the same places. Found by gate-rust-checks ticket 03 (2026-10-30). Closes when the later of the two to merge
-  reads the rule from one function that both checks call.
 
 - **The eval set's code has review 88's findings open.** Raised by cross-review 88 (2026-10-28) in code PR #167
   brought, recorded here rather than fixed in an unrelated branch: the docs task's hidden test sees only ``` fences
@@ -181,6 +179,30 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   base side out of git with its own process, so a change to N Rust files starts N git processes before the helper's
   one run; about 5 ms each here. Raised by cross-review 106 (F5, 2026-10-30): "one `cat-file --batch` or `git archive`
   would do." Closes with one `git cat-file --batch` over all the base paths.
+- **test-integrity's Rust detector does not see some weakenings that Python's does, or that its rules name.** Found
+  while writing it (gate-rust-checks ticket 02, 2026-10-30); docs/quality-gate.md, "Rust tests", lists each:
+  - an expected value held in a `const` or `static` the change edits: `_changed_constants` follows Python's
+    module-level constants, and the Rust side has no counterpart. Closes with the helper listing a file's `const`s
+    and `static`s with a digest of their expressions, and `rust_weakened_tests` comparing those an assertion names;
+  - a `Result` thrown away that holds no assertion macro and no `catch_unwind`, such as `let _ = check();` where
+    `check` returns the `Err` that should fail the test, and a `catch_unwind` result bound to a name and never read.
+    The helper knows no types, so `_rust_swallowed_errors` cannot tell such a value from a cleanup's. Closes with a
+    rule on the text the change replaced, such as a `.unwrap()`, `.expect(...)` or `?` at the base on the same
+    expression, which the helper would need to report;
+  - a skipping attribute that does not start its line, or a multi-line `cfg_attr` whose `ignore` is on a later line,
+    in a test's body or on a module (`_rust_skips` reads those lines' text; a test's own attributes come whole from
+    the helper). Closes with the helper listing the attributes of modules and of statements in a test, which raises
+    its schema.
+  - a test module in a file of its own that a `#[cfg(test)] mod name;` names, where that file is neither under
+    `tests/` nor `tests.rs`, as `mod cli_tests;`: `_rust_test_file` reads a path alone, as requirement 2 of the spec
+    defines the files, so that file's tests are not read and its edits count as code. Raised by cross-review 107
+    (2026-10-30, not recorded). Closes with the helper listing each `mod name;` with its `cfg_test`, and the check
+    resolving the file it names as rustc does (`name.rs` or `name/mod.rs` beside the file, or a `#[path]`).
+  - removing the first of two tests of one name in one file, as under two platforms' `cfg`s: `_RustTest.namesake`
+    numbers them in order, so the second then takes the first's number and is compared with the removed one's base,
+    which reads as a fewer-assertions or a changed literal on it, or as nothing, rather than as a removed test. Raised
+    by cross-review 107 (round 2, not recorded). Closes with namesakes matched by their `cfg` attributes, or by body
+    first as removed tests are.
 - **The parity harness records `state.json` at each command the fakes get, not after each save.** Ticket
   rust-engine/01 asks for "`state.json` after each save"; the ledger reads it only when herdr, gh, Jenkins or PyPI
   gets a call, and leaves out a change to `heartbeat_at` alone (`tests/parity/fakes.py`, `_changed_states`). Raised
@@ -582,6 +604,11 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Fixed
 
+- **Where Rust's tests are was decided in two tickets.** Ticket 03 had placed the spec's requirement 2 in
+  `_complexity_exempt` and `_rust_scored_functions`, and ticket 02's Rust `WeakenedTestsDetector`, written in
+  parallel, in `_rust_tests` and `_rust_swallowed_errors`. Found by gate-rust-checks ticket 03 (2026-10-30). Fixed
+  (2026-10-30, merging ticket 02 into 03): one function, `_in_rust_tests`, with `_rust_test_path` for whole files,
+  which both checks call.
 - **passes-at-base missed a deleted Python script with no `.py`.** `_edits_python_source` counted a deleted file as
   Python source only by its `.py`, so a change that only deleted a `#!` python script outside the tests edited no
   Python source for it. Found while fixing the cognitive-complexity check's same gap (2026-10-25). Fixed

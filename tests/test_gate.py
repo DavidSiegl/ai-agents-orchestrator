@@ -7,6 +7,7 @@ a piece of the quality file's format, are in tests/test_orchestrator.py and test
 
 import ast
 import contextlib
+import dataclasses
 import functools
 import io
 import json
@@ -28,7 +29,6 @@ import unittest
 from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
-import conftest
 from coverage import CoverageData
 from gitrepo import RepositoryTest
 from golden import assert_golden
@@ -36,24 +36,39 @@ from golden import assert_golden
 import gate
 from gate import changed_lines, quality_report
 
+
+def empty_rust_helper(directory):
+    """The path of a stand-in for the gate-rust helper, written into directory, that prints for each file it is given a
+    document of gate.RUST_SYNTAX_SCHEMA's schema that holds nothing: no fns, inline modules or bindings. A gate run that
+    changes Rust needs one, or its Rust checks report that they could not run."""
+    path = os.path.join(directory, "gate-rust")
+    with open(path, "w") as f:
+        f.write(f"#!{sys.executable}\nimport json, sys\nfor _ in sys.argv[1:]:\n"
+                f"    print(json.dumps({{'schema': {gate.RUST_SYNTAX_SCHEMA}, 'fns': [], 'mods': [], 'bindings': []}}))\n")
+    os.chmod(path, 0o700)
+    return path
+
 # The real cargo, found before a test puts a stub of its own on PATH (TestClippy.stub_cargo); None where there is none.
 CARGO = shutil.which("cargo")
 
 
 @functools.cache
 def gate_rust():
-    """The path of the gate-rust helper built from the repository's ci/gate-rust, for the tests that read real Rust:
-    built once per run, a debug build, into the crate's own target directory. A machine without cargo fails these
-    tests rather than skipping them, as the parity harness fails without its tools (TODO.md, "The Rust engine's
-    parity harness")."""
-    crate = conftest.REPO / "ci" / "gate-rust"
+    """The path of the gate-rust helper built from ci/gate-rust beside these tests, for the tests that read real Rust:
+    built once per run, a debug build, wherever CARGO_TARGET_DIR puts it. Under mutmut that is its copy of the crate's
+    sources (pyproject.toml's also_copy). A machine without cargo fails these tests rather than skipping them, as the
+    parity harness fails without its tools (TODO.md, "The Rust engine's parity harness")."""
+    manifest = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "ci", "gate-rust", "Cargo.toml")
     if CARGO is None:
         raise AssertionError("cargo, which builds the gate-rust helper, is not on PATH")
-    build = [CARGO, "build", "--locked", "--quiet", "--manifest-path", str(crate / "Cargo.toml")]
+    build = [CARGO, "build", "--locked", "--quiet", "--message-format=json", "--manifest-path", manifest]
     built = subprocess.run(build, capture_output=True, text=True, check=False)  # noqa: S603
     if built.returncode != 0:
         raise AssertionError(f"cargo could not build the gate-rust helper: {built.stderr}")
-    return str(crate / "target" / "debug" / "gate-rust")
+    # The executable's path from cargo's own report, wherever CARGO_TARGET_DIR puts it.
+    [helper] = [m["executable"] for m in map(json.loads, built.stdout.splitlines())
+                if m.get("reason") == "compiler-artifact" and m.get("executable")]
+    return helper
 
 
 class TestChangedLines(unittest.TestCase):
@@ -316,11 +331,11 @@ class TestGate(RepositoryTest):
 
     def gate(self, *args, base="HEAD"):
         """The exit status, standard output and standard error of `gate.py --base BASE ARGS` in the
-        repo, its Rust read with the gate-rust helper built from this tree."""
+        repo."""
         out, err = io.StringIO(), io.StringIO()
         with contextlib.chdir(self.repo), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            gate_exit = gate.main(["--base", base, "--rust-syntax", gate_rust(), *args])
-        return gate_exit, out.getvalue(), err.getvalue()
+            status = gate.main(["--base", base, *args])
+        return status, out.getvalue(), err.getvalue()
 
     def add_lines(self, n, start=4):
         with open(os.path.join(self.repo, "f.py"), "a") as f:
@@ -623,10 +638,11 @@ class TestGate(RepositoryTest):
         self.add_rust_lines(10)
         python = self.coverage({n: 1 for n in range(4, 14)})
         rust = self.rust_coverage({n: int(n <= 2) for n in range(1, 11)})
-        status, out, _ = self.gate("--coverage", python)
+        helper = empty_rust_helper(self.outside)
+        status, out, _ = self.gate("--coverage", python, "--rust-syntax", helper)
         self.assertEqual(status, 0)
         self.assertIn("100.0% of 10 new lines to cover; 0 lines are not covered.", out)
-        status, out, _ = self.gate("--coverage", python, "--coverage", rust)
+        status, out, _ = self.gate("--coverage", python, "--coverage", rust, "--rust-syntax", helper)
         self.assertEqual(status, 1)
         # (10 Python lines + 2 Rust lines covered) / 20 new lines.
         self.assertIn("- Coverage of new code is 60.0%; the gate wants at least 80%", out)
@@ -970,12 +986,13 @@ class TestClippy(RepositoryTest):
         self.addCleanup(env.stop)
 
     def gate(self):
-        """The exit status and standard output of `gate.py --base HEAD` in the repository, its Rust read with the
-        gate-rust helper built from this tree."""
+        """The exit status and standard output of `gate.py --base HEAD` in the repository, its Rust read by a helper
+        that finds no tests in it (empty_rust_helper)."""
         out = io.StringIO()
+        helper = empty_rust_helper(self.outside)
         with contextlib.chdir(self.repo), contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-            gate_exit = gate.main(["--base", "HEAD", "--rust-syntax", gate_rust()])
-        return gate_exit, out.getvalue()
+            status = gate.main(["--base", "HEAD", "--rust-syntax", helper])
+        return status, out.getvalue()
 
     def stub_cargo(self, script):
         """Put a cargo that runs the sh script on PATH, ahead of the real one."""
@@ -1824,6 +1841,239 @@ class TestWeakenedTests(RepositoryTest):
         self.assertEqual(sorted(gate._changed_files(self.repo, "HEAD"), key=str),
                          sorted([("calc.py", None), (None, "new.py"), ("tests/test_calc.py", "tests/test_calc.py"),
                                  ("tests/test_other.py", "tests/test_renamed.py")], key=str))
+
+
+class TestRustWeakenedTests(RepositoryTest):
+    """The test-integrity check on Rust tests, read by the real gate-rust helper, built from this tree's ci/gate-rust
+    once for the class, over a Cargo package with unit tests in an inline module and integration tests under tests/."""
+
+    LIB = (
+        "pub fn add(a: i32, b: i32) -> i32 {\n"           # 1
+        "    a + b\n"                                       # 2
+        "}\n"                                               # 3
+        "\n"                                                # 4
+        "#[cfg(test)]\n"                                    # 5
+        "mod tests {\n"                                     # 6
+        "    use super::*;\n"                               # 7
+        "\n"                                                # 8
+        "    #[test]\n"                                     # 9
+        "    fn adds_small() {\n"                           # 10
+        "        assert_eq!(add(1, 2), 3);\n"               # 11
+        "        assert_eq!(add(0, 0), 0);\n"               # 12
+        "    }\n"                                           # 13
+        "\n"                                                # 14
+        "    #[test]\n"                                     # 15
+        "    fn adds_large() {\n"                           # 16
+        "        assert_eq!(add(10, 20), 30);\n"            # 17
+        "    }\n"                                           # 18
+        "}\n"                                               # 19
+    )
+    IT = (
+        "use tiny::add;\n"                                  # 1
+        "\n"                                                # 2
+        "#[test]\n"                                         # 3
+        "fn negative() {\n"                                 # 4
+        "    assert_eq!(add(-1, -1), -2);\n"                # 5
+        "}\n"                                               # 6
+        "\n"                                                # 7
+        "#[tokio::test]\n"                                  # 8
+        "async fn zero() {\n"                               # 9
+        "    assert!(add(0, 0) == 0);\n"                    # 10
+        "}\n"                                               # 11
+    )
+    BASE_FILES = {"crate/Cargo.toml": '[package]\nname = "tiny"\nversion = "0.1.0"\nedition = "2021"\n',
+                  "crate/src/lib.rs": LIB, "crate/tests/it.rs": IT}
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.helper = gate_rust()
+
+    def found(self, helper=None):
+        """(path, line, rule) of each finding of the check on the working tree's change, its Rust read with helper, the
+        built one unless given, and the findings themselves."""
+        change = gate.GateChange.from_tree(self.repo, self.base, rust_syntax=helper or self.helper)
+        found = gate.weakened_tests(change)
+        return [(f["path"], f["line"], f["rule"]) for f in found], found
+
+    def test_an_unchanged_tree_and_an_edit_beside_the_tests_have_no_findings(self):
+        self.assertEqual(self.found()[0], [])
+        self.edit("crate/src/lib.rs", "    a + b\n", "    b + a\n")
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_removed_test_is_found_at_its_line_at_the_base(self):
+        self.edit("crate/tests/it.rs", "#[test]\nfn negative() {\n    assert_eq!(add(-1, -1), -2);\n}\n\n", "")
+        self.edit("crate/src/lib.rs", "    #[test]\n    fn adds_large() {\n        assert_eq!(add(10, 20), 30);\n"
+                                      "    }\n", "")
+        where, found = self.found()
+        self.assertEqual(where, [("crate/src/lib.rs", 16, "removed-test"), ("crate/tests/it.rs", 4, "removed-test")])
+        self.assertEqual(found[0]["message"], "`tests::adds_large` is gone; this was line 16 at the base.")
+
+    def test_a_test_moved_into_another_file_under_another_name_is_not_removed(self):
+        self.edit("crate/src/lib.rs", "    #[test]\n    fn adds_large() {\n        assert_eq!(add(10, 20), 30);\n"
+                                      "    }\n", "")
+        self.edit("crate/tests/it.rs", "use tiny::add;\n",
+                  "use tiny::add;\n\n#[test]\nfn large() {\n        assert_eq!(add(10,20),30);\n}\n")
+        self.assertEqual(self.found()[0], [])
+
+    def test_an_inline_module_whose_tests_all_went_is_one_finding(self):
+        self.put("crate/src/lib.rs", self.LIB[:self.LIB.index("\n#[cfg(test)]")])
+        where, found = self.found()
+        self.assertEqual(where, [("crate/src/lib.rs", 6, "removed-test")])
+        self.assertEqual(found[0]["message"], "`tests` and its 2 tests are gone; this was line 6 at the base.")
+
+    def test_two_tests_of_one_name_are_two_tests(self):
+        # Under cfgs that never hold together, as two platforms' versions of one test.
+        twins = ("#[cfg(unix)]\n#[test]\nfn twin() {\n    assert!(add(1, 1) == 2);\n}\n\n"
+                 "#[cfg(not(unix))]\n#[test]\nfn twin() {\n    assert!(add(2, 2) == 4);\n    assert!(add(0, 2) == 2);\n}\n")
+        self.base = self.commit({"crate/tests/twins.rs": "use tiny::add;\n\n" + twins}, "twins")
+        self.edit("crate/tests/twins.rs", "    assert!(add(0, 2) == 2);\n", "")
+        self.assertEqual(self.found()[0], [("crate/tests/twins.rs", 11, "fewer-assertions")])
+        self.put("crate/tests/twins.rs", "use tiny::add;\n\n" + twins[:twins.index("\n#[cfg(not(unix))]")])
+        self.assertEqual(self.found()[0], [("crate/tests/twins.rs", 11, "removed-test")])
+
+    def test_a_deleted_test_file_is_one_finding(self):
+        self.git("rm", "--quiet", "crate/tests/it.rs")
+        where, found = self.found()
+        self.assertEqual(where, [("crate/tests/it.rs", None, "removed-test")])
+        self.assertEqual(found[0]["message"], "deleted, with its 2 tests: `negative`, `zero`.")
+
+    def test_added_skips_are_found_at_their_lines(self):
+        self.edit("crate/tests/it.rs", "use tiny::add;\n", "#![cfg(feature = \"slow\")]\nuse tiny::add;\n")  # 1
+        self.edit("crate/tests/it.rs", "#[test]\nfn negative", "#[test]\n#[ignore]\nfn negative")        # 5
+        self.edit("crate/tests/it.rs", "#[tokio::test]\n", "#[tokio::test] #[cfg_attr(miri, ignore)]\n")  # 10
+        self.edit("crate/src/lib.rs", "#[cfg(test)]\n", "#[cfg(test)]\n#[cfg(unix)]\n")                   # 6
+        self.edit("crate/src/lib.rs", "        assert_eq!(add(10, 20), 30);\n",
+                  "        #[cfg(any())]\n        assert_eq!(add(10, 20), 30);\n")                        # 18
+        where, found = self.found()
+        self.assertEqual(where, [("crate/src/lib.rs", 6, "skip"), ("crate/src/lib.rs", 18, "skip"),
+                                 ("crate/tests/it.rs", 1, "skip"), ("crate/tests/it.rs", 5, "skip"),
+                                 ("crate/tests/it.rs", 10, "skip")])
+        self.assertEqual(found[4]["message"], "`#[cfg_attr(miri, ignore)]` added: it skips a test or turns it off.")
+
+    def test_a_new_test_module_and_attributes_that_skip_nothing_are_not_skips(self):
+        self.edit("crate/src/lib.rs", "}\n\n#[cfg(test)]", "}\n\n#[cfg(unix)]\npub fn unix() {}\n\n#[cfg(test)]")
+        self.edit("crate/tests/it.rs", "#[test]\nfn negative() {",
+                  "#[test]\n#[cfg_attr(feature = \"ignore-me\", allow(dead_code))] fn negative() { let _ignore = 1;")
+        self.put("crate/src/more.rs", "#[cfg(test)]\nmod tests {\n    #[test]\n    #[should_panic(expected = \"x\")]\n"
+                                      "    fn panics() {\n        panic!(\"x\");\n    }\n}\n")
+        self.git("add", "crate/src/more.rs")
+        self.assertEqual(self.found()[0], [])
+
+    def test_swallowed_errors_are_found(self):
+        self.edit("crate/tests/it.rs", "    assert_eq!(add(-1, -1), -2);\n",
+                  "    let _ = std::panic::catch_unwind(|| assert_eq!(add(-1, -1), -2));\n")                # 5
+        self.edit("crate/tests/it.rs", "#[tokio::test]\n", "#[tokio::test]\n#[should_panic]\n")              # 9
+        self.edit("crate/tests/it.rs", "    assert!(add(0, 0) == 0);\n",
+                  "    assert!(add(0, 0) == 0);\n    _ = std::panic::catch_unwind(|| add(1, 1));\n")            # 12
+        self.edit("crate/src/lib.rs", "        assert_eq!(add(10, 20), 30);\n",
+                  "        let _ = check();\n        _ = std::fs::remove_file(\"x\");\n"
+                  "        let _ = (|| assert_eq!(add(10, 20), 30))();\n")                                  # 17-19
+        where, found = self.found()
+        self.assertEqual(where, [("crate/src/lib.rs", 19, "swallowed-error"),
+                                 ("crate/tests/it.rs", 5, "swallowed-error"), ("crate/tests/it.rs", 9, "swallowed-error"),
+                                 ("crate/tests/it.rs", 12, "swallowed-error")])
+        self.assertEqual(found[1]["message"], "`let _ = std::panic::catch_unwind(|| assert_eq!(add(-1, -1), -2));` added in "
+                                              "`negative`: it throws away the panic or the `Err` that would fail the "
+                                              "test.")
+        self.assertIn("`#[should_panic]` without `expected` added on `zero`", found[2]["message"])
+
+    def test_fewer_assertions_are_found_at_the_test(self):
+        self.edit("crate/src/lib.rs", "        assert_eq!(add(0, 0), 0);\n", "")
+        where, found = self.found()
+        self.assertEqual(where, [("crate/src/lib.rs", 10, "fewer-assertions")])
+        self.assertEqual(found[0]["message"], "`tests::adds_small` has 1 assertions, 2 at the base.")
+
+    def test_an_expected_value_changed_with_the_code_is_reported_as_the_pair(self):
+        self.edit("crate/src/lib.rs", "    a + b\n", "    a + b + 1\n")
+        self.edit("crate/src/lib.rs", "assert_eq!(add(10, 20), 30)", "assert_eq!(add(10, 20), 31)")
+        where, found = self.found()
+        self.assertEqual(where, [("crate/src/lib.rs", 17, "expected-value-changed")])
+        self.assertEqual(found[0]["message"], "`tests::adds_large`: `assert_eq!(add(10, 20), 30)` became "
+                                              "`assert_eq!(add(10, 20), 31)`, in a change that also edits the code "
+                                              "under test.")
+
+    def test_an_expected_value_changed_with_only_the_inline_tests_is_not_found(self):
+        # lib.rs holds both the tests and the code; the change edits only its test module, at both ends.
+        self.edit("crate/src/lib.rs", "assert_eq!(add(10, 20), 30)", "assert_eq!(add(10, 20), 31)")
+        self.edit("crate/src/lib.rs", "mod tests {\n", "mod tests {\n    // the cases\n")
+        self.edit("crate/src/lib.rs", "    use super::*;\n", "")
+        self.assertEqual(self.found()[0], [])
+
+    def test_an_expected_value_changed_with_rust_code_added_elsewhere_is_found(self):
+        for path, edit in [("crate/build.rs", lambda: self.put("crate/build.rs", "fn main() {}\n")),
+                           ("crate/src/lib.rs", lambda: self.edit("crate/src/lib.rs", "    }\n}\n",
+                                                                  "    }\n}\n\npub fn three() -> i32 {\n    3\n}\n"))]:
+            with self.subTest(path):
+                self.git("reset", "--quiet", "--hard")
+                self.git("clean", "--quiet", "-fd")
+                edit()
+                self.git("add", "-A")
+                self.edit("crate/tests/it.rs", "assert_eq!(add(-1, -1), -2)", "assert_eq!(add(-1, -1), -3)")
+                self.assertEqual(self.found()[0], [("crate/tests/it.rs", 5, "expected-value-changed")])
+
+    def test_an_expected_value_changed_with_rust_code_renamed_deleted_or_a_line_of_it_removed_is_found(self):
+        self.base = self.commit({"crate/src/util.rs": "pub fn one() -> i32 {\n    1\n}\n",
+                                 "crate/src/lib.rs": self.LIB + "\npub fn two() -> i32 {\n    2\n}\n"}, "more code")
+        for edit in (lambda: self.git("mv", "crate/src/util.rs", "crate/src/helpers.rs"),
+                     lambda: self.git("rm", "--quiet", "crate/src/util.rs"),
+                     lambda: self.edit("crate/src/lib.rs", "\npub fn two() -> i32 {\n    2\n}\n", "")):
+            with self.subTest(edit=edit):
+                self.git("reset", "--quiet", "--hard")
+                edit()
+                self.edit("crate/tests/it.rs", "assert_eq!(add(-1, -1), -2)", "assert_eq!(add(-1, -1), -3)")
+                self.assertEqual(self.found()[0], [("crate/tests/it.rs", 5, "expected-value-changed")])
+
+    def test_rust_outside_a_cargo_package_is_not_the_code_under_test(self):
+        self.put("notes/sketch.rs", "fn sketch() {}\n")
+        self.git("add", "notes/sketch.rs")
+        self.edit("crate/tests/it.rs", "assert_eq!(add(-1, -1), -2)", "assert_eq!(add(-1, -1), -3)")
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_language_whose_tests_the_change_leaves_alone_is_not_asked_about_its_code(self):
+        # Whether the change edits a language's code reads every path of it; with no test file to judge, that is waste.
+        def asked(change, path):
+            raise AssertionError(f"asked whether {path} is Python code")
+        python = dataclasses.replace(gate.WEAKENED_TESTS_DETECTORS[0], is_code=asked)
+        self.edit("crate/tests/it.rs", "assert_eq!(add(-1, -1), -2)", "assert_eq!(add(-1, -1), -3)")
+        with patch.object(gate, "WEAKENED_TESTS_DETECTORS", (python, *gate.WEAKENED_TESTS_DETECTORS[1:])):
+            self.assertEqual(self.found()[0], [])
+
+    def test_a_golden_file_changed_with_rust_code_is_an_expected_value_changed(self):
+        self.commit({"crate/tests/golden/sum.txt": "3\n"}, "golden file")
+        self.base = self.git("rev-parse", "HEAD").strip()
+        self.edit("crate/tests/golden/sum.txt", "3\n", "4\n")
+        self.edit("crate/src/lib.rs", "    a + b\n", "    a + b + 1\n")
+        self.assertEqual(self.found()[0], [("crate/tests/golden/sum.txt", None, "expected-value-changed")])
+
+    def test_a_test_file_the_helper_cannot_parse_says_so(self):
+        self.edit("crate/tests/it.rs", "fn negative() {", "fn negative( {")
+        where, found = self.found()
+        self.assertEqual(where, [("crate/tests/it.rs", 4, "unparsable")])
+        self.assertIn("the gate-rust helper could not read it as Rust at line 4: ", found[0]["message"])
+
+    def test_a_file_under_tests_that_is_not_rust_on_purpose_is_no_finding(self):
+        broken = "// A fixture of a parser's error.\nfn broken( {\n"
+        self.base = self.commit({"crate/tests/fixtures/broken.rs": broken}, "a fixture")
+        self.edit("crate/tests/fixtures/broken.rs", "fn broken(", "fn still_broken(")
+        self.put("crate/tests/fixtures/new.rs", broken)
+        self.git("add", "-A")
+        self.assertEqual(self.found()[0], [])
+
+    def test_a_change_to_rust_the_gate_cannot_read_is_one_not_run_finding(self):
+        self.edit("crate/src/lib.rs", "    a + b\n", "    b + a\n")
+        where, found = self.found(helper=os.path.join(self.outside, "missing"))
+        self.assertEqual(where, [(None, None, "not-run")])
+        self.assertIn("is not there, so the check judged none of the change's Rust.", found[0]["message"])
+
+    def test_the_check_fails_the_gate_for_a_skip_and_weighs_a_removed_test(self):
+        self.edit("crate/tests/it.rs", "#[test]\nfn negative", "#[test]\n#[ignore]\nfn negative")
+        self.edit("crate/src/lib.rs", "    #[test]\n    fn adds_large() {\n        assert_eq!(add(10, 20), 30);\n"
+                                      "    }\n", "")
+        [check] = [c for c in gate.gate_checks() if c.name == "test-integrity"]
+        change = gate.GateChange.from_tree(self.repo, self.base, rust_syntax=self.helper)
+        self.assertEqual([(f["rule"], f["severity"]) for f in map(check.judged, check.find(change))],
+                         [("test-integrity removed-test", "warning"), ("test-integrity skip", "error")])
 
 
 class TestRunInSession(unittest.TestCase):
@@ -4897,7 +5147,7 @@ def rust_scores(source):
         f.write(textwrap.dedent(source))
         f.flush()
         printed = subprocess.run([gate_rust(), f.name], capture_output=True, text=True, check=True).stdout  # noqa: S603
-    return {scored.name: scored.score for scored in gate._rust_scored_functions(json.loads(printed))}
+    return {scored.name: scored.score for scored in gate._rust_scored_functions("src/lib.rs", json.loads(printed))}
 
 
 def rust_score(source):
@@ -5287,11 +5537,15 @@ class TestTooComplexRustFunctions(RepositoryTest):
         fresh = self.new_big()
         self.assertEqual(self.found(), fresh)
 
-    def test_a_fn_moved_unchanged_into_the_tests_keeps_its_base_before_a_copy_can(self):
-        self.put("engine/src/calc.rs", rust_flat("grow", 14) + "\n" + rust_flat("small", 3))
-        self.put("engine/tests/support.rs", rust_flat("big", 20))
+    def test_a_fn_left_in_a_file_the_change_adds_no_line_to_keeps_its_base_before_a_copy_can(self):
+        # calc.rs, renamed and only cut, is not judged, but its big is still itself, so the copy is new.
+        self.git("mv", "engine/src/calc.rs", "engine/src/kept.rs")
+        self.put("engine/src/kept.rs", rust_flat("big", 20) + "\n" + rust_flat("small", 3))
         self.put("engine/src/copy.rs", rust_flat("big", 20))
         self.git("add", "-A")
+        change = gate.GateChange.from_tree(self.repo, self.base)
+        self.assertIn(("engine/src/calc.rs", "engine/src/kept.rs"), change.files)
+        self.assertEqual(change.changed["engine/src/kept.rs"], set())
         self.assertEqual(self.found(), [("engine/src/copy.rs", 1,
                                          "`big`: cognitive complexity 20, a new function; the limit is 15.")])
 

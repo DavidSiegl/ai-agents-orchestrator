@@ -61,14 +61,16 @@ files = ["orchestrator.py", "gate.py", "evals/run.py", "evals/make_bundles.py", 
 [tool.mutmut]
 # What `gate.py`'s surviving-mutants check runs mutmut by, on a copy of the tree in which only the functions a change
 # edits can be mutated (docs/quality-gate.md). The tests read examples/ and docs/ beside the code; mutmut runs them in
-# a directory of its own, which holds only what is listed here; tests/test_evals.py imports evals/.
+# a directory of its own, which holds only what is listed here; tests/test_evals.py imports evals/, and
+# tests/test_gate.py builds the gate-rust helper from ci/gate-rust/'s sources, without its target/: mutmut copies a file
+# into a directory that must be there, which copying src/ first makes.
 source_paths = ["orchestrator.py", "gate.py"]
 pytest_add_cli_args_test_selection = ["tests/"]
 # Without the parity scenarios (tests/parity), which run the engine as a program, about 190 s a run: mutmut's stats
 # and clean runs of them alone would take most of gate.py's mutation budget before it tries a mutant (TODO.md). The
 # Jenkinsfile's Test stage leaves them out of a quality build too, under a condition it states.
 pytest_add_cli_args = ["--ignore=tests/parity"]
-also_copy = ["examples/", "docs/", "evals/"]
+also_copy = ["examples/", "docs/", "evals/", "ci/gate-rust/src/", "ci/gate-rust/Cargo.toml", "ci/gate-rust/Cargo.lock"]
 # argparse's help and description texts: prose, not behaviour, which no test reads word for word. mutmut matches each
 # pattern against each source line and skips every expression that starts on a matching line, with what it holds, the
 # following lines of a text too. The patterns match any keyword argument of those names, not only argparse's: the
