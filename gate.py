@@ -4952,17 +4952,22 @@ def _type_parameter_parts(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lam
 # Vague names: names that fit anything, which tell a reader nothing about what they hold.
 
 # The words the coding rules the agents are given ("Names" in the user's ~/.claude/CLAUDE.md) forbid as names that fit
-# anything; vague_names finds a name that is one, or ends in one after an underscore, in any case. "result" is not
-# here: the rules allow it for what a function returns, and telling that use from the others needs more than ast.
+# anything; vague_names finds a name that is one, or ends in one after an underscore, in any case, and in Rust also one
+# whose last CamelCase word is one, such as RunInfo (_is_vague). "result" is not here: the rules allow it for what a
+# function returns, and telling that use from the others needs more than ast.
 VAGUE_NAME_WORDS = frozenset({"data", "info", "value", "status", "handle", "manager"})
+
+# The last word of a CamelCase name, as Info in RunInfo or Status in HTTPStatus.
+_LAST_CAMEL_WORD = re.compile(r"[A-Z][a-z0-9]*$")
 
 
 def vague_names(change: GateChange) -> list[dict]:
-    """The vague-names check's find: each name that a line the change added to a Python file binds and that
+    """The vague-names check's find: each name that a line the change added to a Python or Rust file binds and that
     VAGUE_NAME_WORDS forbids, once per name and file, at the first such line; a binding on a line the change did not
-    add is never reported. A name is bound as _bound_names says. A changed file that cannot be read or parsed is a
-    finding saying so; the files are those _parsed_changed_files gives."""
-    out = []
+    add is never reported. A name is bound in Python as _bound_names says, and in Rust as _rust_vague_names says. A
+    changed file that cannot be read or parsed is a finding saying so; the files are those _parsed_changed_files
+    gives, and the Rust ones _rust_vague_names reads, whose findings of the gate-rust helper's run are listed too."""
+    out = _rust_vague_names(change)
     for changed in _parsed_changed_files(change):
         path, added, tree = changed.path, changed.added, changed.tree
         if tree is None:
@@ -4973,9 +4978,74 @@ def vague_names(change: GateChange) -> list[dict]:
         for name, at in _bound_names(tree):
             if at[0] in added and name.lower().rpartition("_")[2] in VAGUE_NAME_WORDS:
                 first[name] = min(first.get(name, at), at)
-        out += [_finding(path, line, "vague-name", f"`{name}` could name anything; name it for what it holds.")
-                for name, (line, _) in sorted(first.items(), key=lambda item: item[1])]
+        out += _vague_name_findings(path, first)
     return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
+
+
+def _vague_name_findings(path: str, first: dict[str, tuple[int, int]]) -> list[dict]:
+    """The vague-name findings of the file at path, of first: each vague name's first binding on an added line, as
+    (line, column), in that order."""
+    return [_finding(path, line, "vague-name", f"`{name}` could name anything; name it for what it holds.")
+            for name, (line, _) in sorted(first.items(), key=lambda item: item[1])]
+
+
+def _rust_vague_names(change: GateChange) -> list[dict]:
+    """vague_names's findings for the change's Rust: each regular .rs file of the working tree that the change adds
+    lines to, as the gate-rust helper reads it, its bindings as the schema's `bindings` lists them but for the name and
+    parameters of each fn an `impl Trait for T` holds, which the trait fixes, as @override marks in Python
+    (_rust_fixed_bindings). A name is vague as _is_vague says. A file the helper could not read or parse is a not-read
+    finding at the line it names, and the findings of its run are listed too. A change that adds lines to no such file
+    starts no helper."""
+    paths = {path: added for path, added in change.changed.items() if added and _is_rust_source(change, path)}
+    if not paths:
+        return []
+    files, problems = change.rust_files
+    out = list(problems)
+    for rust in files:
+        if rust.new_path not in paths or rust.after is None:
+            continue
+        error = rust.after.get("error")
+        if error:
+            out.append(_finding(rust.new_path, error["line"], "not-read",
+                                f"does not parse as Rust ({error['message']}), so its names were not read."))
+            continue
+        fixed = _rust_fixed_bindings(rust.after)
+        # The helper gives one line per binding, and no column; the order it lists them in stands in for one.
+        first: dict[str, tuple[int, int]] = {}
+        for n, binding in enumerate(rust.after["bindings"]):
+            name, line = binding["name"], binding["line"]
+            if n not in fixed and line in paths[rust.new_path] and _is_vague(name) and name not in first:
+                first[name] = (line, n)
+        out += _vague_name_findings(rust.new_path, first)
+    return out
+
+
+def _is_vague(name: str) -> bool:
+    """Whether a Rust name is one VAGUE_NAME_WORDS forbids: one of its words, or one ending in one after an underscore,
+    in any case, as in Python; or, Rust's counterpart for the CamelCase it names types and traits in, one whose last
+    CamelCase word is one, such as RunInfo or StateManager."""
+    camel = _LAST_CAMEL_WORD.search(name)
+    return (name.lower().rpartition("_")[2] in VAGUE_NAME_WORDS
+            or camel is not None and camel.group().lower() in VAGUE_NAME_WORDS)
+
+
+def _rust_fixed_bindings(document: dict) -> set[int]:
+    """The indexes in document's `bindings`, a gate-rust helper's document of a file that parsed, of the name and
+    parameters of each fn whose innermost holder is an `impl Trait for T`: the trait fixes them. The helper lists a
+    fn's name as a `fn` binding, with its parameters' `param` bindings right after, as it lists the fn in `fns`; so
+    the kth `fn` binding is the kth of `fns`."""
+    fns = iter(document["fns"])
+    fixed: set[int] = set()
+    holder_fixes = False
+    for n, binding in enumerate(document["bindings"]):
+        if binding["kind"] == "fn":
+            holders = next(fns)["holders"]
+            holder_fixes = bool(holders) and holders[-1]["kind"] == "impl" and holders[-1]["trait"] is not None
+        elif binding["kind"] != "param":
+            holder_fixes = False
+        if holder_fixes:
+            fixed.add(n)
+    return fixed
 
 
 def _bound_names(tree: ast.Module) -> Iterator[tuple[str, tuple[int, int]]]:

@@ -3307,6 +3307,91 @@ class TestVagueNames(RepositoryTest):
         self.assertEqual((check.fails, check.find), (False, gate.vague_names))
 
 
+class TestRustVagueNames(RepositoryTest):
+    """The vague-names check over a real git repository's Rust, read with the gate-rust helper built from this tree."""
+
+    BASE = "fn old(value: u32) -> u32 {\n    value\n}\n"
+
+    BASE_FILES = {"src/lib.rs": BASE}
+
+    def found(self, rust_syntax=None):
+        """(path, line, rule, message) of each finding on the working tree's change, every file in it tracked, read
+        with the helper rust_syntax, by default the one built from this tree."""
+        self.git("add", "-A")
+        change = gate.GateChange.from_tree(self.repo, self.base, rust_syntax=rust_syntax or gate_rust())
+        return [(f["path"], f["line"], f["rule"], f["message"]) for f in gate.vague_names(change)]
+
+    def names(self):
+        """The name each finding on the change reports, with its line, counted from the end of BASE."""
+        base = len(self.BASE.splitlines())
+        return [(line - base, message.split("`")[1]) for _, line, _, message in self.found()]
+
+    def test_each_binding_kind_an_added_line_binds_is_found_once_at_its_first_binding(self):
+        self.put("src/lib.rs", self.BASE + textwrap.dedent("""            use std::fmt::Display as ShownValue;
+            const MAX_VALUE: u32 = 1;
+            static RAW_DATA: u32 = 2;
+            struct RunInfo;
+            enum Status { Up }
+            union Handle { a: u32 }
+            trait StateManager { type Info; const LIMIT_VALUE: u32; }
+            type Data = u32;
+            fn handle(raw_info: u32, (a, b_status): (u32, u32)) -> u32 {
+                let line_value = raw_info;
+                for row_data in [a] {}
+                match Some(b_status) { Some(inner_handle) => {} None => {} }
+                if let Some(maybe_info) = Some(1) {}
+                while let Some(next_status) = None::<u32> {}
+                let add = |left_value: u32| left_value;
+                let line_value = add(line_value);
+                line_value
+            }
+            """))
+        self.assertEqual(self.names(), [
+            (1, "ShownValue"), (2, "MAX_VALUE"), (3, "RAW_DATA"), (4, "RunInfo"), (5, "Status"), (6, "Handle"),
+            (7, "StateManager"), (7, "Info"), (7, "LIMIT_VALUE"), (8, "Data"), (9, "handle"), (9, "raw_info"),
+            (9, "b_status"), (10, "line_value"), (11, "row_data"), (12, "inner_handle"), (13, "maybe_info"),
+            (14, "next_status"), (15, "left_value")])
+        self.assertEqual({(path, rule) for path, _, rule, _ in self.found()}, {("src/lib.rs", "vague-name")})
+
+    def test_a_camel_case_name_is_vague_only_by_its_last_word(self):
+        self.put("src/lib.rs", self.BASE + "struct InfoStore;\nstruct HTTPStatus;\nstruct Valuer;\nfn result() {}\n")
+        self.assertEqual(self.names(), [(2, "HTTPStatus")])
+
+    def test_a_trait_impl_s_fn_takes_its_name_and_parameters_from_the_trait(self):
+        self.put("src/lib.rs", self.BASE + textwrap.dedent("""            struct Door;
+            impl Opener for Door {
+                fn handle(&self, raw_data: u32) -> u32 {
+                    let shown_value = raw_data;
+                    fn inner(own_info: u32) {}
+                    shown_value
+                }
+            }
+            impl Door {
+                fn status(&self, raw_data: u32) {}
+            }
+            """))
+        self.assertEqual(self.names(), [(4, "shown_value"), (5, "own_info"), (10, "status"), (10, "raw_data")])
+
+    def test_a_binding_on_a_line_the_change_left_alone_is_not_found(self):
+        self.put("src/lib.rs", self.BASE.replace("    value\n", "    value + 1\n"))
+        self.assertEqual(self.found(), [])
+
+    def test_a_file_that_does_not_parse_is_a_finding(self):
+        self.put("src/lib.rs", self.BASE + "fn broken( {\n")
+        [(path, line, rule, message)] = self.found()
+        self.assertEqual((path, rule), ("src/lib.rs", "not-read"))
+        self.assertRegex(message, r"^does not parse as Rust \(.+\), so its names were not read\.$")
+
+    def test_the_helper_s_run_is_listed_and_a_change_without_rust_starts_none(self):
+        self.put("src/lib.rs", self.BASE + "struct RunInfo;\n")
+        missing = os.path.join(self.outside, "no-helper")
+        [(path, line, rule, message)] = self.found(rust_syntax=missing)
+        self.assertEqual((path, line, rule), (None, None, "not-run"))
+        self.git("checkout", "HEAD", "--", "src/lib.rs")
+        self.put("notes.py", "x = 1\n")
+        self.assertEqual(self.found(rust_syntax=missing), [])
+
+
 class TestSurvivingMutants(RepositoryTest):
     """The surviving-mutants check over a real git repository, with this suite's own mutmut, or a fake one."""
 

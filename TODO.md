@@ -77,9 +77,10 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   "Reading Rust: the gate-rust helper") `GateChange.rust_files` reads, named by `gate.py --rust-syntax`, which the
   Install stage builds from the tree the Gate stage takes `gate.py` from. `test-integrity` reads Rust's tests through
   it (ticket 02, 2026-10-30: `rust_weakened_tests`, the `rust` entry of `WEAKENED_TESTS_DETECTORS`), and
-  `cognitive-complexity` scores Rust over the `flow` it prints (ticket 03, 2026-10-30); their blind spots are under Open
-  issues. Left: `vague-names`, `passes-at-base`, `surviving-mutants` with cargo-mutants, and a Cargo ecosystem for
-  `new-dependencies` after the switch (04 to 07). Decided against (2026-10-29, the user's): a Rust counterpart of
+  `cognitive-complexity` scores Rust over the `flow` it prints (ticket 03, 2026-10-30), and `vague-names` reads its
+  `bindings` (ticket 04, 2026-10-30: `_rust_vague_names`); their blind spots are under Open issues. Left:
+  `passes-at-base`, `surviving-mutants` with cargo-mutants, and a Cargo ecosystem for `new-dependencies` after the
+  switch (05 to 07). Decided against (2026-10-29, the user's): a Rust counterpart of
   `flaky-tests`, since nextest runs each test in a process of its own, so the reruns under other seeds that
   `flaky-tests` does for pytest (`FLAKY_SEEDS`) have little to catch.
 
@@ -453,9 +454,15 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 - **`test_invariants.py`'s `AnyJenkins` and `Answer` copy `FakeCI` and `FakeResponse`** of
   `tests/test_orchestrator.py`. Raised by cross-review 60 (F4, 2026-10-27). Closes with one fake Jenkins the two files
   share.
-- **`vague-names` does not split CamelCase.** `vague_names` matches a whole name or its last `_`-separated word,
-  so `user_data` is found but a class `InfoManager` or `UserData` is not. Closes, if the run metrics show such names
-  recur, with the last CamelCase word matched too.
+- **`vague-names` does not split CamelCase in Python.** `vague_names` matches a whole Python name or its last
+  `_`-separated word, so `user_data` is found but a class `InfoManager` or `UserData` is not; in Rust the last CamelCase
+  word is matched too (`_is_vague`, gate-rust-checks ticket 04), which is Rust's counterpart. Closes, if the run metrics
+  show such names recur, with Python's matched the same way.
+- **`vague-names` reports a Rust trait impl's associated types and constants.** Only the name and parameters of a `fn`
+  an `impl Trait for T` holds are skipped (`_rust_fixed_bindings`), as gate-rust-checks ticket 04 asked; a `type Value`
+  or `const STATUS` the trait fixes is reported, as in serde's `impl Visitor for V { type Value = ...; }`. The helper's
+  `bindings` give no holder, so the gate cannot tell them apart from an inherent `impl`'s. Found by ticket 04
+  (2026-10-30). Closes with the helper marking each binding an `impl Trait for T` holds directly, a schema change.
 - **`vague-names` reports a name an undecorated override cannot change.** A `def handle(self)` in a
   `socketserver.BaseRequestHandler` subclass, or a parameter the overridden signature names, has no fix; only a
   method marked `@override` is skipped (`_bound_names`). Raised by the cross-review of `written-rules` (F6,
