@@ -170,6 +170,11 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
     defines the files, so that file's tests are not read and its edits count as code. Raised by cross-review 107
     (2026-10-30, not recorded). Closes with the helper listing each `mod name;` with its `cfg_test`, and the check
     resolving the file it names as rustc does (`name.rs` or `name/mod.rs` beside the file, or a `#[path]`).
+  - removing the first of two tests of one name in one file, as under two platforms' `cfg`s: `_RustTest.namesake`
+    numbers them in order, so the second then takes the first's number and is compared with the removed one's base,
+    which reads as a fewer-assertions or a changed literal on it, or as nothing, rather than as a removed test. Raised
+    by cross-review 107 (round 2, not recorded). Closes with namesakes matched by their `cfg` attributes, or by body
+    first as removed tests are.
 - **The parity harness records `state.json` at each command the fakes get, not after each save.** Ticket
   rust-engine/01 asks for "`state.json` after each save"; the ledger reads it only when herdr, gh, Jenkins or PyPI
   gets a call, and leaves out a change to `heartbeat_at` alone (`tests/parity/fakes.py`, `_changed_states`). Raised
