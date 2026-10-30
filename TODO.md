@@ -69,6 +69,22 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Open issues
 
+- **new-dependencies on Cargo: two readings of a manifest that its doc does not state.** In
+  `engine/src/checks/dependencies.rs`, `cargo_manifest_dependencies` keeps the first entry of a crate across its tables,
+  as `add_named` does across manifests: `foo = "1"` in `[dependencies]` and `foo = { git = "..." }` under
+  `[target.'cfg(windows)'.dependencies]` record foo as from crates.io, and its git source is never compared with the
+  spec. And `cargo_member_entry` takes only boolean `true` as `workspace = true`: `workspace = "true"`, `1` or
+  `false` falls through to `cargo_entry` as a crates.io dependency, rather than being refused as an entry of another
+  shape. Raised, not recorded, by cross-review of 20aa212 (2026-10-30); both predate it. Closes with the rule chosen and
+  stated on `cargo_dependencies`'s doc: the first entry, or every source a crate is named with; and a non-boolean
+  `workspace` refused.
+- **`Map` has no first-wins insert.** `cargo_manifest_dependencies` and `add_named`
+  (`engine/src/checks/dependencies.rs`) each spell out `if !out.contains_key(&key) { out.insert(..) }`, a branch that
+  put the first at 16 of the gate's cognitive-complexity limit of 15 (PR #214), which 20aa212 met by moving the
+  `workspace = true` resolution into `cargo_member_entry` instead. Deferred from cross-review of 20aa212 (F1, nit,
+  2026-10-30): "A method there used at both sites would remove that branch from `cargo_manifest_dependencies` and keep
+  inheritance inline." Closes with ticket octoflow-without-python/04, which replaces `py::json::Map` with
+  `serde_json`'s map, whose `entry(..).or_insert(..)` both sites can take.
 - **serve's event stream can miss a finished run's last files.** `end_done_run` (`workflow.rs`) saves state.json
   with the owner cleared, which makes the run finished, before it writes summary.md and metrics.json, and `release`
   saves before summary.md likewise; `RunWatch::changes` (`serve/runs.rs`) reads a finished run's files again only
