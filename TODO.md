@@ -30,7 +30,7 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   for the gate's use in other projects (`.scratch/gate-split/issues/04-configurable-test-files.md`). The gate moves to
   its own repository only once a second project uses it. Decided 2026-10-24.
 - **The parity harness: what it does not record.** `tests/parity/` runs 43 scenarios against the engine as a
-  program and compares each with its recording (docs/architecture.md, Tests). The recordings are the Python engine's,
+  program and compares each with its recording (docs/architecture.md, Tests). `engine/e2e/` runs 26 of them in Rust against the same recordings (octoflow-without-python/01); the others, which need Jenkins, PyPI, kills or serve, are ticket 02's, and everything below holds for both harnesses. The recordings are the Python engine's,
   made before rust-engine ticket 11 removed it, so none of what follows can be recorded from that oracle any more: a
   scenario added for it records the Rust engine, and its recording is a review of the engine's behaviour. Not covered: a secret gitleaks finds, at a quality round or at publish; the
   harnesses other than claude and codex starting an agent (only their arguments differ); a session log's token counts
