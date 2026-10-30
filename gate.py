@@ -1350,13 +1350,14 @@ def weakened_tests(change: GateChange) -> list[dict]:
                 unreadable.append(_finding(new or old, None, "unreadable",
                                            f"could not be read, so its tests were not checked: {e}", severity="error"))
         # find runs without files too, so that it can say it could not read the change, as the Rust detector does.
-        out += unreadable + detector.find(change, files, bool(files) and _edits_code(change, detector))
+        out += unreadable + detector.find(change, files, bool(files) and _edits_code(change, detector.is_code))
     return out
 
 
-def _edits_code(change: GateChange, detector: WeakenedTestsDetector) -> bool:
-    """Whether the change edits, adds, deletes or renames code of detector's language outside its tests."""
-    return any(detector.is_code(change, p) for pair in change.files for p in pair if p)
+def _edits_code(change: GateChange, is_code: Callable[[GateChange, str], bool]) -> bool:
+    """Whether the change edits, adds, deletes or renames code outside the tests: a path on either side of one of its
+    files that is_code(change, path) takes for code, as a WeakenedTestsDetector's is_code does for its language."""
+    return any(is_code(change, p) for pair in change.files for p in pair if p)
 
 
 def _changed_golden_files(change: GateChange) -> list[dict]:
@@ -1365,7 +1366,7 @@ def _changed_golden_files(change: GateChange) -> list[dict]:
     expected value outside any assertion, which `UPDATE_GOLDEN=1` rewrites to whatever the code now writes. A golden
     file the change adds, or renames without editing, has no old value to lose."""
     golden = [(old, new) for old, new in change.files if old is not None and _golden_file(old)]
-    if not golden or not any(_edits_code(change, detector) for detector in WEAKENED_TESTS_DETECTORS):
+    if not golden or not any(_edits_code(change, detector.is_code) for detector in WEAKENED_TESTS_DETECTORS):
         return []
     removals = _removal_points(change.diff)
     out = []
@@ -2769,9 +2770,10 @@ def _series(items: list[str], limit: int | None = None) -> str:
 
 def passes_at_base(change: GateChange, *, budget: float) -> list[dict]:
     """The passes-at-base check's find: runs the Python tests the change adds or edits, as flaky_tests picks them,
-    against the base's code, and reports at its def each one that passed there. Runs only when the change edits Python
-    source outside the tests, as _edits_python_source says: a change to tests alone has no "without the change" to run
-    them in, and one to docs alone none that a test could see.
+    against the base's code, and reports at its def each one that passed there; then does the same for Rust's tests,
+    as _rust_passes_at_base says, with what is left of budget once Python's have run. Runs Python's only when the
+    change edits Python source outside the tests, as _python_code says: a change to tests alone has no "without
+    the change" to run them in, and one to docs alone none that a test could see.
 
     The tests run with pytest, in the gate's own interpreter, in the files git tracked at the base, as `git archive`
     writes them (so a path the base's .gitattributes marks export-ignore is missing there), each submodule filled from
@@ -2797,20 +2799,17 @@ def passes_at_base(change: GateChange, *, budget: float) -> list[dict]:
     parsed, and a copy that cannot be made are not-run findings saying so; a copy that cannot be removed afterwards is a
     finding of its own.
     """
-    if not _edits_python_source(change):
-        return []
-    tests, unreadable = _changed_python_tests(change)
-    out = [_finding(path, None, "not-run", f"{why}, so its tests were not run at the base.")
-           for path, why in unreadable]
-    if tests:
-        out += _in_scratch_directory("not-run", "to run the changed tests at the base in",
-                                     lambda tmp: _base_run_findings(change, tmp, tests, budget))
+    deadline = time.monotonic() + budget
+    out: list[dict] = []
+    if _edits_code(change, _python_code):
+        tests, unreadable = _changed_python_tests(change)
+        out += [_finding(path, None, "not-run", f"{why}, so its tests were not run at the base.")
+                for path, why in unreadable]
+        if tests:
+            out += _in_scratch_directory("not-run", "to run the changed tests at the base in",
+                                         lambda tmp: _base_run_findings(change, tmp, tests, budget))
+    out += _rust_passes_at_base(change, budget, deadline)
     return sorted(out, key=lambda f: (f["path"] or "", f["line"] or 0))
-
-
-def _edits_python_source(change: GateChange) -> bool:
-    """Whether the change edits, adds, deletes or renames Python code outside the tests, as _python_code tells it."""
-    return any(_python_code(change, p) for pair in change.files for p in pair if p)
 
 
 def _beside_tests(path: str) -> bool:
@@ -2883,7 +2882,7 @@ def _base_run_findings(change: GateChange, tmp: str, tests: dict[tuple[str, str]
     puts there, which would import the working tree's code."""
     tree, scratch, plugins = os.path.join(tmp, "tree"), os.path.join(tmp, "tmp"), os.path.join(tmp, "plugins")
     try:
-        empty = _copy_base_with_tests(change, tree, os.path.join(tmp, "base.tar"))
+        empty = _copy_base_with_tests(change, tree, os.path.join(tmp, "base.tar"), _beside_tests)
         os.mkdir(scratch)
         os.mkdir(plugins)
         with open(os.path.join(plugins, f"{_BASE_IMPORTS_PLUGIN}.py"), "x", encoding="utf-8") as f:
@@ -3103,16 +3102,244 @@ def _path_from(top: str, path: str) -> str:
     return os.path.relpath(os.path.join(folder, os.path.basename(path)), os.path.realpath(top)).replace(os.sep, "/")
 
 
-def _base_run_budget_reached(budget: float, when: str) -> dict:
+def _base_run_budget_reached(budget: float, when: str, runner: str = "pytest") -> dict:
     """passes_at_base's finding that its budget of budget seconds ran out when, a clause such as "while it collected
-    the changed tests"."""
-    return _finding(None, None, "budget-reached", f"pytest was stopped at {budget:g} seconds (`--base-run-budget`) "
+    the changed tests", stopping runner, the test runner it names, such as "cargo nextest"."""
+    return _finding(None, None, "budget-reached", f"{runner} was stopped at {budget:g} seconds (`--base-run-budget`) "
                                                   f"{when}, so none of them was judged.")
 
 
-def _copy_base_with_tests(change: GateChange, dest: str, archive: str) -> list[tuple[str, str]]:
+# Rust's tests at the base: passes_at_base's second half, which runs them with cargo-nextest.
+
+# The profile of the nextest configuration the runs at the base take with --config-file (_rust_base_run_findings), in
+# place of the copy's own .config/nextest.toml, as Jenkins's Test stage takes ci/nextest.toml. It writes the JUnit
+# report the gate reads to <profile>/junit.xml in the configuration's store directory, which nextest otherwise puts
+# under the workspace's target directory whatever --target-dir says (https://nexte.st/docs/machine-readable/junit/).
+_NEXTEST_PROFILE = "gate-base"
+
+# cargo-nextest's exit status when the tests could not be built (nextest-metadata's NextestExitCode::BUILD_FAILED).
+_NEXTEST_BUILD_FAILED = 101
+
+
+@dataclass(frozen=True)
+class _ChangedRustTest:
+    """A Rust test the change adds or edits, as _changed_rust_tests finds one, in the working tree."""
+    path: str  # its file's path in the working tree
+    name: str  # _rust_name's, the path from its file to it, as tests::adds
+    line: int  # its fn's line, where a finding on it goes
+
+
+@dataclass(frozen=True)
+class _RustTarget:
+    """The Cargo target a changed Rust test is built in at the base, as _rust_target places it, and what names the test
+    there."""
+    package: str  # the directory, from the copy's top, of the package's Cargo.toml; "" for the top
+    args: tuple[str, ...]  # cargo's target selection, as ("--test", "cli") or ("--lib",)
+    module: tuple[str, ...]  # the module path within the target of the test's file, as ("calc", "tests")
+
+    def label(self) -> str:
+        """The target, in prose, as findings name it."""
+        where = f"`{self.package}`" if self.package else "the top level"
+        return f"`{' '.join(self.args)}` of the package at {where}"
+
+
+def _rust_passes_at_base(change: GateChange, budget: float, deadline: float) -> list[dict]:
+    """passes_at_base's findings for Rust: when the change edits Rust code outside the tests, as _rust_code says, runs
+    the Rust tests it adds or edits (_changed_rust_tests) against the base's code with cargo-nextest, by deadline, a
+    time.monotonic() time, and reports at its fn each one that passed there.
+
+    The tests run in a copy of the base as passes_at_base makes Python's, with the change's test files in place of the
+    base's (_rust_beside_tests): those _rust_test_path places among the tests, any file under a tests directory, and a
+    .rs file the change edits only inside its inline cfg(test) modules. A test in an inline cfg(test) module of a file
+    the change also edits outside those modules cannot be separated from the code it tests: it is a not-run finding at
+    its fn. Each Cargo target the tests are in (_rust_target) is built and run on its own, `cargo nextest run --locked`
+    filtered to its tests, with a target directory of its own outside the copy; one whose tests do not compile there
+    counts as failing, which is what the check expects of a test that needs the change, and gives nothing. A run cut
+    off by the deadline is a budget-reached finding, and the targets after it not-run findings. A test the run did not
+    report, as one a cfg leaves out at the base, gives nothing.
+
+    The findings of the gate-rust helper's run, a changed file the helper could not parse, a test whose target cannot
+    be placed, and a cargo-nextest that cannot start or fails otherwise are not-run findings saying so."""
+    if not _edits_code(change, _rust_code):
+        return []
+    tests, out = _changed_rust_tests(change)
+    separable = []
+    for t in tests:
+        if _rust_test_path(t.path) or not _rust_code(change, t.path):
+            separable.append(t)
+        else:
+            out.append(_finding(t.path, t.line, "not-run",
+                                f"`{t.name}` is in an inline `#[cfg(test)]` module of a file the change also edits "
+                                f"outside it, so it cannot be run apart from the code it tests, at the base."))
+    if separable:
+        out += _in_scratch_directory("not-run", "to run the changed Rust tests at the base in",
+                                     lambda tmp: _rust_base_run_findings(change, tmp, separable, budget, deadline))
+    return out
+
+
+def _changed_rust_tests(change: GateChange) -> tuple[list[_ChangedRustTest], list[dict]]:
+    """The Rust tests, as _rust_tests tells them, that the change adds lines to or removes lines from, their outer
+    attributes included, in the files it leaves in the working tree, in the change's order; and the findings of the
+    gate-rust helper's run (GateChange.rust_files), with a not-run finding for each file the change edits that the
+    helper could not parse, when it is a test file by its place or its base held a cfg(test) module."""
+    files, problems = change.rust_files
+    out = list(problems)
+    removals = _removal_points(change.diff)
+    tests = []
+    for rust in files:
+        path, document = rust.new_path, rust.after
+        added, removed = change.changed.get(path or "", set()), removals.get(path or "", set())
+        if path is None or document is None or not (added or removed):
+            continue
+        if error := document.get("error"):
+            if _rust_test_path(path) or _rust_test_spans(rust.before):
+                out.append(_finding(path, error["line"], "not-run", f"does not parse as Rust ({error['message']}), "
+                                                                    f"so its tests were not run at the base."))
+            continue
+        for t in _rust_tests(0, path, document):
+            first, last = t.fn["attrs_line"], t.fn["end"]
+            # A removal point first - 1 is an attribute removed from its top, as an #[ignore] taken off it.
+            if any(first <= n <= last for n in added) or any(first - 1 <= n <= last for n in removed):
+                tests.append(_ChangedRustTest(path, t.name, t.fn["line"]))
+    return tests, out
+
+
+def _rust_beside_tests(change: GateChange, path: str) -> bool:
+    """Whether a repository path belongs with Rust's tests rather than with the code they test, as the copy
+    _rust_passes_at_base runs them in takes it from the working tree: any file under a tests directory, as Cargo's
+    integration tests and their data are, a tests.rs, and a .rs file the change edits only inside its inline cfg(test)
+    modules, which _rust_code does not count as code."""
+    return "tests" in path.split("/")[:-1] or _rust_test_path(path) or (path.endswith(".rs")
+                                                                      and not _rust_code(change, path))
+
+
+def _rust_base_run_findings(change: GateChange, tmp: str, tests: list[_ChangedRustTest], budget: float,
+                            deadline: float) -> list[dict]:
+    """_rust_passes_at_base's findings on tests, built and run by deadline in a copy of the base it makes in tmp, an
+    empty directory, beside the runs' target directory and nextest configuration; budget is the check's, as findings
+    name it."""
+    tree, target_dir, config = os.path.join(tmp, "tree"), os.path.join(tmp, "target"), os.path.join(tmp, "nextest.toml")
+    try:
+        empty = _copy_base_with_tests(change, tree, os.path.join(tmp, "base.tar"),
+                                      functools.partial(_rust_beside_tests, change))
+        with open(config, "x", encoding="utf-8") as f:
+            # A JSON string is a TOML basic string.
+            f.write(f"[store]\ndir = {json.dumps(os.path.join(tmp, 'nextest'))}\n\n"
+                    f'[profile.{_NEXTEST_PROFILE}.junit]\npath = "junit.xml"\n')
+    except (OSError, tarfile.TarError, GateError) as e:
+        return [_finding(None, None, "not-run", f"could not copy the base to run the changed Rust tests in: {e}; "
+                                                f"they were not run there.")]
+    out = []
+    if empty:
+        named = "; ".join(f"`{path}`, {why}" for path, why in empty)
+        out.append(_finding(None, None, "not-run", f"the copy of the base leaves submodules empty, so a changed Rust "
+                                                f"test that needs one, if any does, was not judged: {named}."))
+    groups: dict[_RustTarget, list[_ChangedRustTest]] = {}
+    for t in tests:
+        target, why = _rust_target(tree, t.path)
+        if target is None:
+            out.append(_finding(t.path, t.line, "not-run", f"`{t.name}` was not run at the base: {why}."))
+        else:
+            groups.setdefault(target, []).append(t)
+    ordered = list(groups.items())
+    for n, (target, mine) in enumerate(ordered):
+        found, stopped = _rust_target_findings(tree, target_dir, config, os.path.join(tmp, "nextest"), target, mine,
+                                               budget, deadline)
+        out += found
+        if stopped:
+            out += [_finding(None, None, "not-run", f"the run at the base used its {budget:g} seconds "
+                                                    f"(`--base-run-budget`) before it reached {later.label()}, so its "
+                                                    f"changed tests were not run there.") for later, _ in ordered[n + 1:]]
+            break
+    return out
+
+
+def _rust_target(tree: str, path: str) -> tuple[_RustTarget | None, str]:
+    """The Cargo target that builds the test file at path, a repository path, in tree, the copy of the base, by Cargo's
+    default places for targets: its package is the one whose Cargo.toml is nearest above it; under its tests/, `x.rs`
+    and a directory `x/` that holds a main.rs are the integration test x, a file below `x/` a module of `x/main.rs`;
+    under its src/bin/, likewise the binary x; src/main.rs is the package's binary; elsewhere under src/, a module of
+    the library where src/lib.rs exists, else of the binaries. A file's module path is its path from that root, as
+    Rust's file modules read it, mod.rs naming its directory. Else None, and why, a clause: no package holds it, or
+    Cargo would not find it there by default. A target a manifest places elsewhere ([[test]] path = ...), a module of
+    src/main.rs where src/lib.rs exists too, and a module a #[path] attribute names are not followed."""
+    *dirs, _ = path.split("/")
+    package = next((d for d in ("/".join(dirs[:k]) for k in range(len(dirs), -1, -1))
+                    if os.path.isfile(os.path.join(tree, d, "Cargo.toml"))), None)
+    if package is None:
+        return None, "no Cargo.toml lies above its file at the base"
+    parts = path.split("/")[len(package.split("/")) if package else 0:]
+    stem = parts[-1].removesuffix(".rs")
+    modules = [*parts[:-1], stem]
+    args: tuple[str, ...]
+    # A directory of tests/ or src/bin/ is a target only through the main.rs in it.
+    holder = parts[:3] if parts[:2] == ["src", "bin"] else parts[:2] if parts[0] == "tests" else []
+    if holder and len(parts) > len(holder) and not os.path.isfile(os.path.join(tree, package, *holder, "main.rs")):
+        return None, f"no `{'/'.join(holder)}/main.rs` makes a target of its directory"
+    if parts[0] == "tests" and len(parts) >= 2:
+        args, rest = ("--test", modules[1]), modules[2:]
+    elif parts[:2] == ["src", "bin"] and len(parts) >= 3:
+        args, rest = ("--bin", modules[2]), modules[3:]
+    elif parts == ["src", "main.rs"]:
+        args, rest = ("--bins",), []
+    elif parts[0] == "src" and len(parts) >= 2:
+        args = ("--lib",) if os.path.isfile(os.path.join(tree, package, "src", "lib.rs")) else ("--bins",)
+        rest = modules[1:]
+    else:
+        return None, "Cargo builds no test target from its place by default"
+    # A target's root file, as src/lib.rs or tests/x/main.rs, and a mod.rs name no module of their own.
+    if rest and (rest[-1] == "mod" or (len(rest) == 1 and rest[0] in ("lib", "main"))):
+        rest = rest[:-1]
+    return _RustTarget(package, args, tuple(rest)), ""
+
+
+def _rust_target_findings(tree: str, target_dir: str, config: str, store: str, target: _RustTarget,
+                          tests: list[_ChangedRustTest], budget: float, deadline: float) -> tuple[list[dict], bool]:
+    """The passes-at-base findings of tests, all in target, built and run with cargo-nextest in tree, the copy of the
+    base, by deadline, building in target_dir with the configuration at config, whose store directory is store; and
+    whether the deadline stopped it. A target whose tests do not compile there gives nothing, as _rust_passes_at_base
+    says."""
+    names = {t: "::".join([*target.module, t.name]) for t in tests}
+    left = deadline - time.monotonic()
+    if left <= 0:
+        return [_base_run_budget_reached(budget, f"before it built {target.label()}", "cargo nextest")], True
+    report = os.path.join(store, _NEXTEST_PROFILE, "junit.xml")
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(report)
+    argv = ["cargo", "nextest", "run", "--locked", "--no-fail-fast", "--no-tests=pass", "--target-dir", target_dir,
+            "--config-file", config, "--profile", _NEXTEST_PROFILE, *target.args,
+            "-E", " | ".join(f"test(={name})" for name in sorted(set(names.values())))]
+    env = {**tool_env(), "CARGO_TERM_COLOR": "never"}
+    try:
+        proc, stopped = _run_in_session(argv, os.path.join(tree, target.package), env, timeout=left)
+    except OSError as e:
+        return [_finding(None, None, "not-run", f"could not start cargo nextest to run the changed Rust tests of "
+                                                f"{target.label()} at the base: {e}")], False
+    if stopped:
+        return [_base_run_budget_reached(budget, f"while it built or ran {target.label()}", "cargo nextest")], True
+    # Cargo exits 101 for any error, rustc's among them; only a compile error is the tests not compiling.
+    if proc.returncode == _NEXTEST_BUILD_FAILED and re.search(r"^error: could not compile ", proc.stderr, re.MULTILINE):
+        return [], False
+    try:
+        cases = junit_outcomes(report)
+    except GateError as e:
+        return [_finding(None, None, "not-run", f"cargo nextest, running the changed Rust tests of {target.label()} at "
+                                                f"the base, exited with status {proc.returncode} and wrote no report "
+                                                f"the gate can read ({e}): {_said(proc)}")], False
+    # junit_outcomes names a case by its binary's id, a dot and the test's name. A name the target builds into
+    # several binaries, as --bins can, or that two tests of one module share under cfgs, passed only if each passed.
+    outcomes: dict[str, set[str]] = {}
+    for case, outcome, _ in cases:
+        outcomes.setdefault(case.rpartition(".")[2], set()).add(outcome)
+    return [_finding(t.path, t.line, "passes-at-base", f"`{t.name}` passes without the change, so it does not test it.")
+            for t, name in names.items() if outcomes.get(name) == {"passed"}], False
+
+
+def _copy_base_with_tests(change: GateChange, dest: str, archive: str,
+                          beside: Callable[[str], bool]) -> list[tuple[str, str]]:
     """Write the files git tracked at change.base to dest, a directory it makes, through a tar file at archive, then
-    replace each file of the change's that _beside_tests accepts with the working tree's: removed at its path at the
+    replace each file of the change's that beside accepts, a repository path that belongs with the tests rather than
+    with the code they test, such as _beside_tests says of Python's, with the working tree's: removed at its path at the
     base, and copied, a symbolic link as a link, to its path in the working tree. A symbolic link is written as it is,
     wherever it points, and no file is written or removed through one: a link on the way to a replaced file is
     replaced by a directory, as the working tree has one there. A submodule holds the files of the commit the base
@@ -3125,10 +3352,10 @@ def _copy_base_with_tests(change: GateChange, dest: str, archive: str) -> list[t
     empty = _unpack_commit(change.root, change.base, dest, archive)
     # A path the base tracks has no link above it there.
     for old, _ in change.files:
-        if old is not None and _beside_tests(old) and os.path.lexists(path := os.path.join(dest, old)):
+        if old is not None and beside(old) and os.path.lexists(path := os.path.join(dest, old)):
             os.remove(path)
     for _, new in change.files:
-        if new is not None and _beside_tests(new) and os.path.lexists(src := os.path.join(change.root, new)):
+        if new is not None and beside(new) and os.path.lexists(src := os.path.join(change.root, new)):
             dst = _unlinked_path(dest, new)
             # A directory the base had where the change has a file or a link: emptied by the removals above, or not.
             if os.path.isdir(dst) and not os.path.islink(dst):

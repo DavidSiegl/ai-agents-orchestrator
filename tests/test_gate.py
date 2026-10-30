@@ -2697,7 +2697,7 @@ class TestPassesAtBase(RepositoryTest):
             with self.subTest(name):
                 self.git("reset", "--quiet", "--hard")
                 edit()
-                self.assertEqual(gate._edits_python_source(gate.GateChange.from_tree(self.repo, base)),
+                self.assertEqual(gate._edits_code(gate.GateChange.from_tree(self.repo, base), gate._python_code),
                                  name != "beside the tests")
 
     def test_no_room_for_the_run_at_the_base_is_a_finding(self):
@@ -3201,6 +3201,118 @@ class TestPassesAtBase(RepositoryTest):
             check.find("change")
         self.assertFalse(check.fails)
         find.assert_called_once_with("change", budget=42)
+
+
+@unittest.skipUnless(CARGO and shutil.which("cargo-nextest"),
+                     "the Rust half of passes-at-base runs cargo nextest, and cargo or cargo-nextest is not on PATH")
+class TestRustPassesAtBase(RepositoryTest):
+    """The passes-at-base check over a real git repository's Cargo package, its tests run with cargo-nextest and read
+    with the gate-rust helper built from this tree."""
+
+    # double is wrong at the base; add is right, and stays so.
+    LIB = ("pub mod other;\n\n"
+           "pub fn add(a: u32, b: u32) -> u32 {\n    a + b\n}\n\n"
+           "pub fn double(a: u32) -> u32 {\n    a + a + 1\n}\n")
+    OTHER = "pub fn one() -> u32 {\n    1\n}\n"
+
+    BASE_FILES = {
+        "Cargo.toml": '[package]\nname = "calc"\nversion = "0.1.0"\nedition = "2021"\n',
+        "Cargo.lock": 'version = 4\n\n[[package]]\nname = "calc"\nversion = "0.1.0"\n',
+        "src/lib.rs": LIB,
+        "src/other.rs": OTHER,
+    }
+
+    def setUp(self):
+        super().setUp()
+        self.put(".gitignore", "target/\n")
+        # Every test fixes double, so that the change edits Rust code outside the tests.
+        self.put("src/lib.rs", self.LIB.replace("a + a + 1", "a * 2"))
+
+    def rebase(self, files, message):
+        """Commit files as the new base, without setUp's fix of double, which stays in the working tree."""
+        self.base = self.commit({**files, "src/lib.rs": self.LIB}, message)
+        self.put("src/lib.rs", self.LIB.replace("a + a + 1", "a * 2"))
+
+    def found(self, budget=gate.BASE_RUN_BUDGET):
+        """(path, line, rule) of each of the check's findings on the working tree, every file in it tracked."""
+        self.git("add", "-A")
+        change = gate.GateChange.from_tree(self.repo, self.base, rust_syntax=gate_rust())
+        return [(f["path"], f["line"], f["rule"]) for f in gate.passes_at_base(change, budget=budget)]
+
+    def fn_line(self, path, name):
+        with open(os.path.join(self.repo, path)) as f:
+            return next(n for n, line in enumerate(f, 1) if line.lstrip().startswith(f"fn {name}("))
+
+    def test_a_test_that_passes_at_the_base_is_found_at_its_fn_and_one_that_fails_there_is_not(self):
+        self.put("tests/calc.rs", "#[test]\nfn adds() {\n    assert_eq!(calc::add(1, 2), 3);\n}\n\n"
+                                  "#[test]\nfn doubles() {\n    assert_eq!(calc::double(2), 4);\n}\n")
+        # No blank line before the module: an added line outside it would edit the file's code.
+        self.put("src/other.rs", self.OTHER + "#[cfg(test)]\nmod tests {\n    #[test]\n    fn is_one() {\n"
+                                              "        assert_eq!(super::one(), 1);\n    }\n}\n")
+        self.assertEqual(self.found(), [("src/other.rs", self.fn_line("src/other.rs", "is_one"), "passes-at-base"),
+                                        ("tests/calc.rs", self.fn_line("tests/calc.rs", "adds"), "passes-at-base")])
+
+    def test_a_test_file_that_does_not_compile_at_the_base_counts_as_failing(self):
+        self.put("src/lib.rs", self.LIB.replace("a + a + 1", "a * 2") + "\npub fn triple(a: u32) -> u32 {\n    a * 3\n}\n")
+        self.put("tests/triple.rs", "#[test]\nfn triples() {\n    assert_eq!(calc::triple(2), 6);\n}\n\n"
+                                    "#[test]\nfn adds_too() {\n    assert_eq!(calc::add(1, 1), 2);\n}\n")
+        self.put("tests/calc.rs", "#[test]\nfn adds() {\n    assert_eq!(calc::add(1, 2), 3);\n}\n")
+        self.assertEqual(self.found(), [("tests/calc.rs", self.fn_line("tests/calc.rs", "adds"), "passes-at-base")])
+
+    def test_a_test_in_an_inline_module_of_a_file_the_change_edits_outside_it_is_not_run(self):
+        self.put("src/lib.rs", self.LIB.replace("a + a + 1", "a * 2") + "\n#[cfg(test)]\nmod tests {\n    #[test]\n"
+                                                                     "    fn doubles() {\n"
+                                                                     "        assert_eq!(super::double(2), 4);\n"
+                                                                     "    }\n}\n")
+        self.assertEqual(self.found(), [("src/lib.rs", self.fn_line("src/lib.rs", "doubles"), "not-run")])
+
+    def test_a_test_whose_first_attribute_the_change_removes_is_run(self):
+        self.rebase({"tests/calc.rs": "#[ignore]\n#[test]\nfn adds() {\n    assert_eq!(calc::add(1, 2), 3);\n}\n"},
+                    "an ignored test")
+        self.put("tests/calc.rs", "#[test]\nfn adds() {\n    assert_eq!(calc::add(1, 2), 3);\n}\n")
+        self.assertEqual(self.found(), [("tests/calc.rs", self.fn_line("tests/calc.rs", "adds"), "passes-at-base")])
+
+    def test_a_cargo_error_other_than_a_compile_error_is_not_run(self):
+        self.rebase({"Cargo.lock": "version = 4\n"}, "a lock file that --locked refuses")
+        self.put("tests/calc.rs", "#[test]\nfn adds() {\n    assert_eq!(calc::add(1, 2), 3);\n}\n")
+        self.assertEqual(self.found(), [(None, None, "not-run")])
+
+    def test_the_budget_running_out_is_a_finding(self):
+        self.put("tests/calc.rs", "#[test]\nfn adds() {\n    assert_eq!(calc::add(1, 2), 3);\n}\n")
+        self.assertEqual(self.found(budget=0.001), [(None, None, "budget-reached")])
+
+    def test_a_change_to_the_tests_alone_runs_nothing(self):
+        self.put("src/lib.rs", self.LIB)
+        self.put("tests/calc.rs", "#[test]\nfn adds() {\n    assert_eq!(calc::add(1, 2), 3);\n}\n")
+        self.assertEqual(self.found(), [])
+
+    def test_where_cargo_builds_a_test_file_and_what_names_its_tests(self):
+        tree = self.repo
+        self.put("src/bin/tool/main.rs", "fn main() {}\n")
+        self.put("tests/cli/main.rs", "mod args;\n")
+        self.put("engine/Cargo.toml", "[package]\n")
+        for path, expected in [
+            ("tests/cli.rs", ("", ("--test", "cli"), ())),
+            ("tests/cli/main.rs", ("", ("--test", "cli"), ())),
+            ("tests/cli/args.rs", ("", ("--test", "cli"), ("args",))),
+            ("src/lib.rs", ("", ("--lib",), ())),
+            ("src/main.rs", ("", ("--bins",), ())),
+            ("src/calc/mod.rs", ("", ("--lib",), ("calc",))),
+            ("src/calc/tests.rs", ("", ("--lib",), ("calc", "tests"))),
+            ("src/bin/tool/main.rs", ("", ("--bin", "tool"), ())),
+            ("src/bin/tool/args.rs", ("", ("--bin", "tool"), ("args",))),
+            ("engine/tests/run.rs", ("engine", ("--test", "run"), ())),
+            ("engine/src/main.rs", ("engine", ("--bins",), ())),
+        ]:
+            with self.subTest(path):
+                target, _ = gate._rust_target(tree, path)
+                self.assertEqual((target.package, target.args, target.module), expected)
+        self.assertEqual(gate._rust_target(tree, "benches/b.rs")[0], None)
+        self.assertEqual(gate._rust_target(tree, "tests/common/mod.rs"),
+                         (None, "no `tests/common/main.rs` makes a target of its directory"))
+        os.remove(os.path.join(tree, "Cargo.toml"))
+        self.assertEqual(gate._rust_target(tree, "tests/cli.rs"),
+                         (None, "no Cargo.toml lies above its file at the base"))
 
 
 class TestVagueNames(RepositoryTest):

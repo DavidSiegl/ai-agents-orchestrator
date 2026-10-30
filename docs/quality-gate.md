@@ -413,6 +413,29 @@ from a directory other than those roots, or through an import hook placed ahead 
 writes where each module it imported came from, and one that took a project file of the working tree's, whether for a
 changed test, a `conftest.py` or a helper, is one `not-run` finding naming the packages, with no test judged.
 
+Rust's tests are judged the same way after Python's, with what is left of the one `--base-run-budget`, when the change
+edits Rust code outside the tests: a `.rs` file of a Cargo package that is not among Rust's tests (as for test
+integrity), edited outside its inline `#[cfg(test)]` modules, added, deleted or renamed. The changed tests are the
+tests, read through the gate-rust helper as test integrity reads them, whose lines, attributes included, the change
+adds to or removes from. They run in a copy of the base made as above, with these files taken from the working tree:
+any file under a `tests` directory, a `tests.rs`, and a `.rs` file the change edits only inside its `#[cfg(test)]`
+modules. A test in a `#[cfg(test)]` module of a file the change also edits outside it cannot be separated from the
+code it tests, and is a `not-run` finding at its `fn`. Each Cargo target the changed tests are in is built and run on
+its own, with `cargo nextest run --locked --no-fail-fast`, filtered to its tests (`-E 'test(=path::name)'`), in the
+copy's package directory, with a target directory and a nextest store outside the copy and the gate's own nextest
+configuration in place of the copy's. The target is found by Cargo's default places: the package is the nearest
+`Cargo.toml` above the file; `tests/x.rs`, and a file under a `tests/x/` that holds a `main.rs`, are the integration
+test `x`; `src/bin/x.rs` and a file under `src/bin/x/` likewise the binary `x`; `src/main.rs` the package's binary;
+any other file under `src/` a module of the library where `src/lib.rs` exists, else of the binaries. A file elsewhere,
+as a shared `tests/common/mod.rs`, is a `not-run` finding. A target whose tests do not compile at the base (rustc's
+`could not compile`) counts as failing there, which is what the check expects of a test that needs the change, and
+gives no finding: so a change that adds a function and a test file calling it is judged as one whose tests fail at the
+base. Any other cargo error, as a lock file `--locked` refuses, is a `not-run` finding. The findings are those above,
+`cargo nextest` in place of pytest; a test passes when every case nextest reports under its name passed, and a test it
+did not report, as one a `cfg` leaves out at the base, gives nothing. A test edited by removing its first attribute,
+as an `#[ignore]`, counts as edited. The target directory is new for every run, so each run compiles the package's dependencies anew,
+within the budget (see `TODO.md`).
+
 **Vague names** lists the names a change binds that tell a reader nothing about what they hold: `data`, `info`,
 `value`, `status`, `handle` and `manager` (`VAGUE_NAME_WORDS`), or a name ending in one after an underscore, such as
 `raw_info`, in any case. A name counts where a line the change adds to a Python file, a `.py` file or a script whose
@@ -752,8 +775,8 @@ request](#a-build-of-main-judged-at-its-pull-request)).
   the tests that run the real clippy fail without it.
 - **`curl`, `sha256sum`, `tar` and `openssl` on the agent**: the Install stage downloads, with `ci/install-tools.sh`,
   pinned releases of the gitleaks the parity scenarios (`tests/parity`) run and of cargo-llvm-cov and cargo-nextest,
-  for the [Rust tests and coverage](#rust-tests-and-coverage), into the workspace's `.tools/bin`, which the Jenkinsfile
-  puts first on `PATH`. The scenarios make the fake PyPI's certificate with openssl. Without gitleaks or openssl the
+  for the [Rust tests and coverage](#rust-tests-and-coverage) and the passes-at-base check's run of the changed Rust
+  tests at the base, into the workspace's `.tools/bin`, which the Jenkinsfile puts first on `PATH`. The scenarios make the fake PyPI's certificate with openssl. Without gitleaks or openssl the
   scenarios fail, naming it.
 - **Node 20.19 or later and npm, Rust 1.90 or later, and Tauri 2's system packages on the agent**, for the Test stage's
   Rust tests, the UI stage's checks of the desktop app and the Package stage's `tauri build` of it. Debian 13's `nodejs`

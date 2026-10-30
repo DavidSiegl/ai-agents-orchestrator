@@ -78,9 +78,10 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   Install stage builds from the tree the Gate stage takes `gate.py` from. `test-integrity` reads Rust's tests through
   it (ticket 02, 2026-10-30: `rust_weakened_tests`, the `rust` entry of `WEAKENED_TESTS_DETECTORS`), and
   `cognitive-complexity` scores Rust over the `flow` it prints (ticket 03, 2026-10-30), and `vague-names` reads its
-  `bindings` (ticket 04, 2026-10-30: `_rust_vague_names`); their blind spots are under Open issues. Left:
-  `passes-at-base`, `surviving-mutants` with cargo-mutants, and a Cargo ecosystem for `new-dependencies` after the
-  switch (05 to 07). Decided against (2026-10-29, the user's): a Rust counterpart of
+  `bindings` (ticket 04, 2026-10-30: `_rust_vague_names`), and `passes-at-base` runs the changed Rust tests at the
+  base with cargo-nextest (ticket 05, 2026-10-30: `_rust_passes_at_base`); their blind spots are under Open issues.
+  Left: `surviving-mutants` with cargo-mutants, and a Cargo ecosystem for `new-dependencies` after the switch (06 and
+  07). Decided against (2026-10-29, the user's): a Rust counterpart of
   `flaky-tests`, since nextest runs each test in a process of its own, so the reruns under other seeds that
   `flaky-tests` does for pytest (`FLAKY_SEEDS`) have little to catch.
 
@@ -463,6 +464,31 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   or `const STATUS` the trait fixes is reported, as in serde's `impl Visitor for V { type Value = ...; }`. The helper's
   `bindings` give no holder, so the gate cannot tell them apart from an inherent `impl`'s. Found by ticket 04
   (2026-10-30). Closes with the helper marking each binding an `impl Trait for T` holds directly, a schema change.
+- **`passes-at-base` builds a Rust package's dependencies anew on every run.** `_rust_base_run_findings` gives each run
+  a target directory in its scratch directory, outside the copy, so every gate run compiles the base's dependencies
+  before it runs a test, within `--base-run-budget`; on a package of many crates that may use the whole budget, which
+  is a `budget-reached` finding. Not measured on Jenkins: gate-rust-checks ticket 05 asked for the Gate stage's added
+  time, which needs a Jenkins build of a Rust change on the branch. Decided against for now: the working tree's own
+  `target/`, where the base's build would overwrite the binaries Cargo copies up to `target/debug`. Closes, if the
+  budget runs out on real changes, with a target directory that lasts between gate runs outside every workspace, as
+  `ci/cargo-lock.sh`'s lock file does.
+- **`passes-at-base` places a Rust test's target by Cargo's default layout only.** `_rust_target` reads the file's
+  place: a target a manifest puts elsewhere (`[[test]] path = ...`, `autotests = false`), a module a `#[path]`
+  attribute names, a module of `src/main.rs` in a package that also has `src/lib.rs` (taken for the library's), and a
+  file under `tests/x/` that `tests/x/main.rs` does not declare are named wrong, so nextest reports no such test and
+  the check gives nothing; a file under `benches/` or `examples/`, or under a `tests/x/` with no `main.rs`, as a
+  shared `tests/common/mod.rs`, is a `not-run` finding. Found by gate-rust-checks
+  ticket 05 (2026-10-30). Closes with the targets read from `cargo metadata` and the module tree from the helper's
+  `mod name;` items.
+- **`passes-at-base` cannot tell a Rust test that needs the change from a base that does not build.** A target whose
+  tests do not compile at the base counts as failing there, whatever rustc's error is (`_NEXTEST_BUILD_FAILED` and
+  `error: could not compile` in `_rust_target_findings`): the test reaching for what the change adds, as the ticket
+  meant, but also a base that does not compile on the gate's machine at all. Any other cargo error, as a lock file
+  `--locked` refuses, is a `not-run` finding. Python's run tells the two apart by whether the failure passes through
+  a file the change edits (`_outside_failed_conftest`). The ticket asked for the build failure to be said "in the
+  finding-free summary, not as a finding"; the quality file has no such summary for a check, so docs/quality-gate.md
+  says it instead. Found by ticket 05 (2026-10-30). Closes with cargo's JSON messages read for the files the errors
+  are in, and the user's ruling on where the summary goes.
 - **`vague-names` skips the parameters of a Rust trait impl's `fn`, which Rust lets the impl rename.** Unlike Python's
   keyword arguments, a Rust caller never names a parameter, so the trait fixes only the `fn`'s name; gate-rust-checks
   ticket 04 asked for the parameters to be skipped too, as `@override`'s are, and clippy's `renamed_function_params`
@@ -627,7 +653,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   Python source for it. Found while fixing the cognitive-complexity check's same gap (2026-10-25). Fixed
   (2026-10-28, with cross-review 79's F5): `_edits_python_source` asks `_python_code` of each side of each changed
   path, which takes `_was_python_source` at the base, and test-integrity's Python detector uses the same function as
-  its `is_code`, so the two checks give one answer to "does the change edit Python code outside the tests".
+  its `is_code`, so the two checks give one answer to "does the change edit Python code outside the tests". Since
+  gate-rust-checks ticket 05 (2026-10-30) that question is `_edits_code(change, _python_code)`, one function for every
+  language's `is_code`, and `_edits_python_source` is gone.
 
 - **`test-integrity` did not see a golden file's change.** A golden file under `tests/golden/` (`tests/golden.py`) is
   an expected value outside any assertion, so a change that rewrote one with `UPDATE_GOLDEN=1` alongside the code it
