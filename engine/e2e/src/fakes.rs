@@ -472,8 +472,8 @@ pub fn ssh(args: &[String]) -> i32 {
     }
     // The command the engine sent, run as sshd's login shell would run it.
     let command = args.get(i + 1..).unwrap_or_default().join(" ");
-    let status = Command::new("sh").args(["-c", &command]).status().unwrap_or_else(|e| panic!("running sh: {e}"));
-    status.code().unwrap_or(255)
+    let exited = Command::new("sh").args(["-c", &command]).status().unwrap_or_else(|e| panic!("running sh: {e}"));
+    exited.code().unwrap_or(255)
 }
 
 /// The world's directory and the program's arguments, from a fake's own: `fake-<program> WORLD ARGS...`.

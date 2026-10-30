@@ -258,22 +258,21 @@ fn run_id_at(t: &[char], i: usize) -> Option<usize> {
     if !boundary(t, i) {
         return None;
     }
-    let mut p = i;
-    for (n, class) in [(8, 'd'), (1, '-'), (6, 'd'), (1, '-'), (6, 'x')] {
-        for _ in 0..n {
-            let ok = match (class, t.get(p)) {
-                ('d', Some(c)) => c.is_ascii_digit(),
-                ('x', c) => is_hex(c.copied()),
-                ('-', Some(c)) => *c == '-',
-                _ => false,
-            };
-            if !ok {
-                return None;
-            }
-            p += 1;
-        }
-    }
-    boundary(t, p).then_some(p)
+    pattern_at(t, i, "dddddddd-dddddd-xxxxxx").filter(|&end| boundary(t, end))
+}
+
+/// Where pattern ends when it matches t at i, one character of t for each of its own: `d` an ASCII digit, `x` a hex
+/// digit of [0-9a-f], `T` a `T` or a space, and any other character itself.
+fn pattern_at(t: &[char], i: usize, pattern: &str) -> Option<usize> {
+    let fits = |class: char, c: char| match class {
+        'd' => c.is_ascii_digit(),
+        'x' => is_hex(Some(c)),
+        'T' => c == 'T' || c == ' ',
+        literal => c == literal,
+    };
+    let n = pattern.chars().count();
+    let matched = pattern.chars().enumerate().all(|(k, class)| t.get(i + k).is_some_and(|c| fits(class, *c)));
+    matched.then_some(i + n)
 }
 
 /// `(?<![0-9a-f])[0-9a-f]{40}(?:[0-9a-f]{24})?(?![0-9a-f])` and its abbreviation, `[0-9a-f]{7,39}` so bordered: the
@@ -292,42 +291,20 @@ fn time_at(t: &[char], i: usize) -> Option<usize> {
     if !boundary(t, i) {
         return None;
     }
-    let mut p = i;
-    for part in ["dddd", "-", "dd", "-", "dd", "T", "dd", ":", "dd", ":", "dd"] {
-        for class in part.chars() {
-            let ok = match (class, t.get(p)) {
-                ('d', Some(c)) => c.is_ascii_digit(),
-                ('T', Some(c)) => *c == 'T' || *c == ' ',
-                (literal, Some(c)) => *c == literal,
-                _ => false,
-            };
-            if !ok {
-                return None;
-            }
-            p += 1;
+    let mut end = pattern_at(t, i, "dddd-dd-ddTdd:dd:dd")?;
+    if t.get(end) == Some(&'.') {
+        let digits = span(t, end + 1, |c| c.is_ascii_digit());
+        if digits > end + 1 {
+            end = digits;
         }
     }
-    if t.get(p) == Some(&'.') {
-        let digits = span(t, p + 1, |c| c.is_ascii_digit());
-        if digits > p + 1 {
-            p = digits;
-        }
-    }
-    let offset = match t.get(p) {
-        Some('Z') => Some(p + 1),
-        Some('+' | '-') => {
-            let two = |q: usize| t.get(q).is_some_and(char::is_ascii_digit) && t.get(q + 1).is_some_and(char::is_ascii_digit);
-            if two(p + 1) && t.get(p + 3) == Some(&':') && two(p + 4) {
-                Some(p + 6)
-            } else if two(p + 1) && two(p + 3) {
-                Some(p + 5)
-            } else {
-                None
-            }
-        }
+    let offset = match t.get(end) {
+        Some('Z') => Some(end + 1),
+        // `:?` is greedy: with the colon first, else without it.
+        Some('+' | '-') => pattern_at(t, end + 1, "dd:dd").or_else(|| pattern_at(t, end + 1, "dddd")),
         _ => None,
     };
-    Some(offset.unwrap_or(p))
+    Some(offset.unwrap_or(end))
 }
 
 /// `"(heartbeat_age|mtime|seconds)": \d+`: a clock's number in JSON text, such as metrics.json's.

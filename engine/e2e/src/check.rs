@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::pyjson;
 use crate::world::{Fakes, World};
@@ -49,41 +49,52 @@ pub fn check(name: &str, fakes: &Fakes, scenario: impl FnOnce(&mut World)) {
 /// Where got first differs from want, two JSON values, as a JSON path and the two sides there; None when they are
 /// equal, the order of an object's keys included. For strings, the line on which they part.
 pub fn first_difference(want: &Value, got: &Value, path: &str) -> Option<String> {
-    let short = |v: &Value, n: usize| pyjson::dumps(v).chars().take(n).collect::<String>();
     match (want, got) {
-        (Value::Object(w), Value::Object(g)) => {
-            for key in w.keys().chain(g.keys().filter(|k| !w.contains_key(*k))) {
-                let (Some(a), Some(b)) = (w.get(key), g.get(key)) else {
-                    let side = if w.contains_key(key) { "recorded" } else { "in this run" };
-                    return Some(format!("{path}: key {key:?} only {side}"));
-                };
-                if let Some(found) = first_difference(a, b, &format!("{path}[{key:?}]")) {
-                    return Some(found);
-                }
-            }
-            let (wk, gk): (Vec<_>, Vec<_>) = (w.keys().collect(), g.keys().collect());
-            (wk != gk).then(|| format!("{path}: keys in another order: recorded {wk:?}, got {gk:?}"))
-        }
-        (Value::Array(w), Value::Array(g)) => {
-            for (i, (a, b)) in w.iter().zip(g).enumerate() {
-                if let Some(found) = first_difference(a, b, &format!("{path}[{i}]")) {
-                    return Some(found);
-                }
-            }
-            (w.len() != g.len()).then(|| {
-                let (side, extra) = if w.len() > g.len() { ("recorded", &w[g.len()]) } else { ("got", &g[w.len()]) };
-                format!("{path}: recorded {} items, got {}; first unmatched ({side}): {}", w.len(), g.len(), short(extra, 500))
-            })
-        }
-        (Value::String(w), Value::String(g)) if w != g => {
-            let (a, b): (Vec<&str>, Vec<&str>) = (w.split('\n').collect(), g.split('\n').collect());
-            let i = a.iter().zip(&b).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
-            let line = |l: &[&str]| l.get(i).map_or("(no line)".to_string(), |s| format!("{s:?}"));
-            Some(format!("{path}, line {}:\n  recorded: {}\n  got:      {}", i + 1, line(&a), line(&b)))
-        }
+        (Value::Object(w), Value::Object(g)) => object_difference(w, g, path),
+        (Value::Array(w), Value::Array(g)) => array_difference(w, g, path),
+        (Value::String(w), Value::String(g)) if w != g => Some(line_difference(w, g, path)),
         (w, g) if w == g => None,
         (w, g) => Some(format!("{path}: recorded {}, got {}", short(w, 300), short(g, 300))),
     }
+}
+
+/// tree's JSON text, cut after n characters.
+fn short(tree: &Value, n: usize) -> String {
+    pyjson::dumps(tree).chars().take(n).collect()
+}
+
+/// first_difference of two objects: a key only one has, the first value under a key that differs, or their keys'
+/// order, in that order.
+fn object_difference(want: &Map<String, Value>, got: &Map<String, Value>, path: &str) -> Option<String> {
+    for key in want.keys().chain(got.keys().filter(|k| !want.contains_key(*k))) {
+        let (Some(a), Some(b)) = (want.get(key), got.get(key)) else {
+            let side = if want.contains_key(key) { "recorded" } else { "in this run" };
+            return Some(format!("{path}: key {key:?} only {side}"));
+        };
+        if let Some(found) = first_difference(a, b, &format!("{path}[{key:?}]")) {
+            return Some(found);
+        }
+    }
+    let (wk, gk): (Vec<_>, Vec<_>) = (want.keys().collect(), got.keys().collect());
+    (wk != gk).then(|| format!("{path}: keys in another order: recorded {wk:?}, got {gk:?}"))
+}
+
+/// first_difference of two arrays: the first item that differs, else their lengths and the first item one has more.
+fn array_difference(want: &[Value], got: &[Value], path: &str) -> Option<String> {
+    let found = want.iter().zip(got).enumerate().find_map(|(i, (a, b))| first_difference(a, b, &format!("{path}[{i}]")));
+    if found.is_some() || want.len() == got.len() {
+        return found;
+    }
+    let (side, extra) = if want.len() > got.len() { ("recorded", &want[got.len()]) } else { ("got", &got[want.len()]) };
+    Some(format!("{path}: recorded {} items, got {}; first unmatched ({side}): {}", want.len(), got.len(), short(extra, 500)))
+}
+
+/// Where two strings that differ part: the line, and each side's text of it.
+fn line_difference(want: &str, got: &str, path: &str) -> String {
+    let (a, b): (Vec<&str>, Vec<&str>) = (want.split('\n').collect(), got.split('\n').collect());
+    let i = a.iter().zip(&b).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
+    let line = |l: &[&str]| l.get(i).map_or("(no line)".to_string(), |s| format!("{s:?}"));
+    format!("{path}, line {}:\n  recorded: {}\n  got:      {}", i + 1, line(&a), line(&b))
 }
 
 #[cfg(test)]
@@ -110,8 +121,12 @@ mod tests {
 
     #[test]
     fn missing_keys_and_items_differ() {
-        assert!(first_difference(&json!({"a": 1}), &json!({}), "$").unwrap().contains("only recorded"));
-        assert!(first_difference(&json!([1]), &json!([1, 2]), "$").unwrap().contains("recorded 1 items, got 2"));
+        assert!(first_difference(&json!({"a": 1}), &json!({}), "$").unwrap().contains("key \"a\" only recorded"));
+        assert!(first_difference(&json!({}), &json!({"b": 1}), "$").unwrap().contains("key \"b\" only in this run"));
+        let found = first_difference(&json!([1]), &json!([1, 2]), "$").unwrap();
+        assert!(found.contains("recorded 1 items, got 2; first unmatched (got): 2"), "{found}");
+        let found = first_difference(&json!([1, 3]), &json!([1]), "$").unwrap();
+        assert!(found.contains("recorded 2 items, got 1; first unmatched (recorded): 3"), "{found}");
         assert!(first_difference(&json!(1), &json!("1"), "$").unwrap().contains("recorded 1, got \"1\""));
     }
 }

@@ -4,30 +4,30 @@
 
 use serde_json::Value;
 
-/// value as json.dumps(value) writes it: ", " between items, ": " after keys, and every character outside printable
+/// tree as json.dumps(tree) writes it: ", " between items, ": " after keys, and every character outside printable
 /// ASCII escaped.
-pub fn dumps(value: &Value) -> String {
+pub fn dumps(tree: &Value) -> String {
     let mut out = String::new();
-    write(value, &mut out, None, 0, true);
+    write(tree, &mut out, None, 0, true);
     out
 }
 
-/// value as json.dump(value, indent=1, ensure_ascii=False) writes a recording: each item of a non-empty array or
+/// tree as json.dump(tree, indent=1, ensure_ascii=False) writes a recording: each item of a non-empty array or
 /// object on a line of its own, indented a space a level, and characters beyond ASCII as they are.
-pub fn dumps_recording(value: &Value) -> String {
+pub fn dumps_recording(tree: &Value) -> String {
     let mut out = String::new();
-    write(value, &mut out, Some(1), 0, false);
+    write(tree, &mut out, Some(1), 0, false);
     out
 }
 
-/// value as json.dumps(value, sort_keys=True) writes it: dumps, with every object's keys in order. Two values give
+/// tree as json.dumps(tree, sort_keys=True) writes it: dumps, with every object's keys in order. Two values give
 /// the same text exactly when they are equal, whatever order their keys were written in.
-pub fn dumps_sorted(value: &Value) -> String {
-    dumps(&sorted(value))
+pub fn dumps_sorted(tree: &Value) -> String {
+    dumps(&sorted(tree))
 }
 
-fn sorted(value: &Value) -> Value {
-    match value {
+fn sorted(tree: &Value) -> Value {
+    match tree {
         Value::Array(items) => Value::Array(items.iter().map(sorted).collect()),
         Value::Object(map) => {
             let mut entries: Vec<_> = map.iter().collect();
@@ -38,10 +38,10 @@ fn sorted(value: &Value) -> Value {
     }
 }
 
-/// Write value at out's end: indent spaces a level (None for one line), level being how many arrays and objects hold
+/// Write tree at out's end: indent spaces a level (None for one line), level being how many arrays and objects hold
 /// it, ascii as json.dumps's ensure_ascii.
-fn write(value: &Value, out: &mut String, indent: Option<usize>, level: usize, ascii: bool) {
-    match value {
+fn write(tree: &Value, out: &mut String, indent: Option<usize>, level: usize, ascii: bool) {
+    match tree {
         Value::Null => out.push_str("null"),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         Value::Number(n) => out.push_str(&n.to_string()),
@@ -126,18 +126,18 @@ mod tests {
 
     #[test]
     fn dumps_spaces_and_escapes_as_python() {
-        let value = json!({"a": [1, "é\n\u{1b}", null, true], "b": {}, "c": [], "d": "🙂"});
+        let tree = json!({"a": [1, "é\n\u{1b}", null, true], "b": {}, "c": [], "d": "🙂"});
         assert_eq!(
-            dumps(&value),
+            dumps(&tree),
             "{\"a\": [1, \"\\u00e9\\n\\u001b\", null, true], \"b\": {}, \"c\": [], \"d\": \"\\ud83d\\ude42\"}"
         );
     }
 
     #[test]
     fn a_recording_is_indented_by_a_space_and_keeps_unicode() {
-        let value = json!({"a": [1, {"x": "é"}], "b": [], "c": {}});
+        let tree = json!({"a": [1, {"x": "é"}], "b": [], "c": {}});
         assert_eq!(
-            dumps_recording(&value),
+            dumps_recording(&tree),
             "{\n \"a\": [\n  1,\n  {\n   \"x\": \"é\"\n  }\n ],\n \"b\": [],\n \"c\": {}\n}"
         );
     }

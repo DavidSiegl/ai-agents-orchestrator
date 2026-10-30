@@ -145,8 +145,8 @@ impl Invocation {
         let deadline = Instant::now() + INVOCATION_TIMEOUT;
         loop {
             match self.child.try_wait() {
-                Ok(Some(status)) => {
-                    let exit = status.code().unwrap_or_else(|| -status.signal().unwrap_or(0));
+                Ok(Some(exited)) => {
+                    let exit = exited.code().unwrap_or_else(|| -exited.signal().unwrap_or(0));
                     self.exit = Some(exit);
                     return exit;
                 }

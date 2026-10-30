@@ -504,3 +504,20 @@ fn spec_file_run(w: &mut World) {
     w.agent("review", [reviewed(1)]);
     w.run(&["run", "--spec", &path]);
 }
+
+// -- check itself ---------------------------------------------------------------------
+
+/// A scenario with no recording fails, rather than passing for want of anything to compare.
+#[test]
+#[should_panic(expected = "has no recording")]
+fn a_scenario_without_a_recording_fails() {
+    check("no_such_scenario", &fakes(), |_| {});
+}
+
+/// A scenario whose record differs from its recording fails, naming where: here a note workflows_listed's recording
+/// does not hold, of a world that ran nothing.
+#[test]
+#[should_panic(expected = "differs from its recording at $[\"invocations\"]")]
+fn a_scenario_that_differs_from_its_recording_fails() {
+    check("workflows_listed", &fakes(), |w| w.note("extra", json!(1)));
+}
