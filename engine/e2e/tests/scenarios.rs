@@ -8,10 +8,8 @@
 
 use serde_json::{json, Map, Value};
 
-use std::path::PathBuf;
-
 use octoflow_e2e::check::Bench;
-use octoflow_e2e::dirs::remove_dir;
+use octoflow_e2e::dirs::{self, Scratch};
 use octoflow_e2e::world::{checkout, wait_for, Fakes, World};
 
 /// This checkout's bench, with the fakes this package builds.
@@ -510,27 +508,20 @@ fn spec_file_run(w: &mut World) {
 
 // -- check itself ---------------------------------------------------------------------
 
-/// A bench whose recordings and worlds are in a directory of the test's own, named name, which is removed when it is
+/// A bench whose recordings and worlds are in a scratch directory of the test's own, which is removed when it is
 /// dropped, the test's panic included; writes as given.
 struct ScratchBench {
     bench: Bench,
-    dir: PathBuf,
+    scratch: Scratch,
 }
 
 impl ScratchBench {
     fn new(name: &str, writes: bool) -> ScratchBench {
-        let dir = bench().worlds.join(format!("octoflow-e2e-bench-{name}-{}", std::process::id()));
-        remove_dir(&dir);
-        let recordings = dir.join("recorded");
-        std::fs::create_dir_all(&recordings).unwrap_or_else(|e| panic!("making {}: {e}", recordings.display()));
-        let bench = Bench { recordings, worlds: dir.clone(), writes, ..bench() };
-        ScratchBench { bench, dir }
-    }
-}
-
-impl Drop for ScratchBench {
-    fn drop(&mut self) {
-        remove_dir(&self.dir);
+        let scratch = Scratch::new(&dirs::temp(), &format!("bench-{name}"));
+        let recordings = scratch.path().join("recorded");
+        std::fs::create_dir(&recordings).unwrap_or_else(|e| panic!("making {}: {e}", recordings.display()));
+        let bench = Bench { recordings, worlds: scratch.path().to_path_buf(), writes, ..bench() };
+        ScratchBench { bench, scratch }
     }
 }
 
@@ -556,7 +547,7 @@ fn a_scenario_that_differs_from_its_recording_fails() {
 fn a_recording_written_holds_the_scenario_again() {
     let scratch = ScratchBench::new("written", true);
     scratch.bench.check("written", |w| w.note("seen", json!("once")));
-    let comparing = Bench { writes: false, recordings: scratch.bench.recordings.clone(), worlds: scratch.dir.clone(), ..bench() };
+    let comparing = Bench { writes: false, recordings: scratch.bench.recordings.clone(), worlds: scratch.bench.worlds.clone(), ..bench() };
     comparing.check("written", |w| w.note("seen", json!("once")));
 }
 
@@ -570,9 +561,7 @@ fn ended(pid: i64) -> bool {
 #[test]
 fn a_dropped_world_leaves_nothing_of_its_engine_running() {
     let scratch = ScratchBench::new("dropped", false);
-    let root = scratch.dir.join("world");
-    std::fs::create_dir_all(&root).unwrap_or_else(|e| panic!("making {}: {e}", root.display()));
-    let mut w = World::new(&root, &scratch.bench.fakes);
+    let mut w = World::new(scratch.scratch.path(), &scratch.bench.fakes);
     w.agent("spec", [spec_written(Some("spec"))]);
     let i = w.start(&["run", "--", TASK], true);
     w.wait_reached("spec");

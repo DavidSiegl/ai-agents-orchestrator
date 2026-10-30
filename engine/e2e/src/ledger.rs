@@ -122,7 +122,12 @@ fn changed_states(state: &mut Map<String, Value>, project: &Path, engine_pids: &
     let mut changed = Vec::new();
     for (_, dir) in entries {
         let path = dir.join("state.json");
-        // A run directory without its state yet, or with one being written, has nothing to log.
+        // What is no run's state the engine skips too (Host::run_states' `[ -f "$f" ] || continue`): an entry of runs/
+        // that is no directory, or a state.json that is no file.
+        if !path.is_file() {
+            continue;
+        }
+        // A state removed since, or one being written, has nothing to log.
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -149,31 +154,83 @@ fn changed_states(state: &mut Map<String, Value>, project: &Path, engine_pids: &
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
+    use crate::dirs::{temp, Scratch};
 
-    /// A project of the test's own, named name, with one run, a, which has no state.json yet.
-    fn project(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("octoflow-e2e-ledger-{name}-{}", std::process::id()));
-        dirs::remove_dir(&dir);
-        let runs = dir.join(".orchestrator").join("runs");
-        fs::create_dir_all(runs.join("a")).expect("a run directory");
-        dir
+    /// A project of the test's own, named name, with its runs, by directory, each its state.json's text, or None for a
+    /// run directory without one.
+    fn project(name: &str, runs: &[(&str, Option<&str>)]) -> Scratch {
+        let scratch = Scratch::new(&temp(), &format!("ledger-{name}"));
+        for (run, text) in runs {
+            let dir = scratch.path().join(".orchestrator/runs").join(run);
+            fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("making {}: {e}", dir.display()));
+            if let Some(text) = text {
+                fs::write(dir.join("state.json"), text).unwrap_or_else(|e| panic!("writing {}'s state: {e}", dir.display()));
+            }
+        }
+        scratch
+    }
+
+    /// The paths of what changed_states found changed, in order.
+    fn changed_paths(state: &mut Map<String, Value>, project: &Path, pids: &[i64]) -> Vec<String> {
+        let pids: BTreeSet<i64> = pids.iter().copied().collect();
+        changed_states(state, project, &pids).iter().map(|c| c["path"].as_str().expect("a path").to_string()).collect()
+    }
+
+    fn state_path(project: &Path, run: &str) -> String {
+        project.join(".orchestrator/runs").join(run).join("state.json").to_string_lossy().into_owned()
     }
 
     #[test]
-    fn a_run_without_its_state_yet_has_none_to_log() {
-        let dir = project("unsaved");
-        let changed = changed_states(&mut Map::new(), &dir, &BTreeSet::new());
-        dirs::remove_dir(&dir);
-        assert!(changed.is_empty());
+    fn a_project_without_runs_has_none_to_log() {
+        let scratch = Scratch::new(&temp(), "ledger-no-runs");
+        let mut state = Map::new();
+        assert!(changed_paths(&mut state, scratch.path(), &[]).is_empty());
+        assert_eq!(state.get("last_states"), None);
     }
 
     #[test]
-    fn a_state_that_cannot_be_read_fails() {
-        let dir = project("unreadable");
-        fs::create_dir_all(dir.join(".orchestrator/runs/b/state.json")).expect("a state.json that is a directory");
-        let read = std::panic::catch_unwind(|| changed_states(&mut Map::new(), &dir, &BTreeSet::new()));
-        dirs::remove_dir(&dir);
-        assert!(read.is_err(), "a state.json that is a directory was read");
+    fn a_state_is_logged_once_until_it_changes_but_for_its_heartbeat() {
+        let scratch = project("logged", &[("a", Some(r#"{"phase": "spec", "heartbeat_at": "1"}"#))]);
+        let (root, a) = (scratch.path(), state_path(scratch.path(), "a"));
+        let mut state = Map::new();
+        assert_eq!(changed_paths(&mut state, root, &[]), std::slice::from_ref(&a));
+        assert_eq!(state["last_states"], json!({&a: r#"{"phase": "spec"}"#}));
+        assert!(changed_paths(&mut state, root, &[]).is_empty());
+        fs::write(&a, r#"{"phase": "spec", "heartbeat_at": "2"}"#).expect("a new heartbeat");
+        assert!(changed_paths(&mut state, root, &[]).is_empty());
+        fs::write(&a, r#"{"phase": "build", "heartbeat_at": "2"}"#).expect("a new phase");
+        assert_eq!(changed_paths(&mut state, root, &[]), [a]);
+    }
+
+    #[test]
+    fn what_is_no_run_state_yet_is_not_logged_or_remembered() {
+        let scratch = project("unsaved", &[("a", None), ("b", Some(r#"{"phase": "sp"#)), ("c", Some("[1]"))]);
+        let (root, b) = (scratch.path(), state_path(scratch.path(), "b"));
+        // An entry of runs/ that is no directory, and a state.json that is a directory.
+        fs::write(root.join(".orchestrator/runs/.DS_Store"), "").expect("a stray file");
+        fs::create_dir_all(root.join(".orchestrator/runs/d/state.json")).expect("a state.json that is a directory");
+        let mut state = Map::new();
+        assert!(changed_paths(&mut state, root, &[]).is_empty());
+        assert_eq!(state["last_states"], json!({}));
+        // Once written whole, b's state is logged as a first one.
+        fs::write(&b, r#"{"phase": "spec"}"#).expect("b's state written whole");
+        assert_eq!(changed_paths(&mut state, root, &[]), [b]);
+    }
+
+    #[test]
+    fn a_state_is_logged_only_while_its_owner_is_of_the_engine_or_it_has_none() {
+        let runs = [
+            ("a", Some(r#"{"owner": {"pid": 7}}"#)),
+            ("b", Some(r#"{"owner": {"pid": 8}}"#)),
+            ("c", Some(r#"{"owner": {}}"#)),
+            ("d", Some(r#"{"owner": null}"#)),
+        ];
+        let scratch = project("owners", &runs);
+        let root = scratch.path();
+        let logged = changed_paths(&mut Map::new(), root, &[7]);
+        assert_eq!(logged, ["a", "c", "d"].map(|run| state_path(root, run)));
     }
 }

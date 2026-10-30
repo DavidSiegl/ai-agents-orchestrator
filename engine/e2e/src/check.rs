@@ -7,11 +7,10 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::{Map, Value};
 
-use crate::dirs::remove_dir;
+use crate::dirs::{self, Scratch};
 use crate::pyjson;
 use crate::world::{Fakes, World};
 
@@ -36,7 +35,7 @@ impl Bench {
         Bench {
             fakes,
             recordings: Path::new(env!("CARGO_MANIFEST_DIR")).join("recorded"),
-            worlds: std::env::var_os("TMPDIR").map_or_else(std::env::temp_dir, PathBuf::from),
+            worlds: dirs::temp(),
             writes: std::env::var("E2E_RECORD").as_deref() == Ok("1"),
         }
     }
@@ -45,16 +44,12 @@ impl Bench {
     /// recording where the bench writes. Panics, failing the test, at a difference or a missing recording. The world's
     /// directory is removed when the scenario passes and kept for a look when it fails.
     pub fn check(&self, name: &str, scenario: impl FnOnce(&mut World)) {
-        // Two checks of one name in one process, as `cargo test` runs them, each get a world of their own.
-        static WORLDS: AtomicUsize = AtomicUsize::new(0);
-        let n = WORLDS.fetch_add(1, Ordering::Relaxed);
-        let root = self.worlds.join(format!("octoflow-e2e-{name}-{}-{n}", std::process::id()));
-        remove_dir(&root);
-        fs::create_dir_all(&root).unwrap_or_else(|e| panic!("making {}: {e}", root.display()));
+        let world = Scratch::kept_on_failure(&self.worlds, name);
+        let root = world.path();
         let got = {
-            let mut world = World::new(&root, &self.fakes);
-            scenario(&mut world);
-            world.record()
+            let mut w = World::new(root, &self.fakes);
+            scenario(&mut w);
+            w.record()
         };
         let path = self.recordings.join(format!("{name}.json"));
         if self.writes {
@@ -69,7 +64,6 @@ impl Bench {
                 panic!("scenario {name} differs from its recording at {difference}\n(its world is kept in {})", root.display());
             }
         }
-        remove_dir(&root);
     }
 }
 
