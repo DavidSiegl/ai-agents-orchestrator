@@ -760,11 +760,11 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   an orphan group of one process per CPU. It only happens when a change edits that code. Jenkins' process-tree
   killer should end them with the build; not checked. Closes with a check on a PR build, or with that test run
   without its own session under mutmut.
-- **The surviving-mutants check selects functions by added lines only.** A function whose edit only removes lines,
-  or changes only the comments or blank lines above it, is not mutation-tested, unlike flaky-tests' selection
-  (`_edits_test`). Kept as the ticket states it. Closes with a decision to pass `_edits_test`-like counting to
-  `_changed_python_functions`. The cognitive-complexity check has a walker of its own (`_scored_functions`), so it
-  is not affected.
+- **The surviving-mutants check mutates Rust by added lines only.** cargo-mutants runs `--in-diff`, which mutates
+  only what the diff's added lines hold, so a Rust function whose edit only removes lines, such as a guard clause, is
+  not mutation-tested; Python's functions count removals (Fixed, "The surviving-mutants check selects functions by
+  added lines only"). Closes with the Rust half choosing whole functions, as `_edits_function` does, and passing
+  them to cargo-mutants with `--re` or `--file` instead of the diff.
 - **mutmut reads a symlinked `.py` file in the surviving-mutants copy.** `_copy_tracked` copies a tracked symlink
   as a link (`gate.py`), `_mark_for_mutmut` leaves links unmarked, and mutmut 3.8.0's `walk_all_files` lists
   a symlink to a file and `create_mutants_for_file` opens it. So once any changed function starts mutmut, a change
@@ -839,6 +839,13 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Fixed
 
+- **The surviving-mutants check selects functions by added lines only.** A Python function whose edit only removed
+  lines was not mutation-tested, unlike flaky-tests' selection (`_edits_test`). Fixed (2026-10-30, gate-open-decisions
+  ticket 03, the user's decision of 2026-10-28): `_changed_python_functions` selects with `_edits_function`, which
+  counts lines removed from a function, its decorators included, and right below it. Decided against: counting
+  comments and blank lines changed above the first decorator, as `_edits_test` does for a test, since they change
+  nothing mutmut mutates and would spend the budget. The cognitive-complexity check has a walker of its own
+  (`_scored_functions`), so it is not affected. Rust stays by added lines (Open issues).
 - **`test_invariants.py`'s `AnyJenkins` and `Answer` copied `FakeCI` and `FakeResponse`** of
   `tests/test_orchestrator.py`. Raised by cross-review 60 (F4, 2026-10-27). Fixed (2026-10-30, rust-engine ticket 11):
   both went with the Python engine; `test_invariants.py` keeps the gate's invariants, and the engine's credentials

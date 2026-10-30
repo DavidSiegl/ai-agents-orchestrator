@@ -284,9 +284,10 @@ A change to a helper or fixture outside the tests' `def`s reruns nothing. The ch
 off, and `--randomly-seed=N` repeats an order.
 
 **Surviving mutants** mutation-tests the functions the change edits, so that code its tests run without checking what
-it does is found; coverage counts such code as tested. A function counts when the change adds a line to it, decorators
-included: a top-level function, or a method of a top-level class, in a Python file outside the test files and, as
-above, `mutants/`. mutmut, in the `dev` group, makes small changes to each, one at a time - an operator
+it does is found; coverage counts such code as tested. A function counts when the change adds lines to it or removes
+lines from it, decorators included, since a deleted guard clause needs a test as much as an added one: a top-level
+function, or a method of a top-level class, in a Python file outside the test files and, as above, `mutants/`.
+mutmut, in the `dev` group, makes small changes to each, one at a time - an operator
 swapped, a number or a string altered, an argument dropped - and runs each of these mutants against the tests that
 call the function:
 
