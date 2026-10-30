@@ -76,14 +76,41 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   helper the checks read Rust through is in: `ci/gate-rust/`, a crate on syn whose JSON (docs/quality-gate.md,
   "Reading Rust: the gate-rust helper") `GateChange.rust_files` reads, named by `gate.py --rust-syntax`, which the
   Install stage builds from the tree the Gate stage takes `gate.py` from. `test-integrity` reads Rust's tests through
-  it (ticket 02, 2026-10-30: `rust_weakened_tests`, the `rust` entry of `WEAKENED_TESTS_DETECTORS`); its blind spots
-  are under Open issues. Left: Rust in `cognitive-complexity` (ticket 03, which the Rust engine's switch waits for),
-  `vague-names`, `passes-at-base`, `surviving-mutants` with cargo-mutants, and a Cargo ecosystem for
+  it (ticket 02, 2026-10-30: `rust_weakened_tests`, the `rust` entry of `WEAKENED_TESTS_DETECTORS`), and
+  `cognitive-complexity` scores Rust over the `flow` it prints (ticket 03, 2026-10-30); their blind spots are under Open
+  issues. Left: `vague-names`, `passes-at-base`, `surviving-mutants` with cargo-mutants, and a Cargo ecosystem for
   `new-dependencies` after the switch (04 to 07). Decided against (2026-10-29, the user's): a Rust counterpart of
   `flaky-tests`, since nextest runs each test in a process of its own, so the reruns under other seeds that
   `flaky-tests` does for pytest (`FLAKY_SEEDS`) have little to catch.
 
 ## Open issues
+
+- **Test code outside the places the spec names is judged as code.** The spec of the Rust checks (requirement 2)
+  places Rust's tests in a `tests/` directory, a `tests.rs` and an inline `#[cfg(test)]` module; `_in_rust_tests` and
+  `_rust_test_path` in `gate.py`, which both Rust checks read, follow it (test-integrity's side of this is the
+  out-of-line `mod name;` item in its list below). So `cognitive-complexity` judges a file that a parent takes in
+  with `#[cfg(test)] mod name;`, as the engine keeps its fakes and `test_support.rs` (`engine/src/host.rs:24` on
+  rust-engine): at rust-engine `476b770`, 3 of the 21 engine functions over the limit are theirs (`FakeState::git`,
+  `FakeJenkinsState::answer`, `helper_cases`). Found by gate-rust-checks ticket 03 (2026-10-30). And, as cross-review
+  108 put it (F4): "A file-level `#[cfg(test)] fn` or `#[cfg(test)] impl`, or a `#[test]` fn outside the places
+  requirement 2 names, is judged against 15." Closes with the user's ruling on the spec's definition, and, if those
+  are tests, the helper listing each out-of-line `mod name;` with its `cfg_test`, so that the gate can follow a
+  declaration to its file, and a `cfg_test` of each fn's own and its impl's attributes.
+- **A macro whose arguments are no expressions separated by commas adds nothing to a Rust fn's score.** The helper's
+  `flow` reads a macro's arguments only where they parse that way (`FlowWalker::visit_macro` in
+  `ci/gate-rust/src/main.rs`), as its `asserts` do. Raised by cross-review 108 (F3, 2026-10-30): "A macro whose
+  arguments do not parse as comma-separated expressions (`vec![if a {..} else {..}; n]`, `matches!(x, P if a && b)`,
+  `tracing::info!(target: "x", ..)`, `select!{..}`) is dropped silently, so its branches, loops and closures add
+  nothing to the score." Clippy's own `cognitive_complexity` reads no macro either. Closes with the helper parsing the
+  common other shapes (`expr; n`, `expr, pattern if guard`, `name: expr` arguments) and a `macro` node, unread, that
+  gate.py can count or report.
+- **Rust's test code takes no part in pairing a function with its base.** `_rust_scored_functions` leaves the fns
+  `_in_rust_tests` places among the tests out on both sides, where a Python file under `tests/` stays in
+  `_base_scores`' pool as a file the check does not judge. So a fn moved unchanged into Rust's tests cannot keep its
+  own base before a copy of it elsewhere takes it, and that copy passes as the original. Found by gate-rust-checks
+  ticket 03 (2026-10-30); since its merge with ticket 02 it holds for test files as for inline test modules. Closes
+  with a per-function "exempt" mark on `_ScoredFunction` that `_BasePool` reads where it now asks
+  `_complexity_exempt` of a path.
 
 - **The eval set's code has review 88's findings open.** Raised by cross-review 88 (2026-10-28) in code PR #167
   brought, recorded here rather than fixed in an unrelated branch: the docs task's hidden test sees only ``` fences
@@ -144,7 +171,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   the Rust engine's top-level one (rust-engine spec, Lane) or `ci/gate-rust/`, the gate's Rust helper, whose tests
   run only where `cargo test` is run by hand, has its lines judged by clippy but its tests never run, and its added
   lines count as nothing to cover. Found while adding Rust coverage (rust-engine ticket 03, 2026-10-27); the helper
-  joined it with gate-rust-checks ticket 01 (2026-10-29).
+  joined it with gate-rust-checks ticket 01 (2026-10-29). Since ticket 03 (2026-10-30), `tests/test_gate.py` builds
+  the helper and runs it over Rust snippets, so the Test stage exercises its `flow`, but not its own `cargo test`.
   Closes when the top-level workspace takes `ui/src-tauri` in as a member and the Test stage runs there, or with
   the Test stage running each workspace and passing each report to the gate.
 - **`GateChange.rust_files` starts one `git cat-file` per base `.rs` file.** `_rust_paths` in `gate.py` copies each
@@ -576,6 +604,11 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Fixed
 
+- **Where Rust's tests are was decided in two tickets.** Ticket 03 had placed the spec's requirement 2 in
+  `_complexity_exempt` and `_rust_scored_functions`, and ticket 02's Rust `WeakenedTestsDetector`, written in
+  parallel, in `_rust_tests` and `_rust_swallowed_errors`. Found by gate-rust-checks ticket 03 (2026-10-30). Fixed
+  (2026-10-30, merging ticket 02 into 03): one function, `_in_rust_tests`, with `_rust_test_path` for whole files,
+  which both checks call.
 - **passes-at-base missed a deleted Python script with no `.py`.** `_edits_python_source` counted a deleted file as
   Python source only by its `.py`, so a change that only deleted a `#!` python script outside the tests edited no
   Python source for it. Found while fixing the cognitive-complexity check's same gap (2026-10-25). Fixed

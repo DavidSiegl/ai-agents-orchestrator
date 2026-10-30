@@ -8,6 +8,7 @@ a piece of the quality file's format, are in tests/test_orchestrator.py and test
 import ast
 import contextlib
 import dataclasses
+import functools
 import io
 import json
 import os
@@ -34,7 +35,6 @@ from golden import assert_golden
 
 import gate
 from gate import changed_lines, quality_report
-from orchestrator import Host
 
 
 def empty_rust_helper(directory):
@@ -47,6 +47,28 @@ def empty_rust_helper(directory):
                 f"    print(json.dumps({{'schema': {gate.RUST_SYNTAX_SCHEMA}, 'fns': [], 'mods': [], 'bindings': []}}))\n")
     os.chmod(path, 0o700)
     return path
+
+# The real cargo, found before a test puts a stub of its own on PATH (TestClippy.stub_cargo); None where there is none.
+CARGO = shutil.which("cargo")
+
+
+@functools.cache
+def gate_rust():
+    """The path of the gate-rust helper built from ci/gate-rust beside these tests, for the tests that read real Rust:
+    built once per run, a debug build, wherever CARGO_TARGET_DIR puts it. Under mutmut that is its copy of the crate's
+    sources (pyproject.toml's also_copy). A machine without cargo fails these tests rather than skipping them, as the
+    parity harness fails without its tools (TODO.md, "The Rust engine's parity harness")."""
+    manifest = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "ci", "gate-rust", "Cargo.toml")
+    if CARGO is None:
+        raise AssertionError("cargo, which builds the gate-rust helper, is not on PATH")
+    build = [CARGO, "build", "--locked", "--quiet", "--message-format=json", "--manifest-path", manifest]
+    built = subprocess.run(build, capture_output=True, text=True, check=False)  # noqa: S603
+    if built.returncode != 0:
+        raise AssertionError(f"cargo could not build the gate-rust helper: {built.stderr}")
+    # The executable's path from cargo's own report, wherever CARGO_TARGET_DIR puts it.
+    [helper] = [m["executable"] for m in map(json.loads, built.stdout.splitlines())
+                if m.get("reason") == "compiler-artifact" and m.get("executable")]
+    return helper
 
 
 class TestChangedLines(unittest.TestCase):
@@ -1123,7 +1145,7 @@ class TestRustFiles(RepositoryTest):
     ECHO = """
         for path in files:
             with open(path, "rb") as f:
-                print(json.dumps({"schema": 1, "text": f.read().decode("latin-1")}))
+                print(json.dumps({"schema": 2, "text": f.read().decode("latin-1")}))
         """
 
     def helper(self, code=ECHO):
@@ -1169,7 +1191,7 @@ class TestRustFiles(RepositoryTest):
         files, findings = self.rust_files(self.helper())
 
         def doc(text):
-            return {"schema": 1, "text": text}
+            return {"schema": 2, "text": text}
         self.assertEqual(findings, [])
         # In the order of GateChange.files, git's.
         self.assertEqual(files, [
@@ -1195,7 +1217,7 @@ class TestRustFiles(RepositoryTest):
         base = self.git("rev-parse", "HEAD").strip()
         self.touch_rust()
         [file], _ = gate.GateChange.from_tree(self.repo, base, rust_syntax=self.helper()).rust_files
-        self.assertEqual(file.before, {"schema": 1, "text": "fn f() {}\n// caf\xe9\n"})
+        self.assertEqual(file.before, {"schema": 2, "text": "fn f() {}\n// caf\xe9\n"})
 
     def test_a_change_to_no_rs_file_starts_no_helper_with_or_without_one(self):
         self.put("notes.txt", "more notes\n")
@@ -1245,17 +1267,17 @@ class TestRustFiles(RepositoryTest):
     def test_a_helper_that_fails_or_prints_other_than_its_documents_is_not_run(self):
         self.touch_rust()
         named = f"the gate-rust helper `{os.path.join(self.outside, 'gate-rust')}`"
-        rebuild = "where this gate.py reads schema 1; build the helper from the tree this gate.py comes from, its " \
+        rebuild = "where this gate.py reads schema 2; build the helper from the tree this gate.py comes from, its " \
                   "`ci/gate-rust`"
         undecodable = "'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"
         cases = [
             ('print("boom", file=sys.stderr)\nsys.exit(3)', f"{named} failed with exit status 3: boom"),
             ('print("not json")', f"{named} printed what is not JSON: not json"),
             ('print(json.dumps([1]))', f"{named} printed a document of schema null, {rebuild}"),
-            ('print(json.dumps({"schema": 2}))', f"{named} printed a document of schema 2, {rebuild}"),
+            ('print(json.dumps({"schema": 3}))', f"{named} printed a document of schema 3, {rebuild}"),
             # One file, kept.rs, on two sides.
-            ('print(json.dumps({"schema": 1}))', f"{named} printed 1 documents for 2 files"),
-            ('print(json.dumps({"schema": 1}), end="")', f'{named} did not end its output with a newline: {{"schema": 1}}'),
+            ('print(json.dumps({"schema": 2}))', f"{named} printed 1 documents for 2 files"),
+            ('print(json.dumps({"schema": 2}), end="")', f'{named} did not end its output with a newline: {{"schema": 2}}'),
             ('sys.stdout.buffer.write(b"\\xff\\n")', f"{named} printed what is not UTF-8: {undecodable}"),
         ]
         for code, why in cases:
@@ -1310,9 +1332,11 @@ class TestRustFiles(RepositoryTest):
     def test_a_document_whose_schema_is_true_is_not_schema_1(self):
         self.touch_rust()
         helper = self.helper('for _ in files:\n    print(json.dumps({"schema": True}))')
-        self.assertEqual(self.rust_files(helper), ([], self.not_run(
-            f"the gate-rust helper `{helper}` printed a document of schema true, where this gate.py reads schema 1; "
-            f"build the helper from the tree this gate.py comes from, its `ci/gate-rust`")))
+        # True == 1, so the gate is made to read schema 1 for this.
+        with patch.object(gate, "RUST_SYNTAX_SCHEMA", 1):
+            self.assertEqual(self.rust_files(helper), ([], self.not_run(
+                f"the gate-rust helper `{helper}` printed a document of schema true, where this gate.py reads schema "
+                f"1; build the helper from the tree this gate.py comes from, its `ci/gate-rust`")))
 
 
 class TestTestIntegrityCheck(unittest.TestCase):
@@ -1863,16 +1887,7 @@ class TestRustWeakenedTests(RepositoryTest):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        manifest = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "ci", "gate-rust", "Cargo.toml")
-        if shutil.which("cargo") is None:
-            raise RuntimeError("cargo is not on PATH, and these tests run the gate-rust helper it builds")
-        proc = Host().run(["cargo", "build", "--locked", "--quiet", "--message-format=json", "--manifest-path",
-                           manifest], timeout=600)
-        if proc.returncode != 0:
-            raise RuntimeError(f"cargo could not build the gate-rust helper: {proc.stderr}")
-        # The executable's path from cargo's own report, wherever CARGO_TARGET_DIR puts it.
-        [cls.helper] = [m["executable"] for m in map(json.loads, proc.stdout.splitlines())
-                        if m.get("reason") == "compiler-artifact" and m.get("executable")]
+        cls.helper = gate_rust()
 
     def found(self, helper=None):
         """(path, line, rule) of each finding of the check on the working tree's change, its Rust read with helper, the
@@ -5123,6 +5138,490 @@ class TestTooComplexFunctions(RepositoryTest):
     def test_it_fails_the_gate(self):
         [check] = [c for c in gate.gate_checks(gate.MUTATION_BUDGET) if c.name == "cognitive-complexity"]
         self.assertEqual((check.fails, check.find), (True, gate.too_complex_functions))
+
+
+def rust_scores(source):
+    """Each fn of source, Rust, that the cognitive-complexity check judges as one, by its name as the check gives it,
+    with its score; read with the gate-rust helper."""
+    with tempfile.NamedTemporaryFile("w", suffix=".rs") as f:
+        f.write(textwrap.dedent(source))
+        f.flush()
+        printed = subprocess.run([gate_rust(), f.name], capture_output=True, text=True, check=True).stdout  # noqa: S603
+    return {scored.name: scored.score for scored in gate._rust_scored_functions("src/lib.rs", json.loads(printed))}
+
+
+def rust_score(source):
+    """The score of the one fn of source, Rust, that the check judges as one."""
+    [score] = rust_scores(source).values()
+    return score
+
+
+class TestRustCognitiveComplexity(unittest.TestCase):
+    """The cognitive complexity of Rust, by the rules above COGNITIVE_COMPLEXITY_LIMIT: a test per row of their
+    mapping of Rust, each expected score added up in the comments, one increment per line."""
+
+    def test_if_else_if_and_else_add_one_and_nest_their_blocks(self):
+        self.assertEqual(rust_score("""
+            fn f(a: i32) -> i32 {
+                if a == 1 {             // +1
+                    1
+                } else if a == 2 {      // +1
+                    if a > 0 { 2 } else { 3 }   // +2, +1
+                } else {                // +1
+                    if a > 0 { 4 } else { 5 }   // +2, +1
+                }
+            }
+        """), 9)
+
+    def test_what_the_first_block_of_an_if_with_else_ifs_holds_counts(self):
+        self.assertEqual(rust_score("""
+            fn f(a: bool) {
+                if a {          // +1
+                    if a {}     // +2
+                } else if a {   // +1
+                }
+            }
+        """), 4)
+
+    def test_an_if_inside_an_else_block_is_nested_where_an_else_if_is_not(self):
+        self.assertEqual(rust_score("""
+            fn f(a: bool) {
+                if a {          // +1
+                } else {        // +1
+                    if a {}     // +2
+                }
+            }
+        """), 4)
+
+    def test_if_let_and_while_let_count_as_if_and_while(self):
+        self.assertEqual(rust_score("""
+            fn f(mut x: Option<u8>) {
+                if let Some(n) = x {            // +1
+                    while let Some(m) = x {     // +2
+                        x = None;
+                    }
+                }
+            }
+        """), 3)
+
+    def test_loop_while_and_for_add_one_and_their_nesting(self):
+        self.assertEqual(rust_score("""
+            fn f(items: &[u8]) {
+                loop {                          // +1
+                    while true {                // +2
+                        for i in items {}       // +3
+                    }
+                }
+            }
+        """), 6)
+
+    def test_a_condition_and_an_iterator_are_at_their_statements_level(self):
+        self.assertEqual(rust_score("""
+            fn f(a: bool) {
+                for i in if a { 0..1 } else { 0..2 } {      // +1, +1 and +1
+                    while if a { true } else { false } {}   // +2, +2 and +1
+                    if match a { _ => true } {}             // +2, +2
+                }
+            }
+        """), 12)
+
+    def test_a_match_adds_one_for_all_its_arms_which_it_nests(self):
+        # The paper's getWords: a switch is one increment, however many cases it has.
+        self.assertEqual(rust_score("""
+            fn get_words(n: u8) -> &'static str {
+                match n {                           // +1
+                    1 => "one",
+                    2 if n > 0 && n < 9 => "a couple",   // the guard's && only: +1
+                    _ => if n > 9 { "lots" } else { "some" },   // +2, +1
+                }
+            }
+        """), 5)
+
+    def test_a_let_else_adds_one_and_its_nesting_and_nests_its_else(self):
+        self.assertEqual(rust_score("""
+            fn f(x: Option<u8>) -> u8 {
+                let Some(n) = x else {              // +1
+                    return if x.is_none() { 0 } else { 1 };     // +2, +1
+                };
+                for _ in 0..n {                     // +1
+                    let Some(m) = x else { break };     // +2
+                }
+                n
+            }
+        """), 7)
+
+    def test_each_run_of_like_boolean_operators_adds_one(self):
+        # The paper's `a && b && c || d || e && f`: three runs of like operators.
+        self.assertEqual(rust_score("""
+            fn f(a: bool, b: bool, c: bool, d: bool, e: bool, g: bool) -> bool {
+                a && b && c || d || e && g      // +3
+            }
+        """), 3)
+        self.assertEqual(rust_score("""
+            fn f(a: bool, b: bool, c: bool) -> bool {
+                a || b && c                     // +2
+            }
+        """), 2)
+
+    def test_a_parenthesised_operand_continues_the_run_and_a_negation_or_a_call_starts_one(self):
+        self.assertEqual(rust_score("""
+            fn f(a: bool, b: bool, c: bool) -> bool {
+                let x = a && (b && c);          // +1
+                let y = a && (b || c);          // +2
+                let z = a && !(b && c);         // +1, +1
+                a || g(b || c)                  // +1, +1
+            }
+        """), 7)
+
+    def test_a_let_chain_s_and_is_a_boolean_operator(self):
+        self.assertEqual(rust_score("""
+            fn f(x: Option<u8>, a: bool) {
+                if let Some(n) = x && a {}      // +1, +1
+            }
+        """), 2)
+
+    def test_a_labelled_break_or_continue_adds_one_and_a_plain_one_nothing(self):
+        self.assertEqual(rust_score("""
+            fn f(items: &[u8]) -> u8 {
+                'outer: for i in items {        // +1
+                    for j in items {            // +2
+                        if *j == 0 { continue 'outer; }     // +3, +1
+                        if *j == 1 { break 'outer; }        // +3, +1
+                        if *j == 2 { continue; }            // +3
+                    }
+                }
+                loop { break 7; }               // +1
+            }
+        """), 15)
+
+    def test_a_closure_nests_its_body_and_counts_toward_its_fn(self):
+        self.assertEqual(rust_score("""
+            fn f(items: &[u8]) -> usize {
+                let g = |x: u8| if x > 1 { 1 } else { 0 };      // +2, +1
+                let h = async move || { for i in items {} };    // +2
+                items.len()
+            }
+        """), 5)
+
+    def test_a_fn_the_body_holds_nests_its_body_and_counts_toward_its_holder(self):
+        scores = rust_scores("""
+            fn outer(a: bool) {
+                fn inner(a: bool) {
+                    if a {}             // +2
+                }
+                struct Local;
+                impl Local {
+                    fn method(&self, a: bool) {
+                        if a {}         // +2
+                    }
+                }
+            }
+        """)
+        self.assertEqual(scores, {"outer": 4})
+
+    def test_a_held_fn_that_calls_itself_adds_one(self):
+        self.assertEqual(rust_score("""
+            fn outer() {
+                fn inner(n: u8) { inner(n) }                    // +1
+                fn holder() { fn deeper() { holder() } }
+                fn caller() { inner(1) }
+                struct Local;
+                impl Local {
+                    fn method(&self) { self.method() }          // +1
+                    fn other(&self) { Self::other(self) }       // +1
+                    fn free(&self) { free() }
+                }
+                fn by_another() { outer() }
+            }
+        """), 4)  # and outer itself, which by_another calls: +1
+
+    def test_recursion_adds_one_to_each_fn_on_a_cycle_of_calls_in_its_file(self):
+        scores = rust_scores("""
+            fn countdown(n: u8) { if n > 0 { countdown(n - 1) } }    // +1, +1
+            fn ping(n: u8) { pong(n) }                               // +1
+            fn pong(n: u8) { ping(n) }                               // +1
+            fn caller() { ping(1); ping(2) }
+            fn first(n: u8) { first(n); if n > 0 {} }                // +1, +1
+            fn solo() { twin() }
+            mod q {
+                pub fn twin() { solo() }
+            }
+            struct Pair<T>(T);
+            impl Pair<Vec<u8>> {
+                fn make() { Pair::make() }                           // +1
+            }
+            struct S;
+            impl S {
+                fn by_self(&self) { self.by_self() }                 // +1
+                fn by_type() { S::by_type() }                        // +1
+                fn by_alias() { Self::by_alias() }                   // +1
+                fn by_free() { by_free() }
+            }
+            trait T {
+                fn default(&self) { self.default() }                 // +1
+                fn by_trait() { T::by_trait() }                      // +1
+            }
+            impl T for S {
+                fn default(&self) { self.by_self() }
+            }
+            impl std::fmt::Display for S {
+                fn fmt(&self) { self.fmt() }                         // +1
+            }
+            impl std::fmt::Debug for S {
+                fn fmt(&self) {}
+            }
+            impl<'a> T for &'a mut S {
+                fn by_trait() { Self::by_trait() }                   // +1
+            }
+            mod n {
+                pub struct S2;
+                impl self::S2 {
+                    pub fn by_path() { S2::by_path() }               // +1
+                }
+            }
+            trait A { fn run(&self); fn step(&self); }
+            trait B { fn run(&self); fn step(&self); }
+            impl A for S {
+                fn run(&self) { self.step() }
+                fn step(&self) {}
+            }
+            impl B for S {
+                fn run(&self) {}
+                fn step(&self) { self.run() }
+            }
+            impl S {
+                fn inherent(&self) { self.by_impl() }                // +1
+            }
+            impl T for S {
+                fn by_impl(&self) { self.inherent() }                // +1
+            }
+            impl Clone for S {
+                fn clone(&self) -> S { S::clone(self) }              // +1
+            }
+            mod m {
+                pub fn countdown() { crate::countdown(1) }
+                pub fn ping() { super::pong(1); crate::m::ping() }
+            }
+        """)
+        self.assertEqual(scores, {"countdown": 2, "ping": 1, "pong": 1, "caller": 0, "first": 2, "solo": 0,
+                                  "q::twin": 0, "Pair<Vec<u8>>::make": 1, "S::by_self": 1,
+                                  "S::by_type": 1, "S::by_alias": 1, "S::by_free": 0, "T::default": 1,
+                                  "T::by_trait": 1, "<S as T>::default": 0, "<S as std::fmt::Display>::fmt": 1,
+                                  "<S as std::fmt::Debug>::fmt": 0, "<&'a mut S as T>::by_trait": 1, "n::self::S2::by_path": 1, "<S as A>::run": 0,
+                                  "<S as A>::step": 0, "<S as B>::run": 0, "<S as B>::step": 0, "S::inherent": 1,
+                                  "<S as T>::by_impl": 1, "<S as Clone>::clone": 1,
+                                  "m::countdown": 0, "m::ping": 0})
+
+    def test_question_marks_blocks_and_a_macro_s_tokens_add_nothing_but_its_expression_arguments_count(self):
+        self.assertEqual(rust_score("""
+            fn f(x: Result<u8, ()>) -> Result<u8, ()> {
+                let v = unsafe { async { x? } };
+                let w = { x?.checked_add(1).ok_or(())? };
+                println!("{}", if v.is_ok() { 1 } else { 2 });     // +1, +1
+                tokio::select! { _ = g() => if true {} }
+                Ok(w)
+            }
+        """), 2)
+
+    def test_a_fn_is_judged_by_its_path_of_modules_impls_and_traits_but_not_in_a_test_module(self):
+        scores = rust_scores("""
+            fn free() {}
+            trait Shape { fn declared(&self); fn defaulted(&self) {} }
+            impl<'a, T: Clone> std::fmt::Debug for Wrapper<'a, T> {
+                fn fmt(&self) {}
+            }
+            mod inner {
+                pub(crate) fn spread() {}
+                #[cfg(test)]
+                mod tests {
+                    fn helper() { if true {} }
+                    #[test]
+                    fn checks() {}
+                }
+            }
+            #[cfg(all(test, unix))]
+            fn only_in_tests() {}
+            #[cfg(test)] mod one_line { fn on_its_first_and_last_line() {} }
+        """)
+        self.assertEqual(scores, {"free": 0, "Shape::defaulted": 0, "<Wrapper<'a,T> as std::fmt::Debug>::fmt": 0,
+                                  "inner::spread": 0, "only_in_tests": 0})
+
+
+class TestComplexityExempt(unittest.TestCase):
+    """_complexity_exempt: where the tests are, whose functions the check never judges."""
+
+    def test_python_s_tests_are_under_tests(self):
+        self.assertTrue(gate._complexity_exempt("tests/test_gate.py"))
+        self.assertFalse(gate._complexity_exempt("gate.py"))
+        self.assertFalse(gate._complexity_exempt("evals/tests/check.py"))
+
+    def test_rust_s_tests_are_in_a_tests_directory_at_any_depth_or_a_tests_rs(self):
+        for path in ["tests/cli.rs", "engine/tests/cli.rs", "engine/src/checks/tests.rs", "tests.rs"]:
+            self.assertTrue(gate._complexity_exempt(path), path)
+        for path in ["engine/src/lib.rs", "engine/src/tests_util.rs", "engine/src/my_tests.rs", "build.rs"]:
+            self.assertFalse(gate._complexity_exempt(path), path)
+
+
+def rust_flat(name, n):
+    """A Rust fn of n ifs one after the other, so of cognitive complexity n."""
+    body = "".join(f"    if x == {k} {{\n        x += {k};\n    }}\n" for k in range(n))
+    return f"fn {name}(mut x: u32) -> u32 {{\n{body}    x\n}}\n"
+
+
+class TestTooComplexRustFunctions(RepositoryTest):
+    """The cognitive-complexity check over a real git repository's Rust, read with the gate-rust helper built from
+    this tree."""
+
+    BASE = rust_flat("grow", 14) + "\n" + rust_flat("big", 20) + "\n" + rust_flat("small", 3)
+
+    BASE_FILES = {"engine/src/calc.rs": BASE}
+
+    def found(self, rust_syntax=None):
+        """(path, line, message) of each finding on the working tree's change, read with the helper rust_syntax,
+        by default the one built from this tree."""
+        change = gate.GateChange.from_tree(self.repo, self.base, rust_syntax=rust_syntax or gate_rust())
+        return [(f["path"], f["line"], f["message"]) for f in gate.too_complex_functions(change)]
+
+    def fn_line(self, name, path="engine/src/calc.rs"):
+        with open(os.path.join(self.repo, path)) as f:
+            return next(n for n, line in enumerate(f, 1) if line.startswith(f"fn {name}("))
+
+    def nest_under(self, k):
+        """Add an if inside the kth if of calc.rs, which only grow's and big's first 14 ifs share: grow's then:
+        2 more, at nesting 1."""
+        self.edit("engine/src/calc.rs", f"    if x == {k} {{\n        x += {k};\n    }}\n    x\n}}\n\nfn big",
+                  f"    if x == {k} {{\n        x += {k};\n        if x > 1 {{}}\n    }}\n    x\n}}\n\nfn big")
+
+    def test_a_new_fn_over_the_limit_is_found_and_one_at_it_is_not(self):
+        self.put("engine/src/calc.rs", self.BASE + "\n" + rust_flat("new_big", 16) + "\n" + rust_flat("new_ok", 15))
+        self.assertEqual(self.found(), [("engine/src/calc.rs", self.fn_line("new_big"),
+                                         "`new_big`: cognitive complexity 16, a new function; the limit is 15.")])
+
+    def test_a_fn_the_change_raises_over_the_limit_is_found_at_its_line(self):
+        self.nest_under(13)  # grow's last if: 14 becomes 16
+        self.assertEqual(self.found(), [("engine/src/calc.rs", 1,
+                                         "`grow`: cognitive complexity 16, 14 at the base; the limit is 15.")])
+
+    def test_a_fn_over_the_limit_that_the_change_makes_worse_is_found(self):
+        self.edit("engine/src/calc.rs", "    if x == 19 {\n        x += 19;\n",
+                  "    if x == 19 {\n        x += 19;\n        if x > 1 {}\n")  # big: 20 becomes 22
+        self.assertEqual(self.found(), [("engine/src/calc.rs", self.fn_line("big"),
+                                         "`big`: cognitive complexity 22, 20 at the base; the limit is 15.")])
+
+    def new_big(self):
+        """Add a new fn over the limit to a file of its own, which every check below finds beside what it expects:
+        the gate before Rust's scoring finds nothing."""
+        self.put("engine/src/fresh.rs", rust_flat("fresh", 16))
+        self.git("add", "engine/src/fresh.rs")
+        return [("engine/src/fresh.rs", 1, "`fresh`: cognitive complexity 16, a new function; the limit is 15.")]
+
+    def test_a_fn_over_the_limit_that_the_change_leaves_no_worse_is_not_found(self):
+        self.edit("engine/src/calc.rs", "        x += 19;\n", "        x += 190;\n")
+        fresh = self.new_big()
+        self.assertEqual(self.found(), fresh)
+
+    def test_a_fn_moved_unchanged_to_another_file_keeps_its_base(self):
+        self.put("engine/src/calc.rs", rust_flat("grow", 14) + "\n" + rust_flat("small", 3))
+        self.put("engine/src/big.rs", "/// Moved.\n" + rust_flat("big", 20))
+        self.git("add", "-A")
+        fresh = self.new_big()
+        self.assertEqual(self.found(), fresh)
+
+    def test_a_fn_moved_unchanged_out_of_a_file_the_change_deletes_keeps_its_base(self):
+        self.git("rm", "--quiet", "engine/src/calc.rs")
+        # With as many lines again of other fns, which git does not take for calc.rs renamed.
+        self.put("engine/src/big.rs", rust_flat("big", 20) + "".join(rust_flat(f"other{k}", 1) for k in range(20)))
+        self.git("add", "-A")
+        self.assertCountEqual(gate.GateChange.from_tree(self.repo, self.base).files,
+                              [("engine/src/calc.rs", None), (None, "engine/src/big.rs")])
+        fresh = self.new_big()
+        self.assertEqual(self.found(), fresh)
+
+    def test_a_fn_left_in_a_file_the_change_adds_no_line_to_keeps_its_base_before_a_copy_can(self):
+        # calc.rs, renamed and only cut, is not judged, but its big is still itself, so the copy is new.
+        self.git("mv", "engine/src/calc.rs", "engine/src/kept.rs")
+        self.put("engine/src/kept.rs", rust_flat("big", 20) + "\n" + rust_flat("small", 3))
+        self.put("engine/src/copy.rs", rust_flat("big", 20))
+        self.git("add", "-A")
+        change = gate.GateChange.from_tree(self.repo, self.base)
+        self.assertIn(("engine/src/calc.rs", "engine/src/kept.rs"), change.files)
+        self.assertEqual(change.changed["engine/src/kept.rs"], set())
+        self.assertEqual(self.found(), [("engine/src/copy.rs", 1,
+                                         "`big`: cognitive complexity 20, a new function; the limit is 15.")])
+
+    def test_the_tests_are_not_judged(self):
+        big = rust_flat("big_test", 20)
+        self.put("engine/tests/cli.rs", big)
+        self.put("engine/src/tests.rs", big)
+        self.put("engine/tests/broken.rs", "fn broken( {\n")
+        self.put("engine/src/calc.rs", self.BASE + "#[cfg(test)]\nmod tests {\n" + big + "}\n")
+        self.git("add", "-A")
+        fresh = self.new_big()
+        self.assertEqual(self.found(), fresh)
+
+    def test_the_impls_of_two_traits_for_one_type_name_their_fns_apart(self):
+        def impls(a, b):
+            return (f"struct X;\nimpl From<u8> for X {{\n{rust_flat('from', a)}}}\n"
+                    f"impl From<u16> for X {{\n{rust_flat('from', b)}}}\n")
+
+        self.put("engine/src/x.rs", impls(16, 20))
+        self.git("add", "engine/src/x.rs")
+        self.git("commit", "--quiet", "-m", "x")
+        self.base = self.git("rev-parse", "HEAD").strip()
+        self.put("engine/src/x.rs", impls(18, 20))
+        why = "`<X as From<u8>>::from`: cognitive complexity 18, 16 at the base; the limit is 15."
+        self.assertEqual(self.found(), [("engine/src/x.rs", 3, why)])
+
+    def test_a_rust_file_that_does_not_parse_is_not_scored_at_the_line_the_helper_names(self):
+        self.put("engine/src/calc.rs", self.BASE + "fn broken( {\n")
+        change = gate.GateChange.from_tree(self.repo, self.base, rust_syntax=gate_rust())
+        [finding] = gate.too_complex_functions(change)
+        # The brace left open is the lexer's error, at the brace.
+        self.assertEqual((finding["path"], finding["line"], finding["severity"]),
+                         ("engine/src/calc.rs", self.BASE.count("\n") + 1, "error"))
+        self.assertRegex(finding["message"], r"^does not parse as Rust \(.+\), so its functions were not scored\.$")
+
+    def test_a_base_that_does_not_parse_has_no_functions_to_lend(self):
+        self.put("engine/src/calc.rs", "fn broken( {\n")
+        self.git("commit", "--quiet", "-am", "broken")
+        self.base = self.git("rev-parse", "HEAD").strip()
+        self.put("engine/src/calc.rs", rust_flat("big", 20))
+        self.assertEqual(self.found(), [("engine/src/calc.rs", 1,
+                                         "`big`: cognitive complexity 20, a new function; the limit is 15.")])
+
+    def test_a_fn_whose_body_is_new_is_new_though_another_s_body_is_gone(self):
+        self.put("engine/src/calc.rs", rust_flat("grow", 14) + "\n" + rust_flat("small", 3))
+        self.put("engine/src/other.rs", rust_flat("other", 20).replace("x += 19;", "x -= 19;"))
+        self.git("add", "-A")
+        self.assertEqual(self.found(), [("engine/src/other.rs", 1,
+                                         "`other`: cognitive complexity 20, a new function; the limit is 15.")])
+
+    def test_without_the_helper_the_change_s_rust_is_not_run(self):
+        self.nest_under(13)
+        missing = os.path.join(self.outside, "gate-rust")
+        why = f"the gate-rust helper `{missing}` is not there, so the check judged none of the change's Rust."
+        self.assertEqual(self.found(missing), [(None, None, why)])
+
+    def test_a_change_to_the_tests_rust_alone_starts_no_helper(self):
+        self.put("engine/tests/cli.rs", rust_flat("big_test", 20))
+        self.git("add", "-A")
+        self.assertEqual(self.found(os.path.join(self.outside, "gate-rust")), [])
+
+    def test_a_change_that_judges_no_rust_starts_no_helper(self):
+        # The deleted calc.rs and the tests' cli.rs are Rust the change touches, which no function of the change's
+        # Python can pair with.
+        started = os.path.join(self.outside, "started")
+        helper = os.path.join(self.outside, "gate-rust")
+        with open(helper, "w") as f:
+            f.write(f"#!/bin/sh\ntouch '{started}'\nexit 1\n")
+        os.chmod(helper, 0o700)
+        self.git("rm", "--quiet", "engine/src/calc.rs")
+        self.put("engine/tests/cli.rs", rust_flat("big_test", 20))
+        self.put("calc.py", flat("new_big", 16))
+        self.git("add", "-A")
+        self.assertEqual([m for _, _, m in self.found(helper)],
+                         ["`new_big`: cognitive complexity 16, a new function; the limit is 15."])
+        self.assertFalse(os.path.exists(started))
 
 
 class TestChangedPythonFiles(RepositoryTest):
