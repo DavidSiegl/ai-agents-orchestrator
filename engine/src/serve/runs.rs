@@ -1,7 +1,8 @@
 //! What serve gives of a project's runs, as orchestrator.py's ProjectRuns, plain_name, RunWatch and sse_event: the
 //! run records `list --json` prints, each run's files and their text, and the events that tell a stream's client what
-//! changed; and each run's agents, read and typed into through herdr. Every path a client names is checked before
-//! anything is read, and an agent is named only by its run and role, never by its herdr name.
+//! changed; and each run's agents, read and typed into through herdr, in the herdr server their run saved. Every path
+//! a client names is checked before anything is read, and an agent is named only by its run and role, never by its
+//! herdr name.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -10,7 +11,7 @@ use std::sync::Arc;
 use crate::cli::listing::run_record;
 use crate::constants::RUNS_DIR;
 use crate::error::OrchestratorError;
-use crate::herdr::{AgentConsole, HerdrError};
+use crate::herdr::{AgentAddress, AgentConsole, HerdrError, HerdrServer};
 use crate::host::Host;
 use crate::py::json::{Json, Map};
 use crate::py::text::repr;
@@ -70,7 +71,7 @@ pub enum AgentInput {
 pub struct ProjectRuns {
     /// Reaches the project; its commands are stopped when the server stops.
     host: Arc<dyn Host + Send + Sync>,
-    /// Reaches the herdr the project's runs start their agents in.
+    /// Reaches the project's runs' agents, each in the herdr server its run saved.
     console: Arc<dyn AgentConsole>,
     /// The project's absolute directory on host.
     cwd: String,
@@ -81,7 +82,7 @@ pub struct ProjectRuns {
 }
 
 impl ProjectRuns {
-    /// The project in directory cwd, absolute, on host, its agents in console's herdr; target is as the field says.
+    /// The project in directory cwd, absolute, on host, its agents reached by console; target is as the field says.
     pub fn new(
         host: Arc<dyn Host + Send + Sync>,
         console: Arc<dyn AgentConsole>,
@@ -140,35 +141,41 @@ impl ProjectRuns {
     /// The last lines of what the run's agent of role shows, at most lines of them (AgentConsole::read). Errors:
     /// agent_name's, Missing for an agent that has exited, Failed when herdr fails otherwise.
     pub fn agent_text(&self, run_id: &str, role: &str, lines: u32) -> Result<String, RunReadError> {
-        let name = self.agent_name(run_id, role)?;
-        self.console.read(&name, lines).map_err(|e| herdr_failure(role, e))
+        let agent = self.agent(run_id, role)?;
+        self.console.read(&agent, lines).map_err(|e| herdr_failure(role, e))
     }
 
     /// Type input into the run's agent of role, without waiting for it to be taken. Errors: as agent_text's.
     pub fn type_into(&self, run_id: &str, role: &str, input: &AgentInput) -> Result<(), RunReadError> {
-        let name = self.agent_name(run_id, role)?;
+        let agent = self.agent(run_id, role)?;
         let typed = match input {
-            AgentInput::Text(text) => self.console.submit(&name, text),
+            AgentInput::Text(text) => self.console.submit(&agent, text),
             AgentInput::Keys(keys) => {
                 let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
-                self.console.send_keys(&name, &keys)
+                self.console.send_keys(&agent, &keys)
             }
         };
         typed.map_err(|e| herdr_failure(role, e))
     }
 
-    /// The herdr name of the run's agent of role, as its state.json saves it. Errors: Refused for a run id that is
-    /// not a plain name; Missing for no such run, or no started agent of that role in it; Failed when state.json
-    /// cannot be read or is not JSON.
-    fn agent_name(&self, run_id: &str, role: &str) -> Result<String, RunReadError> {
+    /// The run's agent of role as its state.json saves it: its herdr name and its run's herdr server. Errors:
+    /// Refused for a run id that is not a plain name; Missing for no such run, or no started agent of that role in
+    /// it; Failed when state.json cannot be read, is not JSON, or saves a herdr_server of another shape.
+    fn agent(&self, run_id: &str, role: &str) -> Result<AgentAddress, RunReadError> {
         let path = format!("{}/state.json", self.dir(run_id)?);
         let text = self.host.read(&path)?.ok_or_else(|| RunReadError::Missing(format!("no run {run_id}")))?;
         let state = Json::parse(&text).map_err(|e| OrchestratorError(format!("{path}: {e}")))?;
         let name = state.get("agents").and_then(|a| a.get(role)).and_then(|a| a.get("name")).and_then(Json::as_str);
-        match name.filter(|n| !n.is_empty()) {
-            Some(name) => Ok(name.to_string()),
-            None => Err(RunReadError::Missing(format!("run {run_id} has no {role} agent"))),
-        }
+        let Some(name) = name.filter(|n| !n.is_empty()) else {
+            return Err(RunReadError::Missing(format!("run {run_id} has no {role} agent")));
+        };
+        let server = match state.get("herdr_server").filter(|s| !s.is_null()) {
+            None => None,
+            Some(saved) => Some(HerdrServer::from_json(saved).ok_or_else(|| {
+                OrchestratorError(format!("{path}: herdr_server is not an object of herdr's variables"))
+            })?),
+        };
+        Ok(AgentAddress { name: name.to_string(), server })
     }
 
     fn dir(&self, run_id: &str) -> Result<String, RunReadError> {

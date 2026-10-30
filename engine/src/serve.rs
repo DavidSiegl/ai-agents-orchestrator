@@ -52,7 +52,7 @@ pub struct Reached {
     pub host: Arc<dyn Host + Send + Sync>,
     /// The project's absolute directory on host.
     pub dir: String,
-    /// Reaches the herdr its runs' agents run in.
+    /// Reaches its runs' agents, each by its AgentAddress.
     pub console: Arc<dyn AgentConsole>,
 }
 
@@ -113,11 +113,13 @@ fn serve(
 }
 
 /// The project on the saved herdr machine or, with machine empty, here: the Host that reaches it, its absolute
-/// directory, cwd's, which may start with ~, and the herdr its agents run in, this machine's herdr forwarding to
-/// machine. Each command is stopped by stopping. Python's project_host: without connect's check for a herdr pane,
-/// since reading a project sends herdr no command, so a window started from a file manager reads it too; its agents'
-/// commands then go to the herdr session the CLI picks without one (HERDR_SESSION, else the default session). Errors:
-/// the machine is not saved or enabled, or the directory cannot be entered.
+/// directory, cwd's, which may start with ~, and the console that reaches its agents, this machine's herdr
+/// forwarding to machine. Each command is stopped by stopping. Python's project_host: without connect's check for a
+/// herdr pane, since reading a project sends herdr no command, so a window started from a file manager reads it too.
+/// On this machine, an agent's commands go to the herdr server its run saved (RunState::herdr_server), whatever
+/// server serve's own environment picks; an agent of a run saved before runs saved it is reached in the one serve's
+/// environment picks (HERDR_SOCKET_PATH, else HERDR_SESSION, else the default session). Errors: the machine is not
+/// saved or enabled, or the directory cannot be entered.
 pub fn project_host(machine: &str, cwd: &str, stopping: &Interrupt) -> Result<Reached, OrchestratorError> {
     let here = ProcessHost::local(stopping);
     let herdr = ProcessHerdr::new(Some(machine), stopping);

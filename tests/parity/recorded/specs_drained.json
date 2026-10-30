@@ -60,6 +60,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "build",
       "round": 0,
       "workspace_id": "",
@@ -130,6 +134,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "build",
       "round": 1,
       "workspace_id": "w1",
@@ -217,6 +225,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "build",
       "round": 1,
       "workspace_id": "w1",
@@ -289,6 +301,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "build",
       "round": 1,
       "workspace_id": "w1",
@@ -363,6 +379,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "review",
       "round": 1,
       "workspace_id": "w1",
@@ -485,6 +505,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "review",
       "round": 1,
       "workspace_id": "w1",
@@ -579,6 +603,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "review",
       "round": 1,
       "workspace_id": "w1",
@@ -675,6 +703,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "publish",
       "round": 1,
       "workspace_id": "w1",
@@ -793,6 +825,10 @@
       "task": "Add a subtract function",
       "cwd": "<world>/project",
       "machine": null,
+      "herdr_server": {
+       "HERDR_SOCKET_PATH": null,
+       "HERDR_SESSION": null
+      },
       "phase": "done",
       "round": 1,
       "workspace_id": "w1",
@@ -923,7 +959,7 @@
   "runs/<run:1>/metrics.json": "{\"version\": 1, \"run_id\": \"<run:1>\", \"workflow\": \"default\", \"outcome\": \"APPROVE\", \"rounds\": 1, \"max_rounds\": 3, \"quality_gate\": false, \"max_quality_rounds\": null, \"pull_request\": \"https://github.com/parity/project/pull/1\", \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\", \"roles\": {\"build\": {\"harness\": \"claude\", \"model\": null}, \"review\": {\"harness\": \"claude\", \"model\": null}}, \"turns\": [{\"step\": \"build\", \"role\": \"build\", \"harness\": \"claude\", \"model\": null, \"round\": 1, \"quality_round\": 0, \"human_paced\": false, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\", \"tokens\": \"unknown\"}, {\"step\": \"review\", \"role\": \"review\", \"harness\": \"claude\", \"model\": null, \"round\": 1, \"quality_round\": 0, \"human_paced\": false, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\", \"tokens\": \"unknown\"}], \"quality_rounds\": [], \"restored_locked_files\": 0}\n",
   "runs/<run:1>/review-1.md": "VERDICT: APPROVE\n\nNone.\n",
   "runs/<run:1>/spec.md": "# Add a subtract function\n\nStatus: ready-for-agent\n\n## Goal\n\nAdd `subtract(a, b)` to src/calc.py.\n",
-  "runs/<run:1>/state.json": "{\"run_id\": \"<run:1>\", \"task\": \"Add a subtract function\", \"cwd\": \"<world>/project\", \"machine\": null, \"phase\": \"done\", \"round\": 1, \"workspace_id\": \"w1\", \"root_pane\": \"p1\", \"base\": \"<sha:1>\", \"base_branch\": \"main\", \"branch\": \"orchestrator/add-a-subtract-function-<key:1>\", \"pr_url\": \"https://github.com/parity/project/pull/1\", \"verdict\": \"APPROVE\", \"conflicts\": [], \"error\": null, \"agents\": {\"build\": {\"name\": \"build-<key:1>\", \"pane\": \"p1\", \"kind\": \"claude\", \"session\": \"session-1\"}, \"review\": {\"name\": \"review-<key:1>\", \"pane\": \"p2\", \"kind\": \"claude\", \"session\": \"session-2\"}}, \"max_rounds\": 3, \"turn_timeout\": 1800, \"permission_mode\": null, \"models\": {}, \"agent_kinds\": {\"spec\": \"claude\", \"build\": \"claude\", \"review\": \"claude\"}, \"pull_request\": true, \"prompted\": \"review-1.md\", \"retried\": [], \"retrying\": null, \"owner\": null, \"heartbeat_at\": \"<time>\", \"quality_job\": null, \"quality_gate_disabled\": false, \"max_quality_rounds\": 3, \"quality_round\": 0, \"ci\": {}, \"workflow\": \"default\", \"workflow_definition\": null, \"prompt_overrides\": {}, \"branch_cleanup\": null, \"worktree\": null, \"closed\": null, \"turns\": [{\"step\": \"build\", \"role\": \"build\", \"round\": 1, \"quality_round\": 0, \"file\": \"build-1.md\", \"agent\": \"claude\", \"model\": null, \"session\": \"session-1\", \"tokens\": \"unknown\", \"human_paced\": false, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\"}, {\"step\": \"review\", \"role\": \"review\", \"round\": 1, \"quality_round\": 0, \"file\": \"review-1.md\", \"agent\": \"claude\", \"model\": null, \"session\": \"session-2\", \"tokens\": \"unknown\", \"human_paced\": false, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\"}], \"quality_rounds\": [], \"blocked\": null, \"locked\": {}, \"restored\": [], \"proofs\": []}\n",
+  "runs/<run:1>/state.json": "{\"run_id\": \"<run:1>\", \"task\": \"Add a subtract function\", \"cwd\": \"<world>/project\", \"machine\": null, \"herdr_server\": {\"HERDR_SOCKET_PATH\": null, \"HERDR_SESSION\": null}, \"phase\": \"done\", \"round\": 1, \"workspace_id\": \"w1\", \"root_pane\": \"p1\", \"base\": \"<sha:1>\", \"base_branch\": \"main\", \"branch\": \"orchestrator/add-a-subtract-function-<key:1>\", \"pr_url\": \"https://github.com/parity/project/pull/1\", \"verdict\": \"APPROVE\", \"conflicts\": [], \"error\": null, \"agents\": {\"build\": {\"name\": \"build-<key:1>\", \"pane\": \"p1\", \"kind\": \"claude\", \"session\": \"session-1\"}, \"review\": {\"name\": \"review-<key:1>\", \"pane\": \"p2\", \"kind\": \"claude\", \"session\": \"session-2\"}}, \"max_rounds\": 3, \"turn_timeout\": 1800, \"permission_mode\": null, \"models\": {}, \"agent_kinds\": {\"spec\": \"claude\", \"build\": \"claude\", \"review\": \"claude\"}, \"pull_request\": true, \"prompted\": \"review-1.md\", \"retried\": [], \"retrying\": null, \"owner\": null, \"heartbeat_at\": \"<time>\", \"quality_job\": null, \"quality_gate_disabled\": false, \"max_quality_rounds\": 3, \"quality_round\": 0, \"ci\": {}, \"workflow\": \"default\", \"workflow_definition\": null, \"prompt_overrides\": {}, \"branch_cleanup\": null, \"worktree\": null, \"closed\": null, \"turns\": [{\"step\": \"build\", \"role\": \"build\", \"round\": 1, \"quality_round\": 0, \"file\": \"build-1.md\", \"agent\": \"claude\", \"model\": null, \"session\": \"session-1\", \"tokens\": \"unknown\", \"human_paced\": false, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\"}, {\"step\": \"review\", \"role\": \"review\", \"round\": 1, \"quality_round\": 0, \"file\": \"review-1.md\", \"agent\": \"claude\", \"model\": null, \"session\": \"session-2\", \"tokens\": \"unknown\", \"human_paced\": false, \"started_at\": \"<time>\", \"ended_at\": \"<time>\", \"seconds\": \"<seconds>\"}], \"quality_rounds\": [], \"blocked\": null, \"locked\": {}, \"restored\": [], \"proofs\": []}\n",
   "runs/<run:1>/summary.md": "# Run <run:1>\n\n- **Workflow:** default\n- **Outcome:** APPROVE\n- **Pull request:** https://github.com/parity/project/pull/1\n- **Branch:** `orchestrator/add-a-subtract-function-<key:1>`\n- **Wall time:** <duration>, from the first turn's start to <time>\n\n## Task\n\nAdd a subtract function\n\n## Roles\n\n| role | harness | model |\n| --- | --- | --- |\n| Spec Collector (spec) | claude | default |\n| Builder (build) | claude | default |\n| Reviewer (review) | claude | default |\n\n## Turns\n\n| step | role | round | harness | model | start (UTC) | duration | file |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| build | build | 1 | claude | default | <time> | <duration> | build-1.md |\n| review | review | 1 | claude | default | <time> | <duration> | review-1.md |\n\n## Rounds\n\n- Round 1: review APPROVE\n",
   "runs/<run:1>/gitleaks-rules/.gitleaks.toml": "[extend]\nuseDefault = true\n"
  },

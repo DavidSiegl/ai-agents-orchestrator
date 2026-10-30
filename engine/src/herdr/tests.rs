@@ -45,6 +45,11 @@ fn last(ran: &Commands) -> (Vec<String>, Option<Duration>) {
     ran.lock().unwrap().last().cloned().expect("a command ran")
 }
 
+/// The address of the agent named name in the server the console's own environment reaches.
+fn address(name: &str) -> AgentAddress {
+    AgentAddress { name: name.to_string(), server: None }
+}
+
 fn argv(words: &[&str]) -> Vec<String> {
     words.iter().map(|w| w.to_string()).collect()
 }
@@ -309,13 +314,13 @@ fn the_other_commands_and_their_answers() {
 fn the_console_reads_the_agent_s_text_and_types_into_it() {
     let (herdr, ran) = answering(Some("box"), 0, "line 1\nline 2\n", "");
     let with = |words: &[&str]| argv(&[&["herdr", "--machine", "box"][..], words].concat());
-    assert_eq!(AgentConsole::read(&herdr, "build-x", 200), Ok("line 1\nline 2\n".to_string()));
+    assert_eq!(AgentConsole::read(&herdr, &address("build-x"), 200), Ok("line 1\nline 2\n".to_string()));
     let read = with(&["agent", "read", "build-x", "--source", "recent", "--lines", "200"]);
     assert_eq!(last(&ran), (read, Some(Duration::from_secs(CALL_LIMIT_SECONDS))));
     let (herdr, ran) = answering(Some("box"), 0, &result("{}"), "");
-    herdr.submit("build-x", "yes, per client").unwrap();
+    herdr.submit(&address("build-x"), "yes, per client").unwrap();
     assert_eq!(last(&ran).0, with(&["agent", "prompt", "build-x", "yes, per client"]));
-    herdr.send_keys("build-x", &["esc", "ctrl+c"]).unwrap();
+    herdr.send_keys(&address("build-x"), &["esc", "ctrl+c"]).unwrap();
     assert_eq!(last(&ran).0, with(&["agent", "send-keys", "build-x", "esc", "ctrl+c"]));
 }
 
@@ -323,27 +328,94 @@ fn the_console_reads_the_agent_s_text_and_types_into_it() {
 fn the_console_refuses_what_herdr_would_take_for_its_own_option() {
     let (herdr, ran) = answering(None, 0, &result("{}"), "");
     // herdr takes --session, --remote and --handoff out of its whole argv, and has no -- to stop it.
-    let refused = herdr.submit("build-x", "--session").unwrap_err();
+    let refused = herdr.submit(&address("build-x"), "--session").unwrap_err();
     assert!(refused.to_string().contains("a prompt cannot start with --"), "{refused}");
-    let refused = herdr.send_keys("build-x", &["esc", "--remote=box"]).unwrap_err();
+    let refused = herdr.send_keys(&address("build-x"), &["esc", "--remote=box"]).unwrap_err();
     assert!(refused.to_string().contains("a key cannot start with --"), "{refused}");
     assert_eq!(herdr.prompt("spec-x", "--help").unwrap_err().code(), None);
     assert!(ran.lock().unwrap().is_empty(), "herdr was asked");
     // What herdr takes as it is still goes to it, positionally.
-    herdr.submit("build-x", "- one\n- two").unwrap();
+    herdr.submit(&address("build-x"), "- one\n- two").unwrap();
     assert_eq!(last(&ran).0, argv(&["herdr", "agent", "prompt", "build-x", "- one\n- two"]));
     herdr.prompt("spec-x", "---\ntitle: x\n---").unwrap();
     assert_eq!(last(&ran).0, argv(&["herdr", "agent", "prompt", "spec-x", "---\ntitle: x\n---"]));
-    herdr.send_keys("build-x", &["-", "--"]).unwrap();
+    herdr.send_keys(&address("build-x"), &["-", "--"]).unwrap();
     assert_eq!(last(&ran).0, argv(&["herdr", "agent", "send-keys", "build-x", "-", "--"]));
 }
 
 #[test]
 fn the_console_names_herdr_s_errors() {
     let (herdr, _) = answering(None, 1, "", &error("agent_not_found", "no agent build-x"));
-    assert_eq!(AgentConsole::read(&herdr, "build-x", 10).unwrap_err().code(), Some("agent_not_found"));
+    assert_eq!(AgentConsole::read(&herdr, &address("build-x"), 10).unwrap_err().code(), Some("agent_not_found"));
     let (herdr, _) = answering(None, 1, "", &error("agent_blocked", "the agent is blocked"));
-    assert_eq!(herdr.submit("build-x", "go").unwrap_err().code(), Some("agent_blocked"));
+    assert_eq!(herdr.submit(&address("build-x"), "go").unwrap_err().code(), Some("agent_blocked"));
+}
+
+/// The HERDR_ variables, sorted, as NAME=value, of the environment in which each of a console's commands to agent runs
+/// herdr, the console being a ProcessHerdr forwarding to machine in an environment of set's HERDR_ variables; every
+/// command must run herdr in the same one.
+fn herdr_variables_of_console_commands(
+    machine: Option<&str>,
+    set: &[(&str, &str)],
+    agent: &AgentAddress,
+) -> Vec<String> {
+    let d = TempDir::new();
+    let env = d.join("env");
+    let record = format!("env | grep '^HERDR_' | sort | tr '\\n' ' ' >> '{env}'; echo >> '{env}'");
+    let script = format!("#!/bin/sh\n{record}\necho '{{\"result\": {{}}}}'\n");
+    tool(&d.path(), "herdr", &script);
+    // Only set's: the test may run in a herdr pane, which has its own.
+    let mut vars = environment(Some(&d.path()), &[]);
+    vars.retain(|(k, _)| !k.to_string_lossy().starts_with("HERDR_"));
+    vars.extend(set.iter().map(|(k, v)| (OsString::from(k), OsString::from(v))));
+    let herdr = ProcessHerdr::in_environment(machine, vars.into_iter(), &Interrupt::new());
+    AgentConsole::read(&herdr, agent, 5).unwrap();
+    herdr.submit(agent, "go").unwrap();
+    herdr.send_keys(agent, &["enter"]).unwrap();
+    let text = std::fs::read_to_string(env).unwrap();
+    let commands: Vec<&str> = text.lines().collect();
+    assert_eq!(commands.len(), 3, "{text}");
+    assert!(commands.iter().all(|c| *c == commands[0]), "{text}");
+    commands[0].split_whitespace().map(String::from).collect()
+}
+
+#[test]
+fn the_console_reaches_an_agent_in_the_server_its_run_saved() {
+    let saved = HerdrServer::from_json(&Json::parse(r#"{"HERDR_SESSION": "work"}"#).unwrap()).unwrap();
+    let agent = AgentAddress { name: "build-x".to_string(), server: Some(saved) };
+    // serve in another server's pane: its socket path is removed, and the run's session set.
+    let pane = [("HERDR_SOCKET_PATH", "/other/herdr.sock"), ("HERDR_SESSION", "other")];
+    assert_eq!(herdr_variables_of_console_commands(None, &pane, &agent), ["HERDR_SESSION=work"]);
+    // A run that reached the default session is reached there from inside a named one.
+    let default = AgentAddress { name: "build-x".to_string(), server: HerdrServer::of_environment(&[]) };
+    assert!(herdr_variables_of_console_commands(None, &pane, &default).is_empty());
+    // A run saved before runs saved their server is reached in serve's own.
+    let unsaved = address("build-x");
+    let own = ["HERDR_SESSION=other", "HERDR_SOCKET_PATH=/other/herdr.sock"];
+    assert_eq!(herdr_variables_of_console_commands(None, &pane, &unsaved), own);
+    // Forwarded to a machine, whose herdr serves the agent, the environment stays serve's.
+    assert_eq!(herdr_variables_of_console_commands(Some("box"), &pane, &agent), own);
+}
+
+#[test]
+fn the_server_herdr_reaches_is_its_environment_s() {
+    let vars = |set: &[(&str, &str)]| -> Vec<(OsString, OsString)> {
+        set.iter().map(|(k, v)| (OsString::from(k), OsString::from(v))).collect()
+    };
+    let server = |machine: Option<&str>, set: &[(&str, &str)]| {
+        ProcessHerdr::in_environment(machine, vars(set).into_iter(), &Interrupt::new()).server()
+    };
+    let pane = [("HERDR_SOCKET_PATH", "/s/herdr.sock"), ("HERDR_ENV", "1"), ("HERDR_SESSION", "work")];
+    let json = r#"{"HERDR_SOCKET_PATH": "/s/herdr.sock", "HERDR_SESSION": "work"}"#;
+    assert_eq!(server(None, &pane).map(|s| s.to_json().dumps()).as_deref(), Some(json));
+    let json = r#"{"HERDR_SOCKET_PATH": null, "HERDR_SESSION": null}"#;
+    assert_eq!(server(None, &[("PATH", "/bin")]).map(|s| s.to_json().dumps()).as_deref(), Some(json));
+    // Forwarded to a machine, no server of this machine is reached.
+    assert_eq!(server(Some("box"), &pane), None);
+    // Nor one state.json could name.
+    use std::os::unix::ffi::OsStringExt;
+    let odd = vec![(OsString::from("HERDR_SESSION"), OsString::from_vec(b"w\xff".to_vec()))];
+    assert_eq!(HerdrServer::of_environment(&odd), None);
 }
 
 // -- TestHerdrLookups ------------------------------------------------------------------------------------------------

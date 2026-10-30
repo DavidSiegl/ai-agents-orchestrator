@@ -70,7 +70,10 @@ fn fields_it_does_not_know_are_kept_and_written_back() {
 
 #[test]
 fn fields_lists_every_field_to_json_writes_and_no_unknown_one_replaces_it() {
-    let written: Vec<String> = match RunState::new("r", "t", "/p").to_json() {
+    // herdr_server is written only when known: the default session is.
+    let mut full = RunState::new("r", "t", "/p");
+    full.herdr_server = HerdrServer::of_environment(&[]);
+    let written: Vec<String> = match full.to_json() {
         Json::Object(map) => map.keys().map(String::from).collect(),
         _ => panic!("an object"),
     };
@@ -90,6 +93,47 @@ fn a_new_state_writes_what_the_python_engines_does() {
          \"phase\": \"spec\", \"round\": 0, \"workspace_id\": \"\", \"root_pane\": \"\", \"base\": null,"
     ));
     assert!(text.ends_with("\"blocked\": null, \"locked\": {}, \"restored\": [], \"proofs\": []}\n"), "{text}");
+}
+
+/// The herdr server a CLI reaches with these variables set and no other.
+fn server(set: &[(&str, &str)]) -> HerdrServer {
+    let vars: Vec<_> = set.iter().map(|(k, v)| (std::ffi::OsString::from(k), std::ffi::OsString::from(v))).collect();
+    HerdrServer::of_environment(&vars).unwrap()
+}
+
+#[test]
+fn the_herdr_server_is_written_after_the_machine_and_read_back() {
+    let mut state = RunState::new("20260929-120000-a1b2c3", "t", "/proj");
+    state.herdr_server = Some(server(&[("HERDR_SOCKET_PATH", "/s/herdr.sock")]));
+    let text = state.to_text();
+    let saved = r#""machine": null, "herdr_server": {"HERDR_SOCKET_PATH": "/s/herdr.sock", "HERDR_SESSION": null}, "#;
+    assert!(text.contains(saved), "{text}");
+    assert_eq!(RunState::from_text(&text).unwrap(), state);
+    // The default session, neither variable set, is a server too, and not the absence of one.
+    state.herdr_server = Some(server(&[]));
+    let back = RunState::from_text(&state.to_text()).unwrap();
+    assert_eq!(back.herdr_server, Some(server(&[])));
+    state.herdr_server = Some(server(&[("HERDR_SESSION", "work")]));
+    assert_eq!(RunState::from_text(&state.to_text()).unwrap(), state);
+}
+
+#[test]
+fn a_state_saved_before_the_herdr_server_has_none_and_writes_back_without_it() {
+    let text = RunState::new("20260929-120000-a1b2c3", "t", "/proj").to_text();
+    assert!(!text.contains("herdr_server"), "{text}");
+    let state = RunState::from_text(&text).unwrap();
+    assert_eq!(state.herdr_server, None);
+    assert_eq!(state.to_text(), text);
+    let text = r#"{"run_id": "r1", "task": "t", "cwd": "/p", "herdr_server": null}"#;
+    assert_eq!(RunState::from_text(text).unwrap().herdr_server, None);
+    // A variable left out of the object was unset.
+    let text = r#"{"run_id": "r1", "task": "t", "cwd": "/p", "herdr_server": {"HERDR_SESSION": "work"}}"#;
+    assert_eq!(RunState::from_text(text).unwrap().herdr_server, Some(server(&[("HERDR_SESSION", "work")])));
+    for value in ["\"work\"", "{\"HERDR_SESSION\": 1}", "[]"] {
+        let text = format!(r#"{{"run_id": "r1", "task": "t", "cwd": "/p", "herdr_server": {value}}}"#);
+        let e = RunState::from_text(&text).unwrap_err();
+        assert_eq!(e.0, "run state r1 is invalid: herdr_server is not an object of herdr's variables");
+    }
 }
 
 #[test]
