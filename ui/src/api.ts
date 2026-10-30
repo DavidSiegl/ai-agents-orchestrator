@@ -83,7 +83,18 @@ export type RunEvent =
 
 export const EVENT_KINDS = ["record", "files", "problem"] as const;
 
-/** The server's endpoints for one connection. */
+/** A request the server did not answer as asked, with the HTTP status it answered and its error message. */
+export class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "HttpError";
+  }
+}
+
+/** The server's endpoints for one connection. Their requests reject with an HttpError for an answer they cannot use. */
 export class Api {
   constructor(private readonly connection: Connection) {}
 
@@ -97,8 +108,8 @@ export class Api {
     return this.text(this.url("/file", project, { run, name }));
   }
 
-  /** The last lines of what the run's agent of role shows; rejects with the server's error message, such as for an
-   * agent that has exited. */
+  /** The last lines of what the run's agent of role shows; rejects with the server's error message, with status 404
+   * for no such run or agent or one that has exited, which reading again will not change. */
   async agentText(project: Project, run: string, role: string, lines: number): Promise<string> {
     return this.text(this.url("/agent", project, { run, role, lines: String(lines) }));
   }
@@ -113,7 +124,7 @@ export class Api {
     });
     if (!response.ok) {
       const body = (await response.json().catch(() => ({}))) as { error?: string };
-      throw new Error(body.error ?? `HTTP ${response.status}`);
+      throw new HttpError(response.status, body.error ?? `HTTP ${response.status}`);
     }
   }
 
@@ -122,7 +133,7 @@ export class Api {
     const response = await fetch(url, { headers: { Authorization: `Bearer ${this.connection.token}` } });
     const body = (await response.json()) as { text?: string; error?: string };
     if (!response.ok || body.text === undefined) {
-      throw new Error(body.error ?? `HTTP ${response.status}`);
+      throw new HttpError(response.status, body.error ?? `HTTP ${response.status}`);
     }
     return body.text;
   }

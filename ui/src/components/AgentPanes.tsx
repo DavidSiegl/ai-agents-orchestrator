@@ -1,5 +1,5 @@
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import type { AgentInput, AgentRef, Api, Project, RunRecord } from "../api";
+import { type AgentInput, type AgentRef, type Api, HttpError, type Project, type RunRecord } from "../api";
 
 /** How often the shown agent's terminal is read again, in milliseconds. */
 export const AGENT_POLL_MS = 2000;
@@ -61,6 +61,9 @@ export function AgentPanes({ api, project, record }: Props) {
 function AgentPane({ api, project, run, agent }: { api: Api; project: Project; run: string; agent: AgentRef }) {
   const { text, problem, refresh } = useAgentText(api, project, run, agent.role);
   const [draft, setDraft] = useState("");
+  // True while the draft is being sent: it can be neither sent again nor changed until the send settles, so that one
+  // Enter sends it once and success clears what was sent.
+  const [sending, setSending] = useState(false);
   const [sendProblem, setSendProblem] = useState<string | null>(null);
   const screen = useRef<HTMLPreElement>(null);
   useEffect(() => {
@@ -82,8 +85,14 @@ function AgentPane({ api, project, run, agent }: { api: Api; project: Project; r
     );
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    if (draft.trim()) {
-      void type({ text: draft }).then((sent) => sent && setDraft(""));
+    if (draft.trim() && !sending) {
+      setSending(true);
+      void type({ text: draft }).then((sent) => {
+        setSending(false);
+        if (sent) {
+          setDraft("");
+        }
+      });
     }
   };
 
@@ -97,10 +106,11 @@ function AgentPane({ api, project, run, agent }: { api: Api; project: Project; r
         <input
           aria-label={`Message to the ${agent.role} agent`}
           value={draft}
+          readOnly={sending}
           onChange={(event) => setDraft(event.target.value)}
           placeholder="Type to the agent, as in its pane"
         />
-        <button type="submit" disabled={!draft.trim()}>
+        <button type="submit" disabled={!draft.trim() || sending}>
           Send
         </button>
         {KEYS.map(([key, label]) => (
@@ -115,8 +125,9 @@ function AgentPane({ api, project, run, agent }: { api: Api; project: Project; r
 }
 
 /** The last AGENT_LINES lines of what the agent shows, read now and every AGENT_POLL_MS while mounted, one read at a
- * time; text keeps the last read that succeeded, and problem says why the last one failed, null once one succeeds.
- * refresh reads again at once. */
+ * time, until a read answers 404: the agent has exited, or never was, and the server would only spawn herdr to say so
+ * again. text keeps the last read that succeeded, and problem says why the last one failed, null once one succeeds.
+ * refresh reads again at once, and resumes reading after a 404. */
 function useAgentText(api: Api, project: Project, run: string, role: string) {
   const [text, setText] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
@@ -130,14 +141,18 @@ function useAgentText(api: Api, project: Project, run: string, role: string) {
           if (current) {
             setText(next);
             setProblem(null);
+            timer = setTimeout(read, AGENT_POLL_MS);
           }
         },
-        (error: Error) => current && setProblem(error.message),
-      ).finally(() => {
-        if (current) {
-          timer = setTimeout(read, AGENT_POLL_MS);
-        }
-      });
+        (error: Error) => {
+          if (current) {
+            setProblem(error.message);
+            if (!(error instanceof HttpError && error.status === 404)) {
+              timer = setTimeout(read, AGENT_POLL_MS);
+            }
+          }
+        },
+      );
     };
     read();
     return () => {
