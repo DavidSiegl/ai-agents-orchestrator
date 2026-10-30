@@ -5,7 +5,8 @@
 //! PATH; the scenario scripts them, runs the engine as a program, and `record` then gives what the engine did,
 //! normalized (crate::normalize), for `check` to compare with the scenario's recording.
 //!
-//! The engine is `E2E_ENGINE`, a command line, when set, else this checkout's orchestrator binary, built with cargo.
+//! The engine is the program `E2E_ENGINE` names, when it is set, else this checkout's orchestrator binary, built with
+//! cargo.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -59,18 +60,13 @@ pub struct Fakes {
     pub ssh: PathBuf,
 }
 
-/// The engine a world runs, as a command line: E2E_ENGINE's words, when it is set; else this checkout's orchestrator
-/// binary, which `cargo build --locked -p octoflow-engine --bin orchestrator` builds once per process, and once per
-/// run for the processes of one nextest run (built_engine). Panics, failing the scenario, where the build fails, so
-/// that a machine without cargo fails the scenarios rather than skipping them.
-pub fn engine_command() -> Vec<String> {
-    static BUILT: OnceLock<Vec<String>> = OnceLock::new();
-    BUILT
-        .get_or_init(|| match std::env::var("E2E_ENGINE") {
-            Ok(command) => shell_words(&command),
-            Err(_) => vec![built_engine()],
-        })
-        .clone()
+/// The path of the engine a world runs: E2E_ENGINE, taken whole as one path, when it is set; else this checkout's
+/// orchestrator binary, which `cargo build --locked -p octoflow-engine --bin orchestrator` builds once per process, and
+/// once per run for the processes of one nextest run (built_engine). Panics, failing the scenario, where the build
+/// fails, so that a machine without cargo fails the scenarios rather than skipping them.
+pub fn engine() -> PathBuf {
+    static ENGINE: OnceLock<PathBuf> = OnceLock::new();
+    ENGINE.get_or_init(|| std::env::var_os("E2E_ENGINE").map_or_else(|| PathBuf::from(built_engine()), PathBuf::from)).clone()
 }
 
 /// The path of this checkout's orchestrator binary, built by cargo into a target directory of its own (cargo_build).
@@ -137,50 +133,6 @@ fn cargo_build() -> String {
         [one] => one.clone(),
         _ => panic!("cargo reported {} binaries for the engine, not one: {paths:?}", paths.len()),
     }
-}
-
-/// command's words, as a POSIX shell with its default IFS splits them: at unquoted spaces, tabs and newlines; `'...'`
-/// taken as it is; in `"..."`, a backslash escaping only `"`, `\`, `$` and a backtick, and kept before any other
-/// character; and outside quotes, a backslash escaping the next character. Python's shlex.split, which split
-/// PARITY_ENGINE, differs in also splitting at a carriage return and in keeping the backslash before `$` and a
-/// backtick in double quotes. Panics, failing the scenario, at a quote left open or a backslash at the end.
-fn shell_words(command: &str) -> Vec<String> {
-    let unclosed = || -> ! { panic!("E2E_ENGINE has a quote left open or a backslash at its end: {command}") };
-    let mut words = Vec::new();
-    let mut word: Option<String> = None;
-    let mut chars = command.chars();
-    while let Some(c) = chars.next() {
-        if matches!(c, ' ' | '\t' | '\n') {
-            words.extend(word.take());
-            continue;
-        }
-        let w = word.get_or_insert_with(String::new);
-        match c {
-            '\'' => loop {
-                match chars.next() {
-                    Some('\'') => break,
-                    Some(c) => w.push(c),
-                    None => unclosed(),
-                }
-            },
-            '"' => loop {
-                match chars.next() {
-                    Some('"') => break,
-                    Some('\\') => match chars.next() {
-                        Some(c @ ('"' | '\\' | '$' | '`')) => w.push(c),
-                        Some(c) => w.extend(['\\', c]),
-                        None => unclosed(),
-                    },
-                    Some(c) => w.push(c),
-                    None => unclosed(),
-                }
-            },
-            '\\' => w.push(chars.next().unwrap_or_else(|| unclosed())),
-            c => w.push(c),
-        }
-    }
-    words.extend(word);
-    words
 }
 
 /// One run of the engine in a world: its arguments, its process and, once it ended, its exit status.
@@ -490,11 +442,11 @@ impl World {
         let n = self.invocations.len() + 1;
         let out_path = self.root.join("out").join(n.to_string());
         let create = |path: &Path| fs::File::create(path).unwrap_or_else(|e| panic!("making {}: {e}", path.display()));
-        let engine = engine_command();
+        let engine = engine();
         // setsid execs the engine in its own process, as Python's start_new_session made it: the leader of a session
         // and a process group of its own, which a kill takes down whole.
         let child = Command::new("setsid")
-            .args(&engine)
+            .arg(&engine)
             .args(args)
             .current_dir(&self.project)
             .env_clear()
@@ -575,7 +527,7 @@ impl World {
                 env.push(("HERDR_ENV".into(), "1".into()));
                 env.push((INVOCATION_VAR.into(), n.to_string()));
                 // An engine instrumented for coverage would write its profile where it runs, into the project; so
-                // E2E_ENGINE can name the instrumented engine as it is (Jenkinsfile, Test stage).
+                // E2E_ENGINE can name the instrumented engine itself (Jenkinsfile, Test stage).
                 env.push(("LLVM_PROFILE_FILE".into(), "/dev/null".into()));
             }
         }
@@ -897,24 +849,6 @@ fn walk(top: &Path, dir: &Path, files: &mut Map<String, Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn shell_words_splits_as_sh() {
-        assert_eq!(shell_words("env A=/dev/null '/x y/orch' \"a\\\"b\" c\\ d"), ["env", "A=/dev/null", "/x y/orch", "a\"b", "c d"]);
-        assert_eq!(shell_words(r#""/opt/a\b/x" "\$\`\\" '' "#), [r"/opt/a\b/x", r"$`\", ""]);
-    }
-
-    #[test]
-    fn shell_words_splits_only_at_spaces_tabs_and_newlines() {
-        assert_eq!(shell_words("a\u{a0}b\tc\u{b}d\ne\rf"), ["a\u{a0}b", "c\u{b}d", "e\rf"]);
-    }
-
-    #[test]
-    fn a_quote_left_open_is_no_command() {
-        for command in ["'/x", "\"/x", "/x\\", "\"/x\\"] {
-            assert!(std::panic::catch_unwind(|| shell_words(command)).is_err(), "{command} was split");
-        }
-    }
 
     #[test]
     fn collapsed_drops_repeated_runs() {

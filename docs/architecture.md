@@ -322,7 +322,7 @@ group and each process below it, since the engine runs each command in a group o
 octoflow-without-python spec): `tests/scenarios.rs` holds the scenarios ported so far, those without kills, the quality
 gate or serve, each a test that `Bench::check` (`src/check.rs`) compares with the same recording. The fakes are the programs
 `fake-herdr`, `fake-gh` and `fake-ssh` (`src/fakes.rs`), sharing the world's ledger (`src/ledger.rs`) under
-`flock`; `World` (`src/world.rs`) makes the world, runs the engine, `E2E_ENGINE`'s command line or this checkout's
+`flock`; `World` (`src/world.rs`) makes the world, runs the engine, the program `E2E_ENGINE` names or this checkout's
 binary built with cargo, and makes the record, which `Normalizer` (`src/normalize.rs`, its matchers finding what
 `normalize.py`'s expressions find) normalizes and `src/pyjson.rs` writes as Python's json module did. `E2E_RECORD=1`
 writes recordings, as `PARITY_RECORD=1` does. Jenkins's Test stage runs them in its nextest run with the instrumented

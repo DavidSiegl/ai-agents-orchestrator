@@ -194,7 +194,7 @@ pipeline {
                     if [ -n "${GIT_REF:-}" ] && git diff --quiet HEAD^ HEAD -- $SCENARIO_INPUTS; then
                         set -- -E 'not package(octoflow-e2e)'
                     fi
-                    E2E_ENGINE="'$WORKSPACE/target/llvm-cov-target/debug/orchestrator'" \\
+                    E2E_ENGINE="$WORKSPACE/target/llvm-cov-target/debug/orchestrator" \\
                     ci/cargo-lock.sh ${GIT_REF:+--no-wait} cargo llvm-cov nextest --locked --workspace \\
                         --ignore-run-fail --profile ci --config-file "$WORKSPACE/ci/nextest.toml" \\
                         --cobertura --output-path "$WORKSPACE/coverage-rust.xml" "$@"
