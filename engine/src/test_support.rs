@@ -287,28 +287,7 @@ pub fn helper_cases() -> Vec<HelperCase> {
         let name = recording.strip_suffix(".json").unwrap();
         let files = recordings.iter().find(|(n, _)| n == name).unwrap().1.get("run_files").unwrap().as_object().unwrap().clone();
         let file = |name: &str| files.get(&format!("{run_dir}{name}")).and_then(Json::as_str).map(String::from);
-        // helpers.py's denormalized: each "<time>" a minute after the one before, each "<seconds>" a count.
-        let mut text = String::new();
-        let (mut times, mut counts) = (0, 5);
-        let state_text = file("state.json").unwrap();
-        let mut rest = state_text.as_str();
-        while let Some(at) = rest.find('"') {
-            text.push_str(&rest[..at]);
-            rest = &rest[at..];
-            if let Some(after) = rest.strip_prefix("\"<time>\"") {
-                text.push_str(&Json::from(crate::summary::iso_utc(epoch + 60 * times)).dumps());
-                times += 1;
-                rest = after;
-            } else if let Some(after) = rest.strip_prefix("\"<seconds>\"") {
-                text.push_str(&counts.to_string());
-                counts += 7;
-                rest = after;
-            } else {
-                text.push('"');
-                rest = &rest[1..];
-            }
-        }
-        text.push_str(rest);
+        let text = denormalized(&file("state.json").unwrap(), epoch);
         let Json::Object(mut saved) = Json::parse(&text).unwrap() else { panic!("a state") };
         let conflicts = case.get("conflicts").and_then(Json::as_array).unwrap();
         if !conflicts.is_empty() {
@@ -339,6 +318,34 @@ pub fn helper_cases() -> Vec<HelperCase> {
         let evidence = crate::pull_request::GateEvidence { last: quality, unjudged: state.quality_gate_disabled };
         out.push(HelperCase { expected: case.clone(), saved, state, spec, report, review, evidence, now });
     }
+    out
+}
+
+/// helpers.py's denormalized: text, a recording's state.json, with each "<time>" string in it a time as
+/// crate::summary::iso_utc writes it, the first at epoch (Unix seconds) and each a minute after the one before, and
+/// each "<seconds>" string a count, 5 and then 7 more each time.
+fn denormalized(text: &str, epoch: i64) -> String {
+    use crate::py::json::Json;
+    let mut out = String::new();
+    let (mut times, mut counts) = (0, 5);
+    let mut rest = text;
+    while let Some(at) = rest.find('"') {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        if let Some(after) = rest.strip_prefix("\"<time>\"") {
+            out.push_str(&Json::from(crate::summary::iso_utc(epoch + 60 * times)).dumps());
+            times += 1;
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix("\"<seconds>\"") {
+            out.push_str(&counts.to_string());
+            counts += 7;
+            rest = after;
+        } else {
+            out.push('"');
+            rest = &rest[1..];
+        }
+    }
+    out.push_str(rest);
     out
 }
 

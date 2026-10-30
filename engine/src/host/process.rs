@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -266,6 +266,25 @@ pub(crate) fn run_process(
         });
     }
     drop(sender);
+    let [stdout, stderr] = read_outputs(&mut child, &received, pending, deadline)?;
+    let status = wait_for_exit(&mut child, &received, deadline)?;
+    if watch.interrupted() {
+        return Err(ProcessError::Interrupted);
+    }
+    let code = status.code().or_else(|| status.signal().map(|signal| -signal)).unwrap_or(-1);
+    Ok((code, stdout, stderr))
+}
+
+/// child's standard output and error, each read to the end, once pending of its pipes have ended. received is what
+/// run_process's pipe threads and its Interrupt's watch send on (Piped); the watch must outlive the call. When
+/// deadline (None for none) passes first, or a pipe fails, fails as Timeout or Io with child's group killed and child
+/// reaped (abandon); when the Interrupt comes first, fails as stop_group does.
+fn read_outputs(
+    child: &mut Child,
+    received: &mpsc::Receiver<Piped>,
+    mut pending: usize,
+    deadline: Option<Instant>,
+) -> Result<[Vec<u8>; 2], ProcessError> {
     let mut outputs: [Vec<u8>; 2] = [vec![], vec![]];
     while pending > 0 {
         let piped = match deadline {
@@ -273,35 +292,41 @@ pub(crate) fn run_process(
             None => received.recv().ok(),
         };
         // The watch's sender lasts as long as the watch, so a None is the deadline passing.
-        let Some(piped) = piped else { return Err(abandon(&mut child, ProcessError::Timeout)) };
+        let Some(piped) = piped else { return Err(abandon(child, ProcessError::Timeout)) };
         match piped {
             Piped::Output(n, Ok(out)) => outputs[n] = out,
-            Piped::Output(_, Err(e)) | Piped::Input(Err(e)) => return Err(abandon(&mut child, ProcessError::Io(e))),
+            Piped::Output(_, Err(e)) | Piped::Input(Err(e)) => return Err(abandon(child, ProcessError::Io(e))),
             Piped::Input(Ok(())) => {}
-            Piped::Interrupted => return Err(stop_group(&mut child)),
+            Piped::Interrupted => return Err(stop_group(child)),
         }
         pending -= 1;
     }
-    let status = loop {
+    Ok(outputs)
+}
+
+/// child's exit status, once it has exited and been reaped, for a command whose pipes have all ended; received is
+/// what run_process's Interrupt's watch sends on. When deadline (None for none) passes first, or the wait fails,
+/// fails as Timeout or Io with child's group killed and child reaped (abandon); when the Interrupt comes first, fails
+/// as stop_group does.
+fn wait_for_exit(
+    child: &mut Child,
+    received: &mpsc::Receiver<Piped>,
+    deadline: Option<Instant>,
+) -> Result<ExitStatus, ProcessError> {
+    loop {
         // A command that closed its output and runs on is stopped by the interrupt as one that did not.
         if let Ok(Piped::Interrupted) = received.try_recv() {
-            return Err(stop_group(&mut child));
+            return Err(stop_group(child));
         }
         match child.try_wait() {
-            Ok(Some(status)) => break status,
+            Ok(Some(status)) => return Ok(status),
             Ok(None) if deadline.is_some_and(|deadline| Instant::now() >= deadline) => {
-                return Err(abandon(&mut child, ProcessError::Timeout))
+                return Err(abandon(child, ProcessError::Timeout))
             }
             Ok(None) => thread::sleep(Duration::from_millis(5)),
-            Err(e) => return Err(abandon(&mut child, ProcessError::Io(e))),
+            Err(e) => return Err(abandon(child, ProcessError::Io(e))),
         }
-    };
-    if watch.interrupted() {
-        return Err(ProcessError::Interrupted);
     }
-    let code = status.code().or_else(|| status.signal().map(|signal| -signal)).unwrap_or(-1);
-    let [stdout, stderr] = outputs;
-    Ok((code, stdout, stderr))
 }
 
 /// Have command start with SIGINT, SIGTERM and SIGHUP unblocked (crate::interrupt::SIGNALS). The engine blocks them

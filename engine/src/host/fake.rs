@@ -381,10 +381,8 @@ impl FakeState {
                 return done;
             }
         }
-        let conflicted = |s: &FakeState| s.conflicts.iter().map(|f| format!("/proj/{f}")).collect::<Vec<_>>();
         match args {
-            ["rev-parse", "--abbrev-ref", "HEAD"] => return ok(&format!("{}\n", self.branch)),
-            ["rev-parse", "-q", "--verify", "MERGE_HEAD"] => return status(if self.merge_head { 0 } else { 1 }),
+            ["rev-parse", rest @ ..] => return self.git_rev_parse(rest),
             ["status", "--porcelain"] => return ok(&porcelain(&self.changed_in(cwd))),
             ["switch", "-c", name] | ["switch", "--quiet", name] => self.branch = name.to_string(),
             ["commit", ..] => {
@@ -392,67 +390,20 @@ impl FakeState {
                 self.changed.retain(|p| !changed.contains(p));
                 self.commit_head();
             }
-            ["worktree", "add", "--detach", path, _] => self.worktrees.insert(*path, "HEAD".to_string()),
-            ["worktree", "remove", path] | ["worktree", "remove", "--force", path] => {
-                if let Some(error) = &self.remove_error {
-                    return Completed::new(128, "", error);
-                }
-                self.worktrees.remove(path);
-                self.changed.retain(|p| !p.starts_with(&format!("{path}/")));
-            }
+            ["worktree", rest @ ..] => return self.git_worktree(rest),
             ["fetch", "--quiet", "origin", _] if self.fetch_error.is_some() => {
                 return Completed::new(128, "", self.fetch_error.as_deref().unwrap_or_default());
             }
-            ["merge-base", "--is-ancestor", "HEAD", _] => return status(if self.diverged { 1 } else { 0 }),
-            ["merge-base", "--is-ancestor", _, "HEAD"] => {
-                return status(if self.upstream.is_none() && !self.diverged { 0 } else { 1 });
-            }
-            ["merge", "--ff-only", "--quiet", _] => {
-                if self.diverged {
-                    return Completed::new(128, "", "fatal: Not possible to fast-forward, aborting.");
-                }
-                if let Some(upstream) = self.upstream.take() {
-                    self.head = Some(upstream);
-                }
-            }
-            ["merge", "--no-edit", "--quiet", _] => {
-                if let Some(first) = self.conflicts.first() {
-                    let said = format!("CONFLICT (content): Merge conflict in {first}");
-                    self.merge_head = true;
-                    self.changed.extend(conflicted(self));
-                    return Completed::new(1, &said, "");
-                }
-                let upstream = self.upstream.take();
-                self.head = Some(format!("merge-{}", upstream.as_deref().unwrap_or("None")));
-            }
+            ["merge-base", "--is-ancestor", commit, of] => return self.git_is_ancestor(commit, of),
+            ["merge", rest @ ..] => return self.git_merge(rest),
             ["diff", "--name-only", "-z", "--diff-filter=U"] => {
                 if !self.merge_head {
                     return ok("");
                 }
                 return ok(&self.conflicts.iter().map(|f| format!("{f}\0")).collect::<String>());
             }
-            ["merge", "--abort"] => {
-                self.merge_head = false;
-                for f in conflicted(self) {
-                    self.changed.remove(&f);
-                }
-            }
-            ["push", "--quiet", "--force", "origin", refspec] => {
-                let (commit, git_ref) = refspec.split_once(':').unwrap_or((refspec, ""));
-                self.remote.insert(git_ref.strip_prefix("refs/heads/").unwrap_or(git_ref), commit.to_string());
-            }
-            ["push", "--quiet", "origin", "--delete", git_ref] => {
-                if self.remote.remove(git_ref.strip_prefix("refs/heads/").unwrap_or(git_ref)).is_none() {
-                    let said = format!("error: unable to delete '{git_ref}': remote ref does not exist");
-                    return Completed::new(1, "", &said);
-                }
-            }
-            ["ls-remote", "--heads", "origin"] if self.list_remote_error.is_some() => {
-                return Completed::new(128, "", self.list_remote_error.as_deref().unwrap_or_default());
-            }
-            ["ls-remote", "--heads", "origin"] => {
-                return ok(&self.remote.iter().map(|(b, c)| format!("{c}\trefs/heads/{b}\n")).collect::<String>());
-            }
+            ["push", rest @ ..] => return self.git_push(rest),
+            ["ls-remote", rest @ ..] => return self.git_ls_remote(rest),
             ["-c", "core.quotePath=false", "diff", ..] => return ok(&self.diff),
             ["remote", "get-url", "origin"] => {
                 if !self.has_origin {
@@ -460,36 +411,9 @@ impl FakeState {
                 }
                 return ok("git@github.com:o/r.git\n");
             }
-            ["ls-remote", "origin", git_ref] => {
-                let b = git_ref.strip_prefix("refs/heads/").unwrap_or(git_ref);
-                return ok(&self.remote.get(b).map(|c| format!("{c}\t{git_ref}\n")).unwrap_or_default());
-            }
-            ["push", "--quiet", lease, "origin", "--delete", git_ref] if lease.starts_with("--force-with-lease=") => {
-                let b = git_ref.strip_prefix("refs/heads/").unwrap_or(git_ref);
-                let at = self.remote.get(b).map_or("None", String::as_str);
-                if *lease != format!("--force-with-lease={git_ref}:{at}") {
-                    return Completed::new(1, "", &format!(" ! [rejected]        {b} (stale info)"));
-                }
-                self.remote.remove(b);
-                self.tracking.remove(b);
-            }
             ["update-ref", "-d", git_ref] => {
                 let b = git_ref.strip_prefix("refs/remotes/origin/").unwrap_or(git_ref);
                 self.tracking.remove(b);
-            }
-            ["rev-parse", "-q", "--verify", git_ref] if git_ref.starts_with("refs/heads/") => {
-                return match self.branches.get(&git_ref["refs/heads/".len()..]) {
-                    Some(commit) => ok(&format!("{commit}\n")),
-                    None => status(1),
-                };
-            }
-            ["rev-parse", "-q", "--verify", object] if object.ends_with("^{commit}") => {
-                let commit = &object[..object.len() - "^{commit}".len()];
-                return status(if self.missing_commits.contains(commit) { 1 } else { 0 });
-            }
-            ["merge-base", "--is-ancestor", commit, of] => {
-                let is = commit == of || self.ancestors.contains(&(commit.to_string(), of.to_string()));
-                return status(if is { 0 } else { 1 });
             }
             ["rev-list", "--count", commits] => {
                 let branch = commits.split_once("..refs/heads/").map_or("", |(_, b)| b);
@@ -499,7 +423,97 @@ impl FakeState {
             ["branch", "--quiet", "-D", b] => {
                 self.branches.remove(b);
             }
-            ["worktree", "list", "--porcelain"] => {
+            _ => {}
+        }
+        ok("")
+    }
+
+    /// `git rev-parse` in the checkout, given the arguments after `rev-parse`: the branch checked out, whether a
+    /// merge is in progress, a local branch's commit, or whether this clone has a commit. Anything else prints
+    /// nothing.
+    fn git_rev_parse(&self, args: &[&str]) -> Completed {
+        match args {
+            ["--abbrev-ref", "HEAD"] => ok(&format!("{}\n", self.branch)),
+            ["-q", "--verify", "MERGE_HEAD"] => status(if self.merge_head { 0 } else { 1 }),
+            ["-q", "--verify", git_ref] if git_ref.starts_with("refs/heads/") => {
+                match self.branches.get(&git_ref["refs/heads/".len()..]) {
+                    Some(commit) => ok(&format!("{commit}\n")),
+                    None => status(1),
+                }
+            }
+            ["-q", "--verify", object] if object.ends_with("^{commit}") => {
+                let commit = &object[..object.len() - "^{commit}".len()];
+                status(if self.missing_commits.contains(commit) { 1 } else { 0 })
+            }
+            _ => ok(""),
+        }
+    }
+
+    /// `git merge-base --is-ancestor commit of`: HEAD is an ancestor of anything unless the branches diverged;
+    /// anything is one of HEAD unless they diverged or there is an upstream to merge; else commit is one of of when
+    /// ancestors says so, or they are the same commit.
+    fn git_is_ancestor(&self, commit: &str, of: &str) -> Completed {
+        let is = match (commit, of) {
+            ("HEAD", _) => !self.diverged,
+            (_, "HEAD") => self.upstream.is_none() && !self.diverged,
+            _ => commit == of || self.ancestors.contains(&(commit.to_string(), of.to_string())),
+        };
+        status(if is { 0 } else { 1 })
+    }
+
+    /// `git merge` of upstream, given the arguments after `merge`: a fast-forward to upstream, which fails once the
+    /// branches diverged; a merge, which stops with a merge in progress and the conflicted files changed when there
+    /// are conflicts; or the abort of a merge in progress. Anything else prints nothing.
+    fn git_merge(&mut self, args: &[&str]) -> Completed {
+        match args {
+            ["--ff-only", "--quiet", _] => {
+                if self.diverged {
+                    return Completed::new(128, "", "fatal: Not possible to fast-forward, aborting.");
+                }
+                if let Some(upstream) = self.upstream.take() {
+                    self.head = Some(upstream);
+                }
+            }
+            ["--no-edit", "--quiet", _] => {
+                if let Some(first) = self.conflicts.first() {
+                    let said = format!("CONFLICT (content): Merge conflict in {first}");
+                    self.merge_head = true;
+                    self.changed.extend(self.conflicted_paths());
+                    return Completed::new(1, &said, "");
+                }
+                let upstream = self.upstream.take();
+                self.head = Some(format!("merge-{}", upstream.as_deref().unwrap_or("None")));
+            }
+            ["--abort"] => {
+                self.merge_head = false;
+                for f in self.conflicted_paths() {
+                    self.changed.remove(&f);
+                }
+            }
+            _ => {}
+        }
+        ok("")
+    }
+
+    /// The paths of the files a merge of upstream conflicts in, in the checkout.
+    fn conflicted_paths(&self) -> Vec<String> {
+        self.conflicts.iter().map(|f| format!("/proj/{f}")).collect()
+    }
+
+    /// `git worktree`, given the arguments after `worktree`: a detached worktree added; one removed, with the
+    /// changes under it, which fails with remove_error when that is set; or the porcelain list of the checkout and
+    /// each linked worktree. Anything else prints nothing.
+    fn git_worktree(&mut self, args: &[&str]) -> Completed {
+        match args {
+            ["add", "--detach", path, _] => self.worktrees.insert(*path, "HEAD".to_string()),
+            ["remove", path] | ["remove", "--force", path] => {
+                if let Some(error) = &self.remove_error {
+                    return Completed::new(128, "", error);
+                }
+                self.worktrees.remove(path);
+                self.changed.retain(|p| !p.starts_with(&format!("{path}/")));
+            }
+            ["list", "--porcelain"] => {
                 let mut trees = vec![("/proj".to_string(), self.branch.clone())];
                 trees.extend(self.worktrees.iter().map(|(p, b)| (p.to_string(), b.clone())));
                 let listed: String = trees
@@ -514,6 +528,53 @@ impl FakeState {
             _ => {}
         }
         ok("")
+    }
+
+    /// `git push` to origin, given the arguments after `push`: a forced push of a commit to a branch, which remote
+    /// then holds; or the delete of a branch from remote, which fails when remote has none, and with a lease fails
+    /// unless remote has it at the commit the lease names ("None" for no branch), and drops its tracking branch too.
+    /// Anything else prints nothing.
+    fn git_push(&mut self, args: &[&str]) -> Completed {
+        match args {
+            ["--quiet", "--force", "origin", refspec] => {
+                let (commit, git_ref) = refspec.split_once(':').unwrap_or((refspec, ""));
+                self.remote.insert(git_ref.strip_prefix("refs/heads/").unwrap_or(git_ref), commit.to_string());
+            }
+            ["--quiet", "origin", "--delete", git_ref] => {
+                if self.remote.remove(git_ref.strip_prefix("refs/heads/").unwrap_or(git_ref)).is_none() {
+                    let said = format!("error: unable to delete '{git_ref}': remote ref does not exist");
+                    return Completed::new(1, "", &said);
+                }
+            }
+            ["--quiet", lease, "origin", "--delete", git_ref] if lease.starts_with("--force-with-lease=") => {
+                let b = git_ref.strip_prefix("refs/heads/").unwrap_or(git_ref);
+                let at = self.remote.get(b).map_or("None", String::as_str);
+                if *lease != format!("--force-with-lease={git_ref}:{at}") {
+                    return Completed::new(1, "", &format!(" ! [rejected]        {b} (stale info)"));
+                }
+                self.remote.remove(b);
+                self.tracking.remove(b);
+            }
+            _ => {}
+        }
+        ok("")
+    }
+
+    /// `git ls-remote` of origin, given the arguments after `ls-remote`: every branch remote holds, which fails with
+    /// list_remote_error when that is set; or the one branch a ref names, nothing when remote has none. Anything else
+    /// prints nothing.
+    fn git_ls_remote(&self, args: &[&str]) -> Completed {
+        match args {
+            ["--heads", "origin"] => match &self.list_remote_error {
+                Some(error) => Completed::new(128, "", error),
+                None => ok(&self.remote.iter().map(|(b, c)| format!("{c}\trefs/heads/{b}\n")).collect::<String>()),
+            },
+            ["origin", git_ref] => {
+                let b = git_ref.strip_prefix("refs/heads/").unwrap_or(git_ref);
+                ok(&self.remote.get(b).map(|c| format!("{c}\t{git_ref}\n")).unwrap_or_default())
+            }
+            _ => ok(""),
+        }
     }
 }
 
