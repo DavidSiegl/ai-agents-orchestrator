@@ -1,8 +1,10 @@
 #!/bin/sh
 # Build dist/octoflow-<os>-<arch>, the Rust engine's orchestrator binary (engine/, a release build), write its
-# .sha256 beside it, and smoke-test it. Jenkins's Package stage builds the Linux binary with it, and
-# .github/workflows/macos-binary.yml the macOS one, so the two builds cannot drift apart. The binary links the
-# C library of the machine it was built on, as the PyInstaller binary of the Python engine did.
+# .sha256 beside it, and smoke-test it; and write dist/octoflow-third-party-licenses.html, the licenses of the crates
+# in it and in the desktop app, which every release ships beside them (packaging/about.toml). Jenkins's Package stage
+# builds the Linux binary with it, and .github/workflows/macos-binary.yml the macOS one, so the two builds cannot
+# drift apart. The binary links the C library of the machine it was built on, as the PyInstaller binary of the Python
+# engine did. Needs cargo-about on PATH, as ci/install-tools.sh pins it.
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -19,6 +21,13 @@ case "$(uname -m)" in
 esac
 name="octoflow-$os-$arch"
 bin="dist/$name"
+notices=dist/octoflow-third-party-licenses.html
+
+# First, so that a dependency under a license packaging/about.toml does not accept fails before the long build.
+command -v cargo-about >/dev/null 2>&1 \
+    || { echo "build-binary.sh: no cargo-about; cargo install --locked cargo-about" >&2; exit 1; }
+mkdir -p dist
+cargo about generate --workspace --locked --fail -c packaging/about.toml -o "$notices" packaging/about.hbs
 
 # The toolchain is rust-toolchain.toml's; --locked holds the build to Cargo.lock. CARGO_TARGET_DIR, where a caller
 # sets one, is where cargo puts the build, so the binary's path is asked of cargo rather than assumed.
@@ -31,7 +40,6 @@ if [ -z "$built" ]; then
     echo "build-binary.sh: cargo did not report the orchestrator binary it built" >&2
     exit 1
 fi
-mkdir -p dist
 cp "$built" "$bin"
 
 if command -v sha256sum >/dev/null 2>&1; then
@@ -45,4 +53,4 @@ echo "smoke test: $bin --help"
 echo "smoke test: $bin workflows"
 "$bin" workflows | grep -q '^default '
 
-echo "built $bin and $bin.sha256"
+echo "built $bin, $bin.sha256 and $notices"

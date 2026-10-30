@@ -457,3 +457,9 @@ Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT l
 option. Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this
 project by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms
 or conditions.
+
+The binaries and the desktop app contain Rust crates under their own licenses, whose texts each release has as
+`octoflow-third-party-licenses.html`; the desktop app has the same file among its resources as
+`THIRD-PARTY-LICENSES.html`. `packaging/build-binary.sh` writes it with
+[cargo-about](https://github.com/EmbarkStudios/cargo-about), by `packaging/about.toml`, which lists the licenses a
+dependency may be under: a dependency under any other fails the build.

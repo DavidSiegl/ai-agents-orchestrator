@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "A read-only window over the orchestrator's runs, with orchestrator.py serve as its sidecar"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+publish = false
 
 [lib]
 # The _lib suffix keeps the library's name apart from the binary's, which Cargo needs on Windows.

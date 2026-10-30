@@ -82,6 +82,12 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Open issues
 
+- **The desktop app ships its npm packages' code without their licenses.** `octoflow-third-party-licenses.html`
+  (`packaging/about.toml`) lists the Rust crates only, as cargo-about reads Cargo's graph; the app's web view bundles
+  `ui/package.json`'s runtime dependencies, React, react-markdown, remark-gfm and @tauri-apps/api with what they pull
+  in, minified into `ui/dist/` without their notices. All were MIT when the project took its license (2026-10-30).
+  Closes with their license texts generated from `ui/package-lock.json` at build time, e.g. by a Vite license
+  plugin, and bundled with the app beside the crates'.
 - **A prompt template's `.attribute` is an error in the Rust engine, where Python filled it in.** `crate::py::format`,
   the port of `str.format` that fills workflow prompt templates (`workflow.rs`, `pipeline.rs`, `prompts.rs`), takes a
   placeholder's value to be a str and answers any attribute with AttributeError (`Accessor::apply_to`), so a template

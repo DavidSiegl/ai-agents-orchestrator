@@ -20,11 +20,12 @@ coverage-rust.xml
 quality.md
 
 # The desktop app's dependencies and build output, the schemas `tauri build` generates, and the orchestrator
-# binary packaging/build-desktop.sh copies in for it to bundle
+# binary and third-party licenses packaging/build-desktop.sh copies in for it to bundle
 ui/node_modules/
 ui/dist/
 ui/src-tauri/gen/
 ui/src-tauri/binaries/
+ui/src-tauri/THIRD-PARTY-LICENSES.html
 
 # The Cargo workspace's build output
 /target/
