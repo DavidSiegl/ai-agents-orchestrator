@@ -463,6 +463,12 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   or `const STATUS` the trait fixes is reported, as in serde's `impl Visitor for V { type Value = ...; }`. The helper's
   `bindings` give no holder, so the gate cannot tell them apart from an inherent `impl`'s. Found by ticket 04
   (2026-10-30). Closes with the helper marking each binding an `impl Trait for T` holds directly, a schema change.
+- **`vague-names` skips the parameters of a Rust trait impl's `fn`, which Rust lets the impl rename.** Unlike Python's
+  keyword arguments, a Rust caller never names a parameter, so the trait fixes only the `fn`'s name; gate-rust-checks
+  ticket 04 asked for the parameters to be skipped too, as `@override`'s are, and clippy's `renamed_function_params`
+  (a restriction lint) holds an impl to the trait's names. So a `raw_data` parameter of an `impl Opener for Door` `fn`
+  is not reported. Raised by the code review of ticket 04 (2026-10-30). Closes with the user's ruling on whether the
+  parameters count as fixed.
 - **`vague-names` reports a name an undecorated override cannot change.** A `def handle(self)` in a
   `socketserver.BaseRequestHandler` subclass, or a parameter the overridden signature names, has no fix; only a
   method marked `@override` is skipped (`_bound_names`). Raised by the cross-review of `written-rules` (F6,
