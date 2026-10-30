@@ -165,6 +165,11 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
     in a test's body or on a module (`_rust_skips` reads those lines' text; a test's own attributes come whole from
     the helper). Closes with the helper listing the attributes of modules and of statements in a test, which raises
     its schema.
+  - a test module in a file of its own that a `#[cfg(test)] mod name;` names, where that file is neither under
+    `tests/` nor `tests.rs`, as `mod cli_tests;`: `_rust_test_file` reads a path alone, as requirement 2 of the spec
+    defines the files, so that file's tests are not read and its edits count as code. Raised by cross-review 107
+    (2026-10-30, not recorded). Closes with the helper listing each `mod name;` with its `cfg_test`, and the check
+    resolving the file it names as rustc does (`name.rs` or `name/mod.rs` beside the file, or a `#[path]`).
 - **The parity harness records `state.json` at each command the fakes get, not after each save.** Ticket
   rust-engine/01 asks for "`state.json` after each save"; the ledger reads it only when herdr, gh, Jenkins or PyPI
   gets a call, and leaves out a change to `heartbeat_at` alone (`tests/parity/fakes.py`, `_changed_states`). Raised

@@ -254,20 +254,21 @@ def _note_path(out: dict[str, set[int]], path: str | None) -> str | None:
 
 def _hunk_lines(line: str) -> range:
     """The new tree's lines that a `@@` line's hunk adds."""
-    m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
-    if not m:
-        return range(0)
-    start = int(m.group(1))
-    return range(start, start + (1 if m.group(2) is None else int(m.group(2))))
+    return _hunk_span(line, "+")
 
 
 def _hunk_removed_lines(line: str) -> range:
     """The old tree's lines that a `@@` line's hunk removes."""
-    m = re.match(r"@@ -(\d+)(?:,(\d+))? \+", line)
+    return _hunk_span(line, "-")
+
+
+def _hunk_span(line: str, side: str) -> range:
+    """The lines that a `@@` line's hunk spans on one side, "-" the old tree's and "+" the new tree's."""
+    m = re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
     if not m:
         return range(0)
-    start = int(m.group(1))
-    return range(start, start + (1 if m.group(2) is None else int(m.group(2))))
+    start, count = m.group(1, 2) if side == "-" else m.group(3, 4)
+    return range(int(start), int(start) + (1 if count is None else int(count)))
 
 
 def _hunk_removal_point(line: str) -> list[int]:
@@ -1348,7 +1349,8 @@ def weakened_tests(change: GateChange) -> list[dict]:
             except (GateError, OSError, UnicodeDecodeError) as e:
                 unreadable.append(_finding(new or old, None, "unreadable",
                                            f"could not be read, so its tests were not checked: {e}", severity="error"))
-        out += unreadable + detector.find(change, files, _edits_code(change, detector))
+        # find runs without files too, so that it can say it could not read the change, as the Rust detector does.
+        out += unreadable + detector.find(change, files, bool(files) and _edits_code(change, detector))
     return out
 
 
@@ -1980,9 +1982,12 @@ class _RustTest:
     file: int  # the ChangedTestFile's index in the list find was given
     name: str  # _rust_name's, as tests::adds
     fn: dict  # its entry in the helper's fns
+    # How many tests of its file and side come before it under the same name, as two fns of one name under cfgs that
+    # never hold together can be, or a macro's: so each of them is a test of its own, the first matched with the first.
+    namesake: int = 0
 
-    def key(self) -> tuple[int, str]:
-        return self.file, self.name
+    def key(self) -> tuple[int, str, int]:
+        return self.file, self.name, self.namesake
 
 
 def rust_weakened_tests(change: GateChange, files: list[ChangedTestFile], code_changed: bool) -> list[dict]:
@@ -2014,21 +2019,23 @@ def _rust_test_documents(files: list[ChangedTestFile],
                          read: list[RustFile]) -> tuple[dict[int, tuple[dict | None, dict | None]], list[dict]]:
     """The helper's two documents of each of files, out of read, GateChange.rust_files's, by the file's index in files,
     each None on a side that holds no Rust the helper could parse, since a base that does not parse has no tests to
-    lose; and an unparsable finding for each file the helper could not parse in the working tree, which is left out."""
+    lose. A file the helper could not parse in the working tree is left out, and is an unparsable finding when its base
+    held tests; one whose base held none has none to lose, as a fixture under tests/ that is not Rust on purpose."""
     sides = {(f.old_path, f.new_path): f for f in read}
     documents: dict[int, tuple[dict | None, dict | None]] = {}
     unparsable = []
     for k, f in enumerate(files):
         pair = sides.get((_rust_side(f.old_path), _rust_side(f.new_path)))
         was, now = (pair.before, pair.after) if pair else (None, None)
-        if now is not None and "error" in now:
+        was = None if was is None or "error" in was else was
+        if now is not None and "error" in now and _rust_tests(k, f.old_path, was):
             error = now["error"]
             where = f" at line {error['line']}" if error["line"] is not None else ""
             unparsable.append(_finding(f.new_path, error["line"], "unparsable",
                                        f"the gate-rust helper could not read it as Rust{where}: {error['message']}; so "
                                        f"its tests were not checked.", severity="error"))
-        else:
-            documents[k] = (None if was is None or "error" in was else was), now
+        elif now is None or "error" not in now:
+            documents[k] = was, now
     return documents, unparsable
 
 
@@ -2055,9 +2062,15 @@ def _rust_tests(k: int, path: str | None, document: dict | None) -> list[_RustTe
         return []
     spans = _rust_test_spans(document)
     everywhere = _rust_test_path(path)
-    return [_RustTest(k, _rust_name(fn), fn) for fn in document["fns"]
-            if any(a["path"].split("::")[-1] == "test" for a in fn["attrs"])
-            and (everywhere or _within(fn["line"], spans))]
+    seen: collections.Counter[str] = collections.Counter()
+    out = []
+    for fn in document["fns"]:
+        if (any(a["path"].split("::")[-1] == "test" for a in fn["attrs"])
+                and (everywhere or _within(fn["line"], spans))):
+            name = _rust_name(fn)
+            out.append(_RustTest(k, name, fn, seen[name]))
+            seen[name] += 1
+    return out
 
 
 def _rust_name(fn: dict) -> str:
@@ -2117,9 +2130,11 @@ def _rust_removed_from(path: str | None, document: dict, tests: list[_RustTest],
     return out
 
 
-# An attribute that skips a test, or turns it or the module holding it off: #[ignore], a cfg other than cfg(test), or a
-# cfg_attr that writes ignore. Matched at the attribute's `#`.
-_RUST_SKIPPING = re.compile(r"#!?\[\s*(?:ignore\b|cfg\s*\((?!\s*test\s*\)\s*\])|cfg_attr\s*\(.*\bignore\b)", re.DOTALL)
+# An attribute that skips a test, or turns it or the module holding it off: #[ignore], a cfg other than cfg(test), such
+# as cfg(all(test, feature = "slow")), which turns tests off as Python's skipIf does, or a cfg_attr that writes ignore,
+# as an argument after its predicate's comma. Matched at the attribute's `#`, reading no further than its first `]`.
+_RUST_SKIPPING = re.compile(r"#!?\[\s*(?:ignore\b|cfg\s*\((?!\s*test\s*\)\s*\])"
+                            r"|cfg_attr\s*\([^\]]*,\s*ignore\s*[=,)])")
 
 
 def _rust_skips(f: ChangedTestFile, document: dict, tests: list[_RustTest]) -> list[dict]:

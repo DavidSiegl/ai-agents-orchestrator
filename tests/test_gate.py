@@ -7,6 +7,7 @@ a piece of the quality file's format, are in tests/test_orchestrator.py and test
 
 import ast
 import contextlib
+import dataclasses
 import io
 import json
 import os
@@ -1906,6 +1907,16 @@ class TestRustWeakenedTests(RepositoryTest):
         self.assertEqual(where, [("crate/src/lib.rs", 6, "removed-test")])
         self.assertEqual(found[0]["message"], "`tests` and its 2 tests are gone; this was line 6 at the base.")
 
+    def test_two_tests_of_one_name_are_two_tests(self):
+        # Under cfgs that never hold together, as two platforms' versions of one test.
+        twins = ("#[cfg(unix)]\n#[test]\nfn twin() {\n    assert!(add(1, 1) == 2);\n}\n\n"
+                 "#[cfg(not(unix))]\n#[test]\nfn twin() {\n    assert!(add(2, 2) == 4);\n    assert!(add(0, 2) == 2);\n}\n")
+        self.base = self.commit({"crate/tests/twins.rs": "use tiny::add;\n\n" + twins}, "twins")
+        self.edit("crate/tests/twins.rs", "    assert!(add(0, 2) == 2);\n", "")
+        self.assertEqual(self.found()[0], [("crate/tests/twins.rs", 11, "fewer-assertions")])
+        self.put("crate/tests/twins.rs", "use tiny::add;\n\n" + twins[:twins.index("\n#[cfg(not(unix))]")])
+        self.assertEqual(self.found()[0], [("crate/tests/twins.rs", 11, "removed-test")])
+
     def test_a_deleted_test_file_is_one_finding(self):
         self.git("rm", "--quiet", "crate/tests/it.rs")
         where, found = self.found()
@@ -1927,6 +1938,8 @@ class TestRustWeakenedTests(RepositoryTest):
 
     def test_a_new_test_module_and_attributes_that_skip_nothing_are_not_skips(self):
         self.edit("crate/src/lib.rs", "}\n\n#[cfg(test)]", "}\n\n#[cfg(unix)]\npub fn unix() {}\n\n#[cfg(test)]")
+        self.edit("crate/tests/it.rs", "#[test]\nfn negative() {",
+                  "#[test]\n#[cfg_attr(feature = \"ignore-me\", allow(dead_code))] fn negative() { let _ignore = 1;")
         self.put("crate/src/more.rs", "#[cfg(test)]\nmod tests {\n    #[test]\n    #[should_panic(expected = \"x\")]\n"
                                       "    fn panics() {\n        panic!(\"x\");\n    }\n}\n")
         self.git("add", "crate/src/more.rs")
@@ -2002,6 +2015,15 @@ class TestRustWeakenedTests(RepositoryTest):
         self.edit("crate/tests/it.rs", "assert_eq!(add(-1, -1), -2)", "assert_eq!(add(-1, -1), -3)")
         self.assertEqual(self.found()[0], [])
 
+    def test_a_language_whose_tests_the_change_leaves_alone_is_not_asked_about_its_code(self):
+        # Whether the change edits a language's code reads every path of it; with no test file to judge, that is waste.
+        def asked(change, path):
+            raise AssertionError(f"asked whether {path} is Python code")
+        python = dataclasses.replace(gate.WEAKENED_TESTS_DETECTORS[0], is_code=asked)
+        self.edit("crate/tests/it.rs", "assert_eq!(add(-1, -1), -2)", "assert_eq!(add(-1, -1), -3)")
+        with patch.object(gate, "WEAKENED_TESTS_DETECTORS", (python, *gate.WEAKENED_TESTS_DETECTORS[1:])):
+            self.assertEqual(self.found()[0], [])
+
     def test_a_golden_file_changed_with_rust_code_is_an_expected_value_changed(self):
         self.commit({"crate/tests/golden/sum.txt": "3\n"}, "golden file")
         self.base = self.git("rev-parse", "HEAD").strip()
@@ -2014,6 +2036,14 @@ class TestRustWeakenedTests(RepositoryTest):
         where, found = self.found()
         self.assertEqual(where, [("crate/tests/it.rs", 4, "unparsable")])
         self.assertIn("the gate-rust helper could not read it as Rust at line 4: ", found[0]["message"])
+
+    def test_a_file_under_tests_that_is_not_rust_on_purpose_is_no_finding(self):
+        broken = "// A fixture of a parser's error.\nfn broken( {\n"
+        self.base = self.commit({"crate/tests/fixtures/broken.rs": broken}, "a fixture")
+        self.edit("crate/tests/fixtures/broken.rs", "fn broken(", "fn still_broken(")
+        self.put("crate/tests/fixtures/new.rs", broken)
+        self.git("add", "-A")
+        self.assertEqual(self.found()[0], [])
 
     def test_a_change_to_rust_the_gate_cannot_read_is_one_not_run_finding(self):
         self.edit("crate/src/lib.rs", "    a + b\n", "    b + a\n")

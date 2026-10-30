@@ -137,21 +137,25 @@ under a `tests` directory or named `tests.rs`, or anywhere inside an inline modu
 holds both: the check compares the items of its test modules, and the rest of the file is code. Rust code outside
 the tests is any other `.rs` file in a directory that holds a `Cargo.toml`, or below one, `build.rs` included, and a
 change edits it when it adds, deletes or renames such a file, or adds or removes a line of it outside its `cfg(test)`
-modules; so a change to the tests of `lib.rs` alone edits no code. A test is known by its file and the names of the
-items that hold it, joined by `::`, as `tests::adds`. Each finding reads the helper's JSON as Python's reads the
-syntax tree:
+modules; so a change to the tests of `lib.rs` alone edits no code. A file that a `#[cfg(test)] mod name;` elsewhere
+names is read by its own path alone, so its tests count only under `tests/` or as `tests.rs` (`TODO.md`). A test is
+known by its file and the names of the items that hold it, joined by `::`, as `tests::adds`; tests of one name in one
+file, as under two `cfg`s for two platforms, are each a test of its own, matched with the other side's in their
+order. Each finding reads the helper's JSON as Python's reads the syntax tree:
 
 - `removed-test`: a test gone from its file. Its body is the helper's `body_digest`, the same whatever the layout and
   comments, so a test moved to another file or module, or renamed, with the same body, is not removed. An inline
   module whose tests all went is one finding, at its `mod` line, as a class is, and so is a deleted file, or one that
   is no longer Rust;
 - `skip`: an attribute added that skips a test or turns it off: `#[ignore]`, a `cfg` other than `cfg(test)` itself,
-  or a `cfg_attr` that writes `ignore`. It counts among a test's attributes; on a line of its own inside a test's
-  body, where a statement's `cfg` turns an assertion off; among the outer attributes of an inline module holding a
-  test; and as an inner attribute, `#![...]`, on a line of its own inside such a module or anywhere in a file under
-  `tests/`. A `cfg` on a helper `fn` is no skip, nor `#[cfg(test)]` on a new test module. Lines are read for
-  attributes only where they start with `#`, so an attribute after other code on its line, or one written over
-  several lines whose `ignore` is not on its first, is not seen there; a test's own attributes the helper gives whole;
+  `cfg(all(test, feature = "slow"))` included, which turns tests off as Python's `skipIf` does, or a `cfg_attr` that
+  writes `ignore`, as an argument after its predicate. It counts among a test's attributes; on a line of its own
+  inside a test's body, where a statement's `cfg` turns an assertion off; among the outer attributes of an inline
+  module holding a test; and as an inner attribute, `#![...]`, on a line of its own inside such a module or anywhere
+  in a file under `tests/`. A `cfg` on a helper `fn` is no skip, nor `#[cfg(test)]` on a new test module. Lines are
+  read for attributes only where they start with `#`, so an attribute after other code on its line, or one written
+  over several lines whose `ignore` is not on its first, is not seen there; a test's own attributes the helper gives
+  whole;
 - `fewer-assertions`: a kept test with fewer of the assertion macros the helper lists (`asserts`: `assert!`,
   `assert_eq!`, `assert_ne!`, their `debug_` forms, and `panic!`) than at the base. It is one to weigh, as Python's;
 - `swallowed-error`: on an added line, a `#[should_panic]` without `expected` on a test, which any panic passes, a
@@ -164,10 +168,10 @@ syntax tree:
   the assertions of the two sides aligned by macro and shape, in a change that also edits Rust code outside the
   tests, on either side. Constants are not followed, as Python's are: an expected value held in a `const` that the
   change edits is not seen. A golden file changed with Rust code is one such finding, as above;
-- `unparsable`: a test file the helper cannot parse in the working tree, at the line syn points at, failing the gate.
-  A base that does not parse has no tests to lose. A file outside `tests/` that is not `tests.rs` is read as a test
-  file only where the helper finds a `cfg(test)` module in it, so one that no longer parses is judged only when its
-  base held one; clippy's build reports it either way;
+- `unparsable`: a test file the helper cannot parse in the working tree while its base held tests, at the line syn
+  points at, failing the gate: those tests cannot be compared. One whose base held none has none to lose, as a
+  fixture under `tests/` that is not Rust on purpose, such as the helper's own `broken.rs`, and is not judged; nor is
+  a base that does not parse;
 - `not-run`: the gate cannot read the change's Rust, as [the helper's section](#reading-rust-the-gate-rust-helper)
   says, for a change to any `.rs` file: one lineless finding, which fails the gate, and the check judges none of
   the change's Rust.
