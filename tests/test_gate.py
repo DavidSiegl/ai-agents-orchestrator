@@ -2783,6 +2783,13 @@ class TestPassesAtBase(RepositoryTest):
             found = self.found()
         self.assertEqual([(f["line"], f["rule"]) for f in found], [(12, "passes-at-base"), (17, "passes-at-base")])
 
+    def test_a_file_beside_the_tests_the_change_deletes_is_gone_from_the_run_at_the_base(self):
+        self.commit({"tests/conftest.py": "raise RuntimeError('the base\\'s conftest')\n"}, "a failing conftest")
+        self.git("rm", "--quiet", "tests/conftest.py")
+        self.fix_add("\n\ndef test_mul_again():\n    assert mul(1, 1) == 1\n")
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in self.found()],
+                         [("tests/test_calc.py", 12, "passes-at-base")])
+
     def test_a_test_that_fails_without_the_fix_gives_nothing(self):
         self.fix_add()
         self.assertEqual(self.found(), [])
@@ -3506,7 +3513,11 @@ class TestRustPassesAtBase(RepositoryTest):
         self.rebase({"engine/Cargo.toml": '[package]\nname = "engine"\nversion = "0.1.0"\nedition = "2021"\n',
                      "engine/Cargo.lock": 'version = 4\n\n[[package]]\nname = "engine"\nversion = "0.1.0"\n',
                      "engine/src/lib.rs": "pub fn one() -> u32 {\n    1\n}\n"}, "a package below the top")
-        self.put("engine/tests/one.rs", "#[test]\nfn is_one() {\n    assert_eq!(engine::one(), 1);\n}\n")
+        # Its tests' data, under its own tests directory, is the change's too.
+        self.rebase({"engine/tests/data.txt": "one\n"}, "the package's tests' data")
+        self.put("engine/tests/data.txt", "two\n")
+        self.put("engine/tests/one.rs", "#[test]\nfn is_one() {\n    assert_eq!(engine::one(), 1);\n"
+                                        '    assert_eq!(include_str!("data.txt"), "two\\n");\n}\n')
         self.assertEqual(self.found(), [("engine/tests/one.rs", 2, "passes-at-base")])
 
     def test_a_test_is_changed_by_a_line_the_change_adds_or_removes_from_its_attributes_to_its_end(self):
@@ -3534,7 +3545,7 @@ class TestRustPassesAtBase(RepositoryTest):
         self.put("src/bin/tool/main.rs", "fn main() {}\n")
         self.put("tests/cli/main.rs", "mod args;\n")
         self.put("engine/Cargo.toml", "[package]\n")
-        self.put("engine/tests/cli/main.rs", "mod args;\n")
+        self.put("engine/tests/run/main.rs", "mod args;\n")
         self.put("tools/x/Cargo.toml", "[package]\n")
         for path, expected in [
             ("tests/cli.rs", ("", ("--test", "cli"), ())),
@@ -3549,7 +3560,8 @@ class TestRustPassesAtBase(RepositoryTest):
             ("engine/tests/run.rs", ("engine", ("--test", "run"), ())),
             ("engine/src/main.rs", ("engine", ("--bins",), ())),
             ("src/bin/solo.rs", ("", ("--bin", "solo"), ())),
-            ("engine/tests/cli/args.rs", ("engine", ("--test", "cli"), ("args",))),
+            # The top level has no tests/run/main.rs: the package's is the one that counts.
+            ("engine/tests/run/args.rs", ("engine", ("--test", "run"), ("args",))),
             # engine has no src/lib.rs, though the top level has one.
             ("engine/src/calc.rs", ("engine", ("--bins",), ("calc",))),
             ("tools/x/tests/run.rs", ("tools/x", ("--test", "run"), ())),
@@ -3906,10 +3918,11 @@ class TestCargoMutantsRuns(unittest.TestCase):
     def test_a_run_stopped_after_some_mutants_counts_those_it_tried(self):
         self.write_outcomes([self.BASELINE, cargo_mutant("replace > with < in unchecked", "CaughtMutant"),
                              cargo_mutant("replace > with == in unchecked", "MissedMutant"),
+                             cargo_mutant("replace unchecked -> bool with true", "Timeout"),
                              cargo_mutant("replace unchecked -> bool with false", "Unviable")])
         [survived, stopped] = self.run_findings(-2, True)
         self.assertEqual(survived["rule"], "survived")
-        self.assertEqual(stopped["message"], "budget reached after 2 of the mutants cargo-mutants made of the "
+        self.assertEqual(stopped["message"], "budget reached after 3 of the mutants cargo-mutants made of the "
                                              "workspace at `engine`: it was stopped at 30 seconds "
                                              "(`--mutation-budget`), so the mutants it did not try may survive too.")
 
@@ -3940,7 +3953,22 @@ class TestCargoMutantsRuns(unittest.TestCase):
                 None, None, "budget-reached", "budget reached before cargo-mutants started on the workspace at "
                                               "`engine`: the 30 seconds of `--mutation-budget` left too little to run "
                                               "and stop it, so its mutants were not tried.")], True))
+            [top] = gate._cargo_mutants_run(SimpleNamespace(diff=self.DIFF.replace("engine/", "")), self.out, scratch,
+                                            "", ["src/a.rs"], 30, time.monotonic())[0]
+        self.assertIn("on the workspace at `.`:", top["message"])
         run.assert_not_called()
+
+    def test_cargo_mutants_runs_in_the_copy_uncoloured_and_is_stopped_with_sigint(self):
+        change = SimpleNamespace(diff=self.DIFF)
+        ended = (subprocess.CompletedProcess([], 0, "", ""), False)
+        with patch.dict("os.environ", {"CARGO_TERM_COLOR": "always", "JENKINS_TOKEN": "secret"}), \
+                patch.object(gate, "_run_in_session", return_value=ended) as run:
+            self.assertEqual(gate._cargo_mutants_run(change, self.out, os.path.join(self.out, "run"), "engine",
+                                                     ["engine/src/a.rs"], 30, time.monotonic() + 600), ([], False))
+        [(argv, cwd, env), kwargs] = run.call_args
+        self.assertEqual(argv[argv.index("--dir") + 1], os.path.join(self.out, "engine"))
+        self.assertEqual((cwd, env["CARGO_TERM_COLOR"], "JENKINS_TOKEN" in env), (self.out, "never", False))
+        self.assertEqual(kwargs["soft_stop"], (signal.SIGINT, gate.MUTMUT_STOP_GRACE))
 
     def test_a_diff_that_cannot_be_written_or_a_cargo_mutants_that_cannot_start_is_not_run(self):
         change = SimpleNamespace(diff=self.DIFF)
@@ -4015,12 +4043,13 @@ class TestCargoMutantsRuns(unittest.TestCase):
             mutated.append(budget)
             return [at("b.py", 9), at("b.py", 1), at("b.py", None)]
         with patch.object(gate, "_changed_rust_code", return_value=["A.rs"]), \
-                patch.object(gate, "_changed_python_functions", return_value=(["f"], [])), \
+                patch.object(gate, "_changed_python_functions", return_value=(["f"], [at("c.py", 3)])), \
                 patch.object(gate, "_mutation_test", side_effect=mutmut), \
                 patch.object(gate, "_cargo_mutants_on_copy", return_value=[at("A.rs", 2), at(None, None)]):
             found = gate.surviving_mutants("change", budget=30)
         self.assertEqual(mutated, [15])
-        self.assertEqual([f["message"] for f in found], ["None:None", "A.rs:2", "b.py:None", "b.py:1", "b.py:9"])
+        self.assertEqual([f["message"] for f in found],
+                         ["None:None", "A.rs:2", "b.py:None", "b.py:1", "b.py:9", "c.py:3"])
 
     def test_no_room_for_cargo_mutants_is_a_finding(self):
         with patch.object(gate, "_changed_rust_code", return_value=["src/lib.rs"]), \
