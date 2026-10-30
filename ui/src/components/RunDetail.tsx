@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { Api, Project } from "../api";
 import type { RunEntry } from "../runs";
 import { formatRound, heartbeatAge, outcome } from "../runs";
+import { AgentPanes } from "./AgentPanes";
 import { HandoffFile } from "./HandoffFile";
 import { StepProgress } from "./StepProgress";
 
@@ -14,7 +15,8 @@ interface Props {
   onClose: () => void;
 }
 
-/** One run: its progress, its files, and the selected one rendered; the newest file until one is chosen. */
+/** One run: its progress, its files, and the selected one rendered, the newest file until one is chosen; and its
+ * agents. */
 export function RunDetail({ api, project, entry, now, onClose }: Props) {
   const { record, files } = entry;
   const [chosen, setChosen] = useState<string | null>(null);
@@ -62,6 +64,7 @@ export function RunDetail({ api, project, entry, now, onClose }: Props) {
           <p className="empty">{files ? "No files yet." : "Loading…"}</p>
         )}
       </div>
+      <AgentPanes api={api} project={project} record={record} />
     </section>
   );
 }

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use super::*;
 use crate::constants::{APPROVE, HEARTBEAT_SECONDS, STALE_SECONDS};
 use crate::runs::STALE;
-use crate::serve::fake::ServeHost;
+use crate::serve::fake::{FakeConsole, ServeHost};
 
 const SERVE_ID: &str = "20261024-120000-5e7e00";
 
@@ -37,7 +37,7 @@ struct Watched {
 impl Watched {
     fn new() -> Watched {
         let host = Arc::new(ServeHost::on(None));
-        let project = ProjectRuns::new(host.clone(), "/proj".to_string(), vec![]);
+        let project = ProjectRuns::new(host.clone(), Arc::new(FakeConsole::default()), "/proj".to_string(), vec![]);
         Watched { host, project }
     }
 
@@ -109,7 +109,8 @@ fn a_run_of_this_host_whose_orchestrator_exited_is_stale() {
         [("host", Json::from(local_host())), ("pid", Json::from(4242)), ("started_at", Json::from("x"))].into_iter().collect(),
     );
     w.save(HEARTBEAT_SECONDS + 1, &[("owner", owner)]);
-    let project = ProjectRuns::new(w.host.clone(), "/proj".to_string(), vec![]).with_pid_alive(|pid| {
+    let console = Arc::new(FakeConsole::default());
+    let project = ProjectRuns::new(w.host.clone(), console, "/proj".to_string(), vec![]).with_pid_alive(|pid| {
         ASKED.fetch_add(1, Ordering::SeqCst);
         assert_eq!(pid, 4242);
         false

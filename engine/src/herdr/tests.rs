@@ -305,6 +305,28 @@ fn the_other_commands_and_their_answers() {
     assert!(format!("{herdr:?}").contains("box"));
 }
 
+#[test]
+fn the_console_reads_the_agent_s_text_and_types_into_it() {
+    let (herdr, ran) = answering(Some("box"), 0, "line 1\nline 2\n", "");
+    let with = |words: &[&str]| argv(&[&["herdr", "--machine", "box"][..], words].concat());
+    assert_eq!(AgentConsole::read(&herdr, "build-x", 200), Ok("line 1\nline 2\n".to_string()));
+    let read = with(&["agent", "read", "build-x", "--source", "recent", "--lines", "200"]);
+    assert_eq!(last(&ran), (read, Some(Duration::from_secs(CALL_LIMIT_SECONDS))));
+    let (herdr, ran) = answering(Some("box"), 0, &result("{}"), "");
+    herdr.submit("build-x", "yes, per client").unwrap();
+    assert_eq!(last(&ran).0, with(&["agent", "prompt", "build-x", "yes, per client"]));
+    herdr.send_keys("build-x", &["esc", "ctrl+c"]).unwrap();
+    assert_eq!(last(&ran).0, with(&["agent", "send-keys", "build-x", "esc", "ctrl+c"]));
+}
+
+#[test]
+fn the_console_names_herdr_s_errors() {
+    let (herdr, _) = answering(None, 1, "", &error("agent_not_found", "no agent build-x"));
+    assert_eq!(AgentConsole::read(&herdr, "build-x", 10).unwrap_err().code(), Some("agent_not_found"));
+    let (herdr, _) = answering(None, 1, "", &error("agent_blocked", "the agent is blocked"));
+    assert_eq!(herdr.submit("build-x", "go").unwrap_err().code(), Some("agent_blocked"));
+}
+
 // -- TestHerdrLookups ------------------------------------------------------------------------------------------------
 
 #[test]

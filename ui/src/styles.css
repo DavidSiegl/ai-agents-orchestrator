@@ -258,3 +258,40 @@ ul.files time {
   border: 1px solid var(--navy-raised);
   padding: 2px 6px;
 }
+
+/* The Agents section: a tab per agent, what its pane shows, and the input to it. */
+.agents {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--navy-raised);
+}
+
+.agents [role="tablist"] {
+  display: flex;
+  gap: 4px;
+}
+
+.agents [role="tab"][aria-selected="true"] {
+  border-color: var(--mint);
+}
+
+.agent pre {
+  height: 24em;
+  margin: 8px 0;
+  padding: 8px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, monospace;
+  border-radius: 4px;
+  background: var(--navy-dark);
+}
+
+.agent form {
+  display: flex;
+  gap: 4px;
+}
+
+.agent form input {
+  flex: 1;
+}

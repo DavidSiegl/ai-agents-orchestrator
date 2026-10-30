@@ -1,10 +1,12 @@
-//! The Python tests' ServeHost: a Host that serve's threads can share, its files in memory.
+//! The Python tests' ServeHost: a Host that serve's threads can share, its files in memory; and FakeConsole, the herdr
+//! its runs' agents are in.
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard};
 
 use crate::constants::RUNS_DIR;
 use crate::error::OrchestratorError;
+use crate::herdr::{AgentConsole, HerdrError};
 use crate::host::{Exec, ExecError, Host, RunFile};
 use crate::py::json::Json;
 
@@ -87,5 +89,53 @@ impl Host for ServeHost {
             .collect();
         files.sort();
         Ok(files.into_iter().map(|(mtime, path)| RunFile { path, mtime }).collect())
+    }
+}
+
+/// An AgentConsole whose agents show `screens`, by herdr name, and which records what is typed into them in `typed`.
+/// An agent without a screen has exited (herdr's agent_not_found); while `down` is set, every command fails as herdr
+/// does when it cannot be reached.
+#[derive(Default)]
+pub struct FakeConsole {
+    state: Mutex<Consoled>,
+}
+
+/// What a FakeConsole holds and records.
+#[derive(Default)]
+pub struct Consoled {
+    /// By agent name, what its terminal shows.
+    pub screens: BTreeMap<String, String>,
+    /// Each command, as `read NAME LINES`, `submit NAME TEXT` or `keys NAME KEY...`, in order.
+    pub typed: Vec<String>,
+    pub down: bool,
+}
+
+impl FakeConsole {
+    pub fn state(&self) -> MutexGuard<'_, Consoled> {
+        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The agent's screen, after recording command; herdr's errors as the type says.
+    fn answer(&self, name: &str, command: String) -> Result<String, HerdrError> {
+        let mut s = self.state();
+        s.typed.push(command);
+        if s.down {
+            return Err(HerdrError::Failed(OrchestratorError::new("herdr is not on PATH")));
+        }
+        s.screens.get(name).cloned().ok_or_else(|| HerdrError::new("agent_not_found", format!("no agent {name}")))
+    }
+}
+
+impl AgentConsole for FakeConsole {
+    fn read(&self, name: &str, lines: u32) -> Result<String, HerdrError> {
+        self.answer(name, format!("read {name} {lines}"))
+    }
+
+    fn submit(&self, name: &str, text: &str) -> Result<(), HerdrError> {
+        self.answer(name, format!("submit {name} {text}")).map(drop)
+    }
+
+    fn send_keys(&self, name: &str, keys: &[&str]) -> Result<(), HerdrError> {
+        self.answer(name, format!("keys {name} {}", keys.join(" "))).map(drop)
     }
 }

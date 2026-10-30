@@ -1,5 +1,5 @@
-// The protocol of `orchestrator.py serve`: its run records, file lists and events. The server's RunRequestHandler
-// and RunWatch document the endpoints and the events, and run_record every key of a record.
+// The protocol of `orchestrator serve`: its run records, file lists, events and agents. The engine's RunServer
+// (engine/src/serve.rs) and RunWatch document the endpoints and the events, and run_record every key of a record.
 
 /** Where the sidecar's server listens, as the Tauri shell got it from `serve`'s first line. */
 export interface Connection {
@@ -21,6 +21,17 @@ export interface Step {
   role: string;
 }
 
+/** A role's agent that the run has started, by its herdr name and harness. */
+export interface AgentRef {
+  role: string;
+  name: string;
+  kind: string;
+}
+
+/** What the window types into an agent: text submitted as a prompt, or keys pressed in order, as herdr names them
+ * (`esc`, `enter`, `up`, `ctrl+c`). */
+export type AgentInput = { text: string } | { keys: string[] };
+
 export interface Turn {
   step: string;
   role: string;
@@ -41,6 +52,8 @@ export interface RunRecord {
   quality_round: number | null;
   role: string | null;
   pane: string | null;
+  /** The agents the run has started, in the order it started them; absent from a server before 0.51.0. */
+  agents?: AgentRef[];
   health: "running" | "stale" | null;
   health_reason: string | null;
   /** Seconds since state.json was written, when the server read it. */
@@ -81,9 +94,32 @@ export class Api {
 
   /** The text of a run's file; rejects with the server's error message for a missing file or a failed read. */
   async fileText(project: Project, run: string, name: string): Promise<string> {
-    const response = await fetch(this.url("/file", project, { run, name }), {
-      headers: { Authorization: `Bearer ${this.connection.token}` },
+    return this.text(this.url("/file", project, { run, name }));
+  }
+
+  /** The last lines of what the run's agent of role shows; rejects with the server's error message, such as for an
+   * agent that has exited. */
+  async agentText(project: Project, run: string, role: string, lines: number): Promise<string> {
+    return this.text(this.url("/agent", project, { run, role, lines: String(lines) }));
+  }
+
+  /** Type input into the run's agent of role, without waiting for the agent to take it; rejects with the server's
+   * error message. */
+  async typeInto(project: Project, run: string, role: string, input: AgentInput): Promise<void> {
+    const response = await fetch(this.url("/agent/input", project, { run, role }), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${this.connection.token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(input),
     });
+    if (!response.ok) {
+      const body = (await response.json().catch(() => ({}))) as { error?: string };
+      throw new Error(body.error ?? `HTTP ${response.status}`);
+    }
+  }
+
+  /** The text field of a GET of url's JSON; rejects with the server's error message, or the status. */
+  private async text(url: string): Promise<string> {
+    const response = await fetch(url, { headers: { Authorization: `Bearer ${this.connection.token}` } });
     const body = (await response.json()) as { text?: string; error?: string };
     if (!response.ok || body.text === undefined) {
       throw new Error(body.error ?? `HTTP ${response.status}`);

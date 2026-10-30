@@ -1,4 +1,4 @@
-//! serve: the runs of any project, read-only, over HTTP on 127.0.0.1 for the desktop app, as orchestrator.py's
+//! serve: the runs of any project, and their agents, over HTTP on 127.0.0.1 for the desktop app, as orchestrator.py's
 //! RunServer, RunRequestHandler and serve_command. [`serve_command`] is the program's `serve`; [`RunServer`] is the
 //! server, on tiny_http, each request answered on a thread of its own; crate::serve::runs is what it serves of a
 //! project. docs/architecture.md's "serve" describes the protocol and its security checks.
@@ -15,13 +15,13 @@ use tiny_http::{Header, Request, Response};
 use crate::cli::listing::RUN_RECORD_VERSION;
 use crate::constants::EXIT_ERROR;
 use crate::error::{os_error, OrchestratorError};
-use crate::herdr::ProcessHerdr;
+use crate::herdr::{AgentConsole, ProcessHerdr};
 use crate::host::{Host, ProcessHost};
 use crate::interrupt::Interrupt;
 use crate::py::json::Json;
 use crate::py::text::repr;
 use crate::py::url::{parse_qsl, urlsplit};
-use runs::{Event, ProjectRuns, RunReadError, RunWatch};
+use runs::{AgentInput, Event, ProjectRuns, RunReadError, RunWatch};
 
 #[cfg(test)]
 mod fake;
@@ -40,12 +40,26 @@ pub struct Polls {
     pub remote: Duration,
 }
 
+/// The lines of an agent's terminal /agent gives without ?lines=, and the most it gives with one.
+pub const AGENT_LINES: (u32, u32) = (200, 2000);
+
+/// The most bytes of a POST's body serve reads; a longer one gets 413.
+pub const MAX_BODY_BYTES: usize = 64 * 1024;
+
+/// A project as Connect reaches it.
+pub struct Reached {
+    /// Reaches the project's files; must stop its commands when the server stops.
+    pub host: Arc<dyn Host + Send + Sync>,
+    /// The project's absolute directory on host.
+    pub dir: String,
+    /// Reaches the herdr its runs' agents run in.
+    pub console: Arc<dyn AgentConsole>,
+}
+
 /// How a RunServer reaches the project a request names: given the saved herdr machine (empty for this one) and the
 /// directory, which may start with ~, as the request gives them, and the Interrupt the server raises when it stops,
-/// which must stop the Host's commands; the Host and the project's absolute directory on it. Errors: the project
-/// cannot be reached. [`project_host`] is the real one.
-pub type Connect =
-    dyn Fn(&str, &str, &Interrupt) -> Result<(Arc<dyn Host + Send + Sync>, String), OrchestratorError> + Send + Sync;
+/// which must stop the Host's commands. Errors: the project cannot be reached. [`project_host`] is the real one.
+pub type Connect = dyn Fn(&str, &str, &Interrupt) -> Result<Reached, OrchestratorError> + Send + Sync;
 
 /// The program's `serve`: start a RunServer that also answers origins, print {"url", "token"} as one JSON line on
 /// standard output, and serve until SIGINT or SIGTERM; returns 0 then, the server stopped. Returns EXIT_ERROR, with
@@ -98,42 +112,44 @@ fn serve(
     }
 }
 
-/// The Host that reaches the project, on the saved herdr machine or, with machine empty, here, and the project's
-/// absolute directory on it; cwd may start with ~. Each command is stopped by stopping. Python's project_host:
-/// without connect's check for a herdr pane, since reading a project sends herdr no command, so a window started
-/// from a file manager reads it too. Errors: the machine is not saved or enabled, or the directory cannot be entered.
-pub fn project_host(
-    machine: &str,
-    cwd: &str,
-    stopping: &Interrupt,
-) -> Result<(Arc<dyn Host + Send + Sync>, String), OrchestratorError> {
+/// The project on the saved herdr machine or, with machine empty, here: the Host that reaches it, its absolute
+/// directory, cwd's, which may start with ~, and the herdr its agents run in, this machine's herdr forwarding to
+/// machine. Each command is stopped by stopping. Python's project_host: without connect's check for a herdr pane,
+/// since reading a project sends herdr no command, so a window started from a file manager reads it too; its agents'
+/// commands then go to the herdr session the CLI picks without one (HERDR_SESSION, else the default session). Errors:
+/// the machine is not saved or enabled, or the directory cannot be entered.
+pub fn project_host(machine: &str, cwd: &str, stopping: &Interrupt) -> Result<Reached, OrchestratorError> {
     let here = ProcessHost::local(stopping);
-    let host = if machine.is_empty() {
-        here
-    } else {
-        here.over_ssh(&ProcessHerdr::new(Some(machine), stopping).ssh_target()?)
-    };
+    let herdr = ProcessHerdr::new(Some(machine), stopping);
+    let host = if machine.is_empty() { here } else { here.over_ssh(&herdr.ssh_target()?) };
     let dir = host.resolve_dir(cwd)?;
-    Ok((Arc::new(host), dir))
+    Ok(Reached { host: Arc::new(host), dir, console: Arc::new(herdr) })
 }
 
-/// serve's HTTP server, on a free port of 127.0.0.1, with its token, answering until it is dropped. Its endpoints are
-/// each a GET of JSON naming the project by ?cwd= and an optional ?machine=:
+/// serve's HTTP server, on a free port of 127.0.0.1, with its token, answering until it is dropped. Its endpoints
+/// each name the project by ?cwd= and an optional ?machine=, and answer JSON; each is a GET but /agent/input:
 ///
 /// - /runs: {"version", "runs"}, as `list --json` prints it.
 /// - /files?run=ID: {"run", "files"}, the run's files as ProjectRuns::files lists them.
 /// - /file?run=ID&name=NAME: {"run", "name", "text"}; 403 for a name outside the run directory or state.json, 404
 ///   for no such file.
+/// - /agent?run=ID&role=ROLE[&lines=N]: {"run", "role", "text"}, the last N lines (AGENT_LINES: 200 by default, at
+///   most 2000) of what the run's agent of the role shows (ProjectRuns::agent_text); 404 for no such run or agent, or
+///   one that has exited.
+/// - POST /agent/input?run=ID&role=ROLE: types into that agent the JSON body's {"text": "..."}, submitted as a prompt,
+///   or {"keys": ["esc", ...]}, pressed in order, and answers {"run", "role"}, without waiting for the agent to take
+///   it; 400 for a body of another shape, 413 for one over MAX_BODY_BYTES, 404 as /agent's.
 /// - /events: a text/event-stream of RunWatch's events, polled every SERVE_POLL.local, every SERVE_POLL.remote for a
 ///   --machine project, until the client goes or the server stops. An HTTP/1.1 client gets it chunked, so that the
 ///   end of the stream is the end of the response; an HTTP/1.0 client's ends when the connection closes.
 ///
 /// Every request is checked in this order: a Host header other than the server's own address, or an Origin other
 /// than its own or one of its origins, gets 403 {"error"}; a CORS preflight (OPTIONS) that passes gets 204, allowing
-/// GET with an Authorization header; a GET then needs the server's token as an `Authorization: Bearer` header or,
-/// for an EventSource, which cannot set one, as ?token=, compared in constant time; else 401. 404 is an unknown
-/// endpoint, 400 a missing parameter, 502 a project that could not be read, each with {"error"}; any other method
-/// gets 501, as http.server answers it. A request with a byte beyond ASCII in its request line or a header is not
+/// GET and POST with an Authorization and a Content-Type header; a GET or POST then needs the server's token as an
+/// `Authorization: Bearer` header or, for an EventSource, which cannot set one, as ?token=, compared in constant time;
+/// else 401. 404 is an unknown endpoint, 400 a missing or malformed parameter, 502 a project that could not be read
+/// or herdr failing, each with {"error"}; a POST of any other endpoint, and any other method, gets 501, as
+/// http.server answers it. A request with a byte beyond ASCII in its request line or a header is not
 /// answered: tiny_http closes its connection. Nothing is logged.
 pub struct RunServer {
     /// What its request threads share.
@@ -276,8 +292,8 @@ impl Shared {
         if let Some(project) = self.lock_projects().get(&key) {
             return Ok(Arc::clone(project));
         }
-        let (host, dir) = (self.connect)(machine, cwd, &self.stopping)?;
-        let project = Arc::new(ProjectRuns::new(host, dir, target_args(machine, cwd)));
+        let reached = (self.connect)(machine, cwd, &self.stopping)?;
+        let project = Arc::new(ProjectRuns::new(reached.host, reached.console, reached.dir, target_args(machine, cwd)));
         self.lock_projects().insert(key, Arc::clone(&project));
         Ok(project)
     }
@@ -304,12 +320,13 @@ impl Shared {
     }
 }
 
-/// The endpoints of a RunServer, as its doc comment lists them.
+/// The GET endpoints of a RunServer, as its doc comment lists them.
 #[derive(Clone, Copy)]
 enum Endpoint {
     Runs,
     Files,
     File,
+    Agent,
     Events,
 }
 
@@ -320,16 +337,25 @@ impl Endpoint {
             "/runs" => (Endpoint::Runs, &[]),
             "/files" => (Endpoint::Files, &["run"]),
             "/file" => (Endpoint::File, &["run", "name"]),
+            "/agent" => (Endpoint::Agent, &["run", "role"]),
             "/events" => (Endpoint::Events, &[]),
             _ => return None,
         })
     }
 }
 
+/// The one endpoint a POST may name.
+const AGENT_INPUT: &str = "/agent/input";
+
+/// What a request answered with JSON gets: its status and body.
+type Answer = (u16, Json);
+
 /// Answer request, as RunServer's doc comment says.
 fn answer(shared: &Shared, request: Request) {
+    let (path, _) = target(&request);
     match request.method().as_str() {
         "GET" => get(shared, request),
+        "POST" if path == AGENT_INPUT => post_input(shared, request),
         "OPTIONS" => preflight(shared, request),
         method => {
             let method = repr(method);
@@ -338,16 +364,59 @@ fn answer(shared: &Shared, request: Request) {
     }
 }
 
-/// Answer a CORS preflight that passes the Host and Origin checks with 204, allowing GET with an Authorization
-/// header. A browser sends no Authorization header with a preflight, so there is no token to check.
+/// The path of request's target and its query's parameters, a parameter given twice being the last one, as Python's
+/// dict of the pairs keeps it.
+fn target(request: &Request) -> (String, HashMap<String, String>) {
+    // As http.server takes a path that starts with //, against open redirects (https://github.com/python/cpython/issues/87389).
+    let target = request.url();
+    let target = if target.starts_with("//") { format!("/{}", target.trim_start_matches('/')) } else { target.to_string() };
+    let url = urlsplit(&target);
+    (url.path, parse_qsl(&url.query).into_iter().collect())
+}
+
+/// The refusal of a request that fails the Host, Origin or token checks, query being its parameters; None when it
+/// passes them.
+fn refusal(shared: &Shared, request: &Request, query: &HashMap<String, String>) -> Option<Answer> {
+    if shared.refused(request) {
+        return Some((403, error("the Host or Origin header is not this server's")));
+    }
+    if !shared.has_token(request, query.get("token").map_or("", String::as_str)) {
+        return Some((401, error("the token is missing or wrong")));
+    }
+    None
+}
+
+/// The project query names, once query holds cwd and every one of params. Errors: 400 naming the missing
+/// parameters, 502 for a project that cannot be reached.
+fn project_of(shared: &Shared, query: &HashMap<String, String>, params: &[&str]) -> Result<Arc<ProjectRuns>, Answer> {
+    let missing: Vec<&str> = std::iter::once("cwd").chain(params.iter().copied()).filter(|p| !query.contains_key(*p)).collect();
+    if !missing.is_empty() {
+        return Err((400, error(&format!("missing parameter {}", missing.join(", ")))));
+    }
+    let param = |name: &str| query.get(name).map_or("", String::as_str);
+    shared.project(param("machine"), param("cwd")).map_err(|e| (502, error(&e.0)))
+}
+
+/// The answer to a read of a run that failed with e.
+fn read_failure(e: RunReadError) -> Answer {
+    match e {
+        RunReadError::Refused(why) => (403, error(&why)),
+        RunReadError::Missing(why) => (404, error(&why)),
+        RunReadError::Failed(e) => (502, error(&e.0)),
+    }
+}
+
+/// Answer a CORS preflight that passes the Host and Origin checks with 204, allowing GET and POST with an
+/// Authorization and a Content-Type header. A browser sends no Authorization header with a preflight, so there is
+/// no token to check.
 fn preflight(shared: &Shared, request: Request) {
     if shared.refused(&request) {
         return send_json(request, 403, &error("the Host or Origin header is not this server's"));
     }
     let mut response = Response::empty(204);
     for (name, value) in allowed_origin(&request).into_iter().chain([
-        ("Access-Control-Allow-Methods".to_string(), "GET".to_string()),
-        ("Access-Control-Allow-Headers".to_string(), "Authorization".to_string()),
+        ("Access-Control-Allow-Methods".to_string(), "GET, POST".to_string()),
+        ("Access-Control-Allow-Headers".to_string(), "Authorization, Content-Type".to_string()),
     ]) {
         response = with_header(response, &name, &value);
     }
@@ -356,31 +425,19 @@ fn preflight(shared: &Shared, request: Request) {
 
 /// Answer a GET of one of the endpoints.
 fn get(shared: &Shared, request: Request) {
-    // As http.server takes a path that starts with //, against open redirects (https://github.com/python/cpython/issues/87389).
-    let target = request.url();
-    let target = if target.starts_with("//") { format!("/{}", target.trim_start_matches('/')) } else { target.to_string() };
-    let url = urlsplit(&target);
-    // A parameter given twice is the last one, as Python's dict of the pairs keeps it.
-    let query: HashMap<String, String> = parse_qsl(&url.query).into_iter().collect();
-    let param = |name: &str| query.get(name).map_or("", String::as_str);
-    if shared.refused(&request) {
-        return send_json(request, 403, &error("the Host or Origin header is not this server's"));
+    let (path, query) = target(&request);
+    if let Some((code, body)) = refusal(shared, &request, &query) {
+        return send_json(request, code, &body);
     }
-    if !shared.has_token(&request, param("token")) {
-        return send_json(request, 401, &error("the token is missing or wrong"));
-    }
-    let Some((endpoint, params)) = Endpoint::at(&url.path) else {
-        return send_json(request, 404, &error(&format!("no endpoint {}", url.path)));
+    let Some((endpoint, params)) = Endpoint::at(&path) else {
+        return send_json(request, 404, &error(&format!("no endpoint {path}")));
     };
-    let missing: Vec<&str> = std::iter::once("cwd").chain(params.iter().copied()).filter(|p| !query.contains_key(*p)).collect();
-    if !missing.is_empty() {
-        return send_json(request, 400, &error(&format!("missing parameter {}", missing.join(", "))));
-    }
-    let project = match shared.project(param("machine"), param("cwd")) {
+    let project = match project_of(shared, &query, params) {
         Ok(project) => project,
-        Err(e) => return send_json(request, 502, &error(&e.0)),
+        Err((code, body)) => return send_json(request, code, &body),
     };
-    let (run, name) = (param("run"), param("name"));
+    let param = |name: &str| query.get(name).map_or("", String::as_str);
+    let (run, name, role) = (param("run"), param("name"), param("role"));
     let answered = match endpoint {
         Endpoint::Runs => project.records().map_err(RunReadError::from).map(|records| {
             let runs = Json::Array(records.into_iter().map(Json::Object).collect());
@@ -391,13 +448,74 @@ fn get(shared: &Shared, request: Request) {
             Some(text) => (200, object([("run", Json::from(run)), ("name", Json::from(name)), ("text", Json::from(text))])),
             None => (404, error(&format!("no file {name} in run {run}"))),
         }),
+        Endpoint::Agent => match agent_lines(query.get("lines")) {
+            Err(answer) => Ok(answer),
+            Ok(lines) => project.agent_text(run, role, lines).map(|text| {
+                (200, object([("run", Json::from(run)), ("role", Json::from(role)), ("text", Json::from(text))]))
+            }),
+        },
         Endpoint::Events => return events(shared, request, &project),
     };
-    match answered {
-        Ok((code, body)) => send_json(request, code, &body),
-        Err(RunReadError::Refused(why)) => send_json(request, 403, &error(&why)),
-        Err(RunReadError::Failed(e)) => send_json(request, 502, &error(&e.0)),
+    let (code, body) = answered.unwrap_or_else(read_failure);
+    send_json(request, code, &body);
+}
+
+/// The lines /agent gives for its ?lines=, given: AGENT_LINES's default without one. Errors: 400 for one that is not
+/// a whole number from 1 to AGENT_LINES's most.
+fn agent_lines(given: Option<&String>) -> Result<u32, Answer> {
+    let (default, most) = AGENT_LINES;
+    let Some(given) = given else { return Ok(default) };
+    given
+        .parse::<u32>()
+        .ok()
+        .filter(|n| (1..=most).contains(n))
+        .ok_or_else(|| (400, error(&format!("lines must be a whole number from 1 to {most}"))))
+}
+
+/// Answer a POST of /agent/input.
+fn post_input(shared: &Shared, mut request: Request) {
+    let (_, query) = target(&request);
+    if let Some((code, body)) = refusal(shared, &request, &query) {
+        return send_json(request, code, &body);
     }
+    let project = match project_of(shared, &query, &["run", "role"]) {
+        Ok(project) => project,
+        Err((code, body)) => return send_json(request, code, &body),
+    };
+    let input = match agent_input(&mut request) {
+        Ok(input) => input,
+        Err((code, body)) => return send_json(request, code, &body),
+    };
+    let param = |name: &str| query.get(name).map_or("", String::as_str);
+    let (run, role) = (param("run"), param("role"));
+    let (code, body) = match project.type_into(run, role, &input) {
+        Ok(()) => (200, object([("run", Json::from(run)), ("role", Json::from(role))])),
+        Err(e) => read_failure(e),
+    };
+    send_json(request, code, &body);
+}
+
+/// The input request's body asks /agent/input to type, as RunServer's doc comment gives its shapes. Errors: 413 for a
+/// body over MAX_BODY_BYTES, 400 for one that cannot be read or is of another shape.
+fn agent_input(request: &mut Request) -> Result<AgentInput, Answer> {
+    let mut body = Vec::new();
+    let limit = MAX_BODY_BYTES as u64 + 1;
+    if let Err(e) = request.as_reader().take(limit).read_to_end(&mut body) {
+        return Err((400, error(&format!("cannot read the body: {}", os_error(&e, None)))));
+    }
+    if body.len() > MAX_BODY_BYTES {
+        return Err((413, error(&format!("the body is over {MAX_BODY_BYTES} bytes"))));
+    }
+    let shape = || (400, error(r#"the body must be {"text": "..."} or {"keys": ["...", ...]}"#));
+    let parsed = std::str::from_utf8(&body).ok().and_then(|text| Json::parse(text).ok()).ok_or_else(shape)?;
+    let fields = parsed.as_object().filter(|o| o.len() == 1).ok_or_else(shape)?;
+    if let Some(text) = fields.get("text").and_then(Json::as_str).filter(|t| !t.is_empty()) {
+        return Ok(AgentInput::Text(text.to_string()));
+    }
+    let keys = fields.get("keys").and_then(Json::as_array).filter(|keys| !keys.is_empty()).ok_or_else(shape)?;
+    let keys: Option<Vec<String>> =
+        keys.iter().map(|k| k.as_str().filter(|k| !k.is_empty()).map(String::from)).collect();
+    keys.map(AgentInput::Keys).ok_or_else(shape)
 }
 
 /// Stream project's events to request's client until it goes or the server stops: a poll's events, or a comment when

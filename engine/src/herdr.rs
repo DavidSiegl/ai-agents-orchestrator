@@ -149,6 +149,21 @@ pub trait Herdr {
     fn close_workspace(&self, workspace: &str) -> Result<(), HerdrError>;
 }
 
+/// What a window does with a run's agent, by its herdr name: show what its pane shows, and type into it, as the human
+/// would in the pane (serve's /agent endpoints). Every error names herdr's code where herdr gave one, such as
+/// agent_not_found for an agent that has exited, or agent_blocked for a prompt to one blocked on a question.
+pub trait AgentConsole: Send + Sync {
+    /// The last lines of the agent's terminal, at most lines of them, as plain text without its ANSI styling.
+    fn read(&self, name: &str, lines: u32) -> Result<String, HerdrError>;
+
+    /// Type text into the agent and submit it, as herdr's `agent prompt` does, without waiting for it to be taken.
+    fn submit(&self, name: &str, text: &str) -> Result<(), HerdrError>;
+
+    /// Press keys in the agent's terminal, in order, each as herdr names it (`esc`, `enter`, `up`, `ctrl+c`); herdr
+    /// checks every key before it sends any, so a key it does not know sends none.
+    fn send_keys(&self, name: &str, keys: &[&str]) -> Result<(), HerdrError>;
+}
+
 /// What running the herdr CLI once gives: its exit status and both outputs, as run_process gives them.
 type Ran = Result<(i32, Vec<u8>, Vec<u8>), ProcessError>;
 
@@ -252,12 +267,7 @@ impl ProcessHerdr {
     /// Run one API-backed command, forwarded to the machine, its process given limit as exec takes it, and give its
     /// `result`. Errors: as exec's, and herdr answering with what is not a result (bad_response).
     fn call_within(&self, args: &[&str], limit: Option<Duration>) -> Result<Json, HerdrError> {
-        let mut argv: Vec<&str> = vec![];
-        if let Some(machine) = &self.machine {
-            argv.extend(["--machine", machine]);
-        }
-        argv.extend(args);
-        let out = self.exec(&argv, limit)?;
+        let out = self.exec_forwarded(args, limit)?;
         let command = args[..args.len().min(2)].join(" ");
         let bad = |why: String| HerdrError::new("bad_response", format!("{command}: {why}"));
         let mut answer = Json::parse(&out).map_err(bad)?;
@@ -265,6 +275,16 @@ impl ProcessHerdr {
             Json::Object(map) => map.remove("result").ok_or_else(|| bad("'result'".to_string())),
             _ => Err(bad(format!("the answer is not an object: {}", strip(&out)))),
         }
+    }
+
+    /// The standard output of `herdr args`, forwarded to the machine, run with limit as exec takes it. Errors: exec's.
+    fn exec_forwarded(&self, args: &[&str], limit: Option<Duration>) -> Result<String, HerdrError> {
+        let mut argv: Vec<&str> = vec![];
+        if let Some(machine) = &self.machine {
+            argv.extend(["--machine", machine]);
+        }
+        argv.extend(args);
+        self.exec(&argv, limit)
     }
 
     /// The standard output of `herdr args`, run with limit on its process (None: as long as it takes). Errors: herdr
@@ -409,6 +429,25 @@ impl Herdr for ProcessHerdr {
 
     fn close_workspace(&self, workspace: &str) -> Result<(), HerdrError> {
         self.call(&["workspace", "close", workspace]).map(drop)
+    }
+}
+
+impl AgentConsole for ProcessHerdr {
+    fn read(&self, name: &str, lines: u32) -> Result<String, HerdrError> {
+        let lines = lines.to_string();
+        // `agent read` prints the text itself, not a JSON answer; its errors are JSON as every command's.
+        let args = ["agent", "read", name, "--source", "recent", "--lines", &lines];
+        self.exec_forwarded(&args, Some(Duration::from_secs(CALL_LIMIT_SECONDS)))
+    }
+
+    fn submit(&self, name: &str, text: &str) -> Result<(), HerdrError> {
+        self.prompt(name, text)
+    }
+
+    fn send_keys(&self, name: &str, keys: &[&str]) -> Result<(), HerdrError> {
+        let mut args = vec!["agent", "send-keys", name];
+        args.extend(keys);
+        self.call(&args).map(drop)
     }
 }
 
