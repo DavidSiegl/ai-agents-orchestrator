@@ -3226,8 +3226,6 @@ class TestPassesAtBase(RepositoryTest):
         find.assert_called_once_with("change", budget=42)
 
 
-@unittest.skipUnless(CARGO and shutil.which("cargo-nextest"),
-                     "the Rust half of passes-at-base runs cargo nextest, and cargo or cargo-nextest is not on PATH")
 class TestRustPassesAtBase(RepositoryTest):
     """The passes-at-base check over a real git repository's Cargo package, its tests run with cargo-nextest and read
     with the gate-rust helper built from this tree."""
@@ -3437,6 +3435,15 @@ class TestVagueNames(RepositoryTest):
         self.assertEqual((path, line, rule), ("calc.py", None, "not-read"))
         self.assertEqual(message, "does not parse as Python, so its names were not read.")
 
+    def test_every_file_s_findings_are_listed_by_path_then_line(self):
+        # b_broken.py comes between the others in the diff, so a check that stopped at it would not read c.py; and
+        # a.py's name is on a later line than c.py's, so the order is the paths' before the lines'.
+        self.put("a.py", "\n\nraw_data = 1\n")
+        self.put("b_broken.py", "def broken(:\n")
+        self.put("c.py", "status = 1\n")
+        self.assertEqual([(path, line, rule) for path, line, rule, _ in self.found()],
+                         [("a.py", 3, "vague-name"), ("b_broken.py", None, "not-read"), ("c.py", 1, "vague-name")])
+
     def test_it_reports_without_failing_the_gate(self):
         [check] = [c for c in gate.gate_checks() if c.name == "vague-names"]
         self.assertEqual((check.fails, check.find), (False, gate.vague_names))
@@ -3507,15 +3514,25 @@ class TestRustVagueNames(RepositoryTest):
             """))
         self.assertEqual(self.names(), [(4, "shown_value"), (5, "own_info"), (10, "status"), (10, "raw_data")])
 
+    def test_a_binding_the_helper_never_prints_where_it_is_fixes_nothing(self):
+        trait_impl = {"holders": [{"kind": "impl", "trait": "Opener"}]}
+        bindings = [{"kind": "param"}, {"kind": "fn"}, {"kind": "param"}, {"kind": "fn"}, {"kind": "param"}]
+        # The param before any fn, and the fn past the one of fns with its param.
+        self.assertEqual(gate._rust_fixed_bindings({"fns": [trait_impl], "bindings": bindings}), {1, 2})
+
     def test_a_binding_on_a_line_the_change_left_alone_is_not_found(self):
         self.put("src/lib.rs", self.BASE.replace("    value\n", "    value + 1\n"))
         self.assertEqual(self.found(), [])
 
-    def test_a_file_that_does_not_parse_is_a_finding(self):
+    def test_a_file_that_does_not_parse_is_a_finding_at_the_line_the_helper_names(self):
         self.put("src/lib.rs", self.BASE + "fn broken( {\n")
-        [(path, line, rule, message)] = self.found()
-        self.assertEqual((path, rule), ("src/lib.rs", "not-read"))
+        # src/lib.rs comes before src/m.rs in the diff, so a check that stopped at it would not read src/m.rs.
+        self.put("src/m.rs", "struct RunInfo;\n")
+        [(path, line, rule, message), found_m] = self.found()
+        # The brace left open is the lexer's error, at the brace.
+        self.assertEqual((path, line, rule), ("src/lib.rs", 4, "not-read"))
         self.assertRegex(message, r"^does not parse as Rust \(.+\), so its names were not read\.$")
+        self.assertEqual(found_m[:3], ("src/m.rs", 1, "vague-name"))
 
     def test_the_helper_s_run_is_listed_and_a_change_without_rust_starts_none(self):
         self.put("src/lib.rs", self.BASE + "struct RunInfo;\n")
@@ -3576,7 +3593,6 @@ class TestCargoMutantsOutcomes(unittest.TestCase):
         code = diff.replace("+y\n", '+let p = "a/ui/b/ui/";\n', 1)
         self.assertIn('+let p = "a/ui/b/ui/";\n', gate._diff_under(code, "ui", ["ui/src/a.rs"]))
 
-    @unittest.skipUnless(CARGO, "cargo, which tells a package's workspace, is not on PATH")
     def test_the_workspace_is_the_one_cargo_tells(self):
         with tempfile.TemporaryDirectory() as d:
             package = "\nversion = '0.1.0'\nedition = '2021'\n"
@@ -3602,9 +3618,6 @@ class TestCargoMutantsOutcomes(unittest.TestCase):
         self.assertFalse(gate._RUST_SUPPRESSION.search("let mutants = skip(1);"))
 
 
-@unittest.skipUnless(CARGO and shutil.which("cargo-mutants") and shutil.which("cargo-nextest"),
-                     "the Rust half of surviving-mutants runs cargo mutants with nextest, and cargo, cargo-mutants or "
-                     "cargo-nextest is not on PATH")
 class TestRustSurvivingMutants(RepositoryTest):
     """The surviving-mutants check over a real git repository's Cargo package, with a real cargo-mutants."""
 
