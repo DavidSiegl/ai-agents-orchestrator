@@ -4,8 +4,6 @@ Each test's failure message names the document that states its rule.
 """
 
 import ast
-import io
-import json
 import re
 import sys
 import time
@@ -15,15 +13,8 @@ import unittest
 import conftest
 from guard_errors import RealSleep
 
-import orchestrator
-from orchestrator import CI
-
 ROOT = conftest.REPO
-SOURCE = ROOT / "orchestrator.py"
 GATE_SOURCE = ROOT / "gate.py"
-
-TOKEN = "tok-3f9a1c"
-JENKINS = "http://jenkins.example:8080"
 
 
 def imported_modules(tree: ast.AST) -> set[str]:
@@ -65,65 +56,25 @@ def authorization_uses(tree: ast.AST) -> list[tuple[str, str]]:
     return uses
 
 
-class AnyJenkins:
-    """urlopen for a Jenkins that gives every request one answer, enough for each of CI's methods to finish, and
-    records each Request in `requests`."""
-
-    BODY = json.dumps({
-        "property": [{"parameterDefinitions": [{"name": p} for p in orchestrator.JOB_PARAMETERS]}],
-        "builds": [], "building": False, "result": "SUCCESS", "suites": [],
-    }).encode()
-
-    def __init__(self):
-        self.requests = []
-
-    def __call__(self, req, timeout=None):
-        self.requests.append(req)
-        return Answer(self.BODY, {"Location": f"{JENKINS}/queue/item/7/"})
-
-
-class Answer(io.BytesIO):
-    """A urlopen response: a body, and headers as a dict."""
-
-    def __init__(self, body: bytes, headers: dict):
-        super().__init__(body)
-        self.headers = headers
-
-
-# One call of each public member of CI. A member added to CI without a line here fails the credentials test, so
-# that its requests are checked too.
-CI_CALLS = {
-    "job_url": lambda ci: ci.job_url,
-    "mask": lambda ci: ci.mask(f"a {TOKEN}"),
-    "check_credentials": lambda ci: ci.check_credentials(),
-    "preflight": lambda ci: ci.preflight(),
-    "trigger": lambda ci: ci.trigger("orchestrator-ci/a1b2c3-1-q1"),
-    "queue_item": lambda ci: ci.queue_item(f"{JENKINS}/queue/item/7/"),
-    "find_build": lambda ci: ci.find_build("orchestrator-ci/a1b2c3-1-q1"),
-    "retained_builds": lambda ci: ci.retained_builds(),
-    "build_result": lambda ci: ci.build_result(41),
-    "quality_file": lambda ci: ci.quality_file(41),
-    "failed_tests": lambda ci: ci.failed_tests(41),
-    "console_tail": lambda ci: ci.console_tail(41),
-}
-
-
 class TestInvariants(unittest.TestCase):
-    def test_the_orchestrator_imports_only_the_standard_library(self):
-        # So neither imports the other either: they meet only in the quality file (docs/quality-gate.md).
-        why = {SOURCE: "so that it runs on a system python3 without uv (pyproject.toml, [project]; "
-                       "docs/ui-options.md, C1)",
-               GATE_SOURCE: "so that the one file is the gate, for another project to run (docs/quality-gate.md)"}
-        for source, reason in why.items():
-            with self.subTest(source.name):
-                others = imported_modules(ast.parse(source.read_text())) - set(sys.stdlib_module_names)
-                self.assertEqual(others, set(), f"{source.name} is stdlib-only, {reason}")
+    def test_the_gate_imports_only_the_standard_library(self):
+        others = imported_modules(ast.parse(GATE_SOURCE.read_text())) - set(sys.stdlib_module_names)
+        self.assertEqual(others, set(), "gate.py is stdlib-only, so that the one file is the gate, for another project "
+                                        "to run (docs/quality-gate.md; docs/ui-options.md, C1)")
 
     def test_the_project_has_no_runtime_dependencies(self):
         with open(ROOT / "pyproject.toml", "rb") as f:
             project = tomllib.load(f)["project"]
-        self.assertEqual(project["dependencies"], [], "the orchestrator has no runtime dependencies "
+        self.assertEqual(project["dependencies"], [], "gate.py has no runtime dependencies "
                                                       "(pyproject.toml, [project]; docs/ui-options.md, C1)")
+
+    def test_the_engine_s_version_is_the_release_s(self):
+        with open(ROOT / "pyproject.toml", "rb") as f:
+            release = tomllib.load(f)["project"]["version"]
+        with open(ROOT / "engine" / "Cargo.toml", "rb") as f:
+            engine = tomllib.load(f)["package"]["version"]
+        self.assertEqual(engine, release, "the engine's version is the release's, which the Jenkinsfile's Release "
+                                          "stage reads from pyproject.toml (docs/architecture.md, Tooling)")
 
     def test_coverage_records_with_the_c_tracer(self):
         with open(ROOT / "pyproject.toml", "rb") as f:
@@ -132,32 +83,12 @@ class TestInvariants(unittest.TestCase):
                                                     "its first tests alone, and gate.py --test-contexts then has mutmut "
                                                     "leave out tests (pyproject.toml, [tool.coverage.run])")
 
-    def test_credentials_travel_only_in_an_unredirected_header(self):
-        rule = ("the token travels only in the Authorization header, never in a URL, and only to the server asked "
-                "(docs/quality-gate.md, Credentials and permissions)")
-        # The serve command's two uses read the header of a request it was sent, and allow it in a preflight.
-        self.assertEqual(authorization_uses(ast.parse(SOURCE.read_text())),
-                         [("CI._request", "add_unredirected_header"), ("RunRequestHandler.do_OPTIONS", "send_header"),
-                          ("RunRequestHandler._has_token", "get")], rule)
+    def test_the_gate_sets_no_authorization_header(self):
+        rule = ("gate.py sends no credentials; only the engine talks to Jenkins, its token in the Authorization header "
+                "alone (docs/quality-gate.md, Credentials and permissions)")
         self.assertEqual(authorization_uses(ast.parse(GATE_SOURCE.read_text())), [], rule)
-        self.assertEqual(set(CI_CALLS), {name for name in vars(CI) if not name.startswith("_")},
-                         "CI_CALLS calls each public member of CI once")
-        jenkins = AnyJenkins()
-        ci = CI("Folder/quality", env={"JENKINS_URL": JENKINS, "JENKINS_USER": "agents", "JENKINS_TOKEN": TOKEN},
-                urlopen=jenkins)
-        for name, call in CI_CALLS.items():
-            with self.subTest(member=name):
-                call(ci)
-        self.assertGreaterEqual(len(jenkins.requests), len(CI_CALLS) - 3)  # job_url, mask, check_credentials ask none
-        for req in jenkins.requests:
-            with self.subTest(url=req.full_url):
-                self.assertNotIn(TOKEN, req.full_url, rule)
-                self.assertNotIn(TOKEN.encode(), req.data or b"", rule)
-                self.assertIn("Authorization", req.unredirected_hdrs, rule)
-                self.assertNotIn("Authorization", req.headers, rule)
 
     def test_no_test_sleeps_for_real(self):
-        rule = "tests run on FakeClock, time that passes only when the workflow sleeps (docs/architecture.md, Tests)"
-        for sleep in (time.sleep, orchestrator.Clocks().sleep):
-            with self.subTest(sleep=sleep), self.assertRaises(RealSleep, msg=rule):
-                sleep(0)
+        with self.assertRaises(RealSleep, msg="a test that must wait on a real process is marked real_sleep "
+                                              "(tests/conftest.py)"):
+            time.sleep(0)

@@ -1,10 +1,19 @@
-"""RepositoryTest, the base of the test cases that run orchestrator on a git repository of their own."""
+"""RepositoryTest, the base of the test cases that run the gate on a git repository of their own, and git, which
+runs git for them."""
 
 import os
+import subprocess
 import tempfile
 import unittest
 
-from orchestrator import Host
+
+def git(cwd, *args):
+    """The standard output of git args, run in cwd, as text. Raises RuntimeError, with git's standard error, when git
+    exits with a status other than 0."""
+    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=False)  # noqa: S603, S607
+    if proc.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)} in {cwd} failed: {proc.stderr.strip()}")
+    return proc.stdout
 
 
 class RepositoryTest(unittest.TestCase):
@@ -17,7 +26,6 @@ class RepositoryTest(unittest.TestCase):
     - repo: the absolute path of the repository's top level.
     - outside: an empty directory that is not inside the repository, for what a test keeps out of the tree, such as
       stub tools, a remote or a rules file; removed with the repository.
-    - host: the Host the helpers run git through, for tests that call its other methods on repo.
     - base: the sha of the commit setUp made of BASE_FILES, or None when BASE_FILES is empty.
     """
 
@@ -30,15 +38,14 @@ class RepositoryTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.repo, self.outside = (os.path.join(tmp.name, d) for d in ("repo", "outside"))
         os.mkdir(self.outside)
-        self.host = Host()
-        self.host.git(tmp.name, "init", "--quiet", "-b", "main", self.repo)
+        git(tmp.name, "init", "--quiet", "-b", "main", self.repo)
         for key, setting in [("user.name", "t"), ("user.email", "t@example.com"), ("commit.gpgsign", "false")]:
             self.git("config", key, setting)
         self.base = self.commit(self.BASE_FILES, "base") if self.BASE_FILES else None
 
     def git(self, *args):
-        """The standard output of git args, run in the repository. Raises OrchestratorError when git fails."""
-        return self.host.git(self.repo, *args)
+        """The standard output of git args, run in the repository. Raises RuntimeError when git fails."""
+        return git(self.repo, *args)
 
     def put(self, name, text):
         """Write text to the file name, a path relative to the repository, replacing it, and making its directories
@@ -58,7 +65,7 @@ class RepositoryTest(unittest.TestCase):
 
     def commit(self, files, message):
         """Put files, a mapping of path to text as put takes them, then commit every change in the working tree,
-        those made before the call included, with message; returns the new commit's sha. Raises OrchestratorError
+        those made before the call included, with message; returns the new commit's sha. Raises RuntimeError
         when git fails, as it does when there is nothing to commit."""
         for name, text in files.items():
             self.put(name, text)

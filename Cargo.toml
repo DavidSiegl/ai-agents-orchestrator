@@ -1,0 +1,22 @@
+# The repository's one Cargo workspace: the Rust engine (engine/, the rust-engine spec's Lane) and the desktop app's
+# Tauri shell (ui/src-tauri/), with one Cargo.lock, one toolchain (rust-toolchain.toml) and one set of lints. Jenkins's
+# Test stage runs every member's tests here, and gate.py's clippy lints the workspace as a whole.
+[workspace]
+members = ["engine", "ui/src-tauri"]
+# gate.py's Rust reader is a package of its own, with its own Cargo.lock: the Install stage builds it from the judged
+# main's tree, apart from this workspace (Jenkinsfile, and docs/quality-gate.md, "Reading Rust: the gate-rust helper").
+exclude = ["ci/gate-rust"]
+resolver = "2"
+
+# clippy's rules for every member, by which gate.py judges a change to its Rust (docs/quality-gate.md): clippy's
+# defaults, and these, which main passed when they were set. Each at warn, since gate.py caps every level at warn
+# anyway; and rustc's unsafe_code at deny would stop cargo test at the first crate that has unsafe code. A member
+# takes them with `[lints] workspace = true`.
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+# A suppression says why it stands: `#[allow(lint, reason = "...")]`.
+allow_attributes_without_reason = "warn"
+dbg_macro = "warn"
+todo = "warn"

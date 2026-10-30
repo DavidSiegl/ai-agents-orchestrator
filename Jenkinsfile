@@ -43,7 +43,7 @@ pipeline {
         // A quality build (GIT_REF set) records what it judges as its build description, before Install runs any
         // code of the change: exactly `judged tree=<sha> parent=<sha> main=<sha>`, full lowercase shas, one space
         // apart. tree is the snapshot's tree, parent its only parent, the run's base, and main the origin/main
-        // commit whose gate and rules the Gate stage judges with. `orchestrator.py judged-in-quality` parses it, by
+        // commit whose gate and rules the Gate stage judges with. `orchestrator judged-in-quality` parses it, by
         // JUDGED_DESCRIPTION. A build restarted from a later stage records none, so nothing trusts it. No later stage
         // may fetch GIT_REF: the orchestrator deletes that branch once the Gate stage has archived quality.md, while
         // the build may still run (docs/quality-gate.md, "The calls").
@@ -100,7 +100,9 @@ pipeline {
                 // toolchain's own LLVM. Both are rustup components the agent image provides: its rustup home,
                 // /usr/local/rustup, is root's, so a build cannot add to it (PR-163's builds 1-3 failed adding
                 // llvm-tools-preview: "component download failed ... No such file or directory"). This step names a
-                // missing one here rather than letting a later stage fail on it.
+                // missing one here rather than letting a later stage fail on it. rustup reads rust-toolchain.toml here,
+                // so it lists the components of the toolchain that file pins, which must be the image's too: rustup
+                // cannot install another one either.
                 sh '''
                     installed=$(rustup component list --installed)
                     for component in clippy llvm-tools; do
@@ -168,14 +170,39 @@ pipeline {
                 // quality build's report lists failing tests and findings together. Any other exit status means
                 // pytest itself could not run.
                 //
-                // A quality build (GIT_REF set) leaves out the parity scenarios (tests/parity) when its change, against
-                // HEAD^, the run's base, touches nothing they depend on: the engine, the harness and its recordings,
-                // tests/conftest.py's guards they run under and tests/guard_errors.py's errors those guards raise, the
-                // example workflows they run, the Python environment, and ci/, which pins the gitleaks they run. They
-                // took quality build #59 past the orchestrator's QUALITY_TIMEOUT (1299 s of 1200), and while
-                // orchestrator.py is frozen a quality round seldom touches those paths. A git diff that fails counts as
-                // a change, so they run. Pull request builds always run them. [tool.mutmut] in pyproject.toml leaves
-                // them out of mutmut's runs.
+                // The Rust tests of every member of the top-level Cargo workspace (Cargo.toml), the engine's and the
+                // desktop shell's, with line coverage, for the Gate stage likewise: --ignore-run-fail writes the
+                // coverage report whatever tests fail and exits 0 for them, so a non-zero status is a build that did
+                // not compile or a tool that could not run. ci/nextest.toml has the ci profile write the JUnit report
+                // the Gate stage reads. Once the tests are built, --ignore-run-fail turns any failure of nextest's run
+                // into a warning (run_nextest in cargo-llvm-cov 0.9.1's src/main.rs), also one that runs no test,
+                // such as a test binary that cannot list its tests; so the JUnit report is removed first and must be
+                // there after. The lock as in the UI stage, which says why a quality build may skip it.
+                sh '''
+                    junit=target/nextest/ci/junit.xml
+                    rm -f "$junit"
+                    ci/cargo-lock.sh ${GIT_REF:+--no-wait} cargo llvm-cov nextest --locked --workspace \\
+                        --ignore-run-fail --profile ci --config-file "$WORKSPACE/ci/nextest.toml" \\
+                        --cobertura --output-path "$WORKSPACE/coverage-rust.xml"
+                    if [ ! -f "$junit" ]; then
+                        echo "cargo-nextest wrote no $junit, so the Rust tests did not run" >&2
+                        exit 1
+                    fi
+                '''
+                // The parity scenarios (tests/parity) replay the Python engine's recordings against the Rust engine's
+                // orchestrator binary, and tests/test_docs.py reads its help: the one the Rust tests above built,
+                // instrumented for coverage, through tests/rust_engine.py's ORCHESTRATOR_BIN and the harness's
+                // PARITY_ENGINE, so that pytest compiles no engine of its own. Run so, it would write its profile
+                // where it runs, into a scenario's project, so LLVM_PROFILE_FILE is /dev/null, which PARITY_ENGINE
+                // passes through env, the harness giving the engine an environment of its own.
+                //
+                // A quality build (GIT_REF set) leaves out the parity scenarios when its change, against HEAD^, the
+                // run's base, touches nothing they depend on: the engine and the Cargo workspace it builds in, the
+                // harness and its recordings, tests/conftest.py's guards they run under and tests/guard_errors.py's
+                // errors those guards raise, the example workflows they run, the Python environment, and ci/, which
+                // pins the gitleaks they run. They took quality build #59 past the orchestrator's QUALITY_TIMEOUT
+                // (1299 s of 1200). A git diff that fails counts as a change, so they run. Pull request builds always
+                // run them. [tool.mutmut] in pyproject.toml leaves them out of mutmut's runs.
                 //
                 // --cov-context=test records which tests run each line, in COVERAGE_FILE, for the Gate stage's
                 // --test-contexts: mutmut then runs only the tests that reach the changed functions. It takes about 7 %
@@ -183,49 +210,36 @@ pipeline {
                 // set to an absolute path, under TMPDIR or elsewhere, the file vanished during a run and over 2300
                 // tests errored.
                 sh '''
+                    engine="$WORKSPACE/target/llvm-cov-target/debug/orchestrator"
+                    if [ ! -x "$engine" ]; then
+                        echo "the Rust tests built no $engine" >&2
+                        exit 1
+                    fi
                     parity=''
-                    if [ -n "${GIT_REF:-}" ] && git diff --quiet HEAD^ HEAD -- orchestrator.py tests/parity \
-                            tests/conftest.py tests/guard_errors.py examples pyproject.toml uv.lock .python-version \
-                            ci; then
+                    if [ -n "${GIT_REF:-}" ] && git diff --quiet HEAD^ HEAD -- engine Cargo.toml Cargo.lock \
+                            rust-toolchain.toml tests/parity tests/rust_engine.py tests/conftest.py tests/guard_errors.py \
+                            examples pyproject.toml uv.lock .python-version ci; then
                         parity='--ignore=tests/parity'
                     fi
                     status=0
-                    uv run pytest $parity --cov=orchestrator --cov=gate --cov-branch --cov-context=test --cov-report=xml \\
+                    LLVM_PROFILE_FILE=/dev/null ORCHESTRATOR_BIN="$engine" \\
+                    PARITY_ENGINE="env LLVM_PROFILE_FILE=/dev/null '$engine'" \\
+                    uv run pytest $parity --cov=gate --cov-branch --cov-context=test --cov-report=xml \\
                         --junitxml=test-results.xml || status=$?
                     [ "$status" -le 1 ] || exit "$status"
                 '''
-                // The Rust tests, with line coverage, for the Gate stage likewise: --ignore-run-fail writes the
-                // coverage report whatever tests fail and exits 0 for them, so a non-zero status is a build that did
-                // not compile or a tool that could not run. ci/nextest.toml has the ci profile write the JUnit report
-                // the Gate stage reads. Once the tests are built, --ignore-run-fail turns any failure of nextest's run
-                // into a warning (run_nextest in cargo-llvm-cov 0.9.1's src/main.rs), also one that runs no test,
-                // such as a test binary that cannot list its tests; so the JUnit report is removed first and must be
-                // there after. The lock as in the UI stage, which says why a quality build may skip it.
-                dir('ui/src-tauri') {
-                    sh '''
-                        junit=target/nextest/ci/junit.xml
-                        rm -f "$junit"
-                        "$WORKSPACE/ci/cargo-lock.sh" ${GIT_REF:+--no-wait} cargo llvm-cov nextest --locked --workspace \\
-                            --ignore-run-fail --profile ci --config-file "$WORKSPACE/ci/nextest.toml" \\
-                            --cobertura --output-path "$WORKSPACE/coverage-rust.xml"
-                        if [ ! -f "$junit" ]; then
-                            echo "cargo-nextest wrote no $junit, so the Rust tests did not run" >&2
-                            exit 1
-                        fi
-                    '''
-                }
             }
             post {
                 always {
-                    junit 'test-results.xml, ui/src-tauri/target/nextest/ci/junit.xml'
+                    junit 'test-results.xml, target/nextest/ci/junit.xml'
                 }
             }
         }
 
         // The desktop app's frontend: its types, lint and Vitest tests; its Tauri shell's tests run in the Test
-        // stage. The gate judges no tests but those the Test stage reports, so this stage stops the build instead,
-        // before Gate: a quality round then reports BUILD_FAILED with the console's end, where a failure after Gate
-        // would hide under quality.md's passing GATE line.
+        // stage, with the rest of the Cargo workspace's. The gate judges no tests but those the Test stage reports, so
+        // this stage stops the build instead, before Gate: a quality round then reports BUILD_FAILED with the
+        // console's end, where a failure after Gate would hide under quality.md's passing GATE line.
         stage('UI') {
             when { expression { return env.JUDGED_AT_PR != 'true' } }
             steps {
@@ -237,14 +251,12 @@ pipeline {
                         npm test
                     '''
                 }
-                dir('ui/src-tauri') {
-                    // The Gate stage's clippy checks the shell's dependencies as cargo check does, not as the Test
-                    // stage's cargo-llvm-cov builds them, instrumented and in a target directory of its own: checked
-                    // here, under the lock, they leave clippy only the shell itself to check. A quality build
-                    // (GIT_REF set) runs within the orchestrator's QUALITY_TIMEOUT, which a wait behind another
-                    // build's Package stage would exceed, so it takes the lock only when it is free.
-                    sh '"$WORKSPACE/ci/cargo-lock.sh" ${GIT_REF:+--no-wait} cargo check --locked --all-targets'
-                }
+                // The Gate stage's clippy checks the workspace's dependencies as cargo check does, not as the Test
+                // stage's cargo-llvm-cov builds them, instrumented and in a target directory of its own: checked here,
+                // under the lock, they leave clippy only the workspace's own crates to check. A quality build (GIT_REF
+                // set) runs within the orchestrator's QUALITY_TIMEOUT, which a wait behind another build's Package
+                // stage would exceed, so it takes the lock only when it is free.
+                sh 'ci/cargo-lock.sh ${GIT_REF:+--no-wait} cargo check --locked --workspace --all-targets'
             }
         }
 
@@ -279,8 +291,7 @@ pipeline {
                         gate = "${env.WORKSPACE_TMP}/main/gate.py"
                         rules = "${env.WORKSPACE_TMP}/main/pyproject.toml"
                     } else if (env.CHANGE_TARGET) {
-                        sh 'git fetch --quiet origin "+refs/heads/$CHANGE_TARGET:refs/remotes/origin/$CHANGE_TARGET"'
-                        base = sh(returnStdout: true, script: 'git merge-base HEAD "origin/$CHANGE_TARGET"').trim()
+                        base = sh(returnStdout: true, script: 'ci/pr-base.sh').trim()
                     } else {
                         // A history rewritten since the last successful build, by a force-push, leaves that build's
                         // commit out of this checkout, where gate.py cannot judge from it ("names no commit", exit
@@ -311,7 +322,7 @@ pipeline {
                                 set -- "$@" --rust-syntax "$WORKSPACE/.gate-rust-target/release/gate-rust"
                             fi
                             uv run --frozen python "$GATE" --base "$GATE_BASE" --config "$GATE_RULES" \\
-                                --tests ui/src-tauri/target/nextest/ci/junit.xml --tests test-results.xml \\
+                                --tests target/nextest/ci/junit.xml --tests test-results.xml \\
                                 --coverage coverage-rust.xml --coverage coverage.xml "$@" --out quality.md
                         ''')
                     }
@@ -375,15 +386,13 @@ pipeline {
                                  octoflow-desktop-linux-x86_64.AppImage; do
                             [ -f "dist/$f.sha256" ] || { echo "no dist/$f; run the whole build" >&2; exit 1; }
                         done
-                        # orchestrator.py packed as an executable zipapp, which runs on any machine with Python 3.13+.
-                        mkdir -p build/pyz dist
-                        cp orchestrator.py build/pyz/
-                        echo 'import sys, orchestrator; sys.exit(orchestrator.main(sys.argv[1:]))' > build/pyz/__main__.py
-                        uv run --frozen python -m zipapp build/pyz -p '/usr/bin/env python3' -c -o dist/octoflow.pyz
-                        uv run --frozen python dist/octoflow.pyz --help >/dev/null
-                        (cd dist && sha256sum octoflow.pyz > octoflow.pyz.sha256)
+                        # A release's own words, docs/releases/v<version>.md, when there is such a file: GitHub puts
+                        # them before the notes it generates from the pull requests.
+                        notes=docs/releases/$tag.md
+                        set --
+                        [ ! -f "$notes" ] || set -- --notes-file "$notes"
                         # Publishing it starts .github/workflows/macos-binary.yml, which adds the macOS binary and app.
-                        gh release create "$tag" dist/octoflow.pyz dist/octoflow.pyz.sha256 \
+                        gh release create "$tag" "$@" \
                             dist/octoflow-linux-x86_64 dist/octoflow-linux-x86_64.sha256 \
                             dist/octoflow-desktop-linux-x86_64.deb dist/octoflow-desktop-linux-x86_64.deb.sha256 \
                             dist/octoflow-desktop-linux-x86_64.AppImage \

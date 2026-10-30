@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import tomllib
@@ -15,10 +16,10 @@ import unittest
 from unittest.mock import patch
 
 import conftest
+from gitrepo import git
 
 from evals import make_bundles
 from evals import run as evals
-from orchestrator import Host
 
 FAKE_ENGINE = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_engine.py")]
 TASK_NAMES = ["bugfix", "docs", "feature", "no-dependency", "refactor"]
@@ -258,9 +259,9 @@ class TestTasks(FakeEngineTest):
         self.assertEqual(make_bundles.bundle_commit(first), commit)
         self.assertNotEqual(make_bundles.make_bundle({**files, "a.txt": "A\n"}, second), commit)
         clone = os.path.join(self.dir, "clone")
-        Host().git(self.dir, "clone", "--quiet", first, clone)
+        git(self.dir, "clone", "--quiet", first, clone)
         self.assertEqual(sorted(os.listdir(clone)), [".git", "a.txt", "dir"])
-        log = Host().git(clone, "log", "--format=%H %D")
+        log = git(clone, "log", "--format=%H %D")
         self.assertEqual(log, f"{commit} HEAD -> main, origin/main, origin/HEAD\n")
 
     def test_the_hidden_tests_are_left_out_of_pytest_runs(self):
@@ -269,9 +270,9 @@ class TestTasks(FakeEngineTest):
         # Collected by name, as the quality gate does a changed test file, a hidden test holds no test.
         for name in TASK_NAMES:
             with self.subTest(task=name):
-                proc = Host().run([sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:randomly",
-                                   "-p", "no:cacheprovider", str(conftest.REPO / f"evals/tasks/{name}/hidden_test.py")],
-                                  timeout=120)
+                proc = subprocess.run([sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:randomly",  # noqa: S603
+                                       "-p", "no:cacheprovider", str(conftest.REPO / f"evals/tasks/{name}/hidden_test.py")],
+                                      capture_output=True, text=True, timeout=120, check=False)
                 self.assertEqual(proc.returncode, 5, proc.stdout + proc.stderr)
 
 
@@ -381,7 +382,7 @@ class TestTable(unittest.TestCase):
 
 class TestRecords(unittest.TestCase):
     def test_a_record_is_the_evals_fields_then_the_trials(self):
-        evaluation = evals.Eval("2026-10-28", "workflow-quick", ["--workflow", "quick"], "orchestrator.py", "abc")
+        evaluation = evals.Eval("2026-10-28", "workflow-quick", ["--workflow", "quick"], "target/debug/orchestrator", "abc")
         record = evaluation.record(trial(run_id="r", rounds=1))
         self.assertEqual(list(record)[:7], ["version", "date", "config", "run_args", "engine", "commit", "task"])
         self.assertEqual((record["version"], record["config"], record["passed"], record["rounds"], record["tokens"]),
@@ -407,7 +408,7 @@ class TestHeadCommit(unittest.TestCase):
     def test_a_tracked_change_marks_the_commit_dirty(self):
         with tempfile.TemporaryDirectory() as d:
             commit = make_bundles.make_bundle({"prompt.txt": "v1\n"}, os.path.join(d, "b.bundle"))
-            Host().git(d, "clone", "--quiet", os.path.join(d, "b.bundle"), "repo")
+            git(d, "clone", "--quiet", os.path.join(d, "b.bundle"), "repo")
             repo = os.path.join(d, "repo")
             with patch.object(evals, "ROOT", repo):
                 self.assertEqual(evals._head_commit(), commit)
@@ -417,7 +418,7 @@ class TestHeadCommit(unittest.TestCase):
                 os.makedirs(os.path.join(repo, "evals", "results"))
                 with open(os.path.join(repo, "evals", "results", "x.jsonl"), "w") as f:
                     f.write("{}\n")
-                Host().git(repo, "add", "evals")
+                git(repo, "add", "evals")
                 self.assertEqual(evals._head_commit(), commit, "a results file is not a change")
                 with open(os.path.join(repo, "prompt.txt"), "w") as f:
                     f.write("v2\n")
@@ -448,8 +449,14 @@ class TestArgs(unittest.TestCase):
     def test_the_engine_is_eval_engine_else_this_checkouts_orchestrator(self):
         with patch.dict(os.environ, {"EVAL_ENGINE": "target/debug/octoflow --flag 'a b'"}):
             self.assertEqual(evals.engine_command(), ["target/debug/octoflow", "--flag", "a b"])
-        with patch.dict(os.environ, {"EVAL_ENGINE": ""}):
-            self.assertEqual(evals.engine_command(), [sys.executable, os.path.join(evals.ROOT, "orchestrator.py")])
+        with patch.dict(os.environ, {"EVAL_ENGINE": ""}), \
+                patch.object(evals, "built_engine", return_value="/built/orchestrator"):
+            self.assertEqual(evals.engine_command(), ["/built/orchestrator"])
+
+    def test_the_checkouts_engine_is_built_before_it_runs(self):
+        path = evals.built_engine()
+        self.assertTrue(os.access(path, os.X_OK), path)
+        self.assertEqual(os.path.basename(path), "orchestrator")
 
 
 class TestMain(FakeEngineTest):

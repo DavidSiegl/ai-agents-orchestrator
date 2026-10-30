@@ -29,15 +29,10 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `orchestrator.py`"), and the Jenkinsfile's cutover fallback is gone. Left: making the test-file patterns a setting,
   for the gate's use in other projects (`.scratch/gate-split/issues/04-configurable-test-files.md`). The gate moves to
   its own repository only once a second project uses it. Decided 2026-10-24.
-- **The Python engine is frozen.** From the merge of the parity harness (`tests/parity/`) until the Rust engine
-  replaces it in one release, nothing lands in `orchestrator.py`, fixes included: its recordings are the oracle
-  each Rust ticket is judged by, and a change to the Python engine would move it. A bug found meanwhile goes into
-  `Open issues` here and is fixed on the `rust-engine` branch. `gate.py`, the docs, the tests and CI are not
-  frozen. The note at the top of `orchestrator.py` says so too. Decided 2026-10-24 (the Rust engine's spec,
-  Decisions).
-- **The Rust engine's parity harness: what it does not record yet.** `tests/parity/` runs 43 scenarios against
-  `orchestrator.py` as a program and compares each with its recording (docs/architecture.md, Tests); the Rust tickets
-  replay them through `PARITY_ENGINE`. Not covered: a secret gitleaks finds, at a quality round or at publish; the
+- **The parity harness: what it does not record.** `tests/parity/` runs 43 scenarios against the engine as a
+  program and compares each with its recording (docs/architecture.md, Tests). The recordings are the Python engine's,
+  made before rust-engine ticket 11 removed it, so none of what follows can be recorded from that oracle any more: a
+  scenario added for it records the Rust engine, and its recording is a review of the engine's behaviour. Not covered: a secret gitleaks finds, at a quality round or at publish; the
   harnesses other than claude and codex starting an agent (only their arguments differ); a session log's token counts
   (every turn records `unknown`); `--timeout` and the stall notice, which take real minutes; the GUI, which the Rust
   engine drops; round 2 of the example workflows and a fresh session's prompts as sent, whose templates only the
@@ -66,8 +61,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 - **The eval set: what it does not cover.** `evals/run.py` (live-checks/04, docs/design.md, Evals) runs the engine as
   a program, `run --no-pr --spec`, rather than being the `orchestrator.py eval` command the ticket named, since the
-  Python engine is frozen (above); `EVAL_ENGINE` points it at the Rust engine. Whether the Rust engine gets an `eval`
-  command of its own is open. Not covered: the quality gate, since the toy repositories have no quality job and their
+  Python engine was frozen then; it runs `EVAL_ENGINE`, else the checkout's `target/debug/orchestrator`. Whether the
+  engine gets an `eval` command of its own is open. Not covered: the quality gate, since the toy repositories have no quality job and their
   origin is a bundle no snapshot can be pushed to, so `quality rounds` stays 0; a `--worktree` or `--machine` run,
   which the runner refuses; and an interview, which `--spec` skips. Decided 2026-10-28. The verification run it
   still lacks is under Open issues.
@@ -87,6 +82,36 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Open issues
 
+- **A prompt template's `.attribute` is an error in the Rust engine, where Python filled it in.** `crate::py::format`,
+  the port of `str.format` that fills workflow prompt templates (`workflow.rs`, `pipeline.rs`, `prompts.rs`), takes a
+  placeholder's value to be a str and answers any attribute with AttributeError (`Accessor::apply_to`), so a template
+  with `{diff.upper}` or `{diff.__class__}` stops the run. Python's `str.format` looked the attribute up on the str:
+  `<class 'str'>`, or a bound method's repr with its address, which no recording can hold. Indexes, `{diff[0]}`,
+  behave as Python's. Found by the code review of the engine's split under the gate's cognitive-complexity limit
+  (2026-10-30). Closes with the docs naming the difference as the engine's, or with attributes refused when the
+  workflow file is read, as a placeholder's name is checked there (`field_names`).
+- **The Rust engine names itself `orchestrator.py`.** Its messages and hints were ported word for word, so the
+  parity recordings, made by the Python engine, hold them: `resume: orchestrator.py resume <id>` in `list` and the
+  interrupted note (`cli/listing.rs`, `cli.rs`'s `resume_command`), `` `orchestrator.py workflows default` `` in
+  `workflows` (`cli/workflows.rs`), and `orchestrator.py` among `judged-in-quality`'s `JUDGING_FILES`, a file the
+  tree no longer has, while the files the build's Rust depends on, `rust-toolchain.toml` and `Cargo.lock`, are not
+  among them, so a quality build of another toolchain counts as having judged the tree. Found by rust-engine ticket 11
+  and its code review (2026-10-30). Closes with the engine naming itself `orchestrator`, its tests and the parity
+  recordings changed with it, and `JUDGING_FILES` the files that judge the tree now, in a change of its own after the
+  switch.
+- **No test crashes the Rust engine after each save.** `tests/test_crash_resume.py` crashed the Python engine
+  in-process right after every write of `state.json` and resumed it, and went with that engine (rust-engine ticket 11,
+  2026-10-30). The parity scenarios still kill the Rust engine as a program, once per phase. Closes with a crash
+  harness on the engine's `FakeHost`, a `Host` whose write of `state.json` can stop the run, in
+  `engine/src/workflow/tests/`.
+- **No contract test talks to the real Jenkins.** `tests/contract/test_jenkins.py` drove the Python engine's `CI`
+  against the live quality job, and went with it (rust-engine ticket 11, 2026-10-30); live-checks/01 (#131) asks for
+  one against the Rust engine's `Jenkins`. Closes with that ticket.
+- **`tests/test_docs.py` reads the engine's names by pattern.** `rust_names` finds each `fn`, type, `const`,
+  `static`, `mod`, string literal, impl `fn` and struct field in `engine/src` by regular expression, not by parsing,
+  so a name in a comment or a `macro_rules!` counts as defined, and a doc's `Type::member` is not checked at all, only
+  `Type.member`. Found by rust-engine ticket 11 (2026-10-30). Closes, if a doc names a gone item unnoticed, with the
+  names read from rustdoc's JSON or syn, as the gate-rust helper reads Rust.
 - **Test code outside the places the spec names is judged as code.** The spec of the Rust checks (requirement 2)
   places Rust's tests in a `tests/` directory, a `tests.rs` and an inline `#[cfg(test)]` module; `_in_rust_tests` and
   `_rust_test_path` in `gate.py`, which both Rust checks read, follow it (test-integrity's side of this is the
@@ -139,15 +164,135 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `orchestrator.py`) from the round's start, and Gate had not begun by then. The suite grew by the parity scenarios
   (`tests/parity`), and PR-160's Test stage took 645 s. A resume gets a fresh timeout and adopts the running build,
   so a run is not lost, but a quality round of this repository whose build takes as long fails once, and is
-  judged only after a resume. Not changed here:
-  the engine is frozen (Planned, "The Python engine is frozen"), so a larger `QUALITY_TIMEOUT` goes to the Rust
-  engine. Narrowed by PR #162 (2026-10-27) for a quality round whose change leaves what the parity scenarios depend on
+  judged only after a resume. Not changed then: the Python engine was frozen (Fixed, "The Python engine was frozen
+  until the Rust engine replaced it"), so a larger `QUALITY_TIMEOUT` is the Rust engine's to set, in
+  `engine/src/constants.rs`, now that it is the engine (rust-engine ticket 11). Narrowed by PR #162 (2026-10-27) for a quality round whose change leaves what the parity scenarios depend on
   alone (Jenkinsfile, Test stage): its build leaves them out. A change that bumps the version touches `pyproject.toml`
   and `uv.lock`, so its build still runs them, and so does the contract test's build of main whenever main's last
   commit was a releasing merge (build #59, before #162, ran them in any case); Gate's mutmut time is narrowed by
   `gate.py --test-contexts` (gate-open-decisions ticket 06), which costs the Test stage about 7 % more. Closes when
   a quality build that runs the scenarios fits in `QUALITY_TIMEOUT`, shown by the contract test green against one, or
   with a larger `QUALITY_TIMEOUT` in the Rust engine.
+- **The Rust engine reads some input no run writes otherwise than the Python engine.** Each is a difference only for a
+  file a human edited, or a case no test of the Python engine pins (rust-engine ticket 04, 2026-10-28): `state.json`
+  with `NaN`, `Infinity` or an integer beyond 64 bits is refused, as serde_json reads it (`engine/src/py/json.rs`),
+  where Python reads it; a time is read as CPython 3.14's `fromisoformat` reads it (`crate::py::datetime`, since
+  ticket 06; one without an offset in the machine's zone since ticket 08's follow-ups, Fixed, "The Rust engine named a
+  new run by the time in UTC"; 3.13, which a system `python3` may be and `packaging/build-binary.sh` builds the Linux binary with, refuses hour 24,
+  which 3.14 reads as the next day's midnight, and reads `T12.5`, `T12:00.5` and `T12:00:00.Z`, which 3.14 refuses
+  (cross-review 92, F4); no harness or run writes either), and a turn whose start is not a time is left out of `summary.md` and `metrics.json`, where the Python engine
+  fails (`epoch_seconds` and `turn_starts` in `engine/src/summary.rs`); a `state.json` field of another type than the
+  Python engine writes is refused naming the run, where Python keeps it, and one it does not know is kept, where Python
+  drops it, as the spec asks (`RunState::from_saved`). And from the machine the agents run on (rust-engine ticket 05,
+  2026-10-28): a path git prints that is not UTF-8 is refused, naming it, by `Host::lock`, `locked_changes`,
+  `restore`, `changed_line_counts` and `crate::patch::added_lines` (so by the secret scan too), where Python reads it
+  as `os.fsdecode` does, and a base's gitleaks rules file that is not UTF-8 fails the scan closed, where the Python
+  engine crashes writing it (`engine/src/host.rs`, `utf8_path`; `engine/src/host/scan.rs`, `base_rules_file`).
+  And from the agents' session logs and herdr (rust-engine ticket 06, 2026-10-28): a session log's line that holds
+  `NaN`, `Infinity` or an integer beyond 64 bits is skipped, as `Json::parse` refuses it, where Python counts its
+  tokens, and a lone surrogate in a line, as an escape or as a byte that is not UTF-8, is read as U+FFFD, so that two
+  Claude Code message ids that differ only there count as one answer, where Python counts two
+  (`Harness::session_usage` in `engine/src/harness.rs`, `Json::parse_lossy`); a harness that is not one of
+  `AGENT_KINDS`, as a hand-edited `state.json` can name, is refused naming those there are (`crate::harness::harness`),
+  where the Python engine fails on a KeyError; and an answer of herdr's that lacks what its command gives, or is not
+  UTF-8, is a `bad_response` naming the command or a failure naming it (`engine/src/herdr.rs`), where Python fails on
+  a KeyError or a UnicodeDecodeError. And from the Workflow's locks and proofs (rust-engine ticket 08, part 4,
+  2026-10-29): a `restored` or `proofs` record of `state.json` without a field the engines write, or with one of
+  another type, stops the run naming it (`Restored::read` in `engine/src/workflow/locks.rs`, `ProofRun::read` in
+  `engine/src/proofs.rs`), where Python fails on a KeyError or a TypeError, or, for a `restored` record without
+  `paths`, restores nothing, or, for a `proofs` record without `said`, reads it only where it needs `said` (no release
+  wrote one: v0.24.0, the first with proofs, writes `said` in every record, and only commits before it on main did
+  not; cross-review 98, F1); and a proof's output that is not UTF-8 is quoted with each such byte as U+FFFD
+  (`Workflow::run_proof`), where Python keeps it as a lone surrogate, which `state.json` holds as an escape and the
+  write of the review then fails on (a UnicodeEncodeError, uncaught).
+  And from drain (rust-engine ticket 09b, 2026-10-29): a name in drain's DIR that is not UTF-8 is left out of the
+  queue (`crate::cli::drain::queue`, `read_queue`), where Python reads its spec.md through os.fsdecode; and doctor
+  reads a tool's version number in ASCII digits only (`crate::cli::doctor`, `version_number`), where Python's `\d`
+  takes any Unicode digit (cross-review 104, F6).
+  Decided against unless a run is found that writes such input.
+- **The Rust engine's Ctrl-C, what is left.** Rust-engine ticket 08's part 6 (2026-10-29) has a SIGINT raise the
+  `Interrupt`, which stops the command the engine waits on (Fixed, "A Ctrl-C at the terminal does not reach the
+  command the Rust engine's `Host` or herdr is running", which since ticket 10 also says how every command of the
+  binary takes it). Not closed: (1) A
+  Ctrl-C during a Jenkins or PyPI request (`crate::http`, ureq) waits for the request to end, up to its timeout, where
+  Python's KeyboardInterrupt stops `urlopen` at once: there is no process to stop, and ureq has no way to abandon a
+  request from another thread. The user accepted that wait for a Ctrl-C (2026-10-29, review 100). Since ticket 08's
+  follow-ups a SIGTERM or a SIGHUP waits so too (cross-review 102, F4: "a `kill <pid>` or a service manager's stop
+  during the quality gate's Jenkins polling or the dependency check's PyPI request waits up to the request
+  timeout"), where it ended the Python engine at once; a service manager that sends SIGKILL after a shorter grace
+  kills the engine with the run unreleased. Closes with a request the Interrupt can cut short (one whose reads are
+  given slices of the timeout, the Interrupt checked between them, or one run on a thread the Workflow stops waiting
+  for), or with the user's ruling that the wait is acceptable for SIGTERM and SIGHUP too. (2) Under macOS, `by_signals`
+  reads no `/proc/self/status` and takes the kernel to discard a signal that was ignored when the engine started, even
+  while blocked, as the BSD kernels do, so `serve`, which waits for SIGINT and SIGTERM also when it started with one
+  ignored, as Python's `signal.signal` replaces an ignored disposition (ticket 10, `crate::serve::serve_command`),
+  does not stop at one it started ignoring there, and `run_process` gives
+  a command the whole 250 ms grace, nix having no `waitid` there; unchecked on a Mac. Closes with
+  `engine/tests/signals.rs`, which is Linux's (it reads `/proc` and starts the engine with GNU `env`), ported to macOS
+  and run on one. A process that left the command's group, as a daemon does, is not reached, as at
+  a timeout; that is no gap, as the terminal's Ctrl-C does not reach one in Python either. (3) On a Linux whose
+  `/proc/self/status` cannot be read, as in a container or sandbox without `/proc`, `ignored_signals` finds nothing
+  ignored, so `by_signals` waits for a signal the engine started with ignored and takes it, Linux queueing a blocked
+  signal whatever its disposition (cross-review 102, F2: "an engine under `nohup` in a container or sandbox without
+  /proc is hung up: the Interrupt is raised, the run released as interrupted", and `interrupt::exit`'s raise of the
+  still-ignored signal returns, so the program exits 129 by `std::process::exit`). Part 6 had the gap for SIGINT;
+  the follow-ups extend it to SIGTERM and SIGHUP. nix reads a signal's disposition only through `sigaction`, which
+  is `unsafe`. Closes with that query, the user's choice of a second `unsafe` block, or with refusing to start on a
+  Linux without `/proc`.
+- **The Rust engine's fromisoformat words some errors as CPython 3.13 does.** `IsoTime::parse`
+  (`engine/src/py/datetime.rs`, rust-engine ticket 06) says its errors are 3.14's, but gives 3.13's wording for a
+  year, month or day out of range and an offset of a day or more: `year 0 is out of range` where 3.14 says `year must
+  be in 1..9999, not 0`, `month must be in 1..12` (3.14 adds `, not 13`), `day is out of range for month` (3.14:
+  `day 29 must be in range 1..28 for month 2 in year 2026`), and the offset's message without 3.14's `, not
+  datetime.timedelta(...)`; 28 of the 3106 `fromisoformat` cases of `engine/tests/oracle/harness.json` differ so.
+  The oracle test compares only whether such a time is refused (found by cross-review 102's F3, 2026-10-29, when it
+  began comparing `timestamp()`'s own refusals by their message). Only the wording differs, and only for times no harness,
+  run or PyPI writes. Closes with the messages worded as 3.14's and the test comparing every message.
+- **The commands the Rust engine runs outlive an engine that is SIGKILLed.** Each command runs in a process group of
+  its own (rust-engine tickets 05, 06), so a SIGKILL of the engine, or of its group, ends the engine and leaves a
+  running `herdr agent wait`, `gh pr create` or push to finish unwatched, where the Python engine's children are in
+  its group and end with it when the group is killed. SIGINT, SIGTERM and SIGHUP now stop them (Fixed, "The commands
+  the Rust engine runs outlived an engine that got a SIGTERM or a SIGHUP"); a SIGKILL cannot be caught. The parity
+  harness's kill kills each process below the engine too (`Invocation.kill`), as "a crash or a lost machine" does;
+  before, `kill_in_publish` against the Rust binary got a pull request from the orphaned `gh`. Closes with the user's
+  ruling that this is acceptable, or with the command's group killed when the engine dies (Linux's
+  `PR_SET_PDEATHSIG`, set in `run_process`'s `pre_exec`, reaches only the command itself, not what it starts).
+- **The Rust engine talks to Jenkins and PyPI otherwise than urllib in a few cases.** Its transport is ureq
+  (`HttpClient`, `engine/src/http.rs`, rust-engine ticket 07, 2026-10-28), which differs from `urlopen` where no test of
+  the Python engine pins it: ureq reaches an http URL through a proxy with CONNECT, as it does an https one, where
+  urllib sends the request itself to the proxy, so a proxy that allows CONNECT only to port 443, as squid does by
+  default, refuses a plain-http Jenkins that `http_proxy` sends through it; TLS trusts the certificates of the places
+  the environment names, else of the system's as openssl-probe finds them, each read by rustls-native-certs
+  (`root_certs`), which trusts otherwise than OpenSSL does for Python in five ways (the user's rulings, 2026-10-28,
+  cross-review 93, F22 and F23): with `SSL_CERT_FILE` set non-empty and `SSL_CERT_DIR` unset, or the reverse, it reads
+  only what is set, where OpenSSL adds the system's default directory or file (with the other set empty, OpenSSL adds
+  nothing either), so an `SSL_CERT_FILE` that cannot be read, such as a removed virtualenv's, trusts none where Python
+  still trusts `/etc/ssl/certs`; a variable set empty counts as unset, which departs from OpenSSL only where the other
+  is unset or empty too: with `SSL_CERT_FILE` empty and `SSL_CERT_DIR` unset the system's bundle is trusted too, where
+  OpenSSL reads no file for it, with `SSL_CERT_DIR` empty and `SSL_CERT_FILE` unset the system's directories are, where
+  OpenSSL reads no directory for it, and with both empty the whole system store is, or Mozilla's roots on a machine with
+  no certificate, where Python loads no certificate at all; it reads every file of a certificate directory, where
+  OpenSSL opens only the files named by a subject's hash, from `.0` up to the first missing or broken one, so a
+  certificate under another name, or behind a broken link, is trusted here only; without either variable it takes the
+  system's bundle and directories from openssl-probe's list of places, not from OpenSSL's compiled-in ones, also on
+  macOS, where neither engine reads the keychain; and without either variable, on a machine with no certificate at all,
+  it trusts Mozilla's roots (webpki-roots), where Python trusts none and fails every https request; and the timeout
+  bounds the connect and each read and write, as urllib's does, but not name resolution. In what it reads
+  (`engine/src/ci.rs`, `engine/src/pypi.rs`, `engine/src/py/toml.rs`): an answer of Jenkins's of another shape than a
+  queue item, a build's result, a list of builds or a test report is a `CIError` that may pass, where the Python engine
+  fails with an `AttributeError`, and a queue item's `executable.number` that is not an integer is one too, where Python
+  keeps it; a manifest is read as TOML 1.1, which tomllib before Python 3.15 refuses in part, and why one is not TOML is
+  the toml crate's words with tomllib's `(at line L, column C)`; and rustls refuses a server certificate that is a
+  CA's own, as a self-signed one made by `openssl req -x509` with its default extensions is (`CaUsedAsEndEntity`),
+  where OpenSSL accepts it when it is trusted, so the parity harness's PyPI has a leaf under a CA of its own (found by
+  ticket 08's part 7, 2026-10-29). Closes, for the proxy, with a transport that sends an
+  http request through a proxy as urllib does, or with `no_proxy` naming Jenkins; the rest decided against unless a
+  setup is found that needs it. Decided against (2026-10-28, ticket 07, design-it-twice): `CI` and `PyPI` as traits of
+  their own with in-memory fakes. The engine's tests would then word every URL and error twice, in the code and in the
+  fake, and ticket 08's Workflow tests, which read the requests Jenkins got (`FakeCI.names`, `requests`, `auth`), would
+  port only by re-deriving them; with the seam at `Http`, as Python's at `urlopen`, `FakeJenkins` and `FakePyPI` play
+  the servers and every line of `Jenkins` and `PyPI` runs in those tests. The user kept the `Http` seam and amended the
+  spec's Lane to say so (2026-10-28, cross-review 93, F1), and issue 08 says which seam it is given.
 - **The contract test leaves its Jenkins build running when it fails.** `tests/contract/test_jenkins.py` triggers one
   quality build and nothing stops it on a failure or a Ctrl-C, so the build holds an executor until it ends, up to
   the 22 minutes build #59 took. Raised by cross-review 73 (F11, 2026-10-27): "a Ctrl-C during the queue wait leaves
@@ -160,7 +305,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   beside a 10-line test read as 40%, not 0%. coverage.py's report of the Python has only `orchestrator` and `gate`.
   Found while adding Rust coverage (rust-engine ticket 03, 2026-10-27). Closes with test modules left out of the
   report, by `#[coverage(off)]` once it is stable or by the tests moving to files that `--ignore-filename-regex`
-  can leave out, or with `gate.py` skipping the lines a `#[cfg(test)]` item spans.
+  can leave out, or with `gate.py` skipping the lines a `#[cfg(test)]` item spans. The Rust engine's tests are in
+  such files already (`engine/src/**/tests.rs`, `engine/src/prompt_parity.rs`, `engine/src/test_support.rs`); the
+  desktop shell's are a `#[cfg(test)]` module in `ui/src-tauri/src/lib.rs`.
 - **No build runs the Rust doctests.** cargo-nextest does not run doctests, and since the Test stage's `cargo llvm-cov
   nextest` replaced the UI stage's `cargo test`, nothing does: `octoflow_ui_lib` is an `rlib` among its crate types
   (`ui/src-tauri/Cargo.toml`), so `cargo test` ran them. The crate has no doc example today. Raised by cross-review 72
@@ -168,15 +315,13 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   Decided against for now: a `cargo test --doc` beside it, which builds the dependencies a third time, uninstrumented,
   under the agent's 3 GB, for no example. Closes with `cargo test --doc --locked` in the Test stage once a doc example
   lands, or with cargo-llvm-cov's `--doctests` once it runs on a stable toolchain.
-- **Jenkins runs the Rust tests of `ui/src-tauri` alone.** The Test stage runs `cargo llvm-cov nextest` in that
-  directory, while `gate.py`'s clippy lints every Cargo workspace git tracks; a crate in another workspace, such as
-  the Rust engine's top-level one (rust-engine spec, Lane) or `ci/gate-rust/`, the gate's Rust helper, whose tests
-  run only where `cargo test` is run by hand, has its lines judged by clippy but its tests never run, and its added
-  lines count as nothing to cover. Found while adding Rust coverage (rust-engine ticket 03, 2026-10-27); the helper
-  joined it with gate-rust-checks ticket 01 (2026-10-29). Since ticket 03 (2026-10-30), `tests/test_gate.py` builds
-  the helper and runs it over Rust snippets, so the Test stage exercises its `flow`, but not its own `cargo test`.
-  Closes when the top-level workspace takes `ui/src-tauri` in as a member and the Test stage runs there, or with
-  the Test stage running each workspace and passing each report to the gate.
+- **Jenkins never runs `ci/gate-rust`'s own tests.** The helper is a package of its own, excluded from the top-level
+  workspace (`Cargo.toml`), whose tests the Test stage runs, so its `cargo test` (`ci/gate-rust/tests/schema.rs`) runs
+  only by hand; its added lines are judged by clippy but count as nothing to cover. `tests/test_gate.py` builds the
+  helper and runs it over Rust snippets, so the Test stage exercises its `flow` (gate-rust-checks ticket 03,
+  2026-10-30), but not its own tests. Narrowed by the Fixed "Jenkins ran the Rust tests of `ui/src-tauri` alone"
+  (rust-engine ticket 04) and the switch's merge of main (rust-engine ticket 11, 2026-10-30), which excluded the
+  helper. Closes with the Test stage also running `cargo nextest` in `ci/gate-rust` and passing its report to the gate.
 - **`GateChange.rust_files` starts one `git cat-file` per base `.rs` file.** `_rust_paths` in `gate.py` copies each
   base side out of git with its own process, so a change to N Rust files starts N git processes before the helper's
   one run; about 5 ms each here. Raised by cross-review 106 (F5, 2026-10-30): "one `cat-file --batch` or `git archive`
@@ -213,6 +358,33 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   every save: for the Python engine an audit hook through `sitecustomize`, or a `mv` on PATH that `Host.write` calls,
   would catch them, and the Rust engine could be held to neither. Closes with the user's ruling on the ticket's
   wording, or a way to see each write of `state.json` from outside the process (inotify has no stdlib binding).
+- **serve answers some requests otherwise than Python's http.server.** The Rust engine's serve is on tiny_http
+  (rust-engine ticket 10, `engine/src/serve.rs`), which reads a request otherwise in a few cases no client of serve's
+  sends: a request line or header with a byte beyond ASCII gets no answer, its connection closed, where Python reads
+  it as Latin-1 and answers, a token so 401 (`non_ascii_tokens`); a header's value loses its trailing blanks, so a
+  `Host` or `Authorization` header with one passes where Python's fails it; a header continued on a folded line is
+  refused with 400, where Python joins the lines; a netloc with one square bracket in an absolute request target is
+  read as it is (`crate::py::url::urlsplit`), where Python's handler fails on urlsplit's ValueError and answers
+  nothing; tiny_http answers a bad request line, an `Expect` other than `100-continue` and HTTP/2 itself (400, 417,
+  505), and neither those nor the 501 to another method are logged on stderr, where http.server logs each error it
+  sends; and a reply names tiny_http in its `Server` header. An event stream to an HTTP/1.1 client is chunked, ending
+  with its last chunk, where Python's HTTP/1.0 stream ends with the connection: tiny_http keeps the connection, so a
+  close-delimited stream would not end for a client at a server's stop. The parity harness's `EventStream` takes the
+  closed chunked stream's AttributeError for its end (`tests/parity/scenarios.py`). Every security check refuses
+  what Python's refuses; these change only how. Decided against unless a client is found that sends such a request.
+- **serve has no limit on its threads, and no timeout for a client that sends nothing.** The engine's serve answers
+  each request on a thread of its own, and tiny_http keeps a thread for each open connection, kept alive between
+  requests (`engine/src/serve.rs`); cross-review 105, F3: "A client that sends a partial request or idles holds it for
+  good." Decided against for now (2026-10-29, the user's ruling): serve binds 127.0.0.1 only and every request needs
+  the token. Reopen if serve listens beyond loopback.
+- **serve reads a run's files through a symbolic link.** A run's files are listed and read by `Host::run_files` and
+  `Host::read`, which follow a symbolic link (`[ -f ]`, `cat`), so a link an agent leaves in its run directory, or a
+  run directory that is a link, lets `/file` and the event stream show a file outside the run, `~/.ssh/id_rsa` say, to
+  the desktop app's window; the name a request gives is still only a plain name, and only the token's holder can ask.
+  `a_link_in_the_run_directory_is_followed_as_python_follows_it` (`engine/src/serve/runs/tests.rs`) pins it. Ruled
+  (2026-10-29, the user): keep the Python engine's behaviour until the switch, then refuse a link whose target is
+  outside the run directory, as a fix on main once the Python engine is gone, which it is since rust-engine ticket 11.
+  Open until that fix.
 - **The parity harness compares serve's event stream at checkpoints, not event by event.** `serve_endpoints_and_events`
   keeps, at each point where the run waits on an agent and once it is done, the last `record` and `files` event of
   each run (`tests/parity/scenarios.py`, `last_by_run`). Raised by cross-review 65 (F10, 2026-10-27), against the
@@ -322,8 +494,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   "forbid"` no longer gives E0453 and its unsafe block is no finding: the gate is OK on a change the workspace's rules
   make uncompilable, and only "Suppressions added" lists the allow, and not even that when the change adds the lint as
   one line inside an existing wrapped `#[allow(\n    a,\n    b,\n)]`, since `_RUST_SUPPRESSION` reads one added line at
-  a time (F15). Nothing in this repository sets `forbid` (`ui/src-tauri/Cargo.toml` is all `warn`), and the Test stage's
-  uncapped `cargo llvm-cov nextest` and the UI stage's `cargo check` would still fail such a build of `ui/src-tauri`.
+  a time (F15). Nothing in this repository sets `forbid` (the top-level `Cargo.toml`'s `[workspace.lints]` are all
+  `warn`), and the Test stage's uncapped `cargo llvm-cov nextest` and the UI stage's `cargo check` would still fail
+  such a build of the workspace.
   Raised by cross-review 66 (F11, 2026-10-27): "The gate is OK on a change that the workspace's rules make
   uncompilable". Closes with a second, uncapped clippy run whose rustc errors (codes `E` and four digits, such as E0453)
   are compile errors, or with the forbidden lints read from the manifests and an added allow of one failing the gate.
@@ -457,9 +630,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
     `artifacts[relativePath]` in the result's `api/json` tree would halve the requests (F2).
   - No test covers a transient `CIError` between two reads, or a build that ends with a file other than the one read
     while it ran (F5).
-- **`test_invariants.py`'s `AnyJenkins` and `Answer` copy `FakeCI` and `FakeResponse`** of
-  `tests/test_orchestrator.py`. Raised by cross-review 60 (F4, 2026-10-27). Closes with one fake Jenkins the two files
-  share.
 - **`vague-names` does not split CamelCase in Python.** `vague_names` matches a whole Python name or its last
   `_`-separated word, so `user_data` is found but a class `InfoManager` or `UserData` is not; in Rust the last CamelCase
   word is matched too (`_is_vague`, gate-rust-checks ticket 04), which is Rust's counterpart. Closes, if the run metrics
@@ -636,10 +806,13 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   a run that `resume` finds done: `Workflow.run` returns the verdict at once, so neither file is ever written, the
   human is never told, the herdr workspace stays open, and after the first save `owner` stays set and the turns have
   no token counts. Found by orchestrator-test-methods/05 (`tests/test_crash_resume.py`, 2026-10-28), whose `expected`
-  pins this behaviour. Not fixed here: the engine is frozen (Planned, "The Python engine is frozen"). Closes in the Rust
+  pins this behaviour. Not fixed here: the engine is frozen (Fixed, "The Python engine was frozen until the Rust engine replaced it"). Closes in the Rust
   engine with a resume of a `done` run that finishes whatever of that ending is missing (each step can tell: the files
   exist, `owner` is cleared, the tokens are counted). The test drives the Python engine in-process, so its pin goes
   with that engine.
+  Since rust-engine ticket 11 (2026-10-30) the Python engine and `tests/test_crash_resume.py`, with its pin, are gone;
+  the Rust engine was ported to behave the same, so the bug stands there until fixed, with no test that crashes it
+  after each save (Open issues, "No test crashes the Rust engine after each save").
 - **A crash between an agent's start and its session being saved costs that turn its session.** `Workflow._start`
   saves the agent's record, then asks herdr for it and `_note_session` saves the session. A resume after the first
   save finds the agent alive (`_agent` returns `ALIVE`) and prompts it without asking herdr, so the turn's record
@@ -648,6 +821,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   tokens. Found by orchestrator-test-methods/05 (2026-10-28), whose `expected` pins it. Not fixed here: the engine is
   frozen. Closes in the Rust engine with `_agent` noting the session of an agent it finds alive; the pin goes with
   the Python engine, as above.
+  Since rust-engine ticket 11 (2026-10-30) the Python engine and `tests/test_crash_resume.py`, with its pin, are gone;
+  the Rust engine was ported to behave the same, so the bug stands there until fixed, with no test that crashes it
+  after each save (Open issues, "No test crashes the Rust engine after each save").
 - **A resumed interview tells the human again that it waits for them.** `Workflow._step_turn`'s `announce` focuses
   the human-paced agent's pane and notifies "<label> is waiting for you" in every orchestrator that takes the turn
   (`_turn`: it "runs once the agent is ready"), so a resume while the interview is under way repeats both, once per
@@ -657,9 +833,304 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `tests/test_crash_resume.py`'s `expected` pins it as up to one repeat per resume while orchestrator.py is frozen.
   Closes with an engine that announces a turn only where none did (for example, only when `prompted` is not the turn's
   file), the Rust engine's, and the pin removed.
+  Since rust-engine ticket 11 (2026-10-30) the Python engine and `tests/test_crash_resume.py`, with its pin, are gone;
+  the Rust engine was ported to behave the same, so the bug stands there until fixed, with no test that crashes it
+  after each save (Open issues, "No test crashes the Rust engine after each save").
 
 ## Fixed
 
+- **`test_invariants.py`'s `AnyJenkins` and `Answer` copied `FakeCI` and `FakeResponse`** of
+  `tests/test_orchestrator.py`. Raised by cross-review 60 (F4, 2026-10-27). Fixed (2026-10-30, rust-engine ticket 11):
+  both went with the Python engine; `test_invariants.py` keeps the gate's invariants, and the engine's credentials
+  are its `http/tests.rs`'s and `ci/tests.rs`'s.
+- **The Python engine was frozen until the Rust engine replaced it.** From the parity harness's merge until the
+  switch, nothing landed in `orchestrator.py`, so that its recordings stayed the oracle each Rust ticket was judged by.
+  Fixed (2026-10-30, rust-engine ticket 11): the Rust engine replaced it in 0.49.0. `orchestrator.py`, its tests and
+  PyInstaller are gone; `packaging/build-binary.sh` builds the Rust binary under the same asset names; the desktop app
+  serves `$ORCHESTRATOR_BIN`, its bundled binary or the checkout's `target/debug/orchestrator`; the parity scenarios
+  replay the Python engine's recordings against the Rust binary in the Test stage; `gate.py` is all the Python left,
+  with `tests/gitrepo.py` running git for its tests rather than the engine's `Host`. Not closed: the engine's
+  messages still name `orchestrator.py` (Open issues, "The Rust engine names itself orchestrator.py").
+- **The Rust engine had no serve.** The desktop app starts `orchestrator serve --origin ...` as its sidecar
+  (`ui/src-tauri/src/lib.rs`), which the `orchestrator` binary did not have. Fixed (2026-10-29, rust-engine ticket 10):
+  `crate::serve`, on tiny_http, a thread per request: `serve_command` prints `{"url", "token"}` and serves until
+  SIGINT or SIGTERM (Fixed, "A Ctrl-C at the terminal does not reach the command the Rust engine's `Host` or herdr is
+  running"); `RunServer` binds 127.0.0.1 on a free port and checks each request in Python's order, the `Host` header,
+  the `Origin` against its own and `--origin`'s, a CORS preflight answered then, the token from `secrets.token_urlsafe`
+  's 32 bytes compared in constant time (`same_bytes`) as `Authorization: Bearer` or `?token=`, the endpoint, its
+  parameters, the project (`project_host`, connected once per machine and directory), and in
+  `crate::serve::runs` `plain_name` and state.json's refusal (`RunReadError::Refused`, Python's `RunPathRefused`)
+  before anything is read; `/runs`, `/files`, `/file` and `/events`, whose `RunWatch` polls every second, every 5 for a
+  `--machine`, and sends `record`, `files` and `problem` events, a comment when nothing changed, until the client goes
+  or the server stops, which also stops the commands its projects' `Host`s run. A request is read as http.server reads
+  it (`crate::py::url`'s `urlsplit` and `parse_qsl`, against Python 3.14's answers in `engine/tests/oracle/python.json`;
+  a path that starts with `//` collapsed; the last of a parameter given twice), and any method but GET and OPTIONS gets
+  http.server's 501 page. Ported: `TestServeEndpoints`, `TestServeSecurity`, `TestServeEvents`,
+  `TestServeEventsOnAMachine`, `TestRunWatch`, `TestServeCommand` and `TestProjectHost` (`engine/src/serve/tests.rs`,
+  `engine/src/serve/runs/tests.rs`, and their process cases in `engine/tests/program.rs`), with each refusal; not
+  `TestProjectRuns`, whose `project_runs` is the tk GUI's. The parity scenario `serve_endpoints_and_events` passes
+  against the binary. Where it answers otherwise than Python: the Open issues "serve answers some requests otherwise
+  than Python's http.server" and "serve reads a run's files through a symbolic link".
+- **A Host need of the doctor's, left for rust-engine ticket 09b.** (Moved from Open issues, 2026-10-29.) `Host::exec` words a command that cannot be
+  started as a message only, so the doctor's `_run_tool`, which tells a tool missing from PATH by its
+  FileNotFoundError, cannot tell it so (cross-review 89, F9: "porting `_run_tool`'s 'not on PATH' check will need
+  either string matching or an interface change"). Closes with ticket 09b, which ports `doctor`, giving `exec` an
+  error of its own for a command not found or having the doctor ask `command -v` first, as `_on_path` already does.
+  The three `TestHost*` cases this entry also named (`test_prune_on_real_git`, `test_close_on_real_git`,
+  `test_closed_without_a_time`) are ported (Fixed, "The Rust engine's CLI commands about a project's runs").
+  Fixed (2026-10-29, ticket 09b): `Host::exec` fails with `ExecError::NotFound` for a command not on PATH and
+  `ExecError::Failed` for any other (`engine/src/host.rs`), and the doctor's `run_tool` (`crate::cli::doctor`) tells a
+  missing tool by it, as `_run_tool` by FileNotFoundError; `ProcessHost::with_runner` runs a test's FakeTools in
+  place of processes, as Python's `Host(run=...)`. `doctor` is ported with `TestCheckSetup` and `TestDoctorCommand`
+  (`engine/src/cli/doctor/tests.rs`) but for its tkinter check, which the Rust engine, without the GUI, does not
+  make (`test_without_tkinter` not ported); the parity scenario `doctor_checks` passes against the binary.
+- **Jenkins calls whose tests need the CLI, left for rust-engine ticket 09b.** (Moved from Open issues, 2026-10-29.) Ticket 07 ported `TestOrchestratorChecks`
+  on `judge_run` of the build's quality file; its Workflow cases (`test_a_build_that_failed_before_the_gate_is_not_checked`,
+  `test_without_the_quality_gate_none_of_this_runs`, `test_the_spec_is_the_runs_task_without_a_contract_step` and the
+  heartbeat kept between PyPI's requests, `test_slow_pypi_keeps_the_run_alive_and_stops_at_the_rounds_deadline`) ticket
+  08's part 5 ported through its quality round (`engine/src/workflow/tests/orchestrator_checks.rs`, 2026-10-29), on
+  FakePyPI's clock and `events`. `judged_in_quality`, `_build_trust`, `_judging_changes`,
+  `JUDGING_FILES` and `JUDGED_DESCRIPTION`, with `TestJudgedInQuality`, are the `judged-in-quality` command's; the
+  Rust `Jenkins::retained_builds` they read is ported. Issue 09 names them (2026-10-28); its Plan (split) gives them to
+  09b (2026-10-29). Fixed (2026-10-29, ticket 09b): `crate::cli::judged` has `judged_in_quality`, `build_trust`, `judging_changes`,
+  `JUDGING_FILES` and the description's format (`Judged::read`, in place of the regular expression), and
+  `judged-in-quality` runs without herdr (`crate::cli`'s `herdrless_command`, given a `Local`), with
+  `TestJudgedInQuality` in `engine/src/cli/judged/tests.rs`; the parity scenario `judged_in_quality` passes against
+  the binary.
+- **The Rust engine's CLI commands about a project's runs.** Fixed (2026-10-29, rust-engine ticket 09a): the
+  `orchestrator` binary has `list` (and `--json`, `--pr-state`), `metrics`, `show`, `prune`, `close` and `workflows`
+  beside `run` and `resume` (`crate::cli::args`' `Command::Runs` and `Command::Workflows`; `crate::cli`'s
+  `runs_command`, `herdrless_command` and `record_in_state`; `crate::cli::listing`, `prune`, `close` and
+  `workflows`), each flag of Python's parse_args for them, argparse's last-wins for a flag given twice
+  (`args_override_self`), and each command's `--help` naming the flags Python's names
+  (`engine/tests/oracle/cli.py`, `help_names_the_flags_python_names`, whose `NOT_YET` is drain, refresh,
+  judged-in-quality and doctor, ticket 09b's). Ported with them: `TestCLI`, `TestRunRecord`, `TestListJSON`,
+  `TestRunHealth`'s print_runs cases, `TestShow`, `TestBlockedListing` but its GUI case, `TestPrune`,
+  `TestSweepSummary`, `TestPruneCLI`, `TestClose`, `TestSweepOnRun`, `TestResumeCLI`, `TestWorkflowCLI`,
+  `TestWorkflowFileCLI`, `TestSpecCLI`'s main cases, `TestHostGit`'s `test_prune_on_real_git` and
+  `test_close_on_real_git`, `TestHostPullRequest.test_closed_without_a_time`, and each CLI case tickets 06 to 08
+  left (the Fixed entry "Harness tests left for rust-engine tickets 08 and 09", and the parts of the
+  Fixed entry on the Workflow that say "for ticket 09"), in `engine/src/cli/**/tests.rs` and `engine/tests/program.rs`.
+  The parity scenarios `workflows_listed`, `runs_listed_and_shown`, `branches_pruned`, `failed_run_closed` and
+  `finished_run_closed` pass against the binary. No arguments print the help on stderr with exit status 2, where
+  Python without a display exits 2 naming the missing command (the spec's Decisions: no tk GUI). Ticket 09b
+  (2026-10-29) adds `drain`, `refresh`, `doctor` and `judged-in-quality` (`crate::cli::drain`, `refresh`, `doctor` and
+  `judged`), with `TestDrain`, `TestDrainWorkflows`, TestPromptFiles' drain case, `TestRefresh`, `TestCheckSetup`,
+  `TestDoctorCommand` and `TestJudgedInQuality`, and empties `NOT_YET`: every command's `--help` names Python's flags,
+  and the parity scenarios `specs_drained`, `conflict_refreshed`, `doctor_checks` and `judged_in_quality` pass. Ticket
+  10 (2026-10-29) adds `serve` (`crate::serve`, Fixed, "The Rust engine had no serve"), so the `--help` test covers
+  every command but gui (`engine/tests/oracle/cli.py`'s `NOT_PORTED`).
+- **Harness tests left for rust-engine tickets 08 and 09.** (Moved from Open issues, 2026-10-29.) Ticket 06 ported `launch_args`, `session_usage` and
+  `turn_tokens` (`engine/src/harness/tests.rs`, `engine/src/summary/tests.rs`), but the Python cases that drive them
+  through `Workflow`, `parse_args`, `new_state` or `resumable_state` wait for those (cross-review 92, F1: "As merged,
+  the ticket's verification is unmet and nothing tracks the gap"). Ticket 08's part 2 (2026-10-29) ported its
+  Workflow cases to `engine/src/workflow/tests/harnesses.rs` and `turn_timings.rs`: all of `TestHarnesses`;
+  `test_role_agent_starts_that_role_in_its_harness`, `test_resume_with_a_new_harness_relaunches_in_it` and
+  `test_a_030_state_resumes_on_claude`, each on the state `new_state` or `resumable_state` would give, built by hand;
+  `test_tokens_come_from_the_session_the_turn_ran_in` and `test_a_turn_that_changed_sessions_has_unknown_tokens`.
+  Part 3 (2026-10-29) ported the Workflow half of `test_run_dir_granted_in_worktree_runs_only`, with worktree runs.
+  Part 7 (2026-10-29), which ports `resumable_state` with resume's flags, ported their `resumable_state` halves
+  (`test_a_030_state_resumes_on_claude`'s 0.3.0 state resumed without flags, `test_resume_with_a_new_harness_relaunches_in_it`'s
+  `--agent pi`) and `test_resume_keeps_or_overrides_the_saved_harnesses`, in `harnesses.rs`. For ticket 09, which ports
+  the CLI: `test_precedence`, `test_flags_reach_the_workflow`, `test_role_agent_for_a_role_the_workflow_lacks` and
+  `test_unknown_kinds_are_argparse_errors`, which drive `parse_args`, `new_state` and `main` as a whole. Ported already: `test_launch_args_leave_the_permission_table_alone`,
+  the `launch_args` half of `test_run_dir_granted_in_worktree_runs_only`,
+  `test_turn_tokens_needs_a_known_window_and_a_harness_it_reads` (ticket 06) and
+  `test_a_030_state_without_a_permission_mode` and `test_unreadable_agent_args` (ticket 04, `engine/src/state/tests.rs`
+  and states.json). Fixed (2026-10-29, ticket 09a): `test_precedence`, `test_flags_reach_the_workflow`,
+  `test_role_agent_for_a_role_the_workflow_lacks` and `test_unknown_kinds_are_argparse_errors` are ported, in
+  `engine/src/cli/tests.rs` and `engine/src/cli/args/tests.rs` (Fixed, "The Rust engine's CLI commands about a
+  project's runs").
+- **The Rust engine's `run` did not prune earlier runs' branches.** Python's `main` runs `sweep_branches` before a
+  `run` that opens a pull request; the Rust `run` of rust-engine ticket 08's part 7 did not. Fixed (2026-10-29,
+  ticket 09a): `crate::cli::prune` has `prune_branches`, `pull_request_pending`, `sweep_summary` and `sweep_branches`,
+  which `crate::cli`'s `new_run` calls before `new_state` for a run without `--no-pr`; a failure is logged and the run
+  goes on, but one met while the Interrupt is raised ends the command interrupted. `TestPrune`, `TestSweepSummary`,
+  `TestPruneCLI` and `TestSweepOnRun` are ported (`engine/src/cli/prune/tests.rs`), and the parity scenario
+  `branches_pruned` passes against the binary.
+- **Local times the Rust engine had yet to read.** Python reads a time without an offset in the machine's zone in
+  `time.strftime` (`new_run_id`) and `datetime.fromisoformat(...).timestamp()` (`epoch_seconds`, `session_usage`,
+  `_young`'s PyPI upload, `pull_request_pending`'s `closedAt`); all but the last were ported so by ticket 08's
+  follow-ups. Fixed (2026-10-29, ticket 09a): `crate::cli::prune::pull_request_pending` reads `closedAt` through
+  `crate::py::datetime::fromisoformat_timestamp`, and words a `closedAt` that is no time, or none, as Python does
+  (`PR #7 is closed at None, which is not a time`).
+- **The Rust engine's Workflow is ported in parts, and its Python tests with them.** Rust-engine ticket 08 lands in
+  seven parts (its issue's Plan): part 1 (`engine/src/workflow.rs`, 2026-10-29) runs a workflow in the project's
+  checkout, its turns, verdict retries, pull request, saves, heartbeat and takeover, and ports `TestWorkflow`,
+  `TestPullRequest`, `TestUpToDateBase`, `TestHeartbeat`, `TestRunHealth`'s `run_health` cases (its two `print_runs` cases are ticket 09's, with `list`), `TestPidAlive` and
+  `TestOneRunPerCheckout` but its worktree cases (which part 3 ported) and its resume --force
+  cases (`test_force_takes_over_the_run_itself`, `test_force_does_not_override_another_live_run`, which go through
+  `resumable_state`, with the minimal `run`/`resume`). Part 2 (2026-10-29, tests only: the cases found nothing
+  missing in part 1's Workflow) ports `TestResume`, `TestPromptDelivery`, `TestResumePullRequest`, `TestTurnTimings`,
+  `TestHarnesses`, the Workflow cases of `TestHarnessFlags` and `TestRunMetrics`, and `TestWorkflowFileAgents`'
+  `test_saved_with_the_run` (`engine/src/workflow/tests/`), but for: the cases of a gated run, which part 5 ported
+  (`TestResumePullRequest.test_resume_on_another_branch_fails_before_any_turn`'s quality phase, and there its check
+  that Jenkins was asked nothing in the other phases; `TestTurnTimings.test_quality_rounds_and_answers_have_records_of_their_own`
+  and `test_a_resumed_analysis_keeps_its_start`; `TestRunMetrics.test_a_gated_run_of_two_rounds_records_its_turns_and_quality_rounds`
+  and `test_a_resumed_quality_round_is_recorded_once`); `TestTurnTimings.test_a_seeded_spec_has_no_record`, which part 3 ported;
+  TestResume's two `RunState.from_dict` cases, which are `crate::state`'s (`engine/src/state/tests.rs`); and the
+  CLI's, for ticket 09 (`TestResumePullRequest.test_cli_exits_1_on_another_branch` and
+  `test_no_pr_is_saved_with_the_run`, `TestRunMetrics.test_the_metrics_command_prints_a_line_per_run_that_is_done`,
+  `TestWorkflowFileAgents.test_workflows_prints_it`). Part 3 (2026-10-29) adds blocked reports (`turn`'s blocks,
+  `block`, `unblocked`, `finish_block`, `block_answer` in `engine/src/workflow/turn.rs`), worktree runs
+  (`open_worktree`, `check_worktree`, the worktree halves of `switch_to_branch` and `leave_work_dir`, `Host::has_origin`)
+  and a seeded spec (`RunSettings::spec`, `seed_spec`, `crate::spec_file`'s `SpecFile` and `read_spec_file`,
+  `Pipeline::seeded_start`), and ports `TestBlocked`, `TestBlockedResume`, `TestWorktreeRun`, `TestOneRunPerCheckout`'s
+  worktree cases, `TestSeededSpec`, `TestOtherWorkflows`, `TestWorkflowWithoutAVerdict`, `TestSavedBeforeWorkflows`,
+  `TestDefaultWorkflowPrompts`, `TestWorkflowPromptsGolden`, `TestSpecBuildReviewExample` and the Workflow-driven cases
+  of `TestWorkflowDefinitions`, `TestWorkflowFiles` and `TestPromptFiles`, but for: the cases of a gated run, which part
+  5 ported (`TestBlocked.test_a_blocked_quality_answer_waits_then_goes_back_to_the_quality_round` and
+  `test_the_note_is_in_every_prompt_of_the_steps_that_can_block_only`; `TestOtherWorkflows.test_gated_step_with_another_name`,
+  `test_fresh_gated_step_answering_a_quality_round` and `test_resumed_gated_step_checks_the_credentials_first`;
+  `TestWorkflowWithoutAVerdict.test_a_gate_that_still_fails_is_not_finished`, `test_a_missing_last_quality_file_fails_the_gate`
+  and `test_a_gate_that_passes_is_finished`; `TestSavedBeforeWorkflows.test_quality_resumes_under_the_default`;
+  `TestDefaultWorkflowPrompts.test_gate_passes_after_a_fix_then_runs_out`, `test_gate_runs_out_then_passes`,
+  `test_fresh_builder_in_round_two_after_quality_rounds`, `test_fresh_builder_answering_a_quality_round_in_round_two` and
+  `test_fresh_reviewer_in_round_two_with_the_gate`; `TestWorkflowDefinitions.test_the_gate_needs_a_gated_step`;
+  `TestPromptFiles.test_a_note_file_reaches_the_turn_that_uses_it`); `resumable_state`'s, for part 7
+  (`TestWorkflowFiles.test_a_saved_definition_that_cannot_be_filled_in_stops_the_resume` and
+  `test_a_corrupt_saved_definition_is_an_error`, `TestPromptFiles.test_a_state_that_replaces_an_unknown_prompt`); and
+  the CLI's, for ticket 09 (`TestWorktreeRun.test_a_run_flag` and `test_flag_reaches_the_workflow`, the `print_runs` half
+  of `TestBlocked.test_the_wait_is_saved_and_listed`, `TestBlockedListing`, `TestSpecCLI` but for `read_spec_file`'s
+  cases, which `engine/src/spec_file/tests.rs` holds, the `role_models` half of
+  `TestOtherWorkflows.test_model_reaches_a_role_without_its_own_flag`,
+  `TestWorkflowWithoutAVerdict.test_a_failed_gate_exits_as_changes_requested` and `test_finished_exits_zero`,
+  `TestWorkflowFiles.test_list_reads_the_gated_step_from_the_saved_definition`, and `TestPromptFiles`' cases of main and
+  drain). Part 4 (2026-10-29) adds locked files (`hold_locks`, `locked_changes`, `locks_note` and `clean_up_locks`
+  in `engine/src/workflow/locks.rs`) and proofs (`judge_proofs`, `rerun_proofs`, `carried_proofs`, `run_proof` under
+  GNU `timeout` and the notes, in `engine/src/workflow/proof_runs.rs`, with `crate::proofs::ProofRun`), and ports
+  `TestLockedFiles`, `TestProofs` and `TestProofInAWorktree` (whose proof is a shell script that finds its repository
+  with git, where Python's is run by pytest, which the Rust tests do not have), but for the cases of a gated run, which
+  part 5 ported (`TestLockedFiles.test_the_gate_judges_the_restored_tests`,
+  `TestProofs.test_a_carried_proof_runs_again_after_the_rounds_last_quality_round_and_before_the_review`), and the
+  pipeline's and workflow file's, which ticket 04 ported. Part 5 (2026-10-29) adds the quality gate's rounds
+  (`judge_quality`, `stuck`, `quality_note`, `gate_passed`, `quality` to `clean_up_quality`, with `require_origin`,
+  `delete_ci_refs` and `delete_ci_ref`, in `engine/src/workflow/quality_rounds.rs`; `check_gate` and the credentials
+  check of `check_start`; `Collaborators::jenkins` and `pypi`; `crate::quality::under_gate_line`), and ports
+  `TestQualityGate`, `TestStuckQualityLoop`, `TestQualityResume`, `TestSecretScanWorkflow`, the Workflow cases of
+  `TestOrchestratorChecks` and `TestQualityCLI`'s `test_state_saved_before_the_gate_has_none`, with every gated case
+  the earlier parts left for it, on `FakeJenkins` (which gains `cancelled`, `quality_reads` and `quality_replies`) and
+  `FakePyPI` (which gains its clock, a `FakeTime`, and `events`); `TestQualityCLI`'s other cases are the CLI's
+  (`test_flag_checks`, `test_gate_reaches_the_workflow`, `test_list_shows_the_quality_phase`, ticket 09) and
+  `resumable_state`'s (`test_resume_limit_against_the_saved_quality_round`, `test_resume_limit_needs_the_gate`, part
+  7). Each test module's doc names the cases it leaves out. Part 6 (2026-10-29) adds the Ctrl-C (`interrupt::on_sigint`,
+  now `by_signals`, the command's group stopped by `run_process`, `SystemClocks`, `LocalHuman`, which is Python's
+  `notify_locally` and
+  `log`); it ports no Python test, whose fakes raise KeyboardInterrupt themselves, and adds the Rust cases the Fixed
+  entry on the Ctrl-C names. Fixed (2026-10-29) by part 7, the last: the `orchestrator` binary (`engine/src/main.rs`,
+  `crate::cli`) with `run` and `resume`, their flags and checks on clap, `new_state`, `resumable_state`,
+  `resumed_state`, `turn_quality_gate_on` and `_off` (`engine/src/workflow/gate_switch.rs`) and `finish`, and the
+  Python cases left for it (`TestQualityGateOnResume`, `TestQualityGateOffOnResume` but `test_show_names_the_gate`,
+  which is `show`'s and ticket 09's, `TestResumableState`,
+  `TestFindRun`, `TestOneRunPerCheckout`'s resume --force cases, `TestWorkflowFiles`', `TestPromptFiles`' and
+  `TestQualityCLI`'s `resumable_state` cases, `engine/src/cli/start/tests.rs`); every `run` and `resume` parity scenario
+  passes against the binary, and so does each scenario that kills a run, with the engines switched at the kill
+  (`tests/parity/test_parity.py`, SWITCHED). What the Rust CLI still lacks is ticket 09's.
+- **The Rust engine named a new run by the time in UTC.** `new_run_id` (`engine/src/cli/start.rs`) wrote the time the
+  run started in UTC, where Python's `time.strftime` writes the local time, and `IsoTime::timestamp` took a time
+  without an offset as UTC, where Python's `timestamp()` takes it as local time: the engine had no time zone database
+  to read. So a run id read an hour or more off in another zone, and runs of both engines in one checkout listed out
+  of start order there (`run_states` sorts by id). Fixed (2026-10-29, rust-engine ticket 08's follow-ups, the user's
+  ruling of 2026-10-29): the jiff crate (0.2.38, its `std`, `tz-system` and `tzdb-zoneinfo` features, no bundled
+  database) reads the zone as the C library does for Python, TZ, else `/etc/localtime`, the rules from
+  `/usr/share/zoneinfo`, UTC where neither can be read (`crate::py::datetime`); `new_run_id` writes the time by
+  `strftime_local`, and `IsoTime::timestamp` solves a time without an offset as CPython's `local_to_seconds` does
+  (fold 0: the first of a time shown twice, the offset before the change for one skipped, and its error within a day
+  of the years 1 and 9999), for `epoch_seconds`, `session_usage` and PyPI's upload times. Held by
+  `engine/tests/oracle/harness.py`'s `fromisoformat` cases, now read in a zone with summer time and with times it skips
+  and shows twice, and its `strftime_local` cases in four zones, and by `engine/tests/program.rs`'s
+  `a_run_is_named_by_the_time_in_the_machine_s_zone` (TZ 5:45 east of UTC). The parity harness still runs in UTC.
+  What Python reads in local time outside run and resume was the Open issue "Local times the Rust engine has yet to
+  read, for rust-engine ticket 09", now Fixed ("Local times the Rust engine had yet to read").
+- **The parity scenarios did not run against the Rust binary in Jenkins.** The Test stage runs `tests/parity` against
+  `orchestrator.py` only, and the Rust tickets ran `PARITY_ENGINE=target/.../orchestrator uv run pytest tests/parity`
+  by hand, with the scenarios that switch engines at the kill (`SWITCHED` in `test_parity.py`). Fixed (2026-10-29,
+  rust-engine ticket 08's follow-ups, the user's ruling of 2026-10-29): the Jenkinsfile's Rust parity stage, after
+  Gate, on a pull request build (`changeRequest()`) whose change touches `engine/`, `tests/parity/`, `Cargo.toml`,
+  `Cargo.lock` or `rust-toolchain.toml` (the user's later ruling, 2026-10-29) since the base Gate judges it from
+  (`ci/pr-base.sh`, now Gate's too; a `git diff --quiet` as the Test stage's for a quality build; a base or diff
+  that fails runs it), runs them against the binary the Test stage's cargo-llvm-cov built
+  (`target/llvm-cov-target/debug/orchestrator`, instrumented, its profiles sent to `/dev/null` by `LLVM_PROFILE_FILE`
+  through `env`, since the harness gives the engine an environment of its own), limited to the
+  scenarios whose recordings invoke only `run` and `resume` (`PARITY_COMMANDS`, new in `test_parity.py`): 33 and the
+  18 switched, 51 passing in 198 s locally with SIGINT and SIGHUP ignored, as a Jenkins `sh` step starts them. A
+  failing scenario fails the build; its JUnit report is `parity-rust.xml`. Unverified until a pull request build runs
+  it: the declarative `when` (`changeRequest()` with an `expression` that runs `sh`), the stage's time on agentbox0
+  and the binary's path there. Quality builds and builds of main do not run it, and ticket 09's commands are added to
+  `PARITY_COMMANDS` as they land: ticket 09a (2026-10-29) adds `list`, `metrics`, `show`, `prune`, `close` and
+  `workflows`, so the stage runs 38 scenarios and the 18 switched, every one but those of `drain`, `refresh`,
+  `doctor`, `judged-in-quality` (ticket 09b) and `serve` (ticket 10); 56 passing in 210 s locally with SIGINT and
+  SIGHUP ignored, the Python engine's 43 taking 192 s. Ticket 09b (2026-10-29) adds `drain`, `refresh`,
+  `judged-in-quality` and `doctor`, so the stage runs every scenario but serve's, 42 and the 18 switched: 60 passing
+  in 228 s locally, so too (380 s on agentbox0, PR-178). Ticket 10 (2026-10-29) adds `serve`, so `PARITY_COMMANDS` names
+  every command but gui and the stage runs every scenario, 43 and the 18 switched: 61 passing in 253 s locally with
+  SIGINT and SIGHUP ignored, `serve_endpoints_and_events` taking 24 s of it; about 405 s expected on agentbox0, by
+  PR-178's ratio. Since rust-engine ticket 11
+  (2026-10-30) the Test stage runs every scenario against that binary on every build, through `PARITY_ENGINE`, and
+  the Rust parity stage is gone.
+- **The commands the Rust engine runs outlived an engine that got a SIGTERM or a SIGHUP.** The commands run in
+  process groups of their own, so a SIGTERM of the engine (a kill, a service manager's stop) or the SIGHUP a closed
+  terminal sends its foreground group ended the engine and left the running command to finish unwatched, and the run
+  unreleased (Open issue "The commands the Rust engine runs outlive an engine that is SIGKILLed", which this narrows).
+  Fixed (2026-10-29, rust-engine ticket 08's follow-ups, the user's ruling of 2026-10-29): `interrupt::by_signals`,
+  which was `on_sigint`, waits for SIGTERM and SIGHUP as for SIGINT (`interrupt::SIGNALS`), so each raises the
+  `Interrupt`: the running command's group is stopped and the Workflow releases the run as interrupted, the program
+  prints the interrupted note with its resume hint (a line stderr does not take, as after a hangup, is lost), and
+  `interrupt::exit`, which `main` ends by, ends the process by the first SIGTERM or SIGHUP it got, as the signal's
+  default action does (a shell's `$?` 143 or 129), where a SIGINT alone exits 130. The exit status is the Python
+  engine's, which those signals kill at once; the release and the note are not: Python leaves the run owned by its
+  dead pid, to be resumed as a stale run, and prints nothing. A signal the engine started with ignored stays ignored,
+  for it and its commands, as nohup's SIGHUP; the commands start with the three unblocked (`unblock_signals`). Held by
+  `engine/tests/signals.rs` (real signals to an engine in a group of its own: a SIGTERM and a SIGHUP stop the command
+  and end the engine by the signal, an ignored SIGHUP reaches neither the engine nor its command) and
+  `engine/tests/program.rs`'s `a_sigterm_or_a_sighup_before_the_run_ends_the_program_by_it_with_the_interrupted_note`.
+- **A Ctrl-C at the terminal does not reach the command the Rust engine's `Host` or herdr is running.** `ProcessHost`
+  and `ProcessHerdr` run each command in a process group of its own (rust-engine tickets 05 and 06), which the
+  terminal's SIGINT, sent to its foreground group, no longer reaches, where in the Python engine every child gets it
+  too, the desktop app's Stop (`killpg` with SIGINT) included; so a Ctrl-C left a push, a scan or an unbounded `herdr
+  agent wait` running (cross-review 92, F2). Fixed (2026-10-29, rust-engine ticket 08, part 6): `interrupt::on_sigint`
+  (now `by_signals`) blocks SIGINT and starts a thread that waits for it (sigwait) and raises the `Interrupt` at each
+  one, from the
+  terminal or a kill of the engine's group; `ProcessHost::local` and `ProcessHerdr::new` take the `Interrupt`, and
+  `run_process` (`engine/src/host/process.rs`) watches it while a command runs: at a raise the command's group gets
+  SIGINT and, once the command exits or `INTERRUPT_GRACE_MS` (250 ms, Python's `Popen._sigint_wait_secs`) pass, SIGKILL,
+  and the command fails as interrupted, also one that answered meanwhile, such as a `herdr agent prompt` herdr had
+  delivered (review 97, F1); while the `Interrupt` is pending no command starts, until the Workflow catches it
+  (`Interrupt::catch`) to release the run; what only logs its failures (the heartbeat, the end's clean-ups, which then
+  keep `RunState::ci`) stops the run at a Ctrl-C, as Python's KeyboardInterrupt passes `except OrchestratorError`, and
+  the proof copies are removed as Python's finally removes them (`Interrupt::finally`); `SystemClocks`' sleep ends at a
+  raise; the children start with SIGINT
+  unblocked (`unblock_sigint`, now `unblock_signals`, the engine's one `unsafe`, `CommandExt::pre_exec`). A SIGINT
+  ignored when the engine started stays ignored, as in Python. Held by the Ctrl-C cases of `engine/src/host/tests.rs`
+  and
+  `engine/src/herdr/tests.rs`, `workflow/tests/interrupted.rs` (a run waiting on herdr, one during a prompt herdr
+  delivered, one already done), `a_ctrl_c_while_a_proof_runs_stops_it_with_what_it_started` (the proof under GNU
+  `timeout`, which leads the group ProcessHost started) and `engine/tests/sigint.rs` (now `signals.rs`: a real SIGINT to
+  an engine's group, and one it inherited ignored). Every command of the binary takes it since: `run` and `resume`
+  turn a raised `Interrupt` outside a Workflow (resolving the directory, reading the run, switching its gate) into the
+  interrupted note and exit status 130 (ticket 08's part 7, `crate::cli`, `stop`), as Python's KeyboardInterrupt
+  anywhere does; so do ticket 09a's (`list`, `metrics`, `show`, `prune`, `close`, `workflows`, the sweep before a run:
+  `run_command`, `herdrless_command`, and `prune_branches` and `fill_pr_states` stop at a failure met while it is
+  raised), and ticket 09b's (`refresh`, `judged-in-quality`, `doctor`, which prints nothing then, and `drain`, which
+  stops between runs and after its last, having printed its spec changes: `crate::cli::drain`, `drain_command`). And
+  `serve` keeps SIGINT and SIGTERM its own, as Python's does (ticket 10, 2026-10-29): `crate::cli::main` runs it
+  before it calls `by_signals`, and `crate::serve::serve_command` blocks the two and waits for them itself, also one
+  ignored at start, then stops the server, which raises the `Interrupt` its projects' commands watch, and exits 0;
+  SIGHUP keeps its default and ends it, as it ends Python's serve (`engine/tests/program.rs`, the serve cases). What is
+  left is the Open issue "The Rust engine's Ctrl-C, what is left".
+- **The Rust engine read a workflow file's tables with their keys sorted.** The toml crate keeps a table in a
+  `BTreeMap` without its `preserve_order` feature, so a table with two problems could be refused naming the other one
+  first, where tomllib gives the file's order. Raised in rust-engine ticket 04 (2026-10-28). Fixed (2026-10-28, the
+  user allowed `indexmap`): toml's `preserve_order` (`engine/Cargo.toml`), held by
+  `a_table_with_two_problems_names_the_first_in_the_file_as_python_does` (`engine/src/workflow_file/tests.rs`).
+- **Jenkins ran the Rust tests of `ui/src-tauri` alone.** The Test stage ran `cargo llvm-cov nextest` in that
+  directory, while `gate.py`'s clippy lints every Cargo workspace git tracks; a crate in another workspace, such as
+  the Rust engine's, would have had its lines judged by clippy but its tests never run, and its added lines counted as
+  nothing to cover. Found while adding Rust coverage (rust-engine ticket 03, 2026-10-27). Fixed (2026-10-28,
+  rust-engine ticket 04): the top-level `Cargo.toml` is the one workspace, with `engine/` and `ui/src-tauri/` as
+  members, one `Cargo.lock`, `[workspace.lints]` and `rust-toolchain.toml`; the Test stage runs `cargo llvm-cov
+  nextest --workspace` and the UI stage `cargo check --workspace` at the top, and the Gate stage reads
+  `target/nextest/ci/junit.xml` there.
 - **Where Rust's tests are was decided in two tickets.** Ticket 03 had placed the spec's requirement 2 in
   `_complexity_exempt` and `_rust_scored_functions`, and ticket 02's Rust `WeakenedTestsDetector`, written in
   parallel, in `_rust_tests` and `_rust_swallowed_errors`. Found by gate-rust-checks ticket 03 (2026-10-30). Fixed

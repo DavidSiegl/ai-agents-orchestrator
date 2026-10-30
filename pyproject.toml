@@ -7,17 +7,15 @@ addopts = ["-m", "not contract"]
 
 [project]
 name = "octoflow"
-version = "0.48.0"
+version = "0.49.0"
 description = "Octoflow AI: coding agents in relay, spec to build to review, each role judged by another, in herdr"
 readme = "README.md"
-# The orchestrator is stdlib-only, so it runs with a system python3 3.13+ without uv.
+# gate.py, the quality gate, is all that is Python now that the engine is Rust's (engine/): stdlib-only, so it runs
+# with a system python3 3.13+ without uv.
 requires-python = ">=3.13"
 dependencies = []
 
 [dependency-groups]
-build = [
-    "pyinstaller>=6.22.3",
-]
 dev = [
     "hypothesis>=6.170.8",
     "mutmut>=3.8.0",
@@ -55,8 +53,8 @@ max-complexity = 15
 "tests/**" = ["S101", "S105", "S106", "S108", "RUF059", "RUF012", "C408", "C901", "D1"]
 
 [tool.mypy]
-# The tests are untyped by design; the orchestrator, the gate and the eval runner are the typed surface.
-files = ["orchestrator.py", "gate.py", "evals/run.py", "evals/make_bundles.py", "evals/acceptance.py"]
+# The tests are untyped by design; the gate and the eval runner are the typed surface.
+files = ["gate.py", "evals/run.py", "evals/make_bundles.py", "evals/acceptance.py"]
 
 [tool.mutmut]
 # What `gate.py`'s surviving-mutants check runs mutmut by, on a copy of the tree in which only the functions a change
@@ -64,7 +62,7 @@ files = ["orchestrator.py", "gate.py", "evals/run.py", "evals/make_bundles.py", 
 # a directory of its own, which holds only what is listed here; tests/test_evals.py imports evals/, and
 # tests/test_gate.py builds the gate-rust helper from ci/gate-rust/'s sources, without its target/: mutmut copies a file
 # into a directory that must be there, which copying src/ first makes.
-source_paths = ["orchestrator.py", "gate.py"]
+source_paths = ["gate.py"]
 pytest_add_cli_args_test_selection = ["tests/"]
 # Without the parity scenarios (tests/parity), which run the engine as a program, about 190 s a run: mutmut's stats
 # and clean runs of them alone would take most of gate.py's mutation budget before it tries a mutant (TODO.md). The
@@ -73,9 +71,8 @@ pytest_add_cli_args = ["--ignore=tests/parity"]
 also_copy = ["examples/", "docs/", "evals/", "ci/gate-rust/src/", "ci/gate-rust/Cargo.toml", "ci/gate-rust/Cargo.lock"]
 # argparse's help and description texts: prose, not behaviour, which no test reads word for word. mutmut matches each
 # pattern against each source line and skips every expression that starts on a matching line, with what it holds, the
-# following lines of a text too. The patterns match any keyword argument of those names, not only argparse's: the
-# statement holding `Pipeline(..., description=description)` in orchestrator.py's parse_workflow is skipped too.
-# Flag names stay mutated: they are behaviour.
+# following lines of a text too. The patterns match any keyword argument of those names, not only argparse's. Flag
+# names stay mutated: they are behaviour.
 do_not_mutate_patterns = ['\bhelp=', '\bdescription=']
 
 [tool.coverage.run]

@@ -3,14 +3,15 @@ and print and keep the numbers. docs/design.md, Evals, says when to run it and w
 
     uv run python evals/run.py [--tasks a,b] [--repeat N] [--config NAME] [--keep] [-- RUN_ARGS...]
 
-Run it from a herdr pane, as `orchestrator.py run`: every trial is a real run, with real agents. RUN_ARGS, after
+Run it from a herdr pane, as `orchestrator run`: every trial is a real run, with real agents. RUN_ARGS, after
 `--`, are given to the engine's `run` unchanged, such as `--workflow quick --model sonnet`; the runner sets
 `--no-pr`, `--spec` and `--cwd` itself, and refuses those, `--machine` and `--worktree` there.
 
-The engine is the command line `EVAL_ENGINE` gives, as tests/parity's PARITY_ENGINE does, else this checkout's
-orchestrator.py on the Python running this script. It is run as a program, through `run` and `close`, and must keep
-a run's files as orchestrator.py does: the runner finds the run under `.orchestrator/runs/<run id>/` in the clone, and
-its numbers in `metrics.json` there (docs/design.md, Run metrics).
+The engine is the command line `EVAL_ENGINE` gives, as tests/parity's PARITY_ENGINE does, else this checkout's own,
+built first (`cargo build --locked -p octoflow-engine`), so that a trial never runs a binary older than the commit it
+is recorded under. It is run as a program, through `run` and
+`close`, and must keep a run's files as the orchestrator does: the runner finds the run under
+`.orchestrator/runs/<run id>/` in the clone, and its numbers in `metrics.json` there (docs/design.md, Run metrics).
 
 A task is a directory evals/tasks/<name>/ holding:
 
@@ -117,11 +118,33 @@ def load_tasks(names: list[str] | None, tasks_dir: str = TASKS_DIR) -> list[Task
     return tasks
 
 
+# How a result line names the engine a trial ran without EVAL_ENGINE: this checkout's own build.
+DEFAULT_ENGINE = "this checkout's build"
+
+
 def engine_command() -> list[str]:
-    """The engine every trial runs, as EVAL_ENGINE gives it, else this checkout's orchestrator.py on this Python."""
+    """The engine every trial runs, as EVAL_ENGINE gives it, else this checkout's own, as built_engine builds it."""
     if command := os.environ.get("EVAL_ENGINE"):
         return shlex.split(command)
-    return [sys.executable, os.path.join(ROOT, "orchestrator.py")]
+    return [built_engine()]
+
+
+def built_engine() -> str:
+    """The path of this checkout's orchestrator binary, `cargo build --locked -p octoflow-engine --bin orchestrator`
+    run first, wherever CARGO_TARGET_DIR puts it. Raises EvalError when cargo is missing, fails, or reports no such
+    binary."""
+    cargo = shutil.which("cargo")
+    if cargo is None:
+        raise EvalError("cargo, which builds the engine, is not on PATH; set EVAL_ENGINE to run another")
+    built = subprocess.run([cargo, "build", "--locked", "--quiet", "-p", "octoflow-engine", "--bin", "orchestrator",  # noqa: S603
+                            "--message-format=json"], cwd=ROOT, capture_output=True, text=True, check=False)
+    if built.returncode != 0:
+        raise EvalError(f"cargo could not build the engine: {built.stderr.strip()}")
+    paths = [m["executable"] for m in map(json.loads, built.stdout.splitlines())
+             if m.get("reason") == "compiler-artifact" and m.get("executable")]
+    if len(paths) != 1:
+        raise EvalError(f"cargo reported {len(paths)} binaries for the engine, not one")
+    return paths[0]
 
 
 def config_name(run_args: list[str]) -> str:
@@ -261,7 +284,7 @@ class Eval:
     date: str  # the day it started, YYYY-MM-DD
     config: str  # the name of its configuration, config_name's or --config's
     run_args: list[str]  # what the engine's run was given beyond the runner's own flags
-    engine: str  # EVAL_ENGINE, or "orchestrator.py" for this checkout's
+    engine: str  # EVAL_ENGINE, or DEFAULT_ENGINE for this checkout's
     commit: str  # this checkout's HEAD, "-dirty" after it with tracked changes: what the default engine ran with
 
     @property
@@ -373,12 +396,12 @@ def main(argv: list[str] | None = None) -> int:
     """Run the eval set as the module docstring says, print its table, and append its result lines to
     evals/results/<date>-<config>.jsonl as each trial ends; the exit status is the module docstring's."""
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    engine = engine_command()
     evaluation = Eval(datetime.date.today().isoformat(), args.config or config_name(args.run_args), args.run_args,
-                      os.environ.get("EVAL_ENGINE") or "orchestrator.py", _head_commit())
+                      os.environ.get("EVAL_ENGINE") or DEFAULT_ENGINE, _head_commit())
     trials: list[Trial] = []
     exit_code = 0
     try:
+        engine = engine_command()
         tasks = load_tasks(args.tasks.split(",") if args.tasks else None)
         for task in tasks:
             for repeat in range(1, args.repeat + 1):

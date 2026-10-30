@@ -1,6 +1,6 @@
 # Quality gate
 
-How Jenkins judges this repository with `gate.py`, and how `orchestrator.py run --quality-gate` uses
+How Jenkins judges this repository with `gate.py`, and how `orchestrator run --quality-gate` uses
 it: the [gate](#the-gate) itself, [running it in another project](#running-the-gate-in-another-project), the
 [quality file as a contract](#the-quality-file-as-a-contract) between the gate and the orchestrator, the
 [Jenkins setup](#jenkins-setup), the
@@ -14,10 +14,10 @@ need the run's spec.
 
 ```bash
 uv run pytest --cov=orchestrator --cov=gate --cov-branch --cov-report=xml --junitxml=test-results.xml
-(cd ui/src-tauri && cargo llvm-cov nextest --workspace --ignore-run-fail --profile ci \
-    --config-file ../../ci/nextest.toml --cobertura --output-path ../../coverage-rust.xml)
+cargo llvm-cov nextest --workspace --ignore-run-fail --profile ci \
+    --config-file ci/nextest.toml --cobertura --output-path coverage-rust.xml
 cargo build --release --locked --manifest-path ci/gate-rust/Cargo.toml
-uv run python gate.py --base main --tests test-results.xml --tests ui/src-tauri/target/nextest/ci/junit.xml \
+uv run python gate.py --base main --tests test-results.xml --tests target/nextest/ci/junit.xml \
     --coverage coverage.xml --coverage coverage-rust.xml --rust-syntax ci/gate-rust/target/release/gate-rust \
     --out quality.md
 ```
@@ -27,8 +27,8 @@ cargo-nextest](#rust-tests-and-coverage); without them, leave out the Rust repor
 alone. The `cargo build` builds the helper the gate reads Rust with ([gate-rust](#reading-rust-the-gate-rust-helper)),
 which `--rust-syntax` names.
 
-`gate.py` is a program of its own beside `orchestrator.py`, and the two share no code: the orchestrator imports
-nothing from it and reads only the file it writes ([the quality file as a
+`gate.py` is a program of its own beside the engine, and the two share no code: the engine, Rust since 0.49.0, runs
+none of it and reads only the file it writes ([the quality file as a
 contract](#the-quality-file-as-a-contract)).
 
 It runs six linters over the files git tracks outside `mutants/` (below), each over the files it reads, and keeps
@@ -38,11 +38,11 @@ counted, never listed and never held against the change, so the gate judges the 
 | Linter | Files | Rules |
 |---|---|---|
 | ruff | `*.py` | `[tool.ruff.lint]` in `pyproject.toml` |
-| mypy | `[tool.mypy] files`, here `orchestrator.py` and `gate.py` | `[tool.mypy]` |
+| mypy | `[tool.mypy] files`, here `gate.py` and the eval runner | `[tool.mypy]` |
 | pymarkdown | `*.md` | `[tool.pymarkdown]` |
 | shellcheck | `*.sh` | its defaults |
 | actionlint | `.github/workflows/*.yml` | its defaults |
-| clippy | `*.rs`, in each Cargo workspace, here `ui/src-tauri/` and `ci/gate-rust/` | the workspace's `[lints]` and `clippy.toml` |
+| clippy | `*.rs`, in each Cargo workspace, here the top-level one and `ci/gate-rust/` | the workspace's `[lints]` and `clippy.toml` |
 
 ruff's rules include the coding rules the agents are given as prose that a linter can apply, so that every harness
 gets them, every time: a docstring on every public module, class, method and function (`D100`-`D104`, `D106`,
@@ -60,16 +60,17 @@ ruff's rules are the project's; the gate caps each at warn, so that a lint at `d
 crate's build and stop cargo before the crates after it, is a finding like the rest. The cap also lets an
 `#[allow(...)]` override a `forbid`, which rustc otherwise refuses, so such an allow silences its lint for the gate;
 it is listed under the suppressions added only where its added line holds the allow itself, not a lint added inside an
-existing wrapped `#[allow(` list (`TODO.md` has the rest). `ui/src-tauri/Cargo.toml` sets its lints to `warn`
-all the same, since rustc's `unsafe_code` at `deny` would stop `cargo test`. Its table adds to clippy's
-defaults the lints `main` passed when it was set, so that clippy found nothing on old lines. A workspace that still
+existing wrapped `#[allow(` list (`TODO.md` has the rest). The top-level `Cargo.toml` sets its `[workspace.lints]`,
+which every member takes, to `warn` all the same, since rustc's `unsafe_code` at `deny` would stop `cargo test`. Its
+table adds to clippy's defaults the lints `main` passed when it was set, so that clippy found nothing on old lines. A
+workspace that still
 does not compile is a failed condition naming the compiler's first error in a tracked file, wherever it is, else
-cargo's own: a change that deletes a function an old line calls breaks the build on no line it added. A linter that
-outlives its timeout is killed with every process it started, such as cargo's rustc.
+cargo's own: a change that deletes a function an old line calls breaks the build on no line it added. A linter
+that outlives its timeout is killed with every process it started, such as cargo's rustc.
 
 ruff, mypy and pymarkdownlnt are in uv's `dev` group, so `uv run` puts them on `PATH`; shellcheck, actionlint, cargo
-and clippy come from the Jenkins agent image (see "What Jenkins needs"). `gate.py`, like the orchestrator, stays
-stdlib-only: it runs them as processes.
+and clippy come from the Jenkins agent image (see "What Jenkins needs"). `gate.py` stays stdlib-only: it runs them
+as processes.
 
 After the linters come the checks `gate_checks` gives, which judge what the change did rather than how the tree
 reads. Each is a `GateCheck` that either fails the gate or only reports: a failing check's findings are issues,
@@ -319,7 +320,7 @@ call the function:
 mutmut runs in the gate's own interpreter, on a copy of the files git tracks, so the working tree stays as it was; its
 state, `mutants/`, goes into the copy too. Its own selector, mutant names such as
 `gate.x_judge_change__mutmut_*`, picks which mutants run only after mutmut has made a mutant of every function,
-which takes minutes for `orchestrator.py`. So in the copy, each function and class the change does not touch gets
+which took minutes for the Python engine. So in the copy, each function and class the change does not touch gets
 mutmut's `# pragma: no mutate block` at the end of its header, and mutmut skips it. The rules' `[tool.mutmut]` says
 what can be mutated (`source_paths`, `only_mutate`, `do_not_mutate`), which tests run
 (`pytest_add_cli_args_test_selection`), what the tests read beside the code (`also_copy`), and which lines are left
@@ -342,7 +343,7 @@ function. Run over this repository's whole suite, those runs alone took longer t
   runs get, so pytest itself applies their paths, `--ignore`, `--deselect` and the rest.
 
 The Jenkinsfile's Test stage writes the file, `.coverage`, with `--cov-context=test`, and the Gate stage passes it.
-mutmut then runs those tests three times. For PR #113's change, 253 mutants of 7 `orchestrator.py` functions, that is
+mutmut then runs those tests three times. For PR #113's change, 253 mutants of 7 functions of the Python engine, that is
 312 tests of 1351, and mutmut took 77 seconds instead of 709 on the build host, with the same verdicts, mutant by
 mutant. The cost grows with the tests that reach the change, not with the suite: a change to a function nearly every
 test calls still costs about as much as before. The collection runs in the gate's copy of the tree, which holds every
@@ -562,8 +563,8 @@ first, at most 50 in all, then a count:
 The Rust tests run with [cargo-nextest](https://nexte.st/), under
 [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov), which builds them with rustc's `-C instrument-coverage`
 and turns what they ran into a Cobertura report with the toolchain's own `llvm-profdata` and `llvm-cov`, from rustup's
-`llvm-tools-preview` component. Jenkins's Test stage runs them in the one Cargo workspace it knows, `ui/src-tauri/`
-(`TODO.md`):
+`llvm-tools-preview` component. Jenkins's Test stage runs them in the repository's one Cargo workspace, the top-level
+`Cargo.toml`, whose members are the engine (`engine/`) and the desktop shell (`ui/src-tauri/`):
 
 ```bash
 cargo llvm-cov nextest --locked --workspace --ignore-run-fail --profile ci --config-file "$WORKSPACE/ci/nextest.toml" \
@@ -576,8 +577,8 @@ cargo llvm-cov nextest --locked --workspace --ignore-run-fail --profile ci --con
   own lines count as covered when they run, so they raise a change's coverage that adds both a function and its tests
   (`TODO.md`).
 - **Paths.** cargo-llvm-cov names each file relative to the workspace's directory, which it gives as the report's
-  `<source>`, so the gate reads `src/lib.rs` as `ui/src-tauri/src/lib.rs`, as long as the report was written in the
-  tree the gate judges; an absolute path stands as it is.
+  `<source>`, here the repository's top, so the gate reads `engine/src/lib.rs` as it is, as long as the report was
+  written in the tree the gate judges; an absolute path stands as it is.
 - **Failing tests** do not stop the build, as pytest's do not: `--ignore-run-fail` runs every test and writes the
   report whatever fails, and the `ci` profile of `ci/nextest.toml` writes their JUnit report to
   `target/nextest/ci/junit.xml` in the workspace, which the Gate stage passes as another `--tests`. A workspace that
@@ -718,7 +719,7 @@ a change that adds or edits files there fails the gate, as [the gate](#the-gate)
 The rule sets were tuned until `main` gave a short list of real findings: ruff's defaults plus bugbear,
 simplifications, pyupgrade, bandit, cyclomatic complexity (`C90`, `max-complexity = 15`; nesting is the
 `cognitive-complexity` check's) and pylint's errors and warnings, with the fake tokens, paths and fixtures of `tests/`
-exempt; mypy at its default strictness on `orchestrator.py` and `gate.py`; pymarkdown without the line-length and
+exempt; mypy at its default strictness on `gate.py` and the eval runner; pymarkdown without the line-length and
 inline-HTML rules. Only lines a change adds count, so what `main` already has does not block.
 
 ## Running the gate in another project
@@ -749,10 +750,10 @@ change](#whose-rules-judge-a-change) says. Which files the test-integrity check 
 The gate writes the quality file and the orchestrator reads it back: from Jenkins after each quality round, to
 decide whether the gate passed, to compare one round's failures with the last (`gate_failures`, and
 `GateFailures.repeats` for a stuck loop), and to amend it with its own checks (`judge_run`). Neither imports the
-other. Each keeps its own copy of the parts below, the gate's in `gate.py` and the orchestrator's beside
-`parse_gate` in `orchestrator.py`, and `TestQualityFileContract` checks that what `quality_report` writes, over
-every section it can write, the orchestrator reads as written, and still does after `judge_run`'s amendments. A
-change to one of these parts changes both copies.
+other. Each keeps its own copy of the parts below, the gate's in `gate.py` and the engine's in `engine/src/quality.rs`
+beside `parse_gate`. `TestQualityFileContract` holds the engine's copies of the format's words to the gate's, and the
+engine's `the_engine_reads_what_the_gate_writes` reads the quality files the gate's tests hold to `tests/golden/` as
+it reads a build's. A change to one of these parts changes both copies.
 
 - **The gate line.** The first non-blank line is `GATE: OK` or `GATE: ERROR`; the reader tolerates Markdown
   emphasis around it. Only the orchestrator writes `GATE: BUILD_FAILED`, for a build that ended before its Gate
@@ -813,13 +814,14 @@ request](#a-build-of-main-judged-at-its-pull-request)).
   `cargo test` took about 100 s on 2 CPUs, and the Test stage's instrumented run of the same tests about 100 s on 3 of
   the development host's CPUs; `CARGO_HOME` is kept in the workspace, so nothing is cached between builds. The UI stage
   runs `cargo check` under the same lock, since the Test stage's build of the dependencies is not the check clippy
-  needs: with them checked, the Gate stage's clippy checks only the shell, in about 2 s, against 77 s for a clean one on
-  the development host's 6 CPUs. The Install stage builds the [gate-rust helper](#reading-rust-the-gate-rust-helper)
-  with `cargo build --release --locked`, from the judged `main`'s `ci/gate-rust/` in a quality build, fetching syn,
-  proc-macro2 and serde_json from crates.io, in about 35 s on those 6 CPUs, and checks the tree's own
-  `ci/gate-rust/` for the Gate stage's clippy as the UI stage checks the shell, in about 4 s, which leaves clippy under
-  a second for it. A helper that does not build, as when crates.io cannot be reached, does not stop the build: the gate
-  then reports a change to Rust as not run by each check that reads it. Package bundles the `.deb` with `dpkg-deb`, and the `.AppImage` with `linuxdeploy`,
+  needs: with them checked, the Gate stage's clippy checks only the workspace's own crates, in about 2 s for the shell
+  alone, against 77 s for a clean one on the development host's 6 CPUs. The Install stage builds the
+  [gate-rust helper](#reading-rust-the-gate-rust-helper) with `cargo build --release --locked`, from the judged
+  `main`'s `ci/gate-rust/` in a quality build, fetching syn, proc-macro2 and serde_json from crates.io, in about 35 s
+  on those 6 CPUs, and checks the tree's own `ci/gate-rust/`, a package outside the top-level workspace, for the Gate
+  stage's clippy as the UI stage checks the workspace, in about 4 s, which leaves clippy under a second for it. A
+  helper that does not build, as when crates.io cannot be reached, does not stop the build: the gate then reports a
+  change to Rust as not run by each check that reads it. Package bundles the `.deb` with `dpkg-deb`, and the `.AppImage` with `linuxdeploy`,
   which `tauri build` downloads from GitHub each build.
 - **`gh` on the agent, and a GitHub token** for the Release stage: a Secret text credential with the ID
   `GitHub-Agents`, holding a token with *Contents: read and write* on this repository. It is the agents' own
@@ -866,7 +868,7 @@ empty `GIT_REF`, before it accepts `buildWithParameters`.
 Before Install runs any code of the change, a quality build's Checkout stage sets its build description to
 `judged tree=<sha> parent=<sha> main=<sha>`, exactly: full lowercase shas, one space apart. `tree` is the
 snapshot's tree, `parent` its only parent, the run's base, and `main` the `origin/main` commit fetched then,
-whose gate and rules the Gate stage judges with. `orchestrator.py judged-in-quality` reads it to decide whether a
+whose gate and rules the Gate stage judges with. `orchestrator judged-in-quality` reads it to decide whether a
 pull request's head is a tree such a build already judged. A build restarted from a later stage skips Checkout,
 records nothing and so is never trusted; its Gate stage refuses to run without the recorded commit.
 
@@ -912,8 +914,8 @@ that passes after one. The quality job mails nothing: its result goes to the orc
 
 A build of `main` that passes then releases the version in `pyproject.toml`: if GitHub has no release
 `v<version>` yet, `gh release create` makes one, with the tag at the commit built, notes generated from the pull
-requests merged since the last release, and `orchestrator.pyz` with its `.sha256` attached. The `.pyz` is
-`orchestrator.py` packed as a zipapp, built and started once with `--help` before the upload. To release, raise
+requests merged since the last release, after the words of `docs/releases/v<version>.md` where there is one, and
+the Linux binary and desktop app with their `.sha256` attached. To release, raise
 `version` in the pull request; a merge that leaves it alone releases nothing. A release that already exists is
 skipped whole, so its files are never replaced.
 
@@ -997,8 +999,8 @@ attempt left. A finished round deletes its branch, and `done` deletes any the ru
 
 ### The calls
 
-`CI` makes them with `urllib.request` over an injected `urlopen`, so the orchestrator stays stdlib-only and the
-tests replace Jenkins. Jenkins takes HTTP Basic `JENKINS_USER:JENKINS_TOKEN` (no crumb with an API token).
+The engine's `Jenkins` (`engine/src/ci.rs`) makes them through `Http`, its one seam to the network, so the tests
+replace Jenkins. Jenkins takes HTTP Basic `JENKINS_USER:JENKINS_TOKEN` (no crumb with an API token).
 Requests time out after `HTTP_TIMEOUT = 30` seconds. The job's full name may include folders: each `/` in it
 becomes `/job/` in its URL, so `AI-Agents-Orchestrator/py-ai-agents-orchestrator-quality` is
 `<JENKINS_URL>/job/AI-Agents-Orchestrator/job/py-ai-agents-orchestrator-quality/` (`<job>` below).
@@ -1099,7 +1101,7 @@ only the spec rule can fail it.
   without a new name. A new default index moves every dependency without a source of its own.
 
 **Diff budget** counts the files the change touches and the lines it adds and removes, from `git diff --numstat -M`
-(`Host.changed_line_counts`); a rename counts as one file, with the lines it changes, and a binary file as a file of
+(`Host::changed_line_counts`); a rename counts as one file, with the lines it changes, and a binary file as a file of
 no lines. Over either limit it is one finding about the change as a whole, naming each count over its limit; within
 both it reports nothing, so the counts of a change of usual size do not take a number the Builder must answer. The
 limits are workflow keys, a whole number of at least 1 each, in a workflow file next to `description`:

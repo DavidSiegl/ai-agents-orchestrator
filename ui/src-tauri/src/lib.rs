@@ -13,73 +13,81 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, RunEvent};
 
-/// The environment variable that names an orchestrator.py to serve, in place of the bundled binary or the
-/// checkout's own.
-const ORCHESTRATOR_ENV: &str = "ORCHESTRATOR_PY";
+/// The environment variable that names an orchestrator binary to serve, in place of the bundled one or the
+/// checkout's own build.
+const ORCHESTRATOR_ENV: &str = "ORCHESTRATOR_BIN";
 
 /// The orchestrator binary's file name in a release bundle, beside the app's own executable: Tauri's
 /// `externalBin` in tauri.release.conf.json, which drops the target triple that packaging/build-desktop.sh gives
 /// it on disk.
 const BUNDLED_NAME: &str = if cfg!(windows) { "octoflow.exe" } else { "octoflow" };
 
-/// The orchestrator the app serves.
+/// The orchestrator the app serves, an executable of the Rust engine (engine/).
 #[derive(Debug, PartialEq)]
 enum Orchestrator {
-    /// An orchestrator.py, run by the python3 on PATH: $ORCHESTRATOR_PY, or the checkout the app was built in.
-    Script(PathBuf),
-    /// The PyInstaller binary a release bundle carries, which needs no Python.
-    Bundled(PathBuf),
+    /// The build of the checkout this app was built in, debug/orchestrator in its Cargo target directory, which
+    /// `cargo build -p octoflow-engine` makes and nothing here rebuilds: a development build's, which serves that
+    /// checkout's project.
+    Checkout(PathBuf),
+    /// Any other: $ORCHESTRATOR_BIN, or the binary a release bundle carries beside the app; it belongs to no
+    /// checkout.
+    Binary(PathBuf),
 }
 
 impl Orchestrator {
-    /// The one to serve: $ORCHESTRATOR_PY when it is set, else the binary beside this executable when there is
-    /// one, as in a release bundle, else the orchestrator.py of the checkout this app was built in.
+    /// The one to serve: $ORCHESTRATOR_BIN when it is set, else the binary beside this executable when there is
+    /// one, as in a release bundle, else the checkout's own build.
     fn locate() -> Orchestrator {
         let exe_dir = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf));
         Orchestrator::locate_from(std::env::var_os(ORCHESTRATOR_ENV), exe_dir.as_deref())
     }
 
-    /// locate, given $ORCHESTRATOR_PY's value and the executable's directory, None when either is unknown.
+    /// locate, given $ORCHESTRATOR_BIN's value and the executable's directory, None when either is unknown.
     fn locate_from(env: Option<OsString>, exe_dir: Option<&Path>) -> Orchestrator {
-        if let Some(script) = env {
-            return Orchestrator::Script(canonical(PathBuf::from(script)));
+        if let Some(binary) = env {
+            return Orchestrator::Binary(canonical(PathBuf::from(binary)));
         }
         if let Some(bundled) = exe_dir.map(|dir| dir.join(BUNDLED_NAME)).filter(|path| path.is_file()) {
-            return Orchestrator::Bundled(bundled);
+            return Orchestrator::Binary(bundled);
         }
-        Orchestrator::Script(canonical(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../orchestrator.py")))
+        Orchestrator::Checkout(checkout_build(std::env::var_os("CARGO_TARGET_DIR")))
     }
 
     /// A command that runs it with no arguments yet, in shell's environment and directory (`UserShell::apply`).
     fn command(&self, shell: &UserShell) -> Command {
-        let mut command = match self {
-            Orchestrator::Script(script) => {
-                let mut command = Command::new("python3");
-                command.arg(script);
-                command
-            }
-            Orchestrator::Bundled(binary) => Command::new(binary),
-        };
+        let (Orchestrator::Checkout(binary) | Orchestrator::Binary(binary)) = self;
+        let mut command = Command::new(binary);
         shell.apply(&mut command);
         command
     }
 
-    /// The directory of the checkout it belongs to; None for the bundled binary, which belongs to none.
+    /// The directory of the checkout it belongs to; None for any binary but the checkout's own build.
     fn project(&self) -> Option<String> {
         match self {
-            Orchestrator::Script(script) => script.parent().map(|dir| dir.display().to_string()),
-            Orchestrator::Bundled(_) => None,
+            Orchestrator::Checkout(_) => Some(checkout().display().to_string()),
+            Orchestrator::Binary(_) => None,
         }
     }
 }
 
-/// How it is run, for messages: `python3 <script>` or the binary's path.
+/// The top of the checkout this app was built in, two directories above its crate's.
+fn checkout() -> PathBuf {
+    canonical(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+}
+
+/// Where `cargo build -p octoflow-engine` puts the checkout's orchestrator: under target_dir, $CARGO_TARGET_DIR's
+/// value, relative to the checkout as cargo takes it, else under the checkout's own target/.
+fn checkout_build(target_dir: Option<OsString>) -> PathBuf {
+    let name = if cfg!(windows) { "orchestrator.exe" } else { "orchestrator" };
+    let target = target_dir.map_or_else(|| checkout().join("target"), |dir| checkout().join(dir));
+    target.join("debug").join(name)
+}
+
+/// How it is run, for messages: the binary's path.
 impl fmt::Display for Orchestrator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Orchestrator::Script(script) => write!(f, "python3 {}", script.display()),
-            Orchestrator::Bundled(binary) => write!(f, "{}", binary.display()),
-        }
+        let (Orchestrator::Checkout(binary) | Orchestrator::Binary(binary)) = self;
+        write!(f, "{}", binary.display())
     }
 }
 
@@ -420,12 +428,39 @@ mod tests {
         dir
     }
 
+    /// The orchestrator binary of this checkout, built as `cargo build -p octoflow-engine` builds it, with the cargo
+    /// that runs these tests; its path is the one cargo reports, wherever CARGO_TARGET_DIR puts it.
+    fn built_orchestrator() -> PathBuf {
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let built = Command::new(cargo)
+            .args(["build", "--locked", "--quiet", "-p", "octoflow-engine", "--bin", "orchestrator"])
+            .args(["--message-format", "json"])
+            .current_dir(checkout())
+            .output()
+            .expect("cargo runs");
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        let report = String::from_utf8(built.stdout).expect("UTF-8");
+        let executable = report
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find_map(|message| message["executable"].as_str().map(PathBuf::from));
+        executable.expect("cargo reports the orchestrator it built")
+    }
+
     #[test]
-    fn locates_the_checkout_without_a_bundled_binary() {
+    fn locates_the_checkout_s_build_without_a_bundled_binary() {
         let located = Orchestrator::locate_from(None, Some(&scratch_dir("checkout")));
-        let Orchestrator::Script(script) = &located else { panic!("{located:?}") };
-        assert!(script.ends_with("orchestrator.py") && script.is_file(), "{located}");
-        assert!(Path::new(&located.project().expect("a checkout")).join("orchestrator.py").is_file());
+        let Orchestrator::Checkout(binary) = &located else { panic!("{located:?}") };
+        assert_eq!(binary, &checkout_build(std::env::var_os("CARGO_TARGET_DIR")), "{located}");
+        assert!(Path::new(&located.project().expect("a checkout")).join("engine/Cargo.toml").is_file());
+    }
+
+    #[test]
+    fn the_checkout_s_build_is_where_cargo_target_dir_puts_it() {
+        let name = if cfg!(windows) { "orchestrator.exe" } else { "orchestrator" };
+        assert_eq!(checkout_build(None), checkout().join("target/debug").join(name));
+        assert!(checkout_build(Some("/elsewhere/target".into())).starts_with("/elsewhere/target/debug"));
+        assert!(checkout_build(Some("relative".into())).starts_with(checkout().join("relative/debug")));
     }
 
     #[test]
@@ -433,7 +468,7 @@ mod tests {
         let dir = scratch_dir("bundled");
         std::fs::write(dir.join(BUNDLED_NAME), "").expect("a stand-in binary");
         let located = Orchestrator::locate_from(None, Some(&dir));
-        assert_eq!(located, Orchestrator::Bundled(dir.join(BUNDLED_NAME)));
+        assert_eq!(located, Orchestrator::Binary(dir.join(BUNDLED_NAME)));
         assert_eq!(located.project(), None);
     }
 
@@ -441,8 +476,8 @@ mod tests {
     fn the_environment_wins_over_the_bundled_binary() {
         let dir = scratch_dir("environment");
         std::fs::write(dir.join(BUNDLED_NAME), "").expect("a stand-in binary");
-        let located = Orchestrator::locate_from(Some("/elsewhere/orchestrator.py".into()), Some(&dir));
-        assert_eq!(located, Orchestrator::Script(PathBuf::from("/elsewhere/orchestrator.py")));
+        let located = Orchestrator::locate_from(Some("/elsewhere/orchestrator".into()), Some(&dir));
+        assert_eq!(located, Orchestrator::Binary(PathBuf::from("/elsewhere/orchestrator")));
     }
 
     #[test]
@@ -454,7 +489,7 @@ mod tests {
         let script = "#!/bin/sh\necho '{\"url\": \"http://127.0.0.1:9\", \"token\": \"t\"}'\nexec sleep 60\n";
         std::fs::write(&binary, script).expect("a stand-in binary");
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("an executable");
-        let sidecar = Sidecar::start(&Orchestrator::Bundled(binary), "tauri://localhost");
+        let sidecar = Sidecar::start(&Orchestrator::Binary(binary), "tauri://localhost");
         let connection = sidecar.connection.clone().expect("the sidecar started");
         assert_eq!(connection.url, "http://127.0.0.1:9");
         assert_eq!(connection.project, None);
@@ -464,12 +499,12 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn serves_the_checkout_and_stops() {
-        let sidecar = Sidecar::start(&Orchestrator::locate_from(None, None), "tauri://localhost");
+        let sidecar = Sidecar::start(&Orchestrator::Checkout(built_orchestrator()), "tauri://localhost");
         let connection = sidecar.connection.clone().expect("the sidecar started");
         assert!(connection.url.starts_with("http://127.0.0.1:"), "{}", connection.url);
         assert!(!connection.token.is_empty());
         let project = connection.project.expect("a checkout");
-        assert!(Path::new(&project).join("orchestrator.py").is_file(), "{project}");
+        assert!(Path::new(&project).join("engine/Cargo.toml").is_file(), "{project}");
         let pid = sidecar.child.lock().unwrap().as_ref().expect("a child").id();
         assert!(exists(pid));
         sidecar.stop();
@@ -478,10 +513,10 @@ mod tests {
     }
 
     #[test]
-    fn a_script_that_is_not_serve_is_an_error() {
-        let sidecar = Sidecar::start(&Orchestrator::Script("/nonexistent/orchestrator.py".into()), "tauri://localhost");
+    fn a_binary_that_is_not_there_is_an_error() {
+        let sidecar = Sidecar::start(&Orchestrator::Binary("/nonexistent/orchestrator".into()), "tauri://localhost");
         let reason = sidecar.connection.err().expect("an error");
-        assert!(reason.contains("/nonexistent/orchestrator.py"), "{reason}");
+        assert!(reason.contains("/nonexistent/orchestrator"), "{reason}");
         assert!(sidecar.child.lock().unwrap().is_none());
     }
 
@@ -510,9 +545,9 @@ mod tests {
         let Cli { orchestrator, command, .. } = cli(["run".into(), "add a limiter".into()]).expect("the CLI");
         assert_eq!(orchestrator, Orchestrator::locate());
         let args: Vec<&OsStr> = command.get_args().collect();
-        let Orchestrator::Script(script) = &orchestrator else { panic!("{orchestrator:?}") };
-        assert_eq!(command.get_program(), "python3");
-        assert_eq!(args, [script.as_os_str(), OsStr::new("run"), OsStr::new("add a limiter")]);
+        let (Orchestrator::Checkout(binary) | Orchestrator::Binary(binary)) = &orchestrator;
+        assert_eq!(command.get_program(), binary.as_os_str());
+        assert_eq!(args, [OsStr::new("run"), OsStr::new("add a limiter")]);
     }
 
     #[test]
@@ -521,7 +556,7 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
         let odd = OsString::from_vec(b"not \xff utf-8".to_vec());
         let Cli { command, .. } = cli([odd.clone(), "--help".into()]).expect("the CLI");
-        let args: Vec<&OsStr> = command.get_args().skip(1).collect();
+        let args: Vec<&OsStr> = command.get_args().collect();
         assert_eq!(args, [odd.as_os_str(), OsStr::new("--help")]);
     }
 

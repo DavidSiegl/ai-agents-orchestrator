@@ -9,14 +9,15 @@ import functools
 import os
 import pathlib
 import re
+import subprocess
 import unittest
 import urllib.parse
 from unittest.mock import patch
 
 import conftest
+import rust_engine
 
 import gate
-import orchestrator
 
 ROOT = conftest.REPO
 README = ROOT / "README.md"
@@ -28,11 +29,10 @@ FLAG = re.compile(r"(?<![\w-])--[a-z][a-z0-9-]*")
 # None stands for the command itself.
 NOT_IN_THE_PARSER = {
     ("roadmap.md", "resume", "--workflow"): "a planned feature, K",
-    ("ui-options.md", "list", "--watch"): "a step of a staged plan, not built",
-    ("ui-options.md", "web", None): "the assessment's name for the command, built as serve",
 }
 
-# Backticked ALL_CAPS names the docs give that are neither orchestrator.py's nor gate.py's, with where they come from.
+# Backticked ALL_CAPS names the docs give that are neither the engine's (engine/src) nor gate.py's, with where they
+# come from.
 OTHER_PROGRAMS_NAMES = {
     "PATH": "an environment variable",
     "PWD": "an environment variable",
@@ -41,16 +41,27 @@ OTHER_PROGRAMS_NAMES = {
     "LD_LIBRARY_PATH": "the dynamic loader's environment variable",
     "PYTEST_ADDOPTS": "pytest's environment variable",
     "CARGO_HOME": "cargo's environment variable",
-    "ORCHESTRATOR_PY": "the desktop app's environment variable, ui/src-tauri/src/lib.rs",
+    "SSL_CERT_FILE": "OpenSSL's environment variable, which the Rust engine's HttpClient reads too",
+    "SSL_CERT_DIR": "OpenSSL's environment variable, which the Rust engine's HttpClient reads too",
+    "ORCHESTRATOR_BIN": "the desktop app's environment variable, ui/src-tauri/src/lib.rs",
     "PARITY_ENGINE": "the parity harness's environment variable, tests/parity/world.py",
     "PARITY_RECORD": "the parity harness's environment variable, tests/parity/test_parity.py",
+    "PARITY_COMMANDS": "the parity harness's environment variable, tests/parity/test_parity.py",
     "EVAL_ENGINE": "the eval runner's environment variable, evals/run.py",
     "UPDATE_GOLDEN": "the golden-file helper's environment variable, tests/golden.py",
     "BUNDLED_NAME": "the desktop app's constant, ui/src-tauri/src/lib.rs",
+    "HARNESSES": "the Rust engine's table of the agent harnesses, engine/src/harness.rs",
+    "CI": "the Python engine's Jenkins client, which engine/src/ci.rs ports as Jenkins",
     "PR_STATUS_CREATOR": "the Jenkinsfile's",
+    "GIT_REF": "the quality job's parameter, which the Jenkinsfile declares and the engine's tests send",
     "CHANGE_TARGET": "an environment variable Jenkins sets",
     "OPTIONS": "an HTTP method",
     "NAME": "the README's placeholder for a prompt's name",
+}
+
+# Documents that describe the code as it was, whose names are not checked against today's, with why.
+HISTORICAL_DOCS = {
+    "ui-options.md": "an assessment of 2026-10-24 of the Python engine's tk window, which 0.49.0 removed",
 }
 
 # Backticked names the docs give that read as Class.member but are file names, with whose files they are.
@@ -58,6 +69,20 @@ FILE_NAMES = {
     "Cargo.toml": "cargo's manifest",
     "Cargo.lock": "cargo's lock file",
 }
+
+
+def engine_help(*command: str) -> str:
+    """What the engine prints for `orchestrator [command] --help`."""
+    return subprocess.run([rust_engine.binary(), *command, "--help"], capture_output=True, text=True,  # noqa: S603
+                          check=True).stdout
+
+
+def help_section(text: str, heading: str) -> list[str]:
+    """The lines of a clap help text's section under heading, such as "Commands:", up to the next blank line."""
+    lines = text.splitlines()
+    start = lines.index(heading) + 1
+    end = next((n for n in range(start, len(lines)) if not lines[n].strip()), len(lines))
+    return lines[start:end]
 
 
 def built_parser(parse_args, argv) -> argparse.ArgumentParser:
@@ -83,12 +108,14 @@ def long_flags(parser: argparse.ArgumentParser) -> set[str]:
 
 @functools.cache
 def cli_commands() -> dict[str, set[str]]:
-    """Each command of the parser main builds, by name, with the long flags it takes, and gate.py's, a program of
-    its own, as the command "gate.py"."""
-    parser = built_parser(orchestrator.parse_args, ["list"])
-    (commands,) = [a.choices for a in parser._actions if isinstance(a, argparse._SubParsersAction)]
-    return {**{name: long_flags(sub) for name, sub in commands.items()},
-            "gate.py": long_flags(built_parser(gate.parse_args, ["--base", "main"]))}
+    """Each command of the engine's CLI, by name, with the long flags its help lists, and gate.py's, a program of its
+    own, as the command "gate.py"."""
+    names = [line.split()[0] for line in help_section(engine_help(), "Commands:")]
+    # An option's own line, as `  -h, --help` or `      --cwd <cwd>`; its description, below it, names other flags.
+    option = re.compile(r"^ {2,6}(?:-\w, )?(--[a-z][a-z0-9-]*)", re.MULTILINE)
+    commands = {name: set(option.findall(engine_help(name).partition("\nOptions:\n")[2]))
+                for name in names if name != "help"}
+    return {**commands, "gate.py": long_flags(built_parser(gate.parse_args, ["--base", "main"]))}
 
 
 def prose_lines(path: pathlib.Path):
@@ -103,7 +130,8 @@ def prose_lines(path: pathlib.Path):
 
 def invocations(path: pathlib.Path, commands):
     """(line number, command, the text of its arguments) for each command of the orchestrator's that path shows
-    being run: in a code span or a fenced line, after `orchestrator.py`, or opening a code span, as in `run --spec`;
+    being run: in a code span or a fenced line, after `orchestrator` or the Python engine's `orchestrator.py`, or
+    opening a code span, as in `run --spec`;
     and gate.py, as the command "gate.py", wherever it is followed by a flag. Shell comments, and what follows a
     pipe, `&&` or `;`, are left out."""
     for n, line, fenced in prose_lines(path):
@@ -112,12 +140,12 @@ def invocations(path: pathlib.Path, commands):
         else:
             texts = re.findall(r"`([^`]+)`", line)
         for text in (re.split(r"\||&&|;|\s#", t)[0] for t in texts):
-            for m in re.finditer(r"orchestrator\.py\s+([a-z][a-z-]*)(.*)", text):
+            for m in re.finditer(r"\borchestrator(?:\.py)?\s+([a-z][a-z-]*)(.*)", text):
                 yield n, m.group(1), m.group(2)
             for m in re.finditer(r"\bgate\.py(\s+--.*)", text):
                 yield n, "gate.py", m.group(1)
             words = text.split()
-            # gate.py is not a command after orchestrator.py; the search above has yielded it.
+            # gate.py is not a command after orchestrator; the search above has yielded it.
             if not fenced and len(words) > 1 and words[0] in commands.keys() - {"gate.py"} \
                     and words[1].startswith("--"):
                 yield n, words[0], text[len(words[0]):]
@@ -138,11 +166,45 @@ def flag_table(path: pathlib.Path):
     return rows
 
 
+def rust_names() -> tuple[set[str], set[str], set[str]]:
+    """The names the engine's Rust (engine/src) defines, as source_names gives gate.py's, read by pattern rather than
+    parsed (TODO.md): each fn, struct, enum, trait, type, const, static and mod; as Type.member, each fn of an impl of
+    the type and each field of a struct; and the text of every string literal outside the tests and fakes. The items
+    are read with the comments and the string and char literals blanked out, so that neither a brace nor a word in
+    them counts."""
+    names, members, strings = set(), set(), set()
+    item = re.compile(r"\b(?:fn|struct|enum|trait|type|const|static|mod)\s+(?:r#)?([A-Za-z_]\w*)")
+    # A string may go on over lines, also by a backslash at a line's end, which \\[\s\S] takes.
+    literal = re.compile(r'//[^\n]*|r(#*)"[\s\S]*?"\1|b?"(?:[^"\\]|\\[\s\S])*"|b?\'(?:[^\'\\\n]|\\[^\n]+?)\'')
+    for path in sorted((ROOT / "engine" / "src").rglob("*.rs")):
+        source = path.read_text()
+        if path.name not in ("tests.rs", "fake.rs", "fixture.rs", "test_support.rs") and "tests" not in path.parts:
+            strings.update(re.findall(r'"((?:[^"\\]|\\.)*)"', source))
+        text = literal.sub(lambda m: " " * len(m.group(0)), source)
+        names.update(item.findall(text))
+        # The fns of each impl block and the fields of each struct: the block runs from its { to the } that closes it.
+        for m in re.finditer(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(impl\b[^{;]*?|struct\s+\w+[^{;(]*?)\{", text, re.MULTILINE):
+            owner = re.findall(r"(?:for\s+)?([A-Z]\w*)(?:<[^{]*>)?\s*$", m.group(1).split(" where ")[0].strip())
+            depth, end = 1, m.end()
+            while depth and end < len(text):
+                depth += {"{": 1, "}": -1}.get(text[end], 0)
+                end += 1
+            if not owner:
+                continue
+            body = text[m.end():end]
+            if m.group(1).startswith("impl"):
+                members.update(f"{owner[-1]}.{fn}" for fn in re.findall(r"\bfn\s+(\w+)", body))
+            else:
+                members.update(f"{owner[-1]}.{field}" for field in re.findall(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:",
+                                                                            body, re.MULTILINE))
+    return names, members, strings
+
+
 def source_names() -> tuple[set[str], set[str], set[str]]:
-    """The names orchestrator.py and gate.py define: at module level; as Class.member, an attribute self is given
-    included; and every string constant, which is how they name an environment variable or a Jenkins parameter."""
-    tree = ast.Module(body=[node for source in ("orchestrator.py", "gate.py")
-                            for node in ast.parse((ROOT / source).read_text()).body], type_ignores=[])
+    """The names the engine (rust_names) and gate.py define: at module level; as Class.member, an attribute self is
+    given included; and every string constant, which is how they name an environment variable or a Jenkins
+    parameter."""
+    tree = ast.Module(body=ast.parse((ROOT / "gate.py").read_text()).body, type_ignores=[])
 
     def defined(body):
         for node in body:
@@ -160,7 +222,8 @@ def source_names() -> tuple[set[str], set[str], set[str]]:
                        if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store)
                        and isinstance(node.value, ast.Name) and node.value.id == "self")
     strings = {node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
-    return set(defined(tree.body)), members, strings
+    names, rust_members, rust_strings = rust_names()
+    return set(defined(tree.body)) | names, members | rust_members, strings | rust_strings
 
 
 @functools.cache
@@ -185,12 +248,12 @@ class TestDocs(unittest.TestCase):
     def test_each_command_the_docs_run_takes_the_flags_they_give_it(self):
         commands = cli_commands()
         errors = []
-        for doc in DOCS:
+        for doc in (d for d in DOCS if d.name not in HISTORICAL_DOCS):
             for n, command, rest in invocations(doc, commands):
                 where = f"{doc.relative_to(ROOT)}:{n}"
                 if command not in commands:
                     if (doc.name, command, None) not in NOT_IN_THE_PARSER:
-                        errors.append(f"{where}: orchestrator.py has no command {command}")
+                        errors.append(f"{where}: the orchestrator has no command {command}")
                     continue
                 errors.extend(f"{where}: {command} takes no {flag}" for flag in FLAG.findall(rest)
                               if flag not in commands[command] and (doc.name, command, flag) not in NOT_IN_THE_PARSER)
@@ -237,24 +300,24 @@ class TestDocs(unittest.TestCase):
         classes = {member.partition(".")[0] for member in members}
         methods = {member.partition(".")[2] for member in members}
         errors = []
-        for doc in DOCS:
+        for doc in (d for d in DOCS if d.name not in HISTORICAL_DOCS):
             for n, line, _ in prose_lines(doc):
                 where = f"{doc.relative_to(ROOT)}:{n}"
                 for code in re.findall(r"`([^`]+)`", line):
                     # A linter's rule code, such as C901 or BLE001, is not a name.
                     if re.fullmatch(r"[A-Z][A-Z0-9_]+", code) and not re.fullmatch(r"[A-Z]+[0-9]+", code):
                         if code not in known and code not in OTHER_PROGRAMS_NAMES:
-                            errors.append(f"{where}: neither orchestrator.py nor gate.py has {code}")
+                            errors.append(f"{where}: neither the engine nor gate.py has {code}")
                     elif m := re.fullmatch(r"(\w+)\(\)", code):
                         if m.group(1) not in names | methods:
-                            errors.append(f"{where}: neither orchestrator.py nor gate.py has a function or method "
+                            errors.append(f"{where}: neither the engine nor gate.py has a function or method "
                                           f"{code}")
                     # Class.member: a capitalized name with a lowercase letter, or an all-caps one that is a class
-                    # of orchestrator.py, such as CI; not CONSTANT.md, a prompt's file, nor one of FILE_NAMES.
+                    # of the engine's, such as CI; not CONSTANT.md, a prompt's file, nor one of FILE_NAMES.
                     elif code not in FILE_NAMES and (m := re.fullmatch(r"([A-Z]\w*)\.([a-z_]\w*)(\(\))?", code)) \
                             and (m.group(1) in classes or re.search("[a-z]", m.group(1))) \
                             and f"{m.group(1)}.{m.group(2)}" not in members:
-                        errors.append(f"{where}: neither orchestrator.py nor gate.py has {m.group(1)}.{m.group(2)}")
+                        errors.append(f"{where}: neither the engine nor gate.py has {m.group(1)}.{m.group(2)}")
         self.assertNoErrors(errors)
 
     def test_each_relative_link_resolves_to_a_file_and_its_anchor_to_a_heading(self):

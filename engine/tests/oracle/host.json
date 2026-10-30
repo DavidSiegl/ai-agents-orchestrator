@@ -1,0 +1,354 @@
+{
+ "added_lines": [
+  [
+   "diff --git a/f.py b/f.py\n--- a/f.py\n+++ b/f.py\n@@ -5,2 +4,0 @@\n-a\n-b\n",
+   {
+    "f.py": {}
+   }
+  ],
+  [
+   "diff --git a/my file.py b/my file.py\nnew file mode 100644\nindex 0000000..e69de29\ndiff --git a/x y.py b/x y.py\n--- a/x y.py\t\n+++ b/x y.py\t\n@@ -1 +1 @@\n-a\n+b\n",
+   {
+    "my file.py": {},
+    "x y.py": {
+     "1": "b"
+    }
+   }
+  ],
+  [
+   "diff --git \"a/tab\\there.py\" \"b/tab\\there.py\"\n--- \"a/tab\\there.py\"\n+++ \"b/tab\\there.py\"\n@@ -0,0 +1 @@\n+x\n",
+   {
+    "tab\there.py": {
+     "1": "x"
+    }
+   }
+  ],
+  [
+   "diff --git a/f.md b/f.md\n--- a/f.md\n+++ b/f.md\n@@ -1,0 +2,3 @@\n+++ b/evil.md\n+--- a/x\n+rename to y\n",
+   {
+    "f.md": {
+     "2": "++ b/evil.md",
+     "3": "--- a/x",
+     "4": "rename to y"
+    }
+   }
+  ],
+  [
+   "diff --git a/old.py b/new.py\nsimilarity index 90%\nrename from old.py\nrename to new.py\n--- a/old.py\n+++ b/new.py\n@@ -2,0 +3 @@\n+z = 1\r\ndiff --git a/uv.lock b/uv.lock\ndeleted file mode 100644\n--- a/uv.lock\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n",
+   {
+    "new.py": {
+     "3": "z = 1\r"
+    }
+   }
+  ],
+  [
+   "diff --git \"a/\\303\\251t\\303\\251.py\" \"b/\\303\\251t\\303\\251.py\"\n--- /dev/null\n+++ \"b/\\303\\251t\\303\\251.py\"\n@@ -0,0 +1,2 @@\n+a\n+b\n",
+   {
+    "été.py": {
+     "1": "a",
+     "2": "b"
+    }
+   }
+  ],
+  [
+   "diff --git \"a/q\\\"uote\\\\back\\a\\b\\f\\n\\r\\v\\z\" \"b/q\\\"uote\\\\back\\a\\b\\f\\n\\r\\v\\z\"\n+++ \"b/q\\\"uote\\\\back\\a\\b\\f\\n\\r\\v\\z\"\n@@ -1 +7 @@\n+x\n",
+   {
+    "q\"uote\\back\u0007\b\f\n\r\u000bz": {
+     "7": "x"
+    }
+   }
+  ],
+  [
+   "diff --git \"a/x\" b/x\n+++ \"b/end\\\"\n@@ -1 +1 @@\n+y\n",
+   {
+    "end\\": {
+     "1": "y"
+    }
+   }
+  ],
+  [
+   "diff --git a/é b/é\n--- a/é\n+++ b/é\n@@ -1 +1 @@\n+ü \f\n",
+   {
+    "é": {
+     "1": "ü \f"
+    }
+   }
+  ],
+  [
+   "diff --git a/f b/f\n@@ -x +1 @@\n+a\n@@ -1,y +2 @@\n+b\n@@ -1 2 @@\n+c\n@@ +4 @@\n+d\n",
+   {
+    "f": {
+     "0": "d"
+    }
+   }
+  ],
+  [
+   "+orphan\ndiff --git a/one b/two\n@@ -1 +1 @@\n+none\n--- a/f\n",
+   {}
+  ],
+  [
+   "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +3 @@\n+a\ndiff --git a/f b/f\n@@ -9 +9 @@\n+b\n",
+   {
+    "f": {
+     "3": "a",
+     "9": "b"
+    }
+   }
+  ],
+  [
+   "diff --git \n",
+   {}
+  ],
+  [
+   "",
+   {}
+  ]
+ ],
+ "extended_file": [
+  [
+   "",
+   {
+    "ok": null
+   }
+  ],
+  [
+   "title = 'x'\n",
+   {
+    "ok": null
+   }
+  ],
+  [
+   "[extend]\nuseDefault = true\n",
+   {
+    "ok": null
+   }
+  ],
+  [
+   "[extend]\npath = 'rules/extra.toml'\n",
+   {
+    "ok": "rules/extra.toml"
+   }
+  ],
+  [
+   "[Extend]\nPath = 'rules/two.toml'\n",
+   {
+    "ok": "rules/two.toml"
+   }
+  ],
+  [
+   "[extend]\npath = ''\n",
+   {
+    "ok": null
+   }
+  ],
+  [
+   "[extend]\npath = '/etc/x.toml'\n",
+   {
+    "error": "extends '/etc/x.toml', which is an absolute path"
+   }
+  ],
+  [
+   "[extend]\npath = 'rules/../../x.toml'\n",
+   {
+    "error": "extends 'rules/../../x.toml', which leaves the repository"
+   }
+  ],
+  [
+   "[extend]\npath = '..'\n",
+   {
+    "error": "extends '..', which leaves the repository"
+   }
+  ],
+  [
+   "[extend]\npath = 'rules/..'\n",
+   {
+    "error": "extends 'rules/..', which is the top level, no file"
+   }
+  ],
+  [
+   "[extend]\npath = '.'\n",
+   {
+    "error": "extends '.', which is the top level, no file"
+   }
+  ],
+  [
+   "[extend]\npath = \"a\\u0000.toml\"\n",
+   {
+    "error": "extends 'a\\x00.toml', which holds a NUL"
+   }
+  ],
+  [
+   "[extend]\npath = 1\n",
+   {
+    "error": "gives a path that is not a string"
+   }
+  ],
+  [
+   "extend = 1\n",
+   {
+    "error": "gives a extend that is not a table"
+   }
+  ],
+  [
+   "[extend]\npath = 'a.toml'\nPath = 'b.toml'\n",
+   {
+    "error": "gives path 2 times, in letters that differ only in case"
+   }
+  ],
+  [
+   "[extend]\n[EXTEND]\n",
+   {
+    "error": "gives extend 2 times, in letters that differ only in case"
+   }
+  ],
+  [
+   "[extend\n",
+   {
+    "error": "is not TOML: Expected ']' at the end of a table declaration (at line 1, column 8)"
+   }
+  ],
+  [
+   "[extend]\npath = 'tmp/../one.toml'\n",
+   {
+    "ok": "tmp/../one.toml"
+   }
+  ],
+  [
+   "[extend]\npath = './x.toml'\n",
+   {
+    "ok": "./x.toml"
+   }
+  ],
+  [
+   "[extend]\npath = 'a//b/./c.toml'\n",
+   {
+    "ok": "a//b/./c.toml"
+   }
+  ]
+ ],
+ "leaks": [
+  [
+   "`cfg.py:1` github-pat in c0ffeec0ffee (fingerprint `c0ffee:cfg.py:github-pat:1`)",
+   "`a b.py:12` gitleaks-allow in abababababab (fingerprint `x:a b.py:gitleaks-allow:12`)"
+  ],
+  "gitleaks found 2 secrets in what the push would publish, so nothing was pushed (report: /r/leaks.json):\n- `cfg.py:1` github-pat in c0ffeec0ffee (fingerprint `c0ffee:cfg.py:github-pat:1`)\n- `a b.py:12` gitleaks-allow in abababababab (fingerprint `x:a b.py:gitleaks-allow:12`)",
+  "gitleaks found 1 secret in what the push would publish, so nothing was pushed (report: /r/leaks.json):\n- `cfg.py:1` github-pat in c0ffeec0ffee (fingerprint `c0ffee:cfg.py:github-pat:1`)"
+ ],
+ "timeout": "Command '['sh', '-c', \"it's\", '_', 'é\\n']' timed out after 60 seconds",
+ "shortened": [
+  [
+   "",
+   ""
+  ],
+  [
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  ],
+  [
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…"
+  ],
+  [
+   "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+   "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé…"
+  ]
+ ],
+ "normpath": [
+  [
+   "",
+   "."
+  ],
+  [
+   ".",
+   "."
+  ],
+  [
+   "..",
+   ".."
+  ],
+  [
+   "a",
+   "a"
+  ],
+  [
+   "a/",
+   "a"
+  ],
+  [
+   "a//b",
+   "a/b"
+  ],
+  [
+   "./a",
+   "a"
+  ],
+  [
+   "a/./b",
+   "a/b"
+  ],
+  [
+   "a/../b",
+   "b"
+  ],
+  [
+   "../a",
+   "../a"
+  ],
+  [
+   "a/../../b",
+   "../b"
+  ],
+  [
+   "../../a/..",
+   "../.."
+  ],
+  [
+   "/a/../..",
+   "/"
+  ],
+  [
+   "//a",
+   "//a"
+  ],
+  [
+   "///a/b/",
+   "/a/b"
+  ],
+  [
+   "/..",
+   "/"
+  ],
+  [
+   "a/b/../../..",
+   ".."
+  ],
+  [
+   "tmp/../one.toml",
+   "one.toml"
+  ],
+  [
+   "rules/..",
+   "."
+  ],
+  [
+   "a/..",
+   "."
+  ]
+ ],
+ "base_rules_refused": "nothing was pushed: the secret scan takes its rules from base abababababab, but its .gitleaks.toml is a symbolic link",
+ "constants": {
+  "MISSING_FILE_STATUS": 3,
+  "GH_UNUSABLE_STATUS": [
+   4,
+   127
+  ],
+  "IN_DIR": "cd -- \"$1\" && shift && exec \"$@\"",
+  "SSH_CONTROL_PERSIST_SECONDS": 60,
+  "SSH_ALIVE_INTERVAL_SECONDS": 10,
+  "SSH_ALIVE_COUNT": 3,
+  "SESSION_LOGS": {
+   "claude": ".claude/projects/*/{session}.jsonl",
+   "pi": ".pi/agent/sessions/*/*_{session}.jsonl"
+  }
+ }
+}

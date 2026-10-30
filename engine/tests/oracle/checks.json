@@ -1,0 +1,2030 @@
+{
+ "judge_run": [
+  {
+   "quality": "GATE: ERROR\n\nintro\n\n## Failed conditions\n\n- Coverage of new code is 50%.\n\n## Issues on changed lines\n\n1. `a.py:5` error ruff F401: m\n\n## Findings to weigh\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n2. `t.py:5` error flaky-tests mixed-results: m\n\n## Failing tests\n\nNone.\n",
+   "checks": [
+    {
+     "name": "new-dependencies",
+     "issues": [
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "not-in-spec",
+       "message": "m"
+      }
+     ],
+     "to_weigh": []
+    },
+    {
+     "name": "diff-budget",
+     "issues": [],
+     "to_weigh": [
+      {
+       "path": null,
+       "line": null,
+       "severity": "error",
+       "rule": "",
+       "message": "m"
+      }
+     ]
+    }
+   ],
+   "out": "GATE: ERROR\n\nintro\n\n## Failed conditions\n\n- Coverage of new code is 50%.\n- 1 findings of the `new-dependencies` check; each is listed below.\n\n## Issues on changed lines\n\n1. `a.py:5` error ruff F401: m\n\n## Findings to weigh\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n2. `t.py:5` error flaky-tests mixed-results: m\n\n## Failing tests\n\nNone.\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\n3. `pyproject.toml:5` error new-dependencies not-in-spec: m\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n4. The change as a whole: error diff-budget: m\n"
+  },
+  {
+   "quality": "GATE: OK\n\nintro\n\n## Issues on changed lines\n\nNone.\n\n## Failing tests\n\nNone.\n",
+   "checks": [
+    {
+     "name": "c",
+     "issues": [
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      }
+     ],
+     "to_weigh": []
+    },
+    {
+     "name": "d",
+     "issues": [
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "s",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "s",
+       "message": "m"
+      }
+     ],
+     "to_weigh": []
+    }
+   ],
+   "out": "GATE: ERROR\n\nintro\n\n## Failed conditions\n\n- 1 findings of the `c` check; each is listed below.\n- 2 findings of the `d` check; each is listed below.\n\n## Issues on changed lines\n\nNone.\n\n## Failing tests\n\nNone.\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\n1. `pyproject.toml:5` error c r: m\n2. `pyproject.toml:5` error d s: m\n3. `pyproject.toml:5` error d s: m\n"
+  },
+  {
+   "quality": "GATE: OK\n\nintro\n\n## Issues on changed lines\n\nNone.\n\n## Failing tests\n\nNone.\n",
+   "checks": [
+    {
+     "name": "c",
+     "issues": [],
+     "to_weigh": []
+    }
+   ],
+   "out": "GATE: OK\n\nintro\n\n## Issues on changed lines\n\nNone.\n\n## Failing tests\n\nNone.\n"
+  },
+  {
+   "quality": "GATE: OK\n\nintro\n\n## Issues on changed lines\n\nNone.\n",
+   "checks": [
+    {
+     "name": "c",
+     "issues": [],
+     "to_weigh": [
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      }
+     ]
+    }
+   ],
+   "out": "GATE: OK\n\nintro\n\n## Issues on changed lines\n\nNone.\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n1. `pyproject.toml:5` error c r: m\n2. `pyproject.toml:5` error c r: m\n3. `pyproject.toml:5` error c r: m\n4. `pyproject.toml:5` error c r: m\n5. `pyproject.toml:5` error c r: m\n6. `pyproject.toml:5` error c r: m\n7. `pyproject.toml:5` error c r: m\n8. `pyproject.toml:5` error c r: m\n9. `pyproject.toml:5` error c r: m\n10. `pyproject.toml:5` error c r: m\n11. `pyproject.toml:5` error c r: m\n12. `pyproject.toml:5` error c r: m\n13. `pyproject.toml:5` error c r: m\n14. `pyproject.toml:5` error c r: m\n15. `pyproject.toml:5` error c r: m\n16. `pyproject.toml:5` error c r: m\n17. `pyproject.toml:5` error c r: m\n18. `pyproject.toml:5` error c r: m\n19. `pyproject.toml:5` error c r: m\n20. `pyproject.toml:5` error c r: m\n21. `pyproject.toml:5` error c r: m\n22. `pyproject.toml:5` error c r: m\n23. `pyproject.toml:5` error c r: m\n24. `pyproject.toml:5` error c r: m\n25. `pyproject.toml:5` error c r: m\n26. `pyproject.toml:5` error c r: m\n27. `pyproject.toml:5` error c r: m\n28. `pyproject.toml:5` error c r: m\n29. `pyproject.toml:5` error c r: m\n30. `pyproject.toml:5` error c r: m\n31. `pyproject.toml:5` error c r: m\n32. `pyproject.toml:5` error c r: m\n33. `pyproject.toml:5` error c r: m\n34. `pyproject.toml:5` error c r: m\n35. `pyproject.toml:5` error c r: m\n36. `pyproject.toml:5` error c r: m\n37. `pyproject.toml:5` error c r: m\n38. `pyproject.toml:5` error c r: m\n39. `pyproject.toml:5` error c r: m\n40. `pyproject.toml:5` error c r: m\n41. `pyproject.toml:5` error c r: m\n42. `pyproject.toml:5` error c r: m\n43. `pyproject.toml:5` error c r: m\n44. `pyproject.toml:5` error c r: m\n45. `pyproject.toml:5` error c r: m\n46. `pyproject.toml:5` error c r: m\n47. `pyproject.toml:5` error c r: m\n48. `pyproject.toml:5` error c r: m\n49. `pyproject.toml:5` error c r: m\n50. `pyproject.toml:5` error c r: m\n\n10 more findings of the orchestrator's checks are not listed.\n"
+  },
+  {
+   "quality": "GATE: ERROR\n\nintro\n\n## Issues on changed lines\n\n1. `a.py:5` error ruff F401: m\n2. `a.py:5` error ruff F401: m\n3. `a.py:5` error ruff F401: m\n4. `a.py:5` error ruff F401: m\n5. `a.py:5` error ruff F401: m\n6. `a.py:5` error ruff F401: m\n7. `a.py:5` error ruff F401: m\n8. `a.py:5` error ruff F401: m\n9. `a.py:5` error ruff F401: m\n10. `a.py:5` error ruff F401: m\n11. `a.py:5` error ruff F401: m\n12. `a.py:5` error ruff F401: m\n13. `a.py:5` error ruff F401: m\n14. `a.py:5` error ruff F401: m\n15. `a.py:5` error ruff F401: m\n16. `a.py:5` error ruff F401: m\n17. `a.py:5` error ruff F401: m\n18. `a.py:5` error ruff F401: m\n19. `a.py:5` error ruff F401: m\n20. `a.py:5` error ruff F401: m\n21. `a.py:5` error ruff F401: m\n22. `a.py:5` error ruff F401: m\n23. `a.py:5` error ruff F401: m\n24. `a.py:5` error ruff F401: m\n25. `a.py:5` error ruff F401: m\n26. `a.py:5` error ruff F401: m\n27. `a.py:5` error ruff F401: m\n28. `a.py:5` error ruff F401: m\n29. `a.py:5` error ruff F401: m\n30. `a.py:5` error ruff F401: m\n31. `a.py:5` error ruff F401: m\n32. `a.py:5` error ruff F401: m\n33. `a.py:5` error ruff F401: m\n34. `a.py:5` error ruff F401: m\n35. `a.py:5` error ruff F401: m\n36. `a.py:5` error ruff F401: m\n37. `a.py:5` error ruff F401: m\n38. `a.py:5` error ruff F401: m\n39. `a.py:5` error ruff F401: m\n40. `a.py:5` error ruff F401: m\n41. `a.py:5` error ruff F401: m\n42. `a.py:5` error ruff F401: m\n43. `a.py:5` error ruff F401: m\n44. `a.py:5` error ruff F401: m\n45. `a.py:5` error ruff F401: m\n46. `a.py:5` error ruff F401: m\n47. `a.py:5` error ruff F401: m\n48. `a.py:5` error ruff F401: m\n49. `a.py:5` error ruff F401: m\n50. `a.py:5` error ruff F401: m\n\n10 more issues on changed lines are not listed; fix the ones above first.\n",
+   "checks": [
+    {
+     "name": "c",
+     "issues": [
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      }
+     ],
+     "to_weigh": [
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "w",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "w",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "w",
+       "message": "m"
+      }
+     ]
+    }
+   ],
+   "out": "GATE: ERROR\n\nintro\n\n## Failed conditions\n\n- 2 findings of the `c` check; each is listed below.\n\n## Issues on changed lines\n\n1. `a.py:5` error ruff F401: m\n2. `a.py:5` error ruff F401: m\n3. `a.py:5` error ruff F401: m\n4. `a.py:5` error ruff F401: m\n5. `a.py:5` error ruff F401: m\n6. `a.py:5` error ruff F401: m\n7. `a.py:5` error ruff F401: m\n8. `a.py:5` error ruff F401: m\n9. `a.py:5` error ruff F401: m\n10. `a.py:5` error ruff F401: m\n11. `a.py:5` error ruff F401: m\n12. `a.py:5` error ruff F401: m\n13. `a.py:5` error ruff F401: m\n14. `a.py:5` error ruff F401: m\n15. `a.py:5` error ruff F401: m\n16. `a.py:5` error ruff F401: m\n17. `a.py:5` error ruff F401: m\n18. `a.py:5` error ruff F401: m\n19. `a.py:5` error ruff F401: m\n20. `a.py:5` error ruff F401: m\n21. `a.py:5` error ruff F401: m\n22. `a.py:5` error ruff F401: m\n23. `a.py:5` error ruff F401: m\n24. `a.py:5` error ruff F401: m\n25. `a.py:5` error ruff F401: m\n26. `a.py:5` error ruff F401: m\n27. `a.py:5` error ruff F401: m\n28. `a.py:5` error ruff F401: m\n29. `a.py:5` error ruff F401: m\n30. `a.py:5` error ruff F401: m\n31. `a.py:5` error ruff F401: m\n32. `a.py:5` error ruff F401: m\n33. `a.py:5` error ruff F401: m\n34. `a.py:5` error ruff F401: m\n35. `a.py:5` error ruff F401: m\n36. `a.py:5` error ruff F401: m\n37. `a.py:5` error ruff F401: m\n38. `a.py:5` error ruff F401: m\n39. `a.py:5` error ruff F401: m\n40. `a.py:5` error ruff F401: m\n41. `a.py:5` error ruff F401: m\n42. `a.py:5` error ruff F401: m\n43. `a.py:5` error ruff F401: m\n44. `a.py:5` error ruff F401: m\n45. `a.py:5` error ruff F401: m\n46. `a.py:5` error ruff F401: m\n47. `a.py:5` error ruff F401: m\n48. `a.py:5` error ruff F401: m\n49. `a.py:5` error ruff F401: m\n50. `a.py:5` error ruff F401: m\n\n10 more issues on changed lines are not listed; fix the ones above first.\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\n5 more findings of the orchestrator's checks are not listed.\n"
+  },
+  {
+   "quality": "GATE: ERROR\n\nintro\n\n## Issues on changed lines\n\n1. `a.py:5` error ruff F401: m\n2. `a.py:5` error ruff F401: m\n3. `a.py:5` error ruff F401: m\n4. `a.py:5` error ruff F401: m\n5. `a.py:5` error ruff F401: m\n6. `a.py:5` error ruff F401: m\n7. `a.py:5` error ruff F401: m\n8. `a.py:5` error ruff F401: m\n9. `a.py:5` error ruff F401: m\n10. `a.py:5` error ruff F401: m\n11. `a.py:5` error ruff F401: m\n12. `a.py:5` error ruff F401: m\n13. `a.py:5` error ruff F401: m\n14. `a.py:5` error ruff F401: m\n15. `a.py:5` error ruff F401: m\n16. `a.py:5` error ruff F401: m\n17. `a.py:5` error ruff F401: m\n18. `a.py:5` error ruff F401: m\n19. `a.py:5` error ruff F401: m\n20. `a.py:5` error ruff F401: m\n21. `a.py:5` error ruff F401: m\n22. `a.py:5` error ruff F401: m\n23. `a.py:5` error ruff F401: m\n24. `a.py:5` error ruff F401: m\n25. `a.py:5` error ruff F401: m\n26. `a.py:5` error ruff F401: m\n27. `a.py:5` error ruff F401: m\n28. `a.py:5` error ruff F401: m\n29. `a.py:5` error ruff F401: m\n30. `a.py:5` error ruff F401: m\n31. `a.py:5` error ruff F401: m\n32. `a.py:5` error ruff F401: m\n33. `a.py:5` error ruff F401: m\n34. `a.py:5` error ruff F401: m\n35. `a.py:5` error ruff F401: m\n36. `a.py:5` error ruff F401: m\n37. `a.py:5` error ruff F401: m\n38. `a.py:5` error ruff F401: m\n39. `a.py:5` error ruff F401: m\n40. `a.py:5` error ruff F401: m\n41. `a.py:5` error ruff F401: m\n42. `a.py:5` error ruff F401: m\n43. `a.py:5` error ruff F401: m\n44. `a.py:5` error ruff F401: m\n45. `a.py:5` error ruff F401: m\n46. `a.py:5` error ruff F401: m\n47. `a.py:5` error ruff F401: m\n48. `a.py:5` error ruff F401: m\n",
+   "checks": [
+    {
+     "name": "c",
+     "issues": [
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      }
+     ],
+     "to_weigh": [
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "w",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "w",
+       "message": "m"
+      },
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "w",
+       "message": "m"
+      }
+     ]
+    }
+   ],
+   "out": "GATE: ERROR\n\nintro\n\n## Failed conditions\n\n- 2 findings of the `c` check; each is listed below.\n\n## Issues on changed lines\n\n1. `a.py:5` error ruff F401: m\n2. `a.py:5` error ruff F401: m\n3. `a.py:5` error ruff F401: m\n4. `a.py:5` error ruff F401: m\n5. `a.py:5` error ruff F401: m\n6. `a.py:5` error ruff F401: m\n7. `a.py:5` error ruff F401: m\n8. `a.py:5` error ruff F401: m\n9. `a.py:5` error ruff F401: m\n10. `a.py:5` error ruff F401: m\n11. `a.py:5` error ruff F401: m\n12. `a.py:5` error ruff F401: m\n13. `a.py:5` error ruff F401: m\n14. `a.py:5` error ruff F401: m\n15. `a.py:5` error ruff F401: m\n16. `a.py:5` error ruff F401: m\n17. `a.py:5` error ruff F401: m\n18. `a.py:5` error ruff F401: m\n19. `a.py:5` error ruff F401: m\n20. `a.py:5` error ruff F401: m\n21. `a.py:5` error ruff F401: m\n22. `a.py:5` error ruff F401: m\n23. `a.py:5` error ruff F401: m\n24. `a.py:5` error ruff F401: m\n25. `a.py:5` error ruff F401: m\n26. `a.py:5` error ruff F401: m\n27. `a.py:5` error ruff F401: m\n28. `a.py:5` error ruff F401: m\n29. `a.py:5` error ruff F401: m\n30. `a.py:5` error ruff F401: m\n31. `a.py:5` error ruff F401: m\n32. `a.py:5` error ruff F401: m\n33. `a.py:5` error ruff F401: m\n34. `a.py:5` error ruff F401: m\n35. `a.py:5` error ruff F401: m\n36. `a.py:5` error ruff F401: m\n37. `a.py:5` error ruff F401: m\n38. `a.py:5` error ruff F401: m\n39. `a.py:5` error ruff F401: m\n40. `a.py:5` error ruff F401: m\n41. `a.py:5` error ruff F401: m\n42. `a.py:5` error ruff F401: m\n43. `a.py:5` error ruff F401: m\n44. `a.py:5` error ruff F401: m\n45. `a.py:5` error ruff F401: m\n46. `a.py:5` error ruff F401: m\n47. `a.py:5` error ruff F401: m\n48. `a.py:5` error ruff F401: m\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\n49. `pyproject.toml:5` error c r: m\n50. `pyproject.toml:5` error c r: m\n\n3 more findings of the orchestrator's checks are not listed.\n"
+  },
+  {
+   "quality": "GATE: OK\n\nintro\n\n## Failed conditions\n\n- `ruff` is not installed: it is not on PATH.\n- 2 tests fail; each is listed below.\n\n## Issues on changed lines\n\nNone.\n\n4 other open issues in the project are not on lines this change added, so they are not listed.\n\n## Findings to weigh\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n1. `t.py:9` warning flaky-tests mixed-results: m\n2. The change as a whole: warning surviving-mutants budget-reached: m\n\n## Failing tests\n\n- `t.T.test_a`: AssertionError: 1 != 2\n- `t.T.test_b`: failed\n\n## Coverage on new code\n\n62.5% of 40 new lines to cover.\n\n## Suppressions added\n\n- `a.py:3` `x = 1  # noqa: F401`\n\n## Build configuration\n\n- The change edits `Jenkinsfile`. The quality job reads it from `main`, so this analysis ran without the edit.\n- The change edits `pyproject.toml`. The gate took its rules from `main.toml`, so the edit did not change how the change was judged.\n- The change edits `uv.lock`, which pins the versions of the linters the gate ran.\n- The change adds or edits `mutants/a.py.meta` under `mutants/`, where mutmut keeps its state. The gate's checks leave them out: none selects a test or a function in them or counts them as a change to the code, and the surviving-mutants check runs mutmut without them. The linters read them as they read any tracked file.\n",
+   "checks": [
+    {
+     "name": "new-dependencies",
+     "issues": [
+      {
+       "path": "pyproject.toml",
+       "line": 5,
+       "severity": "error",
+       "rule": "not-in-spec",
+       "message": "names a package at 7"
+      }
+     ],
+     "to_weigh": [
+      {
+       "path": null,
+       "line": null,
+       "severity": "warning",
+       "rule": "over-budget",
+       "message": "m"
+      }
+     ]
+    }
+   ],
+   "out": "GATE: ERROR\n\nintro\n\n## Failed conditions\n\n- `ruff` is not installed: it is not on PATH.\n- 2 tests fail; each is listed below.\n- 1 findings of the `new-dependencies` check; each is listed below.\n\n## Issues on changed lines\n\nNone.\n\n4 other open issues in the project are not on lines this change added, so they are not listed.\n\n## Findings to weigh\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n1. `t.py:9` warning flaky-tests mixed-results: m\n2. The change as a whole: warning surviving-mutants budget-reached: m\n\n## Failing tests\n\n- `t.T.test_a`: AssertionError: 1 != 2\n- `t.T.test_b`: failed\n\n## Coverage on new code\n\n62.5% of 40 new lines to cover.\n\n## Suppressions added\n\n- `a.py:3` `x = 1  # noqa: F401`\n\n## Build configuration\n\n- The change edits `Jenkinsfile`. The quality job reads it from `main`, so this analysis ran without the edit.\n- The change edits `pyproject.toml`. The gate took its rules from `main.toml`, so the edit did not change how the change was judged.\n- The change edits `uv.lock`, which pins the versions of the linters the gate ran.\n- The change adds or edits `mutants/a.py.meta` under `mutants/`, where mutmut keeps its state. The gate's checks leave them out: none selects a test or a function in them or counts them as a change to the code, and the surviving-mutants check runs mutmut without them. The linters read them as they read any tracked file.\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\n3. `pyproject.toml:5` error new-dependencies not-in-spec: names a package at 7\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n4. The change as a whole: warning new-dependencies over-budget: m\n"
+  },
+  {
+   "quality": "GATE: OK\n\nintro\n",
+   "checks": [
+    {
+     "name": "n",
+     "issues": [
+      {
+       "path": "c\nd .py",
+       "line": 1,
+       "severity": "error",
+       "rule": "flaky x",
+       "message": "`c\nd .py::t` failed"
+      }
+     ],
+     "to_weigh": []
+    }
+   ],
+   "out": "GATE: ERROR\n\nintro\n\n## Failed conditions\n\n- 1 findings of the `n` check; each is listed below.\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\n1. `c\\x0ad .py:1` error n flaky x: `c\\x0ad .py::t` failed\n"
+  },
+  {
+   "quality": "\n\n**GATE: OK**\n\nintro\n\n## Failed conditions\n\n- one\n- two\n\n## Issues\n\n\u0663. x\n12 y\n",
+   "checks": [
+    {
+     "name": "c",
+     "issues": [
+      {
+       "path": "a.py",
+       "line": null,
+       "severity": "error",
+       "rule": "r",
+       "message": "whole file"
+      }
+     ],
+     "to_weigh": [
+      {
+       "path": null,
+       "line": null,
+       "severity": "error",
+       "rule": "",
+       "message": "the change\u2028as a whole"
+      }
+     ]
+    }
+   ],
+   "out": "\n\n**GATE: ERROR**\n\nintro\n\n## Failed conditions\n\n- one\n- two\n- 1 findings of the `c` check; each is listed below.\n\n## Issues\n\n\u0663. x\n12 y\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\n4. `a.py (the whole file)` error c r: whole file\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n5. The change as a whole: error c: the change\\u2028as a whole\n"
+  },
+  {
+   "quality": "## GATE: OK\n## Findings\n\n7. `a.py:1` error x: y",
+   "checks": [
+    {
+     "name": "c",
+     "issues": [
+      {
+       "path": "a.py",
+       "line": 2,
+       "severity": "error",
+       "rule": "",
+       "message": "m"
+      }
+     ],
+     "to_weigh": []
+    }
+   ],
+   "out": "## GATE: ERROR\n## Failed conditions\n\n- 1 findings of the `c` check; each is listed below.\n\n## Findings\n\n7. `a.py:1` error x: y\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\n8. `a.py:2` error c: m\n"
+  },
+  {
+   "quality": "GATE: OKAY\n\n## Failed conditions\n",
+   "checks": [
+    {
+     "name": "c",
+     "issues": [
+      {
+       "path": "a.py",
+       "line": 2,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      }
+     ],
+     "to_weigh": []
+    }
+   ],
+   "out": "GATE: OKAY\n\n## Failed conditions\n\n- 1 findings of the `c` check; each is listed below.\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\n1. `a.py:2` error c r: m\n"
+  },
+  {
+   "quality": "",
+   "checks": [
+    {
+     "name": "c",
+     "issues": [
+      {
+       "path": null,
+       "line": null,
+       "severity": "error",
+       "rule": "r",
+       "message": "m"
+      }
+     ],
+     "to_weigh": []
+    }
+   ],
+   "out": "\n## Failed conditions\n\n- 1 findings of the `c` check; each is listed below.\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\n1. The change as a whole: error c r: m\n"
+  }
+ ],
+ "recorded": [
+  {
+   "from": "gate_turned_on_by_resume runs/<run:1>/quality-1-1.md",
+   "quality": "GATE: OK\n",
+   "spec": "# Add a subtract function\n\nAdd `subtract(a, b)` to `src/calc.py`, returning a - b, with a test.\n",
+   "base_files": {
+    "README.md": "# Parity project\n\nThe project a parity scenario changes.\n",
+    "pyproject.toml": "[project]\nname = \"parity-project\"\nversion = \"0.1.0\"\ndependencies = []\n",
+    "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n",
+    "tests/test_calc.py": "from calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+   },
+   "new_files": {
+    "README.md": "# Parity project\n\nThe project a parity scenario changes.\n",
+    "pyproject.toml": "[project]\nname = \"parity-project\"\nversion = \"0.1.0\"\ndependencies = []\n",
+    "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n\n\ndef subtract(a, b):\n    \"\"\"a minus b.\"\"\"\n    return a - b\n",
+    "tests/test_calc.py": "from calc import add, subtract\n\n\ndef test_add():\n    assert add(1, 2) == 3\n\n\ndef test_subtract():\n    assert subtract(3, 2) == 1\n"
+   },
+   "diff": "diff --git a/src/calc.py b/src/calc.py\nindex 9a58ea6..dde1b7a 100644\n--- a/src/calc.py\n+++ b/src/calc.py\n@@ -3,0 +4,5 @@ def add(a, b):\n+\n+\n+def subtract(a, b):\n+    \"\"\"a minus b.\"\"\"\n+    return a - b\ndiff --git a/tests/test_calc.py b/tests/test_calc.py\nindex 822756f..bc3daf0 100644\n--- a/tests/test_calc.py\n+++ b/tests/test_calc.py\n@@ -1 +1 @@\n-from calc import add\n+from calc import add, subtract\n@@ -5,0 +6,4 @@ def test_add():\n+\n+\n+def test_subtract():\n+    assert subtract(3, 2) == 1\n",
+   "counts": [
+    [
+     "src/calc.py",
+     "src/calc.py",
+     5,
+     0
+    ],
+    [
+     "tests/test_calc.py",
+     "tests/test_calc.py",
+     5,
+     1
+    ]
+   ],
+   "max_files": 15,
+   "max_lines": 600,
+   "pypi": {},
+   "out": "GATE: OK\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n1. `tests/test_calc.py (the whole file)` warning unexpected-paths: the spec mentions neither this path nor its file name.\n"
+  },
+  {
+   "from": "kill_in_quality runs/<run:1>/quality-1-1.md",
+   "quality": "GATE: OK\n",
+   "spec": "# Add a subtract function\n\nAdd `subtract(a, b)` to `src/calc.py`, returning a - b, with a test.\n",
+   "base_files": {
+    "README.md": "# Parity project\n\nThe project a parity scenario changes.\n",
+    "pyproject.toml": "[project]\nname = \"parity-project\"\nversion = \"0.1.0\"\ndependencies = []\n",
+    "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n",
+    "tests/test_calc.py": "from calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+   },
+   "new_files": {
+    "README.md": "# Parity project\n\nThe project a parity scenario changes.\n",
+    "pyproject.toml": "[project]\nname = \"parity-project\"\nversion = \"0.1.0\"\ndependencies = []\n",
+    "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n\n\ndef subtract(a, b):\n    \"\"\"a minus b.\"\"\"\n    return a - b\n",
+    "tests/test_calc.py": "from calc import add, subtract\n\n\ndef test_add():\n    assert add(1, 2) == 3\n\n\ndef test_subtract():\n    assert subtract(3, 2) == 1\n"
+   },
+   "diff": "diff --git a/src/calc.py b/src/calc.py\nindex 9a58ea6..dde1b7a 100644\n--- a/src/calc.py\n+++ b/src/calc.py\n@@ -3,0 +4,5 @@ def add(a, b):\n+\n+\n+def subtract(a, b):\n+    \"\"\"a minus b.\"\"\"\n+    return a - b\ndiff --git a/tests/test_calc.py b/tests/test_calc.py\nindex 822756f..bc3daf0 100644\n--- a/tests/test_calc.py\n+++ b/tests/test_calc.py\n@@ -1 +1 @@\n-from calc import add\n+from calc import add, subtract\n@@ -5,0 +6,4 @@ def test_add():\n+\n+\n+def test_subtract():\n+    assert subtract(3, 2) == 1\n",
+   "counts": [
+    [
+     "src/calc.py",
+     "src/calc.py",
+     5,
+     0
+    ],
+    [
+     "tests/test_calc.py",
+     "tests/test_calc.py",
+     5,
+     1
+    ]
+   ],
+   "max_files": 15,
+   "max_lines": 600,
+   "pypi": {},
+   "out": "GATE: OK\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n1. `tests/test_calc.py (the whole file)` warning unexpected-paths: the spec mentions neither this path nor its file name.\n"
+  },
+  {
+   "from": "quality_fails_then_passes runs/<run:1>/quality-1-1.md",
+   "quality": "GATE: ERROR\n\n## Failed conditions\n\n- 1 findings of the `ruff` check; each is listed below.\n\n## Findings\n\n1. `src/calc.py:7` error ruff F821: undefined name `c`\n",
+   "spec": "# Add a subtract function\n\nAdd `subtract(a, b)` to `src/calc.py`, returning a - b, with a test.\n",
+   "base_files": {
+    "README.md": "# Parity project\n\nThe project a parity scenario changes.\n",
+    "pyproject.toml": "[project]\nname = \"parity-project\"\nversion = \"0.1.0\"\ndependencies = []\n",
+    "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n",
+    "tests/test_calc.py": "from calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+   },
+   "new_files": {
+    "README.md": "# Parity project\n\nThe project a parity scenario changes.\n",
+    "pyproject.toml": "[project]\nname = \"parity-project\"\nversion = \"0.1.0\"\ndependencies = []\n",
+    "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n\n\ndef subtract(a, b):\n    \"\"\"a minus b.\"\"\"\n    return a - b\n",
+    "tests/test_calc.py": "from calc import add, subtract\n\n\ndef test_add():\n    assert add(1, 2) == 3\n\n\ndef test_subtract():\n    assert subtract(3, 2) == 1\n"
+   },
+   "diff": "diff --git a/src/calc.py b/src/calc.py\nindex 9a58ea6..dde1b7a 100644\n--- a/src/calc.py\n+++ b/src/calc.py\n@@ -3,0 +4,5 @@ def add(a, b):\n+\n+\n+def subtract(a, b):\n+    \"\"\"a minus b.\"\"\"\n+    return a - b\ndiff --git a/tests/test_calc.py b/tests/test_calc.py\nindex 822756f..bc3daf0 100644\n--- a/tests/test_calc.py\n+++ b/tests/test_calc.py\n@@ -1 +1 @@\n-from calc import add\n+from calc import add, subtract\n@@ -5,0 +6,4 @@ def test_add():\n+\n+\n+def test_subtract():\n+    assert subtract(3, 2) == 1\n",
+   "counts": [
+    [
+     "src/calc.py",
+     "src/calc.py",
+     5,
+     0
+    ],
+    [
+     "tests/test_calc.py",
+     "tests/test_calc.py",
+     5,
+     1
+    ]
+   ],
+   "max_files": 15,
+   "max_lines": 600,
+   "pypi": {},
+   "out": "GATE: ERROR\n\n## Failed conditions\n\n- 1 findings of the `ruff` check; each is listed below.\n\n## Findings\n\n1. `src/calc.py:7` error ruff F821: undefined name `c`\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n2. `tests/test_calc.py (the whole file)` warning unexpected-paths: the spec mentions neither this path nor its file name.\n"
+  },
+  {
+   "from": "quality_fails_then_passes runs/<run:1>/quality-1-2.md",
+   "quality": "GATE: OK\n",
+   "spec": "# Add a subtract function\n\nAdd `subtract(a, b)` to `src/calc.py`, returning a - b, with a test.\n",
+   "base_files": {
+    "README.md": "# Parity project\n\nThe project a parity scenario changes.\n",
+    "pyproject.toml": "[project]\nname = \"parity-project\"\nversion = \"0.1.0\"\ndependencies = []\n",
+    "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n",
+    "tests/test_calc.py": "from calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+   },
+   "new_files": {
+    "README.md": "# Parity project\n\nThe project a parity scenario changes.\n",
+    "pyproject.toml": "[project]\nname = \"parity-project\"\nversion = \"0.1.0\"\ndependencies = []\n",
+    "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n\n\ndef subtract(a, b):\n    \"\"\"a minus b.\"\"\"\n    return a - b\n",
+    "tests/test_calc.py": "from calc import add, subtract\n\n\ndef test_add():\n    assert add(1, 2) == 3\n\n\ndef test_subtract():\n    assert subtract(3, 2) == 1\n"
+   },
+   "diff": "diff --git a/src/calc.py b/src/calc.py\nindex 9a58ea6..dde1b7a 100644\n--- a/src/calc.py\n+++ b/src/calc.py\n@@ -3,0 +4,5 @@ def add(a, b):\n+\n+\n+def subtract(a, b):\n+    \"\"\"a minus b.\"\"\"\n+    return a - b\ndiff --git a/tests/test_calc.py b/tests/test_calc.py\nindex 822756f..bc3daf0 100644\n--- a/tests/test_calc.py\n+++ b/tests/test_calc.py\n@@ -1 +1 @@\n-from calc import add\n+from calc import add, subtract\n@@ -5,0 +6,4 @@ def test_add():\n+\n+\n+def test_subtract():\n+    assert subtract(3, 2) == 1\n",
+   "counts": [
+    [
+     "src/calc.py",
+     "src/calc.py",
+     5,
+     0
+    ],
+    [
+     "tests/test_calc.py",
+     "tests/test_calc.py",
+     5,
+     1
+    ]
+   ],
+   "max_files": 15,
+   "max_lines": 600,
+   "pypi": {},
+   "out": "GATE: OK\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n1. `tests/test_calc.py (the whole file)` warning unexpected-paths: the spec mentions neither this path nor its file name.\n"
+  },
+  {
+   "from": "quality_passes runs/<run:1>/quality-1-1.md",
+   "quality": "GATE: OK\n\nEvery condition holds.\n",
+   "spec": "# Add a subtract function\n\nAdd `subtract(a, b)` to `src/calc.py`, returning a - b, with a test.\n\nUse attrs for the result type.\n",
+   "base_files": {
+    "README.md": "# Parity project\n\nThe project a parity scenario changes.\n",
+    "pyproject.toml": "[project]\nname = \"parity-project\"\nversion = \"0.1.0\"\ndependencies = []\n",
+    "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n",
+    "tests/test_calc.py": "from calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+   },
+   "new_files": {
+    "README.md": "# Parity project\n\nThe project a parity scenario changes.\n",
+    "pyproject.toml": "[project]\nname = \"parity-project\"\nversion = \"0.1.0\"\ndependencies = [\"attrs>=25\"]\n",
+    "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n\n\ndef subtract(a, b):\n    \"\"\"a minus b.\"\"\"\n    return a - b\n",
+    "tests/test_calc.py": "from calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+   },
+   "diff": "diff --git a/pyproject.toml b/pyproject.toml\nindex a6799e2..5cd7644 100644\n--- a/pyproject.toml\n+++ b/pyproject.toml\n@@ -4 +4 @@ version = \"0.1.0\"\n-dependencies = []\n+dependencies = [\"attrs>=25\"]\ndiff --git a/src/calc.py b/src/calc.py\nindex 9a58ea6..dde1b7a 100644\n--- a/src/calc.py\n+++ b/src/calc.py\n@@ -3,0 +4,5 @@ def add(a, b):\n+\n+\n+def subtract(a, b):\n+    \"\"\"a minus b.\"\"\"\n+    return a - b\n",
+   "counts": [
+    [
+     "pyproject.toml",
+     "pyproject.toml",
+     1,
+     1
+    ],
+    [
+     "src/calc.py",
+     "src/calc.py",
+     5,
+     0
+    ]
+   ],
+   "max_files": 15,
+   "max_lines": 600,
+   "pypi": {
+    "attrs": {
+     "info": {
+      "version": "25.3.0",
+      "license_expression": "MIT"
+     },
+     "releases": {
+      "15.0.0": [
+       {
+        "upload_time_iso_8601": "2015-01-29T00:00:00Z"
+       }
+      ],
+      "25.3.0": [
+       {
+        "upload_time_iso_8601": "2025-03-13T00:00:00Z"
+       }
+      ]
+     },
+     "urls": [
+      {
+       "upload_time_iso_8601": "2025-03-13T00:00:00Z"
+      }
+     ]
+    }
+   },
+   "out": "GATE: OK\n\nEvery condition holds.\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n1. `pyproject.toml:4` warning new-dependencies added: `attrs`, which the spec names: on PyPI since 2015-01-29, latest 25.3.0 of 2025-03-13, license MIT.\n2. `pyproject.toml (the whole file)` warning unexpected-paths: the spec mentions neither this path nor its file name.\n"
+  },
+  {
+   "from": "quality_stuck runs/<run:1>/quality-1-1.md",
+   "quality": "GATE: ERROR\n\n## Failed conditions\n\n- 1 findings of the `ruff` check; each is listed below.\n\n## Findings\n\n1. `src/calc.py:7` error ruff F821: undefined name `c`\n",
+   "spec": "# Add a subtract function\n\nAdd `subtract(a, b)` to `src/calc.py`, returning a - b, with a test.\n",
+   "base_files": {
+    "README.md": "# Parity project\n\nThe project a parity scenario changes.\n",
+    "pyproject.toml": "[project]\nname = \"parity-project\"\nversion = \"0.1.0\"\ndependencies = []\n",
+    "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n",
+    "tests/test_calc.py": "from calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+   },
+   "new_files": {
+    "README.md": "# Parity project\n\nThe project a parity scenario changes.\n",
+    "pyproject.toml": "[project]\nname = \"parity-project\"\nversion = \"0.1.0\"\ndependencies = []\n",
+    "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n\n\ndef subtract(a, b):\n    \"\"\"a minus b.\"\"\"\n    return a - b\n",
+    "tests/test_calc.py": "from calc import add, subtract\n\n\ndef test_add():\n    assert add(1, 2) == 3\n\n\ndef test_subtract():\n    assert subtract(3, 2) == 1\n"
+   },
+   "diff": "diff --git a/src/calc.py b/src/calc.py\nindex 9a58ea6..dde1b7a 100644\n--- a/src/calc.py\n+++ b/src/calc.py\n@@ -3,0 +4,5 @@ def add(a, b):\n+\n+\n+def subtract(a, b):\n+    \"\"\"a minus b.\"\"\"\n+    return a - b\ndiff --git a/tests/test_calc.py b/tests/test_calc.py\nindex 822756f..bc3daf0 100644\n--- a/tests/test_calc.py\n+++ b/tests/test_calc.py\n@@ -1 +1 @@\n-from calc import add\n+from calc import add, subtract\n@@ -5,0 +6,4 @@ def test_add():\n+\n+\n+def test_subtract():\n+    assert subtract(3, 2) == 1\n",
+   "counts": [
+    [
+     "src/calc.py",
+     "src/calc.py",
+     5,
+     0
+    ],
+    [
+     "tests/test_calc.py",
+     "tests/test_calc.py",
+     5,
+     1
+    ]
+   ],
+   "max_files": 15,
+   "max_lines": 600,
+   "pypi": {},
+   "out": "GATE: ERROR\n\n## Failed conditions\n\n- 1 findings of the `ruff` check; each is listed below.\n\n## Findings\n\n1. `src/calc.py:7` error ruff F821: undefined name `c`\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n2. `tests/test_calc.py (the whole file)` warning unexpected-paths: the spec mentions neither this path nor its file name.\n"
+  },
+  {
+   "from": "quality_stuck runs/<run:1>/quality-1-2.md",
+   "quality": "GATE: ERROR\n\n## Failed conditions\n\n- 1 findings of the `ruff` check; each is listed below.\n\n## Findings\n\n1. `src/calc.py:7` error ruff F821: undefined name `c`\n",
+   "spec": "# Add a subtract function\n\nAdd `subtract(a, b)` to `src/calc.py`, returning a - b, with a test.\n",
+   "base_files": {
+    "README.md": "# Parity project\n\nThe project a parity scenario changes.\n",
+    "pyproject.toml": "[project]\nname = \"parity-project\"\nversion = \"0.1.0\"\ndependencies = []\n",
+    "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n",
+    "tests/test_calc.py": "from calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+   },
+   "new_files": {
+    "README.md": "# Parity project\n\nThe project a parity scenario changes.\n",
+    "pyproject.toml": "[project]\nname = \"parity-project\"\nversion = \"0.1.0\"\ndependencies = []\n",
+    "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n\n\ndef subtract(a, b):\n    \"\"\"a minus b.\"\"\"\n    return a - b\n",
+    "tests/test_calc.py": "from calc import add, subtract\n\n\ndef test_add():\n    assert add(1, 2) == 3\n\n\ndef test_subtract():\n    assert subtract(3, 2) == 1\n"
+   },
+   "diff": "diff --git a/src/calc.py b/src/calc.py\nindex 9a58ea6..dde1b7a 100644\n--- a/src/calc.py\n+++ b/src/calc.py\n@@ -3,0 +4,5 @@ def add(a, b):\n+\n+\n+def subtract(a, b):\n+    \"\"\"a minus b.\"\"\"\n+    return a - b\ndiff --git a/tests/test_calc.py b/tests/test_calc.py\nindex 822756f..bc3daf0 100644\n--- a/tests/test_calc.py\n+++ b/tests/test_calc.py\n@@ -1 +1 @@\n-from calc import add\n+from calc import add, subtract\n@@ -5,0 +6,4 @@ def test_add():\n+\n+\n+def test_subtract():\n+    assert subtract(3, 2) == 1\n",
+   "counts": [
+    [
+     "src/calc.py",
+     "src/calc.py",
+     5,
+     0
+    ],
+    [
+     "tests/test_calc.py",
+     "tests/test_calc.py",
+     5,
+     1
+    ]
+   ],
+   "max_files": 15,
+   "max_lines": 600,
+   "pypi": {},
+   "out": "GATE: ERROR\n\n## Failed conditions\n\n- 1 findings of the `ruff` check; each is listed below.\n\n## Findings\n\n1. `src/calc.py:7` error ruff F821: undefined name `c`\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n2. `tests/test_calc.py (the whole file)` warning unexpected-paths: the spec mentions neither this path nor its file name.\n"
+  },
+  {
+   "from": "quality_workflow_without_review runs/<run:1>/quality-1-1.md",
+   "quality": "GATE: ERROR\n\n## Failed conditions\n\n- 1 findings of the `ruff` check; each is listed below.\n\n## Findings\n\n1. `src/calc.py:7` error ruff F821: undefined name `c`\n",
+   "spec": "Add a subtract function",
+   "base_files": {
+    "README.md": "# Parity project\n\nThe project a parity scenario changes.\n",
+    "pyproject.toml": "[project]\nname = \"parity-project\"\nversion = \"0.1.0\"\ndependencies = []\n",
+    "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n",
+    "tests/test_calc.py": "from calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+   },
+   "new_files": {
+    "README.md": "# Parity project\n\nThe project a parity scenario changes.\n",
+    "pyproject.toml": "[project]\nname = \"parity-project\"\nversion = \"0.1.0\"\ndependencies = []\n",
+    "src/calc.py": "def add(a, b):\n    \"\"\"The sum of a and b.\"\"\"\n    return a + b\n\n\ndef subtract(a, b):\n    \"\"\"a minus b.\"\"\"\n    return a - b\n",
+    "tests/test_calc.py": "from calc import add, subtract\n\n\ndef test_add():\n    assert add(1, 2) == 3\n\n\ndef test_subtract():\n    assert subtract(3, 2) == 1\n"
+   },
+   "diff": "diff --git a/src/calc.py b/src/calc.py\nindex 9a58ea6..dde1b7a 100644\n--- a/src/calc.py\n+++ b/src/calc.py\n@@ -3,0 +4,5 @@ def add(a, b):\n+\n+\n+def subtract(a, b):\n+    \"\"\"a minus b.\"\"\"\n+    return a - b\ndiff --git a/tests/test_calc.py b/tests/test_calc.py\nindex 822756f..bc3daf0 100644\n--- a/tests/test_calc.py\n+++ b/tests/test_calc.py\n@@ -1 +1 @@\n-from calc import add\n+from calc import add, subtract\n@@ -5,0 +6,4 @@ def test_add():\n+\n+\n+def test_subtract():\n+    assert subtract(3, 2) == 1\n",
+   "counts": [
+    [
+     "src/calc.py",
+     "src/calc.py",
+     5,
+     0
+    ],
+    [
+     "tests/test_calc.py",
+     "tests/test_calc.py",
+     5,
+     1
+    ]
+   ],
+   "max_files": 15,
+   "max_lines": 600,
+   "pypi": {},
+   "out": "GATE: ERROR\n\n## Failed conditions\n\n- 1 findings of the `ruff` check; each is listed below.\n\n## Findings\n\n1. `src/calc.py:7` error ruff F821: undefined name `c`\n\n## The orchestrator's checks\n\nThe orchestrator ran these itself after the build, with what the build does not see: the run's spec and its workflow.\n\nThese do not fail the gate. Fix each, or say in your report why it should stand.\n\n2. `src/calc.py (the whole file)` warning unexpected-paths: the spec mentions neither this path nor its file name.\n3. `tests/test_calc.py (the whole file)` warning unexpected-paths: the spec mentions neither this path nor its file name.\n"
+  }
+ ],
+ "dependencies": [
+  {
+   "pyproject": "[project]\nname = \"limiter\"\ndependencies = [\n    \"httpx>=0.27\",\n    \"limits>=3\",\n    \"Foo.Bar[extra] >=1; python_version>'3'\",\n    \"baz @ https://example.com/baz.whl\",\n]\n",
+   "lock": null,
+   "direct": [
+    [
+     "httpx",
+     null
+    ],
+    [
+     "limits",
+     null
+    ],
+    [
+     "foo-bar",
+     null
+    ],
+    [
+     "baz",
+     [
+      "url",
+      "https://example.com/baz.whl"
+     ]
+    ]
+   ],
+   "locked": [],
+   "unreadable": []
+  },
+  {
+   "pyproject": "[project]\nname = \"My_Proj\"\ndependencies = [\"x\"]\n[project.optional-dependencies]\nall = [\"my-proj[a]\"]\n[dependency-groups]\ndev = [\"pytest\", {include-group = \"lint\"}]\nlint = [\"ruff==0.5\"]\n",
+   "lock": null,
+   "direct": [
+    [
+     "x",
+     null
+    ],
+    [
+     "pytest",
+     null
+    ],
+    [
+     "ruff",
+     null
+    ]
+   ],
+   "locked": [],
+   "unreadable": []
+  },
+  {
+   "pyproject": "[project]\nname = \"p\"\ndependencies = [\"a\", \"b\", \"c\", \"d\", \"e\", \"f\", \"g\", \"h\"]\n[[tool.uv.index]]\nname = \"corp\"\nurl = \"https://corp.example/simple/\"\n[[tool.uv.index]]\nname = \"pypi\"\nurl = \"https://pypi.org/simple/\"\n[[tool.uv.index]]\nname = 3\n[tool.uv.sources]\na = { index = \"corp\" }\nb = { index = \"pypi\" }\nc = { index = \"nameless\" }\nd = [{ git = \"https://g/d\", marker = \"x\" }, { path = \"y\" }]\ne = { path = 5 }\nf = { mirror = 1.5, n = [true, \"\u00e9\", -0.0, inf] }\ng = { workspace = true }\nh = { index = 3 }\n",
+   "lock": null,
+   "direct": [
+    [
+     "a",
+     [
+      "index",
+      "https://corp.example/simple/"
+     ]
+    ],
+    [
+     "b",
+     null
+    ],
+    [
+     "c",
+     [
+      "index",
+      "nameless"
+     ]
+    ],
+    [
+     "d",
+     [
+      "git",
+      "https://g/d"
+     ]
+    ],
+    [
+     "e",
+     [
+      "path",
+      "5"
+     ]
+    ],
+    [
+     "f",
+     [
+      "unknown",
+      "{ mirror = 1.5, n = [true, \"\\u00e9\", -0.0, Infinity] }"
+     ]
+    ],
+    [
+     "g",
+     [
+      "workspace",
+      ""
+     ]
+    ],
+    [
+     "h",
+     [
+      "index",
+      "3"
+     ]
+    ]
+   ],
+   "locked": [],
+   "unreadable": []
+  },
+  {
+   "pyproject": "[tool.uv.sources]\nf = { at = 1979-05-27T07:32:00Z }\n",
+   "lock": null,
+   "direct": [],
+   "locked": [],
+   "unreadable": [
+    [
+     "pyproject.toml",
+     "Object of type datetime is not JSON serializable"
+    ]
+   ]
+  },
+  {
+   "pyproject": "[project]\ndependencies = [\"a\"]\n[tool.uv.sources]\na = { index = [\"x\"] }\n",
+   "lock": null,
+   "direct": [],
+   "locked": [],
+   "unreadable": [
+    [
+     "pyproject.toml",
+     "cannot use 'list' as a dict key (unhashable type: 'list')"
+    ]
+   ]
+  },
+  {
+   "pyproject": "[[tool.uv.index]]\nname = [\"x\"]\n[tool.uv.sources]\na = { path = \"p\" }\n",
+   "lock": null,
+   "direct": [],
+   "locked": [],
+   "unreadable": [
+    [
+     "pyproject.toml",
+     "cannot use 'list' as a dict key (unhashable type: 'list')"
+    ]
+   ]
+  },
+  {
+   "pyproject": "[project]\ndependencies = [\"a\", \"b\", \"c\", \"d\", \"e\"]\n[[tool.uv.index]]\nname = 1979-05-27T07:32:00Z\nurl = \"https://t/simple\"\n[[tool.uv.index]]\nname = 9007199254740993\nurl = \"https://n/simple\"\n[[tool.uv.index]]\nname = 1979-05-27T07:32:00\nurl = \"https://l/simple\"\n[tool.uv.sources]\na = { index = 1979-05-27T00:32:00-07:00 }\nb = { index = 9007199254740992.0 }\nc = { index = 1979-05-27T07:32:00.000 }\nd = { index = 1979-05-27T07:32:00.0000001 }\ne = { index = 1979-05-27T14:32:00.0000009+07:00 }\n",
+   "lock": null,
+   "direct": [
+    [
+     "a",
+     [
+      "index",
+      "https://t/simple"
+     ]
+    ],
+    [
+     "b",
+     [
+      "index",
+      "9007199254740992.0"
+     ]
+    ],
+    [
+     "c",
+     [
+      "index",
+      "https://l/simple"
+     ]
+    ],
+    [
+     "d",
+     [
+      "index",
+      "https://l/simple"
+     ]
+    ],
+    [
+     "e",
+     [
+      "index",
+      "https://t/simple"
+     ]
+    ]
+   ],
+   "locked": [],
+   "unreadable": []
+  },
+  {
+   "pyproject": "[project]\ndependencies = [\"a\", \"b\"]\n[[tool.uv.index]]\nname = 1\nurl = \"https://one/simple\"\n[tool.uv.sources]\na = { index = true }\nb = { index = 1.0 }\n",
+   "lock": null,
+   "direct": [
+    [
+     "a",
+     [
+      "index",
+      "https://one/simple"
+     ]
+    ],
+    [
+     "b",
+     [
+      "index",
+      "https://one/simple"
+     ]
+    ]
+   ],
+   "locked": [],
+   "unreadable": []
+  },
+  {
+   "pyproject": "[project]\nname = \"p\"\ndependencies = [\"a\"]\n[tool.uv.sources]\na = { mirror = { x = 1 } }\n",
+   "lock": null,
+   "direct": [
+    [
+     "a",
+     [
+      "unknown",
+      "{ mirror = {\"x\": 1} }"
+     ]
+    ]
+   ],
+   "locked": [],
+   "unreadable": []
+  },
+  {
+   "pyproject": "[project]\nname = \"p\"\ndependencies = [\"a\"]\n[[tool.uv.index]]\nurl = \"https://m/simple\"\ndefault = true\n",
+   "lock": "version = 1\n[[package]]\nname = \"a\"\nsource = { registry = \"https://pypi.org/simple\" }\n[[package]]\nname = \"B_c\"\nsource = { git = \"https://g/b?rev=1#abc\" }\n[[package]]\nname = \"d\"\nsource = { directory = \"../d\" }\n[[package]]\nname = \"p\"\nsource = { editable = \".\" }\n[[package]]\nname = \"w\"\nsource = { virtual = \"w\" }\n[[package]]\nname = \"u\"\nsource = { url = \"https://u/u.whl\" }\n[[package]]\nname = \"o\"\nsource = { other = 1979-05-27 }\n[[package]]\nname = \"nosource\"\n",
+   "direct": [
+    [
+     "a",
+     [
+      "index",
+      "https://m/simple"
+     ]
+    ]
+   ],
+   "locked": [],
+   "unreadable": [
+    [
+     "uv.lock",
+     "Object of type date is not JSON serializable"
+    ]
+   ]
+  },
+  {
+   "pyproject": "[project]\nname = \"p\"\ndependencies = [\"a\"]\n",
+   "lock": "version = 1\n[[package]]\nname = \"a\"\nsource = { x = 07:32:00 }\n",
+   "direct": [
+    [
+     "a",
+     null
+    ]
+   ],
+   "locked": [],
+   "unreadable": [
+    [
+     "uv.lock",
+     "Object of type time is not JSON serializable"
+    ]
+   ]
+  },
+  {
+   "pyproject": "[project\n",
+   "lock": "[[package\n",
+   "direct": [],
+   "locked": [],
+   "unreadable": [
+    [
+     "uv.lock",
+     "it is not TOML: Expected ']]' at the end of an array declaration (at line 1, column 10)"
+    ],
+    [
+     "pyproject.toml",
+     "it is not TOML: Expected ']' at the end of a table declaration (at line 1, column 9)"
+    ]
+   ]
+  },
+  {
+   "pyproject": "[project]\ndependencies = \"x\"\n",
+   "lock": "[[package]]\nversion = 1\n",
+   "direct": [],
+   "locked": [],
+   "unreadable": [
+    [
+     "uv.lock",
+     "[[package]] is not a list of tables with a name"
+    ],
+    [
+     "pyproject.toml",
+     "[project] dependencies is not a list"
+    ]
+   ]
+  },
+  {
+   "pyproject": "[project]\ndependencies = [\"=x\"]\n",
+   "lock": "package = 5\n",
+   "direct": [],
+   "locked": [],
+   "unreadable": [
+    [
+     "uv.lock",
+     "[[package]] is not a list of tables with a name"
+    ],
+    [
+     "pyproject.toml",
+     "'=x' is not a requirement"
+    ]
+   ]
+  },
+  {
+   "pyproject": "[project]\ndependencies = [5]\n",
+   "lock": null,
+   "direct": [],
+   "locked": [],
+   "unreadable": [
+    [
+     "pyproject.toml",
+     "5 is not a requirement"
+    ]
+   ]
+  },
+  {
+   "pyproject": "[project]\ndependencies = [1979-05-27]\n",
+   "lock": null,
+   "direct": [],
+   "locked": [],
+   "unreadable": [
+    [
+     "pyproject.toml",
+     "datetime.date(1979, 5, 27) is not a requirement"
+    ]
+   ]
+  },
+  {
+   "pyproject": "[project]\nname = 5\ndependencies = [\"x\"]\n",
+   "lock": null,
+   "direct": [],
+   "locked": [],
+   "unreadable": [
+    [
+     "pyproject.toml",
+     "expected string or bytes-like object, got 'int'"
+    ]
+   ]
+  },
+  {
+   "pyproject": "project = 5\n",
+   "lock": null,
+   "direct": [],
+   "locked": [],
+   "unreadable": [
+    [
+     "pyproject.toml",
+     "project is not a table"
+    ]
+   ]
+  },
+  {
+   "pyproject": "[project]\noptional-dependencies = 5\n",
+   "lock": null,
+   "direct": [],
+   "locked": [],
+   "unreadable": [
+    [
+     "pyproject.toml",
+     "optional-dependencies is not a table"
+    ]
+   ]
+  },
+  {
+   "pyproject": "[project]\n[project.optional-dependencies]\nx = \"y\"\n",
+   "lock": null,
+   "direct": [],
+   "locked": [],
+   "unreadable": [
+    [
+     "pyproject.toml",
+     "[project.optional-dependencies] x is not a list"
+    ]
+   ]
+  },
+  {
+   "pyproject": "dependency-groups = []\n",
+   "lock": null,
+   "direct": [],
+   "locked": [],
+   "unreadable": [
+    [
+     "pyproject.toml",
+     "dependency-groups is not a table"
+    ]
+   ]
+  },
+  {
+   "pyproject": "tool = 1\n",
+   "lock": null,
+   "direct": [],
+   "locked": [],
+   "unreadable": [
+    [
+     "pyproject.toml",
+     "tool is not a table"
+    ]
+   ]
+  },
+  {
+   "pyproject": "[tool]\nuv = []\n",
+   "lock": null,
+   "direct": [],
+   "locked": [],
+   "unreadable": [
+    [
+     "pyproject.toml",
+     "uv is not a table"
+    ]
+   ]
+  },
+  {
+   "pyproject": "[tool.uv]\nindex = 5\n",
+   "lock": null,
+   "direct": [],
+   "locked": [],
+   "unreadable": [
+    [
+     "pyproject.toml",
+     "[[tool.uv.index]] is not a list of tables"
+    ]
+   ]
+  },
+  {
+   "pyproject": "[tool.uv]\nindex = [5]\n",
+   "lock": null,
+   "direct": [],
+   "locked": [],
+   "unreadable": [
+    [
+     "pyproject.toml",
+     "[[tool.uv.index]] is not a list of tables"
+    ]
+   ]
+  },
+  {
+   "pyproject": "[tool.uv]\nsources = 5\n",
+   "lock": null,
+   "direct": [],
+   "locked": [],
+   "unreadable": [
+    [
+     "pyproject.toml",
+     "sources is not a table"
+    ]
+   ]
+  },
+  {
+   "pyproject": "[tool.uv.sources]\nx = 5\n",
+   "lock": null,
+   "direct": [],
+   "locked": [],
+   "unreadable": [
+    [
+     "pyproject.toml",
+     "[tool.uv.sources] x is not a table"
+    ]
+   ]
+  },
+  {
+   "pyproject": "[tool.uv.sources]\nx = []\n",
+   "lock": null,
+   "direct": [],
+   "locked": [],
+   "unreadable": [
+    [
+     "pyproject.toml",
+     "[tool.uv.sources] x is not a table"
+    ]
+   ]
+  },
+  {
+   "pyproject": "[tool.uv.sources]\nx = { url = \"u\", at = 07:32:00.5 }\n[project]\ndependencies = [\"x\"]\n",
+   "lock": null,
+   "direct": [
+    [
+     "x",
+     [
+      "url",
+      "u"
+     ]
+    ]
+   ],
+   "locked": [],
+   "unreadable": []
+  },
+  {
+   "pyproject": "[project]\ndependencies = [\"  x  [a, b]  @  https://x/x.whl  ; python_version > '3'\", \"y [z\", \"w@\", \"v.-\"]\n",
+   "lock": null,
+   "direct": [
+    [
+     "x",
+     [
+      "url",
+      "https://x/x.whl"
+     ]
+    ],
+    [
+     "y",
+     null
+    ],
+    [
+     "w",
+     null
+    ],
+    [
+     "v",
+     null
+    ]
+   ],
+   "locked": [],
+   "unreadable": []
+  },
+  {
+   "pyproject": null,
+   "lock": null,
+   "direct": [],
+   "locked": [],
+   "unreadable": []
+  }
+ ],
+ "requirements": [
+  [
+   "limits>=3",
+   [
+    "limits",
+    null
+   ]
+  ],
+  [
+   "Foo.Bar[extra] >=1",
+   [
+    "foo-bar",
+    null
+   ]
+  ],
+  [
+   "baz @ https://x/baz.whl",
+   [
+    "baz",
+    "https://x/baz.whl"
+   ]
+  ],
+  [
+   " x",
+   [
+    "x",
+    null
+   ]
+  ],
+  [
+   "x.",
+   [
+    "x",
+    null
+   ]
+  ],
+  [
+   "x-._y",
+   [
+    "x-y",
+    null
+   ]
+  ],
+  [
+   "=x",
+   {
+    "error": "'=x' is not a requirement"
+   }
+  ],
+  [
+   "",
+   {
+    "error": "'' is not a requirement"
+   }
+  ],
+  [
+   "a[b",
+   [
+    "a",
+    null
+   ]
+  ],
+  [
+   "a [b] @ u",
+   [
+    "a",
+    "u"
+   ]
+  ],
+  [
+   "a@",
+   [
+    "a",
+    null
+   ]
+  ],
+  [
+   "a @  ",
+   [
+    "a",
+    null
+   ]
+  ],
+  [
+   "a\u3000@\u3000u v",
+   [
+    "a",
+    "u"
+   ]
+  ],
+  [
+   "\u00e9",
+   {
+    "error": "'\u00e9' is not a requirement"
+   }
+  ],
+  [
+   "a[b]c@d",
+   [
+    "a",
+    null
+   ]
+  ],
+  [
+   "a@b@c",
+   [
+    "a",
+    "b@c"
+   ]
+  ]
+ ],
+ "package_keys": [
+  [
+   "Foo.Bar",
+   "foo-bar"
+  ],
+  [
+   "a-_.b",
+   "a-b"
+  ],
+  [
+   "\u00c9T\u00c9_x",
+   "\u00e9t\u00e9-x"
+  ],
+  [
+   "\u03a3\u0391\u03a3",
+   "\u03c3\u03b1\u03c2"
+  ],
+  [
+   "x--",
+   "x-"
+  ]
+ ],
+ "spec_names": [
+  [
+   "Use `Requests`. Add pytest_randomly, and ruff>=0.5 to the dev group.",
+   [
+    "0-5",
+    "add",
+    "and",
+    "dev",
+    "group",
+    "pytest-randomly",
+    "requests",
+    "ruff",
+    "the",
+    "to",
+    "use"
+   ]
+  ],
+  [
+   "",
+   []
+  ],
+  [
+   "zope.interface and zope-",
+   [
+    "and",
+    "zope",
+    "zope-interface"
+   ]
+  ],
+  [
+   "na\u00efve x_y.Z... -a 9",
+   [
+    "9",
+    "a",
+    "na",
+    "ve",
+    "x-y-z"
+   ]
+  ]
+ ],
+ "line_naming": [
+  [
+   "dependencies = [\n    \"zope.interface>=5\",\n    \"zope\",\n]",
+   [
+    2,
+    3
+   ],
+   "zope",
+   3
+  ],
+  [
+   "dependencies = [\n    \"zope.interface>=5\",\n    \"zope\",\n]",
+   [
+    2,
+    3
+   ],
+   "zope-interface",
+   2
+  ],
+  [
+   "x = [\"Pytest_Randomly\", \"pytest-randomly\"]",
+   [
+    1
+   ],
+   "pytest-randomly",
+   1
+  ],
+  [
+   "x = [\"mypytest\", \"pytest-x\", \"pytest\"]",
+   [
+    1
+   ],
+   "pytest",
+   1
+  ],
+  [
+   "x = [\"a\"]",
+   [
+    2,
+    1
+   ],
+   "a",
+   1
+  ],
+  [
+   "x = [\"a_\"]\ny = [\"a_b\"]",
+   [
+    1,
+    2
+   ],
+   "a",
+   1
+  ],
+  [
+   "\u00e9 = \"ab\"",
+   [
+    1
+   ],
+   "ab",
+   1
+  ]
+ ],
+ "toml_values": [
+  {
+   "literal": "\"text\"",
+   "type": "str",
+   "str": "text",
+   "repr": "'text'",
+   "json": "\"text\""
+  },
+  {
+   "literal": "'it\"s'",
+   "type": "str",
+   "str": "it\"s",
+   "repr": "'it\"s'",
+   "json": "\"it\\\"s\""
+  },
+  {
+   "literal": "\"it's\"",
+   "type": "str",
+   "str": "it's",
+   "repr": "\"it's\"",
+   "json": "\"it's\""
+  },
+  {
+   "literal": "\"tab\\t\\u00e9\"",
+   "type": "str",
+   "str": "tab\t\u00e9",
+   "repr": "'tab\\t\u00e9'",
+   "json": "\"tab\\t\\u00e9\""
+  },
+  {
+   "literal": "5",
+   "type": "int",
+   "str": "5",
+   "repr": "5",
+   "json": "5"
+  },
+  {
+   "literal": "-0",
+   "type": "int",
+   "str": "0",
+   "repr": "0",
+   "json": "0"
+  },
+  {
+   "literal": "2.5",
+   "type": "float",
+   "str": "2.5",
+   "repr": "2.5",
+   "json": "2.5"
+  },
+  {
+   "literal": "1e300",
+   "type": "float",
+   "str": "1e+300",
+   "repr": "1e+300",
+   "json": "1e+300"
+  },
+  {
+   "literal": "inf",
+   "type": "float",
+   "str": "inf",
+   "repr": "inf",
+   "json": "Infinity"
+  },
+  {
+   "literal": "-inf",
+   "type": "float",
+   "str": "-inf",
+   "repr": "-inf",
+   "json": "-Infinity"
+  },
+  {
+   "literal": "nan",
+   "type": "float",
+   "str": "nan",
+   "repr": "nan",
+   "json": "NaN"
+  },
+  {
+   "literal": "-0.0",
+   "type": "float",
+   "str": "-0.0",
+   "repr": "-0.0",
+   "json": "-0.0"
+  },
+  {
+   "literal": "true",
+   "type": "bool",
+   "str": "True",
+   "repr": "True",
+   "json": "true"
+  },
+  {
+   "literal": "false",
+   "type": "bool",
+   "str": "False",
+   "repr": "False",
+   "json": "false"
+  },
+  {
+   "literal": "[1, 'a', [true]]",
+   "type": "list",
+   "str": "[1, 'a', [True]]",
+   "repr": "[1, 'a', [True]]",
+   "json": "[1, \"a\", [true]]"
+  },
+  {
+   "literal": "[]",
+   "type": "list",
+   "str": "[]",
+   "repr": "[]",
+   "json": "[]"
+  },
+  {
+   "literal": "{ k = 1, 'q\"' = \"a\" }",
+   "type": "dict",
+   "str": "{'k': 1, 'q\"': 'a'}",
+   "repr": "{'k': 1, 'q\"': 'a'}",
+   "json": "{\"k\": 1, \"q\\\"\": \"a\"}"
+  },
+  {
+   "literal": "{}",
+   "type": "dict",
+   "str": "{}",
+   "repr": "{}",
+   "json": "{}"
+  },
+  {
+   "literal": "1979-05-27T07:32:00Z",
+   "type": "datetime",
+   "str": "1979-05-27 07:32:00+00:00",
+   "repr": "datetime.datetime(1979, 5, 27, 7, 32, tzinfo=datetime.timezone.utc)",
+   "json": {
+    "error": "Object of type datetime is not JSON serializable"
+   }
+  },
+  {
+   "literal": "1979-05-27T07:32:00.999999+01:30",
+   "type": "datetime",
+   "str": "1979-05-27 07:32:00.999999+01:30",
+   "repr": "datetime.datetime(1979, 5, 27, 7, 32, 0, 999999, tzinfo=datetime.timezone(datetime.timedelta(seconds=5400)))",
+   "json": {
+    "error": "Object of type datetime is not JSON serializable"
+   }
+  },
+  {
+   "literal": "1979-05-27T07:32:05-07:00",
+   "type": "datetime",
+   "str": "1979-05-27 07:32:05-07:00",
+   "repr": "datetime.datetime(1979, 5, 27, 7, 32, 5, tzinfo=datetime.timezone(datetime.timedelta(days=-1, seconds=61200)))",
+   "json": {
+    "error": "Object of type datetime is not JSON serializable"
+   }
+  },
+  {
+   "literal": "1979-05-27T00:00:00",
+   "type": "datetime",
+   "str": "1979-05-27 00:00:00",
+   "repr": "datetime.datetime(1979, 5, 27, 0, 0)",
+   "json": {
+    "error": "Object of type datetime is not JSON serializable"
+   }
+  },
+  {
+   "literal": "1979-05-27T07:32:00.5",
+   "type": "datetime",
+   "str": "1979-05-27 07:32:00.500000",
+   "repr": "datetime.datetime(1979, 5, 27, 7, 32, 0, 500000)",
+   "json": {
+    "error": "Object of type datetime is not JSON serializable"
+   }
+  },
+  {
+   "literal": "1979-05-27",
+   "type": "date",
+   "str": "1979-05-27",
+   "repr": "datetime.date(1979, 5, 27)",
+   "json": {
+    "error": "Object of type date is not JSON serializable"
+   }
+  },
+  {
+   "literal": "07:32:00",
+   "type": "time",
+   "str": "07:32:00",
+   "repr": "datetime.time(7, 32)",
+   "json": {
+    "error": "Object of type time is not JSON serializable"
+   }
+  },
+  {
+   "literal": "07:32:05.25",
+   "type": "time",
+   "str": "07:32:05.250000",
+   "repr": "datetime.time(7, 32, 5, 250000)",
+   "json": {
+    "error": "Object of type time is not JSON serializable"
+   }
+  },
+  {
+   "literal": "00:00:00",
+   "type": "time",
+   "str": "00:00:00",
+   "repr": "datetime.time(0, 0)",
+   "json": {
+    "error": "Object of type time is not JSON serializable"
+   }
+  }
+ ]
+}

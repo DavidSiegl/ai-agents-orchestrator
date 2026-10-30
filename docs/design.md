@@ -86,7 +86,7 @@ line per turn.
 
 ## Run metrics
 
-A run that is done writes `metrics.json` in its run directory, one JSON object on one line, and `orchestrator.py
+A run that is done writes `metrics.json` in its run directory, one JSON object on one line, and `orchestrator
 metrics` prints every run's of a project, a line each, oldest first; a run that failed or was interrupted has none
 until a resume finishes it. Its keys:
 
@@ -105,9 +105,9 @@ until a resume finishes it. Its keys:
 So `jq` answers "which check fails most" and "how many rounds does a run take":
 
 ```sh
-orchestrator.py metrics | jq -c -s '[.[].quality_rounds[].fingerprints_by_check | keys[]]
+orchestrator metrics | jq -c -s '[.[].quality_rounds[].fingerprints_by_check | keys[]]
                                     | group_by(.) | map({check: .[0], rounds: length})'
-orchestrator.py metrics | jq -s 'map(.rounds) | add / length'
+orchestrator metrics | jq -s 'map(.rounds) | add / length'
 ```
 
 ### Token usage
@@ -187,7 +187,7 @@ run that failed or was interrupted has no `metrics.json`, so it adds to `passed`
 and a few repeats are a small sample: one trial more or less passed is noise, a shift across tasks and repeats is
 not. Compare results of the same tasks only; a line's `commit`, this checkout's HEAD, says which.
 
-A result line holds `version` (1), `date`, `config`, `run_args`, `engine` (`EVAL_ENGINE`, or `orchestrator.py`),
+A result line holds `version` (1), `date`, `config`, `run_args`, `engine` (`EVAL_ENGINE`, or `target/debug/orchestrator`),
 `commit`, `task`, `repeat`, `passed`, `engine_exit` (the exit status of the engine's run), `seconds`,
 `hidden_test_output` (the last lines of its output, ending with the checks that did not pass), `run_id`, and from
 `metrics.json`, `null` without one: `outcome`, `rounds`, `quality_rounds`, and `tokens`, the four counts summed,
@@ -205,8 +205,9 @@ rebuilds the bundles, and its `--check` fails when one is not of the source. `te
 and runs each hidden test on its task's starting point, which it must reject, and on a solution of it, which it must
 accept. A task changed since a result line was written makes that line incomparable with newer ones.
 
-The runner is a script of its own that runs the engine as a program, not a command of `orchestrator.py`: the Python
-engine is frozen until the Rust engine replaces it (TODO.md), and a program-level runner judges either engine.
+The runner is a script of its own that runs the engine as a program, not a command of the engine: it was written
+while the Python engine was frozen and the Rust one replacing it, so that it judged either, and it judges whichever
+binary `EVAL_ENGINE` names, a release's too.
 
 ## Provenance trailers
 
@@ -378,8 +379,7 @@ Steps 1–3 run on the machine you start the orchestrator from.
    the project's git checkout with an `origin` it can push to, and `gh` logged in unless you use `--no-pr`.
 
 With `--machine`, every herdr command is forwarded with `herdr --machine`. The orchestrator can also run on the
-remote machine itself: copy `orchestrator.py` there and run it with the system `python3` (3.13+) from a herdr
-pane, without `--machine`.
+remote machine itself: copy the binary there and run it from a herdr pane, without `--machine`.
 
 ## Prompt files
 
@@ -397,39 +397,21 @@ saves the texts it started with, so editing or deleting a file does not change a
 
 ## The GUI
 
-The window is a front end to the CLI, not a second way to drive a run. It starts `run` or `resume` as a child
-process of the program it was launched from, so a run started there is the command you would type, which it
-shows at the top of the output, and everything the CLI does applies unchanged: the saved state, `list`, the
-heartbeat, and Ctrl-C's handling, which Stop and a confirmed close reach by sending SIGINT to the child's
-process group. One run at a time keeps the output pane and Stop unambiguous; more runs take more windows.
-
-It shows no live view of a run's phase or handoff files, and leaves per-role harnesses and models to the
-command line. The agents are still in herdr, where you answer the Spec Collector. A run without `--machine`
-still has to start inside a herdr pane, since herdr commands from outside one would reach whichever session is
-focused; listing a local project's runs sends no herdr command, so the window lists them from anywhere.
-
-Its look comes from the octopus in `docs/logo.svg`: a dark navy theme in the logo's colors, on ttk's `clam`
-theme on every platform, since macOS's native one ignores colors. A header shows the logo and the chain of roles
-of the workflow chosen in the form, which is the workflow's definition rather than a run's progress. The run list
-colors each status, and the output pane is terminal-like. Tk 8.6 loads no SVG, so the window embeds
-`docs/logo-64.png`, the logo rendered once, which is also its window and Dock icon.
-
-tkinter is imported only when the window opens, so the CLI keeps running on a Python without it.
-
-Its likely successor, a live UI that also lets you answer the agents, is compared and proposed in
-[ui-options.md](ui-options.md).
+The Python engine had a window of its own, `gui`, a tk form over the CLI that started `run` and `resume` as child
+processes and listed a project's runs. It went with that engine in 0.49.0: the desktop app in `ui/` replaces it, as
+[ui-options.md](ui-options.md) decided, and is read-only so far.
 
 ## Builds and releases
 
 Jenkins does the building and releasing: the tests, the Linux binary (on every pull request and `main` build, so
 a change that breaks it fails before it is merged; not in a quality build) and, on a merge into `main` that raises
-the version, the release with `orchestrator.pyz` and the Linux binary. Jenkins has no Mac, so one GitHub Action
+the version, the release with the Linux binary and desktop app. Jenkins has no Mac, so one GitHub Action
 builds the macOS binary when that release is published and uploads it there. It can only add files to a release
 that exists. It also builds, without uploading, every pull request that touches what goes into the binary, so a
 change that breaks the macOS build fails before it is merged too. Both build with `packaging/build-binary.sh`, so
-the binaries cannot be built or smoke-tested differently. The macOS binary is built only for Apple Silicon and is unsigned, apart from PyInstaller's ad-hoc
-signature, and nobody tests it by hand: the Action's smoke tests, the window opened and closed included, are its
-check. A second Action merges a pull request into `main` once Jenkins passes it, unless a human is to merge it;
+the binaries cannot be built or smoke-tested differently. The macOS binary is built only for Apple Silicon and is
+unsigned, apart from the ad-hoc signature Apple's linker gives every arm64 binary, and nobody tests it by hand: the
+Action's smoke tests are its check. A second Action merges a pull request into `main` once Jenkins passes it, unless a human is to merge it;
 the orchestrator's own pull requests merge the same way, except a draft, which a run opens when it did not succeed
 or conflicts (`.github/workflows/automerge.yml` says which wait).
 

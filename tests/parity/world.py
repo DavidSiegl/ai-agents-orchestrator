@@ -6,8 +6,9 @@ serves Jenkins and PyPI over HTTP from this process; the scenario scripts each o
 with `run` or `start`, and `record` then gives what the run did, normalized (normalize.py), for test_parity.py to
 compare with the scenario's recording.
 
-The engine is `PARITY_ENGINE`, a command line, when set, else this checkout's orchestrator.py on the Python that
-runs the tests: the Rust tickets replay the recordings by pointing it at their binary.
+The engine is `PARITY_ENGINE`, a command line, when set, else this checkout's Rust engine, its orchestrator binary
+built with cargo (tests/rust_engine.py). The recordings are the Python engine's, made before the switch to Rust
+removed it.
 """
 
 import contextlib
@@ -27,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Self
 
 import fakes
+import rust_engine
 from normalize import Normalizer, facts
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -52,10 +54,10 @@ PROJECT_FILES = {
 
 
 def engine_command() -> list[str]:
-    """The engine every world runs, as PARITY_ENGINE gives it, else orchestrator.py on this Python."""
+    """The engine a world runs, as PARITY_ENGINE gives it, else this checkout's (rust_engine.binary)."""
     if command := os.environ.get("PARITY_ENGINE"):
         return shlex.split(command)
-    return [sys.executable, os.path.join(ROOT, "orchestrator.py")]
+    return [rust_engine.binary()]
 
 
 @dataclass
@@ -81,10 +83,31 @@ class Invocation:
         return self.exit
 
     def kill(self) -> None:
-        """Kill it with SIGKILL, and every process it started, as a crash or a lost machine would stop it."""
-        # Gone already when the engine and everything it started have ended.
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(self.process.pid, signal.SIGKILL)
+        """Kill it with SIGKILL, and every process it started, as a crash or a lost machine would stop it: its
+        process group, and each process below it in groups of their own, as the Rust engine starts every command
+        (engine/src/host/process.rs), which a kill of the engine's group alone would leave running. Each is stopped
+        first, until a listing finds none new, so that none starts another between the listing and the kill."""
+        stopped: set[int] = set()
+        try:
+            while True:
+                # The engine's group, then what the listing finds below it that is not stopped yet.
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(self.process.pid, signal.SIGSTOP)
+                below = fakes.descendants(self.process.pid) - {self.process.pid} - stopped
+                if not below:
+                    break
+                for pid in below:
+                    # Each a process of the engine's, or one that ended meanwhile.
+                    with contextlib.suppress(ProcessLookupError):
+                        os.kill(pid, signal.SIGSTOP)
+                stopped |= below
+        finally:
+            # Also when a listing fails: nothing is left stopped.
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(self.process.pid, signal.SIGKILL)
+            for pid in stopped:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
         self.process.wait()
         self.killed = True
 
@@ -116,11 +139,14 @@ class World:
     output). Use it as a context manager: leaving it stops the servers and kills any invocation still running.
     """
 
-    def __init__(self, root: str):
-        """root: an empty directory the world may fill, removed by its owner afterwards. Raises RuntimeError, which
-        fails the scenario, where gitleaks or openssl is not on PATH or openssl cannot make the fake PyPI's
-        certificate."""
+    def __init__(self, root: str, engines: list[list[str]] | None = None):
+        """root: an empty directory the world may fill, removed by its owner afterwards. engines: the engine each
+        invocation runs, as a command line, the n-th for invocation n and the last for every one after it, so that a
+        run one engine started and was killed in is resumed by another; [engine_command()] when not given. Raises
+        RuntimeError, which fails the scenario, where gitleaks or openssl is not on PATH or openssl cannot make the
+        fake PyPI's certificate."""
         self.root = os.path.realpath(root)
+        self.engines = engines or [engine_command()]
         self.project = os.path.join(self.root, "project")
         self.origin = os.path.join(self.root, "origin.git")
         self.config = os.path.join(self.root, "config", "ai-agents-orchestrator")
@@ -281,7 +307,7 @@ class World:
         out = os.path.join(self.root, "out", str(n))
         with open(out, "w") as stdout, open(out + ".err", "w") as stderr:
             process = subprocess.Popen(  # noqa: S603 - the engine under test, with the scenario's arguments
-                [*engine_command(), *args], cwd=cwd or self.project, env=self._env(n), stdin=subprocess.DEVNULL,
+                [*self.engines[min(n, len(self.engines)) - 1], *args], cwd=cwd or self.project, env=self._env(n), stdin=subprocess.DEVNULL,
                 stdout=stdout, stderr=stderr, start_new_session=True)
         self.normalizer.pid(process.pid, n)
         with self.ledger.change() as state:
@@ -330,7 +356,7 @@ class World:
                     "JENKINS_URL": self._url(self._servers.jenkins), "JENKINS_USER": JENKINS_USER,
                     "JENKINS_TOKEN": JENKINS_TOKEN, "no_proxy": "127.0.0.1,localhost"})
         env["https_proxy"] = self._url(self._servers.pypi)
-        env["SSL_CERT_FILE"] = os.path.join(self.root, "pypi-cert.pem")
+        env["SSL_CERT_FILE"] = os.path.join(self.root, "pypi-ca.pem")
         return env
 
     # -- Making the world -------------------------------------------------------
@@ -394,18 +420,27 @@ class World:
         return servers
 
     def _make_certificate(self) -> None:
-        """Make pypi.org's certificate for the PyPI server, self-signed, which the engine trusts by SSL_CERT_FILE.
-        Raises RuntimeError, naming openssl, where it fails."""
-        # openssl as found on PATH by World.__init__'s check.
-        proc = subprocess.run(  # noqa: S603
-            ["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",  # noqa: S607
-             "-nodes",
-             "-keyout", os.path.join(self.root, "pypi-key.pem"), "-out", os.path.join(self.root, "pypi-cert.pem"),
-             "-days", "30", "-subj", "/CN=pypi.org", "-addext", "subjectAltName=DNS:pypi.org"],
-            capture_output=True, check=False)
-        if proc.returncode != 0:
-            raise RuntimeError(f"openssl could not make the fake PyPI's certificate, exit status {proc.returncode}: "
-                               f"{proc.stderr.decode(errors='replace').strip()}")
+        """Make pypi.org's certificate for the PyPI server, signed by a certificate authority of the world's own, which
+        the engine trusts by SSL_CERT_FILE: a leaf under a CA, as PyPI's is, since rustls refuses a server certificate
+        that is itself a CA's, as a self-signed one is (CaUsedAsEndEntity). Raises RuntimeError, naming openssl,
+        where it fails."""
+        def path(name: str) -> str:
+            return os.path.join(self.root, name)
+        key = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-days", "30"]
+        commands = [
+            ["openssl", "req", "-x509", *key, "-keyout", path("pypi-ca-key.pem"), "-out", path("pypi-ca.pem"),
+             "-subj", "/CN=Parity CA", "-addext", "basicConstraints=critical,CA:TRUE",
+             "-addext", "keyUsage=critical,keyCertSign"],
+            ["openssl", "req", "-x509", *key, "-CA", path("pypi-ca.pem"), "-CAkey", path("pypi-ca-key.pem"),
+             "-keyout", path("pypi-key.pem"), "-out", path("pypi-cert.pem"), "-subj", "/CN=pypi.org",
+             "-addext", "subjectAltName=DNS:pypi.org", "-addext", "basicConstraints=critical,CA:FALSE"],
+        ]
+        for command in commands:
+            # openssl as found on PATH by World.__init__'s check.
+            proc = subprocess.run(command, capture_output=True, check=False)  # noqa: S603
+            if proc.returncode != 0:
+                raise RuntimeError(f"openssl could not make the fake PyPI's certificate, exit status "
+                                   f"{proc.returncode}: {proc.stderr.decode(errors='replace').strip()}")
 
     @staticmethod
     def _url(server: http.server.HTTPServer) -> str:

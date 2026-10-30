@@ -1,0 +1,55 @@
+[package]
+name = "octoflow-engine"
+version = "0.49.0"
+description = "The orchestrator's engine, ported from orchestrator.py (the rust-engine spec)"
+edition = "2021"
+publish = false
+
+[dependencies]
+# The command line (crate::cli): its subcommands, flags and usage errors, by the builder API, which can lay out a flag
+# per role and share groups of flags between subcommands as argparse's parents do. 4.6.7 is from 2026-09-14.
+clap = { version = "4.6.7", default-features = false, features = ["std", "help", "usage", "error-context", "string"] }
+# The machine's local time, as Python's time.strftime and a naive datetime's timestamp() read it (py/datetime.rs): its
+# zone from TZ, else /etc/localtime, else UTC, and a zone's rules from /usr/share/zoneinfo, with no database of its
+# own. 0.2.38 is from 2026-10-06; ui/src-tauri's crates had it in Cargo.lock already. Approved by the user for ticket
+# 08, 2026-10-29.
+jiff = { version = "0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
+# Process groups and signals, the user's id, the machine's name and its monotonic clock, through nix's safe API: a Host
+# command's group is killed when it runs out of time or at a Ctrl-C, a SIGTERM or a SIGHUP (host/process.rs), which a
+# thread waits for and the program ends by (interrupt.rs), a run's owner record names its host and pid (runs.rs), and a
+# run's deadlines are kept on the clock Python's time.monotonic reads (workflow/system.rs).
+nix = { version = "0.31", default-features = false, features = ["hostname", "signal", "time", "user"] }
+serde = "1"
+# float_roundtrip: a float reads as the nearest f64, as Python reads it, so that state.json writes back as it was.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sha2 = "0.10"
+# Jenkins and PyPI, over HTTP or HTTPS (http.rs): blocking, and with rustls rather than the system's TLS library, given
+# the certificates it trusts (root_certs; ureq's own Mozilla roots only as the fallback there); gzip and the other
+# extras are left out, since neither server is asked for them.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+# The certificates TLS trusts, found as OpenSSL finds them for Python: SSL_CERT_FILE and SSL_CERT_DIR, else the
+# system's bundle and certificate directory (http.rs, root_certs). Approved by the user for ticket 07, 2026-10-28.
+rustls-native-certs = "0.8.5"
+# Where the system keeps its certificates, when the environment names none (http.rs, root_certs). 0.2.1 in Cargo.lock:
+# 0.2.2 is from 2026-10-26, under two weeks old. Approved by the user for ticket 07, 2026-10-28.
+openssl-probe = "0.2.1"
+# serve's HTTP server on 127.0.0.1 (serve.rs), blocking, a thread per request; also the local server the tests of
+# http.rs and ci.rs answer requests from. Approved by the user for serve (the rust-engine spec's Decisions).
+tiny_http = "0.12"
+# preserve_order: a table's keys come in the file's order, as tomllib gives them, so a table with two problems is
+# refused naming the first, as the Python engine refuses it.
+toml = { version = "1", default-features = false, features = ["parse", "preserve_order", "serde", "std"] }
+
+# The orchestrator program: crate::cli::main.
+[[bin]]
+name = "orchestrator"
+path = "src/main.rs"
+
+# The engine's SIGINT, SIGTERM and SIGHUP, in processes of its own, which need a main of their own (the test's
+# module doc).
+[[test]]
+name = "signals"
+harness = false
+
+[lints]
+workspace = true
