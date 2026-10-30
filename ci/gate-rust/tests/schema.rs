@@ -361,5 +361,10 @@ fn a_fn_body_is_listed_as_the_flow_cognitive_complexity_weighs() {
     let closure = json!({"kind": "closure", "line": 55, "body": []});
     let printed_if = if_(56, json!([]), json!([]), json!([]), false);
     assert_eq!(flow("not_flow"), json!([call(55, &["g"]), closure, printed_if, call(58, &["Ok"])]));
-    assert_eq!(function(&read("fns.rs"), "declared")["flow"], Value::Null);
+    let fns = read("fns.rs");
+    assert_eq!(function(&fns, "declared")["flow"], Value::Null);
+    // A fn another fn holds, also in a closure there, is in its holder's flow alone.
+    assert_eq!(function(&fns, "nested")["flow"], Value::Null);
+    assert_eq!(function(&fns, "in_closure")["flow"], Value::Null);
+    assert_eq!(function(&fns, "in_const")["flow"], json!([]));
 }

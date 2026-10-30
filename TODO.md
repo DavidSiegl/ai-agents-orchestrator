@@ -85,14 +85,24 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Open issues
 
-- **A file that a `#[cfg(test)] mod name;` declaration takes in is judged as code.** The spec of the Rust checks
-  (requirement 2) places Rust's tests in a `tests/` directory, a `tests.rs` and an inline `#[cfg(test)]` module;
-  `_complexity_exempt` and `_rust_scored_functions` in `gate.py` follow it. The engine keeps its fakes and
-  `test_support.rs` in files that a parent declares under `#[cfg(test)]` (`engine/src/host.rs:24` on rust-engine), so
-  `cognitive-complexity` judges them: at rust-engine `476b770`, 3 of the 21 engine functions over the limit are theirs
-  (`FakeState::git`, `FakeJenkinsState::answer`, `helper_cases`). Found by gate-rust-checks ticket 03 (2026-10-30).
-  Closes with the user's ruling on the spec's definition, and, if those files are tests, the helper listing each
-  out-of-line `mod name;` with its `cfg_test`, so that the gate can follow a declaration to its file.
+- **Test code outside the places the spec names is judged as code.** The spec of the Rust checks (requirement 2)
+  places Rust's tests in a `tests/` directory, a `tests.rs` and an inline `#[cfg(test)]` module; `_complexity_exempt`
+  and `_rust_scored_functions` in `gate.py` follow it. So `cognitive-complexity` judges a file that a parent takes in
+  with `#[cfg(test)] mod name;`, as the engine keeps its fakes and `test_support.rs` (`engine/src/host.rs:24` on
+  rust-engine): at rust-engine `476b770`, 3 of the 21 engine functions over the limit are theirs (`FakeState::git`,
+  `FakeJenkinsState::answer`, `helper_cases`). Found by gate-rust-checks ticket 03 (2026-10-30). And, as cross-review
+  108 put it (F4): "A file-level `#[cfg(test)] fn` or `#[cfg(test)] impl`, or a `#[test]` fn outside the places
+  requirement 2 names, is judged against 15." Closes with the user's ruling on the spec's definition, and, if those
+  are tests, the helper listing each out-of-line `mod name;` with its `cfg_test`, so that the gate can follow a
+  declaration to its file, and a `cfg_test` of each fn's own and its impl's attributes.
+- **A macro whose arguments are no expressions separated by commas adds nothing to a Rust fn's score.** The helper's
+  `flow` reads a macro's arguments only where they parse that way (`FlowWalker::visit_macro` in
+  `ci/gate-rust/src/main.rs`), as its `asserts` do. Raised by cross-review 108 (F3, 2026-10-30): "A macro whose
+  arguments do not parse as comma-separated expressions (`vec![if a {..} else {..}; n]`, `matches!(x, P if a && b)`,
+  `tracing::info!(target: "x", ..)`, `select!{..}`) is dropped silently, so its branches, loops and closures add
+  nothing to the score." Clippy's own `cognitive_complexity` reads no macro either. Closes with the helper parsing the
+  common other shapes (`expr; n`, `expr, pattern if guard`, `name: expr` arguments) and a `macro` node, unread, that
+  gate.py can count or report.
 - **A Rust fn in a `#[cfg(test)]` module takes no part in pairing a function with its base.** `_rust_scored_functions`
   leaves such fns out on both sides, where a Python file under `tests/` stays in `_base_scores`' pool as a file the
   check does not judge. So a fn moved unchanged into a test module cannot keep its own base before a copy of it

@@ -3850,21 +3850,25 @@ def _base_scores(change: GateChange,
     in its file's base. A function of judged takes no base in a file _complexity_exempt exempts, since the tests were
     never held to the limit; and a base that cannot be read or parsed has no functions.
 
-    The functions of every other changed Python or Rust file (_is_scored_source), which the check does not judge, such
-    as one _complexity_exempt exempts or one the change adds no line to, pair by body too, from any base, and in
+    The functions of every other changed Python file (_is_python_source), and Rust file (_is_rust_source) when judged
+    holds Rust, which the check does not judge, such as one _complexity_exempt exempts or one the change adds no line
+    to, pair by body too, from any base, and in
     each step before the judged ones, so that one moved unchanged into such a file is still itself and lends its base
     to no copy, whatever the copy's name.
 
     The cost of bodies first: a copy of a function whose original the change edits takes the original's old score,
     as if the original were the new function under its name.
     """
-    unjudged = {new: _working_functions(change, new)[0] or [] for _, new in change.files
-                if new and new not in judged and _is_scored_source(change, new)}
+    # Rust's functions pair only with Rust's, so a change's Rust takes part, and starts the helper, only where the
+    # check judges some.
+    rust = any(path.endswith(".rs") for path in judged)
+    unjudged = {new: _working_functions(change, new)[0] or [] for _, new in change.files if new and new not in judged
+                and ((rust and _is_rust_source(change, new)) or _is_python_source(change, new))}
     working = {**unjudged, **{path: functions for path, (functions, _) in judged.items()}}
     old_paths = {new: old for old, new in change.files if new}
     homes = {path: old_paths.get(path, path) for path in working}
     pool = _BasePool({old: _base_functions(change, old) for old, new in change.files
-                      if old and (new in working or old.endswith(".rs") or _was_python_source(change, old))},
+                      if old and (new in working or (rust and old.endswith(".rs")) or _was_python_source(change, old))},
                      {old: working.get(new, []) if new else [] for old, new in change.files if old})
     for same_name, same_file in _BODY_STEPS:
         for path in [*unjudged, *judged]:
@@ -4037,12 +4041,6 @@ def _is_rust_source(change: GateChange, path: str) -> bool:
     return path.endswith(".rs") and not _is_link_or_special(change, path)
 
 
-def _is_scored_source(change: GateChange, path: str) -> bool:
-    """Whether the cognitive-complexity check scores the working tree's file at path: Python source, as
-    _is_python_source tells it, or Rust, as _is_rust_source does."""
-    return _is_rust_source(change, path) or _is_python_source(change, path)
-
-
 def _was_python_source(change: GateChange, path: str) -> bool:
     """Whether the change's base holds Python source at path, as _holds_python tells it: True for any path named
     *.py, without asking git; for another, False when the base holds no file there or git cannot read it."""
@@ -4115,10 +4113,8 @@ def _rust_document(change: GateChange, path: str, *, base: bool) -> dict | None:
     """The gate-rust helper's document of the change's file at path, at the base for base, else in the working tree,
     as GateChange.rust_files reads it; None where it read no such file, as when it could not run."""
     files, _ = change.rust_files
-    for rust in files:
-        if (rust.old_path if base else rust.new_path) == path:
-            return rust.before if base else rust.after
-    return None
+    return next(((rust.before if base else rust.after) for rust in files
+                 if (rust.old_path if base else rust.new_path) == path), None)
 
 
 def _rust_scored_functions(document: dict) -> list[_ScoredFunction]:
@@ -4126,7 +4122,8 @@ def _rust_scored_functions(document: dict) -> list[_ScoredFunction]:
     judges as one, scored, in the order they start: a fn with a body that no other fn holds, as _ScoredFunction says
     of Python's functions, outside every #[cfg(test)] module, where Rust's tests are (with _complexity_exempt's)."""
     tests = [(m["attrs_line"], m["end"]) for m in document["mods"] if m["cfg_test"]]
-    judged = [f for f in document["fns"] if f["flow"] is not None and all(h["kind"] != "fn" for h in f["holders"])
+    # The helper gives a flow to just the fns with a body that no fn holds.
+    judged = [f for f in document["fns"] if f["flow"] is not None
               and not any(first <= f["attrs_line"] <= last for first, last in tests)]
     recursive = _rust_recursive_functions(judged)
     return [_ScoredFunction(_rust_name(f), f["attrs_line"], f["end"], f["line"],
@@ -4135,16 +4132,24 @@ def _rust_scored_functions(document: dict) -> list[_ScoredFunction]:
 
 
 def _rust_name(fn: dict) -> str:
-    """The name of fn, a gate-rust helper's fn, qualified by the items that hold it and joined by ::, as
-    `engine::Workflow<T>::poll`: an impl by its type, written without the helper's spaces around punctuation, and a
-    trait by its name."""
-    names = [re.sub(r" (?=\W)|(?<=\W) ", "", h["name"]) for h in fn["holders"]]
+    """The name of fn, a gate-rust helper's fn, qualified by the items that hold it and joined by ::, as Rust writes
+    such a path: `engine::Workflow<'a>::poll`, `<Point as fmt::Display>::fmt`; an impl's type and trait written
+    without the spaces the helper puts around punctuation, so that the impls of two traits for one type, as of
+    `From<A>` and `From<B>`, name their fns apart."""
+    def compact(text: str) -> str:
+        return re.sub(r" (?=\W)|(?<=\W) ", "", text)
+
+    names = [(f"<{compact(h['name'])} as {compact(h['trait'])}>" if h["trait"] else compact(h["name"]))
+             if h["kind"] == "impl" else h["name"] for h in fn["holders"]]
     return "::".join([*names, fn["name"]])
 
 
-# A Rust fn as a call names it, for _rust_recursive_functions: the inline modules it lies in, outermost first; the
-# first identifier of the type of the impl or the name of the trait it is in, None outside one; and its name.
-_RustFnKey = tuple[tuple[str, ...], str | None, str]
+# A Rust fn as a call names it, for _rust_recursive_functions: the inline modules it lies in, outermost first; the type
+# of the impl it is in, None outside one; the trait that impl implements, or that it is declared in, None for none;
+# and its name. A type and a trait are each the identifier _rust_path_name gives. _ANY_TRAIT in place of the trait
+# stands for any trait's impl of the type, or its inherent impl.
+_RustFnKey = tuple[tuple[str, ...], str | None, str | None, str]
+_ANY_TRAIT = "*"
 
 
 def _rust_recursive_functions(functions: list[dict]) -> set[int]:
@@ -4153,38 +4158,60 @@ def _rust_recursive_functions(functions: list[dict]) -> set[int]:
     others of them, the calls of the closures and fns their bodies hold included.
 
     A call resolves by its path, within the modules the caller lies in: `f(...)` to the fn f outside any impl or
-    trait; `self.f(...)`, `Self::f(...)` to the fn f of an impl of the type the caller's impl is of, or of the
-    caller's trait; and `T::f(...)` to the fn f of an impl of T or of the trait T. A longer path, such as
-    `crate::f(...)` or `super::f(...)`, `m::f(...)` for a module m, a local closure of a fn's name, a method on
-    anything but self and a call through a trait object resolve to none."""
-    def scope(fn: dict) -> tuple[tuple[str, ...], str | None]:
-        """The modules fn lies in and the type or trait of its innermost impl or trait, by its first identifier."""
-        mods = tuple(h["name"] for h in fn["holders"] if h["kind"] == "mod")
-        owners = [re.findall(r"\w+", h["name"]) for h in fn["holders"] if h["kind"] in ("impl", "trait")]
-        return mods, owners[-1][0] if owners and owners[-1] else None
-
+    trait; `self.f(...)` and `Self::f(...)` to the fn f of the caller's impl or trait, failing that of an inherent impl
+    of its type, failing that of each impl of its type that has one; and `T::f(...)` to the fn f of an inherent impl
+    of the type T, failing that of each impl of T that has one, failing that of the trait T. Not to a trait's default
+    fn from an impl of it. A longer path, such as `crate::f(...)` or `super::f(...)`,
+    `m::f(...)` for a module m, a local closure of a fn's name, a method on anything but self and a call through a
+    trait object resolve to none."""
+    scopes = [_rust_scope(fn) for fn in functions]
     by_key: dict[_RustFnKey, list[int]] = collections.defaultdict(list)
-    for i, fn in enumerate(functions):
-        by_key[(*scope(fn), fn["name"])].append(i)
+    for i, (fn, (mods, typ, trait)) in enumerate(zip(functions, scopes, strict=True)):
+        by_key[(mods, typ, trait, fn["name"])].append(i)
+        if typ:
+            by_key[(mods, typ, _ANY_TRAIT, fn["name"])].append(i)
     edges = []
-    for fn in functions:
-        mods, owner = scope(fn)
-        keys = {_rust_callee(path, mods, owner) for path in _rust_calls(fn["flow"], nested=True)}
-        edges.append([j for key in keys if key for j in by_key.get(key, [])])
+    for fn, scope in zip(functions, scopes, strict=True):
+        edges.append([j for path in _rust_calls(fn["flow"], nested=True)
+                      for j in next((by_key[key] for key in _rust_callees(path, *scope) if key in by_key), [])])
     return _recursing(edges)
 
 
-def _rust_callee(path: list[str], mods: tuple[str, ...], owner: str | None) -> _RustFnKey | None:
-    """The fn that a call of path makes from a fn in the modules mods and the impl or trait owner, as _RustFnKey has
-    them, as _rust_recursive_functions resolves calls; None for a call it resolves to none."""
+def _rust_scope(fn: dict) -> tuple[tuple[str, ...], str | None, str | None]:
+    """The modules, type and trait of fn, a gate-rust helper's fn, as _RustFnKey has them: those of its innermost impl
+    or trait."""
+    mods = tuple(h["name"] for h in fn["holders"] if h["kind"] == "mod")
+    owners = [h for h in fn["holders"] if h["kind"] in ("impl", "trait")]
+    if not owners:
+        return mods, None, None
+    if owners[-1]["kind"] == "trait":
+        return mods, None, owners[-1]["name"]
+    return mods, _rust_path_name(owners[-1]["name"]), _rust_path_name(owners[-1]["trait"] or "")
+
+
+def _rust_path_name(text: str) -> str | None:
+    """The identifier that names the type or trait text, a path as the helper writes it, such as
+    `& 'a mut std :: fmt :: Formatter < '_ >`: its last identifier before any generic arguments, `Formatter`, which is
+    what a call `Formatter::f(...)` names it by; None for none, as for `()` or "", which stands for no trait."""
+    words = re.findall(r"\w+", text.split("<", 1)[0])
+    return words[-1] if words else None
+
+
+def _rust_callees(path: list[str], mods: tuple[str, ...], typ: str | None, trait: str | None) -> list[_RustFnKey]:
+    """The fns, as _RustFnKey has them, that a call of path from a fn of the modules mods, type typ and trait trait may
+    make, as _rust_recursive_functions resolves calls, in the order it tries them; none for a call it resolves to
+    none."""
     match path:
         case [name]:
-            return mods, None, name
+            return [(mods, None, None, name)]
         case ["self" | "Self", name]:
-            return (mods, owner, name) if owner else None
+            # A fn outside any impl or trait has no self, and a trait's own fn, whose typ is None, no inherent impl.
+            if typ is None:
+                return [(mods, None, trait, name)] if trait else []
+            return [(mods, typ, trait, name), (mods, typ, None, name), (mods, typ, _ANY_TRAIT, name)]
         case [named, name]:
-            return mods, named, name
-    return None
+            return [(mods, named, None, name), (mods, named, _ANY_TRAIT, name), (mods, None, named, name)]
+    return []
 
 
 # The parts of a flow node of the gate-rust helper's that hold nodes, by name, whatever its kind

@@ -146,14 +146,15 @@ or a local of the same name is not one to the module's function; not through an 
 Rust is judged the same way, with the same limit, base and findings, read through the [gate-rust
 helper](#reading-rust-the-gate-rust-helper). A function is a `fn` with a body that no other `fn` holds, in an `impl`, a
 `trait` or an inline module or not, named by them as `checks::Workflow<T>::poll`; a `fn` or closure inside it is part of
-it. Its lines start at its first outer attribute, doc comments included. Rust's tests are exempt as Python's are: every
-file in a directory named `tests`, at any depth, or named `tests.rs`, and every `fn` in an inline module marked
-`#[cfg(test)]`. Each `if`, `else if`, `else`, `if let`, `match`, `loop`, `while`, `while let`, `for` and `let ... else`
-scores as Python's branches do; a `match` arm adds nothing, as a `switch`'s case does not in the paper; a run of `&&`
-and `||` is a sequence of boolean operators, a labelled `break` or `continue` a point, and `?` nothing. Recursion
-follows calls by path within the file: `f(...)`, `self.f(...)`, `Self::f(...)` and `Type::f(...)`, not `crate::f(...)`
-or a module's `m::f(...)`. A change to Rust that the gate cannot read, as without `--rust-syntax`, is a `not-run`
-finding, which fails the gate as `not-scored` does.
+it. Its lines start at its first outer attribute, doc comments included. Rust's tests are exempt as Python's are, where
+the spec of the Rust checks places them: every file in a directory named `tests`, at any depth, or named `tests.rs`, and
+every `fn` in an inline module marked `#[cfg(test)]`. Nothing else is: a `#[test]` or `#[cfg(test)]` `fn` outside those,
+and a file that a `#[cfg(test)] mod name;` takes in, are judged (`TODO.md`). Each `if`, `else if`, `else`, `if let`,
+`match`, `loop`, `while`, `while let`, `for` and `let ... else` scores as Python's branches do; a `match` arm adds
+nothing, as a `switch`'s case does not in the paper; a run of `&&` and `||` is a sequence of boolean operators, a
+labelled `break` or `continue` a point, and `?` nothing. Recursion follows calls by path within the file: `f(...)`,
+`self.f(...)`, `Self::f(...)` and `Type::f(...)`, not `crate::f(...)` or a module's `m::f(...)`. A change to Rust that
+the gate cannot read, as without `--rust-syntax`, is a `not-run` finding, which fails the gate as `not-scored` does.
 
 The comment above `COGNITIVE_COMPLEXITY_LIMIT` in `gate.py` says how each Python and Rust construct maps to the
 paper's rules. Each of these is a finding:
@@ -548,11 +549,12 @@ as git numbers them. Each document is an object:
   - `body_digest` is 16 hexadecimal digits that are the same for two bodies of the same tokens, whatever their layout
     and comments, and differ otherwise but by a 64-bit hash's collision; `null` for a `fn` with no body. It is the
     helper's own hash, so compare digests only within one run of one build;
-  - `flow` is what its body does that cognitive complexity weighs, as a list of nodes in the order they start, or
-    `null` for a `fn` with no body. The helper says what the code is; how much each node weighs is `gate.py`'s (the
-    comment above `COGNITIVE_COMPLEXITY_LIMIT`). Each node is an object with a `kind` and the `line` it starts on, and
-    lists of nodes for its parts. Any other syntax is no node: what it holds stands in the list where it is, so the
-    nodes of `f(if a { b } else { c })` are those of the `if`, after the `call` of `f`. The kinds:
+  - `flow` is what its body does that cognitive complexity weighs, as a list of nodes in the order they start; `null`
+    for a `fn` with no body, and for one that another `fn` holds, whose flow is in that one's, as a `fn` node. The
+    helper says what the code is; how much each node weighs is `gate.py`'s (the comment above
+    `COGNITIVE_COMPLEXITY_LIMIT`). Each node is an object with a `kind` and the `line` it starts on, and lists of nodes
+    for its parts. Any other syntax is no node: what it holds stands in the list where it is, so the nodes of
+    `f(if a { b } else { c })` are those of the `if`, after the `call` of `f`. The kinds:
     - `if`: `{"cond", "then", "else", "else_if"}`, an `if` or `if let`: `cond` its condition, `then` its block, and
       `else` its `else` branch, `null` for none. `else_if` is true when that branch is an `if` written `else if`, which
       is then `else`'s one node, and false for `else { ... }`, an `if` inside it included;

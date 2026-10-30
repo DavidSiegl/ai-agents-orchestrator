@@ -319,8 +319,8 @@ class TestGate(RepositoryTest):
         repo, its Rust read with the gate-rust helper built from this tree."""
         out, err = io.StringIO(), io.StringIO()
         with contextlib.chdir(self.repo), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            status = gate.main(["--base", base, "--rust-syntax", gate_rust(), *args])
-        return status, out.getvalue(), err.getvalue()
+            exit_status = gate.main(["--base", base, "--rust-syntax", gate_rust(), *args])
+        return exit_status, out.getvalue(), err.getvalue()
 
     def add_lines(self, n, start=4):
         with open(os.path.join(self.repo, "f.py"), "a") as f:
@@ -5058,6 +5058,7 @@ class TestRustCognitiveComplexity(unittest.TestCase):
         self.assertEqual(rust_score("""
             fn outer() {
                 fn inner(n: u8) { inner(n) }                    // +1
+                fn holder() { fn deeper() { holder() } }
                 struct Local;
                 impl Local {
                     fn method(&self) { self.method() }          // +1
@@ -5083,14 +5084,56 @@ class TestRustCognitiveComplexity(unittest.TestCase):
             }
             trait T {
                 fn default(&self) { self.default() }                 // +1
+                fn by_trait() { T::by_trait() }                      // +1
+            }
+            impl T for S {
+                fn default(&self) { self.by_self() }
+            }
+            impl std::fmt::Display for S {
+                fn fmt(&self) { self.fmt() }                         // +1
+            }
+            impl std::fmt::Debug for S {
+                fn fmt(&self) {}
+            }
+            impl<'a> T for &'a mut S {
+                fn by_trait() { Self::by_trait() }                   // +1
+            }
+            mod n {
+                pub struct S2;
+                impl self::S2 {
+                    pub fn by_path() { S2::by_path() }               // +1
+                }
+            }
+            trait A { fn run(&self); fn step(&self); }
+            trait B { fn run(&self); fn step(&self); }
+            impl A for S {
+                fn run(&self) { self.step() }
+                fn step(&self) {}
+            }
+            impl B for S {
+                fn run(&self) {}
+                fn step(&self) { self.run() }
+            }
+            impl S {
+                fn inherent(&self) { self.by_impl() }                // +1
+            }
+            impl T for S {
+                fn by_impl(&self) { self.inherent() }                // +1
+            }
+            impl Clone for S {
+                fn clone(&self) -> S { S::clone(self) }              // +1
             }
             mod m {
                 pub fn countdown() { crate::countdown(1) }
-                pub fn ping() { super::pong(1) }
+                pub fn ping() { super::pong(1); crate::m::ping() }
             }
         """)
         self.assertEqual(scores, {"countdown": 2, "ping": 1, "pong": 1, "caller": 0, "S::by_self": 1,
                                   "S::by_type": 1, "S::by_alias": 1, "S::by_free": 0, "T::default": 1,
+                                  "T::by_trait": 1, "<S as T>::default": 0, "<S as std::fmt::Display>::fmt": 1,
+                                  "<S as std::fmt::Debug>::fmt": 0, "<&'a mut S as T>::by_trait": 1, "n::self::S2::by_path": 1, "<S as A>::run": 0,
+                                  "<S as A>::step": 0, "<S as B>::run": 0, "<S as B>::step": 0, "S::inherent": 1,
+                                  "<S as T>::by_impl": 1, "<S as Clone>::clone": 1,
                                   "m::countdown": 0, "m::ping": 0})
 
     def test_question_marks_blocks_and_a_macro_s_tokens_add_nothing_but_its_expression_arguments_count(self):
@@ -5123,8 +5166,8 @@ class TestRustCognitiveComplexity(unittest.TestCase):
             #[cfg(all(test, unix))]
             fn only_in_tests() {}
         """)
-        self.assertEqual(scores, {"free": 0, "Shape::defaulted": 0, "Wrapper<'a,T>::fmt": 0, "inner::spread": 0,
-                                  "only_in_tests": 0})
+        self.assertEqual(scores, {"free": 0, "Shape::defaulted": 0, "<Wrapper<'a,T> as std::fmt::Debug>::fmt": 0,
+                                  "inner::spread": 0, "only_in_tests": 0})
 
 
 class TestComplexityExempt(unittest.TestCase):
@@ -5188,15 +5231,24 @@ class TestTooComplexRustFunctions(RepositoryTest):
         self.assertEqual(self.found(), [("engine/src/calc.rs", self.fn_line("big"),
                                          "`big`: cognitive complexity 22, 20 at the base; the limit is 15.")])
 
+    def new_big(self):
+        """Add a new fn over the limit to a file of its own, which every check below finds beside what it expects:
+        the gate before Rust's scoring finds nothing."""
+        self.put("engine/src/fresh.rs", rust_flat("fresh", 16))
+        self.git("add", "engine/src/fresh.rs")
+        return [("engine/src/fresh.rs", 1, "`fresh`: cognitive complexity 16, a new function; the limit is 15.")]
+
     def test_a_fn_over_the_limit_that_the_change_leaves_no_worse_is_not_found(self):
         self.edit("engine/src/calc.rs", "        x += 19;\n", "        x += 190;\n")
-        self.assertEqual(self.found(), [])
+        fresh = self.new_big()
+        self.assertEqual(self.found(), fresh)
 
     def test_a_fn_moved_unchanged_to_another_file_keeps_its_base(self):
         self.put("engine/src/calc.rs", rust_flat("grow", 14) + "\n" + rust_flat("small", 3))
         self.put("engine/src/big.rs", "/// Moved.\n" + rust_flat("big", 20))
         self.git("add", "-A")
-        self.assertEqual(self.found(), [])
+        fresh = self.new_big()
+        self.assertEqual(self.found(), fresh)
 
     def test_a_fn_moved_unchanged_out_of_a_file_the_change_deletes_keeps_its_base(self):
         self.git("rm", "--quiet", "engine/src/calc.rs")
@@ -5205,7 +5257,8 @@ class TestTooComplexRustFunctions(RepositoryTest):
         self.git("add", "-A")
         self.assertCountEqual(gate.GateChange.from_tree(self.repo, self.base).files,
                               [("engine/src/calc.rs", None), (None, "engine/src/big.rs")])
-        self.assertEqual(self.found(), [])
+        fresh = self.new_big()
+        self.assertEqual(self.found(), fresh)
 
     def test_a_fn_moved_unchanged_into_the_tests_keeps_its_base_before_a_copy_can(self):
         self.put("engine/src/calc.rs", rust_flat("grow", 14) + "\n" + rust_flat("small", 3))
@@ -5219,9 +5272,24 @@ class TestTooComplexRustFunctions(RepositoryTest):
         big = rust_flat("big_test", 20)
         self.put("engine/tests/cli.rs", big)
         self.put("engine/src/tests.rs", big)
+        self.put("engine/tests/broken.rs", "fn broken( {\n")
         self.put("engine/src/calc.rs", self.BASE + "#[cfg(test)]\nmod tests {\n" + big + "}\n")
         self.git("add", "-A")
-        self.assertEqual(self.found(), [])
+        fresh = self.new_big()
+        self.assertEqual(self.found(), fresh)
+
+    def test_the_impls_of_two_traits_for_one_type_name_their_fns_apart(self):
+        def impls(a, b):
+            return (f"struct X;\nimpl From<u8> for X {{\n{rust_flat('from', a)}}}\n"
+                    f"impl From<u16> for X {{\n{rust_flat('from', b)}}}\n")
+
+        self.put("engine/src/x.rs", impls(16, 20))
+        self.git("add", "engine/src/x.rs")
+        self.git("commit", "--quiet", "-m", "x")
+        self.base = self.git("rev-parse", "HEAD").strip()
+        self.put("engine/src/x.rs", impls(18, 20))
+        why = "`<X as From<u8>>::from`: cognitive complexity 18, 16 at the base; the limit is 15."
+        self.assertEqual(self.found(), [("engine/src/x.rs", 3, why)])
 
     def test_a_rust_file_that_does_not_parse_is_not_scored(self):
         self.put("engine/src/calc.rs", self.BASE + "fn broken( {\n")
@@ -5240,12 +5308,19 @@ class TestTooComplexRustFunctions(RepositoryTest):
         self.git("add", "-A")
         self.assertEqual(self.found(os.path.join(self.outside, "gate-rust")), [])
 
-    def test_a_change_without_rust_starts_no_helper(self):
+    def test_a_change_that_judges_no_rust_starts_no_helper(self):
+        # The deleted calc.rs is Rust the change touches, which no function of the change's Python can pair with.
+        started = os.path.join(self.outside, "started")
+        helper = os.path.join(self.outside, "gate-rust")
+        with open(helper, "w") as f:
+            f.write(f"#!/bin/sh\ntouch '{started}'\nexit 1\n")
+        os.chmod(helper, 0o700)
+        self.git("rm", "--quiet", "engine/src/calc.rs")
         self.put("calc.py", flat("new_big", 16))
         self.git("add", "-A")
-        missing = os.path.join(self.outside, "gate-rust")
-        self.assertEqual([m for _, _, m in self.found(missing)],
+        self.assertEqual([m for _, _, m in self.found(helper)],
                          ["`new_big`: cognitive complexity 16, a new function; the limit is 15."])
+        self.assertFalse(os.path.exists(started))
 
 
 class TestChangedPythonFiles(RepositoryTest):

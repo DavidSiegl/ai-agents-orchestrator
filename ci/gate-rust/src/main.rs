@@ -183,7 +183,8 @@ impl Collector {
             asserts: Vec::new(),
             discards: Vec::new(),
             body_digest: body.and_then(|b| tokens_text(b.span())).map(|t| digest(&t)),
-            flow: body.map(flow),
+            // A fn another fn holds is in the flow of its holder's body, as a `fn` node.
+            flow: body.filter(|_| !self.holders.iter().any(|h| h["kind"] == "fn")).map(flow),
         });
         self.bind(&sig.ident, "fn");
         for input in &sig.inputs {
