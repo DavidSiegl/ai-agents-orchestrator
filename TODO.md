@@ -72,6 +72,16 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   which the runner refuses; and an interview, which `--spec` skips. Decided 2026-10-28. The verification run it
   still lacks is under Open issues.
 
+- **The gate judges Rust as it judges Python: the rest of it.** `.scratch/gate-rust-checks/` (spec, 2026-10-29). The
+  helper the checks read Rust through is in: `ci/gate-rust/`, a crate on syn whose JSON (docs/quality-gate.md,
+  "Reading Rust: the gate-rust helper") `GateChange.rust_files` reads, named by `gate.py --rust-syntax`, which the
+  Install stage builds from the tree the Gate stage takes `gate.py` from. Left: Rust in `test-integrity` and
+  `cognitive-complexity` (tickets 02 and 03, which the Rust engine's switch waits for), `vague-names`,
+  `passes-at-base`, `surviving-mutants` with cargo-mutants, and a Cargo ecosystem for `new-dependencies` after the
+  switch (04 to 07). Decided against (2026-10-29, the user's): a Rust counterpart of `flaky-tests`, since nextest runs
+  each test in a process of its own, so the reruns under other seeds that `flaky-tests` does for pytest
+  (`FLAKY_SEEDS`) have little to catch.
+
 ## Open issues
 
 - **The eval set's code has review 88's findings open.** Raised by cross-review 88 (2026-10-28) in code PR #167
@@ -130,10 +140,16 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   lands, or with cargo-llvm-cov's `--doctests` once it runs on a stable toolchain.
 - **Jenkins runs the Rust tests of `ui/src-tauri` alone.** The Test stage runs `cargo llvm-cov nextest` in that
   directory, while `gate.py`'s clippy lints every Cargo workspace git tracks; a crate in another workspace, such as
-  the Rust engine's top-level one (rust-engine spec, Lane), has its lines judged by clippy but its tests never run,
-  and its added lines count as nothing to cover. Found while adding Rust coverage (rust-engine ticket 03, 2026-10-27).
+  the Rust engine's top-level one (rust-engine spec, Lane) or `ci/gate-rust/`, the gate's Rust helper, whose tests
+  run only where `cargo test` is run by hand, has its lines judged by clippy but its tests never run, and its added
+  lines count as nothing to cover. Found while adding Rust coverage (rust-engine ticket 03, 2026-10-27); the helper
+  joined it with gate-rust-checks ticket 01 (2026-10-29).
   Closes when the top-level workspace takes `ui/src-tauri` in as a member and the Test stage runs there, or with
   the Test stage running each workspace and passing each report to the gate.
+- **`GateChange.rust_files` starts one `git cat-file` per base `.rs` file.** `_rust_paths` in `gate.py` copies each
+  base side out of git with its own process, so a change to N Rust files starts N git processes before the helper's
+  one run; about 5 ms each here. Raised by cross-review 106 (F5, 2026-10-30): "one `cat-file --batch` or `git archive`
+  would do." Closes with one `git cat-file --batch` over all the base paths.
 - **The parity harness records `state.json` at each command the fakes get, not after each save.** Ticket
   rust-engine/01 asks for "`state.json` after each save"; the ledger reads it only when herdr, gh, Jenkins or PyPI
   gets a call, and leaves out a change to `heartbeat_at` alone (`tests/parity/fakes.py`, `_changed_states`). Raised
