@@ -1,11 +1,11 @@
 //! gate-rust: what gate.py's Rust checks need to know of a Rust source file, read with syn.
 //!
 //! `gate-rust FILE...` reads each FILE, every argument a path, and prints one line of JSON per file, in the order
-//! given: the file's functions with their lines, attributes, assertion macros and discarded values, its inline
-//! modules, and every name it binds; or, for a file it cannot read, decode or parse, an error document saying why.
-//! It exits 0 once every line is written, and 1, saying so on standard error, when standard output cannot be written
-//! to. The schema is written down once, in docs/quality-gate.md ("Reading Rust: the gate-rust helper"); `SCHEMA` is
-//! its version, which gate.py checks, and a change to what this prints raises both.
+//! given: the file's functions with their lines, attributes, assertion macros, discarded values and the flow of their
+//! bodies, its inline modules, and every name it binds; or, for a file it cannot read, decode or parse, an error
+//! document saying why. It exits 0 once every line is written, and 1, saying so on standard error, when standard
+//! output cannot be written to. The schema is written down once, in docs/quality-gate.md ("Reading Rust: the
+//! gate-rust helper"); `SCHEMA` is its version, which gate.py checks, and a change to what this prints raises both.
 
 use std::ffi::OsString;
 use std::io::{self, BufWriter, Write};
@@ -17,10 +17,10 @@ use syn::ext::IdentExt;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::{AttrStyle, Attribute, Block, Expr, FnArg, Meta, Pat, Signature, Stmt, Token, Visibility};
+use syn::{AttrStyle, Attribute, BinOp, Block, Expr, FnArg, Meta, Pat, Signature, Stmt, Token, Visibility};
 
 /// The version of the schema this prints, its documents' `schema` field.
-const SCHEMA: u64 = 1;
+const SCHEMA: u64 = 2;
 
 /// The macros a test asserts with, by the last segment of their path.
 const ASSERTION_MACROS: &[&str] = &[
@@ -99,6 +99,7 @@ struct FnRecord {
     asserts: Vec<Value>,
     discards: Vec<Value>,
     body_digest: Option<String>,
+    flow: Option<Vec<Value>>,
 }
 
 impl FnRecord {
@@ -113,6 +114,7 @@ impl FnRecord {
             "asserts": self.asserts,
             "discards": self.discards,
             "body_digest": self.body_digest,
+            "flow": self.flow,
         })
     }
 }
@@ -181,6 +183,7 @@ impl Collector {
             asserts: Vec::new(),
             discards: Vec::new(),
             body_digest: body.and_then(|b| tokens_text(b.span())).map(|t| digest(&t)),
+            flow: body.map(flow),
         });
         self.bind(&sig.ident, "fn");
         for input in &sig.inputs {
@@ -417,6 +420,195 @@ impl<'ast> Visit<'ast> for Collector {
             }
         }
         visit::visit_macro(self, i);
+    }
+}
+
+/// The schema's `flow` of a `fn` whose body is `body`.
+fn flow(body: &Block) -> Vec<Value> {
+    let mut walker = FlowWalker::default();
+    walker.visit_block(body);
+    walker.nodes
+}
+
+/// Walks a `fn`'s body and gathers the schema's `flow` nodes of it.
+#[derive(Default)]
+struct FlowWalker {
+    /// The nodes of the list the walk is filling, which a node met goes at the end of.
+    nodes: Vec<Value>,
+}
+
+impl FlowWalker {
+    /// The nodes `walk`, a walk of one part of a node, meets, as the list of that part.
+    fn part(&mut self, walk: impl FnOnce(&mut Self)) -> Vec<Value> {
+        let outer = std::mem::take(&mut self.nodes);
+        walk(self);
+        std::mem::replace(&mut self.nodes, outer)
+    }
+
+    fn push(&mut self, kind: &str, at: Span, mut parts: Value) {
+        parts["kind"] = json!(kind);
+        parts["line"] = json!(at.start().line);
+        self.nodes.push(parts);
+    }
+
+    /// Adds a `fn` node for a `fn` the body holds, `method` saying whether it is an `impl`'s or a `trait`'s.
+    fn nested_fn(&mut self, sig: &Signature, body: &Block, method: bool) {
+        let nodes = self.part(|w| w.visit_block(body));
+        let name = sig.ident.unraw().to_string();
+        self.push("fn", sig.fn_token.span, json!({"name": name, "method": method, "body": nodes}));
+    }
+
+    /// Adds a `break` or `continue` node, `labelled` saying whether it names a label.
+    fn jump(&mut self, kind: &str, at: Span, labelled: bool) {
+        self.push(kind, at, json!({"labelled": labelled}));
+    }
+}
+
+impl<'ast> Visit<'ast> for FlowWalker {
+    fn visit_expr_if(&mut self, i: &'ast syn::ExprIf) {
+        let cond = self.part(|w| w.visit_expr(&i.cond));
+        let then = self.part(|w| w.visit_block(&i.then_branch));
+        let (otherwise, else_if) = match &i.else_branch {
+            Some((_, branch)) => (Some(self.part(|w| w.visit_expr(branch))), matches!(**branch, Expr::If(_))),
+            None => (None, false),
+        };
+        self.push("if", i.if_token.span, json!({"cond": cond, "then": then, "else": otherwise, "else_if": else_if}));
+    }
+
+    fn visit_local(&mut self, i: &'ast syn::Local) {
+        let Some(init) = &i.init else {
+            return visit::visit_local(self, i);
+        };
+        self.visit_expr(&init.expr);
+        if let Some((else_token, diverge)) = &init.diverge {
+            let otherwise = self.part(|w| w.visit_expr(diverge));
+            self.push("let-else", else_token.span, json!({"else": otherwise}));
+        }
+    }
+
+    fn visit_expr_match(&mut self, i: &'ast syn::ExprMatch) {
+        let scrutinee = self.part(|w| w.visit_expr(&i.expr));
+        let arms = self.part(|w| {
+            for arm in &i.arms {
+                if let Some((_, guard)) = &arm.guard {
+                    w.visit_expr(guard);
+                }
+                w.visit_expr(&arm.body);
+            }
+        });
+        self.push("match", i.match_token.span, json!({"scrutinee": scrutinee, "arms": arms}));
+    }
+
+    fn visit_expr_loop(&mut self, i: &'ast syn::ExprLoop) {
+        let body = self.part(|w| w.visit_block(&i.body));
+        self.push("loop", i.loop_token.span, json!({"head": [], "body": body}));
+    }
+
+    fn visit_expr_while(&mut self, i: &'ast syn::ExprWhile) {
+        let head = self.part(|w| w.visit_expr(&i.cond));
+        let body = self.part(|w| w.visit_block(&i.body));
+        self.push("while", i.while_token.span, json!({"head": head, "body": body}));
+    }
+
+    fn visit_expr_for_loop(&mut self, i: &'ast syn::ExprForLoop) {
+        let head = self.part(|w| w.visit_expr(&i.expr));
+        let body = self.part(|w| w.visit_block(&i.body));
+        self.push("for", i.for_token.span, json!({"head": head, "body": body}));
+    }
+
+    fn visit_expr_break(&mut self, i: &'ast syn::ExprBreak) {
+        self.jump("break", i.break_token.span, i.label.is_some());
+        if let Some(value) = &i.expr {
+            self.visit_expr(value);
+        }
+    }
+
+    fn visit_expr_continue(&mut self, i: &'ast syn::ExprContinue) {
+        self.jump("continue", i.continue_token.span, i.label.is_some());
+    }
+
+    fn visit_expr_binary(&mut self, i: &'ast syn::ExprBinary) {
+        if !is_logical(&i.op) {
+            return visit::visit_expr_binary(self, i);
+        }
+        let mut ops = Vec::new();
+        let mut operands = Vec::new();
+        logical_run(i, &mut ops, &mut operands);
+        let nodes = self.part(|w| operands.iter().for_each(|o| w.visit_expr(o)));
+        self.push("bool", i.span(), json!({"ops": ops, "operands": nodes}));
+    }
+
+    fn visit_expr_closure(&mut self, i: &'ast syn::ExprClosure) {
+        let body = self.part(|w| w.visit_expr(&i.body));
+        self.push("closure", i.or1_token.span, json!({"body": body}));
+    }
+
+    fn visit_item_fn(&mut self, i: &'ast syn::ItemFn) {
+        self.nested_fn(&i.sig, &i.block, false);
+    }
+
+    fn visit_impl_item_fn(&mut self, i: &'ast syn::ImplItemFn) {
+        self.nested_fn(&i.sig, &i.block, true);
+    }
+
+    fn visit_trait_item_fn(&mut self, i: &'ast syn::TraitItemFn) {
+        if let Some(body) = &i.default {
+            self.nested_fn(&i.sig, body, true);
+        }
+    }
+
+    fn visit_expr_call(&mut self, i: &'ast syn::ExprCall) {
+        if let Expr::Path(callee) = &*i.func {
+            if callee.qself.is_none() {
+                let path: Vec<String> = callee.path.segments.iter().map(|s| s.ident.unraw().to_string()).collect();
+                self.push("call", callee.span(), json!({"path": path}));
+            }
+        }
+        visit::visit_expr_call(self, i);
+    }
+
+    fn visit_expr_method_call(&mut self, i: &'ast syn::ExprMethodCall) {
+        if let Expr::Path(receiver) = &*i.receiver {
+            if receiver.qself.is_none() && receiver.path.is_ident("self") {
+                self.push("call", receiver.span(), json!({"path": ["self", i.method.unraw().to_string()]}));
+            }
+        }
+        visit::visit_expr_method_call(self, i);
+    }
+
+    // What an extern block declares has no body.
+    fn visit_item_foreign_mod(&mut self, _: &'ast syn::ItemForeignMod) {}
+
+    fn visit_macro(&mut self, i: &'ast syn::Macro) {
+        // As Collector reads a macro's arguments.
+        if let Ok(args) = i.parse_body_with(Punctuated::<Expr, Token![,]>::parse_terminated) {
+            for arg in &args {
+                self.visit_expr(arg);
+            }
+        }
+    }
+}
+
+/// Whether `op` is `&&` or `||`.
+fn is_logical(op: &BinOp) -> bool {
+    matches!(op, BinOp::And(_) | BinOp::Or(_))
+}
+
+/// Appends to `ops` the operators of the run of `&&` and `||` that `binary`, one of them, starts, through
+/// parentheses, in the order they are written, and to `operands` what they join.
+fn logical_run<'a>(binary: &'a syn::ExprBinary, ops: &mut Vec<&'static str>, operands: &mut Vec<&'a Expr>) {
+    logical_operand(&binary.left, ops, operands);
+    ops.push(if matches!(binary.op, BinOp::And(_)) { "&&" } else { "||" });
+    logical_operand(&binary.right, ops, operands);
+}
+
+/// What `logical_run` does with an operand, `expr`: continues the run with it when it is a `&&` or `||`, through
+/// parentheses, and appends it to `operands` otherwise.
+fn logical_operand<'a>(expr: &'a Expr, ops: &mut Vec<&'static str>, operands: &mut Vec<&'a Expr>) {
+    match expr {
+        Expr::Paren(inner) => logical_operand(&inner.expr, ops, operands),
+        Expr::Binary(binary) if is_logical(&binary.op) => logical_run(binary, ops, operands),
+        _ => operands.push(expr),
     }
 }
 

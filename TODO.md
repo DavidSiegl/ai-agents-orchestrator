@@ -75,14 +75,34 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 - **The gate judges Rust as it judges Python: the rest of it.** `.scratch/gate-rust-checks/` (spec, 2026-10-29). The
   helper the checks read Rust through is in: `ci/gate-rust/`, a crate on syn whose JSON (docs/quality-gate.md,
   "Reading Rust: the gate-rust helper") `GateChange.rust_files` reads, named by `gate.py --rust-syntax`, which the
-  Install stage builds from the tree the Gate stage takes `gate.py` from. Left: Rust in `test-integrity` and
-  `cognitive-complexity` (tickets 02 and 03, which the Rust engine's switch waits for), `vague-names`,
+  Install stage builds from the tree the Gate stage takes `gate.py` from; `cognitive-complexity` scores Rust over the
+  `flow` it prints (ticket 03). Left: Rust in `test-integrity` (ticket 02, which the Rust engine's switch waits for),
+  `vague-names`,
   `passes-at-base`, `surviving-mutants` with cargo-mutants, and a Cargo ecosystem for `new-dependencies` after the
   switch (04 to 07). Decided against (2026-10-29, the user's): a Rust counterpart of `flaky-tests`, since nextest runs
   each test in a process of its own, so the reruns under other seeds that `flaky-tests` does for pytest
   (`FLAKY_SEEDS`) have little to catch.
 
 ## Open issues
+
+- **A file that a `#[cfg(test)] mod name;` declaration takes in is judged as code.** The spec of the Rust checks
+  (requirement 2) places Rust's tests in a `tests/` directory, a `tests.rs` and an inline `#[cfg(test)]` module;
+  `_complexity_exempt` and `_rust_scored_functions` in `gate.py` follow it. The engine keeps its fakes and
+  `test_support.rs` in files that a parent declares under `#[cfg(test)]` (`engine/src/host.rs:24` on rust-engine), so
+  `cognitive-complexity` judges them: at rust-engine `476b770`, 3 of the 21 engine functions over the limit are theirs
+  (`FakeState::git`, `FakeJenkinsState::answer`, `helper_cases`). Found by gate-rust-checks ticket 03 (2026-10-30).
+  Closes with the user's ruling on the spec's definition, and, if those files are tests, the helper listing each
+  out-of-line `mod name;` with its `cfg_test`, so that the gate can follow a declaration to its file.
+- **A Rust fn in a `#[cfg(test)]` module takes no part in pairing a function with its base.** `_rust_scored_functions`
+  leaves such fns out on both sides, where a Python file under `tests/` stays in `_base_scores`' pool as a file the
+  check does not judge. So a fn moved unchanged into a test module cannot keep its own base before a copy of it
+  elsewhere takes it, and that copy passes as the original. Found by gate-rust-checks ticket 03 (2026-10-30). Closes
+  with a per-function "exempt" mark on `_ScoredFunction` that `_BasePool` reads where it now asks
+  `_complexity_exempt` of a path.
+- **Where Rust's tests are is decided in two tickets.** Ticket 03 put the spec's requirement 2 in
+  `_complexity_exempt` and `_rust_scored_functions`; ticket 02's Rust `WeakenedTestsDetector`, written in parallel,
+  needs the same places. Found by gate-rust-checks ticket 03 (2026-10-30). Closes when the later of the two to merge
+  reads the rule from one function that both checks call.
 
 - **The eval set's code has review 88's findings open.** Raised by cross-review 88 (2026-10-28) in code PR #167
   brought, recorded here rather than fixed in an unrelated branch: the docs task's hidden test sees only ``` fences
@@ -143,7 +163,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   the Rust engine's top-level one (rust-engine spec, Lane) or `ci/gate-rust/`, the gate's Rust helper, whose tests
   run only where `cargo test` is run by hand, has its lines judged by clippy but its tests never run, and its added
   lines count as nothing to cover. Found while adding Rust coverage (rust-engine ticket 03, 2026-10-27); the helper
-  joined it with gate-rust-checks ticket 01 (2026-10-29).
+  joined it with gate-rust-checks ticket 01 (2026-10-29). Since ticket 03 (2026-10-30), `tests/test_gate.py` builds
+  the helper and runs it over Rust snippets, so the Test stage exercises its `flow`, but not its own `cargo test`.
   Closes when the top-level workspace takes `ui/src-tauri` in as a member and the Test stage runs there, or with
   the Test stage running each workspace and passing each report to the gate.
 - **`GateChange.rust_files` starts one `git cat-file` per base `.rs` file.** `_rust_paths` in `gate.py` copies each

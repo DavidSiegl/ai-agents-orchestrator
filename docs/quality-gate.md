@@ -141,18 +141,31 @@ measured: a point for each `if`, `elif`, `else`, ternary, loop, `except`, `match
 and recursion, and one more for each level of nesting on those that nest.
 Recursion is a function that calls itself, or one on a cycle of calls through other functions of its module, each of
 which then scores the point. Calls are followed by name, as Python's scopes resolve them, so a call to a parameter
-or a local of the same name is not one to the module's function; not through an alias, nor into another module. The
-comment above `COGNITIVE_COMPLEXITY_LIMIT` in `gate.py` says how each Python construct maps to the paper's
-rules. Each of these is a finding:
+or a local of the same name is not one to the module's function; not through an alias, nor into another module.
+
+Rust is judged the same way, with the same limit, base and findings, read through the [gate-rust
+helper](#reading-rust-the-gate-rust-helper). A function is a `fn` with a body that no other `fn` holds, in an `impl`, a
+`trait` or an inline module or not, named by them as `checks::Workflow<T>::poll`; a `fn` or closure inside it is part of
+it. Its lines start at its first outer attribute, doc comments included. Rust's tests are exempt as Python's are: every
+file in a directory named `tests`, at any depth, or named `tests.rs`, and every `fn` in an inline module marked
+`#[cfg(test)]`. Each `if`, `else if`, `else`, `if let`, `match`, `loop`, `while`, `while let`, `for` and `let ... else`
+scores as Python's branches do; a `match` arm adds nothing, as a `switch`'s case does not in the paper; a run of `&&`
+and `||` is a sequence of boolean operators, a labelled `break` or `continue` a point, and `?` nothing. Recursion
+follows calls by path within the file: `f(...)`, `self.f(...)`, `Self::f(...)` and `Type::f(...)`, not `crate::f(...)`
+or a module's `m::f(...)`. A change to Rust that the gate cannot read, as without `--rust-syntax`, is a `not-run`
+finding, which fails the gate as `not-scored` does.
+
+The comment above `COGNITIVE_COMPLEXITY_LIMIT` in `gate.py` says how each Python and Rust construct maps to the
+paper's rules. Each of these is a finding:
 
 - `over-limit`: a function over 15, at its `def` line, when it is new or the change raised its score, as
   "`_poll`: cognitive complexity 19, 14 at the base; the limit is 15". A function already over 15 that the change
   leaves no worse is not a finding, since the gate judges the change. Its base is a function of the base, and each
   base function is the base of one function at most:
   - first, one with the same body, since an unchanged function is that function whatever its name: of its name in
-    its file's base, then of its name in the base of another Python file the change touches, a file it deletes
-    included, which counts as Python by its `.py` or its `#!` line at the base, then of any name in its file's base,
-    then elsewhere. So a function moved to another module, renamed or made a method, but otherwise
+    its file's base, then of its name in the base of another Python or Rust file the change touches, a file it
+    deletes included, which counts as Python by its `.py` or its `#!` line at the base, then of any name in its file's
+    base, then elsewhere. So a function moved to another module, renamed or made a method, but otherwise
     unchanged, keeps its score, and a new function given its old name is new. Its score itself can rise with the
     move: two functions that call each other from two modules score no recursion, and moved into one they each
     score its point. Of a function moved unchanged and a
@@ -171,9 +184,10 @@ rules. Each of these is a finding:
   Bodies pairing first has a cost: a copy of a function whose original the change edits keeps the old score and
   passes, as if it were the original renamed and the edited one new, even when the edit takes the original below the
   limit, and wherever the copy is, in a file the check does not judge too. `TODO.md` holds it.
-- `not-scored`: a changed file that could not be read or parsed. Like any finding of the check, it fails the gate: a
-  check that cannot do its work says so rather than pass. A base that cannot be read or parsed is not a finding: its
-  file's functions are judged as new, as `test-integrity` takes a base that does not parse to have no tests.
+- `not-scored`: a changed file that could not be read or parsed, a Rust file at the line the helper names. Like any
+  finding of the check, it fails the gate: a check that cannot do its work says so rather than pass. A base that cannot
+  be read or parsed is not a finding: its file's functions are judged as new, as `test-integrity` takes a base that does
+  not parse to have no tests.
 
 ruff's `C90` stays beside it. It counts branches without their nesting, so it misses a deeply nested function that
 cognitive complexity catches, but it still catches a flat function of many branches, which cognitive complexity scores
@@ -496,7 +510,7 @@ file, in the order given, then exits 0; it exits 1 when it cannot write them. A 
 UTF-8 or that does not parse is still a line of its own, an error document. Lines are numbered from 1, at `\n` alone,
 as git numbers them. Each document is an object:
 
-- `schema`: `1`, the version of this schema, raised by any change to it. The gate refuses a helper of another version
+- `schema`: `2`, the version of this schema, raised by any change to it. The gate refuses a helper of another version
   with the `not-run` finding above, naming both, so that a helper built from an older tree is never misread;
 - `error`, only in an error document, which has no other field but `schema`: `{"message": ..., "line": N}`, syn's
   message and the line it points at; `line` is `null` for a file it could not read or decode, and where syn points at
@@ -504,7 +518,7 @@ as git numbers them. Each document is an object:
 - `fns`: every `fn` that has a body or could have one: free, in an `impl` or `trait` (a trait's declaration without a
   body included), and nested in another `fn` or anywhere inside one, in the order they start. Not a `fn` in an
   `extern` block, nor one inside a macro's tokens, such as the items a `macro_rules!` writes. Each is
-  `{"name", "line", "attrs_line", "end", "holders", "attrs", "asserts", "discards", "body_digest"}`:
+  `{"name", "line", "attrs_line", "end", "holders", "attrs", "asserts", "discards", "body_digest", "flow"}`:
   - `name` is its identifier as Rust reads it, without `r#`;
   - `line` is the line of its first token after its outer attributes, its `pub` or `fn` or `async`; `attrs_line` the
     line its first outer attribute starts on, doc comments included, which is `line` when it has none; and `end` the
@@ -534,6 +548,33 @@ as git numbers them. Each document is an object:
   - `body_digest` is 16 hexadecimal digits that are the same for two bodies of the same tokens, whatever their layout
     and comments, and differ otherwise but by a 64-bit hash's collision; `null` for a `fn` with no body. It is the
     helper's own hash, so compare digests only within one run of one build;
+  - `flow` is what its body does that cognitive complexity weighs, as a list of nodes in the order they start, or
+    `null` for a `fn` with no body. The helper says what the code is; how much each node weighs is `gate.py`'s (the
+    comment above `COGNITIVE_COMPLEXITY_LIMIT`). Each node is an object with a `kind` and the `line` it starts on, and
+    lists of nodes for its parts. Any other syntax is no node: what it holds stands in the list where it is, so the
+    nodes of `f(if a { b } else { c })` are those of the `if`, after the `call` of `f`. The kinds:
+    - `if`: `{"cond", "then", "else", "else_if"}`, an `if` or `if let`: `cond` its condition, `then` its block, and
+      `else` its `else` branch, `null` for none. `else_if` is true when that branch is an `if` written `else if`, which
+      is then `else`'s one node, and false for `else { ... }`, an `if` inside it included;
+    - `let-else`: `{"else"}`, a `let ... else`, with its `else` block; the value it matches against is before it;
+    - `match`: `{"scrutinee", "arms"}`, `arms` each arm's guard and body, in order;
+    - `loop`, `while` and `for`: `{"head", "body"}`, `head` a `while`'s condition (`while let` too) or a `for`'s
+      iterator, empty for `loop`;
+    - `break` and `continue`: `{"labelled"}`, true when it names a label, as `break 'outer`. A `break`'s value is after
+      it;
+    - `bool`: `{"ops", "operands"}`, a run of `&&` and `||`: `ops` each operator, `"&&"` or `"||"`, in the order they
+      are written, through parentheses, so `a && (b || c)` is one run of two; and `operands` the nodes of what they
+      join. An operand that is no `&&` or `||` itself, such as `!(a && b)` or `f(a || b)`, ends the run, and what it
+      holds is a run of its own;
+    - `closure`: `{"body"}`, a closure, `async` or not;
+    - `fn`: `{"name", "method", "body"}`, a `fn` its body holds at any depth, also as a method of an `impl` or `trait`
+      there, which `method` says; `body` is that `fn`'s `flow`;
+    - `call`: `{"path"}`, a call of a path, as `f(x)` or `Self::new()`, `path` its segments' identifiers without their
+      generic arguments, as `["Self", "new"]`; or of a method on `self`, as `self.run()`, `["self", "run"]`. A call of
+      anything else, as `x.f()` or `(g)()`, is none.
+
+    As for `asserts`, a macro's arguments are read when they parse as expressions separated by commas, any other
+    macro's tokens not;
 - `mods`: every inline module, `mod name { ... }`, nested ones included, in the order they start, each
   `{"name", "line", "attrs_line", "end", "cfg_test"}`, the lines as for `fns`. `cfg_test` is true when an attribute of
   its own, outer or inner, is `cfg(P)` with a `P` that holds only under `cfg(test)`: `test` itself, or an `all(...)`

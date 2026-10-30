@@ -62,7 +62,7 @@ fn spans(doc: &Value) -> Vec<(String, u64, u64, u64)> {
 #[test]
 fn every_fn_with_a_body_or_a_place_for_one_is_listed_with_its_lines() {
     let doc = read("fns.rs");
-    assert_eq!(doc["schema"], 1);
+    assert_eq!(doc["schema"], 2);
     let expected = [
         ("free", 5, 3, 5),
         ("method", 10, 10, 12),
@@ -267,7 +267,7 @@ fn two_bodies_of_the_same_tokens_have_one_digest_whatever_their_layout() {
 
 #[test]
 fn a_file_that_does_not_parse_is_an_error_document_at_its_line() {
-    assert_eq!(read("broken.rs"), json!({"schema": 1, "error": {"message": "expected an expression", "line": 6}}));
+    assert_eq!(read("broken.rs"), json!({"schema": 2, "error": {"message": "expected an expression", "line": 6}}));
 }
 
 #[test]
@@ -276,10 +276,10 @@ fn a_file_that_ends_early_is_an_error_document_at_its_line_or_none() {
     let open = scratch_file("ends_early", "open.rs", b"fn f() {}\nfn g() {\n    let x = 1;\n");
     let cut = scratch_file("ends_early", "cut.rs", b"fn f() {}\nfn g()\n");
     let docs = documents(&[&open, &cut]);
-    assert_eq!(docs[0], json!({"schema": 1, "error": {"message": "cannot parse string into token stream", "line": 2}}));
+    assert_eq!(docs[0], json!({"schema": 2, "error": {"message": "cannot parse string into token stream", "line": 2}}));
     assert_eq!(
         docs[1],
-        json!({"schema": 1, "error": {"message": "unexpected end of input, expected curly braces", "line": null}})
+        json!({"schema": 2, "error": {"message": "unexpected end of input, expected curly braces", "line": null}})
     );
 }
 
@@ -325,4 +325,41 @@ fn output_that_cannot_be_written_exits_1_saying_so() {
     assert_eq!(out.status.code(), Some(1));
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(said.starts_with("gate-rust: cannot write to standard output: "), "{said}");
+}
+
+#[test]
+fn a_fn_body_is_listed_as_the_flow_cognitive_complexity_weighs() {
+    let doc = read("flow.rs");
+    let flow = |name: &str| function(&doc, name)["flow"].clone();
+    let call = |line: u64, path: &[&str]| json!({"kind": "call", "line": line, "path": path});
+    let if_ = |line: u64, cond: Value, then: Value, otherwise: Value, else_if: bool| {
+        json!({"kind": "if", "line": line, "cond": cond, "then": then, "else": otherwise, "else_if": else_if})
+    };
+    let nested_if = if_(9, json!([]), json!([]), Value::Null, false);
+    let else_if = if_(6, json!([]), json!([call(7, &["two"])]), json!([nested_if]), false);
+    assert_eq!(flow("branches"), json!([if_(4, json!([]), json!([call(5, &["one"])]), json!([else_if]), true)]));
+    assert_eq!(flow("let_else"), json!([call(14, &["pick"]), {"kind": "let-else", "line": 14, "else": []}]));
+    assert_eq!(
+        flow("matches"),
+        json!([{"kind": "match", "line": 18, "scrutinee": [], "arms": [call(20, &["self", "other"])]}])
+    );
+    let jump = |kind: &str, line: u64, labelled: bool| json!({"kind": kind, "line": line, "labelled": labelled});
+    let for_ = json!({"kind": "for", "line": 27, "head": [], "body": [jump("break", 28, true)]});
+    let while_body = json!([for_, jump("continue", 30, false)]);
+    let while_ = json!({"kind": "while", "line": 26, "head": [call(26, &["next"])], "body": while_body});
+    let loop_ = json!({"kind": "loop", "line": 25, "head": [], "body": [while_, jump("break", 32, false)]});
+    assert_eq!(flow("loops"), json!([loop_]));
+    let run = |ops: &[&str], operands: Value| json!({"kind": "bool", "line": 37, "ops": ops, "operands": operands});
+    let inner_runs = json!([run(&["||"], json!([])), call(37, &["f"]), run(&["&&"], json!([]))]);
+    assert_eq!(flow("logic"), json!([run(&["&&", "||", "&&", "&&"], inner_runs)]));
+    let closure_if = if_(41, json!([]), json!([]), json!([]), false);
+    let inner = json!({"kind": "fn", "line": 42, "name": "inner", "method": false, "body": [call(43, &["inner"])]});
+    let method_body = json!([call(48, &["Self", "method"])]);
+    let method = json!({"kind": "fn", "line": 47, "name": "method", "method": true, "body": method_body});
+    assert_eq!(flow("holders"), json!([{"kind": "closure", "line": 41, "body": [closure_if]}, inner, method]));
+    // A block, `?`, a call of no path, turbofish's generics and a macro whose tokens are no expressions are no nodes.
+    let closure = json!({"kind": "closure", "line": 55, "body": []});
+    let printed_if = if_(56, json!([]), json!([]), json!([]), false);
+    assert_eq!(flow("not_flow"), json!([call(55, &["g"]), closure, printed_if, call(58, &["Ok"])]));
+    assert_eq!(function(&read("fns.rs"), "declared")["flow"], Value::Null);
 }
