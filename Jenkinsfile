@@ -293,7 +293,14 @@ pipeline {
                     } else if (env.CHANGE_TARGET) {
                         base = sh(returnStdout: true, script: 'ci/pr-base.sh').trim()
                     } else {
-                        base = env.PREVIOUS_SUCCESSFUL_COMMIT ?: 'HEAD^1'
+                        // A history rewritten since the last successful build, by a force-push, leaves that build's
+                        // commit out of this checkout, where gate.py cannot judge from it ("names no commit", exit
+                        // status 2) in this and every later build; such a build measures from HEAD^1, as one with no
+                        // successful build before it does.
+                        def previous = env.PREVIOUS_SUCCESSFUL_COMMIT
+                        def kept = previous && sh(returnStatus: true,
+                                                  script: 'git cat-file -e "$PREVIOUS_SUCCESSFUL_COMMIT^{commit}"') == 0
+                        base = kept ? previous : 'HEAD^1'
                     }
                     // The values reach the shell as environment variables, never as Groovy-built shell code.
                     def status
