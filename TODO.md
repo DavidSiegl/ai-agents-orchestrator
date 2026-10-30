@@ -86,8 +86,11 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   parity recordings, made by the Python engine, hold them: `resume: orchestrator.py resume <id>` in `list` and the
   interrupted note (`cli/listing.rs`, `cli.rs`'s `resume_command`), `` `orchestrator.py workflows default` `` in
   `workflows` (`cli/workflows.rs`), and `orchestrator.py` among `judged-in-quality`'s `JUDGING_FILES`, a file the
-  tree no longer has. Found by rust-engine ticket 11 (2026-10-30). Closes with the engine naming itself
-  `orchestrator`, its tests and the parity recordings changed with it, in a change of its own after the switch.
+  tree no longer has, while the files the build's Rust depends on, `rust-toolchain.toml` and `Cargo.lock`, are not
+  among them, so a quality build of another toolchain counts as having judged the tree. Found by rust-engine ticket 11
+  and its code review (2026-10-30). Closes with the engine naming itself `orchestrator`, its tests and the parity
+  recordings changed with it, and `JUDGING_FILES` the files that judge the tree now, in a change of its own after the
+  switch.
 - **No test crashes the Rust engine after each save.** `tests/test_crash_resume.py` crashed the Python engine
   in-process right after every write of `state.json` and resumed it, and went with that engine (rust-engine ticket 11,
   2026-10-30). The parity scenarios still kill the Rust engine as a program, once per phase. Closes with a crash
@@ -1049,7 +1052,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   in 228 s locally, so too (380 s on agentbox0, PR-178). Ticket 10 (2026-10-29) adds `serve`, so `PARITY_COMMANDS` names
   every command but gui and the stage runs every scenario, 43 and the 18 switched: 61 passing in 253 s locally with
   SIGINT and SIGHUP ignored, `serve_endpoints_and_events` taking 24 s of it; about 405 s expected on agentbox0, by
-  PR-178's ratio.
+  PR-178's ratio. Since rust-engine ticket 11
+  (2026-10-30) the Test stage runs every scenario against that binary on every build, through `PARITY_ENGINE`, and
+  the Rust parity stage is gone.
 - **The commands the Rust engine runs outlived an engine that got a SIGTERM or a SIGHUP.** The commands run in
   process groups of their own, so a SIGTERM of the engine (a kill, a service manager's stop) or the SIGHUP a closed
   terminal sends its foreground group ended the engine and left the running command to finish unwatched, and the run

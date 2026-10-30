@@ -22,10 +22,11 @@ bin="dist/$name"
 
 # The toolchain is rust-toolchain.toml's; --locked holds the build to Cargo.lock. CARGO_TARGET_DIR, where a caller
 # sets one, is where cargo puts the build, so the binary's path is asked of cargo rather than assumed.
+report=$(mktemp)
+trap 'rm -f "$report"' EXIT
 cargo build --release --locked -p octoflow-engine --bin orchestrator --message-format=json-render-diagnostics \
-    > build-binary.json
-built=$(sed -n 's/.*"executable":"\([^"]*\/orchestrator\)".*/\1/p' build-binary.json | tail -n 1)
-rm -f build-binary.json
+    > "$report"
+built=$(sed -n 's/.*"executable":"\([^"]*\/orchestrator\)".*/\1/p' "$report" | tail -n 1)
 if [ -z "$built" ]; then
     echo "build-binary.sh: cargo did not report the orchestrator binary it built" >&2
     exit 1

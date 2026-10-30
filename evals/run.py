@@ -7,8 +7,9 @@ Run it from a herdr pane, as `orchestrator run`: every trial is a real run, with
 `--`, are given to the engine's `run` unchanged, such as `--workflow quick --model sonnet`; the runner sets
 `--no-pr`, `--spec` and `--cwd` itself, and refuses those, `--machine` and `--worktree` there.
 
-The engine is the command line `EVAL_ENGINE` gives, as tests/parity's PARITY_ENGINE does, else this checkout's own
-build, target/debug/orchestrator (`cargo build -p octoflow-engine`). It is run as a program, through `run` and
+The engine is the command line `EVAL_ENGINE` gives, as tests/parity's PARITY_ENGINE does, else this checkout's own,
+built first (`cargo build --locked -p octoflow-engine`), so that a trial never runs a binary older than the commit it
+is recorded under. It is run as a program, through `run` and
 `close`, and must keep a run's files as the orchestrator does: the runner finds the run under
 `.orchestrator/runs/<run id>/` in the clone, and its numbers in `metrics.json` there (docs/design.md, Run metrics).
 
@@ -117,15 +118,33 @@ def load_tasks(names: list[str] | None, tasks_dir: str = TASKS_DIR) -> list[Task
     return tasks
 
 
-# The engine a trial runs without EVAL_ENGINE: this checkout's debug build, by its path from the checkout's top.
-DEFAULT_ENGINE = "target/debug/orchestrator"
+# How a result line names the engine a trial ran without EVAL_ENGINE: this checkout's own build.
+DEFAULT_ENGINE = "this checkout's build"
 
 
 def engine_command() -> list[str]:
-    """The engine every trial runs, as EVAL_ENGINE gives it, else this checkout's own build, DEFAULT_ENGINE."""
+    """The engine every trial runs, as EVAL_ENGINE gives it, else this checkout's own, as built_engine builds it."""
     if command := os.environ.get("EVAL_ENGINE"):
         return shlex.split(command)
-    return [os.path.join(ROOT, DEFAULT_ENGINE)]
+    return [built_engine()]
+
+
+def built_engine() -> str:
+    """The path of this checkout's orchestrator binary, `cargo build --locked -p octoflow-engine --bin orchestrator`
+    run first, wherever CARGO_TARGET_DIR puts it. Raises EvalError when cargo is missing, fails, or reports no such
+    binary."""
+    cargo = shutil.which("cargo")
+    if cargo is None:
+        raise EvalError("cargo, which builds the engine, is not on PATH; set EVAL_ENGINE to run another")
+    built = subprocess.run([cargo, "build", "--locked", "--quiet", "-p", "octoflow-engine", "--bin", "orchestrator",  # noqa: S603
+                            "--message-format=json"], cwd=ROOT, capture_output=True, text=True, check=False)
+    if built.returncode != 0:
+        raise EvalError(f"cargo could not build the engine: {built.stderr.strip()}")
+    paths = [m["executable"] for m in map(json.loads, built.stdout.splitlines())
+             if m.get("reason") == "compiler-artifact" and m.get("executable")]
+    if len(paths) != 1:
+        raise EvalError(f"cargo reported {len(paths)} binaries for the engine, not one")
+    return paths[0]
 
 
 def config_name(run_args: list[str]) -> str:
@@ -377,12 +396,12 @@ def main(argv: list[str] | None = None) -> int:
     """Run the eval set as the module docstring says, print its table, and append its result lines to
     evals/results/<date>-<config>.jsonl as each trial ends; the exit status is the module docstring's."""
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    engine = engine_command()
     evaluation = Eval(datetime.date.today().isoformat(), args.config or config_name(args.run_args), args.run_args,
                       os.environ.get("EVAL_ENGINE") or DEFAULT_ENGINE, _head_commit())
     trials: list[Trial] = []
     exit_code = 0
     try:
+        engine = engine_command()
         tasks = load_tasks(args.tasks.split(",") if args.tasks else None)
         for task in tasks:
             for repeat in range(1, args.repeat + 1):

@@ -25,8 +25,9 @@ const BUNDLED_NAME: &str = if cfg!(windows) { "octoflow.exe" } else { "octoflow"
 /// The orchestrator the app serves, an executable of the Rust engine (engine/).
 #[derive(Debug, PartialEq)]
 enum Orchestrator {
-    /// The build of the checkout this app was built in, target/debug/orchestrator in its Cargo workspace, which
-    /// `cargo build -p octoflow-engine` makes: a development build's, which serves that checkout's project.
+    /// The build of the checkout this app was built in, debug/orchestrator in its Cargo target directory, which
+    /// `cargo build -p octoflow-engine` makes and nothing here rebuilds: a development build's, which serves that
+    /// checkout's project.
     Checkout(PathBuf),
     /// Any other: $ORCHESTRATOR_BIN, or the binary a release bundle carries beside the app; it belongs to no
     /// checkout.
@@ -49,7 +50,7 @@ impl Orchestrator {
         if let Some(bundled) = exe_dir.map(|dir| dir.join(BUNDLED_NAME)).filter(|path| path.is_file()) {
             return Orchestrator::Binary(bundled);
         }
-        Orchestrator::Checkout(checkout().join("target/debug/orchestrator"))
+        Orchestrator::Checkout(checkout_build(std::env::var_os("CARGO_TARGET_DIR")))
     }
 
     /// A command that runs it with no arguments yet, in shell's environment and directory (`UserShell::apply`).
@@ -72,6 +73,14 @@ impl Orchestrator {
 /// The top of the checkout this app was built in, two directories above its crate's.
 fn checkout() -> PathBuf {
     canonical(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+}
+
+/// Where `cargo build -p octoflow-engine` puts the checkout's orchestrator: under target_dir, $CARGO_TARGET_DIR's
+/// value, relative to the checkout as cargo takes it, else under the checkout's own target/.
+fn checkout_build(target_dir: Option<OsString>) -> PathBuf {
+    let name = if cfg!(windows) { "orchestrator.exe" } else { "orchestrator" };
+    let target = target_dir.map_or_else(|| checkout().join("target"), |dir| checkout().join(dir));
+    target.join("debug").join(name)
 }
 
 /// How it is run, for messages: the binary's path.
@@ -442,8 +451,16 @@ mod tests {
     fn locates_the_checkout_s_build_without_a_bundled_binary() {
         let located = Orchestrator::locate_from(None, Some(&scratch_dir("checkout")));
         let Orchestrator::Checkout(binary) = &located else { panic!("{located:?}") };
-        assert!(binary.ends_with("target/debug/orchestrator"), "{located}");
+        assert_eq!(binary, &checkout_build(std::env::var_os("CARGO_TARGET_DIR")), "{located}");
         assert!(Path::new(&located.project().expect("a checkout")).join("engine/Cargo.toml").is_file());
+    }
+
+    #[test]
+    fn the_checkout_s_build_is_where_cargo_target_dir_puts_it() {
+        let name = if cfg!(windows) { "orchestrator.exe" } else { "orchestrator" };
+        assert_eq!(checkout_build(None), checkout().join("target/debug").join(name));
+        assert!(checkout_build(Some("/elsewhere/target".into())).starts_with("/elsewhere/target/debug"));
+        assert!(checkout_build(Some("relative".into())).starts_with(checkout().join("relative/debug")));
     }
 
     #[test]

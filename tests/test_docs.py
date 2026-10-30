@@ -29,8 +29,6 @@ FLAG = re.compile(r"(?<![\w-])--[a-z][a-z0-9-]*")
 # None stands for the command itself.
 NOT_IN_THE_PARSER = {
     ("roadmap.md", "resume", "--workflow"): "a planned feature, K",
-    ("ui-options.md", "list", "--watch"): "a step of a staged plan, not built",
-    ("ui-options.md", "web", None): "the assessment's name for the command, built as serve",
 }
 
 # Backticked ALL_CAPS names the docs give that are neither the engine's (engine/src) nor gate.py's, with where they
@@ -55,6 +53,7 @@ OTHER_PROGRAMS_NAMES = {
     "HARNESSES": "the Rust engine's table of the agent harnesses, engine/src/harness.rs",
     "CI": "the Python engine's Jenkins client, which engine/src/ci.rs ports as Jenkins",
     "PR_STATUS_CREATOR": "the Jenkinsfile's",
+    "GIT_REF": "the quality job's parameter, which the Jenkinsfile declares and the engine's tests send",
     "CHANGE_TARGET": "an environment variable Jenkins sets",
     "OPTIONS": "an HTTP method",
     "NAME": "the README's placeholder for a prompt's name",
@@ -131,7 +130,8 @@ def prose_lines(path: pathlib.Path):
 
 def invocations(path: pathlib.Path, commands):
     """(line number, command, the text of its arguments) for each command of the orchestrator's that path shows
-    being run: in a code span or a fenced line, after `orchestrator`, or opening a code span, as in `run --spec`;
+    being run: in a code span or a fenced line, after `orchestrator` or the Python engine's `orchestrator.py`, or
+    opening a code span, as in `run --spec`;
     and gate.py, as the command "gate.py", wherever it is followed by a flag. Shell comments, and what follows a
     pipe, `&&` or `;`, are left out."""
     for n, line, fenced in prose_lines(path):
@@ -140,7 +140,7 @@ def invocations(path: pathlib.Path, commands):
         else:
             texts = re.findall(r"`([^`]+)`", line)
         for text in (re.split(r"\||&&|;|\s#", t)[0] for t in texts):
-            for m in re.finditer(r"\borchestrator\s+([a-z][a-z-]*)(.*)", text):
+            for m in re.finditer(r"\borchestrator(?:\.py)?\s+([a-z][a-z-]*)(.*)", text):
                 yield n, m.group(1), m.group(2)
             for m in re.finditer(r"\bgate\.py(\s+--.*)", text):
                 yield n, "gate.py", m.group(1)
@@ -168,14 +168,20 @@ def flag_table(path: pathlib.Path):
 
 def rust_names() -> tuple[set[str], set[str], set[str]]:
     """The names the engine's Rust (engine/src) defines, as source_names gives gate.py's, read by pattern rather than
-    parsed: each fn, struct, enum, trait, type, const, static and mod; as Type.member, each fn of an impl of the type
-    and each field of a struct; and every string literal's text."""
+    parsed (TODO.md): each fn, struct, enum, trait, type, const, static and mod; as Type.member, each fn of an impl of
+    the type and each field of a struct; and the text of every string literal outside the tests and fakes. The items
+    are read with the comments and the string and char literals blanked out, so that neither a brace nor a word in
+    them counts."""
     names, members, strings = set(), set(), set()
     item = re.compile(r"\b(?:fn|struct|enum|trait|type|const|static|mod)\s+(?:r#)?([A-Za-z_]\w*)")
+    # A string may go on over lines, also by a backslash at a line's end, which \\[\s\S] takes.
+    literal = re.compile(r'//[^\n]*|r(#*)"[\s\S]*?"\1|b?"(?:[^"\\]|\\[\s\S])*"|b?\'(?:[^\'\\\n]|\\[^\n]+?)\'')
     for path in sorted((ROOT / "engine" / "src").rglob("*.rs")):
-        text = path.read_text()
+        source = path.read_text()
+        if path.name not in ("tests.rs", "fake.rs", "fixture.rs", "test_support.rs") and "tests" not in path.parts:
+            strings.update(re.findall(r'"((?:[^"\\]|\\.)*)"', source))
+        text = literal.sub(lambda m: " " * len(m.group(0)), source)
         names.update(item.findall(text))
-        strings.update(re.findall(r'"((?:[^"\\]|\\.)*)"', text))
         # The fns of each impl block and the fields of each struct: the block runs from its { to the } that closes it.
         for m in re.finditer(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(impl\b[^{;]*?|struct\s+\w+[^{;(]*?)\{", text, re.MULTILINE):
             owner = re.findall(r"(?:for\s+)?([A-Z]\w*)(?:<[^{]*>)?\s*$", m.group(1).split(" where ")[0].strip())
@@ -242,7 +248,7 @@ class TestDocs(unittest.TestCase):
     def test_each_command_the_docs_run_takes_the_flags_they_give_it(self):
         commands = cli_commands()
         errors = []
-        for doc in DOCS:
+        for doc in (d for d in DOCS if d.name not in HISTORICAL_DOCS):
             for n, command, rest in invocations(doc, commands):
                 where = f"{doc.relative_to(ROOT)}:{n}"
                 if command not in commands:

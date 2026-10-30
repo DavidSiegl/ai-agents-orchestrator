@@ -1,7 +1,7 @@
 # The built-in default workflow, Spec Collector -> Builder <-> Reviewer, as a workflow file to copy and edit.
 # Copy to ~/.config/ai-agents-orchestrator/workflows/ under a name of your own and run with --workflow <name>,
 # or run it from here with --workflow-file examples/workflows/spec-build-review.toml.
-# Everything below is the output of `python orchestrator.py workflows default`; regenerate it with that
+# Everything below is the output of `orchestrator workflows default`; regenerate it with that
 # command when the built-in workflow changes, then put this header back on top. A test checks that it matches.
 
 [roles.spec]

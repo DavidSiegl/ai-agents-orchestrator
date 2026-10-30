@@ -449,8 +449,14 @@ class TestArgs(unittest.TestCase):
     def test_the_engine_is_eval_engine_else_this_checkouts_orchestrator(self):
         with patch.dict(os.environ, {"EVAL_ENGINE": "target/debug/octoflow --flag 'a b'"}):
             self.assertEqual(evals.engine_command(), ["target/debug/octoflow", "--flag", "a b"])
-        with patch.dict(os.environ, {"EVAL_ENGINE": ""}):
-            self.assertEqual(evals.engine_command(), [os.path.join(evals.ROOT, "target/debug/orchestrator")])
+        with patch.dict(os.environ, {"EVAL_ENGINE": ""}), \
+                patch.object(evals, "built_engine", return_value="/built/orchestrator"):
+            self.assertEqual(evals.engine_command(), ["/built/orchestrator"])
+
+    def test_the_checkouts_engine_is_built_before_it_runs(self):
+        path = evals.built_engine()
+        self.assertTrue(os.access(path, os.X_OK), path)
+        self.assertEqual(os.path.basename(path), "orchestrator")
 
 
 class TestMain(FakeEngineTest):

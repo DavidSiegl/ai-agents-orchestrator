@@ -68,6 +68,14 @@ class TestInvariants(unittest.TestCase):
         self.assertEqual(project["dependencies"], [], "gate.py has no runtime dependencies "
                                                       "(pyproject.toml, [project]; docs/ui-options.md, C1)")
 
+    def test_the_engine_s_version_is_the_release_s(self):
+        with open(ROOT / "pyproject.toml", "rb") as f:
+            release = tomllib.load(f)["project"]["version"]
+        with open(ROOT / "engine" / "Cargo.toml", "rb") as f:
+            engine = tomllib.load(f)["package"]["version"]
+        self.assertEqual(engine, release, "the engine's version is the release's, which the Jenkinsfile's Release "
+                                          "stage reads from pyproject.toml (docs/architecture.md, Tooling)")
+
     def test_coverage_records_with_the_c_tracer(self):
         with open(ROOT / "pyproject.toml", "rb") as f:
             run = tomllib.load(f)["tool"]["coverage"]["run"]

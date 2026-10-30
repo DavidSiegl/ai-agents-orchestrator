@@ -170,36 +170,6 @@ pipeline {
                 // quality build's report lists failing tests and findings together. Any other exit status means
                 // pytest itself could not run.
                 //
-                // The parity scenarios (tests/parity) replay the Python engine's recordings against the Rust engine's
-                // orchestrator binary, which tests/rust_engine.py has cargo build; it is built here first, under the
-                // cargo lock (the UI stage says why), so that pytest's cargo finds it built and compiles nothing.
-                //
-                // A quality build (GIT_REF set) leaves out the parity scenarios when its change, against HEAD^, the
-                // run's base, touches nothing they depend on: the engine and the Cargo workspace it builds in, the
-                // harness and its recordings, tests/conftest.py's guards they run under and tests/guard_errors.py's
-                // errors those guards raise, the example workflows they run, the Python environment, and ci/, which
-                // pins the gitleaks they run. They took quality build #59 past the orchestrator's QUALITY_TIMEOUT
-                // (1299 s of 1200). A git diff that fails counts as a change, so they run. Pull request builds always
-                // run them. [tool.mutmut] in pyproject.toml leaves them out of mutmut's runs.
-                //
-                // --cov-context=test records which tests run each line, in COVERAGE_FILE, for the Gate stage's
-                // --test-contexts: mutmut then runs only the tests that reach the changed functions. It takes about 7 %
-                // longer, under the ctrace core pyproject.toml pins. COVERAGE_FILE stays relative, in the workspace:
-                // set to an absolute path, under TMPDIR or elsewhere, the file vanished during a run and over 2300
-                // tests errored.
-                sh '''
-                    ci/cargo-lock.sh ${GIT_REF:+--no-wait} cargo build --locked -p octoflow-engine --bin orchestrator
-                    parity=''
-                    if [ -n "${GIT_REF:-}" ] && git diff --quiet HEAD^ HEAD -- engine Cargo.toml Cargo.lock \
-                            rust-toolchain.toml tests/parity tests/rust_engine.py tests/conftest.py tests/guard_errors.py \
-                            examples pyproject.toml uv.lock .python-version ci; then
-                        parity='--ignore=tests/parity'
-                    fi
-                    status=0
-                    uv run pytest $parity --cov=gate --cov-branch --cov-context=test --cov-report=xml \\
-                        --junitxml=test-results.xml || status=$?
-                    [ "$status" -le 1 ] || exit "$status"
-                '''
                 // The Rust tests of every member of the top-level Cargo workspace (Cargo.toml), the engine's and the
                 // desktop shell's, with line coverage, for the Gate stage likewise: --ignore-run-fail writes the
                 // coverage report whatever tests fail and exits 0 for them, so a non-zero status is a build that did
@@ -218,6 +188,45 @@ pipeline {
                         echo "cargo-nextest wrote no $junit, so the Rust tests did not run" >&2
                         exit 1
                     fi
+                '''
+                // The parity scenarios (tests/parity) replay the Python engine's recordings against the Rust engine's
+                // orchestrator binary, and tests/test_docs.py reads its help: the one the Rust tests above built,
+                // instrumented for coverage, through tests/rust_engine.py's ORCHESTRATOR_BIN and the harness's
+                // PARITY_ENGINE, so that pytest compiles no engine of its own. Run so, it would write its profile
+                // where it runs, into a scenario's project, so LLVM_PROFILE_FILE is /dev/null, which PARITY_ENGINE
+                // passes through env, the harness giving the engine an environment of its own.
+                //
+                // A quality build (GIT_REF set) leaves out the parity scenarios when its change, against HEAD^, the
+                // run's base, touches nothing they depend on: the engine and the Cargo workspace it builds in, the
+                // harness and its recordings, tests/conftest.py's guards they run under and tests/guard_errors.py's
+                // errors those guards raise, the example workflows they run, the Python environment, and ci/, which
+                // pins the gitleaks they run. They took quality build #59 past the orchestrator's QUALITY_TIMEOUT
+                // (1299 s of 1200). A git diff that fails counts as a change, so they run. Pull request builds always
+                // run them. [tool.mutmut] in pyproject.toml leaves them out of mutmut's runs.
+                //
+                // --cov-context=test records which tests run each line, in COVERAGE_FILE, for the Gate stage's
+                // --test-contexts: mutmut then runs only the tests that reach the changed functions. It takes about 7 %
+                // longer, under the ctrace core pyproject.toml pins. COVERAGE_FILE stays relative, in the workspace:
+                // set to an absolute path, under TMPDIR or elsewhere, the file vanished during a run and over 2300
+                // tests errored.
+                sh '''
+                    engine="$WORKSPACE/target/llvm-cov-target/debug/orchestrator"
+                    if [ ! -x "$engine" ]; then
+                        echo "the Rust tests built no $engine" >&2
+                        exit 1
+                    fi
+                    parity=''
+                    if [ -n "${GIT_REF:-}" ] && git diff --quiet HEAD^ HEAD -- engine Cargo.toml Cargo.lock \
+                            rust-toolchain.toml tests/parity tests/rust_engine.py tests/conftest.py tests/guard_errors.py \
+                            examples pyproject.toml uv.lock .python-version ci; then
+                        parity='--ignore=tests/parity'
+                    fi
+                    status=0
+                    LLVM_PROFILE_FILE=/dev/null ORCHESTRATOR_BIN="$engine" \\
+                    PARITY_ENGINE="env LLVM_PROFILE_FILE=/dev/null '$engine'" \\
+                    uv run pytest $parity --cov=gate --cov-branch --cov-context=test --cov-report=xml \\
+                        --junitxml=test-results.xml || status=$?
+                    [ "$status" -le 1 ] || exit "$status"
                 '''
             }
             post {
