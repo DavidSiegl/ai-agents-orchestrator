@@ -39,15 +39,15 @@ impl Normalizer {
     /// A normalizer that knows only the host's name, as `<host>`. Panics when the host's name cannot be read.
     pub fn new() -> Normalizer {
         let host = nix::unistd::gethostname().unwrap_or_else(|e| panic!("reading the host's name: {e}"));
-        let mut n = Normalizer {
+        let mut normalizer = Normalizer {
             literals: Vec::new(),
             runs: Map::new(),
             keys: Map::new(),
             shas: Map::new(),
             pids: Vec::new(),
         };
-        n.literal(&host.to_string_lossy(), "<host>");
-        n
+        normalizer.literal(&host.to_string_lossy(), "<host>");
+        normalizer
     }
 
     /// Write placeholder wherever text appears; a longer text registered is replaced before a shorter one.

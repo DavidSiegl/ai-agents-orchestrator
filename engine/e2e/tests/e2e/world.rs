@@ -20,6 +20,7 @@ use octoflow_e2e::ledger::{write_atomically, Ledger, INVOCATION_VAR};
 use octoflow_e2e::normalize::{facts, Normalizer};
 use octoflow_e2e::{array_at, object, object_at, procs, str_at, strings};
 use octoflow_engine::py::json::{Json, Map};
+use octoflow_engine::py::text::shlex_quote;
 
 /// Who the world's commits are by: the harness's own, and the engine's, through the git configuration it is given.
 const GIT_NAME: &str = "Parity";
@@ -96,37 +97,58 @@ impl Invocation {
     /// group, and each process below it in groups of their own, as the engine starts every command
     /// (engine/src/host/process.rs), which a kill of the engine's group alone would leave running. Each is stopped
     /// first, until a listing finds none new, so that none starts another between the listing and the kill.
+    ///
+    /// A listing of the processes that fails ends the stopping, and what is stopped so far is killed all the same, so
+    /// that nothing is left stopped; it is reported on standard error, as is a signal that cannot be sent to a process
+    /// that is still there. Neither panics, since a kill runs from World's drop, also while a scenario fails.
     pub fn kill(&mut self) {
         let group = Pid::from_raw(self.pid());
         let mut stopped = std::collections::BTreeSet::new();
         loop {
-            // The engine's group, then what the listing finds below it that is not stopped yet; each may have ended
-            // meanwhile, which is what the kill is for.
-            let _ = killpg(group, Signal::SIGSTOP);
-            let below: Vec<i32> =
-                procs::descendants(self.pid()).into_iter().filter(|p| *p != self.pid() && !stopped.contains(p)).collect();
+            // The engine's group, then what the listing finds below it that is not stopped yet.
+            signal(killpg(group, Signal::SIGSTOP), "stopping the engine's group");
+            let below: Vec<i32> = match procs::descendants(self.pid()) {
+                Ok(found) => found.into_iter().filter(|p| *p != self.pid() && !stopped.contains(p)).collect(),
+                Err(e) => {
+                    eprintln!("listing /proc to stop the engine's processes: {e}; killing what is stopped");
+                    break;
+                }
+            };
             if below.is_empty() {
                 break;
             }
             for pid in below {
-                let _ = kill(Pid::from_raw(pid), Signal::SIGSTOP);
+                signal(kill(Pid::from_raw(pid), Signal::SIGSTOP), "stopping a process of the engine's");
                 stopped.insert(pid);
             }
         }
-        let _ = killpg(group, Signal::SIGKILL);
+        signal(killpg(group, Signal::SIGKILL), "killing the engine's group");
         for pid in stopped {
-            let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
+            signal(kill(Pid::from_raw(pid), Signal::SIGKILL), "killing a process of the engine's");
         }
-        let _ = self.process.wait();
+        if let Err(e) = self.process.wait() {
+            eprintln!("waiting for the killed engine: {e}");
+        }
         self.killed = true;
     }
 
+    /// What it has written to its standard output so far, without waiting for it to end. Panics when the file it
+    /// writes to cannot be read.
     pub fn stdout(&self) -> String {
         read_lossy(&self.out_path)
     }
 
+    /// What it has written to its standard error so far, as stdout reads it.
     pub fn stderr(&self) -> String {
         read_lossy(&err_path(&self.out_path))
+    }
+}
+
+/// Report a signal that was not sent, unless its process had ended already (ESRCH), which is what a kill is for.
+fn signal(sent: nix::Result<()>, what: &str) {
+    match sent {
+        Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+        Err(e) => eprintln!("{what}: {e}"),
     }
 }
 
@@ -149,17 +171,23 @@ fn read_lossy(path: &Path) -> String {
 /// output). Dropping it kills any invocation still running and removes the directory, unless the scenario failed,
 /// when the directory is kept for a look and its path printed.
 pub struct World {
+    /// The world's directory, its symbolic links resolved.
     pub root: PathBuf,
+    /// The git checkout the engine runs in, `root/project`.
     pub project: PathBuf,
+    /// The bare repository that is the project's origin, `root/origin.git`.
     pub origin: PathBuf,
     /// The engine every invocation runs.
     engine: PathBuf,
+    /// What the record's normalization replaces: the world's own paths, and the pids of its invocations.
     pub normalizer: Normalizer,
+    /// Every invocation started, in order: invocation n is the n-th, from 1.
     pub invocations: Vec<Invocation>,
     /// What the scenario observed itself, by key, recorded under notes.
     notes: Map<Json>,
     /// The scenario's script, as the fakes read it from script.json.
     script: Map<Json>,
+    /// The fakes' state and the commands they got, which the world reads and changes too.
     pub ledger: Ledger,
 }
 
@@ -181,7 +209,11 @@ impl World {
         }
         let base = std::env::var_os("TMPDIR").map_or_else(std::env::temp_dir, PathBuf::from);
         let dir = base.join(format!("octoflow-e2e-{scenario}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        // A world an earlier run of the scenario kept, with this process's pid.
+        match fs::remove_dir_all(&dir) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => panic!("removing {}: {e}", dir.display()),
+            _ => {}
+        }
         fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("making {}: {e}", dir.display()));
         let root = dir.canonicalize().unwrap_or_else(|e| panic!("resolving {}: {e}", dir.display()));
         let mut normalizer = Normalizer::new();
@@ -438,9 +470,11 @@ impl World {
 
     /// Shims of the fakes in bin/, and the harnesses' CLIs.
     fn make_bin(&self) {
-        let root = shell_quote(&self.root.to_string_lossy());
-        let mut shims: Vec<(String, String)> =
-            fakes().iter().map(|(name, fake)| ((*name).to_string(), format!("exec {} {root} \"$@\"", shell_quote(fake)))).collect();
+        let root = shlex_quote(&self.root.to_string_lossy());
+        let mut shims: Vec<(String, String)> = fakes()
+            .iter()
+            .map(|(name, fake)| ((*name).to_string(), format!("exec {} {root} \"$@\"", shlex_quote(fake))))
+            .collect();
         // The harnesses' CLIs, which doctor looks for on PATH and herdr would start: nothing runs them here.
         shims.extend(AGENT_KINDS.iter().map(|kind| ((*kind).to_string(), "exit 0".to_string())));
         for (program, body) in shims {
@@ -492,15 +526,15 @@ impl World {
     }
 
     fn normalized(&self, raw: &Json) -> Json {
-        let n = &self.normalizer;
-        let Json::Object(mut out) = n.json(raw, false, None) else { unreachable!("a record is an object") };
+        let normalizer = &self.normalizer;
+        let Json::Object(mut out) = normalizer.json(raw, false, None) else { unreachable!("a record is an object") };
         if let Some(Json::Array(invocations)) = out.get_mut("invocations") {
             for inv in invocations {
                 let Json::Object(inv) = inv else { continue };
                 for stream in ["stdout", "stderr"] {
                     let key = format!("{stream}_facts");
                     if let Some(Json::Str(text)) = inv.remove(&key) {
-                        inv.insert(key, strings(&facts(&n.text(&text, true))));
+                        inv.insert(key, strings(&facts(&normalizer.text(&text, true))));
                     }
                 }
             }
@@ -509,10 +543,10 @@ impl World {
         let raw_events = raw.get("events").map(Json::as_object_or_empty).cloned().unwrap_or_default();
         let out_events = object_at(&mut out, "events");
         for (by, raw_list) in raw_events.iter() {
-            let Some(Json::Array(list)) = out_events.get_mut(&n.text(by, false)) else { continue };
+            let Some(Json::Array(list)) = out_events.get_mut(&normalizer.text(by, false)) else { continue };
             for (raw_event, event) in raw_list.as_array().into_iter().flatten().zip(list.iter_mut()) {
                 if let (Some(stdin), Json::Object(event)) = (raw_event.get("stdin").and_then(Json::as_str), event) {
-                    event.insert("stdin", Json::Str(n.text(stdin, true)));
+                    event.insert("stdin", Json::Str(normalizer.text(stdin, true)));
                 }
             }
         }
@@ -520,11 +554,11 @@ impl World {
         let out_files = object_at(&mut out, "run_files");
         for (path, text) in raw_files.iter() {
             if path.ends_with("summary.md") {
-                out_files.insert(n.text(path, false), Json::Str(n.text(text.as_str().unwrap_or_default(), true)));
+                out_files.insert(normalizer.text(path, false), Json::Str(normalizer.text(text.as_str().unwrap_or_default(), true)));
             }
         }
         // What a scenario notes may word the clock's times too.
-        out.insert("notes", n.json(&Json::Object(self.notes.clone()), true, None));
+        out.insert("notes", normalizer.json(&Json::Object(self.notes.clone()), true, None));
         Json::Object(out)
     }
 
@@ -678,8 +712,8 @@ impl Drop for World {
         }
         if std::thread::panicking() {
             eprintln!("the world is kept at {}", self.root.display());
-        } else {
-            let _ = fs::remove_dir_all(&self.root);
+        } else if let Err(e) = fs::remove_dir_all(&self.root) {
+            eprintln!("removing the world at {}: {e}", self.root.display());
         }
     }
 }
@@ -750,11 +784,6 @@ fn walk(top: &Path, dir: &Path, files: &mut Map<Json>) {
         }
         walk(top, &path, files);
     }
-}
-
-/// path quoted for sh, in single quotes.
-fn shell_quote(path: &str) -> String {
-    format!("'{}'", path.replace('\'', r"'\''"))
 }
 
 /// The full path of program on PATH, if any.

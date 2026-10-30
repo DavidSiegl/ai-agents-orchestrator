@@ -46,6 +46,7 @@ OTHER_PROGRAMS_NAMES = {
     "SSL_CERT_DIR": "OpenSSL's environment variable, which the Rust engine's HttpClient reads too",
     "ORCHESTRATOR_BIN": "the desktop app's environment variable, ui/src-tauri/src/lib.rs",
     "PARITY_ENGINE": "the parity harness's environment variable, tests/parity/world.py",
+    "E2E_ENGINE": "the e2e scenarios' environment variable, engine/e2e/tests/e2e/engine.rs",
     "PARITY_RECORD": "the parity harness's environment variable, tests/parity/test_parity.py",
     "PARITY_COMMANDS": "the parity harness's environment variable, tests/parity/test_parity.py",
     "EVAL_ENGINE": "the eval runner's environment variable, evals/run.py",

@@ -19,11 +19,10 @@ use std::io::Read;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::Command;
-use std::thread::sleep;
 
 use octoflow_engine::py::json::{Json, Map};
 
-use crate::ledger::{invocation, Ledger, POLL};
+use crate::ledger::{invocation, wait_until, Ledger};
 use crate::{array_at, holds, object, object_at, str_at, strings};
 
 /// The URL of pull request n as gh prints it once it has opened it.
@@ -104,10 +103,30 @@ fn flag<'a>(args: &[&'a str], flag: &str) -> &'a str {
 
 /// The `result` of one API-backed herdr command, its effects made in state.
 fn herdr_command(ledger: &Ledger, state: &mut Map<Json>, args: &[&str]) -> Result<Json, HerdrFailure> {
-    let (what, rest) = (args.get(..2).unwrap_or(args), args.get(2..).unwrap_or(&[]));
+    match args.first().copied().unwrap_or_default() {
+        "workspace" => workspace_command(state, args),
+        "pane" => pane_command(state, args),
+        "agent" => agent_command(ledger, state, args),
+        "notification" if args.get(1) == Some(&"show") => Ok(object([])),
+        _ => Err(unknown(args)),
+    }
+}
+
+/// The verb of a herdr command, its second word, and the words after it.
+fn verb_and_rest<'a, 'b>(args: &'a [&'b str]) -> (&'b str, &'a [&'b str]) {
+    (args.get(1).copied().unwrap_or_default(), args.get(2..).unwrap_or_default())
+}
+
+fn unknown(args: &[&str]) -> HerdrFailure {
+    failure("unknown_command", format!("the fake herdr has no command {}", args.join(" ")))
+}
+
+/// herdr's `workspace VERB REST...`, args being the whole command.
+fn workspace_command(state: &mut Map<Json>, args: &[&str]) -> Result<Json, HerdrFailure> {
+    let (verb, rest) = verb_and_rest(args);
     let first = rest.first().copied().unwrap_or_default();
-    match what {
-        ["workspace", "create"] => {
+    match verb {
+        "create" => {
             let w = format!("w{}", next_id(state, "workspace"));
             let pane = format!("p{}", next_id(state, "pane"));
             let label = Json::from(flag(rest, "--label"));
@@ -120,44 +139,50 @@ fn herdr_command(ledger: &Ledger, state: &mut Map<Json>, args: &[&str]) -> Resul
                 ("root_pane", object([("pane_id", Json::Str(pane))])),
             ]))
         }
-        ["workspace", "get"] => {
-            if !object_at(state, "workspaces").contains_key(first) {
-                return Err(failure("workspace_not_found", format!("no workspace {first}")));
-            }
+        "get" if object_at(state, "workspaces").contains_key(first) => {
             Ok(object([("workspace", object([("workspace_id", Json::from(first))]))]))
         }
-        ["workspace", "close"] => {
-            if object_at(state, "workspaces").remove(first).is_none() {
-                return Err(failure("workspace_not_found", format!("no workspace {first}")));
-            }
-            let panes = object_at(state, "panes");
-            let gone: Vec<String> = panes
-                .iter()
-                .filter(|(_, p)| p.get("workspace").and_then(Json::as_str) == Some(first))
-                .map(|(k, _)| k.to_string())
-                .collect();
-            for p in &gone {
-                panes.remove(p);
-            }
-            let live: BTreeSet<String> = panes.keys().map(str::to_string).collect();
-            let agents = object_at(state, "agents");
-            let exited: Vec<String> = agents
-                .iter()
-                .filter(|(_, a)| !live.contains(str_at(a, "pane")))
-                .map(|(k, _)| k.to_string())
-                .collect();
-            for name in &exited {
-                agents.remove(name);
-            }
+        "close" if object_at(state, "workspaces").remove(first).is_some() => {
+            close_panes(state, first);
             Ok(object([]))
         }
-        ["pane", "split"] => {
+        "get" | "close" => Err(failure("workspace_not_found", format!("no workspace {first}"))),
+        _ => Err(unknown(args)),
+    }
+}
+
+/// Remove workspace's panes, and the agents in them, which exit with their panes.
+fn close_panes(state: &mut Map<Json>, workspace: &str) {
+    let panes = object_at(state, "panes");
+    let gone: Vec<String> = panes
+        .iter()
+        .filter(|(_, p)| p.get("workspace").and_then(Json::as_str) == Some(workspace))
+        .map(|(k, _)| k.to_string())
+        .collect();
+    for p in &gone {
+        panes.remove(p);
+    }
+    let live: BTreeSet<String> = panes.keys().map(str::to_string).collect();
+    let agents = object_at(state, "agents");
+    let exited: Vec<String> =
+        agents.iter().filter(|(_, a)| !live.contains(str_at(a, "pane"))).map(|(k, _)| k.to_string()).collect();
+    for name in &exited {
+        agents.remove(name);
+    }
+}
+
+/// herdr's `pane VERB REST...`, args being the whole command.
+fn pane_command(state: &mut Map<Json>, args: &[&str]) -> Result<Json, HerdrFailure> {
+    let (verb, rest) = verb_and_rest(args);
+    let first = rest.first().copied().unwrap_or_default();
+    match verb {
+        "split" => {
             let workspace = pane(state, first)?.get("workspace").cloned().unwrap_or(Json::Null);
             let p = format!("p{}", next_id(state, "pane"));
             object_at(state, "panes").insert(p.clone(), object([("workspace", workspace), ("label", Json::from(""))]));
             Ok(object([("pane", object([("pane_id", Json::Str(p))]))]))
         }
-        ["pane", "rename"] => {
+        "rename" => {
             let label = Json::from(rest.get(1).copied().unwrap_or_default());
             match pane(state, first)? {
                 Json::Object(p) => p.insert("label", label),
@@ -165,11 +190,20 @@ fn herdr_command(ledger: &Ledger, state: &mut Map<Json>, args: &[&str]) -> Resul
             }
             Ok(object([]))
         }
-        ["pane", "get"] => {
+        "get" => {
             pane(state, first)?;
             Ok(object([("pane", object([("pane_id", Json::from(first))]))]))
         }
-        ["agent", "start"] => {
+        _ => Err(unknown(args)),
+    }
+}
+
+/// herdr's `agent VERB NAME REST...`, args being the whole command.
+fn agent_command(ledger: &Ledger, state: &mut Map<Json>, args: &[&str]) -> Result<Json, HerdrFailure> {
+    let (verb, rest) = verb_and_rest(args);
+    let name = rest.first().copied().unwrap_or_default();
+    match verb {
+        "start" => {
             let p = flag(rest, "--pane");
             pane(state, p)?;
             let session = format!("session-{}", next_id(state, "session"));
@@ -179,46 +213,49 @@ fn herdr_command(ledger: &Ledger, state: &mut Map<Json>, args: &[&str]) -> Resul
                 ("status", Json::from("idle")),
                 ("session", Json::Str(session)),
             ]);
-            let record = agent_record(first, &agent);
-            object_at(state, "agents").insert(first, agent);
+            let record = agent_record(name, &agent);
+            object_at(state, "agents").insert(name, agent);
             Ok(object([("agent", record)]))
         }
-        ["agent", "get"] => {
-            let record = agent_record(first, agent(state, first)?);
-            // The engine's first poll of an agent whose action is held: the engine is waiting for it now, and does
-            // nothing but poll again until the hold is released.
-            let holds_on_it: Vec<String> = object_at(state, "held")
-                .iter()
-                .filter(|(_, entry)| str_at(entry, "name") == first)
-                .map(|(hold, _)| hold.to_string())
-                .collect();
-            let reached = array_at(state, "reached");
-            for hold in holds_on_it {
-                if !reached.iter().any(|r| r.as_str() == Some(&hold)) {
-                    reached.push(Json::Str(hold));
-                }
-            }
+        "get" => {
+            let record = agent_record(name, agent(state, name)?);
+            reach_holds_on(state, name);
             Ok(object([("agent", record)]))
         }
-        ["agent", "wait"] => {
-            let a = agent(state, first)?;
+        "wait" => {
+            let a = agent(state, name)?;
             let until: Vec<&str> = rest.windows(2).filter(|w| w[0] == "--until").map(|w| w[1]).collect();
             if !until.is_empty() && !until.contains(&str_at(a, "status")) {
-                return Err(failure("timeout", format!("agent {first} did not reach {}", until.join(", "))));
+                return Err(failure("timeout", format!("agent {name} did not reach {}", until.join(", "))));
             }
-            Ok(object([("agent", agent_record(first, a))]))
+            Ok(object([("agent", agent_record(name, a))]))
         }
-        ["agent", "prompt"] => {
-            agent(state, first)?;
-            prompted(ledger, state, first);
+        "prompt" => {
+            agent(state, name)?;
+            prompted(ledger, state, name);
             Ok(object([]))
         }
-        ["agent", "focus"] => {
-            agent(state, first)?;
+        "focus" => {
+            agent(state, name)?;
             Ok(object([]))
         }
-        ["notification", "show"] => Ok(object([])),
-        _ => Err(failure("unknown_command", format!("the fake herdr has no command {}", args.join(" ")))),
+        _ => Err(unknown(args)),
+    }
+}
+
+/// Mark reached each hold an action of agent name waits on: the engine's first poll of the agent after prompting it,
+/// after which it does nothing but poll again until the hold is released.
+fn reach_holds_on(state: &mut Map<Json>, name: &str) {
+    let holds_on_it: Vec<String> = object_at(state, "held")
+        .iter()
+        .filter(|(_, entry)| str_at(entry, "name") == name)
+        .map(|(hold, _)| hold.to_string())
+        .collect();
+    let reached = array_at(state, "reached");
+    for hold in holds_on_it {
+        if !reached.iter().any(|r| r.as_str() == Some(&hold)) {
+            reached.push(Json::Str(hold));
+        }
     }
 }
 
@@ -358,73 +395,83 @@ pub fn gh(ledger: &Ledger, args: &[String]) -> i32 {
         std::io::stdin().read_to_string(&mut text).unwrap_or_else(|e| panic!("reading gh's standard input: {e}"));
         text
     });
-    let pids = ledger.engine_pids();
-    let creating = words.starts_with(&["pr", "create"]);
-    let hold = ledger.change(|state| {
-        let mut event = Map::from_iter([("gh", strings(args))]);
-        if let Some(stdin) = &stdin {
-            event.insert("stdin", Json::Str(stdin.clone()));
-        }
-        ledger.log(state, event, &invocation(), &pids);
-        let script = ledger.script();
-        let hold = script.get("gh").and_then(|g| g.get("create_hold")).and_then(Json::as_str).map(str::to_string);
-        let hold = hold.filter(|h| creating && !h.is_empty());
-        if let Some(hold) = &hold {
-            array_at(state, "reached").push(Json::Str(hold.clone()));
-        }
-        hold
-    });
+    let hold = logged(ledger, &words, stdin.as_deref());
     if words.starts_with(&["auth", "status"]) {
         println!("github.com\n  Logged in to github.com account parity");
         return 0;
     }
     if let Some(hold) = hold {
-        while !ledger.change(|state| holds(state, "released", &hold)) {
-            sleep(POLL);
-        }
+        wait_until(ledger, |state| holds(state, "released", &hold));
     }
     let origin = str_at(&ledger.script(), "origin").to_string();
-    ledger.change(|state| {
-        if creating {
-            let n = next_id(state, "pr");
-            let pr = object([
-                ("base", Json::from(flag(&words, "--base"))),
-                ("head", Json::from(flag(&words, "--head"))),
-                ("title", Json::from(flag(&words, "--title"))),
-                ("body", Json::from(stdin.clone())),
-                ("isDraft", Json::Bool(words.contains(&"--draft"))),
-                ("state", Json::from("OPEN")),
-                ("closedAt", Json::Null),
-                ("mergeable", Json::from("MERGEABLE")),
-            ]);
-            object_at(state, "prs").insert(n.to_string(), pr);
-            println!("{}", pr_url(n));
-            return 0;
-        }
-        if let ["pr", verb @ ("view" | "edit" | "ready"), target, ..] = words.as_slice() {
+    ledger.change(|state| match words.as_slice() {
+        ["pr", "create", ..] => opened(state, &words, stdin),
+        ["pr", verb @ ("view" | "edit" | "ready"), target, ..] => {
             let number = target.trim_end_matches('/').rsplit('/').next().unwrap_or_default();
             let Some(Json::Object(pr)) = object_at(state, "prs").get_mut(number) else {
                 eprintln!("no pull requests found for {target}");
                 return 1;
             };
             match *verb {
-                "edit" => pr.insert("body", Json::from(stdin.clone())),
+                "edit" => pr.insert("body", Json::from(stdin)),
                 "ready" => pr.insert("isDraft", Json::Bool(false)),
-                _ => {
-                    let head = pr.get("head").and_then(Json::as_str).unwrap_or_default().to_string();
-                    let mut view = pr.clone();
-                    view.insert("headRefOid", Json::Str(origin_commit(&origin, &head)));
-                    let fields = flag(&words, "--json").split(',');
-                    let chosen: Map<Json> =
-                        fields.map(|k| (k, view.get(k).cloned().unwrap_or_else(|| panic!("gh has no field {k}")))).collect();
-                    println!("{}", Json::Object(chosen).dumps());
-                }
+                _ => println!("{}", viewed(pr, flag(&words, "--json"), &origin).dumps()),
             }
-            return 0;
+            0
         }
-        eprintln!("the fake gh has no command {}", words.join(" "));
-        1
+        _ => {
+            eprintln!("the fake gh has no command {}", words.join(" "));
+            1
+        }
     })
+}
+
+/// Log gh command words, with its standard input when it read one; the hold `pr create` is to wait on, reached now,
+/// when the script holds it.
+fn logged(ledger: &Ledger, words: &[&str], stdin: Option<&str>) -> Option<String> {
+    let pids = ledger.engine_pids();
+    ledger.change(|state| {
+        let mut event = Map::from_iter([("gh", strings(words))]);
+        if let Some(stdin) = stdin {
+            event.insert("stdin", Json::from(stdin));
+        }
+        ledger.log(state, event, &invocation(), &pids);
+        let script = ledger.script();
+        let hold = script.get("gh").and_then(|g| g.get("create_hold")).and_then(Json::as_str).map(str::to_string);
+        let hold = hold.filter(|h| words.starts_with(&["pr", "create"]) && !h.is_empty());
+        if let Some(hold) = &hold {
+            array_at(state, "reached").push(Json::Str(hold.clone()));
+        }
+        hold
+    })
+}
+
+/// Open the pull request `gh pr create` words asks for, with body, and print its URL; the exit status.
+fn opened(state: &mut Map<Json>, words: &[&str], body: Option<String>) -> i32 {
+    let n = next_id(state, "pr");
+    let pr = object([
+        ("base", Json::from(flag(words, "--base"))),
+        ("head", Json::from(flag(words, "--head"))),
+        ("title", Json::from(flag(words, "--title"))),
+        ("body", Json::from(body)),
+        ("isDraft", Json::Bool(words.contains(&"--draft"))),
+        ("state", Json::from("OPEN")),
+        ("closedAt", Json::Null),
+        ("mergeable", Json::from("MERGEABLE")),
+    ]);
+    object_at(state, "prs").insert(n.to_string(), pr);
+    println!("{}", pr_url(n));
+    0
+}
+
+/// The fields of pr that `gh pr view --json fields` gives, fields comma-separated, its head commit read from origin.
+/// Panics on a field the fake does not hold.
+fn viewed(pr: &Map<Json>, fields: &str, origin: &str) -> Json {
+    let head = pr.get("head").and_then(Json::as_str).unwrap_or_default();
+    let mut view = pr.clone();
+    view.insert("headRefOid", Json::Str(origin_commit(origin, head)));
+    let chosen = fields.split(',').map(|k| (k, view.get(k).cloned().unwrap_or_else(|| panic!("gh has no field {k}"))));
+    Json::Object(chosen.collect())
 }
 
 /// The commit of branch in the origin repository, or 40 zeros when it has none: gh still names the head that the pull

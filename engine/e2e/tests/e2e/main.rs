@@ -15,7 +15,7 @@ mod world;
 
 use std::path::PathBuf;
 
-use octoflow_engine::py::json::Json;
+use octoflow_engine::py::json::{unicode_string, Json};
 
 /// Where the recordings are.
 fn recorded() -> PathBuf {
@@ -30,7 +30,9 @@ fn check(name: &str, scenario: fn(&mut world::World)) {
     let got = w.record();
     let path = recorded().join(format!("{name}.json"));
     if std::env::var("E2E_RECORD").as_deref() == Ok("1") {
-        let text = got.dumps_indented(1) + "\n";
+        let mut text = String::new();
+        write_recording(&got, 0, &mut text);
+        text.push('\n');
         std::fs::write(&path, text).unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
         return;
     }
@@ -41,6 +43,48 @@ fn check(name: &str, scenario: fn(&mut world::World)) {
     if let Some(difference) = compare::first_difference(&want, &got, "$") {
         panic!("scenario {name} differs from its recording at {difference}");
     }
+}
+
+/// Write json at out's end as the Python harness wrote a recording, `json.dump(json, f, indent=1, ensure_ascii=False)`:
+/// as py::json's dumps_indented(1), but with every character beyond ASCII as it is, not escaped. level is how many
+/// arrays and objects hold json.
+fn write_recording(json: &Json, level: usize, out: &mut String) {
+    let (open, between, close) = (format!("\n{}", " ".repeat(level + 1)), ",", format!("\n{}", " ".repeat(level)));
+    match json {
+        Json::Str(s) => out.push_str(&unicode_string(s)),
+        Json::Array(items) if !items.is_empty() => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                out.push_str(if i == 0 { "" } else { between });
+                out.push_str(&open);
+                write_recording(item, level + 1, out);
+            }
+            out.push_str(&close);
+            out.push(']');
+        }
+        Json::Object(map) if !map.is_empty() => {
+            out.push('{');
+            for (i, (key, value)) in map.iter().enumerate() {
+                out.push_str(if i == 0 { "" } else { between });
+                out.push_str(&open);
+                out.push_str(&unicode_string(key));
+                out.push_str(": ");
+                write_recording(value, level + 1, out);
+            }
+            out.push_str(&close);
+            out.push('}');
+        }
+        // A number, a constant, or an empty array or object, which dumps writes as json.dump does.
+        other => out.push_str(&other.dumps()),
+    }
+}
+
+#[test]
+fn a_recording_keeps_characters_beyond_ascii_as_they_are() {
+    let record = Json::parse(r#"{"a": ["é \u2014", {}, []], "b": {"n": 1.5, "x": null}}"#).expect("JSON");
+    let mut text = String::new();
+    write_recording(&record, 0, &mut text);
+    assert_eq!(text, "{\n \"a\": [\n  \"é \u{2014}\",\n  {},\n  []\n ],\n \"b\": {\n  \"n\": 1.5,\n  \"x\": null\n }\n}");
 }
 
 /// A #[test] for each scenario, by its name in scenarios.rs.
