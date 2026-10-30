@@ -372,6 +372,31 @@ skips every expression that starts on a matching line, with all it holds, so a t
 so is a whole `add_argument(...)` or `add_parser(...)` call that starts on its `help=` or `description=` line. A change
 to such a text alone makes no mutant. Flag names that start a line of their own are still mutated.
 
+**Rust's mutants.** After mutmut, with what is left of the one `--mutation-budget`, the check mutation-tests the Rust a
+change adds lines to outside the tests (a `.rs` file of a Cargo package, as for test integrity) with
+[cargo-mutants](https://mutants.rs/). When the change has Rust to mutate, mutmut gets half the budget, and
+cargo-mutants the rest, with whatever mutmut left unused; a change with no Python functions to mutate gives
+cargo-mutants all of it. cargo-mutants chooses what to mutate itself: it runs `--in-diff` with the change's diff of the workspace's
+`.rs` files, which mutates only what the added lines hold, `--in-place` in the gate's copy of the files git tracks,
+once per Cargo workspace (that of the nearest `Cargo.toml` above the file, as `cargo locate-project` tells it),
+with `--test-tool nextest` and `--timeout 60` for each mutant's tests. Its outcomes, from `mutants.out/outcomes.json`,
+count as mutmut's do: a missed mutant survived; a caught one, and a timeout, did not; an unviable one, which does not
+build, was not tried. Added lines with nothing to mutate, such as a `use` or a `const`, give nothing. The findings are
+mutmut's kinds:
+
+- `survived`: a function with missed mutants, at the line its `fn` starts, with how many of its tried mutants survived
+  and the first three, each by its line and cargo-mutants' description, such as `replace > with == in unchecked`;
+- `budget-reached`: the budget ran out, before cargo-mutants started (it needs the 15 seconds of its stop, as mutmut
+  does) or while it ran, with how many mutants it had tried; the workspaces after it are `not-run`;
+- `not-run`: cargo-mutants could not start, wrote no outcomes the gate can read, or found the unmutated baseline not
+  passing, as for tests that fail or code that does not build in the copy; or the copy could not be made;
+- `not-mutated`: a changed `.rs` file with no `Cargo.toml` above it, or one whose workspace cargo cannot tell;
+- `not-removed`: the copy could not be removed afterwards; the findings stand.
+
+cargo-mutants' own skip attribute, `#[mutants::skip]`, also inside a `cfg_attr`, wrapped or not, is a suppression: the quality file
+lists the change's, as it lists an `#[allow(...)]`. The copy has no `target/`, so each run builds the workspace and its
+dependencies anew within the budget (see `TODO.md`).
+
 **Passes at base** runs the tests the change adds or edits, picked as flaky-tests picks them, against the base's code,
 since a test that passes without the change cannot be what shows the change works: coverage counts the lines it runs,
 surviving-mutants sees only the functions the change edits, and test integrity only tests getting weaker. For a bug
@@ -413,6 +438,29 @@ from a directory other than those roots, or through an import hook placed ahead 
 writes where each module it imported came from, and one that took a project file of the working tree's, whether for a
 changed test, a `conftest.py` or a helper, is one `not-run` finding naming the packages, with no test judged.
 
+Rust's tests are judged the same way after Python's, with what is left of the one `--base-run-budget`, when the change
+edits Rust code outside the tests: a `.rs` file of a Cargo package that is not among Rust's tests (as for test
+integrity), edited outside its inline `#[cfg(test)]` modules, added, deleted or renamed. The changed tests are the
+tests, read through the gate-rust helper as test integrity reads them, whose lines, attributes included, the change
+adds to or removes from. They run in a copy of the base made as above, with these files taken from the working tree:
+any file under a `tests` directory, a `tests.rs`, and a `.rs` file the change edits only inside its `#[cfg(test)]`
+modules. A test in a `#[cfg(test)]` module of a file the change also edits outside it cannot be separated from the
+code it tests, and is a `not-run` finding at its `fn`. Each Cargo target the changed tests are in is built and run on
+its own, with `cargo nextest run --locked --no-fail-fast`, filtered to its tests (`-E 'test(=path::name)'`), in the
+copy's package directory, with a target directory and a nextest store outside the copy and the gate's own nextest
+configuration in place of the copy's. The target is found by Cargo's default places: the package is the nearest
+`Cargo.toml` above the file; `tests/x.rs`, and a file under a `tests/x/` that holds a `main.rs`, are the integration
+test `x`; `src/bin/x.rs` and a file under `src/bin/x/` likewise the binary `x`; `src/main.rs` the package's binary;
+any other file under `src/` a module of the library where `src/lib.rs` exists, else of the binaries. A file elsewhere,
+as a shared `tests/common/mod.rs`, is a `not-run` finding. A target whose tests do not compile at the base (rustc's
+`could not compile`) counts as failing there, which is what the check expects of a test that needs the change, and
+gives no finding: so a change that adds a function and a test file calling it is judged as one whose tests fail at the
+base. Any other cargo error, as a lock file `--locked` refuses, is a `not-run` finding. The findings are those above,
+`cargo nextest` in place of pytest; a test passes when every case nextest reports under its name passed, and a test it
+did not report, as one a `cfg` leaves out at the base, gives nothing. A test edited by removing its first attribute,
+as an `#[ignore]`, counts as edited. The target directory is new for every run, so each run compiles the package's dependencies anew,
+within the budget (see `TODO.md`).
+
 **Vague names** lists the names a change binds that tell a reader nothing about what they hold: `data`, `info`,
 `value`, `status`, `handle` and `manager` (`VAGUE_NAME_WORDS`), or a name ending in one after an underscore, such as
 `raw_info`, in any case. A name counts where a line the change adds to a Python file, a `.py` file or a script whose
@@ -424,6 +472,17 @@ binding the same name is. A function marked `@override` (PEP 698) is skipped, na
 class fixes them; an override without the mark is reported (see `TODO.md`).
 `result` is not on the list, since the rules allow it for what a function returns. A changed file that cannot be read
 or parsed is a `not-read` finding.
+
+Rust is read the same way, through the gate-rust helper's `bindings` (see "Reading Rust: the gate-rust helper"): a name
+counts where a line the change adds to a `.rs` file binds it, by any binding kind the helper lists, from a `let` to a
+`use ... as`. Rust names its types and traits in CamelCase, with no underscore to split on, so its counterpart of the
+underscore rule is a name whose last CamelCase word is one of the words, such as `RunInfo`, `StateManager` or
+`HTTPStatus`, but not `InfoStore`. A constant in capitals, as MAX_VALUE, ends in a word after an underscore, so the
+Python rule catches it. The name and parameters of each `fn` of an `impl Trait for T` are skipped, as `@override` is
+in Python, since the trait fixes them; what such a `fn`'s body binds is still read, as is every `fn` of an inherent
+`impl`. A `.rs` file the helper cannot
+parse is a `not-read` finding at the line it names, and when the helper cannot run, the check lists the `not-run`
+finding the other Rust checks do. A change that adds lines to no `.rs` file starts no helper.
 
 The gate is `GATE: ERROR` when any of these holds, and `GATE: OK` otherwise:
 
@@ -740,9 +799,11 @@ request](#a-build-of-main-judged-at-its-pull-request)).
   a build cannot, and the Install stage fails naming a missing one. The gate fails a build that lacks a linter, and
   the tests that run the real clippy fail without it.
 - **`curl`, `sha256sum`, `tar` and `openssl` on the agent**: the Install stage downloads, with `ci/install-tools.sh`,
-  pinned releases of the gitleaks the parity scenarios (`tests/parity`) run and of cargo-llvm-cov and cargo-nextest,
-  for the [Rust tests and coverage](#rust-tests-and-coverage), into the workspace's `.tools/bin`, which the Jenkinsfile
-  puts first on `PATH`. The scenarios make the fake PyPI's certificate with openssl. Without gitleaks or openssl the
+  pinned releases of the gitleaks the parity scenarios (`tests/parity`) run, of cargo-llvm-cov and cargo-nextest,
+  for the [Rust tests and coverage](#rust-tests-and-coverage) and the passes-at-base check's run of the changed Rust
+  tests at the base, and of cargo-mutants, for the surviving-mutants check's Rust, into the workspace's `.tools/bin`,
+  which the Jenkinsfile puts first on `PATH`. cargo-mutants releases only a glibc build for linux x86_64, so the agent
+  image's glibc must be one it runs on. The scenarios make the fake PyPI's certificate with openssl. Without gitleaks or openssl the
   scenarios fail, naming it.
 - **Node 20.19 or later and npm, Rust 1.90 or later, and Tauri 2's system packages on the agent**, for the Test stage's
   Rust tests, the UI stage's checks of the desktop app and the Package stage's `tauri build` of it. Debian 13's `nodejs`
@@ -800,7 +861,7 @@ empty `GIT_REF`, before it accepts `buildWithParameters`.
 |---|---|---|
 | Quality build (`GIT_REF` set) | `HEAD^`: the snapshot's only parent is the run's base | `main`'s `gate.py`, `pyproject.toml` and gate-rust helper, from the `origin/main` commit its description names (below); a commit without `gate.py` fails the stage, unjudged |
 | Pull request (`CHANGE_TARGET` set) | the merge base with the target branch, fetched first | its own, `Jenkinsfile` included (below) |
-| `main` | the last successful build's commit, else `HEAD^1` | its own; none when judged at its pull request (below) |
+| `main` | the last successful build's commit, else `HEAD^1`, as also when a force-push took that commit out of the history | its own; none when judged at its pull request (below) |
 
 Before Install runs any code of the change, a quality build's Checkout stage sets its build description to
 `judged tree=<sha> parent=<sha> main=<sha>`, exactly: full lowercase shas, one space apart. `tree` is the

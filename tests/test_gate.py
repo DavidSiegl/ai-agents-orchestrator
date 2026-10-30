@@ -1730,21 +1730,25 @@ class TestWeakenedTests(RepositoryTest):
 
     def test_a_golden_file_rewritten_with_the_code_it_pins_is_an_expected_value_changed(self):
         self.commit({"tests/golden/sum.txt": "3\n", "tests/golden/old.txt": "1\n", "tests/golden/moved.txt": "2\n",
-                     "docs/golden/notes.txt": "a\n"}, "golden files")
+                     "tests/golden/cut.txt": "1\n2\n", "docs/golden/notes.txt": "a\n"}, "golden files")
         self.edit("calc.py", "return a + b", "return b + a")
         self.edit("tests/golden/sum.txt", "3\n", "4\n")
+        self.edit("tests/golden/cut.txt", "1\n2\n", "1\n")  # lines removed, none added
         self.git("rm", "--quiet", "tests/golden/old.txt")
         self.git("mv", "tests/golden/moved.txt", "tests/golden/kept.txt")  # its expected value unchanged
         self.put("tests/golden/new.txt", "5\n")  # a new expected value, not a changed one
         self.edit("docs/golden/notes.txt", "a\n", "b\n")  # no test reads it
         self.git("add", "tests/golden/new.txt")
         where, found = self.found()
-        self.assertEqual(where, [("tests/golden/old.txt", None, "expected-value-changed"),
+        self.assertEqual(where, [("tests/golden/cut.txt", None, "expected-value-changed"),
+                                 ("tests/golden/old.txt", None, "expected-value-changed"),
                                  ("tests/golden/sum.txt", None, "expected-value-changed")])
-        self.assertEqual(found[1]["message"], "a golden file, the expected output of a test, changed in a change that "
+        self.assertEqual(found[2]["message"], "a golden file, the expected output of a test, changed in a change that "
                                               "also edits the code under test; check that its diff is what the change "
                                               "means the output to become.")
-        self.assertIn("deleted", found[0]["message"])
+        self.assertEqual(found[1]["message"], "a golden file, the expected output of a test, deleted in a change that "
+                                              "also edits the code under test; check that no test still needs it.")
+        self.assertEqual({f["severity"] for f in found}, {"error"})
 
     def test_a_golden_file_rewritten_with_a_python_script_it_pins_is_an_expected_value_changed(self):
         self.commit({"tests/golden/tool.txt": "3\n", "bin/tool": "#!/usr/bin/env python3\nprint(3)\n",
@@ -1814,7 +1818,18 @@ class TestWeakenedTests(RepositoryTest):
             f.write(b"def test_a():\n    assert '\xff'\n")
         where, found = self.found()
         self.assertEqual(where, [("tests/test_other.py", None, "unreadable")])
-        self.assertIn("so its tests were not checked", found[0]["message"])
+        self.assertEqual((found[0]["severity"], found[0]["message"]),
+                         ("error", ("could not be read, so its tests were not checked: 'utf-8' codec can't decode byte "
+                                   "0xff in position 26: invalid start byte")))
+        self.git("add", "-A")
+        # Too unlike the base's to be taken for a rename: the base's file is removed, and an unreadable one added.
+        self.git("mv", "tests/test_other.py", "tests/test_moved.py")
+        self.assertEqual(self.found()[0], [("tests/test_moved.py", None, "unreadable"),
+                                           ("tests/test_other.py", None, "removed-test")])
+
+    def test_a_test_file_renamed_unedited_loses_no_test(self):
+        self.git("mv", "tests/test_other.py", "tests/test_moved.py")
+        self.assertEqual(self.found()[0], [])
 
     def test_a_removed_helper_class_is_not_a_test(self):
         self.put("tests/test_help.py", "class Helper:\n    def make(self):\n        return 1\n")
@@ -2697,7 +2712,7 @@ class TestPassesAtBase(RepositoryTest):
             with self.subTest(name):
                 self.git("reset", "--quiet", "--hard")
                 edit()
-                self.assertEqual(gate._edits_python_source(gate.GateChange.from_tree(self.repo, base)),
+                self.assertEqual(gate._edits_code(gate.GateChange.from_tree(self.repo, base), gate._python_code),
                                  name != "beside the tests")
 
     def test_no_room_for_the_run_at_the_base_is_a_finding(self):
@@ -2721,6 +2736,59 @@ class TestPassesAtBase(RepositoryTest):
         self.assertEqual((left["path"], left["line"], left["rule"]), (None, None, "not-removed"))
         self.assertRegex(left["message"], r"^could not remove the directory to run the changed tests at the base in, "
                                           r"`.+`: .*Permission denied")
+
+    def test_the_findings_are_listed_by_path_then_line(self):
+        def at(path, line):
+            return gate._finding(path, line, "not-run", f"{path}:{line}")
+        unsorted = [at("b.rs", 9), at("b.rs", 1), at("b.rs", None), at("A.rs", 2), at(None, None)]
+        with patch.object(gate, "_rust_passes_at_base", return_value=unsorted):
+            found = self.found()
+        self.assertEqual([f["message"] for f in found], ["None:None", "A.rs:2", "b.rs:None", "b.rs:1", "b.rs:9"])
+
+    def test_a_base_that_cannot_be_copied_is_a_finding(self):
+        self.fix_add()
+        with patch.object(gate, "_copy_base_with_tests", side_effect=OSError("no space")):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"], f["message"]) for f in found], [(
+            None, None, "not-run", ("could not copy the base to run the changed tests in: no space; the changed tests "
+                                   "were not run there."))])
+
+    def test_an_empty_configuration_that_cannot_be_written_is_a_finding(self):
+        self.git("rm", "--quiet", "pytest.ini")
+        self.commit({}, "no pytest configuration")
+        self.fix_add()
+        with patch.object(gate, "_empty_pytest_ini", side_effect=OSError("no space")):
+            found = self.found()
+        self.assertEqual([(f["path"], f["line"], f["rule"], f["message"]) for f in found], [(
+            None, None, "not-run", ("could not write an empty pytest configuration for the run at the base: no space; "
+                                   "the changed tests were not run there."))])
+
+    def test_tests_with_no_pytest_configuration_run_at_the_base_with_an_empty_one(self):
+        self.git("rm", "--quiet", "pytest.ini")
+        self.commit({}, "no pytest configuration")
+        self.fix_add("\n\ndef test_mul_again():\n    assert mul(1, 1) == 1\n")
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in self.found()],
+                         [("tests/test_calc.py", 12, "passes-at-base")])
+
+    def test_the_run_at_the_base_has_a_tmpdir_of_its_own_and_the_gate_s_pythonpath_after_the_copy(self):
+        extra = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, extra)
+        with open(os.path.join(extra, "extra_mod.py"), "w") as f:
+            f.write("TWO = 2\n")
+        # Each passes only in the run at the base: its TMPDIR lies beside the copy it runs in, which is its cwd.
+        self.fix_add("\n\ndef test_tmpdir():\n    import os\n"
+                     "    assert os.path.dirname(os.environ['TMPDIR']) == os.path.dirname(os.getcwd())\n"
+                     "\n\ndef test_inherited_path():\n    from extra_mod import TWO\n    assert mul(TWO, 1) == 2\n")
+        with patch.dict("os.environ", {"PYTHONPATH": extra}):
+            found = self.found()
+        self.assertEqual([(f["line"], f["rule"]) for f in found], [(12, "passes-at-base"), (17, "passes-at-base")])
+
+    def test_a_file_beside_the_tests_the_change_deletes_is_gone_from_the_run_at_the_base(self):
+        self.commit({"tests/conftest.py": "raise RuntimeError('the base\\'s conftest')\n"}, "a failing conftest")
+        self.git("rm", "--quiet", "tests/conftest.py")
+        self.fix_add("\n\ndef test_mul_again():\n    assert mul(1, 1) == 1\n")
+        self.assertEqual([(f["path"], f["line"], f["rule"]) for f in self.found()],
+                         [("tests/test_calc.py", 12, "passes-at-base")])
 
     def test_a_test_that_fails_without_the_fix_gives_nothing(self):
         self.fix_add()
@@ -3098,6 +3166,17 @@ class TestPassesAtBase(RepositoryTest):
                               "it, if any does, was not judged: `vendor/lib`, which is not initialised in the working "
                               "tree."))])
 
+    def test_two_submodules_not_initialised_are_one_finding(self):
+        self.add_submodule()
+        url = self.git("config", "-f", ".gitmodules", "submodule.vendor/lib.url").strip()
+        self.git("-c", "protocol.file.allow=always", "submodule", "--quiet", "add", url, "vendor/two")
+        self.git("commit", "--quiet", "-m", "a second submodule")
+        self.git("submodule", "--quiet", "deinit", "--force", "--all")
+        self.assertEqual([(f["path"], f["rule"], f["message"]) for f in self.found()], [(
+            None, "not-run", ("the copy of the base leaves submodules empty, so a changed test that imports from "
+                              "them, if any does, was not judged: `vendor/lib`, which is not initialised in the "
+                              "working tree; `vendor/two`, which is not initialised in the working tree."))])
+
     def test_a_submodule_marked_export_ignore_stays_out_of_the_copy(self):
         self.add_submodule()
         self.put(".gitattributes", "vendor/lib export-ignore\n")
@@ -3163,6 +3242,18 @@ class TestPassesAtBase(RepositoryTest):
         self.fix_add("\n\ndef test_mul_one():\n    assert mul(1, 1) == 1\n")
         self.assertEqual([f["rule"] for f in self.found()], ["passes-at-base"])
 
+    def test_a_module_imported_through_a_tracked_link_out_of_the_tree_gets_no_bytecode_there(self):
+        outside = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, outside)
+        with open(os.path.join(outside, "far.py"), "w") as f:
+            f.write("ONE = 1\n")
+        os.symlink(outside, os.path.join(self.repo, "far"))
+        self.git("add", "far")
+        self.git("commit", "--quiet", "-m", "link")
+        self.fix_add("\n\ndef test_far():\n    from far.far import ONE\n    assert mul(ONE, 1) == 1\n")
+        self.assertEqual([f["rule"] for f in self.found()], ["passes-at-base"])
+        self.assertEqual(os.listdir(outside), ["far.py"])
+
     def test_a_run_that_cannot_start_is_a_finding(self):
         self.fix_add()
         with patch.object(gate.sys, "executable", os.path.join(self.repo, "no-python")):
@@ -3173,8 +3264,16 @@ class TestPassesAtBase(RepositoryTest):
     def test_an_unparsable_test_file_is_a_finding(self):
         self.put("calc.py", self.CALC.replace("a - b", "a + b"))
         self.put("tests/test_calc.py", self.TESTS + "def test_new(:\n")
+        self.assertEqual([(f["path"], f["line"], f["rule"], f["message"]) for f in self.found()],
+                         [("tests/test_calc.py", None, "not-run",
+                           "does not parse as Python, so its tests were not run at the base.")])
+
+    def test_an_unparsable_test_file_leaves_the_others_judged(self):
+        self.put("calc.py", self.CALC.replace("a - b", "a + b"))
+        self.put("tests/test_calc.py", self.TESTS + "\n\ndef test_mul_again():\n    assert mul(1, 1) == 1\n")
+        self.put("tests/test_broken.py", "def test_new(:\n")
         self.assertEqual([(f["path"], f["line"], f["rule"]) for f in self.found()],
-                         [("tests/test_calc.py", None, "not-run")])
+                         [("tests/test_broken.py", None, "not-run"), ("tests/test_calc.py", 8, "passes-at-base")])
 
     def test_a_change_beside_the_tests_alone_is_not_run(self):
         # A conftest.py anywhere and any file under tests/ go with the tests, not with the code they test.
@@ -3201,6 +3300,284 @@ class TestPassesAtBase(RepositoryTest):
             check.find("change")
         self.assertFalse(check.fails)
         find.assert_called_once_with("change", budget=42)
+
+
+class TestRustPassesAtBase(RepositoryTest):
+    """The passes-at-base check over a real git repository's Cargo package, its tests run with cargo-nextest and read
+    with the gate-rust helper built from this tree."""
+
+    # double is wrong at the base; add is right, and stays so.
+    LIB = ("pub mod other;\n\n"
+           "pub fn add(a: u32, b: u32) -> u32 {\n    a + b\n}\n\n"
+           "pub fn double(a: u32) -> u32 {\n    a + a + 1\n}\n")
+    OTHER = "pub fn one() -> u32 {\n    1\n}\n"
+
+    BASE_FILES = {
+        "Cargo.toml": '[package]\nname = "calc"\nversion = "0.1.0"\nedition = "2021"\n',
+        "Cargo.lock": 'version = 4\n\n[[package]]\nname = "calc"\nversion = "0.1.0"\n',
+        "src/lib.rs": LIB,
+        "src/other.rs": OTHER,
+    }
+
+    def setUp(self):
+        super().setUp()
+        self.put(".gitignore", "target/\n")
+        # Every test fixes double, so that the change edits Rust code outside the tests.
+        self.put("src/lib.rs", self.LIB.replace("a + a + 1", "a * 2"))
+
+    def rebase(self, files, message):
+        """Commit files as the new base, without setUp's fix of double, which stays in the working tree."""
+        self.base = self.commit({**files, "src/lib.rs": self.LIB}, message)
+        self.put("src/lib.rs", self.LIB.replace("a + a + 1", "a * 2"))
+
+    def found(self, budget=gate.BASE_RUN_BUDGET):
+        """(path, line, rule) of each of the check's findings on the working tree, every file in it tracked."""
+        return [finding[:3] for finding in self.findings(budget)]
+
+    def findings(self, budget=gate.BASE_RUN_BUDGET, during=None):
+        """(path, line, rule, message) of each of the check's findings on the working tree, every file in it tracked,
+        the check run within during, a context manager, as one that patches what runs cargo-nextest, if given; the
+        change's Rust is read with the helper before it."""
+        self.git("add", "-A")
+        change = gate.GateChange.from_tree(self.repo, self.base, rust_syntax=gate_rust())
+        self.assertEqual(change.rust_files[1], [])
+        with during or contextlib.nullcontext():
+            return [(f["path"], f["line"], f["rule"], f["message"]) for f in gate.passes_at_base(change, budget=budget)]
+
+    def two_targets(self):
+        """Add tests/calc.rs's adds and tests/more.rs's adds_more, each a target of its own, both passing at the
+        base."""
+        self.put("tests/calc.rs", "#[test]\nfn adds() {\n    assert_eq!(calc::add(1, 2), 3);\n}\n")
+        self.put("tests/more.rs", "#[test]\nfn adds_more() {\n    assert_eq!(calc::add(2, 2), 4);\n}\n")
+
+    def fn_line(self, path, name):
+        with open(os.path.join(self.repo, path)) as f:
+            return next(n for n, line in enumerate(f, 1) if line.lstrip().startswith(f"fn {name}("))
+
+    def test_a_test_that_passes_at_the_base_is_found_at_its_fn_and_one_that_fails_there_is_not(self):
+        self.put("tests/calc.rs", "#[test]\nfn adds() {\n    assert_eq!(calc::add(1, 2), 3);\n}\n\n"
+                                  "#[test]\nfn doubles() {\n    assert_eq!(calc::double(2), 4);\n}\n")
+        # No blank line before the module: an added line outside it would edit the file's code.
+        self.put("src/other.rs", self.OTHER + "#[cfg(test)]\nmod tests {\n    #[test]\n    fn is_one() {\n"
+                                              "        assert_eq!(super::one(), 1);\n    }\n}\n")
+        self.assertEqual(self.found(), [("src/other.rs", self.fn_line("src/other.rs", "is_one"), "passes-at-base"),
+                                        ("tests/calc.rs", self.fn_line("tests/calc.rs", "adds"), "passes-at-base")])
+
+    def test_a_test_file_that_does_not_compile_at_the_base_counts_as_failing(self):
+        self.put("src/lib.rs", self.LIB.replace("a + a + 1", "a * 2") + "\npub fn triple(a: u32) -> u32 {\n    a * 3\n}\n")
+        # a_triple.rs's target runs first, and the one after it is run all the same; cargo's errors are read
+        # uncoloured, whatever CARGO_TERM_COLOR the gate runs under.
+        self.put("tests/a_triple.rs", "#[test]\nfn triples() {\n    assert_eq!(calc::triple(2), 6);\n}\n\n"
+                                      "#[test]\nfn adds_too() {\n    assert_eq!(calc::add(1, 1), 2);\n}\n")
+        self.put("tests/calc.rs", "#[test]\nfn adds() {\n    assert_eq!(calc::add(1, 2), 3);\n}\n")
+        with patch.dict("os.environ", {"CARGO_TERM_COLOR": "always"}):
+            found = self.findings()
+        self.assertEqual(found, [("tests/calc.rs", self.fn_line("tests/calc.rs", "adds"), "passes-at-base",
+                                  "`adds` passes without the change, so it does not test it.")])
+
+    def test_a_test_in_an_inline_module_of_a_file_the_change_edits_outside_it_is_not_run(self):
+        self.put("src/lib.rs", self.LIB.replace("a + a + 1", "a * 2") + "\n#[cfg(test)]\nmod tests {\n    #[test]\n"
+                                                                     "    fn doubles() {\n"
+                                                                     "        assert_eq!(super::double(2), 4);\n"
+                                                                     "    }\n}\n")
+        # tests/calc.rs's test runs at the base all the same.
+        self.put("tests/calc.rs", "#[test]\nfn adds() {\n    assert_eq!(calc::add(1, 2), 3);\n}\n")
+        self.assertEqual(self.found(), [("src/lib.rs", self.fn_line("src/lib.rs", "doubles"), "not-run"),
+                                        ("tests/calc.rs", self.fn_line("tests/calc.rs", "adds"), "passes-at-base")])
+        change = gate.GateChange.from_tree(self.repo, self.base, rust_syntax=gate_rust())
+        self.assertEqual(gate.passes_at_base(change, budget=gate.BASE_RUN_BUDGET)[0]["message"],
+                         "`tests::doubles` is in an inline `#[cfg(test)]` module of a file the change also edits "
+                         "outside it, so it cannot be run apart from the code it tests, at the base.")
+
+    def test_no_room_for_the_run_at_the_base_is_a_finding(self):
+        self.put("tests/calc.rs", "#[test]\nfn adds() {\n    assert_eq!(calc::add(1, 2), 3);\n}\n")
+        self.git("add", "-A")
+        change = gate.GateChange.from_tree(self.repo, self.base, rust_syntax=gate_rust())
+        # Read before mkdtemp fails: the helper's copy of the base takes a directory too.
+        self.assertEqual(change.rust_files[1], [])
+        with patch.object(gate.tempfile, "mkdtemp", side_effect=OSError(28, "No space left on device")):
+            found = gate.passes_at_base(change, budget=gate.BASE_RUN_BUDGET)
+        self.assertEqual([(f["path"], f["line"], f["rule"], f["message"]) for f in found], [(
+            None, None, "not-run", ("could not make a directory to run the changed Rust tests at the base in: [Errno 28] "
+                                    "No space left on device; nothing ran, so the check judged nothing."))])
+
+    def test_a_target_names_its_selection_and_package_in_prose(self):
+        self.assertEqual(gate._RustTarget("", ("--test", "cli"), ()).label(),
+                         "`--test cli` of the package at the top level")
+        self.assertEqual(gate._RustTarget("engine", ("--lib",), ("calc",)).label(),
+                         "`--lib` of the package at `engine`")
+
+    def test_a_test_whose_first_attribute_the_change_removes_is_run(self):
+        self.rebase({"tests/calc.rs": "#[ignore]\n#[test]\nfn adds() {\n    assert_eq!(calc::add(1, 2), 3);\n}\n"},
+                    "an ignored test")
+        self.put("tests/calc.rs", "#[test]\nfn adds() {\n    assert_eq!(calc::add(1, 2), 3);\n}\n")
+        self.assertEqual(self.found(), [("tests/calc.rs", self.fn_line("tests/calc.rs", "adds"), "passes-at-base")])
+
+    def test_a_cargo_error_other_than_a_compile_error_is_not_run(self):
+        self.rebase({"Cargo.lock": "version = 4\n"}, "a lock file that --locked refuses")
+        self.put("tests/calc.rs", "#[test]\nfn adds() {\n    assert_eq!(calc::add(1, 2), 3);\n}\n")
+        self.assertEqual(self.found(), [(None, None, "not-run")])
+
+    def test_the_budget_running_out_is_a_finding(self):
+        self.two_targets()
+        self.assertEqual(self.findings(budget=0.001), [
+            (None, None, "budget-reached", ("cargo nextest was stopped at 0.001 seconds (`--base-run-budget`) before it "
+                                           "built `--test calc` of the package at the top level, so none of them was "
+                                           "judged.")),
+            (None, None, "not-run", ("the run at the base used its 0.001 seconds (`--base-run-budget`) before it reached "
+                                    "`--test more` of the package at the top level, so its changed tests were not run "
+                                    "there."))])
+
+    def test_a_run_stopped_by_the_budget_is_a_finding(self):
+        self.two_targets()
+        stopped = (subprocess.CompletedProcess([], -9, "", ""), True)
+        found = self.findings(budget=60, during=patch.object(gate, "_run_in_session", return_value=stopped))
+        self.assertEqual(found, [
+            (None, None, "budget-reached", ("cargo nextest was stopped at 60 seconds (`--base-run-budget`) while it "
+                                           "built or ran `--test calc` of the package at the top level, so none of "
+                                           "them was judged.")),
+            (None, None, "not-run", ("the run at the base used its 60 seconds (`--base-run-budget`) before it reached "
+                                    "`--test more` of the package at the top level, so its changed tests were not run "
+                                    "there."))])
+
+    def test_a_cargo_nextest_that_cannot_start_is_a_finding_for_each_target(self):
+        self.two_targets()
+        found = self.findings(during=patch.object(gate, "_run_in_session", side_effect=OSError("no cargo")))
+        self.assertEqual(found, [
+            (None, None, "not-run", (f"could not start cargo nextest to run the changed Rust tests of `--test {name}` of "
+                                    f"the package at the top level at the base: no cargo")) for name in ("calc", "more")])
+
+    def test_a_cargo_error_writing_no_report_is_a_finding_for_each_target(self):
+        self.two_targets()
+        failed = (subprocess.CompletedProcess([], 101, "", "error: failed to run custom build command\n"), False)
+        found = self.findings(during=patch.object(gate, "_run_in_session", return_value=failed))
+        self.assertEqual([finding[:3] for finding in found], [(None, None, "not-run")] * 2)
+        for finding, name in zip(found, ("calc", "more"), strict=True):
+            self.assertRegex(finding[3], rf"^cargo nextest, running the changed Rust tests of `--test {name}` of the "
+                                         rf"package at the top level at the base, exited with status 101 and wrote no "
+                                         rf"report the gate can read \(.+\): .*error: failed to run custom build command")
+
+    def test_a_changed_test_file_that_does_not_parse_is_not_run_and_the_others_are(self):
+        # src/other.rs held a test module at the base, so it holds tests; tests/0_old.rs, deleted, holds none now.
+        self.rebase({"src/other.rs": self.OTHER + "#[cfg(test)]\nmod tests {}\n",
+                     "tests/0_old.rs": "#[test]\nfn old() {}\n"}, "a test module and an old test")
+        os.remove(os.path.join(self.repo, "tests/0_old.rs"))
+        self.put("src/other.rs", self.OTHER + "fn broken( {\n")
+        self.put("tests/a_broken.rs", "#[test]\nfn broken( {\n")
+        self.put("tests/calc.rs", "#[test]\nfn adds() {\n    assert_eq!(calc::add(1, 2), 3);\n}\n")
+        found = self.findings()
+        self.assertEqual([finding[:3] for finding in found], [
+            ("src/other.rs", 4, "not-run"), ("tests/a_broken.rs", 2, "not-run"),
+            ("tests/calc.rs", self.fn_line("tests/calc.rs", "adds"), "passes-at-base")])
+        for finding in found[:2]:
+            self.assertRegex(finding[3], r"^does not parse as Rust \(.+\), so its tests were not run at the base\.$")
+
+    def test_a_file_under_a_tests_directory_is_the_change_s_in_the_run_at_the_base(self):
+        self.rebase({"tests/data.txt": "one\n"}, "the tests' data")
+        self.put("tests/data.txt", "two\n")
+        self.put("tests/calc.rs", '#[test]\nfn reads() {\n    assert_eq!(include_str!("data.txt"), "two\\n");\n}\n')
+        self.assertEqual(self.found(), [("tests/calc.rs", 2, "passes-at-base")])
+
+    def test_a_base_that_cannot_be_copied_is_a_finding(self):
+        self.put("tests/calc.rs", "#[test]\nfn adds() {\n    assert_eq!(calc::add(1, 2), 3);\n}\n")
+        found = self.findings(during=patch.object(gate, "_copy_base_with_tests", side_effect=OSError("no space")))
+        self.assertEqual(found, [(None, None, "not-run", ("could not copy the base to run the changed Rust tests in: "
+                                                         "no space; they were not run there."))])
+
+    def test_empty_submodules_are_one_finding(self):
+        lib = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, lib)
+        self.host.git(lib, "init", "--quiet", "-b", "main")
+        with open(os.path.join(lib, "notes.txt"), "w") as f:
+            f.write("notes\n")
+        self.host.git(lib, "add", "notes.txt")
+        self.host.git(lib, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false",
+                      "commit", "--quiet", "-m", "lib")
+        for name in ("vendor/a", "vendor/b"):
+            self.git("-c", "protocol.file.allow=always", "submodule", "--quiet", "add", lib, name)
+        self.rebase({}, "submodules")
+        self.git("submodule", "--quiet", "deinit", "--force", "--all")
+        self.put("tests/calc.rs", "#[test]\nfn adds() {\n    assert_eq!(calc::add(1, 2), 3);\n}\n")
+        self.assertEqual(self.findings()[0], (
+            None, None, "not-run", ("the copy of the base leaves submodules empty, so a changed Rust test that needs "
+                                   "one, if any does, was not judged: `vendor/a`, which is not initialised in the "
+                                   "working tree; `vendor/b`, which is not initialised in the working tree.")))
+
+    def test_a_test_cargo_builds_no_target_of_is_not_run(self):
+        self.put("tests/common/mod.rs", "#[test]\nfn shared() {\n    assert_eq!(calc::add(1, 2), 3);\n}\n")
+        self.assertEqual(self.findings(), [(
+            "tests/common/mod.rs", 2, "not-run",
+            "`shared` was not run at the base: no `tests/common/main.rs` makes a target of its directory.")])
+
+    def test_a_package_below_the_top_runs_its_tests_in_its_own_directory(self):
+        self.rebase({"engine/Cargo.toml": '[package]\nname = "engine"\nversion = "0.1.0"\nedition = "2021"\n',
+                     "engine/Cargo.lock": 'version = 4\n\n[[package]]\nname = "engine"\nversion = "0.1.0"\n',
+                     "engine/src/lib.rs": "pub fn one() -> u32 {\n    1\n}\n"}, "a package below the top")
+        # Its tests' data, under its own tests directory, is the change's too.
+        self.rebase({"engine/tests/data.txt": "one\n"}, "the package's tests' data")
+        self.put("engine/tests/data.txt", "two\n")
+        self.put("engine/tests/one.rs", "#[test]\nfn is_one() {\n    assert_eq!(engine::one(), 1);\n"
+                                        '    assert_eq!(include_str!("data.txt"), "two\\n");\n}\n')
+        self.assertEqual(self.found(), [("engine/tests/one.rs", 2, "passes-at-base")])
+
+    def test_a_test_is_changed_by_a_line_the_change_adds_or_removes_from_its_attributes_to_its_end(self):
+        test = "#[test]\nfn adds() { assert_eq!(calc::add(1, 2), 3); }\n"
+        for name, base, after, judged in [
+            # No two in a row share a base, which each commits.
+            ("its attribute edited", test, test.replace("#[test]", "#[test] // run"), True),
+            ("a line removed right after it", test + "// tail\n", test, True),
+            ("its last line edited", test, test.replace("3); }", "3);  }"), True),
+            ("a line removed above the line above it", "// a\n// b\n" + test, "// b\n" + test, False),
+        ]:
+            with self.subTest(name):
+                self.rebase({"tests/calc.rs": base}, name)
+                self.put("tests/calc.rs", after)
+                expected = [("tests/calc.rs", self.fn_line("tests/calc.rs", "adds"), "passes-at-base")]
+                self.assertEqual(self.found(), expected if judged else [])
+
+    def test_a_change_to_the_tests_alone_runs_nothing(self):
+        self.put("src/lib.rs", self.LIB)
+        self.put("tests/calc.rs", "#[test]\nfn adds() {\n    assert_eq!(calc::add(1, 2), 3);\n}\n")
+        self.assertEqual(self.found(), [])
+
+    def test_where_cargo_builds_a_test_file_and_what_names_its_tests(self):
+        tree = self.repo
+        self.put("src/bin/tool/main.rs", "fn main() {}\n")
+        self.put("tests/cli/main.rs", "mod args;\n")
+        self.put("engine/Cargo.toml", "[package]\n")
+        self.put("engine/tests/run/main.rs", "mod args;\n")
+        self.put("tools/x/Cargo.toml", "[package]\n")
+        for path, expected in [
+            ("tests/cli.rs", ("", ("--test", "cli"), ())),
+            ("tests/cli/main.rs", ("", ("--test", "cli"), ())),
+            ("tests/cli/args.rs", ("", ("--test", "cli"), ("args",))),
+            ("src/lib.rs", ("", ("--lib",), ())),
+            ("src/main.rs", ("", ("--bins",), ())),
+            ("src/calc/mod.rs", ("", ("--lib",), ("calc",))),
+            ("src/calc/tests.rs", ("", ("--lib",), ("calc", "tests"))),
+            ("src/bin/tool/main.rs", ("", ("--bin", "tool"), ())),
+            ("src/bin/tool/args.rs", ("", ("--bin", "tool"), ("args",))),
+            ("engine/tests/run.rs", ("engine", ("--test", "run"), ())),
+            ("engine/src/main.rs", ("engine", ("--bins",), ())),
+            ("src/bin/solo.rs", ("", ("--bin", "solo"), ())),
+            # The top level has no tests/run/main.rs: the package's is the one that counts.
+            ("engine/tests/run/args.rs", ("engine", ("--test", "run"), ("args",))),
+            # engine has no src/lib.rs, though the top level has one.
+            ("engine/src/calc.rs", ("engine", ("--bins",), ("calc",))),
+            ("tools/x/tests/run.rs", ("tools/x", ("--test", "run"), ())),
+        ]:
+            with self.subTest(path):
+                target, why = gate._rust_target(tree, path)
+                self.assertEqual((target.package, target.args, target.module, why), (*expected, ""))
+        self.assertEqual(gate._rust_target(tree, "benches/b.rs"),
+                         (None, "Cargo builds no test target from its place by default"))
+        self.assertEqual(gate._rust_target(tree, "tests/common/mod.rs"),
+                         (None, "no `tests/common/main.rs` makes a target of its directory"))
+        self.assertEqual(gate._rust_target(tree, "src/bin/gone/args.rs"),
+                         (None, "no `src/bin/gone/main.rs` makes a target of its directory"))
+        os.remove(os.path.join(tree, "Cargo.toml"))
+        self.assertEqual(gate._rust_target(tree, "tests/cli.rs"),
+                         (None, "no Cargo.toml lies above its file at the base"))
 
 
 class TestVagueNames(RepositoryTest):
@@ -3302,9 +3679,455 @@ class TestVagueNames(RepositoryTest):
         self.assertEqual((path, line, rule), ("calc.py", None, "not-read"))
         self.assertEqual(message, "does not parse as Python, so its names were not read.")
 
+    def test_every_file_s_findings_are_listed_by_path_then_line(self):
+        # b_broken.py comes between the others in the diff, so a check that stopped at it would not read c.py; and
+        # a.py's name is on a later line than c.py's, so the order is the paths' before the lines'.
+        self.put("a.py", "\n\nraw_data = 1\n")
+        self.put("b_broken.py", "def broken(:\n")
+        self.put("c.py", "status = 1\n")
+        self.assertEqual([(path, line, rule) for path, line, rule, _ in self.found()],
+                         [("a.py", 3, "vague-name"), ("b_broken.py", None, "not-read"), ("c.py", 1, "vague-name")])
+
+    def test_the_findings_are_listed_by_path_then_line(self):
+        def at(path, line):
+            return gate._finding(path, line, "vague-name", f"{path}:{line}")
+        change = gate.GateChange.from_tree(self.repo, self.git("rev-parse", "HEAD").strip())
+        unsorted = [at("b.rs", 9), at("b.rs", 1), at("b.rs", None), at("A.rs", 2), at(None, None)]
+        with patch.object(gate, "_rust_vague_names", return_value=unsorted):
+            found = gate.vague_names(change)
+        self.assertEqual([f["message"] for f in found], ["None:None", "A.rs:2", "b.rs:None", "b.rs:1", "b.rs:9"])
+
     def test_it_reports_without_failing_the_gate(self):
         [check] = [c for c in gate.gate_checks() if c.name == "vague-names"]
         self.assertEqual((check.fails, check.find), (False, gate.vague_names))
+
+
+class TestRustVagueNames(RepositoryTest):
+    """The vague-names check over a real git repository's Rust, read with the gate-rust helper built from this tree."""
+
+    BASE = "fn old(value: u32) -> u32 {\n    value\n}\n"
+
+    BASE_FILES = {"src/lib.rs": BASE}
+
+    def found(self, rust_syntax=None):
+        """(path, line, rule, message) of each finding on the working tree's change, every file in it tracked, read
+        with the helper rust_syntax, by default the one built from this tree."""
+        self.git("add", "-A")
+        change = gate.GateChange.from_tree(self.repo, self.base, rust_syntax=rust_syntax or gate_rust())
+        return [(f["path"], f["line"], f["rule"], f["message"]) for f in gate.vague_names(change)]
+
+    def names(self):
+        """The name each finding on the change reports, with its line, counted from the end of BASE."""
+        base = len(self.BASE.splitlines())
+        return [(line - base, message.split("`")[1]) for _, line, _, message in self.found()]
+
+    def test_each_binding_kind_an_added_line_binds_is_found_once_at_its_first_binding(self):
+        self.put("src/lib.rs", self.BASE + textwrap.dedent("""            use std::fmt::Display as ShownValue;
+            const MAX_VALUE: u32 = 1;
+            static RAW_DATA: u32 = 2;
+            struct RunInfo;
+            enum Status { Up }
+            union Handle { a: u32 }
+            trait StateManager { type Info; const LIMIT_VALUE: u32; }
+            type Data = u32;
+            fn handle(raw_info: u32, (a, b_status): (u32, u32)) -> u32 {
+                let line_value = raw_info;
+                for row_data in [a] {}
+                match Some(b_status) { Some(inner_handle) => {} None => {} }
+                if let Some(maybe_info) = Some(1) {}
+                while let Some(next_status) = None::<u32> {}
+                let add = |left_value: u32| left_value;
+                let line_value = add(line_value);
+                line_value
+            }
+            """))
+        self.assertEqual(self.names(), [
+            (1, "ShownValue"), (2, "MAX_VALUE"), (3, "RAW_DATA"), (4, "RunInfo"), (5, "Status"), (6, "Handle"),
+            (7, "StateManager"), (7, "Info"), (7, "LIMIT_VALUE"), (8, "Data"), (9, "handle"), (9, "raw_info"),
+            (9, "b_status"), (10, "line_value"), (11, "row_data"), (12, "inner_handle"), (13, "maybe_info"),
+            (14, "next_status"), (15, "left_value")])
+        self.assertEqual({(path, rule) for path, _, rule, _ in self.found()}, {("src/lib.rs", "vague-name")})
+
+    def test_a_camel_case_name_is_vague_only_by_its_last_word(self):
+        self.put("src/lib.rs", self.BASE + "struct InfoStore;\nstruct HTTPStatus;\nstruct Valuer;\nfn result() {}\n")
+        self.assertEqual(self.names(), [(2, "HTTPStatus")])
+
+    def test_a_trait_impl_s_fn_takes_its_name_and_parameters_from_the_trait(self):
+        self.put("src/lib.rs", self.BASE + textwrap.dedent("""            struct Door;
+            impl Opener for Door {
+                fn handle(&self, raw_data: u32) -> u32 {
+                    let shown_value = raw_data;
+                    fn inner(own_info: u32) {}
+                    shown_value
+                }
+            }
+            impl Door {
+                fn status(&self, raw_data: u32) {}
+            }
+            """))
+        self.assertEqual(self.names(), [(4, "shown_value"), (5, "own_info"), (10, "status"), (10, "raw_data")])
+
+    def test_a_binding_the_helper_never_prints_where_it_is_fixes_nothing(self):
+        trait_impl = {"holders": [{"kind": "impl", "trait": "Opener"}]}
+        bindings = [{"kind": "param"}, {"kind": "fn"}, {"kind": "param"}, {"kind": "fn"}, {"kind": "param"}]
+        # The param before any fn, and the fn past the one of fns with its param.
+        self.assertEqual(gate._rust_fixed_bindings({"fns": [trait_impl], "bindings": bindings}), {1, 2})
+
+    def test_a_binding_on_a_line_the_change_left_alone_is_not_found(self):
+        self.put("src/lib.rs", self.BASE.replace("    value\n", "    value + 1\n"))
+        self.assertEqual(self.found(), [])
+
+    def test_a_file_that_does_not_parse_is_a_finding_at_the_line_the_helper_names(self):
+        self.put("src/lib.rs", self.BASE + "fn broken( {\n")
+        # src/lib.rs comes before src/m.rs in the diff, so a check that stopped at it would not read src/m.rs.
+        self.put("src/m.rs", "struct RunInfo;\n")
+        [(path, line, rule, message), found_m] = self.found()
+        # The brace left open is the lexer's error, at the brace.
+        self.assertEqual((path, line, rule), ("src/lib.rs", 4, "not-read"))
+        self.assertRegex(message, r"^does not parse as Rust \(.+\), so its names were not read\.$")
+        self.assertEqual(found_m[:3], ("src/m.rs", 1, "vague-name"))
+
+    def test_the_helper_s_run_is_listed_and_a_change_without_rust_starts_none(self):
+        self.put("src/lib.rs", self.BASE + "struct RunInfo;\n")
+        missing = os.path.join(self.outside, "no-helper")
+        [(path, line, rule, message)] = self.found(rust_syntax=missing)
+        self.assertEqual((path, line, rule), (None, None, "not-run"))
+        self.git("checkout", "HEAD", "--", "src/lib.rs")
+        self.put("notes.py", "x = 1\n")
+        self.assertEqual(self.found(rust_syntax=missing), [])
+
+
+def cargo_mutant(name, summary, function="unchecked", fn_line=9, file="src/lib.rs", line=10):
+    """One outcome as cargo-mutants 27 writes it to outcomes.json, of a mutant of function, whose fn starts at
+    fn_line, named name after its place."""
+    return {"scenario": {"Mutant": {"name": f"{file}:{line}:7: {name}", "file": file, "span": {"start": {"line": line}},
+                                    "function": {"function_name": function, "span": {"start": {"line": fn_line}}}}},
+            "summary": summary}
+
+
+class TestCargoMutantsOutcomes(unittest.TestCase):
+    """How the surviving-mutants check reads cargo-mutants' outcomes, on fakes of them."""
+
+    def test_missed_survives_caught_and_timeout_are_tried_and_unviable_is_not(self):
+        outcomes = [{"scenario": "Baseline", "summary": "Success"},
+                    cargo_mutant("replace > with == in unchecked", "MissedMutant"),
+                    cargo_mutant("replace > with < in unchecked", "CaughtMutant"),
+                    cargo_mutant("replace unchecked -> bool with true", "Timeout"),
+                    cargo_mutant("replace unchecked -> bool with false", "Unviable"),
+                    cargo_mutant("replace * with + in checked", "CaughtMutant", "checked", 5, line=6)]
+        self.assertEqual(gate._cargo_mutants_survivors("engine/", outcomes), [gate._finding(
+            "engine/src/lib.rs", 9, "survived",
+            "1 of 3 mutants of `unchecked` survived its tests: line 10: replace > with == in unchecked.")])
+
+    def test_a_finding_shows_the_first_examples_only(self):
+        outcomes = [cargo_mutant(f"replace > with {op} in unchecked", "MissedMutant") for op in "<=>!"]
+        [finding] = gate._cargo_mutants_survivors("", outcomes)
+        self.assertEqual(finding["message"].count("replace"), gate._SURVIVOR_EXAMPLES)
+        self.assertTrue(finding["message"].startswith("4 of 4 mutants of `unchecked` survived its tests: "))
+
+    def test_unreadable_outcomes_are_a_problem(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIn("outcomes.json", gate._cargo_mutants_outcomes(d)[1])
+            with open(os.path.join(d, "outcomes.json"), "w") as f:
+                json.dump({"outcomes": [{"scenario": "Baseline"}]}, f)
+            self.assertEqual(gate._cargo_mutants_outcomes(d)[0], [])
+            with open(os.path.join(d, "outcomes.json"), "w") as f:
+                json.dump({"outcomes": [{"scenario": "Baseline", "summary": "Success"}]}, f)
+            self.assertEqual(gate._cargo_mutants_outcomes(d), ([{"scenario": "Baseline", "summary": "Success"}], None))
+
+    def test_the_diff_cargo_mutants_reads_is_the_workspace_s_files_from_its_directory(self):
+        diff = ("diff --git a/ui/src/a.rs b/ui/src/a.rs\n--- a/ui/src/a.rs\n+++ b/ui/src/a.rs\n@@ -1 +1 @@\n-x\n+y\n"
+                "diff --git a/gate.py b/gate.py\n--- a/gate.py\n+++ b/gate.py\n@@ -1 +1 @@\n-x\n+y\n")
+        self.assertEqual(gate._diff_under(diff, "ui", ["ui/src/a.rs"]),
+                         "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-x\n+y\n")
+        self.assertEqual(gate._diff_under(diff, "", ["gate.py"]), diff.partition("diff --git a/gate.py")[1]
+                         + diff.partition("diff --git a/gate.py")[2])
+        # A line of the file that reads like a path under the workspace is the file's, and stays.
+        code = diff.replace("+y\n", '+let p = "a/ui/b/ui/";\n', 1)
+        self.assertIn('+let p = "a/ui/b/ui/";\n', gate._diff_under(code, "ui", ["ui/src/a.rs"]))
+
+    def test_the_workspace_is_the_one_cargo_tells(self):
+        with tempfile.TemporaryDirectory() as d:
+            package = "\nversion = '0.1.0'\nedition = '2021'\n"
+            for path, text in [("Cargo.toml", "[workspace]\nmembers = ['engine']\nexclude = ['tools/x']\n"),
+                               ("engine/Cargo.toml", "[package]\nname = 'engine'" + package),
+                               ("engine/src/lib.rs", ""),
+                               ("tools/x/Cargo.toml", "[package]\nname = 'x'" + package),
+                               ("tools/x/src/main.rs", "fn main() {}\n")]:
+                os.makedirs(os.path.dirname(os.path.join(d, path)), exist_ok=True)
+                with open(os.path.join(d, path), "w") as f:
+                    f.write(text)
+            self.assertEqual(gate._cargo_root(d, "engine/src/lib.rs"), ("", ""))
+            os.remove(os.path.join(d, "Cargo.toml"))
+            self.assertEqual(gate._cargo_root(d, "engine/src/lib.rs"), ("engine", ""))
+            self.assertEqual(gate._cargo_root(d, "tools/x/src/main.rs"), ("tools/x", ""))
+            self.assertEqual(gate._cargo_root(d, "src/lib.rs"), (None, "no Cargo.toml lies above it"))
+
+    def test_a_workspace_cargo_cannot_tell_is_a_condition_naming_the_tool_that_needs_it(self):
+        with tempfile.TemporaryDirectory() as d, patch.dict("os.environ", {"PATH": d}):
+            self.assertEqual(gate._cargo_workspaces(d, ["engine/Cargo.toml"], "cargo-mutants"),
+                             ([], ["`cargo-mutants` is not installed: `cargo` is not on PATH."]))
+
+    def test_cargo_mutants_skip_is_a_suppression(self):
+        for line in ["#[mutants::skip]", "#[cfg_attr(test, mutants::skip)]", "    #[mutants::skip] fn f() {}",
+                     "    mutants::skip", "    mutants::skip,"]:
+            with self.subTest(line):
+                self.assertTrue(gate._RUST_SUPPRESSION.search(line))
+        self.assertFalse(gate._RUST_SUPPRESSION.search("let mutants = skip(1);"))
+
+
+class TestCargoMutantsRuns(unittest.TestCase):
+    """How the surviving-mutants check runs cargo-mutants and reads what a run left, with fakes of it."""
+
+    BASELINE = {"scenario": "Baseline", "summary": "Success"}
+
+    def setUp(self):
+        self.out = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.out)
+
+    def write_outcomes(self, outcomes):
+        with open(os.path.join(self.out, "outcomes.json"), "w") as f:
+            json.dump({"outcomes": outcomes}, f)
+
+    def run_findings(self, returncode, stopped):
+        """The findings of a run in the workspace at engine that exited with returncode, stopped by the deadline or
+        not, that left self.out as its mutants.out, under a budget of 30 seconds."""
+        proc = subprocess.CompletedProcess([], returncode, "", "it said so")
+        return gate._cargo_mutants_run_findings(proc, stopped, self.out, "engine", 30)
+
+    def test_a_run_that_finds_nothing_to_mutate_gives_nothing_and_one_that_fails_without_outcomes_is_not_run(self):
+        self.assertEqual(self.run_findings(0, False), [])
+        [finding] = self.run_findings(1, False)
+        self.assertEqual((finding["rule"], finding["path"]), ("not-run", None))
+        self.assertRegex(finding["message"], r"^cargo-mutants, exiting with status 1, wrote no outcomes the gate can "
+                                             r"read \(.+outcomes\.json.+\): .*it said so; the change's Rust was not "
+                                             r"mutation-tested\.$")
+
+    def test_the_survivors_of_a_run_that_ends_are_found_under_the_workspace(self):
+        self.write_outcomes([self.BASELINE, cargo_mutant("replace > with == in unchecked", "MissedMutant")])
+        self.assertEqual(self.run_findings(0, False), [gate._finding(
+            "engine/src/lib.rs", 9, "survived",
+            "1 of 1 mutants of `unchecked` survived its tests: line 10: replace > with == in unchecked.")])
+
+    def test_a_run_stopped_before_its_baseline_is_budget_reached(self):
+        self.assertEqual(self.run_findings(-2, True), [gate._finding(
+            None, None, "budget-reached", "budget reached before cargo-mutants had tested the unmutated baseline of "
+                                          "the workspace at `engine`: it was stopped at 30 seconds "
+                                          "(`--mutation-budget`), so the mutants it did not try may survive too.")])
+
+    def test_a_run_stopped_after_some_mutants_counts_those_it_tried(self):
+        self.write_outcomes([self.BASELINE, cargo_mutant("replace > with < in unchecked", "CaughtMutant"),
+                             cargo_mutant("replace > with == in unchecked", "MissedMutant"),
+                             cargo_mutant("replace unchecked -> bool with true", "Timeout"),
+                             cargo_mutant("replace unchecked -> bool with false", "Unviable")])
+        [survived, stopped] = self.run_findings(-2, True)
+        self.assertEqual(survived["rule"], "survived")
+        self.assertEqual(stopped["message"], "budget reached after 3 of the mutants cargo-mutants made of the "
+                                             "workspace at `engine`: it was stopped at 30 seconds "
+                                             "(`--mutation-budget`), so the mutants it did not try may survive too.")
+
+    def test_a_baseline_that_fails_is_not_run(self):
+        self.write_outcomes([{"scenario": "Baseline", "summary": "Failure"}])
+        self.assertEqual(self.run_findings(4, False), [gate._finding(
+            None, None, "not-run", "the unmutated baseline of the workspace at `engine` did not pass (Failure, as "
+                                   "cargo-mutants words it; its log is mutants.out/log/baseline.log), so it tried no "
+                                   "mutant; the change's Rust was not mutation-tested.")])
+
+    def test_a_mutant_s_outcome_the_gate_cannot_read_is_not_run(self):
+        self.write_outcomes([self.BASELINE, {"scenario": {"Mutant": {"name": "no file"}}, "summary": "MissedMutant"}])
+        self.assertEqual(self.run_findings(2, False), [gate._finding(
+            None, None, "not-run", "cargo-mutants wrote a mutant's outcome the gate cannot read (KeyError('file')); "
+                                   "the change's Rust was not mutation-tested.")])
+
+    DIFF = ("diff --git a/engine/src/a.rs b/engine/src/a.rs\n--- a/engine/src/a.rs\n+++ b/engine/src/a.rs\n"
+            "@@ -1 +1 @@\n-x\n+y\n")
+
+    def test_a_run_past_its_deadline_or_with_no_diff_starts_nothing(self):
+        change = SimpleNamespace(diff=self.DIFF)
+        scratch = os.path.join(self.out, "run")
+        with patch.object(gate, "_run_in_session") as run:
+            self.assertEqual(gate._cargo_mutants_run(change, self.out, scratch, "engine", ["engine/src/b.rs"], 30,
+                                                     time.monotonic() + 600), ([], False))
+            self.assertEqual(gate._cargo_mutants_run(change, self.out, scratch, "engine", ["engine/src/a.rs"], 30,
+                                                     time.monotonic()), ([gate._finding(
+                None, None, "budget-reached", "budget reached before cargo-mutants started on the workspace at "
+                                              "`engine`: the 30 seconds of `--mutation-budget` left too little to run "
+                                              "and stop it, so its mutants were not tried.")], True))
+            [top] = gate._cargo_mutants_run(SimpleNamespace(diff=self.DIFF.replace("engine/", "")), self.out, scratch,
+                                            "", ["src/a.rs"], 30, time.monotonic())[0]
+        self.assertIn("on the workspace at `.`:", top["message"])
+        run.assert_not_called()
+
+    def test_cargo_mutants_runs_in_the_copy_uncoloured_and_is_stopped_with_sigint(self):
+        change = SimpleNamespace(diff=self.DIFF)
+        ended = (subprocess.CompletedProcess([], 0, "", ""), False)
+        with patch.dict("os.environ", {"CARGO_TERM_COLOR": "always", "JENKINS_TOKEN": "secret"}), \
+                patch.object(gate, "_run_in_session", return_value=ended) as run:
+            self.assertEqual(gate._cargo_mutants_run(change, self.out, os.path.join(self.out, "run"), "engine",
+                                                     ["engine/src/a.rs"], 30, time.monotonic() + 600), ([], False))
+        [(argv, cwd, env), kwargs] = run.call_args
+        self.assertEqual(argv[argv.index("--dir") + 1], os.path.join(self.out, "engine"))
+        self.assertEqual((cwd, env["CARGO_TERM_COLOR"], "JENKINS_TOKEN" in env), (self.out, "never", False))
+        self.assertEqual(kwargs["soft_stop"], (signal.SIGINT, gate.MUTMUT_STOP_GRACE))
+
+    def test_a_diff_that_cannot_be_written_or_a_cargo_mutants_that_cannot_start_is_not_run(self):
+        change = SimpleNamespace(diff=self.DIFF)
+        blocked = os.path.join(self.out, "a-file")
+        with open(blocked, "w"):
+            pass
+        found, stopped = gate._cargo_mutants_run(change, self.out, os.path.join(blocked, "run"), "engine",
+                                                 ["engine/src/a.rs"], 30, time.monotonic() + 600)
+        self.assertFalse(stopped)
+        self.assertRegex(found[0]["message"], r"^could not write the change's diff for cargo-mutants: .+; the "
+                                              r"change's Rust was not mutation-tested\.$")
+        with patch.object(gate, "_run_in_session", side_effect=OSError("no cargo")):
+            self.assertEqual(gate._cargo_mutants_run(change, self.out, os.path.join(self.out, "run"), "engine",
+                                                     ["engine/src/a.rs"], 30, time.monotonic() + 600),
+                             ([gate._cargo_mutants_not_run("could not start cargo-mutants: no cargo")], False))
+        self.assertEqual(gate._cargo_mutants_not_run("it failed"), gate._finding(
+            None, None, "not-run", "it failed; the change's Rust was not mutation-tested."))
+
+    def test_each_workspace_runs_in_turn_until_the_budget_runs_out(self):
+        roots = {"a/src/x.rs": ("a", ""), "b/src/x.rs": ("b", ""), "c/src/x.rs": ("c", ""),
+                 "loose.rs": (None, "no Cargo.toml lies above it")}
+        runs = {"a": ([gate._finding("a/src/x.rs", 1, "survived", "a")], False),
+                "b": ([gate._finding("b/src/x.rs", 1, "survived", "b")], True)}
+        with patch.object(gate, "_copy_tracked"), \
+                patch.object(gate, "_cargo_root", side_effect=lambda tree, path: roots[path]), \
+                patch.object(gate, "_cargo_mutants_run", side_effect=lambda *a: runs[a[3]]):
+            found = gate._cargo_mutants_on_copy(SimpleNamespace(root=self.out), self.out, sorted(roots), 30,
+                                                time.monotonic() + 600)
+        self.assertEqual(found, [
+            gate._finding("loose.rs", None, "not-mutated", "was not mutation-tested: no Cargo.toml lies above it."),
+            *runs["a"][0], *runs["b"][0],
+            gate._cargo_mutants_not_run("the budget ran out before cargo-mutants reached the workspace at `c`")])
+
+    def test_a_tree_that_cannot_be_copied_is_not_run(self):
+        with patch.object(gate, "_copy_tracked", side_effect=OSError("no space")):
+            self.assertEqual(gate._cargo_mutants_on_copy(SimpleNamespace(root=self.out), self.out,
+                                                         ["src/x.rs"], 30, time.monotonic() + 600),
+                             [gate._cargo_mutants_not_run("could not copy the tree for cargo-mutants: no space")])
+
+    def test_a_workspace_cargo_is_missing_to_tell_names_cargo_mutants(self):
+        os.makedirs(os.path.join(self.out, "engine"))
+        with open(os.path.join(self.out, "engine", "Cargo.toml"), "w") as f:
+            f.write("[package]\n")
+        with patch.dict("os.environ", {"PATH": self.out}):
+            self.assertEqual(gate._cargo_root(self.out, "engine/src/lib.rs"),
+                             (None, "`cargo-mutants` is not installed: `cargo` is not on PATH"))
+
+    def test_the_diff_of_several_files_keeps_each_section(self):
+        diff = self.DIFF + self.DIFF.replace("a.rs", "b.rs")
+        self.assertEqual(gate._diff_under(diff, "engine", ["engine/src/a.rs", "engine/src/b.rs"]),
+                         diff.replace("/engine/", "/"))
+
+    def test_a_survivor_is_named_by_what_cargo_mutants_knows_of_its_function(self):
+        bare = cargo_mutant("replace a: b with c in nameless", "MissedMutant", line=12)
+        bare["scenario"]["Mutant"]["function"] = {}
+        spanless = cargo_mutant("replace x with y in spanless", "MissedMutant", function="spanless", line=20)
+        del spanless["scenario"]["Mutant"]["function"]["span"]
+        two = [cargo_mutant(f"replace > with {op} in unchecked", "MissedMutant") for op in "<="]
+        self.assertEqual([(f["line"], f["message"]) for f in gate._cargo_mutants_survivors("", [bare, spanless, *two])],
+                         [(12, "1 of 1 mutants of `?` survived its tests: line 12: replace a: b with c in nameless."),
+                          (20, ("1 of 1 mutants of `spanless` survived its tests: line 20: replace x with y in "
+                               "spanless.")),
+                          (9, ("2 of 2 mutants of `unchecked` survived its tests: line 10: replace > with < in "
+                              "unchecked; line 10: replace > with = in unchecked."))])
+
+    def test_the_check_gives_mutmut_half_its_budget_beside_rust_and_lists_findings_by_path_then_line(self):
+        def at(path, line):
+            return gate._finding(path, line, "survived", f"{path}:{line}")
+        mutated = []
+
+        def mutmut(change, functions, budget, test_contexts):
+            mutated.append(budget)
+            return [at("b.py", 9), at("b.py", 1), at("b.py", None)]
+        with patch.object(gate, "_changed_rust_code", return_value=["A.rs"]), \
+                patch.object(gate, "_changed_python_functions", return_value=(["f"], [at("c.py", 3)])), \
+                patch.object(gate, "_mutation_test", side_effect=mutmut), \
+                patch.object(gate, "_cargo_mutants_on_copy", return_value=[at("A.rs", 2), at(None, None)]):
+            found = gate.surviving_mutants("change", budget=30)
+        self.assertEqual(mutated, [15])
+        self.assertEqual([f["message"] for f in found],
+                         ["None:None", "A.rs:2", "b.py:None", "b.py:1", "b.py:9", "c.py:3"])
+
+    def test_no_room_for_cargo_mutants_is_a_finding(self):
+        with patch.object(gate, "_changed_rust_code", return_value=["src/lib.rs"]), \
+                patch.object(gate, "_changed_python_functions", return_value=([], [])), \
+                patch.object(gate.tempfile, "mkdtemp", side_effect=OSError(28, "No space left on device")):
+            found = gate.surviving_mutants("change", budget=30)
+        self.assertEqual(found, [gate._finding(
+            None, None, "not-run", "could not make a directory to run cargo-mutants on a copy of the tree in: [Errno 28] "
+                                   "No space left on device; nothing ran, so the check judged nothing.")])
+
+
+class TestRustSurvivingMutants(RepositoryTest):
+    """The surviving-mutants check over a real git repository's Cargo package, with a real cargo-mutants."""
+
+    LIB = "pub fn add(a: u32, b: u32) -> u32 {\n    a + b\n}\n"
+
+    BASE_FILES = {
+        "Cargo.toml": '[package]\nname = "calc"\nversion = "0.1.0"\nedition = "2021"\n',
+        "Cargo.lock": 'version = 4\n\n[[package]]\nname = "calc"\nversion = "0.1.0"\n',
+        ".gitignore": "target/\n",
+        "src/lib.rs": LIB,
+    }
+
+    # checked's tests notice every mutant; unchecked's call it and check nothing.
+    ADDED = ("\npub fn checked(a: u32) -> u32 {\n    a * 2\n}\n\n"
+             "pub fn unchecked(a: u32) -> bool {\n    a > 3\n}\n")
+    TESTS = ("#[test]\nfn checks() {\n    SLEEP\n    assert_eq!(calc::checked(3), 6);\n    assert_eq!(calc::checked(0), 0);\n}\n\n"
+             "#[test]\nfn calls() {\n    calc::unchecked(1);\n}\n")
+
+    def found(self, budget=gate.MUTATION_BUDGET, sleep=""):
+        """(path, line, rule, message) of each of the check's findings on the change that adds checked and unchecked
+        and their tests, the tests sleeping as sleep, a statement, says."""
+        self.put("src/lib.rs", self.LIB + self.ADDED)
+        self.put("tests/calc.rs", self.TESTS.replace("SLEEP", sleep))
+        self.git("add", "-A")
+        change = gate.GateChange.from_tree(self.repo, self.base, rust_syntax=gate_rust())
+        return [(f["path"], f["line"], f["rule"], f["message"])
+                for f in gate.surviving_mutants(change, budget=budget)]
+
+    def test_a_function_whose_mutants_survive_is_found_and_one_whose_mutants_are_caught_is_not(self):
+        [(path, line, rule, message)] = self.found()
+        self.assertEqual((path, line, rule), ("src/lib.rs", 9, "survived"))
+        self.assertRegex(message, r"^5 of 5 mutants of `unchecked` survived its tests: line 10: replace ")
+
+    def test_the_budget_running_out_is_a_finding(self):
+        # Each run of the tests takes 2 seconds, so the 20 seconds, less the stop's grace, end after a few mutants.
+        found = self.found(budget=gate.MUTMUT_STOP_GRACE + gate.TOOL_KILL_WAIT + 5,
+                           sleep="std::thread::sleep(std::time::Duration::from_secs(2));")
+        [message] = [m for p, n, r, m in found if r == "budget-reached"]
+        self.assertRegex(message, r"^budget reached after \d+ of the mutants cargo-mutants made of the workspace at `\.`")
+
+    def test_a_change_without_rust_never_starts_cargo_mutants(self):
+        self.put("notes.md", "notes\n")
+        self.git("add", "-A")
+        change = gate.GateChange.from_tree(self.repo, self.base, rust_syntax=gate_rust())
+        with patch.object(gate, "_cargo_mutants_on_copy") as run:
+            self.assertEqual(gate.surviving_mutants(change, budget=gate.MUTATION_BUDGET), [])
+        run.assert_not_called()
+
+    def test_a_workspace_below_the_top_is_mutated_in_its_own_directory(self):
+        self.commit({"engine/Cargo.toml": '[package]\nname = "engine"\nversion = "0.1.0"\nedition = "2021"\n',
+                     "engine/Cargo.lock": 'version = 4\n\n[[package]]\nname = "engine"\nversion = "0.1.0"\n',
+                     "engine/src/lib.rs": self.LIB}, "a workspace below the top")
+        self.base = self.git("rev-parse", "HEAD").strip()
+        self.put("engine/src/lib.rs", self.LIB + self.ADDED)
+        self.put("engine/tests/calc.rs", self.TESTS.replace("SLEEP", "").replace("calc::", "engine::"))
+        self.git("add", "-A")
+        change = gate.GateChange.from_tree(self.repo, self.base, rust_syntax=gate_rust())
+        self.assertEqual(gate._changed_rust_code(change), ["engine/src/lib.rs"])
+        [(path, line, rule)] = [(f["path"], f["line"], f["rule"])
+                                for f in gate.surviving_mutants(change, budget=gate.MUTATION_BUDGET)]
+        self.assertEqual((path, line, rule), ("engine/src/lib.rs", 9, "survived"))
+
+    def test_added_lines_with_nothing_to_mutate_give_nothing(self):
+        self.put("src/lib.rs", self.LIB + "\npub const LIMIT: u32 = 4;\n")
+        self.git("add", "-A")
+        change = gate.GateChange.from_tree(self.repo, self.base, rust_syntax=gate_rust())
+        self.assertEqual(gate.surviving_mutants(change, budget=gate.MUTATION_BUDGET), [])
 
 
 class TestSurvivingMutants(RepositoryTest):
