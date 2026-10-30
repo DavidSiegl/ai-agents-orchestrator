@@ -139,18 +139,18 @@ fn cargo_build() -> String {
     }
 }
 
-/// command's words, as a POSIX shell splits them: at unquoted white space; `'...'` taken as it is; in `"..."`, a
-/// backslash escaping only `"`, `\`, `$` and a backtick, and kept before any other character; and outside quotes, a
-/// backslash escaping the next character. Python's shlex.split, which split PARITY_ENGINE, differs only in keeping the
-/// backslash before `$` and a backtick in double quotes. Panics, failing the scenario, at a quote left open or a
-/// backslash at the end.
+/// command's words, as a POSIX shell with its default IFS splits them: at unquoted spaces, tabs and newlines; `'...'`
+/// taken as it is; in `"..."`, a backslash escaping only `"`, `\`, `$` and a backtick, and kept before any other
+/// character; and outside quotes, a backslash escaping the next character. Python's shlex.split, which split
+/// PARITY_ENGINE, differs in also splitting at a carriage return and in keeping the backslash before `$` and a
+/// backtick in double quotes. Panics, failing the scenario, at a quote left open or a backslash at the end.
 fn shell_words(command: &str) -> Vec<String> {
     let unclosed = || -> ! { panic!("E2E_ENGINE has a quote left open or a backslash at its end: {command}") };
     let mut words = Vec::new();
     let mut word: Option<String> = None;
     let mut chars = command.chars();
     while let Some(c) = chars.next() {
-        if c.is_whitespace() {
+        if matches!(c, ' ' | '\t' | '\n') {
             words.extend(word.take());
             continue;
         }
@@ -902,6 +902,11 @@ mod tests {
     fn shell_words_splits_as_sh() {
         assert_eq!(shell_words("env A=/dev/null '/x y/orch' \"a\\\"b\" c\\ d"), ["env", "A=/dev/null", "/x y/orch", "a\"b", "c d"]);
         assert_eq!(shell_words(r#""/opt/a\b/x" "\$\`\\" '' "#), [r"/opt/a\b/x", r"$`\", ""]);
+    }
+
+    #[test]
+    fn shell_words_splits_only_at_spaces_tabs_and_newlines() {
+        assert_eq!(shell_words("a\u{a0}b\tc\u{b}d\ne\rf"), ["a\u{a0}b", "c\u{b}d", "e\rf"]);
     }
 
     #[test]
