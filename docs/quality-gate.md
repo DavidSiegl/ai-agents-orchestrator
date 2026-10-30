@@ -861,7 +861,7 @@ empty `GIT_REF`, before it accepts `buildWithParameters`.
 |---|---|---|
 | Quality build (`GIT_REF` set) | `HEAD^`: the snapshot's only parent is the run's base | `main`'s `gate.py`, `pyproject.toml` and gate-rust helper, from the `origin/main` commit its description names (below); a commit without `gate.py` fails the stage, unjudged |
 | Pull request (`CHANGE_TARGET` set) | the merge base with the target branch, fetched first | its own, `Jenkinsfile` included (below) |
-| `main` | the last successful build's commit, else `HEAD^1` | its own; none when judged at its pull request (below) |
+| `main` | the last successful build's commit, else `HEAD^1`, as also when a force-push took that commit out of the history | its own; none when judged at its pull request (below) |
 
 Before Install runs any code of the change, a quality build's Checkout stage sets its build description to
 `judged tree=<sha> parent=<sha> main=<sha>`, exactly: full lowercase shas, one space apart. `tree` is the
