@@ -177,37 +177,45 @@ fn ends_body(body: &str, at: usize) -> bool {
     matches!(body.get(at..), Some("" | "\n" | "\r" | "\r\n"))
 }
 
+/// The length of the blank line body[at..] starts with: two line ends as line_end takes them; None where none is.
+fn blank_line(body: &str, at: usize) -> Option<usize> {
+    line_end(body, at).and_then(|a| line_end(body, at + a).map(|b| a + b))
+}
+
+/// body without the warning's lines and the blank line after them, or without them and the rest when they end the
+/// body, where they stand at body[at..] as a paragraph of their own: at the start or after a blank line. None when
+/// they do not stand there so.
+fn without_own_paragraph(body: &str, at: usize, lines: &[&str]) -> Option<String> {
+    let opens_paragraph = at == 0 || body[..at].ends_with("\n\n") || body[..at].ends_with("\n\r\n");
+    if !opens_paragraph {
+        return None;
+    }
+    let end = block_end(body, at, lines)?;
+    if let Some(blank) = blank_line(body, end) {
+        return Some(format!("{}{}", &body[..at], &body[end + blank..]));
+    }
+    ends_body(body, end).then(|| body[..at].to_string())
+}
+
+/// body without the blank line at body[at..] and the warning's lines after it, where those lines end the body; None
+/// when they do not stand there so.
+fn without_closing_paragraph(body: &str, at: usize, lines: &[&str]) -> Option<String> {
+    let blank = blank_line(body, at)?;
+    let end = block_end(body, at + blank, lines)?;
+    ends_body(body, end).then(|| format!("{}{}", &body[..at], &body[end..]))
+}
+
 /// body with its first conflict_warning paragraph for base_branch and conflicts removed, and the blank line after it,
 /// or before it when it ends the body; body unchanged when it has no such paragraph. Its lines may end in \r\n, as
 /// GitHub's editor leaves them, and the paragraph's own lines must be as conflict_warning wrote them.
 pub fn without_conflict_warning(body: &str, base_branch: Option<&str>, conflicts: &[String]) -> String {
     let warning = conflict_warning(base_branch, conflicts);
     let lines: Vec<&str> = warning.split('\n').collect();
-    // The earliest place either form of the paragraph stands: as a paragraph of its own at the start or after a blank
-    // line, with the blank line after it or the body's end; or after a blank line, ending the body.
-    for at in (0..=body.len()).filter(|&i| body.is_char_boundary(i)) {
-        let opens_paragraph = at == 0 || body[..at].ends_with("\n\n") || body[..at].ends_with("\n\r\n");
-        if opens_paragraph {
-            if let Some(end) = block_end(body, at, &lines) {
-                let blank = line_end(body, end).and_then(|a| line_end(body, end + a).map(|b| a + b));
-                if let Some(blank) = blank {
-                    return format!("{}{}", &body[..at], &body[end + blank..]);
-                }
-                if ends_body(body, end) {
-                    return body[..at].to_string();
-                }
-            }
-        }
-        let blank_before = line_end(body, at).and_then(|a| line_end(body, at + a).map(|b| a + b));
-        if let Some(blank) = blank_before {
-            if let Some(end) = block_end(body, at + blank, &lines) {
-                if ends_body(body, end) {
-                    return format!("{}{}", &body[..at], &body[end..]);
-                }
-            }
-        }
-    }
-    body.to_string()
+    // The earliest place either form of the paragraph stands, the paragraph of its own first where both do.
+    (0..=body.len())
+        .filter(|&i| body.is_char_boundary(i))
+        .find_map(|at| without_own_paragraph(body, at, &lines).or_else(|| without_closing_paragraph(body, at, &lines)))
+        .unwrap_or_else(|| body.to_string())
 }
 
 /// text as a collapsible section of the pull request, open or closed, cut at PR_SECTION_LIMIT characters with a

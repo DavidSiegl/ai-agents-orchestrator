@@ -404,15 +404,7 @@ fn get(shared: &Shared, request: Request) {
 /// nothing changed, so that a client that went away fails the write and ends the stream.
 fn events(shared: &Shared, request: Request, project: &ProjectRuns) {
     let chunked = *request.http_version() >= (1, 1);
-    let version = if chunked { "1.1" } else { "1.0" };
-    let mut head = format!("HTTP/{version} 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n");
-    for (name, value) in allowed_origin(&request) {
-        head.push_str(&format!("{name}: {value}\r\n"));
-    }
-    if chunked {
-        head.push_str("Transfer-Encoding: chunked\r\n");
-    }
-    head.push_str("\r\n");
+    let head = event_stream_head(&request, chunked);
     let mut out = request.into_writer();
     if out.write_all(head.as_bytes()).and_then(|()| out.flush()).is_err() {
         return;
@@ -436,6 +428,21 @@ fn events(shared: &Shared, request: Request, project: &ProjectRuns) {
         // The client may have gone meanwhile; there is no one to tell.
         let _ = out.write_all(b"0\r\n\r\n").and_then(|()| out.flush());
     }
+}
+
+/// The status line and headers, through the blank line that ends them, that open an event stream answering request:
+/// HTTP/1.1 with chunked transfer encoding when chunked, else HTTP/1.0 with none, allowing request's origin.
+fn event_stream_head(request: &Request, chunked: bool) -> String {
+    let version = if chunked { "1.1" } else { "1.0" };
+    let mut head = format!("HTTP/{version} 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n");
+    for (name, value) in allowed_origin(request) {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    if chunked {
+        head.push_str("Transfer-Encoding: chunked\r\n");
+    }
+    head.push_str("\r\n");
+    head
 }
 
 /// The CORS headers that allow request's Origin, when it has one that is not empty: only after the Host and Origin

@@ -410,10 +410,8 @@ impl Pipeline {
                 // Round 0 lasts until the first editing step, so such a file would be numbered 0.
                 return Some(format!("step {}: a per-round handoff file needs an editing step at or before it", st.id));
             }
-            for template in st.templates() {
-                if let Err(e) = field_names(template) {
-                    return Some(e.to_string());
-                }
+            if let Some(e) = st.templates().into_iter().find_map(|template| field_names(template).err()) {
+                return Some(e.to_string());
             }
             if let Some(unknown) = st.placeholders().iter().find(|p| !known.contains(p.as_str())) {
                 return Some(format!("step {}: unknown prompt placeholder {unknown}", st.id));

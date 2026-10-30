@@ -400,27 +400,30 @@ pub fn workflow_toml(p: &Pipeline) -> String {
     let tables = |key: &str| d.get(key).cloned();
     if let Some(Json::Object(roles)) = tables("roles") {
         for (role, table) in roles.iter() {
-            lines.push(String::new());
-            lines.push(format!("[roles.{role}]"));
-            for (k, v) in table.as_object().into_iter().flat_map(Map::iter) {
-                lines.push(format!("{k} = {}", toml_string(v.as_str().unwrap_or_default())));
-            }
+            lines.extend(toml_table(&format!("[roles.{role}]"), table));
         }
     }
     if let Some(Json::Array(steps)) = tables("steps") {
         for st in &steps {
-            lines.push(String::new());
-            lines.push("[[steps]]".to_string());
-            for (k, v) in st.as_object().into_iter().flat_map(Map::iter) {
-                let value = match v {
-                    Json::Bool(b) => b.to_string(),
-                    _ => toml_string(v.as_str().unwrap_or_default()),
-                };
-                lines.push(format!("{k} = {value}"));
-            }
+            lines.extend(toml_table("[[steps]]", st));
         }
     }
     lines.join("\n") + "\n"
+}
+
+/// The lines of a TOML table under header, such as "[[steps]]", led by a blank line: a `key = value` line for each
+/// field of table in its order, a boolean written as one and anything else as toml_string writes a string, "" for a
+/// value that is not one. A table that is not a JSON object has no fields.
+fn toml_table(header: &str, table: &Json) -> Vec<String> {
+    let mut lines = vec![String::new(), header.to_string()];
+    for (k, v) in table.as_object().into_iter().flat_map(Map::iter) {
+        let value = match v {
+            Json::Bool(b) => b.to_string(),
+            _ => toml_string(v.as_str().unwrap_or_default()),
+        };
+        lines.push(format!("{k} = {value}"));
+    }
+    lines
 }
 
 /// s as a TOML string. A multi-line literal string keeps a prompt readable, but cannot hold ''' or end in a quote,

@@ -663,11 +663,7 @@ impl<'a> Workflow<'a> {
         let mut lines = vec![];
         for n in 1..=s.round {
             let mut parts = vec![];
-            let mut gates = vec![];
-            while s.had_quality_gate() {
-                let Some(text) = self.host.read(&s.quality_path(n, gates.len() as u32 + 1))? else { break };
-                gates.push(parse_gate(&text).unwrap_or("?"));
-            }
+            let gates = self.round_gates(n)?;
             if !gates.is_empty() {
                 parts.push(format!("quality gate {}", gates.join(", ")));
             }
@@ -680,6 +676,19 @@ impl<'a> Workflow<'a> {
             lines.push(format!("Round {n}: {parts}"));
         }
         Ok(lines)
+    }
+
+    /// The gate of each of round n's quality rounds, in order, as their quality files say: "?" for a file that names
+    /// none, and none from the first quality round that has no file on. Empty for a run that never had the quality
+    /// gate. Errors when a quality file cannot be read.
+    fn round_gates(&self, n: u32) -> Result<Vec<&'static str>, OrchestratorError> {
+        let s = &self.state;
+        let mut gates = vec![];
+        while s.had_quality_gate() {
+            let Some(text) = self.host.read(&s.quality_path(n, gates.len() as u32 + 1))? else { break };
+            gates.push(parse_gate(&text).unwrap_or("?"));
+        }
+        Ok(gates)
     }
 
     /// Fail before the interview if the change could not become a pull request.
