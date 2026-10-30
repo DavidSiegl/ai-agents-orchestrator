@@ -146,3 +146,34 @@ fn changed_states(state: &mut Map<String, Value>, project: &Path, engine_pids: &
     }
     changed
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A project of the test's own, named name, with one run, a, which has no state.json yet.
+    fn project(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("octoflow-e2e-ledger-{name}-{}", std::process::id()));
+        dirs::remove_dir(&dir);
+        let runs = dir.join(".orchestrator").join("runs");
+        fs::create_dir_all(runs.join("a")).expect("a run directory");
+        dir
+    }
+
+    #[test]
+    fn a_run_without_its_state_yet_has_none_to_log() {
+        let dir = project("unsaved");
+        let changed = changed_states(&mut Map::new(), &dir, &BTreeSet::new());
+        dirs::remove_dir(&dir);
+        assert!(changed.is_empty());
+    }
+
+    #[test]
+    fn a_state_that_cannot_be_read_fails() {
+        let dir = project("unreadable");
+        fs::create_dir_all(dir.join(".orchestrator/runs/b/state.json")).expect("a state.json that is a directory");
+        let read = std::panic::catch_unwind(|| changed_states(&mut Map::new(), &dir, &BTreeSet::new()));
+        dirs::remove_dir(&dir);
+        assert!(read.is_err(), "a state.json that is a directory was read");
+    }
+}
