@@ -151,7 +151,7 @@ class World:
         self.origin = os.path.join(self.root, "origin.git")
         self.config = os.path.join(self.root, "config", "ai-agents-orchestrator")
         # gitleaks is the real one, which the engine runs; openssl makes the fake PyPI's certificate. Why a missing one
-        # fails the scenario rather than skipping it: TODO.md, "The Rust engine's parity harness".
+        # fails the scenario rather than skipping it: TODO.md, "The parity harness: what it does not record".
         for tool in ("gitleaks", "openssl"):
             if shutil.which(tool) is None:
                 raise RuntimeError(f"{tool} is not on PATH; the parity scenarios need it")

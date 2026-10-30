@@ -21,7 +21,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
 
+use crate::dirs;
 use crate::ledger::Ledger;
+use crate::procs;
 use crate::pyjson;
 
 /// The environment variable that holds the number of the engine invocation a fake serves, as World numbers them.
@@ -64,20 +66,13 @@ fn engine_pids(ledger: &Ledger) -> BTreeSet<i64> {
     }
 }
 
-/// The pids of this process's ancestors, its parent first, as /proc gives them.
+/// The pids of this process's ancestors, its parent first.
 fn ancestors() -> Vec<i64> {
     let mut chain = Vec::new();
     let mut pid = i64::from(std::os::unix::process::parent_id());
     while pid > 1 && !chain.contains(&pid) {
         chain.push(pid);
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
-            .unwrap_or_else(|e| panic!("reading /proc/{pid}/stat: {e}"));
-        // The command name, field 2, is in parentheses and may hold spaces; the parent is the second field after it.
-        pid = stat
-            .rsplit_once(')')
-            .and_then(|(_, rest)| rest.split_whitespace().nth(1))
-            .and_then(|p| p.parse().ok())
-            .unwrap_or_else(|| panic!("/proc/{pid}/stat names no parent: {stat}"));
+        pid = procs::parent(pid).unwrap_or_else(|| panic!("/proc names no parent of process {pid}"));
     }
     chain
 }
@@ -330,10 +325,8 @@ fn perform(ledger: &Ledger, state: &mut Map<String, Value>, name: &str, action: 
     let project = PathBuf::from(ledger.script()["project"].as_str().expect("the script's project"));
     let run_dir = run_dir(&project, role_and_key(name).1);
     let saved_path = run_dir.join("state.json");
-    let saved: Value = std::fs::read_to_string(&saved_path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_else(|| panic!("no state in {}", saved_path.display()));
+    let text = std::fs::read_to_string(&saved_path).unwrap_or_else(|e| panic!("reading {}: {e}", saved_path.display()));
+    let saved: Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{} is no JSON: {e}", saved_path.display()));
     let work_dir = match saved.get("worktree").and_then(Value::as_str).filter(|w| !w.is_empty()) {
         Some(worktree) => PathBuf::from(worktree),
         None => PathBuf::from(saved["cwd"].as_str().expect("the run's cwd")),
@@ -355,12 +348,9 @@ fn perform(ledger: &Ledger, state: &mut Map<String, Value>, name: &str, action: 
 /// The run directory of the run whose key is key.
 fn run_dir(project: &Path, key: &str) -> PathBuf {
     let runs = project.join(".orchestrator").join("runs");
-    let found: Vec<PathBuf> = std::fs::read_dir(&runs)
-        .unwrap_or_else(|e| panic!("listing {}: {e}", runs.display()))
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().ends_with(&format!("-{key}")))
-        .map(|e| e.path())
-        .collect();
+    let suffix = format!("-{key}");
+    let found: Vec<PathBuf> =
+        dirs::entries(&runs).unwrap_or_default().into_iter().filter(|(name, _)| name.ends_with(&suffix)).map(|(_, p)| p).collect();
     match found.as_slice() {
         [one] => one.clone(),
         _ => panic!("no single run directory for key {key} in {}: {found:?}", runs.display()),

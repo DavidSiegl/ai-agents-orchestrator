@@ -7,6 +7,7 @@
 //!
 //! The engine is `E2E_ENGINE`, a command line, when set, else this checkout's orchestrator binary, built with cargo.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
@@ -15,13 +16,16 @@ use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use nix::sys::signal::{killpg, Signal};
+use nix::fcntl::{Flock, FlockArg};
+use nix::sys::signal::{kill, killpg, Signal};
 use nix::unistd::Pid;
 use serde_json::{json, Map, Value};
 
+use crate::dirs;
 use crate::fakes::{AGENT_KINDS, INVOCATION_VAR};
 use crate::ledger::Ledger;
 use crate::normalize::{facts, Normalizer};
+use crate::procs;
 
 /// The repository's top directory, where the Cargo workspace and the example workflows are.
 pub fn checkout() -> PathBuf {
@@ -56,8 +60,9 @@ pub struct Fakes {
 }
 
 /// The engine a world runs, as a command line: E2E_ENGINE's words, when it is set; else this checkout's orchestrator
-/// binary, `cargo build --locked -p octoflow-engine --bin orchestrator` run once per process. Panics, failing the
-/// scenario, where the build fails, so that a machine without cargo fails the scenarios rather than skipping them.
+/// binary, which `cargo build --locked -p octoflow-engine --bin orchestrator` builds once per process, and once per
+/// run for the processes of one nextest run (built_engine). Panics, failing the scenario, where the build fails, so
+/// that a machine without cargo fails the scenarios rather than skipping them.
 pub fn engine_command() -> Vec<String> {
     static BUILT: OnceLock<Vec<String>> = OnceLock::new();
     BUILT
@@ -68,8 +73,40 @@ pub fn engine_command() -> Vec<String> {
         .clone()
 }
 
-/// The path of this checkout's orchestrator binary, built with cargo, which reports where it put it.
+/// The path of this checkout's orchestrator binary, built by cargo. nextest runs each test in a process of its own,
+/// so the processes of one nextest run (NEXTEST_RUN_ID) share one build: the first builds and leaves the path in
+/// `e2e-engine/<run id>` of the target directory the test runs from, under a lock, removing the earlier runs' paths,
+/// and the others read it.
 fn built_engine() -> String {
+    let Ok(run) = std::env::var("NEXTEST_RUN_ID") else {
+        return cargo_build();
+    };
+    let exe = std::env::current_exe().unwrap_or_else(|e| panic!("finding the test's own program: {e}"));
+    // The test runs from <target>/<profile>/deps/.
+    let dir = exe.ancestors().nth(2).expect("a target directory above the test's program").join("e2e-engine");
+    fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("making {}: {e}", dir.display()));
+    let lock = fs::File::create(dir.join("lock")).unwrap_or_else(|e| panic!("making {}'s lock: {e}", dir.display()));
+    // Held until the function returns, so that one process of the run builds while the others wait for its path.
+    let _held = Flock::lock(lock, FlockArg::LockExclusive).unwrap_or_else(|(_, e)| panic!("locking {}: {e}", dir.display()));
+    let stamp = dir.join(&run);
+    if let Ok(path) = fs::read_to_string(&stamp) {
+        if Path::new(&path).is_file() {
+            return path;
+        }
+    }
+    let path = cargo_build();
+    for entry in fs::read_dir(&dir).unwrap_or_else(|e| panic!("listing {}: {e}", dir.display())) {
+        let entry = entry.unwrap_or_else(|e| panic!("listing {}: {e}", dir.display()));
+        if entry.file_name() != "lock" {
+            fs::remove_file(entry.path()).unwrap_or_else(|e| panic!("removing {}: {e}", entry.path().display()));
+        }
+    }
+    fs::write(&stamp, &path).unwrap_or_else(|e| panic!("writing {}: {e}", stamp.display()));
+    path
+}
+
+/// The path of this checkout's orchestrator binary, built with cargo now, which reports where it put it.
+fn cargo_build() -> String {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let out = Command::new(&cargo)
         .args(["build", "--locked", "--quiet", "-p", "octoflow-engine", "--bin", "orchestrator", "--message-format=json"])
@@ -80,7 +117,7 @@ fn built_engine() -> String {
     assert!(out.status.success(), "cargo could not build the engine: {}", out.status);
     let paths: Vec<String> = String::from_utf8_lossy(&out.stdout)
         .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .map(|line| serde_json::from_str::<Value>(line).unwrap_or_else(|e| panic!("cargo printed no JSON message ({e}): {line}")))
         .filter(|m| m["reason"] == "compiler-artifact")
         .filter_map(|m| m["executable"].as_str().map(String::from))
         .collect();
@@ -124,6 +161,7 @@ pub struct Invocation {
     pub n: usize,
     /// The engine's arguments, without the engine's own command.
     pub args: Vec<String>,
+    /// The engine's process, as setsid started it: the leader of its own session and process group.
     child: Child,
     /// Where its standard output goes; its error goes to the same path with `.err` added.
     out_path: PathBuf,
@@ -162,10 +200,34 @@ impl Invocation {
         }
     }
 
-    /// Kill its process group with SIGKILL, and reap it.
+    /// Kill it with SIGKILL, as a crash or a lost machine would stop it, with every process it started: its process
+    /// group, and each process below it in groups of their own, as the engine starts every command
+    /// (engine/src/host/process.rs), which a kill of the engine's group alone would leave running. Each is stopped
+    /// first, until a listing finds none new, so that none starts another between the listing and the kill. Reaps
+    /// the engine.
     fn kill(&mut self) {
-        let _ = killpg(Pid::from_raw(self.child.id() as i32), Signal::SIGKILL);
-        let _ = self.child.wait();
+        let pid = self.pid();
+        let group = Pid::from_raw(pid as i32);
+        let mut stopped = BTreeSet::new();
+        loop {
+            // ESRCH: the group has ended already, which leaves only what was listed below it to stop.
+            let _ = killpg(group, Signal::SIGSTOP);
+            let below: Vec<i64> = procs::descendants(pid).into_iter().filter(|p| *p != pid && !stopped.contains(p)).collect();
+            if below.is_empty() {
+                break;
+            }
+            for p in below {
+                // ESRCH: it ended between the listing and the signal.
+                let _ = kill(Pid::from_raw(p as i32), Signal::SIGSTOP);
+                stopped.insert(p);
+            }
+        }
+        // ESRCH, as above: each signal goes to what may have ended already.
+        let _ = killpg(group, Signal::SIGKILL);
+        for p in stopped {
+            let _ = kill(Pid::from_raw(p as i32), Signal::SIGKILL);
+        }
+        self.child.wait().unwrap_or_else(|e| panic!("reaping engine {:?}: {e}", self.args));
     }
 
     /// What it printed to its standard output so far.
@@ -210,8 +272,12 @@ pub struct World {
     pub project: PathBuf,
     /// The project's origin, a bare repository.
     pub origin: PathBuf,
+    /// What the record replaces with placeholders: the world's paths, the host's name, the invocations' pids, and
+    /// what record learns of runs and git objects.
     pub normalizer: Normalizer,
+    /// Each invocation of the engine started so far, running or ended, in order: invocation n at index n - 1.
     pub invocations: Vec<Invocation>,
+    /// The ledger the fakes write to as the engine runs them, live: what it holds changes under a running invocation.
     pub ledger: Ledger,
     /// What the scenario observed itself, by name, recorded under notes.
     notes: Map<String, Value>,
@@ -224,8 +290,8 @@ impl World {
     /// Panics, failing the scenario, where gitleaks, which the engine runs for real, is not on PATH.
     pub fn new(root: &Path, fakes: &Fakes) -> World {
         let root = root.canonicalize().unwrap_or_else(|e| panic!("finding {}: {e}", root.display()));
-        // Why a missing gitleaks fails the scenario rather than skipping it: TODO.md, "The Rust engine's parity
-        // harness".
+        // Why a missing gitleaks fails the scenario rather than skipping it: TODO.md, "The parity harness: what it does
+        // not record".
         let path = std::env::var_os("PATH").unwrap_or_default();
         assert!(
             std::env::split_paths(&path).any(|dir| dir.join("gitleaks").is_file()),
@@ -426,12 +492,9 @@ impl World {
     /// The saved state of the run with that key, as state.json holds it now.
     pub fn run_state(&self, key: &str) -> Value {
         let runs = self.project.join(".orchestrator").join("runs");
-        let names: Vec<PathBuf> = fs::read_dir(&runs)
-            .unwrap_or_else(|e| panic!("listing {}: {e}", runs.display()))
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().ends_with(&format!("-{key}")))
-            .map(|e| e.path())
-            .collect();
+        let suffix = format!("-{key}");
+        let names: Vec<PathBuf> =
+            dirs::entries(&runs).unwrap_or_default().into_iter().filter(|(name, _)| name.ends_with(&suffix)).map(|(_, p)| p).collect();
         let [dir] = names.as_slice() else { panic!("no single run for key {key}: {names:?}") };
         let text = read_text(&dir.join("state.json"));
         serde_json::from_str(&text).unwrap_or_else(|e| panic!("the state of run {key} is no JSON: {e}"))
@@ -461,7 +524,8 @@ impl World {
             Some(n) => {
                 env.push(("HERDR_ENV".into(), "1".into()));
                 env.push((INVOCATION_VAR.into(), n.to_string()));
-                // An engine instrumented for coverage would write its profile where it runs, into the project.
+                // An engine instrumented for coverage would write its profile where it runs, into the project; so
+                // E2E_ENGINE can name the instrumented engine as it is (Jenkinsfile, Test stage).
                 env.push(("LLVM_PROFILE_FILE".into(), "/dev/null".into()));
             }
         }
@@ -599,13 +663,16 @@ impl World {
             let (name, sha) = line.split_once(' ').expect("a ref and its object");
             refs.insert(name.into(), sha.into());
         }
-        let symbolic = Command::new("git")
+        // symbolic-ref fails for a detached HEAD, which is no failure of the record's.
+        let out = Command::new("git")
             .arg("-C")
             .arg(repo)
             .args(["symbolic-ref", "--quiet", "HEAD"])
+            .env_clear()
+            .envs(self.env(None))
             .output()
-            .is_ok_and(|out| out.status.success());
-        let head = if symbolic { self.git(repo, &["symbolic-ref", "--quiet", "HEAD"]).trim().to_string() } else { "detached".into() };
+            .unwrap_or_else(|e| panic!("running git symbolic-ref in {}: {e}", repo.display()));
+        let head = if out.status.success() { python_text(&out.stdout).trim().to_string() } else { "detached".into() };
         let mut sorted: Vec<(&String, &Value)> = refs.iter().collect();
         sorted.sort_by(|a, b| a.0.cmp(b.0));
         let mut todo: Vec<String> = sorted.into_iter().map(|(_, sha)| sha.as_str().expect("a sha").to_string()).collect();
@@ -753,25 +820,23 @@ fn collapsed(events: &[Value]) -> Vec<Value> {
 /// files in name order, then each of its directories in name order, a symbolic link to one not followed; and at top,
 /// no `worktrees`.
 fn walk(top: &Path, dir: &Path, files: &mut Map<String, Value>) {
-    let Ok(entries) = fs::read_dir(dir) else {
+    let Some(names) = dirs::entries(dir) else {
         return;
     };
-    let mut names: Vec<(String, PathBuf)> =
-        entries.filter_map(|e| e.ok()).map(|e| (e.file_name().to_string_lossy().into_owned(), e.path())).collect();
-    names.sort();
-    let mut dirs = Vec::new();
+    let mut below = Vec::new();
     for (name, path) in names {
         if path.is_dir() {
-            let link = fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink());
+            let meta = fs::symlink_metadata(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+            let link = meta.file_type().is_symlink();
             if !link && !(dir == top && name == "worktrees") {
-                dirs.push(path);
+                below.push(path);
             }
         } else {
             let relative = path.strip_prefix(top).expect("a path under top").to_string_lossy().into_owned();
             files.insert(relative, read_text(&path).into());
         }
     }
-    for d in dirs {
+    for d in below {
         walk(top, &d, files);
     }
 }

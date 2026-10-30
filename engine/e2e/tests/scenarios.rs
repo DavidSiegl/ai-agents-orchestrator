@@ -8,16 +8,19 @@
 
 use serde_json::{json, Map, Value};
 
-use octoflow_e2e::check::check;
+use std::path::PathBuf;
+
+use octoflow_e2e::check::Bench;
+use octoflow_e2e::dirs::remove_dir;
 use octoflow_e2e::world::{checkout, wait_for, Fakes, World};
 
-/// The fakes this package builds, which every world puts on the engine's PATH.
-fn fakes() -> Fakes {
-    Fakes {
+/// This checkout's bench, with the fakes this package builds.
+fn bench() -> Bench {
+    Bench::new(Fakes {
         herdr: env!("CARGO_BIN_EXE_fake-herdr").into(),
         gh: env!("CARGO_BIN_EXE_fake-gh").into(),
         ssh: env!("CARGO_BIN_EXE_fake-ssh").into(),
-    }
+    })
 }
 
 /// A test per scenario, each the function of that name checked against recorded/<name>.json.
@@ -27,7 +30,7 @@ macro_rules! scenarios {
             $(
                 #[test]
                 fn $name() {
-                    super::check(stringify!($name), &super::fakes(), super::$name);
+                    super::bench().check(stringify!($name), super::$name);
                 }
             )*
         }
@@ -507,17 +510,75 @@ fn spec_file_run(w: &mut World) {
 
 // -- check itself ---------------------------------------------------------------------
 
+/// A bench whose recordings and worlds are in a directory of the test's own, named name, which is removed when it is
+/// dropped, the test's panic included; writes as given.
+struct ScratchBench {
+    bench: Bench,
+    dir: PathBuf,
+}
+
+impl ScratchBench {
+    fn new(name: &str, writes: bool) -> ScratchBench {
+        let dir = bench().worlds.join(format!("octoflow-e2e-bench-{name}-{}", std::process::id()));
+        remove_dir(&dir);
+        let recordings = dir.join("recorded");
+        std::fs::create_dir_all(&recordings).unwrap_or_else(|e| panic!("making {}: {e}", recordings.display()));
+        let bench = Bench { recordings, worlds: dir.clone(), writes, ..bench() };
+        ScratchBench { bench, dir }
+    }
+}
+
+impl Drop for ScratchBench {
+    fn drop(&mut self) {
+        remove_dir(&self.dir);
+    }
+}
+
 /// A scenario with no recording fails, rather than passing for want of anything to compare.
 #[test]
 #[should_panic(expected = "has no recording")]
 fn a_scenario_without_a_recording_fails() {
-    check("no_such_scenario", &fakes(), |_| {});
+    ScratchBench::new("unrecorded", false).bench.check("unrecorded", |_| {});
 }
 
-/// A scenario whose record differs from its recording fails, naming where: here a note workflows_listed's recording
-/// does not hold, of a world that ran nothing.
+/// A scenario whose record differs from its recording fails, naming where.
 #[test]
-#[should_panic(expected = "differs from its recording at $[\"invocations\"]")]
+#[should_panic(expected = "differs from its recording at $: key \"invocations\" only in this run")]
 fn a_scenario_that_differs_from_its_recording_fails() {
-    check("workflows_listed", &fakes(), |w| w.note("extra", json!(1)));
+    let scratch = ScratchBench::new("differs", false);
+    let path = scratch.bench.recordings.join("differs.json");
+    std::fs::write(&path, "{}\n").unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
+    scratch.bench.check("differs", |_| {});
+}
+
+/// A bench that writes records the scenario as it ran, and the recording then holds the scenario run again.
+#[test]
+fn a_recording_written_holds_the_scenario_again() {
+    let scratch = ScratchBench::new("written", true);
+    scratch.bench.check("written", |w| w.note("seen", json!("once")));
+    let comparing = Bench { writes: false, recordings: scratch.bench.recordings.clone(), worlds: scratch.dir.clone(), ..bench() };
+    comparing.check("written", |w| w.note("seen", json!("once")));
+}
+
+/// Whether process pid has ended: gone from /proc, or a zombie its parent has not reaped yet.
+fn ended(pid: i64) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .map_or(true, |stat| stat.rsplit_once(')').is_some_and(|(_, rest)| rest.trim_start().starts_with('Z')))
+}
+
+/// A world dropped while its engine waits on an agent kills the engine and every process below it.
+#[test]
+fn a_dropped_world_leaves_nothing_of_its_engine_running() {
+    let scratch = ScratchBench::new("dropped", false);
+    let root = scratch.dir.join("world");
+    std::fs::create_dir_all(&root).unwrap_or_else(|e| panic!("making {}: {e}", root.display()));
+    let mut w = World::new(&root, &scratch.bench.fakes);
+    w.agent("spec", [spec_written(Some("spec"))]);
+    let i = w.start(&["run", "--", TASK], true);
+    w.wait_reached("spec");
+    let pid = w.invocations[i].pid();
+    let engine = octoflow_e2e::procs::descendants(pid);
+    drop(w);
+    let running: Vec<i64> = engine.into_iter().filter(|p| !ended(*p)).collect();
+    assert!(running.is_empty(), "still running after the drop: {running:?}");
 }

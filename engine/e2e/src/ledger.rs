@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use nix::fcntl::{Flock, FlockArg};
 use serde_json::{Map, Value};
 
+use crate::dirs;
 use crate::pyjson;
 
 /// The ledger of the world in `world`.
@@ -113,18 +114,19 @@ impl Ledger {
 /// scheduler decides. heartbeat_at is left out of the comparison: it changes with time alone.
 fn changed_states(state: &mut Map<String, Value>, project: &Path, engine_pids: &BTreeSet<i64>) -> Vec<Value> {
     let runs = project.join(".orchestrator").join("runs");
-    let Ok(entries) = fs::read_dir(&runs) else {
+    let Some(entries) = dirs::entries(&runs) else {
         return Vec::new();
     };
-    let mut names: Vec<String> = entries.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
-    names.sort();
     let last = state.entry("last_states").or_insert_with(|| Value::Object(Map::new()));
     let last = last.as_object_mut().expect("last_states is an object");
     let mut changed = Vec::new();
-    for name in names {
-        let path = runs.join(&name).join("state.json");
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue;
+    for (_, dir) in entries {
+        let path = dir.join("state.json");
+        // A run directory without its state yet, or with one being written, has nothing to log.
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => panic!("reading {}: {e}", path.display()),
         };
         let Ok(Value::Object(mut saved)) = serde_json::from_str::<Value>(&text) else {
             continue;

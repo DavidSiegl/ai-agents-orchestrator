@@ -180,8 +180,8 @@ pipeline {
                 // there after. The lock as in the UI stage, which says why a quality build may skip it.
                 //
                 // The e2e scenarios (engine/e2e) run the orchestrator binary this run builds, through E2E_ENGINE, as
-                // the parity scenarios below do, with LLVM_PROFILE_FILE at /dev/null for the same reason. A quality
-                // build leaves them out on the parity scenarios' terms below, by a nextest filter.
+                // the parity scenarios below do; their World keeps its profile out of the scenario's project itself.
+                // A quality build leaves them out on the parity scenarios' terms below, by a nextest filter.
                 sh '''
                     junit=target/nextest/ci/junit.xml
                     rm -f "$junit"
@@ -190,7 +190,7 @@ pipeline {
                             rust-toolchain.toml examples ci; then
                         set -- -E 'not package(octoflow-e2e)'
                     fi
-                    E2E_ENGINE="env LLVM_PROFILE_FILE=/dev/null '$WORKSPACE/target/llvm-cov-target/debug/orchestrator'" \\
+                    E2E_ENGINE="'$WORKSPACE/target/llvm-cov-target/debug/orchestrator'" \\
                     ci/cargo-lock.sh ${GIT_REF:+--no-wait} cargo llvm-cov nextest --locked --workspace \\
                         --ignore-run-fail --profile ci --config-file "$WORKSPACE/ci/nextest.toml" \\
                         --cobertura --output-path "$WORKSPACE/coverage-rust.xml" "$@"

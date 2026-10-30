@@ -1,6 +1,10 @@
 //! JSON text as Python's json module writes it, which the recordings were made with: the spacing of json.dumps, its
 //! escapes with and without ensure_ascii, and json.dump(indent=1, ensure_ascii=False) for a recording itself. Floats
 //! are written as serde_json writes them, which can differ from Python's repr; no recording holds one.
+//!
+//! The engine's own octoflow_engine::py::json writes json.dumps too, but not ensure_ascii=False, which a recording
+//! needs, and octoflow-without-python ticket 04 deletes it; this module goes with the recordings' Python format, when
+//! that ticket records them again from the Rust engine.
 
 use serde_json::Value;
 

@@ -1,49 +1,76 @@
-//! A scenario run against the engine and compared with its recording in recorded/: `check`.
+//! A scenario run against the engine and compared with its recording: `Bench::check`.
 //!
 //! A scenario's record (World::record) must equal recorded/<name>.json; a difference fails the test, naming where the
 //! two first part. The recordings are the Python engine's, the oracle the Rust engine was ported against, made before
 //! the switch removed it (rust-engine ticket 11). `E2E_RECORD=1 cargo nextest run -p octoflow-e2e` writes recordings
-//! instead: for a scenario added since, which has no Python recording to hold the Rust engine to, so read the diff of
-//! what it recorded as a review of the engine's behaviour before committing it.
+//! instead (Bench::new says when that is right).
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::{Map, Value};
 
+use crate::dirs::remove_dir;
 use crate::pyjson;
 use crate::world::{Fakes, World};
 
-/// The directory of the recordings, recorded/<scenario>.json.
-pub fn recorded() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("recorded")
+/// Where scenarios are checked: the fakes every world puts on the engine's PATH, the recordings a record is held to,
+/// where the worlds are made, and whether a check writes its recording instead of comparing with it.
+pub struct Bench {
+    pub fakes: Fakes,
+    /// The directory of the recordings, <scenario>.json each.
+    pub recordings: PathBuf,
+    /// The directory each scenario's world is made in, a directory of its own below it.
+    pub worlds: PathBuf,
+    /// True means a check writes its scenario's recording, rather than comparing the record with it.
+    pub writes: bool,
 }
 
-/// Run scenario, named name, in a fresh world whose fakes are fakes, and compare what it recorded with its recording,
-/// or with E2E_RECORD=1 write the recording. Panics, failing the test, at a difference or a missing recording. The
-/// world's directory, under TMPDIR, is removed when the scenario passes and kept for a look when it fails.
-pub fn check(name: &str, fakes: &Fakes, scenario: impl FnOnce(&mut World)) {
-    let base = std::env::var_os("TMPDIR").map_or_else(std::env::temp_dir, PathBuf::from);
-    let root = base.join(format!("octoflow-e2e-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&root).unwrap_or_else(|e| panic!("making {}: {e}", root.display()));
-    let got = {
-        let mut world = World::new(&root, fakes);
-        scenario(&mut world);
-        world.record()
-    };
-    let path = recorded().join(format!("{name}.json"));
-    if std::env::var("E2E_RECORD").as_deref() == Ok("1") {
-        fs::write(&path, pyjson::dumps_recording(&got) + "\n").unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
-    } else {
-        let text = fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("scenario {name} has no recording {} ({e}); make it with E2E_RECORD=1, and review what it records", path.display()));
-        let want: Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{} is no JSON: {e}", path.display()));
-        if let Some(difference) = first_difference(&want, &got, "$") {
-            panic!("scenario {name} differs from its recording at {difference}\n(its world is kept in {})", root.display());
+impl Bench {
+    /// The bench of this checkout: its recordings, engine/e2e/recorded/; worlds under TMPDIR; and recordings written
+    /// rather than compared when E2E_RECORD is 1, for a scenario added since the Python engine went, which has no
+    /// Python recording to hold the Rust engine to, so that the diff of what it recorded is read as a review of the
+    /// engine's behaviour before it is committed.
+    pub fn new(fakes: Fakes) -> Bench {
+        Bench {
+            fakes,
+            recordings: Path::new(env!("CARGO_MANIFEST_DIR")).join("recorded"),
+            worlds: std::env::var_os("TMPDIR").map_or_else(std::env::temp_dir, PathBuf::from),
+            writes: std::env::var("E2E_RECORD").as_deref() == Ok("1"),
         }
     }
-    let _ = fs::remove_dir_all(&root);
+
+    /// Run scenario, named name, in a fresh world, and compare what it recorded with its recording, or write the
+    /// recording where the bench writes. Panics, failing the test, at a difference or a missing recording. The world's
+    /// directory is removed when the scenario passes and kept for a look when it fails.
+    pub fn check(&self, name: &str, scenario: impl FnOnce(&mut World)) {
+        // Two checks of one name in one process, as `cargo test` runs them, each get a world of their own.
+        static WORLDS: AtomicUsize = AtomicUsize::new(0);
+        let n = WORLDS.fetch_add(1, Ordering::Relaxed);
+        let root = self.worlds.join(format!("octoflow-e2e-{name}-{}-{n}", std::process::id()));
+        remove_dir(&root);
+        fs::create_dir_all(&root).unwrap_or_else(|e| panic!("making {}: {e}", root.display()));
+        let got = {
+            let mut world = World::new(&root, &self.fakes);
+            scenario(&mut world);
+            world.record()
+        };
+        let path = self.recordings.join(format!("{name}.json"));
+        if self.writes {
+            let text = pyjson::dumps_recording(&got) + "\n";
+            fs::write(&path, text).unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
+        } else {
+            let text = fs::read_to_string(&path).unwrap_or_else(|e| {
+                panic!("scenario {name} has no recording {} ({e}); make it with E2E_RECORD=1, and review what it records", path.display())
+            });
+            let want: Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{} is no JSON: {e}", path.display()));
+            if let Some(difference) = first_difference(&want, &got, "$") {
+                panic!("scenario {name} differs from its recording at {difference}\n(its world is kept in {})", root.display());
+            }
+        }
+        remove_dir(&root);
+    }
 }
 
 /// Where got first differs from want, two JSON values, as a JSON path and the two sides there; None when they are

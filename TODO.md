@@ -72,6 +72,10 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `cargo build` as `tests/rust_engine.py` does, unless `E2E_ENGINE` names one.
   The Jenkinsfile's Test stage already does part of ticket 02's work: it passes the instrumented engine as `E2E_ENGINE`
   and, in a quality build, leaves the package out by a nextest filter on the parity scenarios' terms.
+  `engine/e2e/src/pyjson.rs` writes Python's json format a second time, beside the engine's `py::json`, which lacks
+  `ensure_ascii=False`. Decided (2026-10-30, code review of ticket 01): it stays, rather than the e2e harness depending
+  on `py::json`, which ticket 04 deletes. Closes with ticket 04, which records the scenarios again in the Rust
+  engine's format and deletes both.
 
 - **The eval set: what it does not cover.** `evals/run.py` (live-checks/04, docs/design.md, Evals) runs the engine as
   a program, `run --no-pr --spec`, rather than being the `orchestrator.py eval` command the ticket named, since the
