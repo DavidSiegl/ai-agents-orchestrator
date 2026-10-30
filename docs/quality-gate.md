@@ -429,7 +429,8 @@ Rust is read the same way, through the gate-rust helper's `bindings` (see "Readi
 counts where a line the change adds to a `.rs` file binds it, by any binding kind the helper lists, from a `let` to a
 `use ... as`. Rust names its types and traits in CamelCase, with no underscore to split on, so its counterpart of the
 underscore rule is a name whose last CamelCase word is one of the words, such as `RunInfo`, `StateManager` or
-`HTTPStatus`, but not `InfoStore`; `MAX_VALUE` is caught by the underscore rule, in any case as in Python. The name and
+`HTTPStatus`, but not `InfoStore`; a constant in capitals, as MAX_VALUE, is caught by the underscore rule, in any
+case as in Python. The name and
 parameters of each `fn` of an `impl Trait for T` are skipped, as `@override` is in Python, since the trait fixes them;
 what such a `fn`'s body binds is still read, as is every `fn` of an inherent `impl`. A `.rs` file the helper cannot
 parse is a `not-read` finding at the line it names, and when the helper cannot run, the check lists the `not-run`
