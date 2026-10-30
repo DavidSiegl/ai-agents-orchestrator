@@ -5473,8 +5473,8 @@ def _rust_fixed_bindings(document: dict) -> set[int]:
     """The indexes in document's `bindings`, a gate-rust helper's document of a file that parsed, of the name and
     parameters of each fn whose innermost holder is an `impl Trait for T`: the trait fixes them. The helper lists a
     fn's name as a `fn` binding, with its parameters' `param` bindings right after, as it lists the fn in `fns`; so
-    the kth `fn` binding is the kth of `fns`. A `fn` binding past the last of `fns`, which a helper of this schema never
-    prints, fixes nothing."""
+    the kth `fn` binding is the kth of `fns`. A `fn` binding past the last of `fns`, and a `param` binding before the
+    first `fn` one, which a helper of this schema never prints, fix nothing."""
     fns = iter(document["fns"])
     fixed: set[int] = set()
     holder_fixes = False
