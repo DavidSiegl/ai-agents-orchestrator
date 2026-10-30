@@ -29,15 +29,10 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `orchestrator.py`"), and the Jenkinsfile's cutover fallback is gone. Left: making the test-file patterns a setting,
   for the gate's use in other projects (`.scratch/gate-split/issues/04-configurable-test-files.md`). The gate moves to
   its own repository only once a second project uses it. Decided 2026-10-24.
-- **The Python engine is frozen.** From the merge of the parity harness (`tests/parity/`) until the Rust engine
-  replaces it in one release, nothing lands in `orchestrator.py`, fixes included: its recordings are the oracle
-  each Rust ticket is judged by, and a change to the Python engine would move it. A bug found meanwhile goes into
-  `Open issues` here and is fixed on the `rust-engine` branch. `gate.py`, the docs, the tests and CI are not
-  frozen. The note at the top of `orchestrator.py` says so too. Decided 2026-10-24 (the Rust engine's spec,
-  Decisions).
-- **The Rust engine's parity harness: what it does not record yet.** `tests/parity/` runs 43 scenarios against
-  `orchestrator.py` as a program and compares each with its recording (docs/architecture.md, Tests); the Rust tickets
-  replay them through `PARITY_ENGINE`. Not covered: a secret gitleaks finds, at a quality round or at publish; the
+- **The parity harness: what it does not record.** `tests/parity/` runs 43 scenarios against the engine as a
+  program and compares each with its recording (docs/architecture.md, Tests). The recordings are the Python engine's,
+  made before rust-engine ticket 11 removed it, so none of what follows can be recorded from that oracle any more: a
+  scenario added for it records the Rust engine, and its recording is a review of the engine's behaviour. Not covered: a secret gitleaks finds, at a quality round or at publish; the
   harnesses other than claude and codex starting an agent (only their arguments differ); a session log's token counts
   (every turn records `unknown`); `--timeout` and the stall notice, which take real minutes; the GUI, which the Rust
   engine drops; round 2 of the example workflows and a fresh session's prompts as sent, whose templates only the
@@ -66,8 +61,8 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 - **The eval set: what it does not cover.** `evals/run.py` (live-checks/04, docs/design.md, Evals) runs the engine as
   a program, `run --no-pr --spec`, rather than being the `orchestrator.py eval` command the ticket named, since the
-  Python engine is frozen (above); `EVAL_ENGINE` points it at the Rust engine. Whether the Rust engine gets an `eval`
-  command of its own is open. Not covered: the quality gate, since the toy repositories have no quality job and their
+  Python engine was frozen then; it runs `EVAL_ENGINE`, else the checkout's `target/debug/orchestrator`. Whether the
+  engine gets an `eval` command of its own is open. Not covered: the quality gate, since the toy repositories have no quality job and their
   origin is a bundle no snapshot can be pushed to, so `quality rounds` stays 0; a `--worktree` or `--machine` run,
   which the runner refuses; and an interview, which `--spec` skips. Decided 2026-10-28. The verification run it
   still lacks is under Open issues.
@@ -87,6 +82,25 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
 
 ## Open issues
 
+- **The Rust engine names itself `orchestrator.py`.** Its messages and hints were ported word for word, so the
+  parity recordings, made by the Python engine, hold them: `resume: orchestrator.py resume <id>` in `list` and the
+  interrupted note (`cli/listing.rs`, `cli.rs`'s `resume_command`), `` `orchestrator.py workflows default` `` in
+  `workflows` (`cli/workflows.rs`), and `orchestrator.py` among `judged-in-quality`'s `JUDGING_FILES`, a file the
+  tree no longer has. Found by rust-engine ticket 11 (2026-10-30). Closes with the engine naming itself
+  `orchestrator`, its tests and the parity recordings changed with it, in a change of its own after the switch.
+- **No test crashes the Rust engine after each save.** `tests/test_crash_resume.py` crashed the Python engine
+  in-process right after every write of `state.json` and resumed it, and went with that engine (rust-engine ticket 11,
+  2026-10-30). The parity scenarios still kill the Rust engine as a program, once per phase. Closes with a crash
+  harness on the engine's `FakeHost`, a `Host` whose write of `state.json` can stop the run, in
+  `engine/src/workflow/tests/`.
+- **No contract test talks to the real Jenkins.** `tests/contract/test_jenkins.py` drove the Python engine's `CI`
+  against the live quality job, and went with it (rust-engine ticket 11, 2026-10-30); live-checks/01 (#131) asks for
+  one against the Rust engine's `Jenkins`. Closes with that ticket.
+- **`tests/test_docs.py` reads the engine's names by pattern.** `rust_names` finds each `fn`, type, `const`,
+  `static`, `mod`, string literal, impl `fn` and struct field in `engine/src` by regular expression, not by parsing,
+  so a name in a comment or a `macro_rules!` counts as defined, and a doc's `Type::member` is not checked at all, only
+  `Type.member`. Found by rust-engine ticket 11 (2026-10-30). Closes, if a doc names a gone item unnoticed, with the
+  names read from rustdoc's JSON or syn, as the gate-rust helper reads Rust.
 - **Test code outside the places the spec names is judged as code.** The spec of the Rust checks (requirement 2)
   places Rust's tests in a `tests/` directory, a `tests.rs` and an inline `#[cfg(test)]` module; `_in_rust_tests` and
   `_rust_test_path` in `gate.py`, which both Rust checks read, follow it (test-integrity's side of this is the
@@ -139,9 +153,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `orchestrator.py`) from the round's start, and Gate had not begun by then. The suite grew by the parity scenarios
   (`tests/parity`), and PR-160's Test stage took 645 s. A resume gets a fresh timeout and adopts the running build,
   so a run is not lost, but a quality round of this repository whose build takes as long fails once, and is
-  judged only after a resume. Not changed here:
-  the engine is frozen (Planned, "The Python engine is frozen"), so a larger `QUALITY_TIMEOUT` goes to the Rust
-  engine. Narrowed by PR #162 (2026-10-27) for a quality round whose change leaves what the parity scenarios depend on
+  judged only after a resume. Not changed then: the Python engine was frozen (Fixed, "The Python engine was frozen
+  until the Rust engine replaced it"), so a larger `QUALITY_TIMEOUT` is the Rust engine's to set, in
+  `engine/src/constants.rs`, now that it is the engine (rust-engine ticket 11). Narrowed by PR #162 (2026-10-27) for a quality round whose change leaves what the parity scenarios depend on
   alone (Jenkinsfile, Test stage): its build leaves them out. A change that bumps the version touches `pyproject.toml`
   and `uv.lock`, so its build still runs them, and so does the contract test's build of main whenever main's last
   commit was a releasing merge (build #59, before #162, ran them in any case); Gate's mutmut time is narrowed by
@@ -347,24 +361,19 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   close-delimited stream would not end for a client at a server's stop. The parity harness's `EventStream` takes the
   closed chunked stream's AttributeError for its end (`tests/parity/scenarios.py`). Every security check refuses
   what Python's refuses; these change only how. Decided against unless a client is found that sends such a request.
-- **serve has no limit on its threads, and no timeout for a client that sends nothing.** The Rust engine's serve
-  answers each request on a thread of its own, and tiny_http keeps a thread for each open connection, kept alive
-  between requests (rust-engine ticket 10, `engine/src/serve.rs`); cross-review 105, F3: "A client that sends a
-  partial request or idles holds it for good. Python's server closed after each reply. Any local process that finds
-  the port can exhaust threads or fds." Python's `ThreadingHTTPServer` too starts a thread per connection without a
-  limit, and `RunRequestHandler` sets no `timeout`, so a connection that sends nothing holds its thread there as well;
-  what differs is the kept-alive connection after a reply. A server that stops accepting connections at an error is
-  started again on its port (`dispatch`). Closes with a read timeout and a cap on connections, which tiny_http 0.12
-  does not offer (a `TcpListener` of serve's own, its streams given a read timeout, would be its own HTTP server), or
-  the user's ruling that a local process able to exhaust the user's threads can do worse anyway.
-- **serve reads a run's files through a symbolic link.** A run's files are listed and read by `Host.run_files` and
-  `Host.read`, which follow a symbolic link (`[ -f ]`, `cat`), so a link an agent leaves in its run directory, or a
+- **serve has no limit on its threads, and no timeout for a client that sends nothing.** The engine's serve answers
+  each request on a thread of its own, and tiny_http keeps a thread for each open connection, kept alive between
+  requests (`engine/src/serve.rs`); cross-review 105, F3: "A client that sends a partial request or idles holds it for
+  good." Decided against for now (2026-10-29, the user's ruling): serve binds 127.0.0.1 only and every request needs
+  the token. Reopen if serve listens beyond loopback.
+- **serve reads a run's files through a symbolic link.** A run's files are listed and read by `Host::run_files` and
+  `Host::read`, which follow a symbolic link (`[ -f ]`, `cat`), so a link an agent leaves in its run directory, or a
   run directory that is a link, lets `/file` and the event stream show a file outside the run, `~/.ssh/id_rsa` say, to
   the desktop app's window; the name a request gives is still only a plain name, and only the token's holder can ask.
-  The Rust engine's serve reads them as Python's does (rust-engine ticket 10,
-  `a_link_in_the_run_directory_is_followed_as_python_follows_it`), the Python engine being the parity oracle. Closes
-  with a ruling: refuse a link whose target is outside the run directory, in both engines' `ProjectRuns` (the Rust
-  one only, while the Python engine is frozen), or keep reading through it.
+  `a_link_in_the_run_directory_is_followed_as_python_follows_it` (`engine/src/serve/runs/tests.rs`) pins it. Ruled
+  (2026-10-29, the user): keep the Python engine's behaviour until the switch, then refuse a link whose target is
+  outside the run directory, as a fix on main once the Python engine is gone, which it is since rust-engine ticket 11.
+  Open until that fix.
 - **The parity harness compares serve's event stream at checkpoints, not event by event.** `serve_endpoints_and_events`
   keeps, at each point where the run waits on an agent and once it is done, the last `record` and `files` event of
   each run (`tests/parity/scenarios.py`, `last_by_run`). Raised by cross-review 65 (F10, 2026-10-27), against the
@@ -605,9 +614,6 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
     `artifacts[relativePath]` in the result's `api/json` tree would halve the requests (F2).
   - No test covers a transient `CIError` between two reads, or a build that ends with a file other than the one read
     while it ran (F5).
-- **`test_invariants.py`'s `AnyJenkins` and `Answer` copy `FakeCI` and `FakeResponse`** of
-  `tests/test_orchestrator.py`. Raised by cross-review 60 (F4, 2026-10-27). Closes with one fake Jenkins the two files
-  share.
 - **`vague-names` does not split CamelCase in Python.** `vague_names` matches a whole Python name or its last
   `_`-separated word, so `user_data` is found but a class `InfoManager` or `UserData` is not; in Rust the last CamelCase
   word is matched too (`_is_vague`, gate-rust-checks ticket 04), which is Rust's counterpart. Closes, if the run metrics
@@ -784,10 +790,13 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   a run that `resume` finds done: `Workflow.run` returns the verdict at once, so neither file is ever written, the
   human is never told, the herdr workspace stays open, and after the first save `owner` stays set and the turns have
   no token counts. Found by orchestrator-test-methods/05 (`tests/test_crash_resume.py`, 2026-10-28), whose `expected`
-  pins this behaviour. Not fixed here: the engine is frozen (Planned, "The Python engine is frozen"). Closes in the Rust
+  pins this behaviour. Not fixed here: the engine is frozen (Fixed, "The Python engine was frozen until the Rust engine replaced it"). Closes in the Rust
   engine with a resume of a `done` run that finishes whatever of that ending is missing (each step can tell: the files
   exist, `owner` is cleared, the tokens are counted). The test drives the Python engine in-process, so its pin goes
   with that engine.
+  Since rust-engine ticket 11 (2026-10-30) the Python engine and `tests/test_crash_resume.py`, with its pin, are gone;
+  the Rust engine was ported to behave the same, so the bug stands there until fixed, with no test that crashes it
+  after each save (Open issues, "No test crashes the Rust engine after each save").
 - **A crash between an agent's start and its session being saved costs that turn its session.** `Workflow._start`
   saves the agent's record, then asks herdr for it and `_note_session` saves the session. A resume after the first
   save finds the agent alive (`_agent` returns `ALIVE`) and prompts it without asking herdr, so the turn's record
@@ -796,6 +805,9 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   tokens. Found by orchestrator-test-methods/05 (2026-10-28), whose `expected` pins it. Not fixed here: the engine is
   frozen. Closes in the Rust engine with `_agent` noting the session of an agent it finds alive; the pin goes with
   the Python engine, as above.
+  Since rust-engine ticket 11 (2026-10-30) the Python engine and `tests/test_crash_resume.py`, with its pin, are gone;
+  the Rust engine was ported to behave the same, so the bug stands there until fixed, with no test that crashes it
+  after each save (Open issues, "No test crashes the Rust engine after each save").
 - **A resumed interview tells the human again that it waits for them.** `Workflow._step_turn`'s `announce` focuses
   the human-paced agent's pane and notifies "<label> is waiting for you" in every orchestrator that takes the turn
   (`_turn`: it "runs once the agent is ready"), so a resume while the interview is under way repeats both, once per
@@ -805,9 +817,24 @@ What is known to be open in `orchestrator.py` and `gate.py`, and why. An entry l
   `tests/test_crash_resume.py`'s `expected` pins it as up to one repeat per resume while orchestrator.py is frozen.
   Closes with an engine that announces a turn only where none did (for example, only when `prompted` is not the turn's
   file), the Rust engine's, and the pin removed.
+  Since rust-engine ticket 11 (2026-10-30) the Python engine and `tests/test_crash_resume.py`, with its pin, are gone;
+  the Rust engine was ported to behave the same, so the bug stands there until fixed, with no test that crashes it
+  after each save (Open issues, "No test crashes the Rust engine after each save").
 
 ## Fixed
 
+- **`test_invariants.py`'s `AnyJenkins` and `Answer` copied `FakeCI` and `FakeResponse`** of
+  `tests/test_orchestrator.py`. Raised by cross-review 60 (F4, 2026-10-27). Fixed (2026-10-30, rust-engine ticket 11):
+  both went with the Python engine; `test_invariants.py` keeps the gate's invariants, and the engine's credentials
+  are its `http/tests.rs`'s and `ci/tests.rs`'s.
+- **The Python engine was frozen until the Rust engine replaced it.** From the parity harness's merge until the
+  switch, nothing landed in `orchestrator.py`, so that its recordings stayed the oracle each Rust ticket was judged by.
+  Fixed (2026-10-30, rust-engine ticket 11): the Rust engine replaced it in 0.49.0. `orchestrator.py`, its tests and
+  PyInstaller are gone; `packaging/build-binary.sh` builds the Rust binary under the same asset names; the desktop app
+  serves `$ORCHESTRATOR_BIN`, its bundled binary or the checkout's `target/debug/orchestrator`; the parity scenarios
+  replay the Python engine's recordings against the Rust binary in the Test stage; `gate.py` is all the Python left,
+  with `tests/gitrepo.py` running git for its tests rather than the engine's `Host`. Not closed: the engine's
+  messages still name `orchestrator.py` (Open issues, "The Rust engine names itself orchestrator.py").
 - **The Rust engine had no serve.** The desktop app starts `orchestrator serve --origin ...` as its sidecar
   (`ui/src-tauri/src/lib.rs`), which the `orchestrator` binary did not have. Fixed (2026-10-29, rust-engine ticket 10):
   `crate::serve`, on tiny_http, a thread per request: `serve_command` prints `{"url", "token"}` and serves until

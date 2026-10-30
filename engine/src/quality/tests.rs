@@ -194,3 +194,53 @@ fn lines_that_only_look_like_findings_are_not_read_as_them() {
         assert_eq!(secret_found(line), None, "{line}");
     }
 }
+
+/// The quality file gate.py writes in one case of tests/test_gate.py, as that test holds it to its golden file in
+/// tests/golden/: the one contract between the gate and the engine (docs/quality-gate.md, "The quality file as a
+/// contract"), read here as the engine reads a build's quality.md.
+fn gate_golden(name: &str) -> String {
+    let path = format!("{}/../tests/golden/{name}.txt", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
+}
+
+#[test]
+fn the_engine_reads_what_the_gate_writes() {
+    let error = gate_golden("gate_error");
+    assert_eq!(parse_gate(&error), Some(QUALITY_ERROR));
+    let failures = gate_failures(&error);
+    assert_eq!(
+        failures.conditions,
+        [
+            "1 findings on lines the change added; each is listed below.",
+            "1 findings of the `test-integrity` check; each is listed below.",
+            "1 tests fail; each is listed below.",
+            "Coverage of new code is 50.0%; the gate wants at least 80% once a change has 20 or more new lines to cover.",
+        ]
+    );
+    // The two issues and the failing test; the finding to weigh is left out.
+    let mut want = Map::new();
+    want.insert("ruff", vec![finding_fingerprint(Some("f.py"), "ruff B023", "Function definition does not bind loop variable `x`")]);
+    want.insert(
+        "test-integrity",
+        vec![finding_fingerprint(
+            Some("tests/test_f.py"),
+            "test-integrity skip",
+            "`pytest.mark.skip` added: it skips a test or expects it to fail.",
+        )],
+    );
+    want.insert("tests", vec![finding_fingerprint(Some("tests.T.test_limit"), "tests", "")]);
+    assert_eq!(failures.fingerprints, want);
+
+    let ok = gate_golden("gate_ok");
+    assert_eq!(parse_gate(&ok), Some(QUALITY_OK));
+    assert_eq!(gate_failures(&ok), GateFailures::default());
+}
+
+#[test]
+fn the_engine_reads_a_cut_list_as_the_gate_cuts_it() {
+    // quality_report lists QUALITY_ISSUE_LIMIT issues, here all of them `f.py:<n>` with rule r, and counts the rest.
+    let failures = gate_failures(&gate_golden("quality_report_error_over_limit"));
+    let issues = failures.fingerprints.get("r").expect("the issues, under their rule");
+    assert_eq!(issues.len(), QUALITY_FINDINGS_LIMIT);
+    assert_eq!(issues[0], finding_fingerprint(Some("f.py"), "r", "m1"));
+}

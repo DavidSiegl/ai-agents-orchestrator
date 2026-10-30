@@ -50,12 +50,12 @@ that wrote it:
   resume syntax.
 
 ```bash
-python orchestrator.py run "add a token-bucket rate limiter" --role-agent review=codex --role-agent spec=gemini
+orchestrator run "add a token-bucket rate limiter" --role-agent review=codex --role-agent spec=gemini
 ```
 
 ## Requirements
 
-`python orchestrator.py doctor` checks these, here and where the agents run, and says how to fix each one that
+`orchestrator doctor` checks these, here and where the agents run, and says how to fix each one that
 is missing.
 
 - herdr 0.9+ where the agents run, with the integration of each harness a run uses
@@ -66,8 +66,8 @@ is missing.
 - For any run that pushes: [gitleaks](https://github.com/gitleaks/gitleaks#installing) 8.19+ and git 2.36+.
   Every push is scanned for secrets first, by the base's `.gitleaks.toml` and `.gitleaksignore`, and refused on
   a finding
-- Python 3.13+, standard library only, unless you use a [binary](#install); tkinter for the [GUI](#gui);
-  [uv](https://github.com/astral-sh/uv) only for the tests and the build
+- Nothing for the orchestrator itself, a single [binary](#install); to build it from a checkout, Rust by
+  `rust-toolchain.toml`; [uv](https://github.com/astral-sh/uv) and Python 3.13+ only for `gate.py` and the tests
 - For `--machine`: the machine saved in herdr and non-interactive SSH to it, which the orchestrator's
   commands share one connection to (OpenSSH's `ControlMaster`); see
   [Running the agents on another machine](docs/design.md#running-the-agents-on-another-machine)
@@ -78,7 +78,7 @@ is missing.
 ## Install
 
 Each [release](https://github.com/DavidSiegl/octoflow-ai/releases) has a single-file executable for Linux
-x86_64 and for Apple Silicon macOS, which needs no Python, each with its `.sha256`:
+x86_64 and for Apple Silicon macOS, each with its `.sha256`:
 
 ```bash
 # Linux x86_64; on an Apple Silicon Mac, octoflow-macos-arm64 and `shasum -a 256 -c`
@@ -92,39 +92,25 @@ The macOS binary is not signed or notarized. Downloaded with a browser, it is qu
 choose Open once, or run `xattr -d com.apple.quarantine octoflow-macos-arm64`. A file `curl` downloads opens
 straight away.
 
-Everywhere else, use `octoflow.pyz`, which needs Python 3.13+:
+Everywhere else, build it from a checkout with cargo, by the toolchain `rust-toolchain.toml` pins:
 
 ```bash
-curl -fLO https://github.com/DavidSiegl/octoflow-ai/releases/latest/download/octoflow.pyz
-curl -fLO https://github.com/DavidSiegl/octoflow-ai/releases/latest/download/octoflow.pyz.sha256
-sha256sum -c octoflow.pyz.sha256 && chmod +x octoflow.pyz
-./octoflow.pyz run "add a token-bucket rate limiter to the API client"
+cargo build --release --locked -p octoflow-engine   # target/release/orchestrator
 ```
 
-Both take the same commands and flags as `python orchestrator.py` in a checkout, which the examples below use.
+The examples below call it `orchestrator`: put the binary on your `PATH` under that name. Releases before 0.49.0
+were the Python engine, `orchestrator.py`, which also came as `octoflow.pyz`; the Rust engine takes the same
+commands and flags, and resumes the runs the Python engine started.
 
-### GUI
-
-Run without arguments, or with `gui`, the orchestrator opens a window where a display is available: always on
-macOS, and on Linux when `DISPLAY` or `WAYLAND_DISPLAY` is set; otherwise it prints its usage. The window fills
-in and starts a run, lists the project's runs, resumes one, and follows its output, which Stop interrupts as
-Ctrl-C would. Per-role harnesses and models stay on the command line. Zoom from 75% to 200% with the − and +
-buttons, with Ctrl (⌘ on macOS) and +, − or 0, or with Ctrl and the mouse wheel.
-
-The role agents still run in herdr, so open `herdr` in a terminal to answer the Spec Collector. A run without a
-machine has to start from a herdr pane, so start the window from one, or give a machine. Launched from a file
-manager, the binary sees only that session's `PATH`, which must hold `herdr`, `git`, `gh` and each harness's CLI.
-A Python without tkinter makes `gui` exit with status 1 and print the command to install it, such as
-`apt install python3-tk` or `brew install python-tk@3.13`; the binaries include it. See
-[The GUI](docs/design.md#the-gui).
+The tk window that `gui` opened went with the Python engine; the [desktop app](#desktop-app) is the window now.
 
 ### Desktop app
 
-A desktop app is taking over from the window, one step at a time. So far it is read-only: it shows one project's
+A desktop app shows your runs. So far it is read-only: it shows one project's
 runs and their handoff files live, and starts no runs. It is a Tauri 2 app in [`ui/`](ui). Each release has it
 for Linux x86_64, as `octoflow-desktop-linux-x86_64.deb` and `.AppImage`, and for Apple Silicon macOS, as
-`octoflow-desktop-macos-arm64.dmg`, each with its `.sha256` and the orchestrator inside, so it needs neither
-Python nor a checkout. The macOS app is signed ad hoc only, not notarized, so macOS refuses to open it the
+`octoflow-desktop-macos-arm64.dmg`, each with its `.sha256` and the orchestrator inside, so it needs no
+checkout. The macOS app is signed ad hoc only, not notarized, so macOS refuses to open it the
 first time when a browser downloaded it, as it does the binary.
 
 - **Overview:** each run's task, its progress through the workflow, its round, the current role, whether it is
@@ -174,50 +160,50 @@ Ctrl-C or SIGTERM. Its endpoints and security checks are in [serve](docs/archite
 
 ```bash
 # Check what a run needs, and print a fix for each missing piece; exit status 1 if any is missing
-python orchestrator.py doctor --machine <machine> --cwd ~/GitHub/myproject
+orchestrator doctor --machine <machine> --cwd ~/GitHub/myproject
 
 # From a herdr pane, on the project in the current directory
-python orchestrator.py run "add a token-bucket rate limiter to the API client"
+orchestrator run "add a token-bucket rate limiter to the API client"
 
 # Agents on a machine saved in herdr, driven from anywhere; --cwd is a path on that machine
-python orchestrator.py run "add a token-bucket rate limiter" --machine <machine> --cwd ~/GitHub/myproject
+orchestrator run "add a token-bucket rate limiter" --machine <machine> --cwd ~/GitHub/myproject
 
 # In a git worktree of the run's own, so the checkout stays yours and several runs can work at once
-python orchestrator.py run --worktree "add a token-bucket rate limiter"
+orchestrator run --worktree "add a token-bucket rate limiter"
 
 # Skip the interview: a spec you already have is the contract
-python orchestrator.py run --spec docs/specs/rate-limiter.md
+orchestrator run --spec docs/specs/rate-limiter.md
 
 # Another workflow: one of yours by name, or a workflow file anywhere; `workflows` lists them
-python orchestrator.py run --workflow product-team "add a token-bucket rate limiter"
-python orchestrator.py run --workflow-file examples/workflows/quick.toml "fix the off-by-one in the pager"
+orchestrator run --workflow product-team "add a token-bucket rate limiter"
+orchestrator run --workflow-file examples/workflows/quick.toml "fix the off-by-one in the pager"
 
 # With the quality gate after each Builder turn
-python orchestrator.py run --quality-gate AI-Agents-Orchestrator/py-ai-agents-orchestrator-quality "add a token-bucket rate limiter"
+orchestrator run --quality-gate AI-Agents-Orchestrator/py-ai-agents-orchestrator-quality "add a token-bucket rate limiter"
 
 # Run every ready spec under .scratch/<slug>/spec.md, one pull request each; see Draining specs
-python orchestrator.py drain --worktree
+orchestrator drain --worktree
 
 # A project's runs and whether each is still running; --json for scripts, --pr-state adds each PR's state
-python orchestrator.py list --machine <machine> --cwd ~/GitHub/myproject
+orchestrator list --machine <machine> --cwd ~/GitHub/myproject
 
 # One run in full, by its run id or the six-character key at its end
-python orchestrator.py show e292fb
+orchestrator show e292fb
 
 # Continue a stopped run
-python orchestrator.py resume e292fb
+orchestrator resume e292fb
 
 # Done with a failed or finished run: close its workspace, and a failed --worktree run's worktree and branch
-python orchestrator.py close e292fb
+orchestrator close e292fb
 
 # After you resolved a pull request's conflict and pushed: drop its warning, and its draft if it was approved
-python orchestrator.py refresh e292fb
+orchestrator refresh e292fb
 
 # Delete the branches of runs whose pull request is merged, or closed 14 days ago
-python orchestrator.py prune --dry-run
+orchestrator prune --dry-run
 
 # Every finished run's metrics.json, one JSON line each: outcome, roles, turns with times and tokens
-python orchestrator.py metrics | jq -s 'map(.rounds) | add / length'
+orchestrator metrics | jq -s 'map(.rounds) | add / length'
 
 # Judge the change since a commit as the quality gate does; exit status 0 for GATE: OK, 1 for GATE: ERROR
 uv run python gate.py --base main --coverage coverage.xml --out quality.md
@@ -373,7 +359,7 @@ how it treats specs you edit while it runs.
 
 The roles, their prompts and their order are a workflow. Besides the built-in `default`, add your own as a TOML
 file in `~/.config/ai-agents-orchestrator/workflows/`, named after the workflow, or anywhere with
-`--workflow-file`. `python orchestrator.py workflows` lists them and says why one does not load, and
+`--workflow-file`. `orchestrator workflows` lists them and says why one does not load, and
 `workflows default` prints the default's full definition to start from. [`examples/workflows/`](examples/workflows)
 has three more: `spec-build-review` (the default as a file), `quick` (Builder ⇄ Reviewer, the task as the
 contract) and `product-team` (Product Manager → Architect → QA Engineer → Engineer ⇄ Tech Lead: requirements in
@@ -428,7 +414,7 @@ checked when it loads, and a run saves its workflow, so editing the file does no
 ## Prompt files
 
 To change only some of the texts the agents get, put `NAME.md` in `~/.config/ai-agents-orchestrator/prompts/`,
-where `NAME` is the text's name in `orchestrator.py`. Its content, less its trailing newline, is sent in its
+where `NAME` is the text's name in the engine's `engine/src/prompts.rs`. Its content, less its trailing newline, is sent in its
 place, with exactly the placeholders of the text it replaces.
 
 | File | Sent |
@@ -448,14 +434,16 @@ place, with exactly the placeholders of the text it replaces.
 ## Running tests
 
 ```bash
-uv run pytest
-uv run pytest --cov=orchestrator --cov=gate --cov-branch --cov-report=xml && \
+cargo test --workspace    # the engine's and the desktop shell's
+uv run pytest             # gate.py's, the docs', and the parity scenarios against the engine's binary
+uv run pytest --cov=gate --cov-branch --cov-report=xml && \
     uv run python gate.py --base main --coverage coverage.xml
 ```
 
-`tests/test_properties.py` holds property-based tests: 25 inputs per test by default, 250 with
-`HYPOTHESIS_PROFILE=ci`, as Jenkins runs them. A change to a workflow step's prompt or to the quality file's wording
-fails a test against its golden file in `tests/golden/`; `UPDATE_GOLDEN=1 uv run pytest` rewrites them, and the
+The parity scenarios (`tests/parity`) replay what the Python engine did, recorded before it was removed, against
+the Rust engine, which `uv run pytest` builds with cargo. `tests/test_properties.py` holds property-based tests of
+the gate: 25 inputs per test by default, 250 with `HYPOTHESIS_PROFILE=ci`, as Jenkins runs them. A change to a
+workflow step's prompt or to the quality file's wording fails a test against its golden file in `tests/golden/`; `UPDATE_GOLDEN=1 uv run pytest` rewrites them, and the
 change is reviewed as their diff (see [Tests](docs/architecture.md#tests)). `packaging/build-binary.sh` builds and
 smoke-tests the binary for the machine it runs on; see [Tooling](docs/architecture.md#tooling).
 

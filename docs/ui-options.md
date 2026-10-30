@@ -1,5 +1,9 @@
 # A successor to the Tk GUI
 
+This is an assessment of 2026-10-24, of the Python engine and its tk window as they were then; both are gone since
+0.49.0 (rust-engine ticket 11), so the names it gives of them are the Python engine's, which `orchestrator.py` held,
+and no longer in the tree. Only its decision and C1 below were brought up to date.
+
 Status: **Decided on 2026-10-24: option B, a Tauri 2 desktop app, with a React + TypeScript frontend built by
 Vite.** The webview talks to the orchestrator, which runs beside it as a sidecar, over local HTTP and Server-Sent
 Events, the first of [option B's transports](#option-b-a-desktop-shell-tauri). This chooses against the
@@ -12,7 +16,7 @@ come up: the frontend lives beside `orchestrator.py` in `ui/`, not inside it. Th
 (open question 3). The other [open questions](#open-questions) are still for the human to decide.
 
 The GUI is to become a responsive, reactive feature of its own rather than a launcher over the CLI. This
-document assesses today's window ([design](design.md#the-gui), [code](architecture.md#gui)), states what its
+document assesses today's window ([design](design.md#the-gui)), states what its
 successor must do, describes what every option needs from the engine, compares three graphical architectures
 with wireframes, proposes one with a frontend framework, and lays out the pull requests that would carry it
 out. Code is named by symbol, not line, as in [architecture.md](architecture.md).
@@ -95,8 +99,9 @@ The successor must offer four capabilities:
 
 Under these constraints:
 
-- **C1.** The orchestrator's Python stays stdlib-only, with no runtime dependencies (`dependencies = []` in
-  `pyproject.toml`).
+- **C1.** The Python stays stdlib-only, with no runtime dependencies (`dependencies = []` in `pyproject.toml`):
+  since 0.49.0 that Python is `gate.py` alone. The engine is Rust, and its rule is the rust-engine spec's list of
+  crates: each crate in `engine/Cargo.toml` is one the user approved, as the comment above it says.
 - **C2.** A JavaScript (or similar) frontend build step is allowed.
 - **C3.** `orchestrator.py` may be split into a package.
 - **C4.** The Tk GUI is removed once the successor reaches parity.

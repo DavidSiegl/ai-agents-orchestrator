@@ -53,10 +53,16 @@ OTHER_PROGRAMS_NAMES = {
     "UPDATE_GOLDEN": "the golden-file helper's environment variable, tests/golden.py",
     "BUNDLED_NAME": "the desktop app's constant, ui/src-tauri/src/lib.rs",
     "HARNESSES": "the Rust engine's table of the agent harnesses, engine/src/harness.rs",
+    "CI": "the Python engine's Jenkins client, which engine/src/ci.rs ports as Jenkins",
     "PR_STATUS_CREATOR": "the Jenkinsfile's",
     "CHANGE_TARGET": "an environment variable Jenkins sets",
     "OPTIONS": "an HTTP method",
     "NAME": "the README's placeholder for a prompt's name",
+}
+
+# Documents that describe the code as it was, whose names are not checked against today's, with why.
+HISTORICAL_DOCS = {
+    "ui-options.md": "an assessment of 2026-10-24 of the Python engine's tk window, which 0.49.0 removed",
 }
 
 # Backticked names the docs give that read as Class.member but are file names, with whose files they are.
@@ -106,7 +112,9 @@ def cli_commands() -> dict[str, set[str]]:
     """Each command of the engine's CLI, by name, with the long flags its help lists, and gate.py's, a program of its
     own, as the command "gate.py"."""
     names = [line.split()[0] for line in help_section(engine_help(), "Commands:")]
-    commands = {name: set(FLAG.findall(engine_help(name).partition("\nOptions:\n")[2]))
+    # An option's own line, as `  -h, --help` or `      --cwd <cwd>`; its description, below it, names other flags.
+    option = re.compile(r"^ {2,6}(?:-\w, )?(--[a-z][a-z0-9-]*)", re.MULTILINE)
+    commands = {name: set(option.findall(engine_help(name).partition("\nOptions:\n")[2]))
                 for name in names if name != "help"}
     return {**commands, "gate.py": long_flags(built_parser(gate.parse_args, ["--base", "main"]))}
 
@@ -286,7 +294,7 @@ class TestDocs(unittest.TestCase):
         classes = {member.partition(".")[0] for member in members}
         methods = {member.partition(".")[2] for member in members}
         errors = []
-        for doc in DOCS:
+        for doc in (d for d in DOCS if d.name not in HISTORICAL_DOCS):
             for n, line, _ in prose_lines(doc):
                 where = f"{doc.relative_to(ROOT)}:{n}"
                 for code in re.findall(r"`([^`]+)`", line):

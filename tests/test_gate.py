@@ -29,6 +29,7 @@ import unittest
 from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
+import conftest
 from coverage import CoverageData
 from gitrepo import RepositoryTest, git
 from golden import assert_golden
@@ -152,6 +153,28 @@ class TestChangedLines(unittest.TestCase):
         self.assertEqual(gate.clippy_config_files(diff, changed_lines(diff)),
                          ["clippy.toml", "ui/.cargo/config.toml", "ui/Cargo.toml"])
         self.assertEqual(gate.edited_config(diff, changed_lines(diff)), [])
+
+
+class TestQualityFileContract(unittest.TestCase):
+    """The quality file is the one interface between the gate and the engine, and each keeps its own copy of its
+    format: the gate's here, the engine's in engine/src/quality.rs, whose tests read the golden files this suite holds
+    quality_report and the gate to (the_engine_reads_what_the_gate_writes). This holds the engine's copies of the
+    format's words to the gate's, read from the Rust source."""
+
+    def engine_constant(self, name):
+        source = (conftest.REPO / "engine" / "src" / "quality.rs").read_text()
+        m = re.search(rf"^pub const {name}: [^=]+= (.+);$", source, re.MULTILINE)
+        self.assertIsNotNone(m, f"engine/src/quality.rs has no const {name}")
+        return int(m.group(1)) if m.group(1).isdigit() else json.loads(m.group(1))
+
+    def test_the_engine_s_copies_match_the_gate_s(self):
+        for engine, ours in [("QUALITY_OK", gate.GATE_OK), ("QUALITY_ERROR", gate.GATE_ERROR),
+                             ("QUALITY_FAILED_CONDITIONS", gate.FAILED_CONDITIONS),
+                             ("QUALITY_FAILING_TESTS", gate.FAILING_TESTS),
+                             ("QUALITY_TO_WEIGH_NOTE", gate.TO_WEIGH_NOTE),
+                             ("QUALITY_FINDINGS_LIMIT", gate.QUALITY_ISSUE_LIMIT)]:
+            with self.subTest(engine):
+                self.assertEqual(self.engine_constant(engine), ours)
 
 
 class TestQualityReport(unittest.TestCase):
