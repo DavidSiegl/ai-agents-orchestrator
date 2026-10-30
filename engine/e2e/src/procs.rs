@@ -22,12 +22,12 @@ pub fn ancestors() -> Vec<i32> {
     chain
 }
 
-/// pid and every process below it, as /proc lists them now; the error of listing /proc when it cannot be.
+/// pid and every process below it, as /proc lists them now; the error of listing /proc when it cannot be opened or
+/// read to its end, rather than a set that may lack processes.
 pub fn descendants(pid: i32) -> std::io::Result<BTreeSet<i32>> {
     let mut children: BTreeMap<i32, Vec<i32>> = BTreeMap::new();
-    let entries = fs::read_dir("/proc")?;
-    for entry in entries.flatten() {
-        let Some(child) = entry.file_name().to_str().and_then(|name| name.parse::<i32>().ok()) else { continue };
+    for entry in fs::read_dir("/proc")? {
+        let Some(child) = entry?.file_name().to_str().and_then(|name| name.parse::<i32>().ok()) else { continue };
         // A process that ended since the listing has no parent to read.
         if let Some(p) = parent(child) {
             children.entry(p).or_default().push(child);
